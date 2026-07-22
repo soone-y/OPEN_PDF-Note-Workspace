@@ -1,0 +1,442 @@
+// file: settings/settings_general_schedule.cppinc
+// Included by settings_general.cppinc; contains schedule time dialog and public entry points.
+
+struct ScheduleTimeUiStrings {
+    std::wstring title;
+    std::wstring labelDay;
+    std::wstring labelCopy;
+    std::wstring hintFormat;
+    std::wstring errInvalid;
+    std::wstring labelOk;
+    std::wstring labelCancel;
+    std::vector<std::wstring> dayLabels;
+};
+
+static ScheduleTimeUiStrings GetScheduleTimeUiStrings() {
+    if (IsEnglishUi()) {
+        return {
+            L"Class Start Times",
+            L"Day",
+            L"Copy to all days",
+            L"Format: HH:MM (24h)",
+            L"Enter times in HH:MM format (e.g., 09:30).",
+            L"OK",
+            L"Cancel",
+            { L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat", L"Sun" }
+        };
+    }
+    return {
+        g_config.studentMode ? L"授業開始時刻" : L"開始時刻",
+        L"曜日",
+        L"全曜日にコピー",
+        L"形式: HH:MM (24h)",
+        L"時刻の形式は HH:MM です。(例: 09:30)",
+        L"OK",
+        L"キャンセル",
+        { L"月", L"火", L"水", L"木", L"金", L"土", L"日" }
+    };
+}
+
+struct ScheduleTimeCtx {
+    HWND owner = nullptr;
+    bool done = false;
+    bool ok = false;
+    bool reopenOnCancel = false;
+    int dayIndex = 0;
+    int periods = 6;
+    HWND cbDay = nullptr;
+    HWND btnCopy = nullptr;
+    std::vector<HWND> labels;
+    std::vector<HWND> edits;
+    std::vector<std::wstring> times;
+};
+
+static std::wstring GetWindowTextValue(HWND hWnd) {
+    if (!hWnd) return L"";
+    int len = GetWindowTextLengthW(hWnd);
+    if (len <= 0) return L"";
+    std::wstring text(static_cast<size_t>(len), L'\0');
+    GetWindowTextW(hWnd, text.data(), len + 1);
+    return text;
+}
+
+static bool TryNormalizeTime(const std::wstring& input, std::wstring& out) {
+    std::wstring s = TrimWhitespace(input);
+    if (s.empty()) {
+        out.clear();
+        return true;
+    }
+    int hour = -1;
+    int minute = -1;
+    size_t colon = s.find(L':');
+    if (colon != std::wstring::npos) {
+        std::wstring hStr = s.substr(0, colon);
+        std::wstring mStr = s.substr(colon + 1);
+        if (hStr.empty() || mStr.size() != 2) return false;
+        if (hStr.size() > 2) return false;
+        for (wchar_t ch : hStr) if (!iswdigit(ch)) return false;
+        for (wchar_t ch : mStr) if (!iswdigit(ch)) return false;
+        hour = std::stoi(hStr);
+        minute = std::stoi(mStr);
+    } else {
+        if (s.size() != 3 && s.size() != 4) return false;
+        for (wchar_t ch : s) if (!iswdigit(ch)) return false;
+        if (s.size() == 3) {
+            hour = s[0] - L'0';
+            minute = (s[1] - L'0') * 10 + (s[2] - L'0');
+        } else {
+            hour = (s[0] - L'0') * 10 + (s[1] - L'0');
+            minute = (s[2] - L'0') * 10 + (s[3] - L'0');
+        }
+    }
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
+    wchar_t buf[8]{};
+    swprintf(buf, 8, L"%02d:%02d", hour, minute);
+    out = buf;
+    return true;
+}
+
+static void StoreDayTimes(ScheduleTimeCtx* ctx, int dayIndex) {
+    if (!ctx) return;
+    for (int p = 0; p < ctx->periods; ++p) {
+        size_t idx = static_cast<size_t>(dayIndex + p * kScheduleDayCount);
+        if (idx >= ctx->times.size() || p >= static_cast<int>(ctx->edits.size())) continue;
+        ctx->times[idx] = TrimWhitespace(GetWindowTextValue(ctx->edits[static_cast<size_t>(p)]));
+    }
+}
+
+static void LoadDayTimes(ScheduleTimeCtx* ctx, int dayIndex) {
+    if (!ctx) return;
+    for (int p = 0; p < ctx->periods; ++p) {
+        size_t idx = static_cast<size_t>(dayIndex + p * kScheduleDayCount);
+        std::wstring text;
+        if (idx < ctx->times.size()) text = ctx->times[idx];
+        if (p < static_cast<int>(ctx->edits.size())) {
+            SetWindowTextW(ctx->edits[static_cast<size_t>(p)], text.c_str());
+        }
+    }
+}
+
+static bool NormalizeDayTimes(ScheduleTimeCtx* ctx, int dayIndex) {
+    if (!ctx) return false;
+    for (int p = 0; p < ctx->periods; ++p) {
+        size_t idx = static_cast<size_t>(dayIndex + p * kScheduleDayCount);
+        if (idx >= ctx->times.size()) continue;
+        std::wstring normalized;
+        if (!TryNormalizeTime(ctx->times[idx], normalized)) return false;
+        ctx->times[idx] = normalized;
+    }
+    return true;
+}
+
+static bool NormalizeAllTimes(ScheduleTimeCtx* ctx, int& outBadDay, int& outBadPeriod) {
+    if (!ctx) return false;
+    for (int p = 0; p < ctx->periods; ++p) {
+        for (int d = 0; d < kScheduleDayCount; ++d) {
+            size_t idx = static_cast<size_t>(d + p * kScheduleDayCount);
+            if (idx >= ctx->times.size()) continue;
+            std::wstring normalized;
+            if (!TryNormalizeTime(ctx->times[idx], normalized)) {
+                outBadDay = d;
+                outBadPeriod = p;
+                return false;
+            }
+            ctx->times[idx] = normalized;
+        }
+    }
+    return true;
+}
+
+static LRESULT CALLBACK ScheduleTimeProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<ScheduleTimeCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = reinterpret_cast<ScheduleTimeCtx*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        const auto ui = GetScheduleTimeUiStrings();
+        const int pad = ScaleY(hWnd, 12);
+        const int gapY = ScaleY(hWnd, 6);
+        int labelW = ScaleY(hWnd, 60);
+        int editW = ScaleY(hWnd, 90);
+        int comboW = ScaleY(hWnd, 120);
+        const int uiTextH = FontLineHeightPx(hWnd, g_hUIFont);
+        const int rowH = std::max(ScaleY(hWnd, 24), uiTextH + ScaleY(hWnd, 10));
+        const int labelPadY = std::max(ScaleY(hWnd, 2), (rowH - uiTextH) / 2);
+        int y = pad;
+        int xLabel = pad;
+        int xField = pad + labelW;
+
+        HWND lblDay = CreateWindowExW(0, L"STATIC", ui.labelDay.c_str(),
+                                      WS_CHILD | WS_VISIBLE,
+                                      xLabel, y + labelPadY, labelW, rowH, hWnd, nullptr, g_hInst, nullptr);
+        SetUIFont(lblDay);
+        ctx->cbDay = CreateWindowExW(0, L"COMBOBOX", L"",
+                                     WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                     xField, y, comboW, ScaleY(hWnd, 200), hWnd,
+                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SCHEDULE_TIME_DAY)),
+                                     g_hInst, nullptr);
+        SetUIFont(ctx->cbDay);
+        ui::GuardComboAgainstAccidentalChange(ctx->cbDay);
+        for (const auto& label : ui.dayLabels) {
+            SendMessageW(ctx->cbDay, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+        SendMessageW(ctx->cbDay, CB_SETCURSEL, ctx->dayIndex, 0);
+
+        ctx->btnCopy = CreateWindowExW(0, L"BUTTON", ui.labelCopy.c_str(),
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                       xField + comboW + ScaleY(hWnd, 10), y, ScaleY(hWnd, 140), rowH, hWnd,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SCHEDULE_TIME_COPY)),
+                                       g_hInst, nullptr);
+        SetUIFont(ctx->btnCopy);
+        y += rowH + gapY;
+
+        HWND hint = CreateWindowExW(0, L"STATIC", ui.hintFormat.c_str(),
+                                    WS_CHILD | WS_VISIBLE,
+                                    xField, y + ScaleY(hWnd, 2), ScaleY(hWnd, 240), rowH, hWnd, nullptr, g_hInst, nullptr);
+        SetUIFont(hint);
+        y += rowH + gapY;
+
+        ctx->labels.resize(static_cast<size_t>(ctx->periods));
+        ctx->edits.resize(static_cast<size_t>(ctx->periods));
+        for (int p = 0; p < ctx->periods; ++p) {
+            std::wstring label = IsEnglishUi() ? (L"P" + std::to_wstring(p + 1)) : (std::to_wstring(p + 1) + L"限");
+            ctx->labels[static_cast<size_t>(p)] = CreateWindowExW(0, L"STATIC", label.c_str(),
+                                                                  WS_CHILD | WS_VISIBLE,
+                                                                  xLabel, y + labelPadY, labelW, rowH,
+                                                                  hWnd, nullptr, g_hInst, nullptr);
+            SetUIFont(ctx->labels[static_cast<size_t>(p)]);
+            ctx->edits[static_cast<size_t>(p)] = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                                                 xField, y, editW, rowH,
+                                                                 hWnd,
+                                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SCHEDULE_TIME_BASE + p)),
+                                                                 g_hInst, nullptr);
+            SetUIFont(ctx->edits[static_cast<size_t>(p)]);
+            y += rowH + gapY;
+        }
+
+        RECT btnRc{};
+        GetClientRect(hWnd, &btnRc);
+        int clientW = std::max(0, static_cast<int>(btnRc.right - btnRc.left));
+        int btnH = std::max(ScaleY(hWnd, 28), rowH);
+        int okW = ScaleY(hWnd, 80);
+        int cancelW = ScaleY(hWnd, 95);
+        int btnGap = ScaleY(hWnd, 10);
+        int btnY = y + std::max(ScaleY(hWnd, 4), (rowH - btnH) / 2);
+        int xCancel = std::max(pad, clientW - pad - cancelW);
+        int xOk = std::max(pad, xCancel - btnGap - okW);
+        HWND ok = CreateWindowExW(0, L"BUTTON", ui.labelOk.c_str(),
+                                  WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                                  xOk, btnY, okW, btnH, hWnd,
+                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)),
+                                  g_hInst, nullptr);
+        HWND cancel = CreateWindowExW(0, L"BUTTON", ui.labelCancel.c_str(),
+                                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                      xCancel, btnY, cancelW, btnH, hWnd,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)),
+                                      g_hInst, nullptr);
+        SetUIFont(ok);
+        SetUIFont(cancel);
+
+        // Ensure the window is tall enough for all periods under high DPI.
+        {
+            RECT winRc{};
+            GetWindowRect(hWnd, &winRc);
+            int winW = std::max(0, static_cast<int>(winRc.right - winRc.left));
+            int winH = std::max(0, static_cast<int>(winRc.bottom - winRc.top));
+            RECT clientRc{};
+            GetClientRect(hWnd, &clientRc);
+            int clientH = std::max(0, static_cast<int>(clientRc.bottom - clientRc.top));
+            int frameH = std::max(0, winH - clientH);
+            int desiredClientH = btnY + btnH + pad;
+            int desiredH = desiredClientH + frameH;
+            if (desiredH > winH) {
+                SetWindowPos(hWnd, nullptr, 0, 0, winW, desiredH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+
+        LoadDayTimes(ctx, ctx->dayIndex);
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    }
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        return ThemeCtlColorPanel(ctl, hdc);
+    }
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (DrawThemeButton(dis)) return TRUE;
+        break;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        int code = HIWORD(wParam);
+        if (!ctx) break;
+        if (id == IDC_SCHEDULE_TIME_DAY && code == CBN_SELCHANGE) {
+            StoreDayTimes(ctx, ctx->dayIndex);
+            int sel = static_cast<int>(SendMessageW(ctx->cbDay, CB_GETCURSEL, 0, 0));
+            ctx->dayIndex = std::clamp(sel, 0, kScheduleDayCount - 1);
+            LoadDayTimes(ctx, ctx->dayIndex);
+            return 0;
+        }
+        if (id == IDC_SCHEDULE_TIME_COPY) {
+            StoreDayTimes(ctx, ctx->dayIndex);
+            if (!NormalizeDayTimes(ctx, ctx->dayIndex)) {
+                const auto ui = GetScheduleTimeUiStrings();
+                ShowSoftNotice(hWnd, ui.errInvalid, SoftNoticeKind::Warning);
+                LoadDayTimes(ctx, ctx->dayIndex);
+                return 0;
+            }
+            for (int d = 0; d < kScheduleDayCount; ++d) {
+                if (d == ctx->dayIndex) continue;
+                for (int p = 0; p < ctx->periods; ++p) {
+                    size_t src = static_cast<size_t>(ctx->dayIndex + p * kScheduleDayCount);
+                    size_t dst = static_cast<size_t>(d + p * kScheduleDayCount);
+                    if (src < ctx->times.size() && dst < ctx->times.size()) {
+                        ctx->times[dst] = ctx->times[src];
+                    }
+                }
+            }
+            LoadDayTimes(ctx, ctx->dayIndex);
+            return 0;
+        }
+        if (id == IDOK) {
+            StoreDayTimes(ctx, ctx->dayIndex);
+            int badDay = -1;
+            int badPeriod = -1;
+            if (!NormalizeAllTimes(ctx, badDay, badPeriod)) {
+                const auto ui = GetScheduleTimeUiStrings();
+                std::wstring msg = ui.errInvalid;
+                if (badDay >= 0 && badDay < static_cast<int>(ui.dayLabels.size()) && badPeriod >= 0) {
+                    msg += L"\n";
+                    if (IsEnglishUi()) {
+                        msg += ui.dayLabels[static_cast<size_t>(badDay)] + L" P" + std::to_wstring(badPeriod + 1);
+                    } else {
+                        msg += ui.dayLabels[static_cast<size_t>(badDay)] + L" " + std::to_wstring(badPeriod + 1) + L"限";
+                    }
+                }
+                ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+                if (badDay >= 0 && badDay < kScheduleDayCount) {
+                    SendMessageW(ctx->cbDay, CB_SETCURSEL, badDay, 0);
+                    ctx->dayIndex = badDay;
+                    LoadDayTimes(ctx, ctx->dayIndex);
+                    if (badPeriod >= 0 && badPeriod < ctx->periods) {
+                        SetFocus(ctx->edits[static_cast<size_t>(badPeriod)]);
+                    }
+                }
+                return 0;
+            }
+            g_config.scheduleStartTimes = ctx->times;
+            PersistConfig();
+            ctx->ok = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (id == IDCANCEL || id == 0) {
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+    case WM_DESTROY:
+        if (ctx) RestoreOwnerAfterModal(ctx->owner);
+        if (ctx) ctx->done = true;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static void EnsureScheduleTimeClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = ScheduleTimeProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush
+                                           : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"ScheduleTimeDlgClass";
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+static void ShowScheduleTimeDialog(HWND owner) {
+    EnsureScheduleTimeClass();
+    ScheduleTimeCtx ctx{};
+    ctx.owner = owner;
+    ctx.periods = std::clamp(g_config.schedulePeriods, 1, kScheduleMaxPeriods);
+    ctx.times = g_config.scheduleStartTimes;
+    EnsureScheduleStartTimesCapacity(ctx.times);
+
+    const auto ui = GetScheduleTimeUiStrings();
+    if (owner) EnableWindow(owner, FALSE);
+    int dpiRef = GetDpiY(owner);
+    int wPx = MulDiv(kScheduleTimeDlgWidth, dpiRef, 96);
+    int hPx = MulDiv(kScheduleTimeDlgHeight, dpiRef, 96);
+    HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, L"ScheduleTimeDlgClass",
+                             ui.title.c_str(),
+                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             CW_USEDEFAULT, CW_USEDEFAULT, wPx, hPx,
+                             owner, nullptr, g_hInst, &ctx);
+    if (!w) {
+        if (owner) EnableWindow(owner, TRUE);
+        return;
+    }
+    ShowWindow(w, SW_SHOW);
+    UpdateWindow(w);
+    MSG msg;
+    while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (ShouldSkipImeMessageInModalLoop(msg)) continue;
+        if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
+        if (!IsDialogMessageW(w, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    RestoreOwnerAfterModal(owner);
+}
+
+static void EnsureGeneralSettingsClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = GeneralSettingsProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush
+                                           : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"GeneralSettingsDlgClass";
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+} // namespace
+
+void ShowGeneralSettingsDialog(HWND owner) {
+    ShowUnifiedSettingsDialog(owner, kSettingsNavGeneral);
+}
+
+void ShowNoteSettingsDialog(HWND owner) {
+    ShowUnifiedSettingsDialog(owner, kSettingsNavNote);
+}

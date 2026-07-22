@@ -1,0 +1,51 @@
+// file: main/main_startup_last_open.cppinc
+
+static bool LoadStartupLastOpenTarget(StartupLastOpenTarget* out) {
+    if (!out) return false;
+    *out = StartupLastOpenTarget{};
+    auto path = StartupLastOpenTargetFilePath();
+    if (path.empty()) return false;
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) return false;
+    std::string buf((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    if (buf.empty()) return false;
+    std::wstring line = UTF8ToWide(buf);
+    while (!line.empty() && (line.back() == L'\n' || line.back() == L'\r')) {
+        line.pop_back();
+    }
+    if (!ParseStartupLastOpenLine(line, out)) return false;
+    g_lastStartupLecturePathSaved = out->lecturePath;
+    g_lastStartupSessionPathSaved = out->sessionPath;
+    return true;
+}
+
+bool SaveStartupLastOpenTarget() {
+    if (g_currentLecturePath.empty()) return false;
+    std::wstring lecturePath = g_currentLecturePath;
+    std::wstring sessionPath = g_currentSessionPath;
+    if (lecturePath == g_lastStartupLecturePathSaved &&
+        sessionPath == g_lastStartupSessionPathSaved) {
+        return true;
+    }
+    auto path = StartupLastOpenTargetFilePath();
+    if (path.empty()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) return false;
+    std::wstring line = EscapeSessionLastOpenField(lecturePath) + L"\t" +
+                        EscapeSessionLastOpenField(sessionPath) + L"\n";
+    std::filesystem::path preferredTmp;
+    std::filesystem::path quarantineDir;
+    if (!g_workspaceRoot.empty()) {
+        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
+        preferredTmp = resource / L"__tmp__";
+        quarantineDir = resource / L"__escape__";
+    }
+    std::wstring err;
+    if (!atomic_write::AtomicWriteUtf8(path, WideToUTF8(line), preferredTmp, quarantineDir, &err)) {
+        return false;
+    }
+    g_lastStartupLecturePathSaved = std::move(lecturePath);
+    g_lastStartupSessionPathSaved = std::move(sessionPath);
+    return true;
+}

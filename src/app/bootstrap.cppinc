@@ -1,0 +1,591 @@
+// file: main/bootstrap.cpp
+// NOTE: This file is intentionally included by `src/main.cpp` to keep the build as a
+// single translation unit while physically splitting responsibilities.
+
+#include "ui/noop_nav_guard.h"
+
+static HICON LoadAppWindowIcon(int width, int height) {
+    HICON icon = static_cast<HICON>(LoadImageW(g_hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+                                               width, height, LR_DEFAULTCOLOR | LR_SHARED));
+    if (icon) return icon;
+    return LoadIcon(nullptr, IDI_APPLICATION);
+}
+
+static void AppendTopLevelExceptionLog(const char* label, const char* detail) {
+    std::string line = "top-level exception";
+    if (label && *label) {
+        line += " [";
+        line += label;
+        line += "]";
+    }
+    if (detail && *detail) {
+        line += ": ";
+        line += detail;
+    }
+    AppendAppLogLineUtf8(AppLogKind::Crash, line);
+}
+
+static void PrepareStartupWatchdogForShutdown() {
+    if (g_hSingleInstanceReadyEvent) {
+        SetEvent(g_hSingleInstanceReadyEvent);
+    }
+    if (g_hSingleInstanceShutdownStopEvent) {
+        SetEvent(g_hSingleInstanceShutdownStopEvent);
+    }
+    if (g_hStartupAbortAckEvent) {
+        SetEvent(g_hStartupAbortAckEvent);
+    }
+    if (g_hSingleInstanceShutdownThread) {
+        WaitForSingleObject(g_hSingleInstanceShutdownThread, 6000);
+    }
+    if (g_hStartupWatchdogThread) {
+        WaitForSingleObject(g_hStartupWatchdogThread, 6000);
+    }
+}
+
+static void ShutdownBootstrapResources(bool coInitialized, bool pdfiumInitialized) {
+    PrepareStartupWatchdogForShutdown();
+    if (g_hAccel) {
+        DestroyAcceleratorTable(g_hAccel);
+        g_hAccel = nullptr;
+    }
+    UninstallMainWheelRoutingHooks();
+    ReleaseWorkspaceWriteLock();
+    if (g_hSingleInstanceMutex) {
+        CloseHandle(g_hSingleInstanceMutex);
+        g_hSingleInstanceMutex = nullptr;
+    }
+    if (g_hSingleInstanceReadyEvent) {
+        CloseHandle(g_hSingleInstanceReadyEvent);
+        g_hSingleInstanceReadyEvent = nullptr;
+    }
+    if (g_hStartupWatchdogThread) {
+        CloseHandle(g_hStartupWatchdogThread);
+        g_hStartupWatchdogThread = nullptr;
+    }
+    if (g_hStartupAbortAckEvent) {
+        CloseHandle(g_hStartupAbortAckEvent);
+        g_hStartupAbortAckEvent = nullptr;
+    }
+    if (g_hSingleInstanceShutdownThread) {
+        CloseHandle(g_hSingleInstanceShutdownThread);
+        g_hSingleInstanceShutdownThread = nullptr;
+    }
+    if (g_hSingleInstanceShutdownRequestEvent) {
+        CloseHandle(g_hSingleInstanceShutdownRequestEvent);
+        g_hSingleInstanceShutdownRequestEvent = nullptr;
+    }
+    if (g_hSingleInstanceShutdownStopEvent) {
+        CloseHandle(g_hSingleInstanceShutdownStopEvent);
+        g_hSingleInstanceShutdownStopEvent = nullptr;
+    }
+    if (pdfiumInitialized) {
+        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+        FPDF_DestroyLibrary();
+    }
+    UnloadLibreOfficePrivateFontsForProcess();
+    if (coInitialized) {
+        CoUninitialize();
+    }
+}
+
+static int ReportTopLevelExceptionAndShutdown(const wchar_t* message,
+                                              bool coInitialized,
+                                              bool pdfiumInitialized) {
+    if (g_hMainWnd && IsWindow(g_hMainWnd)) {
+        ShowMainMessageDialog(nullptr,
+                              L"PDF Note Workspace",
+                              message ? message
+                                      : L"予期しない内部エラーが発生したため、安全のため終了します。",
+                              SoftNoticeKind::Error);
+    }
+    ShutdownBootstrapResources(coInitialized, pdfiumInitialized);
+    return 1;
+}
+
+static bool ActivateExistingInstance() {
+    HWND existing = FindWindowW(kMainClass, nullptr);
+    if (!existing) return false;
+    if (IsIconic(existing)) {
+        ShowWindow(existing, SW_RESTORE);
+    } else {
+        ShowWindow(existing, SW_SHOW);
+    }
+    if (!IsWindowVisible(existing)) {
+        ShowWindow(existing, SW_SHOW);
+    }
+    SetWindowPos(existing, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    SetForegroundWindow(existing);
+    return true;
+}
+
+static bool WaitAndActivateExistingInstance(DWORD timeoutMs) {
+    const std::wstring readyEventName = SingleInstanceReadyEventName();
+    HANDLE ready = OpenEventW(SYNCHRONIZE, FALSE, readyEventName.c_str());
+    if (ready) {
+        WaitForSingleObject(ready, timeoutMs);
+        CloseHandle(ready);
+        if (ActivateExistingInstance()) return true;
+    }
+
+    DWORD start = GetTickCount();
+    while (GetTickCount() - start < timeoutMs) {
+        if (ActivateExistingInstance()) return true;
+        Sleep(50);
+    }
+    return ActivateExistingInstance();
+}
+
+static bool WaitForExistingInstanceShutdown(HANDLE mutex, DWORD timeoutMs) {
+    if (!mutex) return false;
+    DWORD wait = WaitForSingleObject(mutex, timeoutMs);
+    return wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+}
+
+static bool PromptAndRequestExistingInstanceShutdown(HANDLE mutex) {
+    SilentDialogOptions dialog;
+    dialog.title = L"PDF Note Workspace";
+    dialog.message =
+        L"別のインスタンスが起動中ですが、ウィンドウが見つかりませんでした。\n"
+        L"バックグラウンドで停止している可能性があります。\n\n"
+        L"既存インスタンスへ通常終了を要求できます。保存保護を通すため、強制終了はしません。";
+    dialog.kind = SoftNoticeKind::Error;
+    dialog.buttons = SilentDialogButtons::YesNo;
+    dialog.defaultResult = SilentDialogResult::Yes;
+    dialog.escapeResult = SilentDialogResult::No;
+    dialog.yesLabel = L"終了を試みる";
+    dialog.noLabel = L"閉じる";
+    dialog.preferredWidthPx = 620;
+
+    if (ShowSilentDialog(nullptr, dialog) != SilentDialogResult::Yes) {
+        return false;
+    }
+
+    if (!SignalSingleInstanceShutdownRequest()) {
+        ShowMainMessageDialog(
+            nullptr,
+            L"PDF Note Workspace",
+            L"既存インスタンスへ終了要求を送れませんでした。\n\n"
+            L"古いバージョンのプロセス、または起動途中で停止したプロセスの可能性があります。\n"
+            L"タスクマネージャーで \"pdf_note_workspace.exe\" を確認してください。",
+            SoftNoticeKind::Error);
+        return false;
+    }
+
+    if (WaitForExistingInstanceShutdown(mutex, 10000)) {
+        return true;
+    }
+
+    ShowMainMessageDialog(
+        nullptr,
+        L"PDF Note Workspace",
+        L"終了要求を送信しましたが、既存インスタンスの終了を確認できませんでした。\n\n"
+        L"保存処理中、終了確認中、または応答停止中の可能性があります。\n"
+        L"しばらく待ってから再起動してください。",
+        SoftNoticeKind::Warning);
+    return false;
+}
+
+static void AppendStartupWatchdogLog(const char* line) {
+    if (!line) return;
+    AppendAppLogLineUtf8(AppLogKind::StartupWatchdog, line);
+}
+
+static DWORD WINAPI SingleInstanceShutdownRequestThread(LPVOID) {
+    HANDLE handles[] = {
+        g_hSingleInstanceShutdownStopEvent,
+        g_hSingleInstanceShutdownRequestEvent,
+    };
+    if (!handles[0] || !handles[1]) return 0;
+
+    for (;;) {
+        DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+        if (wait == WAIT_OBJECT_0) return 0;
+        if (wait == WAIT_OBJECT_0 + 1) {
+            AppendStartupWatchdogLog("Single-instance shutdown request received.");
+            if (g_mainThreadId != 0) {
+                PostThreadMessageW(g_mainThreadId, kMsgSingleInstanceShutdownRequest, 0, 0);
+            }
+            continue;
+        }
+        return 0;
+    }
+}
+
+static DWORD WINAPI StartupWatchdogThread(LPVOID) {
+    HANDLE ready = g_hSingleInstanceReadyEvent;
+    if (!ready) return 0;
+
+    DWORD res = WaitForSingleObject(ready, kStartupWindowTimeoutMs);
+    if (res == WAIT_OBJECT_0) return 0;
+
+    // If the window exists but the ready event was never signaled, try to recover by showing it.
+    if (HWND existing = FindWindowW(kMainClass, nullptr)) {
+        if (IsIconic(existing)) {
+            ShowWindow(existing, SW_RESTORE);
+        } else {
+            ShowWindow(existing, SW_SHOW);
+        }
+        if (!IsWindowVisible(existing)) {
+            ShowWindow(existing, SW_SHOW);
+        }
+        SetWindowPos(existing, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        if (IsWindowVisible(existing)) {
+            SetEvent(ready);
+            return 0;
+        }
+    }
+
+    AppendStartupWatchdogLog("Startup watchdog: main window not visible (timeout).");
+
+    if (g_mainThreadId != 0) {
+        PostThreadMessageW(g_mainThreadId, kMsgStartupWatchdogAbort, 0, 0);
+    }
+
+    if (g_hStartupAbortAckEvent) {
+        WaitForSingleObject(g_hStartupAbortAckEvent, 5000);
+    }
+
+    if (!IsSaveOperationInProgress()) {
+        AppendStartupWatchdogLog("Startup watchdog: forcing ExitProcess().");
+        ExitProcess(2);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------
+int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
+    bool coInitialized = false;
+    bool pdfiumInitialized = false;
+
+    try {
+    g_hInst = hInstance;
+    SetUnhandledExceptionFilter(CrashLogFilter);
+    g_mainThreadId = GetCurrentThreadId();
+    {
+        // Ensure this thread has a message queue early so PostThreadMessage can succeed.
+        MSG pm{};
+        PeekMessageW(&pm, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+    }
+    InstallGlobalBeepFilter();
+    const std::wstring mutexName = SingleInstanceMutexName();
+    const std::wstring readyEventName = SingleInstanceReadyEventName();
+    CaptureStartupDocumentPathFromCommandLine();
+    g_hSingleInstanceMutex = CreateMutexW(nullptr, TRUE, mutexName.c_str());
+    if (g_hSingleInstanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        const bool activated = WaitAndActivateExistingInstance(2500);
+        if (activated && HasPendingStartupOpenDocumentPath()) {
+            if (HWND existing = FindWindowW(kMainClass, nullptr)) {
+                SendStartupOpenDocumentPath(existing, PeekPendingStartupOpenDocumentPath());
+                ActivateExistingInstance();
+            }
+        }
+        bool continueStartup = false;
+        if (!activated) {
+            continueStartup = PromptAndRequestExistingInstanceShutdown(g_hSingleInstanceMutex);
+        }
+        if (!continueStartup) {
+            CloseHandle(g_hSingleInstanceMutex);
+            g_hSingleInstanceMutex = nullptr;
+            return 0;
+        }
+    }
+
+    g_hSingleInstanceReadyEvent = CreateEventW(nullptr, TRUE, FALSE, readyEventName.c_str());
+    g_hSingleInstanceShutdownRequestEvent =
+        CreateEventW(nullptr, FALSE, FALSE, SingleInstanceShutdownRequestEventName().c_str());
+    if (!g_hSingleInstanceShutdownStopEvent) {
+        g_hSingleInstanceShutdownStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    }
+    if (!g_hStartupAbortAckEvent) {
+        g_hStartupAbortAckEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    }
+    if (g_hSingleInstanceShutdownRequestEvent && g_hSingleInstanceShutdownStopEvent &&
+        !g_hSingleInstanceShutdownThread) {
+        g_hSingleInstanceShutdownThread =
+            CreateThread(nullptr, 0, SingleInstanceShutdownRequestThread, nullptr, 0, nullptr);
+    }
+    if (g_hSingleInstanceReadyEvent && !g_hStartupWatchdogThread) {
+        g_hStartupWatchdogThread = CreateThread(nullptr, 0, StartupWatchdogThread, nullptr, 0, nullptr);
+    }
+
+    HRESULT hrCoInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    coInitialized = SUCCEEDED(hrCoInit);
+    {
+        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+        FPDF_InitLibrary();
+        pdfiumInitialized = true;
+        // Safety: disallow access to local machine time from within PDFium sandbox hooks (if any).
+        // This does not affect rendering/annotations, but reduces information that PDF contents could query.
+        FPDF_SetSandBoxPolicy(FPDF_POLICY_MACHINETIME_ACCESS, /*enable=*/false);
+    }
+
+    INITCOMMONCONTROLSEX icc{ sizeof(INITCOMMONCONTROLSEX), ICC_WIN95_CLASSES | ICC_PROGRESS_CLASS };
+    InitCommonControlsEx(&icc);
+
+    LoadLibreOfficePrivateFontsForProcess();
+    g_hUIFont = CreateUIFont();
+    g_hNoteFont = CreateFontFromFaceName(g_noteFontName, g_noteFontPt);
+    g_hNoteRenderFont = CreateFontFromFaceName(g_noteRenderFontName, g_noteRenderFontPt);
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_DBLCLKS;
+    wc.lpfnWndProc = MainWndProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = kMainClass;
+    wc.hIcon = LoadAppWindowIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    wc.hIconSm = LoadAppWindowIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+    RegisterClassExW(&wc);
+
+    WNDCLASSEXW pvc{};
+    pvc.cbSize = sizeof(pvc);
+    pvc.style = CS_DBLCLKS;
+    pvc.lpfnWndProc = PdfViewProc;
+    pvc.hInstance = g_hInst;
+    pvc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    pvc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    pvc.lpszClassName = kPdfViewClass;
+    RegisterClassExW(&pvc);
+
+    WNDCLASSEXW twc{};
+    twc.cbSize = sizeof(twc);
+    twc.lpfnWndProc = ToolbarHostProc;
+    twc.hInstance = g_hInst;
+    twc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    twc.hbrBackground = nullptr;
+    twc.lpszClassName = kToolbarHostClass;
+    RegisterClassExW(&twc);
+
+    HWND hWnd = CreateWindowExW(0, kMainClass, L"PDF Note Workspace",
+                                WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1280, 900,
+                                nullptr, nullptr, g_hInst, nullptr);
+    if (!hWnd) {
+        if (g_hSingleInstanceReadyEvent) {
+            SetEvent(g_hSingleInstanceReadyEvent);
+        }
+        if (g_hStartupWatchdogThread) {
+            WaitForSingleObject(g_hStartupWatchdogThread, 1000);
+            CloseHandle(g_hStartupWatchdogThread);
+            g_hStartupWatchdogThread = nullptr;
+        }
+        if (g_hSingleInstanceReadyEvent) {
+            CloseHandle(g_hSingleInstanceReadyEvent);
+            g_hSingleInstanceReadyEvent = nullptr;
+        }
+        if (g_hStartupAbortAckEvent) {
+            CloseHandle(g_hStartupAbortAckEvent);
+            g_hStartupAbortAckEvent = nullptr;
+        }
+        if (g_hSingleInstanceShutdownStopEvent) {
+            SetEvent(g_hSingleInstanceShutdownStopEvent);
+        }
+        if (g_hSingleInstanceShutdownThread) {
+            WaitForSingleObject(g_hSingleInstanceShutdownThread, 1000);
+            CloseHandle(g_hSingleInstanceShutdownThread);
+            g_hSingleInstanceShutdownThread = nullptr;
+        }
+        if (g_hSingleInstanceShutdownRequestEvent) {
+            CloseHandle(g_hSingleInstanceShutdownRequestEvent);
+            g_hSingleInstanceShutdownRequestEvent = nullptr;
+        }
+        if (g_hSingleInstanceShutdownStopEvent) {
+            CloseHandle(g_hSingleInstanceShutdownStopEvent);
+            g_hSingleInstanceShutdownStopEvent = nullptr;
+        }
+        if (g_hSingleInstanceMutex) {
+            CloseHandle(g_hSingleInstanceMutex);
+            g_hSingleInstanceMutex = nullptr;
+        }
+        return 0;
+    }
+    g_hMainWnd = hWnd;
+
+    HMENU menu = BuildMenuBar();
+    g_hMainMenu = menu;
+    SetMenu(hWnd, menu);
+    g_hAccel = BuildAccelerators();
+    int showCmd = (nCmdShow == SW_HIDE) ? SW_SHOW : nCmdShow;
+    ShowWindow(hWnd, showCmd);
+    ShowWindow(hWnd, SW_SHOW);
+    SetWindowPos(hWnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    UpdateWindow(hWnd);
+    if (g_hSingleInstanceReadyEvent && IsWindowVisible(hWnd)) {
+        SetEvent(g_hSingleInstanceReadyEvent);
+    }
+
+    InstallMainWheelRoutingHooks();
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        if (!msg.hwnd && msg.message == kMsgStartupWatchdogAbort) {
+            if (g_hStartupAbortAckEvent) SetEvent(g_hStartupAbortAckEvent);
+            ShowMainMessageDialog(
+                nullptr,
+                L"PDF Note Workspace",
+                L"起動に失敗しました（メインウィンドウが表示できません）。\n\n"
+                L"タスクマネージャーで \"pdf_note_workspace.exe\" が残っている場合は終了してから、再起動してください。",
+                SoftNoticeKind::Error);
+            if (g_hMainWnd && IsWindow(g_hMainWnd)) {
+                PostMessageW(g_hMainWnd, WM_CLOSE, 0, 0);
+            } else {
+                PostQuitMessage(2);
+            }
+            continue;
+        }
+        if (!msg.hwnd && msg.message == kMsgSingleInstanceShutdownRequest) {
+            if (g_hMainWnd && IsWindow(g_hMainWnd)) {
+                PostMessageW(g_hMainWnd, WM_CLOSE, 0, 0);
+            } else {
+                PostQuitMessage(0);
+            }
+            continue;
+        }
+        if (ShouldSkipImeMessageInLoop(msg)) continue;
+        if (RouteWheelToComboListIfNeeded(msg)) continue;
+        if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
+        bool traceCtrlSave = false;
+        bool traceCtrlDown = false;
+        bool traceAltDown = false;
+        bool traceShiftDown = false;
+        if ((msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) &&
+            (msg.wParam == 'S' || msg.wParam == 's')) {
+            traceCtrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            traceAltDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            traceShiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            traceCtrlSave = traceCtrlDown || traceAltDown;
+            if (traceCtrlSave) {
+                HWND focus = GetFocus();
+                preview_trace::Append(
+                    L"CtrlSLoop",
+                    L"key msg=" + preview_trace::Message(msg.message) +
+                    L" target=" + preview_trace::Window(msg.hwnd) +
+                    L" targetRoot=" + preview_trace::Window(GetAncestor(msg.hwnd, GA_ROOT)) +
+                    L" focus=" + preview_trace::Window(focus) +
+                    L" focusRoot=" + preview_trace::Window(GetAncestor(focus, GA_ROOT)) +
+                    L" ctrl=" + preview_trace::Bool(traceCtrlDown) +
+                    L" alt=" + preview_trace::Bool(traceAltDown) +
+                    L" shift=" + preview_trace::Bool(traceShiftDown));
+            }
+        }
+        bool isEscKey = (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE);
+        bool isCtrlBracket = false;
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_OEM_4) {
+            bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            isCtrlBracket = ctrlDown && !altDown;
+        }
+        if (isEscKey || isCtrlBracket) {
+            HWND root = GetAncestor(msg.hwnd, GA_ROOT);
+            if (root == hWnd) {
+                // Let the PDF view finish textbox editing before global Esc/Ctrl+[ handling.
+                // Esc/Ctrl+[ must commit the active textbox regardless of the HWND that received the key.
+                if (g_pdf.editingText) {
+                    if (g_hPdfView && IsWindow(g_hPdfView)) {
+                        SendMessageW(g_hPdfView, WM_KEYDOWN, VK_ESCAPE, msg.lParam);
+                    }
+                    continue;
+                }
+                {
+                    if (IsNoteCmdlineActive()) {
+                        // While composing with IME in the cmdline input, Esc should cancel IME composition first.
+                        if (!(isEscKey && IsNoteCmdlineImeComposing())) {
+                            CancelNoteCmdline();
+                            continue;
+                        }
+                    }
+                    if (isEscKey && g_linkPending.active) {
+                        CancelPendingLinkMode(hWnd);
+                    }
+                    if (GetFocus() == g_hNoteEdit && IsNoteImeComposing()) {
+                        if (isEscKey) {
+                            HIMC himc = ImmGetContext(g_hNoteEdit);
+                            if (himc) {
+                                ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_COMPLETE, 0);
+                                ImmReleaseContext(g_hNoteEdit, himc);
+                            }
+                            continue;
+                        }
+                    } else {
+                        if (g_noteVimModeEnabled && g_noteNormalMode) {
+                            if (isEscKey || isCtrlBracket) {
+                                bool clearedVisual = ClearNoteNormalVisualMode();
+                                bool clearedPending = ClearNoteNormalPendingState();
+                                if (isEscKey && !clearedVisual && !clearedPending) {
+                                    if (g_hPdfView) SetFocus(g_hPdfView);
+                                }
+                            }
+                            continue;
+                        }
+                        EnterNoteNormalMode(hWnd);
+                        continue;
+                    }
+                }
+            }
+        }
+        if (HandleMainPdfZoomShortcutInLoop(hWnd, msg)) {
+            continue;
+        }
+        if (HandleFixedAnnotToolNavigationShortcutInLoop(hWnd, msg)) {
+            continue;
+        }
+        if (HandleAnnotColorCycleShortcutInLoop(hWnd, msg)) {
+            continue;
+        }
+        if (HandleAnnotToolShortcutInLoop(hWnd, msg)) {
+            continue;
+        }
+        BOOL accelHandled = FALSE;
+        if (g_hAccel) {
+            accelHandled = TranslateAcceleratorW(hWnd, g_hAccel, &msg);
+        }
+        if (traceCtrlSave) {
+            preview_trace::Append(
+                L"CtrlSLoop",
+                L"after_translate handled=" + preview_trace::Bool(accelHandled != FALSE) +
+                L" target=" + preview_trace::Window(msg.hwnd) +
+                L" focus=" + preview_trace::Window(GetFocus()) +
+                L" ctrl=" + preview_trace::Bool(traceCtrlDown) +
+                L" alt=" + preview_trace::Bool(traceAltDown) +
+                L" shift=" + preview_trace::Bool(traceShiftDown));
+        }
+        if (!g_hAccel || !accelHandled) {
+            if (traceCtrlSave) {
+                preview_trace::Append(L"CtrlSLoop",
+                                      L"dispatch target=" + preview_trace::Window(msg.hwnd));
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    ShowManagedAbnormalExitReportIfPending();
+    ShutdownBootstrapResources(coInitialized, pdfiumInitialized);
+    return OverrideExitCodeForManagedAbnormalExit(static_cast<int>(msg.wParam));
+    } catch (const std::filesystem::filesystem_error& ex) {
+        AppendTopLevelExceptionLog("filesystem_error", ex.what());
+        return ReportTopLevelExceptionAndShutdown(
+            L"ファイル操作中に予期しない内部エラーが発生したため、安全のため終了します。\n"
+            L"原本ファイルは変更していません。",
+            coInitialized, pdfiumInitialized);
+    } catch (const std::exception& ex) {
+        AppendTopLevelExceptionLog("std::exception", ex.what());
+        return ReportTopLevelExceptionAndShutdown(
+            L"予期しない内部エラーが発生したため、安全のため終了します。\n"
+            L"原本ファイルは変更していません。",
+            coInitialized, pdfiumInitialized);
+    } catch (...) {
+        AppendTopLevelExceptionLog("unknown", nullptr);
+        return ReportTopLevelExceptionAndShutdown(
+            L"予期しない内部エラーが発生したため、安全のため終了します。\n"
+            L"原本ファイルは変更していません。",
+            coInitialized, pdfiumInitialized);
+    }
+}

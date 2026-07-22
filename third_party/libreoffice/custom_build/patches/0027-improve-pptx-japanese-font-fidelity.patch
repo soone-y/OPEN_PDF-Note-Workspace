@@ -1,0 +1,133 @@
+diff --git a/oox/source/drawingml/textcharacterproperties.cxx b/oox/source/drawingml/textcharacterproperties.cxx
+--- a/oox/source/drawingml/textcharacterproperties.cxx
++++ b/oox/source/drawingml/textcharacterproperties.cxx
+@@ -85,6 +85,10 @@ void TextCharacterProperties::pushToPropMap( PropertyMap& rPropMap, const XmlFil
+     if (!bRet)
+         // In case there is no direct font, try to look it up as a theme reference.
+         bRet = maLatinThemeFont.getFontData( aFontName, nFontPitch, nFontFamily, nullptr, rFilter );
++    const bool bHasLatinFont = bRet;
++    const OUString aLatinFontName = aFontName;
++    const sal_Int16 nLatinFontPitch = nFontPitch;
++    const sal_Int16 nLatinFontFamily = nFontFamily;
+     if (bRet)
+     {
+         rPropMap.setProperty( PROP_CharFontName, aFontName);
+@@ -95,11 +99,32 @@ void TextCharacterProperties::pushToPropMap( PropertyMap& rPropMap, const XmlFil
+     bRet = maAsianFont.getFontData( aFontName, nFontPitch, nFontFamily, nullptr, rFilter );
+     if (!bRet)
+         bRet = maAsianThemeFont.getFontData( aFontName, nFontPitch, nFontFamily, nullptr, rFilter );
++    if (!bRet && moLang.has_value() && !moLang.value().isEmpty()
++        && LanguageTag(moLang.value()).getLocale().Language == u"ja")
++    {
++        // A blank East Asian theme typeface with ja-JP text falls back to Yu Gothic in
++        // current PowerPoint. LibreOffice's generic fallback is Noto Sans JP, whose metrics
++        // move table text, chart titles, axis labels, and legends.
++        aFontName = u"Yu Gothic"_ustr;
++        nFontPitch = nLatinFontPitch;
++        nFontFamily = nLatinFontFamily;
++        bRet = true;
++    }
++    else if (!bRet && bHasLatinFont)
++    {
++        // PowerPoint applies an explicitly selected Latin typeface to East Asian text when
++        // the run has no separate East Asian typeface. Leaving CharFontNameAsian unset makes
++        // Impress use its generic CJK fallback instead, changing text width and chart layout.
++        aFontName = aLatinFontName;
++        nFontPitch = nLatinFontPitch;
++        nFontFamily = nLatinFontFamily;
++        bRet = true;
++    }
+     if (bRet)
+     {
+         rPropMap.setProperty( PROP_CharFontNameAsian, aFontName);
+-        rPropMap.setProperty( PROP_CharFontPitchAsian, nFontFamily);
+-        rPropMap.setProperty( PROP_CharFontFamilyAsian, nFontPitch);
++        rPropMap.setProperty( PROP_CharFontPitchAsian, nFontPitch);
++        rPropMap.setProperty( PROP_CharFontFamilyAsian, nFontFamily);
+     }
+ 
+     bRet = maComplexFont.getFontData( aFontName, nFontPitch, nFontFamily, nullptr, rFilter );
+diff --git a/oox/source/drawingml/textcharacterpropertiescontext.cxx b/oox/source/drawingml/textcharacterpropertiescontext.cxx
+--- a/oox/source/drawingml/textcharacterpropertiescontext.cxx
++++ b/oox/source/drawingml/textcharacterpropertiescontext.cxx
+@@ -159,6 +159,11 @@ ContextHandlerRef TextCharacterPropertiesContext::onCreateContext( sal_Int32 aEl
+         // CT_FontCollection
+         case A_TOKEN( latin ):      // CT_TextFont
+             mrTextCharacterProperties.maLatinFont.setAttributes( rAttribs );
++            // PowerPoint uses the run's explicit Latin typeface for East Asian characters
++            // when no separate <a:ea> follows. Seed the Asian typeface here so this direct
++            // formatting overrides an inherited generic CJK font; an explicit <a:ea> still
++            // replaces it in the next case.
++            mrTextCharacterProperties.maAsianFont.setAttributes( rAttribs );
+         break;
+         case A_TOKEN( ea ):         // CT_TextFont
+             mrTextCharacterProperties.maAsianFont.setAttributes( rAttribs );
+diff --git a/oox/source/drawingml/chart/objectformatter.cxx b/oox/source/drawingml/chart/objectformatter.cxx
+--- a/oox/source/drawingml/chart/objectformatter.cxx
++++ b/oox/source/drawingml/chart/objectformatter.cxx
+@@ -648,7 +648,8 @@ public:
+     explicit            TextFormatter(
+                             ObjectFormatterData& rData,
+                             const AutoTextEntry* pAutoTextEntry,
+-                            const ModelRef< TextBody >& rxGlobalTextProp );
++                            const ModelRef< TextBody >& rxGlobalTextProp,
++                            bool bJapaneseChart );
+ 
+     /** Converts text formatting to the passed property set. */
+     void                convertFormatting(
+@@ -900,9 +901,24 @@ const TextCharacterProperties* lclGetTextProperties( const ModelRef< TextBody >&
+         &rxTextProp->getParagraphs().front()->getProperties().getTextCharacterProperties() : nullptr;
+ }
+ 
++bool lclHasJapaneseChartTitle(const ChartSpaceModel& rChartSpace)
++{
++    if (!rChartSpace.mxTitle.is() || !rChartSpace.mxTitle->mxText.is()
++        || !rChartSpace.mxTitle->mxText->mxTextBody.is())
++        return false;
++
++    const OUString aTitle = rChartSpace.mxTitle->mxText->mxTextBody->toString();
++    for (sal_Int32 i = 0; i < aTitle.getLength(); ++i)
++        if (aTitle[i] >= 0x3040 && aTitle[i] <= 0x30ff)
++            return true;
++    return false;
++}
++
+ } // namespace
+ 
+-TextFormatter::TextFormatter( ObjectFormatterData& rData, const AutoTextEntry* pAutoTextEntry, const ModelRef< TextBody >& rxGlobalTextProp ) :
++TextFormatter::TextFormatter( ObjectFormatterData& rData, const AutoTextEntry* pAutoTextEntry,
++                              const ModelRef< TextBody >& rxGlobalTextProp,
++                              bool bJapaneseChart ) :
+     DetailFormatterBase( rData, pAutoTextEntry )
+ {
+     if( !pAutoTextEntry )
+@@ -912,6 +928,19 @@ TextFormatter::TextFormatter( ObjectFormatterData& rData, const AutoTextEntry* p
+     if( const Theme* pTheme = mrData.mrFilter.getCurrentTheme() )
+         if( const TextCharacterProperties* pTextProps = pTheme->getFontStyle( pAutoTextEntry->mnThemedFont ) )
+             *mxAutoText = *pTextProps;
++    OUString aAsianFontName;
++    sal_Int16 nAsianFontPitch = 0;
++    sal_Int16 nAsianFontFamily = 0;
++    if (bJapaneseChart
++        && !mxAutoText->maAsianFont.getFontData(aAsianFontName, nAsianFontPitch,
++                                                nAsianFontFamily, nullptr,
++                                                mrData.mrFilter))
++    {
++        // PowerPoint uses the Japanese Office fallback for automatic chart labels when the
++        // East Asian theme font is blank. Keep the correction chart-local and require kana
++        // in the title so Chinese and Korean charts retain their own fallback behavior.
++        mxAutoText->maAsianFont.setAttributes(u"Yu Gothic"_ustr);
++    }
+     ::Color nTextColor = getPhColor( -1 );
+     if( sal_Int32(nTextColor) >= 0 ) {
+         mxAutoText->maFillProperties.maFillColor.setSrgbClr( nTextColor );
+@@ -946,7 +975,8 @@ void TextFormatter::convertFormatting( PropertySet& rPropSet, const ModelRef< Te
+ ObjectTypeFormatter::ObjectTypeFormatter( ObjectFormatterData& rData, const ObjectTypeFormatEntry& rEntry, const ChartSpaceModel& rChartSpace, const ObjectType eObjType ) :
+     maLineFormatter(   rData, lclGetAutoFormatEntry( rEntry.mpAutoLines,   rChartSpace.mnStyle ), eObjType ),
+     maFillFormatter(   rData, lclGetAutoFormatEntry( rEntry.mpAutoFills,   rChartSpace.mnStyle ), eObjType ),
+-    maTextFormatter(   rData, lclGetAutoTextEntry(   rEntry.mpAutoTexts,   rChartSpace.mnStyle ), rChartSpace.mxTextProp ),
++    maTextFormatter(   rData, lclGetAutoTextEntry(   rEntry.mpAutoTexts,   rChartSpace.mnStyle ),
++                       rChartSpace.mxTextProp, lclHasJapaneseChartTitle(rChartSpace) ),
+     mrModelObjHelper( rData.maModelObjHelper ),
+     mrEntry( rEntry )
+ {

@@ -1,0 +1,13 @@
+diff --git a/sw/Library_sw.mk b/sw/Library_sw.mk
+--- a/sw/Library_sw.mk
++++ b/sw/Library_sw.mk
+@@ -56,8 +56,7 @@ $(eval $(call gb_Library_use_libraries,sw,\
+     comphelper \
+     cppu \
+     cppuhelper \
+-    $(call gb_Helper_optional,DBCONNECTIVITY, \
+-        dbtools) \
++    dbtools \
+     docmodel \
+     drawinglayercore \
+     drawinglayer \

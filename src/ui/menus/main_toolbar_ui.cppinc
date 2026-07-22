@@ -1,0 +1,201 @@
+// file: main/main_toolbar_ui.cppinc
+
+void UpdateToolbarUI(HWND hWnd) {
+    SetModeButtons();
+
+    // Apply annotation tool visibility/enable state + detect order changes (for relayout).
+    static std::vector<AnnotToolFamily> s_lastExpandedOrder;
+    bool toolOrderChanged = false;
+    const auto& toolOrder = AnnotToolFamilyUiOrder();
+    toolOrderChanged = (s_lastExpandedOrder != toolOrder);
+    if (toolOrderChanged) {
+        s_lastExpandedOrder = toolOrder;
+    }
+
+    // Tool switches should not force a full relayout of the entire window (PDF repaint = flicker).
+    // Only update visibility of toolbar options and repaint the toolbar area once.
+    if (g_hPdfToolbar) SendMessageW(g_hPdfToolbar, WM_SETREDRAW, FALSE, 0);
+    SyncToolbarFontSizeCombo();
+
+    bool anyChange = false;
+    bool visibilityChanged = false;
+    if (EnsureToolbarPaletteButtons()) {
+        anyChange = true;
+        visibilityChanged = true;
+    }
+    auto setVisibleIfChanged = [&](HWND hwnd, bool visible) {
+        if (!hwnd) return;
+        LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        bool nowVisible = (style & WS_VISIBLE) != 0;
+        if (nowVisible == visible) return;
+        anyChange = true;
+        visibilityChanged = true;
+        UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW |
+                     (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, flags);
+    };
+
+    if (toolOrderChanged) {
+        anyChange = true;
+        visibilityChanged = true;
+    }
+
+    // If the selected tool becomes non-selectable, fall back to the first enabled tool.
+    if (!ToolModeEnabledForCurrentPdfView(g_toolMode)) {
+        ToolMode fallback = g_toolMode;
+        for (AnnotToolFamily family : AnnotToolFamilyUiOrder()) {
+            ToolMode mode{};
+            if (FirstEnabledModeForFamily(family, mode)) {
+                fallback = mode;
+                break;
+            }
+        }
+        if (fallback != g_toolMode) {
+            g_toolMode = fallback;
+            SetModeButtons();
+            ApplyActiveColorForMode(hWnd, g_toolMode);
+            anyChange = true;
+        }
+    }
+
+    if (IsMarkerGroupMode(g_toolMode)) g_markerGroupMode = g_toolMode;
+    if (IsPenGroupMode(g_toolMode)) g_penGroupMode = g_toolMode;
+    if (IsShapeGroupMode(g_toolMode)) SyncLegacyShapeStateFromDetail();
+    if (MarkerTextModeStoresUnderlineOption(g_toolMode)) {
+        g_markerTextUnderline = MarkerTextModeUsesUnderline(g_toolMode);
+    }
+
+    bool showFont = ToolbarHasFontOptions(g_toolMode);
+    bool showFontSize = showFont;
+    bool showWidth = ToolbarHasWidthOptions(g_toolMode);
+    bool showMarkerAlpha = ToolbarHasMarkerAlphaOptions(g_toolMode);
+    bool showAnnotMethod = ToolbarHasAnnotMethodOptions(g_toolMode);
+    bool showFreehandCorrection =
+        g_toolMode == ToolMode::Freehand && FreehandCorrectionPenActive(g_config.freehandCorrection);
+    bool showMarkerTextStyle = ToolbarHasMarkerTextStyleOptions(g_toolMode);
+    bool showLineDash = ToolbarHasLineDashOptions(g_toolMode);
+    bool showShape = ToolbarHasShapeOptions(g_toolMode);
+    bool showShapeDrawMode = ToolbarHasShapeDrawModeOptions(g_toolMode);
+    bool showColor = ToolbarHasColorOptions(g_toolMode);
+    bool showMagnifierShape = ToolbarHasMagnifierShapeOptions(g_toolMode);
+    const bool saveBusy = IsSaveTransactionRunning();
+    const bool annotPanelEnabled = !saveBusy && !IsPdfPreviewReadOnlyActive();
+    if (g_hAnnotShow) EnableWindow(g_hAnnotShow, annotPanelEnabled);
+    if (g_hAnnotSettings) EnableWindow(g_hAnnotSettings, annotPanelEnabled);
+    if (g_hAnnotClear) EnableWindow(g_hAnnotClear, annotPanelEnabled);
+
+    // Top-level tool family buttons (enabled/disabled/hidden).
+    for (AnnotToolFamily family : AnnotToolFamilyUiOrder()) {
+        HWND btn = AnnotToolFamilyButtonHwnd(family);
+        if (!btn) continue;
+        AnnotToolUiState s = EffectiveToolFamilyUiStateForCurrentPdfView(family);
+        bool wantVisible = (s != AnnotToolUiState::Hidden);
+        bool wantEnabled = (s == AnnotToolUiState::Enabled);
+        bool prevEnabled = EnableWindow(btn, wantEnabled) != 0;
+        if (prevEnabled != wantEnabled) anyChange = true;
+        setVisibleIfChanged(btn, wantVisible);
+    }
+
+    // Mode variant buttons are no longer top-level toolbar controls. They remain
+    // command targets for shortcuts/menu paths, but the toolbar exposes family buttons.
+    const HWND variantButtons[] = {
+        g_hBtnModeMarkerFree,
+        g_hBtnModeMarkerLine,
+        g_hBtnModeMarkerArrow,
+        g_hBtnModeMarkerWave,
+        g_hBtnModeLine,
+        g_hBtnModeArrow,
+        g_hBtnModeWave,
+    };
+    for (HWND btn : variantButtons) {
+        if (!btn) continue;
+        bool prevEnabled = EnableWindow(btn, FALSE) != 0;
+        if (prevEnabled) anyChange = true;
+        setVisibleIfChanged(btn, false);
+    }
+
+    // If an option doesn't apply to the selected tool, keep it non-interactive (and usually hidden).
+    // This avoids accidental edits via keyboard focus even when controls are temporarily visible.
+    if (g_hComboFont) EnableWindow(g_hComboFont, showFont && !saveBusy);
+    if (g_hComboFontSize) EnableWindow(g_hComboFontSize, showFontSize && !saveBusy);
+    if (g_hComboFontSizeAlt) EnableWindow(g_hComboFontSizeAlt, showFontSize && !saveBusy);
+    if (g_hRadioFontSizeSlotA) EnableWindow(g_hRadioFontSizeSlotA, showFontSize && !saveBusy);
+    if (g_hRadioFontSizeSlotB) EnableWindow(g_hRadioFontSizeSlotB, showFontSize && !saveBusy);
+    if (g_hComboWidth) EnableWindow(g_hComboWidth, showWidth && !saveBusy);
+    if (g_hComboMarkerAlpha) EnableWindow(g_hComboMarkerAlpha, showMarkerAlpha && !saveBusy);
+    if (g_hComboAnnotMethod) EnableWindow(g_hComboAnnotMethod, showAnnotMethod && !saveBusy);
+    if (g_hComboShapeGeometry) EnableWindow(g_hComboShapeGeometry, FALSE);
+    if (g_hComboFreehandCorrection) EnableWindow(g_hComboFreehandCorrection, showFreehandCorrection && !saveBusy);
+    if (g_hComboMarkerTextStyle) EnableWindow(g_hComboMarkerTextStyle, showMarkerTextStyle && !saveBusy);
+    if (g_hComboLineDashStyle) EnableWindow(g_hComboLineDashStyle, showLineDash && !saveBusy);
+    if (g_hComboShapeKind) EnableWindow(g_hComboShapeKind, showShape && !saveBusy);
+    if (g_hComboShapeDrawMode) EnableWindow(g_hComboShapeDrawMode, showShapeDrawMode && !saveBusy);
+    if (g_hComboMagnifierShape) EnableWindow(g_hComboMagnifierShape, showMagnifierShape && !saveBusy);
+    for (HWND h : g_colorButtons) {
+        if (h) EnableWindow(h, showColor && !saveBusy);
+    }
+    if (g_hBtnPaletteCustom) EnableWindow(g_hBtnPaletteCustom, showColor && !saveBusy);
+
+    setVisibleIfChanged(g_hComboFont, showFont);
+    setVisibleIfChanged(g_hComboFontSize, showFontSize);
+    setVisibleIfChanged(g_hComboFontSizeAlt, showFontSize);
+    setVisibleIfChanged(g_hRadioFontSizeSlotA, showFontSize);
+    setVisibleIfChanged(g_hRadioFontSizeSlotB, showFontSize);
+    setVisibleIfChanged(g_hComboWidth, showWidth);
+    setVisibleIfChanged(g_hComboMarkerAlpha, showMarkerAlpha);
+    setVisibleIfChanged(g_hComboAnnotMethod, showAnnotMethod);
+    setVisibleIfChanged(g_hComboShapeGeometry, false);
+    setVisibleIfChanged(g_hComboFreehandCorrection, showFreehandCorrection);
+    setVisibleIfChanged(g_hComboMarkerTextStyle, showMarkerTextStyle);
+    setVisibleIfChanged(g_hComboLineDashStyle, showLineDash);
+    setVisibleIfChanged(g_hComboShapeKind, showShape);
+    setVisibleIfChanged(g_hComboShapeDrawMode, showShapeDrawMode);
+    setVisibleIfChanged(g_hComboMagnifierShape, showMagnifierShape);
+    for (HWND h : g_colorButtons) {
+        setVisibleIfChanged(h, showColor);
+    }
+    setVisibleIfChanged(g_hBtnPaletteCustom, showColor);
+    if (showWidth) {
+        if (SyncWidthComboToMode(g_toolMode)) anyChange = true;
+    }
+    if (showMarkerAlpha) {
+        if (SyncAlphaComboToMode(g_toolMode)) anyChange = true;
+    }
+    if (showAnnotMethod) {
+        if (SyncAnnotMethodCombo(g_toolMode)) anyChange = true;
+    }
+    if (showFreehandCorrection) {
+        if (SyncFreehandCorrectionCombo()) anyChange = true;
+    }
+    if (showMarkerTextStyle) {
+        if (SyncMarkerTextStyleCombo()) anyChange = true;
+    }
+    if (showLineDash) {
+        if (SyncLineDashStyleCombo()) anyChange = true;
+    }
+    if (showShape) {
+        if (SyncShapeKindCombo(g_shapeKind)) anyChange = true;
+    }
+    if (showShapeDrawMode) {
+        if (SyncShapeDrawModeCombo(g_shapeDrawMode)) anyChange = true;
+    }
+    if (showMagnifierShape) {
+        if (SyncMagnifierShapeCombo(g_magnifierShape)) anyChange = true;
+    }
+
+    if (g_hPdfToolbar) SendMessageW(g_hPdfToolbar, WM_SETREDRAW, TRUE, 0);
+    if (g_hPdfToolbar && anyChange) {
+        RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+    }
+    if (visibilityChanged) {
+        HWND mainWnd = hWnd;
+        if (g_hPdfToolbar) {
+            HWND parent = GetParent(g_hPdfToolbar);
+            if (parent) mainWnd = parent;
+        }
+        if (mainWnd && IsWindow(mainWnd)) {
+            LayoutChildren(mainWnd);
+            RedrawWorkspaceLayout(mainWnd);
+        }
+    }
+}

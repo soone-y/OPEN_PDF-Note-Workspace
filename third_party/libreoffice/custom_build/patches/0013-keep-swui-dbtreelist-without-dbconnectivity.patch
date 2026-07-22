@@ -1,0 +1,13 @@
+diff --git a/sw/Library_swui.mk b/sw/Library_swui.mk
+--- a/sw/Library_swui.mk
++++ b/sw/Library_swui.mk
+@@ -57,8 +57,7 @@ $(eval $(call gb_Library_use_libraries,swui,\
+     comphelper \
+     cppu \
+     cppuhelper \
+-    $(call gb_Helper_optional,DBCONNECTIVITY, \
+-        dbtools) \
++    dbtools \
+     editeng \
+     i18nlangtag \
+     i18nutil \

@@ -1,0 +1,1606 @@
+// file: pdf_view/annotation_store.cpp
+// NOTE: This file is intentionally included by `src/pdf_view/pdf_view.cpp` to keep the build as a
+// single translation unit while physically splitting responsibilities.
+#include "core/fault_injection.h"
+#include "core/preview_trace.h"
+
+static const std::filesystem::file_time_type g_pdfRecoveryProcessStartTime =
+    std::filesystem::file_time_type::clock::now();
+
+static bool IsPdfStageCreatedDuringCurrentProcess(const std::filesystem::path& stagePath) {
+    if (stagePath.empty()) return false;
+    std::error_code ec;
+    const auto writeTime = std::filesystem::last_write_time(stagePath, ec);
+    return !ec && writeTime >= g_pdfRecoveryProcessStartTime;
+}
+
+static void AppendPdfOperationExceptionLog(const char* area, const char* detail) {
+    AppendCrashLogLine(area ? area : "pdf_operation", detail);
+}
+
+static void ClearLoadedAnnotationIdentityState() {
+    g_annotsRequireStrongValidation = false;
+    g_annotsLoadedPdfIdValid = false;
+    g_annotsLoadedPdfId = clrop::PdfId{};
+}
+
+static void SetLoadedAnnotationIdentityState(const clrop::PdfId* loadedId,
+                                             bool requireStrongValidation) {
+    if (!loadedId) {
+        ClearLoadedAnnotationIdentityState();
+        return;
+    }
+    g_annotsLoadedPdfId = *loadedId;
+    g_annotsLoadedPdfIdValid = true;
+    g_annotsRequireStrongValidation = requireStrongValidation;
+}
+
+struct AnnotHistoryJsonValue {
+    enum class Type { Null, Bool, Number, String, Array, Object } type = Type::Null;
+    bool b = false;
+    double num = 0.0;
+    std::string str;
+    std::vector<AnnotHistoryJsonValue> arr;
+    std::vector<std::pair<std::string, AnnotHistoryJsonValue>> obj;
+};
+
+class AnnotHistoryJsonParser {
+public:
+    explicit AnnotHistoryJsonParser(std::string_view input) : s(input) {}
+
+    bool Parse(AnnotHistoryJsonValue& out) {
+        SkipWs();
+        if (!ParseValue(out)) return false;
+        SkipWs();
+        return pos == s.size();
+    }
+
+private:
+    std::string_view s;
+    size_t pos = 0;
+
+    void SkipWs() {
+        while (pos < s.size()) {
+            char c = s[pos];
+            if (c == ' ' || c == '\n' || c == '\r' || c == '\t') {
+                ++pos;
+            } else {
+                break;
+            }
+        }
+    }
+
+    bool Match(std::string_view lit) {
+        if (s.substr(pos, lit.size()) == lit) {
+            pos += lit.size();
+            return true;
+        }
+        return false;
+    }
+
+    bool ParseValue(AnnotHistoryJsonValue& out) {
+        SkipWs();
+        if (pos >= s.size()) return false;
+        char c = s[pos];
+        if (c == 'n') return ParseNull(out);
+        if (c == 't' || c == 'f') return ParseBool(out);
+        if (c == '"') return ParseString(out);
+        if (c == '-' || (c >= '0' && c <= '9')) return ParseNumber(out);
+        if (c == '[') return ParseArray(out);
+        if (c == '{') return ParseObject(out);
+        return false;
+    }
+
+    bool ParseNull(AnnotHistoryJsonValue& out) {
+        if (!Match("null")) return false;
+        out.type = AnnotHistoryJsonValue::Type::Null;
+        return true;
+    }
+
+    bool ParseBool(AnnotHistoryJsonValue& out) {
+        if (Match("true")) {
+            out.type = AnnotHistoryJsonValue::Type::Bool;
+            out.b = true;
+            return true;
+        }
+        if (Match("false")) {
+            out.type = AnnotHistoryJsonValue::Type::Bool;
+            out.b = false;
+            return true;
+        }
+        return false;
+    }
+
+    bool ParseNumber(AnnotHistoryJsonValue& out) {
+        size_t start = pos;
+        if (s[pos] == '-') ++pos;
+        while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
+        if (pos < s.size() && s[pos] == '.') {
+            ++pos;
+            while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
+        }
+        if (pos < s.size() && (s[pos] == 'e' || s[pos] == 'E')) {
+            ++pos;
+            if (pos < s.size() && (s[pos] == '+' || s[pos] == '-')) ++pos;
+            while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
+        }
+        if (start == pos) return false;
+        char* endPtr = nullptr;
+        std::string numStr(s.substr(start, pos - start));
+        double val = std::strtod(numStr.c_str(), &endPtr);
+        if (!endPtr) return false;
+        out.type = AnnotHistoryJsonValue::Type::Number;
+        out.num = val;
+        return true;
+    }
+
+    bool ParseString(AnnotHistoryJsonValue& out) {
+        if (pos >= s.size() || s[pos] != '"') return false;
+        ++pos;
+        std::string result;
+        while (pos < s.size()) {
+            char c = s[pos++];
+            if (c == '"') break;
+            if (c == '\\') {
+                if (pos >= s.size()) return false;
+                char esc = s[pos++];
+                switch (esc) {
+                case '"': result.push_back('"'); break;
+                case '\\': result.push_back('\\'); break;
+                case '/': result.push_back('/'); break;
+                case 'b': result.push_back('\b'); break;
+                case 'f': result.push_back('\f'); break;
+                case 'n': result.push_back('\n'); break;
+                case 'r': result.push_back('\r'); break;
+                case 't': result.push_back('\t'); break;
+                case 'u': {
+                    if (pos + 4 > s.size()) return false;
+                    unsigned int code = 0;
+                    for (int i = 0; i < 4; ++i) {
+                        char hc = s[pos++];
+                        code <<= 4;
+                        if (hc >= '0' && hc <= '9') code |= (hc - '0');
+                        else if (hc >= 'a' && hc <= 'f') code |= (hc - 'a' + 10);
+                        else if (hc >= 'A' && hc <= 'F') code |= (hc - 'A' + 10);
+                        else return false;
+                    }
+                    if (code <= 0x7F) {
+                        result.push_back(static_cast<char>(code));
+                    } else if (code <= 0x7FF) {
+                        result.push_back(static_cast<char>(0xC0 | ((code >> 6) & 0x1F)));
+                        result.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+                    } else {
+                        result.push_back(static_cast<char>(0xE0 | ((code >> 12) & 0x0F)));
+                        result.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+                        result.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+                    }
+                    break;
+                }
+                default:
+                    return false;
+                }
+            } else {
+                result.push_back(c);
+            }
+        }
+        out.type = AnnotHistoryJsonValue::Type::String;
+        out.str = result;
+        return true;
+    }
+
+    bool ParseArray(AnnotHistoryJsonValue& out) {
+        if (pos >= s.size() || s[pos] != '[') return false;
+        ++pos;
+        out.type = AnnotHistoryJsonValue::Type::Array;
+        SkipWs();
+        if (pos < s.size() && s[pos] == ']') {
+            ++pos;
+            return true;
+        }
+        while (pos < s.size()) {
+            AnnotHistoryJsonValue v;
+            if (!ParseValue(v)) return false;
+            out.arr.push_back(std::move(v));
+            SkipWs();
+            if (pos < s.size() && s[pos] == ',') {
+                ++pos;
+                continue;
+            }
+            if (pos < s.size() && s[pos] == ']') {
+                ++pos;
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    bool ParseObject(AnnotHistoryJsonValue& out) {
+        if (pos >= s.size() || s[pos] != '{') return false;
+        ++pos;
+        out.type = AnnotHistoryJsonValue::Type::Object;
+        SkipWs();
+        if (pos < s.size() && s[pos] == '}') {
+            ++pos;
+            return true;
+        }
+        while (pos < s.size()) {
+            AnnotHistoryJsonValue key;
+            if (!ParseString(key)) return false;
+            SkipWs();
+            if (pos >= s.size() || s[pos] != ':') return false;
+            ++pos;
+            AnnotHistoryJsonValue val;
+            if (!ParseValue(val)) return false;
+            out.obj.push_back({ key.str, std::move(val) });
+            SkipWs();
+            if (pos < s.size() && s[pos] == ',') {
+                ++pos;
+                continue;
+            }
+            if (pos < s.size() && s[pos] == '}') {
+                ++pos;
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+};
+
+static void WarnAnnotHistorySaveFailure(const std::wstring& detail) {
+    if (g_annotHistorySaveWarned) return;
+    g_annotHistorySaveWarned = true;
+    HWND owner = g_hPdfView ? GetParent(g_hPdfView) : nullptr;
+    std::wstring msg = L"注釈履歴の保存に失敗しました。";
+    if (!detail.empty()) msg += L"\n" + detail;
+    ShowPdfSoftNotice(owner, msg, SoftNoticeKind::Warning);
+}
+
+static void WarnAnnotHistoryLoadFailure(const std::wstring& detail) {
+    if (g_annotHistoryLoadWarned) return;
+    g_annotHistoryLoadWarned = true;
+    HWND owner = g_hPdfView ? GetParent(g_hPdfView) : nullptr;
+    std::wstring msg = L"注釈履歴の読み込みに失敗しました。";
+    if (!detail.empty()) msg += L"\n" + detail;
+    ShowPdfSoftNotice(owner, msg, SoftNoticeKind::Warning);
+}
+
+static bool IsPathUnderRootForAnnotHistory(const std::filesystem::path& child, const std::filesystem::path& root) {
+    std::error_code ec;
+    auto childCanon = std::filesystem::weakly_canonical(child, ec);
+    auto rootCanon = std::filesystem::weakly_canonical(root, ec);
+    if (ec || childCanon.empty() || rootCanon.empty()) return false;
+    std::error_code ec2;
+    auto rel = std::filesystem::relative(childCanon, rootCanon, ec2);
+    if (ec2 || rel.empty()) return false;
+    auto native = rel.native();
+    if (native.empty()) return false;
+    return native[0] != L'.';
+}
+
+static bool IsAnnotHistoryEnabledForPdf(const std::wstring& pdfPath) {
+    if (g_pdf.kind != DocKind::Pdf) return false;
+    if (pdfPath.empty()) return false;
+    if (!IsDefaultCacheDir(g_config.cacheDir)) return false;
+    if (g_workspaceRoot.empty()) return false;
+    auto cacheRoot = WorkspaceCachePath(g_workspaceRoot, g_config);
+    if (cacheRoot.empty()) return false;
+    return IsPathUnderRootForAnnotHistory(std::filesystem::path(pdfPath), cacheRoot);
+}
+
+static std::wstring AnnotHistoryPathForPdf(const std::wstring& pdfPath) {
+    std::filesystem::path p(pdfPath);
+    p.replace_extension(L".annot_history.json");
+    return p.wstring();
+}
+
+static std::string JsonEscape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20) {
+                char buf[7];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                out += buf;
+            } else {
+                out.push_back(static_cast<char>(c));
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+static void WriteJsonString(std::ostringstream& oss, const std::string& s) {
+    oss << '"' << JsonEscape(s) << '"';
+}
+
+static const char* AnnotTypeToString(Annotation::Type t) {
+    switch (t) {
+    case Annotation::Type::MarkerText: return "marker_text";
+    case Annotation::Type::TextColor: return "text_color";
+    case Annotation::Type::MarkerFree: return "marker_free";
+    case Annotation::Type::TextBox: return "text_box";
+    case Annotation::Type::Line: return "line";
+    case Annotation::Type::Arrow: return "arrow";
+    case Annotation::Type::Wave: return "wave";
+    case Annotation::Type::Freehand: return "freehand";
+    case Annotation::Type::LinkMarker: return "link_marker";
+    case Annotation::Type::MathBox: return "math_box";
+    case Annotation::Type::Shape: return "shape";
+    default: return "marker_text";
+    }
+}
+
+static bool AnnotTypeFromString(const std::string& s, Annotation::Type& out) {
+    if (s == "marker_text") { out = Annotation::Type::MarkerText; return true; }
+    if (s == "text_color") { out = Annotation::Type::TextColor; return true; }
+    if (s == "marker_free") { out = Annotation::Type::MarkerFree; return true; }
+    if (s == "text_box") { out = Annotation::Type::TextBox; return true; }
+    if (s == "line") { out = Annotation::Type::Line; return true; }
+    if (s == "arrow") { out = Annotation::Type::Arrow; return true; }
+    if (s == "wave") { out = Annotation::Type::Wave; return true; }
+    if (s == "freehand") { out = Annotation::Type::Freehand; return true; }
+    if (s == "link_marker") { out = Annotation::Type::LinkMarker; return true; }
+    if (s == "math_box") { out = Annotation::Type::MathBox; return true; }
+    if (s == "shape") { out = Annotation::Type::Shape; return true; }
+    return false;
+}
+
+static const char* TextWritingModeToString(TextWritingMode mode) {
+    switch (mode) {
+    case TextWritingMode::VerticalRl: return "vertical_rl";
+    case TextWritingMode::Horizontal:
+    default: return "horizontal";
+    }
+}
+
+static bool TextWritingModeFromString(const std::string& s, TextWritingMode& out) {
+    if (s == "horizontal") { out = TextWritingMode::Horizontal; return true; }
+    if (s == "vertical_rl") { out = TextWritingMode::VerticalRl; return true; }
+    return false;
+}
+
+static void WriteAnnotationJson(std::ostringstream& oss, const Annotation& a) {
+    oss << '{';
+    oss << "\"type\":";
+    WriteJsonString(oss, AnnotTypeToString(a.type));
+    oss << ",\"id\":";
+    WriteJsonString(oss, WideToUTF8(a.id));
+    oss << ",\"page\":" << a.pageIndex;
+    oss << ",\"x1\":" << a.x1;
+    oss << ",\"y1\":" << a.y1;
+    oss << ",\"x2\":" << a.x2;
+    oss << ",\"y2\":" << a.y2;
+    oss << ",\"width\":" << a.width;
+    oss << ",\"alpha\":" << a.alpha;
+    oss << ",\"fontPt\":" << a.fontPt;
+    oss << ",\"color\":" << static_cast<unsigned int>(a.color);
+    oss << ",\"text\":";
+    WriteJsonString(oss, WideToUTF8(a.text));
+    oss << ",\"font\":";
+    WriteJsonString(oss, WideToUTF8(a.fontName));
+    if (a.type == Annotation::Type::TextBox) {
+        oss << ",\"writing_mode\":";
+        WriteJsonString(oss, TextWritingModeToString(a.writingMode));
+        const char* backgroundAssistMode = "inherit";
+        if (a.backgroundAssistMode == TextBackgroundAssistMode::Off) backgroundAssistMode = "off";
+        else if (a.backgroundAssistMode == TextBackgroundAssistMode::Auto) backgroundAssistMode = "auto";
+        else if (a.backgroundAssistMode == TextBackgroundAssistMode::Inverted) backgroundAssistMode = "inverted";
+        oss << ",\"background_assist_mode\":\"" << backgroundAssistMode << "\"";
+    }
+    oss << ",\"shape_kind\":";
+    WriteJsonString(oss, WideToUTF8(ShapeKindToString(a.shapeKind)));
+    oss << ",\"shape_draw_mode\":";
+    WriteJsonString(oss, WideToUTF8(ShapeDrawModeToString(a.shapeDrawMode)));
+    if (a.type == Annotation::Type::Arrow) {
+        oss << ",\"arrow_head\":";
+        WriteJsonString(oss, WideToUTF8(ArrowHeadToString(a.arrowHead)));
+    }
+    oss << ",\"shape_rotation\":" << (std::isfinite(a.shapeRotation) ? a.shapeRotation : kDefaultRotatedEllipseAngleRad);
+    oss << ",\"link_id\":";
+    WriteJsonString(oss, WideToUTF8(a.linkId));
+    oss << ",\"note_path\":";
+    WriteJsonString(oss, WideToUTF8(a.linkNotePath));
+    if (!a.textLines.empty()) {
+        oss << ",\"lines\":[";
+        for (size_t li = 0; li < a.textLines.size(); ++li) {
+            if (li) oss << ',';
+            WriteJsonString(oss, WideToUTF8(a.textLines[li]));
+        }
+        oss << "]";
+    }
+    if (a.type == Annotation::Type::MathBox) {
+        oss << ",\"math_kind\":";
+        WriteJsonString(oss, a.mathKind == MathKind::Markup ? "markup" : "latex");
+    }
+    oss << ",\"path\":[";
+    for (size_t i = 0; i < a.path.size(); ++i) {
+        if (i > 0) oss << ',';
+        oss << '[' << a.path[i].x << ',' << a.path[i].y << ']';
+    }
+    oss << "]";
+    if (!a.dash.empty()) {
+        oss << ",\"dash\":[";
+        for (size_t i = 0; i < a.dash.size(); ++i) {
+            if (i > 0) oss << ',';
+            oss << a.dash[i];
+        }
+        oss << "]";
+    }
+    oss << ",\"quads\":[";
+    for (size_t i = 0; i < a.quads.size(); ++i) {
+        if (i > 0) oss << ',';
+        oss << a.quads[i];
+    }
+    oss << "]";
+    oss << '}';
+}
+
+static void WriteAnnotArray(std::ostringstream& oss, const std::vector<Annotation>& annots) {
+    oss << '[';
+    for (size_t i = 0; i < annots.size(); ++i) {
+        if (i > 0) oss << ',';
+        WriteAnnotationJson(oss, annots[i]);
+    }
+    oss << ']';
+}
+
+static void WriteCommandJson(std::ostringstream& oss, const AnnotCommand& cmd) {
+    const char* kind = "add";
+    switch (cmd.kind) {
+    case AnnotCommandKind::Add: kind = "add"; break;
+    case AnnotCommandKind::Remove: kind = "remove"; break;
+    case AnnotCommandKind::Update: kind = "update"; break;
+    case AnnotCommandKind::Reorder: kind = "reorder"; break;
+    case AnnotCommandKind::ClearAll: kind = "clear"; break;
+    }
+    oss << '{';
+    oss << "\"kind\":";
+    WriteJsonString(oss, kind);
+    oss << ",\"beforeIndex\":" << cmd.beforeIndex;
+    oss << ",\"afterIndex\":" << cmd.afterIndex;
+    oss << ",\"before\":";
+    if (cmd.kind == AnnotCommandKind::Add || cmd.kind == AnnotCommandKind::ClearAll) {
+        oss << "null";
+    } else {
+        WriteAnnotationJson(oss, cmd.before);
+    }
+    oss << ",\"after\":";
+    if (cmd.kind == AnnotCommandKind::Remove || cmd.kind == AnnotCommandKind::ClearAll) {
+        oss << "null";
+    } else {
+        WriteAnnotationJson(oss, cmd.after);
+    }
+    oss << ",\"snapshot\":";
+    if (cmd.kind == AnnotCommandKind::ClearAll || cmd.kind == AnnotCommandKind::Reorder) {
+        WriteAnnotArray(oss, cmd.snapshot);
+    } else {
+        oss << "[]";
+    }
+    oss << ",\"after_snapshot\":";
+    if (cmd.kind == AnnotCommandKind::Reorder) {
+        WriteAnnotArray(oss, cmd.afterSnapshot);
+    } else {
+        oss << "[]";
+    }
+    oss << '}';
+}
+
+static void WriteCommandArray(std::ostringstream& oss, const std::vector<AnnotCommand>& cmds) {
+    oss << '[';
+    for (size_t i = 0; i < cmds.size(); ++i) {
+        if (i > 0) oss << ',';
+        WriteCommandJson(oss, cmds[i]);
+    }
+    oss << ']';
+}
+
+static const AnnotHistoryJsonValue* FindField(const AnnotHistoryJsonValue& obj, const char* key) {
+    if (obj.type != AnnotHistoryJsonValue::Type::Object) return nullptr;
+    for (const auto& kv : obj.obj) {
+        if (kv.first == key) return &kv.second;
+    }
+    return nullptr;
+}
+
+static bool GetNumberField(const AnnotHistoryJsonValue& obj, const char* key, double& out) {
+    auto v = FindField(obj, key);
+    if (!v || v->type != AnnotHistoryJsonValue::Type::Number) return false;
+    out = v->num;
+    return true;
+}
+
+static bool GetIntField(const AnnotHistoryJsonValue& obj, const char* key, int& out) {
+    double v = 0.0;
+    if (!GetNumberField(obj, key, v)) return false;
+    out = static_cast<int>(std::round(v));
+    return true;
+}
+
+static bool GetBoolField(const AnnotHistoryJsonValue& obj, const char* key, bool& out) {
+    auto v = FindField(obj, key);
+    if (!v || v->type != AnnotHistoryJsonValue::Type::Bool) return false;
+    out = v->b;
+    return true;
+}
+
+static bool GetStringField(const AnnotHistoryJsonValue& obj, const char* key, std::string& out) {
+    auto v = FindField(obj, key);
+    if (!v || v->type != AnnotHistoryJsonValue::Type::String) return false;
+    out = v->str;
+    return true;
+}
+
+static bool GetStringArrayField(const AnnotHistoryJsonValue& obj, const char* key, std::vector<std::wstring>& out) {
+    auto v = FindField(obj, key);
+    if (!v || v->type != AnnotHistoryJsonValue::Type::Array) return false;
+    out.clear();
+    for (const auto& elem : v->arr) {
+        if (elem.type != AnnotHistoryJsonValue::Type::String) return false;
+        out.push_back(UTF8ToWide(elem.str));
+    }
+    return true;
+}
+
+static bool GetNumberArrayField(const AnnotHistoryJsonValue& obj, const char* key, std::vector<double>& out) {
+    auto v = FindField(obj, key);
+    if (!v || v->type != AnnotHistoryJsonValue::Type::Array) return false;
+    out.clear();
+    for (const auto& elem : v->arr) {
+        if (elem.type != AnnotHistoryJsonValue::Type::Number) return false;
+        out.push_back(elem.num);
+    }
+    return true;
+}
+
+static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
+    if (v.type != AnnotHistoryJsonValue::Type::Object) return false;
+    std::string typeStr;
+    if (!GetStringField(v, "type", typeStr)) return false;
+    if (!AnnotTypeFromString(typeStr, out.type)) return false;
+    std::string id;
+    if (GetStringField(v, "id", id)) out.id = UTF8ToWide(id);
+    int page = -1;
+    if (!GetIntField(v, "page", page)) return false;
+    out.pageIndex = page;
+    GetNumberField(v, "x1", out.x1);
+    GetNumberField(v, "y1", out.y1);
+    GetNumberField(v, "x2", out.x2);
+    GetNumberField(v, "y2", out.y2);
+    GetNumberField(v, "width", out.width);
+    bool hasAlpha = GetNumberField(v, "alpha", out.alpha);
+    if (!hasAlpha) {
+        switch (out.type) {
+        case Annotation::Type::MarkerText:
+        case Annotation::Type::MarkerFree:
+            out.alpha = kMarkerAlphaDefault;
+            break;
+        case Annotation::Type::TextColor:
+            out.alpha = 1.0;
+            break;
+        default:
+            out.alpha = 1.0;
+            break;
+        }
+    }
+    GetNumberField(v, "fontPt", out.fontPt);
+    int color = 0;
+    if (GetIntField(v, "color", color)) out.color = static_cast<COLORREF>(color);
+    std::string text;
+    if (GetStringField(v, "text", text)) out.text = UTF8ToWide(text);
+    std::string font;
+    if (GetStringField(v, "font", font)) out.fontName = UTF8ToWide(font);
+    std::string shapeKind;
+    if (GetStringField(v, "shape_kind", shapeKind)) {
+        out.shapeKind = ParseShapeKind(UTF8ToWide(shapeKind));
+    }
+    std::string shapeDrawMode;
+    if (GetStringField(v, "shape_draw_mode", shapeDrawMode)) {
+        out.shapeDrawMode = ParseShapeDrawMode(UTF8ToWide(shapeDrawMode));
+    }
+    out.arrowHead = ArrowHead::Single;
+    std::string arrowHead;
+    if (GetStringField(v, "arrow_head", arrowHead)) {
+        out.arrowHead = ParseArrowHead(UTF8ToWide(arrowHead));
+    }
+    bool hasShapeRotation = GetNumberField(v, "shape_rotation", out.shapeRotation);
+    if (!hasShapeRotation && out.shapeKind == ShapeKind::RotatedEllipse) {
+        out.shapeRotation = kDefaultRotatedEllipseAngleRad;
+    }
+    std::string linkId;
+    if (GetStringField(v, "link_id", linkId)) out.linkId = UTF8ToWide(linkId);
+    std::string notePath;
+    if (GetStringField(v, "note_path", notePath)) out.linkNotePath = UTF8ToWide(notePath);
+    std::vector<std::wstring> lines;
+    if (GetStringArrayField(v, "lines", lines)) {
+        out.textLines = std::move(lines);
+    } else {
+        out.textLines.clear();
+    }
+    std::string mathKind;
+    if (GetStringField(v, "math_kind", mathKind)) {
+        out.mathKind = (mathKind == "markup") ? MathKind::Markup : MathKind::Latex;
+    }
+    out.writingMode = TextWritingMode::Horizontal;
+    std::string writingMode;
+    if (GetStringField(v, "writing_mode", writingMode)) {
+        TextWritingMode parsedWritingMode = TextWritingMode::Horizontal;
+        if (TextWritingModeFromString(writingMode, parsedWritingMode)) {
+            out.writingMode = parsedWritingMode;
+        }
+    }
+    if (out.type != Annotation::Type::TextBox) {
+        out.writingMode = TextWritingMode::Horizontal;
+    } else {
+        std::string backgroundAssistMode;
+        if (GetStringField(v, "background_assist_mode", backgroundAssistMode)) {
+            if (backgroundAssistMode == "off") out.backgroundAssistMode = TextBackgroundAssistMode::Off;
+            else if (backgroundAssistMode == "auto") out.backgroundAssistMode = TextBackgroundAssistMode::Auto;
+            else if (backgroundAssistMode == "inverted") out.backgroundAssistMode = TextBackgroundAssistMode::Inverted;
+            else out.backgroundAssistMode = TextBackgroundAssistMode::Inherit;
+        } else {
+            bool readableBackground = false;
+            const bool hasReadableBackground = GetBoolField(v, "readable_bg", readableBackground);
+            bool readableBackgroundInverted = false;
+            GetBoolField(v, "readable_bg_inverted", readableBackgroundInverted);
+            bool configured = false;
+            const bool hasConfiguredFlag = GetBoolField(v, "readable_bg_configured", configured);
+            // A false legacy value followed the global preference.  Preserve
+            // that behavior as Inherit; true values retain their explicit mode.
+            if (hasConfiguredFlag ? configured : hasReadableBackground) {
+                out.backgroundAssistMode = readableBackground
+                    ? (readableBackgroundInverted
+                        ? TextBackgroundAssistMode::Inverted
+                        : TextBackgroundAssistMode::Auto)
+                    : TextBackgroundAssistMode::Inherit;
+            }
+        }
+    }
+
+    out.path.clear();
+    if (const auto* pathVal = FindField(v, "path")) {
+        if (pathVal->type == AnnotHistoryJsonValue::Type::Array) {
+            for (const auto& p : pathVal->arr) {
+                if (p.type != AnnotHistoryJsonValue::Type::Array || p.arr.size() < 2) continue;
+                if (p.arr[0].type != AnnotHistoryJsonValue::Type::Number || p.arr[1].type != AnnotHistoryJsonValue::Type::Number) continue;
+                Annotation::Pt pt{ p.arr[0].num, p.arr[1].num };
+                out.path.push_back(pt);
+            }
+        }
+    }
+
+    out.dash.clear();
+    std::vector<double> dash;
+    if (GetNumberArrayField(v, "dash", dash)) {
+        for (double part : dash) {
+            if (std::isfinite(part) && part > 0.0) out.dash.push_back(std::clamp(part, 0.25, 240.0));
+        }
+        if (out.dash.size() == 1) out.dash.push_back(out.dash.front());
+    }
+
+    out.quads.clear();
+    if (const auto* quadVal = FindField(v, "quads")) {
+        if (quadVal->type == AnnotHistoryJsonValue::Type::Array) {
+            for (const auto& q : quadVal->arr) {
+                if (q.type != AnnotHistoryJsonValue::Type::Number) continue;
+                out.quads.push_back(q.num);
+            }
+        }
+    }
+    return true;
+}
+
+static bool ParseCommand(const AnnotHistoryJsonValue& v, AnnotCommand& out) {
+    if (v.type != AnnotHistoryJsonValue::Type::Object) return false;
+    std::string kind;
+    if (!GetStringField(v, "kind", kind)) return false;
+    if (kind == "add") out.kind = AnnotCommandKind::Add;
+    else if (kind == "remove") out.kind = AnnotCommandKind::Remove;
+    else if (kind == "update") out.kind = AnnotCommandKind::Update;
+    else if (kind == "reorder") out.kind = AnnotCommandKind::Reorder;
+    else if (kind == "clear") out.kind = AnnotCommandKind::ClearAll;
+    else return false;
+    GetIntField(v, "beforeIndex", out.beforeIndex);
+    GetIntField(v, "afterIndex", out.afterIndex);
+    if (const auto* beforeVal = FindField(v, "before")) {
+        if (beforeVal->type == AnnotHistoryJsonValue::Type::Object) {
+            ParseAnnotation(*beforeVal, out.before);
+        }
+    }
+    if (const auto* afterVal = FindField(v, "after")) {
+        if (afterVal->type == AnnotHistoryJsonValue::Type::Object) {
+            ParseAnnotation(*afterVal, out.after);
+        }
+    }
+    out.snapshot.clear();
+    if (const auto* snapVal = FindField(v, "snapshot")) {
+        if (snapVal->type == AnnotHistoryJsonValue::Type::Array) {
+            for (const auto& a : snapVal->arr) {
+                Annotation ann;
+                if (ParseAnnotation(a, ann)) out.snapshot.push_back(std::move(ann));
+            }
+        }
+    }
+    out.afterSnapshot.clear();
+    if (const auto* afterSnapVal = FindField(v, "after_snapshot")) {
+        if (afterSnapVal->type == AnnotHistoryJsonValue::Type::Array) {
+            for (const auto& a : afterSnapVal->arr) {
+                Annotation ann;
+                if (ParseAnnotation(a, ann)) out.afterSnapshot.push_back(std::move(ann));
+            }
+        }
+    }
+    if (out.kind == AnnotCommandKind::Reorder &&
+        (out.snapshot.empty() || out.afterSnapshot.empty())) {
+        return false;
+    }
+    return true;
+}
+
+bool SerializeAnnotCommandsJson(const std::vector<AnnotCommand>& cmds, std::string* outJson) {
+    if (!outJson) return false;
+    std::ostringstream oss;
+    WriteCommandArray(oss, cmds);
+    *outJson = oss.str();
+    return true;
+}
+
+bool DeserializeAnnotCommandsJson(std::string_view json,
+                                  std::vector<AnnotCommand>* outCmds,
+                                  std::wstring* outErr) {
+    if (outCmds) outCmds->clear();
+    if (!outCmds) return false;
+    AnnotHistoryJsonValue root;
+    AnnotHistoryJsonParser parser{json};
+    if (!parser.Parse(root)) {
+        if (outErr) *outErr = L"注釈 command JSON の解析に失敗しました。";
+        return false;
+    }
+    if (root.type != AnnotHistoryJsonValue::Type::Array) {
+        if (outErr) *outErr = L"注釈 command JSON の形式が不正です。";
+        return false;
+    }
+    for (const auto& value : root.arr) {
+        AnnotCommand cmd;
+        if (!ParseCommand(value, cmd)) {
+            if (outErr) *outErr = L"注釈 command JSON に不正な command が含まれています。";
+            return false;
+        }
+        outCmds->push_back(std::move(cmd));
+    }
+    return true;
+}
+
+static bool SaveAnnotHistoryIfNeeded() {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    if (!g_annotHistoryDirty) {
+        preview_trace::Append(
+            L"SaveAnnotHistoryIfNeeded",
+            L"skip=clean elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return true;
+    }
+    if (!IsAnnotHistoryEnabledForPdf(g_pdf.path)) {
+        g_annotHistoryDirty = false;
+        g_annotHistorySaveWarned = false;
+        preview_trace::Append(
+            L"SaveAnnotHistoryIfNeeded",
+            L"skip=disabled pdfPath=" + g_pdf.path +
+            L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return true;
+    }
+    std::filesystem::path path(AnnotHistoryPathForPdf(g_pdf.path));
+    if (!path.parent_path().empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        if (ec) {
+            preview_trace::Append(
+                L"SaveAnnotHistoryIfNeeded",
+                L"create_dir_failed path=" + path.wstring() +
+                L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            WarnAnnotHistorySaveFailure(L"保存先の作成に失敗しました: " + path.parent_path().wstring());
+            return false;
+        }
+    }
+    std::ostringstream oss;
+    oss << '{';
+    oss << "\"version\":1,";
+    oss << "\"undo\":";
+    WriteCommandArray(oss, g_annotUndo);
+    oss << ",\"redo\":";
+    WriteCommandArray(oss, g_annotRedo);
+    oss << '}';
+    std::string data = oss.str();
+    std::filesystem::path preferredTmp;
+    std::filesystem::path quarantineDir;
+    if (!g_workspaceRoot.empty()) {
+        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
+        preferredTmp = resource / L"__tmp__";
+        quarantineDir = resource / L"__escape__";
+    }
+    std::wstring werr;
+    if (!atomic_write::AtomicWriteUtf8(path, data, preferredTmp, quarantineDir, &werr)) {
+        preview_trace::Append(
+            L"SaveAnnotHistoryIfNeeded",
+            L"write_failed path=" + path.wstring() +
+            L" elapsed_ms=" + preview_trace::ElapsedMs(startTick) +
+            L" err=" + werr);
+        std::wstring msg = L"ファイルの書き込みに失敗しました: " + path.wstring();
+        if (!werr.empty()) msg += L"\n" + werr;
+        WarnAnnotHistorySaveFailure(msg);
+        return false;
+    }
+    g_annotHistoryDirty = false;
+    g_annotHistorySaveWarned = false;
+    preview_trace::Append(
+        L"SaveAnnotHistoryIfNeeded",
+        L"end path=" + path.wstring() +
+        L" undoCount=" + std::to_wstring(g_annotUndo.size()) +
+        L" redoCount=" + std::to_wstring(g_annotRedo.size()) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+    return true;
+}
+
+static bool LoadAnnotHistoryForCurrentPdf() {
+    ClearAnnotHistory();
+    g_annotHistoryLoadWarned = false;
+    if (!IsAnnotHistoryEnabledForPdf(g_pdf.path)) return true;
+    std::filesystem::path path(AnnotHistoryPathForPdf(g_pdf.path));
+    std::error_code existsEc;
+    if (!std::filesystem::exists(path, existsEc)) {
+        if (existsEc) {
+            WarnAnnotHistoryLoadFailure(L"ファイルの存在確認に失敗しました: " + path.wstring());
+            return false;
+        }
+        return true;
+    }
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) {
+        WarnAnnotHistoryLoadFailure(L"ファイルを開けません: " + path.wstring());
+        return false;
+    }
+    std::ostringstream oss;
+    oss << ifs.rdbuf();
+    std::string json = oss.str();
+    AnnotHistoryJsonValue root;
+    AnnotHistoryJsonParser parser(json);
+    if (!parser.Parse(root)) {
+        std::filesystem::path quarantineDir;
+        if (!g_workspaceRoot.empty()) {
+            quarantineDir = std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
+        }
+        std::filesystem::path moved;
+        atomic_write::QuarantineFileBestEffort(path, quarantineDir, &moved);
+        ClearAnnotHistory();
+        std::wstring msg = L"JSONの解析に失敗しました: " + path.wstring();
+        if (!moved.empty()) msg += L"\n退避: " + moved.wstring();
+        WarnAnnotHistoryLoadFailure(msg);
+        return false;
+    }
+    if (const auto* undoVal = FindField(root, "undo")) {
+        if (undoVal->type == AnnotHistoryJsonValue::Type::Array) {
+            for (const auto& v : undoVal->arr) {
+                AnnotCommand cmd;
+                if (ParseCommand(v, cmd)) g_annotUndo.push_back(std::move(cmd));
+            }
+        }
+    }
+    if (const auto* redoVal = FindField(root, "redo")) {
+        if (redoVal->type == AnnotHistoryJsonValue::Type::Array) {
+            for (const auto& v : redoVal->arr) {
+                AnnotCommand cmd;
+                if (ParseCommand(v, cmd)) g_annotRedo.push_back(std::move(cmd));
+            }
+        }
+    }
+    TrimAnnotHistory();
+    if (g_annotRedo.size() > kAnnotHistoryLimit) {
+        size_t drop = g_annotRedo.size() - kAnnotHistoryLimit;
+        g_annotRedo.erase(g_annotRedo.begin(), g_annotRedo.begin() + drop);
+    }
+    g_annotHistoryDirty = false;
+    g_annotHistoryLoadWarned = false;
+    return true;
+}
+
+bool SaveAnnotationsIfDirty(HWND owner) {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    preview_trace::Append(
+        L"PdfSaveAnnotationsIfDirty",
+        L"begin pdfPath=" + g_pdf.path +
+        L" editingText=" + preview_trace::Bool(g_pdf.editingText) +
+        L" annotsDirty=" + preview_trace::Bool(g_annotsDirty) +
+        L" annotHistoryDirty=" + preview_trace::Bool(g_annotHistoryDirty));
+    if (g_pdf.kind != DocKind::Pdf) {
+        preview_trace::Append(
+            L"PdfSaveAnnotationsIfDirty",
+            L"skip=no_pdf elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return true;
+    }
+    if (!SaveAnnotHistoryIfNeeded()) {
+        preview_trace::Append(
+            L"PdfSaveAnnotationsIfDirty",
+            L"abort=save_annot_history_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return false;
+    }
+    const bool ok = file_output::SaveAnnotationsIfDirty(owner);
+    preview_trace::Append(
+        L"PdfSaveAnnotationsIfDirty",
+        L"end ok=" + preview_trace::Bool(ok) +
+        L" annotsDirty=" + preview_trace::Bool(g_annotsDirty) +
+        L" annotHistoryDirty=" + preview_trace::Bool(g_annotHistoryDirty) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+    return ok;
+}
+
+void InvalidateAnnotHistoryForPath(const std::wstring& path) {
+    if (path.empty()) return;
+    std::filesystem::path historyPath(path);
+    historyPath.replace_extension(L".annot_history.json");
+    if (!historyPath.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(historyPath, ec);
+    }
+    if (g_pdf.kind == DocKind::Pdf && !g_pdf.path.empty()) {
+        std::filesystem::path currentPdf(g_pdf.path);
+        std::filesystem::path currentClrop = clrop_bridge::ClropPathForPdf(g_pdf.path);
+        if (path == currentPdf.wstring() || path == currentClrop.wstring()) {
+            ClearAnnotHistory();
+            g_annotHistorySaveWarned = false;
+            g_annotHistoryLoadWarned = false;
+            RefreshAnnotPanel();
+        }
+    }
+}
+
+static bool IsSameDocumentPath(const std::wstring& lhs, const std::wstring& rhs) {
+    if (lhs.empty() || rhs.empty()) return false;
+    std::wstring lhsKey = NormalizePathKey(std::filesystem::path(lhs));
+    std::wstring rhsKey = NormalizePathKey(std::filesystem::path(rhs));
+    return !lhsKey.empty() && lhsKey == rhsKey;
+}
+
+static clrop::PdfId BuildCurrentOpenPdfFastId() {
+    clrop::PdfId id;
+    id.path = g_pdf.path;
+
+    std::uint64_t size = 0;
+    if (TryGetFileMetaWin32(std::filesystem::path(g_pdf.path), &size, nullptr)) {
+        id.size = size;
+    }
+
+    if (g_pdf.pageCount > 0) {
+        id.pageCount = g_pdf.pageCount;
+    }
+    if (!g_pdf.pages.empty()) {
+        id.pageSizesPt.reserve(g_pdf.pages.size());
+        for (const auto& page : g_pdf.pages) {
+            id.pageSizesPt.push_back({page.widthPt, page.heightPt});
+        }
+        if (id.pageCount <= 0) {
+            id.pageCount = static_cast<int>(id.pageSizesPt.size());
+        }
+    }
+    return id;
+}
+
+static bool RewriteClropPdfIdForCurrentPdf(HWND owner,
+                                           const std::wstring& clropPath,
+                                           const std::vector<Annotation>& annots,
+                                           clrop::PdfId* outSavedId = nullptr) {
+    if (clropPath.empty() || g_pdf.kind != DocKind::Pdf || g_pdf.path.empty()) return false;
+
+    std::wstring err;
+    if (!clrop_bridge::SaveAnnotations(clropPath, g_pdf.path, annots, err)) {
+        std::wstring msg = L"clrop の pdf_id 更新に失敗しました。\n";
+        msg += L"対象:\n" + clropPath;
+        if (!err.empty()) msg += L"\n\n" + err;
+        ShowPdfMessageDialog(owner, L"clrop", msg, SoftNoticeKind::Error);
+        return false;
+    }
+
+    if (outSavedId) *outSavedId = clrop::ComputePdfId(g_pdf.path);
+    return true;
+}
+
+static void ApplyLoadedAnnotationsForCurrentPdf(std::vector<Annotation>&& loaded,
+                                                bool needsIntegrate,
+                                                const clrop::PdfId* loadedId = nullptr,
+                                                bool requireStrongValidation = false) {
+    g_annots = std::move(loaded);
+    EnsureAnnotationIds(g_annots);
+    g_annotsDirty = false;
+    g_annotsNeedsIntegrate = needsIntegrate;
+    SetLoadedAnnotationIdentityState(loadedId, requireStrongValidation);
+    for (auto& ann : g_annots) {
+        if (ann.type == Annotation::Type::TextBox && ann.textLines.empty()) {
+            EnsureAnnotationTextLines(ann);
+        }
+    }
+    InvalidateRect(g_hPdfView, nullptr, FALSE);
+    LoadAnnotHistoryForCurrentPdf();
+    RefreshAnnotPanel();
+}
+
+static bool StageMergeNearlyEqual(double a, double b, double epsilon = 1e-6) {
+    double scale = std::max({1.0, std::abs(a), std::abs(b)});
+    return std::abs(a - b) <= epsilon * scale;
+}
+
+static bool StageMergeAnnotationEquals(const Annotation& a, const Annotation& b) {
+    if (a.type != b.type) return false;
+    if (a.pageIndex != b.pageIndex) return false;
+    if (!StageMergeNearlyEqual(a.x1, b.x1) || !StageMergeNearlyEqual(a.y1, b.y1) ||
+        !StageMergeNearlyEqual(a.x2, b.x2) || !StageMergeNearlyEqual(a.y2, b.y2)) {
+        return false;
+    }
+    if (!StageMergeNearlyEqual(a.width, b.width) ||
+        !StageMergeNearlyEqual(a.alpha, b.alpha) ||
+        !StageMergeNearlyEqual(a.fontPt, b.fontPt)) {
+        return false;
+    }
+    if (a.color != b.color) return false;
+    if (a.text != b.text || a.textLines != b.textLines) return false;
+    if (a.fontName != b.fontName) return false;
+    if (a.writingMode != b.writingMode || a.backgroundAssistMode != b.backgroundAssistMode) return false;
+    if (a.linkId != b.linkId || a.linkNotePath != b.linkNotePath) return false;
+    if (a.mathKind != b.mathKind) return false;
+    if (a.shapeKind != b.shapeKind) return false;
+    if (a.shapeDrawMode != b.shapeDrawMode) return false;
+    if (a.arrowHead != b.arrowHead) return false;
+    if (!StageMergeNearlyEqual(a.shapeRotation, b.shapeRotation)) return false;
+    if (a.path.size() != b.path.size()) return false;
+    for (size_t i = 0; i < a.path.size(); ++i) {
+        if (!StageMergeNearlyEqual(a.path[i].x, b.path[i].x) ||
+            !StageMergeNearlyEqual(a.path[i].y, b.path[i].y)) {
+            return false;
+        }
+    }
+    if (a.dash.size() != b.dash.size()) return false;
+    for (size_t i = 0; i < a.dash.size(); ++i) {
+        if (!StageMergeNearlyEqual(a.dash[i], b.dash[i])) return false;
+    }
+    if (a.quads.size() != b.quads.size()) return false;
+    for (size_t i = 0; i < a.quads.size(); ++i) {
+        if (!StageMergeNearlyEqual(a.quads[i], b.quads[i])) return false;
+    }
+    return true;
+}
+
+static bool TryRecoverStagedAnnotationsForCurrentPdf(HWND owner,
+                                                     bool promptBeforeApply,
+                                                     bool notifyRecovered,
+                                                     bool* outApplied = nullptr) {
+    if (outApplied) *outApplied = false;
+    if (g_pdf.kind != DocKind::Pdf || g_pdf.path.empty()) return true;
+
+    std::filesystem::path stage = file_output::FindLatestStagedClropPathForPdf(g_pdf.path);
+    if (stage.empty() || !PathExistsWin32(stage)) {
+        return true;
+    }
+
+    std::wstring err;
+    std::vector<Annotation> stagedLoaded;
+    if (!file_output::LoadResolvedStagedAnnotations(g_pdf.path, stage, &stagedLoaded, &err)) {
+        std::wstring msg = L"未統合の注釈差分の読み込みに失敗しました。\nstage checkpoint:\n" + stage.wstring();
+        if (!err.empty()) msg += L"\n\n" + err;
+        ShowPdfMessageDialog(owner, L"clrop recovery", msg, SoftNoticeKind::Error);
+        return false;
+    }
+
+    bool apply = true;
+    if (promptBeforeApply) {
+        std::wstring msg =
+            L"未統合の注釈差分が見つかりました。\n\n"
+            L"差分ファイル:\n" + stage.wstring() + L"\n\n"
+            L"[はい] 差分を復元 (注釈に適用)\n"
+            L"[いいえ] いまは復元しない（差分は保持）";
+        apply = ConfirmPdfYesNo(owner, L"clrop recovery", msg, SoftNoticeKind::Warning,
+                                SilentDialogResult::No, SilentDialogResult::No);
+    }
+
+    if (!apply) return true;
+
+    clrop::PdfId loadedId = clrop::ComputePdfId(g_pdf.path);
+    ApplyLoadedAnnotationsForCurrentPdf(std::move(stagedLoaded), /*needsIntegrate=*/true, &loadedId,
+                                        /*requireStrongValidation=*/false);
+    if (outApplied) *outApplied = true;
+    if (notifyRecovered) {
+        ShowPdfSoftNotice(owner, L"未統合の注釈差分から復元しました。", SoftNoticeKind::Info);
+    }
+    return true;
+}
+
+static void RestorePreviousDocumentAfterOpenFailure(HWND owner,
+                                                    DocKind previousKind,
+                                                    const std::wstring& previousPath,
+                                                    const std::string& previousPasswordUtf8) {
+    g_pendingPdfRestore.reset();
+    if (previousPath.empty()) {
+        ClearPdfState();
+        if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+        SyncLeftPaneSelection();
+        return;
+    }
+
+    if (previousKind == DocKind::Pdf) {
+        QueuePendingPdfRestoreForPath(previousPath);
+        if (!previousPasswordUtf8.empty()) {
+            QueuePdfOpenPasswordForNextLoad(previousPasswordUtf8);
+        }
+        if (LoadPdfDocument(g_hPdfView, previousPath) && LoadAnnotationsForCurrentPdf(owner)) {
+            SyncLeftPaneSelection();
+            bool restored = false;
+            if (!g_pendingInitialFitWidth && !g_pendingInitialFitHeight) {
+                restored = ApplyPendingPdfRestore(g_hPdfView);
+            }
+            if (!restored) {
+                JumpToPage(g_hPdfView, 0);
+            }
+            return;
+        }
+    } else if (previousKind == DocKind::Image) {
+        if (LoadImageDocument(g_hPdfView, previousPath)) {
+            g_toolMode = ToolMode::Pan;
+            SetModeButtons();
+            SyncLeftPaneSelection();
+            return;
+        }
+    }
+
+    ClearPdfState();
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    SyncLeftPaneSelection();
+}
+
+bool LoadAnnotationsForCurrentPdf(HWND owner) {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    preview_trace::Append(
+        L"LoadAnnotationsForCurrentPdf",
+        L"begin pdfPath=" + g_pdf.path +
+        L" previewActive=" + preview_trace::Bool(g_pdfPreviewActive));
+    ResetEditOriginal();
+    g_annots.clear();
+    g_annotsDirty = false;
+    g_annotsNeedsIntegrate = false;
+    ClearLoadedAnnotationIdentityState();
+    if (g_pdfPreviewActive) {
+        ClearAnnotHistory();
+        RefreshAnnotPanel();
+        preview_trace::Append(
+            L"LoadAnnotationsForCurrentPdf",
+            L"skip=preview_active elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return true;
+    }
+    if (g_pdf.kind != DocKind::Pdf) {
+        ClearAnnotHistory();
+        RefreshAnnotPanel();
+        preview_trace::Append(
+            L"LoadAnnotationsForCurrentPdf",
+            L"skip=no_pdf elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return true;
+    }
+    if (g_pdf.path.empty()) {
+        RefreshAnnotPanel();
+        preview_trace::Append(
+            L"LoadAnnotationsForCurrentPdf",
+            L"skip=no_path elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return true;
+    }
+    std::wstring clropPath = clrop_bridge::ClropPathForPdf(g_pdf.path);
+    if (!PathExistsWin32(std::filesystem::path(clropPath))) {
+        bool recovered = false;
+        if (!TryRecoverStagedAnnotationsForCurrentPdf(owner, /*promptBeforeApply=*/false,
+                                                      /*notifyRecovered=*/true, &recovered)) {
+            preview_trace::Append(
+                L"LoadAnnotationsForCurrentPdf",
+                L"recover_failed_no_clrop elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return false;
+        }
+        if (recovered) {
+            preview_trace::Append(
+                L"LoadAnnotationsForCurrentPdf",
+                L"end recovered_without_clrop elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return true;
+        }
+        LoadAnnotHistoryForCurrentPdf();
+        RefreshAnnotPanel();
+        preview_trace::Append(
+            L"LoadAnnotationsForCurrentPdf",
+            L"end no_clrop elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return true;
+    }
+    bool mismatch = false;
+    std::wstring err;
+    clrop::PdfId loadedId;
+    std::vector<Annotation> loaded;
+    const clrop::PdfId expectedFastId = BuildCurrentOpenPdfFastId();
+    if (!clrop_bridge::LoadAnnotations(clropPath, g_pdf.path, loaded, mismatch, &loadedId, err,
+                                       clrop_bridge::LoadAnnotationsValidation::Fast,
+                                       &expectedFastId)) {
+        bool recovered = false;
+        if (!TryRecoverStagedAnnotationsForCurrentPdf(owner, /*promptBeforeApply=*/false,
+                                                      /*notifyRecovered=*/true, &recovered)) {
+            preview_trace::Append(
+                L"LoadAnnotationsForCurrentPdf",
+                L"recover_failed_after_load_error elapsed_ms=" + preview_trace::ElapsedMs(startTick) +
+                L" err=" + err);
+            return false;
+        }
+        if (recovered) {
+            preview_trace::Append(
+                L"LoadAnnotationsForCurrentPdf",
+                L"end recovered_after_load_error elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return true;
+        }
+        std::wstring msg = L"注釈の読み込みに失敗しました。\n";
+        if (!err.empty()) msg += err;
+        ShowPdfMessageDialog(owner, L"clrop", msg, SoftNoticeKind::Error);
+        RefreshAnnotPanel();
+        preview_trace::Append(
+            L"LoadAnnotationsForCurrentPdf",
+            L"load_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick) +
+            L" err=" + err);
+        return false;
+    }
+    if (mismatch) {
+        clrop::PdfId current = clrop::ComputePdfFastId(g_pdf.path);
+        std::wstring msg = BuildMismatchMessage(loadedId, current);
+        SilentDialogOptions options;
+        options.title = L"clrop";
+        options.message = msg;
+        options.kind = SoftNoticeKind::Warning;
+        options.buttons = SilentDialogButtons::OkYesNoCancel;
+        options.okLabel = L"ID更新して読込";
+        options.yesLabel = L"強制読込";
+        options.noLabel = L"無視して新規";
+        options.cancelLabel = L"中止";
+        options.preferredWidthPx = 680;
+        options.defaultResult = SilentDialogResult::Cancel;
+        options.escapeResult = SilentDialogResult::Cancel;
+        SilentDialogResult res = ShowPdfDialog(owner, options);
+        if (res == SilentDialogResult::Cancel || res == SilentDialogResult::None) {
+            RefreshAnnotPanel();
+            preview_trace::Append(
+                L"LoadAnnotationsForCurrentPdf",
+                L"abort=pdf_id_mismatch_cancel elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return false;
+        } else if (res == SilentDialogResult::Ok) {
+            if (!RewriteClropPdfIdForCurrentPdf(owner, clropPath, loaded, &loadedId)) {
+                RefreshAnnotPanel();
+                preview_trace::Append(
+                    L"LoadAnnotationsForCurrentPdf",
+                    L"abort=pdf_id_mismatch_rewrite_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+                return false;
+            }
+            preview_trace::Append(
+                L"LoadAnnotationsForCurrentPdf",
+                L"mismatch_rewritten elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        } else if (res == SilentDialogResult::No) {
+            g_annots.clear();
+            g_annotsDirty = false;
+            g_annotsNeedsIntegrate = false;
+            InvalidateRect(g_hPdfView, nullptr, FALSE);
+            LoadAnnotHistoryForCurrentPdf();
+            RefreshAnnotPanel();
+            preview_trace::Append(
+                L"LoadAnnotationsForCurrentPdf",
+                L"end mismatch_ignore elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return true;
+        }
+        // Yes -> force load
+    }
+    ApplyLoadedAnnotationsForCurrentPdf(std::move(loaded), /*needsIntegrate=*/false, &loadedId,
+                                        /*requireStrongValidation=*/true);
+
+    // If a staged .clrop diff exists (e.g. after a crash), let the user recover it.
+    {
+        std::filesystem::path stage = file_output::FindLatestStagedClropPathForPdf(g_pdf.path);
+        std::error_code ec;
+        if (!stage.empty() && PathExistsWin32(stage)) {
+            std::vector<Annotation> stagedResolved;
+            std::wstring stageErr;
+            if (file_output::LoadResolvedStagedAnnotations(g_pdf.path, stage, &stagedResolved, &stageErr)) {
+                bool sameAsCurrent = stagedResolved.size() == g_annots.size();
+                if (sameAsCurrent) {
+                    for (size_t i = 0; i < stagedResolved.size(); ++i) {
+                        if (!StageMergeAnnotationEquals(stagedResolved[i], g_annots[i])) {
+                            sameAsCurrent = false;
+                            break;
+                        }
+                    }
+                }
+                if (sameAsCurrent) {
+                    file_output::DiscardRedundantStagedClropFilesMatchingOriginal(g_pdf.path);
+                    return true;
+                }
+            }
+            const bool stageCreatedDuringCurrentProcess =
+                IsPdfStageCreatedDuringCurrentProcess(stage);
+            if (!TryRecoverStagedAnnotationsForCurrentPdf(
+                    owner, /*promptBeforeApply=*/!stageCreatedDuringCurrentProcess,
+                                                          /*notifyRecovered=*/false)) {
+                preview_trace::Append(
+                    L"LoadAnnotationsForCurrentPdf",
+                    L"recover_failed_after_stage_detected elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+                return false;
+            }
+        }
+    }
+    preview_trace::Append(
+        L"LoadAnnotationsForCurrentPdf",
+        L"end loaded_annots=" + std::to_wstring(g_annots.size()) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+    return true;
+}
+
+bool MergeStagedAnnotationsIntoCurrentPdf(HWND owner, const std::filesystem::path& stagePath) {
+    if (g_pdf.kind != DocKind::Pdf || g_pdf.path.empty() || stagePath.empty()) return false;
+
+    std::wstring err;
+    std::vector<Annotation> loaded;
+    if (!file_output::LoadResolvedStagedAnnotations(g_pdf.path, stagePath, &loaded, &err)) {
+        std::wstring msg = L"注釈差分の読み込みに失敗しました。\nstage checkpoint:\n" + stagePath.wstring();
+        if (!err.empty()) msg += L"\n\n" + err;
+        ShowPdfMessageDialog(owner, L"clrop merge", msg, SoftNoticeKind::Error);
+        return false;
+    }
+
+    std::vector<Annotation> merged = g_annots;
+    size_t added = 0;
+    for (const auto& candidate : loaded) {
+        bool exists = false;
+        for (const auto& current : merged) {
+            if (StageMergeAnnotationEquals(candidate, current)) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            merged.push_back(candidate);
+            ++added;
+        }
+    }
+    if (added == 0) {
+        ShowSoftNotice(owner ? owner : g_hMainWnd,
+                       IsEnglishUi() ? L"No new annotations were added." : L"追加される注釈はありませんでした。");
+        return true;
+    }
+
+    g_annots = std::move(merged);
+    InvalidatePendingAnnotStageCommands(g_pdf.path);
+    EnsureAnnotationIds(g_annots);
+    for (auto& ann : g_annots) {
+        if (ann.type == Annotation::Type::TextBox && ann.textLines.empty()) {
+            EnsureAnnotationTextLines(ann);
+        }
+    }
+    g_annotsLoadedPdfId = clrop::ComputePdfId(g_pdf.path);
+    g_annotsLoadedPdfIdValid = !g_annotsLoadedPdfId.sha256.empty();
+    g_annotsRequireStrongValidation = false;
+    g_annotsDirty = true;
+    g_annotsNeedsIntegrate = false;
+    InvalidateRect(g_hPdfView, nullptr, FALSE);
+    RefreshAnnotPanel();
+    RefreshMainWindowUiState(owner);
+
+    if (!file_output::SaveAnnotationsIfDirty(owner)) {
+        return false;
+    }
+    if (!file_output::IntegrateStagedDiff(owner, file_output::StagedClropPathForPdf(g_pdf.path))) {
+        return false;
+    }
+    g_annotsNeedsIntegrate = false;
+    RefreshMainWindowUiState(owner);
+
+    if (stagePath != file_output::StagedClropPathForPdf(g_pdf.path)) {
+        file_output::DiscardStagedDiff(stagePath);
+    }
+    ShowSoftNotice(owner ? owner : g_hMainWnd,
+                   IsEnglishUi() ? L"Merged annotations into the current PDF." : L"注釈差分を現在のPDFへ統合しました。");
+    return true;
+}
+
+bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    DocKind previousKind = g_pdf.kind;
+    std::wstring previousPath = g_pdf.path;
+    std::string previousPasswordUtf8 = g_pdf.openPasswordUtf8;
+    SecureStringScope previousPasswordScope(&previousPasswordUtf8);
+    preview_trace::Append(
+        L"OpenPdfWithAnnotations",
+        L"begin path=" + path +
+        L" previousPath=" + previousPath +
+        L" previousKind=" + std::to_wstring(static_cast<int>(previousKind)));
+    auto syncOwnerUi = [&]() {
+        RefreshMainWindowUiState(owner);
+    };
+    try {
+        fault_injection::MaybeThrow(L"OpenPdfWithAnnotations:start");
+        if (!SaveAnnotationsIfDirty(owner)) {
+            SaveLastPdfViewInfo();
+            preview_trace::Append(
+                L"OpenPdfWithAnnotations",
+                L"abort=save_annotations_if_dirty_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return false;
+        }
+        SaveLastPdfViewInfo();
+        auto notifyLectureOpened = []() {
+            if (g_hMainWnd) {
+                PostMessageW(g_hMainWnd, kMsgLectureContentOpened, 0, 0);
+            }
+        };
+        const bool reopeningCurrentPdf =
+            IsPdfFile(path) && previousKind == DocKind::Pdf && IsSameDocumentPath(path, previousPath);
+        const bool forceReloadCurrentPdf = reopeningCurrentPdf && g_pendingPdfOpenPasswordUtf8.has_value();
+        std::vector<Annotation> previousAnnots;
+        bool previousAnnotsDirty = false;
+        bool previousAnnotsNeedsIntegrate = false;
+        bool previousAnnotsRequireStrongValidation = false;
+        bool previousAnnotsLoadedPdfIdValid = false;
+        clrop::PdfId previousAnnotsLoadedPdfId{};
+        if (reopeningCurrentPdf && !forceReloadCurrentPdf) {
+            previousAnnots = g_annots;
+            previousAnnotsDirty = g_annotsDirty;
+            previousAnnotsNeedsIntegrate = g_annotsNeedsIntegrate;
+            previousAnnotsRequireStrongValidation = g_annotsRequireStrongValidation;
+            previousAnnotsLoadedPdfIdValid = g_annotsLoadedPdfIdValid;
+            if (previousAnnotsLoadedPdfIdValid) {
+                previousAnnotsLoadedPdfId = g_annotsLoadedPdfId;
+            }
+        }
+        g_pendingPdfRestore.reset();
+        if (IsPdfFile(path)) {
+            QueuePendingPdfRestoreForPath(path);
+        }
+        if (reopeningCurrentPdf && !forceReloadCurrentPdf) {
+            if (!LoadAnnotationsForCurrentPdf(owner)) {
+                ApplyLoadedAnnotationsForCurrentPdf(std::move(previousAnnots),
+                                                   previousAnnotsNeedsIntegrate,
+                                                   previousAnnotsLoadedPdfIdValid ? &previousAnnotsLoadedPdfId : nullptr,
+                                                   previousAnnotsRequireStrongValidation);
+                g_annotsDirty = previousAnnotsDirty;
+                RefreshMainWindowUiState(owner);
+                QueuePendingPdfRestoreForPath(previousPath);
+                SyncLeftPaneSelection();
+                bool restored = false;
+                if (!g_pendingInitialFitWidth && !g_pendingInitialFitHeight) {
+                    restored = ApplyPendingPdfRestore(g_hPdfView);
+                }
+                if (!restored && g_hPdfView) {
+                    InvalidateRect(g_hPdfView, nullptr, FALSE);
+                }
+                syncOwnerUi();
+                preview_trace::Append(
+                    L"OpenPdfWithAnnotations",
+                    L"abort=reopen_load_annots_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+                return false;
+            }
+            SyncLeftPaneSelection();
+            bool restored = false;
+            if (!g_pendingInitialFitWidth && !g_pendingInitialFitHeight) {
+                restored = ApplyPendingPdfRestore(g_hPdfView);
+            }
+            if (!restored && g_hPdfView) {
+                InvalidateRect(g_hPdfView, nullptr, FALSE);
+            }
+            UpdateSessionLastOpenTargetsAfterOpen();
+            syncOwnerUi();
+            notifyLectureOpened();
+            preview_trace::Append(
+                L"OpenPdfWithAnnotations",
+                L"end reopen_current_pdf elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return true;
+        }
+        if (IsPdfFile(path)) {
+            if (!LoadPdfDocument(g_hPdfView, path)) {
+                RestorePreviousDocumentAfterOpenFailure(owner, previousKind, previousPath, previousPasswordUtf8);
+                preview_trace::Append(
+                    L"OpenPdfWithAnnotations",
+                    L"abort=load_pdf_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+                return false;
+            }
+            preview_trace::Append(
+                L"OpenPdfWithAnnotations",
+                L"after_load_pdf elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            if (!LoadAnnotationsForCurrentPdf(owner)) {
+                RestorePreviousDocumentAfterOpenFailure(owner, previousKind, previousPath, previousPasswordUtf8);
+                preview_trace::Append(
+                    L"OpenPdfWithAnnotations",
+                    L"abort=load_annots_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+                return false;
+            }
+            preview_trace::Append(
+                L"OpenPdfWithAnnotations",
+                L"after_load_annots elapsed_ms=" + preview_trace::ElapsedMs(startTick) +
+                L" annotCount=" + std::to_wstring(g_annots.size()));
+            SyncLeftPaneSelection();
+            preview_trace::Append(
+                L"OpenPdfWithAnnotations",
+                L"after_sync_left_pane elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            bool restored = false;
+            if (!g_pendingInitialFitWidth && !g_pendingInitialFitHeight) {
+                restored = ApplyPendingPdfRestore(g_hPdfView);
+            }
+            if (!restored) {
+                JumpToPage(g_hPdfView, 0);
+            }
+            preview_trace::Append(
+                L"OpenPdfWithAnnotations",
+                L"after_restore_or_jump elapsed_ms=" + preview_trace::ElapsedMs(startTick) +
+                L" restored=" + preview_trace::Bool(restored));
+            UpdateSessionLastOpenTargetsAfterOpen();
+            syncOwnerUi();
+            preview_trace::Append(
+                L"OpenPdfWithAnnotations",
+                L"after_sync_owner_ui elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            notifyLectureOpened();
+            preview_trace::Append(
+                L"OpenPdfWithAnnotations",
+                L"end pdf elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return true;
+        }
+        if (IsImageFile(path)) {
+            if (!LoadImageDocument(g_hPdfView, path)) {
+                RestorePreviousDocumentAfterOpenFailure(owner, previousKind, previousPath, previousPasswordUtf8);
+                preview_trace::Append(
+                    L"OpenPdfWithAnnotations",
+                    L"abort=load_image_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+                return false;
+            }
+            g_toolMode = ToolMode::Pan;
+            SetModeButtons();
+            SyncLeftPaneSelection();
+            UpdateSessionLastOpenTargetsAfterOpen();
+            syncOwnerUi();
+            notifyLectureOpened();
+            preview_trace::Append(
+                L"OpenPdfWithAnnotations",
+                L"end image elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return true;
+        }
+        preview_trace::Append(
+            L"OpenPdfWithAnnotations",
+            L"abort=unsupported_path elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return false;
+    } catch (const std::exception& ex) {
+        AppendPdfOperationExceptionLog("OpenPdfWithAnnotations", ex.what());
+        try {
+            RestorePreviousDocumentAfterOpenFailure(owner, previousKind, previousPath, previousPasswordUtf8);
+        } catch (...) {
+        }
+        ShowPdfMessageDialog(owner ? owner : g_hMainWnd,
+                             L"PDF",
+                             IsEnglishUi() ? L"Opening the PDF was canceled due to an unexpected internal error."
+                                           : L"予期しない内部エラーのため、PDFを開く処理を中止しました。",
+                             SoftNoticeKind::Error);
+        return false;
+    } catch (...) {
+        AppendPdfOperationExceptionLog("OpenPdfWithAnnotations", nullptr);
+        try {
+            RestorePreviousDocumentAfterOpenFailure(owner, previousKind, previousPath, previousPasswordUtf8);
+        } catch (...) {
+        }
+        ShowPdfMessageDialog(owner ? owner : g_hMainWnd,
+                             L"PDF",
+                             IsEnglishUi() ? L"Opening the PDF was canceled due to an unexpected internal error."
+                                           : L"予期しない内部エラーのため、PDFを開く処理を中止しました。",
+                             SoftNoticeKind::Error);
+        return false;
+    }
+}
+
+bool ExportPdfWithAnnotations(HWND owner) {
+    return file_output::ExportPdfWithAnnotations(owner, true, g_config.exportStandardTextAnnots);
+}
+

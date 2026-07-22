@@ -1,0 +1,8 @@
+// file: settings/settings_general.cppinc
+// Included by settings.cpp (single TU).
+// Keep include order stable; later fragments depend on earlier helpers/types.
+
+#include "settings/settings_general_foundation.cppinc"
+#include "settings/settings_general_controls.cppinc"
+#include "settings/settings_general_dialog.cppinc"
+#include "settings/settings_general_schedule.cppinc"

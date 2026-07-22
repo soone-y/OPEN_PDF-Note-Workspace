@@ -1,0 +1,2743 @@
+// file: pdf_view/input.cpp
+// NOTE: This file is intentionally included by `src/pdf_view/pdf_view.cpp` to keep the build as a
+// single translation unit while physically splitting responsibilities.
+
+#include "core/preview_trace.h"
+
+static DWORD g_pdfRecentLinkPlacementDblClickSuppressUntil = 0;
+static POINT g_pdfRecentLinkPlacementDblClickSuppressPt = { -1, -1 };
+static ULONGLONG g_pdfIgnoreNextLeftKeyUntilTick = 0;
+
+struct PdfScrollbarRepeatState {
+    HWND hwnd = nullptr;
+    int bar = 0;
+    UINT action = 0;
+    ULONGLONG firstTick = 0;
+    ULONGLONG lastTick = 0;
+    bool jumped = false;
+};
+
+static PdfScrollbarRepeatState g_pdfScrollbarRepeat;
+
+static bool IsCtrlPaneNavCharPdf(WPARAM ch) {
+    return ch == L'\b' || ch == L'\n' || ch == 0x0B || ch == 0x0C;
+}
+
+enum class PdfScrollbarHoldAction {
+    Step,
+    Ignore,
+    Jump
+};
+
+enum class SinglePageMoveAxis {
+    Vertical,
+    Horizontal
+};
+
+static constexpr double kSinglePageOverscrollThresholdPx = 64.0;
+static double g_singlePageOverscroll = 0.0;
+
+static double CurrentSinglePageRatioX(int pageIndex, int viewW) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pageRects.size())) return 0.5;
+    const auto& rect = g_pdf.pageRects[static_cast<size_t>(pageIndex)];
+    double width = rect.right - rect.left;
+    if (width <= 0.0) return 0.5;
+    PdfFlowMode mode = CurrentFlowMode();
+    double docX = g_pdf.scrollX + static_cast<double>(viewW) * 0.5 - FlowCrossPaddingX(mode);
+    return std::clamp((docX - rect.left) / width, 0.0, 1.0);
+}
+
+static double CurrentSinglePageRatioY(int pageIndex, int viewH) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pageRects.size())) return 0.5;
+    const auto& rect = g_pdf.pageRects[static_cast<size_t>(pageIndex)];
+    double height = rect.bottom - rect.top;
+    if (height <= 0.0) return 0.5;
+    PdfFlowMode mode = CurrentFlowMode();
+    double docY = g_pdf.scrollY + static_cast<double>(viewH) * 0.5 - FlowCrossPaddingY(mode);
+    return std::clamp((docY - rect.top) / height, 0.0, 1.0);
+}
+
+static void SetSinglePageScrollForMove(HWND hwnd, int targetPage, SinglePageMoveAxis axis,
+                                       int direction, double keepRatio) {
+    if (!hwnd || targetPage < 0 || targetPage >= static_cast<int>(g_pdf.pages.size())) return;
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int viewH = rc.bottom - rc.top;
+    const int viewW = rc.right - rc.left;
+
+    g_pdf.singlePageIndex = targetPage;
+    g_pdf.scrollX = 0.0;
+    g_pdf.scrollY = 0.0;
+    UpdatePageLayout(hwnd);
+    if (targetPage < 0 || targetPage >= static_cast<int>(g_pdf.pageRects.size())) return;
+
+    PdfFlowMode mode = CurrentFlowMode();
+    const double padX = FlowCrossPaddingX(mode);
+    const double padY = FlowCrossPaddingY(mode);
+    const auto& rect = g_pdf.pageRects[static_cast<size_t>(targetPage)];
+
+    if (axis == SinglePageMoveAxis::Vertical) {
+        const double x = rect.left + (rect.right - rect.left) * std::clamp(keepRatio, 0.0, 1.0);
+        g_pdf.scrollX = x + padX - static_cast<double>(viewW) * 0.5;
+        g_pdf.scrollY = (direction > 0)
+            ? rect.top
+            : (rect.bottom + padY * 2.0 - static_cast<double>(viewH));
+    } else {
+        const double y = rect.top + (rect.bottom - rect.top) * std::clamp(keepRatio, 0.0, 1.0);
+        g_pdf.scrollX = (direction > 0)
+            ? rect.left
+            : (rect.right + padX * 2.0 - static_cast<double>(viewW));
+        g_pdf.scrollY = y + padY - static_cast<double>(viewH) * 0.5;
+    }
+    ClampPdfScroll(viewH, viewW);
+}
+
+static bool ScrollSinglePageByPrimary(HWND hwnd, double primaryMove, int viewH, int viewW);
+
+static bool StepSinglePageKeepingCrossRatio(HWND hwnd, int delta, SinglePageMoveAxis axis) {
+    if (!hwnd || g_pdf.kind == DocKind::None || g_pdf.pageCount <= 0) return false;
+    g_singlePageOverscroll = 0.0;
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int viewH = rc.bottom - rc.top;
+    const int viewW = rc.right - rc.left;
+    const int current = PageAtCurrentView();
+    const int target = std::clamp(current + delta, 0, std::max(0, g_pdf.pageCount - 1));
+    if (target == current) return true;
+    double keepRatio = (axis == SinglePageMoveAxis::Vertical)
+        ? CurrentSinglePageRatioX(current, viewW)
+        : CurrentSinglePageRatioY(current, viewH);
+    SetSinglePageScrollForMove(hwnd, target, axis, delta, keepRatio);
+    MarkPdfVirtualScrollInput();
+    g_scrollVelocity = 0.0;
+    KillTimer(hwnd, kScrollTimerId);
+    UpdatePdfVirtualScrollCaches(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static bool ScrollPdfByKeyboard(HWND hwnd, double dx, double dy) {
+    if (!hwnd || g_pdf.kind == DocKind::None || g_pdf.pageCount <= 0) return false;
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int viewH = rc.bottom - rc.top;
+    const int viewW = rc.right - rc.left;
+    const double beforeX = g_pdf.scrollX;
+    const double beforeY = g_pdf.scrollY;
+    g_pdf.scrollX += dx;
+    g_pdf.scrollY += dy;
+    ClampPdfScroll(viewH, viewW);
+    if (PdfSinglePageModeActive()) {
+        if (std::abs(g_pdf.scrollX - beforeX) > 0.1 ||
+            std::abs(g_pdf.scrollY - beforeY) > 0.1) {
+            g_singlePageOverscroll = 0.0;
+        }
+        if (dy > 0.0 && std::abs(g_pdf.scrollY - beforeY) < 0.1) {
+            return StepSinglePageKeepingCrossRatio(hwnd, 1, SinglePageMoveAxis::Vertical);
+        }
+        if (dy < 0.0 && std::abs(g_pdf.scrollY - beforeY) < 0.1) {
+            return StepSinglePageKeepingCrossRatio(hwnd, -1, SinglePageMoveAxis::Vertical);
+        }
+        if (dx > 0.0 && std::abs(g_pdf.scrollX - beforeX) < 0.1) {
+            return StepSinglePageKeepingCrossRatio(hwnd, 1, SinglePageMoveAxis::Horizontal);
+        }
+        if (dx < 0.0 && std::abs(g_pdf.scrollX - beforeX) < 0.1) {
+            return StepSinglePageKeepingCrossRatio(hwnd, -1, SinglePageMoveAxis::Horizontal);
+        }
+    }
+    MarkPdfVirtualScrollInput();
+    g_scrollVelocity = 0.0;
+    KillTimer(hwnd, kScrollTimerId);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static bool StepPdfPageByKeyboard(HWND hwnd, int delta) {
+    if (!hwnd || g_pdf.kind == DocKind::None || g_pdf.pageCount <= 0) return false;
+    if (PdfSinglePageModeActive()) {
+        SinglePageMoveAxis axis = FlowIsVertical(CurrentFlowMode())
+            ? SinglePageMoveAxis::Vertical
+            : SinglePageMoveAxis::Horizontal;
+        return StepSinglePageKeepingCrossRatio(hwnd, delta, axis);
+    }
+    const int current = PageAtCurrentView();
+    const int target = std::clamp(current + delta, 0, std::max(0, g_pdf.pageCount - 1));
+    if (target == current) return true;
+    JumpToPage(hwnd, target);
+    return true;
+}
+
+static bool StepPdfPageByPrimaryMove(HWND hwnd, double primaryMove) {
+    if (std::abs(primaryMove) <= 0.1) return false;
+    PdfFlowMode mode = CurrentFlowMode();
+    int delta = primaryMove > 0.0 ? 1 : -1;
+    if (!FlowPrimaryDirPositive(mode)) {
+        delta = -delta;
+    }
+    return StepPdfPageByKeyboard(hwnd, delta);
+}
+
+static bool ScrollSinglePageByPrimary(HWND hwnd, double primaryMove, int viewH, int viewW) {
+    if (!hwnd || !PdfSinglePageModeActive() || std::abs(primaryMove) <= 0.1) return false;
+
+    PdfFlowMode mode = CurrentFlowMode();
+    const bool vertical = FlowIsVertical(mode);
+    const double before = vertical ? g_pdf.scrollY : g_pdf.scrollX;
+    if (vertical) {
+        g_pdf.scrollY += primaryMove;
+    } else {
+        g_pdf.scrollX += primaryMove;
+    }
+    ClampPdfScroll(viewH, viewW);
+    const double after = vertical ? g_pdf.scrollY : g_pdf.scrollX;
+    const double applied = after - before;
+    if (std::abs(applied) > 0.1) {
+        g_singlePageOverscroll = 0.0;
+        MarkPdfVirtualScrollInput();
+        g_scrollVelocity = 0.0;
+        KillTimer(hwnd, kScrollTimerId);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return true;
+    }
+
+    if ((g_singlePageOverscroll > 0.0) != (primaryMove > 0.0)) {
+        g_singlePageOverscroll = 0.0;
+    }
+    g_singlePageOverscroll += primaryMove - applied;
+    if (std::abs(g_singlePageOverscroll) >= kSinglePageOverscrollThresholdPx) {
+        const double turn = g_singlePageOverscroll;
+        g_singlePageOverscroll = 0.0;
+        if (StepPdfPageByPrimaryMove(hwnd, turn)) return true;
+    }
+
+    MarkPdfVirtualScrollInput();
+    g_scrollVelocity = 0.0;
+    KillTimer(hwnd, kScrollTimerId);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static bool IsPdfScrollbarRepeatAction(UINT action) {
+    switch (action) {
+    case SB_PAGEUP:
+    case SB_PAGEDOWN:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static PdfScrollbarHoldAction PdfScrollbarHoldActionFor(HWND hwnd, int bar, UINT action) {
+    if (!IsPdfScrollbarRepeatAction(action)) {
+        g_pdfScrollbarRepeat = {};
+        return PdfScrollbarHoldAction::Step;
+    }
+
+    ULONGLONG now = GetTickCount64();
+    bool sameHold =
+        g_pdfScrollbarRepeat.hwnd == hwnd &&
+        g_pdfScrollbarRepeat.bar == bar &&
+        g_pdfScrollbarRepeat.action == action &&
+        g_pdfScrollbarRepeat.lastTick != 0 &&
+        now - g_pdfScrollbarRepeat.lastTick <= 650;
+    if (!sameHold) {
+        g_pdfScrollbarRepeat.hwnd = hwnd;
+        g_pdfScrollbarRepeat.bar = bar;
+        g_pdfScrollbarRepeat.action = action;
+        g_pdfScrollbarRepeat.firstTick = now;
+        g_pdfScrollbarRepeat.jumped = false;
+        g_pdfScrollbarRepeat.lastTick = now;
+        return PdfScrollbarHoldAction::Step;
+    }
+    g_pdfScrollbarRepeat.lastTick = now;
+
+    ULONGLONG heldMs = now - g_pdfScrollbarRepeat.firstTick;
+    if (!g_pdfScrollbarRepeat.jumped && heldMs >= 700) {
+        g_pdfScrollbarRepeat.jumped = true;
+        return PdfScrollbarHoldAction::Jump;
+    }
+    return PdfScrollbarHoldAction::Ignore;
+}
+
+static void ArmRecentPdfLinkPlacementDblClickSuppress(const POINT& pt) {
+    DWORD graceMs = GetDoubleClickTime() + 50;
+    if (graceMs < 1) graceMs = 1;
+    g_pdfRecentLinkPlacementDblClickSuppressUntil = GetTickCount() + graceMs;
+    g_pdfRecentLinkPlacementDblClickSuppressPt = pt;
+}
+
+static bool ConsumeRecentPdfLinkPlacementDblClickSuppress(const POINT& pt) {
+    if (g_pdfRecentLinkPlacementDblClickSuppressUntil == 0) return false;
+    DWORD now = GetTickCount();
+    if ((g_pdfRecentLinkPlacementDblClickSuppressUntil - now) >= 0x80000000u) {
+        g_pdfRecentLinkPlacementDblClickSuppressUntil = 0;
+        g_pdfRecentLinkPlacementDblClickSuppressPt = { -1, -1 };
+        return false;
+    }
+
+    const int toleranceX = std::max(4, GetSystemMetrics(SM_CXDOUBLECLK));
+    const int toleranceY = std::max(4, GetSystemMetrics(SM_CYDOUBLECLK));
+    const bool sameClickArea =
+        std::abs(pt.x - g_pdfRecentLinkPlacementDblClickSuppressPt.x) <= toleranceX &&
+        std::abs(pt.y - g_pdfRecentLinkPlacementDblClickSuppressPt.y) <= toleranceY;
+    g_pdfRecentLinkPlacementDblClickSuppressUntil = 0;
+    g_pdfRecentLinkPlacementDblClickSuppressPt = { -1, -1 };
+    return sameClickArea;
+}
+
+static bool IsTextFontSizeComboFocusTarget(HWND target) {
+    if (!target) return false;
+    if (target == g_hRadioFontSizeSlotA || target == g_hRadioFontSizeSlotB) return true;
+
+    auto isComboTarget = [&](HWND combo) {
+        if (!combo || !IsWindow(combo)) return false;
+        if (target == combo || IsChild(combo, target)) return true;
+
+        COMBOBOXINFO cbi{};
+        cbi.cbSize = sizeof(cbi);
+        if (!GetComboBoxInfo(combo, &cbi) || !cbi.hwndList) return false;
+
+        HWND list = cbi.hwndList;
+        HWND dropWnd = GetParent(list) ? GetParent(list) : list;
+        return target == list || target == dropWnd ||
+               IsChild(list, target) || IsChild(dropWnd, target);
+    };
+    return isComboTarget(g_hComboFontSize) || isComboTarget(g_hComboFontSizeAlt);
+}
+
+static bool ResolvePdfCtrlInsertNavKey(HWND hwnd, WPARAM wParam, WPARAM* outNavKey) {
+    if (!hwnd || !outNavKey) return false;
+    if ((GetKeyState(VK_CONTROL) & 0x8000) == 0) return false;
+    if ((GetKeyState(VK_MENU) & 0x8000) != 0) return false;
+
+    UINT vk = static_cast<UINT>(wParam);
+    if (vk == VK_PROCESSKEY) {
+        UINT imeVk = static_cast<UINT>(ImmGetVirtualKey(hwnd));
+        if (imeVk != 0) {
+            vk = imeVk;
+        }
+    }
+
+    switch (vk) {
+    case 'H':
+        *outNavKey = VK_LEFT;
+        return true;
+    case 'J':
+        *outNavKey = VK_DOWN;
+        return true;
+    case 'K':
+        *outNavKey = VK_UP;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ForwardPdfImeNavigationKey(HWND hwnd, WPARAM navKey) {
+    if (!hwnd) return false;
+    HWND imeWnd = ImmGetDefaultIMEWnd(hwnd);
+    if (!imeWnd || !IsWindow(imeWnd)) return false;
+    SendMessageW(imeWnd, WM_IME_KEYDOWN, navKey, 0);
+    SendMessageW(imeWnd, WM_IME_KEYUP, navKey, 0);
+    return true;
+}
+
+static bool BeginTextBoxEditClickSelection(HWND hwnd, const POINT& pt, bool shiftDown) {
+    size_t newCaret = 0;
+    if (!HitTestEditCaretFromClientPoint(pt, &newCaret, false)) {
+        return false;
+    }
+
+    size_t anchor = g_pdf.editCaret;
+    if (shiftDown) {
+        if (HasEditSelection()) {
+            anchor = (g_pdf.editCaret == g_pdf.editSelStart) ? g_pdf.editSelEnd : g_pdf.editSelStart;
+        } else {
+            anchor = g_pdf.editCaret;
+        }
+    }
+    g_pdf.editCaret = newCaret;
+    if (shiftDown) {
+        g_pdf.editSelStart = anchor;
+        g_pdf.editSelEnd = newCaret;
+    } else {
+        ClearEditSelection();
+    }
+    g_pdf.editSelAnchor = anchor;
+    g_pdf.editSelectDown = pt;
+    g_pdf.editSelectMoved = false;
+    g_pdf.editSelectingText = true;
+    SetCapture(hwnd);
+    UpdateImeWindowPosition(hwnd, true);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static bool IsCommittedFullWidthParenPair(const std::wstring& text) {
+    return g_config.fullWidthParenCaretInside && g_pdf.editingText && text == L"（）";
+}
+
+static std::wstring NormalizePdfEditInsertedText(const std::wstring& text) {
+    std::wstring out;
+    out.reserve(text.size());
+    for (wchar_t ch : text) {
+        if (ch != L'\r') out.push_back(ch);
+    }
+    return out;
+}
+
+static void InsertPdfEditTextAtSelection(const std::wstring& text) {
+    std::wstring normalized = NormalizePdfEditInsertedText(text);
+    if (normalized.empty()) return;
+
+    size_t selStart = g_pdf.editCaret;
+    size_t selEnd = g_pdf.editCaret;
+    if (HasEditSelection()) {
+        selStart = std::min(g_pdf.editSelStart, g_pdf.editSelEnd);
+        selEnd = std::max(g_pdf.editSelStart, g_pdf.editSelEnd);
+    }
+    selStart = std::min(selStart, g_pdf.editText.size());
+    selEnd = std::min(selEnd, g_pdf.editText.size());
+
+    RecordTextEditChange();
+    if (selEnd > selStart) {
+        g_pdf.editText.erase(selStart, selEnd - selStart);
+    }
+    const bool fullWidthParenPair = IsCommittedFullWidthParenPair(normalized);
+    g_pdf.editText.insert(selStart, normalized);
+    if (fullWidthParenPair) {
+        g_pdf.editCaret = selStart + 1;
+        ClearEditSelection();
+        if (g_config.fullWidthParenCancelNextLeft) {
+            g_pdfIgnoreNextLeftKeyUntilTick = GetTickCount64() + 2000;
+        }
+    } else {
+        g_pdf.editCaret = selStart + normalized.size();
+        ClearEditSelection();
+    }
+}
+
+static double NextTextBoxFontPt(double currentPt) {
+    currentPt = std::clamp(currentPt, 6.0, 96.0);
+    constexpr double presets[] = { 8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 56, 64, 72, 96 };
+    for (double pt : presets) {
+        if (pt > currentPt + 0.05) return pt;
+    }
+    if (currentPt < 96.0) return std::min(96.0, currentPt + 4.0);
+    return currentPt;
+}
+
+static double PreviousTextBoxFontPt(double currentPt) {
+    currentPt = std::clamp(currentPt, 6.0, 96.0);
+    constexpr double presets[] = { 8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 56, 64, 72, 96 };
+    for (int i = static_cast<int>(std::size(presets)) - 1; i >= 0; --i) {
+        if (presets[i] < currentPt - 0.05) return presets[i];
+    }
+    if (currentPt > 6.0) return std::max(6.0, currentPt - 4.0);
+    return currentPt;
+}
+
+static bool EnlargeEditingTextBoxFont(HWND hwnd) {
+    if (!g_pdf.editingText) return false;
+    double nextPt = NextTextBoxFontPt((g_pdf.editFontPt > 0.0) ? g_pdf.editFontPt : g_textFontPt);
+    if (nextPt <= g_pdf.editFontPt + 0.05) return false;
+    RECT before{};
+    bool hadBefore = GetEditingTextBoxClientRect(&before);
+    RecordTextEditChange();
+    g_pdf.editFontPt = nextPt;
+    g_pdf.editLayoutDirty = true;
+    RecalcEditingTextboxSize(true);
+    EnsureEditingTextBoxVisible(hwnd, L"editing_font_enlarge");
+    UpdateImeWindowPosition(hwnd, true);
+    InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+    return true;
+}
+
+static int GetSelectedTextBoxAnnotationIndex() {
+    if (g_hAnnotList) {
+        int sel = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETCURSEL, 0, 0));
+        if (sel >= 0 && sel < static_cast<int>(g_annots.size()) &&
+            g_annots[static_cast<size_t>(sel)].type == Annotation::Type::TextBox) {
+            return sel;
+        }
+    }
+    if (g_pdf.pendingTextBoxIndex >= 0 &&
+        g_pdf.pendingTextBoxIndex < static_cast<int>(g_annots.size()) &&
+        g_annots[static_cast<size_t>(g_pdf.pendingTextBoxIndex)].type == Annotation::Type::TextBox) {
+        return g_pdf.pendingTextBoxIndex;
+    }
+    return -1;
+}
+
+static bool ChangeSelectedTextBoxFont(HWND hwnd, bool enlarge) {
+    int idx = GetSelectedTextBoxAnnotationIndex();
+    if (idx < 0 || idx >= static_cast<int>(g_annots.size())) return false;
+    Annotation before = g_annots[static_cast<size_t>(idx)];
+    if (before.type != Annotation::Type::TextBox) return false;
+
+    double currentPt = (before.fontPt > 0.0) ? before.fontPt : g_textFontPt;
+    double nextPt = enlarge ? NextTextBoxFontPt(currentPt) : PreviousTextBoxFontPt(currentPt);
+    if (std::abs(nextPt - currentPt) <= 0.05) {
+        (void)SyncTextBoxToolFontFromAnnotationIndex(idx);
+        return true;
+    }
+
+    Annotation after = before;
+    after.fontPt = nextPt;
+    if (after.fontName.empty()) after.fontName = g_textFontName;
+    ReflowMovedTextBox(after);
+    g_annots[static_cast<size_t>(idx)] = after;
+    RecordAnnotUpdate(idx, idx, before, after);
+    MarkAnnotsDirty(GetParent(hwnd));
+    (void)SyncTextBoxToolFontFromAnnotationIndex(idx);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+bool ApplyActiveColorToSelectedAnnotation(HWND hwnd) {
+    int idx = GetSelectedTextBoxAnnotationIndex();
+    if (idx < 0 || idx >= static_cast<int>(g_annots.size())) return false;
+    Annotation before = g_annots[static_cast<size_t>(idx)];
+
+    Annotation after = before;
+    after.color = g_activeColor;
+    if (before.color == after.color) {
+        return true;
+    }
+    g_annots[static_cast<size_t>(idx)] = after;
+    RecordAnnotUpdate(idx, idx, before, after);
+    MarkAnnotsDirty(GetParent(hwnd));
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static bool ApplyActiveTextToolFontToSelectedTextBox(HWND hwnd) {
+    int idx = GetSelectedTextBoxAnnotationIndex();
+    if (idx < 0 || idx >= static_cast<int>(g_annots.size())) return false;
+    Annotation before = g_annots[static_cast<size_t>(idx)];
+    if (before.type != Annotation::Type::TextBox) return false;
+
+    Annotation after = before;
+    after.fontPt = ResolveAdaptiveTextFontPtForPage(after.pageIndex, g_textFontPt);
+    after.fontName = g_textFontName;
+    if (std::abs(((before.fontPt > 0.0) ? before.fontPt : after.fontPt) - after.fontPt) <= 0.05 &&
+        before.fontName == after.fontName) {
+        return true;
+    }
+    ReflowMovedTextBox(after);
+    g_annots[static_cast<size_t>(idx)] = after;
+    RecordAnnotUpdate(idx, idx, before, after);
+    MarkAnnotsDirty(GetParent(hwnd));
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static bool ShrinkEditingTextBoxFont(HWND hwnd) {
+    if (!g_pdf.editingText) return false;
+    double nextPt = PreviousTextBoxFontPt((g_pdf.editFontPt > 0.0) ? g_pdf.editFontPt : g_textFontPt);
+    if (nextPt >= g_pdf.editFontPt - 0.05) return false;
+    RECT before{};
+    bool hadBefore = GetEditingTextBoxClientRect(&before);
+    RecordTextEditChange();
+    g_pdf.editFontPt = nextPt;
+    g_pdf.editLayoutDirty = true;
+    RecalcEditingTextboxSize(true);
+    EnsureEditingTextBoxVisible(hwnd, L"editing_font_shrink");
+    UpdateImeWindowPosition(hwnd, true);
+    InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+    return true;
+}
+
+static bool FreehandHoldCorrectionReady() {
+    if (NormalizeFreehandCorrection(g_config.freehandCorrection) != L"hold") return false;
+    ULONGLONG now = GetTickCount64();
+    constexpr ULONGLONG kHoldStillMs = 420;
+    constexpr ULONGLONG kHoldTotalMs = 520;
+    if (g_pdf.drawStartTick == 0 || g_pdf.drawLastMoveTick == 0) return false;
+    return (now - g_pdf.drawLastMoveTick) >= kHoldStillMs &&
+           (now - g_pdf.drawStartTick) >= kHoldTotalMs;
+}
+
+static bool ShouldApplyFreehandShapeCorrection() {
+    std::wstring mode = NormalizeFreehandCorrection(g_config.freehandCorrection);
+    if (mode == L"auto") return true;
+    if (mode == L"hold") return FreehandHoldCorrectionReady();
+    return false;
+}
+
+static Annotation::Type PreferredMoveAnnotationTypeForTool() {
+    if (AnnotToolUsesGeometry(g_toolMode, AnnotToolGeometry::Line)) {
+        return Annotation::Type::Line;
+    }
+    if (IsArrowAnnotToolMode(g_toolMode)) {
+        return Annotation::Type::Arrow;
+    }
+    if (IsWaveAnnotToolMode(g_toolMode)) {
+        return Annotation::Type::Wave;
+    }
+    switch (g_toolMode) {
+    case ToolMode::Freehand: return Annotation::Type::Freehand;
+    case ToolMode::MarkerFree: return Annotation::Type::MarkerFree;
+    case ToolMode::TextBox: return Annotation::Type::TextBox;
+    case ToolMode::Shape: return Annotation::Type::Shape;
+    default: return Annotation::Type::TextBox;
+    }
+}
+
+static bool CanShowTextBoxEditCursorAtPoint(const POINT& pt) {
+    if (IsPdfPreviewReadOnlyActive() || g_pdf.kind != DocKind::Pdf) return false;
+    if (g_pdf.editingText) {
+        size_t unused = 0;
+        return HitTestEditCaretFromClientPoint(pt, &unused, false);
+    }
+    if (g_toolMode != ToolMode::TextBox) return false;
+    if (g_pdf.drawingAnnot || g_pdf.movingAnnot || g_pdf.pendingTextBoxHit ||
+        g_pdf.selectingText || g_pdf.panning || g_pdf.erasing) {
+        return false;
+    }
+    int pageIndex = -1;
+    double px = 0.0, py = 0.0, pageTop = 0.0;
+    if (!HitTestPagePoint(pt, pageIndex, px, py, pageTop)) return false;
+    for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
+        const auto& ann = g_annots[static_cast<size_t>(i)];
+        if (ann.type != Annotation::Type::TextBox || ann.pageIndex != pageIndex) {
+            continue;
+        }
+        double minX = std::min(ann.x1, ann.x2);
+        double maxX = std::max(ann.x1, ann.x2);
+        double minY = std::min(ann.y1, ann.y2);
+        double maxY = std::max(ann.y1, ann.y2);
+        if (px >= minX && px <= maxX && py >= minY && py <= maxY) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool CanShowAnnotationMoveCursorAtPoint(const POINT& pt) {
+    if (IsPdfPreviewReadOnlyActive() || g_pdf.kind != DocKind::Pdf) return false;
+    if (g_pdf.editingText || g_pdf.drawingAnnot || g_pdf.movingAnnot || g_pdf.pendingTextBoxHit ||
+        g_pdf.selectingText || g_pdf.panning || g_pdf.erasing) {
+        return false;
+    }
+    int idx = -1;
+    return HitTestAnnotationForMove(pt, PreferredMoveAnnotationTypeForTool(), idx);
+}
+
+static void RefreshPdfViewClientCursor(HWND hwnd) {
+    if (!hwnd) return;
+    POINT screenPt{};
+    if (!GetCursorPos(&screenPt)) return;
+    if (WindowFromPoint(screenPt) != hwnd) return;
+    POINT clientPt = screenPt;
+    ScreenToClient(hwnd, &clientPt);
+    RECT rc{};
+    if (!GetClientRect(hwnd, &rc) || !PtInRect(&rc, clientPt)) return;
+    SendMessageW(hwnd, WM_SETCURSOR, reinterpret_cast<WPARAM>(hwnd),
+                 MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+}
+
+static bool BlockPdfViewEditInputDuringSave(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (!IsSaveTransactionRunning()) return false;
+    switch (msg) {
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCLIENT && reinterpret_cast<HWND>(wParam) == hwnd) {
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return true;
+        }
+        return false;
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK:
+    case WM_LBUTTONUP:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_CONTEXTMENU:
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+    case WM_MOUSEMOVE:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+    case WM_CHAR:
+    case WM_IME_STARTCOMPOSITION:
+    case WM_IME_COMPOSITION:
+    case WM_IME_ENDCOMPOSITION:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool g_pdfQuickAnnotRightDragArmed = false;
+static POINT g_pdfQuickAnnotRightDragStart{};
+
+static void ArmPdfQuickAnnotRightDrag(const POINT& pt) {
+    g_pdfQuickAnnotRightDragArmed = true;
+    g_pdfQuickAnnotRightDragStart = pt;
+}
+
+static void ClearPdfQuickAnnotRightDrag() {
+    g_pdfQuickAnnotRightDragArmed = false;
+    g_pdfQuickAnnotRightDragStart = {};
+}
+
+static bool TryShowPdfQuickAnnotRightDrag(HWND hwnd, const POINT& pt) {
+    if (!g_pdfQuickAnnotRightDragArmed) return false;
+    const int dx = pt.x - g_pdfQuickAnnotRightDragStart.x;
+    const int dy = pt.y - g_pdfQuickAnnotRightDragStart.y;
+    if (dx * dx + dy * dy < 36) return false;
+    ClearPdfQuickAnnotRightDrag();
+    return HandleQuickAnnotRightButtonDown(hwnd, &pt, true);
+}
+
+// ---------------------------------------------------------------------
+// PdfView window proc
+// ---------------------------------------------------------------------
+
+LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (BlockPdfViewEditInputDuringSave(hwnd, msg, wParam, lParam)) return 0;
+    switch (msg) {
+    case kMsgTextBoxFontUpdate: {
+        if (g_pdf.editingText) {
+            RECT before{};
+            bool hadBefore = GetEditingTextBoxClientRect(&before);
+            g_pdf.editFontName = g_textFontName;
+            g_pdf.editFontPt = ResolveAdaptiveTextFontPtForPage(g_pdf.editPage, g_textFontPt);
+            g_pdf.editLayoutDirty = true;
+            RecalcEditingTextboxSize(true);
+            EnsureEditingTextBoxVisible(hwnd, L"textbox_font_update");
+            UpdateImeWindowPosition(hwnd, true);
+            InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+        } else if (!ApplyActiveTextToolFontToSelectedTextBox(hwnd) &&
+                   g_toolMode == ToolMode::TextBox && g_pdf.textBoxHoverValid) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case kMsgApplyInitialPdfFitWidth: {
+        TryApplyInitialFitWidth(hwnd);
+        return 0;
+    }
+    case kMsgApplyInitialPdfFitHeight: {
+        TryApplyInitialFitHeight(hwnd);
+        return 0;
+    }
+    case kMsgPdfVirtualRenderComplete: {
+        PdfVirtualUpdateResult applied = ApplyPdfVirtualRenderResults(hwnd);
+        PdfVirtualUpdateResult queued = UpdatePdfVirtualScrollCaches(hwnd, PdfVirtualUpdateMode::Timer);
+        if ((applied.changed && !applied.invalidated) || queued.changed || queued.repaint) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_SIZE: {
+        MarkPdfVirtualViewportChange();
+        if (TryApplyInitialFitWidth(hwnd)) return 0;
+        if (TryApplyInitialFitHeight(hwnd)) return 0;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    case WM_SETCURSOR: {
+        if (LOWORD(lParam) == HTCLIENT && reinterpret_cast<HWND>(wParam) == hwnd) {
+            if (IsPdfPreviewReadOnlyActive() && g_toolMode != ToolMode::Select) {
+                SetCursor(LoadCursor(nullptr, IDC_ARROW));
+                return TRUE;
+            }
+            DWORD pos = GetMessagePos();
+            POINT pt{ GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
+            ScreenToClient(hwnd, &pt);
+            if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                if (CanShowAnnotationMoveCursorAtPoint(pt)) {
+                    SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
+                    return TRUE;
+                }
+                if (g_toolMode == ToolMode::TextBox) {
+                    SetCursor(LoadCursor(nullptr, IDC_ARROW));
+                    return TRUE;
+                }
+            } else if (CanShowTextBoxEditCursorAtPoint(pt)) {
+                SetCursor(LoadCursor(nullptr, IDC_IBEAM));
+                return TRUE;
+            }
+            if (IsMarkerTextMode(g_toolMode) || g_toolMode == ToolMode::Select) {
+                bool useIBeam = g_pdf.selectingText && g_pdf.selectionByText;
+                if (!useIBeam) {
+                    int hitPageIndex = -1;
+                    double dummyX = 0.0, dummyY = 0.0, dummyTop = 0.0;
+                    if (HitTestPagePoint(pt, hitPageIndex, dummyX, dummyY, dummyTop)) {
+                        double pdfX = 0.0, pdfY = 0.0;
+                        if (ClientToPdfOnPage(hitPageIndex, ApplyPdfPointerOffset(pt), pdfX, pdfY)) {
+                            const auto& page = g_pdf.pages[static_cast<size_t>(hitPageIndex)];
+                            if (!page.charBoxes.empty()) {
+                                double padPt = MarkerTextPadPt();
+                                useIBeam = HitTestCharIndexLineAware(page, pdfX, pdfY, padPt) >= 0;
+                            }
+                        }
+                    }
+                }
+                if (useIBeam) {
+                    SetCursor(LoadCursor(nullptr, IDC_IBEAM));
+                    return TRUE;
+                }
+            }
+        }
+        break;
+    }
+    case WM_MOUSEWHEEL: {
+        POINT ptScreen{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (HWND comboList = FindComboListBoxUnderCursor(ptScreen)) {
+            SendMessageW(comboList, WM_MOUSEWHEEL, wParam, lParam);
+            return 0;
+        }
+        if (ForwardWheelToDroppedCombo(WM_MOUSEWHEEL, wParam, lParam)) return 0;
+        int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        PdfFlowMode mode = CurrentFlowMode();
+        bool ctrlDown = (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0;
+        bool shiftDown = (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0;
+        if (ctrlDown) {
+            POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
+
+            double steps = static_cast<double>(delta) / 120.0;
+            double totalFactor = std::pow(1.15, steps);
+            SetPdfScale(hwnd, ZoomInputBaseScale() * totalFactor, pt);
+        } else {
+            const int viewH = rc.bottom - rc.top;
+            const int viewW = rc.right - rc.left;
+            MarkPdfVirtualScrollInput();
+            const bool precise = IsPreciseWheelDelta(delta);
+            if (precise) {
+                HandleTouchpadScroll(false, delta, hwnd, viewH, viewW);
+            } else {
+                const bool primaryVertical = FlowIsVertical(mode);
+                const bool scrollVertical = primaryVertical ^ shiftDown;
+                const bool invert = scrollVertical ? g_config.mouseWheelInvertVertical
+                                                   : g_config.mouseWheelInvertHorizontal;
+                const bool accel = scrollVertical;
+                double add = WheelScrollAmountPx(delta, accel);
+                double dir = -1.0;
+                if (invert) dir = -dir;
+                if (g_config.pdfSinglePageMode && !shiftDown && scrollVertical == primaryVertical) {
+                    ScrollSinglePageByPrimary(hwnd, dir * add, viewH, viewW);
+                    return 0;
+                }
+                if (scrollVertical) {
+                    g_pdf.scrollY += dir * add;
+                    ClampPdfScroll(viewH, viewW);
+                    g_scrollVelocity = 0.0;
+                    KillTimer(hwnd, kScrollTimerId);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else {
+                    g_pdf.scrollX += dir * add;
+                    ClampPdfScroll(viewH, viewW);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+        }
+        return 0;
+    }
+    case WM_MOUSEHWHEEL: {
+        POINT ptScreen{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (HWND comboList = FindComboListBoxUnderCursor(ptScreen)) {
+            SendMessageW(comboList, WM_MOUSEHWHEEL, wParam, lParam);
+            return 0;
+        }
+        if (ForwardWheelToDroppedCombo(WM_MOUSEHWHEEL, wParam, lParam)) return 0;
+        int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        const int viewH = rc.bottom - rc.top;
+        const int viewW = rc.right - rc.left;
+        MarkPdfVirtualScrollInput();
+        const bool precise = IsPreciseWheelDelta(delta);
+        if (precise) {
+            HandleTouchpadScroll(true, delta, hwnd, viewH, viewW);
+        } else {
+            const bool invert = g_config.mouseWheelInvertHorizontal;
+            // Horizontal scroll doesn't have velocity yet, keeping it snappy but consistent
+            double add = WheelScrollAmountPx(delta, false);
+            double dir = 1.0;
+            if (invert) dir = -dir;
+            if (g_config.pdfSinglePageMode && !FlowIsVertical(CurrentFlowMode())) {
+                ScrollSinglePageByPrimary(hwnd, dir * add, viewH, viewW);
+                return 0;
+            }
+            g_pdf.scrollX += dir * add;
+            ClampPdfScroll(viewH, viewW);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_VSCROLL: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int viewH = rc.bottom - rc.top;
+        int viewW = rc.right - rc.left;
+        SCROLLINFO si{};
+        si.cbSize = sizeof(si);
+        si.fMask = SIF_ALL;
+        GetScrollInfo(hwnd, SB_VERT, &si);
+        double maxY = MaxScrollY(viewH);
+        UINT action = LOWORD(wParam);
+        PdfScrollbarHoldAction holdAction = PdfScrollbarHoldActionFor(hwnd, SB_VERT, action);
+        if (holdAction == PdfScrollbarHoldAction::Ignore) {
+            return 0;
+        }
+        double holdTarget = 0.0;
+        if (holdAction == PdfScrollbarHoldAction::Jump &&
+            !TryGetPdfScrollbarPointTarget(hwnd, SB_VERT, maxY, &holdTarget)) {
+            holdAction = PdfScrollbarHoldAction::Step;
+        }
+        bool trackStarted = false;
+        switch (action) {
+        case SB_LINEUP:
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdf.scrollY -= kScrollStepPx;
+            break;
+        case SB_LINEDOWN:
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdf.scrollY += kScrollStepPx;
+            break;
+        case SB_PAGEUP:
+            if (holdAction == PdfScrollbarHoldAction::Jump) {
+                StartPdfScrollbarTrack(hwnd, SB_VERT, holdTarget);
+                trackStarted = true;
+            } else {
+                CancelPdfScrollbarTrack(hwnd);
+                g_pdf.scrollY -= static_cast<double>(si.nPage);
+            }
+            break;
+        case SB_PAGEDOWN:
+            if (holdAction == PdfScrollbarHoldAction::Jump) {
+                StartPdfScrollbarTrack(hwnd, SB_VERT, holdTarget);
+                trackStarted = true;
+            } else {
+                CancelPdfScrollbarTrack(hwnd);
+                g_pdf.scrollY += static_cast<double>(si.nPage);
+            }
+            break;
+        case SB_THUMBPOSITION:
+        case SB_THUMBTRACK:
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdf.scrollY = static_cast<double>(si.nTrackPos);
+            break;
+        case SB_TOP:
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdf.scrollY = 0.0;
+            break;
+        case SB_BOTTOM:
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdf.scrollY = maxY;
+            break;
+        default:
+            break;
+        }
+        if (trackStarted) {
+            return 0;
+        }
+        ClampPdfScroll(viewH, viewW);
+        MarkPdfVirtualScrollInput();
+        g_scrollVelocity = 0.0;
+        KillTimer(hwnd, kScrollTimerId);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    case WM_HSCROLL: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int viewH = rc.bottom - rc.top;
+        int viewW = rc.right - rc.left;
+        SCROLLINFO si{};
+        si.cbSize = sizeof(si);
+        si.fMask = SIF_ALL;
+        GetScrollInfo(hwnd, SB_HORZ, &si);
+        double maxX = MaxScrollX(viewW);
+        UINT action = LOWORD(wParam);
+        PdfScrollbarHoldAction holdAction = PdfScrollbarHoldActionFor(hwnd, SB_HORZ, action);
+        if (holdAction == PdfScrollbarHoldAction::Ignore) {
+            return 0;
+        }
+        double holdTarget = 0.0;
+        if (holdAction == PdfScrollbarHoldAction::Jump &&
+            !TryGetPdfScrollbarPointTarget(hwnd, SB_HORZ, maxX, &holdTarget)) {
+            holdAction = PdfScrollbarHoldAction::Step;
+        }
+        bool trackStarted = false;
+        switch (action) {
+        case SB_LINELEFT:
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdf.scrollX -= kScrollStepPx;
+            break;
+        case SB_LINERIGHT:
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdf.scrollX += kScrollStepPx;
+            break;
+        case SB_PAGELEFT:
+            if (holdAction == PdfScrollbarHoldAction::Jump) {
+                StartPdfScrollbarTrack(hwnd, SB_HORZ, holdTarget);
+                trackStarted = true;
+            } else {
+                CancelPdfScrollbarTrack(hwnd);
+                g_pdf.scrollX -= static_cast<double>(si.nPage);
+            }
+            break;
+        case SB_PAGERIGHT:
+            if (holdAction == PdfScrollbarHoldAction::Jump) {
+                StartPdfScrollbarTrack(hwnd, SB_HORZ, holdTarget);
+                trackStarted = true;
+            } else {
+                CancelPdfScrollbarTrack(hwnd);
+                g_pdf.scrollX += static_cast<double>(si.nPage);
+            }
+            break;
+        case SB_THUMBPOSITION:
+        case SB_THUMBTRACK:
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdf.scrollX = static_cast<double>(si.nTrackPos);
+            break;
+        case SB_LEFT:
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdf.scrollX = 0.0;
+            break;
+        case SB_RIGHT:
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdf.scrollX = maxX;
+            break;
+        default:
+            break;
+        }
+        if (trackStarted) {
+            return 0;
+        }
+        ClampPdfScroll(viewH, viewW);
+        MarkPdfVirtualScrollInput();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    case WM_POINTERDOWN:
+    case WM_POINTERUPDATE:
+    case WM_POINTERUP: {
+        UINT32 pointerId = GET_POINTERID_WPARAM(wParam);
+        POINTER_INPUT_TYPE pointerType = PT_POINTER;
+        if (GetPointerType(pointerId, &pointerType) && pointerType == PT_TOUCH) {
+            POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
+            if (msg == WM_POINTERDOWN) {
+                SetCapture(hwnd);
+                g_pdf.panning = true;
+                g_pdf.panAnchor = pt;
+                g_pdf.panStartY = g_pdf.scrollY;
+                g_pdf.panStartX = g_pdf.scrollX;
+                g_pdf.panAxisLock = PanAxisLock::None;
+            } else if (msg == WM_POINTERUPDATE) {
+                if (g_pdf.panning) {
+                    int rawDx = pt.x - g_pdf.panAnchor.x;
+                    int rawDy = pt.y - g_pdf.panAnchor.y;
+                    int dx = rawDx;
+                    int dy = rawDy;
+                    if (g_pdf.panAxisLock == PanAxisLock::None) {
+                        g_pdf.panAxisLock = DetectPanAxisLock(rawDx, rawDy);
+                    }
+                    if (g_pdf.panAxisLock == PanAxisLock::Horizontal) {
+                        dy = 0;
+                    } else if (g_pdf.panAxisLock == PanAxisLock::Vertical) {
+                        dx = 0;
+                    }
+                    g_pdf.scrollY = g_pdf.panStartY - static_cast<double>(dy);
+                    g_pdf.scrollX = g_pdf.panStartX - static_cast<double>(dx);
+                    RECT rc{};
+                    GetClientRect(hwnd, &rc);
+                    double viewW = static_cast<double>(rc.right - rc.left);
+                    double viewH = static_cast<double>(rc.bottom - rc.top);
+                    ClampPdfScroll(viewH, viewW);
+                    MarkPdfVirtualScrollInput();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            } else if (msg == WM_POINTERUP) {
+                if (g_pdf.panning) {
+                    g_pdf.panning = false;
+                    ReleaseCapture();
+                }
+            }
+            return 0;
+        }
+        break;
+    }
+    case WM_LBUTTONDOWN: {
+        g_pdfIgnoreNextLeftKeyUntilTick = 0;
+        if (!CommitActiveNoteEditBoundary(GetParent(hwnd))) return 0;
+        EnsurePdfViewFocus(hwnd);
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        bool previewReadOnly = IsPdfPreviewReadOnlyActive();
+        bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        int hitPageIndex = -1;
+        double hitPx = 0.0, hitPy = 0.0, hitPageTop = 0.0;
+        bool hitPage = HitTestPagePoint(pt, hitPageIndex, hitPx, hitPy, hitPageTop);
+        auto beginTextSelection = [&](int pageIndex, const POINT& startPt) {
+            g_pdf.selectingText = true;
+            g_pdf.hasSelection = true;
+            g_pdf.selectionStartPage = pageIndex;
+            g_pdf.selectionEndPage = pageIndex;
+            g_pdf.selStart = startPt;
+            g_pdf.selEnd = startPt;
+            g_pdf.selectionByText = false;
+            g_pdf.selCharAnchor = -1;
+            g_pdf.selCharFocus = -1;
+            if (pageIndex >= 0 && pageIndex < static_cast<int>(g_pdf.pages.size())) {
+                auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+                double pdfX = 0.0, pdfY = 0.0;
+                double padPt = MarkerTextPadPt();
+                if (page.charBoxes.empty()) {
+                    LoadPdfPageCharBoxes(pageIndex, page.charBoxes);
+                }
+                if (!page.charBoxes.empty() && ClientToPdfOnPage(pageIndex, startPt, pdfX, pdfY)) {
+                    int hitChar = HitTestCharIndexLineAware(page, pdfX, pdfY, padPt);
+                    if (hitChar >= 0) {
+                        g_pdf.selectionByText = true;
+                        g_pdf.selCharAnchor = hitChar;
+                        g_pdf.selCharFocus = hitChar;
+                    }
+                }
+            }
+            SetCapture(hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        };
+        if (previewReadOnly) {
+            if (g_toolMode == ToolMode::Magnifier) {
+                g_pdf.magnifierPos = pt;
+                g_pdf.magnifierActive = true;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (g_toolMode == ToolMode::Select && hitPage) {
+                beginTextSelection(hitPageIndex, ApplyPdfPointerOffset(pt));
+                return 0;
+            }
+            if (g_toolMode == ToolMode::Select) {
+                return 0;
+            }
+            if (g_toolMode == ToolMode::Pan && !g_pdf.pages.empty()) {
+                SetCapture(hwnd);
+                g_pdf.panning = true;
+                g_pdf.panAnchor = pt;
+                g_pdf.panStartY = g_pdf.scrollY;
+                g_pdf.panStartX = g_pdf.scrollX;
+                g_pdf.panAxisLock = PanAxisLock::None;
+            }
+            return 0;
+        }
+        if (g_linkPending.active && !g_linkPending.id.empty() && g_pdf.kind == DocKind::Pdf) {
+            if (hitPage) {
+                Annotation ann;
+                ann.type = Annotation::Type::LinkMarker;
+                ann.pageIndex = hitPageIndex;
+                ann.x1 = hitPx;
+                ann.y1 = hitPy;
+                ann.x2 = hitPx;
+                ann.y2 = hitPy;
+                ann.width = 6.0;
+                ann.color = g_activeColor;
+                ann.linkId = g_linkPending.id;
+                if (g_linkPending.notePoints > 0) {
+                    ann.linkNotePath = g_linkPending.notePath;
+                }
+                g_annots.push_back(ann);
+                ArmRecentPdfLinkPlacementDblClickSuppress(pt);
+                EnsureAnnotationId(g_annots.back(), g_annots, static_cast<int>(g_annots.size()) - 1);
+                g_linkPending.havePdf = true;
+                ++g_linkPending.pdfPoints;
+                g_linkPending.pdfPage = hitPageIndex;
+                g_linkPending.pdfX = hitPx;
+                g_linkPending.pdfY = hitPy;
+                g_linkPending.pdfAnnotIndex = static_cast<int>(g_annots.size() - 1);
+
+                if (g_linkPending.pdfPoints + g_linkPending.notePoints >= 2) {
+                    HWND owner = GetParent(hwnd);
+                    FinalizePendingPdfLinkMarkers(owner, g_linkPending.id, g_linkPending.notePath);
+                    g_linkPending = {};
+                    UpdateLinkModeButtonState(false);
+                } else {
+                    RequestAnnotPanelRevealLatest();
+                    RefreshAnnotPanel();
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+        }
+        if (!g_linkPending.active && !ctrlDown && !g_pdf.editingText &&
+            g_pdf.kind == DocKind::Pdf) {
+            int hitIdx = -1;
+            if (HitTestLinkMarkerAtPoint(pt, hitIdx)) {
+                g_pdf.pendingTextBoxHit = true;
+                g_pdf.pendingTextBoxIndex = hitIdx;
+                g_pdf.pendingTextBoxDown = pt;
+                SetCapture(hwnd);
+                return 0;
+            }
+        }
+        if (g_pdf.kind != DocKind::Pdf) {
+            if (!g_pdf.pages.empty()) {
+                SetCapture(hwnd);
+                g_pdf.panning = true;
+                g_pdf.panAnchor = pt;
+                g_pdf.panStartY = g_pdf.scrollY;
+                g_pdf.panStartX = g_pdf.scrollX;
+            }
+            return 0;
+        }
+        if (g_pdf.editingText) {
+            if (BeginTextBoxEditClickSelection(hwnd, pt, shiftDown)) {
+                return 0;
+            }
+            // A PDF-surface click outside the active box is the explicit
+            // confirmation gesture, including when the IME still has a
+            // composition. CommitTextEditing completes that composition first.
+            // Keeping the edit open here made touchpad taps move the box rather
+            // than confirm it.
+            CommitTextEditing(hwnd, true);
+            return 0;
+        }
+        if (ctrlDown) {
+            int idx = -1;
+            Annotation::Type pref = PreferredMoveAnnotationTypeForTool();
+            if (HitTestAnnotationForMove(pt, pref, idx)) {
+                g_pdf.movingAnnot = true;
+                g_pdf.movingIndex = idx;
+                g_pdf.movingOriginal = g_annots[static_cast<size_t>(idx)];
+                g_pdf.movePage = g_pdf.movingOriginal.pageIndex;
+                double pageTop = 0.0;
+                HitTestPagePoint(pt, g_pdf.movePage, g_pdf.moveStartPdfX, g_pdf.moveStartPdfY, pageTop);
+                SetCapture(hwnd);
+                return 0;
+            }
+            if (g_toolMode == ToolMode::TextBox) {
+                return 0;
+            }
+        }
+        if (g_toolMode == ToolMode::TextBox && hitPage) {
+            if (!ctrlDown) {
+                int hitIdx = -1;
+                for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
+                    const auto& ann = g_annots[static_cast<size_t>(i)];
+                    if ((ann.type != Annotation::Type::TextBox &&
+                         ann.type != Annotation::Type::MathBox) ||
+                        ann.pageIndex != hitPageIndex) {
+                        continue;
+                    }
+                    double minX = std::min(ann.x1, ann.x2);
+                    double maxX = std::max(ann.x1, ann.x2);
+                    double minY = std::min(ann.y1, ann.y2);
+                    double maxY = std::max(ann.y1, ann.y2);
+                    if (hitPx >= minX && hitPx <= maxX && hitPy >= minY && hitPy <= maxY) {
+                        hitIdx = i;
+                        break;
+                    }
+                }
+                if (hitIdx >= 0) {
+                    if (g_hAnnotList) {
+                        SendMessageW(g_hAnnotList, LB_SETCURSEL, static_cast<WPARAM>(hitIdx), 0);
+                    }
+                    (void)SyncTextBoxToolFontFromAnnotationIndex(hitIdx);
+                    g_pdf.pendingTextBoxHit = true;
+                    g_pdf.pendingTextBoxIndex = hitIdx;
+                    g_pdf.pendingTextBoxDown = pt;
+                    SetCapture(hwnd);
+                    return 0;
+                }
+             }
+             // new box (ctrl or no hit on existing)
+             ResetEditOriginal();
+            AdaptiveTextPreset preset = ComputeAdaptiveTextPresetForPage(hitPageIndex, g_textFontPt);
+            double fontPt = preset.fontPt;
+            double anchorX = hitPx - (kTextClickLeftOffsetPx * 72.0 / kDpi / g_pdf.scale);
+            double anchorY = NewTextBoxTopFromClickY(hitPy, fontPt, g_textFontName, g_pdf.scale);
+            BeginTextEdit(hwnd, hitPageIndex, anchorX, anchorY, preset.widthPt, preset.heightPt,
+                          L"", g_textFontName, fontPt);
+            return 0;
+        }
+        if (g_toolMode == ToolMode::Magnifier) {
+            g_pdf.magnifierPos = pt;
+            g_pdf.magnifierActive = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (g_toolMode == ToolMode::Pan) {
+            SetCapture(hwnd);
+            g_pdf.panning = true;
+            g_pdf.panAnchor = pt;
+            g_pdf.panStartY = g_pdf.scrollY;
+            g_pdf.panStartX = g_pdf.scrollX;
+            g_pdf.panAxisLock = PanAxisLock::None;
+            return 0;
+        }
+        if (g_toolMode == ToolMode::Eraser) {
+            g_pdf.erasing = true;
+            g_pdf.eraserCursorValid = true;
+            g_pdf.eraserCursor = pt;
+            EraseAnnotationAtPoint(pt);
+            int newIdx = -1;
+            int newPage = -1;
+            if (HitTestEraserTargetAtPoint(pt, newIdx, newPage)) {
+                g_pdf.eraserHoverIndex = newIdx;
+                g_pdf.eraserHoverPageIndex = newPage;
+            } else {
+                g_pdf.eraserHoverIndex = -1;
+                g_pdf.eraserHoverPageIndex = -1;
+            }
+            SetCapture(hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (hitPage) {
+            if (IsMarkerTextMode(g_toolMode) || g_toolMode == ToolMode::Select) {
+                beginTextSelection(hitPageIndex, ApplyPdfPointerOffset(pt));
+            } else {
+                g_pdf.drawingAnnot = true;
+                g_pdf.drawPageIndex = hitPageIndex;
+                POINT drawPt = ApplyPdfPointerOffset(pt);
+                g_pdf.drawStart = drawPt;
+                g_pdf.drawEnd = drawPt;
+                g_pdf.drawStartTick = GetTickCount64();
+                g_pdf.drawLastMoveTick = g_pdf.drawStartTick;
+                g_pdf.drawPath.clear();
+                g_pdf.drawPath.push_back(drawPt);
+                SetCapture(hwnd);
+            }
+        }
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        POINT cur{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RecordRecentMouseMove(hwnd, &cur);
+        if ((wParam & MK_RBUTTON) != 0 &&
+            !g_pdf.editingText &&
+            TryShowPdfQuickAnnotRightDrag(hwnd, cur)) {
+            return 0;
+        }
+        if (g_pdf.editSelectingText) {
+            size_t newCaret = 0;
+            if (HitTestEditCaretFromClientPoint(cur, &newCaret, true)) {
+                RECT before{};
+                bool hadBefore = GetEditingTextBoxClientRect(&before);
+                if (std::abs(cur.x - g_pdf.editSelectDown.x) >= kTextBoxDragThresholdPx ||
+                    std::abs(cur.y - g_pdf.editSelectDown.y) >= kTextBoxDragThresholdPx) {
+                    if (!g_pdf.editSelectMoved) {
+                        ResetTextBoxRapidClickState();
+                        g_pdf.editSelectMoved = true;
+                    }
+                }
+                g_pdf.editCaret = newCaret;
+                g_pdf.editSelStart = g_pdf.editSelAnchor;
+                g_pdf.editSelEnd = newCaret;
+                UpdateImeWindowPosition(hwnd, true);
+                InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+            }
+            return 0;
+        }
+        if (g_toolMode == ToolMode::Magnifier) {
+            g_pdf.magnifierPos = cur;
+            g_pdf.magnifierActive = true;
+            TRACKMOUSEEVENT tme{};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (g_pdf.movingAnnot) {
+            UpdateMovingAnnotAtClientPoint(hwnd, cur);
+            return 0;
+        }
+        if (g_pdf.pendingTextBoxHit && !g_pdf.movingAnnot) {
+            int dx = cur.x - g_pdf.pendingTextBoxDown.x;
+            int dy = cur.y - g_pdf.pendingTextBoxDown.y;
+            if (std::abs(dx) >= kTextBoxDragThresholdPx ||
+                std::abs(dy) >= kTextBoxDragThresholdPx) {
+                StartPendingTextBoxMove(hwnd, cur);
+                return 0;
+            }
+        }
+        if (g_pdf.drawingAnnot) {
+            POINT pt = ApplyPdfPointerOffset(cur);
+            g_pdf.drawEnd = pt;
+            if ((g_toolMode == ToolMode::MarkerFree || g_toolMode == ToolMode::Freehand) &&
+                g_pdf.drawPageIndex >= 0) {
+                if (g_pdf.drawPath.empty()) {
+                    g_pdf.drawPath.push_back(pt);
+                } else {
+                    POINT last = g_pdf.drawPath.back();
+                    int dx = pt.x - last.x;
+                    int dy = pt.y - last.y;
+                    if (dx * dx + dy * dy >= 4) {
+                        g_pdf.drawPath.push_back(pt);
+                        g_pdf.drawLastMoveTick = GetTickCount64();
+                    }
+                }
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (g_pdf.selectingText) {
+            POINT selectionPt = ApplyPdfPointerOffset(cur);
+            g_pdf.selEnd.x = selectionPt.x;
+            g_pdf.selEnd.y = selectionPt.y;
+            
+            // Auto-scroll logic
+            RECT rcClient;
+            GetClientRect(hwnd, &rcClient);
+            int ch = rcClient.bottom - rcClient.top;
+            if (cur.y < 0 || cur.y > ch) {
+                SetTimer(hwnd, kAutoScrollTimerId, 30, nullptr);
+            } else {
+                KillTimer(hwnd, kAutoScrollTimerId);
+            }
+
+            if (g_pdf.selectionByText) {
+                UpdatePdfTextSelectionFocusAtClientPoint(cur);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (g_pdf.panning) {
+            int rawDx = cur.x - g_pdf.panAnchor.x;
+            int rawDy = cur.y - g_pdf.panAnchor.y;
+            int dx = rawDx;
+            int dy = rawDy;
+            if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+                PanAxisLock detected = DetectPanAxisLock(rawDx, rawDy);
+                if (detected != PanAxisLock::None) {
+                    g_pdf.panAxisLock = detected;
+                } else if (g_pdf.panAxisLock != PanAxisLock::None) {
+                    g_pdf.panAxisLock = PanAxisLock::None;
+                }
+                if (g_pdf.panAxisLock == PanAxisLock::Horizontal) {
+                    dy = 0;
+                } else if (g_pdf.panAxisLock == PanAxisLock::Vertical) {
+                    dx = 0;
+                }
+            } else {
+                g_pdf.panAxisLock = PanAxisLock::None;
+            }
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            g_pdf.scrollY = g_pdf.panStartY - dy;
+            g_pdf.scrollX = g_pdf.panStartX - dx;
+            ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+            MarkPdfVirtualScrollInput();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (g_toolMode == ToolMode::Eraser) {
+            g_pdf.eraserCursorValid = true;
+            g_pdf.eraserCursor = cur;
+
+            TRACKMOUSEEVENT tme{};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+
+            if (g_pdf.erasing) {
+                EraseAnnotationAtPoint(cur);
+            }
+
+            int newIdx = -1;
+            int newPage = -1;
+            if (HitTestEraserTargetAtPoint(cur, newIdx, newPage)) {
+                g_pdf.eraserHoverIndex = newIdx;
+                g_pdf.eraserHoverPageIndex = newPage;
+            } else {
+                g_pdf.eraserHoverIndex = -1;
+                g_pdf.eraserHoverPageIndex = -1;
+            }
+
+            // always repaint so the cursor ring follows the pointer
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (g_pdf.eraserCursorValid) {
+            g_pdf.eraserCursorValid = false;
+            g_pdf.eraserHoverIndex = -1;
+            g_pdf.eraserHoverPageIndex = -1;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        bool wantHoverCaret = (g_toolMode == ToolMode::TextBox &&
+                               (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+                               GetFocus() == hwnd &&
+                               !g_pdf.editingText && !g_pdf.drawingAnnot &&
+                               !g_pdf.movingAnnot && !g_pdf.pendingTextBoxHit &&
+                               !g_pdf.selectingText && !g_pdf.panning && !g_pdf.erasing);
+        bool hoverChanged = false;
+        if (wantHoverCaret) {
+            if (!g_pdf.textBoxHoverValid ||
+                g_pdf.textBoxHoverPos.x != cur.x ||
+                g_pdf.textBoxHoverPos.y != cur.y) {
+                hoverChanged = true;
+            }
+            g_pdf.textBoxHoverValid = true;
+            g_pdf.textBoxHoverPos = ApplyPdfPointerOffset(cur);
+        } else if (g_pdf.textBoxHoverValid) {
+            g_pdf.textBoxHoverValid = false;
+            hoverChanged = true;
+        }
+        if (hoverChanged) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE: {
+        if (g_toolMode == ToolMode::Magnifier && g_pdf.magnifierActive) {
+            g_pdf.magnifierActive = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (g_toolMode == ToolMode::Eraser && g_pdf.eraserCursorValid) {
+            g_pdf.eraserCursorValid = false;
+            g_pdf.eraserHoverIndex = -1;
+            g_pdf.eraserHoverPageIndex = -1;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (g_pdf.textBoxHoverValid) {
+            g_pdf.textBoxHoverValid = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONDBLCLK: {
+        if (IsPdfPreviewReadOnlyActive()) {
+            return 0;
+        }
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (g_linkPending.active || ConsumeRecentPdfLinkPlacementDblClickSuppress(pt)) {
+            return 0;
+        }
+        if (g_pdf.editingText) {
+            bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (BeginTextBoxEditClickSelection(hwnd, pt, shiftDown)) {
+                return 0;
+            }
+            CommitTextEditing(hwnd, true);
+            return 0;
+        }
+        if (TryJumpToLinkMarkerAtPoint(pt)) {
+            return 0;
+        }
+        break;
+    }
+    case WM_CAPTURECHANGED: {
+        if (g_pdf.pendingTextBoxHit && !g_pdf.movingAnnot) {
+            // Some touchpad drivers can transfer capture before delivering a
+            // matching button-up. A stationary pending TextBox hit is a tap,
+            // so complete the same path as WM_LBUTTONUP.
+            CommitPendingTextBoxEdit(hwnd);
+            return 0;
+        }
+        if (g_pdf.erasing) {
+            g_pdf.erasing = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (g_pdf.editSelectingText) {
+            g_pdf.editSelectingText = false;
+            g_pdf.editSelectMoved = false;
+        }
+        break;
+    }
+    case WM_LBUTTONUP: {
+        if (IsPdfPreviewReadOnlyActive() && !g_pdf.panning && !g_pdf.selectingText) {
+            return 0;
+        }
+        bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        (void)ctrlDown;
+        if (g_pdf.editSelectingText) {
+            const bool rapidClickCandidate = !g_pdf.editSelectMoved;
+            g_pdf.editSelectingText = false;
+            g_pdf.editSelectMoved = false;
+            ReleaseCapture();
+            if (rapidClickCandidate &&
+                RegisterTextBoxRapidClick(g_pdf.editPage, g_pdf.editX1, g_pdf.editY1, g_pdf.editX2, g_pdf.editY2)) {
+                CopyActiveTextBoxToClipboard(hwnd);
+                FinishTextBoxTripleClickCopy(hwnd, true);
+                return 0;
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (g_pdf.erasing) {
+            g_pdf.erasing = false;
+            ReleaseCapture();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (g_pdf.movingAnnot) {
+            POINT cur{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            UpdateMovingAnnotAtClientPoint(hwnd, cur);
+        } else if (g_pdf.pendingTextBoxHit) {
+            CommitPendingTextBoxEdit(hwnd);
+        } else if (g_pdf.drawingAnnot) {
+            ReleaseCapture();
+            g_pdf.drawingAnnot = false;
+            POINT start = g_pdf.drawStart;
+            POINT end = g_pdf.drawEnd;
+            int pageIndex = -1;
+            double sx = 0.0, sy = 0.0, top = 0.0;
+            if (HitTestPagePoint(start, pageIndex, sx, sy, top) &&
+                pageIndex == g_pdf.drawPageIndex) {
+                double ex = 0.0, ey = 0.0, dummy = 0.0;
+                bool endOk = HitTestPagePoint(end, pageIndex, ex, ey, dummy);
+                bool added = false;
+                Annotation ann;
+                ann.pageIndex = pageIndex;
+                ann.color = g_activeColor;
+                ann.alpha = ToolAlphaForMode(g_toolMode);
+                ann.width = ToolWidthPtForMode(g_toolMode);
+                ann.x1 = sx; ann.y1 = sy;
+                ann.x2 = ex; ann.y2 = ey;
+                if (IsLineLikeAnnotToolMode(g_toolMode) && endOk) {
+                    ann.type = IsArrowAnnotToolMode(g_toolMode)
+                                   ? Annotation::Type::Arrow
+                                   : IsWaveAnnotToolMode(g_toolMode)
+                                         ? Annotation::Type::Wave
+                                         : Annotation::Type::Line;
+                    if (ann.type == Annotation::Type::Arrow) {
+                        ann.arrowHead = g_arrowHead;
+                    }
+                    double wPt = ToolWidthPtForMode(g_toolMode);
+                    ann.width = (wPt > 0.0) ? wPt : 2.0;
+                    if ((ann.type == Annotation::Type::Line ||
+                         ann.type == Annotation::Type::Arrow ||
+                         ann.type == Annotation::Type::Wave) &&
+                        g_lineDashStyle == L"dash") {
+                        ann.dash = { std::max(1.0, ann.width * 4.0), std::max(1.0, ann.width * 2.0) };
+                    }
+                    g_annots.push_back(ann);
+                    RecordAnnotAdd(static_cast<int>(g_annots.size() - 1), g_annots.back());
+                    MarkAnnotsDirty(GetParent(hwnd));
+                    added = true;
+                } else if (g_toolMode == ToolMode::Shape && endOk) {
+                    ShapeBounds bounds = NormalizeShapeBounds(g_shapeKind, sx, sy, ex, ey);
+                    if ((bounds.right - bounds.left) >= 0.5 && (bounds.top - bounds.bottom) >= 0.5) {
+                        ann.type = Annotation::Type::Shape;
+                        ann.shapeKind = g_shapeKind;
+                        ann.shapeDrawMode = g_shapeDrawMode;
+                        if (ann.shapeKind == ShapeKind::RotatedEllipse) {
+                            ann.shapeRotation = ShapeRotationFromClientEndpoints(start.x, start.y, end.x, end.y);
+                        }
+                        ann.alpha = ToolAlphaForMode(g_toolMode);
+                        ann.width = (g_lineWidthPt > 0.0) ? g_lineWidthPt : 2.5;
+                        ann.x1 = bounds.left;
+                        ann.y1 = bounds.top;
+                        ann.x2 = bounds.right;
+                        ann.y2 = bounds.bottom;
+                        g_annots.push_back(ann);
+                        RecordAnnotAdd(static_cast<int>(g_annots.size() - 1), g_annots.back());
+                        MarkAnnotsDirty(GetParent(hwnd));
+                        added = true;
+                    }
+                } else if (g_toolMode == ToolMode::TextBox && endOk) {
+                    // start inline text editing instead of dialog
+                    ResetEditOriginal();
+                    AdaptiveTextPreset preset = ComputeAdaptiveTextPresetForPage(pageIndex, g_textFontPt);
+                    g_pdf.editingText = true;
+                    g_pdf.editPage = pageIndex;
+                    g_pdf.editX1 = sx;
+                    g_pdf.editY1 = sy;
+                    g_pdf.editX2 = ex;
+                    g_pdf.editY2 = ey;
+                    g_pdf.editFontName = g_textFontName;
+                    g_pdf.editFontPt = preset.fontPt;
+                    double wPt = std::abs(g_pdf.editX2 - g_pdf.editX1);
+                    double hPt = std::abs(g_pdf.editY2 - g_pdf.editY1);
+                    if (wPt < 10.0) g_pdf.editX2 = g_pdf.editX1 + preset.widthPt;
+                    if (hPt < 10.0) {
+                        double clickY = g_pdf.editY1;
+                        g_pdf.editY1 = NewTextBoxTopFromClickY(clickY, g_pdf.editFontPt, g_pdf.editFontName, g_pdf.scale);
+                        g_pdf.editY2 = clickY;
+                    }
+                    g_pdf.editText.clear();
+                    g_pdf.editCaret = 0;
+                    g_pdf.editSelStart = 0;
+                    g_pdf.editSelEnd = 0;
+                    g_pdf.editSelectingText = false;
+                    g_pdf.editSelAnchor = 0;
+                    g_pdf.editLayoutDirty = true;
+                    g_pdf.editInnerLayoutW = 0;
+                    g_pdf.editLayout.lines.clear();
+                    g_pdf.imeComp.clear();
+                    g_pdf.imeComposing = false;
+                    g_pdf.suppressNextImeResultReturnChar = false;
+                    g_pdf.imeResultMessageTime = 0;
+                    ClearTextEditHistory();
+                    RecalcEditingTextboxSize(true);
+                    EnsureEditingTextBoxVisible(hwnd, L"new_text_box");
+                    SetFocus(hwnd);
+                    // Enable IME now that text editing has started.
+                    EnablePdfViewIme(hwnd);
+                    InvalidateEditingTextBoxRect(hwnd);
+                    added = false; // commit happens later
+                } else if (g_toolMode == ToolMode::MarkerFree || g_toolMode == ToolMode::Freehand) {
+                    std::vector<POINT> pts = g_pdf.drawPath;
+                    if (pts.size() < 2) {
+                        pts.clear();
+                        pts.push_back(start);
+                        pts.push_back(end);
+                    }
+                    ann.width = (g_toolMode == ToolMode::MarkerFree) ? g_markerFreeWidthPt : g_freehandWidthPt;
+                    ann.alpha = (g_toolMode == ToolMode::MarkerFree) ? g_markerAlpha : ToolAlphaForMode(g_toolMode);
+                    Annotation::Pt prevPt{};
+                    bool first = true;
+                    for (const auto& p : pts) {
+                        double pxPt = 0.0, pyPt = 0.0;
+                        if (!ClientToPdfOnPage(pageIndex, p, pxPt, pyPt)) continue;
+                        Annotation::Pt dp{ pxPt, pyPt };
+                        ann.path.push_back(dp);
+                        if (first) {
+                            ann.x1 = pxPt; ann.y1 = pyPt;
+                            first = false;
+                        }
+                        prevPt = dp;
+                    }
+                    if (ann.path.size() >= 2) {
+                        if (!first) {
+                            ann.x2 = prevPt.x;
+                            ann.y2 = prevPt.y;
+                        }
+                        ann.type = (g_toolMode == ToolMode::MarkerFree) ? Annotation::Type::MarkerFree : Annotation::Type::Freehand;
+                        g_annots.push_back(ann);
+                        int addedIndex = static_cast<int>(g_annots.size() - 1);
+                        RecordAnnotAdd(addedIndex, g_annots.back());
+                        if (ann.type == Annotation::Type::Freehand) {
+                            Annotation raw = g_annots[static_cast<size_t>(addedIndex)];
+                            Annotation smoothed;
+                            if (TryBuildFreehandSmoothing(raw, &smoothed)) {
+                                smoothed.id = raw.id;
+                                g_annots[static_cast<size_t>(addedIndex)] = smoothed;
+                                RecordAnnotUpdate(addedIndex, addedIndex, raw, g_annots[static_cast<size_t>(addedIndex)]);
+                            } else if (ShouldApplyFreehandShapeCorrection()) {
+                                FreehandCorrectionResult correction;
+                                if (TryBuildFreehandCorrection(raw, &correction) && correction.accepted) {
+                                    correction.corrected.id = raw.id;
+                                    g_annots[static_cast<size_t>(addedIndex)] = correction.corrected;
+                                    RecordAnnotUpdate(addedIndex, addedIndex, raw, g_annots[static_cast<size_t>(addedIndex)]);
+                                }
+                            }
+                        }
+                        MarkAnnotsDirty(GetParent(hwnd));
+                        added = true;
+                    }
+                }
+                if (added) {
+                    if (HWND owner = GetParent(hwnd)) {
+                        UpdateWindowTitle(owner);
+                    }
+                }
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (g_pdf.panning) {
+            g_pdf.panning = false;
+            g_pdf.panAxisLock = PanAxisLock::None;
+            ReleaseCapture();
+        }
+        if (g_pdf.movingAnnot) {
+            if (g_pdf.movingIndex >= 0 && g_pdf.movingIndex < static_cast<int>(g_annots.size())) {
+                Annotation& after = g_annots[static_cast<size_t>(g_pdf.movingIndex)];
+                if (after.type == Annotation::Type::TextBox) {
+                    ReflowMovedTextBox(after);
+                }
+                if (!AnnotationEquals(g_pdf.movingOriginal, after)) {
+                    RecordAnnotUpdate(g_pdf.movingIndex, g_pdf.movingIndex, g_pdf.movingOriginal, after);
+                }
+            }
+            g_pdf.movingAnnot = false;
+            g_pdf.movingIndex = -1;
+            g_pdf.movePage = -1;
+            MarkAnnotsDirty(GetParent(hwnd));
+            ReleaseCapture();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (g_pdf.selectingText) {
+            bool commitMarker = IsMarkerTextMode(g_toolMode);
+            int pageIndex = g_pdf.selectionStartPage;
+            bool selectionByText = g_pdf.selectionByText;
+            int selCharStart = g_pdf.selCharAnchor;
+            int selCharEnd = g_pdf.selCharFocus;
+            g_pdf.selectingText = false;
+            g_pdf.selectionByText = commitMarker ? false : selectionByText;
+            ReleaseCapture();
+            KillTimer(hwnd, kAutoScrollTimerId);
+            double selLeft = 0.0, selRight = 0.0, selTop = 0.0, selBottom = 0.0;
+            bool haveRect = false;
+            const bool textColorMarker = MarkerTextModeUsesTextColor(g_toolMode);
+            if (!selectionByText) {
+                double sx = 0.0, sy = 0.0;
+                double ex = 0.0, ey = 0.0;
+                if (ClientToPdfOnPage(pageIndex, g_pdf.selStart, sx, sy) &&
+                    ClientToPdfOnPage(pageIndex, g_pdf.selEnd,   ex, ey)) {
+                    selLeft   = std::min(sx, ex);
+                    selRight  = std::max(sx, ex);
+                    selTop    = std::max(sy, ey);
+                    selBottom = std::min(sy, ey);
+                    haveRect = true;
+                }
+            }
+            if (commitMarker && pageIndex >= 0 && pageIndex < static_cast<int>(g_pdf.pages.size())) {
+                const int startPage = g_pdf.selectionStartPage;
+                const int endPage = g_pdf.selectionEndPage;
+                const int minPage = selectionByText ? std::min(startPage, endPage) : pageIndex;
+                const int maxPage = selectionByText ? std::max(startPage, endPage) : pageIndex;
+                bool addedAny = false;
+                for (int annPageIndex = minPage; annPageIndex <= maxPage; ++annPageIndex) {
+                    if (annPageIndex < 0 || annPageIndex >= static_cast<int>(g_pdf.pages.size())) continue;
+                    if (!EnsurePdfPageCharBoxes(annPageIndex)) continue;
+                    const auto& page = g_pdf.pages[static_cast<size_t>(annPageIndex)];
+                    if (page.charBoxes.empty()) continue;
+
+                    std::vector<LineSpan> lines;
+                    double padPt = textColorMarker ? 0.0 : MarkerTextPadPtFromWidthPt(g_markerTextWidthPt);
+                    bool underlineMarker = MarkerTextModeUsesUnderline(g_toolMode);
+                    bool horizontalPad = !textColorMarker;
+                    if (selectionByText && selCharStart >= 0 && selCharEnd >= 0) {
+                        int pageCharStart = -1;
+                        int pageCharEnd = -1;
+                        if (!TextSelectionRangeForPage(annPageIndex, startPage, endPage,
+                                                       selCharStart, selCharEnd,
+                                                       static_cast<int>(page.charBoxes.size()) - 1,
+                                                       pageCharStart, pageCharEnd)) {
+                            continue;
+                        }
+                        BuildLineSpansFromCharRange(page, pageCharStart, pageCharEnd, padPt, underlineMarker, horizontalPad, lines);
+                    } else if (haveRect) {
+                        BuildLineSpansFromRect(page, selLeft, selRight, selTop, selBottom, padPt, underlineMarker, horizontalPad, lines);
+                    }
+                    std::vector<double> quads;
+                    double overallMinX = 1e9, overallMaxX = -1e9, overallTop = -1e9, overallBottom = 1e9;
+                    for (const auto& ls : lines) {
+                        if (ls.left > ls.right) continue;
+                        quads.push_back(ls.left);  quads.push_back(ls.top);
+                        quads.push_back(ls.right); quads.push_back(ls.top);
+                        quads.push_back(ls.right); quads.push_back(ls.bottom);
+                        quads.push_back(ls.left);  quads.push_back(ls.bottom);
+                        overallMinX = std::min(overallMinX, ls.left);
+                        overallMaxX = std::max(overallMaxX, ls.right);
+                        overallTop = std::max(overallTop, ls.top);
+                        overallBottom = std::min(overallBottom, ls.bottom);
+                    }
+                    if (!quads.empty()) {
+                        Annotation ann;
+                        ann.type = textColorMarker ? Annotation::Type::TextColor : Annotation::Type::MarkerText;
+                        ann.pageIndex = annPageIndex;
+                        ann.color = g_activeColor;
+                        ann.width = textColorMarker ? 0.0 : ((g_markerTextWidthPt > 0.0) ? g_markerTextWidthPt : 2.0);
+                        ann.alpha = textColorMarker ? 1.0 : g_markerAlpha;
+                        if (selectionByText || !haveRect) {
+                            ann.x1 = overallMinX;
+                            ann.x2 = overallMaxX;
+                            ann.y1 = overallTop;
+                            ann.y2 = overallBottom;
+                        } else {
+                            ann.x1 = std::min(overallMinX, selLeft);
+                            ann.x2 = std::max(overallMaxX, selRight);
+                            ann.y1 = std::max(overallTop, selTop);
+                            ann.y2 = std::min(overallBottom, selBottom);
+                        }
+                        ann.quads = std::move(quads);
+                        g_annots.push_back(std::move(ann));
+                        RecordAnnotAdd(static_cast<int>(g_annots.size() - 1), g_annots.back());
+                        addedAny = true;
+                    }
+                }
+                if (addedAny) {
+                    MarkAnnotsDirty(GetParent(hwnd));
+                }
+            }
+            if (commitMarker) {
+                g_pdf.hasSelection = false;
+                g_pdf.selCharAnchor = -1;
+                g_pdf.selCharFocus = -1;
+            } else {
+                g_pdf.hasSelection = true;
+                g_pdf.selCharAnchor = selCharStart;
+                g_pdf.selCharFocus = selCharEnd;
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MBUTTONDOWN: {
+        EnsurePdfViewFocus(hwnd);
+        SetCapture(hwnd);
+        g_pdf.panning = true;
+        g_pdf.panAnchor.x = GET_X_LPARAM(lParam);
+        g_pdf.panAnchor.y = GET_Y_LPARAM(lParam);
+        g_pdf.panStartY = g_pdf.scrollY;
+        g_pdf.panStartX = g_pdf.scrollX;
+        g_pdf.panAxisLock = PanAxisLock::None;
+        return 0;
+    }
+    case WM_CONTEXTMENU: {
+        if (reinterpret_cast<HWND>(wParam) != hwnd) break;
+        if (IsPdfPreviewReadOnlyActive()) {
+            return 0;
+        }
+        ClearPdfQuickAnnotRightDrag();
+        EnsurePdfViewFocus(hwnd);
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        bool textSelectionAtPoint = false;
+        if (!g_pdf.editingText && g_pdf.hasSelection) {
+            POINT clientPt = pt;
+            if (pt.x == -1 && pt.y == -1) {
+                GetCursorPos(&clientPt);
+            }
+            ScreenToClient(hwnd, &clientPt);
+            textSelectionAtPoint = PdfTextSelectionContainsClientPoint(clientPt);
+            if (!textSelectionAtPoint) {
+                ClearPdfTextSelection();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
+        const bool preferTextContextMenu = g_pdf.editingText || textSelectionAtPoint;
+        if (!preferTextContextMenu && HandleQuickAnnotContextMenu(hwnd, &pt, true)) {
+            return 0;
+        }
+        ShowPdfContextMenu(hwnd, pt);
+        return 0;
+    }
+    case WM_RBUTTONDOWN: {
+        if (IsPdfPreviewReadOnlyActive()) {
+            return 0;
+        }
+        EnsurePdfViewFocus(hwnd);
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (g_pdf.editingText) {
+            RECT rect;
+            if (!GetEditingTextBoxClientRect(&rect) || !PtInRect(&rect, pt)) {
+                CommitTextEditing(hwnd, true);
+            }
+        }
+        bool armQuickAnnot = !g_pdf.editingText;
+        if (armQuickAnnot && g_pdf.hasSelection) {
+            armQuickAnnot = !PdfTextSelectionContainsClientPoint(pt);
+            if (armQuickAnnot) {
+                ClearPdfTextSelection();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
+        if (armQuickAnnot) {
+            ArmPdfQuickAnnotRightDrag(pt);
+        }
+        break;
+    }
+    case WM_RBUTTONUP:
+        ClearPdfQuickAnnotRightDrag();
+        break;
+    case WM_MBUTTONUP: {
+        if (g_pdf.panning) {
+            ReleaseCapture();
+            g_pdf.panning = false;
+            g_pdf.panAxisLock = PanAxisLock::None;
+        }
+        return 0;
+    }
+    case WM_GETDLGCODE: {
+        if (g_pdf.editingText) {
+            return DLGC_WANTALLKEYS | DLGC_WANTTAB | DLGC_WANTCHARS;
+        }
+        break;
+    }
+    case WM_KEYDOWN: {
+        if (wParam == VK_TAB && !g_pdf.editingText) {
+            if (g_hNoteEdit) SetFocus(g_hNoteEdit);
+            return 0;
+        }
+        // Keep wheel/key behavior consistent when a toolbar combobox dropdown is open:
+        // the PDF view typically retains focus, so route navigation keys to the dropdown.
+        if (wParam == VK_UP || wParam == VK_DOWN || wParam == VK_PRIOR || wParam == VK_NEXT ||
+            wParam == VK_HOME || wParam == VK_END) {
+            if (ForwardWheelToDroppedCombo(WM_KEYDOWN, wParam, lParam)) return 0;
+        }
+
+        bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const ULONGLONG ignoreUntil = g_pdfIgnoreNextLeftKeyUntilTick;
+        if (ignoreUntil != 0) {
+            if (!g_pdf.editingText || !g_config.fullWidthParenCancelNextLeft ||
+                GetTickCount64() >= ignoreUntil) {
+                g_pdfIgnoreNextLeftKeyUntilTick = 0;
+            } else if (wParam == VK_LEFT && !ctrlDown && !altDown && !shiftDown) {
+                g_pdfIgnoreNextLeftKeyUntilTick = 0;
+                return 0;
+            }
+        }
+        if (!g_pdf.editingText && ctrlDown && !altDown && !shiftDown) {
+            HWND owner = GetParent(hwnd);
+            if (HandlePaneDirectionalNavigation(owner, PaneNavContext::PdfPane, hwnd, wParam)) {
+                return 0;
+            }
+        }
+        if (wParam == VK_CONTROL && ((lParam & (1LL << 30)) == 0)) {
+            if (g_pdf.textBoxHoverValid) {
+                g_pdf.textBoxHoverValid = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            RefreshPdfViewClientCursor(hwnd);
+        }
+        if (!g_pdf.editingText && ctrlDown && !altDown && !shiftDown &&
+            (wParam == VK_UP || wParam == VK_DOWN)) {
+            if (ApplyActivePaletteColorStep(hwnd, wParam == VK_UP ? -1 : 1, false)) {
+                ApplyActiveColorToSelectedAnnotation(hwnd);
+                return 0;
+            }
+        }
+
+        if (g_pdf.editingText) {
+            WPARAM navKey = 0;
+            if (ResolvePdfCtrlInsertNavKey(hwnd, wParam, &navKey)) {
+                if (g_pdf.imeComposing) {
+                    ForwardPdfImeNavigationKey(hwnd, navKey);
+                    return 0;
+                }
+                wParam = navKey;
+            }
+        }
+        if ((wParam == 'S' || wParam == 's') && (ctrlDown || altDown)) {
+            preview_trace::Append(
+                L"CtrlSPdf",
+                L"key hwnd=" + preview_trace::Window(hwnd) +
+                L" parent=" + preview_trace::Window(GetParent(hwnd)) +
+                L" focus=" + preview_trace::Window(GetFocus()) +
+                L" ctrl=" + preview_trace::Bool(ctrlDown) +
+                L" alt=" + preview_trace::Bool(altDown) +
+                L" shift=" + preview_trace::Bool(shiftDown) +
+                L" previewReadOnly=" + preview_trace::Bool(IsPdfPreviewReadOnlyActive()) +
+                L" editingText=" + preview_trace::Bool(g_pdf.editingText));
+        }
+        if (IsPdfPreviewReadOnlyActive()) {
+            if (wParam == 'I' || wParam == VK_DELETE || wParam == VK_RETURN) {
+                return 0;
+            }
+            bool allowPreviewSelectShortcut =
+                (g_toolMode == ToolMode::Select) && (wParam == 'A' || wParam == 'C');
+            if (ctrlDown && (wParam == 'Z' || wParam == 'Y' || wParam == 'R' ||
+                             wParam == 'A' || wParam == 'C' || wParam == 'V' || wParam == 'X') &&
+                !allowPreviewSelectShortcut) {
+                return 0;
+            }
+        }
+
+        // Keyboard software zoom (no Ctrl) when the PDF view has focus.
+        // Avoid stealing keys while inline text editing is active.
+        if (!g_pdf.editingText && !ctrlDown) {
+            const bool zoomIn = (wParam == VK_OEM_PLUS) || (wParam == VK_ADD);
+            const bool zoomOut = (wParam == VK_OEM_MINUS) || (wParam == VK_SUBTRACT);
+            if (zoomIn || zoomOut) {
+                RECT rc{};
+                GetClientRect(hwnd, &rc);
+                POINT focusPt{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+                double factor = zoomIn ? 1.15 : (1.0 / 1.15);
+                SetPdfScale(hwnd, ZoomInputBaseScale() * factor, focusPt);
+                return 0;
+            }
+        }
+        if (g_noteVimModeEnabled && !g_pdf.editingText && !ctrlDown && !shiftDown && wParam == 'I') {
+             PostMessageW(GetParent(hwnd), kMsgNoteEnterInsertMode, 0, 0);
+             return 0;
+        }
+
+        if (g_pdf.drawingAnnot &&
+            (AnnotToolUsesGeometry(g_toolMode, AnnotToolGeometry::Line) ||
+             IsArrowAnnotToolMode(g_toolMode)) &&
+            ((wParam == VK_CONTROL) || (wParam == VK_RETURN)) &&
+            ((lParam & (1LL << 30)) == 0)) {
+            POINT start = g_pdf.drawStart;
+            POINT end = g_pdf.drawEnd;
+            int dx = end.x - start.x;
+            int dy = end.y - start.y;
+            if (dx * dx + dy * dy >= 4) {
+                int pageIndex = -1;
+                double sx = 0.0, sy = 0.0, top = 0.0;
+                if (HitTestPagePoint(start, pageIndex, sx, sy, top) &&
+                    pageIndex == g_pdf.drawPageIndex) {
+                    double ex = 0.0, ey = 0.0, dummy = 0.0;
+                    bool endOk = HitTestPagePoint(end, pageIndex, ex, ey, dummy);
+                    if (endOk) {
+                        Annotation ann;
+                        ann.type = Annotation::Type::Line; // intermediate segments are always lines
+                        ann.pageIndex = pageIndex;
+                        ann.color = g_activeColor;
+                        ann.alpha = ToolAlphaForMode(g_toolMode);
+                        double wPt = ToolWidthPtForMode(g_toolMode);
+                        ann.width = (wPt > 0.0) ? wPt : 2.0;
+                        ann.x1 = sx; ann.y1 = sy;
+                        ann.x2 = ex; ann.y2 = ey;
+                        g_annots.push_back(ann);
+                        RecordAnnotAdd(static_cast<int>(g_annots.size() - 1), g_annots.back());
+                        MarkAnnotsDirty(GetParent(hwnd));
+                        if (HWND owner = GetParent(hwnd)) {
+                            UpdateWindowTitle(owner);
+                        }
+                        g_pdf.drawStart = end;
+                        g_pdf.drawEnd = end;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                }
+            }
+            return 0;
+        }
+        if (!g_pdf.editingText && ctrlDown) {
+            if (wParam == 'Z' && !shiftDown) {
+                ExecutePdfUndoRedoFromFocus(GetParent(hwnd), true);
+                return 0;
+            }
+            if (wParam == 'Y' || (wParam == 'Z' && shiftDown) || wParam == 'R') {
+                ExecutePdfUndoRedoFromFocus(GetParent(hwnd), false);
+                return 0;
+            }
+            if (wParam == VK_OEM_PLUS || wParam == VK_ADD) {
+                if (ChangeSelectedTextBoxFont(hwnd, true)) return 0;
+            }
+            if (wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT) {
+                if (ChangeSelectedTextBoxFont(hwnd, false)) return 0;
+            }
+            if (g_toolMode == ToolMode::Select) {
+                if (wParam == 'A') {
+                    // 1st Ctrl+A: select current page.
+                    // 2nd Ctrl+A: select all pages.
+                    bool alreadyPageFull = g_pdf.hasSelection && 
+                                          g_pdf.selectionStartPage == g_pdf.selectionEndPage &&
+                                          g_pdf.selCharAnchor == 0;
+                    if (alreadyPageFull && g_pdf.pageCount > 1) {
+                        SelectAllPdfTextAcrossAllPages(hwnd);
+                    } else {
+                        int pageIndex = PageAtCurrentView();
+                        if (pageIndex < 0) pageIndex = GetSelectionPageIndex();
+                        if (pageIndex >= 0) {
+                            SelectAllPdfTextOnPage(hwnd, pageIndex);
+                        }
+                    }
+                    return 0;
+                } else if (wParam == 'C') {
+                    if (!CanCopySelectedPdfText(hwnd)) {
+                        return 0;
+                    }
+                    std::wstring text;
+                    if (GetSelectedPdfText(text) && CopyTextToClipboard(hwnd, text)) {
+                        return 0;
+                    }
+                }
+            }
+        }
+        if (g_pdf.editingText) {
+            if (ctrlDown) {
+                if (wParam == 'Z' && !shiftDown) {
+                    ExecutePdfUndoRedoFromFocus(GetParent(hwnd), true);
+                    return 0;
+                }
+                if (wParam == 'Y' || (wParam == 'Z' && shiftDown)) {
+                    ExecutePdfUndoRedoFromFocus(GetParent(hwnd), false);
+                    return 0;
+                }
+                if (wParam == VK_OEM_PLUS || wParam == VK_ADD) {
+                    EnlargeEditingTextBoxFont(hwnd);
+                    return 0;
+                }
+                if (wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT) {
+                    ShrinkEditingTextBoxFont(hwnd);
+                    return 0;
+                }
+                if (wParam == 'A') {
+                    RECT before{};
+                    bool hadBefore = GetEditingTextBoxClientRect(&before);
+                    g_pdf.imeComp.clear();
+                    g_pdf.imeComposing = false;
+                    g_pdf.suppressNextImeResultReturnChar = false;
+                    g_pdf.imeResultMessageTime = 0;
+                    g_pdf.editLayoutDirty = true;
+                    SelectAllEditText();
+                    UpdateImeWindowPosition(hwnd, true);
+                    InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+                    return 0;
+                }
+                if (wParam == 'C') {
+                    CopyEditSelectionToClipboard(hwnd);
+                    return 0;
+                }
+                if (wParam == 'X') {
+                    if (HasEditSelection() && CopyEditSelectionToClipboard(hwnd)) {
+                        RECT before{};
+                        bool hadBefore = GetEditingTextBoxClientRect(&before);
+                        RecordTextEditChange();
+                        g_pdf.imeComp.clear();
+                        g_pdf.imeComposing = false;
+                        g_pdf.suppressNextImeResultReturnChar = false;
+                        g_pdf.imeResultMessageTime = 0;
+                        g_pdf.editLayoutDirty = true;
+                        DeleteEditSelection();
+                        RecalcEditingTextboxSize(true);
+                        EnsureEditingTextBoxVisible(hwnd, L"cut_text");
+                        UpdateImeWindowPosition(hwnd, true);
+                        InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+                    }
+                    return 0;
+                }
+                if (wParam == 'V') {
+                    RECT before{};
+                    bool hadBefore = GetEditingTextBoxClientRect(&before);
+                    g_pdf.imeComp.clear();
+                    g_pdf.imeComposing = false;
+                    g_pdf.suppressNextImeResultReturnChar = false;
+                    g_pdf.imeResultMessageTime = 0;
+                    g_pdf.editLayoutDirty = true;
+                    if (PasteClipboardToEdit(hwnd)) {
+                        RecalcEditingTextboxSize(true);
+                        EnsureEditingTextBoxVisible(hwnd, L"paste_text");
+                        UpdateImeWindowPosition(hwnd, true);
+                        InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+                    }
+                    return 0;
+                }
+            }
+            if (wParam == VK_ESCAPE) {
+                CommitTextEditing(hwnd, true);
+                // After exiting textbox editing, return keyboard focus to the main window so shortcuts
+                // and IME candidate suppression behave consistently outside text-edit mode.
+                if (g_hMainWnd) {
+                    PostMessageW(g_hMainWnd, kMsgEnterNoteNormalMode, 0, 0);
+                }
+                return 0;
+            }
+            if (wParam == VK_RETURN && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                CommitTextEditing(hwnd, true);
+                return 0;
+            }
+            bool caretMoved = false;
+            RECT editBefore{};
+            bool hadEditBefore = GetEditingTextBoxClientRect(&editBefore);
+            size_t selectionAnchor = g_pdf.editCaret;
+            if (shiftDown) {
+                // Keep the non-caret side as the anchor while expanding/shrinking selection.
+                if (HasEditSelection()) {
+                    selectionAnchor = (g_pdf.editCaret == g_pdf.editSelStart) ? g_pdf.editSelEnd : g_pdf.editSelStart;
+                } else {
+                    selectionAnchor = g_pdf.editCaret;
+                }
+            }
+            LeftRightLineMoveAction lrAction =
+                ParseLeftRightLineMoveAction(g_config.leftRightLineMoveAction);
+            switch (wParam) {
+            case VK_LEFT:
+                if (!shiftDown && HasEditSelection()) {
+                    size_t start = std::min(g_pdf.editSelStart, g_pdf.editSelEnd);
+                    g_pdf.editCaret = std::min(start, g_pdf.editText.size());
+                    caretMoved = true;
+                    break;
+                }
+                if (lrAction == LeftRightLineMoveAction::Stay && IsCaretAtLineBoundary(false)) {
+                    break;
+                }
+                if (g_pdf.editCaret > 0) {
+                    g_pdf.editCaret--;
+                    caretMoved = true;
+                }
+                break;
+            case VK_RIGHT:
+                if (!shiftDown && HasEditSelection()) {
+                    size_t end = std::max(g_pdf.editSelStart, g_pdf.editSelEnd);
+                    g_pdf.editCaret = std::min(end, g_pdf.editText.size());
+                    caretMoved = true;
+                    break;
+                }
+                if (lrAction == LeftRightLineMoveAction::Stay && IsCaretAtLineBoundary(true)) {
+                    break;
+                }
+                if (g_pdf.editCaret < g_pdf.editText.size()) {
+                    g_pdf.editCaret++;
+                    caretMoved = true;
+                }
+                break;
+            case VK_HOME:
+                caretMoved = MoveCaretToLineBoundary(false);
+                break;
+            case VK_END:
+                caretMoved = MoveCaretToLineBoundary(true);
+                break;
+            case VK_UP:
+                caretMoved = MoveCaretVertical(-1);
+                if (!caretMoved) {
+                    caretMoved = MoveCaretToLineBoundary(false);
+                }
+                break;
+            case VK_DOWN: {
+                caretMoved = MoveCaretVertical(1);
+                if (!caretMoved) {
+                    caretMoved = MoveCaretToLineBoundary(true);
+                }
+                break;
+            }
+            default:
+                break;
+            }
+            if (caretMoved) {
+                if (shiftDown) {
+                    g_pdf.editSelStart = selectionAnchor;
+                    g_pdf.editSelEnd = g_pdf.editCaret;
+                } else {
+                    ClearEditSelection();
+                }
+                RecalcEditingTextboxSize(true);
+                EnsureEditingTextBoxVisible(hwnd, L"caret_move");
+                UpdateImeWindowPosition(hwnd, true);
+                InvalidateEditingTextBoxRect(hwnd, hadEditBefore ? &editBefore : nullptr);
+                return 0;
+            }
+            if (wParam == VK_DELETE) {
+                bool changed = false;
+                if (HasEditSelection()) {
+                    RecordTextEditChange();
+                    DeleteEditSelection();
+                    changed = true;
+                } else if (!g_pdf.imeComp.empty()) {
+                    g_pdf.imeComp.erase(0, 1);
+                    changed = true;
+                } else if (g_pdf.editCaret < g_pdf.editText.size()) {
+                    RecordTextEditChange();
+                    g_pdf.editText.erase(g_pdf.editCaret, 1);
+                    changed = true;
+                }
+                if (changed) {
+                    RecalcEditingTextboxSize(true);
+                    EnsureEditingTextBoxVisible(hwnd, L"delete_key");
+                    UpdateImeWindowPosition(hwnd, true);
+                    InvalidateEditingTextBoxRect(hwnd, hadEditBefore ? &editBefore : nullptr);
+                }
+                return 0;
+            }
+        }
+        switch (wParam) {
+        case VK_DOWN:
+            if (!g_pdf.editingText) {
+                ScrollPdfByKeyboard(hwnd, 0.0, kScrollStepPx);
+            }
+            break;
+        case VK_UP:
+            if (!g_pdf.editingText) {
+                ScrollPdfByKeyboard(hwnd, 0.0, -kScrollStepPx);
+            }
+            break;
+        case VK_RIGHT:
+            if (!g_pdf.editingText) {
+                ScrollPdfByKeyboard(hwnd, kScrollStepPx, 0.0);
+            }
+            break;
+        case VK_LEFT:
+            if (!g_pdf.editingText) {
+                ScrollPdfByKeyboard(hwnd, -kScrollStepPx, 0.0);
+            }
+            break;
+        case VK_NEXT: {
+            if (!g_pdf.editingText) {
+                if (g_config.pdfSinglePageMode) {
+                    StepPdfPageByKeyboard(hwnd, 1);
+                } else {
+                    RECT rc; GetClientRect(hwnd, &rc);
+                    MarkPdfVirtualScrollInput();
+                    AddPrimaryScroll(PrimaryPageScrollAmount(rc.bottom - rc.top, rc.right - rc.left),
+                                     rc.bottom - rc.top, rc.right - rc.left);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+            break;
+        }
+        case VK_PRIOR: {
+            if (!g_pdf.editingText) {
+                if (g_config.pdfSinglePageMode) {
+                    StepPdfPageByKeyboard(hwnd, -1);
+                } else {
+                    RECT rc; GetClientRect(hwnd, &rc);
+                    MarkPdfVirtualScrollInput();
+                    AddPrimaryScroll(-PrimaryPageScrollAmount(rc.bottom - rc.top, rc.right - rc.left),
+                                     rc.bottom - rc.top, rc.right - rc.left);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+            break;
+        }
+        case VK_HOME:
+            if (ctrlDown) {
+                JumpToPage(hwnd, 0);
+            }
+            break;
+        case VK_END:
+            if (ctrlDown) {
+                JumpToPage(hwnd, g_pdf.pageCount - 1);
+            }
+            break;
+        case VK_OEM_PLUS:
+        case VK_ADD: {
+            if (!ctrlDown) break;
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            POINT pt{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+            SetPdfScale(hwnd, ZoomInputBaseScale() * 1.15, pt);
+            break;
+        }
+        case VK_OEM_MINUS:
+        case VK_SUBTRACT: {
+            if (!ctrlDown) break;
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            POINT pt{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+            SetPdfScale(hwnd, ZoomInputBaseScale() / 1.15, pt);
+            break;
+        }
+        case '0': {
+            if (!ctrlDown) break;
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            POINT pt{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+            SetPdfScale(hwnd, 1.0, pt);
+            break;
+        }
+        default: break;
+        }
+        return 0;
+    }
+    case WM_KEYUP: {
+        if (wParam == VK_CONTROL) {
+            RefreshPdfViewClientCursor(hwnd);
+        }
+        break;
+    }
+    case WM_TIMER: {
+        if (wParam == kZoomTimerId) {
+            StepPdfZoomAnimation(hwnd);
+            return 0;
+        }
+        if (wParam == kScrollTimerId) {
+            TickScroll(hwnd);
+            return 0;
+        }
+        if (wParam == kPdfVirtualRenderTimerId) {
+            g_pdfVirtualRenderTimerArmed = true;
+            g_pdfVirtualRenderTimerHwnd = hwnd;
+            if (preview_trace::IsEnabled()) {
+                preview_trace::Append(
+                    L"PdfVirtualTimer",
+                    L"tick hwnd=" + preview_trace::Window(hwnd));
+            }
+            PdfVirtualUpdateResult applied = ApplyPdfVirtualRenderResults(hwnd);
+            PdfVirtualUpdateResult result = UpdatePdfVirtualScrollCaches(hwnd, PdfVirtualUpdateMode::Timer);
+            if ((applied.changed && !applied.invalidated) || result.changed || result.repaint) {
+                if (preview_trace::IsEnabled()) {
+                    preview_trace::Append(
+                        L"PdfVirtualTimer",
+                        L"invalidate changed=" + preview_trace::Bool(applied.changed || result.changed) +
+                        L" repaint=" + preview_trace::Bool(result.repaint));
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            if (!applied.pending && !result.pending) {
+                if (preview_trace::IsEnabled()) {
+                    preview_trace::Append(
+                        L"PdfVirtualTimer",
+                        L"kill hwnd=" + preview_trace::Window(hwnd));
+                }
+                KillTimer(hwnd, kPdfVirtualRenderTimerId);
+                g_pdfVirtualRenderTimerArmed = false;
+                g_pdfVirtualRenderTimerHwnd = nullptr;
+            }
+            return 0;
+        }
+        if (wParam == kAutoScrollTimerId) {
+            if (!g_pdf.selectingText) {
+                KillTimer(hwnd, kAutoScrollTimerId);
+                return 0;
+            }
+            POINT pt;
+            GetCursorPos(&pt);
+            ScreenToClient(hwnd, &pt);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            PdfFlowMode mode = CurrentFlowMode();
+            int vh = rc.bottom - rc.top;
+            int vw = rc.right - rc.left;
+            double speed = 0;
+            if (FlowIsVertical(mode)) {
+                if (pt.y < 0) speed = pt.y * 0.5;
+                else if (pt.y > vh) speed = (pt.y - vh) * 0.5;
+            } else {
+                if (pt.x < 0) speed = pt.x * 0.5;
+                else if (pt.x > vw) speed = (pt.x - vw) * 0.5;
+            }
+
+            if (std::abs(speed) > 0.1) {
+                MarkPdfVirtualScrollInput();
+                AddPrimaryScroll(speed, vh, vw);
+                
+                if (g_pdf.selectionByText) {
+                    UpdatePdfTextSelectionFocusAtClientPoint(pt);
+                } else {
+                    int hitPage = -1;
+                    double dummyX = 0.0, dummyY = 0.0, dummyTop = 0.0;
+                    if (HitTestPagePoint(pt, hitPage, dummyX, dummyY, dummyTop)) {
+                        g_pdf.selectionEndPage = hitPage;
+                    }
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else {
+                KillTimer(hwnd, kAutoScrollTimerId);
+            }
+            return 0;
+        }
+        break;
+    }
+    case WM_CHAR: {
+        if (!g_pdf.editingText && (GetKeyState(VK_CONTROL) & 0x8000) != 0 && IsCtrlPaneNavCharPdf(wParam)) {
+            return 0;
+        }
+        if (IsPdfPreviewReadOnlyActive()) {
+            return 0;
+        }
+        if (g_pdf.editingText) {
+            if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                return 0;
+            }
+            wchar_t ch = static_cast<wchar_t>(wParam);
+            if (g_pdf.imeComposing) {
+                return 0;
+            }
+            if (g_pdf.suppressNextImeResultReturnChar && ch == L'\r') {
+                DWORD elapsed = static_cast<DWORD>(GetMessageTime()) - g_pdf.imeResultMessageTime;
+                bool suppressReturn = elapsed <= 120;
+                g_pdf.suppressNextImeResultReturnChar = false;
+                g_pdf.imeResultMessageTime = 0;
+                if (suppressReturn) {
+                    return 0;
+                }
+            } else if (g_pdf.suppressNextImeResultReturnChar) {
+                g_pdf.suppressNextImeResultReturnChar = false;
+                g_pdf.imeResultMessageTime = 0;
+            }
+            if (IsImeOpen(hwnd) && ch >= L' ') {
+                return 0;
+            }
+            bool changed = false;
+            RECT before{};
+            bool hadBefore = GetEditingTextBoxClientRect(&before);
+            if (ch == L'\r') {
+                RecordTextEditChange();
+                DeleteEditSelection();
+                g_pdf.editText.insert(g_pdf.editCaret, 1, L'\n');
+                g_pdf.editCaret++;
+                changed = true;
+            } else if (ch == L'\t') {
+                RecordTextEditChange();
+                DeleteEditSelection();
+                g_pdf.editText.insert(g_pdf.editCaret, L"    ");
+                g_pdf.editCaret += 4;
+                changed = true;
+            } else if (ch == L'\b') {
+                if (HasEditSelection()) {
+                    RecordTextEditChange();
+                    DeleteEditSelection();
+                    changed = true;
+                } else if (!g_pdf.imeComp.empty()) {
+                    g_pdf.imeComp.pop_back();
+                    changed = true;
+                } else if (!g_pdf.editText.empty() && g_pdf.editCaret > 0 && g_pdf.editCaret <= g_pdf.editText.size()) {
+                    RecordTextEditChange();
+                    g_pdf.editText.erase(g_pdf.editCaret - 1, 1);
+                    g_pdf.editCaret--;
+                    changed = true;
+                }
+            } else {
+                RecordTextEditChange();
+                DeleteEditSelection();
+                g_pdf.editText.insert(g_pdf.editCaret, 1, ch);
+                g_pdf.editCaret++;
+                changed = true;
+            }
+            if (changed) {
+                ClearEditSelection();
+                RecalcEditingTextboxSize(true);
+                EnsureEditingTextBoxVisible(hwnd, L"text_input");
+                UpdateImeWindowPosition(hwnd, true);
+                InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+            }
+            return 0;
+        }
+
+        // Keyboard software scroll/pan keys when the PDF view has focus.
+        // (This window proc receives input only while the PDF view is focused.)
+        wchar_t ch = static_cast<wchar_t>(wParam);
+        switch (ch) {
+        case L'h':
+        case L'H':
+        case L'j':
+        case L'J':
+        case L'k':
+        case L'K':
+        case L'l':
+        case L'L': {
+            if (g_pdf.pages.empty()) return 0;
+            const double step = kScrollStepPx;
+            if (ch == L'h' || ch == L'H') {
+                ScrollPdfByKeyboard(hwnd, -step, 0.0);
+                return 0;
+            }
+            if (ch == L'l' || ch == L'L') {
+                ScrollPdfByKeyboard(hwnd, step, 0.0);
+                return 0;
+            }
+            if (ch == L'j' || ch == L'J') {
+                ScrollPdfByKeyboard(hwnd, 0.0, step);
+                return 0;
+            }
+            if (ch == L'k' || ch == L'K') {
+                ScrollPdfByKeyboard(hwnd, 0.0, -step);
+                return 0;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        return 0;
+    }
+    case WM_IME_STARTCOMPOSITION: {
+        // If not editing text, cancel IME composition to prevent input in non-editing state.
+        if (!g_pdf.editingText) {
+            HIMC himc = ImmGetContext(hwnd);
+            if (himc) {
+                ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+                ImmReleaseContext(hwnd, himc);
+            }
+            g_pdf.imeComposing = false;
+            g_pdf.imeComp.clear();
+            g_pdf.suppressNextImeResultReturnChar = false;
+            g_pdf.imeResultMessageTime = 0;
+            return 0;
+        }
+        g_pdf.imeComposing = true;
+        g_pdf.imeComp.clear();
+        g_pdf.editLayoutDirty = true;
+        UpdateImeWindowPosition(hwnd, true);
+        return 0;
+    }
+    case WM_IME_COMPOSITION: {
+        if (!g_pdf.editingText) {
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+        HIMC himc = ImmGetContext(hwnd);
+        if (!himc) {
+            return 0;
+        }
+        const LONG kImeMaxBytes = 1 << 20;
+        RECT before{};
+        bool hadBefore = GetEditingTextBoxClientRect(&before);
+        if (lParam & GCS_RESULTSTR) {
+            LONG size = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
+            if (size > 0 && size < kImeMaxBytes &&
+                (size % static_cast<LONG>(sizeof(wchar_t)) == 0)) {
+                std::wstring buf(static_cast<size_t>(size / sizeof(wchar_t)), L'\0');
+                ImmGetCompositionStringW(himc, GCS_RESULTSTR, buf.data(), size);
+                if (!buf.empty()) {
+                    InsertPdfEditTextAtSelection(buf);
+                    g_pdf.suppressNextImeResultReturnChar = true;
+                    g_pdf.imeResultMessageTime = static_cast<DWORD>(GetMessageTime());
+                }
+            }
+            g_pdf.imeComp.clear();
+            g_pdf.imeComposing = false;
+        }
+        if (lParam & GCS_COMPSTR) {
+            LONG size = ImmGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0);
+            if (size > 0 && size < kImeMaxBytes &&
+                (size % static_cast<LONG>(sizeof(wchar_t)) == 0)) {
+                std::wstring buf(static_cast<size_t>(size / sizeof(wchar_t)), L'\0');
+                ImmGetCompositionStringW(himc, GCS_COMPSTR, buf.data(), size);
+                g_pdf.imeComp = buf;
+                g_pdf.imeComposing = true;
+            } else {
+                g_pdf.imeComp.clear();
+            }
+        }
+        g_pdf.editLayoutDirty = true;
+        RecalcEditingTextboxSize(true);
+        ImmReleaseContext(hwnd, himc);
+        EnsureEditingTextBoxVisible(hwnd, L"ime_composition");
+        UpdateImeWindowPosition(hwnd, true);
+        InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+        return 0;
+    }
+    case WM_IME_ENDCOMPOSITION: {
+        const bool hadComp = !g_pdf.imeComp.empty();
+        g_pdf.imeComposing = false;
+        g_pdf.imeComp.clear();
+        // Only update layout if editing text; otherwise just clear IME state.
+        if (g_pdf.editingText && hadComp) {
+            RECT before{};
+            bool hadBefore = GetEditingTextBoxClientRect(&before);
+            g_pdf.editLayoutDirty = true;
+            RecalcEditingTextboxSize(true);
+            EnsureEditingTextBoxVisible(hwnd, L"ime_endcomposition");
+            InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+        }
+        return 0;
+    }
+    case WM_SETFOCUS: {
+        if (g_pdf.editingText) {
+            EnablePdfViewIme(hwnd);
+            UpdateImeWindowPosition(hwnd, true);
+        } else {
+            // When PDF view gains focus, disable IME if not currently editing text.
+            // This prevents IME composition/candidate display when user types shortcuts.
+            DisablePdfViewIme(hwnd);
+        }
+        if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
+        return 0;
+    }
+    case WM_KILLFOCUS: {
+        g_pdfIgnoreNextLeftKeyUntilTick = 0;
+        if (g_pdf.editingText) {
+            HWND nextFocus = reinterpret_cast<HWND>(wParam);
+            if (IsTextFontSizeComboFocusTarget(nextFocus)) {
+                // Let font-size changes apply without closing the active textbox edit session.
+                ForceImeComplete(hwnd, true);
+                DisablePdfViewIme(hwnd);
+                if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
+                return 0;
+            }
+            // If editing, commit changes which also disables IME.
+            CommitTextEditing(hwnd, true);
+        }
+        if (g_pdf.textBoxHoverValid) {
+            g_pdf.textBoxHoverValid = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        // Ensure IME state is cleared.
+        g_pdf.imeComposing = false;
+        g_pdf.imeComp.clear();
+        g_pdf.suppressNextImeResultReturnChar = false;
+        g_pdf.imeResultMessageTime = 0;
+        if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        RECT paintRc = ps.rcPaint;
+        ApplyPdfVirtualRenderResults(nullptr);
+        // Keep heavyweight page resources inside the virtualized visible/near-visible window.
+        UpdatePdfVirtualScrollCaches(hwnd, PdfVirtualUpdateMode::Paint);
+        RenderPdf(hwnd, hdc, rc, paintRc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+

@@ -1,0 +1,316 @@
+// file: pdf_view/render.cpp
+// NOTE: This file is intentionally included by `src/pdf_view/pdf_view.cpp` to keep the build as a
+// single translation unit while physically splitting responsibilities.
+
+static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintRequest) {
+    RECT paint{};
+    if (!IntersectRect(&paint, &client, &paintRequest)) return;
+
+    int cw = paint.right - paint.left;
+    int ch = paint.bottom - paint.top;
+    if (cw <= 0 || ch <= 0) return;
+
+    HDC memDC = CreateCompatibleDC(hdc);
+    HBITMAP memBmp = CreateCompatibleBitmap(hdc, cw, ch);
+    HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
+    POINT oldViewport{};
+    SetViewportOrgEx(memDC, -paint.left, -paint.top, &oldViewport);
+
+    HBRUSH pdfBg = CreateSolidBrush(g_theme.pdfBg);
+    FillRect(memDC, &paint, pdfBg);
+    DeleteObject(pdfBg);
+
+    const int currentPage = PageAtCurrentView();
+    if (!g_pdf.pages.empty()) {
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        for (size_t i = 0; i < g_pdf.pages.size(); ++i) {
+            const auto& page = g_pdf.pages[i];
+            // Keep page bitmap and annotations aligned by using the same rounding strategy.
+            int destX = static_cast<int>(std::round(PageClientLeft(static_cast<int>(i))));
+            int destY = static_cast<int>(std::round(PageClientTop(static_cast<int>(i))));
+            int drawW = page.w;
+            int drawH = page.h;
+            int srcW = page.bmpW;
+            int srcH = page.bmpH;
+
+            RECT pageRect = { destX, destY, destX + drawW, destY + drawH };
+            RECT visiblePage{};
+            if (!IntersectRect(&visiblePage, &pageRect, &paint)) continue;
+
+            HBRUSH pageBg = CreateSolidBrush(g_theme.pdfPageBg);
+            FillRect(memDC, &pageRect, pageBg);
+            DeleteObject(pageBg);
+            const bool hasDrawableBitmap =
+                !page.pixels.empty() &&
+                srcW > 0 && srcH > 0;
+            if (hasDrawableBitmap) {
+                bmi.bmiHeader.biWidth = srcW;
+                bmi.bmiHeader.biHeight = -srcH;
+                bmi.bmiHeader.biPlanes = 1;
+                bmi.bmiHeader.biBitCount = 32;
+                bmi.bmiHeader.biCompression = BI_RGB;
+                int oldMode = 0;
+                POINT oldOrg{};
+                bool scaled = (srcW != drawW) || (srcH != drawH);
+                bool useHalftoneStretch = false;
+                if (scaled) {
+                    const bool downsampledFullBitmap =
+                        !page.bitmapCoarse && srcW > drawW && srcH > drawH;
+                    useHalftoneStretch = !downsampledFullBitmap;
+                    oldMode = SetStretchBltMode(memDC, useHalftoneStretch ? HALFTONE : COLORONCOLOR);
+                    if (useHalftoneStretch) {
+                        SetBrushOrgEx(memDC, 0, 0, &oldOrg);
+                    }
+                }
+                StretchDIBits(memDC, destX, destY, drawW, drawH,
+                              0, 0, srcW, srcH,
+                              page.pixels.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+                if (scaled) {
+                    if (useHalftoneStretch) {
+                        SetBrushOrgEx(memDC, oldOrg.x, oldOrg.y, nullptr);
+                    }
+                    SetStretchBltMode(memDC, oldMode);
+                }
+            }
+            HPEN pagePen = CreatePen(PS_SOLID, 1, g_theme.splitterLine);
+            HGDIOBJ oldPen = SelectObject(memDC, pagePen);
+            HGDIOBJ oldBrush = SelectObject(memDC, GetStockObject(HOLLOW_BRUSH));
+            Rectangle(memDC, pageRect.left, pageRect.top, pageRect.right, pageRect.bottom);
+            SelectObject(memDC, oldBrush);
+            SelectObject(memDC, oldPen);
+            DeleteObject(pagePen);
+
+            if (static_cast<int>(i) == currentPage) {
+                RECT frameRect = {
+                    pageRect.left - 2,
+                    pageRect.top - 2,
+                    pageRect.right + 2,
+                    pageRect.bottom + 2
+                };
+                HPEN currentPen = CreatePen(PS_SOLID, 3, g_theme.accent);
+                HGDIOBJ oldCurrentPen = SelectObject(memDC, currentPen);
+                HGDIOBJ oldCurrentBrush = SelectObject(memDC, GetStockObject(HOLLOW_BRUSH));
+                Rectangle(memDC, frameRect.left, frameRect.top, frameRect.right, frameRect.bottom);
+                SelectObject(memDC, oldCurrentBrush);
+                SelectObject(memDC, oldCurrentPen);
+                DeleteObject(currentPen);
+            }
+        }
+
+        DrawReadableTextOverlay(memDC, paint);
+        DrawAnnotations(memDC, paint);
+        DrawPdfSearchResultMarker(memDC, paint);
+        DrawInProgress(memDC, paint);
+        DrawTextSelection(memDC);
+        DrawMagnifierLens(memDC, client);
+        DrawEraserHitVisualization(memDC, paint);
+
+        // dotted preview removed; in-progress drawing is handled by DrawInProgress
+    }
+
+    const auto& ui = GetUiText();
+    std::wstring status = ui.statusPageLabel + L" " + std::to_wstring(currentPage + 1) + L"/" +
+                          std::to_wstring(std::max(1, g_pdf.pageCount)) +
+                          L"  " + ui.statusZoomLabel + L" " + std::to_wstring(static_cast<int>(g_pdf.scale * 100)) + L"%";
+    SetBkMode(memDC, TRANSPARENT);
+    SetTextColor(memDC, g_theme.panelText);
+    TextOutW(memDC, 8, 8, status.c_str(), static_cast<int>(status.size()));
+
+    DrawTextBoxHoverCaret(memDC, paint);
+    SetViewportOrgEx(memDC, oldViewport.x, oldViewport.y, nullptr);
+    BitBlt(hdc, paint.left, paint.top, cw, ch, memDC, 0, 0, SRCCOPY);
+
+    SelectObject(memDC, oldBmp);
+    DeleteObject(memBmp);
+    DeleteDC(memDC);
+}
+
+struct PdfScrollbarTrackState {
+    bool active = false;
+    int bar = SB_VERT;
+};
+
+static PdfScrollbarTrackState g_pdfScrollbarTrack;
+static constexpr UINT kPdfScrollbarTrackIntervalMs = 24;
+
+static bool TryGetPdfScrollbarPointTarget(HWND hwnd, int bar, double maxPos, double* outTarget) {
+    if (!hwnd || !outTarget) return false;
+    *outTarget = 0.0;
+    if (maxPos <= 0.0) return true;
+
+    POINT pt{};
+    if (!GetCursorPos(&pt)) return false;
+
+    SCROLLBARINFO sbi{};
+    sbi.cbSize = sizeof(sbi);
+    LONG objId = (bar == SB_VERT) ? OBJID_VSCROLL : OBJID_HSCROLL;
+    if (!GetScrollBarInfo(hwnd, objId, &sbi)) return false;
+
+    bool vertical = (bar == SB_VERT);
+    int lineButton = std::max(0, sbi.dxyLineButton);
+    int trackStart = vertical ? (sbi.rcScrollBar.top + lineButton)
+                              : (sbi.rcScrollBar.left + lineButton);
+    int trackEnd = vertical ? (sbi.rcScrollBar.bottom - lineButton)
+                            : (sbi.rcScrollBar.right - lineButton);
+    int trackLen = trackEnd - trackStart;
+    if (trackLen <= 0) return false;
+
+    int cursor = vertical ? pt.y : pt.x;
+    double ratio = static_cast<double>(std::clamp(cursor, trackStart, trackEnd) - trackStart) /
+                   static_cast<double>(trackLen);
+    *outTarget = std::clamp(ratio * maxPos, 0.0, maxPos);
+    return true;
+}
+
+static void CancelPdfScrollbarTrack(HWND hwnd) {
+    if (!g_pdfScrollbarTrack.active) return;
+    g_pdfScrollbarTrack = {};
+    if (hwnd && std::abs(g_scrollVelocity) < 0.5) {
+        KillTimer(hwnd, kScrollTimerId);
+    }
+}
+
+static void ApplyPdfScrollbarTrackPosition(HWND hwnd, int bar, double target) {
+    if (!hwnd) return;
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    int viewH = rc.bottom - rc.top;
+    int viewW = rc.right - rc.left;
+    double maxPos = (bar == SB_VERT) ? MaxScrollY(viewH) : MaxScrollX(viewW);
+    target = std::clamp(target, 0.0, maxPos);
+
+    double& pos = (bar == SB_VERT) ? g_pdf.scrollY : g_pdf.scrollX;
+    if (std::abs(pos - target) < 0.5) {
+        return;
+    }
+    pos = target;
+    ClampPdfScroll(viewH, viewW);
+    MarkPdfVirtualScrollInput();
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+static void StartPdfScrollbarTrack(HWND hwnd, int bar, double target) {
+    if (!hwnd) return;
+    g_pdfScrollbarTrack.active = true;
+    g_pdfScrollbarTrack.bar = bar;
+    g_scrollVelocity = 0.0;
+    ApplyPdfScrollbarTrackPosition(hwnd, bar, target);
+    SetTimer(hwnd, kScrollTimerId, kPdfScrollbarTrackIntervalMs, nullptr);
+}
+
+static bool TickPdfScrollbarTrack(HWND hwnd) {
+    if (!g_pdfScrollbarTrack.active) return false;
+    if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) == 0) {
+        CancelPdfScrollbarTrack(hwnd);
+        return true;
+    }
+
+    double target = 0.0;
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    int viewH = rc.bottom - rc.top;
+    int viewW = rc.right - rc.left;
+    double maxPos = (g_pdfScrollbarTrack.bar == SB_VERT) ? MaxScrollY(viewH) : MaxScrollX(viewW);
+    if (!TryGetPdfScrollbarPointTarget(hwnd, g_pdfScrollbarTrack.bar, maxPos, &target)) {
+        CancelPdfScrollbarTrack(hwnd);
+        return true;
+    }
+    ApplyPdfScrollbarTrackPosition(hwnd, g_pdfScrollbarTrack.bar, target);
+    return true;
+}
+
+void TickScroll(HWND hwnd) {
+    if (TickPdfScrollbarTrack(hwnd)) {
+        return;
+    }
+    if (std::abs(g_scrollVelocity) < 0.5) {
+        g_scrollVelocity = 0.0;
+        KillTimer(hwnd, kScrollTimerId);
+        return;
+    }
+    MarkPdfVirtualScrollInput();
+    g_pdf.scrollY += g_scrollVelocity;
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    double minY = MinScrollY(rc.bottom - rc.top);
+    double maxY = MaxScrollY(rc.bottom - rc.top);
+    if ((g_pdf.scrollY < minY && g_scrollVelocity < 0.0) ||
+        (g_pdf.scrollY > maxY && g_scrollVelocity > 0.0)) {
+        g_scrollVelocity *= 0.5; // bounce/soften at bounds
+    } else {
+        g_scrollVelocity *= kScrollDamp; // continuous decay
+    }
+    ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void JumpToPage(HWND pdfWnd, int index) {
+    if (g_pdf.pages.empty()) return;
+    MarkPdfVirtualViewportChange();
+    index = std::clamp(index, 0, g_pdf.pageCount - 1);
+    if (index < 0 || index >= static_cast<int>(g_pdf.pageRects.size())) return;
+    RECT rc{};
+    GetClientRect(pdfWnd, &rc);
+    int viewW = std::max(0, static_cast<int>(rc.right - rc.left));
+    int viewH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+    if (PdfSinglePageModeActive()) {
+        g_pdf.singlePageIndex = index;
+        g_pdf.scrollX = 0.0;
+        g_pdf.scrollY = 0.0;
+        UpdatePageLayout(pdfWnd);
+        g_scrollVelocity = 0.0;
+        KillTimer(pdfWnd, kScrollTimerId);
+        UpdatePdfVirtualScrollCaches(pdfWnd);
+        InvalidateRect(pdfWnd, nullptr, FALSE);
+        return;
+    }
+    PdfFlowMode mode = CurrentFlowMode();
+    const bool vertical = FlowIsVertical(mode);
+    const bool forwardPositive = FlowPrimaryDirPositive(mode);
+    const auto& rect = g_pdf.pageRects[static_cast<size_t>(index)];
+    if (vertical) {
+        g_pdf.scrollY = forwardPositive ? rect.top : (rect.bottom - viewH);
+    } else {
+        g_pdf.scrollX = forwardPositive ? rect.left : (rect.right - viewW);
+    }
+    g_scrollVelocity = 0.0;
+    KillTimer(pdfWnd, kScrollTimerId);
+    ClampPdfScroll(viewH, viewW);
+    InvalidateRect(pdfWnd, nullptr, FALSE);
+}
+
+void JumpToPdfPoint(HWND pdfWnd, int pageIndex, double xPt, double yPt) {
+    if (g_pdf.pages.empty()) return;
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return;
+    MarkPdfVirtualViewportChange();
+    if (PdfSinglePageModeActive()) {
+        JumpToPage(pdfWnd, pageIndex);
+        return;
+    }
+    RECT rc{};
+    GetClientRect(pdfWnd, &rc);
+    int viewW = rc.right - rc.left;
+    int viewH = rc.bottom - rc.top;
+    const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    PdfFlowMode mode = CurrentFlowMode();
+    double padX = FlowCrossPaddingX(mode);
+    double padY = FlowCrossPaddingY(mode);
+    const auto& rect = g_pdf.pageRects[static_cast<size_t>(pageIndex)];
+    double localX = xPt * kDpi / 72.0 * g_pdf.scale;
+    double localY = (page.heightPt - yPt) * kDpi / 72.0 * g_pdf.scale;
+    double docX = rect.left + localX;
+    double docY = rect.top + localY;
+    g_pdf.scrollX = docX + padX - viewW * 0.5;
+    g_pdf.scrollY = docY + padY - viewH * 0.5;
+    ClampPdfScroll(viewH, viewW);
+    g_scrollVelocity = 0.0;
+    InvalidateRect(pdfWnd, nullptr, FALSE);
+}
+
+void CommitActiveTextEditing(bool commit) {
+    if (g_pdf.editingText) {
+        CommitTextEditing(g_hPdfView, commit);
+    }
+}
+

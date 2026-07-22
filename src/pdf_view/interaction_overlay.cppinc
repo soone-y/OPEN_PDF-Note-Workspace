@@ -1,0 +1,3269 @@
+// file: pdf_view/interaction_overlay.cppinc
+// NOTE: Included by `src/pdf_view/navigation.cppinc` for hit testing, selection, editing, and annotation overlays.
+
+static int FindNearestCharIndex(const PageCache& page, double xPt, double yPt);
+static bool PdfPtToClientPoint(int pageIndex, double xPt, double yPt, POINT& out);
+
+static POINT ApplyPdfPointerOffset(POINT pt) {
+    pt.x += std::clamp(g_config.pointerOffsetX, -20, 20);
+    pt.y += std::clamp(g_config.pointerOffsetY, -20, 20);
+    return pt;
+}
+
+static bool HitTestPagePoint(const POINT& pt, int& pageIndex, double& pdfX, double& pdfY, double& pageTopOut) {
+    if (g_pdf.pages.empty()) return false;
+    POINT adjusted = ApplyPdfPointerOffset(pt);
+    double docX = ClientToDocX(static_cast<double>(adjusted.x));
+    double docY = ClientToDocY(static_cast<double>(adjusted.y));
+    int found = -1;
+    double bestDist = std::numeric_limits<double>::max();
+    double bestLocalX = 0.0;
+    double bestLocalY = 0.0;
+    for (size_t i = 0; i < g_pdf.pages.size(); ++i) {
+        const auto& page = g_pdf.pages[i];
+        const auto& rect = g_pdf.pageRects[i];
+        double clampedX = std::clamp(docX, rect.left, rect.right);
+        double clampedY = std::clamp(docY, rect.top, rect.bottom);
+        double dx = docX - clampedX;
+        double dy = docY - clampedY;
+        double dist = dx * dx + dy * dy;
+        if (dist < bestDist) {
+            bestDist = dist;
+            found = static_cast<int>(i);
+            bestLocalX = std::clamp(clampedX - rect.left, 0.0, static_cast<double>(page.w));
+            bestLocalY = std::clamp(clampedY - rect.top, 0.0, static_cast<double>(page.h));
+        }
+    }
+    if (found < 0) return false;
+    const auto& page = g_pdf.pages[static_cast<size_t>(found)];
+    pageIndex = found;
+    pageTopOut = PageClientTop(found);
+    pdfX = (bestLocalX / g_pdf.scale) * 72.0 / kDpi;
+    pdfY = page.heightPt - (bestLocalY / g_pdf.scale) * 72.0 / kDpi;
+    return true;
+}
+
+static bool ClientToPdfOnPage(int pageIndex, const POINT& pt, double& pdfX, double& pdfY) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
+    const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    const auto& rect = g_pdf.pageRects[static_cast<size_t>(pageIndex)];
+    double docX = ClientToDocX(static_cast<double>(pt.x));
+    double docY = ClientToDocY(static_cast<double>(pt.y));
+    double localX = docX - rect.left;
+    double localY = docY - rect.top;
+    if (localX < 0 || localX > page.w || localY < 0 || localY > page.h) return false;
+    pdfX = (localX / g_pdf.scale) * 72.0 / kDpi;
+    pdfY = page.heightPt - (localY / g_pdf.scale) * 72.0 / kDpi;
+    return true;
+}
+
+static bool EnsurePdfPageCharBoxes(int pageIndex) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
+    auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    if (!page.charBoxes.empty()) return true;
+    return LoadPdfPageCharBoxes(pageIndex, page.charBoxes) && !page.charBoxes.empty();
+}
+
+static bool EnsurePdfPageReadableGlyphs(int pageIndex) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
+    auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    if (!page.readableGlyphs.empty()) return true;
+    return LoadPdfPageReadableGlyphs(pageIndex, page.readableGlyphs) && !page.readableGlyphs.empty();
+}
+
+static bool EnsurePdfPageReadablePaths(int pageIndex) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
+    auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    if (!page.readablePaths.empty()) return true;
+    return LoadPdfPageReadablePaths(pageIndex, page.readablePaths) && !page.readablePaths.empty();
+}
+
+static std::wstring ReadableOverlayFontName(unsigned int codePoint) {
+    if ((codePoint >= 0x1D400u && codePoint <= 0x1D7FFu) ||
+        (codePoint >= 0x2200u && codePoint <= 0x22FFu) ||
+        (codePoint >= 0x27C0u && codePoint <= 0x27EFu) ||
+        (codePoint >= 0x2980u && codePoint <= 0x29FFu) ||
+        (codePoint >= 0x2A00u && codePoint <= 0x2AFFu)) {
+        return L"Cambria Math";
+    }
+    return g_textFontName.empty() ? GetDefaultFontFaceName() : g_textFontName;
+}
+
+static bool ReadableGlyphHasVisibleInk(const PageCache& page, const PageCache::ReadableGlyph& glyph,
+                                       COLORREF bg) {
+    RECT r = PdfRectToPagePixelRect(page, glyph.left, glyph.bottom, glyph.right, glyph.top, g_pdf.scale);
+    return PagePixelRectHasVisibleInk(page, r, bg, 42, 1.55, 18);
+}
+
+static bool SampleReadableGlyphBackground(const PageCache& page, const PageCache::ReadableGlyph& glyph,
+                                          COLORREF& out) {
+    RECT r = PdfRectToPagePixelRect(page, glyph.left, glyph.bottom, glyph.right, glyph.top, g_pdf.scale);
+    if (r.left >= r.right || r.top >= r.bottom) return false;
+    const int pad = std::max(2, static_cast<int>(std::lround(2.0 * g_pdf.scale)));
+    return AveragePagePixelBorderColor(page, r, pad, out);
+}
+
+static bool SampleReadablePathBackground(const PageCache& page, const PageCache::ReadablePath& path,
+                                         COLORREF& out) {
+    RECT r = PdfRectToPagePixelRect(page, path.left, path.bottom, path.right, path.top, g_pdf.scale);
+    if (r.left > r.right || r.top > r.bottom) return false;
+    const int pad = std::max(3, static_cast<int>(std::lround(3.0 * g_pdf.scale)));
+    return AveragePagePixelBorderColor(page, r, pad, out);
+}
+
+static bool ReadablePathHasVisibleInk(const PageCache& page, const PageCache::ReadablePath& path,
+                                      COLORREF bg) {
+    const double pxPerPt = kDpi / 72.0 * g_pdf.scale;
+    for (const auto& seg : path.segments) {
+        double x1 = seg.x1 * pxPerPt;
+        double y1 = (page.heightPt - seg.y1) * pxPerPt;
+        double x2 = seg.x2 * pxPerPt;
+        double y2 = (page.heightPt - seg.y2) * pxPerPt;
+        double dx = x2 - x1;
+        double dy = y2 - y1;
+        int steps = std::max(1, static_cast<int>(std::ceil(std::hypot(dx, dy) / 3.0)));
+        steps = std::min(steps, 96);
+        for (int i = 0; i <= steps; ++i) {
+            double t = static_cast<double>(i) / static_cast<double>(steps);
+            int x = std::clamp(static_cast<int>(std::lround(x1 + dx * t)), 0, std::max(0, page.w - 1));
+            int y = std::clamp(static_cast<int>(std::lround(y1 + dy * t)), 0, std::max(0, page.h - 1));
+            COLORREF c{};
+            if (!SamplePagePixelColor(page, x, y, c)) continue;
+            if (ColorChannelDistance(c, bg) >= 36 || ContrastRatio(c, bg) >= 1.45) return true;
+        }
+    }
+    return false;
+}
+
+static void DrawReadablePathOverlayForPage(HDC hdc, int pageIndex, double pageLeft, double pageTop) {
+    if (!EnsurePdfPageReadablePaths(pageIndex)) return;
+    const auto& pageWithPaths = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    if (pageWithPaths.pixels.empty()) return;
+    const double pxPerPt = kDpi / 72.0 * g_pdf.scale;
+    for (const auto& path : pageWithPaths.readablePaths) {
+        if (path.segments.empty()) continue;
+        COLORREF bg{};
+        if (!SampleReadablePathBackground(pageWithPaths, path, bg)) continue;
+        if (ReadablePathHasVisibleInk(pageWithPaths, path, bg)) continue;
+        COLORREF color = ReadableOverlayColorForBackground(bg);
+        int penW = std::max(1, static_cast<int>(std::lround(std::max(1.0f, path.widthPt) * pxPerPt)));
+        HPEN pen = CreatePen(PS_SOLID, penW, color);
+        if (!pen) continue;
+        HGDIOBJ oldPen = SelectObject(hdc, pen);
+        for (const auto& seg : path.segments) {
+            int x1 = static_cast<int>(std::lround(pageLeft + seg.x1 * pxPerPt));
+            int y1 = static_cast<int>(std::lround(pageTop + (pageWithPaths.heightPt - seg.y1) * pxPerPt));
+            int x2 = static_cast<int>(std::lround(pageLeft + seg.x2 * pxPerPt));
+            int y2 = static_cast<int>(std::lround(pageTop + (pageWithPaths.heightPt - seg.y2) * pxPerPt));
+            MoveToEx(hdc, x1, y1, nullptr);
+            LineTo(hdc, x2, y2);
+        }
+        if (oldPen) SelectObject(hdc, oldPen);
+        DeleteObject(pen);
+    }
+}
+
+static void DrawReadableTextOverlay(HDC hdc, const RECT& client) {
+    if (!g_readableTextOverlay || !hdc || g_pdf.kind == DocKind::None) return;
+    std::map<std::pair<int, std::wstring>, HFONT> fonts;
+    int oldBk = SetBkMode(hdc, TRANSPARENT);
+    for (int pageIndex = 0; pageIndex < static_cast<int>(g_pdf.pages.size()); ++pageIndex) {
+        const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+        const double pageLeft = PageClientLeft(pageIndex);
+        const double pageTop = PageClientTop(pageIndex);
+        const double pageRight = pageLeft + page.w;
+        const double pageBottom = pageTop + page.h;
+        if (pageRight < client.left || pageLeft > client.right ||
+            pageBottom < client.top || pageTop > client.bottom) {
+            continue;
+        }
+        const bool haveGlyphs = EnsurePdfPageReadableGlyphs(pageIndex);
+        const bool havePaths = EnsurePdfPageReadablePaths(pageIndex);
+        const auto& pageWithGlyphs = g_pdf.pages[static_cast<size_t>(pageIndex)];
+        if (pageWithGlyphs.pixels.empty() || (!haveGlyphs && !havePaths)) continue;
+
+        int pageSaved = SaveDC(hdc);
+        IntersectClipRect(hdc,
+                          static_cast<int>(std::round(pageLeft)),
+                          static_cast<int>(std::round(pageTop)),
+                          static_cast<int>(std::round(pageRight)),
+                          static_cast<int>(std::round(pageBottom)));
+
+        DrawReadablePathOverlayForPage(hdc, pageIndex, pageLeft, pageTop);
+
+        for (const auto& glyph : pageWithGlyphs.readableGlyphs) {
+            if (glyph.text.empty()) continue;
+            COLORREF bg{};
+            if (!SampleReadableGlyphBackground(pageWithGlyphs, glyph, bg)) continue;
+            if (ReadableGlyphHasVisibleInk(pageWithGlyphs, glyph, bg)) continue;
+
+            const double pxPerPt = kDpi / 72.0 * g_pdf.scale;
+            int fontPx = glyph.fontPt > 0.0f
+                ? static_cast<int>(std::lround(glyph.fontPt * kDpi / 72.0 * g_pdf.scale))
+                : static_cast<int>(std::lround((glyph.top - glyph.bottom) * pxPerPt));
+            fontPx = std::clamp(fontPx, 5, 240);
+            std::wstring fontName = ReadableOverlayFontName(glyph.codePoint);
+            HFONT font = nullptr;
+            auto fontKey = std::make_pair(fontPx, fontName);
+            auto it = fonts.find(fontKey);
+            if (it == fonts.end()) {
+                LOGFONTW lf{};
+                lf.lfHeight = -fontPx;
+                lf.lfQuality = ANTIALIASED_QUALITY;
+                lf.lfCharSet = DEFAULT_CHARSET;
+                if (!fontName.empty()) {
+                    wcsncpy_s(lf.lfFaceName, fontName.c_str(), LF_FACESIZE - 1);
+                }
+                font = CreateFontIndirectW(&lf);
+                fonts.emplace(std::move(fontKey), font);
+            } else {
+                font = it->second;
+            }
+            HGDIOBJ oldFont = font ? SelectObject(hdc, font) : nullptr;
+            TEXTMETRICW tm{};
+            GetTextMetricsW(hdc, &tm);
+            const int x = static_cast<int>(std::lround(
+                pageLeft + (glyph.haveOrigin ? glyph.originX : glyph.left) * pxPerPt));
+            const int yTop = glyph.haveOrigin
+                ? static_cast<int>(std::lround(pageTop + (pageWithGlyphs.heightPt - glyph.originY) * pxPerPt - tm.tmAscent))
+                : static_cast<int>(std::lround(pageTop + (pageWithGlyphs.heightPt - glyph.top) * pxPerPt));
+            COLORREF drawColor = ReadableOverlayColorForBackground(bg);
+            COLORREF oldColor = SetTextColor(hdc, drawColor);
+            TextOutW(hdc, x, yTop, glyph.text.c_str(), static_cast<int>(glyph.text.size()));
+            SetTextColor(hdc, oldColor);
+            if (oldFont) SelectObject(hdc, oldFont);
+        }
+        if (pageSaved != 0) RestoreDC(hdc, pageSaved);
+    }
+    SetBkMode(hdc, oldBk);
+    for (auto& kv : fonts) {
+        if (kv.second) DeleteObject(kv.second);
+    }
+}
+
+static void DrawPdfSearchResultMarker(HDC hdc, const RECT& client) {
+    if (!hdc || g_pdfSearchResultMarker.kind == PdfSearchResultMarker::Kind::None) return;
+    const int pageIndex = g_pdfSearchResultMarker.pageIndex;
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return;
+    const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    const double pageLeft = PageClientLeft(pageIndex);
+    const double pageTop = PageClientTop(pageIndex);
+    const double pageRight = pageLeft + page.w;
+    const double pageBottom = pageTop + page.h;
+    if (pageRight < client.left || pageLeft > client.right ||
+        pageBottom < client.top || pageTop > client.bottom) {
+        return;
+    }
+
+    const COLORREF color = RGB(255, 186, 0);
+    if (g_pdfSearchResultMarker.kind == PdfSearchResultMarker::Kind::Text) {
+        if (!EnsurePdfPageCharBoxes(pageIndex)) return;
+        const size_t begin = std::min(g_pdfSearchResultMarker.charStart, page.charBoxes.size());
+        const size_t end = std::min(g_pdfSearchResultMarker.charEnd, page.charBoxes.size());
+        if (end <= begin) return;
+        RECT bounds{
+            std::numeric_limits<LONG>::max(),
+            std::numeric_limits<LONG>::max(),
+            std::numeric_limits<LONG>::min(),
+            std::numeric_limits<LONG>::min()
+        };
+        for (size_t i = begin; i < end; ++i) {
+            const auto& cb = page.charBoxes[i];
+            RECT r{};
+            if (!PtRectToClientRect(pageIndex, cb.left, cb.top, cb.right, cb.bottom, r)) continue;
+            if (r.right <= r.left || r.bottom <= r.top) continue;
+            InflateRect(&r, 1, 1);
+            FillRectAlpha(hdc, r, color, 72);
+            bounds.left = std::min(bounds.left, r.left);
+            bounds.top = std::min(bounds.top, r.top);
+            bounds.right = std::max(bounds.right, r.right);
+            bounds.bottom = std::max(bounds.bottom, r.bottom);
+        }
+        if (bounds.left < bounds.right && bounds.top < bounds.bottom) {
+            InflateRect(&bounds, 4, 4);
+            HPEN pen = CreatePen(PS_SOLID, 3, color);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+            RoundRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, 8, 8);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(pen);
+        }
+        return;
+    }
+
+    POINT pt{};
+    if (!PdfPtToClientPoint(pageIndex, g_pdfSearchResultMarker.xPt, g_pdfSearchResultMarker.yPt, pt)) return;
+    const int radius = std::max(10, static_cast<int>(std::lround(16.0 * std::max(0.75, g_pdf.scale))));
+    RECT r{pt.x - radius, pt.y - radius, pt.x + radius, pt.y + radius};
+    FillEllipseAlphaPx(hdc, r, color, 64);
+    HPEN pen = CreatePen(PS_SOLID, 3, color);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+    Ellipse(hdc, r.left, r.top, r.right, r.bottom);
+    MoveToEx(hdc, pt.x - radius - 5, pt.y, nullptr);
+    LineTo(hdc, pt.x + radius + 6, pt.y);
+    MoveToEx(hdc, pt.x, pt.y - radius - 5, nullptr);
+    LineTo(hdc, pt.x, pt.y + radius + 6);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+static bool TextSelectionRangeForPage(int pageIndex, int startPage, int endPage,
+                                      int anchor, int focus, int maxIndex,
+                                      int& outStart, int& outEnd) {
+    if (pageIndex < 0 || maxIndex < 0 || anchor < 0 || focus < 0) return false;
+    if (startPage == endPage) {
+        outStart = std::clamp(std::min(anchor, focus), 0, maxIndex);
+        outEnd = std::clamp(std::max(anchor, focus), 0, maxIndex);
+        return outStart <= outEnd;
+    }
+
+    const bool forward = startPage < endPage;
+    if (pageIndex == startPage) {
+        outStart = forward ? std::clamp(anchor, 0, maxIndex) : 0;
+        outEnd = forward ? maxIndex : std::clamp(anchor, 0, maxIndex);
+    } else if (pageIndex == endPage) {
+        outStart = forward ? 0 : std::clamp(focus, 0, maxIndex);
+        outEnd = forward ? std::clamp(focus, 0, maxIndex) : maxIndex;
+    } else {
+        const int minPage = std::min(startPage, endPage);
+        const int maxPage = std::max(startPage, endPage);
+        if (pageIndex < minPage || pageIndex > maxPage) return false;
+        outStart = 0;
+        outEnd = maxIndex;
+    }
+    return outStart <= outEnd;
+}
+
+static bool UpdatePdfTextSelectionFocusAtClientPoint(const POINT& pt) {
+    if (!g_pdf.selectionByText) return false;
+    int hitPage = -1;
+    double pdfX = 0.0, pdfY = 0.0, dummyTop = 0.0;
+    if (!HitTestPagePoint(pt, hitPage, pdfX, pdfY, dummyTop)) return false;
+    if (!EnsurePdfPageCharBoxes(hitPage)) return false;
+
+    int hitChar = FindNearestCharIndex(g_pdf.pages[static_cast<size_t>(hitPage)], pdfX, pdfY);
+    if (hitChar < 0) return false;
+    g_pdf.selectionEndPage = hitPage;
+    g_pdf.selCharFocus = hitChar;
+    return true;
+}
+
+static bool PtRectToClientRect(int pageIndex, double x1, double y1, double x2, double y2, RECT& out) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
+    double docX1 = PdfPtToDocX(pageIndex, x1);
+    double docX2 = PdfPtToDocX(pageIndex, x2);
+    double docY1 = PdfPtToDocY(pageIndex, y1);
+    double docY2 = PdfPtToDocY(pageIndex, y2);
+    double cx1 = DocToClientX(docX1);
+    double cx2 = DocToClientX(docX2);
+    double cy1 = DocToClientY(docY1);
+    double cy2 = DocToClientY(docY2);
+    out.left = static_cast<LONG>(std::round(std::min(cx1, cx2)));
+    out.right = static_cast<LONG>(std::round(std::max(cx1, cx2)));
+    out.top = static_cast<LONG>(std::round(std::min(cy1, cy2)));
+    out.bottom = static_cast<LONG>(std::round(std::max(cy1, cy2)));
+    return true;
+}
+
+static double DistPointToSegment2(double px, double py, double x1, double y1, double x2, double y2) {
+    double vx = x2 - x1;
+    double vy = y2 - y1;
+    double wx = px - x1;
+    double wy = py - y1;
+    double c1 = vx * wx + vy * wy;
+    if (c1 <= 0.0) return wx * wx + wy * wy;
+    double c2 = vx * vx + vy * vy;
+    if (c2 <= c1) {
+        double dx = px - x2;
+        double dy = py - y2;
+        return dx * dx + dy * dy;
+    }
+    double b = c1 / c2;
+    double bx = x1 + b * vx;
+    double by = y1 + b * vy;
+    double dx = px - bx;
+    double dy = py - by;
+    return dx * dx + dy * dy;
+}
+
+static std::vector<POINT> BuildWavePointsPx(const POINT& p1, const POINT& p2, double amplitude, double wavelength) {
+    std::vector<POINT> pts;
+    double dx = static_cast<double>(p2.x - p1.x);
+    double dy = static_cast<double>(p2.y - p1.y);
+    double len = std::hypot(dx, dy);
+    if (len < 1e-3) {
+        pts.push_back(p1);
+        pts.push_back(p2);
+        return pts;
+    }
+    double ux = dx / len;
+    double uy = dy / len;
+    double nx = -uy;
+    double ny = ux;
+    double wl = std::max(4.0, wavelength);
+    double amp = std::max(1.0, amplitude);
+    int steps = static_cast<int>(std::max(2.0, std::ceil(len / (wl / 4.0))));
+    pts.reserve(static_cast<size_t>(steps) + 1);
+    constexpr double kPi = 3.14159265358979323846;
+    for (int i = 0; i <= steps; ++i) {
+        double t = len * static_cast<double>(i) / static_cast<double>(steps);
+        double phase = (2.0 * kPi * t) / wl;
+        double offset = std::sin(phase) * amp;
+        double x = static_cast<double>(p1.x) + ux * t + nx * offset;
+        double y = static_cast<double>(p1.y) + uy * t + ny * offset;
+        pts.push_back(POINT{ static_cast<LONG>(std::lround(x)), static_cast<LONG>(std::lround(y)) });
+    }
+    return pts;
+}
+
+static double ComputeArrowHeadLengthPx(double lineLenPx, int penW) {
+    constexpr double kArrowHeadLengthRatio = 0.35;
+    double maxHeadLenPx = std::max(8.0, static_cast<double>(penW) * 3.0);
+    return std::min(lineLenPx * kArrowHeadLengthRatio, maxHeadLenPx);
+}
+
+static void DrawArrowLinePx(HDC hdc, const POINT& p1, const POINT& p2, int penW, COLORREF color, BYTE alpha,
+                            ArrowHead arrowHead) {
+    double dx = static_cast<double>(p2.x - p1.x);
+    double dy = static_cast<double>(p2.y - p1.y);
+    double len = std::hypot(dx, dy);
+    if (len < 1e-3) return;
+    double ux = dx / len;
+    double uy = dy / len;
+    double headLen = ComputeArrowHeadLengthPx(len, penW);
+    double headW = headLen * 0.5;
+    double hx1 = static_cast<double>(p2.x) - ux * headLen + (-uy) * headW;
+    double hy1 = static_cast<double>(p2.y) - uy * headLen + (ux) * headW;
+    double hx2 = static_cast<double>(p2.x) - ux * headLen - (-uy) * headW;
+    double hy2 = static_cast<double>(p2.y) - uy * headLen - (ux) * headW;
+
+    POINT ph1{ static_cast<LONG>(std::lround(hx1)), static_cast<LONG>(std::lround(hy1)) };
+    POINT ph2{ static_cast<LONG>(std::lround(hx2)), static_cast<LONG>(std::lround(hy2)) };
+
+    DrawPolylineAlphaPx(hdc, { p1, p2 }, penW, color, alpha);
+    DrawPolylineAlphaPx(hdc, { ph1, p2 }, penW, color, alpha);
+    DrawPolylineAlphaPx(hdc, { ph2, p2 }, penW, color, alpha);
+    if (arrowHead == ArrowHead::Double) {
+        POINT start1{ static_cast<LONG>(std::lround(static_cast<double>(p1.x) + ux * headLen + (-uy) * headW)),
+                      static_cast<LONG>(std::lround(static_cast<double>(p1.y) + uy * headLen + (ux) * headW)) };
+        POINT start2{ static_cast<LONG>(std::lround(static_cast<double>(p1.x) + ux * headLen - (-uy) * headW)),
+                      static_cast<LONG>(std::lround(static_cast<double>(p1.y) + uy * headLen - (ux) * headW)) };
+        DrawPolylineAlphaPx(hdc, { start1, p1 }, penW, color, alpha);
+        DrawPolylineAlphaPx(hdc, { start2, p1 }, penW, color, alpha);
+    }
+}
+
+
+static bool HasDashPattern(const std::vector<double>& dash) {
+    return !dash.empty();
+}
+
+static void DrawDashedLinePx(HDC hdc,
+                             const POINT& p1,
+                             const POINT& p2,
+                             int penW,
+                             COLORREF color,
+                             BYTE alpha,
+                             const std::vector<double>& dashPt,
+                             double ptToPx) {
+    if (!HasDashPattern(dashPt) || ptToPx <= 0.0) {
+        DrawPolylineAlphaPx(hdc, { p1, p2 }, penW, color, alpha);
+        return;
+    }
+    double dx = static_cast<double>(p2.x - p1.x);
+    double dy = static_cast<double>(p2.y - p1.y);
+    double len = std::hypot(dx, dy);
+    if (len < 1e-3) return;
+    std::vector<double> pattern;
+    pattern.reserve(dashPt.size() == 1 ? 2 : dashPt.size());
+    for (double partPt : dashPt) {
+        if (std::isfinite(partPt) && partPt > 0.0) {
+            pattern.push_back(std::max(1.0, partPt * ptToPx));
+        }
+    }
+    if (pattern.empty()) {
+        DrawPolylineAlphaPx(hdc, { p1, p2 }, penW, color, alpha);
+        return;
+    }
+    if (pattern.size() == 1) pattern.push_back(pattern.front());
+    double ux = dx / len;
+    double uy = dy / len;
+    double pos = 0.0;
+    size_t pat = 0;
+    bool draw = true;
+    int guard = 0;
+    while (pos < len - 1e-3 && guard++ < 4096) {
+        double step = pattern[pat % pattern.size()];
+        double next = std::min(len, pos + step);
+        if (draw && next > pos + 0.25) {
+            POINT a{ static_cast<LONG>(std::lround(static_cast<double>(p1.x) + ux * pos)),
+                     static_cast<LONG>(std::lround(static_cast<double>(p1.y) + uy * pos)) };
+            POINT b{ static_cast<LONG>(std::lround(static_cast<double>(p1.x) + ux * next)),
+                     static_cast<LONG>(std::lround(static_cast<double>(p1.y) + uy * next)) };
+            DrawPolylineAlphaPx(hdc, { a, b }, penW, color, alpha);
+        }
+        pos = next;
+        ++pat;
+        draw = !draw;
+    }
+}
+
+static void DrawDashedArrowLinePx(HDC hdc,
+                                  const POINT& p1,
+                                  const POINT& p2,
+                                  int penW,
+                                  COLORREF color,
+                                  BYTE alpha,
+                                  const std::vector<double>& dashPt,
+                                  double ptToPx,
+                                  ArrowHead arrowHead) {
+    double dx = static_cast<double>(p2.x - p1.x);
+    double dy = static_cast<double>(p2.y - p1.y);
+    double len = std::hypot(dx, dy);
+    if (len < 1e-3) return;
+    double ux = dx / len;
+    double uy = dy / len;
+    double headLen = ComputeArrowHeadLengthPx(len, penW);
+    double headW = headLen * 0.5;
+    double hx1 = static_cast<double>(p2.x) - ux * headLen + (-uy) * headW;
+    double hy1 = static_cast<double>(p2.y) - uy * headLen + (ux) * headW;
+    double hx2 = static_cast<double>(p2.x) - ux * headLen - (-uy) * headW;
+    double hy2 = static_cast<double>(p2.y) - uy * headLen - (ux) * headW;
+    POINT ph1{ static_cast<LONG>(std::lround(hx1)), static_cast<LONG>(std::lround(hy1)) };
+    POINT ph2{ static_cast<LONG>(std::lround(hx2)), static_cast<LONG>(std::lround(hy2)) };
+    DrawDashedLinePx(hdc, p1, p2, penW, color, alpha, dashPt, ptToPx);
+    DrawPolylineAlphaPx(hdc, { ph1, p2 }, penW, color, alpha);
+    DrawPolylineAlphaPx(hdc, { ph2, p2 }, penW, color, alpha);
+    if (arrowHead == ArrowHead::Double) {
+        POINT start1{ static_cast<LONG>(std::lround(static_cast<double>(p1.x) + ux * headLen + (-uy) * headW)),
+                      static_cast<LONG>(std::lround(static_cast<double>(p1.y) + uy * headLen + (ux) * headW)) };
+        POINT start2{ static_cast<LONG>(std::lround(static_cast<double>(p1.x) + ux * headLen - (-uy) * headW)),
+                      static_cast<LONG>(std::lround(static_cast<double>(p1.y) + uy * headLen - (ux) * headW)) };
+        DrawPolylineAlphaPx(hdc, { start1, p1 }, penW, color, alpha);
+        DrawPolylineAlphaPx(hdc, { start2, p1 }, penW, color, alpha);
+    }
+}
+static void DrawWaveLinePx(HDC hdc, const POINT& p1, const POINT& p2, int penW, COLORREF color, BYTE alpha) {
+    double amplitude = std::max(1.0, static_cast<double>(penW) * 0.45);
+    double wavelength = std::max(8.0, static_cast<double>(penW) * 6.0);
+    auto pts = BuildWavePointsPx(p1, p2, amplitude, wavelength);
+    if (pts.size() < 2) return;
+    DrawPolylineAlphaPx(hdc, pts, penW, color, alpha);
+}
+
+static void DrawDashedWaveLinePx(HDC hdc,
+                                 const POINT& p1,
+                                 const POINT& p2,
+                                 int penW,
+                                 COLORREF color,
+                                 BYTE alpha,
+                                 const std::vector<double>& dashPt,
+                                 double ptToPx) {
+    double amplitude = std::max(1.0, static_cast<double>(penW) * 0.45);
+    double wavelength = std::max(8.0, static_cast<double>(penW) * 6.0);
+    auto pts = BuildWavePointsPx(p1, p2, amplitude, wavelength);
+    if (pts.size() < 2) return;
+    if (!HasDashPattern(dashPt) || ptToPx <= 0.0) {
+        DrawPolylineAlphaPx(hdc, pts, penW, color, alpha);
+        return;
+    }
+    std::vector<double> pattern;
+    pattern.reserve(dashPt.size() == 1 ? 2 : dashPt.size());
+    for (double partPt : dashPt) {
+        if (std::isfinite(partPt) && partPt > 0.0) {
+            pattern.push_back(std::max(1.0, partPt * ptToPx));
+        }
+    }
+    if (pattern.empty()) {
+        DrawPolylineAlphaPx(hdc, pts, penW, color, alpha);
+        return;
+    }
+    if (pattern.size() == 1) pattern.push_back(pattern.front());
+
+    size_t pat = 0;
+    bool draw = true;
+    double remaining = pattern[pat % pattern.size()];
+    for (size_t i = 1; i < pts.size(); ++i) {
+        POINT a = pts[i - 1];
+        POINT b = pts[i];
+        double dx = static_cast<double>(b.x - a.x);
+        double dy = static_cast<double>(b.y - a.y);
+        double len = std::hypot(dx, dy);
+        if (len < 1e-3) continue;
+        double ux = dx / len;
+        double uy = dy / len;
+        double pos = 0.0;
+        while (pos < len - 1e-3) {
+            double step = std::min(remaining, len - pos);
+            if (draw && step > 0.25) {
+                POINT s{ static_cast<LONG>(std::lround(static_cast<double>(a.x) + ux * pos)),
+                         static_cast<LONG>(std::lround(static_cast<double>(a.y) + uy * pos)) };
+                POINT e{ static_cast<LONG>(std::lround(static_cast<double>(a.x) + ux * (pos + step))),
+                         static_cast<LONG>(std::lround(static_cast<double>(a.y) + uy * (pos + step))) };
+                DrawPolylineAlphaPx(hdc, { s, e }, penW, color, alpha);
+            }
+            pos += step;
+            remaining -= step;
+            if (remaining <= 1e-3) {
+                ++pat;
+                draw = !draw;
+                remaining = pattern[pat % pattern.size()];
+            }
+        }
+    }
+}
+
+static void DrawMagnifierLens(HDC hdc, const RECT& client) {
+    if (g_toolMode != ToolMode::Magnifier || !g_pdf.magnifierActive) return;
+    POINT center = g_pdf.magnifierPos;
+    if (center.x < client.left || center.x > client.right ||
+        center.y < client.top || center.y > client.bottom) {
+        return;
+    }
+    constexpr int kLensRadius = 60;
+    constexpr double kLensZoom = 2.0;
+    int lensW = kLensRadius * 2;
+    int lensH = kLensRadius * 2;
+    int srcW = std::max(1, static_cast<int>(std::lround(lensW / kLensZoom)));
+    int srcH = std::max(1, static_cast<int>(std::lround(lensH / kLensZoom)));
+    int srcX = center.x - srcW / 2;
+    int srcY = center.y - srcH / 2;
+    RECT lens{ center.x - kLensRadius, center.y - kLensRadius,
+               center.x + kLensRadius, center.y + kLensRadius };
+
+    HDC srcDC = CreateCompatibleDC(hdc);
+    HBITMAP srcBmp = CreateCompatibleBitmap(hdc, srcW, srcH);
+    HGDIOBJ oldBmp = SelectObject(srcDC, srcBmp);
+    BitBlt(srcDC, 0, 0, srcW, srcH, hdc, srcX, srcY, SRCCOPY);
+
+    int saved = SaveDC(hdc);
+    bool useCircle = (g_magnifierShape == MagnifierShape::Circle);
+    HRGN clip = useCircle
+        ? CreateEllipticRgn(lens.left, lens.top, lens.right, lens.bottom)
+        : CreateRectRgn(lens.left, lens.top, lens.right, lens.bottom);
+    SelectClipRgn(hdc, clip);
+    SetStretchBltMode(hdc, HALFTONE);
+    StretchBlt(hdc, lens.left, lens.top, lensW, lensH, srcDC, 0, 0, srcW, srcH, SRCCOPY);
+    RestoreDC(hdc, saved);
+
+    HPEN pen = CreatePen(PS_SOLID, 2, g_theme.accent);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+    if (useCircle) {
+        Ellipse(hdc, lens.left, lens.top, lens.right, lens.bottom);
+    } else {
+        Rectangle(hdc, lens.left, lens.top, lens.right, lens.bottom);
+    }
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+    DeleteObject(clip);
+
+    SelectObject(srcDC, oldBmp);
+    DeleteObject(srcBmp);
+    DeleteDC(srcDC);
+}
+
+static bool PdfPtToClientPoint(int pageIndex, double xPt, double yPt, POINT& out) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
+    double docX = PdfPtToDocX(pageIndex, xPt);
+    double docY = PdfPtToDocY(pageIndex, yPt);
+    out.x = static_cast<LONG>(std::lround(DocToClientX(docX)));
+    out.y = static_cast<LONG>(std::lround(DocToClientY(docY)));
+    return true;
+}
+
+static bool HitTestEraserTargetAtPoint(const POINT& pt, int& outIndex, int& outPageIndex) {
+    int pageIndex = -1;
+    double px = 0.0, py = 0.0, pageTop = 0.0;
+    if (!HitTestPagePoint(pt, pageIndex, px, py, pageTop)) return false;
+    const double tolPt = std::clamp(g_eraserWidthPt, 1.0, 80.0);
+    const double tol2 = tolPt * tolPt;
+
+    for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
+        const Annotation& ann = g_annots[static_cast<size_t>(i)];
+        if (ann.pageIndex != pageIndex) continue;
+        bool hit = false;
+        switch (ann.type) {
+        case Annotation::Type::MarkerText:
+        case Annotation::Type::TextColor: {
+            if (!ann.quads.empty()) {
+                for (size_t qi = 0; qi + 7 < ann.quads.size() && !hit; qi += 8) {
+                    double minX = std::min(std::min(ann.quads[qi + 0], ann.quads[qi + 2]), std::min(ann.quads[qi + 4], ann.quads[qi + 6]));
+                    double maxX = std::max(std::max(ann.quads[qi + 0], ann.quads[qi + 2]), std::max(ann.quads[qi + 4], ann.quads[qi + 6]));
+                    double minY = std::min(std::min(ann.quads[qi + 1], ann.quads[qi + 3]), std::min(ann.quads[qi + 5], ann.quads[qi + 7]));
+                    double maxY = std::max(std::max(ann.quads[qi + 1], ann.quads[qi + 3]), std::max(ann.quads[qi + 5], ann.quads[qi + 7]));
+                    if (px >= minX - tolPt && px <= maxX + tolPt && py >= minY - tolPt && py <= maxY + tolPt) hit = true;
+                }
+            } else {
+                double minX = std::min(ann.x1, ann.x2);
+                double maxX = std::max(ann.x1, ann.x2);
+                double minY = std::min(ann.y1, ann.y2);
+                double maxY = std::max(ann.y1, ann.y2);
+                if (px >= minX - tolPt && px <= maxX + tolPt && py >= minY - tolPt && py <= maxY + tolPt) hit = true;
+            }
+            break;
+        }
+        case Annotation::Type::Line:
+        case Annotation::Type::Arrow:
+        case Annotation::Type::Wave: {
+            hit = DistPointToSegment2(px, py, ann.x1, ann.y1, ann.x2, ann.y2) <= tol2;
+            break;
+        }
+        case Annotation::Type::MarkerFree:
+        case Annotation::Type::Freehand: {
+            if (ann.path.size() >= 2) {
+                for (size_t pi = 0; pi + 1 < ann.path.size(); ++pi) {
+                    if (DistPointToSegment2(px, py, ann.path[pi].x, ann.path[pi].y, ann.path[pi + 1].x, ann.path[pi + 1].y) <= tol2) {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+        case Annotation::Type::TextBox: {
+            double minX = std::min(ann.x1, ann.x2);
+            double maxX = std::max(ann.x1, ann.x2);
+            double minY = std::min(ann.y1, ann.y2);
+            double maxY = std::max(ann.y1, ann.y2);
+            if (px >= minX && px <= maxX && py >= minY && py <= maxY) hit = true;
+            break;
+        }
+        case Annotation::Type::MathBox: {
+            double minX = std::min(ann.x1, ann.x2);
+            double maxX = std::max(ann.x1, ann.x2);
+            double minY = std::min(ann.y1, ann.y2);
+            double maxY = std::max(ann.y1, ann.y2);
+            if (px >= minX - tolPt && px <= maxX + tolPt && py >= minY - tolPt && py <= maxY + tolPt) hit = true;
+            break;
+        }
+        case Annotation::Type::Shape: {
+            double minX = std::min(ann.x1, ann.x2);
+            double maxX = std::max(ann.x1, ann.x2);
+            double minY = std::min(ann.y1, ann.y2);
+            double maxY = std::max(ann.y1, ann.y2);
+            if (px >= minX && px <= maxX && py >= minY && py <= maxY) hit = true;
+            break;
+        }
+        case Annotation::Type::LinkMarker: {
+            double radius = (ann.width > 0.0) ? ann.width : 6.0;
+            double dx = px - ann.x1;
+            double dy = py - ann.y1;
+            hit = (dx * dx + dy * dy) <= (radius * radius);
+            break;
+        }
+        default:
+            break;
+        }
+        if (hit) {
+            outIndex = i;
+            outPageIndex = pageIndex;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void DrawEraserHitVisualization(HDC hdc, const RECT& client) {
+    if (g_toolMode != ToolMode::Eraser) return;
+    if (!g_pdf.eraserCursorValid) return;
+
+    const double tolPt = std::clamp(g_eraserWidthPt, 1.0, 80.0);
+    const int tolPx = std::max(1, static_cast<int>(std::lround(tolPt * kDpi / 72.0 * g_pdf.scale)));
+
+    HPEN cursorPen = CreatePen(PS_SOLID, 2, RGB(240, 60, 60));
+    HGDIOBJ oldPen = SelectObject(hdc, cursorPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+
+    const POINT cur = g_pdf.eraserCursor;
+    if (cur.x >= client.left && cur.x <= client.right && cur.y >= client.top && cur.y <= client.bottom) {
+        Ellipse(hdc, cur.x - tolPx, cur.y - tolPx, cur.x + tolPx, cur.y + tolPx);
+        int c = std::max(2, tolPx / 3);
+        MoveToEx(hdc, cur.x - c, cur.y, nullptr);
+        LineTo(hdc, cur.x + c + 1, cur.y);
+        MoveToEx(hdc, cur.x, cur.y - c, nullptr);
+        LineTo(hdc, cur.x, cur.y + c + 1);
+    }
+
+    int idx = g_pdf.eraserHoverIndex;
+    if (idx >= 0 && idx < static_cast<int>(g_annots.size())) {
+        const Annotation& ann = g_annots[static_cast<size_t>(idx)];
+        if (ann.pageIndex >= 0 && ann.pageIndex < static_cast<int>(g_pdf.pages.size())) {
+            const COLORREF hitColor = RGB(240, 60, 60);
+            const int thick = std::max(2, tolPx * 2);
+
+            switch (ann.type) {
+            case Annotation::Type::MarkerText:
+            case Annotation::Type::TextColor: {
+                HPEN pen = CreatePen(PS_SOLID, 2, hitColor);
+                SelectObject(hdc, pen);
+                if (!ann.quads.empty()) {
+                    for (size_t qi = 0; qi + 7 < ann.quads.size(); qi += 8) {
+                        double minX = std::min(std::min(ann.quads[qi + 0], ann.quads[qi + 2]), std::min(ann.quads[qi + 4], ann.quads[qi + 6])) - tolPt;
+                        double maxX = std::max(std::max(ann.quads[qi + 0], ann.quads[qi + 2]), std::max(ann.quads[qi + 4], ann.quads[qi + 6])) + tolPt;
+                        double minY = std::min(std::min(ann.quads[qi + 1], ann.quads[qi + 3]), std::min(ann.quads[qi + 5], ann.quads[qi + 7])) - tolPt;
+                        double maxY = std::max(std::max(ann.quads[qi + 1], ann.quads[qi + 3]), std::max(ann.quads[qi + 5], ann.quads[qi + 7])) + tolPt;
+                        RECT r{};
+                        if (PtRectToClientRect(ann.pageIndex, minX, minY, maxX, maxY, r)) {
+                            Rectangle(hdc, r.left, r.top, r.right, r.bottom);
+                        }
+                    }
+                } else {
+                    RECT r{};
+                    double minX = std::min(ann.x1, ann.x2) - tolPt;
+                    double maxX = std::max(ann.x1, ann.x2) + tolPt;
+                    double minY = std::min(ann.y1, ann.y2) - tolPt;
+                    double maxY = std::max(ann.y1, ann.y2) + tolPt;
+                    if (PtRectToClientRect(ann.pageIndex, minX, minY, maxX, maxY, r)) {
+                        Rectangle(hdc, r.left, r.top, r.right, r.bottom);
+                    }
+                }
+                DeleteObject(pen);
+                break;
+            }
+            case Annotation::Type::TextBox: {
+                HPEN pen = CreatePen(PS_SOLID, 2, hitColor);
+                SelectObject(hdc, pen);
+                RECT r{};
+                if (PtRectToClientRect(ann.pageIndex, ann.x1, ann.y1, ann.x2, ann.y2, r)) {
+                    Rectangle(hdc, r.left, r.top, r.right, r.bottom);
+                }
+                DeleteObject(pen);
+                break;
+            }
+            case Annotation::Type::MathBox: {
+                HPEN pen = CreatePen(PS_SOLID, 2, hitColor);
+                SelectObject(hdc, pen);
+                RECT r{};
+                double minX = std::min(ann.x1, ann.x2) - tolPt;
+                double maxX = std::max(ann.x1, ann.x2) + tolPt;
+                double minY = std::min(ann.y1, ann.y2) - tolPt;
+                double maxY = std::max(ann.y1, ann.y2) + tolPt;
+                if (PtRectToClientRect(ann.pageIndex, minX, minY, maxX, maxY, r)) {
+                    Rectangle(hdc, r.left, r.top, r.right, r.bottom);
+                }
+                DeleteObject(pen);
+                break;
+            }
+            case Annotation::Type::Shape: {
+                HPEN pen = CreatePen(PS_SOLID, 2, hitColor);
+                SelectObject(hdc, pen);
+                HGDIOBJ oldLocalBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+                RECT r{};
+                double minX = std::min(ann.x1, ann.x2);
+                double maxX = std::max(ann.x1, ann.x2);
+                double minY = std::min(ann.y1, ann.y2);
+                double maxY = std::max(ann.y1, ann.y2);
+                if (PtRectToClientRect(ann.pageIndex, minX, minY, maxX, maxY, r)) {
+                    if (ann.shapeKind == ShapeKind::Rectangle || ann.shapeKind == ShapeKind::Square) {
+                        Rectangle(hdc, r.left, r.top, r.right, r.bottom);
+                    } else if (ann.shapeKind == ShapeKind::Ellipse || ann.shapeKind == ShapeKind::Circle) {
+                        Ellipse(hdc, r.left, r.top, r.right, r.bottom);
+                    } else if (ann.shapeKind == ShapeKind::RotatedEllipse) {
+                        auto pts = BuildRotatedEllipseOutlinePointsPx(r, EffectiveRotatedEllipseAngleRad(ann.shapeRotation));
+                        if (pts.size() >= 3) {
+                            Polygon(hdc, pts.data(), static_cast<int>(pts.size()));
+                        }
+                    } else {
+                        ShapeBounds bounds{ minX, maxX, minY, maxY };
+                        auto pts = BuildShapePolygonPointsClient(ann.pageIndex, ann.shapeKind, bounds);
+                        if (pts.size() >= 3) {
+                            Polygon(hdc, pts.data(), static_cast<int>(pts.size()));
+                        }
+                    }
+                }
+                SelectObject(hdc, oldLocalBrush);
+                DeleteObject(pen);
+                break;
+            }
+            case Annotation::Type::Line:
+            case Annotation::Type::Arrow:
+            case Annotation::Type::Wave: {
+                POINT p1{}, p2{};
+                if (PdfPtToClientPoint(ann.pageIndex, ann.x1, ann.y1, p1) &&
+                    PdfPtToClientPoint(ann.pageIndex, ann.x2, ann.y2, p2)) {
+                    HPEN pen = CreatePen(PS_SOLID, thick, hitColor);
+                    SelectObject(hdc, pen);
+                    MoveToEx(hdc, p1.x, p1.y, nullptr);
+                    LineTo(hdc, p2.x, p2.y);
+                    DeleteObject(pen);
+                }
+                break;
+            }
+            case Annotation::Type::MarkerFree:
+            case Annotation::Type::Freehand: {
+                if (ann.path.size() >= 2) {
+                    std::vector<POINT> pts;
+                    pts.reserve(ann.path.size());
+                    for (const auto& p : ann.path) {
+                        POINT cp{};
+                        if (PdfPtToClientPoint(ann.pageIndex, p.x, p.y, cp)) {
+                            pts.push_back(cp);
+                        }
+                    }
+                    if (pts.size() >= 2) {
+                        HPEN pen = CreatePen(PS_SOLID, thick, hitColor);
+                        SelectObject(hdc, pen);
+                        Polyline(hdc, pts.data(), static_cast<int>(pts.size()));
+                        DeleteObject(pen);
+                    }
+                }
+                break;
+            }
+            case Annotation::Type::LinkMarker: {
+                double radiusPt = (ann.width > 0.0) ? ann.width : 6.0;
+                int radiusPx = std::max(2, static_cast<int>(std::lround(radiusPt * kDpi / 72.0 * g_pdf.scale)));
+                POINT cpt{};
+                if (PdfPtToClientPoint(ann.pageIndex, ann.x1, ann.y1, cpt)) {
+                    HPEN pen = CreatePen(PS_SOLID, 2, hitColor);
+                    SelectObject(hdc, pen);
+                    Ellipse(hdc, cpt.x - radiusPx, cpt.y - radiusPx, cpt.x + radiusPx, cpt.y + radiusPx);
+                    DeleteObject(pen);
+                }
+                break;
+            }
+            default:
+                break;
+            }
+        }
+    }
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(cursorPen);
+}
+
+static bool HitTestLinkMarkerAtPoint(const POINT& pt, int& outIndex) {
+    int pageIndex = -1;
+    double px = 0.0, py = 0.0, pageTop = 0.0;
+    if (!HitTestPagePoint(pt, pageIndex, px, py, pageTop)) return false;
+    for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
+        const auto& ann = g_annots[static_cast<size_t>(i)];
+        if (ann.type != Annotation::Type::LinkMarker) continue;
+        if (ann.pageIndex != pageIndex) continue;
+        double radius = (ann.width > 0.0) ? ann.width : 6.0;
+        double dx = px - ann.x1;
+        double dy = py - ann.y1;
+        if (dx * dx + dy * dy <= radius * radius) {
+            outIndex = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool TryJumpToLinkMarkerAtPoint(const POINT& pt) {
+    int idx = -1;
+    if (HitTestLinkMarkerAtPoint(pt, idx) && idx >= 0 && idx < static_cast<int>(g_annots.size())) {
+        const auto ann = g_annots[static_cast<size_t>(idx)];
+        if (!ann.linkId.empty()) {
+            // Prefer PDF->Note jump, then fall back to PDF->PDF (other PDF only).
+            if (JumpToNoteLinkId(ann.linkId, ann.linkNotePath, false)) return true;
+
+            // Same PDF fallback: jump to another marker with the same id.
+            for (int i = 0; i < static_cast<int>(g_annots.size()); ++i) {
+                if (i == idx) continue;
+                const auto& other = g_annots[static_cast<size_t>(i)];
+                if (other.type != Annotation::Type::LinkMarker) continue;
+                if (other.linkId != ann.linkId) continue;
+                JumpToPdfPoint(g_hPdfView, other.pageIndex, other.x1, other.y1);
+                SetFocus(g_hPdfView);
+                return true;
+            }
+
+            std::wstring targetPdf;
+            Annotation hit{};
+            if (!g_pdf.path.empty()) {
+                // Search other PDFs (exclude current) for a matching LinkMarker id.
+                for (const auto& f : g_pdfFiles) {
+                    if (f.path.empty() || !f.isPdf) continue;
+                    if (f.path == g_pdf.path) continue;
+                    std::wstring err;
+                    std::vector<Annotation> annots;
+                    const auto staged = file_output::FindLatestStagedClropPathForPdf(f.path);
+                    bool loaded = false;
+                    if (!staged.empty()) {
+                        loaded = file_output::LoadResolvedStagedAnnotations(f.path, staged, &annots, &err);
+                        if (!loaded) {
+                            annots.clear();
+                        }
+                    }
+                    if (!loaded) {
+                        std::wstring clropPath = clrop_bridge::ClropPathForPdf(f.path);
+                        if (clropPath.empty()) continue;
+                        std::error_code ec;
+                        if (!std::filesystem::exists(clropPath, ec) || ec) continue;
+                        bool mismatch = false;
+                        loaded = clrop_bridge::LoadAnnotations(clropPath, f.path, annots, mismatch, nullptr, err,
+                                                               clrop_bridge::LoadAnnotationsValidation::None);
+                        if (!loaded) {
+                            continue;
+                        }
+                    }
+                    for (const auto& a : annots) {
+                        if (a.type != Annotation::Type::LinkMarker) continue;
+                        if (a.linkId != ann.linkId) continue;
+                        targetPdf = f.path;
+                        hit = a;
+                        break;
+                    }
+                    if (!targetPdf.empty()) break;
+                }
+            }
+            if (!targetPdf.empty()) {
+                HWND owner = g_hPdfView ? GetParent(g_hPdfView) : nullptr;
+                if (!owner) owner = g_hMainWnd;
+                if (OpenPdfWithAnnotations(owner, targetPdf)) {
+                    if (g_hPdfView) {
+                        JumpToPdfPoint(g_hPdfView, hit.pageIndex, hit.x1, hit.y1);
+                        SetFocus(g_hPdfView);
+                        return true;
+                    }
+                }
+            }
+            HWND owner = g_hPdfView ? GetParent(g_hPdfView) : nullptr;
+            if (!owner) owner = g_hMainWnd;
+            if (owner) {
+                ShowSoftNotice(owner, IsEnglishUi() ? L"Link target not found." : L"リンク先が見つかりませんでした。");
+            }
+        }
+    }
+    return false;
+}
+
+static bool HitTestAnnotationForMove(const POINT& pt, Annotation::Type preferred, int& outIndex) {
+    int pageIndex = -1;
+    double px = 0.0, py = 0.0, pageTop = 0.0;
+    if (!HitTestPagePoint(pt, pageIndex, px, py, pageTop)) return false;
+    const double tolPt = 4.0;
+    const double tol2 = tolPt * tolPt;
+    auto match = [&](const Annotation& ann) {
+        if (ann.pageIndex != pageIndex) return false;
+        if (ann.type == Annotation::Type::MarkerText || ann.type == Annotation::Type::TextColor) return false;
+        switch (ann.type) {
+        case Annotation::Type::Line:
+        case Annotation::Type::Arrow:
+        case Annotation::Type::Wave:
+            return DistPointToSegment2(px, py, ann.x1, ann.y1, ann.x2, ann.y2) <= tol2;
+        case Annotation::Type::MarkerFree:
+        case Annotation::Type::Freehand:
+            if (ann.path.size() < 2) return false;
+            for (size_t i = 0; i + 1 < ann.path.size(); ++i) {
+                if (DistPointToSegment2(px, py, ann.path[i].x, ann.path[i].y, ann.path[i + 1].x, ann.path[i + 1].y) <= tol2) return true;
+            }
+            return false;
+        case Annotation::Type::TextBox: {
+            double minX = std::min(ann.x1, ann.x2);
+            double maxX = std::max(ann.x1, ann.x2);
+            double minY = std::min(ann.y1, ann.y2);
+            double maxY = std::max(ann.y1, ann.y2);
+            return (px >= minX && px <= maxX && py >= minY && py <= maxY);
+        }
+        case Annotation::Type::MathBox: {
+            double minX = std::min(ann.x1, ann.x2);
+            double maxX = std::max(ann.x1, ann.x2);
+            double minY = std::min(ann.y1, ann.y2);
+            double maxY = std::max(ann.y1, ann.y2);
+            return (px >= minX && px <= maxX && py >= minY && py <= maxY);
+        }
+        case Annotation::Type::Shape: {
+            double minX = std::min(ann.x1, ann.x2);
+            double maxX = std::max(ann.x1, ann.x2);
+            double minY = std::min(ann.y1, ann.y2);
+            double maxY = std::max(ann.y1, ann.y2);
+            return (px >= minX && px <= maxX && py >= minY && py <= maxY);
+        }
+        case Annotation::Type::LinkMarker: {
+            double radius = (ann.width > 0.0) ? ann.width : 6.0;
+            double dx = px - ann.x1;
+            double dy = py - ann.y1;
+            return (dx * dx + dy * dy) <= (radius * radius);
+        }
+        case Annotation::Type::MarkerText:
+        case Annotation::Type::TextColor:
+        default:
+            return false;
+        }
+    };
+    // prefer type match to current tool, newest first
+    int candidate = -1;
+    for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
+        const auto& ann = g_annots[static_cast<size_t>(i)];
+        if (!match(ann)) continue;
+        if (ann.type == preferred) {
+            outIndex = i;
+            return true;
+        }
+        if (candidate < 0) candidate = i;
+    }
+    if (candidate >= 0) {
+        outIndex = candidate;
+        return true;
+    }
+    return false;
+}
+
+static bool UpdateMovingAnnotAtClientPoint(HWND hwnd, const POINT& cur);
+
+static void StartPendingTextBoxMove(HWND hwnd, const POINT& pt) {
+    if (g_pdf.pendingTextBoxIndex < 0 ||
+        g_pdf.pendingTextBoxIndex >= static_cast<int>(g_annots.size())) {
+        g_pdf.pendingTextBoxHit = false;
+        g_pdf.pendingTextBoxIndex = -1;
+        return;
+    }
+    POINT down = g_pdf.pendingTextBoxDown;
+    int idx = g_pdf.pendingTextBoxIndex;
+    g_pdf.pendingTextBoxHit = false;
+    g_pdf.pendingTextBoxIndex = -1;
+    ResetTextBoxRapidClickState();
+    g_pdf.movingAnnot = true;
+    g_pdf.movingIndex = idx;
+    g_pdf.movingOriginal = g_annots[static_cast<size_t>(idx)];
+    g_pdf.movePage = g_pdf.movingOriginal.pageIndex;
+    double pageTop = 0.0;
+    HitTestPagePoint(down, g_pdf.movePage, g_pdf.moveStartPdfX, g_pdf.moveStartPdfY, pageTop);
+    UpdateMovingAnnotAtClientPoint(hwnd, pt);
+}
+
+static bool UpdateMovingAnnotAtClientPoint(HWND hwnd, const POINT& cur) {
+    if (!g_pdf.movingAnnot) return false;
+    if (g_pdf.movingIndex < 0 || g_pdf.movingIndex >= static_cast<int>(g_annots.size())) return false;
+
+    double px = 0.0, py = 0.0, dummy = 0.0;
+    int pageIdx = -1;
+    if (!HitTestPagePoint(cur, pageIdx, px, py, dummy)) return false;
+
+    double dx = px - g_pdf.moveStartPdfX;
+    double dy = py - g_pdf.moveStartPdfY;
+    Annotation a = g_pdf.movingOriginal;
+    a.pageIndex = pageIdx;
+    auto applyDelta = [&](double& x, double& y) { x += dx; y += dy; };
+    switch (a.type) {
+    case Annotation::Type::Line:
+    case Annotation::Type::Arrow:
+    case Annotation::Type::Wave:
+    case Annotation::Type::TextBox:
+    case Annotation::Type::MathBox:
+    case Annotation::Type::Shape:
+        applyDelta(a.x1, a.y1);
+        applyDelta(a.x2, a.y2);
+        break;
+    case Annotation::Type::MarkerFree:
+    case Annotation::Type::Freehand:
+        for (auto& p : a.path) { p.x += dx; p.y += dy; }
+        applyDelta(a.x1, a.y1);
+        applyDelta(a.x2, a.y2);
+        break;
+    case Annotation::Type::LinkMarker:
+        applyDelta(a.x1, a.y1);
+        applyDelta(a.x2, a.y2);
+        break;
+    default:
+        break;
+    }
+
+    g_annots[static_cast<size_t>(g_pdf.movingIndex)] = a;
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static void CommitPendingTextBoxEdit(HWND hwnd) {
+    if (g_pdf.pendingTextBoxIndex < 0 ||
+        g_pdf.pendingTextBoxIndex >= static_cast<int>(g_annots.size())) {
+        g_pdf.pendingTextBoxHit = false;
+        g_pdf.pendingTextBoxIndex = -1;
+        ReleaseCapture();
+        return;
+    }
+    int idx = g_pdf.pendingTextBoxIndex;
+    Annotation ann = g_annots[static_cast<size_t>(idx)];
+    g_pdf.pendingTextBoxHit = false;
+    g_pdf.pendingTextBoxIndex = -1;
+    ReleaseCapture();
+    if (ann.type != Annotation::Type::TextBox) {
+        return;
+    }
+    if (RegisterTextBoxRapidClick(ann.pageIndex, ann.x1, ann.y1, ann.x2, ann.y2)) {
+        CopyTextToClipboard(hwnd, ann.text);
+        FinishTextBoxTripleClickCopy(hwnd, false);
+        return;
+    }
+    g_annots.erase(g_annots.begin() + idx);
+    RefreshAnnotPanel();
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    g_editingExistingAnnot = true;
+    g_editingOriginalIndex = idx;
+    g_editingOriginal = ann;
+
+    // Save current toolbar state
+    g_preEditToolbarState.valid = true;
+    g_preEditToolbarState.toolMode = g_toolMode;
+    g_preEditToolbarState.textFontName = g_textFontName;
+    g_preEditToolbarState.textFontPt = g_textFontPt;
+    g_preEditToolbarState.textColor = g_textColor;
+    g_preEditToolbarState.readableBackground = g_textBoxReadableBackground;
+    g_preEditToolbarState.readableBackgroundInverted = g_textBoxReadableBackgroundInverted;
+
+    // Apply annotation properties to toolbar state so it doesn't overwrite
+    g_toolMode = ToolMode::TextBox;
+    g_textFontName = ann.fontName.empty() ? g_textFontName : ann.fontName;
+    g_textFontPt = ann.fontPt > 0 ? ann.fontPt : g_textFontPt;
+    g_textColor = ann.color;
+    g_activeColor = ann.color;
+    if (ann.backgroundAssistMode == TextBackgroundAssistMode::Off) {
+        g_textBoxReadableBackground = false;
+    } else if (ann.backgroundAssistMode == TextBackgroundAssistMode::Auto) {
+        g_textBoxReadableBackground = true;
+        g_textBoxReadableBackgroundInverted = false;
+    } else if (ann.backgroundAssistMode == TextBackgroundAssistMode::Inverted) {
+        g_textBoxReadableBackground = true;
+        g_textBoxReadableBackgroundInverted = true;
+    }
+    if (g_hPdfToolbar) {
+        RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+    }
+    if (g_hMainWnd) {
+        UpdateToolbarUI(g_hMainWnd);
+    }
+
+    const double editFontPt = ResolveAdaptiveTextFontPtForPage(ann.pageIndex, g_textFontPt);
+    BeginTextEdit(hwnd, ann.pageIndex, std::min(ann.x1, ann.x2), std::max(ann.y1, ann.y2),
+                  std::abs(ann.x2 - ann.x1), std::abs(ann.y1 - ann.y2),
+                  ann.text, ann.fontName, editFontPt);
+}
+
+static bool EraseAnnotationAtPoint(const POINT& pt) {
+    int pageIndex = -1;
+    double px = 0.0, py = 0.0, pageTop = 0.0;
+    if (!HitTestPagePoint(pt, pageIndex, px, py, pageTop)) return false;
+    const double tolPt = 4.0;
+    const double tol2 = tolPt * tolPt;
+    for (int idx = static_cast<int>(g_annots.size()) - 1; idx >= 0; --idx) {
+        const Annotation& ann = g_annots[static_cast<size_t>(idx)];
+        if (ann.pageIndex != pageIndex) continue;
+        bool hit = false;
+        switch (ann.type) {
+        case Annotation::Type::MarkerText:
+        case Annotation::Type::TextColor: {
+            if (!ann.quads.empty()) {
+                for (size_t qi = 0; qi + 7 < ann.quads.size() && !hit; qi += 8) {
+                    double minX = std::min(std::min(ann.quads[qi + 0], ann.quads[qi + 2]), std::min(ann.quads[qi + 4], ann.quads[qi + 6]));
+                    double maxX = std::max(std::max(ann.quads[qi + 0], ann.quads[qi + 2]), std::max(ann.quads[qi + 4], ann.quads[qi + 6]));
+                    double minY = std::min(std::min(ann.quads[qi + 1], ann.quads[qi + 3]), std::min(ann.quads[qi + 5], ann.quads[qi + 7]));
+                    double maxY = std::max(std::max(ann.quads[qi + 1], ann.quads[qi + 3]), std::max(ann.quads[qi + 5], ann.quads[qi + 7]));
+                    if (px >= minX - tolPt && px <= maxX + tolPt && py >= minY - tolPt && py <= maxY + tolPt) hit = true;
+                }
+            } else {
+                double minX = std::min(ann.x1, ann.x2);
+                double maxX = std::max(ann.x1, ann.x2);
+                double minY = std::min(ann.y1, ann.y2);
+                double maxY = std::max(ann.y1, ann.y2);
+                if (px >= minX - tolPt && px <= maxX + tolPt && py >= minY - tolPt && py <= maxY + tolPt) hit = true;
+            }
+            break;
+        }
+        case Annotation::Type::Line:
+        case Annotation::Type::Arrow:
+        case Annotation::Type::Wave: {
+            hit = DistPointToSegment2(px, py, ann.x1, ann.y1, ann.x2, ann.y2) <= tol2;
+            break;
+        }
+        case Annotation::Type::MarkerFree:
+        case Annotation::Type::Freehand: {
+            if (ann.path.size() >= 2) {
+                for (size_t i = 0; i + 1 < ann.path.size(); ++i) {
+                    if (DistPointToSegment2(px, py, ann.path[i].x, ann.path[i].y, ann.path[i + 1].x, ann.path[i + 1].y) <= tol2) {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+        case Annotation::Type::TextBox: {
+            double minX = std::min(ann.x1, ann.x2);
+            double maxX = std::max(ann.x1, ann.x2);
+            double minY = std::min(ann.y1, ann.y2);
+            double maxY = std::max(ann.y1, ann.y2);
+            if (px >= minX && px <= maxX && py >= minY && py <= maxY) hit = true;
+            break;
+        }
+        case Annotation::Type::MathBox: {
+            double minX = std::min(ann.x1, ann.x2);
+            double maxX = std::max(ann.x1, ann.x2);
+            double minY = std::min(ann.y1, ann.y2);
+            double maxY = std::max(ann.y1, ann.y2);
+            if (px >= minX - tolPt && px <= maxX + tolPt && py >= minY - tolPt && py <= maxY + tolPt) hit = true;
+            break;
+        }
+        case Annotation::Type::Shape: {
+            double minX = std::min(ann.x1, ann.x2);
+            double maxX = std::max(ann.x1, ann.x2);
+            double minY = std::min(ann.y1, ann.y2);
+            double maxY = std::max(ann.y1, ann.y2);
+            if (px >= minX && px <= maxX && py >= minY && py <= maxY) hit = true;
+            break;
+        }
+        case Annotation::Type::LinkMarker: {
+            double radius = (ann.width > 0.0) ? ann.width : 6.0;
+            double dx = px - ann.x1;
+            double dy = py - ann.y1;
+            hit = (dx * dx + dy * dy) <= (radius * radius);
+            break;
+        }
+        }
+        if (hit) {
+            Annotation removed = ann;
+            g_annots.erase(g_annots.begin() + idx);
+            RecordAnnotRemove(idx, removed);
+            MarkAnnotsDirty(GetParent(g_hPdfView));
+            InvalidateRect(g_hPdfView, nullptr, FALSE);
+            return true;
+        }
+    }
+    return false;
+}
+
+static double MarkerTextPadPt() {
+    return 1.0;
+}
+
+static double MarkerTextPadPtFromWidthPt(double widthPt) {
+    // Treat "width" as marker thickness in pt and apply as vertical padding
+    // (half above the glyph box, half below).
+    double w = (widthPt > 0.0) ? widthPt : 2.0;
+    return std::clamp(w * 0.5, 0.0, 40.0);
+}
+
+static constexpr double kLineMergeTolerancePt = 2.0;
+static constexpr double kMarkerTextHorizontalPadPt = 2.0;
+
+struct LineSpan {
+    double top = -1e9;
+    double bottom = 1e9;
+    double left = 1e9;
+    double right = -1e9;
+};
+
+static void ApplyUnderlineStyleToLineSpans(double padPt, std::vector<LineSpan>& lines) {
+    double thicknessPt = std::clamp(padPt * 3.0, 2.0, 40.0);
+    double dropPt = std::clamp(thicknessPt * 0.25, 0.0, 2.0);
+    for (auto& ls : lines) {
+        if (ls.left > ls.right || ls.bottom > ls.top) continue;
+        double bottom = ls.bottom - dropPt;
+        ls.bottom = bottom;
+        ls.top = bottom + thicknessPt;
+    }
+}
+
+static void ApplyMarkerTextHorizontalPadding(double pageWidthPt, std::vector<LineSpan>& lines) {
+    for (auto& ls : lines) {
+        if (ls.left > ls.right) continue;
+        ls.left = std::max(0.0, ls.left - kMarkerTextHorizontalPadPt);
+        ls.right = std::min(pageWidthPt, ls.right + kMarkerTextHorizontalPadPt);
+    }
+}
+
+static void AppendLineSpanCandidate(double left, double right, double top, double bottom, std::vector<LineSpan>& lines) {
+    if (left > right || bottom > top) return;
+    double midY = (top + bottom) * 0.5;
+    int lineIdx = -1;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (midY <= lines[i].top + kLineMergeTolerancePt && midY >= lines[i].bottom - kLineMergeTolerancePt) {
+            lineIdx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (lineIdx < 0) {
+        LineSpan ls;
+        ls.top = top;
+        ls.bottom = bottom;
+        ls.left = left;
+        ls.right = right;
+        lines.push_back(ls);
+    } else {
+        auto& ls = lines[static_cast<size_t>(lineIdx)];
+        ls.top = std::max(ls.top, top);
+        ls.bottom = std::min(ls.bottom, bottom);
+        ls.left = std::min(ls.left, left);
+        ls.right = std::max(ls.right, right);
+    }
+}
+
+static void BuildLineSpansFromCharRange(const PageCache& page, int start, int end, double padPt,
+                                        bool underline, bool horizontalPad,
+                                        std::vector<LineSpan>& lines) {
+    lines.clear();
+    if (page.charBoxes.empty()) return;
+    int maxIndex = static_cast<int>(page.charBoxes.size()) - 1;
+    int s = std::clamp(std::min(start, end), 0, maxIndex);
+    int e = std::clamp(std::max(start, end), 0, maxIndex);
+    for (int i = s; i <= e; ++i) {
+        const auto& cb = page.charBoxes[static_cast<size_t>(i)];
+        double cbLeft = cb.left;
+        double cbRight = cb.right;
+        double cbTop = underline ? cb.top : cb.top + padPt;
+        double cbBottom = underline ? cb.bottom : cb.bottom - padPt;
+        AppendLineSpanCandidate(cbLeft, cbRight, cbTop, cbBottom, lines);
+    }
+    if (underline) ApplyUnderlineStyleToLineSpans(padPt, lines);
+    if (horizontalPad) ApplyMarkerTextHorizontalPadding(page.widthPt, lines);
+}
+
+static void BuildLineSpansFromRect(const PageCache& page, double selLeft, double selRight,
+                                   double selTop, double selBottom, double padPt,
+                                   bool underline, bool horizontalPad,
+                                   std::vector<LineSpan>& lines) {
+    lines.clear();
+    if (page.charBoxes.empty()) return;
+    for (const auto& cb : page.charBoxes) {
+        double cbLeft = cb.left;
+        double cbRight = cb.right;
+        double hitTop = cb.top + padPt;
+        double hitBottom = cb.bottom - padPt;
+        if (cbRight < selLeft || cbLeft > selRight ||
+            hitTop < selBottom || hitBottom > selTop) continue;
+
+        double spanTop = underline ? cb.top : hitTop;
+        double spanBottom = underline ? cb.bottom : hitBottom;
+        AppendLineSpanCandidate(cbLeft, cbRight, spanTop, spanBottom, lines);
+    }
+    if (underline) ApplyUnderlineStyleToLineSpans(padPt, lines);
+    if (horizontalPad) ApplyMarkerTextHorizontalPadding(page.widthPt, lines);
+}
+
+static bool ExtractTextRange(FPDF_TEXTPAGE textPage, int start, int count, std::wstring& out) {
+    out.clear();
+    if (!textPage || count <= 0) return false;
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    std::wstring text(static_cast<size_t>(count) + 1, L'\0');
+    int got = FPDFText_GetText(textPage, start, count,
+                               reinterpret_cast<unsigned short*>(text.data()));
+    if (got <= 0) return false;
+    text.resize(static_cast<size_t>(got));
+    if (!text.empty() && text.back() == L'\0') {
+        text.pop_back();
+    }
+    out = std::move(text);
+    return !out.empty();
+}
+
+static bool ExtractFullText(FPDF_TEXTPAGE textPage, int nChars, std::wstring& out) {
+    if (nChars <= 0) return false;
+    return ExtractTextRange(textPage, 0, nChars, out);
+}
+
+struct RectSelectionChar {
+    wchar_t ch = L'\0';
+    double left = 0.0;
+    double right = 0.0;
+    double top = 0.0;
+    double bottom = 0.0;
+    size_t sourceIndex = 0;
+};
+
+static std::wstring ReconstructRectSelectionText(std::vector<RectSelectionChar> chars) {
+    if (chars.empty()) return {};
+
+    struct RectSelectionLine {
+        double top = -1e9;
+        double bottom = 1e9;
+        std::vector<RectSelectionChar> chars;
+    };
+
+    std::vector<RectSelectionLine> lines;
+    for (const auto& ch : chars) {
+        double midY = (ch.top + ch.bottom) * 0.5;
+        int lineIdx = -1;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (midY <= lines[i].top + kLineMergeTolerancePt &&
+                midY >= lines[i].bottom - kLineMergeTolerancePt) {
+                lineIdx = static_cast<int>(i);
+                break;
+            }
+        }
+        if (lineIdx < 0) {
+            RectSelectionLine line;
+            line.top = ch.top;
+            line.bottom = ch.bottom;
+            line.chars.push_back(ch);
+            lines.push_back(std::move(line));
+        } else {
+            auto& line = lines[static_cast<size_t>(lineIdx)];
+            line.top = std::max(line.top, ch.top);
+            line.bottom = std::min(line.bottom, ch.bottom);
+            line.chars.push_back(ch);
+        }
+    }
+
+    std::sort(lines.begin(), lines.end(), [](const RectSelectionLine& a, const RectSelectionLine& b) {
+        if (std::abs(a.top - b.top) > kLineMergeTolerancePt) return a.top > b.top;
+        return a.bottom > b.bottom;
+    });
+
+    std::wstring out;
+    for (auto& line : lines) {
+        std::sort(line.chars.begin(), line.chars.end(), [](const RectSelectionChar& a, const RectSelectionChar& b) {
+            if (std::abs(a.left - b.left) > 0.5) return a.left < b.left;
+            return a.sourceIndex < b.sourceIndex;
+        });
+        std::wstring lineText;
+        lineText.reserve(line.chars.size());
+        for (const auto& ch : line.chars) {
+            if (ch.ch != L'\0' && ch.ch != L'\r' && ch.ch != L'\n') {
+                lineText.push_back(ch.ch);
+            }
+        }
+        if (lineText.empty()) continue;
+        if (!out.empty()) out += L"\r\n";
+        out += lineText;
+    }
+    return out;
+}
+
+static constexpr unsigned long kPdfPermissionCopyContent = 0x10u;
+
+static std::optional<std::wstring> GetProtectedPdfCopyBlockMessage(FPDF_DOCUMENT doc) {
+    if (!doc) return std::nullopt;
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    const int secRev = FPDF_GetSecurityHandlerRevision(doc);
+    if (secRev < 0) return std::nullopt;
+
+    const unsigned long userPerms = FPDF_GetDocUserPermissions(doc);
+    const bool canCopy = userPerms == 0xfffffffful || (userPerms & kPdfPermissionCopyContent) != 0;
+
+    if (IsEnglishUi()) {
+        std::wstring message =
+            L"This PDF has author/publisher protection settings.\n"
+            L"To follow the original rights holder's instructions and usage conditions, "
+            L"this app does not copy text from protected source PDFs.";
+        if (!canCopy) {
+            message += L"\n\nThe source PDF also disallows content copying.";
+        }
+        message += L"\n\nIf copying is necessary, confirm the rights holder's permission and use a PDF without protection.";
+        return message;
+    }
+
+    std::wstring message =
+        L"このPDFには著作者・配布元が設定した保護があります。\n"
+        L"元の権利者の指示と利用条件に従うため、このアプリでは保護付きPDFからのテキストコピーを行いません。";
+    if (!canCopy) {
+        message += L"\n\n元のPDFでは内容のコピーも禁止されています。";
+    }
+    message += L"\n\nコピーが必要な場合は、権利者の許諾と元PDFの利用条件を確認し、保護のないPDFで作業してください。";
+    return message;
+}
+
+static bool CanCopySelectedPdfText(HWND owner) {
+    if (auto blockedMessage = GetProtectedPdfCopyBlockMessage(g_pdf.doc)) {
+        if (PromptPasswordAndReopenCurrentPdf(owner ? owner : g_hMainWnd,
+                                              IsEnglishUi() ? L"Copy" : L"コピー",
+                                              *blockedMessage)) {
+            if (auto reblockedMessage = GetProtectedPdfCopyBlockMessage(g_pdf.doc)) {
+                ShowSilentMessageDialog(owner ? owner : g_hMainWnd,
+                                        IsEnglishUi() ? L"Copy" : L"コピー",
+                                        *reblockedMessage,
+                                        SoftNoticeKind::Warning);
+                return false;
+            }
+            return true;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool CopyTextToClipboard(HWND hwnd, const std::wstring& text) {
+    if (text.empty()) return false;
+    if (!OpenClipboard(hwnd)) return false;
+    EmptyClipboard();
+    size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL hmem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!hmem) {
+        CloseClipboard();
+        return false;
+    }
+    void* dst = GlobalLock(hmem);
+    if (!dst) {
+        GlobalFree(hmem);
+        CloseClipboard();
+        return false;
+    }
+    std::memcpy(dst, text.c_str(), bytes);
+    GlobalUnlock(hmem);
+    if (!SetClipboardData(CF_UNICODETEXT, hmem)) {
+        GlobalFree(hmem);
+        CloseClipboard();
+        return false;
+    }
+    CloseClipboard();
+    ShowPdfCopySuccessNotice(hwnd);
+    return true;
+}
+
+static int GetSelectionPageIndex() {
+    if (g_pdf.selectionStartPage >= 0 &&
+        g_pdf.selectionStartPage < static_cast<int>(g_pdf.pages.size())) {
+        return g_pdf.selectionStartPage;
+    }
+    if (!g_pdf.pages.empty()) {
+        return PageAtCurrentView();
+    }
+    return -1;
+}
+
+static bool SelectAllPdfTextOnPage(HWND hwnd, int pageIndex) {
+    if (!g_pdf.doc || pageIndex < 0 || pageIndex >= g_pdf.pageCount) return false;
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
+    auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    if (page.charBoxes.empty() && !LoadPdfPageCharBoxes(pageIndex, page.charBoxes)) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    FPDF_PAGE pdfPage = FPDF_LoadPage(g_pdf.doc, pageIndex);
+    if (!pdfPage) return false;
+    FPDF_TEXTPAGE textPage = FPDFText_LoadPage(pdfPage);
+    if (!textPage) {
+        FPDF_ClosePage(pdfPage);
+        return false;
+    }
+    int nChars = FPDFText_CountChars(textPage);
+    FPDFText_ClosePage(textPage);
+    FPDF_ClosePage(pdfPage);
+    if (nChars <= 0) return false;
+    g_pdf.selectionStartPage = pageIndex;
+    g_pdf.selectionEndPage = pageIndex;
+    g_pdf.hasSelection = true;
+    g_pdf.selectingText = false;
+    g_pdf.selectionByText = true;
+    g_pdf.selCharAnchor = 0;
+    g_pdf.selCharFocus = nChars - 1;
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static bool SelectAllPdfTextAcrossAllPages(HWND hwnd) {
+    if (!g_pdf.doc || g_pdf.pageCount <= 0) return false;
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    int lastPageIdx = g_pdf.pageCount - 1;
+
+    // We need the number of characters in the last page for selCharFocus
+    int nCharsLast = 0;
+    FPDF_PAGE pdfPage = FPDF_LoadPage(g_pdf.doc, lastPageIdx);
+    if (pdfPage) {
+        FPDF_TEXTPAGE textPage = FPDFText_LoadPage(pdfPage);
+        if (textPage) {
+            nCharsLast = FPDFText_CountChars(textPage);
+            FPDFText_ClosePage(textPage);
+        }
+        FPDF_ClosePage(pdfPage);
+    }
+
+    g_pdf.selectionStartPage = 0;
+    g_pdf.selectionEndPage = lastPageIdx;
+    g_pdf.hasSelection = true;
+    g_pdf.selectingText = false;
+    g_pdf.selectionByText = true;
+    g_pdf.selCharAnchor = 0;
+    g_pdf.selCharFocus = std::max(0, nCharsLast - 1);
+
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static bool GetSelectedPdfText(std::wstring& out) {
+    out.clear();
+    if (!g_pdf.doc || g_pdf.kind != DocKind::Pdf) return false;
+    if (!g_pdf.hasSelection || g_pdf.selectionStartPage < 0 || g_pdf.selectionEndPage < 0) return false;
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+
+    int startPage = g_pdf.selectionStartPage;
+    int endPage = g_pdf.selectionEndPage;
+    int minPage = std::min(startPage, endPage);
+    int maxPage = std::max(startPage, endPage);
+    size_t numPages = g_pdf.pages.size();
+    if (minPage >= static_cast<int>(numPages)) return false;
+    maxPage = std::min(maxPage, static_cast<int>(numPages) - 1);
+
+    std::wstring result;
+    for (int i = minPage; i <= maxPage; ++i) {
+        FPDF_PAGE pdfPage = FPDF_LoadPage(g_pdf.doc, i);
+        if (!pdfPage) continue;
+        FPDF_TEXTPAGE textPage = FPDFText_LoadPage(pdfPage);
+        if (!textPage) {
+            FPDF_ClosePage(pdfPage);
+            continue;
+        }
+        int nChars = FPDFText_CountChars(textPage);
+        if (nChars > 0) {
+            if (g_pdf.selectionByText) {
+                int sChar = -1, eChar = -1;
+                if (startPage == endPage) {
+                    sChar = std::min(g_pdf.selCharAnchor, g_pdf.selCharFocus);
+                    eChar = std::max(g_pdf.selCharAnchor, g_pdf.selCharFocus);
+                } else if (i == minPage) {
+                    if (startPage < endPage) {
+                        sChar = g_pdf.selCharAnchor;
+                        eChar = nChars - 1;
+                    } else {
+                        sChar = g_pdf.selCharFocus;
+                        eChar = nChars - 1;
+                    }
+                } else if (i == maxPage) {
+                    if (startPage < endPage) {
+                        sChar = 0;
+                        eChar = g_pdf.selCharFocus;
+                    } else {
+                        sChar = 0;
+                        eChar = g_pdf.selCharAnchor;
+                    }
+                } else {
+                    sChar = 0;
+                    eChar = nChars - 1;
+                }
+
+                if (sChar >= 0 && eChar >= 0) {
+                    std::wstring pageText;
+                    if (ExtractTextRange(textPage, sChar, eChar - sChar + 1, pageText)) {
+                        if (!result.empty()) result += L"\r\n";
+                        result += pageText;
+                    }
+                }
+            } else {
+                // Rectangular selection in document space
+                double x1Doc = ClientToDocX(g_pdf.selStart.x);
+                double y1Doc = ClientToDocY(g_pdf.selStart.y);
+                double x2Doc = ClientToDocX(g_pdf.selEnd.x);
+                double y2Doc = ClientToDocY(g_pdf.selEnd.y);
+                double minXDoc = std::min(x1Doc, x2Doc);
+                double maxXDoc = std::max(x1Doc, x2Doc);
+                double minYDoc = std::min(y1Doc, y2Doc);
+                double maxYDoc = std::max(y1Doc, y2Doc);
+
+                const auto& pageRect = g_pdf.pageRects[i];
+                auto& pageCache = g_pdf.pages[i];
+                if (pageCache.charBoxes.empty()) {
+                    LoadPdfPageCharBoxes(i, pageCache.charBoxes);
+                }
+                PdfFlowMode mode = CurrentFlowMode();
+                double pageDocLeft = pageRect.left + FlowCrossPaddingX(mode);
+                double pageDocTop = pageRect.top + FlowCrossPaddingY(mode);
+
+                std::wstring full;
+                if (ExtractFullText(textPage, nChars, full)) {
+                    size_t maxIdx = std::min(pageCache.charBoxes.size(), full.size());
+                    std::vector<RectSelectionChar> picked;
+                    picked.reserve(maxIdx);
+                    for (size_t c = 0; c < maxIdx; ++c) {
+                        const auto& cb = pageCache.charBoxes[c];
+                        double cbDocLeft = pageDocLeft + cb.left * kDpi / 72.0 * g_pdf.scale;
+                        double cbDocRight = pageDocLeft + cb.right * kDpi / 72.0 * g_pdf.scale;
+                        double cbDocTop = pageDocTop + (pageCache.heightPt - cb.top) * kDpi / 72.0 * g_pdf.scale;
+                        double cbDocBottom = pageDocTop + (pageCache.heightPt - cb.bottom) * kDpi / 72.0 * g_pdf.scale;
+
+                        if (cbDocRight < minXDoc || cbDocLeft > maxXDoc ||
+                            cbDocBottom < minYDoc || cbDocTop > maxYDoc) continue;
+
+                        wchar_t ch = full[c];
+                        if (ch != L'\0') {
+                            picked.push_back(RectSelectionChar{
+                                ch,
+                                cb.left,
+                                cb.right,
+                                cb.top,
+                                cb.bottom,
+                                c,
+                            });
+                        }
+                    }
+                    std::wstring pickedText = ReconstructRectSelectionText(std::move(picked));
+                    if (!pickedText.empty()) {
+                        if (!result.empty()) result += L"\r\n";
+                        result += pickedText;
+                    }
+                }
+            }
+        }
+        FPDFText_ClosePage(textPage);
+        FPDF_ClosePage(pdfPage);
+    }
+    if (!result.empty()) {
+        out = std::move(result);
+        return true;
+    }
+    return false;
+}
+
+void ClearPdfTextSelection() {
+    g_pdf.selectingText = false;
+    g_pdf.hasSelection = false;
+    g_pdf.selectionStartPage = -1;
+    g_pdf.selectionEndPage = -1;
+    g_pdf.selectionByText = false;
+    g_pdf.selCharAnchor = -1;
+    g_pdf.selCharFocus = -1;
+    g_pdf.selStart = {};
+    g_pdf.selEnd = {};
+}
+
+void ClearPdfAnnotationSelection() {
+    if (g_pdf.pendingTextBoxIndex != -1) {
+        g_pdf.pendingTextBoxIndex = -1;
+        if (g_hPdfView) {
+            InvalidateRect(g_hPdfView, nullptr, FALSE);
+        }
+    }
+}
+
+static const wchar_t* ContextMenuLabelCut() { return IsEnglishUi() ? L"Cut" : L"切り取り"; }
+static const wchar_t* ContextMenuLabelCopy() { return IsEnglishUi() ? L"Copy" : L"コピー"; }
+static const wchar_t* ContextMenuLabelPaste() { return IsEnglishUi() ? L"Paste" : L"貼り付け"; }
+static const wchar_t* ContextMenuLabelSelectAll() { return IsEnglishUi() ? L"Select All" : L"全選択"; }
+static const wchar_t* ContextMenuLabelSelectNone() { return IsEnglishUi() ? L"Deselect" : L"選択解除"; }
+static const wchar_t* ContextMenuLabelTextColor() { return IsEnglishUi() ? L"Text color" : L"文字色"; }
+static const wchar_t* ContextMenuLabelClearTextColor() { return IsEnglishUi() ? L"Restore text color" : L"文字色を元に戻す"; }
+static const wchar_t* ContextMenuLabelAnnotTool() { return IsEnglishUi() ? L"Annotation tool" : L"注釈ツール"; }
+
+static std::wstring HexColorLabel(COLORREF color) {
+    wchar_t hex[16]{};
+    swprintf_s(hex, L"#%02X%02X%02X", GetRValue(color), GetGValue(color), GetBValue(color));
+    return hex;
+}
+
+static std::wstring TextColorMenuLabel(COLORREF color, size_t paletteIndex) {
+    struct ColorName {
+        COLORREF color;
+        const wchar_t* en;
+        const wchar_t* ja;
+    };
+    static constexpr ColorName kNames[] = {
+        { RGB(0, 0, 0), L"Black", L"黒" },
+        { RGB(255, 255, 0), L"Yellow", L"黄" },
+        { RGB(255, 0, 0), L"Red", L"赤" },
+        { RGB(0, 160, 255), L"Blue", L"青" },
+        { RGB(0, 200, 0), L"Green", L"緑" },
+        { RGB(255, 140, 0), L"Orange", L"オレンジ" },
+        { RGB(200, 80, 200), L"Purple", L"紫" },
+        { RGB(128, 128, 128), L"Gray", L"グレー" },
+    };
+
+    const std::wstring hex = HexColorLabel(color);
+    for (const auto& name : kNames) {
+        if (name.color == color) {
+            return std::wstring(IsEnglishUi() ? name.en : name.ja) + L" (" + hex + L")";
+        }
+    }
+
+    if (paletteIndex == g_palette.size() - 1) {
+        return std::wstring(IsEnglishUi() ? L"Custom" : L"カスタム") + L" (" + hex + L")";
+    }
+    return hex;
+}
+
+struct TextColorSelectionLines {
+    int pageIndex = -1;
+    std::vector<LineSpan> lines;
+};
+
+static std::vector<TextColorSelectionLines> BuildTextColorSelectionLines() {
+    std::vector<TextColorSelectionLines> result;
+    if (!g_pdf.hasSelection || g_pdf.selectionStartPage < 0 || g_pdf.selectionEndPage < 0) return result;
+
+    const int startPage = g_pdf.selectionStartPage;
+    const int endPage = g_pdf.selectionEndPage;
+    const bool selectionByText = g_pdf.selectionByText;
+    const int minPage = selectionByText ? std::min(startPage, endPage) : startPage;
+    const int maxPage = selectionByText ? std::max(startPage, endPage) : startPage;
+    double selLeft = 0.0, selRight = 0.0, selTop = 0.0, selBottom = 0.0;
+    bool haveRect = false;
+    if (!selectionByText) {
+        double sx = 0.0, sy = 0.0, ex = 0.0, ey = 0.0;
+        if (ClientToPdfOnPage(startPage, g_pdf.selStart, sx, sy) &&
+            ClientToPdfOnPage(startPage, g_pdf.selEnd, ex, ey)) {
+            selLeft = std::min(sx, ex);
+            selRight = std::max(sx, ex);
+            selTop = std::max(sy, ey);
+            selBottom = std::min(sy, ey);
+            haveRect = true;
+        }
+    }
+
+    for (int pageIndex = minPage; pageIndex <= maxPage; ++pageIndex) {
+        if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size()) ||
+            !EnsurePdfPageCharBoxes(pageIndex)) {
+            continue;
+        }
+        const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+        std::vector<LineSpan> lines;
+        if (selectionByText && g_pdf.selCharAnchor >= 0 && g_pdf.selCharFocus >= 0) {
+            int firstChar = -1;
+            int lastChar = -1;
+            if (!TextSelectionRangeForPage(pageIndex, startPage, endPage,
+                                           g_pdf.selCharAnchor, g_pdf.selCharFocus,
+                                           static_cast<int>(page.charBoxes.size()) - 1,
+                                           firstChar, lastChar)) {
+                continue;
+            }
+            BuildLineSpansFromCharRange(page, firstChar, lastChar, 0.0, false, false, lines);
+        } else if (haveRect) {
+            BuildLineSpansFromRect(page, selLeft, selRight, selTop, selBottom, 0.0, false, false, lines);
+        }
+
+        if (!lines.empty()) {
+            result.push_back({ pageIndex, std::move(lines) });
+        }
+    }
+    return result;
+}
+
+static bool PdfTextSelectionContainsClientPoint(const POINT& clientPt) {
+    if (!g_pdf.hasSelection) return false;
+
+    int hitPage = -1;
+    double pdfX = 0.0;
+    double pdfY = 0.0;
+    double pageTop = 0.0;
+    if (!HitTestPagePoint(clientPt, hitPage, pdfX, pdfY, pageTop)) return false;
+
+    const std::vector<TextColorSelectionLines> selectedLines = BuildTextColorSelectionLines();
+    constexpr double kSelectionHitMarginPt = 2.0;
+    for (const auto& selected : selectedLines) {
+        if (selected.pageIndex != hitPage) continue;
+        for (const auto& line : selected.lines) {
+            if (line.left > line.right || line.bottom > line.top) continue;
+            if (pdfX >= line.left - kSelectionHitMarginPt &&
+                pdfX <= line.right + kSelectionHitMarginPt &&
+                pdfY >= line.bottom - kSelectionHitMarginPt &&
+                pdfY <= line.top + kSelectionHitMarginPt) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool AddTextColorAnnotationForSelection(HWND hwnd, COLORREF color) {
+    const std::vector<TextColorSelectionLines> selectedLines = BuildTextColorSelectionLines();
+    bool addedAny = false;
+    for (const auto& selected : selectedLines) {
+        Annotation ann;
+        ann.type = Annotation::Type::TextColor;
+        ann.pageIndex = selected.pageIndex;
+        ann.color = color;
+        ann.alpha = 1.0;
+        ann.x1 = 1e9;
+        ann.x2 = -1e9;
+        ann.y1 = -1e9;
+        ann.y2 = 1e9;
+        for (const auto& line : selected.lines) {
+            if (line.left > line.right || line.bottom > line.top) continue;
+            ann.quads.insert(ann.quads.end(), {
+                line.left, line.top, line.right, line.top,
+                line.right, line.bottom, line.left, line.bottom
+            });
+            ann.x1 = std::min(ann.x1, line.left);
+            ann.x2 = std::max(ann.x2, line.right);
+            ann.y1 = std::max(ann.y1, line.top);
+            ann.y2 = std::min(ann.y2, line.bottom);
+        }
+        if (ann.quads.empty()) continue;
+        g_annots.push_back(std::move(ann));
+        RecordAnnotAdd(static_cast<int>(g_annots.size() - 1), g_annots.back());
+        addedAny = true;
+    }
+    if (!addedAny) return false;
+    MarkAnnotsDirty(GetParent(hwnd));
+    if (HWND owner = GetParent(hwnd)) UpdateWindowTitle(owner);
+    ClearPdfTextSelection();
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static bool QuadBounds(const std::vector<double>& quads, size_t offset,
+                       double& left, double& right, double& top, double& bottom) {
+    if (offset + 7 >= quads.size()) return false;
+    left = std::min(std::min(quads[offset], quads[offset + 2]),
+                    std::min(quads[offset + 4], quads[offset + 6]));
+    right = std::max(std::max(quads[offset], quads[offset + 2]),
+                     std::max(quads[offset + 4], quads[offset + 6]));
+    top = std::max(std::max(quads[offset + 1], quads[offset + 3]),
+                   std::max(quads[offset + 5], quads[offset + 7]));
+    bottom = std::min(std::min(quads[offset + 1], quads[offset + 3]),
+                      std::min(quads[offset + 5], quads[offset + 7]));
+    return left <= right && bottom <= top;
+}
+
+static bool RectOverlapsLineSpan(double left, double right, double top, double bottom, const LineSpan& line) {
+    if (line.left > line.right || line.bottom > line.top) return false;
+    return left <= line.right && right >= line.left && bottom <= line.top && top >= line.bottom;
+}
+
+static bool RectOverlapsAnySelectionLine(int pageIndex, double left, double right, double top, double bottom,
+                                         const std::vector<TextColorSelectionLines>& selectedLines) {
+    for (const auto& selected : selectedLines) {
+        if (selected.pageIndex != pageIndex) continue;
+        for (const auto& line : selected.lines) {
+            if (RectOverlapsLineSpan(left, right, top, bottom, line)) return true;
+        }
+    }
+    return false;
+}
+
+static bool RecomputeAnnotationBoundsFromQuads(Annotation& ann) {
+    if (ann.quads.empty()) return false;
+    double overallLeft = 1e9;
+    double overallRight = -1e9;
+    double overallTop = -1e9;
+    double overallBottom = 1e9;
+    for (size_t offset = 0; offset + 7 < ann.quads.size(); offset += 8) {
+        double left = 0.0;
+        double right = 0.0;
+        double top = 0.0;
+        double bottom = 0.0;
+        if (!QuadBounds(ann.quads, offset, left, right, top, bottom)) continue;
+        overallLeft = std::min(overallLeft, left);
+        overallRight = std::max(overallRight, right);
+        overallTop = std::max(overallTop, top);
+        overallBottom = std::min(overallBottom, bottom);
+    }
+    if (overallLeft > overallRight || overallBottom > overallTop) return false;
+    ann.x1 = overallLeft;
+    ann.x2 = overallRight;
+    ann.y1 = overallTop;
+    ann.y2 = overallBottom;
+    return true;
+}
+
+static bool RemoveTextColorAnnotationsForSelection(HWND hwnd) {
+    const std::vector<TextColorSelectionLines> selectedLines = BuildTextColorSelectionLines();
+    if (selectedLines.empty()) return false;
+
+    bool changed = false;
+    for (int idx = static_cast<int>(g_annots.size()) - 1; idx >= 0; --idx) {
+        Annotation& ann = g_annots[static_cast<size_t>(idx)];
+        if (ann.type != Annotation::Type::TextColor) continue;
+
+        if (ann.quads.empty()) {
+            const double left = std::min(ann.x1, ann.x2);
+            const double right = std::max(ann.x1, ann.x2);
+            const double top = std::max(ann.y1, ann.y2);
+            const double bottom = std::min(ann.y1, ann.y2);
+            if (!RectOverlapsAnySelectionLine(ann.pageIndex, left, right, top, bottom, selectedLines)) continue;
+            Annotation removed = ann;
+            g_annots.erase(g_annots.begin() + idx);
+            RecordAnnotRemove(idx, removed);
+            changed = true;
+            continue;
+        }
+
+        Annotation before = ann;
+        std::vector<double> keptQuads;
+        keptQuads.reserve(ann.quads.size());
+        bool removedQuad = false;
+        for (size_t offset = 0; offset + 7 < ann.quads.size(); offset += 8) {
+            double left = 0.0;
+            double right = 0.0;
+            double top = 0.0;
+            double bottom = 0.0;
+            const bool overlaps = QuadBounds(ann.quads, offset, left, right, top, bottom) &&
+                RectOverlapsAnySelectionLine(ann.pageIndex, left, right, top, bottom, selectedLines);
+            if (overlaps) {
+                removedQuad = true;
+                continue;
+            }
+            keptQuads.insert(keptQuads.end(), ann.quads.begin() + offset, ann.quads.begin() + offset + 8);
+        }
+        if (!removedQuad) continue;
+
+        if (keptQuads.empty()) {
+            Annotation removed = before;
+            g_annots.erase(g_annots.begin() + idx);
+            RecordAnnotRemove(idx, removed);
+        } else {
+            ann.quads = std::move(keptQuads);
+            if (RecomputeAnnotationBoundsFromQuads(ann)) {
+                RecordAnnotUpdate(idx, idx, before, ann);
+            } else {
+                Annotation removed = before;
+                g_annots.erase(g_annots.begin() + idx);
+                RecordAnnotRemove(idx, removed);
+            }
+        }
+        changed = true;
+    }
+
+    if (!changed) return false;
+    MarkAnnotsDirty(GetParent(hwnd));
+    if (HWND owner = GetParent(hwnd)) UpdateWindowTitle(owner);
+    ClearPdfTextSelection();
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+static void ShowPdfContextMenu(HWND hwnd, POINT screenPt) {
+    const bool editing = g_pdf.editingText;
+
+    if (screenPt.x == -1 && screenPt.y == -1) {
+        GetCursorPos(&screenPt);
+    }
+
+    POINT clientPt = screenPt;
+    ScreenToClient(hwnd, &clientPt);
+    const bool hadPdfSelection = g_pdf.hasSelection;
+    const bool hasPdfSelection = hadPdfSelection && PdfTextSelectionContainsClientPoint(clientPt);
+    if (!editing && hadPdfSelection && !hasPdfSelection) {
+        ClearPdfTextSelection();
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
+    auto resolvePageIndex = [&]() -> int {
+        int pageIndex = GetSelectionPageIndex();
+        if (pageIndex >= 0) return pageIndex;
+        int hitPage = -1;
+        double px = 0.0, py = 0.0, top = 0.0;
+        if (HitTestPagePoint(clientPt, hitPage, px, py, top)) return hitPage;
+        return -1;
+    };
+
+    enum : UINT {
+        ID_CTX_CUT = 1,
+        ID_CTX_COPY,
+        ID_CTX_PASTE,
+        ID_CTX_SELECT_ALL,
+        ID_CTX_SELECT_NONE,
+        ID_CTX_TEXT_COLOR_CLEAR = 90,
+        ID_CTX_TEXT_COLOR_BASE = 100
+    };
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+
+    auto appendAnnotTools = [&](HMENU targetMenu) {
+        bool added = false;
+        for (AnnotToolFamily family : AnnotToolFamilyUiOrder()) {
+            const AnnotToolUiState state = AnnotToolFamilyUiStateFor(family);
+            if (state == AnnotToolUiState::Hidden) continue;
+            const int command = AnnotToolFamilyCommand(family);
+            if (command == 0) continue;
+            UINT flags = MF_STRING;
+            if (state == AnnotToolUiState::Disabled) flags |= MF_GRAYED;
+            if (AnnotToolFamilyForMode(g_toolMode) == family) flags |= MF_CHECKED;
+            const std::wstring label = AnnotToolFamilyLabel(family);
+            AppendMenuW(targetMenu, flags, static_cast<UINT_PTR>(command), label.c_str());
+            added = true;
+        }
+        return added;
+    };
+
+    if (editing) {
+        const bool hasEditSelection = HasEditSelection();
+        const bool canPaste = IsClipboardFormatAvailable(CF_UNICODETEXT) != 0;
+        const bool hasText = !g_pdf.editText.empty();
+        AppendMenuW(menu, MF_STRING | (hasEditSelection ? 0 : MF_GRAYED), ID_CTX_CUT, ContextMenuLabelCut());
+        AppendMenuW(menu, MF_STRING | (hasEditSelection ? 0 : MF_GRAYED), ID_CTX_COPY, ContextMenuLabelCopy());
+        AppendMenuW(menu, MF_STRING | (canPaste ? 0 : MF_GRAYED), ID_CTX_PASTE, ContextMenuLabelPaste());
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (hasText ? 0 : MF_GRAYED), ID_CTX_SELECT_ALL, ContextMenuLabelSelectAll());
+        AppendMenuW(menu, MF_STRING | (hasEditSelection ? 0 : MF_GRAYED), ID_CTX_SELECT_NONE, ContextMenuLabelSelectNone());
+    } else if (hasPdfSelection) {
+        const int pageIndex = resolvePageIndex();
+        AppendMenuW(menu, MF_STRING | (hasPdfSelection ? 0 : MF_GRAYED), ID_CTX_COPY, ContextMenuLabelCopy());
+        HMENU textColorMenu = CreatePopupMenu();
+        if (textColorMenu) {
+            AppendMenuW(textColorMenu, MF_STRING, ID_CTX_TEXT_COLOR_CLEAR, ContextMenuLabelClearTextColor());
+            AppendMenuW(textColorMenu, MF_SEPARATOR, 0, nullptr);
+            for (size_t i = 0; i < g_palette.size(); ++i) {
+                const std::wstring label = TextColorMenuLabel(g_palette[i], i);
+                AppendMenuW(textColorMenu, MF_STRING,
+                            ID_CTX_TEXT_COLOR_BASE + static_cast<UINT>(i), label.c_str());
+            }
+            AppendMenuW(menu, MF_POPUP | (hasPdfSelection ? 0 : MF_GRAYED),
+                        reinterpret_cast<UINT_PTR>(textColorMenu), ContextMenuLabelTextColor());
+        }
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (pageIndex >= 0 ? 0 : MF_GRAYED), ID_CTX_SELECT_ALL, ContextMenuLabelSelectAll());
+        AppendMenuW(menu, MF_STRING | (hasPdfSelection ? 0 : MF_GRAYED), ID_CTX_SELECT_NONE, ContextMenuLabelSelectNone());
+        HMENU annotToolMenu = CreatePopupMenu();
+        if (annotToolMenu) {
+            if (appendAnnotTools(annotToolMenu)) {
+                AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(annotToolMenu), ContextMenuLabelAnnotTool());
+            } else {
+                DestroyMenu(annotToolMenu);
+            }
+        }
+    } else {
+        if (!appendAnnotTools(menu)) {
+            DestroyMenu(menu);
+            return;
+        }
+    }
+
+    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPt.x, screenPt.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+    if (!cmd) return;
+
+    if (editing) {
+        switch (cmd) {
+        case ID_CTX_CUT:
+            if (HasEditSelection() && CopyEditSelectionToClipboard(hwnd)) {
+                RECT before{};
+                bool hadBefore = GetEditingTextBoxClientRect(&before);
+                RecordTextEditChange();
+                g_pdf.imeComp.clear();
+                g_pdf.imeComposing = false;
+                g_pdf.suppressNextImeResultReturnChar = false;
+                g_pdf.imeResultMessageTime = 0;
+                g_pdf.editLayoutDirty = true;
+                DeleteEditSelection();
+                RecalcEditingTextboxSize(true);
+                EnsureEditingTextBoxVisible(hwnd, L"ctx_cut_text");
+                UpdateImeWindowPosition(hwnd, true);
+                InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+            }
+            break;
+        case ID_CTX_COPY:
+            CopyEditSelectionToClipboard(hwnd);
+            break;
+        case ID_CTX_PASTE:
+        {
+            RECT before{};
+            bool hadBefore = GetEditingTextBoxClientRect(&before);
+            g_pdf.imeComp.clear();
+            g_pdf.imeComposing = false;
+            g_pdf.suppressNextImeResultReturnChar = false;
+            g_pdf.imeResultMessageTime = 0;
+            g_pdf.editLayoutDirty = true;
+            if (PasteClipboardToEdit(hwnd)) {
+                RecalcEditingTextboxSize(true);
+                EnsureEditingTextBoxVisible(hwnd, L"ctx_paste_text");
+                UpdateImeWindowPosition(hwnd, true);
+                InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+            }
+            break;
+        }
+        case ID_CTX_SELECT_ALL:
+        {
+            RECT before{};
+            bool hadBefore = GetEditingTextBoxClientRect(&before);
+            g_pdf.imeComp.clear();
+            g_pdf.imeComposing = false;
+            g_pdf.suppressNextImeResultReturnChar = false;
+            g_pdf.imeResultMessageTime = 0;
+            g_pdf.editLayoutDirty = true;
+            SelectAllEditText();
+            UpdateImeWindowPosition(hwnd, true);
+            InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+            break;
+        }
+        case ID_CTX_SELECT_NONE:
+        {
+            RECT before{};
+            bool hadBefore = GetEditingTextBoxClientRect(&before);
+            g_pdf.editSelectingText = false;
+            ClearEditSelection();
+            UpdateImeWindowPosition(hwnd, true);
+            InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+            break;
+        }
+        default:
+            break;
+        }
+        return;
+    }
+
+    if (cmd >= ID_CTX_TEXT_COLOR_BASE &&
+        cmd < ID_CTX_TEXT_COLOR_BASE + static_cast<UINT>(g_palette.size())) {
+        const size_t index = static_cast<size_t>(cmd - ID_CTX_TEXT_COLOR_BASE);
+        AddTextColorAnnotationForSelection(hwnd, g_palette[index]);
+        return;
+    }
+
+    if (cmd >= ID_TOOL_MODE_PAN && cmd <= ID_TOOL_MODE_MARKER_TEXT_COLOR) {
+        HWND target = g_hMainWnd ? g_hMainWnd : GetParent(hwnd);
+        if (target) {
+            SendMessageW(target, WM_COMMAND, MAKEWPARAM(cmd, kAnnotContextMenuCommandCode), reinterpret_cast<LPARAM>(hwnd));
+        }
+        return;
+    }
+
+    switch (cmd) {
+    case ID_CTX_TEXT_COLOR_CLEAR:
+        RemoveTextColorAnnotationsForSelection(hwnd);
+        break;
+    case ID_CTX_COPY: {
+        if (!CanCopySelectedPdfText(hwnd)) break;
+        std::wstring text;
+        if (GetSelectedPdfText(text)) {
+            CopyTextToClipboard(hwnd, text);
+        }
+        break;
+    }
+    case ID_CTX_SELECT_ALL: {
+        int pageIndex = resolvePageIndex();
+        if (pageIndex >= 0) {
+            SelectAllPdfTextOnPage(hwnd, pageIndex);
+        }
+        break;
+    }
+    case ID_CTX_SELECT_NONE:
+        ClearPdfTextSelection();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        break;
+    default:
+        break;
+    }
+}
+
+static int HitTestCharIndexExact(const PageCache& page, double xPt, double yPt, double padPt) {
+    if (page.charBoxes.empty()) return -1;
+    for (size_t i = 0; i < page.charBoxes.size(); ++i) {
+        const auto& cb = page.charBoxes[i];
+        if (xPt >= cb.left - padPt && xPt <= cb.right + padPt &&
+            yPt >= cb.bottom - padPt && yPt <= cb.top + padPt) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+static int HitTestCharIndexLineAware(const PageCache& page, double xPt, double yPt, double padPt) {
+    int exact = HitTestCharIndexExact(page, xPt, yPt, padPt);
+    if (exact >= 0) return exact;
+    if (page.charBoxes.empty()) return -1;
+
+    struct LineHit {
+        LineSpan span;
+        double midY = 0.0;
+        int bestChar = -1;
+        double bestDx = 1e30;
+    };
+
+    std::vector<LineHit> lines;
+    lines.reserve(32);
+
+    for (size_t i = 0; i < page.charBoxes.size(); ++i) {
+        const auto& cb = page.charBoxes[i];
+        double cbLeft = cb.left;
+        double cbRight = cb.right;
+        double cbTop = cb.top + padPt;
+        double cbBottom = cb.bottom - padPt;
+        if (cbLeft > cbRight || cbBottom > cbTop) continue;
+        double midY = (cbTop + cbBottom) * 0.5;
+
+        int lineIdx = -1;
+        for (size_t j = 0; j < lines.size(); ++j) {
+            if (midY <= lines[j].span.top + kLineMergeTolerancePt &&
+                midY >= lines[j].span.bottom - kLineMergeTolerancePt) {
+                lineIdx = static_cast<int>(j);
+                break;
+            }
+        }
+
+        double dx = 0.0;
+        if (xPt < cbLeft) dx = cbLeft - xPt;
+        else if (xPt > cbRight) dx = xPt - cbRight;
+
+        if (lineIdx < 0) {
+            LineHit hit;
+            hit.span.top = cbTop;
+            hit.span.bottom = cbBottom;
+            hit.span.left = cbLeft;
+            hit.span.right = cbRight;
+            hit.midY = midY;
+            hit.bestChar = static_cast<int>(i);
+            hit.bestDx = dx;
+            lines.push_back(hit);
+        } else {
+            auto& line = lines[static_cast<size_t>(lineIdx)];
+            line.span.top = std::max(line.span.top, cbTop);
+            line.span.bottom = std::min(line.span.bottom, cbBottom);
+            line.span.left = std::min(line.span.left, cbLeft);
+            line.span.right = std::max(line.span.right, cbRight);
+            line.midY = (line.span.top + line.span.bottom) * 0.5;
+            if (dx < line.bestDx) {
+                line.bestDx = dx;
+                line.bestChar = static_cast<int>(i);
+            }
+        }
+    }
+
+    int bestLine = -1;
+    double bestLineDist = 1e30;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const auto& line = lines[i];
+        if (yPt < line.span.bottom || yPt > line.span.top) continue;
+        if (xPt < line.span.left || xPt > line.span.right) continue;
+        double dist = std::abs(yPt - line.midY);
+        if (dist < bestLineDist) {
+            bestLineDist = dist;
+            bestLine = static_cast<int>(i);
+        }
+    }
+
+    if (bestLine < 0) return -1;
+    return lines[static_cast<size_t>(bestLine)].bestChar;
+}
+
+static int FindNearestCharIndex(const PageCache& page, double xPt, double yPt) {
+    if (page.charBoxes.empty()) return -1;
+    double bestScore = 1e30;
+    int best = -1;
+    for (size_t i = 0; i < page.charBoxes.size(); ++i) {
+        const auto& cb = page.charBoxes[i];
+        double dx = 0.0;
+        if (xPt < cb.left) dx = cb.left - xPt;
+        else if (xPt > cb.right) dx = xPt - cb.right;
+        double dy = 0.0;
+        if (yPt < cb.bottom) dy = cb.bottom - yPt;
+        else if (yPt > cb.top) dy = yPt - cb.top;
+        double score = dy * dy * 4.0 + dx * dx;
+        if (score < bestScore) {
+            bestScore = score;
+            best = static_cast<int>(i);
+        }
+    }
+    return best;
+}
+
+static void DrawTextSelection(HDC hdc) {
+    if (!g_pdf.hasSelection || g_pdf.selectionStartPage < 0 || g_pdf.selectionEndPage < 0) return;
+    int startPage = g_pdf.selectionStartPage;
+    int endPage = g_pdf.selectionEndPage;
+    int minPage = std::min(startPage, endPage);
+    int maxPage = std::max(startPage, endPage);
+    size_t numPages = g_pdf.pages.size();
+    if (minPage >= static_cast<int>(numPages)) return;
+    maxPage = std::min(maxPage, static_cast<int>(numPages) - 1);
+
+    const COLORREF fill = SelectionFillColor();
+    const BYTE alpha = 120;
+    double padPt = MarkerTextPadPt();
+    bool underlineMarkerPreview = false;
+    bool textColorMarkerPreview = false;
+    if (g_pdf.selectingText && IsMarkerTextMode(g_toolMode)) {
+        textColorMarkerPreview = MarkerTextModeUsesTextColor(g_toolMode);
+        padPt = textColorMarkerPreview ? 0.0 : MarkerTextPadPtFromWidthPt(g_markerTextWidthPt);
+        underlineMarkerPreview = MarkerTextModeUsesUnderline(g_toolMode);
+    }
+
+    HPEN pen = CreatePen(PS_NULL, 0, 0);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+
+    for (int i = minPage; i <= maxPage; ++i) {
+        if (g_pdf.selectionByText && (g_pdf.selectingText || i == startPage || i == endPage)) {
+            EnsurePdfPageCharBoxes(i);
+        }
+        const auto& page = g_pdf.pages[static_cast<size_t>(i)];
+        if (page.charBoxes.empty()) continue;
+
+        double pageLeftClientD = PageClientLeft(i);
+        double pageTopClientD = PageClientTop(i);
+        int pageLeft = static_cast<int>(std::round(pageLeftClientD));
+        int pageTop = static_cast<int>(std::round(pageTopClientD));
+
+        auto buildPageTextRects = [&]() {
+            std::vector<RECT> out;
+            out.reserve(page.charBoxes.size());
+            for (const auto& cb : page.charBoxes) {
+                double x1 = cb.left * kDpi / 72.0 * g_pdf.scale;
+                double x2 = cb.right * kDpi / 72.0 * g_pdf.scale;
+                double y1 = (page.heightPt - cb.top) * kDpi / 72.0 * g_pdf.scale;
+                double y2 = (page.heightPt - cb.bottom) * kDpi / 72.0 * g_pdf.scale;
+                RECT tr{};
+                tr.left = static_cast<LONG>(std::round(std::min(x1, x2)));
+                tr.right = static_cast<LONG>(std::round(std::max(x1, x2)));
+                tr.top = static_cast<LONG>(std::round(std::min(y1, y2)));
+                tr.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+                if (tr.left >= tr.right || tr.top >= tr.bottom) continue;
+                out.push_back(tr);
+            }
+            return out;
+        };
+        std::vector<RECT> textRects = buildPageTextRects();
+
+        if (g_pdf.selectionByText) {
+            int sChar = -1, eChar = -1;
+            TextSelectionRangeForPage(i, startPage, endPage,
+                                      g_pdf.selCharAnchor, g_pdf.selCharFocus,
+                                      static_cast<int>(page.charBoxes.size()) - 1,
+                                      sChar, eChar);
+
+            if (sChar >= 0 && eChar >= 0) {
+                std::vector<LineSpan> lines;
+                bool horizontalPadPreview = g_pdf.selectingText && IsMarkerTextMode(g_toolMode) &&
+                                            !textColorMarkerPreview;
+                BuildLineSpansFromCharRange(page, sChar, eChar, padPt, underlineMarkerPreview,
+                                            horizontalPadPreview, lines);
+                for (const auto& ls : lines) {
+                    if (ls.left > ls.right) continue;
+                    double x1 = pageLeftClientD + ls.left * kDpi / 72.0 * g_pdf.scale;
+                    double x2 = pageLeftClientD + ls.right * kDpi / 72.0 * g_pdf.scale;
+                    double y1 = pageTopClientD + (page.heightPt - ls.top) * kDpi / 72.0 * g_pdf.scale;
+                    double y2 = pageTopClientD + (page.heightPt - ls.bottom) * kDpi / 72.0 * g_pdf.scale;
+                    RECT r{};
+                    r.left = static_cast<LONG>(std::round(std::min(x1, x2)));
+                    r.right = static_cast<LONG>(std::round(std::max(x1, x2)));
+                    r.top = static_cast<LONG>(std::round(std::min(y1, y2)));
+                    r.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+                    if (textColorMarkerPreview) {
+                        TintRectTextPixels(hdc, r, g_activeColor, page, pageLeft, pageTop, textRects);
+                    } else {
+                        FillRectAlphaMaskedByText(hdc, r, fill, alpha, page, pageLeft, pageTop, textRects,
+                                                  kMarkerTextAlphaScaleOnText);
+                    }
+                }
+            }
+        } else {
+            // Rectangular selection in document space
+            double x1Doc = ClientToDocX(g_pdf.selStart.x);
+            double y1Doc = ClientToDocY(g_pdf.selStart.y);
+            double x2Doc = ClientToDocX(g_pdf.selEnd.x);
+            double y2Doc = ClientToDocY(g_pdf.selEnd.y);
+            double minXDoc = std::min(x1Doc, x2Doc);
+            double maxXDoc = std::max(x1Doc, x2Doc);
+            double minYDoc = std::min(y1Doc, y2Doc);
+            double maxYDoc = std::max(y1Doc, y2Doc);
+
+            const auto& rect = g_pdf.pageRects[i];
+            PdfFlowMode mode = CurrentFlowMode();
+            double padX = FlowCrossPaddingX(mode);
+            double padY = FlowCrossPaddingY(mode);
+            double pageDocLeft = rect.left + padX;
+            double pageDocTop = rect.top + padY;
+
+            std::vector<LineSpan> underlineLines;
+            for (const auto& cb : page.charBoxes) {
+                double cbDocLeft = pageDocLeft + cb.left * kDpi / 72.0 * g_pdf.scale;
+                double cbDocRight = pageDocLeft + cb.right * kDpi / 72.0 * g_pdf.scale;
+                double cbDocTop = pageDocTop + (page.heightPt - cb.top) * kDpi / 72.0 * g_pdf.scale;
+                double cbDocBottom = pageDocTop + (page.heightPt - cb.bottom) * kDpi / 72.0 * g_pdf.scale;
+
+                if (cbDocRight < minXDoc || cbDocLeft > maxXDoc ||
+                    cbDocBottom < minYDoc || cbDocTop > maxYDoc) continue;
+
+                if (underlineMarkerPreview) {
+                    AppendLineSpanCandidate(cb.left, cb.right, cb.top, cb.bottom, underlineLines);
+                    continue;
+                }
+
+                double leftPt = cb.left;
+                double rightPt = cb.right;
+                if (g_pdf.selectingText && IsMarkerTextMode(g_toolMode) && !textColorMarkerPreview) {
+                    leftPt = std::max(0.0, leftPt - kMarkerTextHorizontalPadPt);
+                    rightPt = std::min(page.widthPt, rightPt + kMarkerTextHorizontalPadPt);
+                }
+                double x1 = pageLeftClientD + leftPt * kDpi / 72.0 * g_pdf.scale;
+                double x2 = pageLeftClientD + rightPt * kDpi / 72.0 * g_pdf.scale;
+                double y1 = pageTopClientD + (page.heightPt - (cb.top + padPt)) * kDpi / 72.0 * g_pdf.scale;
+                double y2 = pageTopClientD + (page.heightPt - (cb.bottom - padPt)) * kDpi / 72.0 * g_pdf.scale;
+                RECT r{};
+                r.left = static_cast<LONG>(std::round(std::min(x1, x2)));
+                r.right = static_cast<LONG>(std::round(std::max(x1, x2)));
+                r.top = static_cast<LONG>(std::round(std::min(y1, y2)));
+                r.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+                if (textColorMarkerPreview) {
+                    TintRectTextPixels(hdc, r, g_activeColor, page, pageLeft, pageTop, textRects);
+                } else {
+                    FillRectAlphaMaskedByText(hdc, r, fill, alpha, page, pageLeft, pageTop, textRects,
+                                              kMarkerTextAlphaScaleOnText);
+                }
+            }
+            if (underlineMarkerPreview) {
+                ApplyUnderlineStyleToLineSpans(padPt, underlineLines);
+                ApplyMarkerTextHorizontalPadding(page.widthPt, underlineLines);
+                for (const auto& ls : underlineLines) {
+                    if (ls.left > ls.right) continue;
+                    double x1 = pageLeftClientD + ls.left * kDpi / 72.0 * g_pdf.scale;
+                    double x2 = pageLeftClientD + ls.right * kDpi / 72.0 * g_pdf.scale;
+                    double y1 = pageTopClientD + (page.heightPt - ls.top) * kDpi / 72.0 * g_pdf.scale;
+                    double y2 = pageTopClientD + (page.heightPt - ls.bottom) * kDpi / 72.0 * g_pdf.scale;
+                    RECT r{};
+                    r.left = static_cast<LONG>(std::round(std::min(x1, x2)));
+                    r.right = static_cast<LONG>(std::round(std::max(x1, x2)));
+                    r.top = static_cast<LONG>(std::round(std::min(y1, y2)));
+                    r.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+                    FillRectAlphaMaskedByText(hdc, r, fill, alpha, page, pageLeft, pageTop, textRects,
+                                              kMarkerTextAlphaScaleOnText);
+                }
+            }
+        }
+    }
+
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+    SelectObject(hdc, oldBrush);
+}
+
+static void DrawTextBoxHoverCaret(HDC hdc, const RECT& client) {
+    if (!g_pdf.textBoxHoverValid) return;
+    if (g_toolMode != ToolMode::TextBox) return;
+    if (GetFocus() != g_hPdfView) return;
+    if (g_pdf.editingText || g_pdf.drawingAnnot || g_pdf.movingAnnot || g_pdf.pendingTextBoxHit ||
+        g_pdf.selectingText || g_pdf.panning || g_pdf.erasing) {
+        return;
+    }
+    int pageIndex = -1;
+    double hitPx = 0.0, hitPy = 0.0, dummyTop = 0.0;
+    if (!HitTestPagePoint(g_pdf.textBoxHoverPos, pageIndex, hitPx, hitPy, dummyTop)) return;
+    AdaptiveTextPreset preset = ComputeAdaptiveTextPresetForPage(pageIndex, g_textFontPt);
+    double fontPt = preset.fontPt;
+    std::wstring fontName = g_textFontName;
+    if (fontName.empty()) {
+        fontName = GetDefaultFontFaceName();
+    }
+    double anchorX = hitPx - (kTextClickLeftOffsetPx * 72.0 / kDpi / g_pdf.scale);
+    double anchorY = NewTextBoxTopFromClickY(hitPy, fontPt, fontName, g_pdf.scale);
+    double right = anchorX + preset.widthPt;
+    double bottom = anchorY - preset.heightPt;
+    RECT outer{};
+    if (!PtRectToClientRect(pageIndex, anchorX, anchorY, right, bottom, outer)) return;
+
+    double scale = (g_pdf.scale > 0.0) ? g_pdf.scale : 1.0;
+    int lineHeightClient = MeasureTextLineHeightPx(fontPt, fontName, scale);
+    if (lineHeightClient <= 0) {
+        lineHeightClient = std::max(1, static_cast<int>(std::lround(fontPt * kDpi / 72.0 * scale)));
+    }
+    int padClient = std::max(1, static_cast<int>(std::lround(kTextPadPx * scale)));
+    int minHeightClient = lineHeightClient + padClient * 2;
+    double minHeightPt = minHeightClient * 72.0 / (kDpi * scale);
+    double heightPt = std::max(preset.heightPt, minHeightPt);
+    bottom = anchorY - heightPt;
+    if (!PtRectToClientRect(pageIndex, anchorX, anchorY, right, bottom, outer)) return;
+    int availHeightClient = std::max<int>(1, static_cast<int>((outer.bottom - outer.top) - padClient * 2));
+    lineHeightClient = std::min(lineHeightClient, availHeightClient);
+    int caretX = outer.left + padClient;
+    int caretY = outer.top + padClient;
+    int y1 = caretY + 2;
+    int y2 = caretY + std::max(2, lineHeightClient - 2);
+
+    int saved = SaveDC(hdc);
+    IntersectClipRect(hdc, client.left, client.top, client.right, client.bottom);
+    IntersectClipRect(hdc, outer.left, outer.top, outer.right, outer.bottom);
+    int caretW = CaretThicknessForLineHeight(lineHeightClient);
+    HPEN pen = CreatePen(PS_SOLID, caretW, g_activeColor);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    MoveToEx(hdc, caretX, y1, nullptr);
+    LineTo(hdc, caretX, y2);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+    if (saved != 0) RestoreDC(hdc, saved);
+}
+
+static void DrawInProgress(HDC hdc, const RECT& client) {
+    // inline text editing display
+    if (g_pdf.editingText && g_pdf.editPage >= 0) {
+        RECT outer{};
+        if (PtRectToClientRect(g_pdf.editPage, g_pdf.editX1, g_pdf.editY1, g_pdf.editX2, g_pdf.editY2, outer)) {
+            RECT tinted = outer;
+            tinted.left = std::max(tinted.left, client.left);
+            tinted.right = std::min(tinted.right, client.right);
+            tinted.top = std::max(tinted.top, client.top);
+            tinted.bottom = std::min(tinted.bottom, client.bottom);
+            FillRectAlpha(hdc, tinted, DarkenColor(g_activeColor, 0.9), 32);
+            HPEN framePen = CreatePen(PS_SOLID, 1, DarkenColor(g_activeColor, 0.7));
+            HGDIOBJ oldPenFrame = nullptr;
+            if (framePen) {
+                oldPenFrame = SelectObject(hdc, framePen);
+                Rectangle(hdc, outer.left, outer.top, outer.right, outer.bottom);
+            }
+
+            std::wstring displayText = BuildEditDisplayText(true);
+            if (EnsureEditLayoutCache(true)) {
+                Annotation tmp;
+                tmp.type = Annotation::Type::TextBox;
+                tmp.pageIndex = g_pdf.editPage;
+                tmp.x1 = g_pdf.editX1;
+                tmp.y1 = g_pdf.editY1;
+                tmp.x2 = g_pdf.editX2;
+                tmp.y2 = g_pdf.editY2;
+                tmp.color = g_activeColor;
+                tmp.text = displayText;
+                tmp.fontName = g_pdf.editFontName.empty() ? g_textFontName : g_pdf.editFontName;
+                tmp.fontPt = g_pdf.editFontPt;
+                tmp.textLines = LayoutResultToLines(g_pdf.editLayout, displayText);
+
+                HDC scratchDc = CreateCompatibleDC(hdc);
+                if (scratchDc) {
+                    DrawTextBoxStable(hdc, scratchDc, outer, tmp);
+                    DeleteDC(scratchDc);
+                }
+
+                int saved = SaveDC(hdc);
+                IntersectClipRect(hdc, outer.left, outer.top, outer.right, outer.bottom);
+
+                const auto& layout = g_pdf.editLayout;
+                const int padLayout = LayoutPadPx();
+                const int lineHeight = std::max(1, static_cast<int>(layout.tm.tmHeight));
+                const double scale = LayoutToClientScale();
+
+                auto toClientX = [&](int xLayout) {
+                    return outer.left + static_cast<int>(std::lround(xLayout * scale));
+                };
+                auto toClientY = [&](int yLayout) {
+                    return outer.top + static_cast<int>(std::lround(yLayout * scale));
+                };
+
+                if (HasEditSelection()) {
+                    size_t selStart = std::min(g_pdf.editSelStart, g_pdf.editSelEnd);
+                    size_t selEnd = std::max(g_pdf.editSelStart, g_pdf.editSelEnd);
+                    size_t dispStart = EditIndexToDisplayIndex(selStart);
+                    size_t dispEnd = EditIndexToDisplayIndex(selEnd);
+                    if (dispEnd > dispStart) {
+                        const COLORREF selColor = SelectionFillColor();
+                        const BYTE selAlpha = 96;
+                        for (size_t i = 0; i < layout.lines.size(); ++i) {
+                            const auto& ln = layout.lines[i];
+                            size_t lineStart = ln.start;
+                            size_t lineEnd = lineStart + ln.len;
+                            if (dispEnd <= lineStart || dispStart >= lineEnd) continue;
+                            size_t segStart = std::max(dispStart, lineStart);
+                            size_t segEnd = std::min(dispEnd, lineEnd);
+                            size_t startCol = (segStart > lineStart) ? (segStart - lineStart) : 0;
+                            size_t endCol = (segEnd > lineStart) ? (segEnd - lineStart) : 0;
+                            int wStart = ColumnWidthForLine(ln, startCol);
+                            int wEnd = ColumnWidthForLine(ln, endCol);
+                            if (wEnd <= wStart) continue;
+                            int x1 = toClientX(padLayout + wStart);
+                            int x2 = toClientX(padLayout + wEnd);
+                            int y1 = toClientY(padLayout + static_cast<int>(i) * lineHeight);
+                            int y2 = toClientY(padLayout + static_cast<int>(i + 1) * lineHeight);
+                            RECT selR{ x1, y1, x2, y2 };
+                            if (selR.right > selR.left && selR.bottom > selR.top) {
+                                FillRectAlpha(hdc, selR, selColor, selAlpha);
+                            }
+                        }
+                    }
+                }
+
+                if (!g_pdf.imeComp.empty()) {
+                    const size_t compStart = std::min(g_pdf.editCaret, g_pdf.editText.size());
+                    const size_t compEnd = compStart + g_pdf.imeComp.size();
+                    HPEN penU = CreatePen(PS_SOLID, 1, g_activeColor);
+                    HGDIOBJ oldPenU = nullptr;
+                    for (size_t i = 0; i < layout.lines.size(); ++i) {
+                        const auto& ln = layout.lines[i];
+                        size_t lineStart = ln.start;
+                        size_t lineEnd = lineStart + ln.len;
+                        if (compEnd <= lineStart || compStart >= lineEnd) continue;
+                        size_t segStart = std::max(compStart, lineStart);
+                        size_t segEnd = std::min(compEnd, lineEnd);
+                        size_t startCol = (segStart > lineStart) ? (segStart - lineStart) : 0;
+                        size_t endCol = (segEnd > lineStart) ? (segEnd - lineStart) : 0;
+                        int wStart = ColumnWidthForLine(ln, startCol);
+                        int wEnd = ColumnWidthForLine(ln, endCol);
+                        if (wEnd > wStart && penU) {
+                            if (!oldPenU) oldPenU = SelectObject(hdc, penU);
+                            int yLayout = padLayout + static_cast<int>(i) * lineHeight + std::max(1, lineHeight - 2);
+                            MoveToEx(hdc, toClientX(padLayout + wStart), toClientY(yLayout), nullptr);
+                            LineTo(hdc, toClientX(padLayout + wEnd), toClientY(yLayout));
+                        }
+                    }
+                    if (oldPenU) SelectObject(hdc, oldPenU);
+                    if (penU) DeleteObject(penU);
+                }
+
+                if (!layout.lines.empty()) {
+                    size_t caretLogical = EditCaretDisplayIndex();
+                    size_t lineIndex = FindLineForCaret(layout.lines, caretLogical);
+                    const auto& line = layout.lines[lineIndex];
+                    size_t lineStart = line.start;
+                    size_t lineEnd = lineStart + line.len;
+                    size_t inLine = (caretLogical > lineStart) ? (std::min(caretLogical, lineEnd) - lineStart) : 0;
+                    int caretX = ColumnWidthForLine(line, inLine);
+                    int caretYLayout = padLayout + static_cast<int>(lineIndex) * lineHeight;
+                    int caretXClient = toClientX(padLayout + caretX);
+                    int caretYClient = toClientY(caretYLayout);
+                    int lineHeightClient = std::max(1, static_cast<int>(std::lround(lineHeight * scale)));
+                    int caretW = CaretThicknessForLineHeight(lineHeightClient);
+                    HPEN pen = CreatePen(PS_SOLID, caretW, g_activeColor);
+                    HGDIOBJ oldPen = SelectObject(hdc, pen);
+                    MoveToEx(hdc, caretXClient, caretYClient + 2, nullptr);
+                    LineTo(hdc, caretXClient, caretYClient + std::max(2, lineHeightClient - 2));
+                    SelectObject(hdc, oldPen);
+                    DeleteObject(pen);
+                }
+
+                if (saved != 0) RestoreDC(hdc, saved);
+            }
+
+            if (oldPenFrame) SelectObject(hdc, oldPenFrame);
+            if (framePen) DeleteObject(framePen);
+        }
+        return;
+    }
+    if (g_pdf.selectingText && IsMarkerTextMode(g_toolMode)) {
+        DrawTextSelection(hdc);
+        return;
+    }
+    if (g_toolMode == ToolMode::TextBox) {
+        DrawTextBoxHoverCaret(hdc, client);
+    }
+    if (!g_pdf.drawingAnnot || g_pdf.drawPageIndex < 0 ||
+        g_pdf.drawPageIndex >= static_cast<int>(g_pdf.pages.size()))
+        return;
+    const auto& page = g_pdf.pages[static_cast<size_t>(g_pdf.drawPageIndex)];
+    double pageLeftClient = PageClientLeft(g_pdf.drawPageIndex);
+    double pageTopClient = PageClientTop(g_pdf.drawPageIndex);
+    double pageRightClient = pageLeftClient + page.w;
+    double pageBottomClient = pageTopClient + page.h;
+    if (pageRightClient < client.left || pageLeftClient > client.right ||
+        pageBottomClient < client.top || pageTopClient > client.bottom) {
+        return;
+    }
+
+    auto color = (g_toolMode == ToolMode::Shape) ? g_activeColor : DarkenColor(g_activeColor, 0.85);
+    BYTE alpha = static_cast<BYTE>(std::clamp(g_markerAlpha, 0.0, 1.0) * 255.0);
+    int penW = 2;
+    if (IsLineLikeAnnotToolMode(g_toolMode)) {
+        double wPt = ToolWidthPtForMode(g_toolMode);
+        penW = static_cast<int>(std::round(std::max(1.0, wPt * kDpi / 72.0 * g_pdf.scale)));
+        alpha = static_cast<BYTE>(std::clamp(ToolAlphaForMode(g_toolMode), 0.0, 1.0) * 255.0);
+    } else if (g_toolMode == ToolMode::MarkerFree) {
+        penW = static_cast<int>(std::round(std::max(1.0, g_markerFreeWidthPt * kDpi / 72.0 * g_pdf.scale)));
+        alpha = static_cast<BYTE>(std::clamp(g_markerAlpha, 0.0, 1.0) * 255.0);
+    } else if (g_toolMode == ToolMode::Freehand) {
+        penW = static_cast<int>(std::round(std::max(1.0, g_freehandWidthPt * kDpi / 72.0 * g_pdf.scale)));
+        alpha = 255;
+    } else if (g_toolMode == ToolMode::Shape) {
+        alpha = static_cast<BYTE>(std::clamp(ToolAlphaForMode(g_toolMode), 0.0, 1.0) * 255.0);
+    }
+
+    if (IsMarkerTextMode(g_toolMode) ||
+        g_toolMode == ToolMode::TextBox ||
+        IsLineLikeAnnotToolMode(g_toolMode) ||
+        g_toolMode == ToolMode::Shape) {
+        double x1 = g_pdf.drawStart.x;
+        double x2 = g_pdf.drawEnd.x;
+        double y1 = g_pdf.drawStart.y;
+        double y2 = g_pdf.drawEnd.y;
+        if (IsMarkerTextMode(g_toolMode)) {
+            RECT r{};
+            r.left = static_cast<LONG>(std::round(std::min(x1, x2)));
+            r.right = static_cast<LONG>(std::round(std::max(x1, x2)));
+            r.top = static_cast<LONG>(std::round(std::min(y1, y2)));
+            r.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+            FillRectAlpha(hdc, r, color, alpha);
+        } else if (IsLineLikeAnnotToolMode(g_toolMode)) {
+            POINT p1{ static_cast<int>(std::round(x1)), static_cast<int>(std::round(y1)) };
+            POINT p2{ static_cast<int>(std::round(x2)), static_cast<int>(std::round(y2)) };
+            std::vector<double> dash;
+            if ((AnnotToolUsesGeometry(g_toolMode, AnnotToolGeometry::Line) ||
+                 IsArrowAnnotToolMode(g_toolMode) ||
+                 IsWaveAnnotToolMode(g_toolMode)) &&
+                g_lineDashStyle == L"dash") {
+                const double wPt = ToolWidthPtForMode(g_toolMode);
+                const double basePt = (wPt > 0.0) ? wPt : 2.0;
+                dash = { std::max(1.0, basePt * 4.0), std::max(1.0, basePt * 2.0) };
+            }
+            const double ptToPx = kDpi / 72.0 * g_pdf.scale;
+            if (IsArrowAnnotToolMode(g_toolMode)) {
+                if (dash.empty()) DrawArrowLinePx(hdc, p1, p2, penW, color, alpha, g_arrowHead);
+                else DrawDashedArrowLinePx(hdc, p1, p2, penW, color, alpha, dash, ptToPx, g_arrowHead);
+            } else if (IsWaveAnnotToolMode(g_toolMode)) {
+                if (dash.empty()) DrawWaveLinePx(hdc, p1, p2, penW, color, alpha);
+                else DrawDashedWaveLinePx(hdc, p1, p2, penW, color, alpha, dash, ptToPx);
+            } else {
+                if (dash.empty()) DrawPolylineAlphaPx(hdc, { p1, p2 }, penW, color, alpha);
+                else DrawDashedLinePx(hdc, p1, p2, penW, color, alpha, dash, ptToPx);
+            }
+        } else if (g_toolMode == ToolMode::Shape) {
+            ShapeBounds bounds = NormalizeShapeBounds(g_shapeKind, x1, y1, x2, y2);
+            RECT r{};
+            r.left = static_cast<LONG>(std::round(bounds.left));
+            r.right = static_cast<LONG>(std::round(bounds.right));
+            r.top = static_cast<LONG>(std::round(bounds.bottom));
+            r.bottom = static_cast<LONG>(std::round(bounds.top));
+            const double strokePt = (g_lineWidthPt > 0.0) ? g_lineWidthPt : 2.5;
+            const int penW = static_cast<int>(std::round(std::max(1.0, strokePt * kDpi / 72.0 * g_pdf.scale)));
+            std::vector<POINT> pts;
+            if (g_shapeKind == ShapeKind::Rectangle || g_shapeKind == ShapeKind::Square) {
+                if (g_shapeDrawMode == ShapeDrawMode::Outline) {
+                    DrawShapeOutlineAlphaPx(hdc, g_shapeKind, r, pts, penW, color, alpha);
+                } else {
+                    FillRectAlpha(hdc, r, color, alpha);
+                }
+            } else if (g_shapeKind == ShapeKind::Ellipse || g_shapeKind == ShapeKind::Circle) {
+                if (g_shapeDrawMode == ShapeDrawMode::Outline) {
+                    DrawShapeOutlineAlphaPx(hdc, g_shapeKind, r, pts, penW, color, alpha);
+                } else {
+                    FillEllipseAlphaPx(hdc, r, color, alpha);
+                }
+            } else if (g_shapeKind == ShapeKind::RotatedEllipse) {
+                pts = BuildRotatedEllipseOutlinePointsPx(r, ShapeRotationFromClientEndpoints(x1, y1, x2, y2));
+                if (g_shapeDrawMode == ShapeDrawMode::Outline) {
+                    DrawShapeOutlineAlphaPx(hdc, g_shapeKind, r, pts, penW, color, alpha);
+                } else {
+                    FillPolygonAlphaPx(hdc, pts, color, alpha);
+                }
+            } else {
+                const LONG midX = static_cast<LONG>(std::lround((bounds.left + bounds.right) * 0.5));
+                const LONG midY = static_cast<LONG>(std::lround((bounds.bottom + bounds.top) * 0.5));
+                if (g_shapeKind == ShapeKind::Diamond) {
+                    pts = {
+                        { midX, static_cast<LONG>(std::lround(bounds.bottom)) },
+                        { static_cast<LONG>(std::lround(bounds.right)), midY },
+                        { midX, static_cast<LONG>(std::lround(bounds.top)) },
+                        { static_cast<LONG>(std::lround(bounds.left)), midY },
+                    };
+                } else {
+                    pts = {
+                        { midX, static_cast<LONG>(std::lround(bounds.bottom)) },
+                        { static_cast<LONG>(std::lround(bounds.right)), static_cast<LONG>(std::lround(bounds.top)) },
+                        { static_cast<LONG>(std::lround(bounds.left)), static_cast<LONG>(std::lround(bounds.top)) },
+                    };
+                }
+                if (g_shapeDrawMode == ShapeDrawMode::Outline) {
+                    DrawShapeOutlineAlphaPx(hdc, g_shapeKind, r, pts, penW, color, alpha);
+                } else {
+                    FillPolygonAlphaPx(hdc, pts, color, alpha);
+                }
+            }
+        } else if (g_toolMode == ToolMode::TextBox) {
+            // no frame; only caret/text during editing
+        }
+    } else if (g_toolMode == ToolMode::MarkerFree || g_toolMode == ToolMode::Freehand) {
+        if (g_pdf.drawPath.size() < 2) return;
+        DrawPolylineAlphaPx(hdc, g_pdf.drawPath, penW, color, alpha);
+    }
+}
+
+static void DrawAnnotations(HDC hdc, const RECT& client) {
+    if (!g_showAnnots) return;
+    std::vector<std::vector<RECT>> textRectsByPage(g_pdf.pages.size());
+    std::vector<char> textRectsReady(g_pdf.pages.size(), 0);
+    static const std::vector<RECT> kEmptyTextRects;
+    auto ensureTextRects = [&](int pageIndex) -> const std::vector<RECT>& {
+        if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return kEmptyTextRects;
+        if (textRectsReady[static_cast<size_t>(pageIndex)]) {
+            return textRectsByPage[static_cast<size_t>(pageIndex)];
+        }
+        textRectsReady[static_cast<size_t>(pageIndex)] = 1;
+        if (!EnsurePdfPageCharBoxes(pageIndex)) {
+            return textRectsByPage[static_cast<size_t>(pageIndex)];
+        }
+        const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+        auto& out = textRectsByPage[static_cast<size_t>(pageIndex)];
+        if (page.charBoxes.empty()) return out;
+        out.reserve(page.charBoxes.size());
+        for (const auto& cb : page.charBoxes) {
+            double x1 = cb.left * kDpi / 72.0 * g_pdf.scale;
+            double x2 = cb.right * kDpi / 72.0 * g_pdf.scale;
+            double y1 = (page.heightPt - cb.top) * kDpi / 72.0 * g_pdf.scale;
+            double y2 = (page.heightPt - cb.bottom) * kDpi / 72.0 * g_pdf.scale;
+            RECT r{};
+            r.left   = static_cast<LONG>(std::round(std::min(x1, x2)));
+            r.right  = static_cast<LONG>(std::round(std::max(x1, x2)));
+            r.top    = static_cast<LONG>(std::round(std::min(y1, y2)));
+            r.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+            if (r.left >= r.right || r.top >= r.bottom) continue;
+            out.push_back(r);
+        }
+        return out;
+    };
+    HDC scratchDc = CreateCompatibleDC(hdc);
+    for (const auto& ann : g_annots) {
+        if (ann.pageIndex < 0 || ann.pageIndex >= static_cast<int>(g_pdf.pages.size())) continue;
+        const auto& page = g_pdf.pages[static_cast<size_t>(ann.pageIndex)];
+        double pageLeftClientD = PageClientLeft(ann.pageIndex);
+        double pageTopClientD = PageClientTop(ann.pageIndex);
+        double pageRightClientD = pageLeftClientD + page.w;
+        double pageBottomClientD = pageTopClientD + page.h;
+        if (pageRightClientD < client.left || pageLeftClientD > client.right ||
+            pageBottomClientD < client.top || pageTopClientD > client.bottom) {
+            continue;
+        }
+        double x1 = pageLeftClientD + ann.x1 * kDpi / 72.0 * g_pdf.scale;
+        double x2 = pageLeftClientD + ann.x2 * kDpi / 72.0 * g_pdf.scale;
+        double y1 = pageTopClientD + (page.heightPt - ann.y1) * kDpi / 72.0 * g_pdf.scale;
+        double y2 = pageTopClientD + (page.heightPt - ann.y2) * kDpi / 72.0 * g_pdf.scale;
+        RECT r{};
+        r.left   = static_cast<LONG>(std::round(std::min(x1, x2)));
+        r.right  = static_cast<LONG>(std::round(std::max(x1, x2)));
+        r.top    = static_cast<LONG>(std::round(std::min(y1, y2)));
+        r.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+
+        if (ann.type == Annotation::Type::TextColor) {
+            const int pageLeft = static_cast<int>(std::round(pageLeftClientD));
+            const int pageTop = static_cast<int>(std::round(pageTopClientD));
+            const auto& textRects = ensureTextRects(ann.pageIndex);
+            if (!ann.quads.empty()) {
+                for (size_t qi = 0; qi + 7 < ann.quads.size(); qi += 8) {
+                    const double minX = std::min(std::min(ann.quads[qi + 0], ann.quads[qi + 2]), std::min(ann.quads[qi + 4], ann.quads[qi + 6]));
+                    const double maxX = std::max(std::max(ann.quads[qi + 0], ann.quads[qi + 2]), std::max(ann.quads[qi + 4], ann.quads[qi + 6]));
+                    const double minY = std::min(std::min(ann.quads[qi + 1], ann.quads[qi + 3]), std::min(ann.quads[qi + 5], ann.quads[qi + 7]));
+                    const double maxY = std::max(std::max(ann.quads[qi + 1], ann.quads[qi + 3]), std::max(ann.quads[qi + 5], ann.quads[qi + 7]));
+                    RECT qr{};
+                    qr.left = static_cast<LONG>(std::round(pageLeftClientD + minX * kDpi / 72.0 * g_pdf.scale));
+                    qr.right = static_cast<LONG>(std::round(pageLeftClientD + maxX * kDpi / 72.0 * g_pdf.scale));
+                    qr.top = static_cast<LONG>(std::round(pageTopClientD + (page.heightPt - maxY) * kDpi / 72.0 * g_pdf.scale));
+                    qr.bottom = static_cast<LONG>(std::round(pageTopClientD + (page.heightPt - minY) * kDpi / 72.0 * g_pdf.scale));
+                    TintRectTextPixels(hdc, qr, ann.color, page, pageLeft, pageTop, textRects);
+                }
+            } else {
+                TintRectTextPixels(hdc, r, ann.color, page, pageLeft, pageTop, textRects);
+            }
+        } else if (ann.type == Annotation::Type::MarkerText) {
+            BYTE a = static_cast<BYTE>(std::clamp(ann.alpha, 0.0, 1.0) * 255.0);
+            BYTE aUse = a > 0 ? a : static_cast<BYTE>(kMarkerAlphaDefault * 255);
+            COLORREF dark = DarkenColor(ann.color, 0.85);
+            int pageLeft = static_cast<int>(std::round(pageLeftClientD));
+            int pageTop = static_cast<int>(std::round(pageTopClientD));
+            const auto& textRects = ensureTextRects(ann.pageIndex);
+            if (!ann.quads.empty()) {
+                for (size_t qi = 0; qi + 7 < ann.quads.size(); qi += 8) {
+                    double minX = std::min(std::min(ann.quads[qi + 0], ann.quads[qi + 2]), std::min(ann.quads[qi + 4], ann.quads[qi + 6]));
+                    double maxX = std::max(std::max(ann.quads[qi + 0], ann.quads[qi + 2]), std::max(ann.quads[qi + 4], ann.quads[qi + 6]));
+                    double minY = std::min(std::min(ann.quads[qi + 1], ann.quads[qi + 3]), std::min(ann.quads[qi + 5], ann.quads[qi + 7]));
+                    double maxY = std::max(std::max(ann.quads[qi + 1], ann.quads[qi + 3]), std::max(ann.quads[qi + 5], ann.quads[qi + 7]));
+                    RECT qr{};
+                    qr.left   = static_cast<LONG>(std::round(pageLeftClientD + minX * kDpi / 72.0 * g_pdf.scale));
+                    qr.right  = static_cast<LONG>(std::round(pageLeftClientD + maxX * kDpi / 72.0 * g_pdf.scale));
+                    qr.top    = static_cast<LONG>(std::round(pageTopClientD + (page.heightPt - maxY) * kDpi / 72.0 * g_pdf.scale));
+                    qr.bottom = static_cast<LONG>(std::round(pageTopClientD + (page.heightPt - minY) * kDpi / 72.0 * g_pdf.scale));
+                    FillRectAlphaMaskedByText(hdc, qr, dark, aUse, page, pageLeft, pageTop, textRects,
+                                              kMarkerTextAlphaScaleOnText);
+                }
+            } else {
+                FillRectAlphaMaskedByText(hdc, r, dark, aUse, page, pageLeft, pageTop, textRects,
+                                          kMarkerTextAlphaScaleOnText);
+            }
+        } else if (ann.type == Annotation::Type::Line ||
+                   ann.type == Annotation::Type::Arrow ||
+                   ann.type == Annotation::Type::Wave) {
+            double sx = pageLeftClientD + ann.x1 * kDpi / 72.0 * g_pdf.scale;
+            double sy = pageTopClientD + (page.heightPt - ann.y1) * kDpi / 72.0 * g_pdf.scale;
+            double ex = pageLeftClientD + ann.x2 * kDpi / 72.0 * g_pdf.scale;
+            double ey = pageTopClientD + (page.heightPt - ann.y2) * kDpi / 72.0 * g_pdf.scale;
+            int penW = static_cast<int>(std::round(std::max(1.0, ann.width * kDpi / 72.0 * g_pdf.scale)));
+            POINT p1{ static_cast<int>(std::round(sx)), static_cast<int>(std::round(sy)) };
+            POINT p2{ static_cast<int>(std::round(ex)), static_cast<int>(std::round(ey)) };
+            double aNorm = ann.alpha;
+            if (aNorm <= 0.0) aNorm = 1.0;
+            BYTE aUse = static_cast<BYTE>(std::clamp(aNorm, 0.0, 1.0) * 255.0);
+            const double ptToPx = kDpi / 72.0 * g_pdf.scale;
+            if (ann.type == Annotation::Type::Arrow) {
+                if (ann.dash.empty()) DrawArrowLinePx(hdc, p1, p2, penW, ann.color, aUse, ann.arrowHead);
+                else DrawDashedArrowLinePx(hdc, p1, p2, penW, ann.color, aUse, ann.dash, ptToPx, ann.arrowHead);
+            } else if (ann.type == Annotation::Type::Wave) {
+                if (ann.dash.empty()) DrawWaveLinePx(hdc, p1, p2, penW, ann.color, aUse);
+                else DrawDashedWaveLinePx(hdc, p1, p2, penW, ann.color, aUse, ann.dash, ptToPx);
+            } else {
+                if (ann.dash.empty()) DrawPolylineAlphaPx(hdc, { p1, p2 }, penW, ann.color, aUse);
+                else DrawDashedLinePx(hdc, p1, p2, penW, ann.color, aUse, ann.dash, ptToPx);
+            }
+        } else if (ann.type == Annotation::Type::Shape) {
+            double aNorm = ann.alpha;
+            if (aNorm <= 0.0) aNorm = 0.35;
+            BYTE aUse = static_cast<BYTE>(std::clamp(aNorm, 0.0, 1.0) * 255.0);
+            int penW = static_cast<int>(std::round(std::max(1.0, ((ann.width > 0.0) ? ann.width : 2.5) * kDpi / 72.0 * g_pdf.scale)));
+            if (ann.shapeKind == ShapeKind::Rectangle || ann.shapeKind == ShapeKind::Square) {
+                if (ann.shapeDrawMode == ShapeDrawMode::Outline) {
+                    DrawShapeOutlineAlphaPx(hdc, ann.shapeKind, r, {}, penW, ann.color, aUse);
+                } else {
+                    FillRectAlpha(hdc, r, ann.color, aUse);
+                }
+            } else if (ann.shapeKind == ShapeKind::Ellipse || ann.shapeKind == ShapeKind::Circle) {
+                if (ann.shapeDrawMode == ShapeDrawMode::Outline) {
+                    DrawShapeOutlineAlphaPx(hdc, ann.shapeKind, r, {}, penW, ann.color, aUse);
+                } else {
+                    FillEllipseAlphaPx(hdc, r, ann.color, aUse);
+                }
+            } else if (ann.shapeKind == ShapeKind::RotatedEllipse) {
+                auto pts = BuildRotatedEllipseOutlinePointsPx(r, EffectiveRotatedEllipseAngleRad(ann.shapeRotation));
+                if (ann.shapeDrawMode == ShapeDrawMode::Outline) {
+                    DrawShapeOutlineAlphaPx(hdc, ann.shapeKind, r, pts, penW, ann.color, aUse);
+                } else {
+                    FillPolygonAlphaPx(hdc, pts, ann.color, aUse);
+                }
+            } else {
+                ShapeBounds bounds;
+                bounds.left = std::min(ann.x1, ann.x2);
+                bounds.right = std::max(ann.x1, ann.x2);
+                bounds.bottom = std::min(ann.y1, ann.y2);
+                bounds.top = std::max(ann.y1, ann.y2);
+                auto pts = BuildShapePolygonPointsClient(ann.pageIndex, ann.shapeKind, bounds);
+                if (pts.size() >= 3) {
+                    if (ann.shapeDrawMode == ShapeDrawMode::Outline) {
+                        DrawShapeOutlineAlphaPx(hdc, ann.shapeKind, r, pts, penW, ann.color, aUse);
+                    } else {
+                        FillPolygonAlphaPx(hdc, pts, ann.color, aUse);
+                    }
+                }
+            }
+        } else if (ann.type == Annotation::Type::MarkerFree || ann.type == Annotation::Type::Freehand) {
+            if (ann.path.size() < 2) continue;
+            std::vector<POINT> pts;
+            pts.reserve(ann.path.size());
+            for (const auto& p : ann.path) {
+                double px = pageLeftClientD + p.x * kDpi / 72.0 * g_pdf.scale;
+                double py = pageTopClientD + (page.heightPt - p.y) * kDpi / 72.0 * g_pdf.scale;
+                POINT pt{};
+                pt.x = static_cast<LONG>(std::round(px));
+                pt.y = static_cast<LONG>(std::round(py));
+                pts.push_back(pt);
+            }
+            if (pts.size() < 2) continue;
+            int penW = static_cast<int>(std::round(std::max(1.0, ann.width * kDpi / 72.0 * g_pdf.scale)));
+            double aNorm = ann.alpha;
+            if (aNorm <= 0.0) aNorm = (ann.type == Annotation::Type::MarkerFree) ? kMarkerAlphaDefault : 1.0;
+            BYTE aUse = static_cast<BYTE>(std::clamp(aNorm, 0.0, 1.0) * 255.0);
+            COLORREF dark = DarkenColor(ann.color, 0.85);
+            DrawPolylineAlphaPx(hdc, pts, penW, dark, aUse);
+        } else if (ann.type == Annotation::Type::LinkMarker) {
+            double cx = pageLeftClientD + ann.x1 * kDpi / 72.0 * g_pdf.scale;
+            double cy = pageTopClientD + (page.heightPt - ann.y1) * kDpi / 72.0 * g_pdf.scale;
+            double radiusPt = (ann.width > 0.0) ? ann.width : 6.0;
+            int radiusPx = static_cast<int>(std::round(radiusPt * kDpi / 72.0 * g_pdf.scale));
+            radiusPx = std::max(3, radiusPx);
+            int dotPx = std::max(1, radiusPx / 3);
+            int penW = std::max(1, radiusPx / 4);
+            HPEN pen = CreatePen(PS_SOLID, penW, ann.color);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(HOLLOW_BRUSH)));
+            Ellipse(hdc,
+                    static_cast<int>(std::round(cx - radiusPx)),
+                    static_cast<int>(std::round(cy - radiusPx)),
+                    static_cast<int>(std::round(cx + radiusPx)),
+                    static_cast<int>(std::round(cy + radiusPx)));
+            HBRUSH dotBrush = CreateSolidBrush(ann.color);
+            SelectObject(hdc, dotBrush);
+            Ellipse(hdc,
+                    static_cast<int>(std::round(cx - dotPx)),
+                    static_cast<int>(std::round(cy - dotPx)),
+                    static_cast<int>(std::round(cx + dotPx)),
+                    static_cast<int>(std::round(cy + dotPx)));
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(dotBrush);
+            DeleteObject(pen);
+        } else if (ann.type == Annotation::Type::MathBox) {
+            if (g_pdf.scale <= 0.0) continue;
+            double scale = g_pdf.scale;
+            double invScale = 1.0 / scale;
+            int prevMode = SetGraphicsMode(hdc, GM_ADVANCED);
+            XFORM oldXf{};
+            bool hasOldXf = false;
+            bool useTransform = (prevMode != 0);
+            if (useTransform) {
+                hasOldXf = (GetWorldTransform(hdc, &oldXf) != 0);
+                XFORM xf{};
+                xf.eM11 = static_cast<FLOAT>(scale);
+                xf.eM12 = 0.0f;
+                xf.eM21 = 0.0f;
+                xf.eM22 = static_cast<FLOAT>(scale);
+                xf.eDx = 0.0f;
+                xf.eDy = 0.0f;
+                if (!SetWorldTransform(hdc, &xf)) {
+                    useTransform = false;
+                }
+            }
+
+            if (!useTransform) {
+                double fontPt = (ann.fontPt > 0.0) ? ann.fontPt : g_textFontPt;
+                int fontPx = std::max(6, static_cast<int>(std::round(fontPt * kDpi / 72.0 * g_pdf.scale)));
+                LOGFONTW lf{};
+                lf.lfHeight = -fontPx;
+                if (!ann.fontName.empty()) {
+                    wcsncpy_s(lf.lfFaceName, ann.fontName.c_str(), LF_FACESIZE - 1);
+                } else {
+                    wcsncpy_s(lf.lfFaceName, g_textFontName.c_str(), LF_FACESIZE - 1);
+                }
+                HFONT hFont = CreateFontIndirectW(&lf);
+                HGDIOBJ oldFont = hFont ? SelectObject(hdc, hFont) : nullptr;
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, ann.color);
+                std::wstring body = NormalizeMathAnnotText(ann);
+                auto node = mathrender::Parse(body);
+                int pad = std::max(2, static_cast<int>(std::round(4.0 * g_pdf.scale)));
+                int availW = std::max(1, static_cast<int>((r.right - r.left) - pad * 2));
+                int availH = std::max(1, static_cast<int>((r.bottom - r.top) - pad * 2));
+                if (node) {
+                    auto layout = mathrender::Measure(*node, hdc, fontPx, mathrender::RenderStyle::Display);
+                    if (layout.width > availW || layout.height > availH) {
+                        int shrink = std::max(2, fontPx / 4);
+                        int fontPx2 = std::max(6, fontPx - shrink);
+                        layout = mathrender::Measure(*node, hdc, fontPx2, mathrender::RenderStyle::Display);
+                        mathrender::Draw(*node, layout, hdc, r.left + pad, r.top + pad, fontPx2, ann.color,
+                                         mathrender::RenderStyle::Display);
+                    } else {
+                        mathrender::Draw(*node, layout, hdc, r.left + pad, r.top + pad, fontPx, ann.color,
+                                         mathrender::RenderStyle::Display);
+                    }
+                }
+                if (oldFont) SelectObject(hdc, oldFont);
+                if (hFont) DeleteObject(hFont);
+                if (prevMode != 0) {
+                    SetGraphicsMode(hdc, prevMode);
+                }
+                continue;
+            }
+
+            double fontPt = (ann.fontPt > 0.0) ? ann.fontPt : g_textFontPt;
+            int fontPx = static_cast<int>(std::round(fontPt * kDpi / 72.0));
+            int minFontPx = static_cast<int>(std::ceil(6.0 / scale));
+            minFontPx = std::max(1, minFontPx);
+            if (fontPx < minFontPx) fontPx = minFontPx;
+            LOGFONTW lf{};
+            lf.lfHeight = -fontPx;
+            std::wstring fontName = ann.fontName.empty() ? g_textFontName : ann.fontName;
+            if (!fontName.empty()) {
+                wcsncpy_s(lf.lfFaceName, fontName.c_str(), LF_FACESIZE - 1);
+            }
+            HFONT hFont = CreateFontIndirectW(&lf);
+            HGDIOBJ oldFont = hFont ? SelectObject(hdc, hFont) : nullptr;
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, ann.color);
+            double baseOffsetX = pageLeftClientD * invScale;
+            double pageTop = pageTopClientD * invScale;
+            double x1Base = ann.x1 * kDpi / 72.0;
+            double x2Base = ann.x2 * kDpi / 72.0;
+            double y1Base = (page.heightPt - ann.y1) * kDpi / 72.0;
+            double y2Base = (page.heightPt - ann.y2) * kDpi / 72.0;
+            RECT tr{};
+            tr.left = static_cast<LONG>(std::lround(std::min(x1Base, x2Base) + baseOffsetX));
+            tr.right = static_cast<LONG>(std::lround(std::max(x1Base, x2Base) + baseOffsetX));
+            tr.top = static_cast<LONG>(std::lround(pageTop + std::min(y1Base, y2Base)));
+            tr.bottom = static_cast<LONG>(std::lround(pageTop + std::max(y1Base, y2Base)));
+            double padBase = 4.0;
+            if (padBase * scale < 2.0) padBase = 2.0 / scale;
+            int padPx = std::max(1, static_cast<int>(std::lround(padBase)));
+            RECT inner{ tr.left + padPx, tr.top + padPx, tr.right - padPx, tr.bottom - padPx };
+            int innerW = inner.right - inner.left;
+            int innerH = inner.bottom - inner.top;
+            std::wstring body = NormalizeMathAnnotText(ann);
+            auto node = mathrender::Parse(body);
+            if (node && innerW > 0 && innerH > 0) {
+                auto layout = mathrender::Measure(*node, hdc, fontPx, mathrender::RenderStyle::Display);
+                if (layout.width > innerW || layout.height > innerH) {
+                    int shrink = std::max(2, fontPx / 4);
+                    int fontPx2 = std::max(minFontPx, fontPx - shrink);
+                    layout = mathrender::Measure(*node, hdc, fontPx2, mathrender::RenderStyle::Display);
+                    mathrender::Draw(*node, layout, hdc, inner.left, inner.top, fontPx2, ann.color,
+                                     mathrender::RenderStyle::Display);
+                } else {
+                    mathrender::Draw(*node, layout, hdc, inner.left, inner.top, fontPx, ann.color,
+                                     mathrender::RenderStyle::Display);
+                }
+            }
+            if (oldFont) SelectObject(hdc, oldFont);
+            if (hFont) DeleteObject(hFont);
+            if (hasOldXf) {
+                SetWorldTransform(hdc, &oldXf);
+            }
+            SetGraphicsMode(hdc, prevMode);
+        } else if (ann.type == Annotation::Type::TextBox) {
+            if (g_pdf.scale <= 0.0) continue;
+            // Stable rendering: rasterize once at a fixed DPI and scale the bitmap to the current zoom.
+            DrawTextBoxStable(hdc, scratchDc, r, ann);
+        }
+    }
+    if (scratchDc) DeleteDC(scratchDc);
+}

@@ -1,0 +1,528 @@
+// Bottom note pane UI and interaction.
+// MathBox input lives under src/note_view/bottom_math_panel.cpp.
+
+static int g_bottomPaneScrollY = 0;
+static int g_bottomPaneMaxScrollY = 0;
+
+static bool TryGetBottomPaneLineRect(HDC hdc,
+                                     const RECT& contentRc,
+                                     const BottomPaneProjection& projection,
+                                     int targetIdx,
+                                     RECT* outRc) {
+    if (!hdc || targetIdx < 0 || !outRc) return false;
+    TEXTMETRICW tm{};
+    GetTextMetricsW(hdc, &tm);
+    const int minLineH = std::max<int>(1, static_cast<int>(tm.tmHeight));
+    std::vector<std::wstring> lines = SplitLines(projection.text);
+    int y = contentRc.top - (projection.mode == BottomNoteMode::Headings ? g_bottomPaneScrollY : 0);
+    for (size_t i = 0; i < lines.size(); ++i) {
+        int lineH = minLineH;
+        if (projection.mode == BottomNoteMode::Headings) {
+            lineH += ScaleY(nullptr, 6);
+        } else {
+            int calcW = std::max<int>(1, static_cast<int>(contentRc.right - contentRc.left));
+            RECT calcRc{ 0, 0, calcW, 0 };
+            DrawTextW(hdc, lines[i].c_str(), -1, &calcRc,
+                      DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT);
+            lineH = std::max<int>(minLineH, calcRc.bottom - calcRc.top);
+        }
+        if (static_cast<int>(i) == targetIdx) {
+            *outRc = RECT{ contentRc.left, y, contentRc.right, y + lineH };
+            return true;
+        }
+        y += lineH;
+    }
+    return false;
+}
+
+static int HitTestBottomPaneLine(HDC hdc,
+                                 const RECT& contentRc,
+                                 const BottomPaneProjection& projection,
+                                 int clientY) {
+    if (!hdc) return -1;
+    TEXTMETRICW tm{};
+    GetTextMetricsW(hdc, &tm);
+    const int minLineH = std::max<int>(1, static_cast<int>(tm.tmHeight));
+    const std::vector<std::wstring> lines = SplitLines(projection.text);
+    int y = contentRc.top - (projection.mode == BottomNoteMode::Headings ? g_bottomPaneScrollY : 0);
+    for (size_t i = 0; i < lines.size(); ++i) {
+        int lineH = minLineH;
+        if (projection.mode == BottomNoteMode::Headings) {
+            lineH += ScaleY(nullptr, 6);
+        } else {
+            int calcW = std::max<int>(1, static_cast<int>(contentRc.right - contentRc.left));
+            RECT calcRc{ 0, 0, calcW, 0 };
+            DrawTextW(hdc, lines[i].c_str(), -1, &calcRc,
+                      DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT);
+            lineH = std::max<int>(minLineH, calcRc.bottom - calcRc.top);
+        }
+        if (clientY >= y && clientY < y + lineH) return static_cast<int>(i);
+        y += lineH;
+    }
+    return -1;
+}
+
+static void DrawBottomAssistSeparatorLine(HWND hWnd,
+                                          HDC hdc,
+                                          const RECT& contentRc,
+                                          const BottomPaneProjection& projection) {
+    if (!projection.drawAssistSeparator) return;
+    RECT sepRc{};
+    if (!TryGetBottomPaneLineRect(hdc, contentRc, projection,
+                                  projection.assistLayout.separatorIdx, &sepRc)) {
+        return;
+    }
+    int padX = ScaleY(hWnd, 10);
+    int y = (sepRc.top + sepRc.bottom) / 2;
+    COLORREF col = BlendColor(g_theme.panelText, g_theme.panelBg, 0.64);
+    HPEN pen = CreatePen(PS_SOLID, 1, col);
+    if (!pen) return;
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    MoveToEx(hdc, std::min<int>(sepRc.right, sepRc.left + padX), y, nullptr);
+    LineTo(hdc, std::max<int>(sepRc.left, sepRc.right - padX), y);
+    if (oldPen) SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+static bool ExecuteBottomPaneCommand(HWND hWnd, const BottomPaneCommand& command) {
+    if (command.kind != BottomPaneCommandKind::None) {
+        if (!command.sourceIdentity.valid() ||
+            !IsActiveNoteViewIdentity(command.sourceIdentity.note_id,
+                                      command.viewIdentity.view_id) ||
+            command.viewIdentity.note_id != command.sourceIdentity.note_id ||
+            command.sourceIdentity.source_revision != CurrentNoteTextCoreModel().revision) {
+            InvalidateRect(hWnd, nullptr, FALSE);
+            return true;
+        }
+    }
+    switch (command.kind) {
+    case BottomPaneCommandKind::None:
+        return false;
+    case BottomPaneCommandKind::ToggleRender:
+        if (IsNoteImeComposing()) {
+            g_bottomNoteRenderTogglePendingAfterIme = true;
+            CommitNoteImeCompositionNow();
+            CompletePendingBottomNoteRenderToggleAfterIme();
+        } else {
+            ToggleNoteRenderSetting();
+        }
+        return true;
+    case BottomPaneCommandKind::ToggleWrap:
+        ToggleNoteWrapSetting();
+        return true;
+    case BottomPaneCommandKind::ToggleVimControls:
+        ToggleNoteVimControlSetting();
+        return true;
+    case BottomPaneCommandKind::ToggleCaretLineRawText:
+        ToggleNoteVimCaretLineRawTextSetting();
+        return true;
+    case BottomPaneCommandKind::ToggleClickInsert:
+        ToggleNoteVimClickInsertSetting();
+        return true;
+    case BottomPaneCommandKind::ShowRawFontMenu:
+        ShowNoteAssistFontMenu(hWnd, NoteAssistFontTarget::Raw);
+        return true;
+    case BottomPaneCommandKind::ShowRenderFontMenu:
+        ShowNoteAssistFontMenu(hWnd, NoteAssistFontTarget::RenderLatin);
+        return true;
+    case BottomPaneCommandKind::ShowRenderJapaneseFontMenu:
+        ShowNoteAssistFontMenu(hWnd, NoteAssistFontTarget::RenderJapanese);
+        return true;
+    case BottomPaneCommandKind::ShowFontSizeMenu:
+        ShowNoteAssistFontSizeMenu(hWnd);
+        return true;
+    case BottomPaneCommandKind::ShowBackgroundMenu:
+        ShowNoteAssistNoteBackgroundMenu(hWnd);
+        return true;
+    case BottomPaneCommandKind::JumpToHeading:
+        if (!CanReadStableSemanticIndex()) {
+            InvalidateRect(hWnd, nullptr, FALSE);
+            return true;
+        }
+        if (!g_hNoteEdit) return true;
+        {
+            size_t target = command.editPosition;
+            const LRESULT line = SendMessageW(g_hNoteEdit, EM_LINEFROMCHAR,
+                                              static_cast<WPARAM>(command.editPosition), 0);
+            if (line >= 0) {
+                const LRESULT lineStart = SendMessageW(g_hNoteEdit, EM_LINEINDEX,
+                                                       static_cast<WPARAM>(line), 0);
+                if (lineStart >= 0) target = static_cast<size_t>(lineStart);
+            }
+            g_noteNormalCaret = static_cast<DWORD>(target);
+            SendMessageW(g_hNoteEdit, EM_SETSEL,
+                         static_cast<WPARAM>(target),
+                         static_cast<LPARAM>(target));
+            SendMessageW(g_hNoteEdit, EM_SCROLLCARET, 0, 0);
+            SetFocus(g_hNoteEdit);
+            InvalidateNoteNormalStateViews();
+        }
+        return true;
+    }
+    return false;
+}
+
+LRESULT CALLBACK BottomNoteProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE:
+        EnsureNoteCmdlineEdit(hWnd);
+        return 0;
+    case WM_DESTROY:
+        ResetBottomAssistFontCache();
+        if (g_hNoteCmdlineEditBrush) {
+            DeleteObject(g_hNoteCmdlineEditBrush);
+            g_hNoteCmdlineEditBrush = nullptr;
+        }
+        g_hNoteCmdlineEdit = nullptr;
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_CTLCOLOREDIT: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        if (ctl == g_hNoteCmdlineEdit) {
+            COLORREF bg = BlendColor(g_theme.panelBg, g_theme.accent, 0.08);
+            if (!g_hNoteCmdlineEditBrush || g_noteCmdlineEditBrushColor != bg) {
+                if (g_hNoteCmdlineEditBrush) DeleteObject(g_hNoteCmdlineEditBrush);
+                g_hNoteCmdlineEditBrush = CreateSolidBrush(bg);
+                g_noteCmdlineEditBrushColor = bg;
+            }
+            SetBkMode(hdc, TRANSPARENT);
+            SetBkColor(hdc, bg);
+            SetTextColor(hdc, g_theme.panelText);
+            return reinterpret_cast<INT_PTR>(g_hNoteCmdlineEditBrush);
+        }
+        break;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc; GetClientRect(hWnd, &rc);
+        const bool showCmdlineBar = (g_noteVimModeEnabled && g_noteNormalMode);
+        const int cmdBarH = showCmdlineBar ? ScaleY(hWnd, 26) : 0;
+        RECT contentRc = rc;
+        if (cmdBarH > 0) {
+            contentRc.bottom = std::max(contentRc.top, contentRc.bottom - cmdBarH);
+        }
+        int w = rc.right - rc.left;
+        int h = rc.bottom - rc.top;
+        HDC paintDC = hdc;
+        HDC memDC = nullptr;
+        HBITMAP memBmp = nullptr;
+        HGDIOBJ oldBmp = nullptr;
+        if (w > 0 && h > 0) {
+            memDC = CreateCompatibleDC(hdc);
+            if (memDC) {
+                memBmp = CreateCompatibleBitmap(hdc, w, h);
+                if (memBmp) {
+                    oldBmp = SelectObject(memDC, memBmp);
+                    paintDC = memDC;
+                } else {
+                    DeleteDC(memDC);
+                    memDC = nullptr;
+                }
+            }
+        }
+        if (g_bottomPanePin == BottomPanePin::Math ||
+            g_bottomNoteMode == BottomNoteMode::Legacy) {
+            if (g_hThemePanelBrush) {
+                FillRect(paintDC, &rc, g_hThemePanelBrush);
+            } else {
+                HBRUSH br = CreateSolidBrush(g_theme.panelBg);
+                FillRect(paintDC, &rc, br);
+                DeleteObject(br);
+            }
+            if (paintDC != hdc && w > 0 && h > 0) {
+                BitBlt(hdc, 0, 0, w, h, paintDC, 0, 0, SRCCOPY);
+            }
+            if (memDC) {
+                SelectObject(memDC, oldBmp);
+                DeleteObject(memBmp);
+                DeleteDC(memDC);
+            }
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+        const BottomNoteMode bottomMode = g_bottomNoteMode;
+        const BottomPaneProjection projection = BuildCurrentBottomPaneProjection(bottomMode);
+        COLORREF textColor = projection.muted
+            ? MutedTextColor(g_noteFgColor)
+            : g_noteFgColor;
+        if (projection.highlightBackground) {
+            HBRUSH highlight = CreateSolidBrush(g_theme.selectionBg);
+            FillRect(paintDC, &rc, highlight);
+            DeleteObject(highlight);
+        } else {
+            if (g_hThemePanelBrush) {
+                FillRect(paintDC, &rc, g_hThemePanelBrush);
+            } else {
+                HBRUSH br = CreateSolidBrush(g_theme.panelBg);
+                FillRect(paintDC, &rc, br);
+                DeleteObject(br);
+            }
+        }
+        HFONT old = nullptr;
+        HFONT baseFont = projection.useAssistFont
+                             ? GetBottomAssistFont(hWnd)
+                             : GetActiveNoteFont();
+        if (baseFont) old = static_cast<HFONT>(SelectObject(paintDC, baseFont));
+        SetBkMode(paintDC, TRANSPARENT);
+        SetTextColor(paintDC, textColor);
+        if (bottomMode == BottomNoteMode::Headings) {
+            TEXTMETRICW tm{}; GetTextMetricsW(paintDC, &tm);
+            int y = contentRc.top - g_bottomPaneScrollY;
+            std::vector<std::wstring> lines = SplitLines(projection.text);
+            const int lineH = tm.tmHeight + ScaleY(hWnd, 6);
+            for (size_t i = 0; i < lines.size(); ++i) {
+                int level = i < projection.headingLevels.size() ? projection.headingLevels[i] : 1;
+                int indent = std::max(0, level - 1) * ScaleY(hWnd, 16);
+                
+                RECT drawRc = { contentRc.left, y, contentRc.right, y + lineH };
+                
+                if (drawRc.bottom > contentRc.top && drawRc.top < contentRc.bottom) {
+                    if (static_cast<int>(i) == projection.activeLineIdx) {
+                        HBRUSH highlight = CreateSolidBrush(kMathCaretHighlight);
+                        FillRect(paintDC, &drawRc, highlight);
+                        DeleteObject(highlight);
+                    }
+                    
+                    std::wstring bullet = (level == 1) ? L"■ " : L"・ ";
+                    std::wstring fullText = bullet + lines[i];
+                    
+                    RECT textRc = { contentRc.left + indent + ScaleY(hWnd, 4), y + ScaleY(hWnd, 3), contentRc.right, y + lineH };
+                    
+                    if (level == 1) {
+                        SetTextColor(paintDC, g_theme.accent);
+                    } else {
+                        SetTextColor(paintDC, textColor);
+                    }
+                    DrawTextW(paintDC, fullText.c_str(), -1, &textRc, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+                }
+                y += lineH;
+            }
+            
+            int totalHeight = y + g_bottomPaneScrollY - contentRc.top;
+            g_bottomPaneMaxScrollY = std::max<int>(0, totalHeight - static_cast<int>(contentRc.bottom - contentRc.top));
+            
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+            si.nMin = 0;
+            si.nMax = totalHeight;
+            si.nPage = contentRc.bottom - contentRc.top;
+            si.nPos = g_bottomPaneScrollY;
+            SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+        } else {
+            DrawTextW(paintDC, projection.text.c_str(), -1, &contentRc,
+                      DT_LEFT | DT_TOP | DT_WORDBREAK);
+            if (projection.drawAssistSeparator) {
+                DrawBottomAssistSeparatorLine(hWnd, paintDC, contentRc, projection);
+            }
+        }
+
+        if (cmdBarH > 0) {
+            RECT barRc{ rc.left, std::max(rc.top, rc.bottom - cmdBarH), rc.right, rc.bottom };
+            COLORREF bg = BlendColor(g_theme.panelBg, g_theme.accent, 0.08);
+            HBRUSH br = CreateSolidBrush(bg);
+            FillRect(paintDC, &barRc, br);
+            DeleteObject(br);
+
+            size_t caret = ClampNoteRawIndex(static_cast<size_t>(g_noteNormalCaret));
+            int lineOneBased = 1;
+            int colOneBased = 1;
+            if (g_hNoteEdit) {
+                LRESULT lineRes = SendMessageW(g_hNoteEdit, EM_LINEFROMCHAR, static_cast<WPARAM>(caret), 0);
+                int line = (lineRes >= 0) ? static_cast<int>(lineRes) : 0;
+                LRESULT lineStartRes = SendMessageW(g_hNoteEdit, EM_LINEINDEX, static_cast<WPARAM>(line), 0);
+                size_t lineStart = (lineStartRes >= 0) ? static_cast<size_t>(lineStartRes) : 0;
+                lineOneBased = std::max(1, line + 1);
+                colOneBased = std::max(1, static_cast<int>((caret >= lineStart) ? (caret - lineStart + 1) : 1));
+            }
+            int textLen = g_hNoteEdit ? GetWindowTextLengthW(g_hNoteEdit) : 0;
+            if (textLen < 0) textLen = 0;
+
+            DWORD now = GetTickCount();
+            std::wstring flash;
+            if (!g_noteCmdlineFlash.empty() && g_noteCmdlineFlashUntilTick != 0 &&
+                static_cast<int>(g_noteCmdlineFlashUntilTick - now) > 0) {
+                flash = g_noteCmdlineFlash;
+            }
+
+            std::wstring left = IsEnglishUi()
+                ? (L"Ln " + std::to_wstring(lineOneBased) + L", Col " + std::to_wstring(colOneBased) +
+                   L"  " + std::to_wstring(static_cast<unsigned long long>(caret)) + L"/" +
+                   std::to_wstring(static_cast<unsigned long long>(textLen)))
+                : (L"行 " + std::to_wstring(lineOneBased) + L"、桁 " + std::to_wstring(colOneBased) +
+                   L"  " + std::to_wstring(static_cast<unsigned long long>(caret)) + L"/" +
+                   std::to_wstring(static_cast<unsigned long long>(textLen)));
+
+            std::wstring right;
+            if (!flash.empty()) {
+                right = flash;
+            } else if (!g_noteLastSearchPattern.empty()) {
+                right = (g_noteLastSearchForward ? L"/" : L"?") + g_noteLastSearchPattern;
+            }
+
+            const int padX = ScaleY(hWnd, 8);
+            const int barLeft = static_cast<int>(barRc.left);
+            const int barRight = static_cast<int>(barRc.right);
+            const int barTop = static_cast<int>(barRc.top);
+            const int barBottom = static_cast<int>(barRc.bottom);
+            const int barW = std::max<int>(0, barRight - barLeft);
+            const int splitX = barLeft + (barW * 45) / 100;
+            RECT leftRc{ barLeft + padX, barTop, std::max<int>(barLeft + padX, splitX - padX), barBottom };
+            RECT rightRc{ std::min<int>(barRight - padX, splitX + padX), barTop, barRight - padX, barBottom };
+            SetBkMode(paintDC, TRANSPARENT);
+            SetTextColor(paintDC, g_theme.panelText);
+            DrawTextW(paintDC, left.c_str(), -1, &leftRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (g_noteCmdlineActive) {
+                std::wstring cmdlineText = GetNoteCmdlineBufferSnapshot();
+                std::wstring prompt(1, g_noteCmdlinePrompt);
+                RECT promptRc = rightRc;
+                promptRc.right = std::min<int>(rightRc.right, rightRc.left + ScaleY(hWnd, 18));
+                RECT cmdlineRc = rightRc;
+                cmdlineRc.left = std::min<int>(rightRc.right, promptRc.right);
+
+                SetTextColor(paintDC, BlendColor(g_theme.panelText, g_theme.accent, 0.55));
+                DrawTextW(paintDC, prompt.c_str(), -1, &promptRc,
+                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                if (!cmdlineText.empty()) {
+                    SetTextColor(paintDC, g_theme.panelText);
+                    DrawTextW(paintDC, cmdlineText.c_str(), -1, &cmdlineRc,
+                              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                }
+                LayoutNoteCmdlineEdit(hWnd, barRc);
+            } else {
+                LayoutNoteCmdlineEdit(hWnd, barRc); // hides if needed
+                if (!right.empty()) {
+                    SetTextColor(paintDC, g_theme.panelText);
+                    DrawTextW(paintDC, right.c_str(), -1, &rightRc,
+                              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                }
+            }
+        }
+        if (old) SelectObject(paintDC, old);
+        if (paintDC != hdc && w > 0 && h > 0) {
+            BitBlt(hdc, 0, 0, w, h, paintDC, 0, 0, SRCCOPY);
+        }
+        if (memDC) {
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+        }
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        if (g_noteVimModeEnabled && g_noteNormalMode) {
+            RECT rc{};
+            GetClientRect(hWnd, &rc);
+            int cmdBarH = ScaleY(hWnd, 26);
+            int y = GET_Y_LPARAM(lParam);
+            if (y >= rc.bottom - cmdBarH) {
+                if (g_noteCmdlineActive) {
+                    EnsureNoteCmdlineEdit(hWnd);
+                    if (g_hNoteCmdlineEdit) SetFocus(g_hNoteCmdlineEdit);
+                }
+                return 0;
+            }
+        }
+        const BottomNoteMode bottomMode = g_bottomNoteMode;
+        if (bottomMode == BottomNoteMode::Assist ||
+            bottomMode == BottomNoteMode::Headings) {
+            const BottomPaneProjection projection =
+                BuildCurrentBottomPaneProjection(bottomMode);
+            int lineIdx = -1;
+            HDC hdc = GetDC(hWnd);
+            if (hdc) {
+                RECT contentRc{};
+                GetClientRect(hWnd, &contentRc);
+                if (g_noteVimModeEnabled && g_noteNormalMode) {
+                    contentRc.bottom = std::max(contentRc.top,
+                                                contentRc.bottom - ScaleY(hWnd, 26));
+                }
+                HFONT font = projection.useAssistFont
+                    ? GetBottomAssistFont(hWnd)
+                    : GetActiveNoteFont();
+                HFONT oldFont = font
+                    ? static_cast<HFONT>(SelectObject(hdc, font))
+                    : nullptr;
+                lineIdx = HitTestBottomPaneLine(hdc, contentRc, projection,
+                                                GET_Y_LPARAM(lParam));
+                if (oldFont) SelectObject(hdc, oldFont);
+                ReleaseDC(hWnd, hdc);
+            }
+            const BottomPaneCommand command =
+                BuildBottomPaneCommandForLine(projection, lineIdx);
+            ExecuteBottomPaneCommand(hWnd, command);
+            return 0;
+        }
+        break;
+    }
+    case WM_MOUSEWHEEL: {
+        if (g_bottomNoteMode == BottomNoteMode::Headings) {
+            int zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            g_bottomPaneScrollY -= (zDelta / WHEEL_DELTA) * 40;
+            if (g_bottomPaneScrollY < 0) g_bottomPaneScrollY = 0;
+            if (g_bottomPaneScrollY > g_bottomPaneMaxScrollY) g_bottomPaneScrollY = g_bottomPaneMaxScrollY;
+            
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_POS;
+            si.nPos = g_bottomPaneScrollY;
+            SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+            
+            InvalidateRect(hWnd, nullptr, FALSE);
+            return 0;
+        }
+        break;
+    }
+    case WM_VSCROLL: {
+        if (g_bottomNoteMode == BottomNoteMode::Headings) {
+            int action = LOWORD(wParam);
+            switch (action) {
+            case SB_LINEUP: g_bottomPaneScrollY -= 20; break;
+            case SB_LINEDOWN: g_bottomPaneScrollY += 20; break;
+            case SB_PAGEUP: {
+                RECT rc; GetClientRect(hWnd, &rc);
+                g_bottomPaneScrollY -= (rc.bottom - rc.top);
+                break;
+            }
+            case SB_PAGEDOWN: {
+                RECT rc; GetClientRect(hWnd, &rc);
+                g_bottomPaneScrollY += (rc.bottom - rc.top);
+                break;
+            }
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION: {
+                SCROLLINFO si{};
+                si.cbSize = sizeof(si);
+                si.fMask = SIF_TRACKPOS;
+                GetScrollInfo(hWnd, SB_VERT, &si);
+                g_bottomPaneScrollY = si.nTrackPos;
+                break;
+            }
+            }
+            if (g_bottomPaneScrollY < 0) g_bottomPaneScrollY = 0;
+            if (g_bottomPaneScrollY > g_bottomPaneMaxScrollY) g_bottomPaneScrollY = g_bottomPaneMaxScrollY;
+            
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_POS;
+            si.nPos = g_bottomPaneScrollY;
+            SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+            
+            InvalidateRect(hWnd, nullptr, FALSE);
+            return 0;
+        }
+        break;
+    }
+    case WM_MOUSEMOVE: {
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RecordRecentMouseMove(hWnd, &pt);
+        break;
+    }
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}

@@ -1,0 +1,447 @@
+// file: pdf_view/navigation.cpp
+// NOTE: This file is intentionally included by `src/pdf_view/pdf_view.cpp` to keep the build as a
+// single translation unit while physically splitting responsibilities.
+
+static void ClampPdfScroll(int viewH, int viewW);
+static void UpdatePageLayout(HWND pdfWnd);
+static void ApplyPdfScaleDirect(HWND pdfWnd, double newScale, POINT focusInClient, bool renderPages);
+static void ShutdownPdfVirtualRenderWorker();
+static constexpr int kPdfSidePadding = 16; // 左右に少し余白を設けて横方向の見切れを防ぐ
+static constexpr int kFitWidthSlackPx = 2; // avoid 1-2px overflow causing horizontal scrollbar
+static constexpr int kFitHeightSlackPx = 2;
+static constexpr int kTextPadPx = 4;       // テキストボックスの内側余白
+static constexpr int kTextWrapEpsilonPx = 1; // wrap tolerance for rounding/overhang
+static constexpr int kTextBoxGlyphOverhangPadPx = 2; // P1-1: keep right-edge glyph overhang from being clipped after commit/save
+// P3-6: annotation TextBox glyphs are rendered in their own high-DPI raster cache,
+// separate from the PDF page bitmap cache, so low-resolution page rendering does not
+// permanently degrade annotation text quality.
+// INCREASED to 576.0 to prevent text annotations from looking "shrunk and forcibly enlarged" on high DPI displays.
+static constexpr double kTextBoxStableRasterDpi = 576.0; // render once, then scale to avoid zoom-hinting jitter
+static constexpr double kTextBoxLayoutDpi = kTextBoxStableRasterDpi;
+static constexpr int kTextClickLeftOffsetPx = 2; // 新規文字注釈をクリック位置へ近づける（P3-14: 従来より4px右寄せ）
+static constexpr double kDefaultTextWidthPt = 60.0;
+static constexpr double kDefaultTextHeightPt = 24.0;
+static constexpr int kTextBoxDragThresholdPx = 6;
+static constexpr size_t kAnnotHistoryLimit = 30;
+static constexpr size_t kTextEditHistoryLimit = 100;
+// Render at a slightly higher scale when zoomed out to keep text crisp.
+static constexpr double kPdfRenderMinScale = 0.75;
+static constexpr double kPdfRenderMaxUpscale = 2.0;
+static constexpr double kMarkerTextAlphaScaleOnText = 0.4;
+static constexpr int kMarkerTextDarkMax = 210;
+static constexpr int kMarkerTextBrightMin = 250;
+static constexpr int kMarkerTextBrightMinChannel = 40;
+static constexpr int kMarkerTextSaturationMin = 40;
+static constexpr int kMarkerTextBlackMax = 70;
+static constexpr int kMarkerTextBlackSatMax = 12;
+// PDF text selection highlight should be darker and theme-independent (Windows style).
+static constexpr COLORREF kPdfSelectionColor = RGB(70, 130, 220);
+enum class SelectionStyleMode { Windows, Theme };
+
+enum class PdfFlowMode { V_TTB, V_BTU, H_LTR, H_RTL };
+
+static PdfFlowMode ParsePdfFlowMode(const std::wstring& mode) {
+    std::wstring m = mode;
+    std::transform(m.begin(), m.end(), m.begin(), ::towlower);
+    if (m == L"v_btu") return PdfFlowMode::V_BTU;
+    if (m == L"h_ltr") return PdfFlowMode::H_LTR;
+    if (m == L"h_rtl") return PdfFlowMode::H_RTL;
+    return PdfFlowMode::V_TTB;
+}
+
+static std::wstring CanonicalFlowModeString(PdfFlowMode mode) {
+    switch (mode) {
+    case PdfFlowMode::V_BTU: return L"v_btu";
+    case PdfFlowMode::H_LTR: return L"h_ltr";
+    case PdfFlowMode::H_RTL: return L"h_rtl";
+    default: return L"v_ttb";
+    }
+}
+
+static std::wstring NormalizeFlowModeString(const std::wstring& mode) {
+    return CanonicalFlowModeString(ParsePdfFlowMode(mode));
+}
+
+static PdfFlowMode CurrentFlowMode() {
+    return ParsePdfFlowMode(g_config.pdfFlowMode);
+}
+
+static bool PdfSinglePageModeActive() {
+    return g_config.pdfSinglePageMode;
+}
+
+static bool FlowIsVertical(PdfFlowMode mode) {
+    return mode == PdfFlowMode::V_TTB || mode == PdfFlowMode::V_BTU;
+}
+
+static bool FlowPrimaryDirPositive(PdfFlowMode mode) {
+    return mode == PdfFlowMode::V_TTB || mode == PdfFlowMode::H_LTR;
+}
+
+static double FlowCrossPaddingX(PdfFlowMode mode) {
+    return FlowIsVertical(mode) ? static_cast<double>(kPdfSidePadding) : 0.0;
+}
+
+static double FlowCrossPaddingY(PdfFlowMode mode) {
+    return FlowIsVertical(mode) ? 0.0 : static_cast<double>(kPdfSidePadding);
+}
+
+static bool IsPreciseWheelDelta(int delta) {
+    return (delta % WHEEL_DELTA) != 0;
+}
+
+static double WheelScrollAmountPx(int delta, bool allowAccel) {
+    double steps = static_cast<double>(delta) / static_cast<double>(WHEEL_DELTA);
+    double absSteps = std::abs(steps);
+    double speedMultiplier = 1.0;
+    if (allowAccel && absSteps > 1.0) {
+        speedMultiplier += (absSteps - 1.0) * 0.6;
+    }
+    return steps * kScrollStepPx * speedMultiplier;
+}
+
+static bool ScrollSinglePageByPrimary(HWND hwnd, double primaryMove, int viewH, int viewW);
+
+static void HandleTouchpadScroll(bool horizontal, int delta, HWND hwnd, int viewH, int viewW) {
+    double add = WheelScrollAmountPx(delta, false);
+    double dir = horizontal ? 1.0 : -1.0;
+    bool invert = horizontal ? g_config.touchpadInvertHorizontal : g_config.touchpadInvertVertical;
+    if (invert) dir = -dir;
+    double move = dir * add;
+
+    const bool primaryAxis = horizontal == !FlowIsVertical(CurrentFlowMode());
+    if (g_config.pdfSinglePageMode && primaryAxis) {
+        ScrollSinglePageByPrimary(hwnd, move, viewH, viewW);
+        return;
+    }
+
+    if (horizontal) {
+        g_pdf.scrollX += move;
+    } else {
+        g_pdf.scrollY += move;
+    }
+    ClampPdfScroll(viewH, viewW);
+    if (!horizontal) {
+        g_scrollVelocity = 0.0;
+        KillTimer(hwnd, kScrollTimerId);
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+static double ClientToDocX(double clientX) {
+    PdfFlowMode mode = CurrentFlowMode();
+    return clientX + g_pdf.scrollX - FlowCrossPaddingX(mode);
+}
+
+static double ClientToDocY(double clientY) {
+    PdfFlowMode mode = CurrentFlowMode();
+    return clientY + g_pdf.scrollY - FlowCrossPaddingY(mode);
+}
+
+static double DocToClientX(double docX) {
+    PdfFlowMode mode = CurrentFlowMode();
+    return docX - g_pdf.scrollX + FlowCrossPaddingX(mode);
+}
+
+static double DocToClientY(double docY) {
+    PdfFlowMode mode = CurrentFlowMode();
+    return docY - g_pdf.scrollY + FlowCrossPaddingY(mode);
+}
+
+static double ContentWidthWithPadding() {
+    PdfFlowMode mode = CurrentFlowMode();
+    return g_pdf.contentWidth + FlowCrossPaddingX(mode) * 2.0;
+}
+
+static double ContentHeightWithPadding() {
+    PdfFlowMode mode = CurrentFlowMode();
+    return g_pdf.contentHeight + FlowCrossPaddingY(mode) * 2.0;
+}
+
+static double MaxScrollX(int viewW) {
+    return std::max(0.0, ContentWidthWithPadding() - static_cast<double>(viewW));
+}
+
+static double MaxScrollY(int viewH) {
+    return std::max(0.0, ContentHeightWithPadding() - static_cast<double>(viewH));
+}
+
+static double MinScrollY(int viewH) {
+    return std::min(0.0, ContentHeightWithPadding() - static_cast<double>(viewH));
+}
+
+static double PageDocLeft(int pageIndex) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pageRects.size())) return 0.0;
+    return g_pdf.pageRects[static_cast<size_t>(pageIndex)].left;
+}
+
+static double PageDocTop(int pageIndex) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pageRects.size())) return 0.0;
+    return g_pdf.pageRects[static_cast<size_t>(pageIndex)].top;
+}
+
+static double PageClientLeft(int pageIndex) {
+    return DocToClientX(PageDocLeft(pageIndex));
+}
+
+static double PageClientTop(int pageIndex) {
+    return DocToClientY(PageDocTop(pageIndex));
+}
+
+static double PdfPtToDocX(int pageIndex, double xPt) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return 0.0;
+    return PageDocLeft(pageIndex) + xPt * kDpi / 72.0 * g_pdf.scale;
+}
+
+static double PdfPtToDocY(int pageIndex, double yPt) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return 0.0;
+    const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    return PageDocTop(pageIndex) + (page.heightPt - yPt) * kDpi / 72.0 * g_pdf.scale;
+}
+
+#include "pdf_view/view_state.cppinc"
+
+static bool GetEditingTextBoxClientRect(RECT* out) {
+    if (!out || !g_pdf.editingText || g_pdf.editPage < 0) return false;
+    if (!PtRectToClientRect(g_pdf.editPage, g_pdf.editX1, g_pdf.editY1, g_pdf.editX2, g_pdf.editY2, *out)) {
+        return false;
+    }
+    InflateRect(out, 8, 8);
+    return out->right > out->left && out->bottom > out->top;
+}
+
+static bool EnsureEditingTextBoxVisible(HWND hwnd, const wchar_t* reason);
+
+static void InvalidateEditingTextBoxRect(HWND hwnd, const RECT* before = nullptr) {
+    if (!hwnd) return;
+    RECT dirty{};
+    bool hasDirty = false;
+    if (before && before->right > before->left && before->bottom > before->top) {
+        dirty = *before;
+        hasDirty = true;
+    }
+
+    RECT after{};
+    if (GetEditingTextBoxClientRect(&after)) {
+        if (hasDirty) {
+            RECT combined{};
+            UnionRect(&combined, &dirty, &after);
+            dirty = combined;
+        } else {
+            dirty = after;
+            hasDirty = true;
+        }
+    }
+
+    if (hasDirty) {
+        InvalidateRect(hwnd, &dirty, FALSE);
+    } else {
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+}
+
+#include "pdf_view/annotation_edit.cppinc"
+
+struct PdfSearchResultMarker {
+    enum class Kind {
+        None,
+        Text,
+        Point
+    };
+    Kind kind = Kind::None;
+    int pageIndex = -1;
+    size_t charStart = 0;
+    size_t charEnd = 0;
+    double xPt = 0.0;
+    double yPt = 0.0;
+};
+
+static PdfSearchResultMarker g_pdfSearchResultMarker;
+
+void ClearPdfSearchResultMarker() {
+    if (g_pdfSearchResultMarker.kind == PdfSearchResultMarker::Kind::None) return;
+    g_pdfSearchResultMarker = {};
+    if (g_hPdfView && IsWindow(g_hPdfView)) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+}
+
+void SetPdfSearchTextMarker(int pageIndex, size_t charStart, size_t charEnd) {
+    if (pageIndex < 0 || charEnd <= charStart) return;
+    g_pdfSearchResultMarker = {};
+    g_pdfSearchResultMarker.kind = PdfSearchResultMarker::Kind::Text;
+    g_pdfSearchResultMarker.pageIndex = pageIndex;
+    g_pdfSearchResultMarker.charStart = charStart;
+    g_pdfSearchResultMarker.charEnd = charEnd;
+    if (g_hPdfView && IsWindow(g_hPdfView)) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+}
+
+void SetPdfSearchPointMarker(int pageIndex, double xPt, double yPt) {
+    if (pageIndex < 0) return;
+    g_pdfSearchResultMarker = {};
+    g_pdfSearchResultMarker.kind = PdfSearchResultMarker::Kind::Point;
+    g_pdfSearchResultMarker.pageIndex = pageIndex;
+    g_pdfSearchResultMarker.xPt = xPt;
+    g_pdfSearchResultMarker.yPt = yPt;
+    if (g_hPdfView && IsWindow(g_hPdfView)) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+}
+
+void ClearPdfState() {
+    g_pdfSearchResultMarker = {};
+    ShutdownPdfVirtualRenderWorker();
+    if (g_pdf.doc) {
+        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+        FPDF_CloseDocument(g_pdf.doc);
+        g_pdf.doc = nullptr;
+    }
+    if (g_pdf.fileHandle && g_pdf.fileHandle != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_pdf.fileHandle);
+        g_pdf.fileHandle = INVALID_HANDLE_VALUE;
+    }
+    g_pdf.kind = DocKind::None;
+    g_pdf.pages.clear();
+    g_pdf.pageRects.clear();
+    g_pdf.contentWidth = 0.0;
+    g_pdf.contentHeight = 0.0;
+    g_pdf.pageCount = 0;
+    g_pdf.scale = 1.0;
+    g_pdf.renderScale = 1.0;
+    g_pdf.scrollY = 0.0;
+    g_pdf.scrollX = 0.0;
+    g_pdf.singlePageIndex = 0;
+    g_pdf.panning = false;
+    g_pdf.panAnchor = {};
+    g_pdf.panStartY = 0.0;
+    g_pdf.panStartX = 0.0;
+    g_pdf.panAxisLock = PanAxisLock::None;
+    g_pdf.drawingAnnot = false;
+    g_pdf.drawPageIndex = -1;
+    g_pdf.drawPath.clear();
+    g_pdf.selectingText = false;
+    g_pdf.hasSelection = false;
+    g_pdf.selectionStartPage = -1;
+    g_pdf.selectionEndPage = -1;
+    g_pdf.selectionByText = false;
+    g_pdf.selCharAnchor = -1;
+    g_pdf.selCharFocus = -1;
+    g_pdf.path.clear();
+    SecureClearString(g_pdf.openPasswordUtf8);
+    g_pdf.imagePixels.clear();
+    g_pdf.imageWidth = 0;
+    g_pdf.imageHeight = 0;
+    g_pdf.imageStride = 0;
+    g_pdf.imageDpiX = kDpi;
+    g_pdf.imageDpiY = kDpi;
+    g_pdf.editingText = false;
+    g_pdf.editPage = -1;
+    g_pdf.editText.clear();
+    g_pdf.editCaret = 0;
+    g_pdf.editSelStart = 0;
+    g_pdf.editSelEnd = 0;
+    g_pdf.editSelectingText = false;
+    g_pdf.editSelAnchor = 0;
+    g_pdf.editLayoutDirty = true;
+    g_pdf.editInnerLayoutW = 0;
+    g_pdf.editLayout.lines.clear();
+    g_pdf.imeComp.clear();
+    g_pdf.imeComposing = false;
+    g_pdf.suppressNextImeResultReturnChar = false;
+    g_pdf.imeResultMessageTime = 0;
+    ClearTextEditHistory();
+    g_pdf.movingEdit = false;
+    g_pdf.movePage = -1;
+    g_pdf.movingAnnot = false;
+    g_pdf.pendingTextBoxHit = false;
+    g_pdf.pendingTextBoxIndex = -1;
+    g_pdf.pendingTextBoxDown = {};
+    g_pdf.textBoxHoverValid = false;
+    g_pdf.textBoxHoverPos = {};
+    g_pdf.erasing = false;
+    g_pdf.eraserCursorValid = false;
+    g_pdf.eraserCursor = {};
+    g_pdf.eraserHoverIndex = -1;
+    g_pdf.eraserHoverPageIndex = -1;
+    g_annots.clear();
+    g_annotsDirty = false;
+    g_annotsNeedsIntegrate = false;
+    g_annotsRequireStrongValidation = false;
+    g_annotsLoadedPdfIdValid = false;
+    g_annotsLoadedPdfId = clrop::PdfId{};
+    ClearAnnotHistory();
+    ResetEditOriginal();
+    RefreshAnnotPanel();
+    g_pendingInitialFitWidth = false;
+    g_pendingInitialFitWidthPt = 0.0;
+    g_pendingInitialFitHeight = false;
+    g_pendingInitialFitHeightPt = 0.0;
+}
+
+#include "pdf_view/annotation_store.cppinc"
+
+#include "pdf_view/layout_cache.cppinc"
+
+static bool EnsureEditingTextBoxVisible(HWND hwnd, const wchar_t* reason) {
+    if (!hwnd || !g_pdf.editingText || g_pdf.editPage < 0) return false;
+
+    RECT client{};
+    if (!GetClientRect(hwnd, &client)) return false;
+
+    RECT r{};
+    if (!GetEditingTextBoxClientRect(&r)) return false;
+
+    constexpr int kEditVisibleMarginPx = 24;
+    const int visibleLeft = client.left + kEditVisibleMarginPx;
+    const int visibleTop = client.top + kEditVisibleMarginPx;
+    const int visibleRight = client.right - kEditVisibleMarginPx;
+    const int visibleBottom = client.bottom - kEditVisibleMarginPx;
+
+    double dx = 0.0;
+    double dy = 0.0;
+    if (r.right > visibleRight) {
+        dx = static_cast<double>(r.right - visibleRight);
+    } else if (r.left < visibleLeft) {
+        dx = static_cast<double>(r.left - visibleLeft);
+    }
+    if (r.bottom > visibleBottom) {
+        dy = static_cast<double>(r.bottom - visibleBottom);
+    } else if (r.top < visibleTop) {
+        dy = static_cast<double>(r.top - visibleTop);
+    }
+
+    if (std::abs(dx) < 0.5 && std::abs(dy) < 0.5) return false;
+
+    const double beforeX = g_pdf.scrollX;
+    const double beforeY = g_pdf.scrollY;
+    g_pdf.scrollX += dx;
+    g_pdf.scrollY += dy;
+
+    const int viewW = std::max(0, static_cast<int>(client.right - client.left));
+    const int viewH = std::max(0, static_cast<int>(client.bottom - client.top));
+    ClampPdfScroll(viewH, viewW);
+
+    const double appliedX = g_pdf.scrollX - beforeX;
+    const double appliedY = g_pdf.scrollY - beforeY;
+    if (std::abs(appliedX) < 0.5 && std::abs(appliedY) < 0.5) return false;
+
+    if (preview_trace::IsEnabled()) {
+        preview_trace::Append(
+            L"PdfTextBoxEditVisibility",
+            L"reason=" + std::wstring(reason ? reason : L"") +
+                L" requestedDx=" + std::to_wstring(static_cast<long long>(std::llround(dx))) +
+                L" requestedDy=" + std::to_wstring(static_cast<long long>(std::llround(dy))) +
+                L" appliedDx=" + std::to_wstring(static_cast<long long>(std::llround(appliedX))) +
+                L" appliedDy=" + std::to_wstring(static_cast<long long>(std::llround(appliedY))));
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+#include "pdf_view/document_io.cppinc"
+
+#include "pdf_view/zoom_flow.cppinc"
+
+#include "pdf_view/interaction_overlay.cppinc"

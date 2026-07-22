@@ -1,0 +1,1026 @@
+﻿// file: main/main_window_proc.cpp
+// NOTE: This file is intentionally included by `src/main.cpp` to keep the build as a
+// single translation unit while physically splitting responsibilities.
+
+// NOTE: Timer IDs must be unique per HWND to avoid collisions in MainWndProc.
+// Keep this in sync with the MainWndProc timer registry in core/app_core.h.
+static constexpr UINT_PTR kSetupJsonExistenceVerifyTimerId = 0x508;
+static_assert(AllUniqueValues(std::array<UINT_PTR, 9>{
+    kAutoSaveTimerId,
+    kAutoIntegrateTimerId,
+    kNoteStageSaveTimerId,
+    kAutoSaveExecuteTimerId,
+    kNoteOverlayRefreshTimerId,
+    kNoteFullReparseTimerId,
+    kSetupJsonExistenceVerifyTimerId,
+    kExitRetryTimerId,
+    ui::kSplitDragTimerId,
+}));
+static std::wstring s_setupJsonExistenceVerifyPath;
+static int s_setupJsonExistenceVerifyAttempt = 0;
+static bool s_initialWorkspaceFocusSet = false;
+static bool s_uiAutomationPosted = false;
+static bool s_uiAutomationFinished = false;
+static bool s_noteOverlayRefreshPending = false;
+static constexpr UINT kNoteOverlayRefreshDelayMs = 35;
+static constexpr UINT kNoteFullReparseDelayMs = 600;
+static ULONGLONG s_noteLastRefreshRequestTick = 0;
+
+static uint64_t s_noteOverlayRefreshTargetRevision = 0;
+
+static HWND ResolveStartupMainFocusTarget(HWND hWnd) {
+    if (g_leftPaneCollapsed) {
+        if (g_hPdfView && IsWindow(g_hPdfView)) return g_hPdfView;
+        if (g_hNoteEdit && IsWindow(g_hNoteEdit)) return g_hNoteEdit;
+        return hWnd;
+    }
+    if (g_hLectureList && IsWindowVisible(g_hLectureList)) return g_hLectureList;
+    if (g_hPdfView && IsWindow(g_hPdfView)) return g_hPdfView;
+    if (g_hNoteEdit && IsWindow(g_hNoteEdit)) return g_hNoteEdit;
+    return hWnd;
+}
+
+static void RefreshNoteOverlayNow() {
+    if (IsNoteImeComposing()) return;
+    if (s_noteOverlayRefreshTargetRevision != 0 && s_noteOverlayRefreshTargetRevision != CurrentEditRevision()) {
+        s_noteOverlayRefreshPending = false;
+        return;
+    }
+    if (g_hMainWnd) {
+        KillTimer(g_hMainWnd, kNoteOverlayRefreshTimerId);
+    }
+    s_noteOverlayRefreshPending = false;
+    s_noteOverlayRefreshTargetRevision = 0;
+    SetNoteTyping(false);
+    RecomputeMathFromNote();
+    if (HasDeferredNoteFullReparse() && g_hMainWnd) {
+        SetTimer(g_hMainWnd, kNoteFullReparseTimerId, kNoteFullReparseDelayMs, nullptr);
+    }
+}
+
+static void ScheduleNoteOverlayRefresh(HWND hWnd, bool immediate, uint64_t targetRevision = 0) {
+    if (!hWnd) hWnd = g_hMainWnd;
+    if (!hWnd || IsNoteImeComposing()) return;
+    s_noteOverlayRefreshTargetRevision = targetRevision;
+    if (immediate) {
+        RefreshNoteOverlayNow();
+        return;
+    }
+    s_noteLastRefreshRequestTick = GetTickCount64();
+    s_noteOverlayRefreshPending = true;
+    SetTimer(hWnd, kNoteOverlayRefreshTimerId, kNoteOverlayRefreshDelayMs, nullptr);
+}
+
+LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // MainWndProc-local WM_APP messages. Values are listed in core/app_core.h.
+    constexpr UINT kMsgInitLayout = WM_APP + 1;
+    constexpr UINT kMsgRunUiAutomation = WM_APP + 210;
+    static_assert(AllUniqueValues(std::array<UINT, 9>{
+        kMsgInitLayout,
+        kMsgNoteOverlayUpdate,
+        kMsgListMaybeScroll,
+        kMsgStartupWatchdogAbort,
+        kMsgSingleInstanceShutdownRequest,
+        kMsgRunUiAutomation,
+        kMsgNoteEnterInsertMode,
+        kMsgOpenStartupDocument,
+        kMsgBackgroundSaveComplete,
+    }));
+    switch (msg) {
+    case WM_CREATE: {
+        DebugAppendLayoutLog(L"WM_CREATE", hWnd, 0, 0);
+        CreateChildren(hWnd);
+        std::wstring automationWorkspaceRoot;
+        if (TryGetUiAutomationWorkspaceRoot(&automationWorkspaceRoot)) {
+            g_workspaceRoot = automationWorkspaceRoot;
+        } else if (auto setupRoot = LoadSetupWorkspaceRoot()) {
+            g_workspaceRoot = *setupRoot;
+        } else {
+            std::error_code currentPathEc;
+            const auto currentPath = std::filesystem::current_path(currentPathEc);
+            if (currentPathEc) {
+                ShowSoftNotice(hWnd, L"作業フォルダを確認できません。", SoftNoticeKind::Error);
+                return -1;
+            }
+            g_workspaceRoot = currentPath.wstring();
+        }
+        std::wstring workspaceLockError;
+        if (!AcquireWorkspaceWriteLock(std::filesystem::path(g_workspaceRoot),
+                                       &workspaceLockError)) {
+            std::wstring message = IsEnglishUi()
+                ? L"This workspace is already open in another PDF Note Workspace process."
+                : L"このワークスペースは別の PDF Note Workspace プロセスで開かれています。";
+            if (!workspaceLockError.empty()) message += L"\n\n" + workspaceLockError;
+            ShowSilentMessageDialog(hWnd, L"PDF Note Workspace", message,
+                                    SoftNoticeKind::Warning);
+            return -1;
+        }
+        SetAppLogWorkspaceRoot(g_workspaceRoot);
+        if (auto pending = ConsumePendingSetupJsonExistenceCheckPath()) {
+            s_setupJsonExistenceVerifyPath = *pending;
+            s_setupJsonExistenceVerifyAttempt = 0;
+            SetTimer(hWnd, kSetupJsonExistenceVerifyTimerId, 1500, nullptr);
+        }
+        LoadTempExternalLecturesFromSetup();
+        g_config = LoadWorkspaceConfig(g_workspaceRoot);
+        ApplyRuntimeLogConfigFromWorkspace(g_workspaceRoot, g_config);
+        InitScheduleSortBaseTime();
+        if (!EnsureWorkspaceResourceDirs(nullptr)) {
+            std::wstring msg = IsEnglishUi()
+                ? L"Workspace is not writable at startup.\nEdit/open operations that require write permission are canceled.\n\nroot:\n" + g_workspaceRoot
+                : L"起動時点でワークスペースに書き込みできません。\n書き込み権限が必要な編集/オープン処理は中断されます。\n\nroot:\n" + g_workspaceRoot;
+            msg += IsEnglishUi()
+                ? L"\n\nCheck access control / security policy for this folder."
+                : L"\n\nこのフォルダのアクセス権・セキュリティ制御を確認してください。";
+            ShowSoftNotice(hWnd, msg);
+        }
+        LoadThemeConfig(g_workspaceRoot);
+        ApplyConfigToUI(hWnd);
+        UpdateToolbarUI(hWnd);
+        OnWorkspaceLoaded(hWnd);
+        std::wstring startupNoticeText;
+        SoftNoticeKind startupNoticeKind = SoftNoticeKind::Info;
+        if (ConsumePendingStartupNotice(&startupNoticeText, &startupNoticeKind) &&
+            !startupNoticeText.empty()) {
+            ShowSoftNotice(hWnd, startupNoticeText, startupNoticeKind);
+        }
+        UpdateAutoSaveTimer(hWnd);
+        UpdateAutoIntegrateTimer(hWnd);
+        // Ensure we run layout once after the window is actually sized/shown.
+        PostMessageW(hWnd, kMsgInitLayout, 0, 0);
+        return 0;
+    }
+    case WM_SHOWWINDOW:
+        if (wParam && g_hSingleInstanceReadyEvent) {
+            SetEvent(g_hSingleInstanceReadyEvent);
+        }
+        break;
+    case WM_COPYDATA: {
+        const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+        if (!data || data->dwData != kCopyDataOpenDocumentPath ||
+            !data->lpData || data->cbData < sizeof(wchar_t) ||
+            (data->cbData % sizeof(wchar_t)) != 0) {
+            return FALSE;
+        }
+        const size_t charCount = data->cbData / sizeof(wchar_t);
+        if (charCount > 32768) return FALSE;
+        const wchar_t* text = static_cast<const wchar_t*>(data->lpData);
+        std::wstring path(text, text + charCount);
+        if (!path.empty() && path.back() == L'\0') path.pop_back();
+        if (path.empty()) return FALSE;
+        QueueStartupOpenDocumentPath(hWnd, std::move(path));
+        return TRUE;
+    }
+    case kMsgInitLayout:
+        LayoutChildren(hWnd);
+        RefreshBottomPaneView();
+        if (!s_initialWorkspaceFocusSet) {
+            s_initialWorkspaceFocusSet = true;
+            if (g_hLectureList && IsWindowVisible(hWnd)) {
+                if (HasPendingStartupOpenDocumentPath()) {
+                    PostMessageW(hWnd, kMsgOpenStartupDocument, 0, 0);
+                } else if (g_leftPaneCollapsed) {
+                    RestoreStartupLastOpenSelection(hWnd);
+                    SetFocus(g_hPdfView ? g_hPdfView : hWnd);
+                } else {
+                    SetFocus(g_hLectureList);
+                    if (!RestoreStartupLastOpenSelection(hWnd)) {
+                        EnsureListboxSelection(g_hLectureList);
+                    }
+                }
+            }
+        }
+        if (IsUiAutomationEnabled() && !s_uiAutomationPosted) {
+            s_uiAutomationPosted = true;
+            PostMessageW(hWnd, kMsgRunUiAutomation, 0, 0);
+        }
+        return 0;
+    case kMsgBackgroundSaveComplete: {
+        auto completion = file_output::CompleteBackgroundSaveAndIntegrateTransaction(
+            hWnd, reinterpret_cast<void*>(lParam));
+        if (!completion.ok) {
+            CompleteUnifiedExportsAfterSave(hWnd, /*saveSucceeded=*/false, /*saveRestarted=*/false);
+            RefreshMainMenuBar(hWnd);
+            RefreshStatusDisplay(hWnd);
+            if (!completion.error.empty()) {
+                ShowSilentMessageDialog(
+                    hWnd,
+                    IsEnglishUi() ? L"Save" : L"統合保存",
+                    completion.error,
+                    SoftNoticeKind::Warning);
+            }
+            return 0;
+        }
+        if (!completion.restarted) {
+            FinalizeManualSaveUi(hWnd, /*updateWindowTitleAfterSave=*/true);
+        }
+        CompleteUnifiedExportsAfterSave(hWnd, /*saveSucceeded=*/true, completion.restarted);
+        return 0;
+    }
+    case kMsgOpenStartupDocument:
+        if (!OpenPendingStartupDocument(hWnd)) {
+            if (g_hLectureList && IsWindowVisible(hWnd) &&
+                static_cast<int>(SendMessageW(g_hLectureList, LB_GETCURSEL, 0, 0)) < 0) {
+                if (g_leftPaneCollapsed) {
+                    RestoreStartupLastOpenSelection(hWnd);
+                    SetFocus(g_hPdfView ? g_hPdfView : hWnd);
+                } else {
+                    SetFocus(g_hLectureList);
+                    if (!RestoreStartupLastOpenSelection(hWnd)) {
+                        EnsureListboxSelection(g_hLectureList);
+                    }
+                }
+            } else if (g_leftPaneCollapsed) {
+                SetFocus(g_hPdfView ? g_hPdfView : hWnd);
+            } else if (g_hLectureList && IsWindowVisible(hWnd)) {
+                if (!RestoreStartupLastOpenSelection(hWnd)) {
+                    EnsureListboxSelection(g_hLectureList);
+                }
+            }
+        }
+        return 0;
+    case kMsgRunUiAutomation: {
+        if (s_uiAutomationFinished) return 0;
+        s_uiAutomationFinished = true;
+        std::wstring error;
+        const bool ok = RunUiAutomationScenarios(hWnd, &error);
+        WriteUiAutomationResult(ok, ok ? L"UI automation passed." : error);
+        SetUiAutomationExitCode(ok ? 0 : 3);
+        PostMessageW(hWnd, WM_CLOSE, 0, 0);
+        return 0;
+    }
+    case kMsgReloadLectureList:
+        s_ignoreLectureSelChange = true;
+        LoadLectures();
+        s_ignoreLectureSelChange = false;
+        return 0;
+    case kMsgReloadSessionList: {
+        if (!g_currentLecturePath.empty()) {
+            const std::wstring previousSessionPath = g_currentSessionPath;
+            LoadSessions(g_currentLecturePath);
+            g_currentSessionPath = previousSessionPath;
+            int idx = CurrentSessionIndex();
+            if (idx >= 0) SendMessageW(g_hSessionList, LB_SETCURSEL, idx, 0);
+            RefreshMainWindowUiState(hWnd);
+        }
+        return 0;
+    }
+    case kMsgLectureContentOpened:
+        if (!g_currentLecturePath.empty() && !IsTempExternalLecturePath(g_currentLecturePath)) {
+            if (UpdateLectureOpenTime(g_currentLecturePath) &&
+                ParseLectureSortMode(g_config.lectureSortMode) == LectureSortMode::Recent &&
+                GetFocus() != g_hLectureList) {
+                s_ignoreLectureSelChange = true;
+                LoadLectures();
+                s_ignoreLectureSelChange = false;
+            }
+        }
+        return 0;
+    case kMsgEnterNoteNormalMode:
+        EnterNoteNormalMode(hWnd);
+        return 0;
+    case kMsgNoteEnterInsertMode:
+        if (g_noteVimModeEnabled) {
+            FocusNoteEditAtNormalCaret();
+        }
+        return 0;
+    case WM_IME_STARTCOMPOSITION:
+    case WM_IME_COMPOSITION:
+    case WM_IME_ENDCOMPOSITION:
+        // If an explicit text input target is focused (e.g. shortcut body edit),
+        // don't cancel IME at the main-window level.
+        if (HWND focused = GetFocus(); IsExplicitImeTargetWindow(focused)) {
+            return 0;
+        }
+        // If IME messages reach the main window in normal mode, cancel/suppress them.
+        CancelAndDisableMainIme(hWnd);
+        return 0;
+    case WM_SIZE:
+        DebugAppendLayoutLog(L"WM_SIZE", hWnd, LOWORD(lParam), HIWORD(lParam));
+        if (s_inSizeMove && wParam == SIZE_RESTORED) {
+            LayoutChildrenLive(hWnd);
+        } else {
+            LayoutChildren(hWnd);
+        }
+        if (wParam == SIZE_RESTORED && !s_inSizeMove) {
+            if (UpdateWindowSizeConfig(hWnd)) {
+                PersistConfig();
+            }
+        }
+        if (wParam == SIZE_MAXIMIZED || (wParam == SIZE_RESTORED && !s_inSizeMove)) {
+            RedrawWorkspaceLayout(hWnd);
+        }
+        return 0;
+    case WM_ENTERSIZEMOVE:
+        s_inSizeMove = true;
+        return 0;
+    case WM_EXITSIZEMOVE:
+        s_inSizeMove = false;
+        LayoutChildren(hWnd);
+        if (UpdateWindowSizeConfig(hWnd)) {
+            PersistConfig();
+        }
+        RedrawWorkspaceLayout(hWnd);
+        return 0;
+    case WM_ERASEBKGND:
+        // Avoid background erase flicker; we paint the background in WM_PAINT.
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        {
+            // The bottom shortcut panel lives directly on the main window background. Fill that region
+            // with panelBg so edit/checkbox controls don't appear to float on a darker windowBg.
+            ui::SplitBands bands = ui::GetSplitBands(hWnd);
+            RECT shortcutRc{};
+            if (TryGetShortcutPanelRect(rc, bands, &shortcutRc)) {
+                HBRUSH panelBg = g_hThemePanelBrush ? g_hThemePanelBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+                int saved = SaveDC(hdc);
+                SelectClipRgn(hdc, nullptr);
+                FillRect(hdc, &shortcutRc, panelBg);
+                RestoreDC(hdc, saved);
+            }
+            ui::PaintSplitBands(hdc, bands);
+        }
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        COLORREF text = g_theme.panelText;
+        COLORREF back = g_theme.panelBg;
+        HBRUSH br = g_hThemePanelBrush ? g_hThemePanelBrush : GetSysColorBrush(COLOR_WINDOW);
+        if (ctl == g_hNoteEdit) {
+            text = g_noteFgColor;
+            back = g_noteBgColor;
+            br = g_hThemeNoteBrush ? g_hThemeNoteBrush : GetSysColorBrush(COLOR_WINDOW);
+        } else if (ctl == g_hShortcutTagEdit) {
+            // Keep shortcut body field visually distinct from numeric d-field.
+            text = BlendColor(g_theme.panelText, g_theme.accent, 0.22);
+            back = BlendColor(g_theme.panelBg, g_theme.accent, 0.10);
+            if (!s_hShortcutTagBrush || s_shortcutTagBrushColor != back) {
+                if (s_hShortcutTagBrush) {
+                    DeleteObject(s_hShortcutTagBrush);
+                    s_hShortcutTagBrush = nullptr;
+                }
+                s_hShortcutTagBrush = CreateSolidBrush(back);
+                s_shortcutTagBrushColor = back;
+            }
+            if (s_hShortcutTagBrush) {
+                br = s_hShortcutTagBrush;
+            }
+        }
+        SetTextColor(hdc, text);
+        SetBkColor(hdc, back);
+        return reinterpret_cast<LRESULT>(br);
+    }
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCLIENT && reinterpret_cast<HWND>(wParam) == hWnd) {
+            if (ui::HandleSetCursor(hWnd)) return TRUE;
+        }
+        break;
+    case WM_KEYDOWN: {
+        if (!s_initialWorkspaceFocusSet && GetFocus() == hWnd) {
+            HWND target = ResolveStartupMainFocusTarget(hWnd);
+            if (target && target != hWnd) {
+                SetFocus(target);
+                SendMessageW(target, msg, wParam, lParam);
+                return 0;
+            }
+        }
+        if (wParam == VK_ESCAPE) {
+            // Esc is handled in the message loop to exit note input focus ("normal mode").
+            return 0;
+        }
+        bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (g_noteVimModeEnabled && g_noteNormalMode && !IsNoteCmdlineActive() &&
+            ctrlDown && !altDown && !shiftDown) {
+            if (HandlePaneDirectionalNavigation(hWnd, PaneNavContext::NotePane, g_hNoteEdit, wParam)) {
+                return 0;
+            }
+        }
+        if (ctrlDown && !altDown && (wParam == 'Z' || wParam == 'Y' || wParam == 'R')) {
+            const bool redo = (wParam == 'Y' || wParam == 'R' || (wParam == 'Z' && shiftDown));
+            ExecutePdfUndoRedoFromFocus(hWnd, !redo);
+            return 0;
+        }
+        break;
+    }
+    case WM_CHAR:
+        if (g_noteVimModeEnabled && g_noteNormalMode && !IsNoteCmdlineActive() &&
+            (GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
+            (wParam == L'\b' || wParam == L'\n' || wParam == 0x0B || wParam == 0x0C)) {
+            return 0;
+        }
+        if (!s_initialWorkspaceFocusSet && GetFocus() == hWnd) {
+            HWND target = ResolveStartupMainFocusTarget(hWnd);
+            if (target && target != hWnd) {
+                SetFocus(target);
+                SendMessageW(target, msg, wParam, lParam);
+                return 0;
+            }
+        }
+        if (g_noteVimModeEnabled && g_noteNormalMode) {
+            wchar_t ch = static_cast<wchar_t>(wParam);
+            if (HandleNoteNormalModeChar(hWnd, ch)) return 0;
+        }
+        break;
+    case WM_LBUTTONDOWN: {
+        if (IsSaveTransactionRunning()) return 0;
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (g_bottomPanePin == BottomPanePin::Math && g_hBottomMath && IsWindowVisible(g_hBottomMath)) {
+            HWND child = ChildWindowFromPointEx(hWnd, pt, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED);
+            if (child == g_hBottomMath) {
+                POINT childPt = pt;
+                MapWindowPoints(hWnd, g_hBottomMath, &childPt, 1);
+                LPARAM childLp = MAKELPARAM(childPt.x, childPt.y);
+                SendMessageW(g_hBottomMath, WM_LBUTTONDOWN, wParam, childLp);
+                return 0;
+            }
+        }
+        if (ui::BeginDrag(hWnd, pt)) return 0;
+        break;
+    }
+    case WM_RBUTTONDOWN:
+        if (IsSaveTransactionRunning()) return 0;
+        break;
+    case WM_CONTEXTMENU: {
+        if (IsSaveTransactionRunning()) return 0;
+        if (reinterpret_cast<HWND>(wParam) == g_hBtnNewNote) {
+            if (ShowNewNoteButtonContextMenu(hWnd, lParam)) {
+                return 0;
+            }
+        }
+        if (reinterpret_cast<HWND>(wParam) == g_hAnnotList) {
+            POINT screenPt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ShowAnnotPanelContextMenu(hWnd, screenPt);
+            return 0;
+        }
+        if (reinterpret_cast<HWND>(wParam) != hWnd) break;
+        break;
+    }
+    case WM_MOUSEMOVE: {
+        if (IsSaveTransactionRunning()) return 0;
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RecordRecentMouseMove(hWnd, &pt);
+        ui::UpdateDrag(hWnd, pt);
+        break;
+    }
+    case WM_LBUTTONUP:
+        if (IsSaveTransactionRunning()) return 0;
+        if (g_bottomPanePin == BottomPanePin::Math && g_hBottomMath && IsWindowVisible(g_hBottomMath)) {
+            POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            HWND child = ChildWindowFromPointEx(hWnd, pt, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED);
+            if (child == g_hBottomMath) {
+                POINT childPt = pt;
+                MapWindowPoints(hWnd, g_hBottomMath, &childPt, 1);
+                LPARAM childLp = MAKELPARAM(childPt.x, childPt.y);
+                SendMessageW(g_hBottomMath, WM_LBUTTONUP, wParam, childLp);
+                return 0;
+            }
+        }
+        if (ui::EndDrag(hWnd)) {
+            bool changed =
+                (g_leftWidth != g_leftStart) ||
+                (g_rightWidth != g_rightStart) ||
+                (g_topHeight != g_topStart) ||
+                (g_leftSplit1 != g_leftSplitStart1) ||
+                (g_leftSplit2 != g_leftSplitStart2);
+            if (changed) {
+                PersistConfig();
+            }
+            // Settle the complete tree once after capture ends so no live
+            // drag invalidation remains visible.
+            RedrawWorkspaceLayout(hWnd);
+            return 0;
+        }
+        break;
+    case WM_CAPTURECHANGED:
+        if (IsSaveTransactionRunning()) return 0;
+        ui::CancelDrag(hWnd);
+        break;
+    case WM_CANCELMODE:
+        ui::CancelDrag(hWnd);
+        break;
+    case WM_LBUTTONDBLCLK: {
+        if (IsSaveTransactionRunning()) return 0;
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (g_bottomPanePin == BottomPanePin::Math && g_hBottomMath && IsWindowVisible(g_hBottomMath)) {
+            HWND child = ChildWindowFromPointEx(hWnd, pt, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED);
+            if (child == g_hBottomMath) {
+                POINT childPt = pt;
+                MapWindowPoints(hWnd, g_hBottomMath, &childPt, 1);
+                LPARAM childLp = MAKELPARAM(childPt.x, childPt.y);
+                SendMessageW(g_hBottomMath, WM_LBUTTONDBLCLK, wParam, childLp);
+                return 0;
+            }
+        }
+        auto hit = ui::HitTest(ui::GetSplitBands(hWnd), pt);
+        if (hit == ui::SplitHit::HLeftTop || hit == ui::SplitHit::HLeftMid) {
+            int split = ui::SplitBandThickness();
+            constexpr int kNewBtnH = 28;
+            constexpr int kNewBtnGap = 6;
+            constexpr int kNewBtnTop = 6;
+            int listTopOffset = kNewBtnTop + kNewBtnH + kNewBtnGap;
+            int available = std::max(0, g_topHeight - listTopOffset);
+            int listSpace = std::max(0, available - split * 2);
+            int seg = (listSpace > 0) ? (listSpace / 3) : 0;
+            g_leftSplit1 = listTopOffset + seg + split;
+            g_leftSplit2 = listTopOffset + seg * 2 + split * 2;
+
+            ui::ApplyLayout(hWnd, ui::LayoutPass::Commit);
+            RedrawWorkspaceLayout(hWnd);
+            PersistConfig();
+            return 0;
+        }
+        if (hit != ui::SplitHit::None) {
+            ResetSplitToDefault(hWnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_INITMENUPOPUP: {
+        HMENU menu = reinterpret_cast<HMENU>(wParam);
+        if (UpdateEditMenuUndoRedoState(menu)) {
+            return 0;
+        }
+        if (menu == g_hBottomPaneMenu || menu == g_hBottomPaneMenuSettings) {
+            UpdateBottomPaneMenuChecks();
+            return 0;
+        }
+        if (menu == g_hScrollDirectionMenu) {
+            UpdateScrollDirectionMenuChecks();
+            return 0;
+        }
+        break;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        int code = HIWORD(wParam);
+        HWND from = reinterpret_cast<HWND>(lParam);
+        if (id == ID_FILE_SAVE_ALL) {
+            preview_trace::Append(
+                L"CtrlSCommand",
+                L"WM_COMMAND code=" + std::to_wstring(code) +
+                L" from=" + preview_trace::Window(from) +
+                L" focus=" + preview_trace::Window(GetFocus()));
+        }
+        if (IsSaveTransactionRunning() && from != nullptr) {
+            return 0;
+        }
+        if (from == g_hShortcutTagEdit && code == EN_CHANGE) {
+            if (s_normalizingShortcutBody) return 0;
+            if (IsImeComposingOnWindow(g_hShortcutTagEdit)) return 0;
+            int len = GetWindowTextLengthW(g_hShortcutTagEdit);
+            if (len <= 0) return 0;
+            std::wstring text(static_cast<size_t>(len) + 1, L'\0');
+            int copied = GetWindowTextW(g_hShortcutTagEdit, text.data(), len + 1);
+            if (copied < 0) copied = 0;
+            text.resize(static_cast<size_t>(copied));
+            DWORD selStart = 0, selEnd = 0;
+            SendMessageW(g_hShortcutTagEdit, EM_GETSEL,
+                         reinterpret_cast<WPARAM>(&selStart),
+                         reinterpret_cast<LPARAM>(&selEnd));
+            auto isAnySpace = [](wchar_t ch) {
+                return (iswspace(ch) != 0) || ch == 0x3000;
+            };
+            std::wstring cleaned;
+            cleaned.reserve(text.size());
+            DWORD removedBeforeStart = 0;
+            DWORD removedBeforeEnd = 0;
+            for (size_t i = 0; i < text.size(); ++i) {
+                if (isAnySpace(text[i])) {
+                    if (static_cast<DWORD>(i) < selStart) ++removedBeforeStart;
+                    if (static_cast<DWORD>(i) < selEnd) ++removedBeforeEnd;
+                } else {
+                    cleaned.push_back(text[i]);
+                }
+            }
+            if (cleaned != text) {
+                s_normalizingShortcutBody = true;
+                SetWindowTextW(g_hShortcutTagEdit, cleaned.c_str());
+                s_normalizingShortcutBody = false;
+                DWORD newStart = (selStart > removedBeforeStart) ? (selStart - removedBeforeStart) : 0;
+                DWORD newEnd = (selEnd > removedBeforeEnd) ? (selEnd - removedBeforeEnd) : 0;
+                SendMessageW(g_hShortcutTagEdit, EM_SETSEL, newStart, newEnd);
+            }
+            return 0;
+        }
+        if (from == g_hNoteEdit && code == EN_CHANGE) {
+            const bool textModified = (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0);
+            if (IsNoteChangeSuppressed()) {
+                // EN_CHANGE does not prove user intent. Only an input message or an explicit
+                // edit command may release the post-load transaction latch.
+                if (textModified && !IsNoteImeComposing()) {
+                    PostMessageW(hWnd, kMsgNoteOverlayUpdate, 0, static_cast<LPARAM>(CurrentEditRevision()));
+                }
+                return 0;
+            }
+            if (g_currentNotePath.empty() && !g_currentSessionPath.empty() &&
+                !file_output::EnsureCurrentNotePathForStage(hWnd)) {
+                preview_trace::Append(L"NoteChange", L"note_deferred_path_failed_on_change");
+                return 0;
+            }
+            if (g_currentNotePath.empty()) {
+                return 0;
+            }
+            g_noteDirty = true;
+            g_noteNeedsIntegrate = true;
+            NotifyEditRevisionChanged();
+            RecordCurrentNoteTextEditForUndo(g_hNoteEdit);
+            SetNoteTyping(true);
+            const bool commitDerivedFrameBeforePaint =
+                RequiresImmediateNoteDerivedFrameCommit() && !IsNoteImeComposing();
+            if (commitDerivedFrameBeforePaint) {
+                ScheduleNoteOverlayRefresh(hWnd, true, CurrentEditRevision());
+            }
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_NOERASE);
+            if (IsNoteImeComposing()) {
+                SyncNoteImeCandidateWindowToCaret(g_hNoteEdit);
+            } else if (!commitDerivedFrameBeforePaint) {
+                ScheduleNoteOverlayRefresh(hWnd, false, CurrentEditRevision());
+            }
+            file_output::NotifyNoteStageEdit(hWnd);
+            return 0;
+        }
+    if (from == g_hAnnotList && code == LBN_SELCHANGE) {
+        int sel = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETCURSEL, 0, 0));
+        (void)SyncTextBoxToolFontFromAnnotationIndex(sel);
+        UpdateAnnotPanelSummary();
+        return 0;
+    }
+        if (from == g_hAnnotList && code == LBN_DBLCLK) {
+            JumpToSelectedAnnot();
+            return 0;
+        }
+        if (from == g_hLectureList && code == LBN_SELCHANGE) {
+            OnLectureSelChange(hWnd);
+            return 0;
+        }
+        if (from == g_hSessionList && code == LBN_SELCHANGE) {
+            OnSessionSelChange(hWnd);
+            return 0;
+        }
+        if (from == g_hPdfList && code == LBN_SELCHANGE) {
+            OnPdfSelChange(hWnd);
+            return 0;
+        }
+        if (from == g_hNoteList && code == LBN_SELCHANGE) {
+            OnNoteSelChange(hWnd);
+            return 0;
+        }
+        if (from == g_hLectureList && code == LBN_DBLCLK) {
+            if (IsDirectoryListDblClickDeferred(from)) return 0;
+            OnLectureDblClk(hWnd);
+            return 0;
+        }
+        if (from == g_hSessionList && code == LBN_DBLCLK) {
+            if (IsDirectoryListDblClickDeferred(from)) return 0;
+            OnSessionDblClk(hWnd);
+            return 0;
+        }
+        if (from == g_hPdfList && code == LBN_DBLCLK) {
+            OnPdfDblClk(hWnd);
+            return 0;
+        }
+        if (from == g_hNoteList && code == LBN_DBLCLK) {
+            OnNoteDblClk(hWnd);
+            return 0;
+        }
+        OnCommand(hWnd, id, code, from);
+        return 0;
+    }
+    case kMsgNoteOverlayUpdate: {
+        ScheduleNoteOverlayRefresh(hWnd, wParam != 0, static_cast<uint64_t>(lParam));
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        if (g_bottomPanePin == BottomPanePin::Math && g_hBottomMath && IsWindowVisible(g_hBottomMath)) {
+            POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            RECT rc{};
+            if (GetWindowRect(g_hBottomMath, &rc) && PtInRect(&rc, pt)) {
+                SendMessageW(g_hBottomMath, msg, wParam, lParam);
+                return 0;
+            }
+        }
+        break;
+    }
+    case WM_DRAWITEM: {
+        LPDRAWITEMSTRUCT dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (dis && dis->CtlType == ODT_LISTBOX) {
+            if (DrawLeftPaneListItem(dis)) return TRUE;
+        }
+        if (dis->CtlType == ODT_MENU) {
+            if (DrawThemedMenuItem(dis)) return TRUE;
+        }
+        if (dis->CtlID == ID_TOOL_FONT && dis->hwndItem == g_hComboFont) {
+            DrawFontComboItem(dis, 12, kFontPreviewSample, g_theme);
+            return TRUE;
+        }
+        if (dis->CtlID == ID_NOTE_SHORTCUT_BACK_PREVIEW) {
+            DrawShortcutPreview(dis, g_noteShortcutBackColor);
+            return TRUE;
+        }
+        if (dis->CtlID == ID_NOTE_SHORTCUT_CHAR_PREVIEW) {
+            DrawShortcutPreview(dis, g_noteShortcutTextColor);
+            return TRUE;
+        }
+        const UINT toolColorBase = static_cast<UINT>(ID_TOOL_COLOR_BASE);
+        const UINT toolColorEnd = toolColorBase + static_cast<UINT>(g_palette.size());
+        if (dis->CtlID >= toolColorBase && dis->CtlID < toolColorEnd) {
+            int idx = static_cast<int>(dis->CtlID - toolColorBase);
+            COLORREF col = g_palette[static_cast<size_t>(idx)];
+            HBRUSH br = CreateSolidBrush(col);
+            FillRect(dis->hDC, &dis->rcItem, br);
+            DeleteObject(br);
+            if (col == g_activeColor) {
+                int sum = static_cast<int>(GetRValue(col)) + static_cast<int>(GetGValue(col)) + static_cast<int>(GetBValue(col));
+                COLORREF border = (sum < 3 * 96) ? RGB(255, 255, 255) : RGB(0, 0, 0);
+                HPEN pen = CreatePen(PS_SOLID, 2, border);
+                HGDIOBJ oldPen = SelectObject(dis->hDC, pen);
+                HGDIOBJ oldBrush = SelectObject(dis->hDC, GetStockObject(HOLLOW_BRUSH));
+                Rectangle(dis->hDC,
+                          dis->rcItem.left + 1, dis->rcItem.top + 1,
+                          dis->rcItem.right - 1, dis->rcItem.bottom - 1);
+                SelectObject(dis->hDC, oldBrush);
+                SelectObject(dis->hDC, oldPen);
+                DeleteObject(pen);
+            }
+            if (dis->itemState & ODS_FOCUS) {
+                DrawFocusRect(dis->hDC, &dis->rcItem);
+            }
+            return TRUE;
+        }
+        if (DrawThemeButton(dis)) return TRUE;
+        break;
+    }
+    case WM_MEASUREITEM: {
+        LPMEASUREITEMSTRUCT mi = reinterpret_cast<LPMEASUREITEMSTRUCT>(lParam);
+        if (mi && mi->CtlType == ODT_LISTBOX) {
+            int itemH = CalcListItemHeight();
+            if (itemH > 0) {
+                mi->itemHeight = static_cast<UINT>(itemH);
+                return TRUE;
+            }
+        }
+        if (MeasureThemedMenuItem(mi)) return TRUE;
+        if (mi->CtlID == ID_TOOL_FONT && mi->CtlType == ODT_COMBOBOX) {
+            mi->itemHeight = static_cast<UINT>(MeasureFontComboItemHeight(g_hComboFont, 12));
+            return TRUE;
+        }
+        break;
+    }
+    case WM_TIMER:
+        if (wParam == kSetupJsonExistenceVerifyTimerId) {
+            if (s_setupJsonExistenceVerifyPath.empty()) {
+                KillTimer(hWnd, kSetupJsonExistenceVerifyTimerId);
+                s_setupJsonExistenceVerifyAttempt = 0;
+                return 0;
+            }
+            ++s_setupJsonExistenceVerifyAttempt;
+            std::wstring err;
+            bool ok = VerifySetupJsonStillExistsReadable(std::filesystem::path(s_setupJsonExistenceVerifyPath), &err);
+            if (!ok) {
+                KillTimer(hWnd, kSetupJsonExistenceVerifyTimerId);
+                // Policy: fail-fast on first failed check. A second check after failure is intentionally skipped.
+                std::wstring msg;
+                if (IsEnglishUi()) {
+                    if (err == L"file not found") {
+                        msg = L"The setup JSON file is missing after creation.\n"
+                              L"It may have been quarantined/deleted by security software.\n\n"
+                              L"No automatic recreate/retry is performed in this check process.\n"
+                              L"Some settings may fail to persist.\n\npath:\n" + s_setupJsonExistenceVerifyPath;
+                    } else {
+                        msg = L"The setup JSON file existence/readability check failed.\n"
+                              L"The file may be locked or access may be restricted.\n\n"
+                              L"No automatic recreate/retry is performed in this check process.\n"
+                              L"Some settings may fail to persist.\n\npath:\n" + s_setupJsonExistenceVerifyPath;
+                    }
+                } else {
+                    if (err == L"file not found") {
+                        msg = L"設定JSONファイルが作成後に見つかりません。\n"
+                              L"セキュリティソフトにより隔離/削除された可能性があります。\n\n"
+                              L"この検証プロセスでは自動再作成・再試行は行いません。\n"
+                              L"一部設定が保存されない可能性があります。\n\npath:\n" + s_setupJsonExistenceVerifyPath;
+                    } else {
+                        msg = L"設定JSONファイルの存在/読み取り確認に失敗しました。\n"
+                              L"ファイルロックまたはアクセス制限の可能性があります。\n\n"
+                              L"この検証プロセスでは自動再作成・再試行は行いません。\n"
+                              L"一部設定が保存されない可能性があります。\n\npath:\n" + s_setupJsonExistenceVerifyPath;
+                    }
+                }
+                if (!err.empty()) msg += L"\n\n" + err;
+                ShowSoftNotice(hWnd, msg);
+                s_setupJsonExistenceVerifyPath.clear();
+                s_setupJsonExistenceVerifyAttempt = 0;
+                return 0;
+            }
+            if (s_setupJsonExistenceVerifyAttempt >= 2) {
+                KillTimer(hWnd, kSetupJsonExistenceVerifyTimerId);
+                s_setupJsonExistenceVerifyPath.clear();
+                s_setupJsonExistenceVerifyAttempt = 0;
+                return 0;
+            }
+            // Second (final) check later.
+            SetTimer(hWnd, kSetupJsonExistenceVerifyTimerId, 4500, nullptr);
+            return 0;
+        }
+        if (wParam == kExitRetryTimerId) {
+            if (!IsSaveOperationInProgress()) {
+                KillTimer(hWnd, kExitRetryTimerId);
+                PostMessageW(hWnd, WM_CLOSE, 0, 0);
+            }
+            return 0;
+        }
+        if (wParam == ui::kSplitDragTimerId) {
+            ui::OnTimer(hWnd);
+            return 0;
+        }
+        if (wParam == kNoteStageSaveTimerId) {
+            file_output::HandleNoteStageSaveTimer(hWnd);
+            return 0;
+        }
+        if (wParam == kAutoSaveTimerId) {
+            file_output::HandleAutoStageSaveTimer(hWnd);
+            return 0;
+        }
+        if (wParam == kAutoSaveExecuteTimerId) {
+            file_output::HandleDeferredAutoStageSaveTimer(hWnd);
+            return 0;
+        }
+        if (wParam == kAutoIntegrateTimerId) {
+            file_output::HandleAutoIntegrateTimer(hWnd);
+            return 0;
+        }
+        if (wParam == kNoteOverlayRefreshTimerId) {
+            KillTimer(hWnd, kNoteOverlayRefreshTimerId);
+            if (s_noteOverlayRefreshPending) {
+                RefreshNoteOverlayNow();
+            }
+            return 0;
+        }
+        if (wParam == kNoteFullReparseTimerId) {
+            KillTimer(hWnd, kNoteFullReparseTimerId);
+            const ULONGLONG now = GetTickCount64();
+            if (HasDeferredNoteFullReparse()) {
+                if (IsNoteTyping() ||
+                    (s_noteLastRefreshRequestTick != 0 &&
+                     now - s_noteLastRefreshRequestTick < kNoteFullReparseDelayMs)) {
+                    SetTimer(hWnd, kNoteFullReparseTimerId, kNoteFullReparseDelayMs, nullptr);
+                } else {
+                    RunDeferredNoteFullReparseNow();
+                }
+            }
+            return 0;
+        }
+        break;
+    case WM_SETFOCUS:
+        // Main window is a shortcut focus target ("normal mode"). Keep IME disabled here so
+        // Japanese IME candidate/composition doesn't appear without a text input target.
+        CancelAndDisableMainIme(hWnd);
+        if (s_skipAutoChildFocusOnce) {
+            s_skipAutoChildFocusOnce = false;
+            return 0;
+        }
+        if (!s_initialWorkspaceFocusSet) {
+            HWND target = ResolveStartupMainFocusTarget(hWnd);
+            if (target && target != hWnd) {
+                SetFocus(target);
+            }
+            return 0;
+        }
+        if (g_pdf.kind != DocKind::None && g_hPdfView) {
+            SetFocus(g_hPdfView);
+        } else if (g_hNoteEdit) {
+            SetFocus(g_hNoteEdit);
+        }
+        return 0;
+    case WM_ACTIVATEAPP:
+        if (wParam) {
+            CheckCurrentNoteFileExternalChange(hWnd);
+        } else {
+            if (file_output::ShouldDeferBackgroundSaveForActiveInput()) {
+                file_output::ScheduleAutoStageSaveRetry(hWnd);
+                return 0;
+            }
+            const bool noteOk = SaveNoteIfDirty(hWnd);
+            const bool annotOk = SaveAnnotationsIfDirty(hWnd);
+            if (!noteOk || !annotOk) {
+                file_output::ScheduleAutoStageSaveRetry(hWnd);
+            }
+        }
+        return 0;
+    case WM_CLOSE: {
+        const auto closeAction = main_close_policy::ResolveCloseRequestAction({
+            s_exitInProgress,
+            IsSaveOperationInProgress(),
+            IsUiAutomationEnabled(),
+            s_uiAutomationFinished,
+        });
+        if (closeAction == main_close_policy::CloseRequestAction::IgnoreAlreadyExiting) return 0;
+        if (closeAction == main_close_policy::CloseRequestAction::WaitForActiveSave) {
+            if (!s_exitPending) {
+                s_exitPending = true;
+                ShowMainSoftNotice(hWnd,
+                                   L"統合保存中です。\n統合保存が完了し次第、終了します。\n\n"
+                                   L"（もし長時間続く場合は、保存先の空き容量や権限をご確認ください）",
+                                   SoftNoticeKind::Warning);
+            }
+            SetTimer(hWnd, kExitRetryTimerId, 200, nullptr);
+            return 0;
+        }
+        if (closeAction == main_close_policy::CloseRequestAction::BypassFinishedAutomation) {
+            // Automation has already written its result. Do not enter an unattended
+            // staged-diff confirmation; leave any test stage intact for diagnosis.
+            s_exitInProgress = true;
+            s_exitPending = false;
+            KillTimer(hWnd, kExitRetryTimerId);
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        s_exitInProgress = true;
+        s_exitPending = false;
+        KillTimer(hWnd, kExitRetryTimerId);
+        const auto completion = main_close_policy::ResolveExitFlowCompletion(HandleAppExit(hWnd));
+        s_exitInProgress = completion.exit_in_progress;
+        if (completion.destroy_window) {
+            DestroyWindow(hWnd);
+        }
+        return 0;
+    }
+    case WM_QUERYENDSESSION:
+        return TRUE;
+    case WM_ENDSESSION:
+        if (wParam == TRUE) {
+            s_exitInProgress = true;
+            KillTimer(hWnd, kExitRetryTimerId);
+            CommitActiveEditsForAppExit(hWnd);
+            (void)SaveNoteIfDirty(hWnd);
+            (void)SaveAnnotationsIfDirty(hWnd);
+            file_output::RunSaveAndIntegrateTransaction(hWnd);
+        }
+        return 0;
+    case WM_DESTROY:
+        KillTimer(hWnd, kNoteStageSaveTimerId);
+        KillTimer(hWnd, kAutoSaveTimerId);
+        KillTimer(hWnd, kAutoSaveExecuteTimerId);
+        KillTimer(hWnd, kAutoIntegrateTimerId);
+        KillTimer(hWnd, kNoteOverlayRefreshTimerId);
+        KillTimer(hWnd, kNoteFullReparseTimerId);
+        KillTimer(hWnd, kExitRetryTimerId);
+        KillTimer(hWnd, kSetupJsonExistenceVerifyTimerId);
+        ClearPdfState();
+        if (g_hUIFont) {
+            DeleteObject(g_hUIFont);
+            g_hUIFont = nullptr;
+        }
+        if (g_hNoteFont) {
+            DeleteObject(g_hNoteFont);
+            g_hNoteFont = nullptr;
+        }
+        if (g_hNoteRenderFont) {
+            DeleteObject(g_hNoteRenderFont);
+            g_hNoteRenderFont = nullptr;
+        }
+        if (g_hThemeWindowBrush) {
+            DeleteObject(g_hThemeWindowBrush);
+            g_hThemeWindowBrush = nullptr;
+        }
+        if (g_hThemePanelBrush) {
+            DeleteObject(g_hThemePanelBrush);
+            g_hThemePanelBrush = nullptr;
+        }
+        if (g_hThemeNoteBrush) {
+            DeleteObject(g_hThemeNoteBrush);
+            g_hThemeNoteBrush = nullptr;
+        }
+        if (g_hThemeToolbarBrush) {
+            DeleteObject(g_hThemeToolbarBrush);
+            g_hThemeToolbarBrush = nullptr;
+        }
+        if (g_hThemeMenuBrush) {
+            DeleteObject(g_hThemeMenuBrush);
+            g_hThemeMenuBrush = nullptr;
+        }
+        if (s_hShortcutTagBrush) {
+            DeleteObject(s_hShortcutTagBrush);
+            s_hShortcutTagBrush = nullptr;
+            s_shortcutTagBrushColor = CLR_INVALID;
+        }
+        g_menuItemData.clear();
+        PostQuitMessage(UiAutomationExitCode());
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+

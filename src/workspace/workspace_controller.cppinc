@@ -1,0 +1,13 @@
+// file: main/workspace_controller.cppinc
+// NOTE: This file is intentionally included by src/main.cpp to keep the build as a
+// single translation unit while physically splitting responsibilities.
+
+#include "math/math_render.h"
+#include "core/preview_trace.h"
+
+// Keep include order stable because later fragments depend on earlier helpers.
+#include "workspace/workspace_config_io.h"
+#include "workspace/workspace_tree.h"
+#include "workspace/workspace_actions.h"
+
+

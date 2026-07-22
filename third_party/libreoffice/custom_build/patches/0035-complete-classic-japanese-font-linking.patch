@@ -1,0 +1,28 @@
+diff --git a/oox/source/drawingml/textrun.cxx b/oox/source/drawingml/textrun.cxx
+--- a/oox/source/drawingml/textrun.cxx
++++ b/oox/source/drawingml/textrun.cxx
+@@ -72,7 +72,8 @@ void lclApplyOfficeJapaneseFontLink(const ::oox::core::XmlFilterBase& rFilterBas
+         = rTextCharacterProps.maAsianFont.getFontData(aAsianFontName, nFontPitch, nFontFamily,
+                                                       nullptr, rFilterBase);
+     if (bHasDirectAsianFont
+-        && (aAsianFontName.equalsIgnoreAsciiCase(u"Courier New")
++        && (aAsianFontName.equalsIgnoreAsciiCase(u"Times New Roman")
++            || aAsianFontName.equalsIgnoreAsciiCase(u"Courier New")
+             || aAsianFontName.equalsIgnoreAsciiCase(u"Cambria Math")))
+     {
+         // Windows PowerPoint links Japanese glyphs in these Latin-only fonts to MS Mincho.
+@@ -82,6 +83,14 @@ void lclApplyOfficeJapaneseFontLink(const ::oox::core::XmlFilterBase& rFilterBas
+         return;
+     }
+ 
++    if (bHasDirectAsianFont && aAsianFontName.equalsIgnoreAsciiCase(u"Calibri"))
++    {
++        // PowerPoint's classic Calibri font link uses MS Gothic for Japanese glyphs.
++        // Calibri itself has no Japanese glyphs, so retaining it here selects Noto Sans JP.
++        rTextCharacterProps.maAsianFont.setAttributes(u"MS Gothic"_ustr);
++        return;
++    }
++
+     if (bHasDirectAsianFont
+         || rTextCharacterProps.maAsianThemeFont.getFontData(aAsianFontName, nFontPitch,
+                                                             nFontFamily, nullptr, rFilterBase))

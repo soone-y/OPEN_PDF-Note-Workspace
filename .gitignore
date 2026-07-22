@@ -1,0 +1,34 @@
+# Editor/local
+.vscode/
+.vs/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# Build outputs
+/out/
+/build/
+/release/
+*.exe
+*.obj
+*.pdb
+
+# Large/generated third-party artifacts
+third_party/libreoffice/source_archives/
+third_party/libreoffice/custom_runtime/
+third_party/libreoffice/custom_image/
+third_party/libreoffice/build/
+
+# Runtime/local data
+/workspace/
+pdf_workspace_setup.json
+pdf_viewer_setup.json
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Python/cache
+__pycache__/
+*.pyc

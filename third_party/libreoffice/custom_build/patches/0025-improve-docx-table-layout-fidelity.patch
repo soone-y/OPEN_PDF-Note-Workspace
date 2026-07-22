@@ -1,0 +1,100 @@
+diff --git a/sw/source/writerfilter/dmapper/DomainMapperTableManager.cxx b/sw/source/writerfilter/dmapper/DomainMapperTableManager.cxx
+index bc2595a..8d25dab 100644
+--- a/sw/source/writerfilter/dmapper/DomainMapperTableManager.cxx
++++ b/sw/source/writerfilter/dmapper/DomainMapperTableManager.cxx
+@@ -30,6 +30,8 @@
+ #include <ooxml/resourceids.hxx>
+ #include <rtl/math.hxx>
+ #include <sal/log.hxx>
++#include <algorithm>
++#include <cmath>
+ #include <numeric>
+ #include "TrackChangesHandler.hxx"
+ #include <oox/token/tokens.hxx>
+@@ -38,6 +40,51 @@ namespace writerfilter::dmapper {
+ 
+ using namespace ::com::sun::star;
+ 
++namespace
++{
++bool lcl_ShouldPreferCellWidthsForAutoFit(const std::vector<sal_Int32>& rTableGrid,
++                                          const std::vector<sal_Int32>& rCellWidths,
++                                          const std::vector<sal_uInt32>& rGridSpans,
++                                          sal_uInt32 nCellCount, sal_uInt32 nGridBefore,
++                                          sal_uInt32 nLayoutType)
++{
++    if (nLayoutType == NS_ooxml::LN_Value_doc_ST_TblLayout_fixed || nGridBefore != 0
++        || rCellWidths.size() != nCellCount || rGridSpans.size() != nCellCount
++        || rTableGrid.size() != nCellCount || rCellWidths.empty()
++        || std::any_of(rCellWidths.begin(), rCellWidths.end(), [](sal_Int32 nWidth) {
++               return nWidth <= 0;
++           })
++        || std::any_of(rGridSpans.begin(), rGridSpans.end(), [](sal_uInt32 nSpan) {
++               return nSpan != 1;
++           }))
++    {
++        return false;
++    }
++
++    const sal_Int64 nGridTotal = std::accumulate(rTableGrid.begin(), rTableGrid.end(), sal_Int64(0));
++    const sal_Int64 nCellTotal = std::accumulate(rCellWidths.begin(), rCellWidths.end(), sal_Int64(0));
++    if (nGridTotal <= 0 || nCellTotal <= 0)
++        return false;
++
++    sal_Int64 nGridPosition = 0;
++    sal_Int64 nCellPosition = 0;
++    for (size_t i = 0; i + 1 < rCellWidths.size(); ++i)
++    {
++        nGridPosition += rTableGrid[i];
++        nCellPosition += rCellWidths[i];
++        // Ignore rounding noise. A stale autofit grid differs from the preferred cell widths by
++        // more than one percent of the table width.
++        const double fGridPosition = static_cast<double>(nGridPosition) / nGridTotal;
++        const double fCellPosition = static_cast<double>(nCellPosition) / nCellTotal;
++        if (std::abs(fGridPosition - fCellPosition) > 0.01)
++        {
++            return true;
++        }
++    }
++    return false;
++}
++}
++
+ DomainMapperTableManager::DomainMapperTableManager() :
+     m_nRow(0),
+     m_nGridSpan(1),
+@@ -702,6 +749,18 @@ void DomainMapperTableManager::endOfRowAction()
+     for (int i : (*pTableGrid))
+         nFullWidthRelative = o3tl::saturating_add(nFullWidthRelative, i);
+ 
++    if (lcl_ShouldPreferCellWidthsForAutoFit(*pTableGrid, *pCellWidths, rCurrentSpans,
++                                             m_nCell.back(), getCurrentGridBefore(), m_nLayoutType))
++    {
++        // Word's autofit layout treats w:tcW as the preferred width when w:tblGrid is stale.
++        // Using the stale grid here makes narrow text columns wrap and changes pagination.
++        pTableGrid = pCellWidths;
++        nFullWidthRelative = std::accumulate(pCellWidths->begin(), pCellWidths->end(), 0);
++        m_nTableWidth = ConversionHelper::convertTwipToMm100_LimitedRoundUp(nFullWidthRelative);
++        pTablePropMap->setValue(TablePropertyMap::TABLE_WIDTH, m_nTableWidth);
++        pTablePropMap->setValue(TablePropertyMap::TABLE_WIDTH_TYPE, text::SizeType::FIX);
++    }
++
+     bool bIsIncompleteGrid = false;
+     if( pTableGrid->size() == nGrids && m_nCell.back( ) > 0 )
+     {
+diff --git a/sw/source/core/txtnode/fntcache.cxx b/sw/source/core/txtnode/fntcache.cxx
+index fcbce15..23af3dc 100644
+--- a/sw/source/core/txtnode/fntcache.cxx
++++ b/sw/source/core/txtnode/fntcache.cxx
+@@ -284,6 +284,11 @@ static sal_uInt16 lcl_ApplyCjkHeightAdjustment(sal_uInt16 nBase, const SwViewShe
+             || stCaps.oCodePageRange->test(vcl::CodePageCoverage::CP949)
+             || stCaps.oCodePageRange->test(vcl::CodePageCoverage::CP950))
+         {
++            // Word uses substantially tighter metrics for Yu Gothic than the generic CJK
++            // compatibility correction. The generic 127% factor adds rows and pages to DOCX
++            // tables made by current Word versions.
++            if (rDev.GetFont().GetFamilyName().equalsIgnoreAsciiCase(u"Yu Gothic"))
++                return (nBase * 108) / 100;
+             return (nBase * 127) / 100;
+         }
+     }

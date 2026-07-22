@@ -1,0 +1,1268 @@
+// file: note_view/note_view_input_helpers.cppinc
+// Included by note_view_input.cppinc; contains input helpers, visual assist, and save guards.
+
+// Note edit input, focus, IME-aware navigation, and token actions.
+// Included by note_view.cpp to keep a single translation unit while narrowing edit scope.
+
+static int g_noteStageObservedCaretLine = -1;
+
+static bool IsPotentialNoteTextMutationMessage(UINT msg, WPARAM wParam) {
+    switch (msg) {
+    case WM_CHAR:
+    case WM_PASTE:
+    case WM_CUT:
+    case WM_CLEAR:
+    case WM_UNDO:
+    case EM_REDO:
+        return true;
+    case WM_KEYDOWN:
+        return wParam == VK_BACK || wParam == VK_DELETE ||
+               wParam == VK_RETURN || wParam == VK_TAB;
+    default:
+        return false;
+    }
+}
+
+static bool EnsureDeferredNoteTargetForInputMessage(HWND hWnd, UINT msg, WPARAM wParam) {
+    if (!g_currentNotePath.empty() || g_currentSessionPath.empty()) return true;
+    if (!IsPotentialNoteTextMutationMessage(msg, wParam)) return true;
+    HWND owner = GetParent(hWnd);
+    if (!owner) owner = g_hMainWnd;
+    return file_output::EnsureCurrentNotePathForStage(owner);
+}
+
+static int CurrentNoteCaretLine(HWND hWnd) {
+    if (!hWnd) return -1;
+    DWORD selStart = 0;
+    DWORD selEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selStart),
+                 reinterpret_cast<LPARAM>(&selEnd));
+    if (selStart > selEnd) std::swap(selStart, selEnd);
+    return static_cast<int>(SendMessageW(hWnd, EM_LINEFROMCHAR, static_cast<WPARAM>(selStart), 0));
+}
+
+static void MaybeFlushNoteStageOnCaretOrFocusChange(HWND hWnd, bool forceFlush) {
+    if (!hWnd) return;
+    const int currentLine = CurrentNoteCaretLine(hWnd);
+    if (forceFlush) {
+        g_noteStageObservedCaretLine = -1;
+        if (!g_noteDirty || IsNoteImeComposing()) return;
+        HWND owner = GetParent(hWnd);
+        if (!owner) owner = g_hMainWnd;
+        (void)file_output::SaveNoteIfDirty(owner);
+        return;
+    }
+    if (currentLine < 0) return;
+    if (g_noteStageObservedCaretLine < 0) {
+        g_noteStageObservedCaretLine = currentLine;
+        return;
+    }
+    if (currentLine == g_noteStageObservedCaretLine) return;
+    g_noteStageObservedCaretLine = currentLine;
+    // Stage persistence is already timer-driven by NotifyNoteStageEdit(). A caret-only
+    // line change must not synchronously perform filesystem work on the input thread.
+}
+
+static bool HandleNoteCtrlUndoRedo(HWND hWnd, WPARAM wParam, bool* outTextChanged) {
+    if (outTextChanged) *outTextChanged = false;
+    if (!hWnd) return false;
+    const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    if (!ctrlDown || altDown) return false;
+
+    const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    bool wantUndo = false;
+    if (wParam == 'Z') {
+        wantUndo = !shiftDown;
+    } else if (wParam == 'Y') {
+        wantUndo = false;
+    } else {
+        return false;
+    }
+
+    // Consume a recognized undo/redo chord even when this note is read-only or
+    // has no history. Otherwise RichEdit's default processing could mutate a
+    // background/read-only note outside the shared eligibility check.
+    if (!CanExecuteNoteUndoRedoFromFocus(wantUndo)) return true;
+
+    const std::wstring beforeText = GetEditText(hWnd);
+    const bool executed = ExecuteNoteUndoRedoFromFocus(GetParent(hWnd), wantUndo);
+    if (outTextChanged) *outTextChanged = executed && GetEditText(hWnd) != beforeText;
+    return true;
+}
+
+static std::wstring GetEditTextRangeForIndexing(HWND hWnd, size_t start, size_t end) {
+    if (!hWnd || end <= start) return L"";
+    if (IsRichEditControl(hWnd)) {
+        const LONG cpMin = static_cast<LONG>(std::clamp<size_t>(start, 0, static_cast<size_t>(LONG_MAX)));
+        const LONG cpMax = static_cast<LONG>(std::clamp<size_t>(end, start, static_cast<size_t>(LONG_MAX)));
+        if (cpMax <= cpMin) return L"";
+        std::wstring text(static_cast<size_t>(cpMax - cpMin) + 1, L'\0');
+        TEXTRANGEW range{};
+        range.chrg.cpMin = cpMin;
+        range.chrg.cpMax = cpMax;
+        range.lpstrText = text.data();
+        LRESULT copied = SendMessageW(hWnd, EM_GETTEXTRANGE, 0, reinterpret_cast<LPARAM>(&range));
+        if (copied < 0) copied = 0;
+        text.resize(static_cast<size_t>(copied));
+        return text;
+    }
+
+    std::wstring text = GetEditTextForIndexing(hWnd);
+    const size_t textLen = text.size();
+    start = std::min(start, textLen);
+    end = std::min(end, textLen);
+    if (end <= start) return L"";
+    return text.substr(start, end - start);
+}
+
+static bool RangeContainsIndexingLineBreak(HWND hWnd, size_t start, size_t end) {
+    const std::wstring text = GetEditTextRangeForIndexing(hWnd, start, end);
+    return text.find(L'\r') != std::wstring::npos || text.find(L'\n') != std::wstring::npos;
+}
+
+static bool RequiresImmediateNoteContentRefreshForDelete(HWND hWnd, WPARAM vkey) {
+    if (!hWnd) return false;
+    if (vkey != VK_BACK && vkey != VK_DELETE) return false;
+
+    DWORD selStart = 0;
+    DWORD selEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selStart),
+                 reinterpret_cast<LPARAM>(&selEnd));
+    if (selStart > selEnd) std::swap(selStart, selEnd);
+
+    const int textLenRaw = GetWindowTextLengthW(hWnd);
+    const size_t textLen = static_cast<size_t>((textLenRaw > 0) ? textLenRaw : 0);
+    size_t delStart = std::min<size_t>(selStart, textLen);
+    size_t delEnd = std::min<size_t>(selEnd, textLen);
+    if (delStart == delEnd) {
+        if (vkey == VK_BACK) {
+            if (delStart == 0) return false;
+            return RangeContainsIndexingLineBreak(hWnd, delStart - 1, delStart);
+        } else {
+            if (delStart >= textLen) return false;
+            return RangeContainsIndexingLineBreak(hWnd, delStart, delStart + 1);
+        }
+    }
+    if (delEnd <= delStart) return false;
+    if ((delEnd - delStart) <= 256) {
+        return RangeContainsIndexingLineBreak(hWnd, delStart, delEnd);
+    }
+
+    const LRESULT startLine = SendMessageW(hWnd, EM_LINEFROMCHAR, static_cast<WPARAM>(delStart), 0);
+    const LRESULT endLine = SendMessageW(hWnd, EM_LINEFROMCHAR, static_cast<WPARAM>(delEnd), 0);
+    return startLine >= 0 && endLine >= 0 && startLine != endLine;
+}
+
+static bool TryGetNativeNoteCaretRect(HWND hWnd, RECT* outRect) {
+    if (!hWnd || !outRect) return false;
+
+    POINT pt{};
+    if (!GetCaretPos(&pt)) {
+        DWORD selStart = 0;
+        DWORD selEnd = 0;
+        SendMessageW(hWnd, EM_GETSEL,
+                     reinterpret_cast<WPARAM>(&selStart),
+                     reinterpret_cast<LPARAM>(&selEnd));
+        POINT charPos{};
+        if (!GetCharPos(hWnd, static_cast<size_t>(std::max(selStart, selEnd)), &charPos)) {
+            return false;
+        }
+        pt = charPos;
+    }
+
+    HDC hdc = GetDC(hWnd);
+    int caretHeight = ScaleY(hWnd, 18);
+    if (hdc) {
+        HFONT font = GetActiveNoteFont();
+        HFONT oldFont = font ? static_cast<HFONT>(SelectObject(hdc, font)) : nullptr;
+        TEXTMETRICW tm{};
+        if (GetTextMetricsW(hdc, &tm) && tm.tmHeight > 0) {
+            caretHeight = tm.tmHeight;
+        }
+        if (oldFont) SelectObject(hdc, oldFont);
+        ReleaseDC(hWnd, hdc);
+    }
+
+    RECT rc{};
+    GetClientRect(hWnd, &rc);
+    const int leftBound = static_cast<int>(rc.left);
+    const int topBound = static_cast<int>(rc.top);
+    const int rightBound = static_cast<int>(rc.right);
+    const int bottomBound = static_cast<int>(rc.bottom);
+    const int ptX = static_cast<int>(pt.x);
+    const int ptY = static_cast<int>(pt.y);
+    auto clampInt = [](int value, int lo, int hi) {
+        if (value < lo) return lo;
+        if (value > hi) return hi;
+        return value;
+    };
+    const int top = clampInt(ptY, topBound, bottomBound);
+    const int bottom = clampInt(ptY + std::max(2, caretHeight), topBound, bottomBound);
+    outRect->left = clampInt(ptX, leftBound, rightBound);
+    outRect->top = top;
+    const int caretRight = static_cast<int>(outRect->left) + std::max(1, ScaleY(hWnd, 1));
+    outRect->right = (caretRight < rightBound) ? caretRight : rightBound;
+    outRect->bottom = (bottom > top) ? bottom : ((top + 2 < bottomBound) ? top + 2 : bottomBound);
+    return true;
+}
+static bool TryGetNoteImeCaretRect(HWND hWnd, RECT* outRect) {
+    if (!hWnd || !outRect) return false;
+
+    DWORD selStart = 0;
+    DWORD selEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selStart),
+                 reinterpret_cast<LPARAM>(&selEnd));
+    const size_t caret = static_cast<size_t>(std::max(selStart, selEnd));
+
+    HDC hdc = GetDC(hWnd);
+    if (!hdc) return TryGetNativeNoteCaretRect(hWnd, outRect);
+
+    bool ok = false;
+    if (IsNoteRenderActive() && CanReadStableRenderDerivedState(/*requireExactRevision=*/false)) {
+        int line = -1;
+        const note::NoteTextModel& currentText = CurrentNoteTextCoreModel();
+        const int editorLength = GetWindowTextLengthW(hWnd);
+        if (editorLength >= 0 &&
+            currentText.raw.size() == static_cast<size_t>(editorLength) &&
+            !currentText.line_starts.empty()) {
+            line = FindLogicalLineForRaw(currentText.line_starts, caret);
+        } else {
+            const std::vector<size_t> logicalStarts = GetNoteLogicalLineStarts(hWnd);
+            if (!logicalStarts.empty()) {
+                line = FindLogicalLineForRaw(logicalStarts, caret);
+            }
+        }
+        if (line >= 0 && line < static_cast<int>(g_lineCache.size())) {
+            if (!IsNoteLineRawHelper(hWnd, line)) {
+                ok = TryGetRenderedCaretRect(hWnd, hdc, caret, outRect);
+            } else {
+                ok = TryGetRawCaretRect(hWnd, hdc, caret, outRect);
+            }
+        }
+    }
+
+    if (!ok && IsNoteRenderActive()) {
+        ok = TryGetRawCaretRect(hWnd, hdc, caret, outRect);
+    }
+
+    ReleaseDC(hWnd, hdc);
+
+    if (ok) return true;
+    return TryGetNativeNoteCaretRect(hWnd, outRect);
+}
+
+void SyncNoteImeCandidateWindowToCaret(HWND hWnd) {
+    if (!hWnd || !IsWindow(hWnd)) return;
+    if (GetFocus() != hWnd) return;
+
+    RECT caretRc{};
+    if (!TryGetNoteImeCaretRect(hWnd, &caretRc)) return;
+
+    HIMC himc = ImmGetContext(hWnd);
+    if (!himc) return;
+
+    COMPOSITIONFORM comp{};
+    comp.dwStyle = CFS_POINT;
+    comp.ptCurrentPos.x = caretRc.left;
+    comp.ptCurrentPos.y = caretRc.top;
+    ImmSetCompositionWindow(himc, &comp);
+
+    CANDIDATEFORM cand{};
+    cand.dwIndex = 0;
+    cand.dwStyle = CFS_EXCLUDE;
+    cand.ptCurrentPos.x = caretRc.left;
+    cand.ptCurrentPos.y = caretRc.bottom;
+    cand.rcArea = caretRc;
+    ImmSetCandidateWindow(himc, &cand);
+
+    ImmReleaseContext(hWnd, himc);
+}
+
+void SyncNativeCaretToRenderState(HWND hWnd) {
+    if (!hWnd || GetFocus() != hWnd) return;
+    if (!IsNoteRenderActive() || g_noteRawOnly) return;
+
+    RECT rc{};
+    if (TryGetNoteImeCaretRect(hWnd, &rc)) {
+        static HWND s_lastHwnd = nullptr;
+        static int s_lastW = 0;
+        static int s_lastH = 0;
+
+        int w = std::max<int>(1, rc.right - rc.left);
+        int h = std::max<int>(1, rc.bottom - rc.top);
+
+        if (hWnd != s_lastHwnd || w != s_lastW || h != s_lastH) {
+            CreateCaret(hWnd, nullptr, w, h);
+            s_lastHwnd = hWnd;
+            s_lastW = w;
+            s_lastH = h;
+        }
+        SetCaretPos(rc.left, rc.top);
+    }
+}
+
+static bool g_noteRenderCaretSuppressed = false;
+static HWND g_noteRenderCaretSuppressedHwnd = nullptr;
+
+static void ResetRenderSuppressedNativeCaretState(HWND hWnd) {
+    if (g_noteRenderCaretSuppressedHwnd == hWnd) {
+        g_noteRenderCaretSuppressed = false;
+        g_noteRenderCaretSuppressedHwnd = nullptr;
+    }
+}
+
+static void SyncNativeCaretVisibilityForRenderState(HWND hWnd) {
+    if (!hWnd) return;
+
+    const bool shouldSuppress = (GetFocus() == hWnd) && IsNoteRenderActive() && !g_noteRawOnly;
+    if (shouldSuppress) {
+        SyncNativeCaretToRenderState(hWnd);
+        if (!g_noteRenderCaretSuppressed || g_noteRenderCaretSuppressedHwnd != hWnd) {
+            HideCaret(hWnd);
+            g_noteRenderCaretSuppressed = true;
+            g_noteRenderCaretSuppressedHwnd = hWnd;
+        }
+        return;
+    }
+
+    if (g_noteRenderCaretSuppressed && g_noteRenderCaretSuppressedHwnd == hWnd) {
+        ShowCaret(hWnd);
+        g_noteRenderCaretSuppressed = false;
+        g_noteRenderCaretSuppressedHwnd = nullptr;
+    }
+}
+
+static bool ShouldSyncNoteImeAfterDefaultMessage(UINT msg) {
+    switch (msg) {
+    case WM_CHAR:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+    case WM_VSCROLL:
+    case WM_HSCROLL:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+    case WM_SIZE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ShouldSyncNativeNoteCaretAfterDefaultMessage(UINT msg) {
+    switch (msg) {
+    case WM_CHAR:
+    case WM_KEYDOWN:
+    case WM_PASTE:
+    case WM_CUT:
+    case WM_UNDO:
+    case EM_REDO:
+    case WM_CLEAR:
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+    case WM_VSCROLL:
+    case WM_HSCROLL:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+    case WM_SIZE:
+    case WM_SETFOCUS:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void SyncRenderDrivenNoteInputUi(HWND hWnd, UINT msg) {
+    if (!hWnd || GetFocus() != hWnd) return;
+    if (ShouldSyncNativeNoteCaretAfterDefaultMessage(msg)) {
+        SyncNativeCaretVisibilityForRenderState(hWnd);
+    }
+    if (g_noteImeComposing && ShouldSyncNoteImeAfterDefaultMessage(msg)) {
+        SyncNoteImeCandidateWindowToCaret(hWnd);
+    }
+}
+
+static void RequestNoteContentRefreshAfterEdit(HWND hWnd) {
+    if (!hWnd) return;
+    SyncRenderDrivenNoteInputUi(hWnd, WM_CHAR);
+    HWND parent = GetParent(hWnd);
+    if (!parent) return;
+    if (IsNoteImeComposing()) return;
+    PostMessageW(parent, kMsgNoteOverlayUpdate, 0, static_cast<LPARAM>(CurrentEditRevision()));
+}
+
+static void MarkNoteUndoRedoTextChangedForSave(HWND hWnd, uint64_t beforeRevision) {
+    if (!hWnd) return;
+    HWND owner = GetParent(hWnd);
+    if (!owner) owner = g_hMainWnd;
+    if (g_currentNotePath.empty() && !g_currentSessionPath.empty()) {
+        file_output::EnsureCurrentNotePathForStage(owner);
+    }
+    g_noteDirty = true;
+    g_noteNeedsIntegrate = true;
+    if (CurrentEditRevision() == beforeRevision) {
+        NotifyEditRevisionChanged();
+    }
+    SetNoteTyping(true);
+    file_output::NotifyNoteStageEdit(owner);
+}
+
+static bool g_noteShowInvisibleChars = false;
+static bool g_noteLineSelectionActive = false;
+static int g_noteLineSelectionAnchorLine = -1;
+static int g_noteLineSelectionLastLine = -1;
+
+struct NoteEditLineRange {
+    size_t start = 0;
+    size_t end = 0;
+    size_t endWithBreak = 0;
+};
+
+static bool IsNoteLineBreakChar(wchar_t ch) {
+    return ch == L'\r' || ch == L'\n';
+}
+
+static int GetNoteLineSelectionGutterWidth(HWND hWnd) {
+    return std::max(ScaleY(hWnd, 18), ScaleY(hWnd, 14));
+}
+
+static int GetNoteLineSelectionHitBoxWidth(HWND hWnd) {
+    return std::max(ScaleY(hWnd, 8), GetNoteLineSelectionGutterWidth(hWnd) / 2);
+}
+
+static NoteEditLineRange NoteEditLineRangeAt(const std::wstring& text, size_t pos) {
+    NoteEditLineRange r{};
+    pos = std::min(pos, text.size());
+    r.start = FindNoteLineStart(text, pos);
+    r.end = FindNoteLineEnd(text, pos);
+    r.endWithBreak = r.end;
+    if (r.endWithBreak < text.size() && IsNoteLineBreakChar(text[r.endWithBreak])) {
+        ++r.endWithBreak;
+    }
+    return r;
+}
+
+struct NoteLineSelectionHit {
+    int line = -1;
+    size_t start = 0;
+    size_t endWithBreak = 0;
+};
+
+static bool ResolveNoteLineSelectionRangeByLine(HWND hWnd, int line, size_t* outStart, size_t* outEndWithBreak) {
+    if (!hWnd || line < 0 || !outStart || !outEndWithBreak) return false;
+    const bool renderActive = IsNoteRenderActive();
+    if (renderActive) {
+        std::wstring indexingText;
+        std::vector<size_t> starts = GetNoteLogicalLineStarts(hWnd, &indexingText);
+        if (starts.empty()) {
+            *outStart = 0;
+            *outEndWithBreak = 0;
+            return line == 0;
+        }
+        line = std::clamp(line, 0, static_cast<int>(starts.size()) - 1);
+        size_t lineStart = 0;
+        size_t lineEnd = 0;
+        size_t nextStart = 0;
+        if (!GetLogicalLineRangeFromStarts(indexingText, starts, line, &lineStart, &lineEnd, &nextStart)) {
+            return false;
+        }
+        *outStart = lineStart;
+        *outEndWithBreak = (nextStart > lineStart) ? nextStart : lineEnd;
+        return true;
+    }
+
+    int lineCount = std::max(1, static_cast<int>(SendMessageW(hWnd, EM_GETLINECOUNT, 0, 0)));
+    line = std::clamp(line, 0, lineCount - 1);
+    LRESULT lineStartRes = SendMessageW(hWnd, EM_LINEINDEX, static_cast<WPARAM>(line), 0);
+    if (lineStartRes < 0) return false;
+    const size_t lineStart = static_cast<size_t>(lineStartRes);
+    LRESULT lineLenRes = SendMessageW(hWnd, EM_LINELENGTH, static_cast<WPARAM>(lineStartRes), 0);
+    if (lineLenRes < 0) lineLenRes = 0;
+    size_t lineEnd = lineStart + static_cast<size_t>(lineLenRes);
+    if (line + 1 < lineCount) {
+        LRESULT nextStartRes = SendMessageW(hWnd, EM_LINEINDEX, static_cast<WPARAM>(line + 1), 0);
+        if (nextStartRes >= 0 && static_cast<size_t>(nextStartRes) > lineStart) {
+            lineEnd = static_cast<size_t>(nextStartRes);
+        }
+    }
+    *outStart = lineStart;
+    *outEndWithBreak = lineEnd;
+    return true;
+}
+
+static bool ResolveNoteLineSelectionHit(HWND hWnd,
+                                        int clientX,
+                                        int clientY,
+                                        bool requireHitBox,
+                                        NoteLineSelectionHit* outHit) {
+    if (!hWnd || !outHit) return false;
+    outHit->line = -1;
+    if (UpdateNoteVisualAssistMargins(hWnd, false)) {
+        UpdateNoteFormatRect(hWnd);
+    }
+
+    const NoteLayoutFrame layoutFrame = BuildNoteLayoutFrame(hWnd);
+    RECT rc = layoutFrame.client;
+    if (clientY < rc.top || clientY >= rc.bottom) return false;
+
+    HDC hdc = GetDC(hWnd);
+    if (!hdc) return false;
+    HFONT font = GetActiveNoteFont();
+    HFONT oldFont = font ? static_cast<HFONT>(SelectObject(hdc, font)) : nullptr;
+    TEXTMETRICW tm{};
+    int lineHeight = ScaleY(hWnd, 18);
+    int spaceW = ScaleY(hWnd, 8);
+    if (GetTextMetricsW(hdc, &tm)) {
+        if (tm.tmHeight > 0) lineHeight = tm.tmHeight;
+        if (tm.tmAveCharWidth > 0) spaceW = tm.tmAveCharWidth;
+    }
+    if (oldFont) SelectObject(hdc, oldFont);
+    ReleaseDC(hWnd, hdc);
+    lineHeight = std::max(1, lineHeight);
+    spaceW = std::max(1, spaceW);
+
+    std::wstring indexingText;
+    std::vector<size_t> logicalStarts;
+    const bool renderActive = layoutFrame.renderActive;
+    if (renderActive) {
+        logicalStarts = GetNoteLogicalLineStarts(hWnd, &indexingText);
+    }
+    int lineCount = renderActive
+        ? std::max<int>(1, static_cast<int>(logicalStarts.size()))
+        : std::max(1, static_cast<int>(SendMessageW(hWnd, EM_GETLINECOUNT, 0, 0)));
+    int maxLine = lineCount - 1;
+
+    auto queryLineBand = [&](int line,
+                             int* outTop,
+                             int* outBottom,
+                             size_t* outStart,
+                             size_t* outEndWithBreak,
+                             POINT* outPos) -> bool {
+        line = std::clamp(line, 0, maxLine);
+        size_t lineStart = 0;
+        size_t lineEnd = 0;
+        size_t nextStart = 0;
+        POINT linePos{};
+        int top = 0;
+        int bottom = 0;
+        if (renderActive) {
+            if (!QueryLogicalLineBandFromStarts(hWnd, indexingText, logicalStarts, line, lineHeight,
+                                                &top, &bottom, &lineStart, &lineEnd, &nextStart, &linePos)) {
+                return false;
+            }
+            if (line == maxLine) bottom = std::max(bottom, static_cast<int>(rc.bottom));
+            linePos.x = NoteLayoutFrameLineBaseXForRenderState(layoutFrame, linePos.x);
+        } else {
+            LRESULT lineStartRes = SendMessageW(hWnd, EM_LINEINDEX, static_cast<WPARAM>(line), 0);
+            if (lineStartRes < 0) return false;
+            lineStart = static_cast<size_t>(lineStartRes);
+            LRESULT lineLenRes = SendMessageW(hWnd, EM_LINELENGTH, static_cast<WPARAM>(lineStartRes), 0);
+            if (lineLenRes < 0) lineLenRes = 0;
+            lineEnd = lineStart + static_cast<size_t>(lineLenRes);
+            if (!GetCharPos(hWnd, lineStart, &linePos)) return false;
+            top = linePos.y;
+            bottom = top + lineHeight;
+            if (line < maxLine) {
+                LRESULT nextStartRes = SendMessageW(hWnd, EM_LINEINDEX, static_cast<WPARAM>(line + 1), 0);
+                if (nextStartRes >= 0) {
+                    nextStart = static_cast<size_t>(nextStartRes);
+                    POINT nextPos{};
+                    if (GetCharPos(hWnd, nextStart, &nextPos) && nextPos.y > top) {
+                        bottom = nextPos.y;
+                    }
+                }
+            } else {
+                bottom = std::max(bottom, static_cast<int>(rc.bottom));
+            }
+        }
+        if (outTop) *outTop = top;
+        if (outBottom) *outBottom = std::max(top + 1, bottom);
+        if (outStart) *outStart = lineStart;
+        if (outEndWithBreak) *outEndWithBreak = (nextStart > lineStart) ? nextStart : lineEnd;
+        if (outPos) *outPos = linePos;
+        return true;
+    };
+
+    int candidate = -1;
+    if (IsRichEditControl(hWnd)) {
+        POINTL pt{clientX, clientY};
+        LRESULT res = SendMessageW(hWnd, EM_CHARFROMPOS, 0, reinterpret_cast<LPARAM>(&pt));
+        if (res >= 0) {
+            candidate = renderActive ? FindLogicalLineForRaw(logicalStarts, static_cast<size_t>(res))
+                                     : static_cast<int>(SendMessageW(hWnd, EM_LINEFROMCHAR, res, 0));
+        }
+    } else {
+        LRESULT res = SendMessageW(hWnd, EM_CHARFROMPOS, 0, MAKELPARAM(clientX, clientY));
+        if (res != -1) {
+            candidate = renderActive ? FindLogicalLineForRaw(logicalStarts, static_cast<size_t>(LOWORD(res)))
+                                     : static_cast<int>(SendMessageW(hWnd, EM_LINEFROMCHAR, LOWORD(res), 0));
+        }
+    }
+    if (candidate < 0) candidate = std::max(0, clientY / lineHeight);
+    candidate = std::clamp(candidate, 0, maxLine);
+
+    for (int guard = 0; guard <= maxLine + 1; ++guard) {
+        int top = 0;
+        int bottom = 0;
+        if (!queryLineBand(candidate, &top, &bottom, nullptr, nullptr, nullptr)) break;
+        if (clientY < top && candidate > 0) {
+            --candidate;
+            continue;
+        }
+        if (clientY >= bottom && candidate < maxLine) {
+            ++candidate;
+            continue;
+        }
+        break;
+    }
+
+    size_t lineStart = 0;
+    size_t lineEndWithBreak = 0;
+    POINT linePos{};
+    if (!queryLineBand(candidate, nullptr, nullptr, &lineStart, &lineEndWithBreak, &linePos)) {
+        return false;
+    }
+
+    if (requireHitBox) {
+        const int clientLeft = static_cast<int>(rc.left);
+        const int gutterW = g_noteShowLineNumbers
+            ? std::max(GetNoteLineSelectionGutterWidth(hWnd), GetNoteLineNumberGutterWidth(hWnd))
+            : GetNoteLineSelectionGutterWidth(hWnd);
+        const int textX = static_cast<int>(linePos.x);
+        const int reservedRight = clientLeft + gutterW;
+        const int right = g_noteShowLineNumbers
+            ? std::min(reservedRight - ScaleY(hWnd, 2), textX - ScaleY(hWnd, 2))
+            : std::min(clientLeft + GetNoteLineSelectionHitBoxWidth(hWnd), textX - ScaleY(hWnd, 2));
+        const int left = clientLeft;
+        if (right <= left) return false;
+        if (clientX < left || clientX >= right) return false;
+    }
+
+    outHit->line = candidate;
+    outHit->start = lineStart;
+    outHit->endWithBreak = lineEndWithBreak;
+    return true;
+}
+
+static bool SelectNoteLines(HWND hWnd, int firstLine, int lastLine) {
+    if (!hWnd || firstLine < 0 || lastLine < 0) return false;
+    if (lastLine < firstLine) std::swap(firstLine, lastLine);
+
+    size_t start = 0;
+    size_t ignoredEnd = 0;
+    size_t ignoredStart = 0;
+    size_t end = 0;
+    if (!ResolveNoteLineSelectionRangeByLine(hWnd, firstLine, &start, &ignoredEnd) ||
+        !ResolveNoteLineSelectionRangeByLine(hWnd, lastLine, &ignoredStart, &end)) {
+        return false;
+    }
+    SendMessageW(hWnd, EM_SETSEL, static_cast<WPARAM>(start), static_cast<LPARAM>(end));
+    SendMessageW(hWnd, EM_SCROLLCARET, 0, 0);
+    SetFocus(hWnd);
+    InvalidateRect(hWnd, nullptr, FALSE);
+    return true;
+}
+
+static bool HandleNoteLineSelectionMouseDown(HWND hWnd, LPARAM lParam) {
+    NoteLineSelectionHit hit{};
+    if (!ResolveNoteLineSelectionHit(hWnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), true, &hit)) {
+        return false;
+    }
+    g_noteLineSelectionActive = true;
+    g_noteLineSelectionAnchorLine = hit.line;
+    g_noteLineSelectionLastLine = hit.line;
+    g_noteRenderSelecting = false;
+    g_notePendingLinkClickInsert = false;
+    g_notePendingCaretIdx = static_cast<size_t>(-1);
+    ClearNoteLinkRenderGrace(hWnd);
+    SelectNoteLines(hWnd, hit.line, hit.line);
+    SetCapture(hWnd);
+    return true;
+}
+
+static bool HandleNoteLineSelectionMouseMove(HWND hWnd, WPARAM wParam, LPARAM lParam) {
+    if (!g_noteLineSelectionActive) return false;
+    if ((wParam & MK_LBUTTON) == 0) return true;
+    NoteLineSelectionHit hit{};
+    if (!ResolveNoteLineSelectionHit(hWnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), false, &hit)) {
+        return true;
+    }
+    if (hit.line != g_noteLineSelectionLastLine) {
+        g_noteLineSelectionLastLine = hit.line;
+        SelectNoteLines(hWnd, g_noteLineSelectionAnchorLine, hit.line);
+    }
+    return true;
+}
+
+static bool HandleNoteLineSelectionMouseUp(HWND hWnd) {
+    if (!g_noteLineSelectionActive) return false;
+    g_noteLineSelectionActive = false;
+    g_noteLineSelectionAnchorLine = -1;
+    g_noteLineSelectionLastLine = -1;
+    if (GetCapture() == hWnd) ReleaseCapture();
+    return true;
+}
+
+static bool NoteLineSelectionHitBoxAtCursor(HWND hWnd) {
+    if (!hWnd) return false;
+    POINT pt{};
+    if (!GetCursorPos(&pt)) return false;
+    if (!ScreenToClient(hWnd, &pt)) return false;
+    NoteLineSelectionHit hit{};
+    return ResolveNoteLineSelectionHit(hWnd, pt.x, pt.y, true, &hit);
+}
+
+static bool GetNoteEditSelectedLineBlock(HWND hWnd,
+                                         const std::wstring& text,
+                                         size_t* outStart,
+                                         size_t* outEndWithBreak,
+                                         size_t* outSelOffsetStart,
+                                         size_t* outSelOffsetEnd) {
+    if (!hWnd || !outStart || !outEndWithBreak || !outSelOffsetStart || !outSelOffsetEnd) return false;
+    DWORD rawSelStart = 0, rawSelEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&rawSelStart),
+                 reinterpret_cast<LPARAM>(&rawSelEnd));
+    size_t selStart = std::min<size_t>(std::min(rawSelStart, rawSelEnd), text.size());
+    size_t selEnd = std::min<size_t>(std::max(rawSelStart, rawSelEnd), text.size());
+    size_t endProbe = selEnd;
+    if (selEnd > selStart && endProbe > 0 && IsNoteLineBreakChar(text[endProbe - 1])) {
+        --endProbe;
+    }
+    NoteEditLineRange first = NoteEditLineRangeAt(text, selStart);
+    NoteEditLineRange last = NoteEditLineRangeAt(text, endProbe);
+    *outStart = first.start;
+    *outEndWithBreak = std::max(first.endWithBreak, last.endWithBreak);
+    *outSelOffsetStart = selStart - first.start;
+    *outSelOffsetEnd = selEnd - first.start;
+    return *outStart <= *outEndWithBreak && *outEndWithBreak <= text.size();
+}
+
+static bool IsNoteWhitespaceChar(wchar_t ch) {
+    return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n' ||
+           ch == 0x3000;
+}
+
+static bool MoveNoteCaretToSmartHomeEnd(HWND hWnd, WPARAM vkey) {
+    if (!hWnd || (vkey != VK_HOME && vkey != VK_END)) return false;
+    if ((GetKeyState(VK_SHIFT) & 0x8000) || (GetKeyState(VK_CONTROL) & 0x8000) ||
+        (GetKeyState(VK_MENU) & 0x8000) || g_noteImeComposing) {
+        return false;
+    }
+    DWORD selStart = 0, selEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selStart),
+                 reinterpret_cast<LPARAM>(&selEnd));
+    if (selStart != selEnd) return false;
+
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    size_t caret = std::min<size_t>(selStart, text.size());
+    NoteEditLineRange line = NoteEditLineRangeAt(text, caret);
+    size_t target = line.start;
+    if (vkey == VK_HOME) {
+        size_t firstText = line.start;
+        while (firstText < line.end && (text[firstText] == L' ' || text[firstText] == L'\t')) {
+            ++firstText;
+        }
+        target = (caret == firstText) ? line.start : firstText;
+    } else {
+        target = line.end;
+    }
+    SendMessageW(hWnd, EM_SETSEL, static_cast<WPARAM>(target), static_cast<LPARAM>(target));
+    SendMessageW(hWnd, EM_SCROLLCARET, 0, 0);
+    InvalidateRect(hWnd, nullptr, FALSE);
+    return true;
+}
+
+static bool DeleteNoteWordAroundCaret(HWND hWnd, WPARAM vkey) {
+    if (!hWnd || (vkey != VK_BACK && vkey != VK_DELETE)) return false;
+    if (!(GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000) ||
+        (GetKeyState(VK_SHIFT) & 0x8000) || g_noteImeComposing) {
+        return false;
+    }
+
+    DWORD rawSelStart = 0, rawSelEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&rawSelStart),
+                 reinterpret_cast<LPARAM>(&rawSelEnd));
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    size_t selStart = std::min<size_t>(std::min(rawSelStart, rawSelEnd), text.size());
+    size_t selEnd = std::min<size_t>(std::max(rawSelStart, rawSelEnd), text.size());
+    size_t delStart = selStart;
+    size_t delEnd = selEnd;
+
+    if (delStart == delEnd) {
+        if (vkey == VK_BACK) {
+            if (delStart == 0) return true;
+            const note::Span span = note::PreviousTextUnitRun(text, {delStart});
+            delStart = span.start.value;
+            delEnd = span.end.value;
+        } else {
+            if (delEnd >= text.size()) return true;
+            const note::Span span = note::NextTextUnitRun(text, {delEnd});
+            delStart = span.start.value;
+            delEnd = span.end.value;
+        }
+    }
+
+    if (delEnd <= delStart) return true;
+    SendMessageW(hWnd, EM_SETSEL, static_cast<WPARAM>(delStart), static_cast<LPARAM>(delEnd));
+    RegisterExpectedCurrentNoteSelectionReplacement(hWnd, L"",
+                                                    static_cast<DWORD>(delStart),
+                                                    static_cast<DWORD>(delStart));
+    SendMessageW(hWnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    FinalizeImmediateNoteEdit(hWnd);
+    return true;
+}
+
+static bool MoveNoteCaretByWord(HWND hWnd, bool forward, bool extendSelection) {
+    if (!hWnd) return false;
+    DWORD rawSelStart = 0, rawSelEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&rawSelStart),
+                 reinterpret_cast<LPARAM>(&rawSelEnd));
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    size_t caret = rawSelEnd;
+    
+    const note::Span span = forward
+        ? note::NextTextUnitRun(text, {caret})
+        : note::PreviousTextUnitRun(text, {caret});
+    caret = forward ? span.end.value : span.start.value;
+    
+    DWORD newAnchor = extendSelection ? rawSelStart : static_cast<DWORD>(caret);
+    SendMessageW(hWnd, EM_SETSEL, static_cast<WPARAM>(newAnchor), static_cast<LPARAM>(caret));
+    SendMessageW(hWnd, EM_SCROLLCARET, 0, 0);
+    InvalidateRect(hWnd, nullptr, FALSE);
+    return true;
+}
+
+static bool MoveNoteCaretByParagraph(HWND hWnd, bool forward, bool extendSelection) {
+    if (!hWnd) return false;
+    DWORD rawSelStart = 0, rawSelEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&rawSelStart),
+                 reinterpret_cast<LPARAM>(&rawSelEnd));
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    size_t caret = rawSelEnd;
+
+    if (!forward) {
+        if (caret == 0) return true;
+        if (caret > 0 && IsNoteLineBreakChar(text[caret - 1])) {
+            --caret;
+            if (caret > 0 && text[caret] == L'\n' && text[caret-1] == L'\r') --caret;
+        }
+        while (caret > 0) {
+            if (IsNoteLineBreakChar(text[caret - 1])) {
+                break;
+            }
+            --caret;
+        }
+    } else {
+        if (caret >= text.size()) return true;
+        while (caret < text.size()) {
+            bool isBreak = IsNoteLineBreakChar(text[caret]);
+            ++caret;
+            if (isBreak) {
+                if (caret < text.size() && text[caret-1] == L'\r' && text[caret] == L'\n') {
+                    ++caret;
+                }
+                break;
+            }
+        }
+    }
+
+    DWORD newAnchor = extendSelection ? rawSelStart : static_cast<DWORD>(caret);
+    SendMessageW(hWnd, EM_SETSEL, static_cast<WPARAM>(newAnchor), static_cast<LPARAM>(caret));
+    SendMessageW(hWnd, EM_SCROLLCARET, 0, 0);
+    InvalidateRect(hWnd, nullptr, FALSE);
+    return true;
+}
+
+static bool MoveSelectedNoteLines(HWND hWnd, int direction) {
+    if (!hWnd || (direction != -1 && direction != 1)) return false;
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    if (text.empty()) return true;
+
+    size_t blockStart = 0, blockEnd = 0, selOffStart = 0, selOffEnd = 0;
+    if (!GetNoteEditSelectedLineBlock(hWnd, text, &blockStart, &blockEnd, &selOffStart, &selOffEnd)) {
+        return false;
+    }
+    if (blockStart >= blockEnd) return true;
+
+    if (direction < 0) {
+        if (blockStart == 0) return true;
+        NoteEditLineRange prev = NoteEditLineRangeAt(text, blockStart - 1);
+        size_t replaceStart = prev.start;
+        std::wstring prevBlock = text.substr(prev.start, blockStart - prev.start);
+        std::wstring moving = text.substr(blockStart, blockEnd - blockStart);
+        std::wstring replacement;
+        if (!moving.empty() && !prevBlock.empty() &&
+            !IsNoteLineBreakChar(moving.back()) && IsNoteLineBreakChar(prevBlock.back())) {
+            replacement = moving + std::wstring(1, prevBlock.back()) +
+                          prevBlock.substr(0, prevBlock.size() - 1);
+        } else {
+            replacement = moving + prevBlock;
+        }
+        size_t newSelStart = selOffStart;
+        size_t newSelEnd = selOffEnd;
+        return ReplaceNoteLineBlock(hWnd, replaceStart, blockEnd, replacement, newSelStart, newSelEnd);
+    }
+
+    if (blockEnd >= text.size()) return true;
+    NoteEditLineRange next = NoteEditLineRangeAt(text, blockEnd);
+    if (next.endWithBreak <= blockEnd) return true;
+    std::wstring moving = text.substr(blockStart, blockEnd - blockStart);
+    std::wstring nextBlock = text.substr(blockEnd, next.endWithBreak - blockEnd);
+    std::wstring replacement;
+    size_t movedOffset = nextBlock.size();
+    if (!moving.empty() && !nextBlock.empty() &&
+        IsNoteLineBreakChar(moving.back()) && !IsNoteLineBreakChar(nextBlock.back())) {
+        replacement = nextBlock + std::wstring(1, moving.back()) +
+                      moving.substr(0, moving.size() - 1);
+        ++movedOffset;
+    } else {
+        replacement = nextBlock + moving;
+    }
+    size_t newSelStart = movedOffset + selOffStart;
+    size_t newSelEnd = movedOffset + selOffEnd;
+    return ReplaceNoteLineBlock(hWnd, blockStart, next.endWithBreak, replacement, newSelStart, newSelEnd);
+}
+
+static bool DuplicateSelectedNoteLines(HWND hWnd) {
+    if (!hWnd) return false;
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    size_t blockStart = 0, blockEnd = 0, selOffStart = 0, selOffEnd = 0;
+    if (!GetNoteEditSelectedLineBlock(hWnd, text, &blockStart, &blockEnd, &selOffStart, &selOffEnd)) {
+        return false;
+    }
+    if (blockStart > blockEnd || blockEnd > text.size()) return false;
+    std::wstring block = text.substr(blockStart, blockEnd - blockStart);
+    if (block.empty()) block = L"\r";
+    std::wstring replacement;
+    size_t duplicateStart = block.size();
+    if (blockEnd == text.size() && !block.empty() && !IsNoteLineBreakChar(block.back())) {
+        replacement = block + L"\r" + block;
+        duplicateStart = block.size() + 1;
+    } else {
+        replacement = block + block;
+    }
+    return ReplaceNoteLineBlock(hWnd, blockStart, blockEnd, replacement,
+                                duplicateStart + selOffStart,
+                                duplicateStart + selOffEnd);
+}
+
+static bool SelectCurrentNoteLine(HWND hWnd) {
+    if (!hWnd) return false;
+    DWORD selStart = 0, selEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selStart),
+                 reinterpret_cast<LPARAM>(&selEnd));
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    size_t caret = std::min<size_t>(std::min(selStart, selEnd), text.size());
+    NoteEditLineRange line = NoteEditLineRangeAt(text, caret);
+    SendMessageW(hWnd, EM_SETSEL, static_cast<WPARAM>(line.start), static_cast<LPARAM>(line.end));
+    SendMessageW(hWnd, EM_SCROLLCARET, 0, 0);
+    InvalidateRect(hWnd, nullptr, FALSE);
+    return true;
+}
+
+static bool JoinCurrentNoteLineWithNext(HWND hWnd) {
+    if (!hWnd) return false;
+    DWORD selStart = 0, selEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selStart),
+                 reinterpret_cast<LPARAM>(&selEnd));
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    size_t caret = std::min<size_t>(std::min(selStart, selEnd), text.size());
+    NoteEditLineRange line = NoteEditLineRangeAt(text, caret);
+    if (line.end >= text.size()) return true;
+    size_t nextStart = line.end;
+    while (nextStart < text.size() && IsNoteLineBreakChar(text[nextStart])) ++nextStart;
+    size_t nextText = nextStart;
+    while (nextText < text.size() && (text[nextText] == L' ' || text[nextText] == L'\t')) ++nextText;
+    bool leftHasText = false;
+    for (size_t i = line.start; i < line.end; ++i) {
+        if (!IsNoteWhitespaceChar(text[i])) { leftHasText = true; break; }
+    }
+    bool rightHasText = (nextText < text.size() && !IsNoteLineBreakChar(text[nextText]));
+    std::wstring replacement = (leftHasText && rightHasText) ? L" " : L"";
+    SendMessageW(hWnd, EM_SETSEL, static_cast<WPARAM>(line.end), static_cast<LPARAM>(nextText));
+    RegisterExpectedCurrentNoteSelectionReplacement(
+        hWnd, replacement,
+        static_cast<DWORD>(line.end + replacement.size()),
+        static_cast<DWORD>(line.end + replacement.size()));
+    SendMessageW(hWnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(replacement.c_str()));
+    FinalizeImmediateNoteEdit(hWnd);
+    return true;
+}
+
+static bool CurrentNoteSelectionOrWord(HWND hWnd, std::wstring* out) {
+    if (!hWnd || !out) return false;
+    out->clear();
+    DWORD rawSelStart = 0, rawSelEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&rawSelStart),
+                 reinterpret_cast<LPARAM>(&rawSelEnd));
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    size_t selStart = std::min<size_t>(std::min(rawSelStart, rawSelEnd), text.size());
+    size_t selEnd = std::min<size_t>(std::max(rawSelStart, rawSelEnd), text.size());
+    if (selEnd > selStart) {
+        *out = text.substr(selStart, selEnd - selStart);
+        return !out->empty();
+    }
+    const note::Span span = selStart < text.size()
+        ? note::NextTextUnitRun(text, {selStart})
+        : note::PreviousTextUnitRun(text, {selStart});
+    if (span.end <= span.start) return false;
+    *out = text.substr(span.start.value, span.end.value - span.start.value);
+    return !out->empty();
+}
+
+static bool BeginNoteSearchFromInsertMode(HWND hWnd, bool backward) {
+    if (!hWnd || !IsWindow(hWnd) || !g_hBottomNote || !IsWindow(g_hBottomNote)) {
+        ShowSoftNotice(GetParent(hWnd),
+                       IsEnglishUi() ? L"Search bar is not available." : L"検索欄を開けませんでした。",
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+    EnsureNoteCmdlineEdit(g_hBottomNote);
+    if (!g_hNoteCmdlineEdit || !IsWindow(g_hNoteCmdlineEdit)) {
+        ShowSoftNotice(GetParent(hWnd),
+                       IsEnglishUi() ? L"Search bar is not available." : L"検索欄を開けませんでした。",
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+
+    std::wstring seed;
+    CurrentNoteSelectionOrWord(hWnd, &seed);
+    ClearSearchHitHighlight(false);
+    g_noteCmdlineActive = true;
+    g_noteCmdlinePrompt = backward ? L'?' : L'/';
+    g_noteCmdlineBuffer = seed;
+    g_noteCmdlineFlash.clear();
+    g_noteCmdlineFlashUntilTick = 0;
+    SetWindowTextW(g_hNoteCmdlineEdit, seed.c_str());
+    SendMessageW(g_hNoteCmdlineEdit, EM_SETSEL, 0, -1);
+    SetFocus(g_hNoteCmdlineEdit);
+    InvalidateRect(g_hBottomNote, nullptr, FALSE);
+    return true;
+}
+
+static bool ReplaceCurrentNoteSearchHit(HWND hWnd) {
+    if (!hWnd || !g_noteSearchHitActive || g_noteSearchHitEnd <= g_noteSearchHitStart) return false;
+    std::wstring replacement;
+    if (!PromptSimpleText(GetParent(hWnd),
+                          IsEnglishUi() ? L"Replace current search hit" : L"現在の検索結果を置換",
+                          L"", replacement)) {
+        return true;
+    }
+    SendMessageW(hWnd, EM_SETSEL,
+                 static_cast<WPARAM>(g_noteSearchHitStart),
+                 static_cast<LPARAM>(g_noteSearchHitEnd));
+    const DWORD after = static_cast<DWORD>(g_noteSearchHitStart + NormalizeTextForNoteIndexing(replacement).size());
+    RegisterExpectedCurrentNoteSelectionReplacement(hWnd, replacement, after, after);
+    SendMessageW(hWnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(replacement.c_str()));
+    ClearSearchHitHighlight(false);
+    FinalizeImmediateNoteEdit(hWnd);
+    return true;
+}
+
+static bool GetNoteImeResultString(HWND hWnd, LPARAM lParam, std::wstring* outResult) {
+    if (outResult) outResult->clear();
+    if (!hWnd || !outResult || !(lParam & GCS_RESULTSTR)) return false;
+    HIMC himc = ImmGetContext(hWnd);
+    if (!himc) return false;
+    const LONG kImeMaxBytes = 1 << 20;
+    LONG size = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
+    bool ok = false;
+    if (size > 0 && size < kImeMaxBytes &&
+        (size % static_cast<LONG>(sizeof(wchar_t)) == 0)) {
+        outResult->assign(static_cast<size_t>(size / sizeof(wchar_t)), L'\0');
+        ImmGetCompositionStringW(himc, GCS_RESULTSTR, outResult->data(), size);
+        ok = true;
+    }
+    ImmReleaseContext(hWnd, himc);
+    return ok;
+}
+
+static bool MoveNoteCaretIntoCommittedFullWidthParenPair(HWND hWnd, const std::wstring& committed) {
+    if (!hWnd || committed != L"（）") return false;
+    if (!g_config.fullWidthParenCaretInside) return false;
+    DWORD rawSelStart = 0;
+    DWORD rawSelEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&rawSelStart),
+                 reinterpret_cast<LPARAM>(&rawSelEnd));
+    if (rawSelStart != rawSelEnd || rawSelStart < 2) return false;
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    const size_t caret = std::min<size_t>(rawSelStart, text.size());
+    if (caret < 2 || text[caret - 2] != L'（' || text[caret - 1] != L'）') return false;
+    const DWORD innerCaret = rawSelStart - 1;
+    SendMessageW(hWnd, EM_SETSEL, innerCaret, innerCaret);
+    SendMessageW(hWnd, EM_SCROLLCARET, 0, 0);
+    if (g_config.fullWidthParenCancelNextLeft) {
+        // IME confirmation can be followed by a synthetic left-arrow navigation.
+        // The caret is already inside the pair, so consume that one navigation.
+        g_ignoreNextLeftKeyUntilTick = GetTickCount64() + 2000;
+    }
+    FinalizeImmediateNoteEdit(hWnd);
+    return true;
+}
+
+static bool GetNoteCurrentLineBand(HWND hWnd, RECT* outBand) {
+    if (!hWnd || !outBand || GetFocus() != hWnd) return false;
+    DWORD selStart = 0, selEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selStart),
+                 reinterpret_cast<LPARAM>(&selEnd));
+    if (selStart != selEnd) return false;
+    int line = static_cast<int>(SendMessageW(hWnd, EM_LINEFROMCHAR, selStart, 0));
+    if (line < 0) return false;
+    LRESULT lineStart = SendMessageW(hWnd, EM_LINEINDEX, static_cast<WPARAM>(line), 0);
+    if (lineStart < 0) return false;
+    POINT pos{};
+    if (!GetCharPos(hWnd, static_cast<size_t>(lineStart), &pos)) return false;
+
+    HDC metricDc = GetDC(hWnd);
+    int lineH = ScaleY(hWnd, 18);
+    if (metricDc) {
+        HFONT font = GetActiveNoteFont();
+        HFONT old = font ? static_cast<HFONT>(SelectObject(metricDc, font)) : nullptr;
+        TEXTMETRICW tm{};
+        if (GetTextMetricsW(metricDc, &tm) && tm.tmHeight > 0) lineH = tm.tmHeight;
+        if (old) SelectObject(metricDc, old);
+        ReleaseDC(hWnd, metricDc);
+    }
+    RECT rc{};
+    GetClientRect(hWnd, &rc);
+    *outBand = RECT{rc.left, pos.y, rc.right, pos.y + std::max(1, lineH)};
+    return outBand->bottom > outBand->top && outBand->right > outBand->left;
+}
+
+static void DrawNoteCurrentLineHighlight(HWND hWnd, HDC hdc, bool fillBand) {
+    if (!hWnd || !hdc) return;
+    RECT band{};
+    if (!GetNoteCurrentLineBand(hWnd, &band)) return;
+    COLORREF col = BlendColor(g_noteBgColor, g_theme.accent, (Luma(g_noteBgColor) >= 128) ? 0.08 : 0.16);
+    if (fillBand) {
+        HBRUSH br = CreateSolidBrush(col);
+        if (br) {
+            FillRect(hdc, &band, br);
+            DeleteObject(br);
+        }
+    }
+}
+
+static void DrawNoteEditVisualAssistOverlay(HWND hWnd, HDC hdc) {
+    if (!hWnd || !hdc) return;
+    if (!g_noteShowInvisibleChars && !g_noteShowLineNumbers) return;
+    RECT rc{};
+    GetClientRect(hWnd, &rc);
+    HDC metricDc = hdc;
+    HFONT font = GetActiveNoteFont();
+    HFONT oldFont = font ? static_cast<HFONT>(SelectObject(metricDc, font)) : nullptr;
+    TEXTMETRICW tm{};
+    GetTextMetricsW(metricDc, &tm);
+    int lineH = std::max<int>(1, static_cast<int>(tm.tmHeight));
+    COLORREF oldText = SetTextColor(hdc, BlendColor(g_noteFgColor, g_noteBgColor, 0.62));
+    int oldBk = SetBkMode(hdc, TRANSPARENT);
+
+    int firstLine = static_cast<int>(SendMessageW(hWnd, EM_GETFIRSTVISIBLELINE, 0, 0));
+    int lineCount = std::max(1, static_cast<int>(SendMessageW(hWnd, EM_GETLINECOUNT, 0, 0)));
+    int visible = std::max<int>(1, static_cast<int>((rc.bottom - rc.top) / lineH + 3));
+    int lastLine = std::min(lineCount - 1, firstLine + visible);
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    for (int line = std::max(0, firstLine); line <= lastLine; ++line) {
+        LRESULT lineStartRes = SendMessageW(hWnd, EM_LINEINDEX, static_cast<WPARAM>(line), 0);
+        if (lineStartRes < 0) continue;
+        size_t lineStart = static_cast<size_t>(lineStartRes);
+        POINT linePos{};
+        if (!GetCharPos(hWnd, lineStart, &linePos)) continue;
+        if (g_noteShowLineNumbers) {
+            std::wstring num = std::to_wstring(line + 1);
+            int gutter = std::max(ScaleY(hWnd, 18), GetNoteLineNumberGutterWidth(hWnd));
+            RECT numRc{rc.left, linePos.y,
+                       std::min<LONG>(rc.right, rc.left + gutter - ScaleY(hWnd, 6)),
+                       linePos.y + lineH};
+            DrawTextW(hdc, num.c_str(), static_cast<int>(num.size()), &numRc,
+                      DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_NOCLIP);
+        }
+        if (!g_noteShowInvisibleChars) continue;
+        size_t lineEnd = FindNoteLineEnd(text, lineStart);
+        for (size_t i = lineStart; i < lineEnd && i < text.size(); ++i) {
+            const wchar_t ch = text[i];
+            if (ch != L' ' && ch != L'\t' && ch != 0x3000) continue;
+            POINT p{};
+            if (!GetCharPos(hWnd, i, &p)) continue;
+            const wchar_t* mark = (ch == L'\t') ? L"\u2192" : L"\u00b7";
+            TextOutW(hdc, p.x, p.y, mark, 1);
+        }
+        if (lineEnd < text.size() && IsNoteLineBreakChar(text[lineEnd])) {
+            POINT p{};
+            if (GetCharPos(hWnd, lineEnd, &p)) {
+                TextOutW(hdc, p.x, p.y, L"\u00b6", 1);
+            }
+        }
+    }
+
+    SetBkMode(hdc, oldBk);
+    SetTextColor(hdc, oldText);
+    if (oldFont) SelectObject(metricDc, oldFont);
+}
+
+// ---------------------------------------------------------------------
+// NoteEdit サブクラスプロシージャ
+// ---------------------------------------------------------------------
+static bool BlockNoteEditInputDuringSave(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)wParam;
+    (void)lParam;
+    if (!IsSaveTransactionRunning()) return false;
+    switch (msg) {
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+    case WM_VSCROLL:
+    case WM_HSCROLL:
+    case WM_PAINT:
+    case WM_NCPAINT:
+    case WM_ERASEBKGND:
+        return false;
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCLIENT && reinterpret_cast<HWND>(wParam) == hWnd) {
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return true;
+        }
+        return false;
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK:
+    case WM_LBUTTONUP:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_CONTEXTMENU:
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+    case WM_MOUSEMOVE:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+    case WM_CHAR:
+    case WM_PASTE:
+    case WM_CUT:
+    case WM_UNDO:
+    case EM_REDO:
+    case WM_CLEAR:
+    case WM_IME_STARTCOMPOSITION:
+    case WM_IME_COMPOSITION:
+    case WM_IME_ENDCOMPOSITION:
+        return true;
+    default:
+        return false;
+    }
+}

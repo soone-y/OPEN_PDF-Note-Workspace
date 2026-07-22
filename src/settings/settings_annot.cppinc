@@ -1,0 +1,2083 @@
+// file: settings/settings_annot.cppinc
+// Included by settings.cpp (single TU).
+
+// ---------------------------------------------------------------------
+// Settings: Annotation options
+// ---------------------------------------------------------------------
+namespace {
+constexpr int IDC_ANNOT_PALETTE_CUSTOM = 1011;
+constexpr int IDC_ANNOT_PALETTE_CUSTOM_PREVIEW = 1012;
+constexpr int IDC_ANNOT_MAGNIFIER_SHAPE = 1013;
+constexpr int IDC_ANNOT_TOOL_LIST = 1014;
+constexpr int IDC_ANNOT_TOOL_UP = 1015;
+constexpr int IDC_ANNOT_TOOL_DOWN = 1016;
+constexpr int IDC_ANNOT_TOOL_STATE = 1017;
+constexpr int IDC_ANNOT_TOOL_RESET = 1018;
+constexpr int IDC_ANNOT_MARKER_TEXT_WIDTH = 1019;
+constexpr int IDC_ANNOT_LINE_TOOLS_SHARE = 1020;
+constexpr int IDC_ANNOT_ARROW_WIDTH = 1021;
+constexpr int IDC_ANNOT_ARROW_COLOR = 1022;
+constexpr int IDC_ANNOT_WAVE_WIDTH = 1023;
+constexpr int IDC_ANNOT_WAVE_COLOR = 1024;
+constexpr int IDC_ANNOT_SECTION_LIST = 1025;
+constexpr int IDC_ANNOT_SHAPE_COLOR = 1026;
+constexpr int IDC_ANNOT_SHAPE_KIND = 1027;
+constexpr int IDC_ANNOT_SHAPE_DRAW_MODE = 1028;
+constexpr int IDC_ANNOT_MARKER_TEXT_STYLE = 1029;
+constexpr int IDC_ANNOT_FREEHAND_CORRECTION = 1030;
+constexpr int IDC_ANNOT_FREEHAND_CORRECTION_STYLE = 1031;
+constexpr int IDC_ANNOT_FREEHAND_CORRECTION_FILL = 1032;
+constexpr int IDC_ANNOT_TEXT_READABLE_BACKGROUND = 1033;
+constexpr int IDC_ANNOT_ARROW_HEAD = 1034;
+constexpr int IDC_ANNOT_CATEGORY_BUTTON_BASE = 1100;
+
+constexpr int kAnnotSectionCount = 6;
+enum AnnotSectionIndex : int {
+    kAnnotSectionText = 0,
+    kAnnotSectionMarker = 1,
+    kAnnotSectionShape = 2,
+    kAnnotSectionStroke = 3,
+    kAnnotSectionLensPalette = 4,
+    kAnnotSectionToolbar = 5,
+};
+
+struct AnnotSettingsCtx {
+    HWND owner = nullptr;
+    bool done = false;
+    bool ok = false;
+    bool embedded = false;
+    HWND headerTitle = nullptr;
+    HWND headerSubtitle = nullptr;
+    std::array<HWND, kSettingsCategoryButtonCount> categoryButtons{};
+    HWND navList = nullptr;
+    HWND scrollPanel = nullptr;
+    HWND btnOk = nullptr;
+    HWND btnCancel = nullptr;
+    bool reopenOnCancel = false;
+    bool notifyCancelDiscard = false;
+    int nextDialog = kSettingsNavNone;
+    HWND cbTextFont = nullptr;
+    HWND cbTextSize = nullptr;
+    HWND cbTextColor = nullptr;
+    HWND chkTextReadableBackground = nullptr;
+    HWND cbLineWidth = nullptr;
+    HWND cbLineColor = nullptr;
+    HWND chkLineToolsShare = nullptr;
+    HWND cbArrowWidth = nullptr;
+    HWND cbArrowColor = nullptr;
+    HWND cbArrowHead = nullptr;
+    HWND cbWaveWidth = nullptr;
+    HWND cbWaveColor = nullptr;
+    HWND cbFreehandWidth = nullptr;
+    HWND cbFreehandColor = nullptr;
+    HWND cbFreehandCorrection = nullptr;
+    HWND cbFreehandCorrectionStyle = nullptr;
+    HWND cbFreehandCorrectionFill = nullptr;
+    HWND cbMarkerWidth = nullptr;
+    HWND cbMarkerColor = nullptr;
+    HWND cbMarkerTextWidth = nullptr;
+    HWND cbMarkerTextColor = nullptr;
+    HWND cbMarkerTextStyle = nullptr;
+    HWND cbShapeColor = nullptr;
+    HWND cbShapeKind = nullptr;
+    HWND cbShapeDrawMode = nullptr;
+    HWND cbMagnifierShape = nullptr;
+    HWND btnPaletteCustom = nullptr;
+    HWND previewPaletteCustom = nullptr;
+    HWND lbTools = nullptr;
+    HWND btnToolUp = nullptr;
+    HWND btnToolDown = nullptr;
+    HWND cbToolState = nullptr;
+    HWND btnToolReset = nullptr;
+    COLORREF palettePreviewColor = RGB(128, 128, 128);
+    std::vector<ToolMode> expandedToolOrder;
+    std::vector<AnnotToolUiState> expandedToolStates;
+    int sectionTops[kAnnotSectionCount]{};
+    int sectionCount = 0;
+    int scrollPos = 0;
+    int scrollMax = 0;
+    int wheelRemainder = 0;
+    int contentHeight = 0;
+    int clientHeight = 0;
+};
+
+static void UpdateAnnotSectionNavUi(AnnotSettingsCtx* ctx, int sectionIndex) {
+    if (!ctx) return;
+    int clamped = std::clamp(sectionIndex, 0, std::max(0, ctx->sectionCount - 1));
+    if (ctx->navList) {
+        SendMessageW(ctx->navList, LB_SETCURSEL, clamped, 0);
+    }
+}
+
+static std::wstring ToolModeLabelW(ToolMode mode) {
+    switch (mode) {
+    case ToolMode::Select:
+        return IsEnglishUi() ? L"Select: tool" : L"選択: ツール";
+    case ToolMode::Pan:
+        return IsEnglishUi() ? L"Pan: tool" : L"パン: ツール";
+    case ToolMode::Magnifier:
+        return IsEnglishUi() ? L"Magnifier: shape" : L"拡大鏡: 形";
+    case ToolMode::TextBox:
+        return IsEnglishUi() ? L"Text: size slot" : L"テキスト: サイズスロット";
+    case ToolMode::MarkerText:
+        return IsEnglishUi() ? L"Text marker" : L"マーカー";
+    case ToolMode::MarkerTextUnderline:
+        return IsEnglishUi() ? L"Underline marker" : L"下線マーカー";
+    case ToolMode::MarkerTextColor:
+        return IsEnglishUi() ? L"Text color marker" : L"文字色マーカー";
+    case ToolMode::MarkerFree:
+        return IsEnglishUi() ? L"Freehand marker" : L"フリーハンドマーカー";
+    case ToolMode::MarkerLine:
+        return IsEnglishUi() ? L"Shape: marker line" : L"図形: マーカー直線";
+    case ToolMode::MarkerArrow:
+        return IsEnglishUi() ? L"Shape: marker arrow" : L"図形: マーカー矢印";
+    case ToolMode::MarkerWave:
+        return IsEnglishUi() ? L"Shape: marker wave" : L"図形: マーカー波線";
+    case ToolMode::Freehand:
+        return IsEnglishUi() ? L"Pen: freehand" : L"ペン: フリーハンド";
+    case ToolMode::Line:
+        return IsEnglishUi() ? L"Shape: line" : L"図形: 直線";
+    case ToolMode::Arrow:
+        return IsEnglishUi() ? L"Shape: arrow" : L"図形: 矢印";
+    case ToolMode::Wave:
+        return IsEnglishUi() ? L"Shape: wave" : L"図形: 波線";
+    case ToolMode::Shape:
+        return IsEnglishUi() ? L"Shape: kind" : L"幾何形状: 種別";
+    case ToolMode::Eraser:
+        return IsEnglishUi() ? L"Eraser: width" : L"消しゴム: 太さ";
+    default:
+        return IsEnglishUi() ? L"Tool: option" : L"ツール: オプション";
+    }
+}
+
+static std::wstring ShapeKindLabelW(ShapeKind kind) {
+    switch (kind) {
+    case ShapeKind::Square:
+        return IsEnglishUi() ? L"Square" : L"正方形";
+    case ShapeKind::Rectangle:
+        return IsEnglishUi() ? L"Rectangle" : L"長方形";
+    case ShapeKind::Diamond:
+        return IsEnglishUi() ? L"Diamond" : L"菱形";
+    case ShapeKind::EquilateralTriangle:
+        return IsEnglishUi() ? L"Equilateral triangle" : L"正三角形";
+    case ShapeKind::Triangle:
+        return IsEnglishUi() ? L"Triangle" : L"三角形";
+    case ShapeKind::Ellipse:
+        return IsEnglishUi() ? L"Ellipse" : L"円";
+    case ShapeKind::RotatedEllipse:
+        return IsEnglishUi() ? L"Rotated ellipse" : L"斜め円";
+    case ShapeKind::Circle:
+    default:
+        return IsEnglishUi() ? L"Circle" : L"正円";
+    }
+}
+
+static std::wstring ShapeDrawModeLabelW(ShapeDrawMode mode) {
+    switch (mode) {
+    case ShapeDrawMode::Outline:
+        return IsEnglishUi() ? L"Outline only" : L"枠線のみ";
+    case ShapeDrawMode::Fill:
+    default:
+        return IsEnglishUi() ? L"Fill" : L"塗りつぶし";
+    }
+}
+
+static std::wstring FreehandCorrectionLabelW(const std::wstring& value) {
+    std::wstring mode = NormalizeFreehandCorrection(value);
+    if (mode == L"auto") return IsEnglishUi() ? L"Auto" : L"自動";
+    if (mode == L"hold") return IsEnglishUi() ? L"Pause" : L"静止";
+    if (mode == L"smooth") return IsEnglishUi() ? L"Smooth" : L"ならす";
+    return IsEnglishUi() ? L"Off" : L"オフ";
+}
+
+static std::wstring FreehandCorrectionStyleLabelW(const std::wstring& value) {
+    std::wstring mode = NormalizeFreehandCorrectionStyle(value);
+    if (mode == L"pen") return IsEnglishUi() ? L"Line style" : L"線設定";
+    if (mode == L"shape") return IsEnglishUi() ? L"Shape style" : L"幾何設定";
+    return IsEnglishUi() ? L"Auto" : L"自動";
+}
+
+static std::wstring FreehandCorrectionFillLabelW(const std::wstring& value) {
+    std::wstring mode = NormalizeFreehandCorrectionFill(value);
+    if (mode == L"use_shape_setting") return IsEnglishUi() ? L"Use shape setting" : L"幾何設定を使う";
+    if (mode == L"always_fill") return IsEnglishUi() ? L"Always fill" : L"常に塗りつぶし";
+    return IsEnglishUi() ? L"Off" : L"オフ";
+}
+
+static std::wstring AnnotToolUiStateLabelW(AnnotToolUiState s) {
+    switch (s) {
+    case AnnotToolUiState::Enabled:
+        return IsEnglishUi() ? L"ON (enabled)" : L"ON (有効)";
+    case AnnotToolUiState::Disabled:
+        return IsEnglishUi() ? L"OFF (disabled)" : L"OFF (グレーアウト)";
+    case AnnotToolUiState::Hidden:
+        return IsEnglishUi() ? L"OFF (hidden)" : L"OFF (非表示)";
+    default:
+        return IsEnglishUi() ? L"ON" : L"ON";
+    }
+}
+
+static AnnotToolUiState ToolModeUiStateOf(const AnnotSettingsCtx* ctx, ToolMode mode) {
+    if (!ctx) return AnnotToolUiState::Enabled;
+    int idx = static_cast<int>(mode);
+    if (idx < 0 || idx >= kToolModeCount) return AnnotToolUiState::Enabled;
+    if (ctx->expandedToolStates.size() != static_cast<size_t>(kToolModeCount)) return AnnotToolUiState::Enabled;
+    return ctx->expandedToolStates[static_cast<size_t>(idx)];
+}
+
+static std::vector<AnnotToolUiState>& ActiveToolStates(AnnotSettingsCtx* ctx) {
+    return ctx->expandedToolStates;
+}
+
+static int ActiveToolCount(const AnnotSettingsCtx* ctx) {
+    return kToolModeCount;
+}
+
+static std::wstring ActiveToolLabelW(const AnnotSettingsCtx* ctx, int idx) {
+    if (idx < 0 || idx >= kToolModeCount) return IsEnglishUi() ? L"Tool" : L"ツール";
+    return ToolModeLabelW(static_cast<ToolMode>(idx));
+}
+
+static AnnotToolUiState ActiveToolUiStateOf(const AnnotSettingsCtx* ctx, int idx) {
+    if (idx < 0 || idx >= kToolModeCount) return AnnotToolUiState::Enabled;
+    return ToolModeUiStateOf(ctx, static_cast<ToolMode>(idx));
+}
+
+static std::vector<int> ActiveToolOrderIndices(const AnnotSettingsCtx* ctx) {
+    std::vector<int> out;
+    if (!ctx) return out;
+    out.reserve(ctx->expandedToolOrder.size());
+    for (ToolMode mode : ctx->expandedToolOrder) out.push_back(static_cast<int>(mode));
+    return out;
+}
+
+static void SetActiveToolOrderByIndices(AnnotSettingsCtx* ctx, const std::vector<int>& order) {
+    if (!ctx) return;
+    ctx->expandedToolOrder.clear();
+    for (int idx : order) {
+        if (idx >= 0 && idx < kToolModeCount) {
+            ctx->expandedToolOrder.push_back(static_cast<ToolMode>(idx));
+        }
+    }
+}
+
+static int AnnotToolListStateColWidthPx(HWND hWnd, int totalW) {
+    int minW = ScaleY(hWnd, 110);
+    int wantW = ScaleY(hWnd, 180);
+    int maxW = std::max(minW, totalW / 2);
+    return std::max(minW, std::min(wantW, maxW));
+}
+
+static COLORREF BlendColor(COLORREF a, COLORREF b, double t) {
+    int ar = GetRValue(a), ag = GetGValue(a), ab = GetBValue(a);
+    int br = GetRValue(b), bg = GetGValue(b), bb = GetBValue(b);
+    int r = static_cast<int>(std::lround(ar + (br - ar) * t));
+    int g = static_cast<int>(std::lround(ag + (bg - ag) * t));
+    int b2 = static_cast<int>(std::lround(ab + (bb - ab) * t));
+    return RGB(std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b2, 0, 255));
+}
+
+static void DrawAnnotToolListItem(AnnotSettingsCtx* ctx, const DRAWITEMSTRUCT* dis) {
+    if (!ctx || !dis) return;
+    if (!ctx->lbTools || dis->hwndItem != ctx->lbTools) return;
+    if (dis->itemID == static_cast<UINT>(-1)) return;
+
+    const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+    const bool focused = (dis->itemState & ODS_FOCUS) != 0;
+
+    RECT rc = dis->rcItem;
+    int totalW = std::max(0, static_cast<int>(rc.right - rc.left));
+    int stateColW = AnnotToolListStateColWidthPx(dis->hwndItem, totalW);
+    int splitX = std::max(rc.left, rc.right - stateColW);
+    int padX = ScaleY(dis->hwndItem, 8);
+
+    if (selected) {
+        HBRUSH br = CreateSolidBrush(g_theme.selectionBg);
+        FillRect(dis->hDC, &rc, br);
+        DeleteObject(br);
+    } else {
+        HBRUSH br = g_hThemePanelBrush ? g_hThemePanelBrush : GetSysColorBrush(COLOR_WINDOW);
+        FillRect(dis->hDC, &rc, br);
+    }
+
+    int toolIdx = static_cast<int>(dis->itemData);
+    AnnotToolUiState s = ActiveToolUiStateOf(ctx, toolIdx);
+
+    std::wstring leftText = ActiveToolLabelW(ctx, toolIdx);
+    std::wstring rightText = AnnotToolUiStateLabelW(s);
+
+    SetBkMode(dis->hDC, TRANSPARENT);
+    COLORREF baseText = selected ? g_theme.selectionText : g_theme.panelText;
+    COLORREF stateText = baseText;
+    if (!selected && (s == AnnotToolUiState::Disabled || s == AnnotToolUiState::Hidden)) {
+        stateText = BlendColor(g_theme.panelText, g_theme.panelBg, (s == AnnotToolUiState::Hidden) ? 0.65 : 0.5);
+    }
+
+    RECT rcTool{rc.left + padX, rc.top,
+                std::max<LONG>(rc.left + padX, static_cast<LONG>(splitX - padX)),
+                rc.bottom};
+    RECT rcState{std::min<LONG>(rc.right, static_cast<LONG>(splitX + padX)), rc.top,
+                 std::max<LONG>(rc.left, rc.right - padX),
+                 rc.bottom};
+
+    SetTextColor(dis->hDC, baseText);
+    DrawTextW(dis->hDC, leftText.c_str(), static_cast<int>(leftText.size()), &rcTool,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SetTextColor(dis->hDC, stateText);
+    DrawTextW(dis->hDC, rightText.c_str(), static_cast<int>(rightText.size()), &rcState,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    if (!selected) {
+        HPEN pen = CreatePen(PS_SOLID, 1, g_theme.splitterLine);
+        HGDIOBJ prev = SelectObject(dis->hDC, pen);
+        MoveToEx(dis->hDC, splitX, rc.top, nullptr);
+        LineTo(dis->hDC, splitX, rc.bottom);
+        SelectObject(dis->hDC, prev);
+        DeleteObject(pen);
+    }
+
+    if (focused) {
+        DrawFocusRect(dis->hDC, &rc);
+    }
+}
+
+static int ListboxFindSelectedIndex(HWND lb) {
+    if (!lb) return -1;
+    return static_cast<int>(SendMessageW(lb, LB_GETCURSEL, 0, 0));
+}
+
+static std::optional<int> ListboxSelectedTool(HWND lb) {
+    int sel = ListboxFindSelectedIndex(lb);
+    if (!lb || sel < 0) return std::nullopt;
+    LRESULT data = SendMessageW(lb, LB_GETITEMDATA, sel, 0);
+    if (data == LB_ERR) return std::nullopt;
+    int idx = static_cast<int>(data);
+    return idx;
+}
+
+static void RefreshAnnotToolList(AnnotSettingsCtx* ctx) {
+    if (!ctx || !ctx->lbTools) return;
+    int sel = static_cast<int>(SendMessageW(ctx->lbTools, LB_GETCURSEL, 0, 0));
+    SendMessageW(ctx->lbTools, LB_RESETCONTENT, 0, 0);
+    for (int idxValue : ActiveToolOrderIndices(ctx)) {
+        std::wstring label = ActiveToolLabelW(ctx, idxValue);
+        int idx = static_cast<int>(SendMessageW(ctx->lbTools, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+        if (idx >= 0) {
+            SendMessageW(ctx->lbTools, LB_SETITEMDATA, idx, static_cast<LPARAM>(idxValue));
+        }
+    }
+    int count = static_cast<int>(SendMessageW(ctx->lbTools, LB_GETCOUNT, 0, 0));
+    if (count <= 0) return;
+    if (sel < 0) sel = 0;
+    if (sel >= count) sel = count - 1;
+    SendMessageW(ctx->lbTools, LB_SETCURSEL, sel, 0);
+}
+
+static void SyncAnnotToolStateCombo(AnnotSettingsCtx* ctx) {
+    if (!ctx || !ctx->cbToolState || !ctx->lbTools) return;
+    auto toolOpt = ListboxSelectedTool(ctx->lbTools);
+    if (!toolOpt) return;
+    int t = static_cast<int>(*toolOpt);
+    if (t < 0 || t >= ActiveToolCount(ctx)) return;
+    AnnotToolUiState s = AnnotToolUiState::Enabled;
+    const auto& states = ActiveToolStates(ctx);
+    if (states.size() == static_cast<size_t>(ActiveToolCount(ctx))) {
+        s = states[static_cast<size_t>(t)];
+    }
+    int want = 0;
+    switch (s) {
+    case AnnotToolUiState::Enabled:  want = 0; break;
+    case AnnotToolUiState::Disabled: want = 1; break;
+    case AnnotToolUiState::Hidden:   want = 2; break;
+    default:                         want = 0; break;
+    }
+    SendMessageW(ctx->cbToolState, CB_SETCURSEL, want, 0);
+}
+
+static std::wstring HexColorW(COLORREF c) {
+    wchar_t buf[16]{};
+    swprintf(buf, 16, L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+    return buf;
+}
+
+static std::wstring FormatSig2W(double v) {
+    wchar_t buf[32]{};
+    swprintf(buf, 32, L"%.2g", v);
+    std::wstring s = buf;
+    if (v >= 0.0 && v < 10.0 && std::floor(v) == v &&
+        s.find(L'.') == std::wstring::npos &&
+        s.find(L'e') == std::wstring::npos && s.find(L'E') == std::wstring::npos) {
+        s += L".0";
+    }
+    return s;
+}
+
+static std::wstring ColorLabelW(COLORREF c) {
+    // Keep it simple and stable: a short name for common palette entries + hex.
+    const auto hex = HexColorW(c);
+    if (c == RGB(0, 0, 0)) return L"黒 " + hex;
+    if (c == RGB(255, 255, 0)) return L"黄 " + hex;
+    if (c == RGB(255, 0, 0)) return L"赤 " + hex;
+    if (c == RGB(0, 160, 255)) return L"青 " + hex;
+    if (c == RGB(0, 200, 0)) return L"緑 " + hex;
+    if (c == RGB(255, 140, 0)) return L"橙 " + hex;
+    if (c == RGB(200, 80, 200)) return L"紫 " + hex;
+    return hex;
+}
+
+static void FillColorCombo(HWND cb) {
+    if (!cb) return;
+    SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+    for (size_t i = 0; i < g_palette.size(); ++i) {
+        COLORREF c = g_palette[i];
+        std::wstring label = (i + 1 == g_palette.size())
+            ? (std::wstring(L"カスタム ") + HexColorW(c))
+            : ColorLabelW(c);
+        int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+        if (idx >= 0) SendMessageW(cb, CB_SETITEMDATA, idx, static_cast<LPARAM>(c));
+    }
+    SendMessageW(cb, CB_SETCURSEL, 0, 0);
+}
+
+static void SelectComboByItemData(HWND cb, DWORD_PTR want) {
+    if (!cb) return;
+    int count = static_cast<int>(SendMessageW(cb, CB_GETCOUNT, 0, 0));
+    for (int i = 0; i < count; ++i) {
+        DWORD_PTR data = static_cast<DWORD_PTR>(SendMessageW(cb, CB_GETITEMDATA, i, 0));
+        if (data == want) {
+            SendMessageW(cb, CB_SETCURSEL, i, 0);
+            return;
+        }
+    }
+}
+
+static void SelectComboClosestPt10(HWND cb, int wantPt10) {
+    if (!cb) return;
+    int count = static_cast<int>(SendMessageW(cb, CB_GETCOUNT, 0, 0));
+    int bestIdx = -1;
+    int bestDelta = 0;
+    for (int i = 0; i < count; ++i) {
+        int pt10 = static_cast<int>(SendMessageW(cb, CB_GETITEMDATA, i, 0));
+        int delta = std::abs(pt10 - wantPt10);
+        if (bestIdx < 0 || delta < bestDelta) {
+            bestIdx = i;
+            bestDelta = delta;
+        }
+    }
+    if (bestIdx >= 0) SendMessageW(cb, CB_SETCURSEL, bestIdx, 0);
+}
+
+static COLORREF GetSelectedColor(HWND cb, COLORREF fallback) {
+    if (!cb) return fallback;
+    int sel = static_cast<int>(SendMessageW(cb, CB_GETCURSEL, 0, 0));
+    if (sel < 0) return fallback;
+    DWORD_PTR data = static_cast<DWORD_PTR>(SendMessageW(cb, CB_GETITEMDATA, sel, 0));
+    if (data == kComboBoxErrData) return fallback;
+    return static_cast<COLORREF>(data);
+}
+
+static bool IsLineToolsShareChecked(const AnnotSettingsCtx* ctx) {
+    if (!ctx || !ctx->chkLineToolsShare) return true;
+    return SendMessageW(ctx->chkLineToolsShare, BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+static void UpdateLineToolsShareUi(AnnotSettingsCtx* ctx) {
+    if (!ctx) return;
+    bool share = IsLineToolsShareChecked(ctx);
+    const BOOL enable = share ? FALSE : TRUE;
+    if (ctx->cbArrowWidth) EnableWindow(ctx->cbArrowWidth, enable);
+    if (ctx->cbArrowColor) EnableWindow(ctx->cbArrowColor, enable);
+    if (ctx->cbWaveWidth) EnableWindow(ctx->cbWaveWidth, enable);
+    if (ctx->cbWaveColor) EnableWindow(ctx->cbWaveColor, enable);
+}
+
+static double GetSelectedPt(HWND cb, double fallback) {
+    if (!cb) return fallback;
+    int sel = static_cast<int>(SendMessageW(cb, CB_GETCURSEL, 0, 0));
+    if (sel < 0) return fallback;
+    DWORD_PTR pt10 = static_cast<DWORD_PTR>(SendMessageW(cb, CB_GETITEMDATA, sel, 0));
+    if (pt10 == kComboBoxErrData) return fallback;
+    return static_cast<double>(pt10) / 10.0;
+}
+
+static void EnsureComboSelectText(HWND combo, const std::wstring& text) {
+    if (!combo || text.empty()) return;
+    int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+    wchar_t buf[256]{};
+    for (int i = 0; i < count; ++i) {
+        int len = static_cast<int>(SendMessageW(combo, CB_GETLBTEXT, i, reinterpret_cast<LPARAM>(buf)));
+        if (len >= 0) {
+            buf[std::min<int>(len, 255)] = L'\0';
+            if (text == buf) {
+                SendMessageW(combo, CB_SETCURSEL, i, 0);
+                return;
+            }
+        }
+    }
+    int idx = static_cast<int>(SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str())));
+    if (idx >= 0) SendMessageW(combo, CB_SETCURSEL, idx, 0);
+}
+
+static void EnsureComboSelectFontFace(HWND combo, const std::wstring& faceName) {
+    if (!combo || faceName.empty()) return;
+    EnsureComboSelectText(combo, ResolveFontDisplayName(faceName));
+}
+
+static void ScrollAnnotSettingsTo(HWND hWnd, AnnotSettingsCtx* ctx, int newPos) {
+    if (!hWnd || !ctx || !ctx->scrollPanel) return;
+    int clamped = std::clamp(newPos, 0, ctx->scrollMax);
+    if (clamped == ctx->scrollPos) return;
+    int delta = ctx->scrollPos - clamped;
+    ctx->scrollPos = clamped;
+    ScrollWindowEx(ctx->scrollPanel, 0, delta, nullptr, nullptr, nullptr, nullptr,
+                   SW_INVALIDATE | SW_ERASE | SW_SCROLLCHILDREN);
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_POS;
+    si.nPos = clamped;
+    SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+}
+
+static void JumpAnnotSettingsToSection(HWND hWnd, AnnotSettingsCtx* ctx, int sectionIndex) {
+    if (!ctx) return;
+    if (sectionIndex < 0 || sectionIndex >= ctx->sectionCount) return;
+    ScrollAnnotSettingsTo(hWnd, ctx, ctx->sectionTops[sectionIndex]);
+}
+
+static void LayoutAnnotSettingsChrome(HWND hWnd, AnnotSettingsCtx* ctx) {
+    if (!hWnd || !ctx) return;
+
+    const int pad = ScaleY(hWnd, 12);
+    const int rowH = std::max(ScaleY(hWnd, 26), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
+    const int navW = ScaleY(hWnd, ctx->embedded ? 170 : 200);
+    const int columnGap = ScaleY(hWnd, 18);
+    const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
+    const int titleH = std::max(rowH, ScaleY(hWnd, 30));
+
+    RECT rc{};
+    GetClientRect(hWnd, &rc);
+    int clientW = std::max(0, static_cast<int>(rc.right - rc.left));
+    int clientH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+
+    int subtitleH = 0;
+    int sectionButtonH = 0;
+    int sectionButtonTop = pad;
+    int headerH = 0;
+    if (!ctx->embedded) {
+        std::wstring subtitle = IsEnglishUi()
+            ? L"Use the buttons below or the list on the left to move. Changes apply only when you press Apply."
+            : L"下のボタンまたは左のカテゴリで移動できます。変更は「反映」を押すまで反映されません。";
+        subtitleH = std::max(FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 4),
+                             MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
+        sectionButtonH = std::max(ScaleY(hWnd, 28), rowH);
+        sectionButtonTop = pad + titleH + subtitleH + ScaleY(hWnd, 8);
+        headerH = titleH + subtitleH + sectionButtonH + ScaleY(hWnd, 20);
+    }
+    int panelTop = pad + headerH;
+    int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
+    int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
+    int contentPaneX = pad + navW + columnGap;
+    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - contentPaneX - pad);
+
+    if (!ctx->embedded && ctx->headerTitle) {
+        SetWindowPos(ctx->headerTitle, nullptr, pad, pad, clientW - pad * 2, titleH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (!ctx->embedded && ctx->headerSubtitle) {
+        SetWindowPos(ctx->headerSubtitle, nullptr, pad, pad + titleH, clientW - pad * 2, subtitleH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (!ctx->embedded) {
+        LayoutHeaderSectionButtons(hWnd, ctx->categoryButtons, pad, sectionButtonTop, clientW - pad * 2, sectionButtonH);
+    }
+    if (ctx->navList) {
+        SetWindowPos(ctx->navList, nullptr, pad, panelTop, navW, panelH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (ctx->scrollPanel) {
+        SetWindowPos(ctx->scrollPanel, nullptr, pad + navW + columnGap, panelTop, contentPaneW, panelH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (!ctx->embedded) {
+        int btnH = std::max(ScaleY(hWnd, 32), rowH);
+        int okW = ScaleY(hWnd, 88);
+        int cancelW = ScaleY(hWnd, 108);
+        int btnGap = ScaleY(hWnd, 10);
+        int btnY = clientH - pad - btnH;
+        int xCancel = std::max(pad, clientW - pad - cancelW);
+        int xOk = std::max(pad, xCancel - btnGap - okW);
+        if (ctx->btnOk) {
+            SetWindowPos(ctx->btnOk, nullptr, xOk, btnY, okW, btnH,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if (ctx->btnCancel) {
+            SetWindowPos(ctx->btnCancel, nullptr, xCancel, btnY, cancelW, btnH,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
+static void ApplyAnnotationSettings(AnnotSettingsCtx* ctx) {
+    if (!ctx) return;
+    if (ctx->cbTextFont) {
+        int sel = static_cast<int>(SendMessageW(ctx->cbTextFont, CB_GETCURSEL, 0, 0));
+        if (sel >= 0) {
+            wchar_t buf[256]{};
+            int len = static_cast<int>(SendMessageW(ctx->cbTextFont, CB_GETLBTEXT, sel, reinterpret_cast<LPARAM>(buf)));
+            if (len >= 0) buf[std::min<int>(len, 255)] = L'\0';
+            g_textFontName = ResolveFontFaceName(buf);
+        }
+    }
+    g_textFontPt = GetSelectedPt(ctx->cbTextSize, g_textFontPt);
+    if (std::clamp(g_textFontActiveSizeSlot, 0, 1) == 1) {
+        g_textFontPtSlotB = g_textFontPt;
+        g_textFontUseA4ScaleSlotB = g_textFontUseA4Scale;
+    } else {
+        g_textFontPtSlotA = g_textFontPt;
+        g_textFontUseA4ScaleSlotA = g_textFontUseA4Scale;
+    }
+    g_lineToolsShareStyle = IsLineToolsShareChecked(ctx);
+    g_lineWidthPt = GetSelectedPt(ctx->cbLineWidth, g_lineWidthPt);
+    if (!g_lineToolsShareStyle) {
+        g_arrowWidthPt = GetSelectedPt(ctx->cbArrowWidth, g_arrowWidthPt);
+        g_waveWidthPt = GetSelectedPt(ctx->cbWaveWidth, g_waveWidthPt);
+    }
+    if (ctx->cbArrowHead) {
+        g_arrowHead = static_cast<ArrowHead>(SelectedComboItemData(ctx->cbArrowHead,
+                                                                     static_cast<DWORD_PTR>(g_arrowHead)));
+    }
+    g_freehandWidthPt = GetSelectedPt(ctx->cbFreehandWidth, g_freehandWidthPt);
+    if (ctx->cbFreehandCorrection) {
+        DWORD_PTR data = SelectedComboItemData(ctx->cbFreehandCorrection, 0);
+        if (data == 3) {
+            g_config.freehandCorrection = L"auto";
+        } else if (data == 2) {
+            g_config.freehandCorrection = L"hold";
+        } else if (data == 1) {
+            g_config.freehandCorrection = L"smooth";
+        } else {
+            g_config.freehandCorrection = L"off";
+        }
+    }
+    if (ctx->cbFreehandCorrectionStyle) {
+        DWORD_PTR data = SelectedComboItemData(ctx->cbFreehandCorrectionStyle, 0);
+        if (data == 1) {
+            g_config.freehandCorrectionStyle = L"pen";
+        } else if (data == 2) {
+            g_config.freehandCorrectionStyle = L"shape";
+        } else {
+            g_config.freehandCorrectionStyle = L"auto";
+        }
+    }
+    if (ctx->cbFreehandCorrectionFill) {
+        DWORD_PTR data = SelectedComboItemData(ctx->cbFreehandCorrectionFill, 0);
+        if (data == 1) {
+            g_config.freehandCorrectionFill = L"use_shape_setting";
+        } else if (data == 2) {
+            g_config.freehandCorrectionFill = L"always_fill";
+        } else {
+            g_config.freehandCorrectionFill = L"off";
+        }
+    }
+    g_markerFreeWidthPt = GetSelectedPt(ctx->cbMarkerWidth, g_markerFreeWidthPt);
+    g_markerTextWidthPt = GetSelectedPt(ctx->cbMarkerTextWidth, g_markerTextWidthPt);
+    if (ctx->cbMarkerTextStyle) {
+        DWORD_PTR data = SelectedComboItemData(ctx->cbMarkerTextStyle, static_cast<DWORD_PTR>(g_markerTextUnderline ? 1 : 0));
+        g_markerTextUnderline = (static_cast<int>(data) != 0);
+    }
+
+    g_textColor = GetSelectedColor(ctx->cbTextColor, g_textColor);
+    if (ctx->chkTextReadableBackground) {
+        g_textBoxReadableBackground =
+            SendMessageW(ctx->chkTextReadableBackground, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
+    g_lineColor = GetSelectedColor(ctx->cbLineColor, g_lineColor);
+    if (!g_lineToolsShareStyle) {
+        g_arrowColor = GetSelectedColor(ctx->cbArrowColor, g_arrowColor);
+        g_waveColor = GetSelectedColor(ctx->cbWaveColor, g_waveColor);
+    }
+    g_freehandColor = GetSelectedColor(ctx->cbFreehandColor, g_freehandColor);
+    g_markerFreeColor = GetSelectedColor(ctx->cbMarkerColor, g_markerFreeColor);
+    g_markerTextColor = GetSelectedColor(ctx->cbMarkerTextColor, g_markerTextColor);
+    if (ctx->cbShapeKind) {
+        DWORD_PTR data = SelectedComboItemData(ctx->cbShapeKind, static_cast<DWORD_PTR>(g_shapeKind));
+        g_shapeKind = static_cast<ShapeKind>(static_cast<int>(data));
+        g_shapeDetail = ShapeDetailForLegacyState(ToolMode::Shape, g_shapeKind);
+    }
+    if (ctx->cbShapeDrawMode) {
+        DWORD_PTR data = SelectedComboItemData(ctx->cbShapeDrawMode, static_cast<DWORD_PTR>(g_shapeDrawMode));
+        g_shapeDrawMode = static_cast<ShapeDrawMode>(static_cast<int>(data));
+    }
+    SyncLegacyShapeStateFromDetail();
+    g_shapeColor = GetSelectedColor(ctx->cbShapeColor, g_shapeColor);
+    if (ctx->cbMagnifierShape) {
+        DWORD_PTR data = SelectedComboItemData(ctx->cbMagnifierShape, static_cast<DWORD_PTR>(g_magnifierShape));
+        g_magnifierShape = static_cast<MagnifierShape>(static_cast<int>(data));
+    }
+    // sync toolbar option selections (without relayout)
+    EnsureComboSelectFontFace(g_hComboFont, g_textFontName);
+    SyncToolbarFontSizeCombo();
+    SyncWidthComboToMode(g_toolMode);
+
+    ApplyAnnotToolModeUiConfig(ctx->expandedToolOrder, ctx->expandedToolStates, false);
+    PersistAnnotToolUiConfigToSetupJson();
+
+    PersistConfig();
+    if (g_hPdfView) PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+    ApplyActiveColorForMode(ctx->owner, g_toolMode);
+    UpdateToolbarUI(ctx->owner);
+}
+
+static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<AnnotSettingsCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        LogPanelEvent(L"Annot", L"WM_CREATE", 0, 0, nullptr);
+        auto cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = reinterpret_cast<AnnotSettingsCtx*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+
+        EnsureSettingsScrollPanelClass();
+
+        const int pad = ScaleY(hWnd, 12);
+        const int gapY = ScaleY(hWnd, 8);
+        const int labelGap = ScaleY(hWnd, 4);
+        const int uiTextH = FontLineHeightPx(hWnd, g_hUIFont);
+        const int sectionTextH = FontLineHeightPx(hWnd, SettingsSectionFont());
+        const int rowH = std::max(ScaleY(hWnd, 26), uiTextH + ScaleY(hWnd, 10));
+        const int comboDropH = ScaleY(hWnd, 240);
+        const int previewW = ScaleY(hWnd, 32);
+        const int previewH = std::max(ScaleY(hWnd, 18), rowH - ScaleY(hWnd, 6));
+        const int previewGap = ScaleY(hWnd, 8);
+        const int customBtnW = ScaleY(hWnd, 90);
+        int y = pad;
+
+        RECT work{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+        int workH = std::max(0, static_cast<int>(work.bottom - work.top));
+        int margin = ScaleY(hWnd, 32);
+
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        int clientW = std::max(0, static_cast<int>(rc.right - rc.left));
+        int clientH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+        const int navW = ScaleY(hWnd, ctx->embedded ? 170 : 200);
+        const int columnGap = ScaleY(hWnd, 18);
+        const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
+        const int titleH = std::max(rowH, ScaleY(hWnd, 30));
+        const std::wstring subtitle = IsEnglishUi()
+            ? L"Use the buttons below or the list on the left to move. Changes apply only when you press Apply."
+            : L"下のボタンまたは左のカテゴリで移動できます。変更は「反映」を押すまで反映されません。";
+        const int subtitleH = ctx->embedded ? 0
+                                            : std::max(uiTextH + ScaleY(hWnd, 4),
+                                                       MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
+        const int sectionButtonH = ctx->embedded ? 0 : std::max(ScaleY(hWnd, 28), rowH);
+        const int headerH = ctx->embedded ? 0 : (titleH + subtitleH + sectionButtonH + ScaleY(hWnd, 20));
+        const int panelTop = pad + headerH;
+        const int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
+        const int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
+        const int contentPaneX = pad + navW + columnGap;
+        const int contentPaneW = std::max(ScaleY(hWnd, 340), clientW - contentPaneX - pad);
+        int contentW = std::max(0, contentPaneW - pad * 2);
+        int controlW = SettingsControlWidth(hWnd, contentW, ctx->embedded, 280, 460);
+        int fontControlW = SettingsControlWidth(hWnd, contentW, ctx->embedded, 320, 560);
+
+        if (!ctx->embedded) {
+            const std::wstring headerTitle = SettingsCategoryDialogTitle(kSettingsNavAnnot);
+            ctx->headerTitle = CreateWindowExW(0, L"STATIC", headerTitle.c_str(),
+                                               WS_CHILD | WS_VISIBLE,
+                                               pad, pad, clientW - pad * 2, titleH,
+                                               hWnd, nullptr, g_hInst, nullptr);
+            ctx->headerSubtitle = CreateWindowExW(0, L"STATIC", subtitle.c_str(),
+                                                  WS_CHILD | WS_VISIBLE,
+                                                  pad, pad + titleH, clientW - pad * 2, subtitleH,
+                                                  hWnd, nullptr, g_hInst, nullptr);
+            SetUIFont(ctx->headerTitle);
+            SetUIFont(ctx->headerSubtitle);
+
+            const auto sectionButtonLabels = SettingsCategoryButtonLabels();
+            for (int i = 0; i < kSettingsCategoryButtonCount; ++i) {
+                ctx->categoryButtons[static_cast<size_t>(i)] =
+                    CreateWindowExW(0, L"BUTTON", sectionButtonLabels[static_cast<size_t>(i)].c_str(),
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                    pad, pad + titleH + subtitleH + ScaleY(hWnd, 8), ScaleY(hWnd, 96), sectionButtonH,
+                                    hWnd,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_CATEGORY_BUTTON_BASE + i)),
+                                    g_hInst, nullptr);
+                SetUIFont(ctx->categoryButtons[static_cast<size_t>(i)]);
+            }
+            UpdateSettingsCategoryButtons(ctx->categoryButtons, kSettingsNavAnnot);
+        }
+
+        ctx->navList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                                       pad, panelTop, navW, panelH,
+                                       hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_SECTION_LIST)),
+                                       g_hInst, nullptr);
+        SetUIFont(ctx->navList);
+        SetSettingsNavFont(ctx->navList);
+        SetWindowSubclass(ctx->navList, SettingsNavListSubclassProc, 1, 0);
+
+        ctx->scrollPanel = CreateWindowExW(0, L"SettingsScrollPanelClass", L"",
+                                           WS_CHILD | WS_VISIBLE,
+                                           contentPaneX, panelTop, contentPaneW, panelH,
+                                           hWnd, nullptr, g_hInst, nullptr);
+
+        WorkspaceConfig defaults;
+        std::wstring defaultTextFont = defaults.textFontName.empty()
+            ? GetDefaultFontFaceName()
+            : defaults.textFontName;
+        std::wstring defaultTextFontLabel = ResolveFontDisplayName(defaultTextFont);
+        std::wstring defaultTextSize = FormatSig2W(defaults.textFontPt) + L"pt";
+        std::wstring defaultTextColor = HexColorW(defaults.textColor);
+        std::wstring defaultLineWidth = FormatSig2W(defaults.lineWidthPt) + L"pt";
+        std::wstring defaultLineColor = HexColorW(defaults.lineColor);
+        std::wstring defaultArrowWidth = FormatSig2W(defaults.arrowWidthPt) + L"pt";
+        std::wstring defaultArrowColor = HexColorW(defaults.arrowColor);
+        std::wstring defaultArrowHead = IsEnglishUi()
+            ? (ParseArrowHead(defaults.arrowHead) == ArrowHead::Double ? L"Double" : L"Single")
+            : (ParseArrowHead(defaults.arrowHead) == ArrowHead::Double ? L"双方向" : L"単方向");
+        std::wstring defaultWaveWidth = FormatSig2W(defaults.waveWidthPt) + L"pt";
+        std::wstring defaultWaveColor = HexColorW(defaults.waveColor);
+        std::wstring defaultFreeWidth = FormatSig2W(defaults.freehandWidthPt) + L"pt";
+        std::wstring defaultFreeColor = HexColorW(defaults.freehandColor);
+        std::wstring defaultFreeCorrection = FreehandCorrectionLabelW(defaults.freehandCorrection);
+        std::wstring defaultFreeCorrectionStyle = FreehandCorrectionStyleLabelW(defaults.freehandCorrectionStyle);
+        std::wstring defaultFreeCorrectionFill = FreehandCorrectionFillLabelW(defaults.freehandCorrectionFill);
+        std::wstring defaultMarkerWidth = FormatSig2W(defaults.markerFreeWidthPt) + L"pt";
+        std::wstring defaultMarkerColor = HexColorW(defaults.markerFreeColor);
+        std::wstring defaultMarkerTextWidth = FormatSig2W(defaults.markerTextWidthPt) + L"pt";
+        std::wstring defaultMarkerTextColor = HexColorW(defaults.markerTextColor);
+        std::wstring defaultShapeColor = HexColorW(defaults.shapeColor);
+        std::wstring defaultShapeKindLabel = ShapeKindLabelW(ParseShapeKind(defaults.shapeKind));
+        std::wstring defaultShapeDrawModeLabel = ShapeDrawModeLabelW(ParseShapeDrawMode(defaults.shapeDrawMode));
+        MagnifierShape defaultShape = ParseMagnifierShape(defaults.magnifierShape);
+        std::wstring defaultMagnifierLabel = IsEnglishUi()
+            ? (defaultShape == MagnifierShape::Square ? L"Square" : L"Circle")
+            : (defaultShape == MagnifierShape::Square ? L"正方形" : L"正円");
+        std::wstring defaultPaletteColor = HexColorW(defaults.paletteCustomColor);
+
+        ctx->expandedToolOrder = AnnotToolModeUiOrder();
+        ctx->expandedToolStates = GetAnnotToolModeUiStates();
+        if (ctx->expandedToolStates.size() != static_cast<size_t>(kToolModeCount)) {
+            ctx->expandedToolStates.assign(static_cast<size_t>(kToolModeCount), AnnotToolUiState::Enabled);
+        }
+
+        HWND contentParent = ctx->scrollPanel ? ctx->scrollPanel : hWnd;
+        auto addLabel = [&](const std::wstring& text) -> HWND {
+            int labelH = std::max(uiTextH + ScaleY(hWnd, 2),
+                                  MeasureTextHeight(hWnd, text, contentW, g_hUIFont));
+            HWND h = CreateWindowExW(0, L"STATIC", text.c_str(),
+                                     WS_CHILD | WS_VISIBLE,
+                                     pad, y, contentW, labelH, contentParent, nullptr, g_hInst, nullptr);
+            SetUIFont(h);
+            y += labelH + labelGap;
+            return h;
+        };
+        auto addCombo = [&](int id, bool ownerDraw, int w) -> HWND {
+            DWORD style = WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST;
+            if (ownerDraw) {
+                style |= CBS_OWNERDRAWFIXED | CBS_HASSTRINGS;
+            }
+            int x = pad + std::max(0, contentW - w);
+            HWND cb = CreateWindowExW(0, L"COMBOBOX", L"", style,
+                                      x, y, w, comboDropH, contentParent,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                      g_hInst, nullptr);
+            SetUIFont(cb);
+            ui::GuardComboAgainstAccidentalChange(cb);
+            y += rowH + gapY;
+            return cb;
+        };
+
+        int sectionTop = y;
+        std::wstring sectionTitle;
+        const int sectionMargin = ScaleY(hWnd, 10);
+        const int groupTitlePad = sectionTextH + ScaleY(hWnd, 8);
+        const int sectionGap = std::max(gapY, ScaleY(hWnd, 18));
+        auto finalizeSection = [&]() {
+            if (sectionTitle.empty()) return;
+            int sectionBottom = std::max(sectionTop + rowH + gapY, y - gapY);
+            int sectionHeight = std::max(rowH + gapY, sectionBottom - sectionTop);
+            int boxTop = std::max(0, sectionTop - sectionMargin);
+            HWND box = CreateWindowExW(0, L"BUTTON", sectionTitle.c_str(),
+                                       WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                                       std::max(0, pad - sectionMargin), boxTop,
+                                       contentW + sectionMargin * 2, sectionHeight + sectionMargin * 2 + ScaleY(hWnd, 2),
+                                       contentParent, nullptr, g_hInst, nullptr);
+            SetSettingsSectionFont(box);
+            SetWindowPos(box, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            sectionTitle.clear();
+            y += sectionGap;
+        };
+        auto beginSection = [&](int index, const wchar_t* title) {
+            if (!sectionTitle.empty()) finalizeSection();
+            sectionTitle = title;
+            sectionTop = y;
+            if (index >= 0 && index < kAnnotSectionCount) {
+                ctx->sectionTops[index] = std::max(0, y - sectionMargin);
+                ctx->sectionCount = std::max(ctx->sectionCount, index + 1);
+            }
+            y += groupTitlePad;
+        };
+
+        beginSection(kAnnotSectionText, L"テキスト");
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Color" : L"色", defaultTextColor));
+        ctx->cbTextColor = addCombo(1003, false, controlW);
+
+        {
+            std::wstring readableLabel = IsEnglishUi()
+                ? L"Add a readable background behind text boxes"
+                : L"テキストボックスに読みやすい背景を付ける";
+            ctx->chkTextReadableBackground = CreateWindowExW(0, L"BUTTON", readableLabel.c_str(),
+                                                             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                                             pad, y, contentW, rowH, contentParent,
+                                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_TEXT_READABLE_BACKGROUND)),
+                                                             g_hInst, nullptr);
+            SetUIFont(ctx->chkTextReadableBackground);
+            SendMessageW(ctx->chkTextReadableBackground, BM_SETCHECK,
+                         g_textBoxReadableBackground ? BST_CHECKED : BST_UNCHECKED, 0);
+            y += rowH + gapY;
+        }
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Size" : L"サイズ", defaultTextSize));
+        ctx->cbTextSize = addCombo(1002, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Font" : L"フォント", defaultTextFontLabel));
+        ctx->cbTextFont = addCombo(1001, true, fontControlW);
+
+        beginSection(kAnnotSectionMarker, IsEnglishUi() ? L"Markers" : L"マーカー");
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Free marker width" : L"フリーマーカーの太さ", defaultMarkerWidth));
+        ctx->cbMarkerWidth = addCombo(1008, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Free marker color" : L"フリーマーカーの色", defaultMarkerColor));
+        ctx->cbMarkerColor = addCombo(1009, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Text marker width" : L"マーカーの太さ", defaultMarkerTextWidth));
+        ctx->cbMarkerTextWidth = addCombo(IDC_ANNOT_MARKER_TEXT_WIDTH, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Text marker color" : L"マーカーの色", defaultMarkerTextColor));
+        ctx->cbMarkerTextColor = addCombo(1010, false, controlW);
+
+        beginSection(kAnnotSectionShape, IsEnglishUi() ? L"Shapes" : L"図形");
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Shape kind" : L"幾何種別", defaultShapeKindLabel));
+        ctx->cbShapeKind = addCombo(IDC_ANNOT_SHAPE_KIND, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Shape draw mode" : L"幾何形状の描画", defaultShapeDrawModeLabel));
+        ctx->cbShapeDrawMode = addCombo(IDC_ANNOT_SHAPE_DRAW_MODE, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Shape color" : L"幾何形状の色", defaultShapeColor));
+        ctx->cbShapeColor = addCombo(IDC_ANNOT_SHAPE_COLOR, false, controlW);
+
+        beginSection(kAnnotSectionStroke, IsEnglishUi() ? L"Line" : L"線");
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Freehand width" : L"フリーハンドの太さ", defaultFreeWidth));
+        ctx->cbFreehandWidth = addCombo(1006, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Freehand color" : L"フリーハンドの色", defaultFreeColor));
+        ctx->cbFreehandColor = addCombo(1007, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Freehand auto correction" : L"フリーハンド自動補正", defaultFreeCorrection));
+        ctx->cbFreehandCorrection = addCombo(IDC_ANNOT_FREEHAND_CORRECTION, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Auto correction style" : L"自動補正のスタイル", defaultFreeCorrectionStyle));
+        ctx->cbFreehandCorrectionStyle = addCombo(IDC_ANNOT_FREEHAND_CORRECTION_STYLE, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Auto correction fill" : L"自動補正の塗りつぶし", defaultFreeCorrectionFill));
+        ctx->cbFreehandCorrectionFill = addCombo(IDC_ANNOT_FREEHAND_CORRECTION_FILL, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Line width" : L"直線の太さ", defaultLineWidth));
+        ctx->cbLineWidth = addCombo(1004, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Line color" : L"直線の色", defaultLineColor));
+        ctx->cbLineColor = addCombo(1005, false, controlW);
+
+        {
+            std::wstring shareLabel = IsEnglishUi()
+                ? L"Use one shared style for line / arrow / wave"
+                : L"直線 / 矢印 / 波線で色と太さを共通化する";
+            ctx->chkLineToolsShare = CreateWindowExW(0, L"BUTTON", shareLabel.c_str(),
+                                                     WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                                     pad, y, contentW, rowH, contentParent,
+                                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_LINE_TOOLS_SHARE)),
+                                                     g_hInst, nullptr);
+            SetUIFont(ctx->chkLineToolsShare);
+            SendMessageW(ctx->chkLineToolsShare, BM_SETCHECK,
+                         g_lineToolsShareStyle ? BST_CHECKED : BST_UNCHECKED, 0);
+            y += rowH + gapY;
+        }
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Arrow width" : L"矢印の太さ", defaultArrowWidth));
+        ctx->cbArrowWidth = addCombo(IDC_ANNOT_ARROW_WIDTH, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Arrow color" : L"矢印の色", defaultArrowColor));
+        ctx->cbArrowColor = addCombo(IDC_ANNOT_ARROW_COLOR, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Arrow head" : L"矢印の頭", defaultArrowHead));
+        ctx->cbArrowHead = addCombo(IDC_ANNOT_ARROW_HEAD, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Wave width" : L"波線の太さ", defaultWaveWidth));
+        ctx->cbWaveWidth = addCombo(IDC_ANNOT_WAVE_WIDTH, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Wave color" : L"波線の色", defaultWaveColor));
+        ctx->cbWaveColor = addCombo(IDC_ANNOT_WAVE_COLOR, false, controlW);
+
+        beginSection(kAnnotSectionLensPalette, IsEnglishUi() ? L"Magnifier" : L"拡大鏡");
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Magnifier shape" : L"拡大鏡の形", defaultMagnifierLabel));
+        ctx->cbMagnifierShape = addCombo(IDC_ANNOT_MAGNIFIER_SHAPE, false, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Current custom color" : L"現在のカスタム色", defaultPaletteColor));
+        ctx->palettePreviewColor = g_paletteCustomColor;
+        int paletteGroupW = previewW + previewGap + customBtnW;
+        int paletteX = pad + std::max(0, contentW - paletteGroupW);
+        int paletteY = y + std::max(ScaleY(hWnd, 2), (rowH - previewH) / 2);
+        ctx->previewPaletteCustom = CreateWindowExW(0, L"STATIC", L"",
+                                                    WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+                                                    paletteX, paletteY, previewW, previewH, contentParent,
+                                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_PALETTE_CUSTOM_PREVIEW)),
+                                                    g_hInst, nullptr);
+        ctx->btnPaletteCustom = CreateWindowExW(0, L"BUTTON",
+                                                IsEnglishUi() ? L"Edit color palette..." : L"カラーパレットを編集...",
+                                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                paletteX + previewW + previewGap, y, customBtnW, rowH, contentParent,
+                                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_PALETTE_CUSTOM)),
+                                                g_hInst, nullptr);
+        SetUIFont(ctx->btnPaletteCustom);
+        y += rowH + gapY;
+
+        beginSection(kAnnotSectionToolbar, IsEnglishUi() ? L"Top options" : L"topオプション");
+        addLabel(IsEnglishUi()
+                     ? L"Order and availability for each parent tool's top option (Up/Down changes the click cycle order)"
+                     : L"親ツールごとのtopオプションの順番と有効状態 (↑↓ でクリック時の切替順を変更)");
+
+        int toolListHeaderH = std::max(uiTextH + ScaleY(hWnd, 2), ScaleY(hWnd, 18));
+        int toolListHeaderPadX = ScaleY(hWnd, 6);
+        int stateColW = AnnotToolListStateColWidthPx(hWnd, contentW);
+        int stateColX = pad + std::max(0, contentW - stateColW);
+        HWND hdrTool = CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"Parent tool: option" : L"親ツール: オプション",
+                                       WS_CHILD | WS_VISIBLE,
+                                       pad + toolListHeaderPadX, y,
+                                       std::max(0, contentW - stateColW - toolListHeaderPadX), toolListHeaderH,
+                                       contentParent, nullptr, g_hInst, nullptr);
+        HWND hdrState = CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"State" : L"状態",
+                                        WS_CHILD | WS_VISIBLE,
+                                        stateColX + toolListHeaderPadX, y,
+                                        std::max(0, stateColW - toolListHeaderPadX), toolListHeaderH,
+                                        contentParent, nullptr, g_hInst, nullptr);
+        HWND hdrSep = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                                      pad, y + toolListHeaderH + ScaleY(hWnd, 2), contentW, ScaleY(hWnd, 2),
+                                      contentParent, nullptr, g_hInst, nullptr);
+        SetUIFont(hdrTool);
+        SetUIFont(hdrState);
+        SetUIFont(hdrSep);
+        y += toolListHeaderH + ScaleY(hWnd, 8);
+
+        int listH = std::max(rowH * 6, ScaleY(hWnd, 160));
+        ctx->lbTools = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                                       WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                                       pad, y, contentW, listH, contentParent,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_TOOL_LIST)),
+                                       g_hInst, nullptr);
+        SetUIFont(ctx->lbTools);
+        y += listH + gapY;
+
+        int btnW = ScaleY(hWnd, 90);
+        int btnH = rowH;
+        int btnGap = ScaleY(hWnd, 8);
+        int xBtns = pad;
+        ctx->btnToolUp = CreateWindowExW(0, L"BUTTON",
+                                         IsEnglishUi() ? L"Up" : L"上へ",
+                                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                         xBtns, y, btnW, btnH, contentParent,
+                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_TOOL_UP)),
+                                         g_hInst, nullptr);
+        xBtns += btnW + btnGap;
+        ctx->btnToolDown = CreateWindowExW(0, L"BUTTON",
+                                           IsEnglishUi() ? L"Down" : L"下へ",
+                                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                           xBtns, y, btnW, btnH, contentParent,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_TOOL_DOWN)),
+                                           g_hInst, nullptr);
+        xBtns += btnW + btnGap;
+        ctx->btnToolReset = CreateWindowExW(0, L"BUTTON",
+                                            IsEnglishUi() ? L"Reset" : L"リセット",
+                                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                            xBtns, y, btnW, btnH, contentParent,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_TOOL_RESET)),
+                                            g_hInst, nullptr);
+        SetUIFont(ctx->btnToolUp);
+        SetUIFont(ctx->btnToolDown);
+        SetUIFont(ctx->btnToolReset);
+        y += rowH + gapY;
+
+        HWND lblState = CreateWindowExW(0, L"STATIC",
+                                        IsEnglishUi() ? L"State:" : L"状態:",
+                                        WS_CHILD | WS_VISIBLE,
+                                        pad, y, controlW, uiTextH, contentParent, nullptr, g_hInst, nullptr);
+        SetUIFont(lblState);
+        y += uiTextH + labelGap;
+        ctx->cbToolState = CreateWindowExW(0, L"COMBOBOX", L"",
+                                           WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                           pad, y, std::min(contentW, ScaleY(hWnd, 240)), comboDropH,
+                                           contentParent,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_TOOL_STATE)),
+                                           g_hInst, nullptr);
+        SetUIFont(ctx->cbToolState);
+        if (ctx->cbToolState) {
+            SendMessageW(ctx->cbToolState, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(IsEnglishUi() ? L"ON (enabled)" : L"ON (有効)"));
+            SendMessageW(ctx->cbToolState, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(IsEnglishUi() ? L"OFF (disabled)" : L"OFF (グレーアウト)"));
+            SendMessageW(ctx->cbToolState, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(IsEnglishUi() ? L"OFF (hidden)" : L"OFF (非表示)"));
+            SendMessageW(ctx->cbToolState, CB_SETCURSEL, 0, 0);
+        }
+        y += rowH + gapY;
+
+        RefreshAnnotToolList(ctx);
+        SyncAnnotToolStateCombo(ctx);
+
+        finalizeSection();
+        y += ScaleY(hWnd, 12);
+
+        if (!ctx->embedded) {
+            int btnH = std::max(ScaleY(hWnd, 32), rowH);
+            int okW = ScaleY(hWnd, 88);
+            int cancelW = ScaleY(hWnd, 108);
+            int btnGap = ScaleY(hWnd, 10);
+            int btnY = clientH - pad - btnH;
+            int xCancel = std::max(pad, clientW - pad - cancelW);
+            int xOk = std::max(pad, xCancel - btnGap - okW);
+            ctx->btnOk = CreateWindowExW(0, L"BUTTON", UiApplyLabel(), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                                         xOk, btnY, okW, btnH, hWnd,
+                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
+            ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel(), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                             xCancel, btnY, cancelW, btnH, hWnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
+            SetUIFont(ctx->btnOk);
+            SetUIFont(ctx->btnCancel);
+        }
+
+        ctx->contentHeight = y + pad;
+        RECT winRc{};
+        GetWindowRect(hWnd, &winRc);
+        int winH = std::max(0, static_cast<int>(winRc.bottom - winRc.top));
+        int frameH = std::max(0, winH - clientH);
+        int desiredClientH = headerH + std::max(ctx->contentHeight, ScaleY(hWnd, 360)) + panelBottomPad;
+        int desiredHeight = std::max(ScaleY(hWnd, 720), desiredClientH + frameH);
+        int maxHeight = (workH > 0) ? std::max(0, workH - margin) : desiredHeight;
+        if (maxHeight > 0) desiredHeight = std::min(desiredHeight, maxHeight);
+        SetWindowPos(hWnd, nullptr, 0, 0, winRc.right - winRc.left, desiredHeight,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        LayoutAnnotSettingsChrome(hWnd, ctx);
+        RECT panelRc{};
+        if (ctx->scrollPanel) {
+            GetClientRect(ctx->scrollPanel, &panelRc);
+        }
+        ctx->clientHeight = std::max(0, static_cast<int>(panelRc.bottom - panelRc.top));
+        ctx->scrollPos = 0;
+        UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
+                           &ctx->scrollPos, &ctx->scrollMax);
+
+        // populate combos
+        if (ctx->cbTextFont) {
+            ResetAndFillDefaultFontListCombo(ctx->cbTextFont);
+            EnsureComboSelectFontFace(ctx->cbTextFont, g_textFontName);
+        }
+        if (ctx->cbTextSize) {
+            SendMessageW(ctx->cbTextSize, CB_RESETCONTENT, 0, 0);
+            for (int pt : {8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 40}) {
+                std::wstring label = std::to_wstring(pt) + L"pt";
+                int idx = static_cast<int>(SendMessageW(ctx->cbTextSize, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+                if (idx >= 0) SendMessageW(ctx->cbTextSize, CB_SETITEMDATA, idx, static_cast<LPARAM>(pt * 10));
+            }
+            SelectComboClosestPt10(ctx->cbTextSize, static_cast<int>(std::llround(g_textFontPt * 10.0)));
+        }
+
+        auto fillWidth = [&](HWND cb, std::initializer_list<int> pts10) {
+            if (!cb) return;
+            SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+            for (int pt10 : pts10) {
+                double pt = static_cast<double>(pt10) / 10.0;
+                std::wstring label = FormatSig2W(pt) + L"pt";
+                int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+                if (idx >= 0) SendMessageW(cb, CB_SETITEMDATA, idx, static_cast<LPARAM>(pt10));
+            }
+            SendMessageW(cb, CB_SETCURSEL, 0, 0);
+        };
+
+        fillWidth(ctx->cbLineWidth, {8, 15, 25, 40, 60});
+        fillWidth(ctx->cbArrowWidth, {8, 15, 25, 40, 60});
+        fillWidth(ctx->cbWaveWidth, {8, 15, 25, 40, 60});
+        fillWidth(ctx->cbFreehandWidth, {8, 15, 25, 40, 60});
+        fillWidth(ctx->cbMarkerWidth, {40, 60, 80, 100, 120});
+        fillWidth(ctx->cbMarkerTextWidth, {20, 40, 60, 80});
+
+        if (ctx->cbFreehandCorrection) {
+            SendMessageW(ctx->cbFreehandCorrection, CB_RESETCONTENT, 0, 0);
+            int idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Off" : L"オフ")));
+            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
+            idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Smooth" : L"ならす")));
+            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(1));
+            idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Pause to correct" : L"静止して補正")));
+            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(2));
+            idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Auto" : L"自動")));
+            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(3));
+            std::wstring correctionMode = NormalizeFreehandCorrection(g_config.freehandCorrection);
+            SelectComboByItemData(ctx->cbFreehandCorrection,
+                                  correctionMode == L"auto" ? 3 :
+                                  correctionMode == L"hold" ? 2 :
+                                  correctionMode == L"smooth" ? 1 : 0);
+        }
+
+        if (ctx->cbFreehandCorrectionStyle) {
+            SendMessageW(ctx->cbFreehandCorrectionStyle, CB_RESETCONTENT, 0, 0);
+            int idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionStyle, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Auto" : L"自動")));
+            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
+            idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionStyle, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Line style" : L"線設定")));
+            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(1));
+            idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionStyle, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Shape style" : L"幾何設定")));
+            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(2));
+            std::wstring style = NormalizeFreehandCorrectionStyle(g_config.freehandCorrectionStyle);
+            SelectComboByItemData(ctx->cbFreehandCorrectionStyle,
+                                  style == L"pen" ? 1 : (style == L"shape" ? 2 : 0));
+        }
+
+        if (ctx->cbFreehandCorrectionFill) {
+            SendMessageW(ctx->cbFreehandCorrectionFill, CB_RESETCONTENT, 0, 0);
+            int idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionFill, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Off" : L"オフ")));
+            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionFill, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
+            idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionFill, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Use shape setting" : L"幾何設定を使う")));
+            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionFill, CB_SETITEMDATA, idx, static_cast<LPARAM>(1));
+            idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionFill, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Always fill" : L"常に塗りつぶし")));
+            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionFill, CB_SETITEMDATA, idx, static_cast<LPARAM>(2));
+            std::wstring fill = NormalizeFreehandCorrectionFill(g_config.freehandCorrectionFill);
+            SelectComboByItemData(ctx->cbFreehandCorrectionFill,
+                                  fill == L"use_shape_setting" ? 1 : (fill == L"always_fill" ? 2 : 0));
+        }
+
+        if (ctx->cbMarkerTextStyle) {
+            SendMessageW(ctx->cbMarkerTextStyle, CB_RESETCONTENT, 0, 0);
+            int idx = static_cast<int>(SendMessageW(ctx->cbMarkerTextStyle, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Text marker" : L"通常")));
+            if (idx >= 0) SendMessageW(ctx->cbMarkerTextStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
+            idx = static_cast<int>(SendMessageW(ctx->cbMarkerTextStyle, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Underline style" : L"下線風")));
+            if (idx >= 0) SendMessageW(ctx->cbMarkerTextStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(1));
+            SelectComboByItemData(ctx->cbMarkerTextStyle, static_cast<DWORD_PTR>(g_markerTextUnderline ? 1 : 0));
+        }
+
+        FillColorCombo(ctx->cbTextColor);
+        FillColorCombo(ctx->cbLineColor);
+        FillColorCombo(ctx->cbArrowColor);
+        FillColorCombo(ctx->cbWaveColor);
+        FillColorCombo(ctx->cbFreehandColor);
+        FillColorCombo(ctx->cbMarkerColor);
+        FillColorCombo(ctx->cbMarkerTextColor);
+        FillColorCombo(ctx->cbShapeColor);
+
+        SelectComboByItemData(ctx->cbTextColor, static_cast<DWORD_PTR>(g_textColor));
+        SelectComboByItemData(ctx->cbLineColor, static_cast<DWORD_PTR>(g_lineColor));
+        SelectComboByItemData(ctx->cbArrowColor, static_cast<DWORD_PTR>(g_arrowColor));
+        SelectComboByItemData(ctx->cbWaveColor, static_cast<DWORD_PTR>(g_waveColor));
+        SelectComboByItemData(ctx->cbFreehandColor, static_cast<DWORD_PTR>(g_freehandColor));
+        SelectComboByItemData(ctx->cbMarkerColor, static_cast<DWORD_PTR>(g_markerFreeColor));
+        SelectComboByItemData(ctx->cbMarkerTextColor, static_cast<DWORD_PTR>(g_markerTextColor));
+        SelectComboByItemData(ctx->cbShapeColor, static_cast<DWORD_PTR>(g_shapeColor));
+
+        SelectComboClosestPt10(ctx->cbLineWidth, static_cast<int>(std::llround(g_lineWidthPt * 10.0)));
+        SelectComboClosestPt10(ctx->cbArrowWidth, static_cast<int>(std::llround(g_arrowWidthPt * 10.0)));
+        SelectComboClosestPt10(ctx->cbWaveWidth, static_cast<int>(std::llround(g_waveWidthPt * 10.0)));
+        SelectComboClosestPt10(ctx->cbFreehandWidth, static_cast<int>(std::llround(g_freehandWidthPt * 10.0)));
+        SelectComboClosestPt10(ctx->cbMarkerWidth, static_cast<int>(std::llround(g_markerFreeWidthPt * 10.0)));
+        SelectComboClosestPt10(ctx->cbMarkerTextWidth, static_cast<int>(std::llround(g_markerTextWidthPt * 10.0)));
+
+        if (ctx->cbArrowHead) {
+            SendMessageW(ctx->cbArrowHead, CB_RESETCONTENT, 0, 0);
+            int idx = static_cast<int>(SendMessageW(ctx->cbArrowHead, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Single" : L"単方向")));
+            if (idx >= 0) SendMessageW(ctx->cbArrowHead, CB_SETITEMDATA, idx, static_cast<LPARAM>(ArrowHead::Single));
+            idx = static_cast<int>(SendMessageW(ctx->cbArrowHead, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Double" : L"双方向")));
+            if (idx >= 0) SendMessageW(ctx->cbArrowHead, CB_SETITEMDATA, idx, static_cast<LPARAM>(ArrowHead::Double));
+            SelectComboByItemData(ctx->cbArrowHead, static_cast<DWORD_PTR>(g_arrowHead));
+        }
+
+        if (ctx->cbMagnifierShape) {
+            SendMessageW(ctx->cbMagnifierShape, CB_RESETCONTENT, 0, 0);
+            int idx = static_cast<int>(SendMessageW(ctx->cbMagnifierShape, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Circle" : L"正円")));
+            if (idx >= 0) {
+                SendMessageW(ctx->cbMagnifierShape, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierShape::Circle));
+            }
+            idx = static_cast<int>(SendMessageW(ctx->cbMagnifierShape, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Square" : L"正方形")));
+            if (idx >= 0) {
+                SendMessageW(ctx->cbMagnifierShape, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierShape::Square));
+            }
+            SelectComboByItemData(ctx->cbMagnifierShape, static_cast<DWORD_PTR>(g_magnifierShape));
+        }
+
+        if (ctx->cbShapeKind) {
+            SendMessageW(ctx->cbShapeKind, CB_RESETCONTENT, 0, 0);
+            const ShapeKind kinds[] = {
+                ShapeKind::Circle,
+                ShapeKind::Ellipse,
+                ShapeKind::RotatedEllipse,
+                ShapeKind::Square,
+                ShapeKind::Rectangle,
+                ShapeKind::Diamond,
+                ShapeKind::Triangle,
+                ShapeKind::EquilateralTriangle,
+            };
+            for (ShapeKind kind : kinds) {
+                std::wstring label = ShapeKindLabelW(kind);
+                int idx = static_cast<int>(SendMessageW(ctx->cbShapeKind, CB_ADDSTRING, 0,
+                                                        reinterpret_cast<LPARAM>(label.c_str())));
+                if (idx >= 0) {
+                    SendMessageW(ctx->cbShapeKind, CB_SETITEMDATA, idx, static_cast<LPARAM>(kind));
+                }
+            }
+            SelectComboByItemData(ctx->cbShapeKind, static_cast<DWORD_PTR>(g_shapeKind));
+        }
+
+        if (ctx->cbShapeDrawMode) {
+            SendMessageW(ctx->cbShapeDrawMode, CB_RESETCONTENT, 0, 0);
+            const ShapeDrawMode modes[] = {
+                ShapeDrawMode::Fill,
+                ShapeDrawMode::Outline,
+            };
+            for (ShapeDrawMode mode : modes) {
+                std::wstring label = ShapeDrawModeLabelW(mode);
+                int idx = static_cast<int>(SendMessageW(ctx->cbShapeDrawMode, CB_ADDSTRING, 0,
+                                                        reinterpret_cast<LPARAM>(label.c_str())));
+                if (idx >= 0) {
+                    SendMessageW(ctx->cbShapeDrawMode, CB_SETITEMDATA, idx, static_cast<LPARAM>(mode));
+                }
+            }
+            SelectComboByItemData(ctx->cbShapeDrawMode, static_cast<DWORD_PTR>(g_shapeDrawMode));
+        }
+
+        if (ctx->navList) {
+            const wchar_t* sectionLabels[kAnnotSectionCount] = {
+                IsEnglishUi() ? L"Text" : L"テキスト",
+                IsEnglishUi() ? L"Markers" : L"マーカー",
+                IsEnglishUi() ? L"Shapes" : L"図形",
+                IsEnglishUi() ? L"Line" : L"線",
+                IsEnglishUi() ? L"Magnifier / Palette" : L"拡大鏡 / パレット",
+                IsEnglishUi() ? L"Top options" : L"topオプション",
+            };
+            SendMessageW(ctx->navList, LB_RESETCONTENT, 0, 0);
+            for (int i = 0; i < ctx->sectionCount && i < kAnnotSectionCount; ++i) {
+                SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(sectionLabels[i]));
+            }
+            UpdateAnnotSectionNavUi(ctx, 0);
+        }
+
+        ApplyThemeToDialog(hWnd);
+        UpdateLineToolsShareUi(ctx);
+        return 0;
+    }
+    case WM_SHOWWINDOW:
+        LogPanelEvent(L"Annot", L"WM_SHOWWINDOW", static_cast<int>(wParam), 0, nullptr);
+        break;
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        return ThemeCtlColorPanel(ctl, hdc);
+    }
+    case WM_SIZE:
+        if (ctx) {
+            LayoutAnnotSettingsChrome(hWnd, ctx);
+            RECT panelRc{};
+            if (ctx->scrollPanel) {
+                GetClientRect(ctx->scrollPanel, &panelRc);
+            }
+            ctx->clientHeight = std::max(0, static_cast<int>(panelRc.bottom - panelRc.top));
+            if (ctx->contentHeight > 0) {
+                UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
+                                   &ctx->scrollPos, &ctx->scrollMax);
+            }
+        }
+        break;
+    case WM_VSCROLL:
+        if (ctx && ctx->scrollMax > 0) {
+            int code = LOWORD(wParam);
+            int pos = ctx->scrollPos;
+            int line = ScaleY(hWnd, 24);
+            int page = std::max(line, ctx->clientHeight - line);
+            switch (code) {
+            case SB_LINEUP: pos -= line; break;
+            case SB_LINEDOWN: pos += line; break;
+            case SB_PAGEUP: pos -= page; break;
+            case SB_PAGEDOWN: pos += page; break;
+            case SB_TOP: pos = 0; break;
+            case SB_BOTTOM: pos = ctx->scrollMax; break;
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION: {
+                SCROLLINFO si{};
+                si.cbSize = sizeof(si);
+                si.fMask = SIF_TRACKPOS;
+                if (GetScrollInfo(hWnd, SB_VERT, &si)) {
+                    pos = si.nTrackPos;
+                }
+                break;
+            }
+            default:
+                break;
+            }
+            ScrollAnnotSettingsTo(hWnd, ctx, pos);
+            return 0;
+        }
+        break;
+    case WM_MOUSEWHEEL:
+        if (ForwardWheelToDroppedComboInTree(hWnd, WM_MOUSEWHEEL, wParam, lParam)) return 0;
+        if (ctx && ctx->scrollMax > 0) {
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            int step = ScaleY(hWnd, 32);
+            int pixels = SettingsWheelDeltaToPixels(delta, step, &ctx->wheelRemainder);
+            if (pixels != 0) {
+                ScrollAnnotSettingsTo(hWnd, ctx, ctx->scrollPos - pixels);
+            }
+            return 0;
+        }
+        break;
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (!ctx || !dis) break;
+        if (dis->hwndItem == ctx->lbTools && dis->CtlID == IDC_ANNOT_TOOL_LIST) {
+            DrawAnnotToolListItem(ctx, dis);
+            return TRUE;
+        }
+        if (dis->hwndItem == ctx->cbTextFont) {
+            DrawFontComboItem(dis, 12, kFontPreviewSample, g_theme);
+            return TRUE;
+        }
+        if (dis->CtlID == IDC_ANNOT_PALETTE_CUSTOM_PREVIEW) {
+            HBRUSH br = CreateSolidBrush(ctx->palettePreviewColor);
+            FillRect(dis->hDC, &dis->rcItem, br);
+            DeleteObject(br);
+            return TRUE;
+        }
+        if (DrawThemeButton(dis)) return TRUE;
+        break;
+    }
+    case WM_MEASUREITEM: {
+        if (!ctx) break;
+        auto* mi = reinterpret_cast<LPMEASUREITEMSTRUCT>(lParam);
+        if (mi->CtlType == ODT_LISTBOX && mi->CtlID == IDC_ANNOT_TOOL_LIST) {
+            int uiTextH = FontLineHeightPx(hWnd, g_hUIFont);
+            mi->itemHeight = static_cast<UINT>(std::max(ScaleY(hWnd, 24), uiTextH + ScaleY(hWnd, 10)));
+            return TRUE;
+        }
+        if (mi->CtlType == ODT_COMBOBOX && mi->CtlID == 1001 && ctx->cbTextFont) {
+            mi->itemHeight = static_cast<UINT>(MeasureFontComboItemHeight(ctx->cbTextFont, 12));
+            return TRUE;
+        }
+        break;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        int code = HIWORD(wParam);
+        LogPanelEvent(L"Annot", L"WM_COMMAND", id, code, reinterpret_cast<HWND>(lParam));
+        if (ctx && id == IDC_ANNOT_SECTION_LIST && code == LBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(ctx->navList, LB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                UpdateAnnotSectionNavUi(ctx, sel);
+                JumpAnnotSettingsToSection(hWnd, ctx, sel);
+            }
+            return 0;
+        }
+        if (ctx && id >= IDC_ANNOT_CATEGORY_BUTTON_BASE &&
+            id < IDC_ANNOT_CATEGORY_BUTTON_BASE + kSettingsCategoryButtonCount) {
+            int category = id - IDC_ANNOT_CATEGORY_BUTTON_BASE;
+            if (category == kSettingsNavAnnot) return 0;
+            if (ctx->embedded) {
+                HWND parent = GetParent(hWnd);
+                if (parent) SendMessageW(parent, kUnifiedSettingsNavigateMsg, static_cast<WPARAM>(category), 0);
+                return 0;
+            }
+            ctx->nextDialog = category;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (id == IDOK && ctx) {
+            if (!ctx->embedded) {
+                ApplyAnnotationSettings(ctx);
+                ctx->ok = true;
+                ShowSoftNotice(hWnd, IsEnglishUi() ? L"Settings applied." : L"設定を反映しました。");
+            }
+            return 0;
+        }
+        if ((id == IDCANCEL || id == 0) && ctx) {
+            if (!ctx->embedded) {
+                ctx->notifyCancelDiscard = true;
+                DestroyWindow(hWnd);
+            }
+            return 0;
+        }
+        if (id == IDC_ANNOT_LINE_TOOLS_SHARE && code == BN_CLICKED && ctx) {
+            UpdateLineToolsShareUi(ctx);
+            return 0;
+        }
+        if (id == IDC_ANNOT_TOOL_LIST && code == LBN_SELCHANGE && ctx) {
+            SyncAnnotToolStateCombo(ctx);
+            return 0;
+        }
+        if (id == IDC_ANNOT_TOOL_STATE && code == CBN_SELCHANGE && ctx) {
+            auto toolOpt = ListboxSelectedTool(ctx->lbTools);
+            if (!toolOpt) return 0;
+            int toolIdx = static_cast<int>(*toolOpt);
+            int toolCount = ActiveToolCount(ctx);
+            if (toolIdx < 0 || toolIdx >= toolCount) return 0;
+            auto& states = ActiveToolStates(ctx);
+            if (states.size() != static_cast<size_t>(toolCount)) {
+                states.assign(static_cast<size_t>(toolCount), AnnotToolUiState::Enabled);
+            }
+            int sel = static_cast<int>(SendMessageW(ctx->cbToolState, CB_GETCURSEL, 0, 0));
+            AnnotToolUiState s = AnnotToolUiState::Enabled;
+            if (sel == 1) s = AnnotToolUiState::Disabled;
+            else if (sel == 2) s = AnnotToolUiState::Hidden;
+            states[static_cast<size_t>(toolIdx)] = s;
+            if (ctx->lbTools) InvalidateRect(ctx->lbTools, nullptr, TRUE);
+            return 0;
+        }
+        if ((id == IDC_ANNOT_TOOL_UP || id == IDC_ANNOT_TOOL_DOWN || id == IDC_ANNOT_TOOL_RESET) && ctx) {
+            std::vector<int> order = ActiveToolOrderIndices(ctx);
+            if (order.empty()) return 0;
+            int sel = ListboxFindSelectedIndex(ctx->lbTools);
+            if (id == IDC_ANNOT_TOOL_RESET) {
+                ctx->expandedToolOrder = {
+                    ToolMode::Select,
+                    ToolMode::Pan,
+                    ToolMode::Magnifier,
+                    ToolMode::TextBox,
+                    ToolMode::MarkerText,
+                    ToolMode::MarkerTextUnderline,
+                    ToolMode::MarkerTextColor,
+                    ToolMode::MarkerFree,
+                    ToolMode::Freehand,
+                    ToolMode::Shape,
+                    ToolMode::Line,
+                    ToolMode::Arrow,
+                    ToolMode::Wave,
+                    ToolMode::MarkerLine,
+                    ToolMode::MarkerArrow,
+                    ToolMode::MarkerWave,
+                    ToolMode::Eraser
+                };
+                ctx->expandedToolStates.assign(static_cast<size_t>(kToolModeCount), AnnotToolUiState::Enabled);
+                RefreshAnnotToolList(ctx);
+                SendMessageW(ctx->lbTools, LB_SETCURSEL, 0, 0);
+                SyncAnnotToolStateCombo(ctx);
+                return 0;
+            }
+            if (sel < 0) sel = 0;
+            if (id == IDC_ANNOT_TOOL_UP && sel > 0 && sel < static_cast<int>(order.size())) {
+                std::swap(order[static_cast<size_t>(sel)], order[static_cast<size_t>(sel - 1)]);
+                SetActiveToolOrderByIndices(ctx, order);
+                RefreshAnnotToolList(ctx);
+                SendMessageW(ctx->lbTools, LB_SETCURSEL, sel - 1, 0);
+                SyncAnnotToolStateCombo(ctx);
+                return 0;
+            }
+            if (id == IDC_ANNOT_TOOL_DOWN && sel >= 0 &&
+                sel + 1 < static_cast<int>(order.size())) {
+                std::swap(order[static_cast<size_t>(sel)], order[static_cast<size_t>(sel + 1)]);
+                SetActiveToolOrderByIndices(ctx, order);
+                RefreshAnnotToolList(ctx);
+                SendMessageW(ctx->lbTools, LB_SETCURSEL, sel + 1, 0);
+                SyncAnnotToolStateCombo(ctx);
+                return 0;
+            }
+            return 0;
+        }
+        if (id == IDC_ANNOT_PALETTE_CUSTOM && ctx) {
+            if (ctx->embedded) {
+                HWND parent = GetParent(hWnd);
+                if (parent) {
+                    SendMessageW(parent, kUnifiedSettingsNavigateMsg,
+                                 static_cast<WPARAM>(kSettingsNavPalette), 0);
+                }
+            }
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        if (ctx && ctx->embedded) return 0;
+        DestroyWindow(hWnd);
+        return 0;
+    case WM_DESTROY:
+        LogPanelEvent(L"Annot", L"WM_DESTROY", 0, 0, nullptr);
+        if (ctx) RestoreOwnerAfterModal(ctx->owner);
+        if (ctx) ctx->done = true;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+static void EnsureAnnotationSettingsClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = AnnotSettingsProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush
+                                           : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"AnnotSettingsDlgClass";
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+} // namespace
+
+namespace {
+constexpr int kUnifiedSettingsDlgWidth = 980;
+constexpr int kUnifiedSettingsDlgHeight = 820;
+constexpr int IDC_UNIFIED_SETTINGS_TAB = 7100;
+constexpr int IDC_UNIFIED_SETTINGS_APPLY = 7101;
+
+struct UnifiedSettingsShellCtx {
+    HWND owner = nullptr;
+    bool done = false;
+    int currentCategory = kSettingsNavGeneral;
+    HWND tabCategories = nullptr;
+    HWND btnOk = nullptr;
+    HWND btnApply = nullptr;
+    HWND btnCancel = nullptr;
+    HWND childBasic = nullptr;
+    HWND childNote = nullptr;
+    HWND childMarkup = nullptr;
+    HWND childAnnot = nullptr;
+    HWND childPalette = nullptr;
+    std::unique_ptr<GeneralSettingsCtx> basicCtx;
+    std::unique_ptr<GeneralSettingsCtx> noteCtx;
+    std::unique_ptr<MarkupSettingsCtx> markupCtx;
+    std::unique_ptr<AnnotSettingsCtx> annotCtx;
+    std::unique_ptr<PaletteSettingsCtx> paletteCtx;
+};
+
+static int UnifiedSettingsTabIndexFromCategory(int category) {
+    return std::clamp(category,
+                      static_cast<int>(kSettingsNavGeneral),
+                      static_cast<int>(kSettingsNavPalette));
+}
+
+static int UnifiedSettingsCategoryFromTabIndex(int tabIndex) {
+    return std::clamp(tabIndex,
+                      static_cast<int>(kSettingsNavGeneral),
+                      static_cast<int>(kSettingsNavPalette));
+}
+
+static void UpdateUnifiedSettingsTab(UnifiedSettingsShellCtx* ctx) {
+    if (!ctx) return;
+    if (ctx->tabCategories) {
+        SendMessageW(ctx->tabCategories, TCM_SETCURSEL,
+                     UnifiedSettingsTabIndexFromCategory(ctx->currentCategory), 0);
+        InvalidateRect(ctx->tabCategories, nullptr, TRUE);
+    }
+}
+
+static SIZE UnifiedSettingsInitialChildSize(HWND parent) {
+    SIZE size{ ScaleY(parent, 360), ScaleY(parent, 320) };
+    if (!parent) return size;
+    RECT rc{};
+    GetClientRect(parent, &rc);
+    const int clientW = std::max(0, static_cast<int>(rc.right - rc.left));
+    const int clientH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+    const int pad = ScaleY(parent, 12);
+    const int gap = ScaleY(parent, 8);
+    const int rowH = std::max(ScaleY(parent, 28), FontLineHeightPx(parent, g_hUIFont) + ScaleY(parent, 10));
+    const int tabH = std::max(ScaleY(parent, 38), FontLineHeightPx(parent, SettingsCategoryFont()) + ScaleY(parent, 16));
+    const int footerH = std::max(ScaleY(parent, 32), rowH);
+    const int childTop = pad + tabH + gap;
+    const int footerY = std::max(childTop, clientH - pad - footerH);
+    size.cx = std::max(ScaleY(parent, 360), clientW - pad * 2);
+    size.cy = std::max(ScaleY(parent, 320), footerY - childTop - gap);
+    return size;
+}
+
+static HWND EnsureUnifiedBasicPage(HWND parent, UnifiedSettingsShellCtx* shell) {
+    if (!parent || !shell) return nullptr;
+    if (shell->childBasic) return shell->childBasic;
+    static const wchar_t kClass[] = L"GeneralSettingsDlgClass";
+    EnsureGeneralSettingsClass();
+    const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
+    shell->basicCtx = std::make_unique<GeneralSettingsCtx>();
+    shell->basicCtx->embedded = true;
+    shell->basicCtx->pageMode = GeneralSettingsPageMode::Basic;
+    shell->basicCtx->initialSection = kGeneralSectionDisplay;
+    shell->childBasic = CreateWindowExW(0, kClass, L"",
+                                        WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+                                        0, 0, childSize.cx, childSize.cy,
+                                        parent, nullptr, g_hInst, shell->basicCtx.get());
+    return shell->childBasic;
+}
+
+static HWND EnsureUnifiedNotePage(HWND parent, UnifiedSettingsShellCtx* shell) {
+    if (!parent || !shell) return nullptr;
+    if (shell->childNote) return shell->childNote;
+    static const wchar_t kClass[] = L"GeneralSettingsDlgClass";
+    EnsureGeneralSettingsClass();
+    const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
+    shell->noteCtx = std::make_unique<GeneralSettingsCtx>();
+    shell->noteCtx->embedded = true;
+    shell->noteCtx->pageMode = GeneralSettingsPageMode::Note;
+    shell->noteCtx->initialSection = 0;
+    shell->childNote = CreateWindowExW(0, kClass, L"",
+                                       WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+                                       0, 0, childSize.cx, childSize.cy,
+                                       parent, nullptr, g_hInst, shell->noteCtx.get());
+    return shell->childNote;
+}
+
+static HWND EnsureUnifiedMarkupPage(HWND parent, UnifiedSettingsShellCtx* shell) {
+    if (!parent || !shell) return nullptr;
+    if (shell->childMarkup) return shell->childMarkup;
+    static const wchar_t kClass[] = L"MarkupSettingsDlgClass";
+    EnsureMarkupSettingsClass();
+    const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
+    shell->markupCtx = std::make_unique<MarkupSettingsCtx>();
+    shell->markupCtx->embedded = true;
+    shell->childMarkup = CreateWindowExW(0, kClass, L"",
+                                         WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+                                         0, 0, childSize.cx, childSize.cy,
+                                         parent, nullptr, g_hInst, shell->markupCtx.get());
+    return shell->childMarkup;
+}
+
+static HWND EnsureUnifiedAnnotPage(HWND parent, UnifiedSettingsShellCtx* shell) {
+    if (!parent || !shell) return nullptr;
+    if (shell->childAnnot) return shell->childAnnot;
+    static const wchar_t kClass[] = L"AnnotSettingsDlgClass";
+    EnsureAnnotationSettingsClass();
+    const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
+    shell->annotCtx = std::make_unique<AnnotSettingsCtx>();
+    shell->annotCtx->embedded = true;
+    shell->childAnnot = CreateWindowExW(0, kClass, L"",
+                                        WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+                                        0, 0, childSize.cx, childSize.cy,
+                                        parent, nullptr, g_hInst, shell->annotCtx.get());
+    return shell->childAnnot;
+}
+
+static HWND EnsureUnifiedPalettePage(HWND parent, UnifiedSettingsShellCtx* shell) {
+    if (!parent || !shell) return nullptr;
+    if (shell->childPalette) return shell->childPalette;
+    static const wchar_t kClass[] = L"PaletteSettingsDlgClass";
+    EnsurePaletteSettingsClass();
+    const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
+    shell->paletteCtx = std::make_unique<PaletteSettingsCtx>();
+    shell->paletteCtx->embedded = true;
+    shell->childPalette = CreateWindowExW(0, kClass, L"",
+                                          WS_CHILD | WS_VISIBLE,
+                                          0, 0, childSize.cx, childSize.cy,
+                                          parent, nullptr, g_hInst, shell->paletteCtx.get());
+    return shell->childPalette;
+}
+
+static void LayoutUnifiedSettingsShell(HWND hWnd, UnifiedSettingsShellCtx* ctx) {
+    if (!hWnd || !ctx) return;
+    RECT rc{};
+    GetClientRect(hWnd, &rc);
+    const int clientW = std::max(0, static_cast<int>(rc.right - rc.left));
+    const int clientH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+    const int pad = ScaleY(hWnd, 12);
+    const int gap = ScaleY(hWnd, 8);
+    const int rowH = std::max(ScaleY(hWnd, 28), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
+    const int tabH = std::max(ScaleY(hWnd, 38), FontLineHeightPx(hWnd, SettingsCategoryFont()) + ScaleY(hWnd, 16));
+    const int footerH = std::max(ScaleY(hWnd, 32), rowH);
+    const int tabY = pad;
+    const int footerY = std::max(tabY + tabH + gap, clientH - pad - footerH);
+    const int childTop = tabY + tabH + gap;
+    const int childH = std::max(ScaleY(hWnd, 320), footerY - childTop - gap);
+
+    if (ctx->tabCategories) {
+        SetWindowPos(ctx->tabCategories, nullptr, pad, tabY, std::max(0, clientW - pad * 2), tabH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        const int tabClientW = std::max(0, clientW - pad * 2);
+        const int tabItemW = std::max(ScaleY(hWnd, 96), tabClientW / kSettingsCategoryButtonCount);
+        SendMessageW(ctx->tabCategories, TCM_SETITEMSIZE, 0,
+                     MAKELPARAM(tabItemW, std::max(ScaleY(hWnd, 28), tabH - ScaleY(hWnd, 4))));
+    }
+
+    const int childX = pad;
+    const int childW = std::max(ScaleY(hWnd, 360), clientW - pad * 2);
+    for (HWND child : { ctx->childBasic, ctx->childNote, ctx->childMarkup, ctx->childAnnot, ctx->childPalette }) {
+        if (!child) continue;
+        SetWindowPos(child, nullptr, childX, childTop, childW, childH, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    const int okW = ScaleY(hWnd, 88);
+    const int cancelW = ScaleY(hWnd, 108);
+    const int applyW = ScaleY(hWnd, 88);
+    const int totalButtonW = okW + gap + cancelW + gap + applyW;
+    const int xOk = std::max(pad, clientW - pad - totalButtonW);
+    const int xCancel = xOk + okW + gap;
+    const int xApply = xCancel + cancelW + gap;
+    if (ctx->btnOk) {
+        SetWindowPos(ctx->btnOk, nullptr, xOk, footerY, okW, footerH, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (ctx->btnCancel) {
+        SetWindowPos(ctx->btnCancel, nullptr, xCancel, footerY, cancelW, footerH, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (ctx->btnApply) {
+        SetWindowPos(ctx->btnApply, nullptr, xApply, footerY, applyW, footerH, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+static void ShowUnifiedSettingsPage(HWND hWnd, UnifiedSettingsShellCtx* ctx, int category) {
+    if (!hWnd || !ctx) return;
+    ctx->currentCategory = std::clamp(category, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavPalette));
+    HWND target = nullptr;
+    switch (ctx->currentCategory) {
+    case kSettingsNavGeneral:
+        target = EnsureUnifiedBasicPage(hWnd, ctx);
+        break;
+    case kSettingsNavNote:
+        target = EnsureUnifiedNotePage(hWnd, ctx);
+        break;
+    case kSettingsNavMarkup:
+        target = EnsureUnifiedMarkupPage(hWnd, ctx);
+        break;
+    case kSettingsNavAnnot:
+        target = EnsureUnifiedAnnotPage(hWnd, ctx);
+        if (ctx->annotCtx) {
+            ctx->annotCtx->palettePreviewColor = g_paletteCustomColor;
+            if (ctx->annotCtx->previewPaletteCustom) {
+                InvalidateRect(ctx->annotCtx->previewPaletteCustom, nullptr, TRUE);
+            }
+        }
+        break;
+    case kSettingsNavPalette:
+        target = EnsureUnifiedPalettePage(hWnd, ctx);
+        break;
+    default:
+        break;
+    }
+
+    for (HWND child : { ctx->childBasic, ctx->childNote, ctx->childMarkup, ctx->childAnnot, ctx->childPalette }) {
+        if (!child) continue;
+        ShowWindow(child, child == target ? SW_SHOW : SW_HIDE);
+    }
+    UpdateUnifiedSettingsTab(ctx);
+    LayoutUnifiedSettingsShell(hWnd, ctx);
+    if (target) {
+        RequestLayout(target);
+        InvalidateRect(target, nullptr, TRUE);
+    }
+}
+
+static void ApplyUnifiedSettings(UnifiedSettingsShellCtx* ctx) {
+    if (!ctx) return;
+    if (ctx->basicCtx && ctx->childBasic) ApplyGeneralSettings(ctx->basicCtx.get());
+    if (ctx->noteCtx && ctx->childNote) ApplyGeneralSettings(ctx->noteCtx.get());
+    if (ctx->markupCtx && ctx->childMarkup) ApplyMarkupSettings(ctx->markupCtx.get());
+    if (ctx->annotCtx && ctx->childAnnot) ApplyAnnotationSettings(ctx->annotCtx.get());
+    if (ctx->paletteCtx && ctx->childPalette) {
+        SaveUserPaletteColorsForSettings(ctx->paletteCtx->colors,
+                                         std::size(ctx->paletteCtx->colors));
+    }
+}
+
+static bool DrawUnifiedSettingsTabItem(UnifiedSettingsShellCtx* ctx, const DRAWITEMSTRUCT* dis) {
+    if (!ctx || !dis || dis->hwndItem != ctx->tabCategories) return false;
+    if (dis->itemID >= static_cast<UINT>(kSettingsCategoryButtonCount)) return false;
+
+    const int category = UnifiedSettingsCategoryFromTabIndex(static_cast<int>(dis->itemID));
+    const bool selected = category == ctx->currentCategory;
+    const bool focused = (dis->itemState & ODS_FOCUS) != 0;
+    RECT rc = dis->rcItem;
+    InflateRect(&rc, -1, -1);
+
+    COLORREF fill = selected ? g_theme.selectionBg : g_theme.buttonBg;
+    if (!selected && (dis->itemState & ODS_HOTLIGHT)) {
+        fill = g_theme.buttonHot;
+    }
+    COLORREF text = selected ? g_theme.selectionText : g_theme.buttonText;
+    COLORREF border = selected ? g_theme.accent : g_theme.buttonBorder;
+
+    HBRUSH fillBrush = CreateSolidBrush(fill);
+    FillRect(dis->hDC, &rc, fillBrush);
+    DeleteObject(fillBrush);
+
+    HBRUSH borderBrush = CreateSolidBrush(border);
+    FrameRect(dis->hDC, &rc, borderBrush);
+    if (selected) {
+        RECT stripe{ rc.left + 2, rc.bottom - std::max(ScaleY(dis->hwndItem, 4), 2), rc.right - 2, rc.bottom - 1 };
+        FillRect(dis->hDC, &stripe, borderBrush);
+    }
+    DeleteObject(borderBrush);
+
+    std::wstring label = SettingsCategoryHeaderLabel(category);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, text);
+    HFONT font = selected ? SettingsCategoryFont() : SettingsNavFont();
+    HGDIOBJ oldFont = font ? SelectObject(dis->hDC, font) : nullptr;
+    RECT textRc = rc;
+    textRc.bottom -= selected ? ScaleY(dis->hwndItem, 2) : 0;
+    DrawTextW(dis->hDC, label.c_str(), -1, &textRc,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    if (oldFont) SelectObject(dis->hDC, oldFont);
+
+    if (focused) {
+        RECT focusRc = rc;
+        InflateRect(&focusRc, -3, -3);
+        DrawFocusRect(dis->hDC, &focusRc);
+    }
+    return true;
+}
+
+static LRESULT CALLBACK UnifiedSettingsShellProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<UnifiedSettingsShellCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = reinterpret_cast<UnifiedSettingsShellCtx*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        if (!ctx) return -1;
+
+        ctx->tabCategories = CreateWindowExW(0, WC_TABCONTROLW, L"",
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_SINGLELINE | TCS_OWNERDRAWFIXED,
+                                             0, 0, 100, 34, hWnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_UNIFIED_SETTINGS_TAB)),
+                                             g_hInst, nullptr);
+        const auto labels = SettingsCategoryButtonLabels();
+        if (ctx->tabCategories) {
+            for (int i = 0; i < kSettingsCategoryButtonCount; ++i) {
+                TCITEMW item{};
+                item.mask = TCIF_TEXT;
+                item.pszText = const_cast<LPWSTR>(labels[static_cast<size_t>(i)].c_str());
+                SendMessageW(ctx->tabCategories, TCM_INSERTITEMW, static_cast<WPARAM>(i),
+                             reinterpret_cast<LPARAM>(&item));
+            }
+        }
+        ctx->btnOk = CreateWindowExW(0, L"BUTTON", UiOkLabel(),
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                     0, 0, 88, 32, hWnd,
+                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)),
+                                     g_hInst, nullptr);
+        ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel(),
+                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                         0, 0, 108, 32, hWnd,
+                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)),
+                                         g_hInst, nullptr);
+        ctx->btnApply = CreateWindowExW(0, L"BUTTON", UiApplyLabel(),
+                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                        0, 0, 88, 32, hWnd,
+                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_UNIFIED_SETTINGS_APPLY)),
+                                        g_hInst, nullptr);
+        for (HWND child : { ctx->tabCategories, ctx->btnOk, ctx->btnCancel, ctx->btnApply }) {
+            SetUIFont(child);
+        }
+        SetSettingsCategoryFont(ctx->tabCategories);
+        ApplyThemeToDialog(hWnd);
+        ShowUnifiedSettingsPage(hWnd, ctx, ctx->currentCategory);
+        return 0;
+    }
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        return ThemeCtlColorPanel(ctl, hdc);
+    }
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (DrawUnifiedSettingsTabItem(ctx, dis)) return TRUE;
+        if (DrawThemeButton(dis)) return TRUE;
+        break;
+    }
+    case WM_NOTIFY: {
+        auto* hdr = reinterpret_cast<LPNMHDR>(lParam);
+        if (ctx && hdr && hdr->hwndFrom == ctx->tabCategories && hdr->code == TCN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(ctx->tabCategories, TCM_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                ShowUnifiedSettingsPage(hWnd, ctx, UnifiedSettingsCategoryFromTabIndex(sel));
+            }
+            return 0;
+        }
+        break;
+    }
+    case WM_SIZE:
+        if (ctx) LayoutUnifiedSettingsShell(hWnd, ctx);
+        return 0;
+    case WM_COMMAND: {
+        const int id = LOWORD(wParam);
+        if (!ctx) break;
+        if (id == IDOK) {
+            ApplyUnifiedSettings(ctx);
+            ctx->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (id == IDC_UNIFIED_SETTINGS_APPLY) {
+            ApplyUnifiedSettings(ctx);
+            ApplyThemeToDialog(hWnd);
+            ShowSoftNotice(hWnd, IsEnglishUi() ? L"Settings applied." : L"設定を反映しました。");
+            return 0;
+        }
+        if (id == IDCANCEL || id == 0) {
+            ctx->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    }
+    case kUnifiedSettingsNavigateMsg:
+        if (ctx) {
+            ShowUnifiedSettingsPage(hWnd, ctx, static_cast<int>(wParam));
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        if (ctx) ctx->done = true;
+        DestroyWindow(hWnd);
+        return 0;
+    case WM_DESTROY:
+        if (ctx) RestoreOwnerAfterModal(ctx->owner);
+        if (ctx) ctx->done = true;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}

@@ -1,0 +1,450 @@
+// file: settings/settings_common.cppinc
+// Included by settings.cpp (single TU).
+
+namespace {
+
+static void RequestLayout(HWND owner) {
+    if (!owner) return;
+    RECT rc{};
+    GetClientRect(owner, &rc);
+    int w = std::max(0, static_cast<int>(rc.right - rc.left));
+    int h = std::max(0, static_cast<int>(rc.bottom - rc.top));
+    SendMessageW(owner, WM_SIZE, SIZE_RESTORED, MAKELPARAM(w, h));
+}
+
+struct SettingsApplyEffects {
+    bool updateAutoSaveTimer = false;
+    bool updateAutoIntegrateTimer = false;
+    bool layout = false;
+    bool updateMathListVisibility = false;
+    bool refreshBottomPane = false;
+    bool reloadLectureList = false;
+    bool reloadSessionList = false;
+    bool applyThemeUi = false;
+    bool invalidatePdfView = false;
+    bool invalidateNoteEdit = false;
+};
+
+static void CommitSettingsApplyEffects(HWND owner, const SettingsApplyEffects& effects) {
+    if (owner) {
+        if (effects.updateAutoSaveTimer) {
+            UpdateAutoSaveTimer(owner);
+        }
+        if (effects.updateAutoIntegrateTimer) {
+            UpdateAutoIntegrateTimer(owner);
+        }
+        if (effects.layout) {
+            RequestLayout(owner);
+        }
+        if (effects.updateMathListVisibility) {
+            UpdateMathListVisibility();
+        }
+        if (effects.refreshBottomPane) {
+            RefreshBottomPaneView();
+        }
+        if (effects.reloadLectureList) {
+            PostMessageW(owner, kMsgReloadLectureList, 0, 0);
+        }
+        if (effects.reloadSessionList) {
+            PostMessageW(owner, kMsgReloadSessionList, 0, 0);
+        }
+        if (effects.applyThemeUi) {
+            ApplyThemeToUI(owner);
+        }
+    } else if (effects.applyThemeUi) {
+        ApplyThemeToUI(nullptr);
+    }
+    if (effects.invalidatePdfView && g_hPdfView) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+    if (effects.invalidateNoteEdit && g_hNoteEdit) {
+        InvalidateRect(g_hNoteEdit, nullptr, TRUE);
+    }
+}
+
+static int GetDpiY(HWND hWnd) {
+    HDC dc = GetDC(hWnd);
+    if (!dc) return 96;
+    int dpi = GetDeviceCaps(dc, LOGPIXELSY);
+    ReleaseDC(hWnd, dc);
+    return (dpi > 0) ? dpi : 96;
+}
+
+static int ScaleY(HWND hWnd, int pxAt96Dpi) {
+    return MulDiv(pxAt96Dpi, GetDpiY(hWnd), 96);
+}
+
+static int FontLineHeightPx(HWND hWnd, HFONT font) {
+    HDC dc = GetDC(hWnd);
+    if (!dc) return 16;
+    HFONT useFont = font ? font : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    HGDIOBJ old = SelectObject(dc, useFont);
+    TEXTMETRICW tm{};
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, old);
+    ReleaseDC(hWnd, dc);
+    return std::max(1, static_cast<int>(tm.tmHeight));
+}
+
+static int MeasureTextHeight(HWND hWnd, const std::wstring& text, int width, HFONT font) {
+    if (width <= 0) return FontLineHeightPx(hWnd, font);
+    HDC dc = GetDC(hWnd);
+    if (!dc) return FontLineHeightPx(hWnd, font);
+    HFONT useFont = font ? font : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    HGDIOBJ old = SelectObject(dc, useFont);
+    RECT rc{0, 0, width, 0};
+    DrawTextW(dc, text.c_str(), -1, &rc, DT_LEFT | DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+    SelectObject(dc, old);
+    ReleaseDC(hWnd, dc);
+    return std::max(1, static_cast<int>(rc.bottom - rc.top));
+}
+
+static HFONT CreateSettingsUIFont(double pt, LONG weight) {
+    LOGFONTW lf{};
+    if (g_hUIFont && GetObjectW(g_hUIFont, sizeof(lf), &lf)) {
+        // Reuse the app UI face so settings typography stays consistent.
+    } else {
+        lf.lfWeight = FW_NORMAL;
+        const auto face = GetDefaultFontFaceName();
+        wcscpy_s(lf.lfFaceName, face.c_str());
+    }
+    HDC screen = GetDC(nullptr);
+    int dpiY = screen ? GetDeviceCaps(screen, LOGPIXELSY) : 96;
+    if (screen) ReleaseDC(nullptr, screen);
+    lf.lfHeight = -MulDiv(static_cast<int>(std::lround(pt)), dpiY, 72);
+    lf.lfWeight = weight;
+    return CreateFontIndirectW(&lf);
+}
+
+static HFONT SettingsCategoryFont() {
+    static HFONT font = CreateSettingsUIFont(11.0, FW_SEMIBOLD);
+    return font ? font : g_hUIFont;
+}
+
+static HFONT SettingsNavFont() {
+    static HFONT font = CreateSettingsUIFont(11.0, FW_NORMAL);
+    return font ? font : g_hUIFont;
+}
+
+static HFONT SettingsSectionFont() {
+    static HFONT font = CreateSettingsUIFont(12.0, FW_SEMIBOLD);
+    return font ? font : g_hUIFont;
+}
+
+static void SetSettingsCategoryFont(HWND hWnd) {
+    if (hWnd) SendMessageW(hWnd, WM_SETFONT, reinterpret_cast<WPARAM>(SettingsCategoryFont()), TRUE);
+}
+
+static void SetSettingsNavFont(HWND hWnd) {
+    if (hWnd) SendMessageW(hWnd, WM_SETFONT, reinterpret_cast<WPARAM>(SettingsNavFont()), TRUE);
+}
+
+static void SetSettingsSectionFont(HWND hWnd) {
+    if (hWnd) SendMessageW(hWnd, WM_SETFONT, reinterpret_cast<WPARAM>(SettingsSectionFont()), TRUE);
+}
+
+// UnifiedSettingsProc-local WM_APP message. Keep value in the central registry
+// comment in core/app_core.h because WM_APP values are otherwise hard to audit.
+constexpr UINT kUnifiedSettingsNavigateMsg = WM_APP + 140;
+static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory);
+static void FillColorCombo(HWND cb);
+static void SelectComboByItemData(HWND cb, DWORD_PTR want);
+static void SelectComboClosestPt10(HWND cb, int wantPt10);
+static double GetSelectedPt(HWND cb, double fallback);
+static COLORREF GetSelectedColor(HWND cb, COLORREF fallback);
+static DWORD_PTR SelectedComboItemData(HWND cb, DWORD_PTR fallback);
+static std::wstring HexColorW(COLORREF c);
+
+static int SettingsControlWidth(HWND hWnd, int contentW, bool embedded, int normalPx, int embeddedPx) {
+    return std::min(contentW, ScaleY(hWnd, embedded ? embeddedPx : normalPx));
+}
+
+static std::wstring SettingLabelWithDefault(const std::wstring& label, const std::wstring& value) {
+    if (value.empty()) return label;
+    return IsEnglishUi()
+        ? (label + L" (default: " + value + L")")
+        : (label + L" (初期: " + value + L")");
+}
+
+static const wchar_t* UiApplyLabel() {
+    return IsEnglishUi() ? L"Apply" : L"反映";
+}
+
+static const wchar_t* UiOkLabel() {
+    return L"OK";
+}
+
+static const wchar_t* UiCancelLabel() {
+    return IsEnglishUi() ? L"Cancel" : L"キャンセル";
+}
+
+static const wchar_t* UiCloseLabel() {
+    return IsEnglishUi() ? L"Close" : L"閉じる";
+}
+
+template <size_t N>
+static int LayoutHeaderSectionButtons(HWND hWnd, const std::array<HWND, N>& buttons,
+                                      int left, int top, int width, int rowH) {
+    if (width <= 0) return top;
+    int visibleCount = 0;
+    for (HWND button : buttons) {
+        if (button) ++visibleCount;
+    }
+    if (visibleCount <= 0) return top;
+
+    const int gap = ScaleY(hWnd, 8);
+    const int totalGap = gap * std::max(0, visibleCount - 1);
+    const int buttonW = std::max(ScaleY(hWnd, 72), (width - totalGap) / visibleCount);
+    int x = left;
+    for (HWND button : buttons) {
+        if (!button) continue;
+        SetWindowPos(button, nullptr, x, top, buttonW, rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+        x += buttonW + gap;
+    }
+    return top + rowH;
+}
+
+constexpr int kSettingsCategoryButtonCount = 5;
+enum SettingsCategoryNavTarget : int {
+    kSettingsNavNone = -1,
+    kSettingsNavGeneral = 0,
+    kSettingsNavNote = 1,
+    kSettingsNavMarkup = 2,
+    kSettingsNavAnnot = 3,
+    kSettingsNavPalette = 4,
+};
+
+static std::wstring SettingsCategoryDialogTitle(int target) {
+    const UiText& ui = GetUiText();
+    switch (target) {
+    case kSettingsNavNote:
+        return ui.menuNoteSettings;
+    case kSettingsNavMarkup:
+        return ui.menuMarkupSettings;
+    case kSettingsNavAnnot:
+        return ui.menuAnnotSettings;
+    case kSettingsNavPalette:
+        return ui.menuPaletteSettings;
+    case kSettingsNavGeneral:
+    default:
+        return ui.menuGeneralSettings;
+    }
+}
+
+static std::wstring SettingsCategoryHeaderLabel(int target) {
+    switch (target) {
+    case kSettingsNavNote:
+        return IsEnglishUi() ? L"Note" : L"ノート";
+    case kSettingsNavMarkup:
+        return IsEnglishUi() ? L"Markup" : L"マークアップ";
+    case kSettingsNavAnnot:
+        return IsEnglishUi() ? L"Annotation" : L"注釈";
+    case kSettingsNavPalette:
+        return IsEnglishUi() ? L"Color Palette" : L"カラーパレット";
+    case kSettingsNavGeneral:
+    default:
+        return IsEnglishUi() ? L"Basic" : L"基本";
+    }
+}
+
+static std::array<std::wstring, kSettingsCategoryButtonCount> SettingsCategoryButtonLabels() {
+    return {
+        SettingsCategoryHeaderLabel(kSettingsNavGeneral),
+        SettingsCategoryHeaderLabel(kSettingsNavNote),
+        SettingsCategoryHeaderLabel(kSettingsNavMarkup),
+        SettingsCategoryHeaderLabel(kSettingsNavAnnot),
+        SettingsCategoryHeaderLabel(kSettingsNavPalette),
+    };
+}
+
+static void UpdateSettingsCategoryButtons(const std::array<HWND, kSettingsCategoryButtonCount>& buttons,
+                                          int activeIndex) {
+    for (int i = 0; i < kSettingsCategoryButtonCount; ++i) {
+        if (!buttons[static_cast<size_t>(i)]) continue;
+        EnableWindow(buttons[static_cast<size_t>(i)], i != activeIndex);
+    }
+}
+
+static void UpdateDialogScroll(HWND hWnd, int contentH, int clientH, int* scrollPos, int* scrollMax) {
+    if (!scrollPos || !scrollMax) return;
+    int maxPos = std::max(0, contentH - clientH);
+    *scrollMax = maxPos;
+    if (*scrollPos > maxPos) *scrollPos = maxPos;
+    if (*scrollPos < 0) *scrollPos = 0;
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    si.nMin = 0;
+    si.nMax = std::max(0, contentH - 1);
+    si.nPage = static_cast<UINT>(std::max(0, clientH));
+    si.nPos = *scrollPos;
+    SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+}
+
+static void ScrollDialogTo(HWND hWnd, int newPos, int* scrollPos, int scrollMax) {
+    if (!scrollPos) return;
+    int clamped = std::clamp(newPos, 0, scrollMax);
+    if (clamped == *scrollPos) return;
+    int delta = *scrollPos - clamped;
+    *scrollPos = clamped;
+    ScrollWindowEx(hWnd, 0, delta, nullptr, nullptr, nullptr, nullptr,
+                   SW_INVALIDATE | SW_ERASE | SW_SCROLLCHILDREN);
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_POS;
+    si.nPos = clamped;
+    SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+}
+
+static int SettingsWheelDeltaToPixels(int wheelDelta, int stepPx, int* remainder) {
+    int raw = wheelDelta * std::max(1, stepPx);
+    if (remainder) raw += *remainder;
+    int pixels = raw / WHEEL_DELTA;
+    if (remainder) *remainder = raw % WHEEL_DELTA;
+    return pixels;
+}
+
+static bool ForwardWheelToDroppedComboInTree(HWND root, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (!root || !IsWindow(root)) return false;
+
+    POINT wheelPt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) }; // screen coords
+    HWND underCursor = WindowFromPoint(wheelPt);
+
+    std::vector<HWND> stack;
+    stack.push_back(root);
+
+    while (!stack.empty()) {
+        HWND cur = stack.back();
+        stack.pop_back();
+
+        for (HWND child = GetWindow(cur, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+            wchar_t cls[64]{};
+            if (GetClassNameW(child, cls, static_cast<int>(std::size(cls))) > 0) {
+                if (wcscmp(cls, L"ComboBox") == 0 &&
+                    SendMessageW(child, CB_GETDROPPEDSTATE, 0, 0) != 0) {
+                    COMBOBOXINFO cbi{};
+                    cbi.cbSize = sizeof(cbi);
+                    if (GetComboBoxInfo(child, &cbi) && cbi.hwndList) {
+                        HWND list = cbi.hwndList;
+                        HWND dropWnd = GetParent(list) ? GetParent(list) : list;
+
+                        RECT rcDrop{}, rcCombo{};
+                        bool hasDrop = GetWindowRect(dropWnd, &rcDrop) != 0;
+                        bool hasCombo = GetWindowRect(child, &rcCombo) != 0;
+
+                        bool overDrop = hasDrop && PtInRect(&rcDrop, wheelPt);
+                        bool overCombo = hasCombo && PtInRect(&rcCombo, wheelPt);
+                        bool overKnownWindow = (underCursor && (underCursor == list || underCursor == dropWnd ||
+                                                               IsChild(dropWnd, underCursor) || IsChild(list, underCursor)));
+
+                        if (!overDrop && !overCombo && !overKnownWindow) {
+                            // Another combo might be dropped; keep searching.
+                        } else {
+                            SendMessageW(dropWnd, msg, wParam, lParam);
+                            return true;
+                        }
+                    } else {
+                        RECT rcCombo{};
+                        if (GetWindowRect(child, &rcCombo) && PtInRect(&rcCombo, wheelPt)) {
+                            SendMessageW(child, msg, wParam, lParam);
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            if (GetWindow(child, GW_CHILD)) {
+                stack.push_back(child);
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool IsEditableTextInputControlForIme(HWND hWnd) {
+    if (!hWnd || !IsWindow(hWnd)) return false;
+    wchar_t cls[64]{};
+    if (GetClassNameW(hWnd, cls, static_cast<int>(std::size(cls))) <= 0) return false;
+    if (_wcsicmp(cls, L"Edit") == 0 ||
+        _wcsicmp(cls, MSFTEDIT_CLASS) == 0 ||
+        _wcsnicmp(cls, L"RICHEDIT", 8) == 0) {
+        LONG_PTR style = GetWindowLongPtrW(hWnd, GWL_STYLE);
+        return (style & ES_READONLY) == 0;
+    }
+    if (_wcsicmp(cls, L"ComboBox") == 0) {
+        LONG_PTR style = GetWindowLongPtrW(hWnd, GWL_STYLE);
+        return (style & CBS_DROPDOWNLIST) == 0;
+    }
+    return false;
+}
+
+static bool IsExplicitImeTargetWindowForModal(HWND hWnd) {
+    if (!hWnd || !IsWindow(hWnd)) return false;
+    if (hWnd == g_hPdfView) {
+        return g_pdf.editingText;
+    }
+    if (hWnd == g_hNoteEdit || (g_hNoteEdit && IsChild(g_hNoteEdit, hWnd))) {
+        return true;
+    }
+    return IsEditableTextInputControlForIme(hWnd);
+}
+
+static void DisableImeForWindow(HWND hWnd) {
+    if (!hWnd) return;
+    HIMC himc = ImmGetContext(hWnd);
+    if (himc) {
+        ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+        ImmSetOpenStatus(himc, FALSE);
+        ImmReleaseContext(hWnd, himc);
+    }
+    ImmAssociateContextEx(hWnd, nullptr, 0);
+}
+
+static void EnableImeForWindow(HWND hWnd) {
+    if (!hWnd) return;
+    ImmAssociateContextEx(hWnd, nullptr, IACE_DEFAULT);
+}
+
+static void EnforceImePolicyForWindowInModal(HWND hWnd) {
+    if (!hWnd || !IsWindow(hWnd)) return;
+    if (GetWindowThreadProcessId(hWnd, nullptr) != GetCurrentThreadId()) return;
+    if (IsExplicitImeTargetWindowForModal(hWnd)) {
+        EnableImeForWindow(hWnd);
+        return;
+    }
+    DisableImeForWindow(hWnd);
+}
+
+static bool ShouldSkipImeMessageInModalLoop(const MSG& msg) {
+    if (HWND focused = GetFocus(); focused) {
+        EnforceImePolicyForWindowInModal(focused);
+    }
+    if (msg.hwnd) {
+        EnforceImePolicyForWindowInModal(msg.hwnd);
+    }
+    bool isImeMsg = (msg.message == WM_IME_STARTCOMPOSITION ||
+                     msg.message == WM_IME_COMPOSITION ||
+                     msg.message == WM_IME_ENDCOMPOSITION);
+    HWND imeTarget = msg.hwnd ? msg.hwnd : GetFocus();
+    if (isImeMsg && !IsExplicitImeTargetWindowForModal(imeTarget)) {
+        DisableImeForWindow(imeTarget);
+        return true;
+    }
+    if (msg.message == WM_KEYDOWN && msg.wParam == VK_PROCESSKEY &&
+        !IsExplicitImeTargetWindowForModal(imeTarget)) {
+        return true;
+    }
+    return false;
+}
+
+static void RestoreOwnerAfterModal(HWND owner) {
+    if (!owner) return;
+    if (!IsWindow(owner)) return;
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    SetActiveWindow(owner);
+    BringWindowToTop(owner);
+}
+
+} // namespace

@@ -1,0 +1,14 @@
+diff --git a/sw/Library_sw.mk b/sw/Library_sw.mk
+--- a/sw/Library_sw.mk
++++ b/sw/Library_sw.mk
+@@ -826,6 +826,10 @@ $(eval $(call gb_Library_add_exception_objects,sw,\
+     sw/source/uibase/wrtsh/wrtundo \
+ ))
+ 
++$(eval $(call gb_Library_add_exception_objects,sw,\
++    sw/source/uibase/dbui/dbtree \
++))
++
+ ifneq (,$(filter DBCONNECTIVITY,$(BUILD_TYPE)))
+ $(eval $(call gb_Library_add_exception_objects,sw,\
+     sw/source/uibase/dbui/dbtree \

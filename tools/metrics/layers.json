@@ -1,0 +1,65 @@
+{
+  "layers": [
+    {
+      "name": "platform",
+      "paths": [
+        "core/path_safety.h",
+        "core/ui_notify.h",
+        "core/ui_prompts.h",
+        "core/app_log.h",
+        "core/atomic_write.h",
+        "core/fault_injection.h",
+        "core/private_fonts.h",
+        "core/font_list.h",
+        "ui/noop_nav_guard.h",
+        "ui/combobox_guard.h"
+      ],
+      "may_depend_on": []
+    },
+    {
+      "name": "foundation",
+      "paths": ["core/"],
+      "may_depend_on": ["platform", "domain"]
+    },
+    {
+      "name": "domain",
+      "paths": ["clrop/", "note/", "math/", "theme/"],
+      "may_depend_on": ["platform", "foundation"]
+    },
+    {
+      "name": "bridge",
+      "paths": ["bridge/"],
+      "may_depend_on": ["platform", "foundation"]
+    },
+    {
+      "name": "shared_resources",
+      "paths": ["resources/"],
+      "may_depend_on": ["platform"]
+    },
+    {
+      "name": "services",
+      "paths": ["file_output/", "search/", "help/", "schedule/"],
+      "may_depend_on": ["platform", "foundation", "domain", "bridge", "shared_resources"]
+    },
+    {
+      "name": "view",
+      "paths": ["pdf_view/", "note_view/", "ui/"],
+      "may_depend_on": ["platform", "foundation", "domain", "services", "bridge"]
+    },
+    {
+      "name": "app_shell",
+      "paths": ["main/", "settings/"],
+      "may_depend_on": ["platform", "foundation", "domain", "services", "view", "bridge", "shared_resources"]
+    },
+    {
+      "name": "entry",
+      "paths": ["main.cpp"],
+      "may_depend_on": ["platform", "foundation", "domain", "services", "view", "app_shell", "bridge", "shared_resources"]
+    },
+    {
+      "name": "readonly_entry",
+      "paths": ["readonly_viewer/"],
+      "may_depend_on": ["platform", "foundation", "domain", "view", "bridge", "shared_resources"]
+    }
+  ]
+}

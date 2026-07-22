@@ -1,0 +1,97 @@
+diff --git a/oox/inc/drawingml/chart/chartspacemodel.hxx b/oox/inc/drawingml/chart/chartspacemodel.hxx
+--- a/oox/inc/drawingml/chart/chartspacemodel.hxx
++++ b/oox/inc/drawingml/chart/chartspacemodel.hxx
+@@ -53,6 +53,7 @@ struct ChartSpaceModel
+     ClrMapPtr           mpClrMap;           /// Optionally passed color map to update
+     OUString            maDrawingPath;      /// Path to drawing fragment with embedded shapes.
+     OUString            maSheetPath;        /// Path to embedded charts.
++    OUString            maLang;             /// Language of automatic chart text.
+     sal_Int32           mnDispBlanksAs;     /// Mode how to display blank values.
+     sal_Int32           mnStyle;            /// Index to default formatting.
+     bool                mbExplicitStyle;    /// Is there a <c:style> tag?
+diff --git a/oox/source/drawingml/chart/chartspacefragment.cxx b/oox/source/drawingml/chart/chartspacefragment.cxx
+--- a/oox/source/drawingml/chart/chartspacefragment.cxx
++++ b/oox/source/drawingml/chart/chartspacefragment.cxx
+@@ -63,6 +63,9 @@ ContextHandlerRef ChartSpaceFragment::onCreateContext( sal_Int32 nElement, const
+                 case C_TOKEN ( date1904 ):
+                     mrModel.mbDate1904 = rAttribs.getBool( XML_val, false );
+                     return nullptr;
++                case C_TOKEN( lang ):
++                    mrModel.maLang = rAttribs.getStringDefaulted( XML_val );
++                    return nullptr;
+                 case C_TOKEN( chart ):
+                     return this;
+                 case C_TOKEN( spPr ):
+diff --git a/oox/source/drawingml/chart/objectformatter.cxx b/oox/source/drawingml/chart/objectformatter.cxx
+--- a/oox/source/drawingml/chart/objectformatter.cxx
++++ b/oox/source/drawingml/chart/objectformatter.cxx
+@@ -649,8 +649,9 @@ public:
+                             ObjectFormatterData& rData,
+                             const AutoTextEntry* pAutoTextEntry,
+                             const ModelRef< TextBody >& rxGlobalTextProp,
+-                            bool bJapaneseChart,
+-                            bool bJapaneseChartTitle );
++                            bool bJapaneseChartLanguage,
++                            bool bHasJapaneseChartTitle,
++                            bool bChartTitleObject );
+ 
+     /** Converts text formatting to the passed property set. */
+     void                convertFormatting(
+@@ -919,7 +920,8 @@ bool lclHasJapaneseChartTitle(const ChartSpaceModel& rChartSpace)
+ 
+ TextFormatter::TextFormatter( ObjectFormatterData& rData, const AutoTextEntry* pAutoTextEntry,
+                               const ModelRef< TextBody >& rxGlobalTextProp,
+-                              bool bJapaneseChart, bool bJapaneseChartTitle ) :
++                              bool bJapaneseChartLanguage, bool bHasJapaneseChartTitle,
++                              bool bChartTitleObject ) :
+     DetailFormatterBase( rData, pAutoTextEntry )
+ {
+     if( !pAutoTextEntry )
+@@ -932,15 +934,31 @@ TextFormatter::TextFormatter( ObjectFormatterData& rData, const AutoTextEntry* p
+     OUString aAsianFontName;
+     sal_Int16 nAsianFontPitch = 0;
+     sal_Int16 nAsianFontFamily = 0;
+-    if (bJapaneseChart
++    if ((bJapaneseChartLanguage || bHasJapaneseChartTitle)
+         && !mxAutoText->maAsianFont.getFontData(aAsianFontName, nAsianFontPitch,
+                                                 nAsianFontFamily, nullptr,
+                                                 mrData.mrFilter))
+     {
+-        // PowerPoint's classic Japanese chart style uses MS Gothic for the title. Other
+-        // generated chart labels use the Office-compatible Japanese sans fallback.
+-        mxAutoText->maAsianFont.setAttributes(
+-            bJapaneseChartTitle ? u"MS Gothic"_ustr : u"Yu Gothic"_ustr);
++        OUString aFilterName;
++        mrData.mrFilter.getMediaDescriptor()[utl::MediaDescriptor::PROP_FILTERNAME]
++            >>= aFilterName;
++
++        OUString aJapaneseTypeface;
++        if (aFilterName.startsWithIgnoreAsciiCase("Impress") && bHasJapaneseChartTitle)
++        {
++            // Preserve PowerPoint's existing classic-title behavior.
++            aJapaneseTypeface = bChartTitleObject ? u"MS Gothic"_ustr : u"Yu Gothic"_ustr;
++        }
++        else if (const Theme* pTheme = mrData.mrFilter.getCurrentTheme())
++        {
++            if (pTheme->getTheme())
++                aJapaneseTypeface
++                    = pTheme->getTheme()->getFontScheme().findMinorSupplementalTypeface(u"Jpan");
++        }
++
++        if (aJapaneseTypeface.isEmpty())
++            aJapaneseTypeface = u"Yu Gothic"_ustr;
++        mxAutoText->maAsianFont.setAttributes(aJapaneseTypeface);
+     }
+     ::Color nTextColor = getPhColor( -1 );
+     if( sal_Int32(nTextColor) >= 0 ) {
+@@ -979,7 +997,9 @@ ObjectTypeFormatter::ObjectTypeFormatter( ObjectFormatterData& rData, const Obje
+     maLineFormatter(   rData, lclGetAutoFormatEntry( rEntry.mpAutoLines,   rChartSpace.mnStyle ), eObjType ),
+     maFillFormatter(   rData, lclGetAutoFormatEntry( rEntry.mpAutoFills,   rChartSpace.mnStyle ), eObjType ),
+     maTextFormatter(   rData, lclGetAutoTextEntry(   rEntry.mpAutoTexts,   rChartSpace.mnStyle ),
+-                       rChartSpace.mxTextProp, lclHasJapaneseChartTitle(rChartSpace),
++                       rChartSpace.mxTextProp,
++                       rChartSpace.maLang.startsWithIgnoreAsciiCase("ja"),
++                       lclHasJapaneseChartTitle(rChartSpace),
+                        eObjType == OBJECTTYPE_CHARTTITLE ),
+     mrModelObjHelper( rData.maModelObjHelper ),
+     mrEntry( rEntry )

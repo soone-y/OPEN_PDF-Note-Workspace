@@ -1,0 +1,814 @@
+// file: main/main_local_path_browser.cppinc
+
+enum class LocalPathBrowserEntryKind {
+    DriveRoot,
+    Directory,
+    File,
+};
+
+struct LocalPathBrowserEntry {
+    std::filesystem::path path;
+    LocalPathBrowserEntryKind kind = LocalPathBrowserEntryKind::File;
+};
+
+struct LocalPathBrowserHit {
+    RECT rect{};
+    std::filesystem::path path;
+};
+
+struct LocalPathBrowserState {
+    HWND owner = nullptr;
+    HWND hwnd = nullptr;
+    HWND edit = nullptr;
+    HWND list = nullptr;
+    HWND status = nullptr;
+    std::wstring title;
+    std::filesystem::path currentDir;
+    bool requireDirectory = false;
+    bool allowMultiple = false;
+    bool browseOnly = false;
+    bool showDriveRoots = false;
+    bool useNativeAfterClose = false;
+    bool done = false;
+    bool accepted = false;
+    std::vector<LocalPathBrowserEntry> entries;
+    std::vector<LocalPathBrowserHit> pathHits;
+    std::vector<std::wstring> results;
+};
+
+static bool IsBrowserDirectoryEntry(const LocalPathBrowserEntry& entry) {
+    return entry.kind == LocalPathBrowserEntryKind::DriveRoot ||
+           entry.kind == LocalPathBrowserEntryKind::Directory;
+}
+
+static std::wstring DisplayNameForBrowserEntry(const LocalPathBrowserEntry& entry) {
+    std::wstring name = entry.path.filename().wstring();
+    if (name.empty()) name = entry.path.wstring();
+    switch (entry.kind) {
+    case LocalPathBrowserEntryKind::DriveRoot:
+        return L"[DRV] " + name;
+    case LocalPathBrowserEntryKind::Directory:
+        return L"[DIR] " + name;
+    case LocalPathBrowserEntryKind::File:
+    default:
+        return L"      " + name;
+    }
+}
+
+// Folder names that are likely to be useful when choosing a class/course
+// directory.  Keep this local to the app picker: it is only a display order
+// hint and must not affect path handling or workspace semantics.
+static int LocalBrowserDirectoryRelevance(const LocalPathBrowserEntry& entry) {
+    if (entry.kind != LocalPathBrowserEntryKind::Directory) return 0;
+    const std::wstring name = ToLowerAscii(entry.path.filename().wstring());
+    static const std::array<const wchar_t*, 43> keywords = {
+        L"授業", L"講義", L"実習", L"演習", L"教室", L"クラス", L"科目",
+        L"学習", L"学校", L"大学", L"高校", L"中学", L"研修", L"セミナー",
+        L"コース", L"講座", L"ゼミ", L"履修", L"時間割", L"教材", L"課題", L"レポート",
+        L"classroom", L"lecture", L"lesson", L"course", L"class", L"seminar",
+        L"practicum", L"workshop", L"tutorial", L"exercise", L"training",
+        L"education", L"school", L"university", L"college", L"subject", L"curriculum",
+        L"coursework", L"homework", L"assignment", L"syllabus"
+    };
+    for (size_t index = 0; index < keywords.size(); ++index) {
+        if (name.find(keywords[index]) != std::wstring::npos) {
+            return static_cast<int>(keywords.size() - index);
+        }
+    }
+    return 0;
+}
+
+static bool ValidateExistingLocalPathForBrowser(HWND owner,
+                                                const std::filesystem::path& selected,
+                                                const std::wstring& title,
+                                                bool requireDirectory) {
+    (void)title;
+    if (selected.empty()) return false;
+    if (IsUncPath(selected)) {
+        ShowSoftNotice(owner,
+                       IsEnglishUi() ? L"UNC/device paths are not supported."
+                                     : L"UNC/デバイスパスは使用できません。",
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+    std::filesystem::path root = selected.root_path();
+    if (!root.empty()) {
+        UINT driveType = GetDriveTypeW(root.c_str());
+        if (driveType == DRIVE_REMOTE) {
+            ShowSoftNotice(owner,
+                           IsEnglishUi() ? L"Network drive paths are not supported."
+                                         : L"ネットワークドライブのパスは使用できません。",
+                           SoftNoticeKind::Warning);
+            return false;
+        }
+    }
+    bool isReparse = false;
+    if (TryIsReparsePointNoFollow(selected, isReparse) && isReparse) {
+        ShowSoftNotice(owner,
+                       IsEnglishUi() ? L"Reparse point paths are not supported."
+                                     : L"ジャンクション/シンボリックリンク等（reparse point）のパスは使用できません。",
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+    std::error_code ec;
+    const bool matchesType = requireDirectory
+        ? std::filesystem::is_directory(selected, ec)
+        : std::filesystem::is_regular_file(selected, ec);
+    if (ec || !matchesType) {
+        ShowSoftNotice(owner,
+                       requireDirectory
+                           ? (IsEnglishUi() ? L"Folder was not found." : L"フォルダが見つかりません。")
+                           : (IsEnglishUi() ? L"File was not found." : L"ファイルが見つかりません。"),
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+    return true;
+}
+
+static void RebuildLocalPathBrowserHits(LocalPathBrowserState* state, HWND pathBar) {
+    if (!state || !pathBar) return;
+    state->pathHits.clear();
+    if (state->showDriveRoots) return;
+    HDC hdc = GetDC(pathBar);
+    if (!hdc) return;
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(pathBar, WM_GETFONT, 0, 0));
+    HGDIOBJ oldFont = font ? SelectObject(hdc, font) : nullptr;
+    int x = 6;
+    RECT client{};
+    GetClientRect(pathBar, &client);
+    auto addPart = [&](const std::wstring& label, const std::filesystem::path& target) {
+        if (label.empty() || target.empty()) return;
+        SIZE size{};
+        GetTextExtentPoint32W(hdc, label.c_str(), static_cast<int>(label.size()), &size);
+        const int right = x + std::max(8, static_cast<int>(size.cx));
+        RECT hit{x, client.top, right, client.bottom};
+        state->pathHits.push_back({hit, target});
+        x = right;
+    };
+    const std::filesystem::path current = state->currentDir;
+    std::filesystem::path accum = current.root_path();
+    if (!accum.empty()) {
+        addPart(accum.wstring(), accum);
+    }
+    std::filesystem::path relative = current.relative_path();
+    for (const auto& part : relative) {
+        if (part.empty()) continue;
+        if (accum.empty()) {
+            accum = part;
+        } else {
+            accum /= part;
+        }
+        addPart(part.wstring(), accum);
+    }
+    if (oldFont) SelectObject(hdc, oldFont);
+    ReleaseDC(pathBar, hdc);
+}
+
+static void RefreshLocalPathBrowserList(LocalPathBrowserState* state);
+
+static std::vector<LocalPathBrowserEntry> EnumerateLocalBrowserDriveRoots() {
+    std::vector<LocalPathBrowserEntry> roots;
+    wchar_t buffer[512]{};
+    DWORD len = GetLogicalDriveStringsW(static_cast<DWORD>(std::size(buffer)), buffer);
+    if (len == 0 || len >= std::size(buffer)) return roots;
+    const wchar_t* p = buffer;
+    while (*p) {
+        std::filesystem::path root(p);
+        const UINT type = GetDriveTypeW(root.c_str());
+        if (type == DRIVE_FIXED || type == DRIVE_REMOVABLE ||
+            type == DRIVE_CDROM || type == DRIVE_RAMDISK) {
+            roots.push_back({root, LocalPathBrowserEntryKind::DriveRoot});
+        }
+        p += wcslen(p) + 1;
+    }
+    auto byName = [](const LocalPathBrowserEntry& a, const LocalPathBrowserEntry& b) {
+        return ToLowerAscii(a.path.wstring()) < ToLowerAscii(b.path.wstring());
+    };
+    std::sort(roots.begin(), roots.end(), byName);
+    return roots;
+}
+
+static void UpdateLocalPathBrowserStatus(LocalPathBrowserState* state) {
+    if (!state || !state->status) return;
+    std::wstring msg;
+    if (state->showDriveRoots) {
+        msg = IsEnglishUi()
+            ? L"Select a local drive to browse. Network drives are hidden."
+            : L"参照するローカルドライブを選択します。ネットワークドライブは表示しません。";
+    } else if (state->browseOnly) {
+        msg = IsEnglishUi()
+            ? L"Double-click a folder to open it. Use Drives or path segments to move across folders."
+            : L"フォルダをダブルクリックして開きます。ドライブボタンや上部パスの区切りで階層移動できます。";
+    } else if (state->allowMultiple) {
+        const int count = state->list
+            ? static_cast<int>(SendMessageW(state->list, LB_GETSELCOUNT, 0, 0))
+            : 0;
+        msg = state->requireDirectory
+            ? (IsEnglishUi()
+                   ? L"Select one or more folders. Selected: " + std::to_wstring(std::max(0, count))
+                   : L"フォルダを1つ以上選択できます。選択数: " + std::to_wstring(std::max(0, count)))
+            : (IsEnglishUi()
+                   ? L"Select one or more files. Selected: " + std::to_wstring(std::max(0, count))
+                   : L"ファイルを1つ以上選択できます。選択数: " + std::to_wstring(std::max(0, count)));
+    } else {
+        msg = state->requireDirectory
+            ? (IsEnglishUi()
+                   ? L"Select the current folder or a listed folder."
+                   : L"現在のフォルダまたは一覧のフォルダを選択します。")
+            : (IsEnglishUi()
+                   ? L"Select a file. Double-click a folder to open it."
+                   : L"ファイルを選択します。フォルダはダブルクリックで開きます。");
+    }
+    SetWindowTextW(state->status, msg.c_str());
+}
+
+static LRESULT CALLBACK LocalPathBarSubclassProc(HWND hWnd,
+                                                 UINT msg,
+                                                 WPARAM wParam,
+                                                 LPARAM lParam,
+                                                 UINT_PTR subclassId,
+                                                 DWORD_PTR refData) {
+    (void)wParam;
+    (void)subclassId;
+    auto* state = reinterpret_cast<LocalPathBrowserState*>(refData);
+    if (msg == WM_LBUTTONDOWN && state) {
+        POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        for (const auto& hit : state->pathHits) {
+            if (PtInRect(&hit.rect, pt)) {
+                state->currentDir = hit.path;
+                RefreshLocalPathBrowserList(state);
+                return 0;
+            }
+        }
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hWnd, LocalPathBarSubclassProc, subclassId);
+    }
+    return DefSubclassProc(hWnd, msg, wParam, lParam);
+}
+
+static void RefreshLocalPathBrowserList(LocalPathBrowserState* state) {
+    if (!state || !state->list) return;
+    SendMessageW(state->list, LB_RESETCONTENT, 0, 0);
+    state->entries.clear();
+    if (state->showDriveRoots) {
+        if (state->edit) {
+            SetWindowTextW(state->edit, IsEnglishUi() ? L"Computer" : L"PC");
+            RebuildLocalPathBrowserHits(state, state->edit);
+        }
+        state->entries = EnumerateLocalBrowserDriveRoots();
+        for (size_t index = 0; index < state->entries.size(); ++index) {
+            const std::wstring label = DisplayNameForBrowserEntry(state->entries[index]);
+            LRESULT item = SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+            if (item != LB_ERR && item != LB_ERRSPACE) {
+                SendMessageW(state->list, LB_SETITEMDATA, static_cast<WPARAM>(item), static_cast<LPARAM>(index));
+            }
+        }
+        UpdateLocalPathBrowserStatus(state);
+        return;
+    }
+    if (state->currentDir.empty()) return;
+    if (state->edit) {
+        SetWindowTextW(state->edit, state->currentDir.wstring().c_str());
+        RebuildLocalPathBrowserHits(state, state->edit);
+    }
+
+    std::vector<LocalPathBrowserEntry> dirs;
+    std::vector<LocalPathBrowserEntry> files;
+    std::error_code iterEc;
+    for (std::filesystem::directory_iterator it(state->currentDir, iterEc), end;
+         !iterEc && it != end; it.increment(iterEc)) {
+        const std::filesystem::path path = it->path();
+        bool isReparse = false;
+        if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) continue;
+        std::error_code typeEc;
+        if (it->is_directory(typeEc) && !typeEc) {
+            dirs.push_back({path, LocalPathBrowserEntryKind::Directory});
+            continue;
+        }
+        if ((!state->requireDirectory || state->browseOnly) &&
+            it->is_regular_file(typeEc) && !typeEc) {
+            files.push_back({path, LocalPathBrowserEntryKind::File});
+        }
+    }
+    auto byName = [](const LocalPathBrowserEntry& a, const LocalPathBrowserEntry& b) {
+        const int relevanceA = LocalBrowserDirectoryRelevance(a);
+        const int relevanceB = LocalBrowserDirectoryRelevance(b);
+        if (relevanceA != relevanceB) return relevanceA > relevanceB;
+        return ToLowerAscii(a.path.filename().wstring()) < ToLowerAscii(b.path.filename().wstring());
+    };
+    std::sort(dirs.begin(), dirs.end(), byName);
+    std::sort(files.begin(), files.end(), byName);
+    state->entries.reserve(dirs.size() + files.size());
+    state->entries.insert(state->entries.end(), dirs.begin(), dirs.end());
+    state->entries.insert(state->entries.end(), files.begin(), files.end());
+    for (size_t index = 0; index < state->entries.size(); ++index) {
+        const std::wstring label = DisplayNameForBrowserEntry(state->entries[index]);
+        LRESULT item = SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        if (item != LB_ERR && item != LB_ERRSPACE) {
+            SendMessageW(state->list, LB_SETITEMDATA, static_cast<WPARAM>(item), static_cast<LPARAM>(index));
+        }
+    }
+    UpdateLocalPathBrowserStatus(state);
+}
+
+static std::filesystem::path BrowserEditPath(LocalPathBrowserState* state) {
+    return state ? state->currentDir : std::filesystem::path{};
+}
+
+static bool AcceptBrowserPath(LocalPathBrowserState* state, const std::filesystem::path& path) {
+    if (!state) return false;
+    if (state->browseOnly) {
+        state->done = true;
+        if (state->hwnd) DestroyWindow(state->hwnd);
+        return true;
+    }
+    if (!ValidateExistingLocalPathForBrowser(state->hwnd ? state->hwnd : state->owner,
+                                             path, state->title, state->requireDirectory)) {
+        return false;
+    }
+    state->results.clear();
+    state->results.push_back(path.wstring());
+    state->accepted = true;
+    state->done = true;
+    if (state->hwnd) DestroyWindow(state->hwnd);
+    return true;
+}
+
+static void EnableNativeFileDialogsFromLocalBrowser(LocalPathBrowserState* state) {
+    if (!state) return;
+    state->useNativeAfterClose = true;
+    state->done = true;
+    if (state->hwnd) DestroyWindow(state->hwnd);
+}
+
+static void LocalPathBrowserOpenSelection(LocalPathBrowserState* state) {
+    if (!state || !state->list) return;
+    const int sel = static_cast<int>(SendMessageW(state->list, LB_GETCURSEL, 0, 0));
+    if (sel < 0) return;
+    const LRESULT data = SendMessageW(state->list, LB_GETITEMDATA, static_cast<WPARAM>(sel), 0);
+    if (data < 0 || static_cast<size_t>(data) >= state->entries.size()) return;
+    const auto& entry = state->entries[static_cast<size_t>(data)];
+    if (IsBrowserDirectoryEntry(entry)) {
+        state->currentDir = entry.path;
+        state->showDriveRoots = false;
+        RefreshLocalPathBrowserList(state);
+        return;
+    }
+    if (!state->requireDirectory && !state->browseOnly) {
+        AcceptBrowserPath(state, entry.path);
+    }
+}
+
+static void LocalPathBrowserAccept(LocalPathBrowserState* state) {
+    if (!state) return;
+    if (state->browseOnly) {
+        state->done = true;
+        if (state->hwnd) DestroyWindow(state->hwnd);
+        return;
+    }
+    if (state->allowMultiple && state->list) {
+        const int count = static_cast<int>(SendMessageW(state->list, LB_GETSELCOUNT, 0, 0));
+        if (count > 0) {
+            std::vector<int> selected(static_cast<size_t>(count), 0);
+            if (SendMessageW(state->list, LB_GETSELITEMS, static_cast<WPARAM>(count),
+                             reinterpret_cast<LPARAM>(selected.data())) != LB_ERR) {
+                std::vector<std::wstring> paths;
+                for (int item : selected) {
+                    const LRESULT data = SendMessageW(state->list, LB_GETITEMDATA, static_cast<WPARAM>(item), 0);
+                    if (data < 0 || static_cast<size_t>(data) >= state->entries.size()) continue;
+                    const auto& entry = state->entries[static_cast<size_t>(data)];
+                    if (IsBrowserDirectoryEntry(entry) != state->requireDirectory) continue;
+                    if (!ValidateExistingLocalPathForBrowser(state->hwnd ? state->hwnd : state->owner,
+                                                             entry.path, state->title, state->requireDirectory)) {
+                        return;
+                    }
+                    paths.push_back(entry.path.wstring());
+                }
+                if (!paths.empty()) {
+                    state->results = std::move(paths);
+                    state->accepted = true;
+                    state->done = true;
+                    if (state->hwnd) DestroyWindow(state->hwnd);
+                    return;
+                }
+            }
+        }
+    }
+
+    if (state->requireDirectory) {
+        std::filesystem::path candidate = BrowserEditPath(state);
+        if (candidate.empty()) candidate = state->currentDir;
+        AcceptBrowserPath(state, candidate);
+        return;
+    }
+
+    const std::filesystem::path typed = BrowserEditPath(state);
+    std::error_code ec;
+    if (!typed.empty() && std::filesystem::is_directory(typed, ec) && !ec) {
+        state->currentDir = typed;
+        RefreshLocalPathBrowserList(state);
+        return;
+    }
+    if (!typed.empty()) {
+        AcceptBrowserPath(state, typed);
+        return;
+    }
+    LocalPathBrowserOpenSelection(state);
+}
+
+static LRESULT CALLBACK LocalPathBrowserProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LocalPathBrowserState* state =
+        reinterpret_cast<LocalPathBrowserState*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<LocalPathBrowserState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        state->hwnd = hWnd;
+        CreateWindowExW(0, L"STATIC",
+                        state->browseOnly ? (IsEnglishUi() ? L"Current folder" : L"現在のフォルダ") :
+                        state->requireDirectory
+                            ? (IsEnglishUi() ? L"Folder path" : L"フォルダパス")
+                            : (IsEnglishUi() ? L"Folder or file path" : L"フォルダまたはファイルパス"),
+                        WS_CHILD | WS_VISIBLE,
+                        12, 10, 660, 20, hWnd, nullptr, cs->hInstance, nullptr);
+        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | SS_LEFTNOWORDWRAP | SS_NOTIFY,
+                                      12, 32, 660, 24, hWnd, reinterpret_cast<HMENU>(101),
+                                      cs->hInstance, nullptr);
+        if (state->edit) {
+            SetWindowSubclass(state->edit, LocalPathBarSubclassProc, 1, reinterpret_cast<DWORD_PTR>(state));
+        }
+        const DWORD listStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+                                LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
+                                (state->allowMultiple ? LBS_EXTENDEDSEL : 0);
+        state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                                      listStyle,
+                                      12, 64, 660, 270, hWnd, reinterpret_cast<HMENU>(102),
+                                      cs->hInstance, nullptr);
+        state->status = CreateWindowExW(0, L"STATIC", L"",
+                                        WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                        12, 342, 660, 24, hWnd, nullptr,
+                                        cs->hInstance, nullptr);
+        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Up" : L"上へ",
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        12, 374, 82, 28, hWnd, reinterpret_cast<HMENU>(201),
+                        cs->hInstance, nullptr);
+        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Drives" : L"ドライブ",
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        106, 374, 82, 28, hWnd, reinterpret_cast<HMENU>(202),
+                        cs->hInstance, nullptr);
+        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Refresh" : L"更新",
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        200, 374, 82, 28, hWnd, reinterpret_cast<HMENU>(203),
+                        cs->hInstance, nullptr);
+        
+        CreateWindowExW(0, L"BUTTON",
+                        state->browseOnly ? (IsEnglishUi() ? L"Close" : L"閉じる") :
+                        state->requireDirectory
+                            ? (IsEnglishUi() ? L"Select" : L"選択")
+                            : (IsEnglishUi() ? L"Open" : L"開く"),
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                        482, 374, 86, 28, hWnd, reinterpret_cast<HMENU>(IDOK),
+                        cs->hInstance, nullptr);
+        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Cancel" : L"キャンセル",
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        586, 374, 86, 28, hWnd, reinterpret_cast<HMENU>(IDCANCEL),
+                        cs->hInstance, nullptr);
+
+        if (!state->browseOnly) {
+            CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"OS Standard Dialog" : L"OS標準で開く",
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                            12, 414, 180, 28, hWnd, reinterpret_cast<HMENU>(204),
+                            cs->hInstance, nullptr);
+            
+            CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Always use OS Standard Dialog (Settings)" : L"常にOS標準を使用 (設定で変更可)",
+                            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+                            206, 418, 300, 20, hWnd, reinterpret_cast<HMENU>(205),
+                            cs->hInstance, nullptr);
+        }
+
+        RefreshLocalPathBrowserList(state);
+        SetFocus(state->list ? state->list : state->edit);
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    }
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        return ThemeCtlColorPanel(ctl, hdc);
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDCANCEL) {
+            if (state) state->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDOK) {
+            LocalPathBrowserAccept(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == 201 && state) {
+            if (state->showDriveRoots) {
+                return 0;
+            }
+            const std::filesystem::path parent = state->currentDir.parent_path();
+            if (!parent.empty() && parent != state->currentDir) {
+                state->currentDir = parent;
+            } else {
+                state->showDriveRoots = true;
+            }
+            RefreshLocalPathBrowserList(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == 202 && state) {
+            state->showDriveRoots = true;
+            RefreshLocalPathBrowserList(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == 203 && state) {
+            RefreshLocalPathBrowserList(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == 204 && state) {
+            if (SendMessageW(GetDlgItem(hWnd, 205), BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                g_config.useNativeFileDialogs = true;
+                if (!g_workspaceRoot.empty()) {
+                    SaveWorkspaceConfig(g_workspaceRoot, g_config);
+                }
+            }
+            EnableNativeFileDialogsFromLocalBrowser(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == 102 && HIWORD(wParam) == LBN_SELCHANGE) {
+            UpdateLocalPathBrowserStatus(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == 102 && HIWORD(wParam) == LBN_DBLCLK) {
+            LocalPathBrowserOpenSelection(state);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        if (state) state->done = true;
+        DestroyWindow(hWnd);
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static std::vector<std::wstring> PromptNativeExistingLocalPaths(HWND owner,
+                                                                const std::filesystem::path& initial,
+                                                                const std::wstring& title,
+                                                                bool requireDirectory,
+                                                                bool allowMultiple);
+
+static std::vector<std::wstring> PromptLocalPathBrowser(HWND owner,
+                                                        const std::filesystem::path& initial,
+                                                        const std::wstring& title,
+                                                        bool requireDirectory,
+                                                        bool allowMultiple,
+                                                        bool browseOnly) {
+    LocalPathBrowserState state;
+    state.owner = owner;
+    state.title = title;
+    state.currentDir = ResolveDialogInitialFolder(initial);
+    state.requireDirectory = requireDirectory;
+    state.allowMultiple = allowMultiple;
+    state.browseOnly = browseOnly;
+    if (state.currentDir.empty()) return {};
+
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = LocalPathBrowserProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = L"LocalPathBrowserDlg";
+    RegisterClassW(&wc);
+
+    if (owner) EnableWindow(owner, FALSE);
+    HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title.c_str(),
+                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             CW_USEDEFAULT, CW_USEDEFAULT, 704, 490,
+                             owner, nullptr, g_hInst, &state);
+    if (!w) {
+        if (owner) EnableWindow(owner, TRUE);
+        return {};
+    }
+    ShowWindow(w, SW_SHOW);
+    UpdateWindow(w);
+
+    MSG msg;
+    while (!state.done) {
+        BOOL gm = GetMessageW(&msg, nullptr, 0, 0);
+        if (gm == -1) break;
+        if (gm == 0) {
+            PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+        if (ShouldSkipImeMessageInLoop(msg)) continue;
+        if (!IsDialogMessageW(w, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    if (owner) {
+        EnableWindow(owner, TRUE);
+        SetActiveWindow(owner);
+    }
+    if (state.useNativeAfterClose && !browseOnly) {
+        return PromptNativeExistingLocalPaths(owner, state.currentDir, title, requireDirectory, allowMultiple);
+    }
+    return state.accepted ? state.results : std::vector<std::wstring>{};
+}
+
+static std::vector<std::wstring> PromptNativeExistingLocalPaths(HWND owner,
+                                                                const std::filesystem::path& initial,
+                                                                const std::wstring& title,
+                                                                bool requireDirectory,
+                                                                bool allowMultiple) {
+    IFileOpenDialog* dialog = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&dialog));
+    if (FAILED(hr) || !dialog) {
+        ShowSoftNotice(owner,
+                       IsEnglishUi() ? L"Windows file picker is not available. Use the app picker instead."
+                                     : L"Windows標準の選択を開けません。自前の選択を使用してください。",
+                       SoftNoticeKind::Warning);
+        return {};
+    }
+
+    DWORD options = 0;
+    if (SUCCEEDED(dialog->GetOptions(&options))) {
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+        options |= requireDirectory ? FOS_PICKFOLDERS : FOS_FILEMUSTEXIST;
+        if (allowMultiple) options |= FOS_ALLOWMULTISELECT;
+        dialog->SetOptions(options);
+    }
+    if (!title.empty()) {
+        dialog->SetTitle(title.c_str());
+    }
+    std::filesystem::path initialDir = ResolveDialogInitialFolder(initial);
+    if (!initialDir.empty()) {
+        IShellItem* folder = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(initialDir.c_str(), nullptr, IID_PPV_ARGS(&folder))) && folder) {
+            dialog->SetFolder(folder);
+            folder->Release();
+        }
+    }
+
+    hr = dialog->Show(MainDialogOwner(owner));
+    if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+        dialog->Release();
+        return {};
+    }
+    if (FAILED(hr)) {
+        dialog->Release();
+        ShowSoftNotice(owner,
+                       IsEnglishUi() ? L"Windows file picker failed."
+                                     : L"Windows標準の選択で失敗しました。",
+                       SoftNoticeKind::Warning);
+        return {};
+    }
+
+    std::vector<std::wstring> paths;
+    if (allowMultiple) {
+        IShellItemArray* items = nullptr;
+        if (SUCCEEDED(dialog->GetResults(&items)) && items) {
+            DWORD count = 0;
+            if (SUCCEEDED(items->GetCount(&count))) {
+                for (DWORD i = 0; i < count; ++i) {
+                    IShellItem* item = nullptr;
+                    if (FAILED(items->GetItemAt(i, &item)) || !item) continue;
+                    PWSTR raw = nullptr;
+                    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw)) && raw) {
+                        paths.emplace_back(raw);
+                        CoTaskMemFree(raw);
+                    }
+                    item->Release();
+                }
+            }
+            items->Release();
+        }
+    } else {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item)) && item) {
+            PWSTR raw = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw)) && raw) {
+                paths.emplace_back(raw);
+                CoTaskMemFree(raw);
+            }
+            item->Release();
+        }
+    }
+    dialog->Release();
+
+    std::vector<std::wstring> results;
+    for (const auto& pathText : paths) {
+        std::filesystem::path selected(pathText);
+        if (!ValidateExistingLocalPathForBrowser(owner, selected, title, requireDirectory)) {
+            return {};
+        }
+        results.push_back(selected.wstring());
+    }
+    return results;
+}
+
+std::optional<std::wstring> PromptExistingLocalPath(HWND owner,
+                                                            const std::filesystem::path& initial,
+                                                            const std::wstring& title,
+                                                            bool requireDirectory) {
+    if (g_config.useNativeFileDialogs) {
+        auto picked = PromptNativeExistingLocalPaths(owner, initial, title, requireDirectory,
+                                                    /*allowMultiple=*/false);
+        if (picked.empty()) return std::nullopt;
+        return picked.front();
+    }
+    std::vector<std::wstring> picked =
+        PromptLocalPathBrowser(owner, initial, title, requireDirectory, /*allowMultiple=*/false,
+                               /*browseOnly=*/false);
+    if (picked.empty()) return std::nullopt;
+    std::filesystem::path selected(picked.front());
+    if (!ValidateExistingLocalPathForBrowser(owner, selected, title, requireDirectory)) {
+        return std::nullopt;
+    }
+    return selected.wstring();
+}
+
+std::optional<std::wstring> PromptExistingLocalPathAppFirst(HWND owner,
+                                                                   const std::filesystem::path& initial,
+                                                                   const std::wstring& title,
+                                                                   bool requireDirectory) {
+    if (g_config.useNativeFileDialogs) {
+        auto picked = PromptNativeExistingLocalPaths(owner, initial, title, requireDirectory,
+                                                    /*allowMultiple=*/false);
+        if (picked.empty()) return std::nullopt;
+        return picked.front();
+    }
+    std::vector<std::wstring> picked =
+        PromptLocalPathBrowser(owner, initial, title, requireDirectory, /*allowMultiple=*/false,
+                               /*browseOnly=*/false);
+    if (picked.empty()) return std::nullopt;
+    std::filesystem::path selected(picked.front());
+    if (!ValidateExistingLocalPathForBrowser(owner, selected, title, requireDirectory)) {
+        return std::nullopt;
+    }
+    return selected.wstring();
+}
+
+static std::vector<std::wstring> PromptExistingLocalFilesAppFirst(HWND owner,
+                                                                  const std::filesystem::path& initial,
+                                                                  const std::wstring& title,
+                                                                  bool allowMultiple) {
+    if (g_config.useNativeFileDialogs) {
+        return PromptNativeExistingLocalPaths(owner, initial, title, /*requireDirectory=*/false,
+                                             allowMultiple);
+    }
+    std::vector<std::wstring> picked =
+        PromptLocalPathBrowser(owner, initial, title, /*requireDirectory=*/false, allowMultiple,
+                               /*browseOnly=*/false);
+    std::vector<std::wstring> results;
+    for (const auto& item : picked) {
+        std::filesystem::path selected(item);
+        if (!ValidateExistingLocalPathForBrowser(owner, selected, title, /*requireDirectory=*/false)) {
+            return {};
+        }
+        results.push_back(selected.wstring());
+    }
+    return results;
+}
+
+std::vector<std::wstring> PromptExistingLocalFolders(HWND owner,
+                                                            const std::filesystem::path& initial,
+                                                            const std::wstring& title,
+                                                            bool allowMultiple) {
+    if (g_config.useNativeFileDialogs) {
+        return PromptNativeExistingLocalPaths(owner, initial, title, /*requireDirectory=*/true,
+                                             allowMultiple);
+    }
+    std::vector<std::wstring> picked =
+        PromptLocalPathBrowser(owner, initial, title, /*requireDirectory=*/true, allowMultiple,
+                               /*browseOnly=*/false);
+    std::vector<std::wstring> results;
+    for (const auto& item : picked) {
+        std::filesystem::path selected(item);
+        if (!ValidateExistingLocalPathForBrowser(owner, selected, title, /*requireDirectory=*/true)) {
+            return {};
+        }
+        results.push_back(selected.wstring());
+    }
+    return results;
+}

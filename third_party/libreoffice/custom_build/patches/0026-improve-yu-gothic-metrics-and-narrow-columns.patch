@@ -1,0 +1,47 @@
+diff --git a/sw/source/core/txtnode/fntcache.cxx b/sw/source/core/txtnode/fntcache.cxx
+--- a/sw/source/core/txtnode/fntcache.cxx
++++ b/sw/source/core/txtnode/fntcache.cxx
+@@ -287,7 +287,8 @@ static sal_uInt16 lcl_ApplyCjkHeightAdjustment(sal_uInt16 nBase, const SwViewSh
+             // Word uses substantially tighter metrics for Yu Gothic than the generic CJK
+             // compatibility correction. The generic 127% factor adds rows and pages to DOCX
+             // tables made by current Word versions.
+-            if (rDev.GetFont().GetFamilyName().equalsIgnoreAsciiCase(u"Yu Gothic"))
++            const OUString& rFamilyName = rDev.GetFont().GetFamilyName();
++            if (rFamilyName.equalsIgnoreAsciiCase(u"Yu Gothic") || rFamilyName == u"游ゴシック")
+                 return (nBase * 108) / 100;
+             return (nBase * 127) / 100;
+         }
+diff --git a/sw/source/writerfilter/dmapper/DomainMapper.cxx b/sw/source/writerfilter/dmapper/DomainMapper.cxx
+--- a/sw/source/writerfilter/dmapper/DomainMapper.cxx
++++ b/sw/source/writerfilter/dmapper/DomainMapper.cxx
+@@ -2882,7 +2882,16 @@ void DomainMapper::lcl_sprm(Sprm& rSprm)
+                 {
+                     pSectionContext->SetEvenlySpaced( true );
+                     pSectionContext->SetColumnCount( nColumnCount );
+-                    pSectionContext->SetColumnDistance( pSectHdl->GetSpace() );
++                    sal_Int32 nColumnDistance = pSectHdl->GetSpace();
++                    // Word allows East Asian hanging punctuation to use a fraction of the
++                    // inter-column gap. Writer otherwise wraps a whole extra line in narrow
++                    // equal-width columns, so retain the same effective text width.
++                    if (nColumnCount >= 3)
++                        nColumnDistance = std::max<sal_Int32>(
++                            0, nColumnDistance
++                                   - ConversionHelper::convertTwipToMm100_Limited(12));
++                    pSectionContext->SetColumnDistance( nColumnDistance );
+                     pSectionContext->SetSeparatorLine( pSectHdl->IsSeparator() );
+                 }
+                 else if( !pSectHdl->GetColumns().empty() )
+@@ -2903,7 +2912,12 @@ void DomainMapper::lcl_sprm(Sprm& rSprm)
+                 else if( nColumnCount )
+                 {
+                     pSectionContext->SetColumnCount( nColumnCount );
+-                    pSectionContext->SetColumnDistance( pSectHdl->GetSpace() );
++                    sal_Int32 nColumnDistance = pSectHdl->GetSpace();
++                    if (nColumnCount >= 3)
++                        nColumnDistance = std::max<sal_Int32>(
++                            0, nColumnDistance
++                                   - ConversionHelper::convertTwipToMm100_Limited(12));
++                    pSectionContext->SetColumnDistance( nColumnDistance );
+                     pSectionContext->SetSeparatorLine( pSectHdl->IsSeparator() );
+                 }
+             }

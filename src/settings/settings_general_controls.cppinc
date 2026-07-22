@@ -1,0 +1,770 @@
+// file: settings/settings_general_controls.cppinc
+// Included by settings_general.cppinc; contains control helpers and apply logic.
+
+
+static const wchar_t* kSelectionStyleValues[] = {
+    L"windows",
+    L"theme"
+};
+
+static std::wstring SelectionStyleLabel(const std::wstring& value) {
+    const bool english = IsEnglishUi();
+    std::wstring v = value;
+    std::transform(v.begin(), v.end(), v.begin(), ::towlower);
+    if (v == L"theme" || v == L"themed" || v == L"tone") {
+        return english ? L"Theme-based" : L"テーマ寄り";
+    }
+    return english ? L"Windows style" : L"Windows風";
+}
+
+static std::wstring NormalizeToneVariantValue(const std::wstring& value) {
+    std::wstring v = value;
+    std::transform(v.begin(), v.end(), v.begin(), ::towlower);
+    if (v == L"pure") return L"pure";
+    if (v == L"guard" || v == L"tone_guard" || v == L"toneguard") return L"guard";
+    if (v == L"emphasis" || v == L"accent" || v == L"tone_emphasis" || v == L"toneemphasis") return L"emphasis";
+    if (v == L"white") return L"white";
+    if (v == L"black") return L"black";
+    return L"pure";
+}
+
+static std::wstring ToneVariantLabel(const std::wstring& value) {
+    const bool english = IsEnglishUi();
+    std::wstring v = NormalizeToneVariantValue(value);
+    if (v == L"guard") return english ? L"Tone guard" : L"トーンガード";
+    if (v == L"emphasis") return english ? L"Tone emphasis" : L"トーン強調";
+    if (v == L"white") return english ? L"White correction" : L"白へ補正";
+    if (v == L"black") return english ? L"Black correction" : L"黒へ補正";
+    return english ? L"Pure" : L"純";
+}
+
+static std::wstring GenHexColorW(COLORREF c) {
+    wchar_t buf[16]{};
+    swprintf(buf, 16, L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+    return buf;
+}
+
+static std::wstring GenColorLabelW(COLORREF c) {
+    return GenHexColorW(c);
+}
+
+static std::wstring FormatThemeLabel(const ThemeColors& theme) {
+    if (theme.name == L"default") {
+        return IsEnglishUi() ? L"Default" : L"デフォルト";
+    }
+
+    std::wstring hex6;
+    const bool isThemeFile = TryParseHex6FromThemeFileId(theme.name, &hex6);
+    std::wstring display = theme.nameJp.empty() ? theme.name : theme.nameJp;
+    if (!isThemeFile || hex6.empty()) return display;
+
+    // Stable "base color code" for built-ins.
+    if (display == L"ホワイト" || display == L"White") hex6 = L"FFFFFF";
+    if (display == L"ダーク" || display == L"Dark") hex6 = L"000000";
+
+    // If the display already equals the color code, don't duplicate "(XXXXXX)".
+    std::wstring dispUp = display;
+    for (auto& ch : dispUp) {
+        if (ch >= L'a' && ch <= L'f') ch = static_cast<wchar_t>(ch - L'a' + L'A');
+    }
+    if (dispUp == hex6) return display;
+    return display + L"(" + hex6 + L")";
+}
+
+static bool TryParseHex6FromThemeFileId(const std::wstring& fileId, std::wstring* outHex6) {
+    if (outHex6) outHex6->clear();
+    const std::wstring prefix = L"theme_";
+    const std::wstring suffix = L".json";
+    if (fileId.size() < prefix.size() + 6 + suffix.size()) return false;
+    if (fileId.rfind(prefix, 0) != 0) return false;
+    if (fileId.substr(fileId.size() - suffix.size()) != suffix) return false;
+    std::wstring mid = fileId.substr(prefix.size(), fileId.size() - prefix.size() - suffix.size());
+    if (mid.size() < 6) return false;
+    std::wstring hex = mid.substr(0, 6);
+    auto isHex = [](wchar_t ch) {
+        return (ch >= L'0' && ch <= L'9') || (ch >= L'a' && ch <= L'f') || (ch >= L'A' && ch <= L'F');
+    };
+    for (wchar_t ch : hex) if (!isHex(ch)) return false;
+    if (mid.size() > 6) {
+        if (mid[6] != L'_') return false;
+        if (mid.size() == 7) return false;
+        for (size_t i = 7; i < mid.size(); ++i) {
+            if (mid[i] < L'0' || mid[i] > L'9') return false;
+        }
+    }
+    for (auto& ch : hex) {
+        if (ch >= L'a' && ch <= L'f') ch = static_cast<wchar_t>(ch - L'a' + L'A');
+    }
+    if (outHex6) *outHex6 = std::move(hex);
+    return true;
+}
+
+static bool IsEditableThemeSelection(const std::wstring& themeName) {
+    return TryParseHex6FromThemeFileId(themeName, nullptr);
+}
+
+static std::wstring GetSelectedToneThemeName(const GeneralSettingsCtx* ctx) {
+    std::wstring targetTheme = g_themeName.empty() ? std::wstring(L"default") : g_themeName;
+    if (!ctx || !ctx->cbTone) return targetTheme;
+    int toneSel = static_cast<int>(SendMessageW(ctx->cbTone, CB_GETCURSEL, 0, 0));
+    if (toneSel < 0) return targetTheme;
+    LRESULT data = SendMessageW(ctx->cbTone, CB_GETITEMDATA, toneSel, 0);
+    if (data == CB_ERR) return targetTheme;
+    size_t idx = static_cast<size_t>(data);
+    if (idx >= g_themeCatalog.size()) return targetTheme;
+    return g_themeCatalog[idx].name;
+}
+
+static void UpdateToneEditButtonEnabled(GeneralSettingsCtx* ctx) {
+    if (!ctx || !ctx->btnToneEdit) return;
+    std::wstring targetTheme = GetSelectedToneThemeName(ctx);
+    EnableWindow(ctx->btnToneEdit, IsEditableThemeSelection(targetTheme) ? TRUE : FALSE);
+}
+
+static std::wstring FormatPtLabel(double pt) {
+    wchar_t buf[32]{};
+    double rounded = std::llround(pt);
+    double delta = pt - rounded;
+    if (delta < 0) delta = -delta;
+    if (delta < 0.05) {
+        swprintf(buf, 32, L"%.0fpt", rounded);
+    } else {
+        swprintf(buf, 32, L"%.1fpt", pt);
+    }
+    return buf;
+}
+
+static int ColorRefToConfig(COLORREF c) {
+    return (GetRValue(c) << 16) | (GetGValue(c) << 8) | GetBValue(c);
+}
+
+static COLORREF ConfigColorToRef(int rgb) {
+    return RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+}
+
+static void FillHighlightColorCombo(HWND cb, COLORREF defaultColor) {
+    if (!cb) return;
+    SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+    std::wstring label = L"初期: " + GenHexColorW(defaultColor);
+    int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+    if (idx >= 0) SendMessageW(cb, CB_SETITEMDATA, idx, kColorDefaultData);
+    const COLORREF palette[] = {
+        RGB(255, 245, 200),
+        RGB(220, 240, 255),
+        RGB(255, 230, 230),
+        RGB(220, 255, 220),
+        RGB(245, 235, 255),
+        RGB(255, 250, 210),
+        RGB(230, 230, 230)
+    };
+    for (COLORREF c : palette) {
+        std::wstring label = GenColorLabelW(c);
+        int i = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+        if (i >= 0) SendMessageW(cb, CB_SETITEMDATA, i, static_cast<LPARAM>(c));
+    }
+    SendMessageW(cb, CB_SETCURSEL, 0, 0);
+}
+
+static bool GenSelectComboByItemData(HWND cb, DWORD_PTR want) {
+    if (!cb) return false;
+    int count = static_cast<int>(SendMessageW(cb, CB_GETCOUNT, 0, 0));
+    for (int i = 0; i < count; ++i) {
+        DWORD_PTR data = static_cast<DWORD_PTR>(SendMessageW(cb, CB_GETITEMDATA, i, 0));
+        if (data == want) {
+            SendMessageW(cb, CB_SETCURSEL, i, 0);
+            return true;
+        }
+    }
+    return false;
+}
+
+static DWORD_PTR SelectedComboItemData(HWND cb, DWORD_PTR fallback) {
+    if (!cb) return fallback;
+    int sel = static_cast<int>(SendMessageW(cb, CB_GETCURSEL, 0, 0));
+    if (sel < 0) return fallback;
+    DWORD_PTR data = static_cast<DWORD_PTR>(SendMessageW(cb, CB_GETITEMDATA, sel, 0));
+    if (data == kComboBoxErrData) return fallback;
+    return data;
+}
+
+static double GenGetSelectedPt(HWND cb, double fallback) {
+    DWORD_PTR pt10 = SelectedComboItemData(cb, kComboBoxErrData);
+    if (pt10 == kComboBoxErrData) return fallback;
+    return static_cast<double>(pt10) / 10.0;
+}
+
+static void GenSelectComboClosestPt10(HWND cb, int wantPt10) {
+    if (!cb) return;
+    int count = static_cast<int>(SendMessageW(cb, CB_GETCOUNT, 0, 0));
+    int bestIdx = -1;
+    int bestDelta = 0;
+    for (int i = 0; i < count; ++i) {
+        int pt10 = static_cast<int>(SendMessageW(cb, CB_GETITEMDATA, i, 0));
+        int delta = std::abs(pt10 - wantPt10);
+        if (bestIdx < 0 || delta < bestDelta) {
+            bestIdx = i;
+            bestDelta = delta;
+        }
+    }
+    if (bestIdx >= 0) SendMessageW(cb, CB_SETCURSEL, bestIdx, 0);
+}
+
+static std::wstring GenGetSelectedComboText(HWND cb) {
+    if (!cb) return L"";
+    int sel = static_cast<int>(SendMessageW(cb, CB_GETCURSEL, 0, 0));
+    if (sel < 0) return L"";
+    wchar_t buf[256]{};
+    int len = static_cast<int>(SendMessageW(cb, CB_GETLBTEXT, sel, reinterpret_cast<LPARAM>(buf)));
+    if (len < 0) return L"";
+    buf[std::min<int>(len, 255)] = L'\0';
+    return std::wstring(buf);
+}
+
+static std::wstring GenGetSelectedFontFace(HWND cb, const std::wstring& fallback) {
+    std::wstring text = GenGetSelectedComboText(cb);
+    if (text.empty()) return fallback;
+    return ResolveFontFaceName(text);
+}
+
+static void GenEnsureComboSelectFontFace(HWND combo, const std::wstring& faceName) {
+    if (!combo || faceName.empty()) return;
+    std::wstring displayName = ResolveFontDisplayName(faceName);
+    int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+    wchar_t buf[256]{};
+    for (int i = 0; i < count; ++i) {
+        int len = static_cast<int>(SendMessageW(combo, CB_GETLBTEXT, i, reinterpret_cast<LPARAM>(buf)));
+        if (len >= 0) {
+            buf[std::min<int>(len, 255)] = L'\0';
+            if (displayName == buf) {
+                SendMessageW(combo, CB_SETCURSEL, i, 0);
+                return;
+            }
+        }
+    }
+    int idx = static_cast<int>(SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(displayName.c_str())));
+    if (idx >= 0) SendMessageW(combo, CB_SETCURSEL, idx, 0);
+}
+
+static void SelectHighlightColor(HWND cb, int configValue) {
+    if (!cb) return;
+    if (configValue < 0) {
+        GenSelectComboByItemData(cb, kColorDefaultData);
+        return;
+    }
+    COLORREF c = ConfigColorToRef(configValue);
+    if (!GenSelectComboByItemData(cb, static_cast<DWORD_PTR>(c))) {
+        std::wstring label = GenColorLabelW(c);
+        int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+        if (idx >= 0) {
+            SendMessageW(cb, CB_SETITEMDATA, idx, static_cast<LPARAM>(c));
+            SendMessageW(cb, CB_SETCURSEL, idx, 0);
+        }
+    }
+}
+
+static void UpdateColorPreview(HWND cb, COLORREF fallback, COLORREF& outColor) {
+    DWORD_PTR data = SelectedComboItemData(cb, kColorDefaultData);
+    if (data == kColorDefaultData) {
+        outColor = fallback;
+    } else {
+        outColor = static_cast<COLORREF>(data);
+    }
+}
+
+static void UpdateNotePreviewFont(GeneralSettingsCtx* ctx, const std::wstring& faceName, double pt) {
+    if (!ctx || !ctx->previewNote) return;
+    double safePt = std::clamp(pt, 6.0, 32.0);
+    HFONT font = CreateFontFromFaceName(faceName, safePt);
+    if (!font) return;
+    HFONT old = ctx->previewFont;
+    ctx->previewFont = font;
+    SendMessageW(ctx->previewNote, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    if (old) DeleteObject(old);
+    InvalidateRect(ctx->previewNote, nullptr, TRUE);
+}
+
+static void UpdateFontCustomizationVisibility(GeneralSettingsCtx* ctx) {
+    if (!ctx || !ctx->cbNoteFontCustomization) return;
+    int mode = static_cast<int>(SendMessageW(ctx->cbNoteFontCustomization, CB_GETCURSEL, 0, 0));
+    if (mode < 0) mode = 0;
+
+    bool latinVisible = (mode >= 1);
+    bool advancedVisible = (mode == 2);
+
+    if (ctx->lblNoteRenderLatin) ShowWindow(ctx->lblNoteRenderLatin, latinVisible ? SW_SHOW : SW_HIDE);
+    if (ctx->cbNoteRenderFontFace) ShowWindow(ctx->cbNoteRenderFontFace, latinVisible ? SW_SHOW : SW_HIDE);
+
+    if (ctx->lblNoteRenderJp) ShowWindow(ctx->lblNoteRenderJp, advancedVisible ? SW_SHOW : SW_HIDE);
+    if (ctx->cbNoteRenderJpFontFace) ShowWindow(ctx->cbNoteRenderJpFontFace, advancedVisible ? SW_SHOW : SW_HIDE);
+
+    if (ctx->lblNoteFontDigit) ShowWindow(ctx->lblNoteFontDigit, advancedVisible ? SW_SHOW : SW_HIDE);
+    if (ctx->cbNoteFontDigitTarget) ShowWindow(ctx->cbNoteFontDigitTarget, advancedVisible ? SW_SHOW : SW_HIDE);
+
+    if (ctx->lblNoteRenderLatin) {
+        SetWindowTextW(ctx->lblNoteRenderLatin, (mode == 1) ? L"統一フォント" : L"別フォント(英字・記号)");
+    }
+}
+
+static std::wstring LayoutDefaultsLabelText(int left, int right, int top, int width, int height) {
+    return L"初期: 左" + std::to_wstring(left) + L" / 右" +
+           std::to_wstring(right) + L" / 上" + std::to_wstring(top) +
+           L" / 幅" + std::to_wstring(width) + L" / 高さ" + std::to_wstring(height);
+}
+
+static std::wstring LayoutDefaultsLabelText() {
+    int left = (g_config.defaultLeftWidth > 0) ? g_config.defaultLeftWidth : kDefaultLeftPane;
+    int right = (g_config.defaultRightWidth > 0) ? g_config.defaultRightWidth : kDefaultRightPane;
+    int top = (g_config.defaultTopHeight > 0) ? g_config.defaultTopHeight : 520;
+    int width = (g_config.defaultWindowWidth > 0) ? g_config.defaultWindowWidth : kDefaultWindowWidth;
+    int height = (g_config.defaultWindowHeight > 0) ? g_config.defaultWindowHeight : kDefaultWindowHeight;
+    return LayoutDefaultsLabelText(left, right, top, width, height);
+}
+
+static const wchar_t* DownKeyLastLineLabel(const std::wstring& action) {
+    std::wstring normalized = DownKeyLastLineActionToString(ParseDownKeyLastLineAction(action));
+    for (const auto& opt : kDownKeyLastLineOptions) {
+        if (normalized == opt.value) return opt.label;
+    }
+    return kDownKeyLastLineOptions[0].label;
+}
+
+static const wchar_t* LeftRightLineMoveLabel(const std::wstring& action) {
+    std::wstring normalized = LeftRightLineMoveActionToString(
+        ParseLeftRightLineMoveAction(action));
+    for (const auto& opt : kLeftRightLineMoveOptions) {
+        if (normalized == opt.value) return opt.label;
+    }
+    return kLeftRightLineMoveOptions[0].label;
+}
+
+static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
+    if (!ctx) return;
+    std::wstring prevLectureSort = g_config.lectureSortMode;
+    std::wstring prevSessionSort = g_config.sessionSortMode;
+    std::wstring prevSessionNumbering = g_config.sessionNumberingMode;
+    bool prevShowMathList = g_showMathList;
+    std::wstring prevQuickAnnotPopupPlacement = g_config.quickAnnotPopupPlacement;
+    std::wstring prevSelectionStyle = g_config.selectionStyle;
+    int prevPointerOffsetX = std::clamp(g_config.pointerOffsetX, -20, 20);
+    int prevPointerOffsetY = std::clamp(g_config.pointerOffsetY, -20, 20);
+    std::wstring prevPdfFlowMode = NormalizePdfFlowModeValue(g_config.pdfFlowMode);
+    std::wstring prevThemeName = g_themeName;
+    std::wstring prevToneVariant = NormalizeToneVariantValue(g_config.toneVariant);
+    const int prevNoteRenderMode = CurrentNoteRenderModeValue(g_noteRenderEnabled, g_noteRenderMath);
+    std::wstring themeName = prevThemeName.empty() ? L"default" : prevThemeName;
+
+    if (ctx->cbNoteFontCustomization) {
+        g_config.noteFontCustomization = static_cast<int>(SendMessageW(ctx->cbNoteFontCustomization, CB_GETCURSEL, 0, 0));
+    }
+    if (ctx->cbNoteFontDigitTarget) {
+        g_config.noteFontDigitTarget = static_cast<int>(SendMessageW(ctx->cbNoteFontDigitTarget, CB_GETCURSEL, 0, 0));
+    }
+
+    if (ctx->cbTone) {
+        int toneSel = static_cast<int>(SendMessageW(ctx->cbTone, CB_GETCURSEL, 0, 0));
+        if (toneSel >= 0) {
+            LRESULT data = SendMessageW(ctx->cbTone, CB_GETITEMDATA, toneSel, 0);
+            if (data != CB_ERR) {
+                size_t idx = static_cast<size_t>(data);
+                if (idx < g_themeCatalog.size()) {
+                    themeName = g_themeCatalog[idx].name;
+                }
+            }
+        }
+    }
+    if (ctx->cbTone) {
+        g_config.colorTone = themeName;
+    }
+
+    bool toneVariantChanged = false;
+    if (ctx->radTonePure || ctx->radToneGuard || ctx->radToneEmphasis || ctx->radToneWhite || ctx->radToneBlack) {
+        std::wstring toneVariant = L"pure";
+        if (ctx->radToneGuard && SendMessageW(ctx->radToneGuard, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+            toneVariant = L"guard";
+        } else if (ctx->radToneEmphasis && SendMessageW(ctx->radToneEmphasis, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+            toneVariant = L"emphasis";
+        } else if (ctx->radToneWhite && SendMessageW(ctx->radToneWhite, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+            toneVariant = L"white";
+        } else if (ctx->radToneBlack && SendMessageW(ctx->radToneBlack, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+            toneVariant = L"black";
+        }
+        g_config.toneVariant = toneVariant;
+        toneVariantChanged = (NormalizeToneVariantValue(g_config.toneVariant) != prevToneVariant);
+    }
+
+    bool pinChanged = false;
+    bool noteModeChanged = false;
+    if (ctx->cbBottomPane) {
+        int paneSel = static_cast<int>(SendMessageW(ctx->cbBottomPane, CB_GETCURSEL, 0, 0));
+        if (paneSel < 0 || paneSel >= static_cast<int>(std::size(kBottomPaneOptions))) paneSel = 0;
+        BottomPanePin wantPin = kBottomPaneOptions[paneSel].pin;
+        BottomNoteMode wantNoteMode = kBottomPaneOptions[paneSel].noteMode;
+        pinChanged = (g_bottomPanePin != wantPin);
+        noteModeChanged = (g_bottomNoteMode != wantNoteMode);
+        g_bottomPanePin = wantPin;
+        g_bottomNoteMode = wantNoteMode;
+        g_config.bottomPanePin = BottomPanePinToString(wantPin);
+        g_config.bottomNoteMode = BottomNoteModeToString(wantNoteMode);
+        if (pinChanged) {
+            UpdateBottomPaneMenuChecks();
+            ApplyBottomPaneEdgeStyle();
+        }
+        if (noteModeChanged && g_hBottomNote) {
+            InvalidateRect(g_hBottomNote, nullptr, TRUE);
+        }
+    }
+
+    bool quickAnnotPopupPlacementChanged = false;
+    if (ctx->cbQuickAnnotPopupPlacement) {
+        int quickAnnotSel = static_cast<int>(SendMessageW(ctx->cbQuickAnnotPopupPlacement, CB_GETCURSEL, 0, 0));
+        if (quickAnnotSel < 0 || quickAnnotSel >= static_cast<int>(std::size(kQuickAnnotPopupPlacementOptions))) quickAnnotSel = 0;
+        g_config.quickAnnotPopupPlacement = kQuickAnnotPopupPlacementOptions[quickAnnotSel].value;
+        quickAnnotPopupPlacementChanged = (g_config.quickAnnotPopupPlacement != prevQuickAnnotPopupPlacement);
+    }
+    if (ctx->cbShortcutTextTagKey) {
+        int keySel = static_cast<int>(SendMessageW(ctx->cbShortcutTextTagKey, CB_GETCURSEL, 0, 0));
+        if (keySel < 0 || keySel >= static_cast<int>(std::size(kShortcutTextTagKeyOptions))) keySel = 0;
+        g_config.noteShortcutTextTagKey = kShortcutTextTagKeyOptions[keySel].value;
+    }
+    if (ctx->chkShortcutHeadingArrowInvert) {
+        g_config.noteShortcutHeadingArrowInvert =
+            (SendMessageW(ctx->chkShortcutHeadingArrowInvert, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+
+    if (ctx->cbLectureSort) {
+        int sortSel = static_cast<int>(SendMessageW(ctx->cbLectureSort, CB_GETCURSEL, 0, 0));
+        if (sortSel < 0 || sortSel >= static_cast<int>(std::size(kLectureSortOptions))) sortSel = 0;
+        g_config.lectureSortMode = kLectureSortOptions[sortSel].value;
+    }
+    if (ctx->cbSessionSort) {
+        int sortSel = static_cast<int>(SendMessageW(ctx->cbSessionSort, CB_GETCURSEL, 0, 0));
+        if (sortSel < 0 || sortSel >= static_cast<int>(std::size(kSessionSortOptions))) sortSel = 0;
+        g_config.sessionSortMode = kSessionSortOptions[sortSel].value;
+    }
+    if (ctx->cbSessionNumbering) {
+        int numberingSel = static_cast<int>(SendMessageW(ctx->cbSessionNumbering, CB_GETCURSEL, 0, 0));
+        if (numberingSel < 0 || numberingSel >= static_cast<int>(std::size(kSessionNumberingOptions))) numberingSel = 0;
+        g_config.sessionNumberingMode = kSessionNumberingOptions[numberingSel].value;
+    }
+    if (ctx->cbSessionAutoOpenMode) {
+        int modeSel = static_cast<int>(SendMessageW(ctx->cbSessionAutoOpenMode, CB_GETCURSEL, 0, 0));
+        if (modeSel < 0 || modeSel >= static_cast<int>(std::size(kSessionAutoOpenOptions))) modeSel = 0;
+        g_config.sessionAutoOpenMode = kSessionAutoOpenOptions[modeSel].value;
+    }
+    if (ctx->chkSessionAutoOpenPair) {
+        g_config.sessionAutoOpenPairLinked =
+            (SendMessageW(ctx->chkSessionAutoOpenPair, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    bool lectureSortChanged = (g_config.lectureSortMode != prevLectureSort);
+    bool sessionSortChanged = (g_config.sessionSortMode != prevSessionSort);
+    bool sessionNumberingChanged = (g_config.sessionNumberingMode != prevSessionNumbering);
+    (void)sessionNumberingChanged;
+    std::wstring selectedPdfFlowMode = prevPdfFlowMode;
+    if (ctx->cbPdfFlowMode) {
+        int sel = static_cast<int>(SendMessageW(ctx->cbPdfFlowMode, CB_GETCURSEL, 0, 0));
+        if (sel < 0 || sel >= static_cast<int>(std::size(kPdfFlowModeOptions))) sel = 0;
+        selectedPdfFlowMode = kPdfFlowModeOptions[sel].value;
+    }
+    bool pdfFlowModeChanged =
+        (NormalizePdfFlowModeValue(selectedPdfFlowMode) != prevPdfFlowMode);
+    if (ctx->cbSelectionStyle) {
+        int sel = static_cast<int>(SendMessageW(ctx->cbSelectionStyle, CB_GETCURSEL, 0, 0));
+        if (sel < 0 || sel >= static_cast<int>(std::size(kSelectionStyleValues))) sel = 0;
+        g_config.selectionStyle = kSelectionStyleValues[sel];
+    }
+    bool selectionStyleChanged = (g_config.selectionStyle != prevSelectionStyle);
+    auto selectedPointerOffset = [](HWND cb, int fallback) {
+        if (!cb) return std::clamp(fallback, -20, 20);
+        int sel = static_cast<int>(SendMessageW(cb, CB_GETCURSEL, 0, 0));
+        if (sel < 0) return std::clamp(fallback, -20, 20);
+        LRESULT data = SendMessageW(cb, CB_GETITEMDATA, sel, 0);
+        if (data == CB_ERR) return std::clamp(fallback, -20, 20);
+        return std::clamp(static_cast<int>(data) - 20, -20, 20);
+    };
+    if (ctx->cbPointerOffsetX) {
+        g_config.pointerOffsetX = selectedPointerOffset(ctx->cbPointerOffsetX, g_config.pointerOffsetX);
+    }
+    if (ctx->cbPointerOffsetY) {
+        g_config.pointerOffsetY = selectedPointerOffset(ctx->cbPointerOffsetY, g_config.pointerOffsetY);
+    }
+    bool pointerOffsetChanged =
+        (std::clamp(g_config.pointerOffsetX, -20, 20) != prevPointerOffsetX) ||
+        (std::clamp(g_config.pointerOffsetY, -20, 20) != prevPointerOffsetY);
+    if (ctx->chkShowMath) {
+        g_showMathList = (SendMessageW(ctx->chkShowMath, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    bool showMathChanged = (g_showMathList != prevShowMathList);
+    if (ctx->chkPdfSinglePageMode) {
+        const bool wasSinglePage = g_config.pdfSinglePageMode;
+        const bool wantSinglePage =
+            (SendMessageW(ctx->chkPdfSinglePageMode, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        if (wantSinglePage != wasSinglePage && g_hPdfView && g_pdf.kind != DocKind::None) {
+            g_pdf.singlePageIndex = PageAtCurrentView();
+        }
+        g_config.pdfSinglePageMode = wantSinglePage;
+        if (wantSinglePage != wasSinglePage) {
+            ApplyPdfDisplayMode(g_hPdfView);
+            UpdatePdfSinglePageModeMenuCheck();
+        }
+    }
+    if (ctx->chkWheelInvertVertical) {
+        g_config.mouseWheelInvertVertical =
+            (SendMessageW(ctx->chkWheelInvertVertical, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkWheelInvertHorizontal) {
+        g_config.mouseWheelInvertHorizontal =
+            (SendMessageW(ctx->chkWheelInvertHorizontal, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkTouchpadInvertVertical) {
+        g_config.touchpadInvertVertical =
+            (SendMessageW(ctx->chkTouchpadInvertVertical, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkTouchpadInvertHorizontal) {
+        g_config.touchpadInvertHorizontal =
+            (SendMessageW(ctx->chkTouchpadInvertHorizontal, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkAutoPairBrackets) {
+        g_config.autoPairBrackets =
+            (SendMessageW(ctx->chkAutoPairBrackets, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkFullWidthParenCaretInside) {
+        g_config.fullWidthParenCaretInside =
+            (SendMessageW(ctx->chkFullWidthParenCaretInside, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkFullWidthParenCancelNextLeft) {
+        g_config.fullWidthParenCancelNextLeft =
+            (SendMessageW(ctx->chkFullWidthParenCancelNextLeft, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->cbDownKeyAction) {
+        int sel = static_cast<int>(SendMessageW(ctx->cbDownKeyAction, CB_GETCURSEL, 0, 0));
+        if (sel < 0 || sel >= static_cast<int>(std::size(kDownKeyLastLineOptions))) sel = 0;
+        g_config.downKeyLastLineAction = kDownKeyLastLineOptions[sel].value;
+    }
+    if (ctx->cbLeftRightLineMoveAction) {
+        int sel = static_cast<int>(SendMessageW(ctx->cbLeftRightLineMoveAction, CB_GETCURSEL, 0, 0));
+        if (sel < 0 || sel >= static_cast<int>(std::size(kLeftRightLineMoveOptions))) sel = 0;
+        g_config.leftRightLineMoveAction = kLeftRightLineMoveOptions[sel].value;
+    }
+    int wantNoteRenderMode = prevNoteRenderMode;
+    if (ctx->cbNoteRenderMode) {
+        wantNoteRenderMode = static_cast<int>(SelectedComboItemData(ctx->cbNoteRenderMode, prevNoteRenderMode));
+    } else if (ctx->chkNoteRender) {
+        wantNoteRenderMode = (SendMessageW(ctx->chkNoteRender, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
+    }
+
+    struct NoteRenderSwitchGuard {
+        bool active = false;
+        explicit NoteRenderSwitchGuard(bool enable) : active(enable) {
+            if (active) BeginNoteRenderSwitch();
+        }
+        ~NoteRenderSwitchGuard() {
+            if (active) EndNoteRenderSwitch();
+        }
+    } noteSwitchGuard((ctx->cbNoteRenderMode != nullptr || ctx->chkNoteRender != nullptr) &&
+                      (wantNoteRenderMode != prevNoteRenderMode));
+
+    if (ctx->cbNoteRenderMode || ctx->chkNoteRender) {
+        g_noteRenderEnabled = (wantNoteRenderMode != 0);
+        g_noteRawOnly = !g_noteRenderEnabled;
+        g_noteRenderMath = (wantNoteRenderMode == 2);
+        g_config.noteRenderEnabled = g_noteRenderEnabled;
+        g_config.noteRenderMath = g_noteRenderMath;
+        g_config.noteRawOnly = g_noteRawOnly;
+    }
+    if (ctx->chkNoteWrapEnabled) {
+        g_noteWrapEnabled = (SendMessageW(ctx->chkNoteWrapEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        g_config.noteWrapEnabled = g_noteWrapEnabled;
+    }
+    if (ctx->chkNoteVimMode) {
+        g_noteVimModeEnabled = (SendMessageW(ctx->chkNoteVimMode, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        g_config.noteVimModeEnabled = g_noteVimModeEnabled;
+        if (!g_noteVimModeEnabled && g_noteNormalMode) {
+            g_noteNormalMode = false;
+            OnExitNoteNormalMode();
+        }
+    }
+    if (ctx->chkNoteVimCaretLineRawText) {
+        g_noteVimCaretLineRawTextVisible =
+            (SendMessageW(ctx->chkNoteVimCaretLineRawText, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        g_config.noteVimCaretLineRawTextVisible = g_noteVimCaretLineRawTextVisible;
+    }
+    if (ctx->chkNoteVimClickInsert) {
+        g_noteVimClickEntersInsertMode =
+            (SendMessageW(ctx->chkNoteVimClickInsert, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        g_config.noteVimClickEntersInsertMode = g_noteVimClickEntersInsertMode;
+    }
+    if (ctx->chkNoteGridEnabled) {
+        g_noteGridEnabled = (SendMessageW(ctx->chkNoteGridEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        g_config.noteGridEnabled = g_noteGridEnabled;
+    }
+    if (ctx->cbNoteGridPitch) {
+        g_noteGridPitch = static_cast<int>(SelectedComboItemData(ctx->cbNoteGridPitch, g_noteGridPitch));
+        g_noteGridPitch = std::clamp(g_noteGridPitch, 4, 256);
+        g_config.noteGridPitch = g_noteGridPitch;
+    }
+    if (ctx->cbNoteMathMargin) {
+        g_config.noteMathMarginTopPercent = static_cast<int>(SelectedComboItemData(
+            ctx->cbNoteMathMargin, g_config.noteMathMarginTopPercent));
+        g_config.noteMathMarginTopPercent = std::clamp(g_config.noteMathMarginTopPercent, 5, 95);
+    }
+    if (ctx->cbNoteMathSupSub) {
+        int supPercent = static_cast<int>(SelectedComboItemData(
+            ctx->cbNoteMathSupSub, g_config.noteMathSupSubGapSupPercent));
+        g_config.noteMathSupSubGapSupPercent = (supPercent <= 0) ? 0 : std::clamp(supPercent, 5, 95);
+        mathrender::SetSupSubGapSupPercent(g_config.noteMathSupSubGapSupPercent);
+    }
+    if (ctx->cbNoteBgMode) {
+        size_t bgIndex = static_cast<size_t>(SelectedComboItemData(ctx->cbNoteBgMode, 0));
+        if (bgIndex < ctx->noteBgChoices.size()) {
+            const auto& choice = ctx->noteBgChoices[bgIndex];
+            switch (choice.kind) {
+            case NoteBackgroundChoiceKind::ThemeCurrent:
+                g_config.noteBgSource = L"theme_current";
+                g_config.noteBgThemeName.clear();
+                break;
+            case NoteBackgroundChoiceKind::ThemeNamed:
+                g_config.noteBgSource = L"theme_named";
+                g_config.noteBgThemeName = choice.themeName;
+                break;
+            case NoteBackgroundChoiceKind::Explicit:
+            default:
+                g_config.noteBgSource = L"explicit";
+                g_config.noteBgThemeName.clear();
+                g_config.noteBgColor = choice.color;
+                break;
+            }
+        }
+    }
+    if (ctx->cbNoteSystem) {
+        int noteSel = static_cast<int>(SendMessageW(ctx->cbNoteSystem, CB_GETCURSEL, 0, 0));
+        if (noteSel < 0 || noteSel >= static_cast<int>(std::size(kNoteSystemOptions))) noteSel = 0;
+        g_config.noteSystem = NoteSystemToString(kNoteSystemOptions[noteSel].value);
+    }
+
+    g_noteFontName = GenGetSelectedFontFace(ctx->cbNoteFontFace, g_noteFontName);
+    if (g_noteFontName.empty()) g_noteFontName = GetDefaultFontFaceName();
+    g_noteFontPt = GenGetSelectedPt(ctx->cbNoteFont, g_noteFontPt);
+    g_noteRenderFontName = GenGetSelectedFontFace(ctx->cbNoteRenderFontFace, g_noteRenderFontName);
+    if (g_noteRenderFontName.empty()) g_noteRenderFontName = g_noteFontName;
+    g_noteRenderJpFontName = GenGetSelectedFontFace(ctx->cbNoteRenderJpFontFace, g_noteRenderJpFontName);
+    if (g_noteRenderJpFontName.empty()) g_noteRenderJpFontName = g_noteRenderFontName;
+    if (g_config.noteFontCustomization == 1) {
+        g_noteFontName = g_noteRenderFontName;
+        g_noteRenderJpFontName = g_noteRenderFontName;
+    }
+    g_noteRenderFontPt = g_noteFontPt;
+    g_config.noteRenderFontName = g_noteRenderFontName;
+    g_config.noteRenderJpFontName = g_noteRenderJpFontName;
+    g_config.noteRenderFontPt = g_noteRenderFontPt;
+    ApplyNoteFont();
+
+    if (ctx->cbAutoSave) {
+        g_config.autoSaveSeconds = NormalizeAutoStageSaveSeconds(
+            static_cast<int>(SelectedComboItemData(ctx->cbAutoSave, g_config.autoSaveSeconds)));
+    }
+    if (ctx->cbAutoIntegrate) {
+        int selected = static_cast<int>(SelectedComboItemData(ctx->cbAutoIntegrate, g_config.autoIntegrateSeconds));
+        if (selected == kAutoIntegrateModeCustom) {
+            int minutes = EffectiveAutoIntegrateCustomMinutes(g_config.autoIntegrateCustomMinutes);
+            int chosen = minutes;
+            HWND promptOwner = ctx->owner ? ctx->owner : g_hMainWnd;
+            if (PromptAutoIntegrateCustomMinutes(promptOwner, minutes, &chosen)) {
+                g_config.autoIntegrateCustomMinutes = chosen;
+            }
+            g_config.autoIntegrateSeconds = kAutoIntegrateModeCustom;
+        } else {
+            g_config.autoIntegrateSeconds = selected;
+        }
+    }
+    if (ctx->editNameRule) {
+        wchar_t buf[512]{};
+        int len = GetWindowTextW(ctx->editNameRule, buf, 511);
+        std::wstring rule(buf, buf + std::max(0, len));
+        rule = TrimWhitespace(rule);
+        if (rule.empty()) {
+            rule = kDefaultNameRule;
+        }
+        g_config.clroNamePattern = rule;
+    }
+    if (ctx->chkUseNativeFileDialogs) {
+        g_config.useNativeFileDialogs =
+            (SendMessageW(ctx->chkUseNativeFileDialogs, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkStudentMode) {
+        g_config.studentMode =
+            (SendMessageW(ctx->chkStudentMode, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        RefreshMainMenuBar(g_hMainWnd);
+        if (g_hBtnNewSession) SetWindowTextW(g_hBtnNewSession, GetUiText().btnNewSession.c_str());
+        if (g_hBottomNote) SetWindowTextW(g_hBottomNote, GetUiText().bottomReserved.c_str());
+    }
+    if (ctx->chkDeveloperMode) {
+        g_config.developerMode =
+            (SendMessageW(ctx->chkDeveloperMode, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        RefreshMainMenuBar(g_hMainWnd);
+    }
+    if (ctx->chkDebugLogPreviewTrace) {
+        g_config.debugLogs.previewTrace =
+            (SendMessageW(ctx->chkDebugLogPreviewTrace, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkDebugLogSwitchTiming) {
+        g_config.debugLogs.switchTiming =
+            (SendMessageW(ctx->chkDebugLogSwitchTiming, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkDebugLogCrash) {
+        g_config.debugLogs.crash =
+            (SendMessageW(ctx->chkDebugLogCrash, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkDebugLogStartupWatchdog) {
+        g_config.debugLogs.startupWatchdog =
+            (SendMessageW(ctx->chkDebugLogStartupWatchdog, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    int scheduleMask = 0;
+    if (!ctx->scheduleDayChecks.empty()) {
+        for (int i = 0; i < static_cast<int>(ctx->scheduleDayChecks.size()); ++i) {
+            if (SendMessageW(ctx->scheduleDayChecks[static_cast<size_t>(i)], BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                scheduleMask |= (1 << i);
+            }
+        }
+    }
+    scheduleMask &= 0x7F;
+    if (scheduleMask == 0) scheduleMask = kDefaultScheduleMask;
+    g_config.scheduleDayMask = scheduleMask;
+    if (ctx->cbSchedulePeriods) {
+        g_config.schedulePeriods = static_cast<int>(SelectedComboItemData(ctx->cbSchedulePeriods, g_config.schedulePeriods));
+    }
+    g_config.schedulePeriods = std::clamp(g_config.schedulePeriods, 1, kScheduleMaxPeriods);
+    size_t scheduleTotal = static_cast<size_t>(kScheduleDayCount * g_config.schedulePeriods);
+    if (g_config.scheduleCells.size() < scheduleTotal) {
+        g_config.scheduleCells.resize(scheduleTotal);
+    } else if (g_config.scheduleCells.size() > scheduleTotal) {
+        g_config.scheduleCells.resize(scheduleTotal);
+    }
+    EnsureScheduleStartTimesCapacity(g_config.scheduleStartTimes);
+
+    ApplyNoteSystem(ctx->owner);
+    SetPdfFlowMode(g_hPdfView, selectedPdfFlowMode);
+    UpdateScrollDirectionMenuChecks();
+    const bool themeChanged = (themeName != prevThemeName || toneVariantChanged);
+    bool themeUiChanged = false;
+    if (themeChanged) {
+        themeUiChanged = ApplyThemeByNameForSettingsBatch(themeName, ctx->owner, true);
+    }
+    g_noteBgColor = ResolveNoteBackgroundColor(g_config.noteBgSource, g_config.noteBgThemeName, g_config.noteBgColor);
+    RefreshNoteBackgroundUi(ctx->owner ? ctx->owner : g_hMainWnd);
+    PersistConfig();
+
+    SettingsApplyEffects effects{};
+    effects.updateAutoSaveTimer = true;
+    effects.updateAutoIntegrateTimer = true;
+    effects.layout = pinChanged || noteModeChanged ||
+                     quickAnnotPopupPlacementChanged || showMathChanged;
+    effects.updateMathListVisibility = showMathChanged;
+    effects.refreshBottomPane = pinChanged || noteModeChanged;
+    effects.reloadLectureList = lectureSortChanged;
+    effects.reloadSessionList = sessionSortChanged;
+    effects.applyThemeUi = themeUiChanged;
+    effects.invalidatePdfView = selectionStyleChanged || pdfFlowModeChanged || pointerOffsetChanged;
+    effects.invalidateNoteEdit = true;
+    CommitSettingsApplyEffects(ctx->owner, effects);
+}
+

@@ -1,0 +1,35 @@
+diff --git a/Repository.mk b/Repository.mk
+--- a/Repository.mk
++++ b/Repository.mk
+@@ -500,10 +500,9 @@ $(eval $(call gb_Helper_register_libraries_for_install,OOOLIBS,ooo, \
+ 	$(call gb_Helper_optional,SCRIPTING, \
+ 		vbaevents \
+ 		vbahelper \
+ 	) \
+ 	vcl \
+-	writerperfect \
+ 	xmlscript \
+ 	xmlfa \
+ 	xmlfd \
+ 	xo \
+@@ -1277,7 +1276,6 @@ $(eval $(call gb_Helper_register_libraries_for_install,OOOLIBS,ooo, \
+ 	svt \
+ 	svx \
+ 	uui \
+ 	vcl \
+-	writerperfect \
+ 	$(if $(ENABLE_NSS)$(ENABLE_OPENSSL),xmlsec) \
+ ))
+diff --git a/RepositoryModule_host.mk b/RepositoryModule_host.mk
+--- a/RepositoryModule_host.mk
++++ b/RepositoryModule_host.mk
+@@ -185,9 +185,8 @@ $(eval $(call gb_Module_add_moduledirs,libreoffice,\
+ 	ure \
+ 	uui \
+ 	vbahelper \
+ 	vcl \
+ 	wizards \
+-	writerperfect \
+     $(call gb_Helper_optional,XMLHELP,xmlhelp) \
+ 	xmloff \
+ 	xmlreader \

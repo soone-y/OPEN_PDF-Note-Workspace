@@ -1,0 +1,70 @@
+// file: settings/settings_unified.cppinc
+// Included by settings.cpp (single TU).
+
+static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory) {
+    static const wchar_t kClass[] = L"UnifiedSettingsShellClass";
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = UnifiedSettingsShellProc;
+        wc.hInstance = g_hInst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush
+                                               : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.lpszClassName = kClass;
+        RegisterClassW(&wc);
+        registered = true;
+    }
+
+    UnifiedSettingsShellCtx ctx{};
+    ctx.owner = owner;
+    ctx.currentCategory = std::clamp(initialCategory, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavPalette));
+
+    if (owner) EnableWindow(owner, FALSE);
+    const int dpiRef = GetDpiY(owner);
+    const int wPx = MulDiv(kUnifiedSettingsDlgWidth, dpiRef, 96);
+    const int hPx = MulDiv(kUnifiedSettingsDlgHeight, dpiRef, 96);
+    HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass,
+                             GetUiText().menuSettings.c_str(),
+                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             CW_USEDEFAULT, CW_USEDEFAULT, wPx, hPx,
+                             owner, nullptr, g_hInst, &ctx);
+    if (!w) {
+        if (owner) EnableWindow(owner, TRUE);
+        return;
+    }
+
+    ShowWindow(w, SW_SHOW);
+    UpdateWindow(w);
+    MSG msg;
+    while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (ShouldSkipImeMessageInModalLoop(msg)) continue;
+        if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
+        if (!IsDialogMessageW(w, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+} // namespace
+
+void ShowAnnotationSettingsDialog(HWND owner) {
+    ShowUnifiedSettingsDialog(owner, kSettingsNavAnnot);
+}
+
+static void LogPanelEvent(const wchar_t* panel,
+                          const wchar_t* tag,
+                          int id,
+                          int code,
+                          HWND from) {
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t buf[512]{};
+    swprintf(buf, 512,
+             L"%04u-%02u-%02u %02u:%02u:%02u.%03u | %ls | %ls | id=%d code=%d from=0x%p\r\n",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+             panel ? panel : L"(panel)", tag ? tag : L"(tag)", id, code, from);
+    OutputDebugStringW(buf);
+}
+
+

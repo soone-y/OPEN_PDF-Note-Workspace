@@ -1,0 +1,74 @@
+diff --git a/Repository.mk b/Repository.mk
+--- a/Repository.mk
++++ b/Repository.mk
+@@ -717,14 +717,6 @@ $(eval $(call gb_Helper_register_libraries_for_install,PLAINLIBS_OOO,ooo, \
+ ))
+ 
+ ifeq ($(OS),WNT)
+-$(eval $(call gb_Helper_register_libraries_for_install,PLAINLIBS_OOO,activexbinarytable, \
+-	regactivex \
+-))
+-
+-$(eval $(call gb_Helper_register_libraries_for_install,PLAINLIBS_OOO,activex, \
+-	so_activex \
+-))
+-
+ $(eval $(call gb_Helper_register_executables_for_install,OOO,spsuppfiles, \
+ 	spsupp_helper \
+ ))
+diff --git a/extensions/Module_extensions.mk b/extensions/Module_extensions.mk
+--- a/extensions/Module_extensions.mk
++++ b/extensions/Module_extensions.mk
+@@ -74,15 +74,6 @@ endif # !ENABLE_WASM_STRIP_BASIC_DRAW_MATH_IMPRESS
+ endif
+ 
+ ifeq ($(OS),WNT)
+-
+-ifeq ($(COM),MSC)
+-$(eval $(call gb_Module_add_targets,extensions,\
+-	WinResTarget_activex \
+-	Library_so_activex \
+-	CustomTarget_so_activex_idl \
+-))
+-
+-endif # COM=MSC
+ 
+ $(eval $(call gb_Module_add_targets,extensions,\
+ 	Library_oleautobridge \
+diff --git a/ucbhelper/Library_ucbhelper.mk b/ucbhelper/Library_ucbhelper.mk
+--- a/ucbhelper/Library_ucbhelper.mk
++++ b/ucbhelper/Library_ucbhelper.mk
+@@ -47,8 +47,4 @@ $(eval $(call gb_Library_add_exception_objects,ucbhelper,\
+     ucbhelper/source/provider/simplenameclashresolverequest \
+ ))
+ 
+-$(eval $(call gb_Library_use_system_win32_libs,ucbhelper,\
+-    Winhttp \
+-))
+-
+ # vim: set noet sw=4 ts=4:
+diff --git a/ucbhelper/source/client/proxydecider.cxx b/ucbhelper/source/client/proxydecider.cxx
+--- a/ucbhelper/source/client/proxydecider.cxx
++++ b/ucbhelper/source/client/proxydecider.cxx
+@@ -429,6 +429,13 @@ InternetProxyServer getNamedInternetProxyServer(
+ namespace
+ {
+ #ifdef _WIN32
++InternetProxyServer GetPACProxy(const OUString&, const OUString&, sal_Int32)
++{
++    // Disable WPAD/PAC probing for the offline conversion runtime.
++    return InternetProxyServer();
++}
++
++#if 0
+ struct GetPACProxyData
+ {
+     const OUString& m_rProtocol;
+@@ -561,6 +569,7 @@ InternetProxyServer GetPACProxy(const OUString& rProtocol, const OUString& rHost
+     }
+     return aData.m_ProxyServer;
+ }
++#endif
+ 
+ #else // .. _WIN32
+ 

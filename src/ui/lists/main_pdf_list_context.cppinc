@@ -1,0 +1,260 @@
+// file: main/main_pdf_list_context.cppinc
+
+enum class EmptyClroDeleteResult {
+    Deleted,
+    NotEligible,
+    Failed,
+};
+
+static bool IsEmptyClroNoteEligibleForDeletion(const std::filesystem::path& path) {
+    if (path.empty()) return false;
+
+    std::wstring extension = path.extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+    if (extension != L".clro") return false;
+
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return false;
+    }
+
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec) && !ec &&
+           std::filesystem::file_size(path, ec) == 0 && !ec &&
+           !file_output::HasPendingOrStagedDiffsUnderPath(path);
+}
+
+static EmptyClroDeleteResult DeleteEmptyClroNoteFile(const std::filesystem::path& path,
+                                                     DWORD* outError) {
+    if (outError) *outError = ERROR_SUCCESS;
+    if (!IsEmptyClroNoteEligibleForDeletion(path)) {
+        return EmptyClroDeleteResult::NotEligible;
+    }
+
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        if (outError) *outError = GetLastError();
+        return EmptyClroDeleteResult::Failed;
+    }
+
+    const auto closeFile = [&]() { CloseHandle(file); };
+    OVERLAPPED lock{};
+    if (!LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0, MAXDWORD, MAXDWORD, &lock)) {
+        if (outError) *outError = GetLastError();
+        closeFile();
+        return EmptyClroDeleteResult::Failed;
+    }
+
+    FILE_BASIC_INFO basicInfo{};
+    FILE_STANDARD_INFO standardInfo{};
+    if (!GetFileInformationByHandleEx(file, FileBasicInfo, &basicInfo, sizeof(basicInfo)) ||
+        !GetFileInformationByHandleEx(file, FileStandardInfo, &standardInfo, sizeof(standardInfo)) ||
+        (basicInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+        (basicInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+        standardInfo.EndOfFile.QuadPart != 0) {
+        if (outError) *outError = GetLastError();
+        closeFile();
+        return EmptyClroDeleteResult::NotEligible;
+    }
+
+    FILE_DISPOSITION_INFO disposition{};
+    disposition.DeleteFile = TRUE;
+    if (!SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition))) {
+        if (outError) *outError = GetLastError();
+        closeFile();
+        return EmptyClroDeleteResult::Failed;
+    }
+    closeFile();
+    return EmptyClroDeleteResult::Deleted;
+}
+
+static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
+    if (!list || (list != g_hPdfList && list != g_hNoteList)) return false;
+    HWND owner = GetParent(list);
+    if (!owner) return false;
+    const bool isNoteList = (list == g_hNoteList);
+    const auto& files = isNoteList ? g_noteFiles : g_pdfFiles;
+
+    POINT screenPt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    int index = -1;
+    if (screenPt.x == -1 && screenPt.y == -1) {
+        index = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
+        if (index < 0) return false;
+        RECT itemRect{};
+        if (SendMessageW(list, LB_GETITEMRECT, static_cast<WPARAM>(index),
+                         reinterpret_cast<LPARAM>(&itemRect)) != LB_ERR) {
+            POINT center{(itemRect.left + itemRect.right) / 2, (itemRect.top + itemRect.bottom) / 2};
+            ClientToScreen(list, &center);
+            screenPt = center;
+        } else {
+            GetCursorPos(&screenPt);
+        }
+    } else {
+        POINT clientPt = screenPt;
+        ScreenToClient(list, &clientPt);
+        DWORD hit = static_cast<DWORD>(
+            SendMessageW(list, LB_ITEMFROMPOINT, 0, MAKELPARAM(clientPt.x, clientPt.y)));
+        if (HIWORD(hit) != 0) return false;
+        index = static_cast<int>(LOWORD(hit));
+        if (index < 0 || index >= static_cast<int>(files.size())) return false;
+        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
+        InvalidateRect(list, nullptr, FALSE);
+    }
+    if (index < 0 || index >= static_cast<int>(files.size())) return false;
+
+    const auto& file = files[static_cast<size_t>(index)];
+    if (file.path.empty()) return false;
+
+    const std::filesystem::path selectedPath(file.path);
+    std::filesystem::path hierarchyRoot = g_currentSessionPath.empty()
+        ? selectedPath.parent_path()
+        : std::filesystem::path(g_currentSessionPath);
+    if (hierarchyRoot.empty()) hierarchyRoot = selectedPath.parent_path();
+    const std::wstring label = FilenameOrPath(selectedPath);
+    const std::wstring hierarchyLabel = FilenameOrPath(hierarchyRoot);
+    const bool canShowHierarchy = !hierarchyRoot.empty();
+    const bool officeFile = !isNoteList && IsOfficeFileListPath(file.path);
+    const bool canDeleteEmptyClro = isNoteList && IsEmptyClroNoteEligibleForDeletion(selectedPath);
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return false;
+    constexpr UINT kCmdOpenInApp = 1;
+    constexpr UINT kCmdOpenReadOnly = 2;
+    constexpr UINT kCmdOpenExplorer = 3;
+    constexpr UINT kCmdShowPath = 4;
+    constexpr UINT kCmdCopyPath = 5;
+    constexpr UINT kCmdShowHierarchy = 6;
+    constexpr UINT kCmdDeleteEmptyClro = 7;
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdOpenInApp,
+                officeFile
+                    ? (IsEnglishUi() ? L"Convert to PDF" : L"PDFに変換")
+                    : (IsEnglishUi() ? L"Open in this app" : L"このソフトで開く"));
+    if (!isNoteList && !officeFile) {
+        const UINT readOnlyFlags = file.isPdf ? MF_STRING : (MF_STRING | MF_GRAYED);
+        AppendMenuW(menu,
+                    readOnlyFlags,
+                    kCmdOpenReadOnly,
+                    IsEnglishUi() ? L"Open in read-only app" : L"読み取り専用ビューアで開く");
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdOpenExplorer,
+                IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示");
+    AppendMenuW(menu,
+                canShowHierarchy ? MF_STRING : (MF_STRING | MF_GRAYED),
+                kCmdShowHierarchy,
+                IsEnglishUi() ? L"Show directory hierarchy" : L"フォルダ階層を確認");
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdShowPath,
+                IsEnglishUi() ? L"Show work path" : L"作業パスを表示");
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdCopyPath,
+                IsEnglishUi() ? L"Copy path" : L"パスをコピー");
+    if (canDeleteEmptyClro) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu,
+                    MF_STRING,
+                    kCmdDeleteEmptyClro,
+                    IsEnglishUi() ? L"Delete empty .clro file" : L"空の .clro ファイルを削除");
+    }
+    SetForegroundWindow(owner);
+    const UINT cmd = TrackPopupMenu(menu,
+                                    TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+                                    screenPt.x,
+                                    screenPt.y,
+                                    0,
+                                    owner,
+                                    nullptr);
+    DestroyMenu(menu);
+    if (cmd == kCmdOpenInApp) {
+        if (officeFile) {
+            return ConvertOfficeFileToCurrentSession(owner, selectedPath);
+        }
+        return isNoteList ? OpenNoteIfDifferent(owner, file.path)
+                          : OpenPdfIfDifferent(owner, file.path);
+    }
+    if (cmd == kCmdOpenReadOnly && !isNoteList && file.isPdf) {
+        return LaunchReadOnlyViewerForPdf(owner, file.path);
+    }
+    if (cmd == kCmdOpenExplorer) {
+        return ShowPathInExplorer(owner, file.path);
+    }
+    if (cmd == kCmdShowPath) {
+        ShowSelectedPathDialog(owner, label, file.path);
+        return true;
+    }
+    if (cmd == kCmdCopyPath) {
+        return CopyPathToClipboard(owner, file.path);
+    }
+    if (cmd == kCmdShowHierarchy && canShowHierarchy) {
+        return ShowDirectoryHierarchyPopup(owner, hierarchyRoot, hierarchyLabel, screenPt);
+    }
+    if (cmd == kCmdDeleteEmptyClro && canDeleteEmptyClro) {
+        DWORD deleteError = ERROR_SUCCESS;
+        const EmptyClroDeleteResult result = DeleteEmptyClroNoteFile(selectedPath, &deleteError);
+        if (result != EmptyClroDeleteResult::Deleted) {
+            const std::wstring message = result == EmptyClroDeleteResult::NotEligible
+                ? (IsEnglishUi()
+                    ? L"The .clro file was not deleted because it is no longer empty or has pending changes."
+                    : L".clro ファイルは空でなくなったか、未処理の変更があるため削除しませんでした。")
+                : (IsEnglishUi()
+                    ? L"Failed to delete the empty .clro file."
+                    : L"空の .clro ファイルを削除できませんでした。");
+            ShowSoftNotice(owner, message, SoftNoticeKind::Warning);
+            return true;
+        }
+
+        if (NormalizePathKeyForList(file.path) == NormalizePathKeyForList(g_currentNotePath)) {
+            ClearNoteEditorSilently(owner, L"");
+        }
+        RefreshCurrentSessionFiles();
+        ShowSoftNotice(owner,
+                       IsEnglishUi() ? L"Deleted the empty .clro file."
+                                     : L"空の .clro ファイルを削除しました。",
+                       SoftNoticeKind::Info);
+        return true;
+    }
+    return cmd != 0;
+}
+
+static void HandlePdfNoteListDrop(HWND hWnd, HDROP drop) {
+    struct DropFinishGuard {
+        HDROP handle = nullptr;
+        ~DropFinishGuard() {
+            if (handle) DragFinish(handle);
+        }
+    } guard{drop};
+
+    if (!drop) return;
+    const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+    if (count == 0) return;
+
+    std::vector<std::wstring> paths;
+    paths.reserve(count);
+    for (UINT i = 0; i < count; ++i) {
+        const UINT len = DragQueryFileW(drop, i, nullptr, 0);
+        if (len == 0) continue;
+        std::wstring path(static_cast<size_t>(len) + 1, L'\0');
+        const UINT copied = DragQueryFileW(drop, i, path.data(), static_cast<UINT>(path.size()));
+        if (copied == 0) continue;
+        path.resize(copied);
+        paths.push_back(std::move(path));
+    }
+    guard.handle = nullptr;
+    DragFinish(drop);
+
+    if (paths.empty()) return;
+    HWND owner = GetParent(hWnd);
+    ImportDroppedFilesToCurrentSession(owner ? owner : hWnd, paths);
+}

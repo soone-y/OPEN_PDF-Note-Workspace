@@ -1,0 +1,1434 @@
+﻿// file: main/main_view_layout.cpp
+// NOTE: This file is intentionally included by `src/main.cpp` to keep the build as a
+// single translation unit while physically splitting responsibilities.
+
+// ---------------------------------------------------------------------
+// Layout and UI creation
+// ---------------------------------------------------------------------
+static bool IsAnnotOptionCycleComboId(int id) {
+    switch (id) {
+    case ID_TOOL_FONT:
+    case ID_TOOL_FONT_SIZE:
+    case ID_TOOL_FONT_SIZE_ALT:
+    case ID_TOOL_WIDTH:
+    case ID_TOOL_MARKER_ALPHA:
+    case ID_TOOL_ANNOT_METHOD:
+    case ID_TOOL_FREEHAND_CORRECTION:
+    case ID_TOOL_MARKER_TEXT_STYLE:
+    case ID_TOOL_LINE_DASH_STYLE:
+    case ID_TOOL_SHAPE_KIND:
+    case ID_TOOL_SHAPE_GEOMETRY:
+    case ID_TOOL_SHAPE_DRAW_MODE:
+    case ID_TOOL_MAGNIFIER_SHAPE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static LRESULT CALLBACK AnnotOptionCycleComboProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                                  UINT_PTR, DWORD_PTR) {
+    switch (msg) {
+    case WM_LBUTTONDOWN:
+        {
+            if (IsAnnotOptionCycleComboId(static_cast<int>(GetWindowLongPtrW(hWnd, GWLP_ID)))) {
+                SetFocus(hWnd);
+                SendMessageW(hWnd, CB_SHOWDROPDOWN, TRUE, 0);
+                return 0;
+            }
+            break;
+        }
+    case WM_LBUTTONDBLCLK:
+        if (IsAnnotOptionCycleComboId(static_cast<int>(GetWindowLongPtrW(hWnd, GWLP_ID)))) {
+            SendMessageW(hWnd, CB_SHOWDROPDOWN, TRUE, 0);
+        }
+        return 0;
+    default:
+        break;
+    }
+    return DefSubclassProc(hWnd, msg, wParam, lParam);
+}
+
+static void InstallAnnotOptionCycleCombo(HWND combo) {
+    if (!combo) return;
+    const int id = static_cast<int>(GetWindowLongPtrW(combo, GWLP_ID));
+    if (!IsAnnotOptionCycleComboId(id)) return;
+    SetWindowSubclass(combo, AnnotOptionCycleComboProc, 2, 0);
+}
+
+static void CreateChildren(HWND hWnd) {
+    g_hLectureList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
+                                     WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP |
+                                     LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                                     0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
+    g_hSessionList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
+                                     WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP |
+                                     LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                                     0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
+    g_hPdfList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
+                                 WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP |
+                                 LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                                 0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
+    g_hNoteList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
+                                   WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP |
+                                   LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                                   0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
+    g_hPdfToolbar = CreateWindowExW(WS_EX_CONTROLPARENT, kToolbarHostClass, L"",
+                                    WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                                    0, 0, 100, 32, hWnd, nullptr, g_hInst, nullptr);
+    g_hPdfView = CreateWindowExW(WS_EX_CLIENTEDGE, kPdfViewClass, L"",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL,
+                                 0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
+    const auto& ui = GetUiText();
+    g_hAnnotShow = CreateWindowExW(0, L"BUTTON", ui.btnToggleAnn.c_str(),
+                                   WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                   0, 0, 100, 24, g_hPdfToolbar,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ANNOT_PANEL_SHOW)),
+                                   g_hInst, nullptr);
+    g_hAnnotSettings = CreateWindowExW(0, L"BUTTON", ui.menuAnnotSettings.c_str(),
+                                       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                       0, 0, 100, 24, hWnd,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ANNOT_PANEL_SETTINGS)),
+                                       g_hInst, nullptr);
+    g_hAnnotClear = CreateWindowExW(0, L"BUTTON", ui.btnClearAnn.c_str(),
+                                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                    0, 0, 100, 24, hWnd,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ANNOT_PANEL_CLEAR)),
+                                    g_hInst, nullptr);
+    g_hAnnotList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
+                                   WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP,
+                                   0, 0, 100, 100, hWnd,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ANNOT_PANEL_LIST)),
+                                   g_hInst, nullptr);
+    g_hAnnotSummary = CreateWindowExW(0, L"STATIC", L"",
+                                      WS_CHILD | SS_LEFT | SS_NOPREFIX,
+                                      0, 0, 100, 60, hWnd, nullptr, g_hInst, nullptr);
+    static HMODULE s_msftedit = nullptr;
+    static HMODULE s_riched20 = nullptr;
+    if (!s_msftedit) {
+        s_msftedit = LoadLibraryW(L"Msftedit.dll");
+    }
+    if (!s_msftedit && !s_riched20) {
+        s_riched20 = LoadLibraryW(L"Riched20.dll");
+    }
+    const wchar_t* noteClass = s_msftedit ? MSFTEDIT_CLASS : (s_riched20 ? RICHEDIT_CLASSW : L"EDIT");
+    g_hNoteEdit = CreateWindowExW(WS_EX_CLIENTEDGE, noteClass, L"",
+                                  WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_VSCROLL | WS_HSCROLL |
+                                  ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL |
+                                  ES_WANTRETURN | ES_NOHIDESEL | WS_TABSTOP,
+                                  0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
+    if (s_msftedit) {
+        // Keep RichEdit paragraph capabilities enabled so per-line spacing (<m>) can be applied
+        // via EM_SETPARAFORMAT. Note I/O remains plain text because we use SetWindowText/GetWindowText.
+        SendMessageW(g_hNoteEdit, EM_SETTEXTMODE, TM_RICHTEXT | TM_MULTILEVELUNDO | TM_MULTICODEPAGE, 0);
+        SendMessageW(g_hNoteEdit, EM_EXLIMITTEXT, 0, 0x7FFFFFF0);
+        SendMessageW(g_hNoteEdit, EM_SETBKGNDCOLOR, 0, g_noteBgColor);
+        SendMessageW(g_hNoteEdit, EM_SETTARGETDEVICE, 0, 1);
+        SendMessageW(g_hNoteEdit, EM_SETOPTIONS, ECOOP_OR,
+                     ECO_AUTOHSCROLL | ECO_AUTOVSCROLL | ECO_WANTRETURN);
+        LRESULT mask = SendMessageW(g_hNoteEdit, EM_GETEVENTMASK, 0, 0);
+        SendMessageW(g_hNoteEdit, EM_SETEVENTMASK, 0, mask | ENM_CHANGE);
+    } else {
+        SendMessageW(g_hNoteEdit, EM_SETLIMITTEXT, 0x7FFFFFF0, 0);
+    }
+    g_oldNoteProc = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrW(g_hNoteEdit, GWLP_WNDPROC,
+                          reinterpret_cast<LONG_PTR>(NoteEditProc)));
+
+    static const wchar_t kBottomNoteClass[] = L"ClroBottomNote";
+    static const wchar_t kBottomMathClass[] = L"ClroBottomMath";
+    WNDCLASSW nc{};
+    nc.lpfnWndProc = BottomNoteProc;
+    nc.hInstance = g_hInst;
+    nc.lpszClassName = kBottomNoteClass;
+    RegisterClassW(&nc);
+    WNDCLASSW mc{};
+    mc.style = CS_DBLCLKS;
+    mc.lpfnWndProc = BottomMathProc;
+    mc.hInstance = g_hInst;
+    mc.lpszClassName = kBottomMathClass;
+    RegisterClassW(&mc);
+    g_hBottomNote = CreateWindowExW(WS_EX_CLIENTEDGE, kBottomNoteClass, L"",
+                                    WS_CHILD | WS_VISIBLE,
+                                    0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
+    g_hBottomMath = CreateWindowExW(WS_EX_CLIENTEDGE, kBottomMathClass, L"",
+                                    WS_CHILD | WS_TABSTOP,
+                                    0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
+    g_hBottomRight = g_hBottomMath; // legacy alias
+
+    SetUIFont(g_hLectureList);
+    SetUIFont(g_hSessionList);
+    SetUIFont(g_hPdfList);
+    SetUIFont(g_hNoteList);
+    SetUIFont(g_hPdfView);
+    SetUIFont(g_hPdfToolbar);
+    SetWindowSubclass(g_hLectureList, DirectoryListProc, 5,
+                      reinterpret_cast<DWORD_PTR>(&s_lectureListDblClick));
+    SetWindowSubclass(g_hSessionList, DirectoryListProc, 6,
+                      reinterpret_cast<DWORD_PTR>(&s_sessionListDblClick));
+    SetWindowSubclass(g_hPdfList, PdfNoteListProc, 3, reinterpret_cast<DWORD_PTR>(&s_pdfListClick));
+    SetWindowSubclass(g_hNoteList, PdfNoteListProc, 4, reinterpret_cast<DWORD_PTR>(&s_noteListClick));
+    DragAcceptFiles(g_hPdfList, TRUE);
+    DragAcceptFiles(g_hNoteList, TRUE);
+    SetUIFont(g_hAnnotShow);
+    SetUIFont(g_hAnnotSettings);
+    SetUIFont(g_hAnnotClear);
+    SetUIFont(g_hAnnotList);
+    SetUIFont(g_hAnnotSummary);
+    {
+        HFONT activeNoteFont = (g_noteRenderEnabled && !g_noteRawOnly && g_hNoteRenderFont)
+                                   ? g_hNoteRenderFont
+                                   : g_hNoteFont;
+        if (activeNoteFont) {
+            SendMessageW(g_hNoteEdit, WM_SETFONT, reinterpret_cast<WPARAM>(activeNoteFont), TRUE);
+        } else {
+            SetUIFont(g_hNoteEdit);
+        }
+    }
+    SetUIFont(g_hBottomNote);
+    SetUIFont(g_hBottomMath);
+    int itemH = CalcListItemHeight();
+    if (itemH > 0) {
+        SendMessageW(g_hLectureList, LB_SETITEMHEIGHT, 0, itemH);
+        SendMessageW(g_hSessionList, LB_SETITEMHEIGHT, 0, itemH);
+        SendMessageW(g_hPdfList,      LB_SETITEMHEIGHT, 0, itemH);
+        SendMessageW(g_hNoteList,     LB_SETITEMHEIGHT, 0, itemH);
+        SendMessageW(g_hAnnotList,    LB_SETITEMHEIGHT, 0, itemH);
+    }
+    SetWindowTextW(g_hBottomNote, ui.bottomReserved.c_str());
+    g_hBtnNewSession = CreateWindowExW(0, L"BUTTON", ui.btnNewSession.c_str(),
+                                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                            0, 0, 140, 28, hWnd,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_FILE_NEW_SESSION)),
+                                            g_hInst, nullptr);
+    g_hBtnNewNote = CreateWindowExW(0, L"BUTTON", ui.btnNewNote.c_str(),
+                                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                    0, 0, 140, 28, hWnd,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_FILE_NEW_CLRO)),
+                                    g_hInst, nullptr);
+    g_hBtnToggleLeftPane = CreateWindowExW(0, L"BUTTON", L"<<",
+                                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                           0, 0, 28, 28, hWnd,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_VIEW_LEFT_PANE_TOGGLE)),
+                                           g_hInst, nullptr);
+    g_hBtnToggleAnn = CreateWindowExW(0, L"BUTTON", ui.btnToggleAnn.c_str(),
+                                       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                       0, 0, 150, 26, g_hPdfToolbar,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TOGGLE_ANNOTS)),
+                                       g_hInst, nullptr);
+    g_hBtnModeSelect = CreateWindowExW(0, L"BUTTON", ui.btnModeSelect.c_str(),
+                                       WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                                       0, 0, 80, 24, g_hPdfToolbar,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_SELECT)),
+                                       g_hInst, nullptr);
+    g_hBtnModePan = CreateWindowExW(0, L"BUTTON", ui.btnModePan.c_str(),
+                                     WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                     0, 0, 80, 24, g_hPdfToolbar,
+                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_PAN)),
+                                     g_hInst, nullptr);
+    g_hBtnModeMagnifier = CreateWindowExW(0, L"BUTTON", ui.btnModeMagnifier.c_str(),
+                                           WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                           0, 0, 90, 24, g_hPdfToolbar,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_MAGNIFIER)),
+                                           g_hInst, nullptr);
+    g_hBtnModeMarker = CreateWindowExW(0, L"BUTTON", ui.btnModeMarker.c_str(),
+                                        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                        0, 0, 80, 24, g_hPdfToolbar,
+                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_MARKER_TEXT)),
+                                        g_hInst, nullptr);
+    g_hBtnModeMarkerFree = CreateWindowExW(0, L"BUTTON", ui.btnModeMarkerFree.c_str(),
+                                            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                            0, 0, 100, 24, g_hPdfToolbar,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_MARKER_FREE)),
+                                            g_hInst, nullptr);
+    std::wstring markerLineLabel = IsEnglishUi() ? L"Marker Line" : L"マーカー直線";
+    std::wstring markerArrowLabel = IsEnglishUi() ? L"Marker Arrow" : L"マーカー矢印";
+    std::wstring markerWaveLabel = IsEnglishUi() ? L"Marker Wave" : L"マーカー波線";
+    g_hBtnModeMarkerLine = CreateWindowExW(0, L"BUTTON", markerLineLabel.c_str(),
+                                            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                            0, 0, 110, 24, g_hPdfToolbar,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_MARKER_LINE)),
+                                            g_hInst, nullptr);
+    g_hBtnModeMarkerArrow = CreateWindowExW(0, L"BUTTON", markerArrowLabel.c_str(),
+                                             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                             0, 0, 120, 24, g_hPdfToolbar,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_MARKER_ARROW)),
+                                             g_hInst, nullptr);
+    g_hBtnModeMarkerWave = CreateWindowExW(0, L"BUTTON", markerWaveLabel.c_str(),
+                                            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                            0, 0, 120, 24, g_hPdfToolbar,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_MARKER_WAVE)),
+                                            g_hInst, nullptr);
+    g_hBtnModeText = CreateWindowExW(0, L"BUTTON", ui.btnModeText.c_str(),
+                                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                      0, 0, 80, 24, g_hPdfToolbar,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_TEXT)),
+                                      g_hInst, nullptr);
+    g_hBtnModeLine = CreateWindowExW(0, L"BUTTON", ui.btnModeLine.c_str(),
+                                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                      0, 0, 80, 24, g_hPdfToolbar,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_LINE)),
+                                      g_hInst, nullptr);
+    g_hBtnModeArrow = CreateWindowExW(0, L"BUTTON", ui.btnModeArrow.c_str(),
+                                       WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                       0, 0, 80, 24, g_hPdfToolbar,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_ARROW)),
+                                       g_hInst, nullptr);
+    g_hBtnModeWave = CreateWindowExW(0, L"BUTTON", ui.btnModeWave.c_str(),
+                                      WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                      0, 0, 80, 24, g_hPdfToolbar,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_WAVE)),
+                                      g_hInst, nullptr);
+    const std::wstring penButtonLabel = IsEnglishUi() ? L"Pen" : L"ペン";
+    g_hBtnModeFreehand = CreateWindowExW(0, L"BUTTON", penButtonLabel.c_str(),
+                                          WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                          0, 0, 90, 24, g_hPdfToolbar,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_FREEHAND)),
+                                          g_hInst, nullptr);
+    g_hBtnModeShape = CreateWindowExW(0, L"BUTTON", ui.btnModeShape.c_str(),
+                                       WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                       0, 0, 90, 24, g_hPdfToolbar,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_SHAPE)),
+                                       g_hInst, nullptr);
+    g_hBtnModeEraser = CreateWindowExW(0, L"BUTTON", ui.btnModeEraser.c_str(),
+                                        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                        0, 0, 90, 24, g_hPdfToolbar,
+                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_ERASER)),
+                                        g_hInst, nullptr);
+
+    g_colorButtons.clear();
+    for (size_t i = 0; i < g_palette.size(); ++i) {
+        HWND btn = CreateWindowExW(0, L"BUTTON", L"",
+                                   WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                   0, 0, 24, 24, g_hPdfToolbar,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_COLOR_BASE + static_cast<int>(i))),
+                                   g_hInst, nullptr);
+        SendMessageW(btn, WM_SETFONT,
+                     reinterpret_cast<WPARAM>(g_hUIFont), TRUE);
+        g_colorButtons.push_back(btn);
+    }
+    g_hBtnPaletteCustom = CreateWindowExW(0, L"BUTTON", L"...",
+                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                          0, 0, 24, 24, g_hPdfToolbar,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_COLOR_CUSTOM)),
+                                          g_hInst, nullptr);
+    SetUIFont(g_hBtnPaletteCustom);
+    SetUIFont(g_hChkShortcutHeading1);
+    SetUIFont(g_hChkShortcutHeading2);
+    SetUIFont(g_hShortcutHeadingLevelLabel);
+    SetUIFont(g_hBtnShortcutHeadingLevelUp);
+    SetUIFont(g_hChkShortcutBack);
+    SetUIFont(g_hChkShortcutChar);
+    SetUIFont(g_hChkShortcutBold);
+    SetUIFont(g_hChkShortcutItalic);
+    SetUIFont(g_hChkShortcutStrike);
+    SetUIFont(g_hChkShortcutUnderline);
+    SetUIFont(g_hChkShortcutLinkDecor);
+    SetUIFont(g_hBtnShortcutBackPreview);
+    SetUIFont(g_hBtnShortcutCharPreview);
+    SetUIFont(g_hBtnShortcutBackPalette);
+    SetUIFont(g_hBtnShortcutCharPalette);
+    SetUIFont(g_hShortcutIndentLabel);
+    SetUIFont(g_hShortcutIndentEdit);
+    SetUIFont(g_hShortcutMarginLabel);
+    SetUIFont(g_hShortcutMarginEdit);
+    SetUIFont(g_hShortcutFontSizeLabel);
+    SetUIFont(g_hShortcutFontSizeEdit);
+    SetUIFont(g_hShortcutTagEdit);
+    SetUIFont(g_hBtnShortcutInput);
+    SetUIFont(g_hBtnShortcutPdfLink);
+
+    g_hComboFont = CreateWindowExW(0, L"COMBOBOX", L"",
+                                   WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS,
+                                   0, 0, 140, 200, g_hPdfToolbar,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_FONT)),
+                                   g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboFont, g_hPdfView);
+    AppendDefaultFontListToCombo(g_hComboFont);
+    SendMessageW(g_hComboFont, CB_SETCURSEL, 0, 0);
+
+    g_hComboFontSize = CreateWindowExW(0, L"COMBOBOX", L"",
+                                       WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                       0, 0, 120, 260, g_hPdfToolbar,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_FONT_SIZE)),
+                                       g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboFontSize, g_hPdfView);
+    g_hComboFontSizeAlt = CreateWindowExW(0, L"COMBOBOX", L"",
+                                          WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                          0, 0, 120, 260, g_hPdfToolbar,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_FONT_SIZE_ALT)),
+                                          g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboFontSizeAlt, g_hPdfView);
+    g_hRadioFontSizeSlotA = CreateWindowExW(0, L"BUTTON", L"A",
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+                                            0, 0, 34, 24, g_hPdfToolbar,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_FONT_SIZE_SLOT_A)),
+                                            g_hInst, nullptr);
+    g_hRadioFontSizeSlotB = CreateWindowExW(0, L"BUTTON", L"B",
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                                            0, 0, 34, 24, g_hPdfToolbar,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_FONT_SIZE_SLOT_B)),
+                                            g_hInst, nullptr);
+    g_hChkTextReadableBackground = CreateWindowExW(0, L"BUTTON",
+                                                   IsEnglishUi() ? L"Readable bg" : L"背景補助",
+                                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                                   0, 0, 120, 24, g_hPdfToolbar,
+                                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TEXT_READABLE_BACKGROUND)),
+                                                   g_hInst, nullptr);
+    SendMessageW(g_hChkTextReadableBackground, BM_SETCHECK,
+                 g_textBoxReadableBackground ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_hRadioTextReadableBackgroundNormal = CreateWindowExW(0, L"BUTTON",
+                                                           IsEnglishUi() ? L"Normal" : L"通常",
+                                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+                                                           0, 0, 64, 24, g_hPdfToolbar,
+                                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TEXT_READABLE_BACKGROUND_NORMAL)),
+                                                           g_hInst, nullptr);
+    g_hRadioTextReadableBackgroundInverted = CreateWindowExW(0, L"BUTTON",
+                                                             IsEnglishUi() ? L"Invert" : L"反転",
+                                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                                                             0, 0, 64, 24, g_hPdfToolbar,
+                                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TEXT_READABLE_BACKGROUND_INVERTED)),
+                                                             g_hInst, nullptr);
+    SendMessageW(g_hRadioTextReadableBackgroundNormal, BM_SETCHECK,
+                 g_textBoxReadableBackgroundInverted ? BST_UNCHECKED : BST_CHECKED, 0);
+    SendMessageW(g_hRadioTextReadableBackgroundInverted, BM_SETCHECK,
+                 g_textBoxReadableBackgroundInverted ? BST_CHECKED : BST_UNCHECKED, 0);
+    SyncToolbarFontSizeCombo();
+
+    // Single "width" option; values are tool-specific, but the UI control is shared.
+    g_hComboWidth = CreateWindowExW(0, L"COMBOBOX", L"",
+                                   WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                   0, 0, 130, 200, g_hPdfToolbar,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_WIDTH)),
+                                   g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboWidth, g_hPdfView);
+    if (g_hComboWidth) {
+        auto add = [&](const wchar_t* label, int pt10) {
+            double pt = static_cast<double>(pt10) / 10.0;
+            std::wstring s = std::wstring(label) + L" (" + FormatSig2(pt) + L"pt)";
+            int idx = static_cast<int>(SendMessageW(g_hComboWidth, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s.c_str())));
+            if (idx >= 0) SendMessageW(g_hComboWidth, CB_SETITEMDATA, idx, static_cast<LPARAM>(pt10));
+        };
+        // Default set (line/freehand). Marker-free will swap options when selected.
+        add(L"細", 15);
+        add(L"中", 25);
+        add(L"太", 40);
+        SendMessageW(g_hComboWidth, CB_SETCURSEL, 1, 0);
+    }
+
+    g_hComboMarkerAlpha = CreateWindowExW(0, L"COMBOBOX", L"",
+                                          WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                          0, 0, 120, 200, g_hPdfToolbar,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MARKER_ALPHA)),
+                                          g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboMarkerAlpha, g_hPdfView);
+    if (g_hComboMarkerAlpha) {
+        auto add = [&](const wchar_t* label, double alpha) {
+            int permille = static_cast<int>(std::llround(alpha * 1000.0));
+            int pct = static_cast<int>(std::llround(alpha * 100.0));
+            std::wstring s = std::wstring(label) + L" (" + std::to_wstring(pct) + L"%)";
+            int idx = static_cast<int>(SendMessageW(g_hComboMarkerAlpha, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s.c_str())));
+            if (idx >= 0) SendMessageW(g_hComboMarkerAlpha, CB_SETITEMDATA, idx, static_cast<LPARAM>(permille));
+        };
+        const wchar_t* labels[] = { L"薄", L"標準", L"濃", L"最大" };
+        const int count = ToolAlphaOptionCountForMode(ToolMode::MarkerText);
+        for (int i = 0; i < count; ++i) {
+            add(labels[std::min(i, 3)], ToolAlphaOptionValueForMode(ToolMode::MarkerText, i));
+        }
+        SendMessageW(g_hComboMarkerAlpha, CB_SETCURSEL, 1, 0);
+    }
+
+    g_hComboAnnotMethod = CreateWindowExW(0, L"COMBOBOX", L"",
+                                          WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                          0, 0, 140, 220, g_hPdfToolbar,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_ANNOT_METHOD)),
+                                          g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboAnnotMethod, g_hPdfView);
+
+    g_hComboShapeGeometry = CreateWindowExW(0, L"COMBOBOX", L"",
+                                             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                             0, 0, 140, 220, g_hPdfToolbar,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_SHAPE_GEOMETRY)),
+                                             g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboShapeGeometry, g_hPdfView);
+
+    g_hComboFreehandCorrection = CreateWindowExW(0, L"COMBOBOX", L"",
+                                                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                                 0, 0, 140, 180, g_hPdfToolbar,
+                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_FREEHAND_CORRECTION)),
+                                                 g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboFreehandCorrection, g_hPdfView);
+
+    g_hComboMarkerTextStyle = CreateWindowExW(0, L"COMBOBOX", L"",
+                                              WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                              0, 0, 140, 160, g_hPdfToolbar,
+                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MARKER_TEXT_STYLE)),
+                                              g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboMarkerTextStyle, g_hPdfView);
+    if (g_hComboMarkerTextStyle) {
+        auto add = [&](const wchar_t* label, int value) {
+            int idx = static_cast<int>(SendMessageW(g_hComboMarkerTextStyle, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(label)));
+            if (idx >= 0) {
+                SendMessageW(g_hComboMarkerTextStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(value));
+            }
+        };
+        add(IsEnglishUi() ? L"Text marker" : L"通常", 0);
+        add(IsEnglishUi() ? L"Underline style" : L"下線風", 1);
+        SendMessageW(g_hComboMarkerTextStyle, CB_SETCURSEL, g_markerTextUnderline ? 1 : 0, 0);
+    }
+
+    g_hComboLineDashStyle = CreateWindowExW(0, L"COMBOBOX", L"",
+                                            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                            0, 0, 120, 160, g_hPdfToolbar,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_LINE_DASH_STYLE)),
+                                            g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboLineDashStyle, g_hPdfView);
+    if (g_hComboLineDashStyle) {
+        auto add = [&](const wchar_t* label, int value) {
+            int idx = static_cast<int>(SendMessageW(g_hComboLineDashStyle, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(label)));
+            if (idx >= 0) {
+                SendMessageW(g_hComboLineDashStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(value));
+            }
+        };
+        add(IsEnglishUi() ? L"Solid" : L"実線", 0);
+        add(IsEnglishUi() ? L"Dashed" : L"破線", 1);
+        SendMessageW(g_hComboLineDashStyle, CB_SETCURSEL, g_lineDashStyle == L"dash" ? 1 : 0, 0);
+    }
+
+    g_hComboShapeKind = CreateWindowExW(0, L"COMBOBOX", L"",
+                                        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                        0, 0, 140, 220, g_hPdfToolbar,
+                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_SHAPE_KIND)),
+                                        g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboShapeKind, g_hPdfView);
+    if (g_hComboShapeKind) {
+        auto add = [&](const wchar_t* label, ShapeKind kind) {
+            int idx = static_cast<int>(SendMessageW(g_hComboShapeKind, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(label)));
+            if (idx >= 0) {
+                SendMessageW(g_hComboShapeKind, CB_SETITEMDATA, idx, static_cast<LPARAM>(kind));
+            }
+        };
+        add(IsEnglishUi() ? L"Circle" : L"正円", ShapeKind::Circle);
+        add(IsEnglishUi() ? L"Ellipse" : L"円", ShapeKind::Ellipse);
+        add(IsEnglishUi() ? L"Rotated ellipse" : L"斜め円", ShapeKind::RotatedEllipse);
+        add(IsEnglishUi() ? L"Square" : L"正方形", ShapeKind::Square);
+        add(IsEnglishUi() ? L"Rectangle" : L"長方形", ShapeKind::Rectangle);
+        add(IsEnglishUi() ? L"Diamond" : L"菱形", ShapeKind::Diamond);
+        add(IsEnglishUi() ? L"Triangle" : L"三角形", ShapeKind::Triangle);
+        add(IsEnglishUi() ? L"Equilateral triangle" : L"正三角形", ShapeKind::EquilateralTriangle);
+        int want = static_cast<int>(g_shapeKind);
+        int count = static_cast<int>(SendMessageW(g_hComboShapeKind, CB_GETCOUNT, 0, 0));
+        for (int i = 0; i < count; ++i) {
+            int data = static_cast<int>(SendMessageW(g_hComboShapeKind, CB_GETITEMDATA, i, 0));
+            if (data == want) {
+                SendMessageW(g_hComboShapeKind, CB_SETCURSEL, i, 0);
+                break;
+            }
+        }
+    }
+
+    g_hComboShapeDrawMode = CreateWindowExW(0, L"COMBOBOX", L"",
+                                            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                            0, 0, 140, 160, g_hPdfToolbar,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_SHAPE_DRAW_MODE)),
+                                            g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboShapeDrawMode, g_hPdfView);
+    if (g_hComboShapeDrawMode) {
+        auto add = [&](const wchar_t* label, ShapeDrawMode mode) {
+            int idx = static_cast<int>(SendMessageW(g_hComboShapeDrawMode, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(label)));
+            if (idx >= 0) {
+                SendMessageW(g_hComboShapeDrawMode, CB_SETITEMDATA, idx, static_cast<LPARAM>(mode));
+            }
+        };
+        add(IsEnglishUi() ? L"Filled" : L"塗りつぶし", ShapeDrawMode::Fill);
+        add(IsEnglishUi() ? L"Outline only" : L"枠線のみ", ShapeDrawMode::Outline);
+        int want = static_cast<int>(g_shapeDrawMode);
+        int count = static_cast<int>(SendMessageW(g_hComboShapeDrawMode, CB_GETCOUNT, 0, 0));
+        for (int i = 0; i < count; ++i) {
+            int data = static_cast<int>(SendMessageW(g_hComboShapeDrawMode, CB_GETITEMDATA, i, 0));
+            if (data == want) {
+                SendMessageW(g_hComboShapeDrawMode, CB_SETCURSEL, i, 0);
+                break;
+            }
+        }
+    }
+
+    g_hComboMagnifierShape = CreateWindowExW(0, L"COMBOBOX", L"",
+                                             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                             0, 0, 120, 200, g_hPdfToolbar,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MAGNIFIER_SHAPE)),
+                                             g_hInst, nullptr);
+    ui::GuardComboAgainstAccidentalChange(g_hComboMagnifierShape, g_hPdfView);
+    if (g_hComboMagnifierShape) {
+        int idx = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"正円")));
+        if (idx >= 0) {
+            SendMessageW(g_hComboMagnifierShape, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierShape::Circle));
+        }
+        idx = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"正方形")));
+        if (idx >= 0) {
+            SendMessageW(g_hComboMagnifierShape, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierShape::Square));
+        }
+        int want = static_cast<int>(g_magnifierShape);
+        int count = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_GETCOUNT, 0, 0));
+        for (int i = 0; i < count; ++i) {
+            int data = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_GETITEMDATA, i, 0));
+            if (data == want) {
+                SendMessageW(g_hComboMagnifierShape, CB_SETCURSEL, i, 0);
+                break;
+            }
+        }
+    }
+
+    InstallAnnotOptionCycleCombo(g_hComboFont);
+    InstallAnnotOptionCycleCombo(g_hComboFontSize);
+    InstallAnnotOptionCycleCombo(g_hComboFontSizeAlt);
+    InstallAnnotOptionCycleCombo(g_hComboWidth);
+    InstallAnnotOptionCycleCombo(g_hComboMarkerAlpha);
+    InstallAnnotOptionCycleCombo(g_hComboAnnotMethod);
+    InstallAnnotOptionCycleCombo(g_hComboShapeGeometry);
+    InstallAnnotOptionCycleCombo(g_hComboFreehandCorrection);
+    InstallAnnotOptionCycleCombo(g_hComboMarkerTextStyle);
+    InstallAnnotOptionCycleCombo(g_hComboLineDashStyle);
+    InstallAnnotOptionCycleCombo(g_hComboShapeKind);
+    InstallAnnotOptionCycleCombo(g_hComboShapeDrawMode);
+    InstallAnnotOptionCycleCombo(g_hComboMagnifierShape);
+
+    g_hChkShortcutHeading1 = CreateWindowExW(0, L"BUTTON",
+                                             IsEnglishUi() ? L"Heading" : L"見出し",
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                             0, 0, 80, 24, hWnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_HEADING1)),
+                                             g_hInst, nullptr);
+    g_hChkShortcutHeading2 = CreateWindowExW(0, L"BUTTON", L"▼",
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                             0, 0, 28, 24, hWnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_HEADING2)),
+                                             g_hInst, nullptr);
+    g_hShortcutHeadingLevelLabel = CreateWindowExW(0, L"STATIC",
+                                                   std::to_wstring(std::clamp(g_noteShortcutHeadingLevel, 1, 9)).c_str(),
+                                                   WS_CHILD | WS_VISIBLE | SS_CENTER,
+                                                   0, 0, 28, 24, hWnd, nullptr, g_hInst, nullptr);
+    g_hBtnShortcutHeadingLevelUp = CreateWindowExW(0, L"BUTTON", L"▲",
+                                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                                   0, 0, 28, 24, hWnd,
+                                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_HEADING_LEVEL_UP)),
+                                                   g_hInst, nullptr);
+    g_hChkShortcutBack = CreateWindowExW(0, L"BUTTON", L"back",
+                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                         0, 0, 120, 24, hWnd, nullptr, g_hInst, nullptr);
+    g_hChkShortcutChar = CreateWindowExW(0, L"BUTTON", L"char",
+                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                         0, 0, 120, 24, hWnd, nullptr, g_hInst, nullptr);
+    g_hChkShortcutBold = CreateWindowExW(0, L"BUTTON", L"b",
+                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                         0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
+    g_hChkShortcutItalic = CreateWindowExW(0, L"BUTTON", L"i",
+                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                           0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
+    g_hChkShortcutStrike = CreateWindowExW(0, L"BUTTON", L"x",
+                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                           0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
+    g_hChkShortcutUnderline = CreateWindowExW(0, L"BUTTON", L"u",
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                              0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
+    {
+        const wchar_t* label = IsEnglishUi() ? L"Link decor" : L"ﾘﾝｸ装飾";
+        g_hChkShortcutLinkDecor = CreateWindowExW(0, L"BUTTON", label,
+                                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                                  0, 0, 80, 24, hWnd, nullptr, g_hInst, nullptr);
+        if (g_hChkShortcutLinkDecor) {
+            SendMessageW(g_hChkShortcutLinkDecor, BM_SETCHECK, BST_CHECKED, 0);
+        }
+    }
+    g_hBtnShortcutBackPreview = CreateWindowExW(0, L"BUTTON", L"",
+                                                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                                 0, 0, 20, 20, hWnd,
+                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_BACK_PREVIEW)),
+                                                 g_hInst, nullptr);
+    g_hBtnShortcutCharPreview = CreateWindowExW(0, L"BUTTON", L"",
+                                                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                                 0, 0, 20, 20, hWnd,
+                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_CHAR_PREVIEW)),
+                                                 g_hInst, nullptr);
+    g_hBtnShortcutBackPalette = CreateWindowExW(0, L"BUTTON", L"...",
+                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                                 0, 0, 32, 24, hWnd,
+                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_BACK_PICKER)),
+                                                 g_hInst, nullptr);
+    g_hBtnShortcutCharPalette = CreateWindowExW(0, L"BUTTON", L"...",
+                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                                 0, 0, 32, 24, hWnd,
+                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_CHAR_PICKER)),
+                                                 g_hInst, nullptr);
+    g_hShortcutIndentLabel = CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"d=" : L"d=",
+                                             WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                             0, 0, 30, 24, hWnd, nullptr, g_hInst, nullptr);
+    g_hShortcutIndentEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER,
+                                              0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
+    if (g_hShortcutIndentEdit) {
+        const wchar_t* cue = IsEnglishUi() ? L"number" : L"数値";
+        SendMessageW(g_hShortcutIndentEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue));
+    }
+    g_hShortcutMarginLabel = CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"m=" : L"m=",
+                                             WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                             0, 0, 30, 24, hWnd, nullptr, g_hInst, nullptr);
+    g_hShortcutMarginEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_CENTER,
+                                            0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
+    if (g_hShortcutMarginEdit) {
+        const wchar_t* cue = IsEnglishUi() ? L"margin units" : L"マージン単位";
+        SendMessageW(g_hShortcutMarginEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue));
+    }
+    g_hShortcutFontSizeLabel = CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"s=" : L"s=",
+                                               WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                               0, 0, 30, 24, hWnd, nullptr, g_hInst, nullptr);
+    g_hShortcutFontSizeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER,
+                                              0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
+    if (g_hShortcutFontSizeEdit) {
+        const wchar_t* cue = IsEnglishUi() ? L"px" : L"px";
+        SendMessageW(g_hShortcutFontSizeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue));
+    }
+    g_hShortcutTagEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                           0, 0, 120, 24, hWnd, nullptr, g_hInst, nullptr);
+    if (g_hShortcutTagEdit) {
+        const wchar_t* cue = IsEnglishUi() ? L"Body text (no spaces)"
+                                           : L"本文テキスト（空白不可）";
+        SendMessageW(g_hShortcutTagEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue));
+    }
+    g_hBtnShortcutInput = CreateWindowExW(0, L"BUTTON", L"入力",
+                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                           0, 0, 90, 26, hWnd,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_INPUT)),
+                                           g_hInst, nullptr);
+    g_hBtnShortcutPdfLink = CreateWindowExW(0, L"BUTTON", L"リンク",
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                            0, 0, 90, 26, hWnd,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_PDF_LINK)),
+                                            g_hInst, nullptr);
+    g_hBtnNoteAssistBullet = CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"- List" : L"- 箇条",
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                             0, 0, 70, 26, hWnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_ASSIST_BULLET)),
+                                             g_hInst, nullptr);
+    g_hBtnNoteAssistQuote = CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"> Quote" : L"> 引用",
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                            0, 0, 70, 26, hWnd,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_ASSIST_QUOTE)),
+                                            g_hInst, nullptr);
+    g_hBtnNoteAssistPageRef = CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"P Ref" : L"P 参照",
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                              0, 0, 70, 26, hWnd,
+                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_ASSIST_PAGE_REF)),
+                                              g_hInst, nullptr);
+    SetUIFont(g_hBtnNoteAssistBullet);
+    SetUIFont(g_hBtnNoteAssistQuote);
+    SetUIFont(g_hBtnNoteAssistPageRef);
+
+    SetUIFont(g_hBtnToggleAnn);
+    SetUIFont(g_hBtnNewSession);
+    SetUIFont(g_hBtnNewNote);
+    SetUIFont(g_hBtnToggleLeftPane);
+    SetUIFont(g_hBtnModeSelect);
+    SetUIFont(g_hBtnModePan);
+    SetUIFont(g_hBtnModeMagnifier);
+    SetUIFont(g_hBtnModeMarker);
+    SetUIFont(g_hBtnModeMarkerFree);
+    SetUIFont(g_hBtnModeMarkerLine);
+    SetUIFont(g_hBtnModeMarkerArrow);
+    SetUIFont(g_hBtnModeMarkerWave);
+    SetUIFont(g_hBtnModeText);
+    SetUIFont(g_hBtnModeLine);
+    SetUIFont(g_hBtnModeArrow);
+    SetUIFont(g_hBtnModeWave);
+    SetUIFont(g_hBtnModeFreehand);
+    SetUIFont(g_hBtnModeEraser);
+    SetUIFont(g_hBtnPaletteCustom);
+    SetUIFont(g_hComboFont);
+    SetUIFont(g_hComboFontSize);
+    SetUIFont(g_hComboFontSizeAlt);
+    SetUIFont(g_hRadioFontSizeSlotA);
+    SetUIFont(g_hRadioFontSizeSlotB);
+    SetUIFont(g_hChkTextReadableBackground);
+    SetUIFont(g_hRadioTextReadableBackgroundNormal);
+    SetUIFont(g_hRadioTextReadableBackgroundInverted);
+    SetUIFont(g_hComboWidth);
+    SetUIFont(g_hComboMarkerAlpha);
+    SetUIFont(g_hComboAnnotMethod);
+    SetUIFont(g_hComboShapeGeometry);
+    SetUIFont(g_hComboMarkerTextStyle);
+    SetUIFont(g_hComboLineDashStyle);
+    SetUIFont(g_hComboShapeKind);
+    SetUIFont(g_hComboShapeDrawMode);
+    SetUIFont(g_hComboMagnifierShape);
+    g_toolMode = ToolMode::Select;
+    SetModeButtons();
+    if (g_hBottomNote) ShowWindow(g_hBottomNote, SW_HIDE);
+    if (g_hBottomMath) ShowWindow(g_hBottomMath, SW_HIDE);
+}
+
+int CurrentLectureIndex() {
+    for (size_t i = 0; i < g_lectures.size(); ++i) {
+        if (g_lectures[i] == g_currentLecturePath) return static_cast<int>(i);
+    }
+    return -1;
+}
+int CurrentSessionIndex() {
+    auto curCanon = g_currentSessionPath.empty() ? std::filesystem::path{} : CanonicalOrSelf(std::filesystem::path(g_currentSessionPath));
+    for (size_t i = 0; i < g_sessions.size(); ++i) {
+        const auto& s = g_sessions[i];
+        auto pathCanon = CanonicalOrSelf(std::filesystem::path(s.path));
+        if (!curCanon.empty() && pathCanon == curCanon) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+int CurrentPdfIndex() {
+    if (CurrentLogicalPdfPath().empty()) return -1;
+    for (size_t i = 0; i < g_pdfFiles.size(); ++i) {
+        if (g_pdfFiles[i].path == CurrentLogicalPdfPath()) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int CurrentNoteIndex() {
+    if (g_currentNotePath.empty()) return -1;
+    for (size_t i = 0; i < g_noteFiles.size(); ++i) {
+        if (g_noteFiles[i].path == g_currentNotePath) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+struct SessionOrganizeStats {
+    int candidates = 0;
+    int moved = 0;
+    int renamedOnConflict = 0;
+    int failed = 0;
+    std::vector<std::wstring> failures;
+};
+
+static std::filesystem::path BuildConflictFreePath(const std::filesystem::path& destDir,
+                                                   const std::filesystem::path& fileName) {
+    std::error_code ec;
+    std::filesystem::path base = fileName.stem();
+    std::filesystem::path ext = fileName.extension();
+    std::filesystem::path candidate = destDir / fileName;
+    int suffix = 1;
+    while (std::filesystem::exists(candidate, ec) && !ec) {
+        candidate = destDir / (base.wstring() + L" (" + std::to_wstring(suffix) + L")" + ext.wstring());
+        ++suffix;
+    }
+    return candidate;
+}
+
+static SessionOrganizeStats NormalizeCacheSession(const std::filesystem::path& sessionRoot) {
+    SessionOrganizeStats stats;
+    std::error_code ec;
+    auto pdfDir  = sessionRoot / L"pdf";
+    auto noteDir = sessionRoot / L"note";
+    std::filesystem::create_directories(pdfDir, ec);
+    if (ec) {
+        stats.failed++;
+        stats.failures.push_back(L"failed to create directory: " + pdfDir.wstring());
+        return stats;
+    }
+    ec.clear();
+    std::filesystem::create_directories(noteDir, ec);
+    if (ec) {
+        stats.failed++;
+        stats.failures.push_back(L"failed to create directory: " + noteDir.wstring());
+        return stats;
+    }
+    ec.clear();
+
+    for (const auto& entry : std::filesystem::directory_iterator(sessionRoot, ec)) {
+        bool isReparse = false;
+        if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
+        std::error_code stEc;
+        if (!entry.is_regular_file(stEc) || stEc) continue;
+        auto src = entry.path();
+        auto ext = src.extension().wstring();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+        bool isPdf = IsPdfFile(src);
+        bool isClrop = (ext == L".clrop");
+
+        std::filesystem::path destDir;
+        if (isPdf || IsImageFile(src) || isClrop) {
+            destDir = pdfDir;
+        } else if (IsNoteFile(src)) {
+            destDir = noteDir;
+        } else {
+            continue;
+        }
+        stats.candidates++;
+
+        std::filesystem::path dest = destDir / src.filename();
+        if (CanonicalOrSelf(src) == CanonicalOrSelf(dest)) continue;
+        if (std::filesystem::exists(dest, ec) && !ec) {
+            dest = BuildConflictFreePath(destDir, src.filename());
+            if (dest.filename() != src.filename()) {
+                stats.renamedOnConflict++;
+            }
+        }
+        ec.clear();
+
+        std::filesystem::rename(src, dest, ec);
+        if (!ec) {
+            if (isPdf) {
+                MovePdfViewInfoPath(src.wstring(), dest.wstring());
+            }
+            stats.moved++;
+            continue;
+        }
+
+        ec.clear();
+        std::filesystem::copy_file(src, dest, std::filesystem::copy_options::none, ec);
+        if (ec) {
+            stats.failed++;
+            stats.failures.push_back(src.wstring() + L" -> " + dest.wstring());
+            continue;
+        }
+
+        ec.clear();
+        std::filesystem::remove(src, ec);
+        if (ec) {
+            stats.failed++;
+            stats.failures.push_back(L"copied but source remove failed: " + src.wstring());
+            continue;
+        }
+        if (isPdf) {
+            MovePdfViewInfoPath(src.wstring(), dest.wstring());
+        }
+        stats.moved++;
+    }
+    return stats;
+}
+
+static void OrganizeCurrentSessionFiles(HWND hWnd) {
+    const auto& ui = GetUiText();
+    if (g_currentSessionPath.empty()) {
+        ShowSoftNotice(hWnd, ui.errNewClroNoSession, SoftNoticeKind::Warning);
+        return;
+    }
+
+    std::filesystem::path sessionRoot(g_currentSessionPath);
+    std::error_code ec;
+    if (!std::filesystem::exists(sessionRoot, ec) || !std::filesystem::is_directory(sessionRoot, ec)) {
+        std::wstring msg = ui.errImportFile + L"\n" + sessionRoot.wstring();
+        ShowSilentMessageDialog(hWnd, ui.menuOrganizeSessionFiles, msg, SoftNoticeKind::Error);
+        return;
+    }
+
+    int candidates = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(sessionRoot, ec)) {
+        bool isReparse = false;
+        if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
+        std::error_code stEc;
+        if (!entry.is_regular_file(stEc) || stEc) continue;
+        auto path = entry.path();
+        auto ext = path.extension().wstring();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+        bool isClrop = (ext == L".clrop");
+        if (IsPdfFile(path) || IsImageFile(path) || isClrop || IsNoteFile(path)) {
+            ++candidates;
+        }
+    }
+    if (candidates <= 0) {
+        std::wstring msg = IsEnglishUi() ? L"No files to organize." : L"整理するファイルはありません。";
+        ShowSoftNotice(hWnd, msg);
+        return;
+    }
+
+    if (!SaveNoteIfDirty(hWnd)) return;
+
+    std::filesystem::path pdfDir  = sessionRoot / L"pdf";
+    std::filesystem::path noteDir = sessionRoot / L"note";
+    std::filesystem::path reopenPdfPath;
+    std::filesystem::path reloadNotePath;
+
+    if (g_pdf.kind != DocKind::None && !CurrentLogicalPdfPath().empty()) {
+        std::filesystem::path currentPdf(CurrentLogicalPdfPath());
+        bool isAtRoot = (CanonicalOrSelf(currentPdf.parent_path()) == CanonicalOrSelf(sessionRoot));
+        if (isAtRoot && (IsPdfFile(currentPdf) || IsImageFile(currentPdf))) {
+            reopenPdfPath = pdfDir / currentPdf.filename();
+            if (IsPdfFile(currentPdf)) {
+                SaveLastPdfViewInfo();
+            }
+            ClearPdfState();
+            if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+        }
+    }
+    if (!g_currentNotePath.empty()) {
+        std::filesystem::path currentNote(g_currentNotePath);
+        if (CanonicalOrSelf(currentNote.parent_path()) == CanonicalOrSelf(sessionRoot) && IsNoteFile(currentNote)) {
+            reloadNotePath = noteDir / currentNote.filename();
+        }
+    }
+
+    SessionOrganizeStats organizeStats = NormalizeCacheSession(sessionRoot);
+    RefreshCurrentSessionFiles();
+
+    if (!reloadNotePath.empty() && std::filesystem::exists(reloadNotePath, ec)) {
+        LoadNoteFile(hWnd, reloadNotePath.wstring());
+    }
+    if (!reopenPdfPath.empty() && std::filesystem::exists(reopenPdfPath, ec)) {
+        EndIntegratedPdfPreviewMode(hWnd, true);
+        OpenPdfWithAnnotations(hWnd, reopenPdfPath.wstring());
+    }
+
+    std::wstring msg;
+    if (organizeStats.failed > 0) {
+        msg = IsEnglishUi() ? L"Organize finished with warnings." : L"整理処理を完了しました（一部警告あり）。";
+        msg += (IsEnglishUi() ? L"\nMoved: " : L"\n移動: ") + std::to_wstring(organizeStats.moved);
+        msg += (IsEnglishUi() ? L"\nFailed: " : L"\n失敗: ") + std::to_wstring(organizeStats.failed);
+        if (!organizeStats.failures.empty()) {
+            msg += IsEnglishUi() ? L"\n\nDetails:\n" : L"\n\n詳細:\n";
+            const size_t limit = std::min<size_t>(organizeStats.failures.size(), 6);
+            for (size_t i = 0; i < limit; ++i) {
+                msg += L" - " + organizeStats.failures[i] + L"\n";
+            }
+            if (organizeStats.failures.size() > limit) {
+                msg += L" - ...\n";
+            }
+        }
+    } else if (organizeStats.candidates <= 0) {
+        msg = IsEnglishUi() ? L"No files to organize." : L"整理するファイルはありません。";
+    } else {
+        msg = IsEnglishUi() ? L"Organized files into \"pdf\" / \"note\" folders." : L"\"pdf\" / \"note\" フォルダに整理しました。";
+        if (organizeStats.renamedOnConflict > 0) {
+            msg += IsEnglishUi()
+                ? L"\nName conflicts were kept safely by renaming destination files."
+                : L"\n同名衝突は上書きせず、別名で安全に保存しました。";
+        }
+    }
+
+    if (g_hBtnModeMarker) ShowWindow(g_hBtnModeMarker, SW_HIDE);
+    if (g_hBtnModeMarkerFree) ShowWindow(g_hBtnModeMarkerFree, SW_HIDE);
+    if (g_hBtnModeMarkerLine) ShowWindow(g_hBtnModeMarkerLine, SW_HIDE);
+    if (g_hBtnModeMarkerArrow) ShowWindow(g_hBtnModeMarkerArrow, SW_HIDE);
+    if (g_hBtnModeMarkerWave) ShowWindow(g_hBtnModeMarkerWave, SW_HIDE);
+    if (g_hBtnModeLine) ShowWindow(g_hBtnModeLine, SW_HIDE);
+    if (g_hBtnModeArrow) ShowWindow(g_hBtnModeArrow, SW_HIDE);
+    if (g_hBtnModeWave) ShowWindow(g_hBtnModeWave, SW_HIDE);
+    if (g_hBtnModeFreehand) ShowWindow(g_hBtnModeFreehand, SW_HIDE);
+    if (organizeStats.failed > 0) {
+        ShowSilentMessageDialog(hWnd, ui.menuOrganizeSessionFiles, msg, SoftNoticeKind::Warning);
+    } else {
+        ShowSoftNotice(hWnd, msg);
+    }
+}
+
+static int PromptCompleteOffStageActionOnExit(HWND hWnd) {
+    std::wstring msg = IsEnglishUi()
+        ? L"There are unintegrated staged changes. Choose how to exit.\n\n"
+          L"Yes:\n"
+          L"Save to the original now, then exit.\n\n"
+          L"No:\n"
+          L"Exit without saving to the original and keep staged changes.\n\n"
+          L"Cancel:\n"
+          L"Return to the app without exiting."
+        : L"未統合の stage 差分があります。終了方法を選んでください。\n\n"
+          L"はい:\n"
+          L"いま原本へ保存してから終了します。\n\n"
+          L"いいえ:\n"
+          L"原本へ保存せず、stage 差分を残したまま終了します。\n\n"
+          L"キャンセル:\n"
+          L"終了せずアプリに戻ります。";
+    const std::wstring stagedLocations = file_output::FormatStagedDiffLocationSummary();
+    if (!stagedLocations.empty()) {
+        msg += IsEnglishUi() ? L"\n\nStaged diff details:\n\n" : L"\n\n未統合差分の詳細:\n\n";
+        msg += stagedLocations;
+    }
+    SilentDialogOptions dialog;
+    dialog.title = IsEnglishUi() ? L"Exit confirmation" : L"終了確認";
+    dialog.message = msg;
+    dialog.kind = SoftNoticeKind::Warning;
+    dialog.buttons = SilentDialogButtons::YesNoCancel;
+    dialog.defaultResult = SilentDialogResult::Yes;
+    dialog.escapeResult = SilentDialogResult::Cancel;
+    dialog.preferredWidthPx = 680;
+    SilentDialogResult res = ShowSilentDialog(hWnd, dialog);
+    if (res == SilentDialogResult::Yes) return IDYES;
+    if (res == SilentDialogResult::No) return IDNO;
+    return IDCANCEL;
+}
+
+static bool CommitActiveEditsForAppExit(HWND hWnd) {
+    if (!CommitActiveNoteEditBoundary(hWnd)) return false;
+    EndInlineTextEditing(g_hPdfView, true);
+    return true;
+}
+
+static void FinalizeAppExitState(HWND hWnd, const std::wstring& previewTempPath) {
+    UpdateWindowTitle(hWnd);
+    RefreshStatusDisplay(hWnd);
+    if (g_pdfPreviewActive) {
+        EndIntegratedPdfPreviewMode(hWnd, /*restoreOriginalPdf=*/false);
+    }
+    if (!previewTempPath.empty()) {
+        std::filesystem::path previewTemp(previewTempPath);
+        std::error_code ec;
+        std::filesystem::remove(previewTemp, ec);
+        const std::filesystem::path siblingA = previewTemp.parent_path() / L"note_preview.pdf";
+        const std::filesystem::path siblingB = previewTemp.parent_path() / L"note_preview_alt.pdf";
+        if (previewTemp.filename() == L"note_preview.pdf") {
+            std::filesystem::remove(siblingB, ec);
+        } else if (previewTemp.filename() == L"note_preview_alt.pdf") {
+            std::filesystem::remove(siblingA, ec);
+        }
+    }
+    SaveLastPdfViewInfo();
+    PersistTempExternalLecturesToSetup(); // best-effort: keep external lecture paths across restarts
+    ClearPdfState();
+    g_tempExternalLectures.clear();
+}
+
+static bool HandleManagedAbnormalExit(HWND hWnd) {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    preview_trace::Append(
+        L"ManagedAbnormalExit",
+        L"begin noteDirty=" + preview_trace::Bool(g_noteDirty) +
+        L" noteNeedsIntegrate=" + preview_trace::Bool(g_noteNeedsIntegrate) +
+        L" annotsDirty=" + preview_trace::Bool(g_annotsDirty) +
+        L" annotsNeedsIntegrate=" + preview_trace::Bool(g_annotsNeedsIntegrate));
+    CancelPendingLinkMode(hWnd);
+    if (!CommitActiveEditsForAppExit(hWnd)) {
+        ClearManagedAbnormalExitRequest();
+        preview_trace::Append(
+            L"ManagedAbnormalExit",
+            L"abort=commit_active_edits_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return false;
+    }
+
+    const bool noteHadDirty = g_noteDirty;
+    const bool annotHadDirty = g_annotsDirty;
+    const std::wstring previewTempPath = g_pdfPreviewTempPath;
+    const bool noteStageOk = SaveNoteIfDirty(hWnd);
+    const bool annotStageOk = SaveAnnotationsIfDirty(hWnd);
+    if (!noteStageOk || !annotStageOk) {
+        ClearManagedAbnormalExitRequest();
+        ShowMainMessageDialog(
+            hWnd,
+            IsEnglishUi() ? L"Abnormal exit canceled" : L"異常終了を中止しました",
+            IsEnglishUi()
+                ? L"Unsaved edits could not be preserved to stage, so the abnormal exit was canceled."
+                : L"未保存の編集を stage に保護できなかったため、異常終了を中止しました。",
+            SoftNoticeKind::Error);
+        preview_trace::Append(
+            L"ManagedAbnormalExit",
+            L"abort=stage_preserve_failed noteOk=" + preview_trace::Bool(noteStageOk) +
+            L" annotOk=" + preview_trace::Bool(annotStageOk) +
+            L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return false;
+    }
+
+    RememberCurrentSessionFiles();
+    s_managedAbnormalExit.reportText =
+        BuildManagedAbnormalExitReportText(noteHadDirty, noteStageOk, annotHadDirty, annotStageOk);
+    s_managedAbnormalExit.reportPending = true;
+    s_managedAbnormalExit.completed = true;
+    s_managedAbnormalExit.requested = false;
+    AppendCrashLogWide(L"ManagedAbnormalExitReport", s_managedAbnormalExit.reportText);
+    FinalizeAppExitState(hWnd, previewTempPath);
+    preview_trace::Append(
+        L"ManagedAbnormalExit",
+        L"end elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+    return true;
+}
+
+static bool HandleAppExit(HWND hWnd) {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    preview_trace::Append(
+        L"HandleAppExit",
+        L"begin notePath=" + g_currentNotePath +
+        L" pdfPath=" + g_pdf.path +
+        L" previewActive=" + preview_trace::Bool(g_pdfPreviewActive) +
+        L" noteDirty=" + preview_trace::Bool(g_noteDirty) +
+        L" noteNeedsIntegrate=" + preview_trace::Bool(g_noteNeedsIntegrate) +
+        L" annotsDirty=" + preview_trace::Bool(g_annotsDirty) +
+        L" annotsNeedsIntegrate=" + preview_trace::Bool(g_annotsNeedsIntegrate));
+    if (s_managedAbnormalExit.requested) {
+        return HandleManagedAbnormalExit(hWnd);
+    }
+    CancelPendingLinkMode(hWnd);
+    if (!CommitActiveEditsForAppExit(hWnd)) {
+        preview_trace::Append(
+            L"HandleAppExit",
+            L"abort=commit_active_edits_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return false;
+    }
+    RememberCurrentSessionFiles();
+    const std::wstring previewTempPath = g_pdfPreviewTempPath;
+    if (!SaveNoteIfDirty(hWnd)) {
+        preview_trace::Append(
+            L"HandleAppExit",
+            L"abort=save_note_if_dirty_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return PromptStayOrOpenDiffManager(
+            hWnd,
+            IsEnglishUi() ? L"Exiting the app" : L"アプリ終了",
+            IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try exiting again."
+                          : L"「差分管理」で未統合差分を整理してから、もう一度終了してください。");
+    }
+    if (!SaveAnnotationsIfDirty(hWnd)) {
+        preview_trace::Append(
+            L"HandleAppExit",
+            L"abort=save_annotations_if_dirty_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return PromptStayOrOpenDiffManager(
+            hWnd,
+            IsEnglishUi() ? L"Exiting the app" : L"アプリ終了",
+            IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try exiting again."
+                          : L"「差分管理」で未統合差分を整理してから、もう一度終了してください。");
+    }
+    const bool hasStagedDiffs = file_output::HasAnyStagedDiffs();
+    preview_trace::Append(
+        L"HandleAppExit",
+        L"post_stage_save hasStagedDiffs=" + preview_trace::Bool(hasStagedDiffs) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+    if (hasStagedDiffs) {
+        int action = PromptCompleteOffStageActionOnExit(hWnd);
+        preview_trace::Append(
+            L"HandleAppExit",
+            L"staged_action=" + std::to_wstring(action) +
+            L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        if (action == IDCANCEL) {
+            preview_trace::Append(
+                L"HandleAppExit",
+                L"abort=user_canceled elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return false;
+        }
+        if (action == IDYES) {
+            if (!file_output::IntegrateStagedNoteAndAnnotations(hWnd)) {
+                preview_trace::Append(
+                    L"HandleAppExit",
+                    L"abort=integrate_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+                return false;
+            }
+        } else {
+            preview_trace::Append(
+                L"HandleAppExit",
+                L"exit_with_staged_diffs elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        }
+    }
+    FinalizeAppExitState(hWnd, previewTempPath);
+    preview_trace::Append(
+        L"HandleAppExit",
+        L"end elapsed_ms=" + preview_trace::ElapsedMs(startTick) +
+        L" previewTempPath=" + previewTempPath);
+    return true;
+}
+
+static bool PrepareWorkspaceRestart(HWND hWnd) {
+    RememberCurrentSessionFiles();
+    if (!SaveNoteIfDirty(hWnd)) {
+        return PromptStayOrOpenDiffManager(
+            hWnd,
+            IsEnglishUi() ? L"Switching workspaces" : L"ワークスペース切替",
+            IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
+                          : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+    }
+    if (!SaveAnnotationsIfDirty(hWnd)) {
+        return PromptStayOrOpenDiffManager(
+            hWnd,
+            IsEnglishUi() ? L"Switching workspaces" : L"ワークスペース切替",
+            IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
+                          : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+    }
+    SaveLastPdfViewInfo();
+    ClearPdfAndNoteSelection();
+    return true;
+}
+
+static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool promptClassdir, bool persistConfig) {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    preview_trace::Append(
+        L"ReloadWorkspaceFromRoot",
+        L"begin root=" + root +
+        L" promptClassdir=" + preview_trace::Bool(promptClassdir) +
+        L" persistConfig=" + preview_trace::Bool(persistConfig));
+    if (root.empty()) return;
+    // No-network requirement: block UNC/device-prefix workspace roots (\\server\share, \\?\UNC\..., etc).
+    if (root.rfind(L"\\\\", 0) == 0) {
+        const wchar_t* msg = IsEnglishUi()
+            ? L"UNC/device paths are not supported as a workspace root."
+            : L"UNC/デバイスパスはワークスペースのルートとして使用できません。";
+        ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+        preview_trace::Append(
+            L"ReloadWorkspaceFromRoot",
+            L"abort=unsupported_unc elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return;
+    }
+    bool isReparse = false;
+    if (TryIsReparsePointNoFollow(std::filesystem::path(root), isReparse) && isReparse) {
+        const wchar_t* msg = IsEnglishUi()
+            ? L"Reparse point folders (junction/symlink) are not supported as a workspace root."
+            : L"ジャンクション/シンボリックリンク等（reparse point）のフォルダはワークスペースとして使用できません。";
+        ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+        preview_trace::Append(
+            L"ReloadWorkspaceFromRoot",
+            L"abort=reparse_root elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return;
+    }
+    std::error_code ec;
+    if (!std::filesystem::exists(std::filesystem::path(root), ec) || ec ||
+        !std::filesystem::is_directory(std::filesystem::path(root), ec) || ec) {
+        std::wstring msg = IsEnglishUi()
+            ? L"Workspace folder not found:\n" + root
+            : L"ワークスペースフォルダが見つかりません:\n" + root;
+        ShowSilentMessageDialog(hWnd, GetUiText().menuFile, msg, SoftNoticeKind::Warning);
+        preview_trace::Append(
+            L"ReloadWorkspaceFromRoot",
+            L"abort=missing_root elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return;
+    }
+
+    // Preflight: ensure we can create/write __resource__ before switching (avoid starting edits that can't be saved).
+    {
+        std::wstring err;
+        if (!EnsureWorkspaceResourceDirsWithErr(root, nullptr, &err)) {
+            std::wstring msg = IsEnglishUi()
+                ? L"Workspace switch was canceled because the target workspace is not writable.\n\nroot:\n" + root
+                : L"切り替え先ワークスペースに書き込みできないため、ワークスペース切り替えを中断しました。\n\nroot:\n" + root;
+            msg += IsEnglishUi()
+                ? L"\n\nCheck access control / security policy for this folder."
+                : L"\n\nこのフォルダのアクセス権・セキュリティ制御を確認してください。";
+            if (!err.empty()) msg += L"\n\n" + err;
+            ShowSoftNotice(hWnd, msg);
+            preview_trace::Append(
+                L"ReloadWorkspaceFromRoot",
+                L"abort=resource_dir_unwritable elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            return;
+        }
+    }
+    std::wstring workspaceLockError;
+    if (!AcquireWorkspaceWriteLock(std::filesystem::path(root), &workspaceLockError)) {
+        std::wstring msg = IsEnglishUi()
+            ? L"Workspace switch was canceled because the target workspace is open in another PDF Note Workspace process."
+            : L"切り替え先ワークスペースが別の PDF Note Workspace プロセスで開かれているため、切り替えを中断しました。";
+        if (!workspaceLockError.empty()) msg += L"\n\n" + workspaceLockError;
+        ShowSilentMessageDialog(hWnd, GetUiText().menuFile, msg, SoftNoticeKind::Warning);
+        preview_trace::Append(
+            L"ReloadWorkspaceFromRoot",
+            L"abort=workspace_write_lock elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return;
+    }
+    g_workspaceRoot = root;
+    SetAppLogWorkspaceRoot(g_workspaceRoot);
+    g_config = LoadWorkspaceConfig(g_workspaceRoot);
+    ApplyRuntimeLogConfigFromWorkspace(g_workspaceRoot, g_config);
+    InitScheduleSortBaseTime();
+    EnsureWorkspaceResourceDirs(nullptr);
+    {
+        std::wstring identityErr;
+        if (!note::ConfigureRuntimeNoteIdentityStore(
+                std::filesystem::path(g_workspaceRoot), &identityErr)) {
+            std::wstring message = IsEnglishUi()
+                ? L"Persistent note identities could not be loaded. Notes remain available, but identity persistence is disabled for this workspace."
+                : L"ノートの永続identityを読み込めませんでした。ノートは利用できますが、このワークスペースではidentityの永続化を無効にします。";
+            if (!identityErr.empty()) message += L"\n\n" + identityErr;
+            ShowSoftNotice(hWnd, message, SoftNoticeKind::Warning);
+        }
+    }
+    LoadThemeConfig(g_workspaceRoot);
+    if (promptClassdir) {
+        CheckAndPromptClassdirMismatch(hWnd, g_workspaceRoot);
+    }
+    ApplyConfigToUI(hWnd);
+    OnWorkspaceLoaded(hWnd);
+    UpdateAutoSaveTimer(hWnd);
+    UpdateAutoIntegrateTimer(hWnd);
+    if (persistConfig) {
+        PersistConfig();
+    }
+    RefreshStatusDisplay(hWnd);
+    preview_trace::Append(
+        L"ReloadWorkspaceFromRoot",
+        L"end root=" + root +
+        L" lectureCount=" + std::to_wstring(g_lectures.size()) +
+        L" sessionCount=" + std::to_wstring(g_sessions.size()) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+}
+
+void LayoutChildren(HWND hWnd) {
+    LayoutChildrenImpl(hWnd, ui::LayoutPass::Commit);
+}
+
+static void LayoutChildrenLive(HWND hWnd) {
+    LayoutChildrenImpl(hWnd, ui::LayoutPass::Live);
+}
+
+static void LayoutChildrenImpl(HWND hWnd, ui::LayoutPass pass) {
+    RECT rc{};
+    GetClientRect(hWnd, &rc);
+    int cw = rc.right - rc.left;
+    int ch = rc.bottom - rc.top;
+    DebugAppendLayoutLog(pass == ui::LayoutPass::Live ? L"Layout(live)" : L"Layout", hWnd, cw, ch);
+    if (cw <= 0 || ch <= 0) return;
+
+    ui::ApplyLayout(hWnd, pass);
+}
+
+static bool IsLeftPaneFocusWindow(HWND hwnd) {
+    if (!hwnd) return false;
+    const HWND hiddenWhenCollapsed[] = {
+        g_hLectureList,
+        g_hSessionList,
+        g_hPdfList,
+        g_hNoteList,
+        g_hBtnNewSession,
+        g_hBtnNewNote,
+        g_hChkShortcutHeading1,
+        g_hChkShortcutHeading2,
+        g_hShortcutHeadingLevelLabel,
+        g_hBtnShortcutHeadingLevelUp,
+        g_hChkShortcutBack,
+        g_hChkShortcutChar,
+        g_hChkShortcutBold,
+        g_hChkShortcutItalic,
+        g_hChkShortcutStrike,
+        g_hChkShortcutUnderline,
+        g_hChkShortcutLinkDecor,
+        g_hBtnShortcutBackPreview,
+        g_hBtnShortcutCharPreview,
+        g_hBtnShortcutBackPalette,
+        g_hBtnShortcutCharPalette,
+        g_hShortcutIndentLabel,
+        g_hShortcutIndentEdit,
+        g_hShortcutMarginLabel,
+        g_hShortcutMarginEdit,
+        g_hShortcutFontSizeLabel,
+        g_hShortcutFontSizeEdit,
+        g_hShortcutTagEdit,
+        g_hBtnShortcutInput,
+        g_hBtnShortcutPdfLink,
+        g_hBtnNoteAssistBullet,
+        g_hBtnNoteAssistQuote,
+        g_hBtnNoteAssistPageRef,
+    };
+    for (HWND h : hiddenWhenCollapsed) {
+        if (hwnd == h) return true;
+    }
+    return false;
+}
+
+static void SetLeftPaneCollapsed(HWND hWnd, bool collapsed) {
+    if (g_leftPaneCollapsed == collapsed) return;
+    if (collapsed && IsLeftPaneFocusWindow(GetFocus())) {
+        SetFocus(g_hPdfView ? g_hPdfView : hWnd);
+    }
+    g_leftPaneCollapsed = collapsed;
+    g_config.leftPaneCollapsed = collapsed;
+    LayoutChildren(hWnd);
+    RedrawWorkspaceLayout(hWnd);
+    PersistConfig();
+    RefreshMainMenuBar(hWnd);
+}
+
+

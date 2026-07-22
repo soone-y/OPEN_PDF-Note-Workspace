@@ -1,0 +1,334 @@
+// file: settings/settings_palette.cppinc
+// Included by settings.cpp (single TU).
+
+// ---------------------------------------------------------------------
+// Settings: User palette
+// ---------------------------------------------------------------------
+namespace {
+constexpr int IDC_PALETTE_SLOT_BASE = 5200;
+constexpr int IDC_PALETTE_SLOT_COUNT = 16;
+constexpr int IDC_PALETTE_INFO = 5216;
+constexpr int IDC_PALETTE_SELECTED_INFO = 5217;
+
+struct PaletteSettingsCtx {
+    HWND owner = nullptr;
+    bool done = false;
+    bool ok = false;
+    bool embedded = false;
+    bool reopenOnCancel = false;
+    COLORREF colors[IDC_PALETTE_SLOT_COUNT]{};
+    int selectedSlot = 0;
+    int changedSlot = -1;
+    HWND headerTitle = nullptr;
+    HWND headerSubtitle = nullptr;
+    HWND btnOpen = nullptr;
+    HWND btnClose = nullptr;
+    HWND selectedInfo = nullptr;
+};
+
+static void DrawPaletteSlotButton(const DRAWITEMSTRUCT* dis, COLORREF color, bool isTargetSlot, bool isChangedSlot) {
+    if (!dis) return;
+    RECT rc = dis->rcItem;
+    const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+    const bool focused = (dis->itemState & ODS_FOCUS) != 0;
+
+    HBRUSH fill = CreateSolidBrush(color);
+    FillRect(dis->hDC, &rc, fill);
+    DeleteObject(fill);
+
+    int borderWidth = selected ? 2 : 1;
+    COLORREF borderColor = RGB(0, 0, 0);
+    if (isChangedSlot) {
+        borderWidth = 3;
+        borderColor = RGB(220, 70, 40);
+    } else if (isTargetSlot) {
+        borderWidth = 3;
+        borderColor = g_theme.accent;
+    }
+
+    HPEN border = CreatePen(PS_SOLID, borderWidth, borderColor);
+    HGDIOBJ oldPen = SelectObject(dis->hDC, border);
+    HGDIOBJ oldBrush = SelectObject(dis->hDC, GetStockObject(HOLLOW_BRUSH));
+    Rectangle(dis->hDC, rc.left, rc.top, rc.right, rc.bottom);
+    SelectObject(dis->hDC, oldBrush);
+    SelectObject(dis->hDC, oldPen);
+    DeleteObject(border);
+
+    if (isChangedSlot || isTargetSlot) {
+        RECT rcInner = rc;
+        InflateRect(&rcInner, -4, -4);
+        if (rcInner.right > rcInner.left && rcInner.bottom > rcInner.top) {
+            HPEN innerBorder = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+            HGDIOBJ oldPen2 = SelectObject(dis->hDC, innerBorder);
+            HGDIOBJ oldBrush2 = SelectObject(dis->hDC, GetStockObject(HOLLOW_BRUSH));
+            Rectangle(dis->hDC, rcInner.left, rcInner.top, rcInner.right, rcInner.bottom);
+            SelectObject(dis->hDC, oldBrush2);
+            SelectObject(dis->hDC, oldPen2);
+            DeleteObject(innerBorder);
+        }
+    }
+
+    if (focused) {
+        RECT rcFocus = rc;
+        InflateRect(&rcFocus, -3, -3);
+        DrawFocusRect(dis->hDC, &rcFocus);
+    }
+}
+
+static bool IsPaletteSlotId(int id) {
+    return id >= IDC_PALETTE_SLOT_BASE && id < IDC_PALETTE_SLOT_BASE + IDC_PALETTE_SLOT_COUNT;
+}
+
+static bool OpenChooseColorForPaletteSlot(HWND owner, COLORREF* colors, int slot,
+                                          PaletteSettingsCtx* paletteCtx = nullptr) {
+    if (!colors) return false;
+    if (slot < 0 || slot >= IDC_PALETTE_SLOT_COUNT) slot = 0;
+    if (paletteCtx) {
+        paletteCtx->selectedSlot = slot;
+        paletteCtx->changedSlot = -1;
+    }
+    COLORREF chooserCustom[IDC_PALETTE_SLOT_COUNT]{};
+    for (int i = 0; i < IDC_PALETTE_SLOT_COUNT; ++i) chooserCustom[i] = colors[i];
+
+    CHOOSECOLORW cc{};
+    cc.lStructSize = sizeof(cc);
+    cc.hwndOwner = owner;
+    cc.rgbResult = colors[slot];
+    cc.lpCustColors = chooserCustom;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (!ChooseColorW(&cc)) {
+        if (paletteCtx) {
+            paletteCtx->selectedSlot = slot;
+            paletteCtx->changedSlot = -1;
+        }
+        if (owner && IsWindow(owner)) {
+            InvalidateRect(owner, nullptr, TRUE);
+            UpdateWindow(owner);
+        }
+        return false;
+    }
+
+    colors[slot] = cc.rgbResult;
+    if (paletteCtx) {
+        paletteCtx->selectedSlot = slot;
+        paletteCtx->changedSlot = slot;
+    }
+    if (owner && IsWindow(owner)) {
+        InvalidateRect(owner, nullptr, TRUE);
+    }
+    return true;
+}
+
+MAYBE_UNUSED static std::wstring PaletteHexColorW(COLORREF c) {
+    wchar_t buf[16]{};
+    swprintf(buf, std::size(buf), L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+    return std::wstring(buf);
+}
+
+static void UpdatePaletteSelectedInfo(PaletteSettingsCtx* ctx) {
+    if (!ctx || !ctx->selectedInfo) return;
+    int idx = std::clamp(ctx->selectedSlot, 0, IDC_PALETTE_SLOT_COUNT - 1);
+    COLORREF c = ctx->colors[idx];
+    std::wstring hex = PaletteHexColorW(c);
+    std::wstring text;
+    if (IsEnglishUi()) {
+        text = L"Selected: Slot " + std::to_wstring(idx + 1) + L"  " + hex +
+               L"\r\nRGB: R=" + std::to_wstring(GetRValue(c)) +
+               L"  G=" + std::to_wstring(GetGValue(c)) +
+               L"  B=" + std::to_wstring(GetBValue(c));
+    } else {
+        text = L"選択中: スロット " + std::to_wstring(idx + 1) + L"  " + hex +
+               L"\r\nRGB: R=" + std::to_wstring(GetRValue(c)) +
+               L"  G=" + std::to_wstring(GetGValue(c)) +
+               L"  B=" + std::to_wstring(GetBValue(c));
+    }
+    if (ctx->changedSlot == idx) {
+        text += IsEnglishUi() ? L"\r\nUpdated" : L"\r\n更新済み";
+    }
+    SetWindowTextW(ctx->selectedInfo, text.c_str());
+}
+
+static void EnsurePaletteSettingsClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = [](HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
+        auto* ctx = reinterpret_cast<PaletteSettingsCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+        switch (msg) {
+        case WM_CREATE: {
+            auto cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            ctx = reinterpret_cast<PaletteSettingsCtx*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+            if (!ctx) return -1;
+
+            LoadUserPaletteColorsForSettings(ctx->colors, std::size(ctx->colors));
+
+            const int pad = ScaleY(hWnd, 12);
+            const int gap = ScaleY(hWnd, 6);
+            const int slotW = ScaleY(hWnd, 36);
+            const int slotH = ScaleY(hWnd, 32);
+            const int rowH = std::max(ScaleY(hWnd, 28), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
+            const int columns = 8;
+            const int titleH = std::max(rowH, ScaleY(hWnd, 30));
+            std::wstring subtitle = IsEnglishUi()
+                ? L"Select a slot, then use Change Color to update it."
+                : L"スロットを選び、「色を変更」でその色を更新します。";
+            int subtitleH = ctx->embedded ? 0
+                                          : std::max(FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 4),
+                                                     MeasureTextHeight(hWnd, subtitle, ScaleY(hWnd, 360), g_hUIFont));
+            if (!ctx->embedded) {
+                ctx->headerTitle = CreateWindowExW(0, L"STATIC",
+                                                   GetUiText().menuPaletteSettings.c_str(),
+                                                   WS_CHILD | WS_VISIBLE,
+                                                   pad, pad, ScaleY(hWnd, 360), titleH,
+                                                   hWnd, nullptr, g_hInst, nullptr);
+                ctx->headerSubtitle = CreateWindowExW(0, L"STATIC", subtitle.c_str(),
+                                                      WS_CHILD | WS_VISIBLE,
+                                                      pad, pad + titleH, ScaleY(hWnd, 360), subtitleH,
+                                                      hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_INFO)),
+                                                      g_hInst, nullptr);
+                SetUIFont(ctx->headerTitle);
+                SetUIFont(ctx->headerSubtitle);
+            }
+
+            int gridY = ctx->embedded ? pad : (pad + titleH + subtitleH + ScaleY(hWnd, 12));
+            for (int i = 0; i < IDC_PALETTE_SLOT_COUNT; ++i) {
+                int row = i / columns;
+                int col = i % columns;
+                int x = pad + col * (slotW + gap);
+                int yy = gridY + row * (slotH + gap);
+                std::wstring label = std::to_wstring(i + 1);
+                HWND btn = CreateWindowExW(0, L"BUTTON", label.c_str(),
+                                           WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
+                                           x, yy, slotW, slotH, hWnd,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_SLOT_BASE + i)),
+                                           g_hInst, nullptr);
+                SetUIFont(btn);
+            }
+
+            int rows = (IDC_PALETTE_SLOT_COUNT + columns - 1) / columns;
+            int y = gridY + rows * slotH + std::max(0, rows - 1) * gap + ScaleY(hWnd, 10);
+            int btnH = rowH;
+            int okW = ScaleY(hWnd, 130);
+            int cancelW = ScaleY(hWnd, 96);
+            int btnGap = ScaleY(hWnd, 10);
+            int totalW = columns * slotW + (columns - 1) * gap;
+            int xCancel = pad + totalW - cancelW;
+            int xOk = ctx->embedded ? (pad + totalW - okW) : (xCancel - btnGap - okW);
+
+            ctx->btnOpen = CreateWindowExW(0, L"BUTTON",
+                                           ctx->embedded
+                                               ? (IsEnglishUi() ? L"Change Color..." : L"色を変更...")
+                                               : (IsEnglishUi() ? L"Open Color Palette" : L"カラーパレットを開く"),
+                                           WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                                           xOk, y, okW, btnH, hWnd,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
+            SetUIFont(ctx->btnOpen);
+            if (!ctx->embedded) {
+                ctx->btnClose = CreateWindowExW(0, L"BUTTON",
+                                                UiCloseLabel(),
+                                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                xCancel, y, cancelW, btnH, hWnd,
+                                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
+                SetUIFont(ctx->btnClose);
+            }
+
+            RECT clientRc{};
+            GetClientRect(hWnd, &clientRc);
+            int infoY = y + btnH + gap;
+            int infoW = totalW;
+            int infoRemainH = std::max(ScaleY(hWnd, 74),
+                                       static_cast<int>(clientRc.bottom - infoY - pad));
+            ctx->selectedInfo = CreateWindowExW(0, L"STATIC", L"",
+                                                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                                pad, infoY, infoW, infoRemainH,
+                                                hWnd,
+                                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_SELECTED_INFO)),
+                                                g_hInst, nullptr);
+            SetUIFont(ctx->selectedInfo);
+            UpdatePaletteSelectedInfo(ctx);
+
+            ApplyThemeToDialog(hWnd);
+            return 0;
+        }
+        case WM_THEMECHANGED:
+            ApplyThemeToDialog(hWnd);
+            return 0;
+        case WM_ERASEBKGND: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            RECT rc{};
+            GetClientRect(hWnd, &rc);
+            HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+            FillRect(hdc, &rc, bg);
+            return 1;
+        }
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+        case WM_CTLCOLORBTN: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            HWND ctl = reinterpret_cast<HWND>(lParam);
+            return ThemeCtlColorPanel(ctl, hdc);
+        }
+        case WM_DRAWITEM: {
+            auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            if (!ctx || !dis) break;
+            if (!IsPaletteSlotId(static_cast<int>(dis->CtlID))) break;
+            int idx = static_cast<int>(dis->CtlID) - IDC_PALETTE_SLOT_BASE;
+            if (idx < 0 || idx >= IDC_PALETTE_SLOT_COUNT) break;
+            const bool isTargetSlot = (idx == ctx->selectedSlot);
+            const bool isChangedSlot = (idx == ctx->changedSlot);
+            DrawPaletteSlotButton(dis, ctx->colors[idx], isTargetSlot, isChangedSlot);
+            return TRUE;
+        }
+        case WM_COMMAND: {
+            int id = LOWORD(wParam);
+            if (!ctx) break;
+            if (id == IDOK) {
+                if (OpenChooseColorForPaletteSlot(hWnd, ctx->colors, ctx->selectedSlot, ctx)) {
+                    InvalidateRect(hWnd, nullptr, TRUE);
+                }
+                UpdatePaletteSelectedInfo(ctx);
+                return 0;
+            }
+            if (id == IDCANCEL || id == 0) {
+                if (ctx->embedded) return 0;
+                DestroyWindow(hWnd);
+                return 0;
+            }
+            if (IsPaletteSlotId(id)) {
+                int idx = id - IDC_PALETTE_SLOT_BASE;
+                ctx->selectedSlot = idx;
+                ctx->changedSlot = -1;
+                InvalidateRect(hWnd, nullptr, TRUE);
+                UpdatePaletteSelectedInfo(ctx);
+                return 0;
+            }
+            break;
+        }
+        case WM_CLOSE:
+            if (ctx && ctx->embedded) return 0;
+            DestroyWindow(hWnd);
+            return 0;
+        case WM_DESTROY:
+            if (ctx) RestoreOwnerAfterModal(ctx->owner);
+            if (ctx) ctx->done = true;
+            return 0;
+        default:
+            break;
+        }
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
+    };
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush
+                                           : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"PaletteSettingsDlgClass";
+    RegisterClassW(&wc);
+    registered = true;
+}
+} // namespace
+
+void ShowPaletteSettingsDialog(HWND owner) {
+    ShowUnifiedSettingsDialog(owner, kSettingsNavPalette);
+}

@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000024 Mon Sep 17 00:00:00 2001
+From: PDF Note Workspace <local@example.invalid>
+Date: Mon, 8 Jun 2026 01:25:00 +0900
+Subject: [PATCH] Use LocalAppData instead of Documents as Windows home
+
+The conversion runtime is used headlessly with an explicit UserInstallation
+profile.  Treating the Windows Documents known folder as the generic home
+directory causes Controlled Folder Access to block soffice.bin during
+conversion startup, even when Work/Backup/Temp paths are redirected.
+
+Use LocalAppData for the Windows home directory fallback so custom headless
+conversion does not attempt to create or modify the protected Documents
+folder.
+---
+ sal/osl/w32/security.cxx | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sal/osl/w32/security.cxx b/sal/osl/w32/security.cxx
+index 111111111111..222222222222 100644
+--- a/sal/osl/w32/security.cxx
++++ b/sal/osl/w32/security.cxx
+@@ -417,7 +417,7 @@ sal_Bool SAL_CALL osl_getHomeDir(oslSecurity Security, rtl_uString **pustrDirect
+ 
+     OUString aSysDir = pSecImpl->m_pNetResource
+                            ? OUString(o3tl::toU(pSecImpl->m_pNetResource->lpRemoteName))
+-                           : GetSpecialFolder(FOLDERID_Documents);
++                           : GetSpecialFolder(FOLDERID_LocalAppData);
+ 
+     return !aSysDir.isEmpty()
+            && osl_File_E_None == osl_getFileURLFromSystemPath(aSysDir.pData, pustrDirectory);
+-- 
+2.45.0
+

@@ -1,0 +1,1124 @@
+// file: pdf_view/annotation_edit.cppinc
+// NOTE: Included by `src/pdf_view/navigation.cppinc` to keep annotation editing/history in the same translation unit.
+
+static std::vector<AnnotCommand> g_annotUndo;
+static std::vector<AnnotCommand> g_annotRedo;
+static std::vector<AnnotCommand> g_pendingAnnotStageCommands;
+static std::wstring g_pendingAnnotStageTargetPath;
+static bool g_pendingAnnotStageCommandsValid = true;
+static bool g_editingExistingAnnot = false;
+static int g_editingOriginalIndex = -1;
+static Annotation g_editingOriginal;
+static bool g_annotHistoryDirty = false;
+static bool g_annotHistorySaveWarned = false;
+static bool g_annotHistoryLoadWarned = false;
+
+struct TextEditSnapshot {
+    std::wstring text;
+    std::wstring fontName;
+    double fontPt = 0.0;
+    size_t caret = 0;
+    size_t selStart = 0;
+    size_t selEnd = 0;
+};
+
+static std::vector<TextEditSnapshot> g_textEditUndo;
+static std::vector<TextEditSnapshot> g_textEditRedo;
+
+// ============================================================================
+// End of duplicates
+// ============================================================================
+
+static std::wstring NormalizeAnnotStagePathKey(const std::wstring& path) {
+    if (path.empty()) return {};
+    std::error_code ec;
+    std::filesystem::path canon = std::filesystem::weakly_canonical(std::filesystem::path(path), ec);
+    std::wstring out = ec ? path : canon.wstring();
+    std::replace(out.begin(), out.end(), L'/', L'\\');
+    std::transform(out.begin(), out.end(), out.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(ch));
+    });
+    return out;
+}
+
+static bool PendingAnnotStageTargetMatches(const std::wstring& pdfPath) {
+    if (pdfPath.empty() || g_pendingAnnotStageTargetPath.empty()) return false;
+    return NormalizeAnnotStagePathKey(g_pendingAnnotStageTargetPath) ==
+           NormalizeAnnotStagePathKey(pdfPath);
+}
+
+void ResetPendingAnnotStageCommands() {
+    g_pendingAnnotStageCommands.clear();
+    g_pendingAnnotStageTargetPath.clear();
+    g_pendingAnnotStageCommandsValid = true;
+}
+
+void ClearPendingAnnotStageCommands(const std::wstring& pdfPath) {
+    if (!pdfPath.empty() && !PendingAnnotStageTargetMatches(pdfPath) &&
+        !g_pendingAnnotStageTargetPath.empty()) {
+        return;
+    }
+    g_pendingAnnotStageCommands.clear();
+    g_pendingAnnotStageTargetPath = pdfPath;
+    g_pendingAnnotStageCommandsValid = true;
+}
+
+void InvalidatePendingAnnotStageCommands(const std::wstring& pdfPath) {
+    if (!pdfPath.empty()) {
+        if (g_pendingAnnotStageTargetPath.empty()) {
+            g_pendingAnnotStageTargetPath = pdfPath;
+        } else if (!PendingAnnotStageTargetMatches(pdfPath)) {
+            return;
+        }
+    }
+    g_pendingAnnotStageCommandsValid = false;
+}
+
+bool CollectPendingAnnotStageCommands(const std::wstring& pdfPath, std::vector<AnnotCommand>* outCmds) {
+    if (outCmds) outCmds->clear();
+    if (!outCmds) return false;
+    if (!g_pendingAnnotStageCommandsValid) return false;
+    if (!PendingAnnotStageTargetMatches(pdfPath)) return false;
+    if (g_pendingAnnotStageCommands.empty()) return false;
+    *outCmds = g_pendingAnnotStageCommands;
+    return true;
+}
+
+static void QueuePendingAnnotStageCommand(const AnnotCommand& cmd) {
+    const std::wstring pdfPath = CurrentLogicalPdfPath();
+    if (pdfPath.empty()) return;
+    if (g_pendingAnnotStageTargetPath.empty() || !PendingAnnotStageTargetMatches(pdfPath)) {
+        g_pendingAnnotStageCommands.clear();
+        g_pendingAnnotStageTargetPath = pdfPath;
+        g_pendingAnnotStageCommandsValid = true;
+    }
+    if (!g_pendingAnnotStageCommandsValid) return;
+    g_pendingAnnotStageCommands.push_back(cmd);
+}
+
+static void ResetEditOriginal() {
+    g_editingExistingAnnot = false;
+    g_editingOriginalIndex = -1;
+    g_editingOriginal = Annotation{};
+    g_pdf.pendingTextBoxHit = false;
+    g_pdf.pendingTextBoxIndex = -1;
+    g_pdf.pendingTextBoxDown = {};
+}
+
+static TextEditSnapshot CaptureTextEditSnapshot() {
+    return TextEditSnapshot{
+        g_pdf.editText,
+        g_pdf.editFontName,
+        g_pdf.editFontPt,
+        g_pdf.editCaret,
+        g_pdf.editSelStart,
+        g_pdf.editSelEnd,
+    };
+}
+
+static void RestoreTextEditSnapshot(const TextEditSnapshot& snap) {
+    g_pdf.editText = snap.text;
+    g_pdf.editFontName = snap.fontName.empty() ? g_textFontName : snap.fontName;
+    g_pdf.editFontPt = (snap.fontPt > 0.0) ? snap.fontPt : g_textFontPt;
+    size_t maxPos = g_pdf.editText.size();
+    g_pdf.editCaret = std::min(snap.caret, maxPos);
+    g_pdf.editSelStart = std::min(snap.selStart, maxPos);
+    g_pdf.editSelEnd = std::min(snap.selEnd, maxPos);
+    g_pdf.imeComp.clear();
+    g_pdf.imeComposing = false;
+    g_pdf.suppressNextImeResultReturnChar = false;
+    g_pdf.imeResultMessageTime = 0;
+    g_pdf.editLayoutDirty = true;
+}
+
+static void ClearTextEditHistory() {
+    g_textEditUndo.clear();
+    g_textEditRedo.clear();
+}
+
+static void RecordTextEditChange() {
+    if (!g_pdf.editingText) return;
+    g_textEditRedo.clear();
+    g_textEditUndo.push_back(CaptureTextEditSnapshot());
+    if (g_textEditUndo.size() > kTextEditHistoryLimit) {
+        size_t drop = g_textEditUndo.size() - kTextEditHistoryLimit;
+        g_textEditUndo.erase(g_textEditUndo.begin(), g_textEditUndo.begin() + drop);
+    }
+}
+
+static bool UndoTextEdit(HWND hwnd) {
+    if (!g_pdf.editingText || g_textEditUndo.empty()) return false;
+    RECT before{};
+    bool hadBefore = GetEditingTextBoxClientRect(&before);
+    g_textEditRedo.push_back(CaptureTextEditSnapshot());
+    TextEditSnapshot snap = std::move(g_textEditUndo.back());
+    g_textEditUndo.pop_back();
+    RestoreTextEditSnapshot(snap);
+    RecalcEditingTextboxSize(true);
+    EnsureEditingTextBoxVisible(hwnd, L"undo_text_edit");
+    UpdateImeWindowPosition(hwnd, true);
+    InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+    return true;
+}
+
+static bool RedoTextEdit(HWND hwnd) {
+    if (!g_pdf.editingText || g_textEditRedo.empty()) return false;
+    RECT before{};
+    bool hadBefore = GetEditingTextBoxClientRect(&before);
+    g_textEditUndo.push_back(CaptureTextEditSnapshot());
+    if (g_textEditUndo.size() > kTextEditHistoryLimit) {
+        size_t drop = g_textEditUndo.size() - kTextEditHistoryLimit;
+        g_textEditUndo.erase(g_textEditUndo.begin(), g_textEditUndo.begin() + drop);
+    }
+    TextEditSnapshot snap = std::move(g_textEditRedo.back());
+    g_textEditRedo.pop_back();
+    RestoreTextEditSnapshot(snap);
+    RecalcEditingTextboxSize(true);
+    EnsureEditingTextBoxVisible(hwnd, L"redo_text_edit");
+    UpdateImeWindowPosition(hwnd, true);
+    InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+    return true;
+}
+
+static void ClearAnnotHistory() {
+    g_annotUndo.clear();
+    g_annotRedo.clear();
+    g_annotHistoryDirty = false;
+    ResetPendingAnnotStageCommands();
+}
+
+static void TrimAnnotHistory() {
+    if (g_annotUndo.size() <= kAnnotHistoryLimit) return;
+    size_t drop = g_annotUndo.size() - kAnnotHistoryLimit;
+    g_annotUndo.erase(g_annotUndo.begin(), g_annotUndo.begin() + drop);
+}
+
+static void PushAnnotCommand(AnnotCommand cmd) {
+    AnnotCommand pendingCopy = cmd;
+    g_annotRedo.clear();
+    g_annotUndo.push_back(std::move(cmd));
+    TrimAnnotHistory();
+    MarkAnnotHistoryDirty();
+    QueuePendingAnnotStageCommand(pendingCopy);
+}
+
+static void InsertAnnotAt(const Annotation& ann, int index) {
+    if (index < 0 || index > static_cast<int>(g_annots.size())) {
+        g_annots.push_back(ann);
+        EnsureAnnotationId(g_annots.back(), g_annots, static_cast<int>(g_annots.size()) - 1);
+        return;
+    }
+    g_annots.insert(g_annots.begin() + index, ann);
+    EnsureAnnotationId(g_annots[static_cast<size_t>(index)], g_annots, index);
+}
+
+static bool EraseAnnotAt(int index) {
+    if (index < 0 || index >= static_cast<int>(g_annots.size())) return false;
+    g_annots.erase(g_annots.begin() + index);
+    return true;
+}
+
+static bool AnnotationEquals(const Annotation& a, const Annotation& b) {
+    if (a.type != b.type) return false;
+    if (a.shapeKind != b.shapeKind) return false;
+    if (a.shapeDrawMode != b.shapeDrawMode) return false;
+    if (a.arrowHead != b.arrowHead) return false;
+    if (a.shapeRotation != b.shapeRotation) return false;
+    if (a.pageIndex != b.pageIndex) return false;
+    if (a.x1 != b.x1 || a.y1 != b.y1 || a.x2 != b.x2 || a.y2 != b.y2) return false;
+    if (a.width != b.width || a.alpha != b.alpha || a.fontPt != b.fontPt) return false;
+    if (a.color != b.color) return false;
+    if (a.text != b.text || a.fontName != b.fontName) return false;
+    if (a.linkId != b.linkId || a.linkNotePath != b.linkNotePath) return false;
+    if (a.mathKind != b.mathKind || a.backgroundAssistMode != b.backgroundAssistMode) return false;
+    if (a.path.size() != b.path.size()) return false;
+    for (size_t i = 0; i < a.path.size(); ++i) {
+        if (a.path[i].x != b.path[i].x || a.path[i].y != b.path[i].y) return false;
+    }
+    if (a.dash.size() != b.dash.size()) return false;
+    for (size_t i = 0; i < a.dash.size(); ++i) {
+        if (a.dash[i] != b.dash[i]) return false;
+    }
+    if (a.quads.size() != b.quads.size()) return false;
+    for (size_t i = 0; i < a.quads.size(); ++i) {
+        if (a.quads[i] != b.quads[i]) return false;
+    }
+    return true;
+}
+
+static int FindAnnotIndexByIdInList(const std::vector<Annotation>& annots, std::wstring_view id) {
+    if (id.empty()) return -1;
+    for (size_t i = 0; i < annots.size(); ++i) {
+        if (annots[i].id == id) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+static int FindAnnotIndexByIdOrFallbackInList(const std::vector<Annotation>& annots,
+                                              const std::wstring& id,
+                                              int fallbackIndex) {
+    int resolved = FindAnnotIndexByIdInList(annots, id);
+    if (resolved >= 0) return resolved;
+    if (fallbackIndex >= 0 && fallbackIndex < static_cast<int>(annots.size())) return fallbackIndex;
+    return -1;
+}
+
+static void InsertAnnotAtInList(std::vector<Annotation>* annots, const Annotation& ann, int index) {
+    if (!annots) return;
+    if (index < 0 || index > static_cast<int>(annots->size())) {
+        annots->push_back(ann);
+        EnsureAnnotationId(annots->back(), *annots, static_cast<int>(annots->size()) - 1);
+        return;
+    }
+    annots->insert(annots->begin() + index, ann);
+    EnsureAnnotationId((*annots)[static_cast<size_t>(index)], *annots, index);
+}
+
+static bool EraseAnnotAtInList(std::vector<Annotation>* annots, int index) {
+    if (!annots || index < 0 || index >= static_cast<int>(annots->size())) return false;
+    annots->erase(annots->begin() + index);
+    return true;
+}
+
+void ApplyAnnotCommandToList(std::vector<Annotation>* annots, const AnnotCommand& cmd) {
+    if (!annots) return;
+    switch (cmd.kind) {
+    case AnnotCommandKind::Add:
+        {
+            const int existingIndex = FindAnnotIndexByIdInList(*annots, cmd.after.id);
+            if (existingIndex >= 0 && existingIndex < static_cast<int>(annots->size())) {
+                (*annots)[static_cast<size_t>(existingIndex)] = cmd.after;
+                EnsureAnnotationId((*annots)[static_cast<size_t>(existingIndex)], *annots, existingIndex);
+            } else {
+                InsertAnnotAtInList(annots, cmd.after, cmd.afterIndex);
+            }
+        }
+        break;
+    case AnnotCommandKind::Remove:
+        EraseAnnotAtInList(annots, FindAnnotIndexByIdOrFallbackInList(*annots, cmd.before.id, cmd.beforeIndex));
+        break;
+    case AnnotCommandKind::Update:
+        {
+            const int resolvedBeforeIndex =
+                FindAnnotIndexByIdOrFallbackInList(*annots, cmd.before.id, cmd.beforeIndex);
+            if (cmd.beforeIndex == cmd.afterIndex &&
+                resolvedBeforeIndex >= 0 && resolvedBeforeIndex < static_cast<int>(annots->size())) {
+                (*annots)[static_cast<size_t>(resolvedBeforeIndex)] = cmd.after;
+                EnsureAnnotationId((*annots)[static_cast<size_t>(resolvedBeforeIndex)], *annots, resolvedBeforeIndex);
+            } else {
+                int insertIndex = cmd.afterIndex;
+                if (resolvedBeforeIndex >= 0 && insertIndex > resolvedBeforeIndex) {
+                    --insertIndex;
+                }
+                EraseAnnotAtInList(annots, resolvedBeforeIndex);
+                InsertAnnotAtInList(annots, cmd.after, insertIndex);
+            }
+        }
+        break;
+    case AnnotCommandKind::Reorder:
+        if (!cmd.afterSnapshot.empty()) {
+            *annots = cmd.afterSnapshot;
+            EnsureAnnotationIds(*annots);
+        }
+        break;
+    case AnnotCommandKind::ClearAll:
+        annots->clear();
+        break;
+    }
+}
+
+static void ApplyAnnotCommand(const AnnotCommand& cmd) {
+    ApplyAnnotCommandToList(&g_annots, cmd);
+}
+
+static void RevertAnnotCommand(const AnnotCommand& cmd) {
+    switch (cmd.kind) {
+    case AnnotCommandKind::Add:
+        EraseAnnotAt(FindAnnotIndexByIdOrFallback(cmd.after.id, cmd.afterIndex));
+        break;
+    case AnnotCommandKind::Remove:
+        InsertAnnotAt(cmd.before, cmd.beforeIndex);
+        break;
+    case AnnotCommandKind::Update:
+        {
+            const int resolvedAfterIndex = FindAnnotIndexByIdOrFallback(cmd.after.id, cmd.afterIndex);
+            if (cmd.beforeIndex == cmd.afterIndex &&
+                resolvedAfterIndex >= 0 && resolvedAfterIndex < static_cast<int>(g_annots.size())) {
+                g_annots[static_cast<size_t>(resolvedAfterIndex)] = cmd.before;
+                EnsureAnnotationId(g_annots[static_cast<size_t>(resolvedAfterIndex)],
+                                   g_annots,
+                                   resolvedAfterIndex);
+            } else {
+                int insertIndex = cmd.beforeIndex;
+                if (resolvedAfterIndex >= 0 && insertIndex > resolvedAfterIndex) {
+                    --insertIndex;
+                }
+                EraseAnnotAt(resolvedAfterIndex);
+                InsertAnnotAt(cmd.before, insertIndex);
+            }
+        }
+        break;
+    case AnnotCommandKind::Reorder:
+        g_annots = cmd.snapshot;
+        EnsureAnnotationIds(g_annots);
+        break;
+    case AnnotCommandKind::ClearAll:
+        g_annots = cmd.snapshot;
+        EnsureAnnotationIds(g_annots);
+        break;
+    }
+}
+
+static void RecordAnnotAdd(int index, const Annotation& ann, bool revealLatest = true) {
+    Annotation recorded = ann;
+    if (index >= 0 && index < static_cast<int>(g_annots.size())) {
+        EnsureAnnotationId(g_annots[static_cast<size_t>(index)], g_annots, index);
+        recorded = g_annots[static_cast<size_t>(index)];
+    } else {
+        EnsureAnnotationId(recorded, g_annots, -1);
+    }
+    AnnotCommand cmd;
+    cmd.kind = AnnotCommandKind::Add;
+    cmd.afterIndex = index;
+    cmd.after = std::move(recorded);
+    if (revealLatest) RequestAnnotPanelRevealLatest();
+    PushAnnotCommand(std::move(cmd));
+}
+
+static void RecordAnnotRemove(int index, const Annotation& ann) {
+    Annotation recorded = ann;
+    EnsureAnnotationId(recorded, g_annots, -1);
+    AnnotCommand cmd;
+    cmd.kind = AnnotCommandKind::Remove;
+    cmd.beforeIndex = index;
+    cmd.before = std::move(recorded);
+    PushAnnotCommand(std::move(cmd));
+}
+
+static void RecordAnnotUpdate(int beforeIndex, int afterIndex, const Annotation& before, const Annotation& after) {
+    Annotation beforeRecorded = before;
+    Annotation afterRecorded = after;
+    if (afterIndex >= 0 && afterIndex < static_cast<int>(g_annots.size())) {
+        EnsureAnnotationId(g_annots[static_cast<size_t>(afterIndex)], g_annots, afterIndex);
+        afterRecorded = g_annots[static_cast<size_t>(afterIndex)];
+    } else {
+        EnsureAnnotationId(afterRecorded, g_annots, -1);
+    }
+    if (beforeRecorded.id.empty()) {
+        beforeRecorded.id = afterRecorded.id;
+    }
+    AnnotCommand cmd;
+    cmd.kind = AnnotCommandKind::Update;
+    cmd.beforeIndex = beforeIndex;
+    cmd.afterIndex = afterIndex;
+    cmd.before = std::move(beforeRecorded);
+    cmd.after = std::move(afterRecorded);
+    PushAnnotCommand(std::move(cmd));
+}
+
+static void RecordAnnotClear(std::vector<Annotation>&& snapshot) {
+    EnsureAnnotationIds(snapshot);
+    AnnotCommand cmd;
+    cmd.kind = AnnotCommandKind::ClearAll;
+    cmd.snapshot = std::move(snapshot);
+    PushAnnotCommand(std::move(cmd));
+}
+
+static void RecordAnnotReorder(std::vector<Annotation>&& beforeSnapshot) {
+    EnsureAnnotationIds(beforeSnapshot);
+    EnsureAnnotationIds(g_annots);
+    AnnotCommand cmd;
+    cmd.kind = AnnotCommandKind::Reorder;
+    cmd.snapshot = std::move(beforeSnapshot);
+    cmd.afterSnapshot = g_annots;
+    PushAnnotCommand(std::move(cmd));
+}
+
+static bool AnnotationListsEqual(const std::vector<Annotation>& left,
+                                 const std::vector<Annotation>& right) {
+    if (left.size() != right.size()) return false;
+    for (size_t i = 0; i < left.size(); ++i) {
+        if (left[i].id != right[i].id || !AnnotationEquals(left[i], right[i])) return false;
+    }
+    return true;
+}
+
+
+static void MarkAnnotHistoryDirty() {
+    if (g_pdf.kind != DocKind::Pdf) return;
+    g_annotHistoryDirty = true;
+    EnsurePdfViewFocus(g_hPdfView);
+    if (NormalizeAutoStageSaveSeconds(g_config.autoSaveSeconds) != kAutoSaveModeOff) {
+        HWND owner = g_hMainWnd;
+        file_output::NotifyAutoStageSaveStep(owner);
+    }
+}
+static void EnsurePdfViewFocus(HWND hwnd) {
+    if (!hwnd) return;
+    if (g_pdf.kind == DocKind::None) return; // no document -> keep focus in other panes
+    if (GetFocus() == hwnd) return;
+    SetFocus(hwnd);
+}
+
+void MarkAnnotsDirty(HWND owner) {
+    if (g_pdf.kind != DocKind::Pdf) return;
+    EnsureAnnotationIds(g_annots);
+    const bool annotsDirtyWasClear = !g_annotsDirty;
+    g_annotsDirty = true;
+    g_annotsNeedsIntegrate = true;
+    NotifyEditRevisionChanged();
+    // TextBox is raster-cached for stable zoom behavior; clear on any annotation change.
+    ClearTextBoxRasterCache();
+    if (annotsDirtyWasClear) {
+        RefreshMainWindowUiState(owner);
+    } else if (owner) {
+        UpdateWindowTitle(owner);
+    }
+    if (NormalizeAutoStageSaveSeconds(g_config.autoSaveSeconds) != kAutoSaveModeOff) {
+        file_output::NotifyAutoStageSaveStep(owner);
+    }
+    RefreshAnnotPanel();
+}
+
+bool DeleteAnnotationAtIndex(HWND owner, int index) {
+    if (g_pdf.kind != DocKind::Pdf || IsPdfPreviewReadOnlyActive() ||
+        index < 0 || index >= static_cast<int>(g_annots.size())) {
+        return false;
+    }
+
+    // Commit an active inline edit before changing the annotation collection so
+    // the undo record always represents a complete, stable annotation.
+    const std::wstring selectedId = g_annots[static_cast<size_t>(index)].id;
+    EndInlineTextEditing(g_hPdfView, true);
+    index = FindAnnotIndexByIdOrFallback(selectedId, index);
+    if (index < 0 || index >= static_cast<int>(g_annots.size())) return false;
+
+    Annotation removed = g_annots[static_cast<size_t>(index)];
+    g_annots.erase(g_annots.begin() + index);
+    RecordAnnotRemove(index, removed);
+    MarkAnnotsDirty(owner);
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    return true;
+}
+
+static void IncludeAnnotPointInBounds(double x, double y, bool& haveBounds,
+                                      double& minX, double& maxX, double& minY, double& maxY) {
+    if (!haveBounds) {
+        minX = maxX = x;
+        minY = maxY = y;
+        haveBounds = true;
+        return;
+    }
+    minX = std::min(minX, x);
+    maxX = std::max(maxX, x);
+    minY = std::min(minY, y);
+    maxY = std::max(maxY, y);
+}
+
+static void TranslateAnnotation(Annotation& ann, double dx, double dy) {
+    ann.x1 += dx;
+    ann.y1 += dy;
+    ann.x2 += dx;
+    ann.y2 += dy;
+    for (auto& point : ann.path) {
+        point.x += dx;
+        point.y += dy;
+    }
+    for (size_t i = 0; i + 1 < ann.quads.size(); i += 2) {
+        ann.quads[i] += dx;
+        ann.quads[i + 1] += dy;
+    }
+}
+
+static void OffsetDuplicateAnnotationWithinPage(Annotation& ann) {
+    constexpr double kOffsetPt = 12.0;
+    bool haveBounds = false;
+    double minX = 0.0, maxX = 0.0, minY = 0.0, maxY = 0.0;
+    IncludeAnnotPointInBounds(ann.x1, ann.y1, haveBounds, minX, maxX, minY, maxY);
+    IncludeAnnotPointInBounds(ann.x2, ann.y2, haveBounds, minX, maxX, minY, maxY);
+    for (const auto& point : ann.path) {
+        IncludeAnnotPointInBounds(point.x, point.y, haveBounds, minX, maxX, minY, maxY);
+    }
+    for (size_t i = 0; i + 1 < ann.quads.size(); i += 2) {
+        IncludeAnnotPointInBounds(ann.quads[i], ann.quads[i + 1], haveBounds, minX, maxX, minY, maxY);
+    }
+
+    double dx = kOffsetPt;
+    double dy = kOffsetPt;
+    if (ann.pageIndex >= 0 && ann.pageIndex < static_cast<int>(g_pdf.pages.size()) && haveBounds) {
+        const auto& page = g_pdf.pages[static_cast<size_t>(ann.pageIndex)];
+        if (maxX + dx > page.widthPt) dx = (minX - kOffsetPt >= 0.0) ? -kOffsetPt : 0.0;
+        if (maxY + dy > page.heightPt) dy = (minY - kOffsetPt >= 0.0) ? -kOffsetPt : 0.0;
+    }
+    TranslateAnnotation(ann, dx, dy);
+}
+
+static void SelectAnnotListIndex(int index) {
+    if (!g_hAnnotList || index < 0) return;
+    SendMessageW(g_hAnnotList, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
+    SendMessageW(g_hAnnotList, LB_SETTOPINDEX, static_cast<WPARAM>(index), 0);
+}
+
+bool DuplicateAnnotationAtIndex(HWND owner, int index) {
+    if (g_pdf.kind != DocKind::Pdf || IsPdfPreviewReadOnlyActive() ||
+        index < 0 || index >= static_cast<int>(g_annots.size())) {
+        return false;
+    }
+    const std::wstring selectedId = g_annots[static_cast<size_t>(index)].id;
+    EndInlineTextEditing(g_hPdfView, true);
+    index = FindAnnotIndexByIdOrFallback(selectedId, index);
+    if (index < 0 || index >= static_cast<int>(g_annots.size())) return false;
+
+    Annotation duplicate = g_annots[static_cast<size_t>(index)];
+    duplicate.id.clear();
+    OffsetDuplicateAnnotationWithinPage(duplicate);
+    const int duplicateIndex = index + 1;
+    InsertAnnotAt(duplicate, duplicateIndex);
+    RecordAnnotAdd(duplicateIndex, g_annots[static_cast<size_t>(duplicateIndex)], false);
+    MarkAnnotsDirty(owner);
+    SelectAnnotListIndex(duplicateIndex);
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    return true;
+}
+
+bool ReorderAnnotationAtIndex(HWND owner, int index, bool bringToFront) {
+    if (g_pdf.kind != DocKind::Pdf || IsPdfPreviewReadOnlyActive() ||
+        index < 0 || index >= static_cast<int>(g_annots.size())) {
+        return false;
+    }
+    const std::wstring selectedId = g_annots[static_cast<size_t>(index)].id;
+    EndInlineTextEditing(g_hPdfView, true);
+    index = FindAnnotIndexByIdOrFallback(selectedId, index);
+    if (index < 0 || index >= static_cast<int>(g_annots.size())) return false;
+
+    const std::vector<Annotation> beforeSnapshot = g_annots;
+    const Annotation selected = g_annots[static_cast<size_t>(index)];
+    int firstOnPage = -1;
+    int lastOnPage = -1;
+    for (int i = 0; i < static_cast<int>(g_annots.size()); ++i) {
+        if (g_annots[static_cast<size_t>(i)].pageIndex != selected.pageIndex) continue;
+        if (firstOnPage < 0) firstOnPage = i;
+        lastOnPage = i;
+    }
+    if (firstOnPage < 0 ||
+        (bringToFront && index == lastOnPage) ||
+        (!bringToFront && index == firstOnPage)) {
+        return false;
+    }
+    g_annots.erase(g_annots.begin() + index);
+
+    int destination = -1;
+    if (bringToFront) {
+        for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
+            if (g_annots[static_cast<size_t>(i)].pageIndex == selected.pageIndex) {
+                destination = i + 1;
+                break;
+            }
+        }
+    } else {
+        for (int i = 0; i < static_cast<int>(g_annots.size()); ++i) {
+            if (g_annots[static_cast<size_t>(i)].pageIndex == selected.pageIndex) {
+                destination = i;
+                break;
+            }
+        }
+    }
+    if (destination < 0) destination = static_cast<int>(g_annots.size());
+    g_annots.insert(g_annots.begin() + destination, selected);
+    if (AnnotationListsEqual(g_annots, beforeSnapshot)) return false;
+
+    RecordAnnotReorder(std::vector<Annotation>(beforeSnapshot));
+    MarkAnnotsDirty(owner);
+    SelectAnnotListIndex(destination);
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    return true;
+}
+
+bool UpdateAnnotationAtIndex(HWND owner, int index, const Annotation& after) {
+    if (g_pdf.kind != DocKind::Pdf || IsPdfPreviewReadOnlyActive() ||
+        index < 0 || index >= static_cast<int>(g_annots.size())) {
+        return false;
+    }
+    const Annotation before = g_annots[static_cast<size_t>(index)];
+    if (AnnotationEquals(before, after)) return true;
+    g_annots[static_cast<size_t>(index)] = after;
+    EnsureAnnotationId(g_annots[static_cast<size_t>(index)], g_annots, index);
+    RecordAnnotUpdate(index, index, before, g_annots[static_cast<size_t>(index)]);
+    MarkAnnotsDirty(owner);
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    return true;
+}
+
+bool ApplyCurrentToolbarStyleToAnnotation(HWND owner, int index) {
+    if (index < 0 || index >= static_cast<int>(g_annots.size())) return false;
+    Annotation after = g_annots[static_cast<size_t>(index)];
+    after.color = g_activeColor;
+    if (g_hComboWidth) {
+        const int selected = static_cast<int>(SendMessageW(g_hComboWidth, CB_GETCURSEL, 0, 0));
+        if (selected >= 0) {
+            const LRESULT value = SendMessageW(g_hComboWidth, CB_GETITEMDATA, selected, 0);
+            if (value != CB_ERR && value > 0) after.width = static_cast<double>(value) / 10.0;
+        }
+    }
+    if (g_hComboMarkerAlpha) {
+        const int selected = static_cast<int>(SendMessageW(g_hComboMarkerAlpha, CB_GETCURSEL, 0, 0));
+        if (selected >= 0) {
+            const LRESULT value = SendMessageW(g_hComboMarkerAlpha, CB_GETITEMDATA, selected, 0);
+            if (value != CB_ERR && value >= 0 && value <= 1000) {
+                after.alpha = static_cast<double>(value) / 1000.0;
+            }
+        }
+    }
+    return UpdateAnnotationAtIndex(owner, index, after);
+}
+
+bool FinalizePendingPdfLinkMarkers(HWND owner, const std::wstring& linkId, const std::wstring& notePath) {
+    if (g_pdf.kind != DocKind::Pdf) return false;
+    if (linkId.empty()) return false;
+    bool found = false;
+    for (size_t i = 0; i < g_annots.size(); ++i) {
+        auto& ann = g_annots[i];
+        if (ann.type != Annotation::Type::LinkMarker) continue;
+        if (ann.linkId != linkId) continue;
+        if (!notePath.empty()) {
+            ann.linkNotePath = notePath;
+        }
+        RecordAnnotAdd(static_cast<int>(i), ann);
+        found = true;
+    }
+    if (!found) return false;
+    MarkAnnotsDirty(owner);
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    return true;
+}
+
+bool DiscardPendingPdfLinkMarkers(const std::wstring& linkId) {
+    if (linkId.empty()) return false;
+    bool removed = false;
+    for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
+        const auto& ann = g_annots[static_cast<size_t>(i)];
+        if (ann.type != Annotation::Type::LinkMarker) continue;
+        if (ann.linkId != linkId) continue;
+        g_annots.erase(g_annots.begin() + i);
+        removed = true;
+    }
+    if (removed) {
+        MarkAnnotsDirty(g_hPdfView ? GetParent(g_hPdfView) : nullptr);
+        RefreshAnnotPanel();
+        if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+    return removed;
+}
+
+static bool UndoAnnotCommand(HWND owner) {
+    if (g_pdf.kind != DocKind::Pdf) return false;
+    if (g_annotUndo.empty()) return false;
+    AnnotCommand cmd = std::move(g_annotUndo.back());
+    g_annotUndo.pop_back();
+    if (cmd.kind == AnnotCommandKind::ClearAll) {
+        // Avoid keeping two full copies (g_annots + cmd.snapshot). Redo will capture again if needed.
+        g_annots = std::move(cmd.snapshot);
+    } else {
+        RevertAnnotCommand(cmd);
+    }
+    g_annotRedo.push_back(std::move(cmd));
+    InvalidatePendingAnnotStageCommands(CurrentLogicalPdfPath());
+    MarkAnnotHistoryDirty();
+    MarkAnnotsDirty(owner);
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    return true;
+}
+
+static bool RedoAnnotCommand(HWND owner) {
+    if (g_pdf.kind != DocKind::Pdf) return false;
+    if (g_annotRedo.empty()) return false;
+    AnnotCommand cmd = std::move(g_annotRedo.back());
+    g_annotRedo.pop_back();
+    if (cmd.kind == AnnotCommandKind::ClearAll && cmd.snapshot.empty()) {
+        // Re-capture the current annotations so undo after redo can restore them (even if snapshot was evicted).
+        cmd.snapshot = std::move(g_annots);
+    }
+    ApplyAnnotCommand(cmd);
+    g_annotUndo.push_back(std::move(cmd));
+    TrimAnnotHistory();
+    InvalidatePendingAnnotStageCommands(CurrentLogicalPdfPath());
+    MarkAnnotHistoryDirty();
+    MarkAnnotsDirty(owner);
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    return true;
+}
+
+static bool IsPdfUndoRedoFocusOwner() {
+    HWND focused = GetFocus();
+    return g_hPdfView && focused &&
+           (focused == g_hPdfView || IsChild(g_hPdfView, focused));
+}
+
+bool CanExecutePdfUndoRedoFromFocus(bool undo) {
+    if (!IsPdfUndoRedoFocusOwner() || g_pdf.kind != DocKind::Pdf || IsPdfPreviewReadOnlyActive()) {
+        return false;
+    }
+    if (g_pdf.editingText) {
+        return undo ? !g_textEditUndo.empty() : !g_textEditRedo.empty();
+    }
+    return undo ? !g_annotUndo.empty() : !g_annotRedo.empty();
+}
+
+bool ExecutePdfUndoRedoFromFocus(HWND owner, bool undo) {
+    if (!CanExecutePdfUndoRedoFromFocus(undo)) return false;
+    if (g_pdf.editingText) {
+        return undo ? UndoTextEdit(g_hPdfView) : RedoTextEdit(g_hPdfView);
+    }
+    return undo ? UndoAnnotCommand(owner) : RedoAnnotCommand(owner);
+}
+
+void ClearAllAnnotationsWithUndo(HWND owner) {
+    if (g_pdf.kind != DocKind::Pdf) return;
+    if (g_annots.empty()) return;
+    const auto& ui = GetUiText();
+    const std::wstring firstMsg = IsEnglishUi()
+        ? L"Clear all annotations?"
+        : L"注釈をすべて削除します。よろしいですか？";
+    if (!ConfirmPdfYesNo(owner, ui.appTitle, firstMsg, SoftNoticeKind::Warning,
+                         SilentDialogResult::No, SilentDialogResult::No)) {
+        return;
+    }
+
+    SilentDialogOptions second;
+    second.title = ui.appTitle;
+    second.message = IsEnglishUi()
+        ? L"Final confirmation.\n\nThis clears every annotation in the current PDF view."
+        : L"最終確認です。\n\n現在のPDF表示内の注釈をすべて削除します。";
+    second.kind = SoftNoticeKind::Warning;
+    second.buttons = SilentDialogButtons::YesNo;
+    second.yesLabel = IsEnglishUi() ? L"Clear All" : L"全削除";
+    second.noLabel = IsEnglishUi() ? L"Cancel" : L"キャンセル";
+    second.defaultResult = SilentDialogResult::No;
+    second.escapeResult = SilentDialogResult::No;
+    second.placement = SilentDialogPlacement::OwnerLowerLeft;
+    if (ShowPdfDialog(owner, second) != SilentDialogResult::Yes) {
+        return;
+    }
+    RecordAnnotClear(std::move(g_annots));
+    g_annots.clear(); // keep state explicit; cmd.snapshot owns previous data
+    MarkAnnotsDirty(owner);
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+}
+
+static bool AddMathAnnotationCore(HWND pdfWnd,
+                                  const std::wstring& rawText,
+                                  MathKind kind,
+                                  const POINT* screenPt,
+                                  bool useViewCenterFallback) {
+    if (!pdfWnd) return false;
+    if (g_pdfPreviewActive) return false;
+    if (g_pdf.pages.empty()) return false;
+    if (TrimWhitespace(rawText).empty()) return false;
+
+    POINT clientPt{};
+    if (screenPt) {
+        clientPt = *screenPt;
+        if (!ScreenToClient(pdfWnd, &clientPt)) return false;
+    } else {
+        RECT client{};
+        if (!GetClientRect(pdfWnd, &client)) return false;
+        clientPt.x = std::max<int>(0, static_cast<int>((client.right - client.left) / 2));
+        clientPt.y = std::max<int>(0, static_cast<int>((client.bottom - client.top) / 2));
+    }
+
+    int pageIndex = -1;
+    double pdfX = 0.0, pdfY = 0.0, pageTop = 0.0;
+    if (!HitTestPagePoint(clientPt, pageIndex, pdfX, pdfY, pageTop)) {
+        if (!useViewCenterFallback) return false;
+        const int currentPage = PageAtCurrentView();
+        if (currentPage < 0 || currentPage >= static_cast<int>(g_pdf.pages.size())) return false;
+        pageIndex = currentPage;
+        const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+        pdfX = page.widthPt * 0.5;
+        pdfY = page.heightPt * 0.5;
+    }
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
+
+    Annotation ann;
+    ann.type = Annotation::Type::MathBox;
+    ann.pageIndex = pageIndex;
+    ann.color = g_textColor;
+    ann.text = rawText;
+    ann.mathKind = kind;
+    ann.fontName = g_textFontName;
+    ann.fontPt = ResolveAdaptiveTextFontPtForPage(pageIndex, g_textFontPt);
+
+    HDC hdc = GetDC(pdfWnd);
+    if (!hdc) return false;
+    double fontPt = (ann.fontPt > 0.0) ? ann.fontPt : g_textFontPt;
+    int fontPx = std::max(6, static_cast<int>(std::round(fontPt * kDpi / 72.0)));
+    LOGFONTW lf{};
+    lf.lfHeight = -fontPx;
+    if (!ann.fontName.empty()) {
+        wcsncpy_s(lf.lfFaceName, ann.fontName.c_str(), LF_FACESIZE - 1);
+    } else {
+        wcsncpy_s(lf.lfFaceName, g_textFontName.c_str(), LF_FACESIZE - 1);
+    }
+    HFONT hFont = CreateFontIndirectW(&lf);
+    HGDIOBJ oldFont = hFont ? SelectObject(hdc, hFont) : nullptr;
+    std::wstring body = NormalizeMathAnnotText(ann);
+    int padPx = 4;
+    int widthPx = 60;
+    int heightPx = 24;
+    if (auto node = mathrender::Parse(body); node) {
+        auto layout = mathrender::Measure(*node, hdc, fontPx, mathrender::RenderStyle::Display);
+        widthPx = std::max(16, layout.width + padPx * 2);
+        heightPx = std::max(12, layout.height + padPx * 2);
+    }
+    if (oldFont) SelectObject(hdc, oldFont);
+    if (hFont) DeleteObject(hFont);
+    ReleaseDC(pdfWnd, hdc);
+
+    double wPt = widthPx * 72.0 / kDpi;
+    double hPt = heightPx * 72.0 / kDpi;
+
+    const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    double left = pdfX - wPt * 0.5;
+    double right = pdfX + wPt * 0.5;
+    double top = pdfY + hPt * 0.5;
+    double bottom = pdfY - hPt * 0.5;
+    if (right > page.widthPt) {
+        double shift = right - page.widthPt;
+        left -= shift;
+        right -= shift;
+    }
+    if (left < 0.0) {
+        right -= left;
+        left = 0.0;
+    }
+    if (top > page.heightPt) {
+        double shift = top - page.heightPt;
+        top -= shift;
+        bottom -= shift;
+    }
+    if (bottom < 0.0) {
+        double shift = -bottom;
+        top += shift;
+        bottom = 0.0;
+    }
+    ann.x1 = left;
+    ann.y1 = top;
+    ann.x2 = right;
+    ann.y2 = bottom;
+
+    g_annots.push_back(ann);
+    RecordAnnotAdd(static_cast<int>(g_annots.size() - 1), g_annots.back());
+    MarkAnnotsDirty(GetParent(pdfWnd));
+    RefreshAnnotPanel();
+    InvalidateRect(pdfWnd, nullptr, FALSE);
+    if (HWND owner = GetParent(pdfWnd)) {
+        UpdateWindowTitle(owner);
+    }
+    return true;
+}
+
+bool AddMathAnnotationFromList(HWND pdfWnd, int mathIndex, const POINT& screenPt) {
+    if (mathIndex < 0 || mathIndex >= static_cast<int>(g_mathEntries.size())) return false;
+    const MathEntry& entry = g_mathEntries[static_cast<size_t>(mathIndex)];
+    return AddMathAnnotationCore(pdfWnd, entry.text, entry.kind, &screenPt, false);
+}
+
+bool AddMathAnnotationFromTextAtPoint(HWND pdfWnd, const std::wstring& rawText, MathKind kind, const POINT& screenPt) {
+    return AddMathAnnotationCore(pdfWnd, rawText, kind, &screenPt, false);
+}
+
+bool AddMathAnnotationFromText(HWND pdfWnd, const std::wstring& rawText, MathKind kind) {
+    return AddMathAnnotationCore(pdfWnd, rawText, kind, nullptr, true);
+}
+
+static void BeginTextEdit(HWND hwnd, int pageIndex, double anchorX, double anchorY,
+                          double wPt, double hPt, const std::wstring& text,
+                          const std::wstring& fontName, double fontPt) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return;
+    const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    double left = anchorX;
+    double top = anchorY;
+    double right = left + wPt;
+    double bottom = top - hPt;
+    if (right > page.widthPt) {
+        double shift = right - page.widthPt;
+        left = std::max(0.0, left - shift);
+        right = page.widthPt;
+    }
+    if (bottom < 0.0) {
+        double shift = -bottom;
+        top = std::min(page.heightPt, top + shift);
+        bottom = 0.0;
+    }
+    if (left < 0.0) left = 0.0;
+    if (right > page.widthPt) right = page.widthPt;
+    if (top > page.heightPt) top = page.heightPt;
+    g_pdf.editingText = true;
+    g_pdf.editPage = pageIndex;
+    g_pdf.editX1 = left;
+    g_pdf.editX2 = right;
+    g_pdf.editY1 = top;
+    g_pdf.editY2 = bottom;
+    g_pdf.editText = text;
+    g_pdf.editCaret = g_pdf.editText.size();
+    g_pdf.editSelStart = g_pdf.editCaret;
+    g_pdf.editSelEnd = g_pdf.editCaret;
+    g_pdf.editSelectingText = false;
+    g_pdf.editSelAnchor = g_pdf.editCaret;
+    g_pdf.editLayoutDirty = true;
+    g_pdf.editInnerLayoutW = 0;
+    g_pdf.editLayout.lines.clear();
+    g_pdf.editFontName = fontName.empty() ? g_textFontName : fontName;
+    g_pdf.editFontPt = fontPt > 0.0 ? fontPt : g_textFontPt;
+    g_pdf.imeComp.clear();
+    g_pdf.imeComposing = false;
+    g_pdf.suppressNextImeResultReturnChar = false;
+    g_pdf.imeResultMessageTime = 0;
+    g_pdf.textBoxHoverValid = false;
+    ClearTextEditHistory();
+    RecalcEditingTextboxSize(true);
+    EnsureEditingTextBoxVisible(hwnd, L"begin_text_edit");
+    SetFocus(hwnd);
+    // Enable IME now that text editing has started.
+    EnablePdfViewIme(hwnd);
+    InvalidateEditingTextBoxRect(hwnd);
+}
+
+// ---------------------------------------------------------------------
+// clrop load/save helpers
+// ---------------------------------------------------------------------
+static std::wstring DescribePdfId(const clrop::PdfId& id) {
+    std::wstringstream ss;
+    ss << L"size=" << id.size;
+    if (id.pageCount > 0) {
+        ss << L", pages=" << id.pageCount;
+    }
+    if (!id.pageSizesPt.empty()) {
+        const auto& first = id.pageSizesPt.front();
+        ss << L", first_page_pt=" << first[0] << L"x" << first[1];
+    }
+    if (!id.sha256.empty()) {
+        ss << L", sha256=" << UTF8ToWide(id.sha256);
+    }
+    if (!id.path.empty()) {
+        ss << L", path=" << id.path;
+    }
+    return ss.str();
+}
+
+static std::wstring BuildMismatchMessage(const clrop::PdfId& fileId, const clrop::PdfId& current) {
+    std::wstring msg = L"注釈ファイルのpdf_idが現在のPDFと一致しません。\n\n";
+    msg += L"他の経路でPDFの内容や注釈が更新されたときにも起こり得ます。\n\n";
+    msg += L"注釈側: " + DescribePdfId(fileId) + L"\n";
+    msg += L"現在のPDF: " + DescribePdfId(current) + L"\n\n";
+    msg += L"[OK] idを更新して読込 / [はい] 強制読込 / [いいえ] 無視して新規 / [キャンセル] 中止";
+    return msg;
+}
+
+static std::wstring StripMathDelims(const std::wstring& raw) {
+    if (raw.size() >= 4 && raw[0] == L'\\' && raw[1] == L'[' &&
+        raw[raw.size() - 2] == L'\\' && raw[raw.size() - 1] == L']') {
+        return raw.substr(2, raw.size() - 4);
+    }
+    if (raw.size() >= 4 && raw[0] == L'\\' && raw[1] == L'(' &&
+        raw[raw.size() - 2] == L'\\' && raw[raw.size() - 1] == L')') {
+        return raw.substr(2, raw.size() - 4);
+    }
+    if (raw.size() >= 2 && raw.front() == L'$' && raw.back() == L'$') {
+        if (raw.size() >= 4 && raw[1] == L'$' && raw[raw.size() - 2] == L'$') {
+            return raw.substr(2, raw.size() - 4);
+        }
+        return raw.substr(1, raw.size() - 2);
+    }
+    if (raw.size() >= 9 &&
+        (_wcsnicmp(raw.c_str(), L"<math>", 6) == 0) &&
+        (_wcsicmp(raw.c_str() + raw.size() - 3, L"</>") == 0)) {
+        return raw.substr(6, raw.size() - 9);
+    }
+    return raw;
+}
+
+static std::wstring StripMarkupTags(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    bool inTag = false;
+    for (wchar_t ch : s) {
+        if (ch == L'<') {
+            inTag = true;
+            continue;
+        }
+        if (ch == L'>' && inTag) {
+            inTag = false;
+            continue;
+        }
+        if (!inTag) out.push_back(ch);
+    }
+    return out;
+}
+
+static std::wstring StripLineJoins(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        if (s[i] == L'\r') { ++i; continue; }
+        if (s[i] == L'\n') { out.push_back(L' '); ++i; continue; }
+        if (s[i] == L'<' && i + 3 < s.size()) {
+            if (_wcsnicmp(s.c_str() + i, L"<br>", 4) == 0) {
+                out.push_back(L' ');
+                i += 4;
+                continue;
+            }
+            if (_wcsnicmp(s.c_str() + i, L"<br/>", 5) == 0) {
+                out.push_back(L' ');
+                i += 5;
+                continue;
+            }
+            if (_wcsnicmp(s.c_str() + i, L"<br />", 6) == 0) {
+                out.push_back(L' ');
+                i += 6;
+                continue;
+            }
+        }
+        out.push_back(s[i]);
+        ++i;
+    }
+    return out;
+}
+
+static std::wstring NormalizeMarkupMathText(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        wchar_t ch = s[i];
+        if (ch >= 0xFF01 && ch <= 0xFF5E) {
+            ch = static_cast<wchar_t>(ch - 0xFEE0);
+        }
+        out.push_back(ch);
+    }
+    std::wstring res;
+    res.reserve(out.size());
+    for (size_t i = 0; i < out.size(); ++i) {
+        if (i + 1 < out.size() && out[i] == L'-' && out[i + 1] == L'>') {
+            res.push_back(L'\u2192');
+            ++i;
+            continue;
+        }
+        res.push_back(out[i]);
+    }
+    return res;
+}
+
+static std::wstring NormalizeMathAnnotText(const Annotation& ann) {
+    std::wstring body = StripMathDelims(ann.text);
+    if (ann.mathKind == MathKind::Markup) {
+        body = StripMarkupTags(body);
+        body = StripLineJoins(body);
+        body = NormalizeMarkupMathText(body);
+    }
+    return body;
+}
+
+// ---------------------------------------------------------------------
+// PDF rendering (multi-page continuous)
+// ---------------------------------------------------------------------

@@ -1,0 +1,104 @@
+// file: main/main_temp_external.cppinc
+
+static void LoadTempExternalLecturesFromSetup() {
+    g_tempExternalLectures.clear();
+    auto dirs = LoadSetupTempExternalLectureDirs();
+    if (dirs.empty()) return;
+    std::unordered_set<std::wstring> seen;
+    seen.reserve(dirs.size());
+    for (const auto& dir : dirs) {
+        if (dir.empty()) continue;
+        std::filesystem::path p(dir);
+        std::wstring canon = CanonicalOrSelf(p).wstring();
+        if (canon.empty()) canon = p.wstring();
+        if (seen.insert(canon).second) {
+            g_tempExternalLectures.push_back({canon});
+        }
+    }
+}
+
+bool PersistTempExternalLecturesToSetup() {
+    std::vector<std::wstring> dirs;
+    dirs.reserve(g_tempExternalLectures.size());
+    for (const auto& item : g_tempExternalLectures) {
+        if (!item.path.empty()) dirs.push_back(item.path);
+    }
+    return PersistSetupTempExternalLectureDirs(dirs);
+}
+
+static bool RemoveTempExternalLecturePath(const std::wstring& lecturePath) {
+    if (lecturePath.empty()) return false;
+    std::wstring canon = CanonicalOrSelf(std::filesystem::path(lecturePath)).wstring();
+    if (canon.empty()) canon = lecturePath;
+    size_t before = g_tempExternalLectures.size();
+    g_tempExternalLectures.erase(
+        std::remove_if(g_tempExternalLectures.begin(), g_tempExternalLectures.end(),
+                       [&](const TempExternalLecture& item) { return item.path == canon; }),
+        g_tempExternalLectures.end());
+    if (g_tempExternalLectures.size() == before) return false;
+    PersistTempExternalLecturesToSetup();
+    return true;
+}
+
+bool IsTempExternalLecturePath(const std::wstring& lecturePath) {
+    if (lecturePath.empty()) return false;
+    auto canon = CanonicalOrSelf(std::filesystem::path(lecturePath)).wstring();
+    for (const auto& item : g_tempExternalLectures) {
+        if (item.path == canon) return true;
+    }
+    return false;
+}
+
+static std::wstring PreferredTempExternalLecturePathForRemoval() {
+    int sel = (g_hLectureList)
+        ? static_cast<int>(SendMessageW(g_hLectureList, LB_GETCURSEL, 0, 0))
+        : -1;
+    if (sel >= 0 && sel < static_cast<int>(g_lectures.size())) {
+        const std::wstring& selected = g_lectures[static_cast<size_t>(sel)];
+        if (IsTempExternalLecturePath(selected)) return selected;
+    }
+    if (IsTempExternalLecturePath(g_currentLecturePath)) {
+        return g_currentLecturePath;
+    }
+    if (!g_tempExternalLectures.empty()) {
+        return g_tempExternalLectures.front().path;
+    }
+    return L"";
+}
+
+static std::optional<std::wstring> PromptTempExternalLecturePathToRemove(HWND owner) {
+    if (g_tempExternalLectures.empty()) {
+        ShowMainSoftNotice(owner,
+                            IsEnglishUi() ? L"There is no temporary external lecture path to remove."
+                                          : (g_config.studentMode
+                                                 ? L"削除できる一時外部授業パスがありません。"
+                                                 : L"削除できる一時外部上位項目パスがありません。"),
+                            SoftNoticeKind::Info);
+        return std::nullopt;
+    }
+
+    std::vector<std::wstring> paths;
+    paths.reserve(g_tempExternalLectures.size());
+    for (const auto& item : g_tempExternalLectures) {
+        if (!item.path.empty()) paths.push_back(item.path);
+    }
+    if (paths.empty()) return std::nullopt;
+
+    std::wstring selected;
+    if (!PromptSelectPath(owner,
+                           GetUiText().menuRemoveTempExternalLecture,
+                           IsEnglishUi() ? L"Select the temporary external lecture path to remove."
+                                         : (g_config.studentMode
+                                                ? L"削除する一時外部授業パスを選択してください。"
+                                                : L"削除する一時外部上位項目パスを選択してください。"),
+                           paths, PreferredTempExternalLecturePathForRemoval(), selected)) {
+        return std::nullopt;
+    }
+    return selected;
+}
+
+static std::wstring TempExternalLectureLabel(const std::wstring& lecturePath) {
+    std::wstring name = std::filesystem::path(lecturePath).filename().wstring();
+    if (name.empty()) name = lecturePath;
+    return (IsEnglishUi() ? L"[External] " : L"外部: ") + name;
+}

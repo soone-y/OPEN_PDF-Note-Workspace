@@ -1,0 +1,1812 @@
+// file: main/command_dispatch.cppinc
+// NOTE: This file is intentionally included by src/main.cpp to keep the build as a
+// single translation unit while physically splitting responsibilities.
+
+struct NoteAssistSelection {
+    DWORD start = 0;
+    DWORD end = 0;
+    bool hasRange = false;
+    std::wstring text;
+};
+
+static NoteAssistSelection ReadNoteAssistSelection() {
+    NoteAssistSelection selection{};
+    if (!g_hNoteEdit) return selection;
+    SendMessageW(g_hNoteEdit, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selection.start),
+                 reinterpret_cast<LPARAM>(&selection.end));
+    if (selection.end < selection.start) std::swap(selection.start, selection.end);
+    selection.hasRange = selection.end > selection.start;
+    if (!selection.hasRange) return selection;
+
+    const int len = std::max(0, GetWindowTextLengthW(g_hNoteEdit));
+    std::vector<wchar_t> buf(static_cast<size_t>(len) + 1, L'\0');
+    if (IsRichEditControlWindow(g_hNoteEdit)) {
+        LRESULT copied = SendMessageW(g_hNoteEdit, EM_GETSELTEXT, 0, reinterpret_cast<LPARAM>(buf.data()));
+        if (copied > 0) {
+            selection.text.assign(buf.data(), static_cast<size_t>(copied));
+            return selection;
+        }
+    }
+
+    const std::wstring text = GetNoteEditTextForIndexing(g_hNoteEdit);
+    const size_t safeStart = std::min<size_t>(selection.start, text.size());
+    const size_t safeEnd = std::min<size_t>(selection.end, text.size());
+    if (safeEnd > safeStart) {
+        selection.text = text.substr(safeStart, safeEnd - safeStart);
+    }
+    return selection;
+}
+
+static std::wstring PrefixNoteAssistLines(const std::wstring& text, const std::wstring& prefix) {
+    if (text.empty()) return prefix;
+    std::wstring out;
+    out.reserve(text.size() + prefix.size() * 4);
+    out += prefix;
+    for (size_t i = 0; i < text.size(); ++i) {
+        out.push_back(text[i]);
+        if (text[i] == L'\r' && i + 1 < text.size() && text[i + 1] == L'\n') {
+            out.push_back(text[++i]);
+            if (i + 1 < text.size()) out += prefix;
+        } else if ((text[i] == L'\r' || text[i] == L'\n') && i + 1 < text.size()) {
+            out += prefix;
+        }
+    }
+    return out;
+}
+
+static void InsertNoteAssistSnippet(const NoteAssistSelection& selection, const std::wstring& snippet) {
+    if (snippet.empty()) return;
+    CommitPendingNoteClickCaret();
+    if (selection.hasRange && g_hNoteEdit) {
+        SendMessageW(g_hNoteEdit, EM_SETSEL,
+                     static_cast<WPARAM>(selection.start),
+                     static_cast<LPARAM>(selection.end));
+    }
+    InsertSnippetIntoNote(snippet);
+    if (g_hNoteEdit) SetFocus(g_hNoteEdit);
+}
+
+static bool ExecuteFocusedUndoRedo(HWND owner, bool undo) {
+    if (CanExecuteNoteUndoRedoFromFocus(undo)) {
+        return ExecuteNoteUndoRedoFromFocus(owner, undo);
+    }
+    if (CanExecutePdfUndoRedoFromFocus(undo)) {
+        return ExecutePdfUndoRedoFromFocus(owner, undo);
+    }
+    return false;
+}
+
+static bool HandleNoteAssistCommand(HWND hWnd, int id) {
+    NoteAssistSelection selection = ReadNoteAssistSelection();
+    const std::wstring& selected = selection.text;
+    switch (id) {
+    case ID_NOTE_ASSIST_BULLET:
+        InsertNoteAssistSnippet(selection, selected.empty() ? L"- " : PrefixNoteAssistLines(selected, L"- "));
+        return true;
+    case ID_NOTE_ASSIST_QUOTE:
+        InsertNoteAssistSnippet(selection, selected.empty() ? L"> " : PrefixNoteAssistLines(selected, L"> "));
+        return true;
+    case ID_NOTE_ASSIST_PAGE_REF: {
+        if (g_pdf.kind == DocKind::None || CurrentLogicalPdfPath().empty() || g_pdf.pageCount <= 0) {
+            ShowSoftNotice(hWnd,
+                           IsEnglishUi() ? L"Open a PDF before inserting a page reference."
+                                         : L"ページ参照を挿入する前に PDF を開いてください。",
+                           SoftNoticeKind::Warning);
+            return true;
+        }
+        int page = PageAtCurrentView();
+        if (page < 0) page = 0;
+        page = std::min(page, std::max(0, g_pdf.pageCount - 1));
+        std::wstring name = std::filesystem::path(CurrentLogicalPdfPath()).filename().wstring();
+        if (name.empty()) name = IsEnglishUi() ? L"PDF" : L"PDF";
+        std::wstring snippet = IsEnglishUi()
+            ? (L"PDF p." + std::to_wstring(page + 1) + L": " + name)
+            : (L"PDF p." + std::to_wstring(page + 1) + L": " + name);
+        InsertNoteAssistSnippet(selection, snippet);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+static bool HandleNoteShortcutCommand(HWND hWnd, int id, UINT code) {
+    if (HandleNoteAssistCommand(hWnd, id)) {
+        return true;
+    }
+
+    switch (id) {
+    case ID_NOTE_SHORTCUT_INPUT: {
+        CommitPendingNoteClickCaret();
+        const bool pendingLinkToNote = (g_linkPending.active && !g_linkPending.id.empty());
+        const bool fromNoteClickRawInsert = (code == kNoteShortcutInputCodeClickRaw);
+        const bool fromNoteClickRenderedInsert = (code == kNoteShortcutInputCodeClickRendered);
+        const bool fromNoteClickLinkInsert = fromNoteClickRawInsert || fromNoteClickRenderedInsert;
+        if (fromNoteClickLinkInsert && !pendingLinkToNote) {
+            return true;
+        }
+
+        const bool renderActive = (g_noteRenderEnabled && !g_noteRawOnly);
+        const bool fromButtonLinkInsert = (!fromNoteClickLinkInsert && pendingLinkToNote);
+        const bool linkInsertAction = fromNoteClickLinkInsert || fromButtonLinkInsert;
+        const bool rawStyleLinkInsert =
+            fromNoteClickRawInsert || (fromButtonLinkInsert && !renderActive);
+
+        if (!linkInsertAction) {
+            std::wstring snippet = BuildNoteShortcutSnippet();
+            if (!snippet.empty()) {
+                InsertSnippetIntoNote(snippet);
+                if (g_hNoteEdit) SetFocus(g_hNoteEdit);
+            }
+            return true;
+        }
+
+        // Safety-first link insertion:
+        // - Never insert a new tag literal inside an existing markup tag token.
+        // - In raw-like mode, if the caret is inside an opening tag token, only "attach link attribute" is allowed.
+        if (!g_hNoteEdit || !pendingLinkToNote) {
+            FinalizePendingLinkModeIfReady(hWnd);
+            return true;
+        }
+
+        DWORD selStartRaw = 0, selEndRaw = 0;
+        SendMessageW(g_hNoteEdit, EM_GETSEL,
+                     reinterpret_cast<WPARAM>(&selStartRaw),
+                     reinterpret_cast<LPARAM>(&selEndRaw));
+        std::wstring text = GetNoteEditTextForIndexing(g_hNoteEdit);
+
+        size_t rawSelStart = static_cast<size_t>(std::min(selStartRaw, selEndRaw));
+        size_t basePos = NormalizeInsertPosForEditControlText(text, rawSelStart);
+        basePos = std::min(basePos, text.size());
+
+        size_t noteAnchorPos = basePos;
+        bool linkPointAdded = false;
+
+        if (rawStyleLinkInsert) {
+            bool insideOpeningTagToken = false;
+            size_t attachedAnchorPos = 0;
+            if (TryAttachPendingLinkToMarkupTagAtSelection(&attachedAnchorPos, &insideOpeningTagToken)) {
+                noteAnchorPos = attachedAnchorPos;
+                linkPointAdded = true;
+            } else if (insideOpeningTagToken) {
+                if (hWnd) {
+                    ShowSoftNotice(hWnd, IsEnglishUi() ? L"Cannot insert link inside a tag." : L"タグ内ではリンク挿入できません。");
+                }
+                FinalizePendingLinkModeIfReady(hWnd);
+                return true;
+            }
+        }
+
+        if (!linkPointAdded) {
+            size_t insertPos = basePos;
+            if (rawStyleLinkInsert) {
+                if (auto token = FindMarkupTagTokenAtPos(text, insertPos)) {
+                    if (token->closing) {
+                        insertPos = std::min(text.size(), token->open);
+                    } else {
+                        if (hWnd) {
+                            ShowSoftNotice(hWnd, IsEnglishUi() ? L"Cannot insert link inside a tag." : L"タグ内ではリンク挿入できません。");
+                        }
+                        FinalizePendingLinkModeIfReady(hWnd);
+                        return true;
+                    }
+                }
+            } else {
+                insertPos = NormalizeInsertPosOutsideMarkupTagToken(text, insertPos);
+            }
+
+            insertPos = NormalizeInsertPosForEditControlText(text, insertPos);
+            insertPos = std::min(insertPos, text.size());
+
+            if (IsInsertPosInsideMarkupTagToken(text, insertPos)) {
+                if (hWnd) {
+                    ShowSoftNotice(hWnd, IsEnglishUi() ? L"Insert canceled (unsafe position)." : L"安全のため挿入を中止しました。");
+                }
+                FinalizePendingLinkModeIfReady(hWnd);
+                return true;
+            }
+
+            const bool needPrefixBreak =
+                (insertPos > 0 && !IsLinkTokenBoundaryForInsert(text[insertPos - 1]));
+
+            std::wstring snippet = BuildNoteClickLinkSnippet(needPrefixBreak, rawStyleLinkInsert);
+            snippet.erase(std::remove(snippet.begin(), snippet.end(), L'\r'), snippet.end());
+            snippet.erase(std::remove(snippet.begin(), snippet.end(), L'\n'), snippet.end());
+            if (snippet.empty()) {
+                FinalizePendingLinkModeIfReady(hWnd);
+                return true;
+            }
+
+            InsertSnippetIntoNoteAt(insertPos, snippet);
+            if (g_hNoteEdit) SetFocus(g_hNoteEdit);
+
+            noteAnchorPos = insertPos + (needPrefixBreak ? 1 : 0);
+            linkPointAdded = true;
+        }
+
+        if (linkPointAdded) {
+            ++g_linkPending.notePoints;
+            g_linkPending.haveNote = (g_linkPending.notePoints > 0);
+            g_linkPending.notePath = g_currentNotePath;
+            g_linkPending.notePos = noteAnchorPos;
+        }
+        FinalizePendingLinkModeIfReady(hWnd);
+        return true;
+    }
+    case ID_NOTE_SHORTCUT_BACK_PICKER:
+        OnShortcutColorPick(hWnd, g_noteShortcutBackColor, g_hBtnShortcutBackPreview);
+        return true;
+    case ID_NOTE_SHORTCUT_CHAR_PICKER:
+        OnShortcutColorPick(hWnd, g_noteShortcutTextColor, g_hBtnShortcutCharPreview);
+        return true;
+    case ID_NOTE_SHORTCUT_PDF_LINK:
+        ToggleLinkMode(hWnd);
+        if (g_hNoteEdit) SetFocus(g_hNoteEdit);
+        return true;
+    case ID_NOTE_SHORTCUT_HEADING1:
+        return true;
+    case ID_NOTE_SHORTCUT_HEADING2:
+        if (code == BN_CLICKED) {
+            g_noteShortcutHeadingLevel += g_config.noteShortcutHeadingArrowInvert ? 1 : -1;
+            UpdateShortcutHeadingLevelLabel();
+        }
+        return true;
+    case ID_NOTE_SHORTCUT_HEADING_LEVEL_UP:
+        if (code == BN_CLICKED) {
+            g_noteShortcutHeadingLevel += g_config.noteShortcutHeadingArrowInvert ? -1 : 1;
+            UpdateShortcutHeadingLevelLabel();
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ToolOptionCycleReverseRequested() {
+    return (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+}
+
+static bool AdvanceComboSelection(HWND combo, bool reverse) {
+    if (!combo) return false;
+    const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+    if (count <= 1) return false;
+    int sel = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+    if (sel < 0 || sel >= count) sel = 0;
+    const int next = reverse ? ((sel + count - 1) % count) : ((sel + 1) % count);
+    if (next == sel) return false;
+    SendMessageW(combo, CB_SETCURSEL, next, 0);
+    return true;
+}
+
+static bool ApplyShapeDetailSelection(HWND hWnd, ShapeDetail detail);
+static bool CycleShapeToolFamilyOption(HWND hWnd, bool reverse);
+
+static bool CyclePrimaryAnnotOptionForMode(HWND hWnd, ToolMode mode, bool reverse) {
+    if (g_toolMode != mode) return false;
+
+    if (ToolbarHasFontOptions(mode)) {
+        SetActiveToolbarFontSizeSlot(std::clamp(g_textFontActiveSizeSlot, 0, 1) == 0 ? 1 : 0);
+        if (g_hPdfView) {
+            const bool continueTextEditing = g_pdf.editingText;
+            PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+            if (continueTextEditing) SetFocus(g_hPdfView);
+            else SetFocus(g_hPdfView);
+        }
+        return true;
+    }
+
+    if (ToolbarHasMagnifierShapeOptions(mode)) {
+        if (!AdvanceComboSelection(g_hComboMagnifierShape, reverse)) return false;
+        int sel = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_GETCURSEL, 0, 0));
+        if (sel < 0) return false;
+        LRESULT data = SendMessageW(g_hComboMagnifierShape, CB_GETITEMDATA, sel, 0);
+        if (data == CB_ERR) return false;
+        g_magnifierShape = static_cast<MagnifierShape>(static_cast<int>(data));
+        PersistConfig();
+        if (g_hPdfView) {
+            InvalidateRect(g_hPdfView, nullptr, FALSE);
+            SetFocus(g_hPdfView);
+        }
+        return true;
+    }
+
+    if (ToolbarHasWidthOptions(mode)) {
+        if (g_hComboWidth) SyncWidthComboToMode(mode);
+        if (!AdvanceComboSelection(g_hComboWidth, reverse)) return false;
+        int sel = static_cast<int>(SendMessageW(g_hComboWidth, CB_GETCURSEL, 0, 0));
+        if (sel < 0) return false;
+        LRESULT pt10 = SendMessageW(g_hComboWidth, CB_GETITEMDATA, sel, 0);
+        if (pt10 == CB_ERR) return false;
+        SetWidthValueForMode(mode, static_cast<double>(pt10) / 10.0);
+        PersistConfig();
+        if (g_hPdfView) {
+            InvalidateRect(g_hPdfView, nullptr, FALSE);
+            SetFocus(g_hPdfView);
+        }
+        return true;
+    }
+
+    if (ToolbarHasMarkerAlphaOptions(mode)) {
+        if (g_hComboMarkerAlpha) SyncAlphaComboToMode(mode);
+        if (!AdvanceComboSelection(g_hComboMarkerAlpha, reverse)) return false;
+        int sel = static_cast<int>(SendMessageW(g_hComboMarkerAlpha, CB_GETCURSEL, 0, 0));
+        if (sel < 0) return false;
+        LRESULT permille = SendMessageW(g_hComboMarkerAlpha, CB_GETITEMDATA, sel, 0);
+        if (permille == CB_ERR) return false;
+        SetAlphaValueForMode(mode, static_cast<double>(permille) / 1000.0);
+        PersistConfig();
+        if (g_hPdfView) {
+            InvalidateRect(g_hPdfView, nullptr, FALSE);
+            SetFocus(g_hPdfView);
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static std::vector<ToolMode> EnabledTopOptionModesForFamily(AnnotToolFamily family) {
+    std::vector<ToolMode> modes;
+    auto appendEnabled = [&](ToolMode mode) {
+        if (AnnotToolFamilyForMode(mode) != family) return;
+        if (!ToolModeEnabledForCurrentPdfView(mode)) return;
+        modes.push_back(mode);
+    };
+    for (ToolMode mode : AnnotToolModeUiOrder()) {
+        appendEnabled(mode);
+    }
+    return modes;
+}
+
+static ToolMode LastOrFirstEnabledFamilyMode(AnnotToolFamily family) {
+    auto modes = EnabledTopOptionModesForFamily(family);
+    if (modes.empty()) return g_toolMode;
+    ToolMode preferred = modes.front();
+    if (family == AnnotToolFamily::Marker && ToolModeEnabledForCurrentPdfView(g_markerGroupMode)) {
+        preferred = g_markerGroupMode;
+    } else if (family == AnnotToolFamily::Pen && ToolModeEnabledForCurrentPdfView(g_penGroupMode)) {
+        preferred = g_penGroupMode;
+    } else if (family == AnnotToolFamily::Shape &&
+               ToolModeEnabledForCurrentPdfView(ToolModeForShapeDetail(g_shapeDetail))) {
+        preferred = ToolModeForShapeDetail(g_shapeDetail);
+    }
+    if (AnnotToolFamilyForMode(preferred) != family) preferred = modes.front();
+    if (std::find(modes.begin(), modes.end(), preferred) == modes.end()) preferred = modes.front();
+    return preferred;
+}
+
+static std::optional<ToolMode> NextEnabledFamilyMode(AnnotToolFamily family, bool reverse) {
+    auto modes = EnabledTopOptionModesForFamily(family);
+    if (modes.empty()) return std::nullopt;
+    if (AnnotToolFamilyForMode(g_toolMode) != family) {
+        return LastOrFirstEnabledFamilyMode(family);
+    }
+    auto it = std::find(modes.begin(), modes.end(), g_toolMode);
+    if (it == modes.end()) return reverse ? modes.back() : modes.front();
+    size_t idx = static_cast<size_t>(std::distance(modes.begin(), it));
+    idx = reverse ? (idx + modes.size() - 1) % modes.size()
+                  : (idx + 1) % modes.size();
+    return modes[idx];
+}
+
+static std::vector<int> EnabledPenAnnotMethodDataSequence() {
+    std::vector<int> items;
+    for (ToolMode candidate : AnnotToolModeUiOrder()) {
+        if (AnnotToolFamilyForMode(candidate) != AnnotToolFamily::Pen) continue;
+        if (!ToolModeEnabledForCurrentPdfView(candidate)) continue;
+        if (candidate == ToolMode::Freehand) {
+            items.push_back(static_cast<int>(ToolMode::Freehand));
+            items.push_back(kAnnotMethodDataCorrectionPen);
+        } else {
+            items.push_back(static_cast<int>(candidate));
+        }
+    }
+    return items;
+}
+
+static int CurrentPenAnnotMethodData() {
+    if (g_toolMode == ToolMode::Freehand) {
+        return FreehandCorrectionPenActive(g_config.freehandCorrection)
+                   ? kAnnotMethodDataCorrectionPen
+                   : static_cast<int>(ToolMode::Freehand);
+    }
+    return static_cast<int>(g_toolMode);
+}
+
+static bool ApplyAnnotMethodData(HWND hWnd, int data) {
+    ToolMode nextMode{};
+    if (data == kAnnotMethodDataCorrectionPen) {
+        nextMode = ToolMode::Freehand;
+        if (!FreehandCorrectionPenActive(g_config.freehandCorrection)) {
+            g_config.freehandCorrection = L"auto";
+        }
+    } else {
+        nextMode = static_cast<ToolMode>(data);
+        if (nextMode == ToolMode::Freehand &&
+            FreehandCorrectionPenActive(g_config.freehandCorrection)) {
+            g_config.freehandCorrection = L"off";
+        }
+    }
+
+    if (!ToolModeEnabledForCurrentPdfView(nextMode) ||
+        !ToolbarHasAnnotMethodOptions(nextMode)) {
+        return false;
+    }
+
+    if (!CommitActiveNoteEditBoundary(hWnd)) return false;
+    EndInlineTextEditing(g_hPdfView, true);
+    g_toolMode = nextMode;
+    if (IsMarkerGroupMode(nextMode)) {
+        g_markerGroupMode = nextMode;
+        g_config.annotLastMarkerDetail = UTF8ToWide(AnnotToolModeKey(nextMode));
+    }
+    if (IsPenGroupMode(nextMode)) {
+        g_penGroupMode = nextMode;
+        g_config.annotLastPenDetail = UTF8ToWide(AnnotToolModeKey(nextMode));
+    }
+    if (IsShapeGroupMode(nextMode)) {
+        g_shapeGroupMode = nextMode;
+        g_config.annotLastShapeDetail = UTF8ToWide(AnnotToolModeKey(nextMode));
+        g_shapeToolSelection = ShapeToolSelectionForMode(nextMode, g_shapeDrawMode);
+    }
+    if (MarkerTextModeStoresUnderlineOption(nextMode)) {
+        g_markerTextUnderline = MarkerTextModeUsesUnderline(nextMode);
+    }
+    // The selected detail is part of the persistent category-selection state.
+    PersistConfig();
+    ApplyActiveColorForMode(hWnd, g_toolMode);
+    UpdateToolbarUI(hWnd);
+    if (g_hPdfView) SetFocus(g_hPdfView);
+    return true;
+}
+
+static bool CyclePenToolFamilyOption(HWND hWnd, bool reverse) {
+    auto items = EnabledPenAnnotMethodDataSequence();
+    if (items.size() <= 1) return false;
+    int current = CurrentPenAnnotMethodData();
+    auto it = std::find(items.begin(), items.end(), current);
+    size_t idx = 0;
+    if (it == items.end()) {
+        idx = reverse ? (items.size() - 1) : 0;
+    } else {
+        idx = static_cast<size_t>(std::distance(items.begin(), it));
+        idx = reverse ? (idx + items.size() - 1) % items.size()
+                      : (idx + 1) % items.size();
+    }
+    return ApplyAnnotMethodData(hWnd, items[idx]);
+}
+
+static bool SelectAnnotToolFamily(HWND hWnd, AnnotToolFamily family, bool cycleOption, bool reverse) {
+    if (cycleOption &&
+        family == AnnotToolFamily::Pen &&
+        AnnotToolFamilyForMode(g_toolMode) == AnnotToolFamily::Pen &&
+        CyclePenToolFamilyOption(hWnd, reverse)) {
+        return true;
+    }
+    if (cycleOption &&
+        family == AnnotToolFamily::Shape &&
+        AnnotToolFamilyForMode(g_toolMode) == AnnotToolFamily::Shape &&
+        CycleShapeToolFamilyOption(hWnd, reverse)) {
+        return true;
+    }
+
+    if (!cycleOption && AnnotToolFamilyForMode(g_toolMode) == family) {
+        return true;
+    }
+
+    auto nextOpt = NextEnabledFamilyMode(family, reverse);
+    if (!nextOpt) return false;
+    ToolMode nextMode = (family == AnnotToolFamily::Shape)
+        ? ToolModeForShapeDetail(g_shapeDetail)
+        : *nextOpt;
+
+    if (family != AnnotToolFamily::Marker &&
+        family != AnnotToolFamily::Pen &&
+        g_toolMode == nextMode &&
+        cycleOption) {
+        if (!CommitActiveNoteEditBoundary(hWnd)) return false;
+        if (CyclePrimaryAnnotOptionForMode(hWnd, nextMode, reverse)) {
+            return true;
+        }
+    }
+
+    if (!CommitActiveNoteEditBoundary(hWnd)) return false;
+    EndInlineTextEditing(g_hPdfView, true);
+    ClearPdfTextSelection();
+    ClearPdfAnnotationSelection();
+    g_toolMode = nextMode;
+    if (family == AnnotToolFamily::Marker) {
+        g_markerGroupMode = nextMode;
+        g_config.annotLastMarkerDetail = UTF8ToWide(AnnotToolModeKey(nextMode));
+    }
+    if (family == AnnotToolFamily::Pen) {
+        g_penGroupMode = nextMode;
+        g_config.annotLastPenDetail = UTF8ToWide(AnnotToolModeKey(nextMode));
+    }
+    if (family == AnnotToolFamily::Shape) {
+        SyncLegacyShapeStateFromDetail();
+        nextMode = ToolModeForShapeDetail(g_shapeDetail);
+        g_toolMode = nextMode;
+        g_config.shapeDetail = UTF8ToWide(ShapeDetailKey(g_shapeDetail));
+        g_config.annotLastShapeDetail = UTF8ToWide(AnnotToolModeKey(g_shapeGroupMode));
+    }
+    if (MarkerTextModeStoresUnderlineOption(g_toolMode)) {
+        g_markerTextUnderline = MarkerTextModeUsesUnderline(g_toolMode);
+    }
+    PersistConfig();
+    ApplyActiveColorForMode(hWnd, g_toolMode);
+    UpdateToolbarUI(hWnd);
+    SetFocus(g_hPdfView);
+    if (g_toolMode == ToolMode::Magnifier && g_hPdfView) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+    return true;
+}
+
+static bool SelectAnnotToolMode(HWND hWnd, ToolMode mode, bool cycleOption, bool reverse) {
+    if (!ToolModeEnabledForCurrentPdfView(mode)) return false;
+    if (AnnotToolFamilyForMode(mode) == AnnotToolFamily::Shape) {
+        ShapeDetail detail = (mode == ToolMode::Shape && !ShapeDetailIsClosed(g_shapeDetail))
+            ? ShapeDetail::Rectangle
+            : ShapeDetailForLegacyState(mode, g_shapeKind);
+        return ApplyShapeDetailSelection(hWnd, detail);
+    }
+    if (cycleOption) {
+        if (!CommitActiveNoteEditBoundary(hWnd)) return false;
+        if (CyclePrimaryAnnotOptionForMode(hWnd, mode, reverse)) return true;
+    }
+    if (!cycleOption && g_toolMode == mode) return true;
+    if (!CommitActiveNoteEditBoundary(hWnd)) return false;
+    EndInlineTextEditing(g_hPdfView, true);
+    ClearPdfTextSelection();
+    ClearPdfAnnotationSelection();
+    g_toolMode = mode;
+
+    AnnotToolFamily family = AnnotToolFamilyForMode(mode);
+    if (family == AnnotToolFamily::Marker) {
+        g_markerGroupMode = mode;
+        g_config.annotLastMarkerDetail = UTF8ToWide(AnnotToolModeKey(mode));
+    }
+    if (family == AnnotToolFamily::Pen) {
+        g_penGroupMode = mode;
+        g_config.annotLastPenDetail = UTF8ToWide(AnnotToolModeKey(mode));
+    }
+    if (family == AnnotToolFamily::Shape) {
+        g_shapeGroupMode = mode;
+        g_config.annotLastShapeDetail = UTF8ToWide(AnnotToolModeKey(mode));
+        g_shapeToolSelection = ShapeToolSelectionForMode(mode, g_shapeDrawMode);
+    }
+    if (MarkerTextModeStoresUnderlineOption(mode)) {
+        bool nextUnderline = MarkerTextModeUsesUnderline(mode);
+        if (g_markerTextUnderline != nextUnderline) {
+            g_markerTextUnderline = nextUnderline;
+        }
+    }
+    PersistConfig();
+
+    ApplyActiveColorForMode(hWnd, g_toolMode);
+    UpdateToolbarUI(hWnd);
+    if (g_hPdfView) SetFocus(g_hPdfView);
+    if (g_toolMode == ToolMode::Magnifier && g_hPdfView) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+    return true;
+}
+
+static bool ApplyShapeDetailSelection(HWND hWnd, ShapeDetail detail) {
+    ToolMode nextMode = ToolModeForShapeDetail(detail);
+    if (!ToolModeEnabledForCurrentPdfView(nextMode)) return false;
+    if (g_toolMode == nextMode && g_shapeDetail == detail) return true;
+
+    if (!CommitActiveNoteEditBoundary(hWnd)) return false;
+    EndInlineTextEditing(g_hPdfView, true);
+    ClearPdfTextSelection();
+    ClearPdfAnnotationSelection();
+    g_shapeDetail = detail;
+    SyncLegacyShapeStateFromDetail();
+    g_toolMode = ToolModeForShapeDetail(g_shapeDetail);
+    g_config.shapeDetail = UTF8ToWide(ShapeDetailKey(g_shapeDetail));
+    g_config.annotLastShapeDetail = UTF8ToWide(AnnotToolModeKey(g_shapeGroupMode));
+    PersistConfig();
+    ApplyActiveColorForMode(hWnd, g_toolMode);
+    UpdateToolbarUI(hWnd);
+    if (g_hPdfView) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+        SetFocus(g_hPdfView);
+    }
+    return true;
+}
+
+static bool CycleShapeToolFamilyOption(HWND hWnd, bool reverse) {
+    std::vector<ShapeDetail> selections;
+    for (ShapeDetail detail : OrderedShapeDetails()) {
+        if (ToolModeEnabledForCurrentPdfView(ToolModeForShapeDetail(detail))) {
+            selections.push_back(detail);
+        }
+    }
+    if (selections.size() <= 1) return false;
+
+    auto it = std::find(selections.begin(), selections.end(), g_shapeDetail);
+    size_t index = it == selections.end() ? 0 : static_cast<size_t>(std::distance(selections.begin(), it));
+    index = reverse ? (index + selections.size() - 1) % selections.size()
+                    : (index + 1) % selections.size();
+    return ApplyShapeDetailSelection(hWnd, selections[index]);
+}
+
+static bool IsMenuCommandAllowedDuringSave(int id) {
+    switch (id) {
+    case ID_FILE_SAVE_ALL:
+    case ID_VIEW_RESET_ZOOM:
+    case ID_VIEW_SET_ZOOM:
+    case ID_VIEW_FIRST_PAGE:
+    case ID_VIEW_PREV_PAGE:
+    case ID_VIEW_NEXT_PAGE:
+    case ID_VIEW_LAST_PAGE:
+    case ID_VIEW_SCROLL_DIR_V_TTB:
+    case ID_VIEW_SCROLL_DIR_V_BTU:
+    case ID_VIEW_SCROLL_DIR_H_RTL:
+    case ID_VIEW_SCROLL_DIR_H_LTR:
+    case ID_VIEW_PDF_SINGLE_PAGE_MODE:
+    case ID_VIEW_BOTTOM_NOTE:
+    case ID_VIEW_BOTTOM_HEADINGS:
+    case ID_VIEW_BOTTOM_MATH:
+    case ID_VIEW_BOTTOM_ASSIST:
+    case ID_VIEW_LEFT_PANE_TOGGLE:
+    case ID_VIEW_READABLE_TEXT_OVERLAY:
+    case ID_VIEW_JUMP_PAGE:
+    case ID_VIEW_NOTE_WRAP:
+    case ID_HELP_GUIDE:
+    case ID_HELP_CUSTOM_EXTENSION:
+    case ID_HELP_PDF_INFO:
+    case ID_HELP_ABOUT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
+    if (IsSaveTransactionRunning()) {
+        if (id == ID_FILE_SAVE_ALL) {
+            SaveAllManual(hWnd);
+            return;
+        }
+        if (!IsMenuCommandAllowedDuringSave(id)) {
+            ShowMainSoftNotice(
+                hWnd,
+                IsEnglishUi()
+                    ? L"Save is running. Editing and file operations are disabled until it finishes."
+                    : L"統合保存中です。完了まで編集とファイル操作は無効です。",
+                SoftNoticeKind::Info);
+            return;
+        }
+    }
+    if (id >= ID_SHORTCUT_BASE &&
+        id < ID_SHORTCUT_BASE + static_cast<int>(g_shortcuts.size())) {
+        CommitPendingNoteClickCaret();
+        for (const auto& sc : g_shortcuts) {
+            if (sc.id == id) {
+                InsertSnippetIntoNote(sc.snippet);
+                break;
+            }
+        }
+        return;
+    }
+    if (HandleNoteShortcutCommand(hWnd, id, code)) {
+        return;
+    }
+
+    if (id >= ID_ANNOT_CONTEXT_FONT_SIZE_BASE &&
+        id < ID_ANNOT_CONTEXT_FONT_SIZE_BASE + 9) {
+        static constexpr int kFontPt10[] = { 100, 120, 140, 160, 180, 200, 240, 280, 320 };
+        const int index = id - ID_ANNOT_CONTEXT_FONT_SIZE_BASE;
+        const double pt = static_cast<double>(kFontPt10[index]) / 10.0;
+        if (std::clamp(g_textFontActiveSizeSlot, 0, 1) == 1) {
+            g_textFontPtSlotB = pt;
+        } else {
+            g_textFontPtSlotA = pt;
+        }
+        g_textFontPt = pt;
+        SyncToolbarFontSizeCombo();
+        PersistConfig();
+        if (g_hPdfView) {
+            PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+            SetFocus(g_hPdfView);
+        }
+        return;
+    }
+
+    if (id >= ID_ANNOT_CONTEXT_WIDTH_BASE &&
+        id < ID_ANNOT_CONTEXT_WIDTH_BASE + 3) {
+        int widthPt10[3]{ 15, 25, 40 };
+        if (g_toolMode == ToolMode::MarkerFree ||
+            g_toolMode == ToolMode::MarkerLine ||
+            g_toolMode == ToolMode::MarkerArrow ||
+            g_toolMode == ToolMode::MarkerWave) {
+            widthPt10[0] = 60;
+            widthPt10[1] = 80;
+            widthPt10[2] = 100;
+        } else if (g_toolMode == ToolMode::MarkerText ||
+                   g_toolMode == ToolMode::MarkerTextUnderline) {
+            widthPt10[0] = 20;
+            widthPt10[1] = 40;
+            widthPt10[2] = 60;
+        } else if (g_toolMode == ToolMode::Eraser) {
+            widthPt10[0] = 20;
+            widthPt10[1] = 40;
+            widthPt10[2] = 80;
+        }
+        const int index = id - ID_ANNOT_CONTEXT_WIDTH_BASE;
+        StoreToolWidthPtForMode(g_toolMode, static_cast<double>(widthPt10[index]) / 10.0);
+        PersistConfig();
+        SyncWidthComboToMode(g_toolMode);
+        if (g_hPdfView) {
+            InvalidateRect(g_hPdfView, nullptr, FALSE);
+            SetFocus(g_hPdfView);
+        }
+        return;
+    }
+
+    const int alphaOptionCount = ToolAlphaOptionCountForMode(g_toolMode);
+    if (id >= ID_ANNOT_CONTEXT_ALPHA_BASE &&
+        id < ID_ANNOT_CONTEXT_ALPHA_BASE + alphaOptionCount) {
+        const int index = id - ID_ANNOT_CONTEXT_ALPHA_BASE;
+        StoreToolAlphaForMode(g_toolMode, ToolAlphaOptionValueForMode(g_toolMode, index));
+        PersistConfig();
+        if (g_hComboMarkerAlpha) SyncAlphaComboToMode(g_toolMode);
+        if (g_hPdfView) {
+            InvalidateRect(g_hPdfView, nullptr, FALSE);
+            SetFocus(g_hPdfView);
+        }
+        return;
+    }
+
+    const bool cycleToolOption = (code != kAnnotContextMenuCommandCode);
+    const bool reverseToolOptionCycle = ToolOptionCycleReverseRequested();
+
+    switch (id) {
+    case ID_FILE_ADD_TEMP_EXTERNAL_LECTURE: {
+        auto initial = DialogDocumentsInitialFolder();
+        auto picked = PickFoldersWithInitial(hWnd, initial, GetUiText().menuAddTempExternalLecture);
+        AddTempExternalLectures(hWnd, picked);
+        break;
+    }
+    case ID_FILE_REMOVE_TEMP_EXTERNAL_LECTURE: {
+        auto pickedTarget = PromptTempExternalLecturePathToRemove(hWnd);
+        if (!pickedTarget) break;
+        const std::wstring target = *pickedTarget;
+        if (file_output::HasPendingOrStagedDiffsUnderPath(std::filesystem::path(target))) {
+            std::wstring msg = IsEnglishUi()
+                ? L"There are unsaved or staged changes under this temporary external lecture.\n\n"
+                  L"Save them before removing the temporary external lecture path?\n\n"
+                  L"[Yes] Save and remove\n"
+                  L"[No] Keep the temporary external lecture path"
+                : (std::wstring(g_config.studentMode
+                                     ? L"この一時外部授業の配下に、未保存または未統合の stage 差分があります。\n\n"
+                                     : L"この一時外部上位項目の配下に、未保存または未統合の stage 差分があります。\n\n") +
+                   (g_config.studentMode
+                        ? L"保存してから一時外部授業パスを削除しますか？\n\n"
+                        : L"保存してから一時外部上位項目パスを削除しますか？\n\n") +
+                   L"[はい] 保存して削除\n" +
+                   (g_config.studentMode ? L"[いいえ] 一時外部授業パスを残す"
+                                         : L"[いいえ] 一時外部上位項目パスを残す"));
+            if (!ConfirmMainYesNo(hWnd, GetUiText().menuFile, msg, SoftNoticeKind::Warning,
+                                  SilentDialogResult::No, SilentDialogResult::No)) {
+                break;
+            }
+            SaveAllManual(hWnd);
+            if (file_output::HasPendingOrStagedDiffsUnderPath(std::filesystem::path(target))) {
+                const wchar_t* msg = IsEnglishUi()
+                    ? L"Some unsaved or staged changes still remain under this temporary external lecture. The path was not removed."
+                    : (g_config.studentMode
+                           ? L"この一時外部授業の配下に未保存または未統合の差分がまだ残っているため、パスは削除しませんでした。"
+                           : L"この一時外部上位項目の配下に未保存または未統合の差分がまだ残っているため、パスは削除しませんでした。");
+                ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+                break;
+            }
+        }
+        if (!ConfirmRecommendedPdfExportBeforeRemovingTempLecture(hWnd, std::filesystem::path(target))) {
+            break;
+        }
+        bool removingCurrent = (!g_currentLecturePath.empty() && target == g_currentLecturePath);
+        if (removingCurrent) {
+            RememberCurrentSessionFiles();
+            if (!SaveNoteIfDirty(hWnd)) {
+                PromptStayOrOpenDiffManager(
+                    hWnd,
+                    IsEnglishUi() ? L"Removing the temporary lecture path"
+                                  : (g_config.studentMode ? L"一時外部授業パスの削除" : L"一時外部上位項目パスの削除"),
+                    IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
+                                  : L"「差分管理」で未統合差分を整理してから、もう一度実行してください。");
+                break;
+            }
+            ClearPdfAndNoteSelection();
+            ResetSessionAndFiles();
+            g_currentLecturePath.clear();
+        }
+        if (RemoveTempExternalLecturePath(target)) {
+            s_ignoreLectureSelChange = true;
+            LoadLectures();
+            s_ignoreLectureSelChange = false;
+            UpdateWindowTitle(hWnd);
+            RefreshMainMenuBar(hWnd);
+        }
+        break;
+    }
+    case ID_FILE_OPEN_WS: {
+        auto picked = PickWorkspaceFolder(hWnd);
+        if (!picked) break;
+        if (!PrepareWorkspaceRestart(hWnd)) break;
+        // setup.json(pdf_workspace_setup.json)のworkspaceRootを更新
+        UpdateSetupJsonWorkspaceRoot(*picked);
+        ReloadWorkspaceFromRoot(hWnd, *picked, true, true);
+        break;
+    }
+    case ID_FILE_RELOAD_WS:
+        if (g_workspaceRoot.empty()) break;
+        if (!PrepareWorkspaceRestart(hWnd)) break;
+        UpdateSetupJsonWorkspaceRoot(g_workspaceRoot);
+        ReloadWorkspaceFromRoot(hWnd, g_workspaceRoot, false, false);
+        break;
+    case ID_FILE_NEW_SESSION:
+        ShowNewSessionDialog(hWnd);
+        RefreshMainMenuBar(hWnd);
+        break;
+    case ID_FILE_NEW_LECTURE:
+        ShowNewLectureDialog(hWnd);
+        RefreshMainMenuBar(hWnd);
+        break;
+    case ID_FILE_SAVE_ALL:
+        SaveAllManual(hWnd);
+        break;
+    case ID_FILE_SAVE_NOTE:
+        SaveCurrentNoteManual(hWnd);
+        break;
+    case ID_FILE_RECOVERY:
+        ShowRecoveryDialog(hWnd);
+        break;
+    case ID_FILE_RESTORE_BACKUP:
+        ShowRestoreBackupListDialogAndExecute(hWnd);
+        break;
+    case ID_FILE_DELETE_BACKUP:
+        ShowDeleteSavedBackupDialog(hWnd);
+        break;
+    case ID_EDIT_UNDO:
+        ExecuteFocusedUndoRedo(hWnd, true);
+        break;
+    case ID_EDIT_REDO:
+        ExecuteFocusedUndoRedo(hWnd, false);
+        break;
+    case ID_FILE_EXPORT_PDF_QUICK: {
+        if (!CanStartExportCommand(hWnd, id)) break;
+        ExportDialogResult result{};
+        result.kind = ExportDialogKind::PdfAll;
+        // The quick path promises a selectable/copyable annotated PDF.
+        result.standardTextAnnots = true;
+        // Keep TextBox wrapping aligned with the PDF-pane display.
+        result.matchPdfPaneTextLayout = true;
+        result.pdfScale = 1.0;
+        ExecuteUnifiedExports(hWnd, {result});
+        break;
+    }
+    case ID_FILE_EXPORT_NOTE_TEXT_QUICK: {
+        if (!CanStartExportCommand(hWnd, id)) break;
+        ExportDialogResult result{};
+        result.kind = ExportDialogKind::NoteText;
+        result.textOptions.mathMode = file_output::MathMode::Raw;
+        result.textOptions.markupMode = file_output::MarkupMode::Simplified;
+        result.textOptions.includeCommentLines = true;
+        ExecuteUnifiedExports(hWnd, {result});
+        break;
+    }
+    case ID_FILE_EXPORT_NOTE_MARKDOWN_QUICK: {
+        if (!CanStartExportCommand(hWnd, id)) break;
+        ExportDialogResult result{};
+        result.kind = ExportDialogKind::NoteMarkup;
+        result.noteMarkupOptions.format = file_output::NoteMarkupExportOptions::Format::Markdown;
+        result.noteMarkupOptions.mathMode = file_output::NoteMarkupExportOptions::MathMode::Format;
+        result.noteMarkupOptions.includeCommentLines = true;
+        result.noteMarkupOptions.includeTitleHeading = false;
+        result.noteMarkupOptions.shiftHeadingLevels = true;
+        ExecuteUnifiedExports(hWnd, {result});
+        break;
+    }
+    case ID_FILE_EXPORT_NOTE_HTML_QUICK: {
+        if (!CanStartExportCommand(hWnd, id)) break;
+        ExportDialogResult result{};
+        result.kind = ExportDialogKind::NoteMarkup;
+        result.noteMarkupOptions.format = file_output::NoteMarkupExportOptions::Format::Html;
+        result.noteMarkupOptions.mathMode = file_output::NoteMarkupExportOptions::MathMode::Format;
+        result.noteMarkupOptions.includeCommentLines = true;
+        result.noteMarkupOptions.includeTitleHeading = true;
+        result.noteMarkupOptions.shiftHeadingLevels = true;
+        ExecuteUnifiedExports(hWnd, {result});
+        break;
+    }
+    case ID_FILE_EXPORT_PDF:
+    case ID_FILE_EXPORT_COMBINED:
+    case ID_FILE_EXPORT_PDF_PAGES:
+    case ID_FILE_EXPORT_PNG_PAGE:
+    case ID_FILE_EXPORT_NOTE_TEXT:
+    case ID_FILE_EXPORT_NOTE_MARKUP:
+    case ID_FILE_EXPORT_NOTE_HTML: {
+        if (!CanStartExportCommand(hWnd, id)) break;
+        ExportDialogKind preset = ExportDialogKind::PdfAll;
+        switch (id) {
+        case ID_FILE_EXPORT_PDF_PAGES:
+            preset = ExportDialogKind::PdfPages;
+            break;
+        case ID_FILE_EXPORT_PNG_PAGE:
+            preset = ExportDialogKind::PdfPng;
+            break;
+        case ID_FILE_EXPORT_NOTE_TEXT:
+            preset = ExportDialogKind::NoteText;
+            break;
+        case ID_FILE_EXPORT_NOTE_MARKUP:
+            preset = ExportDialogKind::NoteMarkup;
+            break;
+        case ID_FILE_EXPORT_NOTE_HTML:
+            // Legacy path: start at markup export, default to HTML.
+            preset = ExportDialogKind::NoteMarkup;
+            break;
+        case ID_FILE_EXPORT_PDF:
+        case ID_FILE_EXPORT_COMBINED:
+        default:
+            preset = ExportDialogKind::PdfAll;
+            break;
+        }
+        std::vector<ExportDialogResult> dialogResults;
+        if (!ShowUnifiedExportDialog(hWnd, preset, dialogResults)) break;
+        ExecuteUnifiedExports(hWnd, dialogResults);
+        break;
+    }
+    case ID_DEBUG_LOG_ARCHIVE:
+        if (!g_config.developerMode) break;
+        ArchiveWorkspaceLogFiles(hWnd);
+        break;
+    case ID_DEBUG_LOG_DELETE:
+        if (!g_config.developerMode) break;
+        DeleteWorkspaceLogFiles(hWnd);
+        break;
+    case ID_DEBUG_LOG_TOGGLE_ALL:
+        if (!g_config.developerMode) break;
+        ToggleAllDebugLogs(hWnd);
+        break;
+    case ID_DEBUG_RESOURCE_MONITOR:
+        if (!g_config.developerMode) break;
+        ShowDebugResourceMonitorWindow(hWnd, BuildDebugResourceMonitorText());
+        break;
+    case ID_FILE_NEW_CLRO:
+        if (!SaveNoteIfDirty(hWnd)) break;
+        CreateNewClroInSession(hWnd);
+        break;
+    case ID_FILE_IMPORT_FILE:
+        ImportFileToCurrentSession(hWnd);
+        break;
+    case ID_FILE_IMPORT_DIR_AS_LECTURE:
+        ImportDirectoryAsLecture(hWnd);
+        break;
+    case ID_FILE_IMPORT_DIR_AS_SESSION:
+        ImportDirectoryAsSession(hWnd);
+        break;
+    case ID_FILE_ORGANIZE_SESSION_FILES:
+        OrganizeCurrentSessionFiles(hWnd);
+        break;
+    case ID_FILE_OPEN_WORKSPACE_DIR: {
+        const auto& ui = GetUiText();
+        if (g_workspaceRoot.empty()) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"No workspace is open."
+                : L"ワークスペースが開かれていません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+
+        std::filesystem::path target(g_workspaceRoot);
+        if (target.wstring().rfind(L"\\\\", 0) == 0) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"UNC/device paths are not supported."
+                : L"UNC/デバイスパスは使用できません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        bool isReparse = false;
+        if (TryIsReparsePointNoFollow(target, isReparse) && isReparse) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"Reparse point folders (junction/symlink) are not supported."
+                : L"ジャンクション/シンボリックリンク等（reparse point）のフォルダは使用できません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        std::wstring openErr;
+        if (!TryOpenDirForList(target, &openErr)) {
+            std::wstring msg = IsEnglishUi()
+                ? L"Root folder is not accessible:\n\n"
+                : L"ルートフォルダにアクセスできません:\n\n";
+            msg += target.wstring();
+            if (!openErr.empty()) msg += L"\n\n" + openErr;
+            ShowMainMessageDialog(hWnd, ui.menuOpenWorkspaceDir, msg, SoftNoticeKind::Warning);
+            break;
+        }
+
+        ShowPathInExplorer(hWnd, target.wstring());
+        break;
+    }
+    case ID_FILE_OPEN_LECTURE_DIR: {
+        const auto& ui = GetUiText();
+        if (g_currentLecturePath.empty()) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"No lecture is selected."
+                : (g_config.studentMode ? L"授業が選択されていません。" : L"上位項目が選択されていません。");
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+
+        std::filesystem::path target(g_currentLecturePath);
+        if (target.wstring().rfind(L"\\\\", 0) == 0) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"UNC/device paths are not supported."
+                : L"UNC/デバイスパスは使用できません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        bool isReparse = false;
+        if (TryIsReparsePointNoFollow(target, isReparse) && isReparse) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"Reparse point folders (junction/symlink) are not supported."
+                : L"ジャンクション/シンボリックリンク等（reparse point）のフォルダは使用できません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        std::wstring openErr;
+        if (!TryOpenDirForList(target, &openErr)) {
+            std::wstring msg = IsEnglishUi()
+                ? L"Lecture folder is not accessible:\n\n"
+                : (g_config.studentMode ? L"授業フォルダにアクセスできません:\n\n" : L"上位項目フォルダにアクセスできません:\n\n");
+            msg += target.wstring();
+            if (!openErr.empty()) msg += L"\n\n" + openErr;
+            ShowMainMessageDialog(hWnd, ui.menuOpenLectureDir, msg, SoftNoticeKind::Warning);
+            break;
+        }
+
+        ShowPathInExplorer(hWnd, target.wstring());
+        break;
+    }
+    case ID_OP_RENAME_PDF:
+        RenameOrMoveCurrentOperationTarget(hWnd, /*isPdf=*/true, /*renameOnly=*/true);
+        break;
+    case ID_OP_RENAME_NOTE:
+        RenameOrMoveCurrentOperationTarget(hWnd, /*isPdf=*/false, /*renameOnly=*/true);
+        break;
+    case ID_OP_MOVE_PDF:
+        RenameOrMoveCurrentOperationTarget(hWnd, /*isPdf=*/true, /*renameOnly=*/false);
+        break;
+    case ID_OP_MOVE_NOTE:
+        RenameOrMoveCurrentOperationTarget(hWnd, /*isPdf=*/false, /*renameOnly=*/false);
+        break;
+    case ID_OP_OPEN_READONLY_VIEWER:
+        LaunchReadOnlyViewerForPdf(hWnd, CurrentLogicalPdfPath());
+        break;
+    case ID_OP_LAUNCH_READONLY_VIEWER:
+        LaunchReadOnlyViewerEmpty(hWnd);
+        break;
+    case ID_OP_CLOSE_ALL_READONLY_VIEWERS:
+        CloseAllReadOnlyViewerWindows(hWnd);
+        break;
+    case ID_OP_CONVERT_OFFICE_TO_PDF:
+        ConvertOfficeFilesToCurrentSession(hWnd);
+        break;
+    case ID_OP_CREATE_BLANK_PDF:
+        CreateBlankPdfInCurrentSession(hWnd);
+        break;
+    case ID_OP_STAGE_MANAGE:
+        ShowStageManagerDialog(hWnd);
+        break;
+    case ID_FILE_EXIT:
+        PostMessageW(hWnd, WM_CLOSE, 0, 0);
+        break;
+    case ID_VIEW_RESET_ZOOM:
+        if (g_pdf.kind != DocKind::None) {
+            g_pdf.scale = 1.0;
+            BuildPageCaches(g_hPdfView);
+            InvalidateRect(g_hPdfView, nullptr, FALSE);
+        }
+        break;
+    case ID_VIEW_SET_ZOOM: {
+        if (g_pdf.kind == DocKind::None) break;
+        int minPct = static_cast<int>(std::lround(kMinScale * 100.0));
+        int maxPct = static_cast<int>(std::lround(kMaxScale * 100.0));
+        std::wstring title = GetUiText().menuSetZoom + L" (" + std::to_wstring(minPct) + L"-" +
+                             std::to_wstring(maxPct) + L"%)";
+        std::wstring initial = std::to_wstring(static_cast<int>(std::lround(g_pdf.scale * 100.0)));
+        std::wstring input;
+        if (!PromptSimpleText(hWnd, title, initial, input)) break;
+        double scale = 1.0;
+        if (!TryParseZoomScale(input, &scale)) break;
+        RECT rc{};
+        GetClientRect(g_hPdfView, &rc);
+        POINT focus{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+        SetPdfScale(g_hPdfView, scale, focus);
+        break;
+    }
+    case ID_VIEW_SCROLL_DIR_V_TTB:
+    case ID_VIEW_SCROLL_DIR_V_BTU:
+    case ID_VIEW_SCROLL_DIR_H_RTL:
+    case ID_VIEW_SCROLL_DIR_H_LTR: {
+        std::wstring mode = L"v_ttb";
+        switch (id) {
+        case ID_VIEW_SCROLL_DIR_V_BTU:
+            mode = L"v_btu";
+            break;
+        case ID_VIEW_SCROLL_DIR_H_RTL:
+            mode = L"h_rtl";
+            break;
+        case ID_VIEW_SCROLL_DIR_H_LTR:
+            mode = L"h_ltr";
+            break;
+        default:
+            mode = L"v_ttb";
+            break;
+        }
+        SetPdfFlowMode(g_hPdfView, mode);
+        PersistConfig();
+        UpdateScrollDirectionMenuChecks();
+        break;
+    }
+    case ID_VIEW_PDF_SINGLE_PAGE_MODE:
+        if (g_hPdfView && g_pdf.kind != DocKind::None) {
+            g_pdf.singlePageIndex = PageAtCurrentView();
+        }
+        g_config.pdfSinglePageMode = !g_config.pdfSinglePageMode;
+        ApplyPdfDisplayMode(g_hPdfView);
+        PersistConfig();
+        UpdatePdfSinglePageModeMenuCheck();
+        break;
+    case ID_VIEW_LEFT_PANE_TOGGLE:
+        SetLeftPaneCollapsed(hWnd, !g_leftPaneCollapsed);
+        break;
+    case ID_VIEW_READABLE_TEXT_OVERLAY:
+        g_readableTextOverlay = !g_readableTextOverlay;
+        CheckMenuItem(GetMenu(hWnd), ID_VIEW_READABLE_TEXT_OVERLAY,
+                      MF_BYCOMMAND | (g_readableTextOverlay ? MF_CHECKED : MF_UNCHECKED));
+        if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+        break;
+    case ID_VIEW_RESET_PDF_POSITION:
+    case ID_TEMP_RESET_PDF_POSITION: {
+        const auto& ui = GetUiText();
+        if (g_workspaceRoot.empty()) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"No workspace is open."
+                : L"ワークスペースが開かれていません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        std::filesystem::path src = PdfViewPositionsFilePath();
+        std::error_code ec;
+        bool sourceExists = !src.empty() && std::filesystem::exists(src, ec) && !ec;
+        std::vector<std::filesystem::path> oldBackups;
+        bool deleteOld = false;
+        if (sourceExists) {
+            oldBackups = ListEscapeBackupsByPrefix(L"pdf_view_positions.txt");
+            if (!oldBackups.empty()) {
+                AskDeleteOlderBackups(hWnd, ui.menuResetPdfPosition, ui.menuResetPdfPosition, &deleteOld);
+            }
+        }
+        std::filesystem::path backup;
+        if (!BackupTempFileToEscape(src, &backup)) {
+            const wchar_t* err = IsEnglishUi()
+                ? L"Failed to reset saved PDF positions."
+                : L"PDF位置情報のリセットに失敗しました。";
+            ShowMainMessageDialog(hWnd, ui.menuResetPdfPosition, err, SoftNoticeKind::Warning);
+            break;
+        }
+        if (deleteOld && !oldBackups.empty()) {
+            DeleteBackupFiles(oldBackups, backup);
+        }
+        ClearLastPdfViewInfo();
+        RefreshMainMenuBar(hWnd);
+        break;
+    }
+    case ID_TEMP_RESET_LECTURE_LAST_OPEN: {
+        const auto& ui = GetUiText();
+        if (g_workspaceRoot.empty()) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"No workspace is open."
+                : L"ワークスペースが開かれていません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        const wchar_t* confirm = IsEnglishUi()
+            ? L"Reset the saved last-open times for lectures?\n\nA backup will be moved to \"__resource__/__escape__\"."
+            : (g_config.studentMode
+                   ? L"授業の「最終オープン時刻」をリセットしますか？\n\n現在のファイルは \"__resource__/__escape__\" に退避します。"
+                   : L"上位項目の「最終オープン時刻」をリセットしますか？\n\n現在のファイルは \"__resource__/__escape__\" に退避します。");
+        if (!ConfirmMainYesNo(hWnd, ui.menuResetLectureLastOpen, confirm, SoftNoticeKind::Warning,
+                              SilentDialogResult::No, SilentDialogResult::No)) {
+            break;
+        }
+        std::filesystem::path lectureSrc = LectureLastOpenFilePath();
+        std::error_code lecEc;
+        bool sourceExists = !lectureSrc.empty() && std::filesystem::exists(lectureSrc, lecEc) && !lecEc;
+        std::vector<std::filesystem::path> oldBackups;
+        bool deleteOld = false;
+        if (sourceExists) {
+            oldBackups = ListEscapeBackupsByPrefix(kLectureLastOpenFileName);
+            if (!oldBackups.empty()) {
+                AskDeleteOlderBackups(hWnd, ui.menuResetLectureLastOpen, ui.menuResetLectureLastOpen, &deleteOld);
+            }
+        }
+        std::filesystem::path backup;
+        if (!ResetLectureLastOpenTimes(&backup)) {
+            const wchar_t* err = IsEnglishUi()
+                ? L"Failed to reset last-open times."
+                : L"最終オープン時刻のリセットに失敗しました。";
+            ShowMainMessageDialog(hWnd, ui.menuResetLectureLastOpen, err, SoftNoticeKind::Warning);
+            break;
+        }
+        if (deleteOld && !oldBackups.empty()) {
+            DeleteBackupFiles(oldBackups, backup);
+        }
+        s_ignoreLectureSelChange = true;
+        LoadLectures();
+        s_ignoreLectureSelChange = false;
+        RefreshStatusDisplay(hWnd);
+        UpdateWindowTitle(hWnd);
+        const wchar_t* done = IsEnglishUi()
+            ? L"Reset last-open times."
+            : L"最終オープン時刻をリセットしました。";
+        ShowSoftNotice(hWnd, done);
+        RefreshMainMenuBar(hWnd);
+        break;
+    }
+    case ID_TEMP_RESET_SESSION_LAST_OPEN: {
+        const auto& ui = GetUiText();
+        if (g_workspaceRoot.empty()) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"No workspace is open."
+                : L"ワークスペースが開かれていません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        const wchar_t* confirm = IsEnglishUi()
+            ? L"Reset the saved last-open PDF/Note pairs per session?\n\nA backup will be moved to \"__resource__/__escape__\"."
+            : (g_config.studentMode
+                   ? L"回次ごとの「最終オープンPDF/ノート」履歴をリセットしますか？\n\n現在のファイルは \"__resource__/__escape__\" に退避します。"
+                   : L"下位項目ごとの「最終オープンPDF/ノート」履歴をリセットしますか？\n\n現在のファイルは \"__resource__/__escape__\" に退避します。");
+        if (!ConfirmMainYesNo(hWnd, ui.menuResetSessionLastOpen, confirm, SoftNoticeKind::Warning,
+                              SilentDialogResult::No, SilentDialogResult::No)) {
+            break;
+        }
+        std::filesystem::path sessionSrc = SessionLastOpenFilePath();
+        std::error_code sesEc;
+        bool sourceExists = !sessionSrc.empty() && std::filesystem::exists(sessionSrc, sesEc) && !sesEc;
+        std::vector<std::filesystem::path> oldBackups;
+        bool deleteOld = false;
+        if (sourceExists) {
+            oldBackups = ListEscapeBackupsByPrefix(L"session_last_open.txt");
+            if (!oldBackups.empty()) {
+                AskDeleteOlderBackups(hWnd, ui.menuResetSessionLastOpen, ui.menuResetSessionLastOpen, &deleteOld);
+            }
+        }
+        std::filesystem::path backup;
+        if (!ResetSessionLastOpenTimes(&backup)) {
+            const wchar_t* err = IsEnglishUi()
+                ? L"Failed to reset session last-open history."
+                : (g_config.studentMode ? L"回次の最終オープン履歴のリセットに失敗しました。"
+                                        : L"下位項目の最終オープン履歴のリセットに失敗しました。");
+            ShowMainMessageDialog(hWnd, ui.menuResetSessionLastOpen, err, SoftNoticeKind::Warning);
+            break;
+        }
+        if (deleteOld && !oldBackups.empty()) {
+            DeleteBackupFiles(oldBackups, backup);
+        }
+        const wchar_t* done = IsEnglishUi()
+            ? L"Reset session last-open history."
+            : (g_config.studentMode ? L"回次の最終オープン履歴をリセットしました。"
+                                    : L"下位項目の最終オープン履歴をリセットしました。");
+        ShowSoftNotice(hWnd, done);
+        RefreshMainMenuBar(hWnd);
+        break;
+    }
+    case ID_TEMP_RESTORE_LECTURE_LAST_OPEN: {
+        const auto& ui = GetUiText();
+        if (g_workspaceRoot.empty()) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"No workspace is open."
+                : L"ワークスペースが開かれていません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        std::wstring err;
+        bool canceled = false;
+        if (!RestoreTempDataFromEscape(hWnd, LectureLastOpenFilePath(), kLectureLastOpenFileName,
+                                       ui.menuRestoreLectureLastOpen, &err, &canceled)) {
+            if (!canceled && !err.empty()) {
+                ShowMainMessageDialog(hWnd, ui.menuRestoreLectureLastOpen, err, SoftNoticeKind::Warning);
+            }
+            break;
+        }
+        s_ignoreLectureSelChange = true;
+        LoadLectures();
+        s_ignoreLectureSelChange = false;
+        RefreshStatusDisplay(hWnd);
+        UpdateWindowTitle(hWnd);
+        const wchar_t* done = IsEnglishUi()
+            ? L"Restored last-open times."
+            : L"最終オープン時刻を復元しました。";
+        ShowSoftNotice(hWnd, done);
+        RefreshMainMenuBar(hWnd);
+        break;
+    }
+    case ID_TEMP_RESTORE_PDF_POSITION: {
+        const auto& ui = GetUiText();
+        if (g_workspaceRoot.empty()) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"No workspace is open."
+                : L"ワークスペースが開かれていません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        std::wstring err;
+        bool canceled = false;
+        if (!RestoreTempDataFromEscape(hWnd, PdfViewPositionsFilePath(), L"pdf_view_positions.txt",
+                                       ui.menuRestorePdfPosition, &err, &canceled)) {
+            if (!canceled && !err.empty()) {
+                ShowMainMessageDialog(hWnd, ui.menuRestorePdfPosition, err, SoftNoticeKind::Warning);
+            }
+            break;
+        }
+        const wchar_t* done = IsEnglishUi()
+            ? L"Restored saved PDF positions."
+            : L"PDF位置情報を復元しました。";
+        ShowSoftNotice(hWnd, done);
+        RefreshMainMenuBar(hWnd);
+        break;
+    }
+    case ID_TEMP_RESTORE_SESSION_LAST_OPEN: {
+        const auto& ui = GetUiText();
+        if (g_workspaceRoot.empty()) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"No workspace is open."
+                : L"ワークスペースが開かれていません。";
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        std::wstring err;
+        bool canceled = false;
+        if (!RestoreTempDataFromEscape(hWnd, SessionLastOpenFilePath(), L"session_last_open.txt",
+                                       ui.menuRestoreSessionLastOpen, &err, &canceled)) {
+            if (!canceled && !err.empty()) {
+                ShowMainMessageDialog(hWnd, ui.menuRestoreSessionLastOpen, err, SoftNoticeKind::Warning);
+            }
+            break;
+        }
+        LoadSessionLastOpenMap();
+        const wchar_t* done = IsEnglishUi()
+            ? L"Restored session last-open history."
+            : (g_config.studentMode ? L"回次の最終オープン履歴を復元しました。"
+                                    : L"下位項目の最終オープン履歴を復元しました。");
+        ShowSoftNotice(hWnd, done);
+        RefreshMainMenuBar(hWnd);
+        break;
+    }
+    case ID_TEMP_DELETE_PDF_POSITION_BACKUP:
+    case ID_TEMP_DELETE_LECTURE_LAST_OPEN_BACKUP:
+    case ID_TEMP_DELETE_SESSION_LAST_OPEN_BACKUP: {
+        const auto& ui = GetUiText();
+        std::wstring prefix;
+        std::wstring title;
+        if (id == ID_TEMP_DELETE_PDF_POSITION_BACKUP) {
+            prefix = L"pdf_view_positions.txt";
+            title = ui.menuDeletePdfPositionBackup;
+        } else if (id == ID_TEMP_DELETE_LECTURE_LAST_OPEN_BACKUP) {
+            prefix = kLectureLastOpenFileName;
+            title = ui.menuDeleteLectureLastOpenBackup;
+        } else {
+            prefix = L"session_last_open.txt";
+            title = ui.menuDeleteSessionLastOpenBackup;
+        }
+        std::filesystem::path selected;
+        std::wstring err;
+        bool canceled = false;
+        if (!PickEscapeBackupFile(hWnd, prefix, title, &selected, &err, &canceled)) {
+            if (!canceled && !err.empty()) {
+                ShowMainMessageDialog(hWnd, title, err, SoftNoticeKind::Warning);
+            }
+            break;
+        }
+        std::error_code rmEc;
+        std::filesystem::remove(selected, rmEc);
+        if (rmEc) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"Failed to delete backup file."
+                : L"バックアップファイルの削除に失敗しました。";
+            ShowMainMessageDialog(hWnd, title, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        const wchar_t* done = IsEnglishUi()
+            ? L"Deleted backup file."
+            : L"バックアップファイルを削除しました。";
+        ShowSoftNotice(hWnd, done);
+        RefreshMainMenuBar(hWnd);
+        break;
+    }
+    case ID_VIEW_FIRST_PAGE:
+        JumpToPage(g_hPdfView, 0);
+        break;
+    case ID_VIEW_PREV_PAGE:
+        JumpToPage(g_hPdfView, PageAtCurrentView() - 1);
+        break;
+    case ID_VIEW_NEXT_PAGE:
+        JumpToPage(g_hPdfView, PageAtCurrentView() + 1);
+        break;
+    case ID_VIEW_LAST_PAGE:
+        JumpToPage(g_hPdfView, g_pdf.pageCount - 1);
+        break;
+    case ID_VIEW_JUMP_PAGE: {
+        if (g_pdf.kind == DocKind::None || g_pdf.pageCount <= 0) break;
+        std::wstring title = GetUiText().menuJumpPage + L" (1-" + std::to_wstring(g_pdf.pageCount) + L")";
+        std::wstring input;
+        std::wstring initial = std::to_wstring(PageAtCurrentView() + 1);
+        if (!PromptSimpleText(hWnd, title, initial, input)) break;
+        input = TrimWhitespace(input);
+        if (input.empty()) break;
+        wchar_t* end = nullptr;
+        long val = std::wcstol(input.c_str(), &end, 10);
+        if (end == input.c_str()) break;
+        int page = static_cast<int>(std::clamp<long>(val, 1, g_pdf.pageCount));
+        JumpToPage(g_hPdfView, page - 1);
+        break;
+    }
+    case ID_VIEW_BOTTOM_NOTE:
+        SetBottomPanePinMode(BottomPanePin::Note, BottomNoteMode::Legacy);
+        break;
+    case ID_VIEW_BOTTOM_HEADINGS:
+        SetBottomPanePinMode(BottomPanePin::Note, BottomNoteMode::Headings);
+        break;
+    case ID_VIEW_BOTTOM_MATH:
+        SetBottomPanePinMode(BottomPanePin::Math, g_bottomNoteMode);
+        break;
+    case ID_VIEW_BOTTOM_ASSIST:
+        SetBottomPanePinMode(BottomPanePin::Note, BottomNoteMode::Assist);
+        break;
+    case ID_VIEW_NOTE_WRAP:
+        ToggleNoteWrapSetting();
+        RefreshMainMenuBar(hWnd);
+        break;
+    case ID_SETTINGS_GENERAL:
+        ShowGeneralSettingsDialog(hWnd);
+        break;
+    case ID_SETTINGS_NOTE:
+        ShowNoteSettingsDialog(hWnd);
+        break;
+    case ID_SETTINGS_MARKUP:
+        ShowMarkupSettingsDialog(hWnd);
+        break;
+    case ID_SETTINGS_ANNOTATION:
+        ShowAnnotationSettingsDialog(hWnd);
+        break;
+    case ID_SETTINGS_PALETTE:
+        ShowPaletteSettingsDialog(hWnd);
+        break;
+    case ID_SETTINGS_PRESET_SAVE:
+        SaveSettingsPreset(hWnd);
+        break;
+    case ID_SETTINGS_PRESET_LOAD:
+        LoadSettingsPreset(hWnd);
+        break;
+    case ID_SETTINGS_BUNDLE_EXPORT:
+        ExportAllUserSettings(hWnd);
+        break;
+    case ID_SETTINGS_BUNDLE_IMPORT:
+        ImportAllUserSettings(hWnd);
+        break;
+    case ID_LECTURE_SCHEDULE:
+        ShowScheduleWindow(hWnd);
+        break;
+    case ID_SEARCH:
+        ToggleSearchWindow(hWnd);
+        break;
+    case ID_HELP_GUIDE:
+        ShowHelpDialog(hWnd);
+        break;
+    case ID_HELP_CUSTOM_EXTENSION:
+        ShowCustomExtensionHelpDialog(hWnd);
+        break;
+    case ID_HELP_PDF_INFO:
+        ShowPdfInfoDialog(hWnd);
+        break;
+    case ID_HELP_SHOW_LOG_PATH: {
+        std::wstring label = IsEnglishUi() ? L"Log Directory Path" : L"ログフォルダのパス";
+        std::filesystem::path logDir = AppLogPath(AppLogKind::Crash).parent_path();
+        ShowSelectedPathDialog(hWnd, label, logDir.wstring());
+        break;
+    }
+    case ID_HELP_ABOUT:
+        ShowMainMessageDialog(hWnd, GetUiText().aboutTitle, BuildAboutDialogText(), SoftNoticeKind::Info);
+        break;
+    case ID_HELP_CRASH: {
+        if (!g_config.developerMode) break;
+        // intentional crash for testing
+        volatile int* p = nullptr;
+        *p = 1;
+        break;
+    }
+    case ID_TOOL_CLEAR_ANNOTS:
+        ClearAllAnnotationsWithUndo(hWnd);
+        break;
+    case ID_TOOL_TOGGLE_ANNOTS:
+        g_showAnnots = !g_showAnnots;
+        g_config.showAnnots = g_showAnnots;
+        PersistConfig();
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+        RefreshAnnotPanel();
+        InvalidateThemeButton(g_hBtnToggleAnn);
+        InvalidateThemeButton(g_hAnnotShow);
+        break;
+    case ID_ANNOT_PANEL_SHOW:
+        g_showAnnots = (SendMessageW(g_hAnnotShow, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        g_config.showAnnots = g_showAnnots;
+        PersistConfig();
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+        RefreshAnnotPanel();
+        InvalidateThemeButton(g_hAnnotShow);
+        InvalidateThemeButton(g_hBtnToggleAnn);
+        break;
+    case ID_ANNOT_PANEL_SETTINGS:
+        ShowAnnotationSettingsDialog(hWnd);
+        break;
+    case ID_ANNOT_PANEL_CLEAR:
+        ClearAllAnnotationsWithUndo(hWnd);
+        break;
+    case ID_TOOL_MODE_SELECT:
+        SelectAnnotToolFamily(hWnd, AnnotToolFamily::Select, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_PAN:
+        SelectAnnotToolFamily(hWnd, AnnotToolFamily::Pan, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_MAGNIFIER:
+        SelectAnnotToolFamily(hWnd, AnnotToolFamily::Magnifier, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_MARKER_TEXT:
+        SelectAnnotToolFamily(hWnd, AnnotToolFamily::Marker, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_MARKER_UNDERLINE:
+        SelectAnnotToolMode(hWnd, ToolMode::MarkerTextUnderline, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_MARKER_TEXT_COLOR:
+        SelectAnnotToolMode(hWnd, ToolMode::MarkerTextColor, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_MARKER_FREE:
+        SelectAnnotToolMode(hWnd, ToolMode::MarkerFree, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_MARKER_LINE:
+        SelectAnnotToolMode(hWnd, ToolMode::MarkerLine, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_MARKER_ARROW:
+        SelectAnnotToolMode(hWnd, ToolMode::MarkerArrow, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_MARKER_WAVE:
+        SelectAnnotToolMode(hWnd, ToolMode::MarkerWave, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_TEXT:
+        SelectAnnotToolFamily(hWnd, AnnotToolFamily::Text, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_LINE:
+        SelectAnnotToolMode(hWnd, ToolMode::Line, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_ARROW:
+        SelectAnnotToolMode(hWnd, ToolMode::Arrow, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_WAVE:
+        SelectAnnotToolMode(hWnd, ToolMode::Wave, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_FREEHAND:
+        SelectAnnotToolFamily(hWnd, AnnotToolFamily::Pen, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_SHAPE:
+        SelectAnnotToolFamily(hWnd, AnnotToolFamily::Shape, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_MODE_ERASER:
+        SelectAnnotToolFamily(hWnd, AnnotToolFamily::Eraser, cycleToolOption, reverseToolOptionCycle);
+        break;
+    case ID_TOOL_COLOR_CUSTOM: {
+        COLORREF picked = g_paletteCustomColor;
+        if (PickColorDialog(hWnd, picked, &picked)) {
+            ApplyPaletteCustomColor(hWnd, picked);
+            if (g_hPdfView) {
+                ApplyActiveColorToSelectedAnnotation(g_hPdfView);
+            }
+        }
+        break;
+    }
+    default:
+        if (id >= ID_TOOL_COLOR_BASE &&
+            id < ID_TOOL_COLOR_BASE + static_cast<int>(g_palette.size())) {
+            g_activeColor = g_palette[static_cast<size_t>(id - ID_TOOL_COLOR_BASE)];
+            StoreToolColorForMode(g_toolMode, g_activeColor);
+            PersistConfig();
+            if (g_hPdfToolbar) {
+                RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+            }
+            if (g_hPdfView) {
+                ApplyActiveColorToSelectedAnnotation(g_hPdfView);
+            }
+        } else if (id == ID_TOOL_FONT && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboFont, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                wchar_t buf[128]{};
+                int len = static_cast<int>(SendMessageW(g_hComboFont, CB_GETLBTEXT, sel, reinterpret_cast<LPARAM>(buf)));
+                if (len >= 0) {
+                    buf[std::min<int>(len, 127)] = L'\0';
+                    g_textFontName = ResolveFontFaceName(buf);
+                    PersistConfig();
+                    if (g_hPdfView) PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+                }
+            }
+        } else if (id == ID_TOOL_FONT_SIZE && code == CBN_SELCHANGE) {
+            if (ApplyToolbarFontSizeComboSelection(g_hComboFontSize)) {
+                PersistConfig();
+                if (g_hPdfView && g_textFontActiveSizeSlot == 0) {
+                    const bool continueTextEditing = g_pdf.editingText;
+                    PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+                    if (continueTextEditing) {
+                        SetFocus(g_hPdfView);
+                    }
+                }
+            }
+        } else if (id == ID_TOOL_FONT_SIZE_ALT && code == CBN_SELCHANGE) {
+            if (ApplyToolbarFontSizeComboSelection(g_hComboFontSizeAlt)) {
+                PersistConfig();
+                if (g_hPdfView && g_textFontActiveSizeSlot == 1) {
+                    const bool continueTextEditing = g_pdf.editingText;
+                    PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+                    if (continueTextEditing) {
+                        SetFocus(g_hPdfView);
+                    }
+                }
+            }
+        } else if (id == ID_TOOL_FONT_SIZE_SLOT_A && code == BN_CLICKED) {
+            SetActiveToolbarFontSizeSlot(0);
+            if (g_hPdfView) SetFocus(g_hPdfView);
+        } else if (id == ID_TOOL_FONT_SIZE_SLOT_B && code == BN_CLICKED) {
+            SetActiveToolbarFontSizeSlot(1);
+            if (g_hPdfView) SetFocus(g_hPdfView);
+        } else if (id == ID_TOOL_TEXT_READABLE_BACKGROUND && code == BN_CLICKED) {
+            g_textBoxReadableBackground =
+                SendMessageW(g_hChkTextReadableBackground, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            PersistConfig();
+            if (g_hPdfView) {
+                InvalidateRect(g_hPdfView, nullptr, FALSE);
+                SetFocus(g_hPdfView);
+            }
+        } else if ((id == ID_TOOL_TEXT_READABLE_BACKGROUND_NORMAL ||
+                    id == ID_TOOL_TEXT_READABLE_BACKGROUND_INVERTED) && code == BN_CLICKED) {
+            g_textBoxReadableBackgroundInverted = id == ID_TOOL_TEXT_READABLE_BACKGROUND_INVERTED;
+            PersistConfig();
+            if (g_hPdfView) {
+                InvalidateRect(g_hPdfView, nullptr, FALSE);
+                SetFocus(g_hPdfView);
+            }
+        } else if (id == ID_TOOL_WIDTH && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboWidth, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                LRESULT pt10 = SendMessageW(g_hComboWidth, CB_GETITEMDATA, sel, 0);
+                if (pt10 != CB_ERR) {
+                    double pt = static_cast<double>(pt10) / 10.0;
+                    SetWidthValueForMode(g_toolMode, pt);
+                    PersistConfig();
+                }
+            }
+        } else if (id == ID_TOOL_MARKER_ALPHA && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboMarkerAlpha, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                LRESULT permille = SendMessageW(g_hComboMarkerAlpha, CB_GETITEMDATA, sel, 0);
+                if (permille != CB_ERR) {
+                    SetAlphaValueForMode(g_toolMode, static_cast<double>(permille) / 1000.0);
+                    PersistConfig();
+                }
+            }
+        } else if (id == ID_TOOL_ANNOT_METHOD && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboAnnotMethod, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                LRESULT data = SendMessageW(g_hComboAnnotMethod, CB_GETITEMDATA, sel, 0);
+                if (data != CB_ERR) {
+                    if (AnnotToolFamilyForMode(g_toolMode) == AnnotToolFamily::Shape) {
+                        if (!ApplyShapeDetailSelection(
+                                hWnd, static_cast<ShapeDetail>(static_cast<int>(data)))) {
+                            UpdateToolbarUI(hWnd);
+                        }
+                    } else {
+                        ApplyAnnotMethodData(hWnd, static_cast<int>(data));
+                    }
+                }
+            }
+        } else if (id == ID_TOOL_SHAPE_GEOMETRY && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboShapeGeometry, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                LRESULT data = SendMessageW(g_hComboShapeGeometry, CB_GETITEMDATA, sel, 0);
+                if (data != CB_ERR) {
+                    UpdateToolbarUI(hWnd);
+                }
+            }
+        } else if (id == ID_TOOL_FREEHAND_CORRECTION && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboFreehandCorrection, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                LRESULT data = SendMessageW(g_hComboFreehandCorrection, CB_GETITEMDATA, sel, 0);
+                if (data != CB_ERR) {
+                    int v = static_cast<int>(data);
+                    std::wstring next = (v == 2) ? L"auto" : (v == 1) ? L"hold" : L"smooth";
+                    if (NormalizeCorrectionPenMode(g_config.freehandCorrection) != next) {
+                        g_config.freehandCorrection = next;
+                        PersistConfig();
+                    }
+                    UpdateToolbarUI(hWnd);
+                    if (g_hPdfView) SetFocus(g_hPdfView);
+                }
+            }
+        } else if (id == ID_TOOL_MARKER_TEXT_STYLE && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboMarkerTextStyle, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                LRESULT data = SendMessageW(g_hComboMarkerTextStyle, CB_GETITEMDATA, sel, 0);
+                if (data != CB_ERR) {
+                    g_markerTextUnderline = (static_cast<int>(data) != 0);
+                    PersistConfig();
+                    if (g_hPdfView) {
+                        InvalidateRect(g_hPdfView, nullptr, FALSE);
+                        SetFocus(g_hPdfView);
+                    }
+                }
+            }
+        } else if (id == ID_TOOL_LINE_DASH_STYLE && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboLineDashStyle, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                LRESULT data = SendMessageW(g_hComboLineDashStyle, CB_GETITEMDATA, sel, 0);
+                if (data != CB_ERR) {
+                    g_lineDashStyle = (static_cast<int>(data) != 0) ? L"dash" : L"solid";
+                    PersistConfig();
+                    if (g_hPdfView) {
+                        InvalidateRect(g_hPdfView, nullptr, FALSE);
+                        SetFocus(g_hPdfView);
+                    }
+                }
+            }
+        } else if (id == ID_TOOL_SHAPE_KIND && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboShapeKind, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                LRESULT data = SendMessageW(g_hComboShapeKind, CB_GETITEMDATA, sel, 0);
+                if (data != CB_ERR) {
+                    g_shapeKind = static_cast<ShapeKind>(static_cast<int>(data));
+                    g_shapeDetail = ShapeDetailForLegacyState(ToolMode::Shape, g_shapeKind);
+                    SyncLegacyShapeStateFromDetail();
+                    PersistConfig();
+                    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+                }
+            }
+        } else if (id == ID_TOOL_SHAPE_DRAW_MODE && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboShapeDrawMode, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                LRESULT data = SendMessageW(g_hComboShapeDrawMode, CB_GETITEMDATA, sel, 0);
+                if (data != CB_ERR) {
+                    g_shapeDrawMode = static_cast<ShapeDrawMode>(static_cast<int>(data));
+                    SyncLegacyShapeStateFromDetail();
+                    PersistConfig();
+                    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+                }
+            }
+        } else if (id == ID_TOOL_MAGNIFIER_SHAPE && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                LRESULT data = SendMessageW(g_hComboMagnifierShape, CB_GETITEMDATA, sel, 0);
+                if (data != CB_ERR) {
+                    g_magnifierShape = static_cast<MagnifierShape>(static_cast<int>(data));
+                    PersistConfig();
+                    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+                }
+            }
+        }
+        break;
+    }
+    
+}

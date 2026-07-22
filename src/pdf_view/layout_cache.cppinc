@@ -1,0 +1,1410 @@
+﻿// file: pdf_view/layout_cache.cppinc
+// NOTE: Included by `src/pdf_view/navigation.cppinc` for page layout, cache population, and image loading.
+
+static void ClampPdfScroll(int viewH, int viewW) {
+    PdfFlowMode mode = CurrentFlowMode();
+    double padX = FlowCrossPaddingX(mode);
+    double padY = FlowCrossPaddingY(mode);
+    double contentWPad = g_pdf.contentWidth + padX * 2.0;
+    double contentHPad = g_pdf.contentHeight + padY * 2.0;
+
+    if (contentWPad <= 0.0 || contentHPad <= 0.0) {
+        g_pdf.scrollY = 0.0;
+        g_pdf.scrollX = 0.0;
+        if (g_hPdfView) {
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+            si.nMin = 0;
+            si.nMax = 0;
+            si.nPage = static_cast<UINT>(std::max(0, viewH));
+            si.nPos = 0;
+            SetScrollInfo(g_hPdfView, SB_VERT, &si, TRUE);
+            si.nPage = static_cast<UINT>(std::max(0, viewW));
+            SetScrollInfo(g_hPdfView, SB_HORZ, &si, TRUE);
+        }
+        SyncToolbarFontSizeCombo();
+        return;
+    }
+
+    double rangeY = contentHPad - static_cast<double>(viewH);
+    double minYBase = std::min(0.0, rangeY);
+    double maxYBase = std::max(0.0, rangeY);
+    double minY = minYBase - kScrollOvershootPx;
+    double maxBoundY = maxYBase + kScrollOvershootPx;
+    g_pdf.scrollY = std::clamp(g_pdf.scrollY, minY, maxBoundY);
+
+    double rangeX = contentWPad - static_cast<double>(viewW);
+    double minXBase = std::min(0.0, rangeX);
+    double maxXBase = std::max(0.0, rangeX);
+    double minX = minXBase - kScrollOvershootPx;
+    double maxBoundX = maxXBase + kScrollOvershootPx;
+    g_pdf.scrollX = std::clamp(g_pdf.scrollX, minX, maxBoundX);
+
+    if (g_hPdfView) {
+        auto clampPos = [](double pos, double maxPos) {
+            if (maxPos <= 0.0) return 0;
+            double v = std::clamp(pos, 0.0, maxPos);
+            return static_cast<int>(std::round(v));
+        };
+        int contentH = static_cast<int>(std::round(contentHPad));
+        int contentW = static_cast<int>(std::round(contentWPad));
+        SCROLLINFO si{};
+        si.cbSize = sizeof(si);
+        si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+        if (viewH <= 0 || contentH <= viewH) {
+            si.nMin = 0;
+            si.nMax = 0;
+            si.nPage = static_cast<UINT>(std::max(0, viewH));
+            si.nPos = 0;
+        } else {
+            si.nMin = 0;
+            si.nMax = std::max(0, contentH - 1);
+            si.nPage = static_cast<UINT>(viewH);
+            si.nPos = clampPos(g_pdf.scrollY, static_cast<double>(contentH - viewH));
+        }
+        SetScrollInfo(g_hPdfView, SB_VERT, &si, TRUE);
+
+        if (viewW <= 0 || contentW <= viewW) {
+            si.nMin = 0;
+            si.nMax = 0;
+            si.nPage = static_cast<UINT>(std::max(0, viewW));
+            si.nPos = 0;
+        } else {
+            si.nMin = 0;
+            si.nMax = std::max(0, contentW - 1);
+            si.nPage = static_cast<UINT>(viewW);
+            si.nPos = clampPos(g_pdf.scrollX, static_cast<double>(contentW - viewW));
+        }
+        SetScrollInfo(g_hPdfView, SB_HORZ, &si, TRUE);
+    }
+    SyncToolbarFontSizeCombo();
+}
+
+static void UpdatePageLayout(HWND pdfWnd) {
+    g_pdf.pageRects.clear();
+    g_pdf.contentWidth = 0.0;
+    g_pdf.contentHeight = 0.0;
+
+    for (auto& page : g_pdf.pages) {
+        int w = static_cast<int>(std::round(page.widthPt * kDpi / 72.0 * g_pdf.scale));
+        int h = static_cast<int>(std::round(page.heightPt * kDpi / 72.0 * g_pdf.scale));
+        page.w = std::max(1, w);
+        page.h = std::max(1, h);
+    }
+
+    const size_t count = g_pdf.pages.size();
+    if (count == 0) {
+        RECT rc{};
+        GetClientRect(pdfWnd, &rc);
+        ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+        g_scrollVelocity = 0.0;
+        return;
+    }
+
+    PdfFlowMode mode = CurrentFlowMode();
+    const bool vertical = FlowIsVertical(mode);
+    const bool forwardPositive = FlowPrimaryDirPositive(mode);
+
+    if (PdfSinglePageModeActive()) {
+        RECT rc{};
+        GetClientRect(pdfWnd, &rc);
+        const int viewW = std::max(0, static_cast<int>(rc.right - rc.left));
+        const int viewH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+        const int current = std::clamp(g_pdf.singlePageIndex, 0, static_cast<int>(count) - 1);
+        g_pdf.singlePageIndex = current;
+        const auto& page = g_pdf.pages[static_cast<size_t>(current)];
+        const double padX = FlowCrossPaddingX(mode);
+        const double padY = FlowCrossPaddingY(mode);
+        const double pageLeft = std::max(0.0, (static_cast<double>(viewW) - static_cast<double>(page.w)) * 0.5 - padX);
+        const double pageTop = std::max(0.0, (static_cast<double>(viewH) - static_cast<double>(page.h)) * 0.5 - padY);
+        g_pdf.contentWidth = pageLeft + static_cast<double>(page.w);
+        g_pdf.contentHeight = pageTop + static_cast<double>(page.h);
+        g_pdf.pageRects.resize(count);
+        constexpr double kOffscreenPageOrigin = -10000000.0;
+        for (size_t i = 0; i < count; ++i) {
+            const auto& hidden = g_pdf.pages[i];
+            const double offset = kOffscreenPageOrigin - static_cast<double>(i) * kPageGapPx;
+            g_pdf.pageRects[i] = { offset, offset, offset + hidden.w, offset + hidden.h };
+        }
+        g_pdf.pageRects[static_cast<size_t>(current)] = {
+            pageLeft, pageTop, pageLeft + page.w, pageTop + page.h
+        };
+        ClampPdfScroll(viewH, viewW);
+        g_scrollVelocity = 0.0;
+        return;
+    }
+
+    if (vertical) {
+        double totalH = 0.0;
+        double maxW = 0.0;
+        for (const auto& page : g_pdf.pages) {
+            totalH += page.h;
+            maxW = std::max(maxW, static_cast<double>(page.w));
+        }
+        if (count > 1) totalH += kPageGapPx * static_cast<double>(count - 1);
+        g_pdf.contentWidth = maxW;
+        g_pdf.contentHeight = totalH;
+        g_pdf.pageRects.resize(count);
+        if (forwardPositive) {
+            double y = 0.0;
+            for (size_t i = 0; i < count; ++i) {
+                const auto& page = g_pdf.pages[i];
+                g_pdf.pageRects[i] = { 0.0, y, static_cast<double>(page.w), y + page.h };
+                y += page.h + kPageGapPx;
+            }
+        } else {
+            double y = totalH;
+            for (size_t i = 0; i < count; ++i) {
+                const auto& page = g_pdf.pages[i];
+                y -= page.h;
+                g_pdf.pageRects[i] = { 0.0, y, static_cast<double>(page.w), y + page.h };
+                y -= kPageGapPx;
+            }
+        }
+    } else {
+        double totalW = 0.0;
+        double maxH = 0.0;
+        for (const auto& page : g_pdf.pages) {
+            totalW += page.w;
+            maxH = std::max(maxH, static_cast<double>(page.h));
+        }
+        if (count > 1) totalW += kPageGapPx * static_cast<double>(count - 1);
+        g_pdf.contentWidth = totalW;
+        g_pdf.contentHeight = maxH;
+        g_pdf.pageRects.resize(count);
+        if (forwardPositive) {
+            double x = 0.0;
+            for (size_t i = 0; i < count; ++i) {
+                const auto& page = g_pdf.pages[i];
+                g_pdf.pageRects[i] = { x, 0.0, x + page.w, static_cast<double>(page.h) };
+                x += page.w + kPageGapPx;
+            }
+        } else {
+            double x = totalW;
+            for (size_t i = 0; i < count; ++i) {
+                const auto& page = g_pdf.pages[i];
+                x -= page.w;
+                g_pdf.pageRects[i] = { x, 0.0, x + page.w, static_cast<double>(page.h) };
+                x -= kPageGapPx;
+            }
+        }
+    }
+
+    RECT rc{};
+    GetClientRect(pdfWnd, &rc);
+    ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+    g_scrollVelocity = 0.0;
+}
+
+static bool RenderPdfPageBitmap(int pageIndex, int targetW, int targetH, std::vector<uint8_t>& outPixels, int& outStride) {
+    if (!g_pdf.doc || pageIndex < 0 || pageIndex >= g_pdf.pageCount) return false;
+    if (targetW <= 0 || targetH <= 0) return false;
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    FPDF_PAGE page = FPDF_LoadPage(g_pdf.doc, pageIndex);
+    if (!page) return false;
+    int stride = targetW * 4;
+    std::vector<uint8_t> pixels;
+    pixels.assign(static_cast<size_t>(stride) * targetH, 255);
+    FPDF_BITMAP bmp = FPDFBitmap_CreateEx(targetW, targetH, FPDFBitmap_BGRA, pixels.data(), stride);
+    FPDFBitmap_FillRect(bmp, 0, 0, targetW, targetH, 0xFFFFFFFF);
+    FPDF_RenderPageBitmap(bmp, page, 0, 0, targetW, targetH, 0, FPDF_ANNOT | FPDF_LCD_TEXT);
+    FPDFBitmap_Destroy(bmp);
+    FPDF_ClosePage(page);
+    outStride = stride;
+    outPixels = std::move(pixels);
+    return true;
+}
+
+static bool RenderImageBitmap(int targetW, int targetH, std::vector<uint8_t>& outPixels, int& outStride) {
+    if (g_pdf.imagePixels.empty() || g_pdf.imageWidth <= 0 || g_pdf.imageHeight <= 0) return false;
+    if (targetW <= 0 || targetH <= 0) return false;
+    std::wstring err;
+    if (!ScaleImagePixelsWic(g_pdf.imagePixels.data(), g_pdf.imageWidth, g_pdf.imageHeight,
+                             g_pdf.imageStride, targetW, targetH, outPixels, &err)) {
+        return false;
+    }
+    outStride = targetW * 4;
+    if (static_cast<int>(outPixels.size()) != outStride * targetH) {
+        outPixels.assign(static_cast<size_t>(outStride) * targetH, 255);
+    }
+    return true;
+}
+
+struct PdfVirtualUpdateResult {
+    bool changed = false;
+    bool pending = false;
+    bool invalidated = false;
+    bool repaint = false;
+};
+
+enum class PdfVirtualUpdateMode {
+    Paint,
+    Timer,
+    Immediate
+};
+
+struct PdfVirtualRenderCandidate {
+    size_t index = 0;
+    bool visible = false;
+    double distance = 0.0;
+    int targetW = 0;
+    int targetH = 0;
+    uint64_t targetPixels = 0;
+    bool coarse = false;
+};
+
+struct PdfVirtualRenderJob {
+    HWND hwnd = nullptr;
+    std::wstring path;
+    std::string passwordUtf8;
+    uint64_t generation = 0;
+    int pageIndex = -1;
+    int targetW = 0;
+    int targetH = 0;
+    bool coarse = false;
+
+    PdfVirtualRenderJob() = default;
+    PdfVirtualRenderJob(const PdfVirtualRenderJob&) = default;
+    PdfVirtualRenderJob& operator=(const PdfVirtualRenderJob&) = default;
+    PdfVirtualRenderJob(PdfVirtualRenderJob&&) noexcept = default;
+    PdfVirtualRenderJob& operator=(PdfVirtualRenderJob&&) noexcept = default;
+    ~PdfVirtualRenderJob() { SecureClearString(passwordUtf8); }
+};
+
+struct PdfVirtualRenderResult {
+    uint64_t generation = 0;
+    int pageIndex = -1;
+    int targetW = 0;
+    int targetH = 0;
+    int stride = 0;
+    bool coarse = false;
+    bool success = false;
+    std::vector<uint8_t> pixels;
+};
+
+static std::mutex g_pdfVirtualWorkerMutex;
+static std::condition_variable g_pdfVirtualWorkerCv;
+static std::deque<PdfVirtualRenderJob> g_pdfVirtualJobs;
+static std::deque<PdfVirtualRenderResult> g_pdfVirtualResults;
+static std::thread g_pdfVirtualWorkerThread;
+static bool g_pdfVirtualWorkerStarted = false;
+static bool g_pdfVirtualWorkerStop = false;
+static bool g_pdfVirtualWorkerHasActiveJob = false;
+static PdfVirtualRenderJob g_pdfVirtualWorkerActiveJob;
+
+static void InvalidatePdfVirtualPageRect(HWND hwnd, int pageIndex) {
+    if (!hwnd || pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return;
+    const PageCache& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    RECT r{
+        static_cast<LONG>(std::floor(PageClientLeft(pageIndex))) - 2,
+        static_cast<LONG>(std::floor(PageClientTop(pageIndex))) - 2,
+        static_cast<LONG>(std::ceil(PageClientLeft(pageIndex) + page.w)) + 2,
+        static_cast<LONG>(std::ceil(PageClientTop(pageIndex) + page.h)) + 2
+    };
+    InvalidateRect(hwnd, &r, FALSE);
+}
+
+static std::wstring ToExtendedPathIfAbsoluteForRender(const std::wstring& path) {
+    if (path.rfind(L"\\\\?\\", 0) == 0) return path;
+    if (path.size() >= 3 && std::iswalpha(path[0]) && path[1] == L':' &&
+        (path[2] == L'\\' || path[2] == L'/')) {
+        return L"\\\\?\\" + path;
+    }
+    if (path.rfind(L"\\\\", 0) == 0) {
+        return L"\\\\?\\UNC\\" + path.substr(2);
+    }
+    return path;
+}
+
+static int GetPdfBlockFromRenderHandle(void* param, unsigned long position,
+                                       unsigned char* outBuffer, unsigned long size) {
+    HANDLE h = reinterpret_cast<HANDLE>(param);
+    if (!h || h == INVALID_HANDLE_VALUE || !outBuffer) return 0;
+    LARGE_INTEGER li{};
+    li.QuadPart = static_cast<LONGLONG>(position);
+    if (!SetFilePointerEx(h, li, nullptr, FILE_BEGIN)) return 0;
+    DWORD read = 0;
+    if (!ReadFile(h, outBuffer, size, &read, nullptr)) return 0;
+    return read == size ? 1 : 0;
+}
+
+static bool OpenWorkerPdfDocument(const PdfVirtualRenderJob& job,
+                                  FPDF_DOCUMENT& doc,
+                                  HANDLE& fileHandle,
+                                  std::wstring& loadedPath,
+                                  std::string& loadedPassword) {
+    if (doc && loadedPath == job.path && loadedPassword == job.passwordUtf8) return true;
+    if (doc) {
+        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+        FPDF_CloseDocument(doc);
+        doc = nullptr;
+    }
+    if (fileHandle && fileHandle != INVALID_HANDLE_VALUE) {
+        CloseHandle(fileHandle);
+        fileHandle = INVALID_HANDLE_VALUE;
+    }
+    loadedPath.clear();
+    SecureClearString(loadedPassword);
+
+    std::wstring openPath = ToExtendedPathIfAbsoluteForRender(job.path);
+    HANDLE hFile = CreateFileW(openPath.c_str(),
+                               GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+                               nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(hFile, &size) || size.QuadPart <= 0 ||
+        size.QuadPart > static_cast<LONGLONG>(std::numeric_limits<unsigned long>::max())) {
+        CloseHandle(hFile);
+        return false;
+    }
+
+    FPDF_FILEACCESS access{};
+    access.m_FileLen = static_cast<unsigned long>(size.QuadPart);
+    access.m_GetBlock = GetPdfBlockFromRenderHandle;
+    access.m_Param = reinterpret_cast<void*>(hFile);
+    const char* password = job.passwordUtf8.empty() ? nullptr : job.passwordUtf8.c_str();
+    FPDF_DOCUMENT loaded = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+        loaded = FPDF_LoadCustomDocument(&access, password);
+    }
+    if (!loaded) {
+        CloseHandle(hFile);
+        return false;
+    }
+    doc = loaded;
+    fileHandle = hFile;
+    loadedPath = job.path;
+    loadedPassword = job.passwordUtf8;
+    return true;
+}
+
+static bool RenderPdfPageBitmapOnWorker(FPDF_DOCUMENT doc, int pageIndex, int targetW, int targetH,
+                                        std::vector<uint8_t>& outPixels, int& outStride) {
+    if (!doc || pageIndex < 0 || targetW <= 0 || targetH <= 0) return false;
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc, pageIndex);
+    if (!page) return false;
+    int stride = targetW * 4;
+    std::vector<uint8_t> pixels;
+    pixels.assign(static_cast<size_t>(stride) * targetH, 255);
+    FPDF_BITMAP bmp = FPDFBitmap_CreateEx(targetW, targetH, FPDFBitmap_BGRA, pixels.data(), stride);
+    FPDFBitmap_FillRect(bmp, 0, 0, targetW, targetH, 0xFFFFFFFF);
+    FPDF_RenderPageBitmap(bmp, page, 0, 0, targetW, targetH, 0, FPDF_ANNOT | FPDF_LCD_TEXT);
+    FPDFBitmap_Destroy(bmp);
+    FPDF_ClosePage(page);
+    outStride = stride;
+    outPixels = std::move(pixels);
+    return true;
+}
+
+static bool IsSamePdfVirtualJob(const PdfVirtualRenderJob& a, const PdfVirtualRenderJob& b) {
+    return a.generation == b.generation &&
+           a.pageIndex == b.pageIndex &&
+           a.targetW == b.targetW &&
+           a.targetH == b.targetH &&
+           a.coarse == b.coarse;
+}
+
+static void PdfVirtualRenderWorkerMain() {
+    FPDF_DOCUMENT workerDoc = nullptr;
+    HANDLE workerFile = INVALID_HANDLE_VALUE;
+    std::wstring loadedPath;
+    std::string loadedPassword;
+    SecureStringScope loadedPasswordScope(&loadedPassword);
+
+    for (;;) {
+        PdfVirtualRenderJob job;
+        {
+            std::unique_lock<std::mutex> lock(g_pdfVirtualWorkerMutex);
+            g_pdfVirtualWorkerCv.wait(lock, [] {
+                return g_pdfVirtualWorkerStop || !g_pdfVirtualJobs.empty();
+            });
+            if (g_pdfVirtualWorkerStop) break;
+            job = std::move(g_pdfVirtualJobs.front());
+            g_pdfVirtualJobs.pop_front();
+            SecureClearString(g_pdfVirtualWorkerActiveJob.passwordUtf8);
+            g_pdfVirtualWorkerActiveJob = job;
+            g_pdfVirtualWorkerHasActiveJob = true;
+        }
+
+        PdfVirtualRenderResult result;
+        result.generation = job.generation;
+        result.pageIndex = job.pageIndex;
+        result.targetW = job.targetW;
+        result.targetH = job.targetH;
+        result.coarse = job.coarse;
+        if (OpenWorkerPdfDocument(job, workerDoc, workerFile, loadedPath, loadedPassword)) {
+            result.success = RenderPdfPageBitmapOnWorker(workerDoc, job.pageIndex, job.targetW, job.targetH,
+                                                         result.pixels, result.stride);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+            g_pdfVirtualWorkerHasActiveJob = false;
+            if (!g_pdfVirtualWorkerStop) {
+                g_pdfVirtualResults.push_back(std::move(result));
+            }
+        }
+        if (job.hwnd) {
+            PostMessageW(job.hwnd, kMsgPdfVirtualRenderComplete, 0, 0);
+        }
+    }
+
+    if (workerDoc) {
+        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+        FPDF_CloseDocument(workerDoc);
+    }
+    if (workerFile && workerFile != INVALID_HANDLE_VALUE) {
+        CloseHandle(workerFile);
+    }
+}
+
+static void EnsurePdfVirtualRenderWorker() {
+    std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+    if (g_pdfVirtualWorkerStarted) return;
+    g_pdfVirtualWorkerStop = false;
+    g_pdfVirtualWorkerThread = std::thread(PdfVirtualRenderWorkerMain);
+    g_pdfVirtualWorkerStarted = true;
+}
+
+static void ShutdownPdfVirtualRenderWorker() {
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        g_pdfVirtualJobs.clear();
+        g_pdfVirtualResults.clear();
+        if (!g_pdfVirtualWorkerStarted) return;
+        g_pdfVirtualWorkerStop = true;
+    }
+    g_pdfVirtualWorkerCv.notify_all();
+    if (g_pdfVirtualWorkerThread.joinable()) {
+        g_pdfVirtualWorkerThread.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        g_pdfVirtualWorkerStarted = false;
+        g_pdfVirtualWorkerStop = false;
+        g_pdfVirtualWorkerHasActiveJob = false;
+        g_pdfVirtualJobs.clear();
+        g_pdfVirtualResults.clear();
+    }
+}
+
+static void CancelPdfVirtualRenderJobs() {
+    std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+    g_pdfVirtualJobs.clear();
+    g_pdfVirtualResults.clear();
+}
+
+static bool HasPdfVirtualRenderWork() {
+    std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+    return g_pdfVirtualWorkerHasActiveJob ||
+           !g_pdfVirtualJobs.empty() ||
+           !g_pdfVirtualResults.empty();
+}
+
+static bool QueuePdfVirtualRenderJob(HWND hwnd, const PdfVirtualRenderCandidate& candidate) {
+    if (g_pdf.kind != DocKind::Pdf || g_pdf.path.empty()) return false;
+    EnsurePdfVirtualRenderWorker();
+    PdfVirtualRenderJob job;
+    job.hwnd = hwnd;
+    job.path = g_pdf.path;
+    job.passwordUtf8 = g_pdf.openPasswordUtf8;
+    job.generation = g_pdf.renderGeneration;
+    job.pageIndex = static_cast<int>(candidate.index);
+    job.targetW = candidate.targetW;
+    job.targetH = candidate.targetH;
+    job.coarse = candidate.coarse;
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        if (g_pdfVirtualWorkerHasActiveJob && IsSamePdfVirtualJob(g_pdfVirtualWorkerActiveJob, job)) {
+            return true;
+        }
+        if (!job.coarse) {
+            for (auto it = g_pdfVirtualJobs.begin(); it != g_pdfVirtualJobs.end(); ) {
+                if (it->generation == job.generation &&
+                    it->pageIndex == job.pageIndex &&
+                    it->coarse) {
+                    it = g_pdfVirtualJobs.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        for (const auto& queued : g_pdfVirtualJobs) {
+            if (IsSamePdfVirtualJob(queued, job)) return true;
+        }
+        g_pdfVirtualJobs.push_back(std::move(job));
+    }
+    g_pdfVirtualWorkerCv.notify_one();
+    return true;
+}
+
+static PdfVirtualUpdateResult ApplyPdfVirtualRenderResults(HWND hwnd) {
+    PdfVirtualUpdateResult result;
+    std::deque<PdfVirtualRenderResult> results;
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        results.swap(g_pdfVirtualResults);
+    }
+    for (auto& item : results) {
+        if (item.generation != g_pdf.renderGeneration) continue;
+        if (item.pageIndex < 0 || item.pageIndex >= static_cast<int>(g_pdf.pages.size())) continue;
+        if (item.targetW <= 0 || item.targetH <= 0) continue;
+        PageCache& page = g_pdf.pages[static_cast<size_t>(item.pageIndex)];
+        if (!item.success || item.pixels.empty() || item.stride <= 0) {
+            page.bitmapFailedGeneration = item.generation;
+            page.bitmapFailedW = item.targetW;
+            page.bitmapFailedH = item.targetH;
+            page.bitmapFailedCoarse = item.coarse;
+            continue;
+        }
+        page.bmpW = item.targetW;
+        page.bmpH = item.targetH;
+        page.stride = item.stride;
+        page.pixelsGeneration = item.generation;
+        page.bitmapCoarse = item.coarse;
+        page.bitmapFailedGeneration = 0;
+        page.bitmapFailedW = 0;
+        page.bitmapFailedH = 0;
+        page.bitmapFailedCoarse = false;
+        page.pixels = std::move(item.pixels);
+        result.changed = true;
+        if (hwnd) {
+            InvalidatePdfVirtualPageRect(hwnd, item.pageIndex);
+            result.invalidated = true;
+        }
+    }
+    result.pending = HasPdfVirtualRenderWork();
+    return result;
+}
+
+static bool LoadPdfPageCharBoxes(int pageIndex, std::vector<PageCache::CharBox>& out) {
+    if (!g_pdf.doc || pageIndex < 0 || pageIndex >= g_pdf.pageCount) return false;
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    FPDF_PAGE page = FPDF_LoadPage(g_pdf.doc, pageIndex);
+    if (!page) return false;
+    FPDF_TEXTPAGE textPage = FPDFText_LoadPage(page);
+    bool ok = false;
+    if (textPage) {
+        int nChars = FPDFText_CountChars(textPage);
+        out.clear();
+        out.reserve(static_cast<size_t>(nChars));
+        for (int c = 0; c < nChars; ++c) {
+            double left = 0, right = 0, bottom = 0, top = 0;
+            if (FPDFText_GetCharBox(textPage, c, &left, &right, &bottom, &top)) {
+                out.push_back({
+                    static_cast<float>(left),
+                    static_cast<float>(right),
+                    static_cast<float>(top),
+                    static_cast<float>(bottom),
+                });
+            }
+        }
+        FPDFText_ClosePage(textPage);
+        ok = true;
+    }
+    FPDF_ClosePage(page);
+    return ok;
+}
+
+static bool IsReadableOverlayChar(unsigned int codePoint) {
+    if (codePoint == 0 || codePoint == L'\r' || codePoint == L'\n' || codePoint == L'\t') return false;
+    if (codePoint == L' ' || codePoint == 0x3000) return false;
+    if (codePoint <= 0xFFFFu && iswcntrl(static_cast<wchar_t>(codePoint))) return false;
+    return codePoint <= 0x10FFFFu;
+}
+
+static std::wstring WideStringFromCodePoint(unsigned int codePoint) {
+    if (codePoint <= 0xFFFFu) {
+        return std::wstring(1, static_cast<wchar_t>(codePoint));
+    }
+    codePoint -= 0x10000u;
+    wchar_t high = static_cast<wchar_t>(0xD800u + ((codePoint >> 10) & 0x3FFu));
+    wchar_t low = static_cast<wchar_t>(0xDC00u + (codePoint & 0x3FFu));
+    std::wstring out;
+    out.push_back(high);
+    out.push_back(low);
+    return out;
+}
+
+static COLORREF ColorRefFromPdfRgb(unsigned int r, unsigned int g, unsigned int b) {
+    return RGB(static_cast<BYTE>(std::min<unsigned int>(r, 255)),
+               static_cast<BYTE>(std::min<unsigned int>(g, 255)),
+               static_cast<BYTE>(std::min<unsigned int>(b, 255)));
+}
+
+static bool LoadPdfPageReadableGlyphs(int pageIndex, std::vector<PageCache::ReadableGlyph>& out) {
+    if (!g_pdf.doc || pageIndex < 0 || pageIndex >= g_pdf.pageCount) return false;
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    FPDF_PAGE page = FPDF_LoadPage(g_pdf.doc, pageIndex);
+    if (!page) return false;
+    FPDF_TEXTPAGE textPage = FPDFText_LoadPage(page);
+    bool ok = false;
+    if (textPage) {
+        int nChars = FPDFText_CountChars(textPage);
+        out.clear();
+        out.reserve(static_cast<size_t>(std::max(0, nChars)));
+        for (int c = 0; c < nChars; ++c) {
+            const unsigned int unicode = FPDFText_GetUnicode(textPage, c);
+            if (!IsReadableOverlayChar(unicode)) continue;
+            std::wstring text = WideStringFromCodePoint(unicode);
+            if (text.empty()) continue;
+
+            double left = 0.0;
+            double right = 0.0;
+            double bottom = 0.0;
+            double top = 0.0;
+            if (!FPDFText_GetCharBox(textPage, c, &left, &right, &bottom, &top)) continue;
+            if (left >= right || bottom >= top) continue;
+            double originX = 0.0;
+            double originY = 0.0;
+            const bool haveOrigin = FPDFText_GetCharOrigin(textPage, c, &originX, &originY);
+
+            unsigned int r = 0;
+            unsigned int g = 0;
+            unsigned int b = 0;
+            unsigned int a = 255;
+            COLORREF fill = RGB(255, 255, 255);
+            const bool haveFill = FPDFText_GetFillColor(textPage, c, &r, &g, &b, &a);
+            if (haveFill) {
+                fill = ColorRefFromPdfRgb(r, g, b);
+            }
+
+            const double fontPt = FPDFText_GetFontSize(textPage, c);
+            out.push_back({
+                std::move(text),
+                unicode,
+                static_cast<float>(left),
+                static_cast<float>(right),
+                static_cast<float>(top),
+                static_cast<float>(bottom),
+                static_cast<float>(originX),
+                static_cast<float>(originY),
+                static_cast<float>(fontPt > 0.0 ? fontPt : 0.0),
+                fill,
+                haveFill,
+                haveOrigin,
+            });
+        }
+        FPDFText_ClosePage(textPage);
+        ok = true;
+    }
+    FPDF_ClosePage(page);
+    return ok;
+}
+
+struct PdfPointF {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+static PdfPointF TransformPdfPoint(const FS_MATRIX& m, float x, float y) {
+    PdfPointF p{};
+    p.x = m.a * x + m.c * y + m.e;
+    p.y = m.b * x + m.d * y + m.f;
+    return p;
+}
+
+static bool LoadPdfPageReadablePaths(int pageIndex, std::vector<PageCache::ReadablePath>& out) {
+    if (!g_pdf.doc || pageIndex < 0 || pageIndex >= g_pdf.pageCount) return false;
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    FPDF_PAGE page = FPDF_LoadPage(g_pdf.doc, pageIndex);
+    if (!page) return false;
+
+    out.clear();
+    const int objectCount = FPDFPage_CountObjects(page);
+    out.reserve(static_cast<size_t>(std::max(0, objectCount / 4)));
+    for (int i = 0; i < objectCount; ++i) {
+        FPDF_PAGEOBJECT obj = FPDFPage_GetObject(page, i);
+        if (!obj || FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_PATH) continue;
+
+        int fillMode = 0;
+        FPDF_BOOL stroke = 0;
+        if (!FPDFPath_GetDrawMode(obj, &fillMode, &stroke) || !stroke) continue;
+
+        float left = 0.0f;
+        float bottom = 0.0f;
+        float right = 0.0f;
+        float top = 0.0f;
+        if (!FPDFPageObj_GetBounds(obj, &left, &bottom, &right, &top)) continue;
+        if (left >= right || bottom >= top) continue;
+
+        unsigned int r = 0;
+        unsigned int g = 0;
+        unsigned int b = 0;
+        unsigned int a = 255;
+        COLORREF strokeColor = RGB(255, 255, 255);
+        const bool haveStroke = FPDFPageObj_GetStrokeColor(obj, &r, &g, &b, &a);
+        if (haveStroke) strokeColor = ColorRefFromPdfRgb(r, g, b);
+
+        float width = 1.0f;
+        if (!FPDFPageObj_GetStrokeWidth(obj, &width) || width <= 0.0f) width = 1.0f;
+
+        FS_MATRIX matrix{};
+        const bool haveMatrix = !!FPDFPageObj_GetMatrix(obj, &matrix);
+        if (!haveMatrix) {
+            matrix.a = 1.0f;
+            matrix.d = 1.0f;
+        }
+
+        PageCache::ReadablePath path{};
+        path.left = left;
+        path.right = right;
+        path.top = top;
+        path.bottom = bottom;
+        path.widthPt = width;
+        path.strokeColor = strokeColor;
+        path.haveStrokeColor = haveStroke;
+
+        const int segmentCount = FPDFPath_CountSegments(obj);
+        PdfPointF current{};
+        PdfPointF subpathStart{};
+        bool haveCurrent = false;
+        for (int s = 0; s < segmentCount; ++s) {
+            FPDF_PATHSEGMENT seg = FPDFPath_GetPathSegment(obj, s);
+            if (!seg) continue;
+            float sx = 0.0f;
+            float sy = 0.0f;
+            if (!FPDFPathSegment_GetPoint(seg, &sx, &sy)) continue;
+            PdfPointF pt = TransformPdfPoint(matrix, sx, sy);
+            const int type = FPDFPathSegment_GetType(seg);
+            if (type == FPDF_SEGMENT_MOVETO) {
+                current = pt;
+                subpathStart = pt;
+                haveCurrent = true;
+                continue;
+            }
+            if (type == FPDF_SEGMENT_LINETO && haveCurrent) {
+                path.segments.push_back({ current.x, current.y, pt.x, pt.y });
+                current = pt;
+            } else if (type == FPDF_SEGMENT_BEZIERTO) {
+                current = pt;
+            }
+            if (haveCurrent && FPDFPathSegment_GetClose(seg)) {
+                path.segments.push_back({ current.x, current.y, subpathStart.x, subpathStart.y });
+                current = subpathStart;
+            }
+        }
+        if (!path.segments.empty()) out.push_back(std::move(path));
+    }
+
+    FPDF_ClosePage(page);
+    return true;
+}
+
+static void EvictPageBitmap(PageCache& page) {
+    if (!page.pixels.empty()) {
+        std::vector<uint8_t>().swap(page.pixels);
+    }
+    page.bmpW = 0;
+    page.bmpH = 0;
+    page.stride = 0;
+    page.pixelsGeneration = 0;
+    page.bitmapCoarse = false;
+    page.bitmapFailedGeneration = 0;
+    page.bitmapFailedW = 0;
+    page.bitmapFailedH = 0;
+    page.bitmapFailedCoarse = false;
+}
+
+static void EvictPageCharBoxes(PageCache& page) {
+    if (!page.charBoxes.empty()) {
+        std::vector<PageCache::CharBox>().swap(page.charBoxes);
+    }
+    if (!page.readableGlyphs.empty()) {
+        std::vector<PageCache::ReadableGlyph>().swap(page.readableGlyphs);
+    }
+    if (!page.readablePaths.empty()) {
+        std::vector<PageCache::ReadablePath>().swap(page.readablePaths);
+    }
+}
+
+struct PdfVirtualViewport {
+    bool valid = false;
+    bool vertical = true;
+    int viewW = 0;
+    int viewH = 0;
+    double visibleStart = 0.0;
+    double visibleEnd = 0.0;
+    double retainStart = 0.0;
+    double retainEnd = 0.0;
+    int retainMargin = 0;
+};
+
+struct PdfVirtualCacheMetrics {
+    size_t visiblePages = 0;
+    size_t retainedPages = 0;
+    size_t renderedPages = 0;
+    size_t evictedBitmaps = 0;
+    size_t evictedCharBoxes = 0;
+    size_t bitmapPages = 0;
+    size_t charBoxPages = 0;
+    uint64_t bitmapBytes = 0;
+};
+
+static ULONGLONG g_pdfVirtualLastScrollInputTick = 0;
+static ULONGLONG g_pdfVirtualLastViewportChangeTick = 0;
+static bool g_pdfVirtualViewportSignatureValid = false;
+static double g_pdfVirtualLastScrollX = 0.0;
+static double g_pdfVirtualLastScrollY = 0.0;
+static double g_pdfVirtualLastScale = 0.0;
+static double g_pdfVirtualLastRenderScale = 0.0;
+static int g_pdfVirtualLastViewW = 0;
+static int g_pdfVirtualLastViewH = 0;
+static PdfFlowMode g_pdfVirtualLastFlowMode = PdfFlowMode::V_TTB;
+static bool g_pdfVirtualWasScrollActive = false;
+static bool g_pdfVirtualNeedsSettleRepaint = false;
+static bool g_pdfVirtualRenderTimerArmed = false;
+static HWND g_pdfVirtualRenderTimerHwnd = nullptr;
+
+static uint64_t PageBitmapBytes(const PageCache& page) {
+    if (page.pixels.empty() || page.bmpW <= 0 || page.bmpH <= 0 || page.stride <= 0) return 0;
+    return static_cast<uint64_t>(page.stride) * static_cast<uint64_t>(page.bmpH);
+}
+
+static void InvalidatePdfRenderGeneration() {
+    CancelPdfVirtualRenderJobs();
+    g_pdfVirtualViewportSignatureValid = false;
+    g_pdfVirtualWasScrollActive = false;
+    g_pdfVirtualNeedsSettleRepaint = false;
+    ++g_pdf.renderGeneration;
+    if (g_pdf.renderGeneration == 0) {
+        g_pdf.renderGeneration = 1;
+    }
+}
+
+static void MarkPdfVirtualScrollInput() {
+    ULONGLONG now = preview_trace::TickNow();
+    g_pdfVirtualLastScrollInputTick = now;
+    g_pdfVirtualLastViewportChangeTick = now;
+    g_pdfVirtualNeedsSettleRepaint = true;
+}
+
+static void MarkPdfVirtualViewportChange() {
+    g_pdfVirtualLastViewportChangeTick = preview_trace::TickNow();
+    g_pdfVirtualNeedsSettleRepaint = true;
+}
+
+static bool NearlySamePdfVirtualValue(double a, double b) {
+    return std::abs(a - b) < 0.01;
+}
+
+static void UpdatePdfVirtualViewportSignature(const PdfVirtualViewport& viewport, ULONGLONG now) {
+    PdfFlowMode flowMode = CurrentFlowMode();
+    bool changed =
+        !g_pdfVirtualViewportSignatureValid ||
+        !NearlySamePdfVirtualValue(g_pdfVirtualLastScrollX, g_pdf.scrollX) ||
+        !NearlySamePdfVirtualValue(g_pdfVirtualLastScrollY, g_pdf.scrollY) ||
+        !NearlySamePdfVirtualValue(g_pdfVirtualLastScale, g_pdf.scale) ||
+        !NearlySamePdfVirtualValue(g_pdfVirtualLastRenderScale, g_pdf.renderScale) ||
+        g_pdfVirtualLastViewW != viewport.viewW ||
+        g_pdfVirtualLastViewH != viewport.viewH ||
+        g_pdfVirtualLastFlowMode != flowMode;
+    if (!changed) return;
+    g_pdfVirtualViewportSignatureValid = true;
+    g_pdfVirtualLastScrollX = g_pdf.scrollX;
+    g_pdfVirtualLastScrollY = g_pdf.scrollY;
+    g_pdfVirtualLastScale = g_pdf.scale;
+    g_pdfVirtualLastRenderScale = g_pdf.renderScale;
+    g_pdfVirtualLastViewW = viewport.viewW;
+    g_pdfVirtualLastViewH = viewport.viewH;
+    g_pdfVirtualLastFlowMode = flowMode;
+    g_pdfVirtualLastViewportChangeTick = now;
+}
+
+static bool IsPdfVirtualScrollActive(const PdfVirtualViewport& viewport, ULONGLONG now) {
+    UpdatePdfVirtualViewportSignature(viewport, now);
+    if (g_zoomAnimating) return true;
+    if (g_pdf.panning) return true;
+    if (std::abs(g_scrollVelocity) >= 0.5) return true;
+    if (g_pdfVirtualLastViewportChangeTick != 0 && now - g_pdfVirtualLastViewportChangeTick < 220) return true;
+    return g_pdfVirtualLastScrollInputTick != 0 && now - g_pdfVirtualLastScrollInputTick < 180;
+}
+
+static double ComputePageBitmapScale(bool coarse, bool stationaryDetail) {
+    if (!coarse) {
+        return g_pdf.renderScale;
+    }
+    return std::max(0.35, g_pdf.renderScale * 0.45);
+}
+
+static std::pair<int, int> ComputePageBitmapTargetSize(const PageCache& page,
+                                                       bool coarse = false,
+                                                       bool stationaryDetail = false) {
+    constexpr uint64_t kStationaryDetailMaxPixels = 16ull * 1024ull * 1024ull;
+    const double scale = ComputePageBitmapScale(coarse, stationaryDetail);
+    int targetW = std::max(1, static_cast<int>(std::lround(page.widthPt * kDpi / 72.0 * scale)));
+    int targetH = std::max(1, static_cast<int>(std::lround(page.heightPt * kDpi / 72.0 * scale)));
+    if (stationaryDetail) {
+        uint64_t pixels = static_cast<uint64_t>(targetW) * static_cast<uint64_t>(targetH);
+        if (pixels > kStationaryDetailMaxPixels) {
+            double ratio = std::sqrt(static_cast<double>(kStationaryDetailMaxPixels) /
+                                     static_cast<double>(pixels));
+            targetW = std::max(1, static_cast<int>(std::lround(targetW * ratio)));
+            targetH = std::max(1, static_cast<int>(std::lround(targetH * ratio)));
+        }
+    }
+    return { targetW, targetH };
+}
+
+static PdfVirtualViewport ComputePdfVirtualViewport(HWND pdfWnd) {
+    PdfVirtualViewport viewport;
+    if (!pdfWnd || g_pdf.pages.empty()) return viewport;
+    RECT rc{};
+    if (!GetClientRect(pdfWnd, &rc)) return viewport;
+    viewport.viewW = rc.right - rc.left;
+    viewport.viewH = rc.bottom - rc.top;
+    if (viewport.viewW <= 0 || viewport.viewH <= 0) return viewport;
+
+    PdfFlowMode mode = CurrentFlowMode();
+    viewport.vertical = FlowIsVertical(mode);
+    const int primaryView = viewport.vertical ? viewport.viewH : viewport.viewW;
+    viewport.visibleStart = viewport.vertical ? g_pdf.scrollY : g_pdf.scrollX;
+    viewport.visibleEnd = viewport.visibleStart + primaryView;
+
+    int baseMargin = std::clamp(primaryView / 4, 200, 800);
+    double speed = std::abs(g_scrollVelocity);
+    if (speed >= 80.0) {
+        baseMargin = std::max(80, baseMargin / 4);
+    } else if (speed >= 35.0) {
+        baseMargin = std::max(120, baseMargin / 2);
+    }
+    viewport.retainMargin = baseMargin;
+    viewport.retainStart = viewport.visibleStart - viewport.retainMargin;
+    viewport.retainEnd = viewport.visibleEnd + viewport.retainMargin;
+    viewport.valid = true;
+    return viewport;
+}
+
+static double PagePrimaryStart(const PdfVirtualViewport& viewport, const PdfViewState::RectD& rect) {
+    return viewport.vertical ? rect.top : rect.left;
+}
+
+static double PagePrimaryEnd(const PdfVirtualViewport& viewport, const PdfViewState::RectD& rect) {
+    return viewport.vertical ? rect.bottom : rect.right;
+}
+
+static bool RangesOverlap(double aStart, double aEnd, double bStart, double bEnd) {
+    return aEnd >= bStart && aStart <= bEnd;
+}
+
+static double DistanceOutsideRange(double start, double end, double rangeStart, double rangeEnd) {
+    if (end < rangeStart) return rangeStart - end;
+    if (start > rangeEnd) return start - rangeEnd;
+    return 0.0;
+}
+
+static double DistanceFromRangeCenter(double start, double end, double rangeStart, double rangeEnd) {
+    double itemCenter = (start + end) * 0.5;
+    double rangeCenter = (rangeStart + rangeEnd) * 0.5;
+    return std::abs(itemCenter - rangeCenter);
+}
+
+static void TrimPdfVirtualOffscreenBitmaps(const PdfVirtualViewport& viewport,
+                                           const std::vector<char>& visiblePages,
+                                           PdfVirtualCacheMetrics& metrics) {
+    const int budgetMiB = std::clamp(g_config.pdfBitmapBudgetMiB,
+                                     kPdfBitmapBudgetMiBMin,
+                                     kPdfBitmapBudgetMiBMax);
+    const uint64_t kBitmapBudgetBytes = static_cast<uint64_t>(budgetMiB) * 1024ull * 1024ull;
+    if (metrics.bitmapBytes <= kBitmapBudgetBytes || g_pdf.pages.empty()) return;
+
+    struct Candidate {
+        size_t index = 0;
+        double distance = 0.0;
+        uint64_t bytes = 0;
+    };
+    std::vector<Candidate> candidates;
+    candidates.reserve(g_pdf.pages.size());
+    for (size_t i = 0; i < g_pdf.pages.size() && i < g_pdf.pageRects.size(); ++i) {
+        if (i < visiblePages.size() && visiblePages[i]) continue;
+        uint64_t bytes = PageBitmapBytes(g_pdf.pages[i]);
+        if (bytes == 0) continue;
+        const auto& rect = g_pdf.pageRects[i];
+        double start = PagePrimaryStart(viewport, rect);
+        double end = PagePrimaryEnd(viewport, rect);
+        candidates.push_back({ i, DistanceOutsideRange(start, end, viewport.visibleStart, viewport.visibleEnd), bytes });
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.distance != b.distance) return a.distance > b.distance;
+        return a.bytes > b.bytes;
+    });
+    for (const auto& candidate : candidates) {
+        if (metrics.bitmapBytes <= kBitmapBudgetBytes) break;
+        PageCache& page = g_pdf.pages[candidate.index];
+        uint64_t bytes = PageBitmapBytes(page);
+        if (bytes == 0) continue;
+        EvictPageBitmap(page);
+        metrics.bitmapBytes = (metrics.bitmapBytes > bytes) ? (metrics.bitmapBytes - bytes) : 0;
+        ++metrics.evictedBitmaps;
+    }
+}
+
+static void RecountPdfVirtualCacheMetrics(PdfVirtualCacheMetrics& metrics) {
+    metrics.bitmapPages = 0;
+    metrics.bitmapBytes = 0;
+    metrics.charBoxPages = 0;
+    for (const auto& page : g_pdf.pages) {
+        uint64_t bytes = PageBitmapBytes(page);
+        if (bytes > 0) {
+            ++metrics.bitmapPages;
+            metrics.bitmapBytes += bytes;
+        }
+        if (!page.charBoxes.empty()) {
+            ++metrics.charBoxPages;
+        }
+    }
+}
+
+static bool PageBitmapMatchesTarget(const PageCache& page, int targetW, int targetH, bool coarse) {
+    return !page.pixels.empty() &&
+           page.bmpW == targetW &&
+           page.bmpH == targetH &&
+           page.pixelsGeneration == g_pdf.renderGeneration &&
+           page.bitmapCoarse == coarse;
+}
+
+static bool PageBitmapFailedTarget(const PageCache& page, int targetW, int targetH, bool coarse) {
+    return page.bitmapFailedGeneration == g_pdf.renderGeneration &&
+           page.bitmapFailedW == targetW &&
+           page.bitmapFailedH == targetH &&
+           page.bitmapFailedCoarse == coarse;
+}
+
+static void SchedulePdfVirtualRender(HWND pdfWnd) {
+    if (!pdfWnd) return;
+    if (g_pdfVirtualRenderTimerArmed && g_pdfVirtualRenderTimerHwnd == pdfWnd) {
+        return;
+    }
+    UINT_PTR timerId = SetTimer(pdfWnd, kPdfVirtualRenderTimerId, 16, nullptr);
+    if (timerId != 0) {
+        g_pdfVirtualRenderTimerArmed = true;
+        g_pdfVirtualRenderTimerHwnd = pdfWnd;
+    }
+    if (preview_trace::IsEnabled()) {
+        preview_trace::Append(
+            L"PdfVirtualTimer",
+            L"set hwnd=" + preview_trace::Window(pdfWnd) +
+            L" ok=" + preview_trace::Bool(timerId != 0) +
+            L" id=" + std::to_wstring(static_cast<unsigned long long>(timerId)));
+    }
+}
+
+static void TracePdfVirtualCacheUpdate(const PdfVirtualViewport& viewport,
+                                       const PdfVirtualCacheMetrics& metrics,
+                                       const PdfVirtualUpdateResult& result,
+                                       PdfVirtualUpdateMode mode,
+                                       bool coarseActive,
+                                       ULONGLONG startTick) {
+    if (!preview_trace::IsEnabled()) return;
+    if (metrics.renderedPages == 0 && metrics.evictedBitmaps == 0 && metrics.evictedCharBoxes == 0 &&
+        !result.pending) return;
+
+    static ULONGLONG s_lastTraceTick = 0;
+    ULONGLONG now = preview_trace::TickNow();
+    if (s_lastTraceTick != 0 && now - s_lastTraceTick < 250) return;
+    s_lastTraceTick = now;
+
+    preview_trace::Append(
+        L"PdfVirtualScroll",
+        L"axis=" + std::wstring(viewport.vertical ? L"v" : L"h") +
+        L" mode=" + std::to_wstring(static_cast<int>(mode)) +
+        L" view=" + std::to_wstring(viewport.viewW) + L"x" + std::to_wstring(viewport.viewH) +
+        L" visible=" + std::to_wstring(metrics.visiblePages) +
+        L" retained=" + std::to_wstring(metrics.retainedPages) +
+        L" rendered=" + std::to_wstring(metrics.renderedPages) +
+        L" evict_bmp=" + std::to_wstring(metrics.evictedBitmaps) +
+        L" evict_chars=" + std::to_wstring(metrics.evictedCharBoxes) +
+        L" bmp_pages=" + std::to_wstring(metrics.bitmapPages) +
+        L" char_pages=" + std::to_wstring(metrics.charBoxPages) +
+        L" bmp_mib=" + std::to_wstring(metrics.bitmapBytes / (1024ull * 1024ull)) +
+        L" margin=" + std::to_wstring(viewport.retainMargin) +
+        L" coarse=" + preview_trace::Bool(coarseActive) +
+        L" pending=" + preview_trace::Bool(result.pending) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+}
+
+static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
+                                                           PdfVirtualUpdateMode mode = PdfVirtualUpdateMode::Immediate) {
+    PdfVirtualUpdateResult result;
+    const ULONGLONG startTick = preview_trace::TickNow();
+    if (!pdfWnd || g_pdf.pages.empty()) return result;
+    PdfVirtualViewport viewport = ComputePdfVirtualViewport(pdfWnd);
+    if (!viewport.valid) return result;
+
+    // Avoid caching huge offscreen bitmaps at high zoom. Visible pages still render at full target size.
+    constexpr uint64_t kPrefetchMaxPixels = 8ull * 1024ull * 1024ull; // ~32MB @ BGRA
+    constexpr uint64_t kOffscreenKeepMaxPixels = 12ull * 1024ull * 1024ull; // ~48MB @ BGRA
+    const ULONGLONG now = preview_trace::TickNow();
+    const bool scrollActive = IsPdfVirtualScrollActive(viewport, now);
+    if (scrollActive) {
+        result.pending = true;
+        g_pdfVirtualWasScrollActive = true;
+        g_pdfVirtualNeedsSettleRepaint = true;
+    } else if (g_pdfVirtualWasScrollActive || g_pdfVirtualNeedsSettleRepaint) {
+        result.repaint = true;
+        g_pdfVirtualWasScrollActive = false;
+        g_pdfVirtualNeedsSettleRepaint = false;
+    }
+    const bool allowOffscreenRender = !scrollActive && mode != PdfVirtualUpdateMode::Paint;
+    const bool allowCoarseVisibleRender = scrollActive;
+    const size_t maxVisibleRenders =
+        (mode == PdfVirtualUpdateMode::Paint) ? 1 :
+        (mode == PdfVirtualUpdateMode::Timer) ? 2 : 3;
+    const size_t maxOffscreenRenders =
+        (mode == PdfVirtualUpdateMode::Paint || scrollActive) ? 0 : 1;
+    const ULONGLONG maxRenderMs =
+        (mode == PdfVirtualUpdateMode::Paint) ? 6 :
+        (mode == PdfVirtualUpdateMode::Timer) ? 12 : 18;
+
+    PdfVirtualCacheMetrics metrics;
+    std::vector<char> visiblePages(g_pdf.pages.size(), 0);
+    std::vector<PdfVirtualRenderCandidate> renderCandidates;
+    renderCandidates.reserve(g_pdf.pages.size());
+    for (size_t i = 0; i < g_pdf.pages.size(); ++i) {
+        if (i >= g_pdf.pageRects.size()) break;
+        auto& page = g_pdf.pages[i];
+        const auto& rect = g_pdf.pageRects[i];
+        double start = PagePrimaryStart(viewport, rect);
+        double end = PagePrimaryEnd(viewport, rect);
+        bool inRetainedRange = RangesOverlap(start, end, viewport.retainStart, viewport.retainEnd);
+        bool inVisibleRange = RangesOverlap(start, end, viewport.visibleStart, viewport.visibleEnd);
+        double visibleDistance = DistanceFromRangeCenter(start, end, viewport.visibleStart, viewport.visibleEnd);
+        if (inVisibleRange) {
+            visiblePages[i] = 1;
+            ++metrics.visiblePages;
+        }
+        if (inRetainedRange) {
+            ++metrics.retainedPages;
+        }
+        if (inVisibleRange &&
+            page.pixelsGeneration == g_pdf.renderGeneration &&
+            page.bitmapCoarse) {
+            result.pending = true;
+        }
+        if (!inRetainedRange) {
+            if (!page.pixels.empty()) ++metrics.evictedBitmaps;
+            if (!page.charBoxes.empty()) ++metrics.evictedCharBoxes;
+            EvictPageBitmap(page);
+            EvictPageCharBoxes(page);
+            result.changed = true;
+            continue;
+        }
+
+        // Render pixels if missing or size mismatch
+        const bool pageHasFreshFull =
+            !page.pixels.empty() &&
+            page.pixelsGeneration == g_pdf.renderGeneration &&
+            !page.bitmapCoarse;
+        const bool useCoarseTarget = inVisibleRange && allowCoarseVisibleRender && !pageHasFreshFull;
+        const bool useStationaryDetail = inVisibleRange && !scrollActive;
+        auto [targetW, targetH] = ComputePageBitmapTargetSize(page, useCoarseTarget,
+                                                              useStationaryDetail);
+        uint64_t targetPixels = static_cast<uint64_t>(targetW) * static_cast<uint64_t>(targetH);
+        const bool allowRetainedRender = inVisibleRange || (allowOffscreenRender && targetPixels <= kPrefetchMaxPixels);
+        if (!inVisibleRange && !allowRetainedRender) {
+            uint64_t havePixels = static_cast<uint64_t>(page.bmpW) * static_cast<uint64_t>(page.bmpH);
+            if (havePixels > kOffscreenKeepMaxPixels) {
+                if (!page.pixels.empty()) ++metrics.evictedBitmaps;
+                EvictPageBitmap(page);
+                result.changed = true;
+            }
+        } else if (!PageBitmapMatchesTarget(page, targetW, targetH, useCoarseTarget) &&
+                   !PageBitmapFailedTarget(page, targetW, targetH, useCoarseTarget)) {
+            renderCandidates.push_back({ i, inVisibleRange, visibleDistance, targetW, targetH, targetPixels,
+                                         useCoarseTarget });
+        }
+    }
+
+    std::sort(renderCandidates.begin(), renderCandidates.end(),
+              [](const PdfVirtualRenderCandidate& a, const PdfVirtualRenderCandidate& b) {
+                  if (a.visible != b.visible) return a.visible && !b.visible;
+                  if (a.coarse != b.coarse) return a.coarse && !b.coarse;
+                  if (a.distance != b.distance) return a.distance < b.distance;
+                  if (a.targetPixels != b.targetPixels) return a.targetPixels < b.targetPixels;
+                  return a.index < b.index;
+              });
+
+    size_t visibleRendered = 0;
+    size_t offscreenRendered = 0;
+    for (const auto& candidate : renderCandidates) {
+        if (candidate.index >= g_pdf.pages.size()) continue;
+        if (candidate.visible) {
+            if (visibleRendered >= maxVisibleRenders) {
+                result.pending = true;
+                continue;
+            }
+        } else {
+            if (offscreenRendered >= maxOffscreenRenders) {
+                result.pending = true;
+                continue;
+            }
+        }
+        ULONGLONG elapsed = preview_trace::TickNow() - startTick;
+        if (metrics.renderedPages > 0 && elapsed >= maxRenderMs) {
+            result.pending = true;
+            continue;
+        }
+
+        if (candidate.visible) {
+            ++visibleRendered;
+        } else {
+            ++offscreenRendered;
+        }
+
+        if (g_pdf.kind == DocKind::Pdf) {
+            if (QueuePdfVirtualRenderJob(pdfWnd, candidate)) {
+                result.pending = true;
+            }
+            continue;
+        }
+
+        PageCache& page = g_pdf.pages[candidate.index];
+        std::vector<uint8_t> pixels;
+        int stride = 0;
+        bool ok = false;
+        if (g_pdf.kind == DocKind::Image) {
+            ok = RenderImageBitmap(candidate.targetW, candidate.targetH, pixels, stride);
+        } else if (g_pdf.kind == DocKind::Pdf) {
+            ok = RenderPdfPageBitmap(static_cast<int>(candidate.index), candidate.targetW, candidate.targetH,
+                                     pixels, stride);
+        }
+        if (ok) {
+            page.bmpW = candidate.targetW;
+            page.bmpH = candidate.targetH;
+            page.stride = stride;
+            page.pixelsGeneration = g_pdf.renderGeneration;
+            page.bitmapCoarse = candidate.coarse;
+            page.pixels = std::move(pixels);
+            ++metrics.renderedPages;
+            result.changed = true;
+            if (candidate.coarse) {
+                result.pending = true;
+            }
+        }
+    }
+
+    RecountPdfVirtualCacheMetrics(metrics);
+    const size_t evictedBeforeTrim = metrics.evictedBitmaps;
+    TrimPdfVirtualOffscreenBitmaps(viewport, visiblePages, metrics);
+    if (metrics.evictedBitmaps != evictedBeforeTrim) {
+        result.changed = true;
+    }
+    RecountPdfVirtualCacheMetrics(metrics);
+    if (HasPdfVirtualRenderWork()) {
+        result.pending = true;
+    }
+    if (result.pending) {
+        SchedulePdfVirtualRender(pdfWnd);
+    }
+    TracePdfVirtualCacheUpdate(viewport, metrics, result, mode, scrollActive, startTick);
+    return result;
+}
+
+void BuildPageCaches(HWND pdfWnd) {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    InvalidatePdfRenderGeneration();
+    g_pdf.pages.clear();
+    g_pdf.pageRects.clear();
+    g_pdf.contentWidth = 0.0;
+    g_pdf.contentHeight = 0.0;
+    g_pdf.hasSelection = false;
+    g_pdf.selectionStartPage = -1;
+    g_pdf.selectionEndPage = -1;
+    g_pdf.selectingText = false;
+    g_pdf.selectionByText = false;
+    g_pdf.selCharAnchor = -1;
+    g_pdf.selCharFocus = -1;
+    g_pdf.selectionByText = false;
+    g_pdf.selCharAnchor = -1;
+    g_pdf.selCharFocus = -1;
+    g_pdf.renderScale = ComputePdfRenderScale(g_pdf.scale);
+    if (g_pdf.kind == DocKind::None) {
+        preview_trace::Append(
+            L"BuildPageCaches",
+            L"skip=no_document elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return;
+    }
+
+    if (g_pdf.kind == DocKind::Image) {
+        if (g_pdf.imagePixels.empty() || g_pdf.imageWidth <= 0 || g_pdf.imageHeight <= 0) return;
+        PageCache cache;
+        cache.index = 0;
+        double dpiX = (g_pdf.imageDpiX > 0.0) ? g_pdf.imageDpiX : kDpi;
+        double dpiY = (g_pdf.imageDpiY > 0.0) ? g_pdf.imageDpiY : kDpi;
+        cache.widthPt = g_pdf.imageWidth * 72.0 / dpiX;
+        cache.heightPt = g_pdf.imageHeight * 72.0 / dpiY;
+        cache.w = static_cast<int>(std::round(cache.widthPt * kDpi / 72.0 * g_pdf.scale));
+        cache.h = static_cast<int>(std::round(cache.heightPt * kDpi / 72.0 * g_pdf.scale));
+        if (cache.w <= 0 || cache.h <= 0) return;
+        cache.bmpW = std::max(1, static_cast<int>(std::lround(cache.widthPt * kDpi / 72.0 * g_pdf.renderScale)));
+        cache.bmpH = std::max(1, static_cast<int>(std::lround(cache.heightPt * kDpi / 72.0 * g_pdf.renderScale)));
+        cache.stride = cache.bmpW * 4;
+        cache.pixelsGeneration = g_pdf.renderGeneration;
+        cache.bitmapCoarse = false;
+        std::wstring err;
+        if (!ScaleImagePixelsWic(g_pdf.imagePixels.data(), g_pdf.imageWidth, g_pdf.imageHeight,
+                                 g_pdf.imageStride, cache.bmpW, cache.bmpH, cache.pixels, &err)) {
+            cache.pixels.assign(static_cast<size_t>(cache.stride) * cache.bmpH, 255);
+        }
+        g_pdf.pages.push_back(std::move(cache));
+        g_pdf.pageCount = 1;
+        UpdatePendingFitSizeFromPages();
+        UpdatePageLayout(pdfWnd);
+        preview_trace::Append(
+            L"BuildPageCaches",
+            L"end image pageCount=1 elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return;
+    }
+
+    if (!g_pdf.doc) {
+        preview_trace::Append(
+            L"BuildPageCaches",
+            L"skip=no_pdf_doc elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return;
+    }
+
+    // Fast Page Layout: Only query page dimensions without full rendering or text extraction
+    for (int i = 0; i < g_pdf.pageCount; ++i) {
+        double widthPt = 0, heightPt = 0;
+        {
+            std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+            if (!FPDF_GetPageSizeByIndex(g_pdf.doc, i, &widthPt, &heightPt)) continue;
+        }
+        
+        PageCache cache;
+        cache.index = i;
+        cache.widthPt = widthPt;
+        cache.heightPt = heightPt;
+
+        cache.w = static_cast<int>(std::round(cache.widthPt * kDpi / 72.0 * g_pdf.scale));
+        cache.h = static_cast<int>(std::round(cache.heightPt * kDpi / 72.0 * g_pdf.scale));
+        
+        cache.bmpW = 0;
+        cache.bmpH = 0;
+        cache.stride = 0;
+        // pixels and charBoxes stay empty until UpdatePdfVirtualScrollCaches is called
+
+        g_pdf.pages.push_back(std::move(cache));
+    }
+    UpdatePendingFitSizeFromPages();
+    UpdatePageLayout(pdfWnd);
+    
+    // Immediately render what's visible (unless an initial fit-width is pending).
+    if (!((g_pendingInitialFitWidth || g_pendingInitialFitHeight) &&
+          g_pdf.kind == DocKind::Pdf && g_pdf.doc)) {
+        UpdatePdfVirtualScrollCaches(pdfWnd);
+    }
+    preview_trace::Append(
+        L"BuildPageCaches",
+        L"end pdf pageCount=" + std::to_wstring(g_pdf.pageCount) +
+        L" cachedPages=" + std::to_wstring(g_pdf.pages.size()) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+}

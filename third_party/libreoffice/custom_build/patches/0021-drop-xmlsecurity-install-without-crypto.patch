@@ -1,0 +1,24 @@
+diff --git a/Repository.mk b/Repository.mk
+index 8489a8759671..8fd061cc3651 100644
+--- a/Repository.mk
++++ b/Repository.mk
+@@ -695,8 +695,6 @@ $(eval $(call gb_Helper_register_libraries_for_install,OOOLIBS,ooo, \
+ 	ucphier1 \
+ 	ucppkg1 \
+     $(call gb_CondExeUnopkg,unopkgapp) \
+-	xmlsecurity \
+-	xsec_xmlsec \
+ 	xstor \
+ 	$(if $(filter $(OS),MACOSX), \
+ 		macab1 \
+@@ -736,6 +734,10 @@ $(eval $(call gb_Helper_register_libraries_for_install,OOOLIBS,ooo, \
+ 	) \
+ ))
+ 
++$(eval $(call gb_Helper_register_libraries,PLAINLIBS_NONE, \
++	xmlsecurity xsec_xmlsec \
++))
++
+ $(eval $(call gb_Helper_register_plugins_for_install,PLAINLIBS_OOO,ooo, \
+     localedata_en \
+     localedata_es \

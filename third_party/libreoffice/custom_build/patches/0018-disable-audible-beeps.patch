@@ -1,0 +1,43 @@
+diff --git a/basic/source/runtime/methods.cxx b/basic/source/runtime/methods.cxx
+index 9fcf6b939287..4d725d8bd3fd 100644
+--- a/basic/source/runtime/methods.cxx
++++ b/basic/source/runtime/methods.cxx
+@@ -4008,7 +4008,6 @@ void SbRtl_Beep(StarBASIC *, SbxArray & rPar, bool)
+     {
+         return StarBASIC::Error( ERRCODE_BASIC_BAD_ARGUMENT );
+     }
+-    Sound::Beep();
+ }
+ 
+ void SbRtl_Load(StarBASIC *, SbxArray & rPar, bool)
+diff --git a/vcl/source/app/sound.cxx b/vcl/source/app/sound.cxx
+index ef2749e22cfb..f7ee8d27b215 100644
+--- a/vcl/source/app/sound.cxx
++++ b/vcl/source/app/sound.cxx
+@@ -26,13 +26,6 @@
+ 
+ void Sound::Beep()
+ {
+-    // #i91990#
+-    if (Application::IsHeadlessModeEnabled())
+-        return;
+-
+-    vcl::Window* pWindow = ImplGetDefaultWindow();
+-
+-    pWindow->ImplGetFrame()->Beep();
+ }
+ 
+ /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+diff --git a/vcl/win/window/salframe.cxx b/vcl/win/window/salframe.cxx
+index a6c3e4db6682..e7965e6a155f 100644
+--- a/vcl/win/window/salframe.cxx
++++ b/vcl/win/window/salframe.cxx
+@@ -3002,8 +3002,6 @@ const SystemEnvData& WinSalFrame::GetSystemData() const
+ 
+ void WinSalFrame::Beep()
+ {
+-    // a simple beep
+-    MessageBeep( 0 );
+ }
+ 
+ void WinSalFrame::FlashWindow() const

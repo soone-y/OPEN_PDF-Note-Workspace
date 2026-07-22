@@ -1,0 +1,2747 @@
+// file: main/main_ui_automation.cppinc
+
+static bool SetFaultInjectionPointForAutomation(const wchar_t* point) {
+    if (!SetEnvironmentVariableW(L"PDF_NOTE_SMALL_ENABLE_FAULT_INJECTION", L"1")) return false;
+    return SetEnvironmentVariableW(L"PDF_NOTE_SMALL_THROW_POINT", point ? point : L"");
+}
+
+static void ClearFaultInjectionPointForAutomation() {
+    SetEnvironmentVariableW(L"PDF_NOTE_SMALL_ENABLE_FAULT_INJECTION", nullptr);
+    SetEnvironmentVariableW(L"PDF_NOTE_SMALL_THROW_POINT", nullptr);
+}
+
+static int FindAlternativeFileIndex(HWND list, int currentIndex) {
+    const int count = ListboxItemCount(list);
+    for (int i = 0; i < count; ++i) {
+        if (i == currentIndex) continue;
+        if (list == g_hPdfList) {
+            if (i < static_cast<int>(g_pdfFiles.size()) &&
+                NormalizePathKey(g_pdfFiles[static_cast<size_t>(i)].path) != NormalizePathKey(CurrentLogicalPdfPath())) {
+                return i;
+            }
+            continue;
+        }
+        if (list == g_hNoteList) {
+            if (i < static_cast<int>(g_noteFiles.size()) &&
+                NormalizePathKey(g_noteFiles[static_cast<size_t>(i)].path) != NormalizePathKey(g_currentNotePath)) {
+                return i;
+            }
+            continue;
+        }
+        return i;
+    }
+    return -1;
+}
+
+static std::wstring GetNoteAutomationIndexingText() {
+    if (!g_hNoteEdit) return L"";
+    const int len = GetWindowTextLengthW(g_hNoteEdit);
+    if (len <= 0) return L"";
+    std::wstring text(static_cast<size_t>(len) + 1, L'\0');
+    const int copied = GetWindowTextW(g_hNoteEdit, text.data(), len + 1);
+    if (copied < 0) return L"";
+    text.resize(static_cast<size_t>(copied));
+
+    std::wstring normalized;
+    normalized.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        normalized.push_back(text[i]);
+        if (text[i] == L'\r' && i + 1 < text.size() && text[i + 1] == L'\n') {
+            ++i;
+        }
+    }
+    return normalized;
+}
+
+static int FindNoteTextSnippetStart(const std::wstring& needle) {
+    if (!g_hNoteEdit || needle.empty()) return -1;
+    const std::wstring text = GetNoteAutomationIndexingText();
+    if (text.empty()) return -1;
+    const size_t pos = text.find(needle);
+    if (pos == std::wstring::npos) return -1;
+    return static_cast<int>(pos);
+}
+
+static bool SelectNoteTextSnippet(const std::wstring& needle) {
+    const int start = FindNoteTextSnippetStart(needle);
+    if (start < 0 || !g_hNoteEdit) return false;
+    const int end = start + static_cast<int>(needle.size());
+    SendMessageW(g_hNoteEdit, EM_SETSEL, static_cast<WPARAM>(start), static_cast<LPARAM>(end));
+    SendMessageW(g_hNoteEdit, EM_SCROLLCARET, 0, 0);
+    return true;
+}
+
+static bool SendUiAutomationNoteUndoChangedText() {
+    if (!g_hNoteEdit) return false;
+    SetFocus(g_hNoteEdit);
+    if (GetFocus() != g_hNoteEdit) return false;
+    const std::wstring beforeText = GetNoteAutomationIndexingText();
+    const bool canUndo = CanExecuteNoteUndoRedoFromFocus(true);
+    const bool saveRunning = IsSaveTransactionRunning();
+    SendMessageW(g_hNoteEdit, WM_UNDO, 0, 0);
+    const bool changed = GetNoteAutomationIndexingText() != beforeText;
+    AppendUiAutomationTrace(L"note_undo:can=" + std::to_wstring(canUndo) +
+                            L" save_running=" + std::to_wstring(saveRunning) +
+                            L" changed=" + std::to_wstring(changed));
+    return changed;
+}
+
+static bool SendUiAutomationNoteRedoChangedText() {
+    if (!g_hNoteEdit) return false;
+    SetFocus(g_hNoteEdit);
+    if (GetFocus() != g_hNoteEdit) return false;
+    const std::wstring beforeText = GetNoteAutomationIndexingText();
+    SendMessageW(g_hNoteEdit, EM_REDO, 0, 0);
+    return GetNoteAutomationIndexingText() != beforeText;
+}
+
+static std::wstring DescribeNoteUiSnapshot(const NoteUiSnapshot& snapshot) {
+    auto boolText = [](bool value) -> const wchar_t* {
+        return value ? L"true" : L"false";
+    };
+    return L"note=" + std::to_wstring(snapshot.sourceIdentity.note_id.value) +
+           L", view=" + std::to_wstring(snapshot.viewIdentity.view_id.value) +
+           L", revision=" + std::to_wstring(snapshot.sourceIdentity.content_revision) +
+           L", tx_suppress=" + std::wstring(boolText(snapshot.changeSuppressed)) +
+           L", tx_active=" + std::wstring(boolText(snapshot.programMutationActive)) +
+           L", tx_wait_input=" + std::wstring(boolText(snapshot.waitingForUserInput)) +
+           L", tx_depth=" + std::to_wstring(snapshot.transactionDepth) +
+           L", tx_sequence=" + std::to_wstring(snapshot.transactionSequence) +
+           L", tx_owner=" + std::to_wstring(snapshot.transactionOwnerNoteId.value) +
+           L", route=" + std::wstring(boolText(snapshot.markdownRoute)) +
+           L", render=" + std::wstring(boolText(snapshot.renderOverlayActive)) +
+           L", ready=" + std::wstring(boolText(snapshot.documentReady)) +
+           L", math=" + std::to_wstring(snapshot.mathSpanCount) +
+           L", rendered=" + std::to_wstring(snapshot.renderedMathSegmentCount) +
+           L", display=" + std::to_wstring(snapshot.renderedDisplayMathSegmentCount) +
+           L", selected=" + std::wstring(boolText(snapshot.selectedMathFound)) +
+           L", block=" + std::wstring(boolText(snapshot.selectedMathIsBlock)) +
+           L", delim=" + snapshot.selectedMathDelimiter +
+           L", norm=" + snapshot.selectedMathNormalizedText;
+}
+
+static bool RestoreUiAutomationNoteSelection(HWND owner,
+                                             const std::wstring& notePath,
+                                             int noteIndex,
+                                             std::wstring* outError) {
+    if (notePath.empty()) return true;
+    LoadNoteFile(owner, notePath);
+    SyncBottomPaneAfterNoteLoad(owner);
+    SyncLeftPaneSelection();
+    if (noteIndex >= 0 && g_hNoteList) {
+        SendMessageW(g_hNoteList, LB_SETCURSEL, noteIndex, 0);
+    }
+    if (NormalizePathKey(g_currentNotePath) != NormalizePathKey(notePath)) {
+        if (outError) *outError = L"Failed to restore the previous note after math UI testing.";
+        return false;
+    }
+    return true;
+}
+
+static bool EnsureUiAutomationTargetSession(HWND owner, std::wstring* outError) {
+    AppendUiAutomationTrace(L"ensure_target:begin");
+    if (!owner) {
+        if (outError) *outError = L"Main window is not ready.";
+        return false;
+    }
+    if (!g_hLectureList || !g_hSessionList || !g_hPdfList || !g_hNoteList) {
+        if (outError) *outError = L"Required list controls are not available.";
+        return false;
+    }
+
+    EnsureListboxSelection(g_hLectureList);
+    EnsureListboxSelection(g_hSessionList);
+    EnsureListboxSelection(g_hPdfList);
+    EnsureListboxSelection(g_hNoteList);
+
+    std::wstring automationRoot;
+    if (TryGetUiAutomationWorkspaceRoot(&automationRoot)) {
+        const std::filesystem::path workspaceRoot(automationRoot);
+        const std::filesystem::path lecturePath = workspaceRoot / L"lecture1";
+        const std::filesystem::path sessionPath = lecturePath / L"session1";
+        const std::filesystem::path pdf1Path = sessionPath / L"sample.pdf";
+        const std::filesystem::path pdf2Path = sessionPath / L"sample2.pdf";
+        const std::filesystem::path note1Path = sessionPath / L"note1.txt";
+        const std::filesystem::path note2Path = sessionPath / L"note2.txt";
+        std::error_code fixtureEc;
+        const bool fixtureReady =
+            std::filesystem::exists(lecturePath, fixtureEc) &&
+            std::filesystem::exists(sessionPath, fixtureEc) &&
+            std::filesystem::exists(pdf1Path, fixtureEc) &&
+            std::filesystem::exists(pdf2Path, fixtureEc) &&
+            std::filesystem::exists(note1Path, fixtureEc) &&
+            std::filesystem::exists(note2Path, fixtureEc);
+        if (fixtureReady) {
+            AppendUiAutomationTrace(L"ensure_target:fixture_begin");
+            LoadLectures();
+            g_currentLecturePath = lecturePath.wstring();
+            LoadSessions(g_currentLecturePath);
+
+            SessionEntry target;
+            bool foundSession = false;
+            for (const auto& session : g_sessions) {
+                if (NormalizePathKey(session.path) == NormalizePathKey(sessionPath.wstring())) {
+                    target = session;
+                    foundSession = true;
+                    break;
+                }
+            }
+            if (!foundSession) {
+                target.displayName = sessionPath.filename().wstring();
+                target.path = sessionPath.wstring();
+            }
+
+            std::wstring preferredPdf = pdf1Path.wstring();
+            std::wstring preferredNote = note1Path.wstring();
+            LoadFiles(target, preferredPdf, preferredNote);
+            AppendUiAutomationTrace(L"ensure_target:fixture_files_loaded");
+            EndIntegratedPdfPreviewMode(owner, true);
+            if (!OpenPdfWithAnnotations(owner, preferredPdf)) {
+                if (outError) *outError = L"Failed to open fixture PDF for UI automation.";
+                return false;
+            }
+            AppendUiAutomationTrace(L"ensure_target:fixture_pdf_opened");
+            LoadNoteFile(owner, preferredNote);
+            SyncBottomPaneAfterNoteLoad(owner);
+            AppendUiAutomationTrace(L"ensure_target:fixture_note_opened");
+            SyncLeftPaneSelection();
+            if (CurrentPdfIndex() >= 0) {
+                SendMessageW(g_hPdfList, LB_SETCURSEL, CurrentPdfIndex(), 0);
+            }
+            if (CurrentNoteIndex() >= 0) {
+                SendMessageW(g_hNoteList, LB_SETCURSEL, CurrentNoteIndex(), 0);
+            }
+            if (static_cast<int>(g_pdfFiles.size()) >= 2 &&
+                static_cast<int>(g_noteFiles.size()) >= 2 &&
+                CurrentPdfIndex() >= 0 &&
+                CurrentNoteIndex() >= 0 &&
+                !CurrentLogicalPdfPath().empty() &&
+                !g_currentNotePath.empty()) {
+                AppendUiAutomationTrace(L"ensure_target:fixture_success");
+                return true;
+            }
+            AppendUiAutomationTrace(L"ensure_target:fixture_incomplete");
+        }
+    }
+
+    const int lectureCount = ListboxItemCount(g_hLectureList);
+    for (int lectureIdx = 0; lectureIdx < lectureCount; ++lectureIdx) {
+        if (lectureIdx >= static_cast<int>(g_lectures.size())) continue;
+        AppendUiAutomationTrace(L"ensure_target:lecture_" + std::to_wstring(lectureIdx));
+        g_currentLecturePath = g_lectures[static_cast<size_t>(lectureIdx)];
+        SendMessageW(g_hLectureList, LB_SETCURSEL, lectureIdx, 0);
+        LoadSessions(g_currentLecturePath);
+        const int sessionCount = static_cast<int>(g_sessions.size());
+        for (int sessionIdx = 0; sessionIdx < sessionCount; ++sessionIdx) {
+            AppendUiAutomationTrace(L"ensure_target:session_" + std::to_wstring(sessionIdx));
+            const auto& target = g_sessions[static_cast<size_t>(sessionIdx)];
+            SendMessageW(g_hSessionList, LB_SETCURSEL, sessionIdx, 0);
+            g_currentSessionPath = target.path;
+            std::wstring preferredPdf;
+            std::wstring preferredNote;
+            LoadFiles(target, preferredPdf, preferredNote);
+            const std::wstring autoOpenPdfPath = FirstOpenablePdfListPath();
+            if (!autoOpenPdfPath.empty()) {
+                AppendUiAutomationTrace(L"ensure_target:open_pdf_begin");
+                EndIntegratedPdfPreviewMode(owner, true);
+                OpenPdfWithAnnotations(owner, autoOpenPdfPath);
+                AppendUiAutomationTrace(L"ensure_target:open_pdf_end");
+            }
+            if (!g_noteFiles.empty()) {
+                AppendUiAutomationTrace(L"ensure_target:open_note_begin");
+                LoadNoteFile(owner, g_noteFiles.front().path);
+                SyncBottomPaneAfterNoteLoad(owner);
+                AppendUiAutomationTrace(L"ensure_target:open_note_end");
+            }
+            SyncLeftPaneSelection();
+            AppendUiAutomationTrace(L"ensure_target:sync_done");
+            if (static_cast<int>(g_pdfFiles.size()) >= 2 &&
+                static_cast<int>(g_noteFiles.size()) >= 2 &&
+                CurrentPdfIndex() >= 0 &&
+                CurrentNoteIndex() >= 0 &&
+                !CurrentLogicalPdfPath().empty() &&
+                !g_currentNotePath.empty()) {
+                AppendUiAutomationTrace(L"ensure_target:success");
+                return true;
+            }
+        }
+    }
+
+    AppendUiAutomationTrace(L"ensure_target:not_found");
+    if (outError) {
+        *outError = L"No session with at least two PDFs and two notes was found for UI automation.";
+    }
+    return false;
+}
+
+static bool VerifyUiRollbackState(const std::wstring& expectedLecturePath,
+                                  const std::wstring& expectedSessionPath,
+                                  const std::wstring& expectedPdfPath,
+                                  const std::wstring& expectedNotePath,
+                                  int expectedPdfIndex,
+                                  int expectedNoteIndex,
+                                  std::wstring* outError) {
+    if (NormalizePathKey(g_currentLecturePath) != NormalizePathKey(expectedLecturePath)) {
+        if (outError) *outError = L"Lecture path was not restored.";
+        return false;
+    }
+    if (NormalizePathKey(g_currentSessionPath) != NormalizePathKey(expectedSessionPath)) {
+        if (outError) *outError = L"Session path was not restored.";
+        return false;
+    }
+    if (NormalizePathKey(CurrentLogicalPdfPath()) != NormalizePathKey(expectedPdfPath)) {
+        if (outError) *outError = L"PDF path was not restored.";
+        return false;
+    }
+    if (NormalizePathKey(g_currentNotePath) != NormalizePathKey(expectedNotePath)) {
+        if (outError) *outError = L"Note path was not restored.";
+        return false;
+    }
+    if (CurrentPdfIndex() != expectedPdfIndex) {
+        if (outError) *outError = L"PDF list selection was not restored.";
+        return false;
+    }
+    if (CurrentNoteIndex() != expectedNoteIndex) {
+        if (outError) *outError = L"Note list selection was not restored.";
+        return false;
+    }
+    return true;
+}
+
+static size_t CountUiAutomationStagesForTarget(file_output::StagedDiffKind kind,
+                                               const std::wstring& targetPath) {
+    if (targetPath.empty()) return 0;
+    const std::wstring targetKey = NormalizePathKey(std::filesystem::path(targetPath));
+    size_t count = 0;
+    for (const auto& entry : file_output::ListStagedDiffEntries()) {
+        if (entry.kind != kind) continue;
+        if (NormalizePathKey(std::filesystem::path(entry.targetPath)) != targetKey) continue;
+        ++count;
+    }
+    return count;
+}
+
+static bool ReadUiAutomationFileBytes(const std::filesystem::path& path, std::string* out) {
+    if (!out) return false;
+    out->clear();
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return false;
+    *out = std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    return static_cast<bool>(stream) || stream.eof();
+}
+
+static bool HasPngFileSignature(const std::string& bytes) {
+    static constexpr char kSignature[] = {
+        static_cast<char>(0x89), 'P', 'N', 'G', '\r', '\n', static_cast<char>(0x1a), '\n'};
+    return bytes.size() >= sizeof(kSignature) &&
+           std::equal(std::begin(kSignature), std::end(kSignature), bytes.begin());
+}
+
+static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_workspaceRoot.empty() || CurrentLogicalPdfPath().empty() ||
+        g_currentNotePath.empty() || g_pdf.pages.empty()) {
+        if (outError) *outError = L"Output export automation requires an open PDF and note in a workspace.";
+        return false;
+    }
+
+    const std::filesystem::path sourcePdf(CurrentLogicalPdfPath());
+    const std::filesystem::path sourceNote(g_currentNotePath);
+    std::string originalPdf;
+    std::string originalNote;
+    if (!ReadUiAutomationFileBytes(sourcePdf, &originalPdf) ||
+        !ReadUiAutomationFileBytes(sourceNote, &originalNote)) {
+        if (outError) *outError = L"Failed to capture source files before output export automation.";
+        return false;
+    }
+
+    const std::filesystem::path outputDir = std::filesystem::path(g_workspaceRoot) /
+        L"__resource__" / L"__tmp__" / L"ui_automation_output";
+    std::error_code ec;
+    std::filesystem::create_directories(outputDir, ec);
+    if (ec) {
+        if (outError) *outError = L"Failed to create the automation output directory.";
+        return false;
+    }
+    const std::filesystem::path pdfOut = outputDir / L"export.pdf";
+    const std::filesystem::path pngOut = outputDir / L"page.png";
+    const std::filesystem::path textOut = outputDir / L"note.txt";
+    const std::filesystem::path markdownOut = outputDir / L"note.md";
+    const std::filesystem::path htmlOut = outputDir / L"note.html";
+
+    const std::vector<file_output::PdfPageSpec> firstPage{{0, false}};
+    if (!file_output::ExportPdfPages(owner, firstPage, pdfOut.wstring(),
+                                     g_config.exportStandardTextAnnots, 1.0,
+                                     /*matchPdfPaneTextLayout=*/true)) {
+        if (outError) *outError = L"PDF export failed during output export automation.";
+        return false;
+    }
+    if (!file_output::ExportPdfPagePng(owner, 0, pngOut.wstring(),
+                                        file_output::PdfPngStyle::PdfLike,
+                                        /*includeAnnotations=*/false, 320, 240)) {
+        if (outError) *outError = L"PNG export failed during output export automation.";
+        return false;
+    }
+    file_output::TextExportOptions textOptions{};
+    file_output::NoteMarkupExportOptions markupOptions{};
+    markupOptions.format = file_output::NoteMarkupExportOptions::Format::Markdown;
+    if (!file_output::ExportNotePlainText(sourceNote.wstring(), textOut.wstring(), textOptions) ||
+        !file_output::ExportNoteMarkup(sourceNote.wstring(), markdownOut.wstring(), markupOptions) ||
+        !file_output::ExportNoteHtml(sourceNote.wstring(), htmlOut.wstring())) {
+        if (outError) *outError = L"Note export failed during output export automation.";
+        return false;
+    }
+
+    std::string exportedPdf;
+    std::string exportedPng;
+    std::string exportedText;
+    std::string exportedMarkdown;
+    std::string exportedHtml;
+    if (!ReadUiAutomationFileBytes(pdfOut, &exportedPdf) || exportedPdf.size() < 5 ||
+        exportedPdf.compare(0, 5, "%PDF-") != 0 ||
+        !ReadUiAutomationFileBytes(pngOut, &exportedPng) || !HasPngFileSignature(exportedPng) ||
+        !ReadUiAutomationFileBytes(textOut, &exportedText) || exportedText.empty() ||
+        !ReadUiAutomationFileBytes(markdownOut, &exportedMarkdown) || exportedMarkdown.empty() ||
+        !ReadUiAutomationFileBytes(htmlOut, &exportedHtml) || exportedHtml.empty()) {
+        if (outError) *outError = L"An exported artifact was missing, empty, or had an invalid file signature.";
+        return false;
+    }
+
+    // Export APIs must reject their source as an output path without mutating it.
+    if (file_output::ExportPdfPages(owner, firstPage, sourcePdf.wstring(),
+                                    g_config.exportStandardTextAnnots, 1.0,
+                                    /*matchPdfPaneTextLayout=*/true) ||
+        file_output::ExportNotePlainText(sourceNote.wstring(), sourceNote.wstring(), textOptions)) {
+        if (outError) *outError = L"An export API accepted its source file as an output path.";
+        return false;
+    }
+    std::string finalPdf;
+    std::string finalNote;
+    if (!ReadUiAutomationFileBytes(sourcePdf, &finalPdf) || finalPdf != originalPdf ||
+        !ReadUiAutomationFileBytes(sourceNote, &finalNote) || finalNote != originalNote) {
+        if (outError) *outError = L"An output export changed a source file.";
+        return false;
+    }
+    return true;
+}
+
+static bool RunUiAutomationNoteSaveScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_currentNotePath.empty() || !g_hNoteEdit) {
+        if (outError) *outError = L"Note save automation requires an open note editor.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before note save automation.";
+        return false;
+    }
+
+    const std::wstring notePath = g_currentNotePath;
+    const std::wstring undoToken = L"ui-automation-note-undo-token";
+    const std::wstring directSaveToken = L"ui-automation-note-direct-save-token";
+
+    InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), undoToken);
+    if (FindNoteTextSnippetStart(undoToken) < 0) {
+        if (outError) *outError = L"Failed to insert the note undo token.";
+        return false;
+    }
+    if (!SendUiAutomationNoteUndoChangedText()) {
+        if (outError) *outError = L"Note undo did not change the note text.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(undoToken) >= 0) {
+        if (outError) *outError = L"Note undo token remained after undo.";
+        return false;
+    }
+    if (!SaveNoteIfDirty(owner)) {
+        if (outError) *outError = L"SaveNoteIfDirty failed after undoing back to the original note.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) != 0) {
+        if (outError) *outError = L"Undoing a note edit back to the original content still created a staged diff.";
+        return false;
+    }
+    if (g_noteDirty || g_noteNeedsIntegrate) {
+        if (outError) *outError = L"Note flags remained dirty after undo reconciliation save.";
+        return false;
+    }
+    if (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0) {
+        if (outError) *outError = L"Note editor modified flag remained set after undo reconciliation save.";
+        return false;
+    }
+
+    const std::wstring redoStageToken = L"ui-automation-note-redo-stage-token";
+    InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), redoStageToken);
+    if (FindNoteTextSnippetStart(redoStageToken) < 0) {
+        if (outError) *outError = L"Failed to insert the note redo-stage token.";
+        return false;
+    }
+    if (!SendUiAutomationNoteUndoChangedText()) {
+        if (outError) *outError = L"Note undo did not remove the redo-stage token.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(redoStageToken) >= 0) {
+        if (outError) *outError = L"Redo-stage token remained after undo.";
+        return false;
+    }
+    if (!SendUiAutomationNoteRedoChangedText()) {
+        if (outError) *outError = L"Note redo did not restore the redo-stage token.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(redoStageToken) < 0) {
+        if (outError) *outError = L"Redo-stage token was missing after redo.";
+        return false;
+    }
+    if (!g_noteDirty) {
+        if (outError) *outError = L"Note redo did not mark the note dirty.";
+        return false;
+    }
+    if (!SaveNoteIfDirty(owner)) {
+        if (outError) *outError = L"SaveNoteIfDirty failed after note redo.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) == 0) {
+        if (outError) *outError = L"Note redo did not create a staged diff.";
+        return false;
+    }
+    if (!SelectNoteTextSnippet(redoStageToken)) {
+        if (outError) *outError = L"Could not reselect the redo-stage token for cleanup.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    if (!SaveNoteIfDirty(owner)) {
+        if (outError) *outError = L"Cleanup redo-stage save failed during UI automation.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(redoStageToken) >= 0) {
+        if (outError) *outError = L"Cleanup redo-stage token remained in the note.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) != 0) {
+        if (outError) *outError = L"Cleanup redo-stage save left staged note diffs behind.";
+        return false;
+    }
+
+    InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), directSaveToken);
+    if (FindNoteTextSnippetStart(directSaveToken) < 0) {
+        if (outError) *outError = L"Failed to insert the direct-save token.";
+        return false;
+    }
+    if (!file_output::SaveNoteFile(owner)) {
+        if (outError) *outError = L"Direct note save failed during UI automation.";
+        return false;
+    }
+    if (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0) {
+        if (outError) *outError = L"Direct note save did not clear the editor modified flag.";
+        return false;
+    }
+    if (g_noteDirty || g_noteNeedsIntegrate) {
+        if (outError) *outError = L"Direct note save left note dirty/integrate flags set.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) != 0) {
+        if (outError) *outError = L"Direct note save left staged note diffs behind.";
+        return false;
+    }
+
+    if (!SelectNoteTextSnippet(directSaveToken)) {
+        if (outError) *outError = L"Could not reselect the direct-save token for cleanup.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    if (!file_output::SaveNoteFile(owner)) {
+        if (outError) *outError = L"Cleanup direct note save failed during UI automation.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(directSaveToken) >= 0) {
+        if (outError) *outError = L"Cleanup direct-save token remained in the note.";
+        return false;
+    }
+    if (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0) {
+        if (outError) *outError = L"Cleanup direct note save left the editor modified flag set.";
+        return false;
+    }
+    return true;
+}
+
+static bool RunUiAutomationNoteSwitchUndoScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_currentNotePath.empty() || !g_hNoteEdit) {
+        if (outError) *outError = L"Note switch automation requires an open note editor.";
+        return false;
+    }
+
+    const std::wstring notePath = g_currentNotePath;
+    const int noteIndex = CurrentNoteIndex();
+    const int altNoteIndex = FindAlternativeFileIndex(g_hNoteList, noteIndex);
+    if (altNoteIndex < 0) {
+        if (outError) *outError = L"Could not find an alternate note for switch/undo automation.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before note switch/undo automation.";
+        return false;
+    }
+
+    const std::wstring token = L"ui-automation-note-switch-undo-token";
+    InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), token);
+    if (FindNoteTextSnippetStart(token) < 0) {
+        if (outError) *outError = L"Failed to insert the note switch/undo token.";
+        return false;
+    }
+
+    SetListboxSelAndNotify(g_hNoteList, altNoteIndex);
+    if (NormalizePathKey(std::filesystem::path(g_currentNotePath)) ==
+        NormalizePathKey(std::filesystem::path(notePath))) {
+        if (outError) *outError = L"Switching to the alternate note did not change the current note.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) == 0) {
+        if (outError) *outError = L"Switching away from a dirty note did not stage its snapshot.";
+        return false;
+    }
+
+    SetListboxSelAndNotify(g_hNoteList, noteIndex);
+    if (NormalizePathKey(std::filesystem::path(g_currentNotePath)) !=
+        NormalizePathKey(std::filesystem::path(notePath))) {
+        if (outError) *outError = L"Switching back did not restore the original note.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(token) < 0) {
+        if (outError) *outError = L"Switching back lost the staged note edit text.";
+        return false;
+    }
+    if (!SendUiAutomationNoteUndoChangedText()) {
+        if (outError) *outError = L"Note undo did not change the note text after switching files.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(token) >= 0) {
+        if (outError) *outError = L"Undo after switching files did not remove the note edit token.";
+        return false;
+    }
+    if (!SaveNoteIfDirty(owner)) {
+        if (outError) *outError = L"Saving the reverted note after switching files failed.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) != 0) {
+        if (outError) *outError = L"Reverting a switched note back to the original content left a staged diff behind.";
+        return false;
+    }
+    if (g_noteDirty || g_noteNeedsIntegrate) {
+        if (outError) *outError = L"Reverted switched note remained dirty or marked for integration.";
+        return false;
+    }
+    if (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0) {
+        if (outError) *outError = L"Reverted switched note left the editor modified flag set.";
+        return false;
+    }
+    return true;
+}
+
+static bool CleanupUiAutomationNoteToken(HWND owner,
+                                         const std::wstring& notePath,
+                                         const std::wstring& token,
+                                         std::wstring* outError) {
+    if (FindNoteTextSnippetStart(token) >= 0) {
+        if (!SelectNoteTextSnippet(token)) {
+            if (outError) *outError = L"Could not select the note automation token for cleanup.";
+            return false;
+        }
+        SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    }
+    if (!SaveNoteIfDirty(owner)) {
+        if (outError) *outError = L"Cleanup note save failed during automation.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(token) >= 0) {
+        if (outError) *outError = L"Cleanup note token remained after save.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) != 0) {
+        if (outError) *outError = L"Cleanup note save left staged note diffs behind.";
+        return false;
+    }
+    return true;
+}
+
+static bool RunUiAutomationStagedNoteRestoreViewScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_currentNotePath.empty() || !g_hNoteEdit) {
+        if (outError) *outError = L"Staged note restore-view automation requires an open note editor.";
+        return false;
+    }
+
+    const std::wstring notePath = g_currentNotePath;
+    const int noteIndex = CurrentNoteIndex();
+    const int altNoteIndex = FindAlternativeFileIndex(g_hNoteList, noteIndex);
+    if (altNoteIndex < 0) {
+        if (outError) *outError = L"Could not find an alternate note for staged restore-view automation.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before staged restore-view automation.";
+        return false;
+    }
+
+    const std::wstring token = L"ui-automation-staged-note-restore-view-token";
+    InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), token);
+    const int tokenStart = FindNoteTextSnippetStart(token);
+    if (tokenStart < 0) {
+        if (outError) *outError = L"Failed to insert the staged restore-view token.";
+        return false;
+    }
+
+    const DWORD expectedSelStart = static_cast<DWORD>(tokenStart + 14);
+    const DWORD expectedSelEnd = static_cast<DWORD>(tokenStart + 25);
+    SendMessageW(g_hNoteEdit, EM_SETSEL,
+                 static_cast<WPARAM>(expectedSelStart),
+                 static_cast<LPARAM>(expectedSelEnd));
+    SendMessageW(g_hNoteEdit, EM_SCROLLCARET, 0, 0);
+    const int expectedFirstVisibleLine = static_cast<int>(
+        SendMessageW(g_hNoteEdit, EM_GETFIRSTVISIBLELINE, 0, 0));
+
+    SetListboxSelAndNotify(g_hNoteList, altNoteIndex);
+    if (NormalizePathKey(std::filesystem::path(g_currentNotePath)) ==
+        NormalizePathKey(std::filesystem::path(notePath))) {
+        if (outError) *outError = L"Switching away did not change the current note for staged restore-view automation.";
+        return false;
+    }
+
+    std::optional<file_output::StagedDiffEntry> stagedEntry;
+    const std::wstring noteKey = NormalizePathKey(std::filesystem::path(notePath));
+    for (const auto& entry : file_output::ListStagedDiffEntries()) {
+        if (entry.kind != file_output::StagedDiffKind::Note) continue;
+        if (NormalizePathKey(std::filesystem::path(entry.targetPath)) != noteKey) continue;
+        if (!stagedEntry.has_value() || entry.isLatest) {
+            stagedEntry = entry;
+        }
+    }
+    if (!stagedEntry.has_value()) {
+        if (outError) *outError = L"Switching away did not create a staged note diff for restore-view automation.";
+        return false;
+    }
+    if (stagedEntry->targetPath.empty() || stagedEntry->stagePath.empty()) {
+        if (outError) *outError = L"Staged restore-view diff did not expose both target and stage paths.";
+        return false;
+    }
+    if (!stagedEntry->noteRestoreView.has_value()) {
+        if (outError) *outError = L"Staged note diff did not record restore-view metadata.";
+        return false;
+    }
+    const auto restore = *stagedEntry->noteRestoreView;
+    if (restore.contentRevision == 0) {
+        if (outError) *outError = L"Staged note restore metadata did not record content revision.";
+        return false;
+    }
+    if (restore.selectionStart != expectedSelStart || restore.selectionEnd != expectedSelEnd) {
+        if (outError) *outError = L"Staged note restore metadata did not record the editor selection.";
+        return false;
+    }
+    if (restore.firstVisibleLine != expectedFirstVisibleLine) {
+        if (outError) *outError = L"Staged note restore metadata did not record the first visible line.";
+        return false;
+    }
+
+    SetListboxSelAndNotify(g_hNoteList, noteIndex);
+    if (NormalizePathKey(std::filesystem::path(g_currentNotePath)) != noteKey) {
+        if (outError) *outError = L"Switching back did not restore the original note for staged restore-view automation.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(token) < 0) {
+        if (outError) *outError = L"Switching back lost the staged restore-view note text.";
+        return false;
+    }
+
+    DWORD actualSelStart = 0;
+    DWORD actualSelEnd = 0;
+    SendMessageW(g_hNoteEdit, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&actualSelStart),
+                 reinterpret_cast<LPARAM>(&actualSelEnd));
+    if (actualSelStart != expectedSelStart || actualSelEnd != expectedSelEnd) {
+        if (outError) *outError = L"Staged note restore did not restore the editor selection.";
+        return false;
+    }
+    const int actualFirstVisibleLine = static_cast<int>(
+        SendMessageW(g_hNoteEdit, EM_GETFIRSTVISIBLELINE, 0, 0));
+    if (actualFirstVisibleLine != expectedFirstVisibleLine) {
+        if (outError) *outError = L"Staged note restore did not restore the first visible line.";
+        return false;
+    }
+
+    return CleanupUiAutomationNoteToken(owner, notePath, token, outError);
+}
+static bool RunUiAutomationNoteBoundaryCommitScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_currentNotePath.empty() || !g_hNoteEdit) {
+        if (outError) *outError = L"Note boundary commit automation requires an open note editor.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before note boundary commit automation.";
+        return false;
+    }
+
+    const std::wstring notePath = g_currentNotePath;
+    const std::wstring escToken = L"ui-automation-note-esc-commit-token";
+    InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), escToken);
+    if (FindNoteTextSnippetStart(escToken) < 0) {
+        if (outError) *outError = L"Failed to insert the note Esc commit token.";
+        return false;
+    }
+    EnterNoteNormalMode(owner);
+    if (FindNoteTextSnippetStart(escToken) < 0) {
+        if (outError) *outError = L"Esc boundary lost the note edit token.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) == 0) {
+        if (outError) *outError = L"Esc boundary did not stage the note edit.";
+        return false;
+    }
+    if (!CleanupUiAutomationNoteToken(owner, notePath, escToken, outError)) return false;
+
+    const std::wstring toolToken = L"ui-automation-note-tool-switch-commit-token";
+    InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), toolToken);
+    if (FindNoteTextSnippetStart(toolToken) < 0) {
+        if (outError) *outError = L"Failed to insert the note tool-switch commit token.";
+        return false;
+    }
+
+    ToolMode targetMode = ToolMode::Pan;
+    if (g_toolMode == targetMode || !ToolModeEnabledForCurrentPdfView(targetMode)) {
+        targetMode = ToolMode::Select;
+    }
+    if (g_toolMode == targetMode || !ToolModeEnabledForCurrentPdfView(targetMode)) {
+        targetMode = ToolMode::Magnifier;
+    }
+    if (g_toolMode == targetMode || !ToolModeEnabledForCurrentPdfView(targetMode)) {
+        if (outError) *outError = L"Could not find an alternate enabled annotation tool for note boundary automation.";
+        return false;
+    }
+    if (!SelectAnnotToolMode(owner, targetMode, false, false)) {
+        if (outError) *outError = L"Annotation tool switch failed during note boundary automation.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(toolToken) < 0) {
+        if (outError) *outError = L"Tool switch boundary lost the note edit token.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) == 0) {
+        if (outError) *outError = L"Tool switch boundary did not stage the note edit.";
+        return false;
+    }
+    if (!CleanupUiAutomationNoteToken(owner, notePath, toolToken, outError)) return false;
+
+    const std::wstring pdfClickToken = L"ui-automation-note-pdf-click-commit-token";
+    InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), pdfClickToken);
+    if (FindNoteTextSnippetStart(pdfClickToken) < 0) {
+        if (outError) *outError = L"Failed to insert the note PDF-click commit token.";
+        return false;
+    }
+    if (!g_hPdfView || !IsWindow(g_hPdfView)) {
+        if (outError) *outError = L"PDF view was not available for note PDF-click boundary automation.";
+        return false;
+    }
+    const LPARAM clickPoint = MAKELPARAM(4, 4);
+    SendMessageW(g_hPdfView, WM_LBUTTONDOWN, 0, clickPoint);
+    SendMessageW(g_hPdfView, WM_LBUTTONUP, 0, clickPoint);
+    if (FindNoteTextSnippetStart(pdfClickToken) < 0) {
+        if (outError) *outError = L"PDF click boundary lost the note edit token.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) == 0) {
+        if (outError) *outError = L"PDF click boundary did not stage the note edit.";
+        return false;
+    }
+    return CleanupUiAutomationNoteToken(owner, notePath, pdfClickToken, outError);
+}
+
+static bool RunUiAutomationDeferredNoteInitialInputScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_currentSessionPath.empty() || !g_hNoteEdit || g_currentNotePath.empty()) {
+        if (outError) *outError = L"Deferred note initial-input automation requires an open session and note editor.";
+        return false;
+    }
+    if (!SaveNoteIfDirty(owner)) {
+        if (outError) *outError = L"Failed to save the current note before deferred-note automation.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before deferred-note automation.";
+        return false;
+    }
+
+    const std::wstring previousNotePath = g_currentNotePath;
+    const bool previousRenderEnabled = g_noteRenderEnabled;
+    const bool previousRawOnly = g_noteRawOnly;
+    const bool previousNoteNormalMode = g_noteNormalMode;
+
+    auto restorePreviousNote = [&]() {
+        file_output::DiscardAllStagedDiffs(owner);
+        g_noteRenderEnabled = previousRenderEnabled;
+        g_noteRawOnly = previousRawOnly;
+        g_noteNormalMode = previousNoteNormalMode;
+        if (!previousNotePath.empty()) {
+            LoadNoteFile(owner, previousNotePath);
+            SyncBottomPaneAfterNoteLoad(owner);
+        } else {
+            ClearNoteEditorSilently(owner, L"");
+            g_previewNote.clear();
+            RefreshBottomPaneView();
+        }
+        RefreshMainWindowUiState(owner);
+    };
+
+    struct DeferredNoteCase {
+        bool renderEnabled;
+        bool rawOnly;
+        const wchar_t* label;
+        const wchar_t* token;
+    };
+    const DeferredNoteCase cases[] = {
+        {true, false, L"render-on", L"ui-automation-deferred-note-render-on"},
+        {false, true, L"render-off", L"ui-automation-deferred-note-render-off"},
+    };
+
+    for (const auto& tc : cases) {
+        if (!file_output::DiscardAllStagedDiffs(owner)) {
+            restorePreviousNote();
+            if (outError) *outError = L"Failed to clear staged diffs before deferred-note case.";
+            return false;
+        }
+        ClearNoteEditorSilently(owner, L"");
+        g_previewNote.clear();
+        g_noteRenderEnabled = tc.renderEnabled;
+        g_noteRawOnly = tc.rawOnly;
+        g_noteNormalMode = false;
+        RefreshBottomPaneView();
+        RefreshMainWindowUiState(owner);
+
+        const std::wstring token = tc.token;
+        for (wchar_t ch : token) {
+            SendMessageW(g_hNoteEdit, WM_CHAR, static_cast<WPARAM>(ch), 1);
+        }
+        if (g_currentNotePath.empty()) {
+            restorePreviousNote();
+            if (outError) *outError = std::wstring(L"Deferred note initial input did not establish a note path: ") + tc.label;
+            return false;
+        }
+        const std::wstring deferredNotePath = g_currentNotePath;
+        if (FindNoteTextSnippetStart(token) < 0) {
+            restorePreviousNote();
+            if (outError) *outError = std::wstring(L"Deferred note initial input was rejected by the editor: ") + tc.label;
+            return false;
+        }
+        if (!g_noteDirty) {
+            restorePreviousNote();
+            if (outError) *outError = std::wstring(L"Deferred note initial input did not mark the note dirty: ") + tc.label;
+            return false;
+        }
+        if (!SaveNoteIfDirty(owner)) {
+            restorePreviousNote();
+            if (outError) *outError = std::wstring(L"Deferred note initial input did not save to stage: ") + tc.label;
+            return false;
+        }
+        if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, deferredNotePath) == 0) {
+            restorePreviousNote();
+            if (outError) *outError = std::wstring(L"Deferred note initial input did not create a note stage: ") + tc.label;
+            return false;
+        }
+        const std::filesystem::path stagePath = file_output::FindLatestStagedNotePathFor(deferredNotePath);
+        std::string stagedBytes;
+        std::wstring stageErr;
+        if (stagePath.empty() ||
+            !file_output::LoadResolvedStagedNoteBytes(deferredNotePath, stagePath, &stagedBytes, &stageErr)) {
+            restorePreviousNote();
+            if (outError) *outError = std::wstring(L"Deferred note initial input stage could not be read: ") + tc.label;
+            return false;
+        }
+        const std::string tokenUtf8 = WideToUTF8(token);
+        if (stagedBytes.find(tokenUtf8) == std::string::npos) {
+            restorePreviousNote();
+            if (outError) *outError = std::wstring(L"Deferred note initial input did not reach staged bytes: ") + tc.label;
+            return false;
+        }
+    }
+
+    restorePreviousNote();
+    return true;
+}
+
+static bool RunUiAutomationExistingNoteRenderModeSaveScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_currentNotePath.empty() || !g_hNoteEdit) {
+        if (outError) *outError = L"Existing note render-mode save automation requires an open note editor.";
+        return false;
+    }
+    if (!SaveNoteIfDirty(owner)) {
+        if (outError) *outError = L"Failed to save the current note before render-mode save automation.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before render-mode save automation.";
+        return false;
+    }
+
+    const std::wstring notePath = g_currentNotePath;
+    const bool previousRenderEnabled = g_noteRenderEnabled;
+    const bool previousRawOnly = g_noteRawOnly;
+    const bool previousNoteNormalMode = g_noteNormalMode;
+
+    auto restoreMode = [&]() {
+        g_noteRenderEnabled = previousRenderEnabled;
+        g_noteRawOnly = previousRawOnly;
+        g_noteNormalMode = previousNoteNormalMode;
+        RefreshBottomPaneView();
+        RefreshMainWindowUiState(owner);
+    };
+
+    struct RenderModeCase {
+        bool renderEnabled;
+        bool rawOnly;
+        const wchar_t* label;
+        const wchar_t* token;
+    };
+    const RenderModeCase cases[] = {
+        {true, false, L"render-on", L"ui-automation-existing-note-render-on-save"},
+        {false, true, L"render-off", L"ui-automation-existing-note-render-off-save"},
+    };
+
+    for (const auto& tc : cases) {
+        if (!file_output::DiscardAllStagedDiffs(owner)) {
+            restoreMode();
+            if (outError) *outError = L"Failed to clear staged diffs before render-mode case.";
+            return false;
+        }
+        g_noteRenderEnabled = tc.renderEnabled;
+        g_noteRawOnly = tc.rawOnly;
+        g_noteNormalMode = false;
+        RefreshBottomPaneView();
+        RefreshMainWindowUiState(owner);
+
+        const std::wstring token = tc.token;
+        InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), token);
+        if (FindNoteTextSnippetStart(token) < 0) {
+            restoreMode();
+            if (outError) *outError = std::wstring(L"Existing note render-mode edit was rejected: ") + tc.label;
+            return false;
+        }
+        if (!g_noteDirty) {
+            restoreMode();
+            if (outError) *outError = std::wstring(L"Existing note render-mode edit did not mark the note dirty: ") + tc.label;
+            return false;
+        }
+        if (!SaveNoteIfDirty(owner)) {
+            restoreMode();
+            if (outError) *outError = std::wstring(L"Existing note render-mode edit did not save to stage: ") + tc.label;
+            return false;
+        }
+        if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) == 0) {
+            restoreMode();
+            if (outError) *outError = std::wstring(L"Existing note render-mode edit did not create a note stage: ") + tc.label;
+            return false;
+        }
+        const std::filesystem::path stagePath = file_output::FindLatestStagedNotePathFor(notePath);
+        std::string stagedBytes;
+        std::wstring stageErr;
+        if (stagePath.empty() ||
+            !file_output::LoadResolvedStagedNoteBytes(notePath, stagePath, &stagedBytes, &stageErr)) {
+            restoreMode();
+            if (outError) *outError = std::wstring(L"Existing note render-mode stage could not be read: ") + tc.label;
+            return false;
+        }
+        const std::string tokenUtf8 = WideToUTF8(token);
+        if (stagedBytes.find(tokenUtf8) == std::string::npos) {
+            restoreMode();
+            if (outError) *outError = std::wstring(L"Existing note render-mode edit did not reach staged bytes: ") + tc.label;
+            return false;
+        }
+        if (!CleanupUiAutomationNoteToken(owner, notePath, token, outError)) {
+            restoreMode();
+            return false;
+        }
+    }
+
+    restoreMode();
+    return true;
+}
+static bool RunUiAutomationPdfActiveEditSaveScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_pdf.kind != DocKind::Pdf || CurrentLogicalPdfPath().empty() ||
+        !g_hPdfView || g_pdf.pages.empty()) {
+        if (outError) *outError = L"PDF save automation requires an open PDF document.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before PDF save automation.";
+        return false;
+    }
+
+    const std::wstring pdfPath = CurrentLogicalPdfPath();
+    const std::wstring token = L"ui automation pdf active edit";
+    const auto& page = g_pdf.pages.front();
+    const double left = std::clamp(24.0, 0.0, std::max(24.0, page.widthPt - 48.0));
+    const double right = std::min(page.widthPt, left + 140.0);
+    const double top = std::max(32.0, std::min(page.heightPt, 96.0));
+    const double bottom = std::max(0.0, top - 28.0);
+
+    g_pdf.editingText = true;
+    g_pdf.editPage = 0;
+    g_pdf.editX1 = left;
+    g_pdf.editX2 = right;
+    g_pdf.editY1 = top;
+    g_pdf.editY2 = bottom;
+    g_pdf.editText = token;
+    g_pdf.editCaret = g_pdf.editText.size();
+    g_pdf.editSelStart = g_pdf.editCaret;
+    g_pdf.editSelEnd = g_pdf.editCaret;
+    g_pdf.editSelectingText = false;
+    g_pdf.editSelAnchor = g_pdf.editCaret;
+    g_pdf.editLayoutDirty = true;
+    g_pdf.editInnerLayoutW = 0;
+    g_pdf.editLayout.lines.clear();
+    g_pdf.editFontName = g_textFontName;
+    g_pdf.editFontPt = (g_textFontPt > 0.0) ? g_textFontPt : 12.0;
+    g_pdf.imeComp.clear();
+    g_pdf.imeComposing = false;
+    g_annotsDirty = false;
+    g_annotsNeedsIntegrate = false;
+
+    if (!SaveAnnotationsIfDirty(owner)) {
+        if (outError) *outError = L"Saving annotations while a textbox edit was active failed.";
+        return false;
+    }
+
+    const std::filesystem::path stagePath = file_output::FindLatestStagedClropPathForPdf(pdfPath);
+    if (stagePath.empty()) {
+        if (outError) *outError = L"Saving an active PDF textbox edit did not create a staged clrop diff.";
+        return false;
+    }
+
+    std::vector<Annotation> loaded;
+    bool mismatch = false;
+    std::wstring err;
+    if (!clrop_bridge::LoadAnnotations(stagePath.wstring(), pdfPath, loaded, mismatch, nullptr, err,
+                                       clrop_bridge::LoadAnnotationsValidation::None)) {
+        if (outError) *outError = L"Failed to load the staged clrop created from an active textbox edit.";
+        return false;
+    }
+
+    bool foundTextBox = false;
+    for (const auto& ann : loaded) {
+        if (ann.type == Annotation::Type::TextBox && ann.text == token) {
+            foundTextBox = true;
+            break;
+        }
+    }
+    if (!foundTextBox) {
+        if (outError) *outError = L"Active textbox edit text was missing from the staged clrop diff.";
+        return false;
+    }
+
+    g_pdf.editingText = false;
+    g_pdf.editPage = -1;
+    g_pdf.editText.clear();
+    g_pdf.editCaret = 0;
+    g_pdf.editSelStart = 0;
+    g_pdf.editSelEnd = 0;
+    g_pdf.editSelectingText = false;
+    g_pdf.editSelAnchor = 0;
+    g_pdf.editLayoutDirty = true;
+    g_pdf.editInnerLayoutW = 0;
+    g_pdf.editLayout.lines.clear();
+    g_pdf.imeComp.clear();
+    g_pdf.imeComposing = false;
+    g_annotsDirty = false;
+    g_annotsNeedsIntegrate = false;
+    file_output::DiscardAllStagedDiffs(owner);
+    RefreshMainWindowUiState(owner);
+    if (g_hPdfView) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+    return true;
+}
+
+static bool RunUiAutomationPdfTextboxEscCommitScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_pdf.kind != DocKind::Pdf || CurrentLogicalPdfPath().empty() ||
+        !g_hPdfView || g_pdf.pages.empty()) {
+        if (outError) *outError = L"PDF textbox Esc automation requires an open PDF document.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before PDF textbox Esc automation.";
+        return false;
+    }
+
+    const std::wstring pdfPath = CurrentLogicalPdfPath();
+    const std::wstring token = L"ui automation pdf textbox esc commit";
+    const auto& page = g_pdf.pages.front();
+    const double left = std::clamp(30.0, 0.0, std::max(30.0, page.widthPt - 60.0));
+    const double right = std::min(page.widthPt, left + 180.0);
+    const double top = std::max(40.0, std::min(page.heightPt, 120.0));
+    const double bottom = std::max(0.0, top - 30.0);
+
+    g_pdf.editingText = true;
+    g_pdf.editPage = 0;
+    g_pdf.editX1 = left;
+    g_pdf.editX2 = right;
+    g_pdf.editY1 = top;
+    g_pdf.editY2 = bottom;
+    g_pdf.editText = token;
+    g_pdf.editCaret = g_pdf.editText.size();
+    g_pdf.editSelStart = g_pdf.editCaret;
+    g_pdf.editSelEnd = g_pdf.editCaret;
+    g_pdf.editSelectingText = false;
+    g_pdf.editSelAnchor = g_pdf.editCaret;
+    g_pdf.editLayoutDirty = true;
+    g_pdf.editInnerLayoutW = 0;
+    g_pdf.editLayout.lines.clear();
+    g_pdf.editFontName = g_textFontName;
+    g_pdf.editFontPt = (g_textFontPt > 0.0) ? g_textFontPt : 12.0;
+    g_pdf.imeComp.clear();
+    g_pdf.imeComposing = false;
+    g_annotsDirty = false;
+    g_annotsNeedsIntegrate = false;
+
+    SendMessageW(g_hPdfView, WM_KEYDOWN, VK_ESCAPE, 0);
+    if (g_pdf.editingText) {
+        if (outError) *outError = L"Esc did not end PDF textbox editing.";
+        return false;
+    }
+
+    bool foundInMemory = false;
+    for (const auto& ann : g_annots) {
+        if (ann.type == Annotation::Type::TextBox && ann.text == token) {
+            foundInMemory = true;
+            break;
+        }
+    }
+    if (!foundInMemory) {
+        if (outError) *outError = L"Esc ended PDF textbox editing without committing the text.";
+        return false;
+    }
+    if (!g_annotsDirty || !g_annotsNeedsIntegrate) {
+        if (outError) *outError = L"Esc-committed PDF textbox did not mark annotations dirty.";
+        return false;
+    }
+
+    if (!SaveAnnotationsIfDirty(owner)) {
+        if (outError) *outError = L"Saving an Esc-committed PDF textbox failed.";
+        return false;
+    }
+    const std::filesystem::path stagePath = file_output::FindLatestStagedClropPathForPdf(pdfPath);
+    if (stagePath.empty()) {
+        if (outError) *outError = L"Esc-committed PDF textbox did not create a staged clrop diff.";
+        return false;
+    }
+
+    std::vector<Annotation> loaded;
+    bool mismatch = false;
+    std::wstring err;
+    if (!clrop_bridge::LoadAnnotations(stagePath.wstring(), pdfPath, loaded, mismatch, nullptr, err,
+                                       clrop_bridge::LoadAnnotationsValidation::None)) {
+        if (outError) *outError = L"Failed to load the staged clrop created from an Esc-committed textbox.";
+        return false;
+    }
+    bool foundStaged = false;
+    for (const auto& ann : loaded) {
+        if (ann.type == Annotation::Type::TextBox && ann.text == token) {
+            foundStaged = true;
+            break;
+        }
+    }
+    if (!foundStaged) {
+        if (outError) *outError = L"Esc-committed PDF textbox text was missing from the staged clrop diff.";
+        return false;
+    }
+
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before PDF textbox focus-boundary automation.";
+        return false;
+    }
+    const std::wstring focusToken = L"ui automation pdf textbox focus commit";
+    g_pdf.editingText = true;
+    g_pdf.editPage = 0;
+    g_pdf.editX1 = left;
+    g_pdf.editX2 = right;
+    g_pdf.editY1 = top;
+    g_pdf.editY2 = bottom;
+    g_pdf.editText = focusToken;
+    g_pdf.editCaret = g_pdf.editText.size();
+    g_pdf.editSelStart = g_pdf.editCaret;
+    g_pdf.editSelEnd = g_pdf.editCaret;
+    g_pdf.editSelectingText = false;
+    g_pdf.editSelAnchor = g_pdf.editCaret;
+    g_pdf.editLayoutDirty = true;
+    g_pdf.editInnerLayoutW = 0;
+    g_pdf.editLayout.lines.clear();
+    g_pdf.editFontName = g_textFontName;
+    g_pdf.editFontPt = (g_textFontPt > 0.0) ? g_textFontPt : 12.0;
+    g_pdf.imeComp.clear();
+    g_pdf.imeComposing = false;
+    g_annotsDirty = false;
+    g_annotsNeedsIntegrate = false;
+
+    SendMessageW(g_hPdfView, WM_KILLFOCUS, reinterpret_cast<WPARAM>(owner), 0);
+    if (g_pdf.editingText) {
+        if (outError) *outError = L"Focus loss did not end PDF textbox editing.";
+        return false;
+    }
+    bool foundFocusInMemory = false;
+    for (const auto& ann : g_annots) {
+        if (ann.type == Annotation::Type::TextBox && ann.text == focusToken) {
+            foundFocusInMemory = true;
+            break;
+        }
+    }
+    if (!foundFocusInMemory) {
+        if (outError) *outError = L"Focus loss ended PDF textbox editing without committing the text.";
+        return false;
+    }
+    if (!g_annotsDirty || !g_annotsNeedsIntegrate) {
+        if (outError) *outError = L"Focus-committed PDF textbox did not mark annotations dirty.";
+        return false;
+    }
+    if (!SaveAnnotationsIfDirty(owner)) {
+        if (outError) *outError = L"Saving a focus-committed PDF textbox failed.";
+        return false;
+    }
+    const std::filesystem::path focusStagePath = file_output::FindLatestStagedClropPathForPdf(pdfPath);
+    if (focusStagePath.empty()) {
+        if (outError) *outError = L"Focus-committed PDF textbox did not create a staged clrop diff.";
+        return false;
+    }
+    std::vector<Annotation> focusLoaded;
+    mismatch = false;
+    err.clear();
+    if (!clrop_bridge::LoadAnnotations(focusStagePath.wstring(), pdfPath, focusLoaded, mismatch, nullptr, err,
+                                       clrop_bridge::LoadAnnotationsValidation::None)) {
+        if (outError) *outError = L"Failed to load the staged clrop created from a focus-committed textbox.";
+        return false;
+    }
+    bool foundFocusStaged = false;
+    for (const auto& ann : focusLoaded) {
+        if (ann.type == Annotation::Type::TextBox && ann.text == focusToken) {
+            foundFocusStaged = true;
+            break;
+        }
+    }
+    if (!foundFocusStaged) {
+        if (outError) *outError = L"Focus-committed PDF textbox text was missing from the staged clrop diff.";
+        return false;
+    }
+
+    g_annotsDirty = false;
+    g_annotsNeedsIntegrate = false;
+    file_output::DiscardAllStagedDiffs(owner);
+    RefreshMainWindowUiState(owner);
+    if (g_hPdfView) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+    return true;
+}
+
+static bool RunUiAutomationAnnotListLatestVisibleScenario(HWND owner, std::wstring* outError) {
+    if (!g_hAnnotList || g_pdf.kind != DocKind::Pdf || g_pdf.pages.empty()) {
+        if (outError) *outError = L"Annotation list latest-visible automation requires an open PDF and annot list.";
+        return false;
+    }
+
+    const auto originalAnnots = g_annots;
+    const int originalSel = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETCURSEL, 0, 0));
+    auto restore = [&]() {
+        g_annots = originalAnnots;
+        RefreshAnnotPanel();
+        if (originalSel >= 0 && originalSel < static_cast<int>(g_annots.size())) {
+            SendMessageW(g_hAnnotList, LB_SETCURSEL, static_cast<WPARAM>(originalSel), 0);
+        }
+        UpdateAnnotPanelSummary();
+    };
+
+    g_annots.clear();
+    const auto& page = g_pdf.pages.front();
+    for (int i = 0; i < 12; ++i) {
+        Annotation ann;
+        ann.type = Annotation::Type::TextBox;
+        ann.pageIndex = 0;
+        ann.x1 = 24.0;
+        ann.x2 = std::min(page.widthPt, 120.0);
+        ann.y1 = std::max(30.0, page.heightPt - 24.0 - i * 2.0);
+        ann.y2 = std::max(0.0, ann.y1 - 18.0);
+        ann.text = L"ui automation annot list " + std::to_wstring(i);
+        ann.fontName = g_textFontName;
+        ann.fontPt = (g_textFontPt > 0.0) ? g_textFontPt : 12.0;
+        ann.color = g_activeColor;
+        g_annots.push_back(ann);
+    }
+
+    RequestAnnotPanelRevealLatest();
+    RefreshAnnotPanel();
+
+    const int count = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETCOUNT, 0, 0));
+    const int sel = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETCURSEL, 0, 0));
+    const int top = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETTOPINDEX, 0, 0));
+    if (count != static_cast<int>(g_annots.size()) || count <= 0) {
+        restore();
+        if (outError) *outError = L"Annotation list latest-visible automation did not populate the list.";
+        return false;
+    }
+    if (sel != count - 1) {
+        restore();
+        if (outError) *outError = L"Annotation list did not select the latest annotation after reveal request.";
+        return false;
+    }
+    if (top < 0 || top > sel) {
+        restore();
+        if (outError) *outError = L"Annotation list top index is inconsistent after latest reveal.";
+        return false;
+    }
+
+    restore();
+    return true;
+}
+static bool RunUiAutomationPdfTextboxTripleClickCopyFocusScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_pdf.kind != DocKind::Pdf || !g_hPdfView || g_pdf.pages.empty()) {
+        if (outError) *outError = L"PDF textbox triple-click automation requires an open PDF document.";
+        return false;
+    }
+
+    const auto originalAnnots = g_annots;
+    const bool originalAnnotsDirty = g_annotsDirty;
+    const bool originalAnnotsNeedsIntegrate = g_annotsNeedsIntegrate;
+    auto restore = [&]() {
+        g_annots = originalAnnots;
+        g_annotsDirty = originalAnnotsDirty;
+        g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+        g_pdf.editingText = false;
+        g_pdf.editPage = -1;
+        g_pdf.editText.clear();
+        g_pdf.editCaret = 0;
+        g_pdf.editSelStart = 0;
+        g_pdf.editSelEnd = 0;
+        g_pdf.editSelectingText = false;
+        g_pdf.editSelectMoved = false;
+        g_pdf.pendingTextBoxHit = false;
+        g_pdf.pendingTextBoxIndex = -1;
+        g_pdf.imeComp.clear();
+        g_pdf.imeComposing = false;
+        g_pdf.textBoxRapidClickTick = 0;
+        g_pdf.textBoxRapidClickCount = 0;
+        g_pdf.textBoxRapidClickPage = -1;
+        if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    };
+
+    const auto& page = g_pdf.pages.front();
+    const double left = std::clamp(36.0, 0.0, std::max(36.0, page.widthPt - 72.0));
+    const double right = std::min(page.widthPt, left + 150.0);
+    const double top = std::max(40.0, std::min(page.heightPt, 140.0));
+    const double bottom = std::max(0.0, top - 30.0);
+
+    Annotation existing;
+    existing.type = Annotation::Type::TextBox;
+    existing.pageIndex = 0;
+    existing.x1 = left;
+    existing.x2 = right;
+    existing.y1 = top;
+    existing.y2 = bottom;
+    existing.text = L"ui automation triple click existing copy";
+    existing.fontName = g_textFontName;
+    existing.fontPt = (g_textFontPt > 0.0) ? g_textFontPt : 12.0;
+    existing.color = g_activeColor;
+    g_annots.push_back(existing);
+    const int existingIndex = static_cast<int>(g_annots.size()) - 1;
+
+    g_pdf.pendingTextBoxHit = true;
+    g_pdf.pendingTextBoxIndex = existingIndex;
+    g_pdf.textBoxRapidClickTick = GetTickCount64();
+    g_pdf.textBoxRapidClickCount = 2;
+    g_pdf.textBoxRapidClickPage = 0;
+    g_pdf.textBoxRapidClickX1 = std::min(left, right);
+    g_pdf.textBoxRapidClickX2 = std::max(left, right);
+    g_pdf.textBoxRapidClickY1 = std::min(top, bottom);
+    g_pdf.textBoxRapidClickY2 = std::max(top, bottom);
+    if (g_hNoteEdit) SetFocus(g_hNoteEdit);
+    SendMessageW(g_hPdfView, WM_LBUTTONUP, 0, MAKELPARAM(12, 12));
+
+    if (g_pdf.pendingTextBoxHit || g_pdf.pendingTextBoxIndex >= 0 || g_pdf.editingText) {
+        restore();
+        if (outError) *outError = L"Triple-click copy left an existing PDF textbox in pending/edit state.";
+        return false;
+    }
+    if (GetFocus() != g_hPdfView) {
+        restore();
+        if (outError) *outError = L"Triple-click copy did not return focus to the PDF view.";
+        return false;
+    }
+    if (g_annots.size() != originalAnnots.size() + 1 ||
+        g_annots.back().type != Annotation::Type::TextBox ||
+        g_annots.back().text != existing.text) {
+        restore();
+        if (outError) *outError = L"Triple-click copy changed the existing PDF textbox annotation.";
+        return false;
+    }
+
+    const std::wstring activeToken = L"ui automation triple click active edit copy";
+    g_pdf.editingText = true;
+    g_pdf.editPage = 0;
+    g_pdf.editX1 = left;
+    g_pdf.editX2 = right;
+    g_pdf.editY1 = top;
+    g_pdf.editY2 = bottom;
+    g_pdf.editText = activeToken;
+    g_pdf.editCaret = g_pdf.editText.size();
+    g_pdf.editSelStart = g_pdf.editCaret;
+    g_pdf.editSelEnd = g_pdf.editCaret;
+    g_pdf.editSelectingText = true;
+    g_pdf.editSelectMoved = false;
+    g_pdf.editSelAnchor = g_pdf.editCaret;
+    g_pdf.editLayoutDirty = true;
+    g_pdf.editInnerLayoutW = 0;
+    g_pdf.editLayout.lines.clear();
+    g_pdf.editFontName = g_textFontName;
+    g_pdf.editFontPt = (g_textFontPt > 0.0) ? g_textFontPt : 12.0;
+    g_pdf.imeComp.clear();
+    g_pdf.imeComposing = false;
+    g_pdf.textBoxRapidClickTick = GetTickCount64();
+    g_pdf.textBoxRapidClickCount = 2;
+    g_pdf.textBoxRapidClickPage = 0;
+    g_pdf.textBoxRapidClickX1 = std::min(left, right);
+    g_pdf.textBoxRapidClickX2 = std::max(left, right);
+    g_pdf.textBoxRapidClickY1 = std::min(top, bottom);
+    g_pdf.textBoxRapidClickY2 = std::max(top, bottom);
+    if (g_hNoteEdit) SetFocus(g_hNoteEdit);
+    SendMessageW(g_hPdfView, WM_LBUTTONUP, 0, MAKELPARAM(12, 12));
+
+    if (g_pdf.editingText || g_pdf.editSelectingText) {
+        restore();
+        if (outError) *outError = L"Triple-click copy did not end active PDF textbox editing.";
+        return false;
+    }
+    if (GetFocus() != g_hPdfView) {
+        restore();
+        if (outError) *outError = L"Triple-click copy after active edit did not focus the PDF view.";
+        return false;
+    }
+    bool foundCommitted = false;
+    for (const auto& ann : g_annots) {
+        if (ann.type == Annotation::Type::TextBox && ann.text == activeToken) {
+            foundCommitted = true;
+            break;
+        }
+    }
+    if (!foundCommitted) {
+        restore();
+        if (outError) *outError = L"Triple-click copy ended active edit without committing the textbox text.";
+        return false;
+    }
+
+    restore();
+    return true;
+}
+static bool RunUiAutomationPendingLinkCancelStageScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_pdf.kind != DocKind::Pdf || CurrentLogicalPdfPath().empty() || !g_hPdfView) {
+        if (outError) *outError = L"Pending-link cancel automation requires an open PDF document.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before pending-link cancel automation.";
+        return false;
+    }
+
+    const std::wstring pdfPath = CurrentLogicalPdfPath();
+    const std::vector<Annotation> originalAnnots = g_annots;
+    const bool originalAnnotsDirty = g_annotsDirty;
+    const bool originalAnnotsNeedsIntegrate = g_annotsNeedsIntegrate;
+    const LinkPending originalLinkPending = g_linkPending;
+
+    const std::wstring linkId = L"ui-automation-pending-link-cancel-stage";
+    Annotation marker;
+    marker.type = Annotation::Type::LinkMarker;
+    marker.pageIndex = 0;
+    marker.x1 = 16.0;
+    marker.y1 = 16.0;
+    marker.x2 = 16.0;
+    marker.y2 = 16.0;
+    marker.width = 6.0;
+    marker.color = RGB(40, 40, 40);
+    marker.linkId = linkId;
+    g_annots.push_back(marker);
+
+    g_linkPending = {};
+    g_linkPending.active = true;
+    g_linkPending.id = linkId;
+    g_linkPending.havePdf = true;
+    g_linkPending.pdfPoints = 1;
+    g_linkPending.pdfPage = 0;
+    g_linkPending.pdfAnnotIndex = static_cast<int>(g_annots.size()) - 1;
+    RememberPendingLinkPdfPath(pdfPath);
+    UpdateLinkModeButtonState(true);
+
+    CancelPendingLinkMode(owner);
+    if (g_linkPending.active) {
+        g_annots = originalAnnots;
+        g_annotsDirty = originalAnnotsDirty;
+        g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+        g_linkPending = originalLinkPending;
+        UpdateLinkModeButtonState(originalLinkPending.active);
+        if (outError) *outError = L"Pending link mode stayed active after cancellation.";
+        return false;
+    }
+    for (const auto& ann : g_annots) {
+        if (ann.type == Annotation::Type::LinkMarker && ann.linkId == linkId) {
+            g_annots = originalAnnots;
+            g_annotsDirty = originalAnnotsDirty;
+            g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+            g_linkPending = originalLinkPending;
+            UpdateLinkModeButtonState(originalLinkPending.active);
+            if (outError) *outError = L"Pending PDF link marker remained in memory after cancellation.";
+            return false;
+        }
+    }
+    if (!g_annotsDirty || !g_annotsNeedsIntegrate) {
+        g_annots = originalAnnots;
+        g_annotsDirty = originalAnnotsDirty;
+        g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+        g_linkPending = originalLinkPending;
+        UpdateLinkModeButtonState(originalLinkPending.active);
+        if (outError) *outError = L"Pending link cancellation did not mark annotations dirty for staging.";
+        return false;
+    }
+    if (!SaveAnnotationsIfDirty(owner)) {
+        g_annots = originalAnnots;
+        g_annotsDirty = originalAnnotsDirty;
+        g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+        g_linkPending = originalLinkPending;
+        UpdateLinkModeButtonState(originalLinkPending.active);
+        if (outError) *outError = L"Pending link cancellation could not be saved to stage.";
+        return false;
+    }
+
+    const std::filesystem::path stagePath = file_output::FindLatestStagedClropPathForPdf(pdfPath);
+    if (stagePath.empty()) {
+        g_annots = originalAnnots;
+        g_annotsDirty = originalAnnotsDirty;
+        g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+        g_linkPending = originalLinkPending;
+        UpdateLinkModeButtonState(originalLinkPending.active);
+        if (outError) *outError = L"Pending link cancellation did not create a staged clrop diff.";
+        return false;
+    }
+
+    std::vector<Annotation> stagedAnnots;
+    bool mismatch = false;
+    std::wstring err;
+    if (!clrop_bridge::LoadAnnotations(stagePath.wstring(), pdfPath, stagedAnnots, mismatch, nullptr, err,
+                                       clrop_bridge::LoadAnnotationsValidation::None)) {
+        g_annots = originalAnnots;
+        g_annotsDirty = originalAnnotsDirty;
+        g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+        g_linkPending = originalLinkPending;
+        UpdateLinkModeButtonState(originalLinkPending.active);
+        if (outError) *outError = L"Failed to load staged clrop after pending link cancellation.";
+        return false;
+    }
+    for (const auto& ann : stagedAnnots) {
+        if (ann.type == Annotation::Type::LinkMarker && ann.linkId == linkId) {
+            g_annots = originalAnnots;
+            g_annotsDirty = originalAnnotsDirty;
+            g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+            g_linkPending = originalLinkPending;
+            UpdateLinkModeButtonState(originalLinkPending.active);
+            if (outError) *outError = L"Canceled pending link marker remained in staged clrop.";
+            return false;
+        }
+    }
+
+    g_annots = originalAnnots;
+    g_annotsDirty = originalAnnotsDirty;
+    g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+    g_linkPending = originalLinkPending;
+    UpdateLinkModeButtonState(originalLinkPending.active);
+    file_output::DiscardAllStagedDiffs(owner);
+    RefreshAnnotPanel();
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    RefreshMainWindowUiState(owner);
+    return true;
+}
+
+static bool RunUiAutomationExitBoundaryCommitScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_currentNotePath.empty() || !g_hNoteEdit ||
+        g_pdf.kind != DocKind::Pdf || CurrentLogicalPdfPath().empty() ||
+        !g_hPdfView || g_pdf.pages.empty()) {
+        if (outError) *outError = L"Exit boundary automation requires an open note and PDF.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before exit boundary automation.";
+        return false;
+    }
+
+    const std::wstring notePath = g_currentNotePath;
+    const std::wstring noteToken = L"ui-automation-exit-note-commit-token";
+    InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), noteToken);
+    if (FindNoteTextSnippetStart(noteToken) < 0) {
+        if (outError) *outError = L"Failed to insert the exit-boundary note token.";
+        return false;
+    }
+
+    const std::vector<Annotation> originalAnnots = g_annots;
+    const bool originalAnnotsDirty = g_annotsDirty;
+    const bool originalAnnotsNeedsIntegrate = g_annotsNeedsIntegrate;
+
+    const std::wstring pdfToken = L"ui automation exit pdf textbox commit";
+    const auto& page = g_pdf.pages.front();
+    const double left = std::clamp(36.0, 0.0, std::max(36.0, page.widthPt - 72.0));
+    const double right = std::min(page.widthPt, left + 190.0);
+    const double top = std::max(48.0, std::min(page.heightPt, 136.0));
+    const double bottom = std::max(0.0, top - 32.0);
+
+    g_pdf.editingText = true;
+    g_pdf.editPage = 0;
+    g_pdf.editX1 = left;
+    g_pdf.editX2 = right;
+    g_pdf.editY1 = top;
+    g_pdf.editY2 = bottom;
+    g_pdf.editText = pdfToken;
+    g_pdf.editCaret = g_pdf.editText.size();
+    g_pdf.editSelStart = g_pdf.editCaret;
+    g_pdf.editSelEnd = g_pdf.editCaret;
+    g_pdf.editSelectingText = false;
+    g_pdf.editSelAnchor = g_pdf.editCaret;
+    g_pdf.editLayoutDirty = true;
+    g_pdf.editInnerLayoutW = 0;
+    g_pdf.editLayout.lines.clear();
+    g_pdf.editFontName = g_textFontName;
+    g_pdf.editFontPt = (g_textFontPt > 0.0) ? g_textFontPt : 12.0;
+    g_pdf.imeComp.clear();
+    g_pdf.imeComposing = false;
+    g_annotsDirty = false;
+    g_annotsNeedsIntegrate = false;
+
+    if (!CommitActiveEditsForAppExit(owner)) {
+        if (outError) *outError = L"Exit boundary failed to commit active edits.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(noteToken) < 0) {
+        if (outError) *outError = L"Exit boundary lost the note edit token.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) == 0) {
+        if (outError) *outError = L"Exit boundary did not stage the note edit.";
+        return false;
+    }
+    if (g_pdf.editingText) {
+        if (outError) *outError = L"Exit boundary did not end PDF text editing.";
+        return false;
+    }
+
+    bool foundPdfTextbox = false;
+    for (const auto& ann : g_annots) {
+        if (ann.type == Annotation::Type::TextBox && ann.text == pdfToken) {
+            foundPdfTextbox = true;
+            break;
+        }
+    }
+    if (!foundPdfTextbox) {
+        if (outError) *outError = L"Exit boundary did not commit the PDF text box.";
+        return false;
+    }
+    if (!g_annotsDirty || !g_annotsNeedsIntegrate) {
+        if (outError) *outError = L"Exit-boundary PDF text box did not mark annotations dirty.";
+        return false;
+    }
+
+    g_annots = originalAnnots;
+    g_annotsDirty = originalAnnotsDirty;
+    g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+
+    return CleanupUiAutomationNoteToken(owner, notePath, noteToken, outError);
+}
+static bool RunUiAutomationNoteRollbackScenario(HWND owner, std::wstring* outError) {
+    const std::wstring lecturePath = g_currentLecturePath;
+    const std::wstring sessionPath = g_currentSessionPath;
+    const std::wstring pdfPath = CurrentLogicalPdfPath();
+    const std::wstring notePath = g_currentNotePath;
+    const int pdfIndex = CurrentPdfIndex();
+    const int noteIndex = CurrentNoteIndex();
+    const int altNoteIndex = FindAlternativeFileIndex(g_hNoteList, noteIndex);
+    if (altNoteIndex < 0) {
+        if (outError) *outError = L"Could not find an alternate note for rollback testing.";
+        return false;
+    }
+    if (!SetFaultInjectionPointForAutomation(L"OnNoteSelChange:start")) {
+        if (outError) *outError = L"Failed to enable fault injection for note rollback scenario.";
+        return false;
+    }
+    SetListboxSelAndNotify(g_hNoteList, altNoteIndex);
+    ClearFaultInjectionPointForAutomation();
+    return VerifyUiRollbackState(lecturePath, sessionPath, pdfPath, notePath, pdfIndex, noteIndex, outError);
+}
+
+static bool RunUiAutomationPdfRollbackScenario(HWND owner, std::wstring* outError) {
+    const std::wstring lecturePath = g_currentLecturePath;
+    const std::wstring sessionPath = g_currentSessionPath;
+    const std::wstring pdfPath = CurrentLogicalPdfPath();
+    const std::wstring notePath = g_currentNotePath;
+    const int pdfIndex = CurrentPdfIndex();
+    const int noteIndex = CurrentNoteIndex();
+    const int altPdfIndex = FindAlternativeFileIndex(g_hPdfList, pdfIndex);
+    if (altPdfIndex < 0) {
+        if (outError) *outError = L"Could not find an alternate PDF for rollback testing.";
+        return false;
+    }
+    if (!SetFaultInjectionPointForAutomation(L"OnPdfSelChange:start")) {
+        if (outError) *outError = L"Failed to enable fault injection for PDF rollback scenario.";
+        return false;
+    }
+    SetListboxSelAndNotify(g_hPdfList, altPdfIndex);
+    ClearFaultInjectionPointForAutomation();
+    return VerifyUiRollbackState(lecturePath, sessionPath, pdfPath, notePath, pdfIndex, noteIndex, outError);
+}
+
+bool RunUiAutomationStartupLastOpenScenario(HWND owner, std::wstring* outError) {
+    if (!owner) {
+        if (outError) *outError = L"Main window is not ready for startup restore testing.";
+        return false;
+    }
+    const std::wstring lecturePath = g_currentLecturePath;
+    const std::wstring sessionPath = g_currentSessionPath;
+    const int altPdfIndex = FindAlternativeFileIndex(g_hPdfList, CurrentPdfIndex());
+    const int altNoteIndex = FindAlternativeFileIndex(g_hNoteList, CurrentNoteIndex());
+    if (altPdfIndex < 0 || altNoteIndex < 0) {
+        if (outError) *outError = L"Could not find alternate files for startup restore testing.";
+        return false;
+    }
+
+    SetListboxSelAndNotify(g_hPdfList, altPdfIndex);
+    SetListboxSelAndNotify(g_hNoteList, altNoteIndex);
+
+    const std::wstring expectedPdfPath = CurrentLogicalPdfPath();
+    const std::wstring expectedNotePath = g_currentNotePath;
+    const int expectedPdfIndex = CurrentPdfIndex();
+    const int expectedNoteIndex = CurrentNoteIndex();
+    if (expectedPdfPath.empty() || expectedNotePath.empty()) {
+        if (outError) *outError = L"Failed to open alternate files for startup restore testing.";
+        return false;
+    }
+
+    OnWorkspaceLoaded(owner);
+    const std::wstring previousAutoOpenMode = g_config.sessionAutoOpenMode;
+
+    g_config.sessionAutoOpenMode = L"off";
+    const bool selectedOnlyRestored = RestoreStartupLastOpenSelection(owner);
+    if (!selectedOnlyRestored) {
+        g_config.sessionAutoOpenMode = previousAutoOpenMode;
+        if (outError) *outError = L"Startup restore did not restore the last session in selection-only mode.";
+        return false;
+    }
+    const int selectedOnlyPdfIndex = static_cast<int>(SendMessageW(g_hPdfList, LB_GETCURSEL, 0, 0));
+    const int selectedOnlyNoteIndex = static_cast<int>(SendMessageW(g_hNoteList, LB_GETCURSEL, 0, 0));
+    if (selectedOnlyPdfIndex != expectedPdfIndex || selectedOnlyNoteIndex != expectedNoteIndex) {
+        g_config.sessionAutoOpenMode = previousAutoOpenMode;
+        if (outError) *outError = L"Startup restore did not select the last-open PDF/Note when auto-open was off.";
+        return false;
+    }
+
+    g_config.sessionAutoOpenMode = L"view";
+    const bool restored = RestoreStartupLastOpenSelection(owner);
+    g_config.sessionAutoOpenMode = previousAutoOpenMode;
+    if (!restored) {
+        if (outError) *outError = L"Startup restore did not reopen the last session.";
+        return false;
+    }
+
+    return VerifyUiRollbackState(lecturePath, sessionPath,
+                                 expectedPdfPath, expectedNotePath,
+                                 expectedPdfIndex, expectedNoteIndex,
+                                 outError);
+}
+
+
+bool PrepareUiAutomationStagedExitScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_currentNotePath.empty() || !g_hNoteEdit) {
+        if (outError) *outError = L"Staged-exit automation requires an open note editor.";
+        return false;
+    }
+    if (!file_output::DiscardAllStagedDiffs(owner)) {
+        if (outError) *outError = L"Failed to clear staged diffs before staged-exit automation.";
+        return false;
+    }
+
+    const std::wstring notePath = g_currentNotePath;
+    const std::wstring token = L"ui-automation-staged-exit-token";
+    InsertSnippetIntoNoteAt(GetNoteAutomationIndexingText().size(), token);
+    if (FindNoteTextSnippetStart(token) < 0) {
+        if (outError) *outError = L"Failed to insert the staged-exit note token.";
+        return false;
+    }
+    if (!SaveNoteIfDirty(owner)) {
+        if (outError) *outError = L"Failed to stage the note for exit automation.";
+        return false;
+    }
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) == 0) {
+        if (outError) *outError = L"Staged-exit automation did not leave a note stage.";
+        return false;
+    }
+    return true;
+}
+
+static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError) {
+    if (!owner) {
+        if (outError) *outError = L"Main window is not ready for math render testing.";
+        return false;
+    }
+    const std::wstring previousNotePath = g_currentNotePath;
+    const int previousNoteIndex = CurrentNoteIndex();
+    const std::filesystem::path mathNotePath =
+        std::filesystem::path(g_currentSessionPath) / L"note_math.md";
+    std::error_code mathNoteEc;
+    const bool mathNoteExists = std::filesystem::exists(mathNotePath, mathNoteEc);
+    if (mathNoteEc || !mathNoteExists) {
+        if (outError) *outError = L"Math UI automation fixture note was not found.";
+        return false;
+    }
+
+    auto restorePrevious = [&]() {
+        std::wstring ignored;
+        RestoreUiAutomationNoteSelection(owner, previousNotePath, previousNoteIndex, &ignored);
+    };
+
+    LoadNoteFile(owner, mathNotePath.wstring());
+    SyncBottomPaneAfterNoteLoad(owner);
+    SyncLeftPaneSelection();
+
+    if (NormalizePathKey(g_currentNotePath) != NormalizePathKey(mathNotePath.wstring())) {
+        restorePrevious();
+        if (outError) *outError = L"Failed to open the math fixture note.";
+        return false;
+    }
+
+    const NoteUiSnapshot initial = CaptureNoteUiSnapshot();
+    if (!initial.markdownRoute) {
+        restorePrevious();
+        if (outError) *outError = L"Math fixture note did not use the Markdown route.";
+        return false;
+    }
+    if (!initial.documentReady) {
+        restorePrevious();
+        if (outError) *outError = L"Markdown note document was not ready for math fixture note.";
+        return false;
+    }
+    if (initial.mathSpanCount < 4) {
+        restorePrevious();
+        if (outError) {
+            *outError = L"Expected four math spans in the math fixture note. " +
+                        DescribeNoteUiSnapshot(initial);
+        }
+        return false;
+    }
+    if (initial.renderedMathSegmentCount < 4) {
+        restorePrevious();
+        if (outError) {
+            *outError = L"Expected rendered math segments for all math delimiters. " +
+                        DescribeNoteUiSnapshot(initial);
+        }
+        return false;
+    }
+    if (initial.renderedDisplayMathSegmentCount < 2) {
+        restorePrevious();
+        if (outError) {
+            *outError = L"Expected rendered display-math segments for block delimiters. " +
+                        DescribeNoteUiSnapshot(initial);
+        }
+        return false;
+    }
+    const std::wstring markdownStrongRendered = L"- Bold marker regression";
+    const std::wstring markdownStrongRawLeak = L"**Bold marker regression";
+    if (initial.renderedText.find(markdownStrongRendered) == std::wstring::npos ||
+        initial.renderedText.find(markdownStrongRawLeak) != std::wstring::npos) {
+        restorePrevious();
+        if (outError) {
+            *outError = L"Markdown strong markers leaked into rendered note text. " +
+                        DescribeNoteUiSnapshot(initial);
+        }
+        return false;
+    }
+
+    const std::wstring tailAnchor = L"Inline dollar $x$";
+    const std::wstring tailAppendFirst = L"TAILRENDERCHECKA";
+    const std::wstring tailAppendSecond = L"TAILRENDERCHECKB";
+    const std::wstring tailAppend = tailAppendFirst + tailAppendSecond;
+    const int tailAnchorStart = FindNoteTextSnippetStart(tailAnchor);
+    if (tailAnchorStart < 0) {
+        restorePrevious();
+        if (outError) *outError = L"Could not find the Markdown line used for trailing render testing.";
+        return false;
+    }
+    InsertSnippetIntoNoteAt(static_cast<size_t>(tailAnchorStart) + tailAnchor.size(), tailAppendFirst);
+    RecomputeMathFromNote();
+    InsertSnippetIntoNoteAt(static_cast<size_t>(tailAnchorStart) + tailAnchor.size() +
+                                tailAppendFirst.size(),
+                            tailAppendSecond);
+    RecomputeMathFromNote();
+    const NoteUiSnapshot tailSnapshot = CaptureNoteUiSnapshot();
+    const bool tailVisible = tailSnapshot.renderedText.find(tailAnchor + tailAppend) != std::wstring::npos;
+    if (!SelectNoteTextSnippet(tailAppend)) {
+        restorePrevious();
+        if (outError) *outError = L"Could not select trailing render automation insertions for cleanup.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    RecomputeMathFromNote();
+    if (!SaveNoteIfDirty(owner)) {
+        restorePrevious();
+        if (outError) *outError = L"Could not reconcile the Markdown note after trailing render testing.";
+        return false;
+    }
+    if (!tailVisible) {
+        restorePrevious();
+        if (outError) *outError = L"Text appended at a rendered line end was missing from the render cache.";
+        return false;
+    }
+
+    if (!SelectNoteTextSnippet(L"$x$")) {
+        restorePrevious();
+        if (outError) *outError = L"Could not select inline dollar math in the fixture note.";
+        return false;
+    }
+    const NoteUiSnapshot inlineSnapshot = CaptureNoteUiSnapshot();
+    if (!inlineSnapshot.selectedMathFound ||
+        inlineSnapshot.selectedMathIsBlock ||
+        inlineSnapshot.selectedMathDelimiter != L"$...$" ||
+        inlineSnapshot.selectedMathNormalizedText != L"x") {
+        restorePrevious();
+        if (outError) {
+            *outError =
+                L"Inline dollar math selection was not reflected consistently in note UI state. " +
+                DescribeNoteUiSnapshot(inlineSnapshot);
+        }
+        return false;
+    }
+
+    if (!SelectNoteTextSnippet(L"$$z$$")) {
+        restorePrevious();
+        if (outError) *outError = L"Could not select block dollar math in the fixture note.";
+        return false;
+    }
+    const NoteUiSnapshot blockSnapshot = CaptureNoteUiSnapshot();
+    if (!blockSnapshot.selectedMathFound ||
+        !blockSnapshot.selectedMathIsBlock ||
+        blockSnapshot.selectedMathDelimiter != L"$$...$$" ||
+        blockSnapshot.selectedMathNormalizedText != L"z") {
+        restorePrevious();
+        if (outError) {
+            *outError =
+                L"Block dollar math selection was not reflected consistently in note UI state. " +
+                DescribeNoteUiSnapshot(blockSnapshot);
+        }
+        return false;
+    }
+
+    return RestoreUiAutomationNoteSelection(owner, previousNotePath, previousNoteIndex, outError);
+}
+
+static void WriteUiAutomationResult(bool ok, const std::wstring& detail) {
+    std::wstring pathValue;
+    if (!ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_RESULT_FILE", &pathValue) || pathValue.empty()) return;
+    std::error_code ec;
+    std::filesystem::path path(pathValue);
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+    std::ofstream os(path, std::ios::binary | std::ios::trunc);
+    if (!os) return;
+    std::wstring payload = ok ? L"OK\n" : L"FAIL\n";
+    if (!detail.empty()) payload += detail + L"\n";
+    const std::string utf8 = WideToUTF8(payload);
+    os.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+}
+
+void AppendUiAutomationTrace(const std::wstring& line) {
+    std::wstring pathValue;
+    if (!ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_RESULT_FILE", &pathValue) || pathValue.empty()) return;
+    std::filesystem::path tracePath(pathValue);
+    tracePath += L".trace.txt";
+    std::error_code ec;
+    if (tracePath.has_parent_path()) {
+        std::filesystem::create_directories(tracePath.parent_path(), ec);
+    }
+    std::ofstream os(tracePath, std::ios::binary | std::ios::app);
+    if (!os) return;
+    const std::string utf8 = WideToUTF8(line + L"\n");
+    os.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+}
+
+static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_workspaceRoot.empty()) {
+        if (outError) *outError = L"Palette automation requires a loaded workspace.";
+        return false;
+    }
+
+    constexpr size_t kCount = kToolPaletteCommandSlotCapacity;
+    COLORREF originalColors[kCount]{};
+    LoadUserPaletteColorsForSettings(originalColors, kCount);
+    const auto originalPalette = g_palette;
+    const COLORREF originalActive = g_activeColor;
+    const ToolMode originalMode = g_toolMode;
+    const COLORREF originalTextColor = ToolColorForMode(ToolMode::TextBox);
+
+    auto restore = [&]() {
+        SaveUserPaletteColorsForSettings(originalColors, kCount);
+        StoreToolColorForMode(ToolMode::TextBox, originalTextColor);
+        g_toolMode = originalMode;
+        g_activeColor = originalActive;
+        if (originalPalette.size() == g_palette.size()) {
+            g_palette = originalPalette;
+            if (!g_palette.empty()) g_paletteCustomColor = g_palette.back();
+        }
+        PersistConfig();
+        UpdateToolbarUI(owner);
+    };
+
+    COLORREF colors[kCount]{};
+    std::copy(std::begin(originalColors), std::end(originalColors), std::begin(colors));
+    const COLORREF savedColor = RGB(0x0C, 0x22, 0x38);
+    colors[2] = savedColor;
+    SaveUserPaletteColorsForSettings(colors, kCount);
+
+    if (g_palette.size() != kCount || g_palette[2] != savedColor) {
+        restore();
+        if (outError) *outError = L"Palette settings save did not refresh the runtime palette.";
+        return false;
+    }
+
+    const std::filesystem::path palettePath =
+        std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__settings__" / L"user_palette.json";
+    std::ifstream ifs(palettePath, std::ios::binary);
+    std::string persisted((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    if (persisted.find("#0C2238") == std::string::npos) {
+        restore();
+        if (outError) *outError = L"Palette settings save did not persist the selected color.";
+        return false;
+    }
+
+    g_toolMode = ToolMode::TextBox;
+    StoreToolColorForMode(g_toolMode, originalTextColor);
+    g_activeColor = originalTextColor;
+    UpdateToolbarUI(owner);
+    EnsureToolbarPaletteButtons();
+    if (g_colorButtons.size() < kCount || !g_colorButtons[2] || !IsWindow(g_colorButtons[2])) {
+        restore();
+        if (outError) *outError = L"Toolbar palette buttons were not created for the saved palette.";
+        return false;
+    }
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_TOOL_COLOR_BASE + 2, BN_CLICKED), 0);
+    if (g_activeColor != savedColor || ToolColorForMode(ToolMode::TextBox) != savedColor) {
+        restore();
+        if (outError) *outError = L"Toolbar palette selection did not apply to the active tool color.";
+        return false;
+    }
+
+    if (!ApplyActivePaletteColorStep(g_hPdfView ? g_hPdfView : owner, 1, false) ||
+        ToolColorForMode(ToolMode::TextBox) != colors[3]) {
+        restore();
+        if (outError) *outError = L"Palette color cycling did not use the saved runtime palette.";
+        return false;
+    }
+
+    restore();
+    return true;
+}
+
+static bool ThemeBrushMatchesColor(HBRUSH brush, COLORREF expected) {
+    LOGBRUSH info{};
+    return brush && GetObjectW(brush, sizeof(info), &info) > 0 &&
+           info.lbStyle == BS_SOLID && info.lbColor == expected;
+}
+
+static bool RunUiAutomationThemeSwitchScenario(HWND owner, std::wstring* outError) {
+    if (!owner || !IsWindow(owner)) {
+        if (outError) *outError = L"Theme automation requires the main window.";
+        return false;
+    }
+
+    const std::wstring originalThemeName = g_themeName;
+    const bool originalOwnerDraw = g_config.ownerDrawUi;
+    std::vector<std::wstring> candidates;
+    for (const auto& theme : g_themeCatalog) {
+        if (theme.name != L"default" && theme.name != originalThemeName) {
+            candidates.push_back(theme.name);
+        }
+    }
+    if (candidates.size() < 2) {
+        if (outError) *outError = L"Theme automation requires two alternate themes.";
+        return false;
+    }
+
+    auto restore = [&]() -> bool {
+        if (!ApplyThemeByName(originalThemeName, owner, /*persist=*/false)) return false;
+        return g_config.ownerDrawUi == originalOwnerDraw;
+    };
+    auto fail = [&](const std::wstring& message) -> bool {
+        const bool restored = restore();
+        if (outError) {
+            *outError = restored ? message : message + L" Theme restoration also failed.";
+        }
+        return false;
+    };
+    auto verifyAppliedTheme = [&](const std::wstring& expectedName) -> bool {
+        if (g_themeName != expectedName || !g_config.ownerDrawUi) return false;
+        if (!ThemeBrushMatchesColor(g_hThemeWindowBrush, g_theme.windowBg) ||
+            !ThemeBrushMatchesColor(g_hThemePanelBrush, g_theme.panelBg) ||
+            !ThemeBrushMatchesColor(g_hThemeToolbarBrush, g_theme.toolbarBg) ||
+            !ThemeBrushMatchesColor(g_hThemeMenuBrush, g_theme.menuBg)) {
+            return false;
+        }
+        if (!g_hBtnModeSelect ||
+            (GetWindowLongPtrW(g_hBtnModeSelect, GWL_STYLE) & BS_OWNERDRAW) == 0) {
+            return false;
+        }
+        HMENU menu = GetMenu(owner);
+        MENUITEMINFOW item{};
+        item.cbSize = sizeof(item);
+        item.fMask = MIIM_FTYPE;
+        return menu && GetMenuItemInfoW(menu, 0, TRUE, &item) &&
+               (item.fType & MFT_OWNERDRAW) != 0;
+    };
+
+    if (!ApplyThemeByName(candidates[0], owner, /*persist=*/false) ||
+        !verifyAppliedTheme(candidates[0])) {
+        return fail(L"First theme did not update the UI resources and owner-draw controls.");
+    }
+    const COLORREF firstSelectionBg = g_theme.selectionBg;
+    const COLORREF firstSelectionText = g_theme.selectionText;
+
+    if (!ApplyThemeByName(candidates[1], owner, /*persist=*/false) ||
+        !verifyAppliedTheme(candidates[1])) {
+        return fail(L"Second theme did not update the UI resources and owner-draw controls.");
+    }
+    if (g_theme.selectionBg == firstSelectionBg && g_theme.selectionText == firstSelectionText) {
+        return fail(L"Theme switch did not change the selection colors.");
+    }
+    RedrawWindow(owner, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+
+    if (!restore()) {
+        if (outError) *outError = L"Theme automation could not restore the original theme.";
+        return false;
+    }
+    return true;
+}
+
+static bool RunUiAutomationSessionSortNumberingScenario(std::wstring* outError) {
+    std::vector<SessionEntry> sessions;
+    auto add = [&](const std::wstring& name) {
+        SessionEntry s;
+        s.displayName = name;
+        s.path = name;
+        sessions.push_back(std::move(s));
+    };
+    add(L"第10回");
+    add(L"補講");
+    add(L"第2回");
+    add(L"第1回");
+
+    auto asc = sessions;
+    SortSessionsForDisplay(asc, SessionSortMode::NumericAsc);
+    if (asc.size() != 4 || asc[0].displayName != L"第1回" || asc[1].displayName != L"第2回" ||
+        asc[2].displayName != L"第10回" || asc[3].displayName != L"補講") {
+        if (outError) *outError = L"Session numeric ascending sort failed.";
+        return false;
+    }
+
+    auto desc = sessions;
+    SortSessionsForDisplay(desc, SessionSortMode::NumericDesc);
+    if (desc.size() != 4 || desc[0].displayName != L"第10回" || desc[1].displayName != L"第2回" ||
+        desc[2].displayName != L"第1回" || desc[3].displayName != L"補講") {
+        if (outError) *outError = L"Session numeric descending sort failed.";
+        return false;
+    }
+
+    if (NextSessionNumberForSuggestions(sessions, SessionNumberingMode::CountPlusOne) != 5) {
+        if (outError) *outError = L"Session count-based numbering failed.";
+        return false;
+    }
+    if (NextSessionNumberForSuggestions(sessions, SessionNumberingMode::MaxNumberPlusOne) != 11) {
+        if (outError) *outError = L"Session max-number-based numbering failed.";
+        return false;
+    }
+    return true;
+}
+
+static bool RunUiAutomationWorkspaceConfigRoundTripScenario(std::wstring* outError) {
+    if (g_workspaceRoot.empty()) {
+        if (outError) *outError = L"Workspace configuration automation requires a workspace.";
+        return false;
+    }
+
+    const WorkspaceConfig originalConfig = g_config;
+    auto restore = [&]() {
+        g_config = originalConfig;
+        PersistConfig();
+    };
+
+    g_config.language = L"en";
+    g_config.pdfBitmapBudgetMiB = kPdfBitmapBudgetMiBMin;
+    g_config.pointerOffsetX = 17;
+    g_config.pointerOffsetY = -13;
+    g_config.debugLogs.previewTrace = true;
+    g_config.debugLogs.switchTiming = true;
+    g_config.debugLogs.crash = false;
+    g_config.debugLogs.startupWatchdog = false;
+    g_config.debugLogs.officeConversion = false;
+    PersistConfig();
+
+    std::wstring readError;
+    const std::filesystem::path configPath = std::filesystem::path(g_workspaceRoot) / L"workspace.json";
+    const auto loaded = LoadWorkspaceConfigFromFile(configPath, &readError);
+    const bool matches = loaded &&
+        loaded->language == L"en" &&
+        loaded->pdfBitmapBudgetMiB == kPdfBitmapBudgetMiBMin &&
+        loaded->pointerOffsetX == 17 &&
+        loaded->pointerOffsetY == -13 &&
+        loaded->debugLogs.previewTrace &&
+        loaded->debugLogs.switchTiming &&
+        !loaded->debugLogs.crash &&
+        !loaded->debugLogs.startupWatchdog &&
+        !loaded->debugLogs.officeConversion;
+    restore();
+    if (!matches) {
+        if (outError) {
+            *outError = L"Workspace configuration save/load round trip did not preserve settings.";
+            if (!readError.empty()) *outError += L" " + readError;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool WriteUiAutomationTextFile(const std::filesystem::path& path, const std::string& text, std::wstring* outError) {
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) {
+        if (outError) *outError = L"Could not create automation settings directory.";
+        return false;
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        if (outError) *outError = L"Could not write automation test file: " + path.wstring();
+        return false;
+    }
+    out.write(text.data(), static_cast<std::streamsize>(text.size()));
+    return static_cast<bool>(out);
+}
+
+static bool CaptureUiAutomationSettingsBytes(std::map<std::wstring, std::optional<std::string>>* out) {
+    if (!out || g_workspaceRoot.empty()) return false;
+    out->clear();
+    const std::filesystem::path root(g_workspaceRoot);
+    const std::filesystem::path settings = root / L"__resource__" / L"__settings__";
+    const std::pair<const wchar_t*, std::filesystem::path> paths[] = {
+        {L"workspace.json", root / L"workspace.json"},
+        {L"user_palette.json", settings / L"user_palette.json"},
+        {L"tool_shortcuts.json", settings / L"tool_shortcuts.json"},
+        {L"schedule.json", settings / L"schedule.json"}
+    };
+    for (const auto& item : paths) {
+        std::string bytes;
+        if (ReadUiAutomationFileBytes(item.second, &bytes)) {
+            out->emplace(item.first, std::move(bytes));
+        } else {
+            out->emplace(item.first, std::nullopt);
+        }
+    }
+    return true;
+}
+
+static bool UiAutomationSettingsBytesEqual(const std::map<std::wstring, std::optional<std::string>>& a,
+                                           const std::map<std::wstring, std::optional<std::string>>& b) {
+    if (a.size() != b.size()) return false;
+    for (const auto& kv : a) {
+        const auto it = b.find(kv.first);
+        if (it == b.end()) return false;
+        if (kv.second.has_value() != it->second.has_value()) return false;
+        if (kv.second && it->second && *kv.second != *it->second) return false;
+    }
+    return true;
+}
+
+static bool SettingsImportBackupExistsForAutomation() {
+    if (g_workspaceRoot.empty()) return false;
+    const std::filesystem::path escapeDir =
+        std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(escapeDir, ec) || ec) return false;
+    for (const auto& entry : std::filesystem::directory_iterator(escapeDir, ec)) {
+        if (ec) break;
+        if (!entry.is_directory(ec) || ec) {
+            ec.clear();
+            continue;
+        }
+        const std::wstring name = entry.path().filename().wstring();
+        if (name.find(L"settings_import_") != 0) continue;
+        if (std::filesystem::exists(entry.path() / L"manifest.txt", ec) && !ec) return true;
+        ec.clear();
+    }
+    return false;
+}
+
+static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outError) {
+    if (g_workspaceRoot.empty()) {
+        if (outError) *outError = L"Settings bundle automation requires a workspace.";
+        return false;
+    }
+
+    const WorkspaceConfig originalConfig = g_config;
+    auto restoreConfig = [&]() {
+        g_config = originalConfig;
+        PersistConfig();
+        ApplyConfigToUI(owner);
+    };
+
+    const std::filesystem::path root(g_workspaceRoot);
+    const std::filesystem::path settings = root / L"__resource__" / L"__settings__";
+    const std::filesystem::path bundle = root / L"__resource__" / L"__tmp__" / L"settings_bundle_test.pnssettings";
+    const std::filesystem::path malformed = root / L"__resource__" / L"__tmp__" / L"settings_bundle_bad.pnssettings";
+    const std::filesystem::path duplicate = root / L"__resource__" / L"__tmp__" / L"settings_bundle_duplicate.pnssettings";
+    const std::filesystem::path unknown = root / L"__resource__" / L"__tmp__" / L"settings_bundle_unknown.pnssettings";
+    const std::filesystem::path oversized = root / L"__resource__" / L"__tmp__" / L"settings_bundle_oversized.pnssettings";
+
+    g_config.language = L"en";
+    g_config.pointerOffsetX = 17;
+    g_config.pointerOffsetY = -19;
+    g_config.schedulePeriods = 2;
+    g_config.scheduleStartTimes.assign(91, L"");
+    g_config.scheduleStartTimes[0] = L"08:30";
+    g_config.scheduleCells.assign(14, L"");
+    g_config.scheduleCells[0] = L"automation schedule cell";
+    PersistConfig();
+    const std::string paletteJson = "{\n  \"colors\": [\"#112233\", \"#445566\", \"#778899\"]\n}\n";
+    const std::string shortcutsJson = "{\n  \"version\": 1,\n  \"shortcuts\": [\n    { \"key\": \"Ctrl+1\", \"tool\": \"text\" }\n  ]\n}\n";
+    if (!WriteUiAutomationTextFile(settings / L"user_palette.json", paletteJson, outError) ||
+        !WriteUiAutomationTextFile(settings / L"tool_shortcuts.json", shortcutsJson, outError)) {
+        restoreConfig();
+        return false;
+    }
+    ApplyConfigToUI(owner);
+
+    std::wstring err;
+    if (!ExportAllUserSettingsToFile(bundle, &err)) {
+        restoreConfig();
+        if (outError) *outError = L"Settings bundle export failed: " + err;
+        return false;
+    }
+    std::map<std::wstring, std::optional<std::string>> exportedBytes;
+    if (!CaptureUiAutomationSettingsBytes(&exportedBytes)) {
+        restoreConfig();
+        if (outError) *outError = L"Could not capture settings after bundle export.";
+        return false;
+    }
+
+    g_config.language = L"ja";
+    g_config.pointerOffsetX = -7;
+    g_config.pointerOffsetY = 8;
+    g_config.scheduleStartTimes[0] = L"10:10";
+    g_config.scheduleCells[0] = L"mutated";
+    PersistConfig();
+    if (!WriteUiAutomationTextFile(settings / L"user_palette.json", "{ \"colors\": [\"#ABCDEF\"] }\n", outError) ||
+        !WriteUiAutomationTextFile(settings / L"tool_shortcuts.json", "{ \"version\": 1, \"shortcuts\": [] }\n", outError)) {
+        restoreConfig();
+        return false;
+    }
+
+    if (!ImportAllUserSettingsFromFile(bundle, &err)) {
+        restoreConfig();
+        if (outError) *outError = L"Settings bundle import failed: " + err;
+        return false;
+    }
+    std::map<std::wstring, std::optional<std::string>> importedBytes;
+    if (!CaptureUiAutomationSettingsBytes(&importedBytes) ||
+        !UiAutomationSettingsBytesEqual(exportedBytes, importedBytes)) {
+        std::wstring mismatch = L"";
+        for (const auto& kv : exportedBytes) {
+            const auto it = importedBytes.find(kv.first);
+            if (it == importedBytes.end()) {
+                mismatch += L" missing:" + kv.first;
+            } else if (kv.second.has_value() != it->second.has_value()) {
+                mismatch += L" presence:" + kv.first;
+            } else if (kv.second && it->second && *kv.second != *it->second) {
+                mismatch += L" bytes:" + kv.first;
+                WriteUiAutomationTextFile(root / L"__resource__" / L"__tmp__" / (kv.first + L".actual_after_import"),
+                                          *it->second,
+                                          nullptr);
+            }
+        }
+        restoreConfig();
+        if (outError) *outError = L"Settings bundle import did not restore the exported files." + mismatch;
+        return false;
+    }
+    std::wstring readErr;
+    const auto loaded = LoadWorkspaceConfigFromFile(root / L"workspace.json", &readErr);
+    if (!loaded || loaded->language != L"en" || loaded->pointerOffsetX != 17 || loaded->pointerOffsetY != -19) {
+        restoreConfig();
+        if (outError) *outError = L"Imported workspace.json could not be reloaded.";
+        return false;
+    }
+
+    const std::string malformedBytes = "PDF_NOTE_SETTINGS_BUNDLE_V1\nworkspace.json\t8\n{broken}\nEND\n";
+    const std::string duplicateBytes = "PDF_NOTE_SETTINGS_BUNDLE_V1\nworkspace.json\t16\n{\"classesDir\":\".\"}\nworkspace.json\t16\n{\"classesDir\":\".\"}\nEND\n";
+    const std::string unknownBytes = "PDF_NOTE_SETTINGS_BUNDLE_V1\nworkspace.json\t16\n{\"classesDir\":\".\"}\nsecret.json\t2\n{}\nEND\n";
+    std::string largeBytes = "PDF_NOTE_SETTINGS_BUNDLE_V1\nworkspace.json\t524289\n";
+    largeBytes.append(524289, 'x');
+    largeBytes += "\nEND\n";
+    if (!WriteUiAutomationTextFile(malformed, malformedBytes, outError) ||
+        !WriteUiAutomationTextFile(duplicate, duplicateBytes, outError) ||
+        !WriteUiAutomationTextFile(unknown, unknownBytes, outError) ||
+        !WriteUiAutomationTextFile(oversized, largeBytes, outError)) {
+        restoreConfig();
+        return false;
+    }
+
+    const std::filesystem::path badInputs[] = {malformed, duplicate, unknown, oversized};
+    for (const auto& bad : badInputs) {
+        std::map<std::wstring, std::optional<std::string>> beforeBad;
+        CaptureUiAutomationSettingsBytes(&beforeBad);
+        if (ImportAllUserSettingsFromFile(bad, &err)) {
+            restoreConfig();
+            if (outError) *outError = L"Invalid settings bundle was accepted: " + bad.filename().wstring();
+            return false;
+        }
+        std::map<std::wstring, std::optional<std::string>> afterBad;
+        CaptureUiAutomationSettingsBytes(&afterBad);
+        if (!UiAutomationSettingsBytesEqual(beforeBad, afterBad)) {
+            restoreConfig();
+            if (outError) *outError = L"Invalid settings bundle changed active settings: " + bad.filename().wstring();
+            return false;
+        }
+    }
+
+    SetFaultInjectionPointForAutomation(L"settings_import_after_first_aux_write");
+    std::map<std::wstring, std::optional<std::string>> beforeFault;
+    CaptureUiAutomationSettingsBytes(&beforeFault);
+    const bool faultAccepted = ImportAllUserSettingsFromFile(bundle, &err);
+    ClearFaultInjectionPointForAutomation();
+    std::map<std::wstring, std::optional<std::string>> afterFault;
+    CaptureUiAutomationSettingsBytes(&afterFault);
+    if (faultAccepted || !UiAutomationSettingsBytesEqual(beforeFault, afterFault) ||
+        !SettingsImportBackupExistsForAutomation()) {
+        restoreConfig();
+        if (outError) *outError = L"Settings bundle fault injection did not roll back and preserve a backup.";
+        return false;
+    }
+
+    restoreConfig();
+    return true;
+}
+
+static bool RunUiAutomationAppLogContractScenario(std::wstring* outError) {
+    if (g_workspaceRoot.empty()) {
+        if (outError) *outError = L"App-log automation requires a workspace.";
+        return false;
+    }
+    if (!IsAppLogEnabled(AppLogKind::PreviewTrace) ||
+        IsAppLogEnabled(AppLogKind::SwitchTiming) ||
+        !IsAppLogEnabled(AppLogKind::Crash) ||
+        IsAppLogEnabled(AppLogKind::StartupWatchdog)) {
+        if (outError) *outError = L"App-log runtime configuration did not match the workspace settings.";
+        return false;
+    }
+    constexpr const wchar_t* kToken = L"automation-log-contract";
+    AppendAppLogLine(AppLogKind::PreviewTrace, kToken);
+    AppendAppLogLine(AppLogKind::SwitchTiming, kToken);
+    AppendAppLogLine(AppLogKind::Crash, kToken);
+    AppendAppLogLine(AppLogKind::StartupWatchdog, kToken);
+    return true;
+}
+
+static bool RunUiAutomationWorkspaceConfigRecoveryScenario(std::wstring* outError) {
+    if (g_workspaceRoot.empty()) {
+        if (outError) *outError = L"Workspace configuration recovery automation requires a workspace.";
+        return false;
+    }
+    const std::filesystem::path root(g_workspaceRoot);
+    const std::filesystem::path configPath = root / L"workspace.json";
+    const std::filesystem::path escapeDir = root / L"__resource__" / L"__escape__";
+    std::error_code ec;
+    if (std::filesystem::exists(configPath, ec) || ec) {
+        if (outError) *outError = L"Corrupt workspace.json was not removed from the active workspace root.";
+        return false;
+    }
+    ec.clear();
+    if (!std::filesystem::is_directory(escapeDir, ec) || ec) {
+        if (outError) *outError = L"Corrupt workspace.json was not quarantined into __escape__.";
+        return false;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(escapeDir, ec)) {
+        if (!ec && entry.is_regular_file(ec) && !ec) return true;
+        ec.clear();
+    }
+    if (outError) *outError = L"Workspace configuration quarantine directory contained no recovered file.";
+    return false;
+}
+
+static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
+    ClearFaultInjectionPointForAutomation();
+    AppendUiAutomationTrace(L"automation:start");
+    std::wstring configOnlyValue;
+    const bool configOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_ONLY", &configOnlyValue) &&
+                            (configOnlyValue == L"1" || configOnlyValue == L"true");
+    std::wstring logContractOnlyValue;
+    const bool logContractOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_LOG_CONTRACT_ONLY", &logContractOnlyValue) &&
+                                 (logContractOnlyValue == L"1" || logContractOnlyValue == L"true");
+    std::wstring configRecoveryOnlyValue;
+    const bool configRecoveryOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_RECOVERY_ONLY", &configRecoveryOnlyValue) &&
+                                    (configRecoveryOnlyValue == L"1" || configRecoveryOnlyValue == L"true");
+    std::wstring settingsBundleOnlyValue;
+    const bool settingsBundleOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY", &settingsBundleOnlyValue) &&
+                                    (settingsBundleOnlyValue == L"1" || settingsBundleOnlyValue == L"true");
+    if ((configOnly ? 1 : 0) + (logContractOnly ? 1 : 0) + (configRecoveryOnly ? 1 : 0) +
+        (settingsBundleOnly ? 1 : 0) > 1) {
+        if (outError) *outError = L"Only one focused UI automation mode may be selected.";
+        return false;
+    }
+    if (configOnly) {
+        if (!RunUiAutomationWorkspaceConfigRoundTripScenario(outError)) {
+            AppendUiAutomationTrace(L"automation:workspace_config_roundtrip_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:workspace_config_roundtrip_ok");
+        return true;
+    }
+    if (logContractOnly) {
+        if (!RunUiAutomationAppLogContractScenario(outError)) {
+            AppendUiAutomationTrace(L"automation:app_log_contract_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:app_log_contract_ok");
+        return true;
+    }
+    if (configRecoveryOnly) {
+        if (!RunUiAutomationWorkspaceConfigRecoveryScenario(outError)) {
+            AppendUiAutomationTrace(L"automation:workspace_config_recovery_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:workspace_config_recovery_ok");
+        return true;
+    }
+    if (settingsBundleOnly) {
+        if (!RunUiAutomationSettingsBundleScenario(owner, outError)) {
+            AppendUiAutomationTrace(L"automation:settings_bundle_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:settings_bundle_ok");
+        return true;
+    }
+    if (!EnsureUiAutomationTargetSession(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:ensure_target_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:ensure_target_ok");
+    if (!RunUiAutomationOutputExportScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:output_export_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:output_export_ok");
+    if (!RunUiAutomationSessionSortNumberingScenario(outError)) {
+        AppendUiAutomationTrace(L"automation:session_sort_numbering_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:session_sort_numbering_ok");
+    if (!RunUiAutomationWorkspaceConfigRoundTripScenario(outError)) {
+        AppendUiAutomationTrace(L"automation:workspace_config_roundtrip_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:workspace_config_roundtrip_ok");
+    if (!RunUiAutomationPaletteScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:palette_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:palette_ok");
+    if (!RunUiAutomationThemeSwitchScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:theme_switch_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:theme_switch_ok");
+    if (!RunUiAutomationNoteSaveScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:note_save_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:note_save_ok");
+    if (!RunUiAutomationNoteSwitchUndoScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:note_switch_undo_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:note_switch_undo_ok");
+    if (!RunUiAutomationStagedNoteRestoreViewScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:staged_note_restore_view_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:staged_note_restore_view_ok");
+    if (!RunUiAutomationNoteBoundaryCommitScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:note_boundary_commit_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:note_boundary_commit_ok");
+    if (!RunUiAutomationDeferredNoteInitialInputScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:deferred_note_initial_input_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:deferred_note_initial_input_ok");
+    if (!RunUiAutomationExistingNoteRenderModeSaveScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:existing_note_render_mode_save_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:existing_note_render_mode_save_ok");
+    if (!RunUiAutomationPdfActiveEditSaveScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:pdf_active_edit_save_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:pdf_active_edit_save_ok");
+    if (!RunUiAutomationPdfTextboxEscCommitScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:pdf_textbox_esc_commit_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:pdf_textbox_esc_commit_ok");
+    if (!RunUiAutomationPdfTextboxTripleClickCopyFocusScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:pdf_textbox_triple_click_copy_focus_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:pdf_textbox_triple_click_copy_focus_ok");
+    if (!RunUiAutomationAnnotListLatestVisibleScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:annot_list_latest_visible_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:annot_list_latest_visible_ok");
+    if (!RunUiAutomationPendingLinkCancelStageScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:pending_link_cancel_stage_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:pending_link_cancel_stage_ok");
+    if (!RunUiAutomationExitBoundaryCommitScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:exit_boundary_commit_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:exit_boundary_commit_ok");
+    if (!RunUiAutomationNoteRollbackScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:note_rollback_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:note_rollback_ok");
+    if (!RunUiAutomationPdfRollbackScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:pdf_rollback_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:pdf_rollback_ok");
+    if (!RunUiAutomationStartupLastOpenScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:startup_restore_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:startup_restore_ok");
+    if (!RunUiAutomationOperationTransactionRecoveryScenario(outError)) {
+        AppendUiAutomationTrace(L"automation:operation_tx_recovery_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:operation_tx_recovery_ok");
+    if (!PrepareUiAutomationStagedExitScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:staged_exit_setup_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:staged_exit_ready");
+    if (!RunUiAutomationMathRenderScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:math_render_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:math_render_ok");
+    return true;
+}

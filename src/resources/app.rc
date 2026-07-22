@@ -1,0 +1,7 @@
+#include "app_resource.h"
+
+#ifndef CLROP_READ_ONLY_BUILD
+IDI_APP_ICON ICON "src/resources/icons/app_icon.ico"
+#endif
+IDI_READONLY_VIEWER_ICON ICON "src/resources/icons/readonly_viewer_icon.ico"
+IDI_TEXT_VIEWER_ICON ICON "src/resources/icons/text_viewer_icon.ico"
