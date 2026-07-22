@@ -565,6 +565,16 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
             y += rowH + gap;
         };
 
+        int linkW = std::max(0, innerW);
+        int linkDecorW = 88;
+        if (linkDecorW > linkW) linkDecorW = linkW;
+        place(g_hChkShortcutLinkDecor, x, y, linkDecorW, rowH);
+        int linkBtnX = x + linkDecorW + gap;
+        int linkBtnW = std::max(0, linkW - linkDecorW - gap);
+        linkBtnW = std::min(linkBtnW, 90);
+        place(g_hBtnShortcutPdfLink, linkBtnX, y, linkBtnW, rowH);
+        y += rowH + gap;
+
         layoutPaletteRow({ g_hBtnNoteAssistBullet, g_hBtnNoteAssistQuote, g_hBtnNoteAssistPageRef });
 
         int inputRowW = std::max(0, innerW);
@@ -639,14 +649,6 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
             y += rowH + gap;
         }
 
-        int linkW = std::max(0, innerW);
-        int linkDecorW = 88;
-        if (linkDecorW > linkW) linkDecorW = linkW;
-        place(g_hChkShortcutLinkDecor, x, y, linkDecorW, rowH);
-        int linkBtnX = x + linkDecorW + gap;
-        int linkBtnW = std::max(0, linkW - linkDecorW - gap);
-        linkBtnW = std::min(linkBtnW, 90);
-        place(g_hBtnShortcutPdfLink, linkBtnX, y, linkBtnW, rowH);
     };
 
     // Left column (directory/session lists)

@@ -6468,8 +6468,8 @@ static std::wstring BuildNoteClickLinkSnippet(bool needPrefixBreak, bool rawLike
     return out;
 }
 
-static void InsertSnippetIntoNoteAt(size_t pos, const std::wstring& snippet) {
-    (void)InsertSnippetIntoCurrentNoteAt(pos, snippet);
+static bool InsertSnippetIntoNoteAt(size_t pos, const std::wstring& snippet) {
+    return InsertSnippetIntoCurrentNoteAt(pos, snippet);
 }
 
 static void OnShortcutColorPick(HWND owner, COLORREF& target, HWND preview) {

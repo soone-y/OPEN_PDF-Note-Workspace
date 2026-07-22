@@ -134,9 +134,29 @@ static bool HandleNoteShortcutCommand(HWND hWnd, int id, UINT code) {
             fromNoteClickRawInsert || (fromButtonLinkInsert && !renderActive);
 
         if (!linkInsertAction) {
+            // A typed body is inserted after the current selection, rather than
+            // replacing it.  An empty body continues to use the selection as the
+            // text to decorate.
+            const bool hasBodyOverride = !GetShortcutBodyInput().empty();
             std::wstring snippet = BuildNoteShortcutSnippet();
             if (!snippet.empty()) {
+                if (hasBodyOverride && g_hNoteEdit) {
+                    DWORD selectionStart = 0;
+                    DWORD selectionEnd = 0;
+                    SendMessageW(g_hNoteEdit, EM_GETSEL,
+                                 reinterpret_cast<WPARAM>(&selectionStart),
+                                 reinterpret_cast<LPARAM>(&selectionEnd));
+                    const DWORD insertPos = std::max(selectionStart, selectionEnd);
+                    SendMessageW(g_hNoteEdit, EM_SETSEL, insertPos, insertPos);
+                }
                 InsertSnippetIntoNote(snippet);
+                // Do not discard typed input when there is no open note: the
+                // insertion routine leaves the note untouched in that case.
+                if (hasBodyOverride &&
+                    (!g_currentNotePath.empty() || !g_currentSessionPath.empty()) &&
+                    g_hShortcutTagEdit) {
+                    SetWindowTextW(g_hShortcutTagEdit, L"");
+                }
                 if (g_hNoteEdit) SetFocus(g_hNoteEdit);
             }
             return true;
@@ -218,7 +238,14 @@ static bool HandleNoteShortcutCommand(HWND hWnd, int id, UINT code) {
                 return true;
             }
 
-            InsertSnippetIntoNoteAt(insertPos, snippet);
+            const bool inserted = InsertSnippetIntoNoteAt(insertPos, snippet);
+            if (!inserted) {
+                FinalizePendingLinkModeIfReady(hWnd);
+                return true;
+            }
+            if (fromButtonLinkInsert && !GetShortcutBodyInput().empty() && g_hShortcutTagEdit) {
+                SetWindowTextW(g_hShortcutTagEdit, L"");
+            }
             if (g_hNoteEdit) SetFocus(g_hNoteEdit);
 
             noteAnchorPos = insertPos + (needPrefixBreak ? 1 : 0);
