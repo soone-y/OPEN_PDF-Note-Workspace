@@ -8,6 +8,15 @@ static DWORD g_pdfRecentLinkPlacementDblClickSuppressUntil = 0;
 static POINT g_pdfRecentLinkPlacementDblClickSuppressPt = { -1, -1 };
 static ULONGLONG g_pdfIgnoreNextLeftKeyUntilTick = 0;
 
+static void NotifyAnnotationInputWhileHidden(HWND hwnd) {
+    if (g_showAnnots) return;
+    ShowSoftNotice(hwnd,
+                   IsEnglishUi()
+                       ? L"Annotations are hidden. New annotations will be saved but not shown until display is turned on."
+                       : L"注釈表示がOFFです。入力した注釈は保存されますが、表示をONにするまで見えません。",
+                   SoftNoticeKind::Warning);
+}
+
 struct PdfScrollbarRepeatState {
     HWND hwnd = nullptr;
     int bar = 0;
@@ -1222,6 +1231,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
         }
         if (g_toolMode == ToolMode::TextBox && hitPage) {
+            NotifyAnnotationInputWhileHidden(hwnd);
             if (!ctrlDown) {
                 int hitIdx = -1;
                 for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
@@ -1297,8 +1307,12 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         if (hitPage) {
             if (IsMarkerTextMode(g_toolMode) || g_toolMode == ToolMode::Select) {
+                if (IsMarkerTextMode(g_toolMode)) {
+                    NotifyAnnotationInputWhileHidden(hwnd);
+                }
                 beginTextSelection(hitPageIndex, ApplyPdfPointerOffset(pt));
             } else {
+                NotifyAnnotationInputWhileHidden(hwnd);
                 g_pdf.drawingAnnot = true;
                 g_pdf.drawPageIndex = hitPageIndex;
                 POINT drawPt = ApplyPdfPointerOffset(pt);

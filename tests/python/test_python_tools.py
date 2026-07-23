@@ -165,6 +165,12 @@ class AnnotationToolPolicyTests(unittest.TestCase):
         ):
             self.assertIn(f"{key} = RGB(255, 140, 0)", config)
 
+    def test_annotation_input_warns_when_annotations_are_hidden(self) -> None:
+        source = (REPO_ROOT / "src/pdf_view/input.cppinc").read_text(encoding="utf-8")
+        self.assertIn("NotifyAnnotationInputWhileHidden", source)
+        self.assertIn("注釈表示がOFFです。入力した注釈は保存されますが", source)
+        self.assertIn("if (g_showAnnots) return;", source)
+
 
 @contextmanager
 def repo_tempdir():

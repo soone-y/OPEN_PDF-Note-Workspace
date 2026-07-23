@@ -612,7 +612,7 @@ static bool IsPlainTextNotePath(const std::wstring& notePath) {
     std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t ch) {
         return static_cast<wchar_t>(towlower(ch));
     });
-    return ext == L".txt";
+    return ext == L".txt" || ext == L".csv";
 }
 
 static bool IsSamePath(const std::filesystem::path& a, const std::filesystem::path& b) {

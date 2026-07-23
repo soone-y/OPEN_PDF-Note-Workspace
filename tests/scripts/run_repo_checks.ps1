@@ -66,7 +66,7 @@ $versionTrackedDocumentationPaths = @(
     (Join-Path $repoRoot "docs/public/README.md"),
     (Join-Path $repoRoot "Document/Index.md"),
     (Join-Path $repoRoot "Document/How_to_Build.md"),
-    (Join-Path $repoRoot "Document/How_to_File_Formats.md"),
+    (Join-Path $repoRoot "Document/What_is_File_Formats.md"),
     (Join-Path $repoRoot "Document/How_to_Save_and_Recovery.md"),
     (Join-Path $repoRoot "Document/How_to_Setup.md"),
     (Join-Path $repoRoot "Document/How_to_Troubleshoot.md"),

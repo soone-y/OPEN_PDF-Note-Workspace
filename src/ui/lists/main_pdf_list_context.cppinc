@@ -120,6 +120,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     const std::wstring hierarchyLabel = FilenameOrPath(hierarchyRoot);
     const bool canShowHierarchy = !hierarchyRoot.empty();
     const bool officeFile = !isNoteList && IsOfficeFileListPath(file.path);
+    const bool canRename = isNoteList || (!officeFile && file.isPdf);
     const bool canDeleteEmptyClro = isNoteList && IsEmptyClroNoteEligibleForDeletion(selectedPath);
 
     HMENU menu = CreatePopupMenu();
@@ -131,6 +132,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdCopyPath = 5;
     constexpr UINT kCmdShowHierarchy = 6;
     constexpr UINT kCmdDeleteEmptyClro = 7;
+    constexpr UINT kCmdRename = 8;
     AppendMenuW(menu,
                 MF_STRING,
                 kCmdOpenInApp,
@@ -161,6 +163,11 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
                 MF_STRING,
                 kCmdCopyPath,
                 IsEnglishUi() ? L"Copy path" : L"パスをコピー");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu,
+                canRename ? MF_STRING : (MF_STRING | MF_GRAYED),
+                kCmdRename,
+                IsEnglishUi() ? L"Rename" : L"名前の変更");
     if (canDeleteEmptyClro) {
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu,
@@ -199,6 +206,13 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     }
     if (cmd == kCmdShowHierarchy && canShowHierarchy) {
         return ShowDirectoryHierarchyPopup(owner, hierarchyRoot, hierarchyLabel, screenPt);
+    }
+    if (cmd == kCmdRename && canRename) {
+        const bool opened = isNoteList ? OpenNoteIfDifferent(owner, file.path)
+                                       : OpenPdfIfDifferent(owner, file.path);
+        if (!opened) return false;
+        return RenameOrMoveCurrentOperationTarget(owner, /*isPdf=*/!isNoteList,
+                                                  /*renameOnly=*/true);
     }
     if (cmd == kCmdDeleteEmptyClro && canDeleteEmptyClro) {
         DWORD deleteError = ERROR_SUCCESS;

@@ -32,7 +32,7 @@ VERSION_TRACKED_DOCUMENTS = frozenset(
         "docs/public/README.md",
         "Document/Index.md",
         "Document/How_to_Build.md",
-        "Document/How_to_File_Formats.md",
+        "Document/What_is_File_Formats.md",
         "Document/How_to_Save_and_Recovery.md",
         "Document/How_to_Setup.md",
         "Document/How_to_Troubleshoot.md",

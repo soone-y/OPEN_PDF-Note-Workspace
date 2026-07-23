@@ -5,8 +5,8 @@ PDF Note Workspace サンプルワークスペース
 
 内容:
 - `workspace.json`: サンプル用の保守的なローカル専用設定です。
-- `講義サンプル/第01回_基本操作/`: サンプル PDF とサンプルノートです。
-- `講義サンプル/第02回_空の回/`: 短い案内付きの空セッションひな型です。
+- `講義サンプル/第01回_基本操作/`: `.clro`、`.md`、`.tex`、`.txt`、`.csv` のノート例です。
+- `講義サンプル/第02回_空の回/`: 同名の PDF と `.clrop` を組にした、注釈の読み込み・書き出し例です。
 
 PDF は、このプロジェクトに同梱する小さな合成テスト PDF です。ローカル確認用サンプルとしてのみ含めています。
 
@@ -17,7 +17,7 @@ You can copy this folder and rename the copy to "workspace" if you want to start
 
 Contents:
 - `workspace.json`: conservative local-only settings for the sample.
-- `講義サンプル/第01回_基本操作/`: sample notes and sample PDFs.
-- `講義サンプル/第02回_空の回/`: empty-session template with a short guide.
+- `講義サンプル/第01回_基本操作/`: `.clro`, `.md`, `.tex`, `.txt`, and `.csv` note examples.
+- `講義サンプル/第02回_空の回/`: a PDF and same-named `.clrop` pair for checking annotation loading and export.
 
 The PDFs are small synthetic test PDFs bundled with this project. They are included only as local sample documents.

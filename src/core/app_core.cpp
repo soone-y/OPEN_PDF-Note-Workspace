@@ -2290,7 +2290,7 @@ bool IsPdfOrImageFile(const std::filesystem::path& p) {
 bool IsNoteFile(const std::filesystem::path& p) {
     auto ext = p.extension().wstring();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-    return ext == L".txt" || ext == L".md" || ext == L".markdown" ||
+    return ext == L".txt" || ext == L".csv" || ext == L".md" || ext == L".markdown" ||
            ext == L".note" || ext == L".tex" || ext == L".icr" || ext == L".clro";
 }
 

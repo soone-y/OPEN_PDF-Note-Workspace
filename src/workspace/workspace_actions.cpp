@@ -488,7 +488,7 @@ std::wstring s_newNoteExtension = L".clro";
 
 bool IsSupportedNewNoteExtension(const std::wstring& ext) {
     std::wstring lower = ToLowerAscii(ext);
-    return lower == L".clro" || lower == L".txt" || lower == L".md" || lower == L".tex";
+    return lower == L".clro" || lower == L".txt" || lower == L".csv" || lower == L".md" || lower == L".tex";
 }
 
 std::wstring DefaultNewNoteStem() {
@@ -557,8 +557,8 @@ bool BuildNamedNoteFileName(HWND owner,
             owner,
             IsEnglishUi() ? L"Create Note" : L"ノート作成",
             IsEnglishUi()
-                ? L"Use one of these extensions: .md, .clro, .txt, .tex"
-                : L"拡張子は .md / .clro / .txt / .tex のいずれかにしてください。",
+                ? L"Use one of these extensions: .md, .clro, .txt, .tex, .csv"
+                : L"拡張子は .md / .clro / .txt / .tex / .csv のいずれかにしてください。",
             SoftNoticeKind::Warning);
         return false;
     }
@@ -1116,12 +1116,14 @@ std::optional<std::wstring> PromptNoteFileNameWithSaveDialog(HWND owner,
         { L"CLRO note (*.clro)", L"*.clro" },
         { L"Text note (*.txt)", L"*.txt" },
         { L"TeX note (*.tex)", L"*.tex" },
+        { L"CSV note (*.csv)", L"*.csv" },
     };
     UINT filterIndex = 1;
     std::wstring ext = ToLowerAscii(defaultExt);
     if (ext == L".clro") filterIndex = 2;
     else if (ext == L".txt") filterIndex = 3;
     else if (ext == L".tex") filterIndex = 4;
+    else if (ext == L".csv") filterIndex = 5;
     std::wstring defaultExtNoDot = ext;
     if (!defaultExtNoDot.empty() && defaultExtNoDot.front() == L'.') {
         defaultExtNoDot.erase(defaultExtNoDot.begin());
@@ -1153,8 +1155,8 @@ std::optional<std::wstring> PromptNoteFileNameWithSaveDialog(HWND owner,
         fileName += defaultExt;
     } else if (!IsSupportedNewNoteExtension(pickedExt)) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Use .md, .clro, .txt, or .tex."
-                                     : L"拡張子は .md / .clro / .txt / .tex のいずれかにしてください。",
+                       IsEnglishUi() ? L"Use .md, .clro, .txt, .tex, or .csv."
+                                     : L"拡張子は .md / .clro / .txt / .tex / .csv のいずれかにしてください。",
                        SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -1213,6 +1215,7 @@ bool ShowNewNoteButtonContextMenu(HWND hWnd, LPARAM lParam) {
         { 2, L".clro" },
         { 3, L".txt" },
         { 4, L".tex" },
+        { 5, L".csv" },
     };
     for (const auto& item : kExtItems) {
         UINT flags = MF_STRING;

@@ -1287,7 +1287,7 @@ static std::wstring NoteExtensionLowerForPath(const std::wstring& notePath) {
 
 static NoteContentRoute NoteContentRouteForPath(const std::wstring& notePath) {
     const std::wstring ext = NoteExtensionLowerForPath(notePath);
-    if (ext == L".txt") return NoteContentRoute::PlainText;
+    if (ext == L".txt" || ext == L".csv") return NoteContentRoute::PlainText;
     return NoteContentRoute::MarkdownMd4c;
 }
 

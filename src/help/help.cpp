@@ -422,7 +422,7 @@ static std::wstring CurrentNoteContextHelpText(bool english) {
     std::filesystem::path path(g_currentNotePath);
     std::wstring ext = path.extension().wstring();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-    std::wstring route = ext == L".txt"
+    std::wstring route = (ext == L".txt" || ext == L".csv")
         ? (english ? L"plain text" : L"プレーンテキスト")
         : (english ? L"Markdown/MD4C" : L"Markdown/MD4C");
     return (english ? L"Current note: " : L"現在のノート: ") + path.filename().wstring() +
