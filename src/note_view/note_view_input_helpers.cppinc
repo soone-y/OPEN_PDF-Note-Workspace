@@ -62,8 +62,11 @@ static void MaybeFlushNoteStageOnCaretOrFocusChange(HWND hWnd, bool forceFlush) 
     g_noteStageObservedCaretLine = currentLine;
     // Pure caret line changes without pending text edits only require an overlay repaint
     // (switching former caret line to Rendered mode using existing line cache), avoiding heavy full-document parses.
-    // If a text edit was performed prior to leaving the line, flush pending edit state synchronously.
-    if (!IsNoteImeComposing() && IsNoteTyping()) {
+    // If a text edit was performed prior to leaving the line, commit any pending derived-
+    // state at this stable boundary rather than waiting for a later idle refresh.
+    if (!IsNoteImeComposing() &&
+        (IsNoteTyping() || g_noteDirty || HasDeferredNoteFullReparse() ||
+         RequiresImmediateNoteDerivedFrameCommit())) {
         FlushPendingMathRecompute(hWnd);
     }
 }
