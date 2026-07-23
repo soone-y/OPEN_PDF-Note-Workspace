@@ -410,6 +410,10 @@ th{background:#f3f5f7;font-weight:600;}
 std::string StyleSpanToCss(StyleKind kind, std::wstring_view value) {
     const std::string v = EscapeHtml(WideToUtf8(value));
     switch (kind) {
+    case StyleKind::Bold:
+        return "font-weight:bold;";
+    case StyleKind::Italic:
+        return "font-style:italic;";
     case StyleKind::Underline:
         return "text-decoration:underline;";
     case StyleKind::TextColor:

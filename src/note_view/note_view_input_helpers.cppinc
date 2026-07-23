@@ -60,8 +60,12 @@ static void MaybeFlushNoteStageOnCaretOrFocusChange(HWND hWnd, bool forceFlush) 
     }
     if (currentLine == g_noteStageObservedCaretLine) return;
     g_noteStageObservedCaretLine = currentLine;
-    // Stage persistence is already timer-driven by NotifyNoteStageEdit(). A caret-only
-    // line change must not synchronously perform filesystem work on the input thread.
+    // Pure caret line changes without pending text edits only require an overlay repaint
+    // (switching former caret line to Rendered mode using existing line cache), avoiding heavy full-document parses.
+    // If a text edit was performed prior to leaving the line, flush pending edit state synchronously.
+    if (!IsNoteImeComposing() && IsNoteTyping()) {
+        FlushPendingMathRecompute(hWnd);
+    }
 }
 
 static bool HandleNoteCtrlUndoRedo(HWND hWnd, WPARAM wParam, bool* outTextChanged) {

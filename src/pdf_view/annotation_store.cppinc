@@ -1153,6 +1153,7 @@ static void RestorePreviousDocumentAfterOpenFailure(HWND owner,
         if (LoadImageDocument(g_hPdfView, previousPath)) {
             g_toolMode = ToolMode::Pan;
             SetModeButtons();
+            UpdateToolbarUI(g_hMainWnd);
             SyncLeftPaneSelection();
             return;
         }
@@ -1535,6 +1536,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
             if (!restored) {
                 JumpToPage(g_hPdfView, 0);
             }
+            UpdateToolbarUI(g_hMainWnd);
             preview_trace::Append(
                 L"OpenPdfWithAnnotations",
                 L"after_restore_or_jump elapsed_ms=" + preview_trace::ElapsedMs(startTick) +
@@ -1560,6 +1562,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
             }
             g_toolMode = ToolMode::Pan;
             SetModeButtons();
+            UpdateToolbarUI(g_hMainWnd);
             SyncLeftPaneSelection();
             UpdateSessionLastOpenTargetsAfterOpen();
             syncOwnerUi();

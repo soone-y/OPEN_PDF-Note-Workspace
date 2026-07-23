@@ -152,10 +152,15 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 1;
     case WM_SETCURSOR:
         if (LOWORD(lParam) == HTCLIENT &&
-            reinterpret_cast<HWND>(wParam) == hWnd &&
-            NoteLineSelectionHitBoxAtCursor(hWnd)) {
-            SetCursor(LoadCursor(nullptr, IDC_ARROW));
-            return TRUE;
+            reinterpret_cast<HWND>(wParam) == hWnd) {
+            if (NoteLineSelectionHitBoxAtCursor(hWnd)) {
+                SetCursor(LoadCursor(nullptr, IDC_ARROW));
+                return TRUE;
+            }
+            if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 || g_ctrlRenderSelecting || g_ctrlRenderSelected) {
+                SetCursor(LoadCursor(nullptr, IDC_IBEAM));
+                return TRUE;
+            }
         }
         break;
     case WM_PAINT: {
@@ -394,9 +399,12 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_NOERASE);
         }
 
-        // EN_CHANGE records the dirty edit and refreshes render state directly. Keep explicit
-        // refreshes only for structural edits or programmatic paths that may not route cleanly.
-        if (structuralEdit && CurrentEditRevision() == beforeDefaultEditRevision) {
+        // EN_CHANGE records the dirty edit and refreshes render state directly. For structural edits
+        // (such as inserting a newline), flush overlay and line cache synchronously so the exited line renders immediately.
+        if (structuralEdit && !g_noteImeComposing) {
+            SetNoteTyping(false);
+            RecomputeMathFromNote();
+        } else if (structuralEdit && CurrentEditRevision() == beforeDefaultEditRevision) {
             RequestNoteContentRefreshAfterEdit(hWnd);
         }
         SyncRenderDrivenNoteInputUi(hWnd, msg);
@@ -982,6 +990,33 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (HandleNoteNormalModeMouseDown(hWnd, lParam)) {
             return 0;
         }
+        const bool isCtrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (!isCtrlDown) {
+            g_ctrlRenderSelecting = false;
+            g_ctrlRenderSelected = false;
+        } else if (g_noteRenderEnabled && !g_noteRawOnly) {
+            const std::optional<size_t> hit =
+                HitTestMarkupPosition(hWnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            size_t idx = 0;
+            if (hit) {
+                idx = *hit;
+            } else if (IsRichEditControl(hWnd)) {
+                POINTL pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                LRESULT res = SendMessageW(hWnd, EM_CHARFROMPOS, 0, reinterpret_cast<LPARAM>(&pt));
+                if (res >= 0) idx = static_cast<size_t>(res);
+            }
+            g_ctrlRenderSelecting = true;
+            g_ctrlRenderSelected = false;
+            g_noteRenderSelecting = true;
+            g_noteRenderSelectAnchor = idx;
+            g_noteRenderMouseDragActive = false;
+            SendMessageW(hWnd, EM_SETSEL, static_cast<WPARAM>(idx), static_cast<LPARAM>(idx));
+            SetFocus(hWnd);
+            SetCapture(hWnd);
+            InvalidateRect(hWnd, nullptr, FALSE);
+            SyncRenderDrivenNoteInputUi(hWnd, WM_LBUTTONDOWN);
+            return 0;
+        }
         g_notePendingLinkClickInsert = (g_linkPending.active && !g_linkPending.id.empty());
         g_notePendingLinkClickDown = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (!g_notePendingLinkClickInsert || !g_noteRenderEnabled || g_noteRawOnly) {
@@ -1155,6 +1190,12 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_notePendingLinkClickInsert = false;
         }
         if (msg == WM_LBUTTONUP && g_noteRenderSelecting) {
+            if (g_ctrlRenderSelecting) {
+                g_ctrlRenderSelecting = false;
+                DWORD selS = 0, selE = 0;
+                SendMessageW(hWnd, EM_GETSEL, reinterpret_cast<WPARAM>(&selS), reinterpret_cast<LPARAM>(&selE));
+                g_ctrlRenderSelected = (selS != selE);
+            }
             g_noteRenderSelecting = false;
             g_noteRenderMouseDragActive = false;
             ReleaseCapture();
@@ -1171,6 +1212,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_noteLineSelectionAnchorLine = -1;
         g_noteLineSelectionLastLine = -1;
         g_noteRenderSelecting = false;
+        g_ctrlRenderSelecting = false;
         g_noteRenderMouseDragActive = false;
         g_noteNormalMouseDragActive = false;
         g_notePendingLinkClickInsert = false;
@@ -1196,7 +1238,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_noteHasFocus = false;
         g_noteImeComposing = false;
         ClearRenderInsertGrace(hWnd);
-        FlushPendingMathRecompute(hWnd); // Ensure final edits are reflected before focus leaves.
+        FlushPendingMathRecompute(hWnd); // Ensure final edits are reflected if typing was active before focus leaves.
         MaybeFlushNoteStageOnCaretOrFocusChange(hWnd, true);
         if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
         if (g_hBottomMath && g_bottomPanePin == BottomPanePin::Math) {

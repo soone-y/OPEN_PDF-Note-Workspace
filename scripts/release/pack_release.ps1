@@ -318,20 +318,6 @@ function Copy-ReleaseSampleWorkspace([string]$SampleDest) {
     }
 
     Copy-DirectoryContents -SourceDir $sampleSource -DestDir $sampleDest
-
-    $samplePdfSource = Join-Path $repoRoot "tests\fixtures\ui_automation_session\sample.pdf"
-    $sampleSessionSource = @(
-        Get-ChildItem -LiteralPath $sampleSource -Recurse -Directory |
-            Where-Object { $_.Name -like "*01*" } |
-            Select-Object -First 1
-    )
-    if ($sampleSessionSource.Count -ne 1) {
-        throw "Release sample workspace session template not found under: $sampleSource"
-    }
-    $sampleSessionRel = $sampleSessionSource[0].FullName.Substring($sampleSource.Length).TrimStart('\', '/')
-    $sampleSessionDest = Join-Path $sampleDest $sampleSessionRel
-    Copy-File -Source $samplePdfSource -Dest (Join-Path $sampleSessionDest "sample_pdf_1.pdf")
-    Copy-File -Source $samplePdfSource -Dest (Join-Path $sampleSessionDest "sample_pdf_2.pdf")
 }
 
 function New-ReleaseFolderName([string]$Prefix) {

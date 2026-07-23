@@ -1124,6 +1124,15 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_OP_CONVERT_OFFICE_TO_PDF:
         ConvertOfficeFilesToCurrentSession(hWnd);
         break;
+    case ID_OP_CONVERT_IMAGE_TO_PDF: {
+        if (!IsImageFile(std::filesystem::path(CurrentLogicalPdfPath()))) break;
+        std::wstring outputPath;
+        if (file_output::ConvertImageToPdf(hWnd, CurrentLogicalPdfPath(), &outputPath)) {
+            RefreshCurrentSessionFiles();
+            OpenPdfIfDifferent(hWnd, outputPath);
+        }
+        break;
+    }
     case ID_OP_CREATE_BLANK_PDF:
         CreateBlankPdfInCurrentSession(hWnd);
         break;

@@ -63,6 +63,17 @@ static bool AveragePagePixelBorderColor(const PageCache& page, const RECT& inner
 static bool PagePixelRectHasVisibleInk(const PageCache& page, const RECT& inner, COLORREF bg,
                                        int channelThreshold, double contrastThreshold,
                                        int sampleDivisor);
+
+static TextBoxInteractionState g_textBoxState = TextBoxInteractionState::Idle;
+
+static TextBoxInteractionState GetTextBoxState() {
+    return g_textBoxState;
+}
+
+static void SetTextBoxState(TextBoxInteractionState state) {
+    g_textBoxState = state;
+}
+
 static bool TextBoxReadableBackground(const Annotation& ann, COLORREF* outColor, BYTE* outAlpha);
 static void DrawTextBoxReadableBackground(HDC hdc, const RECT& r, const Annotation& ann);
 static void DrawPolylineAlphaPx(HDC hdc, const std::vector<POINT>& pts, int penW, COLORREF color, BYTE alpha);
@@ -2085,6 +2096,7 @@ static void CommitTextEditing(HWND hwnd, bool commit) {
     }
 
     g_pdf.editingText = false;
+    SetTextBoxState(TextBoxInteractionState::Idle);
     g_pdf.editPage = -1;
     g_pdf.editText.clear();
     g_pdf.editCaret = 0;
@@ -3024,12 +3036,16 @@ static int ColumnWidthForLine(const TextLineLayout& line, size_t column) {
 
 static size_t HitTestLineForX(const TextLineLayout& line, int x) {
     if (line.len == 0) return line.start;
-    size_t idx = 0;
-    while (idx < line.widths.size() && x > line.widths[idx]) {
-        ++idx;
+    int prevX = 0;
+    for (size_t i = 0; i < line.widths.size(); ++i) {
+        int currX = line.widths[i];
+        int midX = (prevX + currX) / 2;
+        if (x <= midX) {
+            return line.start + i;
+        }
+        prevX = currX;
     }
-    if (idx > line.len) idx = line.len;
-    return line.start + idx;
+    return line.start + line.widths.size();
 }
 
 static size_t HitTestCaretIndex(const TextLayoutResult& layout, const RECT& inner, const POINT& pt) {
@@ -3406,7 +3422,8 @@ static void RecalcEditingTextboxSize(bool includeComp) {
     double left = std::min(g_pdf.editX1, g_pdf.editX2);
     double top = std::max(g_pdf.editY1, g_pdf.editY2);
     const auto& page = g_pdf.pages[static_cast<size_t>(g_pdf.editPage)];
-    double maxWidthPt = std::max(10.0, page.widthPt - left - 4.0);
+    double pageAvailWidthPt = std::max(10.0, page.widthPt - 8.0);
+    double maxWidthPt = pageAvailWidthPt;
     double maxHeightPt = std::max(8.0, top);
     int maxPxW = PtToLayoutPx(maxWidthPt);
     if (maxPxW <= 0) maxPxW = 1;

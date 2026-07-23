@@ -357,7 +357,7 @@ static bool BeginTextBoxEditClickSelection(HWND hwnd, const POINT& pt, bool shif
         return false;
     }
 
-    size_t anchor = g_pdf.editCaret;
+    size_t anchor = newCaret;
     if (shiftDown) {
         if (HasEditSelection()) {
             anchor = (g_pdf.editCaret == g_pdf.editSelStart) ? g_pdf.editSelEnd : g_pdf.editSelStart;
@@ -714,6 +714,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_pdf.editFontName = g_textFontName;
             g_pdf.editFontPt = ResolveAdaptiveTextFontPtForPage(g_pdf.editPage, g_textFontPt);
             g_pdf.editLayoutDirty = true;
+            EnsureEditLayoutCache(true);
             RecalcEditingTextboxSize(true);
             EnsureEditingTextBoxVisible(hwnd, L"textbox_font_update");
             UpdateImeWindowPosition(hwnd, true);
@@ -1185,6 +1186,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             int hitIdx = -1;
             if (HitTestLinkMarkerAtPoint(pt, hitIdx)) {
                 g_pdf.pendingTextBoxHit = true;
+                    SetTextBoxState(TextBoxInteractionState::PendingClick);
                 g_pdf.pendingTextBoxIndex = hitIdx;
                 g_pdf.pendingTextBoxDown = pt;
                 SetCapture(hwnd);
@@ -1218,6 +1220,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             Annotation::Type pref = PreferredMoveAnnotationTypeForTool();
             if (HitTestAnnotationForMove(pt, pref, idx)) {
                 g_pdf.movingAnnot = true;
+                SetTextBoxState(TextBoxInteractionState::Moving);
                 g_pdf.movingIndex = idx;
                 g_pdf.movingOriginal = g_annots[static_cast<size_t>(idx)];
                 g_pdf.movePage = g_pdf.movingOriginal.pageIndex;
@@ -1256,6 +1259,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     }
                     (void)SyncTextBoxToolFontFromAnnotationIndex(hitIdx);
                     g_pdf.pendingTextBoxHit = true;
+                    SetTextBoxState(TextBoxInteractionState::PendingClick);
                     g_pdf.pendingTextBoxIndex = hitIdx;
                     g_pdf.pendingTextBoxDown = pt;
                     SetCapture(hwnd);

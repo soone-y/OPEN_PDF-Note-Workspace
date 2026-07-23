@@ -1722,6 +1722,14 @@ int main() {
     }
 
     {
+        const note::NoteDocument doc = ParseMd4c(L"PDF に<b>マーカー</b>を引いたり、<i>斜体</i>にする\n");
+        const auto* boldSpan = FindStyleSpan(doc, note::StyleKind::Bold);
+        const auto* italicSpan = FindStyleSpan(doc, note::StyleKind::Italic);
+        Expect(boldSpan != nullptr, "<b> tag creates StyleKind::Bold span");
+        Expect(italicSpan != nullptr, "<i> tag creates StyleKind::Italic span");
+    }
+
+    {
         const note::NoteDocument doc = ParseMd4c(L"");
         Expect(doc.blocks.empty(), "empty note parses without blocks or crash");
         Expect(doc.math_spans.empty(), "empty note has no math spans");

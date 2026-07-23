@@ -3468,6 +3468,8 @@ static bool g_noteHasFocus = false;
 static bool g_noteRenderSelecting = false;
 static size_t g_noteRenderSelectAnchor = 0;
 static bool g_noteRenderMouseDragActive = false;
+static bool g_ctrlRenderSelecting = false;
+static bool g_ctrlRenderSelected = false;
 static bool g_noteNormalMouseDragActive = false;
 static std::wstring g_noteLastClickLinkId;
 static DWORD g_noteLastClickTime = 0;
@@ -3948,6 +3950,7 @@ static bool IsNoteLineRawHelper(HWND hWnd, int line) {
     // raw overlay shifts the second click onto the markup token instead of
     // the rendered link text.
     if (NoteLinkRenderGraceRemainingMs() > 0 && line == caretLine) return false;
+    if (g_ctrlRenderSelecting || (g_ctrlRenderSelected && hasSelection)) return false;
 
     if (showVimCaretLineRawInNote) return line == caretLine;
     if (noteNormalModeActive) return false;

@@ -2,6 +2,24 @@
 #pragma once
 #include "core/annot_commands.h"
 #include "core/app_core.h"
+
+enum class TextBoxInteractionState {
+    Idle,           // 通常の非編集状態
+    PendingClick,   // MouseDown中のタップ/移動判定待ち
+    Moving,         // 枠ドラッグ移動中
+    Editing         // インラインテキスト編集モード
+};
+
+struct PreEditToolbarState {
+    bool valid = false;
+    ToolMode toolMode = ToolMode::TextBox;
+    std::wstring textFontName;
+    double textFontPt = 12.0;
+    COLORREF textColor = RGB(0, 0, 0);
+    bool readableBackground = false;
+    bool readableBackgroundInverted = false;
+};
+
 #include <string>
 #include <string_view>
 #include <vector>

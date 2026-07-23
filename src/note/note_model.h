@@ -131,6 +131,8 @@ enum class StyleKind {
     LinkId,
     LinkAccent,
     LinkUnderline,
+    Bold,
+    Italic,
 };
 
 enum class MathKind {

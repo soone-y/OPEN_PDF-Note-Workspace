@@ -1,9 +1,12 @@
 # Office conversion fixtures
 
-Place local conversion samples here:
+This directory contains the tracked Office conversion fixture set used to validate
+the reduced LibreOffice runtime. It includes four `.docx` and four `.pptx` files
+covering charts, tables, fonts, shapes, images, SmartArt, equations, multilingual
+text, fields, content controls, and embedded objects.
 
-- at least one `.docx`
-- at least one `.pptx`
+Keep the source Office files unchanged. Generated PDFs remain local-only and are
+written under `.local\repo_resource\tmp`.
 
 Run:
 

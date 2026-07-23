@@ -6,6 +6,7 @@ struct MainMenuStateSnapshot {
     bool hasSessionLastOpenBackup = false;
     bool hasSavedFileBackup = false;
     bool hasCurrentPdf = false;
+    bool hasCurrentImage = false;
     bool hasCurrentNote = false;
     bool hasStagedDiffs = false;
     bool noteEditorDirty = false;
@@ -32,6 +33,7 @@ struct MainMenuStateSnapshot {
                hasSessionLastOpenBackup == other.hasSessionLastOpenBackup &&
                hasSavedFileBackup == other.hasSavedFileBackup &&
                hasCurrentPdf == other.hasCurrentPdf &&
+               hasCurrentImage == other.hasCurrentImage &&
                hasCurrentNote == other.hasCurrentNote &&
                hasStagedDiffs == other.hasStagedDiffs &&
                noteEditorDirty == other.noteEditorDirty &&

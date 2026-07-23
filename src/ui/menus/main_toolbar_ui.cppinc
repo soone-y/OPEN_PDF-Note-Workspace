@@ -79,10 +79,12 @@ void UpdateToolbarUI(HWND hWnd) {
     bool showColor = ToolbarHasColorOptions(g_toolMode);
     bool showMagnifierShape = ToolbarHasMagnifierShapeOptions(g_toolMode);
     const bool saveBusy = IsSaveTransactionRunning();
-    const bool annotPanelEnabled = !saveBusy && !IsPdfPreviewReadOnlyActive();
+    const bool annotPanelEnabled = !saveBusy && !IsPdfPreviewReadOnlyActive() &&
+                                   g_pdf.kind == DocKind::Pdf;
     if (g_hAnnotShow) EnableWindow(g_hAnnotShow, annotPanelEnabled);
     if (g_hAnnotSettings) EnableWindow(g_hAnnotSettings, annotPanelEnabled);
     if (g_hAnnotClear) EnableWindow(g_hAnnotClear, annotPanelEnabled);
+    if (g_hAnnotList) EnableWindow(g_hAnnotList, annotPanelEnabled);
 
     // Top-level tool family buttons (enabled/disabled/hidden).
     for (AnnotToolFamily family : AnnotToolFamilyUiOrder()) {

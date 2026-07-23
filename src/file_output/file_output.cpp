@@ -3223,6 +3223,165 @@ static bool SavePdfDocument(FPDF_DOCUMENT doc, const std::wstring& outPath, std:
     return true;
 }
 
+struct ImagePdfSourcePixels {
+    std::vector<uint8_t> bgra;
+    int width = 0;
+    int height = 0;
+    int stride = 0;
+    double dpiX = kDpi;
+    double dpiY = kDpi;
+};
+
+static bool LoadImageForPdfConversion(const std::wstring& sourcePath,
+                                      ImagePdfSourcePixels* out,
+                                      std::wstring* err) {
+    if (!out || sourcePath.empty()) return false;
+    *out = {};
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    const auto cleanup = [&]() {
+        if (converter) converter->Release();
+        if (frame) frame->Release();
+        if (decoder) decoder->Release();
+        if (factory) factory->Release();
+    };
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&factory));
+    if (FAILED(hr) || !factory) {
+        if (err) *err = L"WIC factory creation failed.";
+        return false;
+    }
+    hr = factory->CreateDecoderFromFilename(sourcePath.c_str(), nullptr, GENERIC_READ,
+                                            WICDecodeMetadataCacheOnLoad, &decoder);
+    if (FAILED(hr) || !decoder) {
+        if (err) *err = L"Image decoder creation failed.";
+        cleanup();
+        return false;
+    }
+    hr = decoder->GetFrame(0, &frame);
+    if (FAILED(hr) || !frame) {
+        if (err) *err = L"Image frame loading failed.";
+        cleanup();
+        return false;
+    }
+    UINT width = 0;
+    UINT height = 0;
+    if (FAILED(frame->GetSize(&width, &height)) || width == 0 || height == 0 ||
+        width > static_cast<UINT>(std::numeric_limits<int>::max() / 4) ||
+        height > static_cast<UINT>(std::numeric_limits<int>::max())) {
+        if (err) *err = L"Image dimensions are not supported.";
+        cleanup();
+        return false;
+    }
+    const size_t stride = static_cast<size_t>(width) * 4;
+    if (height > std::numeric_limits<size_t>::max() / stride ||
+        stride > static_cast<size_t>(std::numeric_limits<UINT>::max()) ||
+        stride * height > static_cast<size_t>(std::numeric_limits<UINT>::max())) {
+        if (err) *err = L"Image is too large to convert safely.";
+        cleanup();
+        return false;
+    }
+    hr = factory->CreateFormatConverter(&converter);
+    if (FAILED(hr) || !converter ||
+        FAILED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
+                                     WICBitmapDitherTypeNone, nullptr, 0.0,
+                                     WICBitmapPaletteTypeCustom))) {
+        if (err) *err = L"Image pixel conversion failed.";
+        cleanup();
+        return false;
+    }
+    out->bgra.assign(stride * height, 0);
+    hr = converter->CopyPixels(nullptr, static_cast<UINT>(stride),
+                               static_cast<UINT>(stride * height), out->bgra.data());
+    if (FAILED(hr)) {
+        if (err) *err = L"Image pixel read failed.";
+        cleanup();
+        return false;
+    }
+    double dpiX = kDpi;
+    double dpiY = kDpi;
+    if (FAILED(frame->GetResolution(&dpiX, &dpiY)) || !std::isfinite(dpiX) || !std::isfinite(dpiY) ||
+        dpiX <= 0.0 || dpiY <= 0.0) {
+        dpiX = kDpi;
+        dpiY = kDpi;
+    }
+    cleanup();
+
+    // The image viewer composites transparent pixels against white. Do the same for the PDF,
+    // so conversion preserves its visible pixels instead of introducing a black background.
+    for (size_t i = 0; i + 3 < out->bgra.size(); i += 4) {
+        const int alpha = out->bgra[i + 3];
+        if (alpha == 255) continue;
+        const int inverse = 255 - alpha;
+        out->bgra[i] = static_cast<uint8_t>((out->bgra[i] * alpha + 255 * inverse + 127) / 255);
+        out->bgra[i + 1] = static_cast<uint8_t>((out->bgra[i + 1] * alpha + 255 * inverse + 127) / 255);
+        out->bgra[i + 2] = static_cast<uint8_t>((out->bgra[i + 2] * alpha + 255 * inverse + 127) / 255);
+        out->bgra[i + 3] = 255;
+    }
+    out->width = static_cast<int>(width);
+    out->height = static_cast<int>(height);
+    out->stride = static_cast<int>(stride);
+    out->dpiX = dpiX;
+    out->dpiY = dpiY;
+    return true;
+}
+
+static bool ConvertImageToPdfFile(const std::wstring& sourcePath,
+                                  const std::wstring& destinationPath,
+                                  std::wstring* err) {
+    ImagePdfSourcePixels image;
+    if (!LoadImageForPdfConversion(sourcePath, &image, err)) return false;
+    const double widthPt = image.width * 72.0 / image.dpiX;
+    const double heightPt = image.height * 72.0 / image.dpiY;
+    if (!std::isfinite(widthPt) || !std::isfinite(heightPt) || widthPt <= 0.0 || heightPt <= 0.0 ||
+        widthPt > 14400.0 || heightPt > 14400.0) {
+        if (err) *err = IsEnglishUi() ? L"Image page size is not supported by PDF."
+                                      : L"画像のページサイズはPDFで扱えません。";
+        return false;
+    }
+    FPDF_DOCUMENT doc = nullptr;
+    bool prepared = false;
+    {
+        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+        doc = FPDF_CreateNewDocument();
+        if (doc) {
+            FPDF_PAGE page = FPDFPage_New(doc, 0, widthPt, heightPt);
+            FPDF_PAGEOBJECT object = page ? FPDFPageObj_NewImageObj(doc) : nullptr;
+            FPDF_BITMAP bitmap = object
+                ? FPDFBitmap_CreateEx(image.width, image.height, FPDFBitmap_BGRA,
+                                       image.bgra.data(), image.stride)
+                : nullptr;
+            if (page && object && bitmap &&
+                FPDFImageObj_SetBitmap(&page, 1, object, bitmap) &&
+                FPDFImageObj_SetMatrix(object, widthPt, 0.0, 0.0, -heightPt, 0.0, heightPt)) {
+                FPDFPage_InsertObject(page, object);
+                object = nullptr; // FPDFPage_InsertObject transfers ownership to PDFium.
+                prepared = !!FPDFPage_GenerateContent(page);
+            }
+            if (bitmap) FPDFBitmap_Destroy(bitmap);
+            if (object) FPDFPageObj_Destroy(object);
+            if (page) FPDF_ClosePage(page);
+        }
+    }
+    if (!prepared) {
+        if (doc) {
+            std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+            FPDF_CloseDocument(doc);
+        }
+        if (err) *err = IsEnglishUi() ? L"Failed to create the image PDF."
+                                      : L"画像PDFを作成できませんでした。";
+        return false;
+    }
+    const bool saved = SavePdfDocument(doc, destinationPath, err);
+    {
+        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+        FPDF_CloseDocument(doc);
+    }
+    return saved;
+}
+
 static bool ExportPdfDocumentWithSpecs(FPDF_DOCUMENT srcDoc,
                                        const std::vector<Annotation>& annots,
                                        const std::vector<file_output::PdfPageSpec>& pages,
@@ -3315,6 +3474,36 @@ static bool ExportPdfDocumentWithSpecs(FPDF_DOCUMENT srcDoc,
 } // namespace
 
 namespace file_output {
+
+bool ConvertImageToPdf(HWND owner, const std::wstring& imagePath, std::wstring* outPath) {
+    if (outPath) outPath->clear();
+    const std::filesystem::path source(imagePath);
+    if (!IsImageFile(source)) return false;
+    const std::wstring defaultName = DefaultNameFromPath(imagePath, L".pdf", L"image.pdf");
+    const std::wstring title = IsEnglishUi() ? L"Convert Image to PDF" : L"画像をPDFに変換";
+    COMDLG_FILTERSPEC filters[] = {
+        { L"PDF (*.pdf)", L"*.pdf" },
+        { L"All Files (*.*)", L"*.*" },
+    };
+    auto target = PickSavePath(owner, title.c_str(), defaultName, InitialDirForPath(imagePath),
+                               filters, static_cast<UINT>(std::size(filters)), L"pdf");
+    if (!target) return false;
+    std::wstring err;
+    if (!ConvertImageToPdfFile(imagePath, *target, &err)) {
+        ShowFileOutputMessageDialog(owner, title,
+                                    err.empty() ? (IsEnglishUi() ? L"Image-to-PDF conversion failed."
+                                                                 : L"画像からPDFへの変換に失敗しました。")
+                                                : err,
+                                    SoftNoticeKind::Error);
+        return false;
+    }
+    if (outPath) *outPath = *target;
+    ShowFileOutputSoftNotice(owner,
+                             IsEnglishUi() ? L"Image PDF created without modifying the source image."
+                                           : L"元画像を変更せずにPDFを作成しました。",
+                             SoftNoticeKind::Info);
+    return true;
+}
 
 static bool ResolvePdfPageSize(int pageIndex, double* outWPt, double* outHPt) {
     if (outWPt) *outWPt = 0.0;

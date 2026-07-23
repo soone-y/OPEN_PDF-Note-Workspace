@@ -1903,6 +1903,15 @@ static void ApplyUnifiedSettings(UnifiedSettingsShellCtx* ctx) {
     if (ctx->paletteCtx && ctx->childPalette) {
         SaveUserPaletteColorsForSettings(ctx->paletteCtx->colors,
                                          std::size(ctx->paletteCtx->colors));
+        if (ctx->owner && IsWindow(ctx->owner)) {
+            UpdateToolbarUI(ctx->owner);
+        }
+        if (g_hPdfView) {
+            InvalidateRect(g_hPdfView, nullptr, FALSE);
+        }
+        if (g_hPdfToolbar) {
+            RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+        }
     }
 }
 

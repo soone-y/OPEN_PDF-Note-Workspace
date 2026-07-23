@@ -219,6 +219,10 @@ bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, Pd
 bool ExportPdfPagePng(HWND owner, int pageIndex, PdfPngStyle style, bool includeAnnotations, int outWidthPx, int outHeightPx);
 bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, PdfPngStyle style, bool includeAnnotations, int outWidthPx, int outHeightPx);
 
+// Create a new one-page PDF from a PNG/JPEG without modifying the source image.
+// The source pixels and physical DPI determine the PDF page content and size.
+bool ConvertImageToPdf(HWND owner, const std::wstring& imagePath, std::wstring* outPath = nullptr);
+
 // Note text exports.
 bool ExportNotePlainText(HWND owner, const TextExportOptions& options);
 bool ExportNoteMarkup(HWND owner, const NoteMarkupExportOptions& options);

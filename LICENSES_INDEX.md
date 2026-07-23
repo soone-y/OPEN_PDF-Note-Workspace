@@ -34,23 +34,23 @@ release パッケージを受け取った利用者は、`docs/` と `licenses/` 
 
 | コンポーネント | 主な用途 | 同梱/利用形態 | 主なライセンス | 注意度 | 必要な対応 |
 | --- | --- | --- | --- | --- | --- |
-| PDFium package `145.0.7568.0` | PDFium バイナリ/ヘッダのパッケージ | `third_party/pdfium/`、release では `pdfium.dll` | MIT 系 | ｱﾘ | `third_party/pdfium/LICENSE` を同梱 |
+| PDFium package `145.0.7568.0` | PDFium バイナリ/ヘッダのパッケージ | `third_party/pdfium/`、release では `pdfium.dll` | MIT 系 | 低 | `third_party/pdfium/LICENSE` を同梱 |
 | PDFium 本体 | PDF 読み込み、描画、テキスト抽出、書き出し | `pdfium.dll` | BSD 3-Clause + Apache 2.0 系 | 中 | `pdfium.txt` と関連 license 群を同梱 |
 | Abseil | PDFium 依存 | PDFium 同梱 | Apache License 2.0 | 中 | LICENSE、NOTICE がある場合は NOTICE、改変表示 |
-| Anti-Grain Geometry / AGG 2.3 | PDFium 依存 | PDFium 同梱 | permissive notice | ｱﾘ | 著作権表示を保持 |
-| fast_float | PDFium 依存 | PDFium 同梱 | MIT License | ｱﾘ | 著作権表示とライセンス文を保持 |
+| Anti-Grain Geometry / AGG 2.3 | PDFium 依存 | PDFium 同梱 | permissive notice | 低 | 著作権表示を保持 |
+| fast_float | PDFium 依存 | PDFium 同梱 | MIT License | 低 | 著作権表示とライセンス文を保持 |
 | FreeType | フォント描画関連 | PDFium / LibreOffice 依存で含まれる可能性 | FreeType Project License | 中 | FreeType 利用クレジットを保持 |
 | ICU | Unicode / 国際化関連 | PDFium / LibreOffice 依存で含まれる可能性 | Unicode License V3 / ICU License + third-party notices | 中 | ICU ライセンスと同梱 notice を保持 |
-| Little CMS / lcms2 | 色管理 | PDFium / LibreOffice 依存で含まれる可能性 | MIT 系 | ｱﾘ | 著作権表示とライセンス文を保持 |
+| Little CMS / lcms2 | 色管理 | PDFium / LibreOffice 依存で含まれる可能性 | MIT 系 | 低 | 著作権表示とライセンス文を保持 |
 | libjpeg-turbo / IJG | JPEG 画像処理 | PDFium / LibreOffice 依存で含まれる可能性 | IJG License + Modified BSD 3-Clause + zlib | 中 | IJG 表示文、BSD 文、改変時表示を保持 |
-| libopenjpeg | JPEG 2000 関連 | PDFium 依存 | BSD 2-Clause | ｱﾘ | 著作権表示と免責文を保持 |
-| libpng | PNG 画像処理 | PDFium / LibreOffice 依存で含まれる可能性 | PNG Reference Library License / zlib 系 | ｱﾘ | 出所詐称禁止、改変表示、通知保持 |
-| libtiff | TIFF 画像処理 | PDFium / LibreOffice 依存で含まれる可能性 | permissive / BSD 風 | ｱﾘ | 著作権表示、名称の広告利用禁止 |
+| libopenjpeg | JPEG 2000 関連 | PDFium 依存 | BSD 2-Clause | 低 | 著作権表示と免責文を保持 |
+| libpng | PNG 画像処理 | PDFium / LibreOffice 依存で含まれる可能性 | PNG Reference Library License / zlib 系 | 低 | 出所詐称禁止、改変表示、通知保持 |
+| libtiff | TIFF 画像処理 | PDFium / LibreOffice 依存で含まれる可能性 | permissive / BSD 風 | 低 | 著作権表示、名称の広告利用禁止 |
 | LLVM libc | PDFium 依存 | PDFium 同梱 | Apache 2.0 with LLVM Exceptions | 中 | Apache 文、LLVM 例外、NOTICE がある場合は保持 |
-| zlib | 圧縮 | PDFium 依存等 | zlib License | ｱﾘ | 出所詐称禁止、改変表示、通知保持 |
+| zlib | 圧縮 | PDFium 依存等 | zlib License | 低 | 出所詐称禁止、改変表示、通知保持 |
 | MinGW-w64 runtime DLLs | C++/GCC runtime | `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` | GPLv3 + GCC Runtime Library Exception / MIT + BSD 系 | 中 | `COPYING3.txt`, `COPYING.RUNTIME.txt`, `COPYING.txt` を同梱 |
 | zlib runtime | DOCX staging copy の ZIP 展開/検証 | `zlib1.dll` | zlib License | 低 | `zlib.txt` を同梱 |
-| MD4C | Markdown 解析 | `third_party/md4c/src/md4c.c`, `md4c.h` をビルドに使用 | MIT License | ｱﾘ | `LICENSE.md` を同梱。局所パッチを管理 |
+| MD4C | Markdown 解析 | `third_party/md4c/src/md4c.c`, `md4c.h` をビルドに使用 | MIT License | 低 | `LICENSE.md` を同梱。局所パッチを管理 |
 | LibreOffice `26.2.3.2` | 同梱フォントの private font 利用。docx/pptx から PDF への headless 変換 | `third_party/libreoffice/image/` は比較・フォント・license 参照用。変換エンジン本体は検証済みカスタム runtime を release 配置または環境変数で指定 | MPL 2.0 中心 + LGPL/GPL/MPL/Apache 等多数 | 中〜高 | `license.txt`, `LICENSE.html`, `NOTICE` を同梱。runtime を含める場合は同梱 runtime 自身の文書を使い、改変 patch を提示可能にする |
 | LibreOffice 同梱フォント | 英語・記号向けフォント候補 | `FR_PRIVATE` でプロセス内読み込み | LibreOffice の各フォント notice に従う | 中 | `license.txt`, `LICENSE.html`, `NOTICE` を同梱。再配布範囲を選択フォントに限定 |
 | Windows / OS フォント | 日本語表示、注釈、PDF 書き出し | 利用者環境にインストール済みのフォントをフェイス名で利用 | 各 OS / 各フォントのライセンス | 中 | フォントファイルを本リポジトリの権利として扱わない。再配布権を与えない |

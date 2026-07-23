@@ -47,6 +47,7 @@ MainMenuStateSnapshot CaptureMainMenuStateSnapshot() {
         L" sessionBackup=" + preview_trace::Bool(state.hasSessionLastOpenBackup) +
         L" savedFileBackup=" + preview_trace::Bool(state.hasSavedFileBackup));
     state.hasCurrentPdf = HasExportablePdf();
+    state.hasCurrentImage = g_pdf.kind == DocKind::Image;
     state.hasCurrentNote = !g_currentNotePath.empty();
     state.hasStagedDiffs = file_output::HasAnyStagedDiffs();
     preview_trace::Append(

@@ -574,9 +574,8 @@ std::vector<COLORREF> g_palette = {
     RGB(255,   0,   0), // red
     RGB(  0, 160, 255), // blue
     RGB(  0, 200,   0), // green
-    RGB(255, 140,   0), // orange
     RGB(200,  80, 200), // magenta-ish for variation
-    RGB(128, 128, 128)  // custom slot (user-editable)
+    RGB(128, 128, 128)  // custom slot (user-editable / dynamic)
 };
 COLORREF g_paletteCustomColor = g_palette.back();
 COLORREF g_activeColor = g_palette.front();
@@ -1389,22 +1388,21 @@ static std::filesystem::path UserPaletteFilePath() {
 static void FillDefaultUserPaletteColors(COLORREF* custom, size_t count) {
     if (!custom || count == 0) return;
     constexpr COLORREF defaults[] = {
-        RGB(0, 0, 0),
-        RGB(255, 255, 0),
-        RGB(255, 0, 0),
-        RGB(0, 160, 255),
-        RGB(0, 200, 0),
-        RGB(255, 140, 0),
-        RGB(200, 80, 200),
-        RGB(128, 128, 128),
-        RGB(255, 255, 255),
-        RGB(0, 170, 123),
+        RGB(255, 140,   0), // orange (default annotation color)
+        RGB(255, 255,   0), // marker yellow
+        RGB(255,   0,   0), // red
+        RGB(  0, 160, 255), // blue
+        RGB(  0, 200,   0), // green
+        RGB(200,  80, 200), // magenta-ish
+        RGB(128, 128, 128), // custom slot (user-editable / dynamic)
+        RGB(  0,   0,   0), // black
+        RGB(255, 255, 255), // white
+        RGB(  0, 170, 123),
         RGB(255, 189, 133),
-        RGB(29, 80, 221),
-        RGB(0, 96, 160),
-        RGB(120, 80, 220),
-        RGB(220, 70, 40),
-        RGB(64, 64, 64),
+        RGB( 29,  80, 221),
+        RGB(  0,  96, 160),
+        RGB(120,  80, 220),
+        RGB(220,  70, 40),
     };
     for (size_t i = 0; i < count; ++i) {
         custom[i] = defaults[std::min(i, std::size(defaults) - 1)];
@@ -1414,11 +1412,28 @@ static void FillDefaultUserPaletteColors(COLORREF* custom, size_t count) {
 static void ApplyRuntimePaletteColors(const COLORREF* colors, size_t count) {
     if (!colors || count == 0) return;
 
+    // Deduplicate: keep first occurrence of each color for slots 0..(count-2).
+    // The last entry (dynamic custom slot) is always appended, even if it matches
+    // an earlier color, so it remains addressable as g_palette.back().
+    std::vector<COLORREF> deduped;
+    deduped.reserve(count);
+    for (size_t i = 0; i + 1 < count; ++i) {
+        bool isDup = false;
+        for (size_t j = 0; j < deduped.size(); ++j) {
+            if (deduped[j] == colors[i]) { isDup = true; break; }
+        }
+        if (!isDup) deduped.push_back(colors[i]);
+    }
+    deduped.push_back(colors[count - 1]); // always keep the dynamic custom slot
+
+    const COLORREF* deduped_colors = deduped.data();
+    const size_t deduped_count = deduped.size();
+
     const std::vector<COLORREF> prevPalette = g_palette;
     const COLORREF prevActive = g_activeColor;
     const COLORREF prevCustom = g_paletteCustomColor;
     int activeSlot = -1;
-    if (prevPalette.size() == count) {
+    if (prevPalette.size() == deduped_count) {
         for (size_t i = 0; i < prevPalette.size(); ++i) {
             if (prevPalette[i] == prevActive) {
                 activeSlot = static_cast<int>(i);
@@ -1426,10 +1441,10 @@ static void ApplyRuntimePaletteColors(const COLORREF* colors, size_t count) {
             }
         }
     } else if (prevActive == prevCustom) {
-        activeSlot = static_cast<int>(count - 1);
+        activeSlot = static_cast<int>(deduped_count - 1);
     }
 
-    g_palette.assign(colors, colors + count);
+    g_palette.assign(deduped_colors, deduped_colors + deduped_count);
     g_paletteCustomColor = g_palette.back();
 
     if (activeSlot >= 0 && static_cast<size_t>(activeSlot) < g_palette.size() &&
@@ -1441,13 +1456,12 @@ static void ApplyRuntimePaletteColors(const COLORREF* colors, size_t count) {
 
 static void ResetRuntimePaletteToDefault() {
     COLORREF colors[] = {
-        RGB(0, 0, 0),
-        RGB(255, 255, 0),
-        RGB(255, 0, 0),
-        RGB(0, 160, 255),
-        RGB(0, 200, 0),
-        RGB(255, 140, 0),
-        RGB(200, 80, 200),
+        RGB(255, 140,   0), // orange
+        RGB(255, 255,   0), // yellow
+        RGB(255,   0,   0), // red
+        RGB(  0, 160, 255), // blue
+        RGB(  0, 200,   0), // green
+        RGB(200,  80, 200), // magenta
         g_paletteCustomColor,
     };
     ApplyRuntimePaletteColors(colors, std::size(colors));
@@ -1584,6 +1598,23 @@ bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor) {
     cc.lStructSize = sizeof(cc);
     cc.hwndOwner = owner;
     cc.rgbResult = initial;
+    static COLORREF s_customColors[16] = {
+        RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255),
+        RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255),
+        RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255),
+        RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255)
+    };
+    static bool s_initialized = false;
+    if (!s_initialized) {
+        s_initialized = true;
+        COLORREF loaded[16]{};
+        if (LoadUserPaletteColors(loaded, 16)) {
+            for (size_t i = 0; i < 16; ++i) {
+                s_customColors[i] = loaded[i];
+            }
+        }
+    }
+    cc.lpCustColors = s_customColors;
     cc.Flags = CC_FULLOPEN | CC_RGBINIT;
     if (!ChooseColorW(&cc)) return false;
     *outColor = cc.rgbResult;
@@ -2349,13 +2380,10 @@ static void SyncLeftPaneSelectionNow() {
     auto ensureSel = [](HWND hList, int idx) {
         if (!hList) return;
         int count = static_cast<int>(SendMessageW(hList, LB_GETCOUNT, 0, 0));
+        int targetSel = (idx >= 0 && idx < count) ? idx : -1;
         int curSel = static_cast<int>(SendMessageW(hList, LB_GETCURSEL, 0, 0));
-        if (curSel < 0 || curSel >= count) {
-            if (idx < 0 || idx >= count) {
-                SendMessageW(hList, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
-            } else {
-                SendMessageW(hList, LB_SETCURSEL, idx, 0);
-            }
+        if (curSel != targetSel) {
+            SendMessageW(hList, LB_SETCURSEL, static_cast<WPARAM>(targetSel), 0);
         }
         // Open-item highlighting depends on global current-path state, so repaint
         // even when the logical selection index has not changed.

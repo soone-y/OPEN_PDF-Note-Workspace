@@ -1174,6 +1174,9 @@ static bool UpdateMovingAnnotAtClientPoint(HWND hwnd, const POINT& cur) {
 }
 
 static void CommitPendingTextBoxEdit(HWND hwnd) {
+    if (g_pdf.editingText) {
+        CommitTextEditing(hwnd, true);
+    }
     if (g_pdf.pendingTextBoxIndex < 0 ||
         g_pdf.pendingTextBoxIndex >= static_cast<int>(g_annots.size())) {
         g_pdf.pendingTextBoxHit = false;
@@ -1181,6 +1184,7 @@ static void CommitPendingTextBoxEdit(HWND hwnd) {
         ReleaseCapture();
         return;
     }
+    POINT downPt = g_pdf.pendingTextBoxDown;
     int idx = g_pdf.pendingTextBoxIndex;
     Annotation ann = g_annots[static_cast<size_t>(idx)];
     g_pdf.pendingTextBoxHit = false;
@@ -1236,6 +1240,14 @@ static void CommitPendingTextBoxEdit(HWND hwnd) {
     BeginTextEdit(hwnd, ann.pageIndex, std::min(ann.x1, ann.x2), std::max(ann.y1, ann.y2),
                   std::abs(ann.x2 - ann.x1), std::abs(ann.y1 - ann.y2),
                   ann.text, ann.fontName, editFontPt);
+    size_t clickCaret = 0;
+    if (HitTestEditCaretFromClientPoint(downPt, &clickCaret, true)) {
+        g_pdf.editCaret = clickCaret;
+        g_pdf.editSelStart = clickCaret;
+        g_pdf.editSelEnd = clickCaret;
+        g_pdf.editSelAnchor = clickCaret;
+        UpdateImeWindowPosition(hwnd, true);
+    }
 }
 
 static bool EraseAnnotationAtPoint(const POINT& pt) {

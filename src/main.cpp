@@ -3103,12 +3103,17 @@ static int FindFileEntryIndexByPath(const std::vector<FileEntry>& files, const s
 }
 
 static bool SelectStartupLastOpenFileListItem(HWND list,
-                                              const std::vector<FileEntry>& files,
-                                              const std::wstring& path) {
-    const int index = FindFileEntryIndexByPath(files, path);
-    if (!list || index < 0) return false;
-    SendMessageW(list, LB_SETCURSEL, index, 0);
-    return true;
+                                               const std::vector<FileEntry>& files,
+                                               const std::wstring& path) {
+    if (!list) return false;
+    const int idx = FindFileEntryIndexByPath(files, path);
+    if (idx < 0) return false;
+    return SetListboxSelAndNotify(list, idx);
+}
+
+static bool IsStartupLastOpenFileInList(const std::vector<FileEntry>& files,
+                                        const std::wstring& path) {
+    return FindFileEntryIndexByPath(files, path) >= 0;
 }
 
 static void TraceStartupLastOpenRestore(const std::wstring& step,
@@ -3243,13 +3248,15 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
 
     if (ParseSessionAutoOpenMode(g_config.sessionAutoOpenMode) == SessionAutoOpenMode::Off) {
         LoadFiles(targetSession, preferredPdf, preferredNote);
+        const bool selectedPdf = SelectStartupLastOpenFileListItem(g_hPdfList, g_pdfFiles, preferredPdf);
+        const bool selectedNote = SelectStartupLastOpenFileListItem(g_hNoteList, g_noteFiles, preferredNote);
         SyncLeftPaneSelection();
         pdfRestored = hasPreferredPdf &&
-            SelectStartupLastOpenFileListItem(g_hPdfList, g_pdfFiles, preferredPdf);
+            IsStartupLastOpenFileInList(g_pdfFiles, preferredPdf);
         noteRestored = hasPreferredNote &&
-            SelectStartupLastOpenFileListItem(g_hNoteList, g_noteFiles, preferredNote);
-        if (hasPreferredPdf && !pdfRestored) missing.push_back(L"PDF");
-        if (hasPreferredNote && !noteRestored) missing.push_back(IsEnglishUi() ? L"note" : L"ノート");
+            IsStartupLastOpenFileInList(g_noteFiles, preferredNote);
+        if (hasPreferredPdf && !selectedPdf) missing.push_back(L"PDF");
+        if (hasPreferredNote && !selectedNote) missing.push_back(IsEnglishUi() ? L"note" : L"ノート");
         RefreshMainWindowUiState(hWnd);
         return finish(L"end=selected_files_only");
     }
@@ -3260,7 +3267,7 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
         if (CanOpenPdfListPathInApp(preferredPdf)) {
             pdfRestored = OpenPdfIfDifferent(hWnd, preferredPdf);
         } else {
-            pdfRestored = SelectStartupLastOpenFileListItem(g_hPdfList, g_pdfFiles, preferredPdf);
+            pdfRestored = IsStartupLastOpenFileInList(g_pdfFiles, preferredPdf);
         }
         if (!pdfRestored) missing.push_back(L"PDF");
     }
@@ -5325,8 +5332,9 @@ void ApplyPaletteCustomColor(HWND hWnd, COLORREF color) {
     SetPaletteCustomColor(color);
     COLORREF custom[16]{};
     LoadUserPaletteColorsForSettings(custom, std::size(custom));
-    if (custom[std::size(custom) - 1] != color) {
-        custom[std::size(custom) - 1] = color;
+    const size_t customSlotIdx = g_palette.empty() ? 7 : (g_palette.size() - 1);
+    if (customSlotIdx < std::size(custom) && custom[customSlotIdx] != color) {
+        custom[customSlotIdx] = color;
         SaveUserPaletteColorsForSettings(custom, std::size(custom));
     }
     if (g_activeColor == prev && prev != color) {
@@ -5827,6 +5835,7 @@ static bool PreviewAllowsPdfTool(ToolMode mode) {
 
 static bool ToolModeEnabledForCurrentPdfView(ToolMode mode) {
     if (AnnotToolModeUiStateFor(mode) != AnnotToolUiState::Enabled) return false;
+    if (g_pdf.kind == DocKind::Image && !PreviewAllowsPdfTool(mode)) return false;
     if (IsSaveTransactionRunning()) return false;
     if (IsPdfPreviewReadOnlyActive() && !PreviewAllowsPdfTool(mode)) return false;
     return true;
@@ -5861,6 +5870,9 @@ static bool FirstEnabledModeForFamily(AnnotToolFamily family, ToolMode& out) {
 static AnnotToolUiState EffectiveToolUiStateForCurrentPdfView(ToolMode mode) {
     AnnotToolUiState state = AnnotToolModeUiStateFor(mode);
     if (state == AnnotToolUiState::Hidden) return state;
+    if (g_pdf.kind == DocKind::Image && !PreviewAllowsPdfTool(mode)) {
+        return AnnotToolUiState::Disabled;
+    }
     if (IsSaveTransactionRunning()) {
         return AnnotToolUiState::Disabled;
     }
@@ -6477,7 +6489,7 @@ static void OnShortcutColorPick(HWND owner, COLORREF& target, HWND preview) {
     if (!PickColorDialog(owner, target, &picked)) return;
     if (picked == target) return;
     target = picked;
-    PersistConfig();
+    ApplyPaletteCustomColor(owner, picked);
     if (preview) InvalidateRect(preview, nullptr, TRUE);
 }
 

@@ -133,6 +133,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdShowHierarchy = 6;
     constexpr UINT kCmdDeleteEmptyClro = 7;
     constexpr UINT kCmdRename = 8;
+    constexpr UINT kCmdConvertImageToPdf = 9;
     AppendMenuW(menu,
                 MF_STRING,
                 kCmdOpenInApp,
@@ -145,6 +146,11 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
                     readOnlyFlags,
                     kCmdOpenReadOnly,
                     IsEnglishUi() ? L"Open in read-only app" : L"読み取り専用ビューアで開く");
+    }
+    const bool imageFile = !isNoteList && IsImageFile(selectedPath);
+    if (imageFile) {
+        AppendMenuW(menu, MF_STRING, kCmdConvertImageToPdf,
+                    IsEnglishUi() ? L"Convert image to PDF..." : L"画像をPDFに変換...");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu,
@@ -193,6 +199,12 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     }
     if (cmd == kCmdOpenReadOnly && !isNoteList && file.isPdf) {
         return LaunchReadOnlyViewerForPdf(owner, file.path);
+    }
+    if (cmd == kCmdConvertImageToPdf && imageFile) {
+        std::wstring outputPath;
+        if (!file_output::ConvertImageToPdf(owner, file.path, &outputPath)) return false;
+        RefreshCurrentSessionFiles();
+        return OpenPdfIfDifferent(owner, outputPath);
     }
     if (cmd == kCmdOpenExplorer) {
         return ShowPathInExplorer(owner, file.path);

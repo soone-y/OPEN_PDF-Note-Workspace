@@ -954,6 +954,7 @@ static void BeginTextEdit(HWND hwnd, int pageIndex, double anchorX, double ancho
     if (right > page.widthPt) right = page.widthPt;
     if (top > page.heightPt) top = page.heightPt;
     g_pdf.editingText = true;
+    SetTextBoxState(TextBoxInteractionState::Editing);
     g_pdf.editPage = pageIndex;
     g_pdf.editX1 = left;
     g_pdf.editX2 = right;

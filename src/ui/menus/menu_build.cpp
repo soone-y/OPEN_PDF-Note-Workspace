@@ -93,6 +93,8 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     if (!kIsLiteEdition) {
         AppendMenuW(op, MF_STRING, ID_OP_CONVERT_OFFICE_TO_PDF, ui.menuConvertOfficeToPdf.c_str());
     }
+    AppendMenuW(op, MenuStringState(menuState.hasCurrentImage), ID_OP_CONVERT_IMAGE_TO_PDF,
+                IsEnglishUi() ? L"Convert image to PDF..." : L"画像をPDFに変換...");
     AppendMenuW(op, MenuStringState(!g_currentSessionPath.empty()),
                 ID_OP_CREATE_BLANK_PDF, ui.menuCreateBlankPdf.c_str());
     AppendMenuW(op, MF_SEPARATOR, 0, nullptr);

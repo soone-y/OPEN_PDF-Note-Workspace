@@ -1,4 +1,4 @@
-﻿// file: main/main_window_proc.cpp
+// file: main/main_window_proc.cpp
 // NOTE: This file is intentionally included by `src/main.cpp` to keep the build as a
 // single translation unit while physically splitting responsibilities.
 
@@ -63,6 +63,8 @@ static void ScheduleNoteOverlayRefresh(HWND hWnd, bool immediate, uint64_t targe
     if (!hWnd || IsNoteImeComposing()) return;
     s_noteOverlayRefreshTargetRevision = targetRevision;
     if (immediate) {
+        if (hWnd) KillTimer(hWnd, kNoteOverlayRefreshTimerId);
+        s_noteOverlayRefreshPending = false;
         RefreshNoteOverlayNow();
         return;
     }

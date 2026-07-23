@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "purpose": "AIが依頼内容に応じて必要な資料を段階的に読むための経路表",
+  "entry_point": "../For_AI.md",
+  "status": "active",
+  "shared_context": "project_context.xml",
+  "routes": [
+    {
+      "id": "user_guidance",
+      "when": "アプリの用途、導入、基本操作、画面構成、困ったときについて質問された場合",
+      "read": [
+        "core/features_faq.md",
+        "core/use_cases.md",
+        "core/ui_concepts.md",
+        "core/troubleshooting_quick.md",
+        "../README.md",
+        "../Document/Index.md",
+        "../Document/How_to_Use.md",
+        "../Document/How_to_Troubleshoot.md"
+      ]
+    },
+    {
+      "id": "project_overview_and_oss",
+      "when": "OSS、このソフトの目的、利用できること、利用資源、ライセンス、第三者コンポーネントについて質問された場合",
+      "read": [
+        "core/features_faq.md",
+        "project_context.xml",
+        "../README.md",
+        "../LICENSE.md",
+        "../LICENSES_INDEX.md",
+        "../THIRD_PARTY_NOTICES.md"
+      ]
+    },
+    {
+      "id": "design_philosophy",
+      "when": "このプロジェクトが解こうとしている課題、PDF・注釈・ノート・数式・ワークスペースの関係、または設計思想について質問された場合",
+      "read": [
+        "core/use_cases.md",
+        "core/ui_concepts.md",
+        "project_context.xml",
+        "../README.md",
+        "../Document/How_to_Use.md",
+        "../Document/What_is_File_Formats.md"
+      ],
+      "distinguish_design_principles_from_current_implementation": true
+    },
+    {
+      "id": "objective_analysis",
+      "when": "安全性、外部通信、保存、復元、Office変換、配布内容について、根拠に基づく分析や検証を求められた場合",
+      "read": [
+        "core/features_faq.md",
+        "core/file_formats.md",
+        "project_context.xml",
+        "../AGENTS.md"
+      ],
+      "verify_source_code_and_tests": true
+    },
+    {
+      "id": "sound_behavior",
+      "when": "通知音、Windowsの一般警告音、静音性について質問された場合",
+      "read": [
+        "core/features_faq.md",
+        "core/troubleshooting_quick.md",
+        "project_context.xml",
+        "../AGENTS.md",
+        "../Document/How_to_Troubleshoot.md"
+      ],
+      "treat_reported_general_warning_sound_as_unresolved_issue": true
+    },
+    {
+      "id": "file_formats",
+      "when": "PDF、.clrop、.clro、Markdown、TeX、テキスト、CSVの扱いについて質問された場合",
+      "read": [
+        "core/file_formats.md",
+        "../Document/What_is_File_Formats.md",
+        "../Document/How_to_Save_and_Recovery.md"
+      ]
+    },
+    {
+      "id": "safe_change",
+      "when": "コード、保存、注釈、出力、配布物を変更する依頼の場合",
+      "read": [
+        "../AGENTS.md"
+      ],
+      "follow_local_instructions": true
+    }
+  ],
+  "future_modules": []
+}

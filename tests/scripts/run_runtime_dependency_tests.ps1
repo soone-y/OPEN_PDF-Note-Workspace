@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 Set-StrictMode -Version Latest
@@ -115,9 +115,13 @@ $sampleWorkspaceDryRunHits = @($dryRun | Select-String -SimpleMatch "sample_work
 if ($sampleWorkspaceDryRunHits.Count -eq 0) {
     throw "pack_release dry-run did not include sample workspace"
 }
-$samplePdfDryRunHits = @($dryRun | Select-String -SimpleMatch "sample_pdf_1.pdf")
-if ($samplePdfDryRunHits.Count -eq 0) {
-    throw "pack_release dry-run did not include sample PDFs"
+$sampleGuidePdf = Join-Path $repoRoot "release_assets\sample_workspace\講義サンプル\第01回_基本操作\使い方_基本操作.pdf"
+if (-not (Test-Path -LiteralPath $sampleGuidePdf)) {
+    throw "Sample workspace template is missing basic usage guide PDF: $sampleGuidePdf"
+}
+$sampleSpecPdf = Join-Path $repoRoot "release_assets\sample_workspace\講義サンプル\第02回_最初期構想\PDF学習ワークスペース統合画面構成および基本仕様書.pdf"
+if (-not (Test-Path -LiteralPath $sampleSpecPdf)) {
+    throw "Sample workspace template is missing specification PDF: $sampleSpecPdf"
 }
 
 Write-Host "Checking LibreOffice conversion runtime release contract..." -ForegroundColor Cyan

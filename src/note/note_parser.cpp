@@ -606,6 +606,18 @@ bool ParseStyleOpenTag(std::wstring_view content, StyleFrame* outFrame) {
         if (!value) {
             if (lowered == L"u") {
                 pushSpec(StyleKind::Underline, L"1");
+            } else if (lowered == L"b" || lowered == L"bold" || lowered == L"strong") {
+                AddCloseAlias(&outFrame->close_aliases, L"b");
+                AddCloseAlias(&outFrame->close_aliases, L"bold");
+                AddCloseAlias(&outFrame->close_aliases, L"strong");
+                outFrame->specs.push_back(StyleSpec{StyleKind::Bold, L"1"});
+                recognized = true;
+            } else if (lowered == L"i" || lowered == L"italic" || lowered == L"em") {
+                AddCloseAlias(&outFrame->close_aliases, L"i");
+                AddCloseAlias(&outFrame->close_aliases, L"italic");
+                AddCloseAlias(&outFrame->close_aliases, L"em");
+                outFrame->specs.push_back(StyleSpec{StyleKind::Italic, L"1"});
+                recognized = true;
             } else if (lowered == L"la" || lowered == L"linkaccent") {
                 AddCloseAlias(&outFrame->close_aliases, L"la");
                 AddCloseAlias(&outFrame->close_aliases, L"linkaccent");
@@ -669,6 +681,22 @@ bool ParseStyleOpenTag(std::wstring_view content, StyleFrame* outFrame) {
         } else if (lowered == L"u") {
             if (ParseMarkupBool(trimmedValue)) {
                 pushSpec(StyleKind::Underline, L"1");
+            }
+        } else if (lowered == L"b" || lowered == L"bold" || lowered == L"strong") {
+            if (ParseMarkupBool(trimmedValue)) {
+                AddCloseAlias(&outFrame->close_aliases, L"b");
+                AddCloseAlias(&outFrame->close_aliases, L"bold");
+                AddCloseAlias(&outFrame->close_aliases, L"strong");
+                outFrame->specs.push_back(StyleSpec{StyleKind::Bold, L"1"});
+                recognized = true;
+            }
+        } else if (lowered == L"i" || lowered == L"italic" || lowered == L"em") {
+            if (ParseMarkupBool(trimmedValue)) {
+                AddCloseAlias(&outFrame->close_aliases, L"i");
+                AddCloseAlias(&outFrame->close_aliases, L"italic");
+                AddCloseAlias(&outFrame->close_aliases, L"em");
+                outFrame->specs.push_back(StyleSpec{StyleKind::Italic, L"1"});
+                recognized = true;
             }
         }
     }

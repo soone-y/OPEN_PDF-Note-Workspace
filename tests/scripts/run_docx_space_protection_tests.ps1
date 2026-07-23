@@ -35,8 +35,38 @@ if (-not $compiler) {
 }
 $compilerDir = Split-Path -Parent $compiler.Source
 
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function New-DocxFixture {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][System.IO.Compression.CompressionLevel]$CompressionLevel
+    )
+
+    $zip = [System.IO.Compression.ZipFile]::Open($Path, "Create")
+    try {
+        $entry = $zip.CreateEntry("word/document.xml", $CompressionLevel)
+        $stream = $entry.Open()
+        try {
+            $wordNs = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            $textStr = 'sample' + [char]0x3000 + [char]0x5C0F + [char]0x30C6 + [char]0x30B9 + [char]0x30C8
+            $xmlStr = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="' + $wordNs + '"><w:body><w:p><w:r><w:t>' + $textStr + '</w:t></w:r></w:p></w:body></w:document>'
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($xmlStr)
+            $stream.Write($bytes, 0, $bytes.Length)
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-Copy-Item -LiteralPath $fixture -Destination $asciiFixture -Force
+Remove-Item -LiteralPath $asciiFixture -Force -ErrorAction SilentlyContinue
+New-DocxFixture -Path $asciiFixture -CompressionLevel Optimal
 Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $storedFixture -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $storedStaged -Force -ErrorAction SilentlyContinue

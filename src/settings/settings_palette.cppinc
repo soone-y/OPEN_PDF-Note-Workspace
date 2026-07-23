@@ -130,14 +130,20 @@ static void UpdatePaletteSelectedInfo(PaletteSettingsCtx* ctx) {
     int idx = std::clamp(ctx->selectedSlot, 0, IDC_PALETTE_SLOT_COUNT - 1);
     COLORREF c = ctx->colors[idx];
     std::wstring hex = PaletteHexColorW(c);
+    std::wstring roleText;
+    if (idx < 7) {
+        roleText = IsEnglishUi() ? L" (Fixed Preset)" : L" (固定プリセット)";
+    } else if (idx == 7) {
+        roleText = IsEnglishUi() ? L" (Dynamic Custom Slot)" : L" (選択更新枠)";
+    }
     std::wstring text;
     if (IsEnglishUi()) {
-        text = L"Selected: Slot " + std::to_wstring(idx + 1) + L"  " + hex +
+        text = L"Selected: Slot " + std::to_wstring(idx + 1) + roleText + L"  " + hex +
                L"\r\nRGB: R=" + std::to_wstring(GetRValue(c)) +
                L"  G=" + std::to_wstring(GetGValue(c)) +
                L"  B=" + std::to_wstring(GetBValue(c));
     } else {
-        text = L"選択中: スロット " + std::to_wstring(idx + 1) + L"  " + hex +
+        text = L"選択中: スロット " + std::to_wstring(idx + 1) + roleText + L"  " + hex +
                L"\r\nRGB: R=" + std::to_wstring(GetRValue(c)) +
                L"  G=" + std::to_wstring(GetGValue(c)) +
                L"  B=" + std::to_wstring(GetBValue(c));
