@@ -109,13 +109,13 @@ MinGW-w64 の DLL を release に含める場合、次を同梱します。
 | 主用途 | 同梱フォントの private font 利用。docx/pptx から PDF への headless 変換 |
 | 主ライセンス | MPL 2.0 ベース。第三者コンポーネントとして LGPL/GPL/MPL/Apache/SIL OFL/LPPL/CC-BY-SA 等を含む |
 | 必須同梱文書 | `license.txt`, `LICENSE.html`, `NOTICE` |
-| release 現状 | 既定で選択フォント、検証済みカスタム runtime、runtime 側 license/NOTICE、custom build 入力を同梱。`-NoLibreOfficeRuntime` 指定時だけ runtime を除外。runtime は配布前に SDK、ローカルビルドパス、更新 URL を除去 |
+| release 現状 | 標準 release は選択フォント、検証済みカスタム runtime、runtime 側 license/NOTICE、custom build 入力を同梱。変換機能を含めない軽量配布は `-Lite` を指定する。runtime は配布前に SDK、ローカルビルドパス、更新 URL を除去 |
 
 ### 7.0.1 LibreOffice license/notice の採用基準
 
 - 選択フォントだけを release に含める場合でも、LibreOffice の `license.txt`, `LICENSE.html`, `NOTICE` は保持する。
 - 公式管理者展開イメージ `third_party/libreoffice/image` は外部通信可能な import/marker が残るため、Office 変換 runtime として採用しない。
-- 標準 release は検証済みカスタム runtime を `libreoffice/custom_runtime/instdir/` へコピーし、その `instdir` に存在する `license.txt`, `LICENSE.html`, `NOTICE` を `licenses/libreoffice/` へコピーする。runtime を除外する場合だけ `-NoLibreOfficeRuntime` を指定する。
+- 標準 release は検証済みカスタム runtime を `libreoffice/custom_runtime/instdir/` へコピーし、その `instdir` に存在する `license.txt`, `LICENSE.html`, `NOTICE` を `licenses/libreoffice/` へコピーする。変換機能を含めない軽量配布は `-Lite` を指定する。`-NoLibreOfficeRuntime` は `-Lite` と併用する変換なし配布用の指定であり、標準 release では使用できない。
 - release にコピーした runtime は、`tools/release_checks/sanitize_libreoffice_runtime_release.py` により `sdk/` を除外し、ローカル絶対パス/ビルドユーザー名を等長置換し、`program/version.ini` の更新 URL を空にする。
 - カスタム build は LibreOffice source に patch を当てているため、`third_party/libreoffice/custom_build/patches/*.patch` と `communication_free_options.input` を、改変内容と build 条件を示す再現入力として保持する。
 - `scripts/release/pack_release.ps1` は、release 内に `soffice.com` または `mergedlo.dll` を検出した場合、bundled runtime 側の LibreOffice license 文書を `licenses/libreoffice/` へコピーし、custom build options/patches も `licenses/libreoffice/custom_build/` へコピーする。
@@ -161,7 +161,9 @@ MinGW-w64 の DLL を release に含める場合、次を同梱します。
 | フォント再配布 | Windows フォント、環境依存フォント | フォントファイルを勝手に同梱しない。LibreOffice 同梱フォントは対応 notice とセットで扱う |
 | 変換時の外部通信 | LibreOffice 更新確認、クラッシュ報告、外部リンク等 | 不要ファイル削除、専用 profile、実機確認 |
 
-## 10. release パッケージに入れるべき最小構成
+## 10. 標準 release パッケージの構成
+
+以下は Office 変換 runtime を含む標準 release の構成です。`-Lite`、`-NoSampleWorkspace`、`-NoSetupJson`、`-IncludeWorkspace` などの梱包オプションを指定する場合は、一部の項目が省略または置換されます。
 
 ```text
 PDF Note Workspace release/
@@ -169,8 +171,6 @@ PDF Note Workspace release/
   readonly_viewer.exe.buildinfo.txt
   pdf_note_workspace.exe
   pdf_note_workspace.exe.buildinfo.txt
-  readonly_viewer.exe
-  readonly_viewer.exe.buildinfo.txt
   pdf_workspace_setup.json
   pdfium.dll
   libstdc++-6.dll
@@ -181,6 +181,9 @@ PDF Note Workspace release/
     image/
       Fonts/
         # release で同梱する選択フォントのみ
+    custom_runtime/
+      instdir/
+        # 標準 release で同梱する検証済み Office 変換 runtime
   sample_workspace/
   docs/
     README.md
@@ -219,11 +222,16 @@ PDF Note Workspace release/
       license.txt
       LICENSE.html
       NOTICE
+      custom_build/
+        communication_free_options.input
+        release_reduction_manifest.json
+        patches/
+          # カスタム build に適用した patch 一式
   manifest.json
   checksums.sha256
 ```
 
-標準 release は `libreoffice/custom_runtime/instdir/` を同梱し、`license.txt`, `LICENSE.html`, `NOTICE` と custom build 入力も必ず含めます。配布 runtime は SDK とローカルビルド情報を含めず、更新 URL を空にします。変換機能を含めない軽量配布だけ `-NoLibreOfficeRuntime` を指定してください。
+標準 release は `libreoffice/custom_runtime/instdir/` を同梱し、runtime 側の `license.txt`, `LICENSE.html`, `NOTICE`、`communication_free_options.input`、`release_reduction_manifest.json`、custom build の patch 一式も必ず含めます。配布 runtime は SDK とローカルビルド情報を含めず、更新 URL を空にします。変換機能を含めない軽量配布は `-Lite` を指定します。`-NoLibreOfficeRuntime` は `-Lite` と併用する変換なし配布用の指定であり、標準 release では使用できません。
 
 ## 11. 追加時ルール
 

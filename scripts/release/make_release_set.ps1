@@ -8,7 +8,6 @@ param(
     [string]$WorkspacePath = "",
     [switch]$NoSetupJson,
     [switch]$NoSampleWorkspace,
-    [switch]$NoLibreOfficeRuntime,
     [string]$LibreOfficeRuntimePath = "",
     [switch]$SkipFreshnessCheck,
     [string]$ReleaseNotesPath = "",
@@ -208,7 +207,6 @@ try {
         if (-not [string]::IsNullOrWhiteSpace($WorkspacePath)) { $packArgsFull["WorkspacePath"] = $WorkspacePath }
         if ($NoSetupJson) { $packArgsFull["NoSetupJson"] = $true }
         if ($NoSampleWorkspace) { $packArgsFull["NoSampleWorkspace"] = $true }
-        if ($NoLibreOfficeRuntime) { $packArgsFull["NoLibreOfficeRuntime"] = $true }
         if (-not [string]::IsNullOrWhiteSpace($LibreOfficeRuntimePath)) { $packArgsFull["LibreOfficeRuntimePath"] = $LibreOfficeRuntimePath }
         if ($SkipFreshnessCheck) { $packArgsFull["SkipFreshnessCheck"] = $true }
         if ($DryRun) { $packArgsFull["DryRun"] = $true }

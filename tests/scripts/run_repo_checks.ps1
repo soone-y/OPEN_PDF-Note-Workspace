@@ -451,7 +451,8 @@ function Invoke-SafetyScans {
         'https?://openoffice\.org/',
         'https?://www\.w3\.org/',
         'https?://schemas\.openxmlformats\.org/',
-        'https?://purl\.org/'
+        'https?://purl\.org/',
+        '\\publish\.ps1:\d+:.*https://github\.com/\$Repository/commit/\$commitHash'
     )
 
     # AGENTS.md permits OS standard file dialogs only for explicit user file operations.
@@ -462,6 +463,7 @@ function Invoke-SafetyScans {
         '\\src\\readonly_viewer\\pdf_preview_panel\.cpp:\d+:.*\b(?:IFileSaveDialog|CLSID_FileSaveDialog)\b',
         '\\src\\ui\\lists\\main_local_path_browser\.cppinc:\d+:.*\b(?:IFileOpenDialog|CLSID_FileOpenDialog)\b',
         '\\src\\workspace\\workspace_actions\.cpp:\d+:.*\b(?:IFileSaveDialog|CLSID_FileSaveDialog)\b',
+        '\\src\\workspace\\workspace_config_io\.cpp:\d+:.*\b(?:IFileOpenDialog|CLSID_FileOpenDialog|IFileSaveDialog|CLSID_FileSaveDialog)\b',
         '\\src\\file_output\\file_output\.cpp:\d+:.*\b(?:IFileSaveDialog|CLSID_FileSaveDialog)\b'
     )
 

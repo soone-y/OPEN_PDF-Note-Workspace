@@ -133,8 +133,8 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 - ファイル取り込み時の docx/pptx 変換は、通信機能を持たないカスタム build runtime が見つかった場合に有効です。
 - `image/Fonts/` 配下から選んだ欧文・記号フォントは、アプリ起動時に `AddFontResourceExW(..., FR_PRIVATE, ...)` でプロセス private font として読み込み、システムへインストールしません。
 - headless 変換専用とし、ユーザー原本ではなくアプリ管理下のコピーを入力にします。
-- release パッケージでは、アプリ側 private font 利用のため選択したフォントファイルを `libreoffice/image/Fonts/` に置き、検証済みカスタム runtime を `libreoffice/custom_runtime/instdir/` 配置で標準同梱し、LibreOffice ライセンス/NOTICE 文書を同梱します。変換機能を含めない軽量配布だけ `-NoLibreOfficeRuntime` を指定します。
-- カスタム Office 変換 runtime を release に含める場合は、`scripts/release/pack_release.ps1` が同梱 runtime 自身の `license.txt`, `LICENSE.html`, `NOTICE` を `licenses/libreoffice/` へコピーし、`third_party/libreoffice/custom_build/patches/*.patch` と build options も `licenses/libreoffice/custom_build/` へコピーします。
+- release パッケージでは、アプリ側 private font 利用のため選択したフォントファイルを `libreoffice/image/Fonts/` に置き、検証済みカスタム runtime を `libreoffice/custom_runtime/instdir/` 配置で標準同梱し、LibreOffice ライセンス/NOTICE 文書を同梱します。変換機能を含めない軽量配布は `-Lite` を指定します。
+- カスタム Office 変換 runtime を release に含める場合は、`scripts/release/pack_release.ps1` が同梱 runtime 自身の `license.txt`, `LICENSE.html`, `NOTICE` を `licenses/libreoffice/` へコピーし、`third_party/libreoffice/custom_build/communication_free_options.input`、`release_reduction_manifest.json`、`patches/*.patch` も `licenses/libreoffice/custom_build/` へコピーします。
 
 ### 5.2 ローカル方針
 
@@ -203,7 +203,7 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 ### 5.4 配布時の扱い
 
 - `scripts/release/pack_release.ps1` は `third_party/libreoffice/image/Fonts/` から英語・記号向けの選択フォントだけを release の `libreoffice/image/Fonts/` へコピーし、上記ライセンス/NOTICE 文書を release の `licenses/libreoffice/` へコピーします。
-- 標準 release には LibreOffice runtime 本体、runtime 側 license/NOTICE、custom build 入力を含めます。変換機能を含めない軽量配布だけ `scripts/release/pack_release.ps1 -NoLibreOfficeRuntime` を指定してください。
+- 標準 release には LibreOffice runtime 本体、runtime 側 license/NOTICE、custom build 入力を含めます。変換機能を含めない軽量配布は `scripts/release/pack_release.ps1 -Lite` を指定してください。`-NoLibreOfficeRuntime` は `-Lite` と併用する変換なし配布用の指定であり、標準 release では使用できません。
 - release 同梱前に、外部通信経路、マクロ、外部リンク/リモート画像参照、クラッシュレポート、更新確認が実行されないことを実機で再確認してください。
 - 不要になった license/notice を削る判断は、対応する実体ファイルを release から除外済みであることを確認してから行います。現時点で Git 管理している LibreOffice license 文書3件は、選択フォントの配布に対応するため保持します。
 
