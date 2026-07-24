@@ -1,6 +1,6 @@
 # PDF Note Workspace
 
-対象アプリ版: 0.8.60
+対象アプリ版: 0.8.63
 
 Windows 向けの PDF 学習ワークスペースです。PDF 閲覧、非破壊注釈、ノート編集を 1 つのアプリにまとめています。
 
@@ -83,8 +83,8 @@ PDF に書き込んだ注釈は、PDF 本体ではなく、同じフォルダに
 
 ## 全体ビルドと配布
 
-- `./full_build.ps1`: 通常版、Lite版、閲覧専用ビューアを Release 構成でまとめてビルドする入口です。引数なしで実行すると、配布準備済みの実行ファイルを `out/` に作成します。
-- `./full_release.ps1`: 上記の全ビルド後、通常版・Lite版の配布フォルダと ZIP、チェックサム、公開スナップショットをまとめて作る入口です。引数なしで実行すると、配布可能な release set をリポジトリ外の `../PDF-Note-ReleaseSet/` に作成します。
+- `./full_build.ps1`: 通常版、Lite版、閲覧専用ビューアを Release 構成でまとめてビルドする入口です（`-Lite` で Lite版のみのビルドも可能）。引数なしで実行すると、配布準備済みの実行ファイルを `out/` に作成します。
+- `./full_release.ps1`: 上記のビルド後、配布フォルダと ZIP、チェックサム、公開スナップショットをまとめて作る入口です（実機テスト等で早めに試作したい場合は `-Lite` を指定すると Lite版のみ短時間で作成できます）。引数なしで実行すると、配布可能な release set をリポジトリ外の `../PDF-Note-ReleaseSet/` に作成します。
 - 個別のビルド条件や配布構成は、`scripts/build/build_workspace.ps1`、`scripts/build/build_readonly_viewer.ps1`、`scripts/release/make_release_set.ps1`、`scripts/release/pack_release.ps1` を直接使います。
 
 ## ライセンス

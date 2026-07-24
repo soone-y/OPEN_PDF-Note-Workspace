@@ -12,7 +12,10 @@
 //   3050..(3050 + kToolPaletteCommandSlotCapacity - 1) ID_TOOL_COLOR_BASE
 // Keep static IDs outside those ranges. If a dynamic upper bound changes,
 // update this registry and the corresponding WM_COMMAND range checks.
-inline constexpr int kToolPaletteCommandSlotCapacity = 16;
+inline constexpr int kToolPaletteCommandSlotCapacity = 24; // Total JSON storage capacity (7 presets + 1 last OK + 16 picker custom)
+inline constexpr int kPresetPaletteSlotCount = 7;          // Fixed preset slots (0..6)
+inline constexpr int kLastOkColorSlotIndex = 7;             // Last OK color slot in JSON
+inline constexpr int kPickerCustomColorStartSlotIndex = 8;  // Picker "作成した色" 16 slots (8..23)
 enum CommandId : int {
     ID_FILE_OPEN_WS = 1001,
     ID_FILE_RELOAD_WS,

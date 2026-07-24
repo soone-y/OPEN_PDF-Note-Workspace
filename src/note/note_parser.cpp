@@ -618,6 +618,13 @@ bool ParseStyleOpenTag(std::wstring_view content, StyleFrame* outFrame) {
                 AddCloseAlias(&outFrame->close_aliases, L"em");
                 outFrame->specs.push_back(StyleSpec{StyleKind::Italic, L"1"});
                 recognized = true;
+            } else if (lowered == L"x" || lowered == L"s" || lowered == L"strike" || lowered == L"del") {
+                AddCloseAlias(&outFrame->close_aliases, L"x");
+                AddCloseAlias(&outFrame->close_aliases, L"s");
+                AddCloseAlias(&outFrame->close_aliases, L"strike");
+                AddCloseAlias(&outFrame->close_aliases, L"del");
+                outFrame->specs.push_back(StyleSpec{StyleKind::Strike, L"1"});
+                recognized = true;
             } else if (lowered == L"la" || lowered == L"linkaccent") {
                 AddCloseAlias(&outFrame->close_aliases, L"la");
                 AddCloseAlias(&outFrame->close_aliases, L"linkaccent");
@@ -696,6 +703,15 @@ bool ParseStyleOpenTag(std::wstring_view content, StyleFrame* outFrame) {
                 AddCloseAlias(&outFrame->close_aliases, L"italic");
                 AddCloseAlias(&outFrame->close_aliases, L"em");
                 outFrame->specs.push_back(StyleSpec{StyleKind::Italic, L"1"});
+                recognized = true;
+            }
+        } else if (lowered == L"x" || lowered == L"s" || lowered == L"strike" || lowered == L"del") {
+            if (ParseMarkupBool(trimmedValue)) {
+                AddCloseAlias(&outFrame->close_aliases, L"x");
+                AddCloseAlias(&outFrame->close_aliases, L"s");
+                AddCloseAlias(&outFrame->close_aliases, L"strike");
+                AddCloseAlias(&outFrame->close_aliases, L"del");
+                outFrame->specs.push_back(StyleSpec{StyleKind::Strike, L"1"});
                 recognized = true;
             }
         }

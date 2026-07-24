@@ -2,7 +2,8 @@
 param(
     [switch]$Rebuild,
     [switch]$Clean,
-    [switch]$VerboseOutput
+    [switch]$VerboseOutput,
+    [switch]$Lite
 )
 
 Set-StrictMode -Version Latest
@@ -66,9 +67,15 @@ $readOnlyViewerArtifactPath = Join-Path $PSScriptRoot "out/bin/readonly_viewer.e
 $workspaceConfigurationInputs = @($workspaceBuildScript, $buildSourcesManifest)
 $readOnlyViewerConfigurationInputs = @($readOnlyViewerBuildScript, $buildSourcesManifest)
 
-Write-Host "Building all distributable applications (Release configuration)..." -ForegroundColor Cyan
-Invoke-FullBuildStep -ScriptPath $workspaceBuildScript -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $fullArtifactPath -ConfigurationPaths $workspaceConfigurationInputs)
-Invoke-FullBuildStep -ScriptPath $workspaceBuildScript -Edition "Lite" -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $liteArtifactPath -ConfigurationPaths $workspaceConfigurationInputs)
-Invoke-FullBuildStep -ScriptPath $readOnlyViewerBuildScript -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $readOnlyViewerArtifactPath -ConfigurationPaths $readOnlyViewerConfigurationInputs)
+if ($Lite) {
+    Write-Host "Building Lite distributable application (Release configuration)..." -ForegroundColor Cyan
+    Invoke-FullBuildStep -ScriptPath $workspaceBuildScript -Edition "Lite" -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $liteArtifactPath -ConfigurationPaths $workspaceConfigurationInputs)
+    Invoke-FullBuildStep -ScriptPath $readOnlyViewerBuildScript -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $readOnlyViewerArtifactPath -ConfigurationPaths $readOnlyViewerConfigurationInputs)
+} else {
+    Write-Host "Building all distributable applications (Release configuration)..." -ForegroundColor Cyan
+    Invoke-FullBuildStep -ScriptPath $workspaceBuildScript -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $fullArtifactPath -ConfigurationPaths $workspaceConfigurationInputs)
+    Invoke-FullBuildStep -ScriptPath $workspaceBuildScript -Edition "Lite" -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $liteArtifactPath -ConfigurationPaths $workspaceConfigurationInputs)
+    Invoke-FullBuildStep -ScriptPath $readOnlyViewerBuildScript -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $readOnlyViewerArtifactPath -ConfigurationPaths $readOnlyViewerConfigurationInputs)
+}
 
 exit 0

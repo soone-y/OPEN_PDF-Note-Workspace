@@ -5328,20 +5328,21 @@ void ApplyActiveColorForMode(HWND hWnd, ToolMode mode) {
 }
 
 void ApplyPaletteCustomColor(HWND hWnd, COLORREF color) {
-    COLORREF prev = g_paletteCustomColor;
-    SetPaletteCustomColor(color);
-    COLORREF custom[16]{};
+    const COLORREF prev = g_paletteCustomColor;
+    g_paletteCustomColor = color;  // Update last OK color (slot 9)
+
+    // Persist: index 7 = last OK color, index 8 = picker custom #1.
+    COLORREF custom[kToolPaletteCommandSlotCapacity]{};
     LoadUserPaletteColorsForSettings(custom, std::size(custom));
-    const size_t customSlotIdx = g_palette.empty() ? 7 : (g_palette.size() - 1);
-    if (customSlotIdx < std::size(custom) && custom[customSlotIdx] != color) {
-        custom[customSlotIdx] = color;
-        SaveUserPaletteColorsForSettings(custom, std::size(custom));
-    }
+    custom[static_cast<size_t>(kLastOkColorSlotIndex)]             = g_paletteCustomColor;
+    custom[static_cast<size_t>(kPickerCustomColorStartSlotIndex)] = g_paletteDialogCustomColor;
+    SaveUserPaletteColorsForSettings(custom, std::size(custom));
+    // ^ rebuilds g_palette and calls PersistConfig()
+
     if (g_activeColor == prev && prev != color) {
         g_activeColor = color;
         StoreToolColorForMode(g_toolMode, color);
     }
-    PersistConfig();
     if (g_hPdfToolbar) {
         RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
@@ -6486,10 +6487,16 @@ static bool InsertSnippetIntoNoteAt(size_t pos, const std::wstring& snippet) {
 
 static void OnShortcutColorPick(HWND owner, COLORREF& target, HWND preview) {
     COLORREF picked = target;
-    if (!PickColorDialog(owner, target, &picked)) return;
-    if (picked == target) return;
-    target = picked;
-    ApplyPaletteCustomColor(owner, picked);
+    if (PickColorDialog(owner, target, &picked, /*trackDialogCustom=*/true)) {
+        if (picked != target) {
+            target = picked;
+            ApplyPaletteCustomColor(owner, picked);
+        }
+    } else {
+        if (g_hPdfToolbar) {
+            RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+        }
+    }
     if (preview) InvalidateRect(preview, nullptr, TRUE);
 }
 

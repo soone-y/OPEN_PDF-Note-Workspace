@@ -9,6 +9,7 @@
 #include "file_output/file_output.h"
 #include "clrop/bridge.h"
 #include "clrop/hash.h"
+#include "ui/dialogs/annot_math_panel.h"
 #include "fpdf_save.h"
 #include "fpdf_edit.h"
 #include "fpdf_ppo.h"
@@ -66,7 +67,7 @@ static bool PagePixelRectHasVisibleInk(const PageCache& page, const RECT& inner,
 
 static TextBoxInteractionState g_textBoxState = TextBoxInteractionState::Idle;
 
-static TextBoxInteractionState GetTextBoxState() {
+[[maybe_unused]] static TextBoxInteractionState GetTextBoxState() {
     return g_textBoxState;
 }
 
@@ -2170,11 +2171,8 @@ static void CommitTextEditing(HWND hwnd, bool commit) {
         RefreshAnnotPanel();
     }
 
-    // Ensure the text box is deselected after panel refresh,
-    // so that changing tool colors later does not unintentionally modify this text box.
-    if (g_hAnnotList) {
-        SendMessageW(g_hAnnotList, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
-    }
+    // Ensure the text box and selection models are completely deselected after commit.
+    ClearAnnotationSelection();
 
     InvalidateRect(hwnd, nullptr, FALSE);
 }

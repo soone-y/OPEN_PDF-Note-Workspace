@@ -462,18 +462,55 @@ static bool EnlargeEditingTextBoxFont(HWND hwnd) {
     return true;
 }
 
-static int GetSelectedTextBoxAnnotationIndex() {
+static bool IsDrawingOrCreationToolMode(ToolMode mode) {
+    switch (mode) {
+    case ToolMode::TextBox:
+    case ToolMode::Freehand:
+    case ToolMode::MarkerText:
+    case ToolMode::MarkerTextUnderline:
+    case ToolMode::MarkerTextColor:
+    case ToolMode::MarkerFree:
+    case ToolMode::MarkerLine:
+    case ToolMode::MarkerArrow:
+    case ToolMode::MarkerWave:
+    case ToolMode::Line:
+    case ToolMode::Arrow:
+    case ToolMode::Wave:
+    case ToolMode::Shape:
+    case ToolMode::Eraser:
+    case ToolMode::Pan:
+    case ToolMode::Magnifier:
+        return true;
+    default:
+        return false;
+    }
+}
+
+int GetActiveSelectedAnnotationIndex() {
+    if (IsDrawingOrCreationToolMode(g_toolMode) && !g_pdf.editingText && !g_pdf.pendingTextBoxHit) {
+        return -1;
+    }
+    if (g_pdf.editingText && g_editingExistingAnnot && g_editingOriginalIndex >= 0) {
+        return g_editingOriginalIndex;
+    }
+    if (g_pdf.pendingTextBoxIndex >= 0 &&
+        g_pdf.pendingTextBoxIndex < static_cast<int>(g_annots.size())) {
+        return g_pdf.pendingTextBoxIndex;
+    }
     if (g_hAnnotList) {
         int sel = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETCURSEL, 0, 0));
-        if (sel >= 0 && sel < static_cast<int>(g_annots.size()) &&
-            g_annots[static_cast<size_t>(sel)].type == Annotation::Type::TextBox) {
+        if (sel >= 0 && sel < static_cast<int>(g_annots.size())) {
             return sel;
         }
     }
-    if (g_pdf.pendingTextBoxIndex >= 0 &&
-        g_pdf.pendingTextBoxIndex < static_cast<int>(g_annots.size()) &&
-        g_annots[static_cast<size_t>(g_pdf.pendingTextBoxIndex)].type == Annotation::Type::TextBox) {
-        return g_pdf.pendingTextBoxIndex;
+    return -1;
+}
+
+static int GetSelectedTextBoxAnnotationIndex() {
+    int idx = GetActiveSelectedAnnotationIndex();
+    if (idx >= 0 && idx < static_cast<int>(g_annots.size()) &&
+        g_annots[static_cast<size_t>(idx)].type == Annotation::Type::TextBox) {
+        return idx;
     }
     return -1;
 }

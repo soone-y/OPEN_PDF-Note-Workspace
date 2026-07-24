@@ -7461,7 +7461,10 @@ static bool IsLegacyStyleCloseSelector(const std::wstring& selector) {
         return true;
     }
     static const wchar_t* const kSelectors[] = {
-        L"b", L"i", L"u", L"x",
+        L"b", L"bold", L"strong",
+        L"i", L"italic", L"em",
+        L"u", L"underline",
+        L"x", L"strike", L"del",
         L"char", L"c",
         L"back",
         L"font", L"f",
@@ -7684,6 +7687,15 @@ static void ApplyNoteStyleSpanToStyle(const note::StyleSpan& source,
         break;
     case note::StyleKind::LinkUnderline:
         style->linkUnderline = true;
+        break;
+    case note::StyleKind::Bold:
+        style->bold = true;
+        break;
+    case note::StyleKind::Italic:
+        style->italic = true;
+        break;
+    case note::StyleKind::Strike:
+        style->strike = true;
         break;
     default:
         break;

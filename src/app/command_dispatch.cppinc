@@ -1649,10 +1649,14 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         break;
     case ID_TOOL_COLOR_CUSTOM: {
         COLORREF picked = g_paletteCustomColor;
-        if (PickColorDialog(hWnd, picked, &picked)) {
+        if (PickColorDialog(hWnd, picked, &picked, /*trackDialogCustom=*/true)) {
             ApplyPaletteCustomColor(hWnd, picked);
             if (g_hPdfView) {
                 ApplyActiveColorToSelectedAnnotation(g_hPdfView);
+            }
+        } else {
+            if (g_hPdfToolbar) {
+                RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
             }
         }
         break;

@@ -575,9 +575,10 @@ std::vector<COLORREF> g_palette = {
     RGB(  0, 160, 255), // blue
     RGB(  0, 200,   0), // green
     RGB(200,  80, 200), // magenta-ish for variation
-    RGB(128, 128, 128)  // custom slot (user-editable / dynamic)
+    RGB(128, 128, 128), // gray (7th fixed preset)
 };
-COLORREF g_paletteCustomColor = g_palette.back();
+COLORREF g_paletteCustomColor = RGB(0, 0, 0);       // slot 9: last OK color (black default)
+COLORREF g_paletteDialogCustomColor = RGB(0, 0, 0); // slot 8: s_customColors[0] snapshot (black default)
 COLORREF g_activeColor = g_palette.front();
 WNDPROC g_oldNoteProc = nullptr;
 std::wstring g_currentLecturePath;
@@ -1388,83 +1389,84 @@ static std::filesystem::path UserPaletteFilePath() {
 static void FillDefaultUserPaletteColors(COLORREF* custom, size_t count) {
     if (!custom || count == 0) return;
     constexpr COLORREF defaults[] = {
-        RGB(255, 140,   0), // orange (default annotation color)
-        RGB(255, 255,   0), // marker yellow
-        RGB(255,   0,   0), // red
-        RGB(  0, 160, 255), // blue
-        RGB(  0, 200,   0), // green
-        RGB(200,  80, 200), // magenta-ish
-        RGB(128, 128, 128), // custom slot (user-editable / dynamic)
-        RGB(  0,   0,   0), // black
-        RGB(255, 255, 255), // white
-        RGB(  0, 170, 123),
-        RGB(255, 189, 133),
-        RGB( 29,  80, 221),
-        RGB(  0,  96, 160),
-        RGB(120,  80, 220),
-        RGB(220,  70, 40),
+        RGB(255, 140,   0), // [0] Orange (Preset 1)
+        RGB(255, 255,   0), // [1] Yellow (Preset 2)
+        RGB(255,   0,   0), // [2] Red    (Preset 3)
+        RGB(  0, 160, 255), // [3] Blue   (Preset 4)
+        RGB(  0, 200,   0), // [4] Green  (Preset 5)
+        RGB(200,  80, 200), // [5] Magenta(Preset 6)
+        RGB(128, 128, 128), // [6] Gray   (Preset 7)
+        RGB(  0,   0,   0), // [7] Last OK selected color (black default)
+        RGB(  0,   0,   0), // [8] Picker Custom #1 (Dynamic Slot 8 candidate, black default)
+        RGB(  0,   0,   0), // [9] Picker Custom #2 (black default)
+        RGB(255, 255, 255), // [10] Picker Custom #3 (white)
+        RGB(255, 255, 255), // [11] Picker Custom #4 (white)
+        RGB(255, 255, 255), // [12] Picker Custom #5 (white)
+        RGB(255, 255, 255), // [13] Picker Custom #6 (white)
+        RGB(255, 255, 255), // [14] Picker Custom #7 (white)
+        RGB(255, 255, 255), // [15] Picker Custom #8 (white)
+        RGB(255, 255, 255), // [16] Picker Custom #9 (white)
+        RGB(255, 255, 255), // [17] Picker Custom #10 (white)
+        RGB(255, 255, 255), // [18] Picker Custom #11 (white)
+        RGB(255, 255, 255), // [19] Picker Custom #12 (white)
+        RGB(255, 255, 255), // [20] Picker Custom #13 (white)
+        RGB(255, 255, 255), // [21] Picker Custom #14 (white)
+        RGB(255, 255, 255), // [22] Picker Custom #15 (white)
+        RGB(255, 255, 255), // [23] Picker Custom #16 (white)
     };
     for (size_t i = 0; i < count; ++i) {
         custom[i] = defaults[std::min(i, std::size(defaults) - 1)];
     }
 }
 
-static void ApplyRuntimePaletteColors(const COLORREF* colors, size_t count) {
-    if (!colors || count == 0) return;
-
-    // Deduplicate: keep first occurrence of each color for slots 0..(count-2).
-    // The last entry (dynamic custom slot) is always appended, even if it matches
-    // an earlier color, so it remains addressable as g_palette.back().
-    std::vector<COLORREF> deduped;
-    deduped.reserve(count);
-    for (size_t i = 0; i + 1 < count; ++i) {
-        bool isDup = false;
-        for (size_t j = 0; j < deduped.size(); ++j) {
-            if (deduped[j] == colors[i]) { isDup = true; break; }
-        }
-        if (!isDup) deduped.push_back(colors[i]);
-    }
-    deduped.push_back(colors[count - 1]); // always keep the dynamic custom slot
-
-    const COLORREF* deduped_colors = deduped.data();
-    const size_t deduped_count = deduped.size();
-
+// Build the runtime palette from fixed presets + two dynamic slots.
+// Dynamic slot 8: g_paletteDialogCustomColor (s_customColors[0] snapshot).
+// Dynamic slot 9: g_paletteCustomColor (last OK-returned color).
+// Either dynamic slot is omitted when it exactly duplicates any earlier entry.
+static void BuildAndApplyRuntimePalette(const COLORREF* presets, size_t presetCount) {
     const std::vector<COLORREF> prevPalette = g_palette;
     const COLORREF prevActive = g_activeColor;
-    const COLORREF prevCustom = g_paletteCustomColor;
-    int activeSlot = -1;
-    if (prevPalette.size() == deduped_count) {
-        for (size_t i = 0; i < prevPalette.size(); ++i) {
-            if (prevPalette[i] == prevActive) {
-                activeSlot = static_cast<int>(i);
-                break;
-            }
-        }
-    } else if (prevActive == prevCustom) {
-        activeSlot = static_cast<int>(deduped_count - 1);
+
+    std::vector<COLORREF> result;
+    result.reserve(presetCount + 2);
+
+    // Add presets without duplicates.
+    for (size_t i = 0; i < presetCount; ++i) {
+        bool dup = false;
+        for (const COLORREF& c : result) { if (c == presets[i]) { dup = true; break; } }
+        if (!dup) result.push_back(presets[i]);
     }
 
-    g_palette.assign(deduped_colors, deduped_colors + deduped_count);
-    g_paletteCustomColor = g_palette.back();
+    // Slot 8: dialog custom color — append only if not already in presets.
+    bool dialogInPresets = false;
+    for (const COLORREF& c : result) { if (c == g_paletteDialogCustomColor) { dialogInPresets = true; break; } }
+    if (!dialogInPresets) result.push_back(g_paletteDialogCustomColor);
 
-    if (activeSlot >= 0 && static_cast<size_t>(activeSlot) < g_palette.size() &&
-        prevActive != g_palette[static_cast<size_t>(activeSlot)]) {
-        g_activeColor = g_palette[static_cast<size_t>(activeSlot)];
-        StoreToolColorForMode(g_toolMode, g_activeColor);
-    }
+    // Slot 9: last OK color — append only if distinct from all prior entries.
+    bool okInPrior = false;
+    for (const COLORREF& c : result) { if (c == g_paletteCustomColor) { okInPrior = true; break; } }
+    if (!okInPrior) result.push_back(g_paletteCustomColor);
+
+    g_palette = result;
+
+    // Preserve the active color if it is still present; otherwise keep it as-is
+    // (the color may still be used even if not displayed as a button).
+    (void)prevPalette;
+    (void)prevActive;
 }
 
 static void ResetRuntimePaletteToDefault() {
-    COLORREF colors[] = {
+    COLORREF presets[] = {
         RGB(255, 140,   0), // orange
         RGB(255, 255,   0), // yellow
         RGB(255,   0,   0), // red
         RGB(  0, 160, 255), // blue
         RGB(  0, 200,   0), // green
         RGB(200,  80, 200), // magenta
-        g_paletteCustomColor,
+        RGB(128, 128, 128), // gray (7th preset)
     };
-    ApplyRuntimePaletteColors(colors, std::size(colors));
+    static_assert(std::size(presets) == kPresetPaletteSlotCount, "preset count mismatch");
+    BuildAndApplyRuntimePalette(presets, std::size(presets));
 }
 
 static bool ParseHexColorToken(const std::string& value, COLORREF& out) {
@@ -1592,42 +1594,54 @@ void SetPaletteCustomColor(COLORREF color) {
     }
 }
 
-bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor) {
+bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor, bool trackDialogCustom) {
     if (!outColor) return false;
     CHOOSECOLORW cc{};
     cc.lStructSize = sizeof(cc);
     cc.hwndOwner = owner;
     cc.rgbResult = initial;
-    static COLORREF s_customColors[16] = {
-        RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255),
-        RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255),
-        RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255),
-        RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255), RGB(255, 255, 255)
-    };
-    static bool s_initialized = false;
-    if (!s_initialized) {
-        s_initialized = true;
-        COLORREF loaded[16]{};
-        if (LoadUserPaletteColors(loaded, 16)) {
-            for (size_t i = 0; i < 16; ++i) {
-                s_customColors[i] = loaded[i];
-            }
-        }
+
+    // Load full 24-slot palette from JSON (or defaults).
+    // Indices 8..23 correspond 1-to-1 with s_customColors[0..15].
+    COLORREF custom[kToolPaletteCommandSlotCapacity]{};
+    LoadUserPaletteColors(custom, std::size(custom));
+
+    COLORREF s_customColors[16];
+    for (size_t i = 0; i < 16; ++i) {
+        s_customColors[i] = custom[kPickerCustomColorStartSlotIndex + i];
     }
+
     cc.lpCustColors = s_customColors;
     cc.Flags = CC_FULLOPEN | CC_RGBINIT;
-    if (!ChooseColorW(&cc)) return false;
-    *outColor = cc.rgbResult;
-    return true;
+    bool ok = ChooseColorW(&cc);
+
+    // Save modified custom colors (s_customColors[0..15]) back to JSON indices 8..23
+    for (size_t i = 0; i < 16; ++i) {
+        custom[kPickerCustomColorStartSlotIndex + i] = s_customColors[i];
+    }
+    g_paletteDialogCustomColor = s_customColors[0]; // JSON index 8 / Picker #1
+
+    if (ok) {
+        *outColor = cc.rgbResult;
+        g_paletteCustomColor = cc.rgbResult;
+        custom[kLastOkColorSlotIndex] = cc.rgbResult; // JSON index 7 / Last OK
+    }
+
+    // Persist full 24 slots to JSON and rebuild runtime palette.
+    SaveUserPaletteColors(custom, std::size(custom));
+    BuildAndApplyRuntimePalette(custom, static_cast<size_t>(kPresetPaletteSlotCount));
+    PersistConfig();
+
+    return ok;
 }
 
 void SyncUserPaletteToRuntime() {
     COLORREF custom[kToolPaletteCommandSlotCapacity]{};
-    if (LoadUserPaletteColors(custom, std::size(custom))) {
-        ApplyRuntimePaletteColors(custom, std::size(custom));
-    } else {
-        ResetRuntimePaletteToDefault();
-    }
+    LoadUserPaletteColors(custom, std::size(custom));
+    // Index 7 = Last OK color, Index 8 = Picker Custom #1
+    g_paletteCustomColor       = custom[static_cast<size_t>(kLastOkColorSlotIndex)];
+    g_paletteDialogCustomColor = custom[static_cast<size_t>(kPickerCustomColorStartSlotIndex)];
+    BuildAndApplyRuntimePalette(custom, static_cast<size_t>(kPresetPaletteSlotCount));
 }
 
 void LoadUserPaletteColorsForSettings(COLORREF* custom, size_t count) {
@@ -1638,7 +1652,14 @@ void SaveUserPaletteColorsForSettings(const COLORREF* custom, size_t count) {
     SaveUserPaletteColors(custom, count);
     if (!custom || count == 0) return;
 
-    ApplyRuntimePaletteColors(custom, count);
+    if (count > static_cast<size_t>(kLastOkColorSlotIndex)) {
+        g_paletteCustomColor = custom[kLastOkColorSlotIndex];
+    }
+    if (count > static_cast<size_t>(kPickerCustomColorStartSlotIndex)) {
+        g_paletteDialogCustomColor = custom[kPickerCustomColorStartSlotIndex];
+    }
+
+    BuildAndApplyRuntimePalette(custom, static_cast<size_t>(kPresetPaletteSlotCount));
     PersistConfig();
 }
 

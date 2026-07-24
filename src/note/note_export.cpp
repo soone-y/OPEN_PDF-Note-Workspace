@@ -189,7 +189,10 @@ bool IsRecognizedStyleOpenTag(std::wstring_view content) {
 
         const std::wstring lowered = ToLowerAscii(key);
         if (!value) {
-            if (lowered == L"u" || lowered == L"la" || lowered == L"linkaccent" ||
+            if (lowered == L"u" || lowered == L"b" || lowered == L"bold" || lowered == L"strong" ||
+                lowered == L"i" || lowered == L"italic" || lowered == L"em" ||
+                lowered == L"x" || lowered == L"s" || lowered == L"strike" || lowered == L"del" ||
+                lowered == L"la" || lowered == L"linkaccent" ||
                 lowered == L"lu" || lowered == L"linkunderline" || lowered == L"m") {
                 recognized = true;
             }
@@ -209,7 +212,9 @@ bool IsRecognizedStyleOpenTag(std::wstring_view content) {
             recognized = true;
         } else if (lowered == L"d") {
             recognized = IsNumericValue(trimmedValue) || !trimmedValue.empty();
-        } else if (lowered == L"u") {
+        } else if (lowered == L"u" || lowered == L"b" || lowered == L"bold" || lowered == L"strong" ||
+                   lowered == L"i" || lowered == L"italic" || lowered == L"em" ||
+                   lowered == L"x" || lowered == L"s" || lowered == L"strike" || lowered == L"del") {
             recognized = ParseMarkupBool(trimmedValue);
         }
     }
@@ -416,6 +421,8 @@ std::string StyleSpanToCss(StyleKind kind, std::wstring_view value) {
         return "font-style:italic;";
     case StyleKind::Underline:
         return "text-decoration:underline;";
+    case StyleKind::Strike:
+        return "text-decoration:line-through;";
     case StyleKind::TextColor:
         return "color:" + v + ";";
     case StyleKind::BackgroundColor:

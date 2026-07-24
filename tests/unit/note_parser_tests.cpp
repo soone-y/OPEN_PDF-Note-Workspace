@@ -1730,6 +1730,24 @@ int main() {
     }
 
     {
+        auto [model, doc] = BuildMd4cModelAndDoc(L"<b>bold</b> <i>italic</i> <x>strike</x>\n");
+        const auto* boldSpan = FindStyleSpan(doc, note::StyleKind::Bold);
+        const auto* strikeSpan = FindStyleSpan(doc, note::StyleKind::Strike);
+        Expect(boldSpan != nullptr, "<b>...</b> creates StyleKind::Bold span");
+        Expect(strikeSpan != nullptr, "<x>...</x> creates StyleKind::Strike span");
+
+        std::string html = note::ExportHtml(model, doc, note::MarkupExportConfig{});
+        Expect(html.find("font-weight:bold;") != std::string::npos, "ExportHtml renders StyleKind::Bold as CSS font-weight:bold;");
+        Expect(html.find("text-decoration:line-through;") != std::string::npos, "ExportHtml renders StyleKind::Strike as CSS text-decoration:line-through;");
+    }
+
+    {
+        const note::NoteDocument doc = ParseMd4c(L"<b>Universal closing</b> </>\n");
+        const auto* boldSpan = FindStyleSpan(doc, note::StyleKind::Bold);
+        Expect(boldSpan != nullptr, "<b>...</> creates StyleKind::Bold span with universal closing tag");
+    }
+
+    {
         const note::NoteDocument doc = ParseMd4c(L"");
         Expect(doc.blocks.empty(), "empty note parses without blocks or crash");
         Expect(doc.math_spans.empty(), "empty note has no math spans");

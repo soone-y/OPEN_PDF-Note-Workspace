@@ -14,7 +14,8 @@ param(
     [string]$PublicAllowlist = "",
     [string]$PublicGitignoreTemplate = "",
     [switch]$SnapshotOnly,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$Lite
 )
 
 Set-StrictMode -Version Latest
@@ -196,29 +197,31 @@ try {
             throw "Missing pack script: $packScript"
         }
 
-        # Build Full Version
-        $packArgsFull = @{
+        $packArgsBase = @{
             OutBaseDir = $stagingBaseRel
             NamePrefix = "release"
             Checksums = $Checksums
         }
-        if ($Zip) { $packArgsFull["Zip"] = $true }
-        if ($IncludeWorkspace) { $packArgsFull["IncludeWorkspace"] = $true }
-        if (-not [string]::IsNullOrWhiteSpace($WorkspacePath)) { $packArgsFull["WorkspacePath"] = $WorkspacePath }
-        if ($NoSetupJson) { $packArgsFull["NoSetupJson"] = $true }
-        if ($NoSampleWorkspace) { $packArgsFull["NoSampleWorkspace"] = $true }
-        if (-not [string]::IsNullOrWhiteSpace($LibreOfficeRuntimePath)) { $packArgsFull["LibreOfficeRuntimePath"] = $LibreOfficeRuntimePath }
-        if ($SkipFreshnessCheck) { $packArgsFull["SkipFreshnessCheck"] = $true }
-        if ($DryRun) { $packArgsFull["DryRun"] = $true }
+        if ($Zip) { $packArgsBase["Zip"] = $true }
+        if ($IncludeWorkspace) { $packArgsBase["IncludeWorkspace"] = $true }
+        if (-not [string]::IsNullOrWhiteSpace($WorkspacePath)) { $packArgsBase["WorkspacePath"] = $WorkspacePath }
+        if ($NoSetupJson) { $packArgsBase["NoSetupJson"] = $true }
+        if ($NoSampleWorkspace) { $packArgsBase["NoSampleWorkspace"] = $true }
+        if (-not [string]::IsNullOrWhiteSpace($LibreOfficeRuntimePath)) { $packArgsBase["LibreOfficeRuntimePath"] = $LibreOfficeRuntimePath }
+        if ($SkipFreshnessCheck) { $packArgsBase["SkipFreshnessCheck"] = $true }
+        if ($DryRun) { $packArgsBase["DryRun"] = $true }
 
-        Write-Info "Packing Full version..."
-        & $packScript @packArgsFull
-        if (-not $?) {
-            throw "pack_release.ps1 (Full) failed."
+        if (-not $Lite) {
+            # Build Full Version
+            Write-Info "Packing Full version..."
+            & $packScript @packArgsBase
+            if (-not $?) {
+                throw "pack_release.ps1 (Full) failed."
+            }
         }
 
         # Build Lite Version
-        $packArgsLite = $packArgsFull.Clone()
+        $packArgsLite = $packArgsBase.Clone()
         $packArgsLite["Lite"] = $true
 
         Write-Info "Packing Lite version..."
@@ -236,29 +239,44 @@ try {
                 $_.Name -like "release_*" -and $_.Name -notlike "release_Lite_*"
             })
             $liteStagedDirs = @($stagedDirs | Where-Object { $_.Name -like "release_Lite_*" })
-            if ($fullStagedDirs.Count -ne 1 -or $liteStagedDirs.Count -ne 1 -or $stagedDirs.Count -ne 2) {
-                throw "Expected exactly one Full and one Lite staged release directory under $stagingBaseDir."
+            
+            if ($Lite) {
+                if ($liteStagedDirs.Count -ne 1 -or $stagedDirs.Count -ne 1) {
+                    throw "Expected exactly one Lite staged release directory under $stagingBaseDir."
+                }
+            } else {
+                if ($fullStagedDirs.Count -ne 1 -or $liteStagedDirs.Count -ne 1 -or $stagedDirs.Count -ne 2) {
+                    throw "Expected exactly one Full and one Lite staged release directory under $stagingBaseDir."
+                }
             }
 
-            $fullStagedDir = $fullStagedDirs[0]
+            if (-not $Lite) {
+                $fullStagedDir = $fullStagedDirs[0]
+                $releaseComponentName = $fullStagedDir.Name
+                Move-ItemStrict -Source $fullStagedDir.FullName -Destination (Join-Path $setRoot $releaseComponentName)
+            }
             $liteStagedDir = $liteStagedDirs[0]
-            $releaseComponentName = $fullStagedDir.Name
             $releaseLiteComponentName = $liteStagedDir.Name
-            Move-ItemStrict -Source $fullStagedDir.FullName -Destination (Join-Path $setRoot $releaseComponentName)
             Move-ItemStrict -Source $liteStagedDir.FullName -Destination (Join-Path $setRoot $releaseLiteComponentName)
 
             if ($Zip) {
                 $stagedZips = @(Get-ChildItem -LiteralPath $stagingBaseDir -File -Force | Where-Object { $_.Extension -ieq ".zip" })
-                $expectedZipNames = @(
-                    ($releaseComponentName + ".zip"),
-                    ($releaseLiteComponentName + ".zip")
-                )
-                $unexpectedZips = @($stagedZips | Where-Object { $_.Name -notin $expectedZipNames })
-                if ($stagedZips.Count -ne 2 -or $unexpectedZips.Count -ne 0) {
-                    throw "Expected ZIP files for the Full and Lite staged releases under $stagingBaseDir."
+                if ($Lite) {
+                    $expectedZipNames = @(($releaseLiteComponentName + ".zip"))
+                    $releaseZipComponentName = $null
+                    $releaseLiteZipComponentName = $expectedZipNames[0]
+                } else {
+                    $expectedZipNames = @(
+                        ($releaseComponentName + ".zip"),
+                        ($releaseLiteComponentName + ".zip")
+                    )
+                    $releaseZipComponentName = $expectedZipNames[0]
+                    $releaseLiteZipComponentName = $expectedZipNames[1]
                 }
-                $releaseZipComponentName = $expectedZipNames[0]
-                $releaseLiteZipComponentName = $expectedZipNames[1]
+                $unexpectedZips = @($stagedZips | Where-Object { $_.Name -notin $expectedZipNames })
+                if ($stagedZips.Count -ne $expectedZipNames.Count -or $unexpectedZips.Count -ne 0) {
+                    throw "Expected ZIP files for staged releases under $stagingBaseDir."
+                }
                 foreach ($zipName in $expectedZipNames) {
                     $stagedZipPath = Join-Path $stagingBaseDir $zipName
                     Move-ItemStrict -Source $stagedZipPath -Destination (Join-Path $setRoot $zipName)

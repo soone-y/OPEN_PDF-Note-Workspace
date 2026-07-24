@@ -133,6 +133,7 @@ enum class StyleKind {
     LinkUnderline,
     Bold,
     Italic,
+    Strike,
 };
 
 enum class MathKind {

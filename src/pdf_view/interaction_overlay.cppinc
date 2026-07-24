@@ -1824,13 +1824,22 @@ void ClearPdfTextSelection() {
     g_pdf.selEnd = {};
 }
 
-void ClearPdfAnnotationSelection() {
-    if (g_pdf.pendingTextBoxIndex != -1) {
-        g_pdf.pendingTextBoxIndex = -1;
-        if (g_hPdfView) {
-            InvalidateRect(g_hPdfView, nullptr, FALSE);
-        }
+void ClearAnnotationSelection() {
+    g_pdf.pendingTextBoxIndex = -1;
+    g_pdf.pendingTextBoxHit = false;
+    g_pdf.movingAnnot = false;
+    g_pdf.movingIndex = -1;
+    if (g_hAnnotList) {
+        SendMessageW(g_hAnnotList, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
     }
+    UpdateAnnotPanelSummary();
+    if (g_hPdfView) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+}
+
+void ClearPdfAnnotationSelection() {
+    ClearAnnotationSelection();
 }
 
 static const wchar_t* ContextMenuLabelCut() { return IsEnglishUi() ? L"Cut" : L"切り取り"; }

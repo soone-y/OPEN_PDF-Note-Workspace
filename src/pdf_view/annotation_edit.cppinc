@@ -202,7 +202,7 @@ static void PushAnnotCommand(AnnotCommand cmd) {
     QueuePendingAnnotStageCommand(pendingCopy);
 }
 
-static void InsertAnnotAt(const Annotation& ann, int index) {
+void InsertAnnotAt(const Annotation& ann, int index) {
     if (index < 0 || index > static_cast<int>(g_annots.size())) {
         g_annots.push_back(ann);
         EnsureAnnotationId(g_annots.back(), g_annots, static_cast<int>(g_annots.size()) - 1);

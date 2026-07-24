@@ -2033,6 +2033,63 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
     return RestoreUiAutomationNoteSelection(owner, previousNotePath, previousNoteIndex, outError);
 }
 
+static bool TestSelectionAndColorIsolationInvariants(HWND owner, std::wstring* outError) {
+    if (!owner || !IsWindow(owner) || g_pdf.kind != DocKind::Pdf) return true;
+
+    Annotation ann;
+    ann.type = Annotation::Type::TextBox;
+    ann.pageIndex = 0;
+    ann.x1 = 100.0; ann.y1 = 100.0; ann.x2 = 200.0; ann.y2 = 150.0;
+    ann.text = L"Automation Test Box";
+    const COLORREF originalAnnotColor = RGB(255, 0, 0);
+    ann.color = originalAnnotColor;
+    InsertAnnotAt(ann, static_cast<int>(g_annots.size()));
+    const int createdIdx = static_cast<int>(g_annots.size()) - 1;
+    RefreshAnnotPanel();
+
+    g_toolMode = ToolMode::TextBox;
+    ClearAnnotationSelection();
+
+    g_activeColor = RGB(0, 0, 255);
+    ApplyActiveColorToSelectedAnnotation(g_hPdfView ? g_hPdfView : owner);
+
+    if (g_annots[static_cast<size_t>(createdIdx)].color != originalAnnotColor) {
+        if (outError) *outError = L"Invariant Violation: TextBox color was changed after commitment upon tool color update!";
+        return false;
+    }
+
+    g_toolMode = ToolMode::Freehand;
+    ClearAnnotationSelection();
+
+    if (g_hAnnotList && SendMessageW(g_hAnnotList, LB_GETCURSEL, 0, 0) != static_cast<LPARAM>(-1)) {
+        if (outError) *outError = L"Invariant Violation: Annotation selection in ListBox was not cleared upon switching to drawing tool!";
+        return false;
+    }
+
+    if (GetActiveSelectedAnnotationIndex() != -1) {
+        if (outError) *outError = L"Invariant Violation: Active selected annotation index was not -1 in creation tool mode!";
+        return false;
+    }
+
+    if (g_hAnnotList) {
+        g_toolMode = ToolMode::Select;
+        SendMessageW(g_hAnnotList, LB_SETCURSEL, static_cast<WPARAM>(createdIdx), 0);
+        g_activeColor = RGB(0, 255, 0);
+        ApplyActiveColorToSelectedAnnotation(g_hPdfView ? g_hPdfView : owner);
+        if (g_annots[static_cast<size_t>(createdIdx)].color != RGB(0, 255, 0)) {
+            if (outError) *outError = L"Explicit Selection Failure: Color was not updated when explicitly selected in ListBox!";
+            return false;
+        }
+    }
+
+    if (createdIdx >= 0 && createdIdx < static_cast<int>(g_annots.size())) {
+        DeleteAnnotationAtIndex(owner, createdIdx);
+    }
+    ClearAnnotationSelection();
+
+    return true;
+}
+
 static void WriteUiAutomationResult(bool ok, const std::wstring& detail) {
     std::wstring pathValue;
     if (!ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_RESULT_FILE", &pathValue) || pathValue.empty()) return;
@@ -2085,7 +2142,9 @@ static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
         g_activeColor = originalActive;
         if (originalPalette.size() == g_palette.size()) {
             g_palette = originalPalette;
-            if (!g_palette.empty()) g_paletteCustomColor = g_palette.back();
+            // Restore dynamic globals from original palette data.
+            g_paletteCustomColor       = originalColors[static_cast<size_t>(kLastOkColorSlotIndex)];
+            g_paletteDialogCustomColor = originalColors[static_cast<size_t>(kPickerCustomColorStartSlotIndex)];
         }
         PersistConfig();
         UpdateToolbarUI(owner);
@@ -2097,7 +2156,16 @@ static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
     colors[2] = savedColor;
     SaveUserPaletteColorsForSettings(colors, kCount);
 
-    if (g_palette.size() != kCount || g_palette[2] != savedColor) {
+    // Check that the saved color appears somewhere in the rebuilt runtime palette
+    // (exact slot count is dynamic now; it depends on whether dynamic slots are unique).
+    bool foundSavedColor = false;
+    for (COLORREF c : g_palette) {
+        if (c == savedColor) {
+            foundSavedColor = true;
+            break;
+        }
+    }
+    if (g_palette.empty() || !foundSavedColor) {
         restore();
         if (outError) *outError = L"Palette settings save did not refresh the runtime palette.";
         return false;
@@ -2118,7 +2186,7 @@ static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
     g_activeColor = originalTextColor;
     UpdateToolbarUI(owner);
     EnsureToolbarPaletteButtons();
-    if (g_colorButtons.size() < kCount || !g_colorButtons[2] || !IsWindow(g_colorButtons[2])) {
+    if (g_colorButtons.size() < g_palette.size() || !g_colorButtons[2] || !IsWindow(g_colorButtons[2])) {
         restore();
         if (outError) *outError = L"Toolbar palette buttons were not created for the saved palette.";
         return false;
@@ -2643,6 +2711,11 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
         return false;
     }
     AppendUiAutomationTrace(L"automation:workspace_config_roundtrip_ok");
+    if (!TestSelectionAndColorIsolationInvariants(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:selection_invariants_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:selection_invariants_ok");
     if (!RunUiAutomationPaletteScenario(owner, outError)) {
         AppendUiAutomationTrace(L"automation:palette_failed");
         return false;

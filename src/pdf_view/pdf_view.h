@@ -50,6 +50,9 @@ bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
 void CommitActiveTextEditing(bool commit);
 void ClearPdfTextSelection();
 void ClearPdfAnnotationSelection();
+void ClearAnnotationSelection();
+int GetActiveSelectedAnnotationIndex();
+void InsertAnnotAt(const Annotation& ann, int index);
 bool ApplyActiveColorToSelectedAnnotation(HWND hwnd);
 bool DeleteAnnotationAtIndex(HWND owner, int index);
 bool DuplicateAnnotationAtIndex(HWND owner, int index);

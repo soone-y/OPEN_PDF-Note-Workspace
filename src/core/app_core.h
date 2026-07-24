@@ -652,7 +652,8 @@ extern ToolMode g_markerGroupMode;
 extern ToolMode g_penGroupMode;
 extern ToolMode g_shapeGroupMode;
 extern std::vector<COLORREF> g_palette;
-extern COLORREF g_paletteCustomColor;
+extern COLORREF g_paletteCustomColor;      // JSON index 7: last OK selected color (Dynamic Slot 9 candidate)
+extern COLORREF g_paletteDialogCustomColor; // JSON index 8: picker custom color #1 (Dynamic Slot 8 candidate)
 extern COLORREF g_activeColor;
 extern WNDPROC g_oldNoteProc;
 extern std::wstring g_textFontName;
@@ -739,7 +740,7 @@ bool IsJapaneseRenderCharForNoteFont(wchar_t ch);
 std::wstring ResolveNoteRenderBaseFace();
 std::wstring ResolveNoteRenderJpFace();
 void SetPaletteCustomColor(COLORREF color);
-bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor);
+bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor, bool trackDialogCustom = false);
 void SyncUserPaletteToRuntime();
 void LoadUserPaletteColorsForSettings(COLORREF* custom, size_t count);
 void SaveUserPaletteColorsForSettings(const COLORREF* custom, size_t count);
@@ -783,6 +784,7 @@ void RefreshMainMenuBar(HWND hWnd);
 void RefreshMainWindowUiState(HWND hWnd);
 void RequestAnnotPanelRevealLatest();
 void RefreshAnnotPanel();
+void UpdateAnnotPanelSummary();
 bool SyncTextBoxToolFontFromAnnotationIndex(int index);
 const std::wstring& CurrentLogicalPdfPath();
 void UpdateSessionLastOpenTargetsAfterOpen();
