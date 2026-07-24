@@ -47,6 +47,7 @@ jobs:
         run: |
           mkdir -p _site/for_ai/core
           # エントリポイントと上位参照ファイル
+          cp index.html _site/
           cp For_AI.md _site/
           cp README.md _site/
           cp LICENSE.md _site/
