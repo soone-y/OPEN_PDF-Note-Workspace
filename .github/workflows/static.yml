@@ -1,0 +1,81 @@
+# for_ai/ ディレクトリの AI 向け文書を GitHub Pages (静的 HTML) で公開する
+# ベース: GitHub 公式 "Deploy static content to Pages" テンプレート
+name: Deploy for_ai to GitHub Pages
+
+on:
+  push:
+    # main ブランチへの push のうち、公開対象ファイルが変更された場合のみ実行
+    branches: ["main"]
+    paths:
+      - "for_ai/**"
+      - "For_AI.md"
+      - "README.md"
+      - "LICENSE.md"
+      - "LICENSES_INDEX.md"
+      - "THIRD_PARTY_NOTICES.md"
+      - "AGENTS.md"
+      - "Document/**"
+      - ".github/workflows/static.yml"
+
+  # Actions タブから手動実行できるようにする
+  workflow_dispatch:
+
+# GitHub Pages へのデプロイに必要な権限
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同時デプロイは 1 件のみ許可。進行中のデプロイはキャンセルしない
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 公開対象ファイルだけを _site/ に集める
+      # src/ tests/ out/ などソースコードは含めない
+      - name: Collect for_ai files
+        run: |
+          mkdir -p _site/for_ai/core
+          # エントリポイントと上位参照ファイル
+          cp For_AI.md _site/
+          cp README.md _site/
+          cp LICENSE.md _site/
+          cp LICENSES_INDEX.md _site/
+          cp THIRD_PARTY_NOTICES.md _site/
+          cp AGENTS.md _site/ 2>/dev/null || true
+          # for_ai/ 本体
+          cp for_ai/manifest.json _site/for_ai/
+          cp for_ai/project_context.xml _site/for_ai/
+          cp "for_ai/AI共有用プロンプト.txt" "_site/for_ai/AI共有用プロンプト.txt"
+          cp for_ai/core/*.md _site/for_ai/core/
+          # Document/ (manifest.json の各ルートから参照される)
+          # How_to_Build.md は開発者専用のため除外する
+          mkdir -p _site/Document
+          cp Document/*.md _site/Document/ 2>/dev/null || true
+          rm -f _site/Document/How_to_Build.md
+          # __APP_VERSION__ プレースホルダを実際の版番号で置換する
+          APP_VERSION=$(cat APP_VERSION.txt | tr -d '[:space:]')
+          find _site -name "*.md" -exec sed -i "s/__APP_VERSION__/${APP_VERSION}/g" {} +
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # ソース全体ではなく _site/ だけをアップロード
+          path: '_site'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

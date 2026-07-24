@@ -8,5 +8,9 @@
 リポジトリ URL:
 （ここに URL を貼り付けます）
 
+AI 向け文書の Web 公開版 (GitHub Pages):
+https://soone-y.github.io/OPEN_PDF-Note-Workspace/For_AI.md
+（このURLで For_AI.md を直接参照できます）
+
 質問:
 （ここに質問を書きます）
