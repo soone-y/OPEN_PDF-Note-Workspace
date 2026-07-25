@@ -29,7 +29,7 @@ function Invoke-RequiredScript {
     }
 }
 
-$fullBuildScript = Join-Path $PSScriptRoot "full_build.ps1"
+$buildScript = Join-Path $PSScriptRoot "build.ps1"
 $releaseSetScript = Join-Path $PSScriptRoot "scripts/release/make_release_set.ps1"
 
 $buildArgs = @()
@@ -47,7 +47,7 @@ if ($Lite) {
     Write-Host "Creating a complete distributable release set..." -ForegroundColor Cyan
 }
 
-Invoke-RequiredScript -ScriptPath $fullBuildScript -Arguments $buildArgs
+Invoke-RequiredScript -ScriptPath $buildScript -Arguments $buildArgs
 Invoke-RequiredScript -ScriptPath $releaseSetScript -Arguments $releaseSetArgs
 
 exit 0

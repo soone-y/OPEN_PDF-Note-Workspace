@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$SkipBuild,
     [switch]$SkipReadOnlyViewerBuild,
@@ -35,8 +35,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$fullBuildScript = Join-Path $repoRoot "full_build.ps1"
-$fullReleaseScript = Join-Path $repoRoot "full_release.ps1"
+$buildScript = Join-Path $repoRoot "build.ps1"
+$releaseScript = Join-Path $repoRoot "release.ps1"
 $workspaceBuildScript = Join-Path $repoRoot "scripts\build\build_workspace.ps1"
 $atomicWriteScript = Join-Path $PSScriptRoot "run_atomic_write_tests.ps1"
 $pathSafetyScript = Join-Path $PSScriptRoot "run_path_safety_tests.ps1"
@@ -299,8 +299,9 @@ function Assert-VersionTrackedDocumentation {
             throw "Version-tracked documentation file not found: $path"
         }
         $text = Get-Content -LiteralPath $path -Raw
-        if ($text -notmatch "(?m)^同梱リポジトリ版: __REPO_VERSION__\r?$") {
-            throw "Version-tracked documentation is missing the __REPO_VERSION__ marker: $path"
+        $markerPattern = '(?m)^' + [regex]::Escape('同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)') + '\r?$'
+        if ($text -notmatch $markerPattern) {
+            throw "Version-tracked documentation is missing the ZIP placeholder marker: $path"
         }
     }
 }
@@ -597,8 +598,8 @@ try {
     Assert-ScriptExists -Path $libreOfficeRuntimeGateScript
 
     if (-not $SkipBuild) {
-        Assert-ScriptExists -Path $fullBuildScript
-        Assert-ScriptExists -Path $fullReleaseScript
+        Assert-ScriptExists -Path $buildScript
+        Assert-ScriptExists -Path $releaseScript
         Assert-ScriptExists -Path $workspaceBuildScript
         Invoke-Step -Name "Build" -Action {
             if ($Release) {
@@ -606,9 +607,9 @@ try {
                     throw "-Release cannot be combined with -SkipReadOnlyViewerBuild because a full release always includes every application."
                 }
                 if ($Rebuild -or $VerboseOutput) {
-                    throw "Use full_release.ps1 directly for a complete release; -Rebuild and -VerboseOutput are not supported with -Release."
+                    throw "Use release.ps1 directly for a complete release; -Rebuild and -VerboseOutput are not supported with -Release."
                 }
-                Invoke-ChildPowerShellScript -ScriptPath $fullReleaseScript
+                Invoke-ChildPowerShellScript -ScriptPath $releaseScript
                 return
             }
 
@@ -620,10 +621,10 @@ try {
                 return
             }
 
-            $fullBuildArgs = @()
-            if ($Rebuild) { $fullBuildArgs += "-Rebuild" }
-            if ($VerboseOutput) { $fullBuildArgs += "-VerboseOutput" }
-            Invoke-ChildPowerShellScript -ScriptPath $fullBuildScript -Arguments $fullBuildArgs
+            $buildArgs = @()
+            if ($Rebuild) { $buildArgs += "-Rebuild" }
+            if ($VerboseOutput) { $buildArgs += "-VerboseOutput" }
+            Invoke-ChildPowerShellScript -ScriptPath $buildScript -Arguments $buildArgs
         }
 
     }

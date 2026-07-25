@@ -26,21 +26,6 @@ DEFAULT_GITIGNORE_TEMPLATE = (
 EXCLUDED_DIR_NAMES = {"__pycache__", ".pytest_cache"}
 EXCLUDED_FILE_SUFFIXES = {".pyc", ".pyo", ".orig", ".rej", ".bak"}
 EXCLUDED_FILE_NAMES = {"Thumbs.db", "Desktop.ini"}
-VERSION_TRACKED_DOCUMENTS = frozenset(
-    {
-        "README.md",
-        "docs/public/README.md",
-        "Document/Index.md",
-        "Document/How_to_Build.md",
-        "Document/What_is_File_Formats.md",
-        "Document/How_to_Save_and_Recovery.md",
-        "Document/How_to_Setup.md",
-        "Document/How_to_Troubleshoot.md",
-        "Document/How_to_Use.md",
-    }
-)
-
-
 @dataclass(frozen=True)
 class SnapshotPlan:
     directories: tuple[PurePosixPath, ...]
@@ -279,23 +264,6 @@ def read_repo_version(root: Path) -> str | None:
     return version
 
 
-def render_version_tracked_document(source: Path, target: Path, version: str) -> None:
-    text = source.read_text(encoding="utf-8")
-    marker = "__REPO_VERSION__"
-    marker_count = text.count(marker)
-    if marker_count == 1:
-        rendered = text.replace(marker, version)
-    elif marker_count > 1:
-        raise ValueError(f"version-tracked document contains multiple repo version markers: {source}")
-    else:
-        heading = re.search(r"^# .*\r?$", text, re.MULTILINE)
-        if heading is None:
-            raise ValueError(f"version-tracked document has no top-level heading: {source}")
-        insertion = f"{heading.group(0)}\n\n同梱リポジトリ版: {marker}"
-        rendered = text[: heading.start()] + insertion + text[heading.end() :]
-    target.write_text(rendered, encoding="utf-8", newline="")
-
-
 def copy_snapshot(
     dest: Path,
     plan: SnapshotPlan,
@@ -315,10 +283,7 @@ def copy_snapshot(
     for source, rel_path in plan.files:
         target = dest / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        if repo_version is not None and rel_path.as_posix() in VERSION_TRACKED_DOCUMENTS:
-            render_version_tracked_document(source, target, repo_version)
-        else:
-            shutil.copy2(source, target)
+        shutil.copy2(source, target)
     shutil.copy2(gitignore_template, dest / ".gitignore")
 
 

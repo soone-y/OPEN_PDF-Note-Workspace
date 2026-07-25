@@ -84,10 +84,10 @@ def recommendations_for_paths(paths: Iterable[str], diff_text: str = "") -> dict
     markdown_changed = any(Path(path).suffix.lower() in {".md", ".markdown"} for path in normalized)
     verification_relevant = any(
         path.startswith(("src/", "tests/", "tools/", "scripts/"))
-        or path in {"full_build.ps1", "full_release.ps1"}
+        or path in {"build.ps1", "release.ps1"}
         for path in normalized
     )
-    full_entry_changed = any(path in {"full_build.ps1", "full_release.ps1"} for path in normalized)
+    full_entry_changed = any(path in {"build.ps1", "release.ps1"} for path in normalized)
 
     if markdown_changed:
         add_unique(inspect, "python tools/dev/md_structure_scanner.py . --index out/md_structure_index.tsv")

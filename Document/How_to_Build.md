@@ -1,6 +1,6 @@
-# ビルドと検証
+﻿# ビルドと検証
 
-同梱リポジトリ版: ﻿0.9.000
+同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)
 
 この文書は、ソースからビルドする開発者向けです。配布物を通常利用するだけの場合は [How_to_Use.md](How_to_Use.md) を参照してください。
 
@@ -18,10 +18,10 @@
 ## ビルド
 
 ```powershell
-./full_build.ps1
+./build.ps1
 ```
 
-`full_build.ps1` は通常版、Lite版、閲覧専用ビューアをすべて Release 構成で作る全体入口です。引数なしの実行で、配布準備済みの実行ファイルを `out/` に作成します。
+`build.ps1` は通常版、Lite版、閲覧専用ビューアをすべて Release 構成で作る全体入口です。引数なしの実行で、配布準備済みの実行ファイルを `out/` に作成します。
 
 個別にビルドする場合は、詳細入口を直接使います。
 
@@ -55,11 +55,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_atomic_wri
 ## release 作成
 
 ```powershell
-./full_release.ps1
+./release.ps1
 # 実機テストのサイクルを早めるため、Lite版のみを短時間で試作・パックする場合:
-./full_release.ps1 -Lite
+./release.ps1 -Lite
 ```
 
-配布時は `out/` を直接渡さず、release set 内に作られる通常版と Lite版のフォルダまたは ZIP を使います。`./full_release.ps1` は通常版・Lite版・閲覧専用ビューアを再ビルドしてから、配布物、ZIP、チェックサム、公開スナップショットを作ります（実機テスト等で高速にLite版のみを作成したい場合は `-Lite` オプションが便利です）。通常版には検証済み LibreOffice conversion runtime を必ず同梱し、Lite版には同梱しません。通常版からruntimeだけを除いた配布物は作れません。通常利用者には、二つの版を混ぜず、用途に応じてどちらか一方を配布してください。
+配布時は `out/` を直接渡さず、release set 内に作られる通常版と Lite版のフォルダまたは ZIP を使います。`./release.ps1` は通常版・Lite版・閲覧専用ビューアを再ビルドしてから、配布物、ZIP、チェックサム、公開スナップショットを作ります（実機テスト等で高速にLite版のみを作成したい場合は `-Lite` オプションが便利です）。通常版には検証済み LibreOffice conversion runtime を必ず同梱し、Lite版には同梱しません。通常版からruntimeだけを除いた配布物は作れません。通常利用者には、二つの版を混ぜず、用途に応じてどちらか一方を配布してください。
 
 配布名、出力先、同梱物などを個別に調整する場合だけ、`scripts/release/make_release_set.ps1` または `scripts/release/pack_release.ps1` を使います。

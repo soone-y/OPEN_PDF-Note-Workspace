@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$OutBaseDir = "out/release",
     [string]$NamePrefix = "pdf_note_workspace",
@@ -77,7 +77,7 @@ function Assert-ArtifactFresh([string]$ArtifactPath, [string[]]$InputPaths, [str
             continue
         }
         if ($item.LastWriteTimeUtc -gt $artifactTime) {
-            throw ("Build artifact is stale. Re-run full_build.ps1 (or scripts\build\build_workspace.ps1) before packaging. Newer input: {0}" -f $item.FullName)
+            throw ("Build artifact is stale. Re-run build.ps1 (or scripts\build\build_workspace.ps1) before packaging. Newer input: {0}" -f $item.FullName)
         }
     }
 }
@@ -152,7 +152,7 @@ function Get-RepoVersion {
 }
 
 function Apply-RepoVersionMarkers([string]$DocsDir, [string]$RepoVersion) {
-    $marker = "__REPO_VERSION__"
+    $marker = "(ZIP配布物ではここにバージョンが記載されます)"
     if ($DryRun) {
         Write-Info "[dry-run] apply $marker in release documentation: $DocsDir"
         return

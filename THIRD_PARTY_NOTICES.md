@@ -67,7 +67,7 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 
 ### 3.1 実装上の位置づけ
 
-- `full_build.ps1` は `scripts/build/build_workspace.ps1` 経由で、`g++` のあるツールチェーンから次の DLL を `out/bin/` にコピーします。
+- `build.ps1` は `scripts/build/build_workspace.ps1` 経由で、`g++` のあるツールチェーンから次の DLL を `out/bin/` にコピーします。
   - `libstdc++-6.dll`
   - `libgcc_s_seh-1.dll`
   - `libwinpthread-1.dll`

@@ -38,6 +38,11 @@ constexpr int kAnnotInspectorClose = 111;
 constexpr int kAnnotInspectorDetails = 112;
 constexpr int kAnnotInspectorApply = 113;
 constexpr int kAnnotInspectorValidation = 114;
+constexpr int kAnnotInspectorX1 = 115;
+constexpr int kAnnotInspectorY1 = 116;
+constexpr int kAnnotInspectorX2 = 117;
+constexpr int kAnnotInspectorY2 = 118;
+constexpr int kAnnotInspectorColorHex = 119;
 
 struct AnnotInspectorCtx {
     HWND owner = nullptr;
@@ -45,7 +50,58 @@ struct AnnotInspectorCtx {
     bool editable = false;
     bool initializing = false;
     Annotation::Type type = Annotation::Type::TextBox;
+    int inactiveDismissCount = 0;
 };
+
+std::wstring ColorToHexWString(COLORREF color) {
+    const wchar_t hex[] = L"0123456789ABCDEF";
+    std::wstring label = L"#";
+    for (BYTE value : { GetRValue(color), GetGValue(color), GetBValue(color) }) {
+        label.push_back(hex[value >> 4]);
+        label.push_back(hex[value & 0x0F]);
+    }
+    return label;
+}
+
+bool TryReadDoubleNumber(HWND hWnd, int id, double* outVal) {
+    HWND control = GetDlgItem(hWnd, id);
+    const int length = control ? GetWindowTextLengthW(control) : 0;
+    if (!control || length <= 0) return false;
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    GetWindowTextW(control, text.data(), length + 1);
+    text.resize(static_cast<size_t>(length));
+    const wchar_t* start = text.c_str();
+    while (iswspace(*start)) ++start;
+    wchar_t* end = nullptr;
+    errno = 0;
+    const double val = std::wcstod(start, &end);
+    while (end && iswspace(*end)) ++end;
+    if (start == end || !end || *end != L'\0' || errno == ERANGE || !std::isfinite(val)) {
+        return false;
+    }
+    if (outVal) *outVal = val;
+    return true;
+}
+
+bool TryReadColorHex(HWND hWnd, int id, COLORREF* outColor) {
+    HWND control = GetDlgItem(hWnd, id);
+    const int length = control ? GetWindowTextLengthW(control) : 0;
+    if (!control || length <= 0) return false;
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    GetWindowTextW(control, text.data(), length + 1);
+    text.resize(static_cast<size_t>(length));
+    std::wstring hexStr = TrimWhitespace(text);
+    if (!hexStr.empty() && hexStr.front() == L'#') hexStr.erase(0, 1);
+    if (hexStr.size() != 6) return false;
+    wchar_t* end = nullptr;
+    unsigned long val = std::wcstoul(hexStr.c_str(), &end, 16);
+    if (end != hexStr.c_str() + 6 || *end != L'\0') return false;
+    BYTE r = static_cast<BYTE>((val >> 16) & 0xFF);
+    BYTE g = static_cast<BYTE>((val >> 8) & 0xFF);
+    BYTE b = static_cast<BYTE>(val & 0xFF);
+    if (outColor) *outColor = RGB(r, g, b);
+    return true;
+}
 
 std::wstring AnnotTypeLabel(const Annotation& ann) {
     const auto& ui = GetUiText();
@@ -258,16 +314,6 @@ bool InspectorHasContent(const Annotation::Type type) {
         type == Annotation::Type::LinkMarker;
 }
 
-std::wstring InspectorColorLabel(COLORREF color) {
-    const wchar_t hex[] = L"0123456789ABCDEF";
-    std::wstring label = IsEnglishUi() ? L"Change color (#" : L"色を変更 (#";
-    for (BYTE value : { GetRValue(color), GetGValue(color), GetBValue(color) }) {
-        label.push_back(hex[value >> 4]);
-        label.push_back(hex[value & 0x0F]);
-    }
-    return label + L")";
-}
-
 std::wstring InspectorNumberText(double value) {
     std::wstring text = std::to_wstring(value);
     while (!text.empty() && text.back() == L'0') text.pop_back();
@@ -329,14 +375,13 @@ void ShowInspectorValidation(HWND hWnd, int controlId, const wchar_t* message) {
     }
 }
 
-void ClearInspectorValidation(HWND hWnd) {
-    SetWindowTextW(GetDlgItem(hWnd, kAnnotInspectorValidation), L"");
+void ShowNoSoundPopup(HWND hWnd, int controlId, const wchar_t* title, const wchar_t* message) {
+    (void)title;
+    ShowInspectorValidation(hWnd, controlId, message);
 }
 
-void UpdateInspectorDetails(HWND hWnd, const AnnotInspectorCtx* ctx) {
-    if (!ctx || ctx->index < 0 || ctx->index >= static_cast<int>(g_annots.size())) return;
-    SetWindowTextW(GetDlgItem(hWnd, kAnnotInspectorDetails),
-                   AnnotationInspectorDetails(g_annots[static_cast<size_t>(ctx->index)]).c_str());
+void ClearInspectorValidation(HWND hWnd) {
+    SetWindowTextW(GetDlgItem(hWnd, kAnnotInspectorValidation), L"");
 }
 
 std::wstring InspectorEditableText(const Annotation& ann) {
@@ -352,49 +397,62 @@ void SetAnnotInspectorEditable(HWND hWnd, AnnotInspectorCtx* ctx, bool editable)
                      ctx->editable ? kAnnotInspectorEdit : kAnnotInspectorView);
     HWND content = GetDlgItem(hWnd, kAnnotInspectorContent);
     if (content) EnableWindow(content, ctx->editable && InspectorHasContent(ctx->type));
-    for (const int id : { kAnnotInspectorColor, kAnnotInspectorWidth, kAnnotInspectorAlpha,
+    for (const int id : { kAnnotInspectorX1, kAnnotInspectorY1, kAnnotInspectorX2, kAnnotInspectorY2,
+                          kAnnotInspectorColorHex, kAnnotInspectorColor, kAnnotInspectorWidth, kAnnotInspectorAlpha,
                           kAnnotInspectorShapeKind, kAnnotInspectorShapeDrawMode,
-                          kAnnotInspectorArrowHead, kAnnotInspectorDash }) {
+                          kAnnotInspectorArrowHead, kAnnotInspectorDash, kAnnotInspectorApply }) {
         if (HWND control = GetDlgItem(hWnd, id)) EnableWindow(control, ctx->editable);
     }
 }
 
-bool ApplyAnnotInspectorContent(HWND hWnd, AnnotInspectorCtx* ctx) {
-    if (!ctx || ctx->initializing || !ctx->editable || ctx->index < 0 ||
-        ctx->index >= static_cast<int>(g_annots.size())) return false;
-    Annotation after = g_annots[static_cast<size_t>(ctx->index)];
-    HWND content = GetDlgItem(hWnd, kAnnotInspectorContent);
-    const int length = content ? GetWindowTextLengthW(content) : 0;
-    std::wstring value(static_cast<size_t>(std::max(0, length)) + 1, L'\0');
-    if (content && length > 0) GetWindowTextW(content, value.data(), length + 1);
-    value.resize(static_cast<size_t>(std::max(0, length)));
-    if (after.type == Annotation::Type::TextBox || after.type == Annotation::Type::MathBox) {
-        after.text = value;
-        if (after.type == Annotation::Type::TextBox) after.textLines.clear();
-    } else if (after.type == Annotation::Type::LinkMarker) {
-        after.linkNotePath = value;
-    } else {
-        return false;
-    }
-    return UpdateAnnotationAtIndex(ctx->owner, ctx->index, after);
-}
-
-bool ApplyAnnotInspectorStyle(HWND hWnd, AnnotInspectorCtx* ctx, bool showValidation) {
+bool ApplyAnnotInspectorAll(HWND hWnd, AnnotInspectorCtx* ctx, bool showValidation) {
     if (!ctx || ctx->initializing || !ctx->editable || ctx->index < 0 ||
         ctx->index >= static_cast<int>(g_annots.size())) return true;
+
+    double x1 = 0.0, y1 = 0.0, x2 = 0.0, y2 = 0.0;
+    if (!TryReadDoubleNumber(hWnd, kAnnotInspectorX1, &x1)) {
+        if (showValidation) ShowNoSoundPopup(hWnd, kAnnotInspectorX1, L"プロパティエラー", L"X1 座標を正しく数値で入力してください。");
+        return false;
+    }
+    if (!TryReadDoubleNumber(hWnd, kAnnotInspectorY1, &y1)) {
+        if (showValidation) ShowNoSoundPopup(hWnd, kAnnotInspectorY1, L"プロパティエラー", L"Y1 座標を正しく数値で入力してください。");
+        return false;
+    }
+    if (!TryReadDoubleNumber(hWnd, kAnnotInspectorX2, &x2)) {
+        if (showValidation) ShowNoSoundPopup(hWnd, kAnnotInspectorX2, L"プロパティエラー", L"X2 座標を正しく数値で入力してください。");
+        return false;
+    }
+    if (!TryReadDoubleNumber(hWnd, kAnnotInspectorY2, &y2)) {
+        if (showValidation) ShowNoSoundPopup(hWnd, kAnnotInspectorY2, L"プロパティエラー", L"Y2 座標を正しく数値で入力してください。");
+        return false;
+    }
+
+    COLORREF color = RGB(0, 0, 0);
+    if (!TryReadColorHex(hWnd, kAnnotInspectorColorHex, &color)) {
+        if (showValidation) ShowNoSoundPopup(hWnd, kAnnotInspectorColorHex, L"プロパティエラー", L"色は #RRGGBB 形式 (例: #FF0080) で入力してください。");
+        return false;
+    }
+
     double width = 0.0;
     if (!TryReadInspectorNumber(hWnd, kAnnotInspectorWidth, 0.5, 24.0, width)) {
-        if (showValidation) ShowInspectorValidation(hWnd, kAnnotInspectorWidth, L"幅は 0.5〜24 pt の数値で入力してください。");
+        if (showValidation) ShowNoSoundPopup(hWnd, kAnnotInspectorWidth, L"プロパティエラー", L"幅は 0.5〜24 pt の数値で入力してください。");
         return false;
     }
     double opacity = 0.0;
     if (!TryReadInspectorNumber(hWnd, kAnnotInspectorAlpha, 0.0, 100.0, opacity)) {
-        if (showValidation) ShowInspectorValidation(hWnd, kAnnotInspectorAlpha, L"透明度は 0〜100 の数値で入力してください。");
+        if (showValidation) ShowNoSoundPopup(hWnd, kAnnotInspectorAlpha, L"プロパティエラー", L"透明度は 0〜100 の数値で入力してください。");
         return false;
     }
+
     Annotation after = g_annots[static_cast<size_t>(ctx->index)];
+    after.x1 = x1;
+    after.y1 = y1;
+    after.x2 = x2;
+    after.y2 = y2;
+    after.color = color;
     after.width = width;
     after.alpha = opacity / 100.0;
+
     if (after.type == Annotation::Type::Shape) {
         after.shapeKind = static_cast<ShapeKind>(InspectorComboValue(hWnd, kAnnotInspectorShapeKind,
             static_cast<LPARAM>(after.shapeKind)));
@@ -411,8 +469,22 @@ bool ApplyAnnotInspectorStyle(HWND hWnd, AnnotInspectorCtx* ctx, bool showValida
                                                     std::max(1.0, after.width * 2.0) }
                             : std::vector<double>{};
     }
-    const bool changed = UpdateAnnotationAtIndex(ctx->owner, ctx->index, after);
-    if (changed) UpdateInspectorDetails(hWnd, ctx);
+
+    HWND content = GetDlgItem(hWnd, kAnnotInspectorContent);
+    if (content && InspectorHasContent(after.type)) {
+        const int length = GetWindowTextLengthW(content);
+        std::wstring value(static_cast<size_t>(std::max(0, length)) + 1, L'\0');
+        if (length > 0) GetWindowTextW(content, value.data(), length + 1);
+        value.resize(static_cast<size_t>(std::max(0, length)));
+        if (after.type == Annotation::Type::TextBox || after.type == Annotation::Type::MathBox) {
+            after.text = value;
+            if (after.type == Annotation::Type::TextBox) after.textLines.clear();
+        } else if (after.type == Annotation::Type::LinkMarker) {
+            after.linkNotePath = value;
+        }
+    }
+
+    (void)UpdateAnnotationAtIndex(ctx->owner, ctx->index, after);
     ClearInspectorValidation(hWnd);
     return true;
 }
@@ -431,42 +503,97 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         const Annotation& ann = g_annots[static_cast<size_t>(ctx->index)];
         ctx->type = ann.type;
         ctx->initializing = true;
+        ctx->inactiveDismissCount = 0;
         const bool hasContent = InspectorHasContent(ann.type);
-        const int styleTop = hasContent ? 382 : 196;
+        const bool hasExtraRow = (ann.type == Annotation::Type::Shape ||
+                                  ann.type == Annotation::Type::Arrow ||
+                                  ann.type == Annotation::Type::Line);
+
         CreateWindowExW(0, L"BUTTON", L"プロパティ", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                        16, 8, 95, 24, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorView), g_hInst, nullptr);
+                        16, 10, 90, 22, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorView), g_hInst, nullptr);
         CreateWindowExW(0, L"BUTTON", L"編集", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                        116, 8, 70, 24, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorEdit), g_hInst, nullptr);
+                        112, 10, 70, 22, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorEdit), g_hInst, nullptr);
+
+        const int infoY = 36;
         CreateWindowExW(0, L"BUTTON", L"注釈情報", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                        8, 36, 496, 140, hWnd, nullptr, g_hInst, nullptr);
-        HWND details = CreateWindowExW(0, L"STATIC", AnnotationInspectorDetails(ann).c_str(),
-                                       WS_CHILD | WS_VISIBLE,
-                                       20, 56, 468, 112, hWnd,
-                                       reinterpret_cast<HMENU>(kAnnotInspectorDetails), g_hInst, nullptr);
-        const wchar_t* label = (ann.type == Annotation::Type::LinkMarker) ? L"リンク先" :
+                        8, infoY, 496, 106, hWnd, nullptr, g_hInst, nullptr);
+
+        const std::wstring pageStr = ann.pageIndex >= 0 ? std::to_wstring(ann.pageIndex + 1) : L"?";
+        std::wstring typeLabel = L"種類: " + AnnotTypeLabel(ann);
+        std::wstring pageLabel = L"ページ: " + pageStr;
+
+        CreateWindowExW(0, L"STATIC", typeLabel.c_str(), WS_CHILD | WS_VISIBLE,
+                        20, infoY + 22, 220, 20, hWnd, nullptr, g_hInst, nullptr);
+        CreateWindowExW(0, L"STATIC", pageLabel.c_str(), WS_CHILD | WS_VISIBLE,
+                        250, infoY + 22, 220, 20, hWnd, nullptr, g_hInst, nullptr);
+
+        CreateWindowExW(0, L"STATIC", L"座標 (X1, Y1) - (X2, Y2):", WS_CHILD | WS_VISIBLE,
+                        20, infoY + 46, 220, 20, hWnd, nullptr, g_hInst, nullptr);
+
+        const int posRowY = infoY + 68;
+        CreateWindowExW(0, L"STATIC", L"X1:", WS_CHILD | WS_VISIBLE,
+                        20, posRowY + 3, 24, 20, hWnd, nullptr, g_hInst, nullptr);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", InspectorNumberText(ann.x1).c_str(),
+                        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                        46, posRowY, 70, 24, hWnd,
+                        reinterpret_cast<HMENU>(kAnnotInspectorX1), g_hInst, nullptr);
+
+        CreateWindowExW(0, L"STATIC", L"Y1:", WS_CHILD | WS_VISIBLE,
+                        126, posRowY + 3, 24, 20, hWnd, nullptr, g_hInst, nullptr);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", InspectorNumberText(ann.y1).c_str(),
+                        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                        152, posRowY, 70, 24, hWnd,
+                        reinterpret_cast<HMENU>(kAnnotInspectorY1), g_hInst, nullptr);
+
+        CreateWindowExW(0, L"STATIC", L"X2:", WS_CHILD | WS_VISIBLE,
+                        232, posRowY + 3, 24, 20, hWnd, nullptr, g_hInst, nullptr);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", InspectorNumberText(ann.x2).c_str(),
+                        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                        258, posRowY, 70, 24, hWnd,
+                        reinterpret_cast<HMENU>(kAnnotInspectorX2), g_hInst, nullptr);
+
+        CreateWindowExW(0, L"STATIC", L"Y2:", WS_CHILD | WS_VISIBLE,
+                        338, posRowY + 3, 24, 20, hWnd, nullptr, g_hInst, nullptr);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", InspectorNumberText(ann.y2).c_str(),
+                        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                        364, posRowY, 70, 24, hWnd,
+                        reinterpret_cast<HMENU>(kAnnotInspectorY2), g_hInst, nullptr);
+
+        int currY = infoY + 106 + 10;
+
+        const wchar_t* contentGroupLabel = (ann.type == Annotation::Type::LinkMarker) ? L"リンク先" :
             ((ann.type == Annotation::Type::TextBox || ann.type == Annotation::Type::MathBox) ? L"本文" : L"内容");
+
         if (hasContent) {
-            CreateWindowExW(0, L"BUTTON", label, WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                            8, 184, 496, 182, hWnd, nullptr, g_hInst, nullptr);
+            CreateWindowExW(0, L"BUTTON", contentGroupLabel, WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                            8, currY, 496, 150, hWnd, nullptr, g_hInst, nullptr);
+            CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", InspectorEditableText(ann).c_str(),
+                            WS_CHILD | WS_VISIBLE | ES_MULTILINE | WS_VSCROLL,
+                            20, currY + 22, 472, 116, hWnd,
+                            reinterpret_cast<HMENU>(kAnnotInspectorContent), g_hInst, nullptr);
+            currY += 150 + 10;
         }
-        HWND contentLabel = CreateWindowExW(0, L"STATIC", label, WS_CHILD | (hasContent ? WS_VISIBLE : 0),
-                        20, 204, 90, 20, hWnd, nullptr, g_hInst, nullptr);
-        HWND content = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", InspectorEditableText(ann).c_str(),
-                                       WS_CHILD | WS_VISIBLE | ES_MULTILINE | WS_VSCROLL,
-                                       20, 226, 468, 126, hWnd,
-                                       reinterpret_cast<HMENU>(kAnnotInspectorContent), g_hInst, nullptr);
-        if (!hasContent) ShowWindow(content, SW_HIDE);
+
+        const int styleGroupY = currY;
+        const int styleGroupH = hasExtraRow ? 102 : 64;
         CreateWindowExW(0, L"BUTTON", L"スタイル", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                        8, styleTop - 12, 496, 106, hWnd, nullptr, g_hInst, nullptr);
-        CreateWindowExW(0, L"STATIC", L"表示", WS_CHILD | WS_VISIBLE,
-                        20, styleTop, 55, 22, hWnd, nullptr, g_hInst, nullptr);
-        HWND color = CreateWindowExW(0, L"BUTTON", InspectorColorLabel(ann.color).c_str(), WS_CHILD | WS_VISIBLE,
-                                     70, styleTop - 3, 145, 26, hWnd,
-                                     reinterpret_cast<HMENU>(kAnnotInspectorColor), g_hInst, nullptr);
-        CreateWindowExW(0, L"STATIC", L"幅", WS_CHILD | WS_VISIBLE,
-                        228, styleTop, 28, 22, hWnd, nullptr, g_hInst, nullptr);
+                        8, styleGroupY, 496, styleGroupH, hWnd, nullptr, g_hInst, nullptr);
+
+        const int y1 = styleGroupY + 24;
+        CreateWindowExW(0, L"STATIC", L"色:", WS_CHILD | WS_VISIBLE,
+                        20, y1 + 3, 28, 20, hWnd, nullptr, g_hInst, nullptr);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", ColorToHexWString(ann.color).c_str(),
+                        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                        50, y1, 70, 24, hWnd,
+                        reinterpret_cast<HMENU>(kAnnotInspectorColorHex), g_hInst, nullptr);
+        CreateWindowExW(0, L"BUTTON", L"選択...", WS_CHILD | WS_VISIBLE,
+                        124, y1, 60, 24, hWnd,
+                        reinterpret_cast<HMENU>(kAnnotInspectorColor), g_hInst, nullptr);
+
+        CreateWindowExW(0, L"STATIC", L"幅:", WS_CHILD | WS_VISIBLE,
+                        198, y1 + 3, 24, 20, hWnd, nullptr, g_hInst, nullptr);
         HWND width = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWN,
-                                     254, styleTop - 3, 82, 180, hWnd,
+                                     224, y1, 65, 180, hWnd,
                                      reinterpret_cast<HMENU>(kAnnotInspectorWidth), g_hInst, nullptr);
         for (const auto& option : { std::pair<const wchar_t*, int>{L"1.0", 10}, {L"1.5", 15},
                                     {L"2.0", 20}, {L"2.5", 25}, {L"4.0", 40},
@@ -475,12 +602,14 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         }
         SelectInspectorComboValue(width, static_cast<LPARAM>(std::lround(ann.width * 10.0)));
         SetWindowTextW(width, InspectorNumberText(ann.width).c_str());
+
         CreateWindowExW(0, L"STATIC", L"pt", WS_CHILD | WS_VISIBLE,
-                        338, styleTop, 20, 22, hWnd, nullptr, g_hInst, nullptr);
-        CreateWindowExW(0, L"STATIC", L"透明度", WS_CHILD | WS_VISIBLE,
-                        362, styleTop, 48, 22, hWnd, nullptr, g_hInst, nullptr);
+                        292, y1 + 3, 20, 20, hWnd, nullptr, g_hInst, nullptr);
+
+        CreateWindowExW(0, L"STATIC", L"透明度:", WS_CHILD | WS_VISIBLE,
+                        320, y1 + 3, 48, 20, hWnd, nullptr, g_hInst, nullptr);
         HWND alpha = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWN,
-                                     412, styleTop - 3, 56, 180, hWnd,
+                                     370, y1, 56, 180, hWnd,
                                      reinterpret_cast<HMENU>(kAnnotInspectorAlpha), g_hInst, nullptr);
         for (const auto& option : { std::pair<const wchar_t*, int>{L"20", 200}, {L"40", 400},
                                     {L"50", 500}, {L"60", 600}, {L"80", 800}, {L"100", 1000} }) {
@@ -488,14 +617,16 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         }
         SelectInspectorComboValue(alpha, static_cast<LPARAM>(std::lround(ann.alpha * 1000.0)));
         SetWindowTextW(alpha, std::to_wstring(static_cast<int>(std::lround(ann.alpha * 100.0))).c_str());
+
         CreateWindowExW(0, L"STATIC", L"%", WS_CHILD | WS_VISIBLE,
-                        470, styleTop, 16, 22, hWnd, nullptr, g_hInst, nullptr);
+                        430, y1 + 3, 16, 20, hWnd, nullptr, g_hInst, nullptr);
 
         if (ann.type == Annotation::Type::Shape) {
-            CreateWindowExW(0, L"STATIC", L"形状", WS_CHILD | WS_VISIBLE,
-                            20, styleTop + 34, 40, 22, hWnd, nullptr, g_hInst, nullptr);
+            const int y2 = styleGroupY + 60;
+            CreateWindowExW(0, L"STATIC", L"形状:", WS_CHILD | WS_VISIBLE,
+                            20, y2 + 3, 36, 20, hWnd, nullptr, g_hInst, nullptr);
             HWND kind = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                                        60, styleTop + 31, 136, 190, hWnd,
+                                        58, y2, 130, 190, hWnd,
                                         reinterpret_cast<HMENU>(kAnnotInspectorShapeKind), g_hInst, nullptr);
             const std::pair<const wchar_t*, ShapeKind> kinds[] = {
                 {L"正円", ShapeKind::Circle}, {L"円", ShapeKind::Ellipse}, {L"斜め円", ShapeKind::RotatedEllipse},
@@ -504,48 +635,91 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             };
             for (const auto& option : kinds) AddInspectorComboItem(kind, option.first, static_cast<LPARAM>(option.second));
             SelectInspectorComboValue(kind, static_cast<LPARAM>(ann.shapeKind));
-            CreateWindowExW(0, L"STATIC", L"描画", WS_CHILD | WS_VISIBLE,
-                            214, styleTop + 34, 40, 22, hWnd, nullptr, g_hInst, nullptr);
+
+            CreateWindowExW(0, L"STATIC", L"描画:", WS_CHILD | WS_VISIBLE,
+                            200, y2 + 3, 36, 20, hWnd, nullptr, g_hInst, nullptr);
             HWND drawMode = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                                            254, styleTop + 31, 120, 120, hWnd,
+                                            238, y2, 110, 120, hWnd,
                                             reinterpret_cast<HMENU>(kAnnotInspectorShapeDrawMode), g_hInst, nullptr);
             AddInspectorComboItem(drawMode, L"塗りつぶし", static_cast<LPARAM>(ShapeDrawMode::Fill));
             AddInspectorComboItem(drawMode, L"枠線", static_cast<LPARAM>(ShapeDrawMode::Outline));
             SelectInspectorComboValue(drawMode, static_cast<LPARAM>(ann.shapeDrawMode));
         } else if (ann.type == Annotation::Type::Arrow) {
-            CreateWindowExW(0, L"STATIC", L"矢印の頭", WS_CHILD | WS_VISIBLE,
-                            20, styleTop + 34, 60, 22, hWnd, nullptr, g_hInst, nullptr);
+            const int y2 = styleGroupY + 60;
+            CreateWindowExW(0, L"STATIC", L"矢印:", WS_CHILD | WS_VISIBLE,
+                            20, y2 + 3, 36, 20, hWnd, nullptr, g_hInst, nullptr);
             HWND arrowHead = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                                             84, styleTop + 31, 110, 120, hWnd,
+                                             58, y2, 100, 120, hWnd,
                                              reinterpret_cast<HMENU>(kAnnotInspectorArrowHead), g_hInst, nullptr);
             AddInspectorComboItem(arrowHead, L"単方向", static_cast<LPARAM>(ArrowHead::Single));
             AddInspectorComboItem(arrowHead, L"双方向", static_cast<LPARAM>(ArrowHead::Double));
             SelectInspectorComboValue(arrowHead, static_cast<LPARAM>(ann.arrowHead));
-        }
-        if (ann.type == Annotation::Type::Line || ann.type == Annotation::Type::Arrow) {
-            CreateWindowExW(0, L"STATIC", L"線種", WS_CHILD | WS_VISIBLE,
-                            214, styleTop + 34, 40, 22, hWnd, nullptr, g_hInst, nullptr);
+
+            CreateWindowExW(0, L"STATIC", L"線種:", WS_CHILD | WS_VISIBLE,
+                            170, y2 + 3, 36, 20, hWnd, nullptr, g_hInst, nullptr);
             HWND dash = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                                        254, styleTop + 31, 120, 120, hWnd,
+                                        208, y2, 90, 120, hWnd,
+                                        reinterpret_cast<HMENU>(kAnnotInspectorDash), g_hInst, nullptr);
+            AddInspectorComboItem(dash, L"実線", 0);
+            AddInspectorComboItem(dash, L"破線", 1);
+            SelectInspectorComboValue(dash, ann.dash.empty() ? 0 : 1);
+        } else if (ann.type == Annotation::Type::Line) {
+            const int y2 = styleGroupY + 60;
+            CreateWindowExW(0, L"STATIC", L"線種:", WS_CHILD | WS_VISIBLE,
+                            20, y2 + 3, 36, 20, hWnd, nullptr, g_hInst, nullptr);
+            HWND dash = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                        58, y2, 90, 120, hWnd,
                                         reinterpret_cast<HMENU>(kAnnotInspectorDash), g_hInst, nullptr);
             AddInspectorComboItem(dash, L"実線", 0);
             AddInspectorComboItem(dash, L"破線", 1);
             SelectInspectorComboValue(dash, ann.dash.empty() ? 0 : 1);
         }
+
+        currY = styleGroupY + styleGroupH + 12;
+
+        CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                        20, currY + 4, 250, 22, hWnd,
+                        reinterpret_cast<HMENU>(kAnnotInspectorValidation), g_hInst, nullptr);
         CreateWindowExW(0, L"BUTTON", L"適用", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                        302, styleTop + 66, 90, 26, hWnd,
+                        288, currY, 96, 28, hWnd,
                         reinterpret_cast<HMENU>(kAnnotInspectorApply), g_hInst, nullptr);
         CreateWindowExW(0, L"BUTTON", L"閉じる", WS_CHILD | WS_VISIBLE,
-                        398, styleTop + 66, 90, 26, hWnd,
+                        392, currY, 96, 28, hWnd,
                         reinterpret_cast<HMENU>(kAnnotInspectorClose), g_hInst, nullptr);
-        CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-                        20, styleTop + 70, 276, 20, hWnd,
-                        reinterpret_cast<HMENU>(kAnnotInspectorValidation), g_hInst, nullptr);
-        SetUIFont(details); SetUIFont(content); SetUIFont(contentLabel); SetUIFont(color); SetUIFont(width); SetUIFont(alpha);
+
+        EnumChildWindows(hWnd, [](HWND child, LPARAM) -> BOOL {
+            SetUIFont(child);
+            return TRUE;
+        }, 0);
+
+        const int targetClientH = currY + 28 + 12;
+        RECT rcClient{ 0, 0, 512, targetClientH };
+        const DWORD dwStyle = static_cast<DWORD>(GetWindowLongW(hWnd, GWL_STYLE));
+        const DWORD dwExStyle = static_cast<DWORD>(GetWindowLongW(hWnd, GWL_EXSTYLE));
+        AdjustWindowRectEx(&rcClient, dwStyle, FALSE, dwExStyle);
+        SetWindowPos(hWnd, nullptr, 0, 0, rcClient.right - rcClient.left, rcClient.bottom - rcClient.top,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+
         SetAnnotInspectorEditable(hWnd, ctx, ctx->editable);
+        ApplyThemeToDialog(hWnd);
         ctx->initializing = false;
         return 0;
     }
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{}; GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+        return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
     case WM_COMMAND: {
         const int id = LOWORD(wParam);
         const int code = HIWORD(wParam);
@@ -558,48 +732,49 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             SetAnnotInspectorEditable(hWnd, ctx, true);
             return 0;
         }
-        if (id == kAnnotInspectorContent && code == EN_CHANGE) {
-            ApplyAnnotInspectorContent(hWnd, ctx);
-            return 0;
-        }
         if (id == kAnnotInspectorColor && code == BN_CLICKED && ctx->editable &&
             ctx->index >= 0 && ctx->index < static_cast<int>(g_annots.size())) {
-            COLORREF color{};
-            if (PickColorDialog(hWnd, g_annots[static_cast<size_t>(ctx->index)].color, &color)) {
-                Annotation after = g_annots[static_cast<size_t>(ctx->index)];
-                after.color = color;
-                if (UpdateAnnotationAtIndex(ctx->owner, ctx->index, after)) {
-                    SetWindowTextW(GetDlgItem(hWnd, kAnnotInspectorColor), InspectorColorLabel(color).c_str());
-                    UpdateInspectorDetails(hWnd, ctx);
-                }
+            COLORREF currentColor = g_annots[static_cast<size_t>(ctx->index)].color;
+            (void)TryReadColorHex(hWnd, kAnnotInspectorColorHex, &currentColor);
+            COLORREF pickedColor{};
+            if (PickColorDialog(hWnd, currentColor, &pickedColor)) {
+                SetWindowTextW(GetDlgItem(hWnd, kAnnotInspectorColorHex), ColorToHexWString(pickedColor).c_str());
+                ApplyAnnotInspectorAll(hWnd, ctx, false);
             }
             return 0;
         }
         if ((id == kAnnotInspectorWidth || id == kAnnotInspectorAlpha ||
              id == kAnnotInspectorShapeKind || id == kAnnotInspectorShapeDrawMode ||
              id == kAnnotInspectorArrowHead || id == kAnnotInspectorDash) && code == CBN_SELCHANGE) {
-            ApplyAnnotInspectorStyle(hWnd, ctx, false);
+            ApplyAnnotInspectorAll(hWnd, ctx, false);
             return 0;
         }
         if (id == kAnnotInspectorApply && code == BN_CLICKED) {
-            ApplyAnnotInspectorStyle(hWnd, ctx, true);
+            ApplyAnnotInspectorAll(hWnd, ctx, true);
             return 0;
         }
         if (id == kAnnotInspectorClose && code == BN_CLICKED) {
-            if (ApplyAnnotInspectorStyle(hWnd, ctx, true)) DestroyWindow(hWnd);
+            if (ApplyAnnotInspectorAll(hWnd, ctx, true)) DestroyWindow(hWnd);
             return 0;
         }
         break;
     }
-    case WM_ACTIVATE:
-        // Keep this dialog alive while its owned color picker is open.  A click in
-        // the owner or elsewhere still closes it, as required for a transient inspector.
-        if (LOWORD(wParam) == WA_INACTIVE && GetWindow(reinterpret_cast<HWND>(lParam), GW_OWNER) != hWnd) {
-            if (ApplyAnnotInspectorStyle(hWnd, ctx, true)) DestroyWindow(hWnd);
+    case WM_ACTIVATE: {
+        const WORD activation = LOWORD(wParam);
+        HWND otherWnd = reinterpret_cast<HWND>(lParam);
+        if (activation == WA_INACTIVE && GetWindow(otherWnd, GW_OWNER) != hWnd) {
+            ctx->inactiveDismissCount++;
+            if (ctx->inactiveDismissCount >= 3) {
+                DestroyWindow(hWnd);
+                return 0;
+            }
+        } else if (activation != WA_INACTIVE) {
+            ctx->inactiveDismissCount = 0;
         }
         return 0;
+    }
     case WM_CLOSE:
-        if (ApplyAnnotInspectorStyle(hWnd, ctx, true)) DestroyWindow(hWnd);
+        if (ApplyAnnotInspectorAll(hWnd, ctx, true)) DestroyWindow(hWnd);
         return 0;
     case WM_NCDESTROY:
         delete ctx;
