@@ -108,7 +108,7 @@ $binDir = Join-Path $outRoot $binDirectoryName
 $logDir = Join-Path $outRoot "logs"
 $endTimeLogPath = Join-Path $logDir "build_end_time.log"
 $buildDetailLogPath = Join-Path $logDir ("build_detail_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-$versionFilePath = Join-Path $repoRoot "APP_VERSION.txt"
+$versionFilePath = Join-Path $repoRoot "REPO_VERSION.txt"
 
 function Append-BuildDetailLog {
     param([AllowNull()]$Line)
@@ -638,6 +638,29 @@ try {
         else {
             Write-Host "Build settings changed; forcing full recompile to avoid missing changes." -ForegroundColor Yellow
         }
+    }
+
+    $versionChanged = $false
+    if (Test-Path -LiteralPath $buildInfoManifestPath) {
+        $manifestContent = Get-Content -LiteralPath $buildInfoManifestPath -Raw -ErrorAction SilentlyContinue
+        $manifestMatch = [regex]::Match($manifestContent, '(?m)^version`t(?<ver>.+)`r?$')
+        if ($manifestMatch.Success -and $manifestMatch.Groups["ver"].Value.Trim() -ne $appVersion) {
+            $versionChanged = $true
+        }
+    }
+    elseif (Test-Path -LiteralPath $versionFilePath) {
+        if (-not (Test-Path -LiteralPath $outputExe) -or (Get-Item -LiteralPath $versionFilePath).LastWriteTimeUtc -gt (Get-Item -LiteralPath $outputExe).LastWriteTimeUtc) {
+            $versionChanged = $true
+        }
+    }
+
+    if ($versionChanged) {
+        Write-Host "Repo version changed ($appVersion); selectively recompiling version component (app_core.cpp) and relinking..." -ForegroundColor Yellow
+        $appCoreObj = Join-Path $objDir "app_core.o"
+        if (Test-Path -LiteralPath $appCoreObj) {
+            Remove-Item -Force -LiteralPath $appCoreObj -ErrorAction SilentlyContinue
+        }
+        $forceLink = $true
     }
 
     function Get-DependencySeparatorIndex {

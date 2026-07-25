@@ -60,7 +60,7 @@ $binaryScanScript = Join-Path $repoRoot "tools\release_checks\binary_scan.py"
 $libreOfficeRuntimeGateScript = Join-Path $repoRoot "tools\release_checks\libreoffice_runtime_gate.py"
 $binaryOutputDir = Join-Path $repoRoot "out/bin"
 $liteBinaryOutputDir = Join-Path $repoRoot "out/bin_lite"
-$appVersionPath = Join-Path $repoRoot "APP_VERSION.txt"
+$repoVersionPath = Join-Path $repoRoot "REPO_VERSION.txt"
 $versionTrackedDocumentationPaths = @(
     (Join-Path $repoRoot "README.md"),
     (Join-Path $repoRoot "docs/public/README.md"),
@@ -239,7 +239,7 @@ function Assert-BuildInfoManifest {
     }
     $escapedVersion = [regex]::Escape($ExpectedVersion)
     if ($text -notmatch ("(?m)^version`t{0}`r?$" -f $escapedVersion)) {
-        throw "Build info manifest version does not match APP_VERSION.txt ('$ExpectedVersion'): $Path"
+        throw "Build info manifest version does not match REPO_VERSION.txt ('$ExpectedVersion'): $Path"
     }
     if ($text -notmatch "(?m)^build_timestamp`t.+`r?$") {
         throw "Build info manifest is missing the build timestamp line: $Path"
@@ -280,13 +280,13 @@ function Assert-BuildInfoManifest {
     }
 }
 
-function Get-AppVersionForVerification {
-    if (-not (Test-Path -LiteralPath $appVersionPath)) {
-        throw "App version file not found: $appVersionPath"
+function Get-RepoVersionForVerification {
+    if (-not (Test-Path -LiteralPath $repoVersionPath)) {
+        throw "Repo version file not found: $repoVersionPath"
     }
-    $version = (Get-Content -LiteralPath $appVersionPath -Raw).Trim()
+    $version = (Get-Content -LiteralPath $repoVersionPath -Raw).Trim()
     if ([string]::IsNullOrWhiteSpace($version)) {
-        throw "App version file is empty: $appVersionPath"
+        throw "Repo version file is empty: $repoVersionPath"
     }
     return $version
 }
@@ -299,8 +299,8 @@ function Assert-VersionTrackedDocumentation {
             throw "Version-tracked documentation file not found: $path"
         }
         $text = Get-Content -LiteralPath $path -Raw
-        if ($text -notmatch "(?m)^対象アプリ版: __APP_VERSION__\r?$") {
-            throw "Version-tracked documentation is missing the __APP_VERSION__ marker: $path"
+        if ($text -notmatch "(?m)^同梱リポジトリ版: __REPO_VERSION__\r?$") {
+            throw "Version-tracked documentation is missing the __REPO_VERSION__ marker: $path"
         }
     }
 }
@@ -629,7 +629,7 @@ try {
     }
 
     Invoke-Step -Name "Version Consistency" -Action {
-        $expectedVersion = Get-AppVersionForVerification
+        $expectedVersion = Get-RepoVersionForVerification
         Assert-VersionTrackedDocumentation -ExpectedVersion $expectedVersion
         Assert-BuildInfoManifest -Path $appBuildInfoManifestPath -ExeName "pdf_note_workspace.exe" -ExpectedVersion $expectedVersion -ExpectedEdition "full"
         Assert-BuildInfoManifest -Path $liteAppBuildInfoManifestPath -ExeName "pdf_note_workspace.exe" -ExpectedVersion $expectedVersion -ExpectedEdition "lite"

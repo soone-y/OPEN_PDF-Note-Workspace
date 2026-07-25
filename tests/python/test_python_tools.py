@@ -1003,16 +1003,16 @@ class ExportPublicSnapshotTests(unittest.TestCase):
             self.assertFalse((dest / "src" / "__pycache__").exists())
             self.assertIn("files: 3", stdout.getvalue())
 
-    def test_main_applies_app_version_to_version_tracked_documents_only_in_snapshot(self) -> None:
+    def test_main_applies_repo_version_to_version_tracked_documents_only_in_snapshot(self) -> None:
         with repo_tempdir() as root:
             ops = root / "docs" / "internal" / "operations"
             ops.mkdir(parents=True)
             allowlist = ops / "allowlist.txt"
             gitignore_template = ops / "public.gitignore"
-            allowlist.write_text("APP_VERSION.txt\nREADME.md\nLICENSE.md\n", encoding="utf-8")
+            allowlist.write_text("REPO_VERSION.txt\nREADME.md\nLICENSE.md\n", encoding="utf-8")
             gitignore_template.write_text("out/\n", encoding="utf-8")
-            (root / "APP_VERSION.txt").write_text("0.8.48\n", encoding="utf-8")
-            (root / "README.md").write_text("# Project\n\n対象アプリ版: __APP_VERSION__\n", encoding="utf-8")
+            (root / "REPO_VERSION.txt").write_text("0.8.48\n", encoding="utf-8")
+            (root / "README.md").write_text("# Project\n\n同梱リポジトリ版: __REPO_VERSION__\n", encoding="utf-8")
             (root / "LICENSE.md").write_text("# License\nVersion 1\n", encoding="utf-8")
 
             dest = root.parent / f"{root.name}_public"
@@ -1026,8 +1026,8 @@ class ExportPublicSnapshotTests(unittest.TestCase):
             )
 
             self.assertEqual(code, 0)
-            self.assertIn("対象アプリ版: 0.8.48", (dest / "README.md").read_text(encoding="utf-8"))
-            self.assertIn("対象アプリ版: __APP_VERSION__", (root / "README.md").read_text(encoding="utf-8"))
+            self.assertIn("同梱リポジトリ版: 0.8.48", (dest / "README.md").read_text(encoding="utf-8"))
+            self.assertIn("同梱リポジトリ版: __REPO_VERSION__", (root / "README.md").read_text(encoding="utf-8"))
             self.assertEqual((dest / "LICENSE.md").read_text(encoding="utf-8"), "# License\nVersion 1\n")
 
     def test_main_excludes_working_copy_artifacts_from_allowlisted_directory(self) -> None:

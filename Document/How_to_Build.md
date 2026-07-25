@@ -1,6 +1,6 @@
 # ビルドと検証
 
-対象アプリ版: 0.8.65
+同梱リポジトリ版: ﻿0.9.000
 
 この文書は、ソースからビルドする開発者向けです。配布物を通常利用するだけの場合は [How_to_Use.md](How_to_Use.md) を参照してください。
 
@@ -11,7 +11,7 @@
 - `g++` が `PATH` にあること
 - `third_party/pdfium/lib/pdfium.dll.lib` があること
 - `third_party/pdfium/bin/pdfium.dll` があること
-- アプリ版番号は `APP_VERSION.txt` で管理すること
+- リポジトリ版番号は `REPO_VERSION.txt` で管理すること
 
 依存関係はリポジトリに vendor 配置し、ビルドや実行時に外部通信を行わない方針です。
 
@@ -44,7 +44,7 @@ python tests/python/validate_codebase.py
 python -m unittest tests/python/test_python_tools.py
 ```
 
-`run_repo_checks.ps1` は、`APP_VERSION.txt` と最新ビルドの Full / Lite / 閲覧専用ビューアの `.buildinfo.txt` を比較し、版番号の不一致を検出します。文書に版番号マーカーがあることも確認します。`-SkipBuild` を付けた場合も、既存のビルド成果物についてこの確認を行います。release作成時には、このマーカーが `APP_VERSION.txt` の値へ置換されます。
+`run_repo_checks.ps1` は、`REPO_VERSION.txt` と最新ビルドの Full / Lite / 閲覧専用ビューアの `.buildinfo.txt` を比較し、版番号の不一致を検出します。文書に版番号マーカーがあることも確認します。`-SkipBuild` を付けた場合も、既存のビルド成果物についてこの確認を行います。release作成時には、このマーカーが `REPO_VERSION.txt` の値へ置換されます。
 
 保存処理を変更した場合は、保存系テストも実行してください。
 

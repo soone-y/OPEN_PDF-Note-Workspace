@@ -61,21 +61,22 @@ function Test-BuildConfigurationIsNewer {
 $workspaceBuildScript = Join-Path $PSScriptRoot "scripts/build/build_workspace.ps1"
 $readOnlyViewerBuildScript = Join-Path $PSScriptRoot "scripts/build/build_readonly_viewer.ps1"
 $buildSourcesManifest = Join-Path $PSScriptRoot "scripts/build/build_sources.json"
+$repoVersionFile = Join-Path $PSScriptRoot "REPO_VERSION.txt"
 $fullArtifactPath = Join-Path $PSScriptRoot "out/bin/pdf_note_workspace.exe"
 $liteArtifactPath = Join-Path $PSScriptRoot "out/bin_lite/pdf_note_workspace.exe"
 $readOnlyViewerArtifactPath = Join-Path $PSScriptRoot "out/bin/readonly_viewer.exe"
-$workspaceConfigurationInputs = @($workspaceBuildScript, $buildSourcesManifest)
-$readOnlyViewerConfigurationInputs = @($readOnlyViewerBuildScript, $buildSourcesManifest)
+$workspaceConfigurationInputs = @($workspaceBuildScript, $buildSourcesManifest, $repoVersionFile)
+$readOnlyViewerConfigurationInputs = @($readOnlyViewerBuildScript, $buildSourcesManifest, $repoVersionFile)
 
 if ($Lite) {
     Write-Host "Building Lite distributable application (Release configuration)..." -ForegroundColor Cyan
-    Invoke-FullBuildStep -ScriptPath $workspaceBuildScript -Edition "Lite" -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $liteArtifactPath -ConfigurationPaths $workspaceConfigurationInputs)
-    Invoke-FullBuildStep -ScriptPath $readOnlyViewerBuildScript -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $readOnlyViewerArtifactPath -ConfigurationPaths $readOnlyViewerConfigurationInputs)
+    Invoke-FullBuildStep -ScriptPath $workspaceBuildScript -Edition "Lite"
+    Invoke-FullBuildStep -ScriptPath $readOnlyViewerBuildScript
 } else {
     Write-Host "Building all distributable applications (Release configuration)..." -ForegroundColor Cyan
-    Invoke-FullBuildStep -ScriptPath $workspaceBuildScript -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $fullArtifactPath -ConfigurationPaths $workspaceConfigurationInputs)
-    Invoke-FullBuildStep -ScriptPath $workspaceBuildScript -Edition "Lite" -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $liteArtifactPath -ConfigurationPaths $workspaceConfigurationInputs)
-    Invoke-FullBuildStep -ScriptPath $readOnlyViewerBuildScript -ForceRebuild:(Test-BuildConfigurationIsNewer -ArtifactPath $readOnlyViewerArtifactPath -ConfigurationPaths $readOnlyViewerConfigurationInputs)
+    Invoke-FullBuildStep -ScriptPath $workspaceBuildScript
+    Invoke-FullBuildStep -ScriptPath $workspaceBuildScript -Edition "Lite"
+    Invoke-FullBuildStep -ScriptPath $readOnlyViewerBuildScript
 }
 
 exit 0

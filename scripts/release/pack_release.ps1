@@ -139,20 +139,20 @@ function Write-TextFile([string]$DestPath, [string]$Value, [string]$Encoding = "
     Set-Content -LiteralPath $DestPath -Value $Value -Encoding $Encoding
 }
 
-function Get-AppVersion {
-    $versionPath = Join-Path $repoRoot "APP_VERSION.txt"
+function Get-RepoVersion {
+    $versionPath = Join-Path $repoRoot "REPO_VERSION.txt"
     if (-not (Test-Path -LiteralPath $versionPath)) {
-        throw "App version file not found: $versionPath"
+        throw "Repo version file not found: $versionPath"
     }
     $version = (Get-Content -LiteralPath $versionPath -Raw).Trim()
     if ([string]::IsNullOrWhiteSpace($version)) {
-        throw "App version file is empty: $versionPath"
+        throw "Repo version file is empty: $versionPath"
     }
     return $version
 }
 
-function Apply-AppVersionMarkers([string]$DocsDir, [string]$AppVersion) {
-    $marker = "__APP_VERSION__"
+function Apply-RepoVersionMarkers([string]$DocsDir, [string]$RepoVersion) {
+    $marker = "__REPO_VERSION__"
     if ($DryRun) {
         Write-Info "[dry-run] apply $marker in release documentation: $DocsDir"
         return
@@ -165,7 +165,7 @@ function Apply-AppVersionMarkers([string]$DocsDir, [string]$AppVersion) {
         if ($markerCount -ne 1) {
             throw "User-facing release document must contain exactly one $marker marker: $($document.FullName)"
         }
-        [System.IO.File]::WriteAllText($document.FullName, $content.Replace($marker, $AppVersion), $utf8)
+        [System.IO.File]::WriteAllText($document.FullName, $content.Replace($marker, $RepoVersion), $utf8)
     }
 }
 
@@ -327,7 +327,7 @@ function New-ReleaseFolderName([string]$Prefix) {
 
 Push-Location -LiteralPath $repoRoot
 try {
-    $appVersion = Get-AppVersion
+    $repoVersion = Get-RepoVersion
     $binDir = Join-Path $repoRoot "out\bin"
     $appBinDir = if ($Lite) { Join-Path $repoRoot "out\bin_lite" } else { $binDir }
     $exeName = "pdf_note_workspace.exe"
@@ -469,7 +469,7 @@ try {
             }
         }
     }
-    Apply-AppVersionMarkers -DocsDir $docsDir -AppVersion $appVersion
+    Apply-RepoVersionMarkers -DocsDir $docsDir -RepoVersion $repoVersion
     foreach ($docName in @("LICENSE.md", "LICENSES_INDEX.md", "THIRD_PARTY_NOTICES.md")) {
         $docPath = Join-Path $repoRoot $docName
         if (Test-Path -LiteralPath $docPath) {

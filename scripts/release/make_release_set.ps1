@@ -100,8 +100,8 @@ function Convert-ToSafeLabel([string]$Value) {
     return (($Value -replace '[^0-9A-Za-z._-]+', '_').Trim('_'))
 }
 
-function Get-AppVersionLabel {
-    $versionFile = Join-Path $repoRoot "APP_VERSION.txt"
+function Get-RepoVersionLabel {
+    $versionFile = Join-Path $repoRoot "REPO_VERSION.txt"
     if (-not (Test-Path -LiteralPath $versionFile)) {
         return ""
     }
@@ -111,7 +111,7 @@ function Get-AppVersionLabel {
 
 function New-ReleaseSetFolderName([string]$Prefix) {
     $stamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
-    $version = Get-AppVersionLabel
+    $version = Get-RepoVersionLabel
     if ([string]::IsNullOrWhiteSpace($version)) {
         return "${Prefix}_${stamp}"
     }
@@ -315,7 +315,7 @@ try {
 
     $manifest = [PSCustomObject]@{
         created_at = (Get-Date).ToString("o")
-        app_version = (Get-AppVersionLabel)
+        app_version = (Get-RepoVersionLabel)
         name = $folderName
         components = [PSCustomObject]@{
             release = $releaseComponentName

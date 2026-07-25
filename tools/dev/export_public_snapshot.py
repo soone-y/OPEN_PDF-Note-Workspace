@@ -269,29 +269,29 @@ def validate_destination(root: Path, dest: Path) -> Path:
     return dest_resolved
 
 
-def read_app_version(root: Path) -> str | None:
-    version_path = root / "APP_VERSION.txt"
+def read_repo_version(root: Path) -> str | None:
+    version_path = root / "REPO_VERSION.txt"
     if not version_path.is_file():
         return None
     version = version_path.read_text(encoding="utf-8").strip()
     if not version:
-        raise ValueError(f"app version file is empty: {version_path}")
+        raise ValueError(f"repo version file is empty: {version_path}")
     return version
 
 
 def render_version_tracked_document(source: Path, target: Path, version: str) -> None:
     text = source.read_text(encoding="utf-8")
-    marker = "__APP_VERSION__"
+    marker = "__REPO_VERSION__"
     marker_count = text.count(marker)
     if marker_count == 1:
         rendered = text.replace(marker, version)
     elif marker_count > 1:
-        raise ValueError(f"version-tracked document contains multiple app version markers: {source}")
+        raise ValueError(f"version-tracked document contains multiple repo version markers: {source}")
     else:
         heading = re.search(r"^# .*\r?$", text, re.MULTILINE)
         if heading is None:
             raise ValueError(f"version-tracked document has no top-level heading: {source}")
-        insertion = f"{heading.group(0)}\n\n対象アプリ版: {marker}"
+        insertion = f"{heading.group(0)}\n\n同梱リポジトリ版: {marker}"
         rendered = text[: heading.start()] + insertion + text[heading.end() :]
     target.write_text(rendered, encoding="utf-8", newline="")
 
@@ -300,7 +300,7 @@ def copy_snapshot(
     dest: Path,
     plan: SnapshotPlan,
     gitignore_template: Path,
-    app_version: str | None,
+    repo_version: str | None,
     dry_run: bool,
 ) -> None:
     if not gitignore_template.is_file():
@@ -315,8 +315,8 @@ def copy_snapshot(
     for source, rel_path in plan.files:
         target = dest / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        if app_version is not None and rel_path.as_posix() in VERSION_TRACKED_DOCUMENTS:
-            render_version_tracked_document(source, target, app_version)
+        if repo_version is not None and rel_path.as_posix() in VERSION_TRACKED_DOCUMENTS:
+            render_version_tracked_document(source, target, repo_version)
         else:
             shutil.copy2(source, target)
     shutil.copy2(gitignore_template, dest / ".gitignore")
@@ -356,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
             dest,
             plan,
             args.gitignore_template.resolve(),
-            read_app_version(root),
+            read_repo_version(root),
             args.dry_run,
         )
     except (FileNotFoundError, ValueError, OSError, RuntimeError) as error:

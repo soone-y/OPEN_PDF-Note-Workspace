@@ -361,7 +361,7 @@ static UiText g_uiJa{
     L"予約スペース",
     L"バージョン情報", L"ソフト情報\n"
     L"ソフト名: PDF Note Workspace\n"
-    L"バージョン: {APP_VERSION}\n"
+    L"リポジトリバージョン: {REPO_VERSION}\n"
     L"ビルド日時: {BUILD_TIMESTAMP}\n"
     L"ビルド成果物 (SHA-256):\n"
     L"{BUILD_ARTIFACTS}\n"
@@ -431,7 +431,7 @@ static UiText g_uiEn{
     L"Reserved pane",
     L"About", L"Software Information\n"
     L"Software Name: PDF Note Workspace\n"
-    L"Version: {APP_VERSION}\n"
+    L"Repository Version: {REPO_VERSION}\n"
     L"Build Date/Time: {BUILD_TIMESTAMP}\n"
     L"Build Artifacts (SHA-256):\n"
     L"{BUILD_ARTIFACTS}\n"
@@ -7275,7 +7275,7 @@ std::wstring BuildAboutDialogText() {
     const BuildInfoManifestData buildInfo = LoadBuildInfoManifestData();
     std::wstring text = GetUiText().aboutText;
 
-    ReplaceAllInPlace(&text, L"{APP_VERSION}",
+    ReplaceAllInPlace(&text, L"{REPO_VERSION}",
                       buildInfo.version.empty() ? L"0.0.0" : buildInfo.version);
     ReplaceAllInPlace(&text, L"{BUILD_TIMESTAMP}",
                       buildInfo.buildTimestamp.empty()
