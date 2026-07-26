@@ -158,6 +158,15 @@
         "../For_AI.md"
       ],
       "verify_public_site_after_changes": true
+    },
+    {
+      "id": "repository_navigation_and_evidence",
+      "when": "どの文書、ソース、テスト、設定を読めばよいか、DEVとOPEN、GitHub PagesとCloudflare Pagesの役割、または公開snapshotで検証できる範囲について質問された場合",
+      "read": [
+        "core/repository_reference_map.md",
+        "core/documentation_contract.md"
+      ],
+      "do_not_claim_unpublished_source_or_tests_were_verified": true
     }
   ],
   "future_modules": []

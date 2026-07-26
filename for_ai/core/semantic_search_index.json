@@ -55,6 +55,18 @@
       "keywords": ["音", "ビープ", "警告音", "一般の警告音", "静音"],
       "target_node": "for_ai/core/troubleshooting_quick.md",
       "evidence_path": "docs/public/How_to_Troubleshoot.md"
+    },
+    {
+      "intent": "どの文書、ソースコード、テスト、設定を確認すれば回答や変更を安全に進められるか知りたい",
+      "keywords": ["資料地図", "一次資料", "ソース", "テスト", "設定", "検証", "変更"],
+      "target_node": "for_ai/core/repository_reference_map.md",
+      "evidence_path": "for_ai/manifest.json"
+    },
+    {
+      "intent": "DEVとOPEN、GitHub PagesとCloudflare Pagesの役割や、公開snapshotで確認できる範囲を知りたい",
+      "keywords": ["DEV", "OPEN", "GitHub Pages", "Cloudflare Pages", "公開snapshot", "公開", "デプロイ"],
+      "target_node": "for_ai/core/repository_reference_map.md",
+      "evidence_path": "site/README.md"
     }
   ]
 }
