@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI_CORE_NODE: ARCHITECTURE_LAYERS – PDF Note Workspace</title>
+  <style>
+    :root {
+      --bg-main: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --border-color: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --pre-bg: #0f172a;
+      --pre-text: #f8fafc;
+      --note-bg: #f0f9ff;
+      --note-border: #0284c7;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-main: #0f172a;
+        --card-bg: #1e293b;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0284c7;
+        --border-color: #334155;
+        --code-bg: #0f172a;
+        --pre-bg: #020617;
+        --pre-text: #f8fafc;
+        --note-bg: rgba(56, 189, 248, 0.1);
+        --note-border: #38bdf8;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.75;
+      padding: 24px 12px;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 28px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+
+    .doc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 14px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--accent);
+      flex-wrap: wrap;
+    }
+
+    .site-menu { position: relative; }
+
+    .site-menu summary {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      list-style: none;
+      padding: 6px 12px;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 0.88em;
+      font-weight: 600;
+    }
+
+    .site-menu summary::-webkit-details-marker { display: none; }
+    .menu-icon {
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      margin-right: 7px;
+      border-top: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      position: relative;
+    }
+    .menu-icon::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 3px;
+      border-top: 2px solid currentColor;
+    }
+    .site-menu summary:hover {
+      background-color: var(--border-color);
+    }
+
+    .site-menu nav {
+      position: absolute;
+      z-index: 1;
+      top: calc(100% + 8px);
+      left: 0;
+      min-width: 200px;
+      padding: 8px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .site-menu nav a {
+      display: block;
+      padding: 7px 9px;
+      color: var(--text-main);
+      font-size: 0.9em;
+      text-decoration: none;
+    }
+
+    .site-menu nav a:hover { background-color: var(--code-bg); }
+
+    .raw-md-link {
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+
+    h1 { font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }
+    h2 { font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }
+    h3 { font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }
+
+    p { margin-bottom: 1.1em; word-break: break-word; }
+
+    a { color: var(--accent); text-decoration: none; font-weight: 500; }
+    a:hover { text-decoration: underline; color: var(--accent-hover); }
+
+    code {
+      background-color: var(--code-bg);
+      color: var(--text-main);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      border: 1px solid var(--border-color);
+    }
+
+    pre {
+      background-color: var(--pre-bg);
+      color: var(--pre-text);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1.2em 0;
+      font-size: 0.9em;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background-color: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+
+    blockquote {
+      border-left: 4px solid var(--note-border);
+      background-color: var(--note-bg);
+      margin: 1.2em 0;
+      padding: 12px 16px;
+      color: var(--text-main);
+      border-radius: 0 6px 6px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      font-size: 0.92em;
+      overflow-x: auto;
+      display: block;
+    }
+
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--code-bg);
+      font-weight: 600;
+    }
+
+    ul, ol {
+      padding-left: 1.6em;
+      margin-bottom: 1.1em;
+    }
+
+    li { margin-bottom: 0.3em; }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 1em 0;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px dashed var(--border-color);
+      margin: 2em 0;
+    }
+
+    footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border-color);
+      text-align: center;
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="doc-header">
+
+    <div class="raw-md-link">
+      <a href="architecture_layers.md" target="_blank">Raw Markdown</a>
+    </div>
+  </div>
+
+  <main>
+<h1>AI_CORE_NODE: ARCHITECTURE_LAYERS</h1>
+<p><ai_node_schema version="1.0" category="architecture"></p>
+<p>  <summary>PDF Note Workspace の Win32 C++ アーキテクチャ階層、レイヤー設計、コンポーネント依存関係、データフローの解説</summary></p>
+<p></ai_node_schema></p>
+<h2>1. 概要 (Overview)</h2>
+<p>PDF Note Workspace は、Win32 API と C++17 で実装された高性能・純ローカル・非破壞デスクトップアプリケーションです。</p>
+<p>外部のフレームワーク（Qt, Electron, .NET）を使用せず、直接 Windows API とネイティブ描画モジュール（GDI/GDI+）で統合されています。</p>
+<h2>2. 階層構造 (Layer Hierarchy)</h2>
+<pre style="border: 1px solid var(--accent); background-color: var(--note-bg); color: var(--text-main); font-family: monospace;"><code>graph TD
+    GUI[&quot;Win32 Window (GUI)&lt;br/&gt;[Main Frame / Splitter / Menu / Dialogs]&quot;] --&gt; PDF[&quot;PDF View Controller&lt;br/&gt;[PDFium / Annot Layer / GDI+]&quot;]
+    GUI --&gt; NOTE[&quot;Note Editor Controller&lt;br/&gt;[md4c Parser / Text Canvas]&quot;]
+    PDF --&gt; CORE[&quot;Core Data &amp; Workspace&lt;br/&gt;[Document Model / Stage / Backup / Undo-Redo]&quot;]
+    NOTE --&gt; CORE
+    CORE --&gt; STORAGE[&quot;Persistence &amp; File I/O&lt;br/&gt;[.clrop (JSON) / .clro (MD) / Atomic Writer]&quot;]</code></pre>
+<p><layer_dependencies></p>
+<p>  <layer id="gui" name="Win32 Window (GUI)" level="1"></p>
+<p>    <submodules>Main Frame, Panel Splitter, Menu, Dialogs, Theme Manager</submodules></p>
+<p>    <depends_on>pdf_controller, note_controller</depends_on></p>
+<p>  </layer></p>
+<p>  <layer id="pdf_controller" name="PDF View Controller" level="2"></p>
+<p>    <submodules>PDFium Adapter, Annot Layer, GDI+ Canvas</submodules></p>
+<p>    <depends_on>core_workspace</depends_on></p>
+<p>  </layer></p>
+<p>  <layer id="note_controller" name="Note Editor Controller" level="2"></p>
+<p>    <submodules>md4c Parser, GDI Text Canvas</submodules></p>
+<p>    <depends_on>core_workspace</depends_on></p>
+<p>  </layer></p>
+<p>  <layer id="core_workspace" name="Core Data & Workspace" level="3"></p>
+<p>    <submodules>Document Model, Stage, Backup, Undo-Redo, Workspace</submodules></p>
+<p>    <depends_on>persistence</depends_on></p>
+<p>  </layer></p>
+<p>  <layer id="persistence" name="Persistence & File I/O" level="4"></p>
+<p>    <submodules>.clrop (JSON), .clro (MD), Atomic Writer, Path Safety</submodules></p>
+<p>    <is_bottom_layer>true</is_bottom_layer></p>
+<p>  </layer></p>
+<p></layer_dependencies></p>
+<h3>レヤーと役割</h3>
+<p>1. <strong>Win32 Window / Application Layer (<code>src/main.cpp</code>, <code>src/ui/</code>, <code>src/app/</code>)</strong>:</p>
+<p>   - <code>WinMain</code>, メインウィンドウメッセージループ（<code>WndProc</code>）。</p>
+<p>   - ウィンドウレイアウト splitter（左右分割表示）、テーマ切り替え（Light/Dark）。</p>
+<p>   - キーボードショートカット・ダイアログ管理。</p>
+<p>2. <strong>PDF View & Annotation Layer (<code>src/pdf_view/</code>, <code>src/clrop/</code>)</strong>:</p>
+<p>   - PDFium ライブラリを用いた PDF ページのレンダリングとズーム・スクロール。</p>
+<p>   - フリーハンドペン、ハイライト、テキスト、図形注釈のベクター描画 canvas。</p>
+<p>   - インタラクティブな注釈選択、移動、プロパティ変更、リアルタイム描画。</p>
+<p>3. <strong>Note Editor Layer (<code>src/note_view/</code>)</strong>:</p>
+<p>   - <code>.clro</code> や <code>.md</code> などのテキスト/Markdown ノート編集。</p>
+<p>   - <code>md4c</code> ライブラリを使用した高速 Markdown パースとリアルタイムリッチ表示。</p>
+<p>   - 簡易 Mermaid 図表や TeX 数式プレビュー描画。</p>
+<p>4. <strong>Workspace & Stage Manager (<code>src/workspace/</code>, <code>src/file_output/</code>)</strong>:</p>
+<p>   - 開かれている PDF、注釈、ノート、表示位置の一括状態管理。</p>
+<p>   - 編集途中のデータを安全に一時保管する <code>stage</code> ガード機構。</p>
+<p>   - 操作の無制限 Undo / Redo スタック。</p>
+<p>5. <strong>Persistence & Atomic I/O (<code>src/core/atomic_write.h</code>, <code>src/clrop/</code>)</strong>:</p>
+<p>   - 注釈の <code>.clrop</code> (JSON) パース・シリアライズ。</p>
+<p>   - <code>atomic_write::AtomicWriteUtf8</code> / <code>AtomicWriteBytes</code> による安全な置換処理。</p>
+<p>   - パスと書込先は各呼び出し元で検証する。リポジトリで変更するときはローカルの <code>AGENTS.md</code> の保存・パス安全要件を確認する。</p>
+<h2>3. スレッドと制御フロー (Threading & Control Flow)</h2>
+<ul>
+<li><strong>メイン UI スレッド</strong>:</li>
+</ul>
+<p>  - メッセージループ、WM_PAINT 描画、ユーザー入力レスポンスはすべてメイン UI スレッドで処理されます。</p>
+<p>  - 同期ブロック処理（<code>Future.get()</code> やデッドロックを招くロック）はメインスレッドで禁止されています。</p>
+<ul>
+<li><strong>ローカルバックグラウンド処理</strong>:</li>
+</ul>
+<p>  - DOCX/PPTX から PDF への変換時（通常版）など重いローカル外部処理のみ、別プロセス（同梱 LibreOffice）へ非同期委託されます。外部通信は発生しません。</p>
+<h2>4. モジュール間参照ルール</h2>
+<ul>
+<li><code>src/storage/</code> などの低層モジュールは <code>src/ui/</code> などの GUI モジュールへ依存してはならない。</li>
+<li>すべてのデータ書き込み処理は <code>src/storage/</code> のアトミックライターを経由しなければならない。</li>
+</ul>
+  </main>
+
+  <footer>
+    PDF Note Workspace Documentation &copy; 2026
+  </footer>
+</div>
+
+</body>
+</html>

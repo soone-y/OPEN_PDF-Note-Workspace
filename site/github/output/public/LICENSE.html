@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ライセンス情報 – PDF Note Workspace</title>
+  <style>
+    :root {
+      --bg-main: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --border-color: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --pre-bg: #0f172a;
+      --pre-text: #f8fafc;
+      --note-bg: #f0f9ff;
+      --note-border: #0284c7;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-main: #0f172a;
+        --card-bg: #1e293b;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0284c7;
+        --border-color: #334155;
+        --code-bg: #0f172a;
+        --pre-bg: #020617;
+        --pre-text: #f8fafc;
+        --note-bg: rgba(56, 189, 248, 0.1);
+        --note-border: #38bdf8;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.75;
+      padding: 24px 12px;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 28px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+
+    .doc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 14px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--accent);
+      flex-wrap: wrap;
+    }
+
+    .site-menu { position: relative; }
+
+    .site-menu summary {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      list-style: none;
+      padding: 6px 12px;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 0.88em;
+      font-weight: 600;
+    }
+
+    .site-menu summary::-webkit-details-marker { display: none; }
+    .menu-icon {
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      margin-right: 7px;
+      border-top: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      position: relative;
+    }
+    .menu-icon::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 3px;
+      border-top: 2px solid currentColor;
+    }
+    .site-menu summary:hover {
+      background-color: var(--border-color);
+    }
+
+    .site-menu nav {
+      position: absolute;
+      z-index: 1;
+      top: calc(100% + 8px);
+      left: 0;
+      min-width: 200px;
+      padding: 8px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .site-menu nav a {
+      display: block;
+      padding: 7px 9px;
+      color: var(--text-main);
+      font-size: 0.9em;
+      text-decoration: none;
+    }
+
+    .site-menu nav a:hover { background-color: var(--code-bg); }
+
+    .raw-md-link {
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+
+    h1 { font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }
+    h2 { font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }
+    h3 { font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }
+
+    p { margin-bottom: 1.1em; word-break: break-word; }
+
+    a { color: var(--accent); text-decoration: none; font-weight: 500; }
+    a:hover { text-decoration: underline; color: var(--accent-hover); }
+
+    code {
+      background-color: var(--code-bg);
+      color: var(--text-main);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      border: 1px solid var(--border-color);
+    }
+
+    pre {
+      background-color: var(--pre-bg);
+      color: var(--pre-text);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1.2em 0;
+      font-size: 0.9em;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background-color: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+
+    blockquote {
+      border-left: 4px solid var(--note-border);
+      background-color: var(--note-bg);
+      margin: 1.2em 0;
+      padding: 12px 16px;
+      color: var(--text-main);
+      border-radius: 0 6px 6px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      font-size: 0.92em;
+      overflow-x: auto;
+      display: block;
+    }
+
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--code-bg);
+      font-weight: 600;
+    }
+
+    ul, ol {
+      padding-left: 1.6em;
+      margin-bottom: 1.1em;
+    }
+
+    li { margin-bottom: 0.3em; }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 1em 0;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px dashed var(--border-color);
+      margin: 2em 0;
+    }
+
+    footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border-color);
+      text-align: center;
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="doc-header">
+    <details class="site-menu">
+      <summary aria-label="文書メニューを開く"><span class="menu-icon" aria-hidden="true"></span>文書メニュー</summary>
+      <nav aria-label="文書メニュー">
+        <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace" target="_blank" rel="noopener noreferrer">GitHub リポジトリ</a>
+        <a href="./index.html">ポータルへ戻る</a>
+        <a href="./README.html">README</a>
+        <a href="./docs/public/Index.html">文書案内</a>
+        <a href="./docs/public/How_to_Setup.html">セットアップ</a>
+        <a href="./docs/public/How_to_Use.html">基本操作</a>
+        <a href="./LICENSE.html">ライセンス</a>
+        <a href="./THIRD_PARTY_NOTICES.html">第三者通知</a>
+      </nav>
+    </details>
+    <div class="raw-md-link">
+      <a href="LICENSE.md" target="_blank">Raw Markdown</a>
+    </div>
+  </div>
+
+  <main>
+<h1>ライセンス情報</h1>
+<p>本リポジトリ <code>PDF Note Workspace</code> の本体コードおよび別ライセンス表記のない同梱素材は、zlib License で提供します。</p>
+<p><code>third_party/</code> 配下の外部依存物、利用者の環境にあるフォント、ローカルのツールチェーンから取得するランタイム DLL は、このライセンスの対象外です。これらは <code>THIRD_PARTY_NOTICES.md</code> を参照してください。</p>
+<p>release パッケージを受け取った利用者は、まず <code>docs/LICENSE.md</code>, <code>docs/LICENSES_INDEX.md</code>, <code>docs/THIRD_PARTY_NOTICES.md</code>, <code>licenses/</code> を参照してください。本書中の <code>third_party/...</code> 表記は、リポジトリ上の元配置を示します。</p>
+<h2>1. 本プロジェクトのライセンス</h2>
+<ul>
+<li>ライセンス: <code>zlib License</code></li>
+<li>著作権表示: <code>Copyright (c) 2026 Soone-Y</code></li>
+<li>対象:</li>
+</ul>
+<p>  - <code>src/</code>, <code>scripts/</code>, <code>tests/</code>, <code>docs/</code> の本体コードと文書</p>
+<p>  - 別ライセンス表記のないリポジトリ同梱素材</p>
+<ul>
+<li>対象外:</li>
+</ul>
+<p>  - <code>third_party/</code> 配下の外部依存物とそのライセンス文書</p>
+<p>  - 利用者の Windows / ツールチェーン / ローカル環境に属するフォントや DLL</p>
+<p>ライセンス本文:</p>
+<pre><code>zlib License
+
+Copyright (c) 2026 Soone-Y
+
+This software is provided &#x27;as-is&#x27;, without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.</code></pre>
+<p>参考和訳:</p>
+<p>以下の日本語訳は理解補助のための参考訳です。解釈に差異がある場合は、上記の英語原文を優先します。</p>
+<pre><code>zlib License
+
+Copyright (c) 2026 Soone-Y
+
+このソフトウェアは、明示または黙示を問わず、いかなる保証もなく
+「現状のまま」提供されます。
+本ソフトウェアの使用によって生じたいかなる損害についても、
+作者は一切の責任を負いません。
+
+営利目的を含むあらゆる目的で本ソフトウェアを使用、改変、
+再配布することを許可します。以下の制限に従うものとします。
+
+1. 本ソフトウェアの出所を偽ってはなりません。
+   あなたが原作者であると主張してはなりません。
+   本ソフトウェアを製品で使用する場合、製品文書に謝辞を記載することは
+   望ましいですが、必須ではありません。
+2. 改変したソース版は、改変版であることを明確に表示しなければならず、
+   原版であると偽ってはなりません。
+3. この表示は、いかなるソース配布物からも削除または改変してはなりません。</code></pre>
+<h2>2. フォントと素材の扱い</h2>
+<h3>フォント</h3>
+<ul>
+<li>画面表示と通常の描画は、原則として実行環境にインストール済みのフォントをフェイス名で指定して行います（Windows標準フォントなど）。</li>
+<li>一部、LibreOffice に同梱されている欧文・記号フォントを <code>third_party/libreoffice/image/Fonts/</code> に保持し、アプリ起動時にプロセス専用（private font）として読み込んで利用します。このフォントのライセンスは LibreOffice の利用条件に従います。</li>
+<li>既定の候補名は <code>src/core/font_list.h</code> に定義されており、Windows 系フォントや上記 LibreOffice 側フォントに加えて、<code>Noto Sans JP</code>、<code>Source Han Sans JP</code>、<code>Hiragino Sans</code> など「その環境に存在する場合だけ使える」名前も含みます。</li>
+<li>標準テキスト注釈付き PDF 書き出しでは、書き出し元マシン上のフォントデータを Windows レジストリ/GDI から取得して PDFium に渡し、実フォントとして埋め込める場合があります。失敗時はビットマップ描画へフォールバックします。</li>
+<li>したがって、書き出し PDF に含まれるフォントデータのライセンスは「このリポジトリ」ではなく、「書き出しを行ったマシンにインストールされている各フォント」または「同梱されている LibreOffice フォント」の利用条件に従います。</li>
+</ul>
+<h3>同梱素材</h3>
+<ul>
+<li>別ライセンス表記のないリポジトリ同梱素材は、本プロジェクト素材として、配布上は本体と同じ zlib License で扱います。</li>
+<li>外部由来の素材を追加する場合は、その時点で出所とライセンスを <code>THIRD_PARTY_NOTICES.md</code> か別紙へ追記してください。</li>
+</ul>
+<h2>3. サードパーティ依存の参照先</h2>
+<ul>
+<li>release パッケージでの参照先:</li>
+</ul>
+<p>  - <code>docs/THIRD_PARTY_NOTICES.md</code></p>
+<p>  - <code>licenses/pdfium/</code></p>
+<p>  - <code>licenses/mingw-w64/</code></p>
+<p>  - <code>licenses/md4c/</code></p>
+<p>  - <code>licenses/zlib/</code></p>
+<p>  - <code>licenses/libreoffice/</code></p>
+<ul>
+<li>リポジトリ上の元配置:</li>
+</ul>
+<p>  - <code>third_party/pdfium/LICENSE</code></p>
+<p>  - <code>third_party/pdfium/licenses/</code></p>
+<p>  - <code>third_party/mingw_runtime_licenses/mingw-w64/</code></p>
+<p>  - <code>third_party/md4c/LICENSE.md</code></p>
+<p>  - <code>third_party/libreoffice/image/license.txt</code>, <code>third_party/libreoffice/image/LICENSE.html</code>, <code>third_party/libreoffice/image/NOTICE</code></p>
+<h2>4. 個人、教育機関、その他団体などにおける利用</h2>
+<ul>
+<li>いかなる団体また個人も、本プロジェクトのライセンスに則って特段の許可を得ること無く利用できます。</li>
+<li>ライセンス表記に同意できない場合は利用できません。</li>
+<li>ライセンスの許す限りの資源、例えばライセンス表記自体などを教育目的に利用することもできます。</li>
+</ul>
+  </main>
+
+  <footer>
+    PDF Note Workspace Documentation &copy; 2026
+  </footer>
+</div>
+
+</body>
+</html>

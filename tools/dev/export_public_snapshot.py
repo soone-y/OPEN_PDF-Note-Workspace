@@ -58,7 +58,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--allowlist",
         type=Path,
         default=DEFAULT_ALLOWLIST,
-        help="Line-based allowlist file. Defaults to the conservative public demo allowlist.",
+        help="Line-based allowlist file. Defaults to the release snapshot allowlist.",
     )
     parser.add_argument(
         "--gitignore-template",

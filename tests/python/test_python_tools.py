@@ -41,6 +41,9 @@ libreoffice_conversion_quality_test = load_module(
 )
 render_human_docs = load_module("render_human_docs", "site/github/scripts/render_human_docs.py")
 build_public_site = load_module("build_public_site", "site/github/scripts/build_public_site.py")
+sync_publication_inputs = load_module(
+    "sync_publication_inputs", "site/github/scripts/sync_publication_inputs.py"
+)
 cpp_include_visualizer = load_module("cpp_include_visualizer", "tools/metrics/cpp_include_visualizer.py")
 md_structure_scanner = load_module("md_structure_scanner", "tools/dev/md_structure_scanner.py")
 persistence_index = load_module("persistence_index", "tools/dev/persistence_index.py")
@@ -1895,6 +1898,8 @@ class AiDocumentationStructureTests(unittest.TestCase):
         self.assertIn("customization_and_settings", route_ids)
         self.assertIn("save_and_recovery_procedures", route_ids)
         self.assertIn("support_and_feedback", route_ids)
+        self.assertIn("repository_navigation_and_evidence", route_ids)
+        self.assertTrue((REPO_ROOT / "for_ai" / "core" / "repository_reference_map.md").is_file())
 
 
 class BuildPublicSiteTests(unittest.TestCase):
@@ -1912,11 +1917,19 @@ class BuildPublicSiteTests(unittest.TestCase):
             ):
                 (root / name).write_text("__APP_VERSION__", encoding="utf-8")
             (root / "REPO_VERSION.txt").write_text("1.2.3\n", encoding="utf-8")
+            (root / "README.md").write_text(
+                "- ソースからビルドする: [docs/public/How_to_Build.md](docs/public/How_to_Build.md)",
+                encoding="utf-8",
+            )
             (root / "site" / "github" / "index.html").write_text("__APP_VERSION__", encoding="utf-8")
             (root / ".github" / "SECURITY.md").write_text("# Security", encoding="utf-8")
             (root / "for_ai" / "core" / "semantic_search_index.json").write_text("{}", encoding="utf-8")
             (root / "docs" / "public" / "How_to_Use.md").write_text("# Use __APP_VERSION__", encoding="utf-8")
             (root / "docs" / "public" / "How_to_Build.md").write_text("private", encoding="utf-8")
+            (root / "docs" / "public" / "Index.md").write_text(
+                "| [How_to_Build.md](How_to_Build.md) | 開発用 |",
+                encoding="utf-8",
+            )
             (root / "docs" / "images" / "overview.png").write_bytes(b"image")
             (root / "site" / "github" / "documentation_portal_allowlist.json").write_text(
                 json.dumps({
@@ -1956,6 +1969,77 @@ class BuildPublicSiteTests(unittest.TestCase):
             self.assertTrue((site / "docs" / "public" / "How_to_Use.md").exists())
             self.assertFalse((site / "docs" / "public" / "How_to_Build.md").exists())
             self.assertEqual((site / "docs" / "public" / "How_to_Use.md").read_text(encoding="utf-8"), "# Use 1.2.3")
+            self.assertNotIn("How_to_Build.md](", (site / "README.md").read_text(encoding="utf-8"))
+            self.assertNotIn("How_to_Build.md](", (site / "docs" / "public" / "Index.md").read_text(encoding="utf-8"))
+
+
+class SyncPublicationInputsTests(unittest.TestCase):
+    def test_syncs_allowlisted_github_inputs_and_removes_retired_content(self) -> None:
+        with repo_tempdir() as root:
+            source = root / "source"
+            destination = root / "destination"
+            for path, text in {
+                "For_AI.md": "AI entry",
+                "for_ai/manifest.json": "{}",
+                "docs/public/How_to_Use.md": "use",
+                "docs/public/How_to_Build.md": "private",
+                "docs/images/app.png": "image",
+                ".github/workflows/static.yml": "workflow",
+                "site/github/index.html": "portal",
+                "site/github/output/public/index.html": "generated",
+            }.items():
+                target = source / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            allowlist = {
+                "schema_version": 1,
+                "documentation_portal": {
+                    "files": [{"source": "For_AI.md", "destination": "For_AI.md"}],
+                    "trees": [
+                        {"source": "for_ai", "destination": "for_ai"},
+                        {"source": "docs/images", "destination": "docs/images"},
+                    ],
+                    "document_markdown": {
+                        "source": "docs/public", "destination": "docs/public", "exclude": ["How_to_Build.md"],
+                    },
+                },
+                "pages_submission": {
+                    "files": [{"source": ".github/workflows/static.yml", "destination": ".github/workflows/static.yml"}],
+                    "trees": [{"source": "site/github", "destination": "site/github", "exclude_prefixes": ["output/"]}],
+                    "retired_paths": ["index.html"],
+                },
+            }
+            config = source / "site/github/documentation_portal_allowlist.json"
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(json.dumps(allowlist), encoding="utf-8")
+            destination.mkdir()
+            (destination / "site/github/output/public").mkdir(parents=True)
+            (destination / "site/github/output/public/index.html").write_text("old", encoding="utf-8")
+            (destination / "index.html").write_text("retired", encoding="utf-8")
+
+            sync_publication_inputs.sync_publication_inputs(source, destination)
+
+            self.assertEqual((destination / "For_AI.md").read_text(encoding="utf-8"), "AI entry")
+            self.assertTrue((destination / "for_ai/manifest.json").is_file())
+            self.assertTrue((destination / "docs/images/app.png").is_file())
+            self.assertTrue((destination / "docs/public/How_to_Use.md").is_file())
+            self.assertFalse((destination / "docs/public/How_to_Build.md").exists())
+            self.assertTrue((destination / ".github/workflows/static.yml").is_file())
+            self.assertTrue((destination / "site/github/index.html").is_file())
+            self.assertFalse((destination / "site/github/output").exists())
+            self.assertFalse((destination / "index.html").exists())
+
+    def test_rejects_private_development_reference(self) -> None:
+        with repo_tempdir() as root:
+            destination = root / "destination"
+            destination.mkdir()
+            (destination / "For_AI.md").write_text(
+                "DEV_PDF-Note-Workspace must not be published",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "private development reference"):
+                sync_publication_inputs.validate_publication_inputs(destination)
 
 if __name__ == "__main__":
     unittest.main()

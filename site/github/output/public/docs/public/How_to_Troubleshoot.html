@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>困ったときの対処 – PDF Note Workspace</title>
+  <style>
+    :root {
+      --bg-main: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --border-color: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --pre-bg: #0f172a;
+      --pre-text: #f8fafc;
+      --note-bg: #f0f9ff;
+      --note-border: #0284c7;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-main: #0f172a;
+        --card-bg: #1e293b;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0284c7;
+        --border-color: #334155;
+        --code-bg: #0f172a;
+        --pre-bg: #020617;
+        --pre-text: #f8fafc;
+        --note-bg: rgba(56, 189, 248, 0.1);
+        --note-border: #38bdf8;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.75;
+      padding: 24px 12px;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 28px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+
+    .doc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 14px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--accent);
+      flex-wrap: wrap;
+    }
+
+    .site-menu { position: relative; }
+
+    .site-menu summary {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      list-style: none;
+      padding: 6px 12px;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 0.88em;
+      font-weight: 600;
+    }
+
+    .site-menu summary::-webkit-details-marker { display: none; }
+    .menu-icon {
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      margin-right: 7px;
+      border-top: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      position: relative;
+    }
+    .menu-icon::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 3px;
+      border-top: 2px solid currentColor;
+    }
+    .site-menu summary:hover {
+      background-color: var(--border-color);
+    }
+
+    .site-menu nav {
+      position: absolute;
+      z-index: 1;
+      top: calc(100% + 8px);
+      left: 0;
+      min-width: 200px;
+      padding: 8px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .site-menu nav a {
+      display: block;
+      padding: 7px 9px;
+      color: var(--text-main);
+      font-size: 0.9em;
+      text-decoration: none;
+    }
+
+    .site-menu nav a:hover { background-color: var(--code-bg); }
+
+    .raw-md-link {
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+
+    h1 { font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }
+    h2 { font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }
+    h3 { font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }
+
+    p { margin-bottom: 1.1em; word-break: break-word; }
+
+    a { color: var(--accent); text-decoration: none; font-weight: 500; }
+    a:hover { text-decoration: underline; color: var(--accent-hover); }
+
+    code {
+      background-color: var(--code-bg);
+      color: var(--text-main);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      border: 1px solid var(--border-color);
+    }
+
+    pre {
+      background-color: var(--pre-bg);
+      color: var(--pre-text);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1.2em 0;
+      font-size: 0.9em;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background-color: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+
+    blockquote {
+      border-left: 4px solid var(--note-border);
+      background-color: var(--note-bg);
+      margin: 1.2em 0;
+      padding: 12px 16px;
+      color: var(--text-main);
+      border-radius: 0 6px 6px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      font-size: 0.92em;
+      overflow-x: auto;
+      display: block;
+    }
+
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--code-bg);
+      font-weight: 600;
+    }
+
+    ul, ol {
+      padding-left: 1.6em;
+      margin-bottom: 1.1em;
+    }
+
+    li { margin-bottom: 0.3em; }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 1em 0;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px dashed var(--border-color);
+      margin: 2em 0;
+    }
+
+    footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border-color);
+      text-align: center;
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="doc-header">
+    <details class="site-menu">
+      <summary aria-label="文書メニューを開く"><span class="menu-icon" aria-hidden="true"></span>文書メニュー</summary>
+      <nav aria-label="文書メニュー">
+        <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace" target="_blank" rel="noopener noreferrer">GitHub リポジトリ</a>
+        <a href="../../index.html">ポータルへ戻る</a>
+        <a href="../../README.html">README</a>
+        <a href="../../docs/public/Index.html">文書案内</a>
+        <a href="../../docs/public/How_to_Setup.html">セットアップ</a>
+        <a href="../../docs/public/How_to_Use.html">基本操作</a>
+        <a href="../../LICENSE.html">ライセンス</a>
+        <a href="../../THIRD_PARTY_NOTICES.html">第三者通知</a>
+      </nav>
+    </details>
+    <div class="raw-md-link">
+      <a href="How_to_Troubleshoot.md" target="_blank">Raw Markdown</a>
+    </div>
+  </div>
+
+  <main>
+<h1>困ったときの対処</h1>
+<p>同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)</p>
+<p>この文書は、問題が起きたときにデータを失わず状況を切り分けるための案内です。直そうとしてファイルを消す前に、まず一次対応を行ってください。</p>
+<h2>最初に行うこと</h2>
+<p>問題が起きても、すぐにファイルを削除・改名・上書きしないでください。特に <code>__resource__/__tmp__/__stage__/</code> と <code>__resource__/__escape__/</code> は、未統合の編集や復旧用データを含むことがあります。</p>
+<p>次を確認します。</p>
+<p>1. エラー表示と対象ファイル名を控える</p>
+<p>2. ワークスペースと対象ファイルの空き容量・書込み権限を確認する</p>
+<p>3. 差分管理で未統合の変更が残っていないか確認する</p>
+<p>4. 必要ならワークスペース全体を別の安全な場所へコピーしてから調査する</p>
+<p>コピーを作るときは、アプリを終了してからワークスペースのフォルダ全体を複製します。<code>__resource__</code> を除外しないでください。</p>
+<h2>よくある状況</h2>
+<table>
+<tr><th>状況</th><th>一次対応</th><th>理解しておくこと</th></tr>
+<tr><td>ノートが保存できない</td><td>保存先の書込み権限、空き容量、同名ファイルのロックを確認する</td><td>元ファイルを守るため、保存失敗時は統合を中止します</td></tr>
+<tr><td>変更が見えない</td><td>差分管理を開き、stage があるか確認する</td><td>編集中の変更は、原本とは別に stage へ保護されることがあります</td></tr>
+<tr><td>以前の状態へ戻したい</td><td>「保存 > 復元/バックアップ...」を使う</td><td>バックアップは統合前に作られます。未統合の変更との関係を確認してください</td></tr>
+<tr><td><code>.clro</code> と <code>.clrop</code> を取り違えた</td><td>拡張子を変更せず、元の名前へ戻す</td><td><code>.clro</code> はノート、<code>.clrop</code> は PDF 注釈 JSON です</td></tr>
+<tr><td><code>.md</code> が期待どおりに見えない</td><td><code>.txt</code> ではないか、文字コードや内容を確認する</td><td><code>.md</code> は <code>.clro</code> と同じ Markdown/MD4C 経路です</td></tr>
+<tr><td>アプリを閉じるときに未統合の変更が表示される</td><td>内容を確認し、保存するか差分管理を開く</td><td>stage は作業途中を守るためのもので、原本への保存とは別です</td></tr>
+<tr><td>PDF やノートを移動・改名した後に問題が出た</td><td>変更前のワークスペースコピーへ戻し、差分管理を確認する</td><td>注釈データや stage は元のファイルとの対応を保って扱います</td></tr>
+<tr><td>Lite版で DOCX/PPTX をドロップしても PDF にならない</td><td>PDF を用意してから取り込むか、通常版を使う</td><td>Lite版は変換 runtime を含まないため、Office-to-PDF 変換は行いません。ウィンドウ名に <code>Lite</code> と表示されます</td></tr>
+<tr><td>通常版で「LibreOffice変換ランタイムが見つからない」と表示される</td><td>通常版のZIPを新しい空フォルダへ展開し直し、フォルダ内のファイルを混ぜずに起動する</td><td>runtimeが欠けてもLite版には切り替わりません。通常版の配布フォルダ一式を復元します</td></tr>
+<tr><td>通常版で Office 変換後の見た目が元文書と異なる</td><td>変換後の PDF を確認し、必要なら元文書のフォントやレイアウトを調整して変換し直す</td><td>DOCX/PPTX 変換は試験的です。Microsoft Office やオンライン変換サービスは使用せず、同梱 LibreOffice でローカル変換します</td></tr>
+<tr><td>起動時に「Windows によって PC が保護されました」と表示される</td><td>「詳細情報」をクリックし、現れた「実行」ボタンを押す</td><td>インストーラーのない未署名ZIP配布物のため表示されます。1回許可すれば次回からそのまま起動できます</td></tr>
+<tr><td>操作時に Windows の「一般の警告音」が鳴る</td><td>鳴った操作、アプリ版、Windows の版を控える。Windows の音を無効にすることで問題を受け入れない</td><td>この音は意図した通知ではなく、未解消の既知問題です。ファイルが壊れたことを示すものではありませんが、再現情報を添えて報告してください</td></tr>
+<tr><td>「プログラムから開く」でPDFを開くと案内が出る、または目的のファイルが開かない</td><td>対象ファイルがワークスペース内にあるか確認する。ワークスペース外のファイル単体閲覧は「読み取り専用ソフト（<code>readonly_viewer.exe</code>）」を使う</td><td>メインソフトはワークスペース内のPDF/画像ファイルを直接開く仕様です。ワークスペース内のファイルであれば「プログラムから開く」で開けますが、外のファイルは安全案内が表示されます</td></tr>
+</table>
+<h2>解決のための知識</h2>
+<h3>ファイルの開き方とソフトの使い分け</h3>
+<ul>
+<li><strong>メインソフト (<code>pdf_note_workspace.exe</code>)</strong>:</li>
+</ul>
+<p>  ワークスペース内の PDF や画像ファイルを「プログラムから開く」で指定すると、該当する講義・セッションと同期して直接開きます。注釈の編集・保存を行う場合はこちらを使います。</p>
+<ul>
+<li><strong>読み取り専用ソフト (<code>readonly_viewer.exe</code>)</strong>:</li>
+</ul>
+<p>  ワークスペース外にある任意の PDF、Markdown、TXT などのファイルを単体で確認・閲覧したい場合に適しています。「プログラムから開く」に指定すれば、ワークスペース保護に制約されず直接閲覧できます。</p>
+<h3>stage と原本は別です</h3>
+<p>stage は編集途中を保護するためのデータで、原本への保存が完了したことを意味しません。<code>Ctrl+S</code> などで統合したときに、原本が更新されます。</p>
+<h3><code>.clro</code> は通常テキストです</h3>
+<p><code>.clro</code> は UTF-8 のノート本文です。見慣れない拡張子ですが、バイナリ形式ではありません。形式の選択は <a href="What_is_File_Formats.html">What_is_File_Formats.md</a> を参照してください。</p>
+<h3>復旧データは問題を調べるまで残します</h3>
+<p><code>__escape__</code> や stage を消すと、復旧できる情報まで失う可能性があります。削除は、内容と不要になったことを確認してから行ってください。</p>
+<h2>相談・記録に役立つ情報</h2>
+<p>問題を再現できる場合は、次を控えると原因の確認に役立ちます。</p>
+<ul>
+<li>何をしようとしたときに起きたか</li>
+<li>表示されたメッセージ</li>
+<li>対象の PDF、ノート、注釈ファイルの種類</li>
+<li>保存前か保存後か、未統合の変更があるか</li>
+<li>アプリの版番号と Windows の版</li>
+</ul>
+<p>個人情報や PDF・ノート本文をそのまま共有する必要はありません。必要な場合だけ、複製した作業用データで確認してください。</p>
+  </main>
+
+  <footer>
+    PDF Note Workspace Documentation &copy; 2026
+  </footer>
+</div>
+
+</body>
+</html>

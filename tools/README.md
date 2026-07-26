@@ -42,7 +42,7 @@ python tools/metrics/analyze_build_logs.py --format json --top 20 > out/reports/
 
 ## 公開スナップショット作成ツール (`export_public_snapshot.py`)
 
-実装本体は `tools/dev/export_public_snapshot.py` にあり、日常運用ではルートの `export_public_snapshot.ps1` から呼び出します。allowlist と公開用 `.gitignore` テンプレートを使い、開発リポジトリから公開用リポジトリへ持ち込んでよいファイルだけを別ディレクトリへコピーします。
+実装本体は `tools/dev/export_public_snapshot.py` にあります。これは互換性のために残した明示的なローカルexport補助であり、release、`Submit`、GitHub Pages、Cloudflare Pagesの通常運用では使用しません。実行には専用のallowlistを必ず明示指定します。
 
 ### 特徴
 - コピー元の開発リポジトリは変更しません。
@@ -55,7 +55,7 @@ python tools/metrics/analyze_build_logs.py --format json --top 20 > out/reports/
 ワークスペースのルートディレクトリで以下を実行してください。
 
 ```powershell
-export_public_snapshot.ps1 --dest C:\tmp\pdf-note-public
+export_public_snapshot.ps1 --dest C:\tmp\pdf-note-public --allowlist C:\path\to\explicit_allowlist.txt
 ```
 
-`--dest` を省略すると GUI のフォルダ選択ダイアログを開きます。端末から入力する場合は `export_public_snapshot.ps1 --select-dest cui` を使います。既定では `docs/internal/operations/public_repo_demo許可リスト_2026-07-02.txt` を読み、そこに列挙されたパスだけをコピーします。`--dry-run` を付けると、コピー予定だけを確認できます。
+`--dest` を省略すると GUI のフォルダ選択ダイアログを開きます。端末から入力する場合は `export_public_snapshot.ps1 --select-dest cui` を使います。既定allowlistはありません。`--dry-run` を付けると、コピー予定だけを確認できます。

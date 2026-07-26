@@ -20,5 +20,25 @@
       "destination": "docs/public",
       "exclude": ["How_to_Build.md"]
     }
+  },
+  "pages_submission": {
+    "files": [
+      { "source": ".github/workflows/static.yml", "destination": ".github/workflows/static.yml" }
+    ],
+    "trees": [
+      {
+        "source": "site/github",
+        "destination": "site/github",
+        "exclude_prefixes": ["output/", "scripts/__pycache__/"]
+      }
+    ],
+    "retired_paths": [
+      "index.html",
+      "tools/dev/build_public_site.py",
+      "tools/dev/validate_public_site.py",
+      "tools/dev/render_human_docs.py",
+      "site/scripts",
+      "site/src"
+    ]
   }
 }

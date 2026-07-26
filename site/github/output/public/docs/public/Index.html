@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF Note Workspace 文書案内 – PDF Note Workspace</title>
+  <style>
+    :root {
+      --bg-main: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --border-color: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --pre-bg: #0f172a;
+      --pre-text: #f8fafc;
+      --note-bg: #f0f9ff;
+      --note-border: #0284c7;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-main: #0f172a;
+        --card-bg: #1e293b;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0284c7;
+        --border-color: #334155;
+        --code-bg: #0f172a;
+        --pre-bg: #020617;
+        --pre-text: #f8fafc;
+        --note-bg: rgba(56, 189, 248, 0.1);
+        --note-border: #38bdf8;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.75;
+      padding: 24px 12px;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 28px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+
+    .doc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 14px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--accent);
+      flex-wrap: wrap;
+    }
+
+    .site-menu { position: relative; }
+
+    .site-menu summary {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      list-style: none;
+      padding: 6px 12px;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 0.88em;
+      font-weight: 600;
+    }
+
+    .site-menu summary::-webkit-details-marker { display: none; }
+    .menu-icon {
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      margin-right: 7px;
+      border-top: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      position: relative;
+    }
+    .menu-icon::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 3px;
+      border-top: 2px solid currentColor;
+    }
+    .site-menu summary:hover {
+      background-color: var(--border-color);
+    }
+
+    .site-menu nav {
+      position: absolute;
+      z-index: 1;
+      top: calc(100% + 8px);
+      left: 0;
+      min-width: 200px;
+      padding: 8px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .site-menu nav a {
+      display: block;
+      padding: 7px 9px;
+      color: var(--text-main);
+      font-size: 0.9em;
+      text-decoration: none;
+    }
+
+    .site-menu nav a:hover { background-color: var(--code-bg); }
+
+    .raw-md-link {
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+
+    h1 { font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }
+    h2 { font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }
+    h3 { font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }
+
+    p { margin-bottom: 1.1em; word-break: break-word; }
+
+    a { color: var(--accent); text-decoration: none; font-weight: 500; }
+    a:hover { text-decoration: underline; color: var(--accent-hover); }
+
+    code {
+      background-color: var(--code-bg);
+      color: var(--text-main);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      border: 1px solid var(--border-color);
+    }
+
+    pre {
+      background-color: var(--pre-bg);
+      color: var(--pre-text);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1.2em 0;
+      font-size: 0.9em;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background-color: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+
+    blockquote {
+      border-left: 4px solid var(--note-border);
+      background-color: var(--note-bg);
+      margin: 1.2em 0;
+      padding: 12px 16px;
+      color: var(--text-main);
+      border-radius: 0 6px 6px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      font-size: 0.92em;
+      overflow-x: auto;
+      display: block;
+    }
+
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--code-bg);
+      font-weight: 600;
+    }
+
+    ul, ol {
+      padding-left: 1.6em;
+      margin-bottom: 1.1em;
+    }
+
+    li { margin-bottom: 0.3em; }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 1em 0;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px dashed var(--border-color);
+      margin: 2em 0;
+    }
+
+    footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border-color);
+      text-align: center;
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="doc-header">
+    <details class="site-menu">
+      <summary aria-label="文書メニューを開く"><span class="menu-icon" aria-hidden="true"></span>文書メニュー</summary>
+      <nav aria-label="文書メニュー">
+        <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace" target="_blank" rel="noopener noreferrer">GitHub リポジトリ</a>
+        <a href="../../index.html">ポータルへ戻る</a>
+        <a href="../../README.html">README</a>
+        <a href="../../docs/public/Index.html">文書案内</a>
+        <a href="../../docs/public/How_to_Setup.html">セットアップ</a>
+        <a href="../../docs/public/How_to_Use.html">基本操作</a>
+        <a href="../../LICENSE.html">ライセンス</a>
+        <a href="../../THIRD_PARTY_NOTICES.html">第三者通知</a>
+      </nav>
+    </details>
+    <div class="raw-md-link">
+      <a href="Index.md" target="_blank">Raw Markdown</a>
+    </div>
+  </div>
+
+  <main>
+<h1>PDF Note Workspace 文書案内</h1>
+<p>同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)</p>
+<p>このフォルダは、利用者と開発者が目的別に読める文書の入口です。初めての方は、上から順に必要な文書だけ読めば使い始められます。</p>
+<p>初めて使う場合は、まず <a href="How_to_Setup.html">How_to_Setup.md</a> を読んで ZIP を展開し、その後 <a href="How_to_Use.html">How_to_Use.md</a> を読んでください。</p>
+<p>配布フォルダ内の EXE、DLL、<code>pdf_workspace_setup.json</code> は一緒に置いたまま使い、起動場所を変えたい場合はショートカットを作成してください。</p>
+<h2>通常版と Lite版の選び方</h2>
+<p>配布物には、Office ファイルを PDF に変換できる通常版と、変換 runtime を含めない Lite版があります。PDF 閲覧、注釈、ノート、保存・復元はどちらも同じです。</p>
+<table>
+<tr><th>選ぶ版</th><th>向いている用途</th><th>Office ファイルの扱い</th></tr>
+<tr><td>通常版</td><td><code>.docx</code> / <code>.pptx</code> をアプリ内で PDF にして使いたい</td><td>同梱 LibreOffice でローカル変換する。変換は試験的なため、結果を確認する</td></tr>
+<tr><td>Lite版</td><td>PDF を既に用意している、または配布サイズを小さくしたい</td><td>Office-to-PDF 変換は行わない。PDF を用意してから取り込む</td></tr>
+</table>
+<p>Lite版はウィンドウ名に <code>Lite</code> と表示されます。Lite版へ DOCX/PPTX をドロップしても変換・取込みはせず、Lite版では使えないことを表示します。Microsoft Office やオンライン変換サービスは、どちらの版でも使用しません。</p>
+<h2>ファイル名が英語である理由</h2>
+<p><code>How_to_Use.md</code> のような英語のファイル名は、Windows のフォルダ、ZIP 配布、開発用ツールでも同じ名前で確実に扱えるようにするための識別名です。読むために英語を理解する必要はありません。文書の見出しと本文は日本語です。</p>
+<p><code>How_to</code> は「使い方」の意味です。ファイル名は変更せず、表の日本語の案内から目的の文書を開いてください。</p>
+<h2>利用者向け</h2>
+<table>
+<tr><th>文書</th><th>読む場面</th></tr>
+<tr><td><a href="How_to_Setup.html">How_to_Setup.md</a></td><td>ZIP の展開、ショートカット、関連付け、更新、削除を行いたい</td></tr>
+<tr><td><a href="How_to_Use.html">How_to_Use.md</a></td><td>起動、ワークスペース、ノート作成、基本保存を知りたい</td></tr>
+<tr><td><a href="What_is_File_Formats.html">What_is_File_Formats.md</a></td><td><code>.clro</code>、<code>.md</code>、<code>.txt</code>、<code>.clrop</code> の違いを知りたい</td></tr>
+<tr><td><a href="How_to_Save_and_Recovery.html">How_to_Save_and_Recovery.md</a></td><td>保存、stage、バックアップ、復元を理解したい</td></tr>
+<tr><td><a href="How_to_Troubleshoot.html">How_to_Troubleshoot.md</a></td><td>困ったときの一次対応と、解決のための知識を得たい</td></tr>
+</table>
+<p>アプリ内では「ヘルプ」から同じ主題をカテゴリ別に確認できます。ヘルプは外部サイトへ接続しません。</p>
+<h2>開発者向け</h2>
+<table>
+<tr><th>文書</th><th>読む場面</th></tr>
+<tr><td>How_to_Build.md（開発用の手順は公開していません）</td><td>ソースからビルド、テスト、release 作成を行いたい</td></tr>
+</table>
+<p>設計・調査・運用上の詳細は <code>docs/internal/</code> 配下にあります。通常の利用者が読む必要はありません。</p>
+<h2>ライセンス</h2>
+<ul>
+<li>リポジトリでは、ルートの <code>LICENSE.md</code>、<code>LICENSES_INDEX.md</code>、<code>THIRD_PARTY_NOTICES.md</code> を参照してください。</li>
+<li>配布物では、同じファイルを <code>docs/</code> フォルダに同梱しています。</li>
+</ul>
+  </main>
+
+  <footer>
+    PDF Note Workspace Documentation &copy; 2026
+  </footer>
+</div>
+
+</body>
+</html>
