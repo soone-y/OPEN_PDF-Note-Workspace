@@ -174,7 +174,7 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--replace", action="store_true", help="replace the tracked site/output/public output")
+    parser.add_argument("--replace", action="store_true", help="replace the generated site/output/public directory")
     parser.add_argument(
         "--documentation-portal",
         action="store_true",

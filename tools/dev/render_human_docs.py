@@ -86,24 +86,49 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       flex-wrap: wrap;
     }}
 
-    .doc-nav a {{
+    .site-menu {{ position: relative; }}
+
+    .site-menu summary {{
       display: inline-flex;
       align-items: center;
-      gap: 4px;
+      cursor: pointer;
+      list-style: none;
       padding: 6px 12px;
       background-color: var(--code-bg);
       border: 1px solid var(--border-color);
       border-radius: 6px;
       color: var(--text-main);
-      text-decoration: none;
       font-size: 0.88em;
       font-weight: 600;
-      transition: background-color 0.15s;
     }}
 
-    .doc-nav a:hover {{
+    .site-menu summary::-webkit-details-marker {{ display: none; }}
+    .site-menu summary:hover {{
       background-color: var(--border-color);
     }}
+
+    .site-menu nav {{
+      position: absolute;
+      z-index: 1;
+      top: calc(100% + 8px);
+      left: 0;
+      min-width: 200px;
+      padding: 8px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    }}
+
+    .site-menu nav a {{
+      display: block;
+      padding: 7px 9px;
+      color: var(--text-main);
+      font-size: 0.9em;
+      text-decoration: none;
+    }}
+
+    .site-menu nav a:hover {{ background-color: var(--code-bg); }}
 
     .raw-md-link {{
       font-size: 0.82em;
@@ -210,12 +235,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 <div class="container">
   <div class="doc-header">
-    <div class="doc-nav">
-      <a href="{root_rel}index.html">&laquo; ポータルへ戻る</a>
-      <a href="{root_rel}For_AI.html">AI資料</a>
-      <a href="{root_rel}README.html">README</a>
-      <a href="{root_rel}Document/Index.html">文書案内</a>
-    </div>
+{navigation_html}
     <div class="raw-md-link">
       <a href="{raw_md_name}" target="_blank">📄 Raw Markdown (.md)</a>
     </div>
@@ -366,12 +386,30 @@ def format_inline(text: str, root_rel: str) -> str:
     text = re.sub(r'`(.*?)`', lambda m: f'<code>{html.escape(m.group(1))}</code>', text)
     return text
 
+def navigation_html(*, root_rel: str, is_ai_document: bool) -> str:
+    if is_ai_document:
+        return ""
+    return f"""    <details class=\"site-menu\">
+      <summary aria-label=\"文書メニューを開く\">☰ メニュー</summary>
+      <nav aria-label=\"文書メニュー\">
+        <a href=\"{root_rel}index.html\">ポータルへ戻る</a>
+        <a href=\"{root_rel}README.html\">README</a>
+        <a href=\"{root_rel}Document/Index.html\">文書案内</a>
+        <a href=\"{root_rel}Document/How_to_Setup.html\">セットアップ</a>
+        <a href=\"{root_rel}Document/How_to_Use.html\">基本操作</a>
+        <a href=\"{root_rel}LICENSE.html\">ライセンス</a>
+        <a href=\"{root_rel}THIRD_PARTY_NOTICES.html\">第三者通知</a>
+      </nav>
+    </details>"""
+
+
 def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
     """Markdown ファイルを読み込み、対応する HTML ファイルを生成します。"""
     content = md_path.read_text(encoding="utf-8").lstrip("\ufeff")
     rel_path = md_path.relative_to(site_dir)
     depth = len(rel_path.parts) - 1
     root_rel = "../" * depth if depth > 0 else "./"
+    is_ai_document = rel_path.name == "For_AI.md" or rel_path.parts[0] == "for_ai"
 
     # タイトルの抽出
     title_match = re.search(r"^#\s+(.*)$", content, re.MULTILINE)
@@ -382,6 +420,7 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
         title=html.escape(title),
         root_rel=root_rel,
         raw_md_name=md_path.name,
+        navigation_html=navigation_html(root_rel=root_rel, is_ai_document=is_ai_document),
         content_html=body_html
     )
 

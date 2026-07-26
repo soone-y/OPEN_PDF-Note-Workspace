@@ -30,7 +30,7 @@
 
 ## 公開前の必須確認
 
-公開物は次の順で生成・検査する。`site/output/public/` は開発リポジトリで追跡する公開成果物であり、手で編集しない。
+公開物は次の順で生成・検査する。`site/output/public/` はローカルおよびCIで生成する公開成果物であり、Gitでは追跡せず、手で編集しない。
 
 ```text
 python site/scripts/build_public_site.py --replace
