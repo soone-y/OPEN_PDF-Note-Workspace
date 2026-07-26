@@ -52,7 +52,7 @@ jobs:
         run: python3 site/scripts/build_public_site.py --replace --documentation-portal
 
       - name: Validate selected documentation site
-        run: python3 site/scripts/validate_public_site.py --site site/output/public
+        run: python3 site/scripts/validate_public_site.py --site site/output/public --profile documentation_portal
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

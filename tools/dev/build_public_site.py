@@ -66,8 +66,12 @@ def load_allowlist() -> dict:
     return allowlist
 
 
-def copy_allowlisted_content(staging_dir: Path, allowlist: dict) -> None:
-    for entry in allowlist.get("files", []):
+def copy_allowlisted_content(staging_dir: Path, allowlist: dict, *, profile: str) -> None:
+    rules = allowlist.get(profile, allowlist)
+    if not isinstance(rules, dict):
+        raise ValueError(f"Allowlist profile must be an object: {profile}")
+
+    for entry in rules.get("files", []):
         if not isinstance(entry, dict):
             raise ValueError("Allowlist files entries must be objects")
         source = resolve_repo_relative_path(entry.get("source", ""), label="allowlist file source")
@@ -76,7 +80,7 @@ def copy_allowlisted_content(staging_dir: Path, allowlist: dict) -> None:
         )
         copy_file(source, destination)
 
-    for entry in allowlist.get("trees", []):
+    for entry in rules.get("trees", []):
         if not isinstance(entry, dict):
             raise ValueError("Allowlist trees entries must be objects")
         source = resolve_repo_relative_path(entry.get("source", ""), label="allowlist tree source")
@@ -85,9 +89,11 @@ def copy_allowlisted_content(staging_dir: Path, allowlist: dict) -> None:
         )
         copy_tree(source, destination)
 
-    document_rule = allowlist.get("document_markdown")
+    document_rule = rules.get("document_markdown")
+    if document_rule is None:
+        return
     if not isinstance(document_rule, dict):
-        raise ValueError("Allowlist document_markdown entry is required")
+        raise ValueError("Allowlist document_markdown entry must be an object")
     source = resolve_repo_relative_path(document_rule.get("source", ""), label="allowlist document source")
     destination = resolve_staging_relative_path(
         staging_dir, document_rule.get("destination", ""), label="allowlist document destination"
@@ -135,7 +141,8 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
         staging_dir.mkdir()
 
         allowlist = load_allowlist()
-        copy_allowlisted_content(staging_dir, allowlist)
+        profile = "documentation_portal" if documentation_portal else "introduction"
+        copy_allowlisted_content(staging_dir, allowlist, profile=profile)
 
         if documentation_portal:
             copy_file(REPO_ROOT / "index.html", staging_dir / "index.html")

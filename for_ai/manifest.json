@@ -11,6 +11,7 @@
       "when": "アプリの用途、導入、基本操作、画面構成、困ったときについて質問された場合",
       "read": [
         "core/features_faq.md",
+        "core/user_guidance_reference.md",
         "core/use_cases.md",
         "core/ui_concepts.md",
         "core/troubleshooting_quick.md",
@@ -19,6 +20,50 @@
         "../Document/How_to_Use.md",
         "../Document/How_to_Troubleshoot.md"
       ]
+    },
+    {
+      "id": "installation_and_updates",
+      "when": "導入、通常版とLite版の選択、ZIP展開、ショートカット、関連付け、更新、削除について質問された場合",
+      "read": [
+        "core/user_guidance_reference.md",
+        "../README.md",
+        "../Document/Index.md",
+        "../Document/How_to_Setup.md"
+      ]
+    },
+    {
+      "id": "customization_and_settings",
+      "when": "設定、注釈ツール、色、フォント、ノート、ショートカット、ワークスペースのカスタマイズについて質問された場合",
+      "read": [
+        "core/user_guidance_reference.md",
+        "core/ui_concepts.md",
+        "core/data_schemas.md",
+        "../Document/How_to_Setup.md"
+      ],
+      "verify_source_code_and_tests_for_unlisted_settings": true
+    },
+    {
+      "id": "save_and_recovery_procedures",
+      "when": "stage、統合保存、Ctrl+S、バックアップ、復元、保存失敗、未統合の変更について質問された場合",
+      "read": [
+        "core/user_guidance_reference.md",
+        "core/file_formats.md",
+        "core/data_schemas.md",
+        "../Document/How_to_Save_and_Recovery.md",
+        "../Document/How_to_Troubleshoot.md"
+      ],
+      "verify_source_code_and_tests": true
+    },
+    {
+      "id": "support_and_feedback",
+      "when": "不具合報告、要望、セキュリティ報告、開発者への連絡方法について質問された場合",
+      "read": [
+        "core/user_guidance_reference.md",
+        "core/troubleshooting_quick.md",
+        "../Document/How_to_Troubleshoot.md",
+        "../.github/SECURITY.md"
+      ],
+      "do_not_assume_contact_channel_availability": true
     },
     {
       "id": "project_overview_and_oss",

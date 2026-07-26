@@ -9,6 +9,30 @@
       "evidence_path": "Document/What_is_File_Formats.md"
     },
     {
+      "intent": "導入、ZIP展開、通常版とLite版、更新の手順を知りたい",
+      "keywords": ["導入", "セットアップ", "ZIP", "展開", "通常版", "Lite版", "更新"],
+      "target_node": "for_ai/core/user_guidance_reference.md",
+      "evidence_path": "Document/How_to_Setup.md"
+    },
+    {
+      "intent": "設定、フォント、色、注釈ツール、ショートカットをどこまで変更できるか知りたい",
+      "keywords": ["設定", "カスタマイズ", "フォント", "色", "パレット", "ショートカット", "注釈"],
+      "target_node": "for_ai/core/user_guidance_reference.md",
+      "evidence_path": "src/help/help.cpp"
+    },
+    {
+      "intent": "stage、統合保存、バックアップ、復元、保存失敗の流れを知りたい",
+      "keywords": ["stage", "統合保存", "Ctrl+S", "バックアップ", "復元", "保存失敗"],
+      "target_node": "for_ai/core/user_guidance_reference.md",
+      "evidence_path": "Document/How_to_Save_and_Recovery.md"
+    },
+    {
+      "intent": "不具合報告、要望、セキュリティ報告、開発者への連絡方法を知りたい",
+      "keywords": ["不具合報告", "要望", "連絡", "問い合わせ", "Issue", "セキュリティ"],
+      "target_node": "for_ai/core/user_guidance_reference.md",
+      "evidence_path": ".github/SECURITY.md"
+    },
+    {
       "intent": "Lite版と通常版の違い・どちらを選ぶべきか知りたい",
       "keywords": ["Lite", "通常版", "LibreOffice", "Office変換", "DOCX", "PPTX"],
       "target_node": "for_ai/core/features_faq.md",

@@ -12,10 +12,11 @@ from pathlib import Path
 
 
 TEXT_EXTENSIONS = {".html", ".json", ".md", ".txt", ".xml"}
-REQUIRED_FILES = (
+DOCUMENTATION_PORTAL_REQUIRED_FILES = (
     "index.html", "For_AI.md", "README.md", "for_ai/manifest.json",
     "for_ai/project_context.xml", "for_ai/core/semantic_search_index.json",
 )
+INTRODUCTION_REQUIRED_FILES = ("index.html", "assets/app_overview.png")
 MARKDOWN_LINK = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HTML_LINK = re.compile(r"(?:href|src)=[\"']([^\"'#]+)", re.IGNORECASE)
 
@@ -79,11 +80,17 @@ def validate_manifest(site: Path, errors: list[str]) -> None:
                 errors.append(f"manifest route '{route.get('id', '<unknown>')}' references missing file: {relative_path}")
 
 
-def validate_site(site: Path) -> list[str]:
+def validate_site(site: Path, *, profile: str) -> list[str]:
     errors: list[str] = []
     if not site.is_dir():
         return [f"site directory does not exist: {site}"]
-    for relative_path in REQUIRED_FILES:
+    if profile == "documentation_portal":
+        required_files = DOCUMENTATION_PORTAL_REQUIRED_FILES
+    elif profile == "introduction":
+        required_files = INTRODUCTION_REQUIRED_FILES
+    else:
+        return [f"unsupported site profile: {profile}"]
+    for relative_path in required_files:
         if not (site / relative_path).is_file():
             errors.append(f"required public file is missing: {relative_path}")
     if (site / "Document" / "How_to_Build.md").exists():
@@ -91,15 +98,22 @@ def validate_site(site: Path) -> list[str]:
     validate_text_encoding(site, errors)
     validate_structured_files(site, errors)
     validate_local_links(site, errors)
-    validate_manifest(site, errors)
+    if profile == "documentation_portal":
+        validate_manifest(site, errors)
     return errors
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--site", type=Path, required=True)
+    parser.add_argument(
+        "--profile",
+        choices=("introduction", "documentation_portal"),
+        default="introduction",
+        help="expected public-site profile (default: introduction)",
+    )
     args = parser.parse_args(argv)
-    errors = validate_site(args.site)
+    errors = validate_site(args.site, profile=args.profile)
     if errors:
         print("Public-site validation failed:", file=sys.stderr)
         for error in errors:
