@@ -103,6 +103,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }}
 
     .site-menu summary::-webkit-details-marker {{ display: none; }}
+    .menu-icon {{
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      margin-right: 7px;
+      border-top: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      position: relative;
+    }}
+    .menu-icon::after {{
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 3px;
+      border-top: 2px solid currentColor;
+    }}
     .site-menu summary:hover {{
       background-color: var(--border-color);
     }}
@@ -237,7 +254,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="doc-header">
 {navigation_html}
     <div class="raw-md-link">
-      <a href="{raw_md_name}" target="_blank">📄 Raw Markdown (.md)</a>
+      <a href="{raw_md_name}" target="_blank">Raw Markdown</a>
     </div>
   </div>
 
@@ -390,8 +407,9 @@ def navigation_html(*, root_rel: str, is_ai_document: bool) -> str:
     if is_ai_document:
         return ""
     return f"""    <details class=\"site-menu\">
-      <summary aria-label=\"文書メニューを開く\">☰ メニュー</summary>
+      <summary aria-label=\"文書メニューを開く\"><span class=\"menu-icon\" aria-hidden=\"true\"></span>文書メニュー</summary>
       <nav aria-label=\"文書メニュー\">
+        <a href=\"https://github.com/soone-y/OPEN_PDF-Note-Workspace\" target=\"_blank\" rel=\"noopener noreferrer\">GitHub リポジトリ</a>
         <a href=\"{root_rel}index.html\">ポータルへ戻る</a>
         <a href=\"{root_rel}README.html\">README</a>
         <a href=\"{root_rel}Document/Index.html\">文書案内</a>

@@ -1,246 +1,70 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="PDF Note Workspace の AI 向け公開資料の参照入口です。">
   <meta name="ai-agent-entrypoint" content="For_AI.md">
   <meta name="ai-manifest" content="for_ai/manifest.json">
-  <script type="application/ld+json">
-  {
-    "@context": "https://schema.org",
-    "@type": "SoftwareSourceCode",
-    "name": "PDF Note Workspace",
-    "description": "Win32 C++ 非破壊PDF閲覧・注釈・ノート統合ワークスペース",
-    "codeRepository": "https://github.com/soone-y/OPEN_PDF-Note-Workspace",
-    "programmingLanguage": "C++17",
-    "mainEntity": {
-      "@type": "TechArticle",
-      "name": "AI Concierge Entry",
-      "url": "For_AI.md"
-    }
-  }
-  </script>
-  <title>PDF Note Workspace – Entry &amp; Reference</title>
+  <title>PDF Note Workspace — AI Reference</title>
   <style>
-    /* 古き良きデザインでありつつ、使いやすさを確保するスタイル */
-    body {
-      font-family: "Hiragino Kaku Gothic ProN", "メイリオ", Meiryo, "MS PGothic", sans-serif;
-      background-color: #f1f1f1;
-      color: #333333;
-      margin: 0;
-      padding: 20px 10px;
-      line-height: 1.6;
-    }
-
-    .container {
-      max-width: 720px;
-      margin: 0 auto;
-      background-color: #ffffff;
-      border: 1px solid #c0c0c0;
-      padding: 24px;
-      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
-    }
-
-    header {
-      border-bottom: 2px solid #004488;
-      padding-bottom: 8px;
-      margin-bottom: 20px;
-    }
-
-    h1 {
-      font-size: 1.5em;
-      color: #004488;
-      margin: 0 0 4px 0;
-    }
-
-    .sub-title {
-      font-size: 0.9em;
-      color: #666666;
-    }
-
-    .site-url {
-      font-size: 0.85em;
-      color: #004488;
-      margin-top: 4px;
-      word-break: break-all;
-    }
-
-    .section-panel {
-      border: 1px solid #dddddd;
-      background-color: #fafafa;
-      padding: 16px;
-      margin-bottom: 20px;
-    }
-
-    .panel-human {
-      border: 1px solid #c7d7e6;
-      background-color: #f9fcff;
-    }
-
-    .panel-ai {
-      border: 1px solid #d9c9ea;
-      background-color: #fcf9ff;
-    }
-
-    .panel-title {
-      font-size: 1.15em;
-      font-weight: bold;
-      margin: 0 0 8px 0;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .title-human {
-      color: #0c5a8a;
-    }
-
-    .title-ai {
-      color: #5d357f;
-    }
-
-    .panel-desc {
-      font-size: 0.9em;
-      color: #555555;
-      margin-bottom: 14px;
-    }
-
-    .btn-main {
-      display: inline-block;
-      padding: 8px 16px;
-      font-size: 0.95em;
-      font-weight: bold;
-      text-decoration: none;
-      border-radius: 4px;
-      margin-bottom: 12px;
-      box-shadow: 1px 1px 2px rgba(0, 0, 0, 0.15);
-      transition: background-color 0.15s;
-    }
-
-    .btn-human {
-      background-color: #0c5a8a;
-      color: #ffffff;
-      border: 1px solid #083f60;
-    }
-
-    .btn-human:hover {
-      background-color: #0a4d75;
-    }
-
-    .btn-ai {
-      background-color: #7b4aa6;
-      color: #ffffff;
-      border: 1px solid #5d357f;
-    }
-
-    .btn-ai:hover {
-      background-color: #683e8d;
-    }
-
-    .doc-list {
-      list-style: none;
-      padding: 0;
-      margin: 8px 0 0 0;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .doc-list li a {
-      display: block;
-      padding: 6px 10px;
-      background-color: #ffffff;
-      border: 1px solid #cccccc;
-      color: #004488;
-      text-decoration: none;
-      font-size: 0.9em;
-    }
-
-    .doc-list li a:hover {
-      background-color: #f0f4f8;
-      border-color: #004488;
-    }
-
-    footer {
-      margin-top: 24px;
-      padding-top: 12px;
-      border-top: 1px dashed #cccccc;
-      text-align: center;
-      font-size: 0.8em;
-      color: #777777;
-    }
+    :root { --page: #fafaf8; --ink: #202522; --muted: #5f6862; --line: #d7dcd7; --link: #245e52; --panel: #ffffff; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--page); color: var(--ink); font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Yu Gothic UI", Meiryo, sans-serif; font-size: 16px; line-height: 1.7; }
+    main { width: min(780px, calc(100% - 40px)); margin: 0 auto; padding: 48px 0 56px; }
+    header { padding-bottom: 24px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: clamp(26px, 5vw, 36px); font-weight: 650; letter-spacing: .01em; }
+    h2 { margin: 0 0 12px; font-size: 19px; font-weight: 650; }
+    p { margin: 0; }
+    p + p { margin-top: 12px; }
+    .purpose { margin-top: 12px; color: var(--muted); }
+    section { margin-top: 30px; padding: 22px; border: 1px solid var(--line); background: var(--panel); }
+    .instruction { border-left: 4px solid var(--link); }
+    ul { margin: 12px 0 0; padding-left: 1.25em; }
+    li + li { margin-top: 7px; }
+    a { color: var(--link); text-underline-offset: 2px; }
+    code { padding: 1px 4px; border: 1px solid var(--line); background: #f4f6f3; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; }
+    .human { color: var(--muted); }
+    footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
+    @media (max-width: 560px) { main { width: min(100% - 28px, 780px); padding-top: 32px; } section { padding: 18px; } }
   </style>
 </head>
 <body>
-<!--
-  AI_ENTRY_POINT:
-  This page serves as the entry portal for PDF Note Workspace on GitHub Pages (https://soone-y.github.io/OPEN_PDF-Note-Workspace/).
-  - For Humans: Visit the GitHub repository (https://github.com/soone-y/OPEN_PDF-Note-Workspace) or view README.md.
-  - For AI Agents: Read `For_AI.md` (Web: https://soone-y.github.io/OPEN_PDF-Note-Workspace/For_AI.md) first and follow references to `for_ai/manifest.json` and `for_ai/project_context.xml`.
--->
-
-<div class="container">
-  <header>
-    <h1>PDF Note Workspace</h1>
-    <div class="sub-title">公式 Web ドキュメント &amp; エントリポータル</div>
-    <div class="site-url">https://soone-y.github.io/OPEN_PDF-Note-Workspace/</div>
-  </header>
-
+  <!-- AI_ENTRY_POINT: read For_AI.md first. The manifest selects narrower primary sources. -->
   <main>
-    <!-- 人間向けセクション -->
-    <section class="section-panel panel-human">
-      <div class="panel-title title-human">
-        <span>👤 一般のご利用・開発者向け</span>
-      </div>
-      <p class="panel-desc">
-        PDF Note Workspace の概要、ダウンロード、使い方、ソースコードの確認は GitHub リポジトリまたは各種ドキュメントをご覧ください。
-      </p>
+    <header>
+      <h1>PDF Note Workspace: AI Reference</h1>
+      <p class="purpose">この GitHub Pages は、公開リポジトリの AI 向け正本資料へ直接到達するための参照入口です。</p>
+    </header>
 
-      <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace" class="btn-main btn-human" target="_blank" rel="noopener noreferrer">
-        GitHub リポジトリを開く（README・Releases） &raquo;
-      </a>
-
-      <ul class="doc-list">
-        <li><a href="README.html">📄 README (プロジェクト概要・入手方法)</a></li>
-        <li><a href="Document/Index.html">📚 Document/Index (利用者向け文書案内)</a></li>
-        <li><a href="Document/How_to_Setup.html">🚀 Document/How_to_Setup (セットアップ手順)</a></li>
-        <li><a href="Document/How_to_Use.html">📖 Document/How_to_Use (操作方法)</a></li>
-        <li><a href="LICENSE.html">⚖️ LICENSE (プロジェクト本体のライセンス)</a></li>
-        <li><a href="THIRD_PARTY_NOTICES.html">📜 THIRD_PARTY_NOTICES (第三者コンポーネントの通知)</a></li>
+    <section class="instruction">
+      <h2>AI が最初に読むもの</h2>
+      <p><a href="For_AI.md">For_AI.md</a> を最初に読みます。続いて <a href="for_ai/manifest.json">for_ai/manifest.json</a> から質問に対応する資料を選び、重要な判断はリンク先の正本で確認してください。</p>
+      <ul>
+        <li><a href="For_AI.md">For_AI.md</a> — 読み方、探索手順、基本制約</li>
+        <li><a href="for_ai/manifest.json">for_ai/manifest.json</a> — 目的別の参照経路</li>
+        <li><a href="for_ai/project_context.xml">for_ai/project_context.xml</a> — プロジェクト文脈と開発動機の構造化データ</li>
       </ul>
     </section>
 
-    <!-- AI 向けセクション -->
-    <section class="section-panel panel-ai">
-      <div class="panel-title title-ai">
-        <span>🤖 AI アシスタント・LLM 向け</span>
-      </div>
-      <p class="panel-desc">
-        AI が本リポジトリの構造・開発方針・仕様コンテキストを把握するための参照インデックスです。
-      </p>
-
-      <a href="For_AI.html" class="btn-main btn-ai">
-        🤖 For_AI (AI エントリポイント) へ進む &raquo;
-      </a>
-
-      <ul class="doc-list">
-        <li><a href="For_AI.html">🗺️ For_AI – AI 向けエントリ案内</a></li>
-        <li><a href="for_ai/manifest.json">🧭 for_ai/manifest.json – 参照経路マップ</a></li>
-        <li><a href="for_ai/project_context.xml">🧩 for_ai/project_context.xml – 構造化文脈データ</a></li>
-        <li><a href="for_ai/core/architecture_layers.html">🏗️ for_ai/core/architecture_layers – C++ レイヤー構造</a></li>
-        <li><a href="for_ai/core/code_symbol_index.html">📍 for_ai/core/code_symbol_index – ソースコードシンボルマップ</a></li>
-        <li><a href="for_ai/core/ai_guardrails.html">⛔ for_ai/core/ai_guardrails – AI ガードレール &amp; 禁止パターン</a></li>
-        <li><a href="for_ai/core/data_schemas.html">📊 for_ai/core/data_schemas – .clrop / .clro スキーマ</a></li>
-        <li><a href="for_ai/core/safety_and_nonnegotiables.html">🛡️ for_ai/core/safety_and_nonnegotiables – 最優先安全仕様</a></li>
-        <li><a href="for_ai/core/features_faq.html">💡 for_ai/core/features_faq – 機能仕様 &amp; FAQ</a></li>
-        <li><a href="for_ai/core/troubleshooting_quick.html">🛠️ for_ai/core/troubleshooting_quick – トラブルシューティング</a></li>
+    <section>
+      <h2>主要な正本資料</h2>
+      <ul>
+        <li><a href="for_ai/core/safety_and_nonnegotiables.md">安全上の絶対要件</a></li>
+        <li><a href="for_ai/core/architecture_layers.md">アーキテクチャ層</a></li>
+        <li><a href="for_ai/core/data_schemas.md">データ形式とスキーマ</a></li>
+        <li><a href="for_ai/core/features_faq.md">機能と FAQ</a></li>
+        <li><a href="for_ai/core/documentation_contract.md">AI 向け文書の契約</a></li>
+        <li><a href="LICENSE.md">ライセンス</a>、<a href="LICENSES_INDEX.md">ライセンス一覧</a>、<a href="THIRD_PARTY_NOTICES.md">第三者通知</a></li>
       </ul>
     </section>
+
+    <section class="human">
+      <h2>人間が利用・開発する場合</h2>
+      <p>配布物、README、操作案内、ソースコード、Issue は <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace">GitHub リポジトリ</a> を入口にしてください。</p>
+    </section>
+
+    <footer>Raw Markdown、JSON、XML はこのサイト内でそのまま公開されています。</footer>
   </main>
-
-  <footer>
-    PDF Note Workspace Documentation Index (soone-y.github.io)
-  </footer>
-</div>
 </body>
 </html>

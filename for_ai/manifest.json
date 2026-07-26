@@ -4,6 +4,7 @@
   "entry_point": "../For_AI.md",
   "status": "active",
   "shared_context": "project_context.xml",
+  "route_definition_policy": "この routes 配列は質問別の読取対象を定義する唯一の経路表である。For_AI.md は読取順と検証規約だけを持ち、質問別の経路定義を重複して持たない。",
   "routes": [
     {
       "id": "user_guidance",

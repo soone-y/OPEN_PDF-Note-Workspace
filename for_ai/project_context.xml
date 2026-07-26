@@ -267,7 +267,7 @@
 
   <navigation>
     <entry_point>../For_AI.md</entry_point>
-    <route_manifest>manifest.json</route_manifest>
+    <route_manifest role="canonical-route-definition">manifest.json</route_manifest>
     <user_document_index>../Document/Index.md</user_document_index>
     <file_format_reference>../Document/What_is_File_Formats.md</file_format_reference>
     <save_recovery_reference>../Document/How_to_Save_and_Recovery.md</save_recovery_reference>
