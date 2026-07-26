@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ノートと注釈の拡張子 – PDF Note Workspace</title>
+  <style>
+    :root {
+      --bg-main: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --border-color: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --pre-bg: #0f172a;
+      --pre-text: #f8fafc;
+      --note-bg: #f0f9ff;
+      --note-border: #0284c7;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-main: #0f172a;
+        --card-bg: #1e293b;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0284c7;
+        --border-color: #334155;
+        --code-bg: #0f172a;
+        --pre-bg: #020617;
+        --pre-text: #f8fafc;
+        --note-bg: rgba(56, 189, 248, 0.1);
+        --note-border: #38bdf8;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.75;
+      padding: 24px 12px;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 28px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+
+    .doc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 14px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--accent);
+      flex-wrap: wrap;
+    }
+
+    .site-menu { position: relative; }
+
+    .site-menu summary {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      list-style: none;
+      padding: 6px 12px;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 0.88em;
+      font-weight: 600;
+    }
+
+    .site-menu summary::-webkit-details-marker { display: none; }
+    .menu-icon {
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      margin-right: 7px;
+      border-top: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      position: relative;
+    }
+    .menu-icon::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 3px;
+      border-top: 2px solid currentColor;
+    }
+    .site-menu summary:hover {
+      background-color: var(--border-color);
+    }
+
+    .site-menu nav {
+      position: absolute;
+      z-index: 1;
+      top: calc(100% + 8px);
+      left: 0;
+      min-width: 200px;
+      padding: 8px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .site-menu nav a {
+      display: block;
+      padding: 7px 9px;
+      color: var(--text-main);
+      font-size: 0.9em;
+      text-decoration: none;
+    }
+
+    .site-menu nav a:hover { background-color: var(--code-bg); }
+
+    .raw-md-link {
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+
+    h1 { font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }
+    h2 { font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }
+    h3 { font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }
+
+    p { margin-bottom: 1.1em; word-break: break-word; }
+
+    a { color: var(--accent); text-decoration: none; font-weight: 500; }
+    a:hover { text-decoration: underline; color: var(--accent-hover); }
+
+    code {
+      background-color: var(--code-bg);
+      color: var(--text-main);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      border: 1px solid var(--border-color);
+    }
+
+    pre {
+      background-color: var(--pre-bg);
+      color: var(--pre-text);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1.2em 0;
+      font-size: 0.9em;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background-color: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+
+    blockquote {
+      border-left: 4px solid var(--note-border);
+      background-color: var(--note-bg);
+      margin: 1.2em 0;
+      padding: 12px 16px;
+      color: var(--text-main);
+      border-radius: 0 6px 6px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      font-size: 0.92em;
+      overflow-x: auto;
+      display: block;
+    }
+
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--code-bg);
+      font-weight: 600;
+    }
+
+    ul, ol {
+      padding-left: 1.6em;
+      margin-bottom: 1.1em;
+    }
+
+    li { margin-bottom: 0.3em; }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 1em 0;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px dashed var(--border-color);
+      margin: 2em 0;
+    }
+
+    footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border-color);
+      text-align: center;
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="doc-header">
+    <details class="site-menu">
+      <summary aria-label="文書メニューを開く"><span class="menu-icon" aria-hidden="true"></span>文書メニュー</summary>
+      <nav aria-label="文書メニュー">
+        <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace" target="_blank" rel="noopener noreferrer">GitHub リポジトリ</a>
+        <a href="../../index.html">ポータルへ戻る</a>
+        <a href="../../README.html">README</a>
+        <a href="../../docs/public/Index.html">文書案内</a>
+        <a href="../../docs/public/How_to_Setup.html">セットアップ</a>
+        <a href="../../docs/public/How_to_Use.html">基本操作</a>
+        <a href="../../LICENSE.html">ライセンス</a>
+        <a href="../../THIRD_PARTY_NOTICES.html">第三者通知</a>
+      </nav>
+    </details>
+    <div class="raw-md-link">
+      <a href="What_is_File_Formats.md" target="_blank">Raw Markdown</a>
+    </div>
+  </div>
+
+  <main>
+<h1>ノートと注釈の拡張子</h1>
+<p>同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)</p>
+<p>拡張子は、ファイルの種類を見分けるための末尾の文字列です。このソフトでは、ノートと PDF 注釈で用途が異なるため、拡張子を変更して種類を変えないでください。</p>
+<h2>ノートと注釈の拡張子</h2>
+<table>
+<tr><th>拡張子</th><th>用途</th><th>アプリ内の扱い</th></tr>
+<tr><td><code>.clro</code></td><td>本ソフトの標準ノート</td><td>新規作成・候補名・既定の命名規則で使います。UTF-8 の通常テキストです</td></tr>
+<tr><td><code>.md</code> / <code>.markdown</code></td><td>互換 Markdown ノート</td><td><code>.clro</code> と同じ Markdown/MD4C 経路で読み書きできます。既存ファイルを自動改名・変換しません</td></tr>
+<tr><td><code>.tex</code></td><td>TeX 用ノート</td><td>Markdown/MD4C 経路で扱います。TeX の数式を含むノートに使えます</td></tr>
+<tr><td><code>.txt</code> / <code>.csv</code></td><td>書式なしノート</td><td>Markdown、独自 markup、レンダリング表示、ノートリンクを使わないプレーンテキストです。<code>.csv</code> の表計算用の特別な処理は行いません</td></tr>
+<tr><td><code>.clrop</code></td><td>PDF 注釈データ</td><td>PDF 注釈用の JSON です。ノートではありません</td></tr>
+</table>
+<h2>PDF と <code>.clrop</code> は 1 組です</h2>
+<p>PDF に注釈を付けると、アプリは PDF 本体を書き換えず、PDF と同じフォルダに同じ名前の <code>.clrop</code> を置きます。拡張子だけが異なります。</p>
+<pre><code>授業資料.pdf     # 元の PDF
+授業資料.clrop   # 授業資料.pdf に付けた注釈データ</code></pre>
+<p>PDF を開くと、アプリは対応する <code>.clrop</code> を読み込み、PDF の上に注釈を表示します。注釈を再び表示・編集するには、PDF と <code>.clrop</code> の両方が必要です。PDF 単体を別の場所へ移す、または名前を変えると、対応する注釈を見つけられなくなることがあります。</p>
+<p>PDF をコピー、移動、共有するときは、対応する <code>.clrop</code> も一緒に扱ってください。安全のため、作業前にワークスペース全体をコピーしておくことを勧めます。<code>.clrop</code> はアプリが管理する注釈データなので、テキストエディターで編集したり、拡張子を変えたりしないでください。</p>
+<h2>初めて使う場合の選び方</h2>
+<ul>
+<li>新しくノートを作る: <code>.clro</code> のまま作成します。</li>
+<li>他の Markdown 対応ソフトとノートを共有する: <code>.md</code> または <code>.markdown</code> を選びます。</li>
+<li>TeX の数式を含むノートを作る: <code>.tex</code> を選びます。</li>
+<li>書式を付けずにメモする: <code>.txt</code> を選びます。</li>
+<li>CSV をノートとして確認・編集する: <code>.csv</code> を選びます。表としては処理されません。</li>
+<li>画像（<code>.png</code> / <code>.jpg</code> / <code>.jpeg</code>）を取り込む: 1 ページの PDF へ変換してワークスペースに取り込めます。</li>
+<li>PDF に付けた注釈を扱う: <code>.clrop</code> をアプリに任せます。手動編集はしません。</li>
+</ul>
+<h2><code>.clro</code> と <code>.md</code> の違い</h2>
+<p><code>.clro</code> と <code>.md</code> は、本文の Markdown/MD4C 解析・表示では同じ経路を使います。ただし、アプリ内での役割は異なります。<code>.clro</code> は本ソフトの標準ノート、<code>.md</code> は他の Markdown ソフトとの互換用です。</p>
+<ul>
+<li>本ソフトで新しく作るノートは <code>.clro</code> です。</li>
+<li><code>.md</code> は他の Markdown 対応ソフトとやり取りしたい場合に選べます。</li>
+<li>リネーム、コピー、リンク先作成では、元のノートの拡張子を保ちます。</li>
+<li>既存の <code>.md</code> を勝手に <code>.clro</code> へ変えることはありません。</li>
+</ul>
+<p>つまり、本文の書式が似ていても、作成時の既定値・候補名・利用目的は区別されています。見慣れない <code>.clro</code> を <code>.md</code> に改名する必要はありません。</p>
+<h2>ノートは PDF 注釈とは別に開いて編集します</h2>
+<p>ノートは PDF の中に保存されず、独立したファイルとして扱います。一般的な <code>.txt</code> / <code>.csv</code>、Markdown の <code>.md</code> / <code>.markdown</code>、TeX 用の <code>.tex</code>、本ソフトの標準ノート <code>.clro</code> を開けます。PDF の表示・注釈と並行して、選んだノートを開いて編集できます。</p>
+<p><code>.clro</code> は UTF-8 のテキストを使う、本ソフトの標準ノート形式です。Markdown/MD4C の見出し、強調、リンクなどで内容を修飾できます。新しいノートを作る場合は <code>.clro</code> を選んでください。既存の <code>.md</code>、<code>.markdown</code>、<code>.txt</code> を開いて編集しても、アプリが勝手に <code>.clro</code> へ変更することはありません。</p>
+<h2><code>.txt</code> と <code>.csv</code> は書式なしのノートです</h2>
+<p><code>.txt</code> と <code>.csv</code> では、Markdown の見出しやリンク、独自 markup をノート書式として解釈しません。<code>.csv</code> を開いても、表計算や列の解析などの特別な処理は行いません。Markdown の表示やノート間リンクを使いたい場合は、<code>.clro</code>、<code>.md</code>、または <code>.tex</code> を使ってください。</p>
+<h2><code>.clrop</code> をノートとして扱わない</h2>
+<p><code>.clrop</code> は PDF と対応付けた注釈データです。<code>.clro</code> への改名、ノートとしての編集、手作業での書換えは行わないでください。注釈に問題がある場合は、まず <a href="How_to_Troubleshoot.html">How_to_Troubleshoot.md</a> を確認してください。</p>
+<p>ファイルを別の場所へ移す、名前を変える、共有する必要がある場合は、作業前にワークスペース全体をコピーしておくと安全です。</p>
+  </main>
+
+  <footer>
+    PDF Note Workspace Documentation &copy; 2026
+  </footer>
+</div>
+
+</body>
+</html>

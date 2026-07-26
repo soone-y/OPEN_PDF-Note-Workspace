@@ -22,7 +22,7 @@ OUTPUT_DIR = GITHUB_SITE_ROOT / "output" / "public"
 ALLOWLIST_PATH = GITHUB_SITE_ROOT / "documentation_portal_allowlist.json"
 VERSION_TOKEN = "__APP_VERSION__"
 DEVELOPER_BUILD_GUIDE_URL = (
-    "https://github.com/soone-y/DEV_PDF-Note-Workspace/blob/dev/Document/How_to_Build.md"
+    "https://github.com/soone-y/DEV_PDF-Note-Workspace/blob/dev/docs/public/How_to_Build.md"
 )
 
 
@@ -114,12 +114,12 @@ def replace_version_tokens(site_dir: Path, version: str) -> None:
 
 def replace_developer_only_links(site_dir: Path) -> None:
     """Keep public pages navigable while keeping the developer build guide private."""
-    targets = (site_dir / "README.md", site_dir / "Document" / "Index.md")
+    targets = (site_dir / "README.md", site_dir / "docs" / "public" / "Index.md")
     for markdown_file in targets:
         if not markdown_file.is_file():
             continue
         text = markdown_file.read_text(encoding="utf-8-sig")
-        text = text.replace("Document/How_to_Build.md", DEVELOPER_BUILD_GUIDE_URL)
+        text = text.replace("docs/public/How_to_Build.md", DEVELOPER_BUILD_GUIDE_URL)
         text = text.replace("(How_to_Build.md)", f"({DEVELOPER_BUILD_GUIDE_URL})")
         markdown_file.write_text(text, encoding="utf-8")
 

@@ -86,8 +86,8 @@ def validate_site(site: Path) -> list[str]:
     for relative_path in DOCUMENTATION_PORTAL_REQUIRED_FILES:
         if not (site / relative_path).is_file():
             errors.append(f"required public file is missing: {relative_path}")
-    if (site / "Document" / "How_to_Build.md").exists():
-        errors.append("developer-only Document/How_to_Build.md must not be public")
+    if (site / "docs" / "public" / "How_to_Build.md").exists():
+        errors.append("developer-only docs/public/How_to_Build.md must not be public")
     validate_text_encoding(site, errors)
     validate_structured_files(site, errors)
     validate_local_links(site, errors)

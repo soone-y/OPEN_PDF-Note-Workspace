@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI_CORE_NODE: DATA_SCHEMAS – PDF Note Workspace</title>
+  <style>
+    :root {
+      --bg-main: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --border-color: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --pre-bg: #0f172a;
+      --pre-text: #f8fafc;
+      --note-bg: #f0f9ff;
+      --note-border: #0284c7;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-main: #0f172a;
+        --card-bg: #1e293b;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0284c7;
+        --border-color: #334155;
+        --code-bg: #0f172a;
+        --pre-bg: #020617;
+        --pre-text: #f8fafc;
+        --note-bg: rgba(56, 189, 248, 0.1);
+        --note-border: #38bdf8;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.75;
+      padding: 24px 12px;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 28px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+
+    .doc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 14px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--accent);
+      flex-wrap: wrap;
+    }
+
+    .site-menu { position: relative; }
+
+    .site-menu summary {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      list-style: none;
+      padding: 6px 12px;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 0.88em;
+      font-weight: 600;
+    }
+
+    .site-menu summary::-webkit-details-marker { display: none; }
+    .menu-icon {
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      margin-right: 7px;
+      border-top: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      position: relative;
+    }
+    .menu-icon::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 3px;
+      border-top: 2px solid currentColor;
+    }
+    .site-menu summary:hover {
+      background-color: var(--border-color);
+    }
+
+    .site-menu nav {
+      position: absolute;
+      z-index: 1;
+      top: calc(100% + 8px);
+      left: 0;
+      min-width: 200px;
+      padding: 8px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .site-menu nav a {
+      display: block;
+      padding: 7px 9px;
+      color: var(--text-main);
+      font-size: 0.9em;
+      text-decoration: none;
+    }
+
+    .site-menu nav a:hover { background-color: var(--code-bg); }
+
+    .raw-md-link {
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+
+    h1 { font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }
+    h2 { font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }
+    h3 { font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }
+
+    p { margin-bottom: 1.1em; word-break: break-word; }
+
+    a { color: var(--accent); text-decoration: none; font-weight: 500; }
+    a:hover { text-decoration: underline; color: var(--accent-hover); }
+
+    code {
+      background-color: var(--code-bg);
+      color: var(--text-main);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      border: 1px solid var(--border-color);
+    }
+
+    pre {
+      background-color: var(--pre-bg);
+      color: var(--pre-text);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1.2em 0;
+      font-size: 0.9em;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background-color: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+
+    blockquote {
+      border-left: 4px solid var(--note-border);
+      background-color: var(--note-bg);
+      margin: 1.2em 0;
+      padding: 12px 16px;
+      color: var(--text-main);
+      border-radius: 0 6px 6px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      font-size: 0.92em;
+      overflow-x: auto;
+      display: block;
+    }
+
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--code-bg);
+      font-weight: 600;
+    }
+
+    ul, ol {
+      padding-left: 1.6em;
+      margin-bottom: 1.1em;
+    }
+
+    li { margin-bottom: 0.3em; }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 1em 0;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px dashed var(--border-color);
+      margin: 2em 0;
+    }
+
+    footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border-color);
+      text-align: center;
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="doc-header">
+
+    <div class="raw-md-link">
+      <a href="data_schemas.md" target="_blank">Raw Markdown</a>
+    </div>
+  </div>
+
+  <main>
+<h1>AI_CORE_NODE: DATA_SCHEMAS</h1>
+<p><ai_node_schema version="1.0" category="data-schemas"></p>
+<p>  <summary>.clrop (JSON注釈データ), .clro (標準ノート), pdf_workspace_setup.json (設定) のデータモデル・スキーマ仕様</summary></p>
+<p></ai_node_schema></p>
+<h2>1. 注釈保存ファイル (<code>.clrop</code> - ClassRoom PDF Annotation)</h2>
+<p><code>.clrop</code> は、PDF 本体を一切傷つけずに注釈・手書きペン・テキスト・図形を別保存するための標準 JSON フォーマットです。</p>
+<h3>全体構造 (Root JSON Schema)</h3>
+<pre><code>{
+  &quot;version&quot;: 1,
+  &quot;app_version&quot;: &quot;0.9.003&quot;,
+  &quot;target_pdf_hash&quot;: &quot;a1b2c3d4...&quot;,
+  &quot;page_count&quot;: 12,
+  &quot;pages&quot;: [
+    {
+      &quot;page_index&quot;: 0,
+      &quot;annotations&quot;: [
+        {
+          &quot;id&quot;: &quot;annot-uuid-1&quot;,
+          &quot;type&quot;: &quot;ink&quot;,
+          &quot;color&quot;: &quot;#FF0000&quot;,
+          &quot;opacity&quot;: 1.0,
+          &quot;thickness&quot;: 2.5,
+          &quot;points&quot;: [
+            { &quot;x&quot;: 100.5, &quot;y&quot;: 200.0 },
+            { &quot;x&quot;: 105.0, &quot;y&quot;: 202.5 }
+          ]
+        },
+        {
+          &quot;id&quot;: &quot;annot-uuid-2&quot;,
+          &quot;type&quot;: &quot;text&quot;,
+          &quot;color&quot;: &quot;#0000FF&quot;,
+          &quot;font_size&quot;: 14,
+          &quot;bounds&quot;: { &quot;x&quot;: 50, &quot;y&quot;: 80, &quot;w&quot;: 200, &quot;h&quot;: 100 },
+          &quot;content&quot;: &quot;ここに注釈メモ&quot;
+        }
+      ]
+    }
+  ]
+}</code></pre>
+<h3>注釈オブジェクトプロパティ (<code>AnnotationObject</code>)</h3>
+<table>
+<tr><th>フィールド</th><th>型</th><th>説明</th></tr>
+<tr><td><code>id</code></td><td>string</td><td>注釈ごとの固有識別子 (UUID v4)</td></tr>
+<tr><td><code>type</code></td><td>string</td><td><code>ink</code> (フリーハンド), <code>highlight</code> (マーカー), <code>text</code> (テキスト), <code>rect</code> (矩形), <code>line</code> (直線), <code>math</code> (TeX数式)</td></tr>
+<tr><td><code>color</code></td><td>string</td><td>HEX カラーコード (<code>#RRGGBB</code> または <code>#RRGGBBAA</code>)</td></tr>
+<tr><td><code>thickness</code></td><td>number</td><td>線の太さ（ピクセル）</td></tr>
+<tr><td><code>opacity</code></td><td>number</td><td>不透明度 (<code>0.0</code> 〜 <code>1.0</code>)</td></tr>
+<tr><td><code>points</code></td><td>array</td><td><code>ink</code> / <code>line</code> の場合の座標配列 <code>[ {x, y}, ... ]</code></td></tr>
+<tr><td><code>bounds</code></td><td>object</td><td><code>text</code> / <code>rect</code> の描画領域 <code>{x, y, w, h}</code></td></tr>
+<tr><td><code>content</code></td><td>string</td><td><code>text</code> や <code>math</code> の内容テキスト</td></tr>
+</table>
+<hr>
+<h2>2. アプリ標準ノート (<code>.clro</code> - ClassRoom Note)</h2>
+<p><code>.clro</code> は、Markdown をハイパーセットとしてサポートする標準テキストノートです。</p>
+<ul>
+<li><strong>フォーマット</strong>: UTF-8 エンコーディングのテキストファイル（BOMなし）。</li>
+<li><strong>Markdown 互換性</strong>: 標準的な GFM (GitHub Flavored Markdown) をそのまま開くことが可能。</li>
+<li><strong>拡張機能</strong>: TeX 数式ブロック (<code>$$ ... $$</code>), Mermaid ダイアグラム (<code> </code><code></code>mermaid ... <code></code><code> </code>) のローカル表示に対応。</li>
+</ul>
+<hr>
+<h2>3. アプリ設定ファイル (<code>pdf_workspace_setup.json</code>)</h2>
+<p>配布物およびワークスペースで環境設定を管理する JSON ファイルです。</p>
+<pre><code>{
+  &quot;version&quot;: 1,
+  &quot;ui&quot;: {
+    &quot;theme&quot;: &quot;light&quot;,
+    &quot;sidebar_width&quot;: 280,
+    &quot;last_workspace_dir&quot;: &quot;&quot;
+  },
+  &quot;annotation_defaults&quot;: {
+    &quot;pen_color&quot;: &quot;#FF0000&quot;,
+    &quot;pen_thickness&quot;: 2.0,
+    &quot;highlight_color&quot;: &quot;#FFFF0040&quot;
+  },
+  &quot;safety&quot;: {
+    &quot;no_network_strict&quot;: true,
+    &quot;silent_warning_policy&quot;: true,
+    &quot;atomic_save&quot;: true
+  }
+}</code></pre>
+  </main>
+
+  <footer>
+    PDF Note Workspace Documentation &copy; 2026
+  </footer>
+</div>
+
+</body>
+</html>

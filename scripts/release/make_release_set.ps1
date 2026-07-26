@@ -324,11 +324,11 @@ try {
     # ローカル確認・閲覧用 docs_html ディレクトリの生成（提出物には含めない）
     Ensure-Directory $docsHtmlDir
     if (-not $DryRun) {
-        $docOutDir = Join-Path $docsHtmlDir "Document"
+        $docOutDir = Join-Path $docsHtmlDir "public"
         Ensure-Directory $docOutDir
-        Copy-FileStrict -Source (Join-Path $repoRoot "index.html") -Destination (Join-Path $docsHtmlDir "index.html")
+        Copy-FileStrict -Source (Join-Path $repoRoot "site/github/index.html") -Destination (Join-Path $docsHtmlDir "index.html")
         Copy-FileStrict -Source (Join-Path $repoRoot "README.md") -Destination (Join-Path $docsHtmlDir "README.md")
-        $docFiles = Get-ChildItem -LiteralPath (Join-Path $repoRoot "Document") -Filter "*.md"
+        $docFiles = Get-ChildItem -LiteralPath (Join-Path $repoRoot "docs\public") -Filter "*.md"
         foreach ($file in $docFiles) {
             $destFile = Join-Path $docOutDir $file.Name
             Copy-FileStrict -Source $file.FullName -Destination $destFile
@@ -354,7 +354,7 @@ try {
         if (-not $pythonCommand) {
             $pythonCommand = Get-Command py -ErrorAction SilentlyContinue
         }
-        $renderScript = Join-Path $repoRoot "tools/dev/render_human_docs.py"
+        $renderScript = Join-Path $repoRoot "site/github/scripts/render_human_docs.py"
         if ($pythonCommand -and (Test-Path -LiteralPath $renderScript)) {
             Write-Info "Generating HTML documentation in docs_html..."
             & $pythonCommand.Source $renderScript $docsHtmlDir

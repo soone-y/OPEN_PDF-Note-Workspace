@@ -39,8 +39,8 @@ libreoffice_smoke_test = load_module("libreoffice_smoke_test", "tools/libreoffic
 libreoffice_conversion_quality_test = load_module(
     "libreoffice_conversion_quality_test", "tools/libreoffice/libreoffice_conversion_quality_test.py"
 )
-render_human_docs = load_module("render_human_docs", "tools/dev/render_human_docs.py")
-build_public_site = load_module("build_public_site", "tools/dev/build_public_site.py")
+render_human_docs = load_module("render_human_docs", "site/github/scripts/render_human_docs.py")
+build_public_site = load_module("build_public_site", "site/github/scripts/build_public_site.py")
 cpp_include_visualizer = load_module("cpp_include_visualizer", "tools/metrics/cpp_include_visualizer.py")
 md_structure_scanner = load_module("md_structure_scanner", "tools/dev/md_structure_scanner.py")
 persistence_index = load_module("persistence_index", "tools/dev/persistence_index.py")
@@ -1839,13 +1839,13 @@ class LibreOfficeConversionQualityToolTests(unittest.TestCase):
 
 
 class RenderHumanDocsTests(unittest.TestCase):
-    def test_generates_html_for_human_docs_only(self) -> None:
+    def test_generates_html_for_human_and_ai_docs(self) -> None:
         with repo_tempdir() as site_dir:
             readme = site_dir / "README.md"
             readme.write_text("# Project README\n\nSome text.", encoding="utf-8")
 
-            doc_dir = site_dir / "Document"
-            doc_dir.mkdir()
+            doc_dir = site_dir / "docs" / "public"
+            doc_dir.mkdir(parents=True)
             use_doc = doc_dir / "How_to_Use.md"
             use_doc.write_text("# How to Use\n\nUsage steps.", encoding="utf-8")
 
@@ -1857,22 +1857,54 @@ class RenderHumanDocsTests(unittest.TestCase):
 
             # 人間用ドキュメントの .html が作られていること
             self.assertTrue((site_dir / "README.html").exists())
-            self.assertTrue((site_dir / "Document" / "How_to_Use.html").exists())
+            self.assertTrue((site_dir / "docs" / "public" / "How_to_Use.html").exists())
+            human_html = (site_dir / "docs" / "public" / "How_to_Use.html").read_text(encoding="utf-8")
+            self.assertIn('class="site-menu"', human_html)
+            self.assertIn('GitHub リポジトリ', human_html)
+            self.assertNotIn('☰', human_html)
             # 生の .md も残っていること
             self.assertTrue(readme.exists())
             self.assertTrue(use_doc.exists())
-            # For_AI.html は作られないこと
-            self.assertFalse((site_dir / "For_AI.html").exists())
+            # AI向け資料もブラウザ用HTMLを生成し、生の .md は残すこと
+            self.assertTrue((site_dir / "For_AI.html").exists())
+            self.assertTrue(for_ai.exists())
+            ai_html = (site_dir / "For_AI.html").read_text(encoding="utf-8")
+            self.assertNotIn('class="site-menu"', ai_html)
+            self.assertIn('Raw Markdown', ai_html)
+            self.assertNotIn('📄', ai_html)
+
+
+class AiDocumentationStructureTests(unittest.TestCase):
+    def test_manifest_is_the_only_question_route_definition(self) -> None:
+        entry = (REPO_ROOT / "For_AI.md").read_text(encoding="utf-8")
+        manifest = json.loads((REPO_ROOT / "for_ai" / "manifest.json").read_text(encoding="utf-8-sig"))
+
+        self.assertIn("<ai_concierge_instruction", entry)
+        self.assertNotIn("ai_conierge_instruction", entry)
+        self.assertIn("<default_operational_mode>read_only_inquiry_response</default_operational_mode>", entry)
+        self.assertNotIn("[ROUTE_KEY:", entry)
+        self.assertNotIn("TARGET_NODES:", entry)
+        self.assertIn("route_definition_policy", manifest)
+        self.assertTrue(manifest["route_definition_policy"])
+
+        route_ids = [route["id"] for route in manifest["routes"]]
+        self.assertEqual(len(route_ids), len(set(route_ids)))
+        self.assertIn("safe_change", route_ids)
+        self.assertIn("ai_documentation_quality", route_ids)
+        self.assertIn("installation_and_updates", route_ids)
+        self.assertIn("customization_and_settings", route_ids)
+        self.assertIn("save_and_recovery_procedures", route_ids)
+        self.assertIn("support_and_feedback", route_ids)
 
 
 class BuildPublicSiteTests(unittest.TestCase):
     def test_builds_only_selected_files_and_keeps_machine_readable_index(self) -> None:
         with repo_tempdir() as root:
             (root / "for_ai" / "core").mkdir(parents=True)
-            (root / "Document").mkdir()
+            (root / "docs" / "public").mkdir(parents=True)
             (root / "docs" / "images").mkdir(parents=True)
-            (root / "site" / "src").mkdir(parents=True)
-            (root / "site" / "src" / "assets").mkdir()
+            (root / "site" / "github").mkdir(parents=True)
+            (root / ".github").mkdir()
 
             for name in (
                 "index.html", "For_AI.md", "README.md", "LICENSE.md", "LICENSES_INDEX.md",
@@ -1880,48 +1912,50 @@ class BuildPublicSiteTests(unittest.TestCase):
             ):
                 (root / name).write_text("__APP_VERSION__", encoding="utf-8")
             (root / "REPO_VERSION.txt").write_text("1.2.3\n", encoding="utf-8")
-            (root / "site" / "src" / "index.html").write_text("__APP_VERSION__", encoding="utf-8")
-            (root / "site" / "src" / "assets" / "og.png").write_bytes(b"og")
+            (root / "site" / "github" / "index.html").write_text("__APP_VERSION__", encoding="utf-8")
+            (root / ".github" / "SECURITY.md").write_text("# Security", encoding="utf-8")
             (root / "for_ai" / "core" / "semantic_search_index.json").write_text("{}", encoding="utf-8")
-            (root / "Document" / "How_to_Use.md").write_text("# Use __APP_VERSION__", encoding="utf-8")
-            (root / "Document" / "How_to_Build.md").write_text("private", encoding="utf-8")
+            (root / "docs" / "public" / "How_to_Use.md").write_text("# Use __APP_VERSION__", encoding="utf-8")
+            (root / "docs" / "public" / "How_to_Build.md").write_text("private", encoding="utf-8")
             (root / "docs" / "images" / "overview.png").write_bytes(b"image")
-            (root / "site" / "src" / "public_site_allowlist.json").write_text(
+            (root / "site" / "github" / "documentation_portal_allowlist.json").write_text(
                 json.dumps({
                     "schema_version": 1,
                     "version_source": "REPO_VERSION.txt",
-                    "files": [
-                        {
-                            "source": "site/src/index.html" if name == "index.html" else name,
-                            "destination": name,
-                        }
-                        for name in (
-                            "index.html", "For_AI.md", "README.md", "LICENSE.md",
-                            "LICENSES_INDEX.md", "THIRD_PARTY_NOTICES.md",
-                        )
-                    ] + [{"source": "site/src/assets/og.png", "destination": "og.png"}],
-                    "trees": [
-                        {"source": "for_ai", "destination": "for_ai"},
-                        {"source": "docs/images", "destination": "docs/images"},
-                    ],
-                    "document_markdown": {
-                        "source": "Document", "destination": "Document",
-                        "exclude": ["How_to_Build.md"],
+                    "documentation_portal": {
+                        "files": [
+                            {"source": name, "destination": name}
+                            for name in (
+                                "For_AI.md", "README.md", "LICENSE.md",
+                                "LICENSES_INDEX.md", "THIRD_PARTY_NOTICES.md",
+                            )
+                        ] + [
+                            {"source": ".github/SECURITY.md", "destination": ".github/SECURITY.md"},
+                        ],
+                        "trees": [
+                            {"source": "for_ai", "destination": "for_ai"},
+                            {"source": "docs/images", "destination": "docs/images"},
+                        ],
+                        "document_markdown": {
+                            "source": "docs/public", "destination": "docs/public",
+                            "exclude": ["How_to_Build.md"],
+                        },
                     },
                 }),
                 encoding="utf-8",
             )
 
             with mock.patch.object(build_public_site, "REPO_ROOT", root), \
+                 mock.patch.object(build_public_site, "GITHUB_SITE_ROOT", root / "site" / "github"), \
+                 mock.patch.object(build_public_site, "ALLOWLIST_PATH", root / "site" / "github" / "documentation_portal_allowlist.json"), \
                  mock.patch.object(build_public_site, "OUTPUT_DIR", root / "_site"):
-                self.assertEqual(build_public_site.build_site(), 0)
+                self.assertEqual(build_public_site.build_site(documentation_portal=True), 0)
 
             site = root / "_site"
             self.assertTrue((site / "for_ai" / "core" / "semantic_search_index.json").exists())
-            self.assertTrue((site / "Document" / "How_to_Use.md").exists())
-            self.assertFalse((site / "Document" / "How_to_Build.md").exists())
-            self.assertEqual((site / "Document" / "How_to_Use.md").read_text(encoding="utf-8"), "# Use 1.2.3")
-
+            self.assertTrue((site / "docs" / "public" / "How_to_Use.md").exists())
+            self.assertFalse((site / "docs" / "public" / "How_to_Build.md").exists())
+            self.assertEqual((site / "docs" / "public" / "How_to_Use.md").read_text(encoding="utf-8"), "# Use 1.2.3")
 
 if __name__ == "__main__":
     unittest.main()

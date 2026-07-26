@@ -16,8 +16,8 @@
       { "source": "docs/images", "destination": "docs/images" }
     ],
     "document_markdown": {
-      "source": "Document",
-      "destination": "Document",
+      "source": "docs/public",
+      "destination": "docs/public",
       "exclude": ["How_to_Build.md"]
     }
   }

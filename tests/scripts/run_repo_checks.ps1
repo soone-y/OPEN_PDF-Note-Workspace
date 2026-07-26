@@ -63,14 +63,13 @@ $liteBinaryOutputDir = Join-Path $repoRoot "out/bin_lite"
 $repoVersionPath = Join-Path $repoRoot "REPO_VERSION.txt"
 $versionTrackedDocumentationPaths = @(
     (Join-Path $repoRoot "README.md"),
-    (Join-Path $repoRoot "docs/public/README.md"),
-    (Join-Path $repoRoot "Document/Index.md"),
-    (Join-Path $repoRoot "Document/How_to_Build.md"),
-    (Join-Path $repoRoot "Document/What_is_File_Formats.md"),
-    (Join-Path $repoRoot "Document/How_to_Save_and_Recovery.md"),
-    (Join-Path $repoRoot "Document/How_to_Setup.md"),
-    (Join-Path $repoRoot "Document/How_to_Troubleshoot.md"),
-    (Join-Path $repoRoot "Document/How_to_Use.md")
+    (Join-Path $repoRoot "docs/public/Index.md"),
+    (Join-Path $repoRoot "docs/public/How_to_Build.md"),
+    (Join-Path $repoRoot "docs/public/What_is_File_Formats.md"),
+    (Join-Path $repoRoot "docs/public/How_to_Save_and_Recovery.md"),
+    (Join-Path $repoRoot "docs/public/How_to_Setup.md"),
+    (Join-Path $repoRoot "docs/public/How_to_Troubleshoot.md"),
+    (Join-Path $repoRoot "docs/public/How_to_Use.md")
 )
 $appBuildInfoManifestPath = Join-Path $binaryOutputDir "pdf_note_workspace.exe.buildinfo.txt"
 $liteAppBuildInfoManifestPath = Join-Path $liteBinaryOutputDir "pdf_note_workspace.exe.buildinfo.txt"

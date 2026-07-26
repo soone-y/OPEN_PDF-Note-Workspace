@@ -448,7 +448,7 @@ try {
         Sanitize-LibreOfficeRuntimeForRelease -ImageDir $releaseLoRuntime
     }
 
-    $documentSource = Join-Path $repoRoot "Document"
+    $documentSource = Join-Path $repoRoot "docs\public"
     if (Test-Path -LiteralPath $documentSource) {
         Copy-DirectoryContents -SourceDir $documentSource -DestDir $docsDir
     }
@@ -458,15 +458,9 @@ try {
         Copy-File -Source $releaseReadme -Dest (Join-Path $docsDir "README.md")
     }
     else {
-        $publicReadme = Join-Path $repoRoot "docs\public\README.md"
-        if (Test-Path -LiteralPath $publicReadme) {
-            Copy-File -Source $publicReadme -Dest (Join-Path $docsDir "README.md")
-        }
-        else {
-            $repoReadme = Join-Path $repoRoot "README.md"
-            if (Test-Path -LiteralPath $repoReadme) {
-                Copy-File -Source $repoReadme -Dest (Join-Path $docsDir "README.md")
-            }
+        $repoReadme = Join-Path $repoRoot "README.md"
+        if (Test-Path -LiteralPath $repoReadme) {
+            Copy-File -Source $repoReadme -Dest (Join-Path $docsDir "README.md")
         }
     }
     Apply-RepoVersionMarkers -DocsDir $docsDir -RepoVersion $repoVersion

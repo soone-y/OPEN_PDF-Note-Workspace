@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI_CORE_NODE: USER_GUIDANCE_REFERENCE – PDF Note Workspace</title>
+  <style>
+    :root {
+      --bg-main: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --border-color: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --pre-bg: #0f172a;
+      --pre-text: #f8fafc;
+      --note-bg: #f0f9ff;
+      --note-border: #0284c7;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-main: #0f172a;
+        --card-bg: #1e293b;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0284c7;
+        --border-color: #334155;
+        --code-bg: #0f172a;
+        --pre-bg: #020617;
+        --pre-text: #f8fafc;
+        --note-bg: rgba(56, 189, 248, 0.1);
+        --note-border: #38bdf8;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.75;
+      padding: 24px 12px;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 28px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+
+    .doc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 14px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--accent);
+      flex-wrap: wrap;
+    }
+
+    .site-menu { position: relative; }
+
+    .site-menu summary {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      list-style: none;
+      padding: 6px 12px;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 0.88em;
+      font-weight: 600;
+    }
+
+    .site-menu summary::-webkit-details-marker { display: none; }
+    .menu-icon {
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      margin-right: 7px;
+      border-top: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      position: relative;
+    }
+    .menu-icon::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 3px;
+      border-top: 2px solid currentColor;
+    }
+    .site-menu summary:hover {
+      background-color: var(--border-color);
+    }
+
+    .site-menu nav {
+      position: absolute;
+      z-index: 1;
+      top: calc(100% + 8px);
+      left: 0;
+      min-width: 200px;
+      padding: 8px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .site-menu nav a {
+      display: block;
+      padding: 7px 9px;
+      color: var(--text-main);
+      font-size: 0.9em;
+      text-decoration: none;
+    }
+
+    .site-menu nav a:hover { background-color: var(--code-bg); }
+
+    .raw-md-link {
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+
+    h1 { font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }
+    h2 { font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }
+    h3 { font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }
+
+    p { margin-bottom: 1.1em; word-break: break-word; }
+
+    a { color: var(--accent); text-decoration: none; font-weight: 500; }
+    a:hover { text-decoration: underline; color: var(--accent-hover); }
+
+    code {
+      background-color: var(--code-bg);
+      color: var(--text-main);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      border: 1px solid var(--border-color);
+    }
+
+    pre {
+      background-color: var(--pre-bg);
+      color: var(--pre-text);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1.2em 0;
+      font-size: 0.9em;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background-color: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+
+    blockquote {
+      border-left: 4px solid var(--note-border);
+      background-color: var(--note-bg);
+      margin: 1.2em 0;
+      padding: 12px 16px;
+      color: var(--text-main);
+      border-radius: 0 6px 6px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      font-size: 0.92em;
+      overflow-x: auto;
+      display: block;
+    }
+
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--code-bg);
+      font-weight: 600;
+    }
+
+    ul, ol {
+      padding-left: 1.6em;
+      margin-bottom: 1.1em;
+    }
+
+    li { margin-bottom: 0.3em; }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 1em 0;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px dashed var(--border-color);
+      margin: 2em 0;
+    }
+
+    footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border-color);
+      text-align: center;
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="doc-header">
+
+    <div class="raw-md-link">
+      <a href="user_guidance_reference.md" target="_blank">Raw Markdown</a>
+    </div>
+  </div>
+
+  <main>
+<h1>AI_CORE_NODE: USER_GUIDANCE_REFERENCE</h1>
+<p><ai_node_schema version="1.0" category="user-guidance-reference"></p>
+<p>  <summary>導入、利用者が変更できる範囲、保存・復元、支援依頼を説明するための参照ノード</summary></p>
+<p>  <answer_rule>画面や版による差異を断定せず、利用者の版、通常版かLite版か、Windows環境、対象ファイルを確認する。</answer_rule></p>
+<p></ai_node_schema></p>
+<h2>1. 導入と更新</h2>
+<p>利用者向けの正本は <code>docs/public/How_to_Setup.md</code> である。AIは導入を案内するとき、次の順序を崩さない。</p>
+<p>1. GitHub Releases の Assets から、通常版または Lite版の ZIP を一つ選ぶ。ソースコード ZIP はアプリ配布物ではない。</p>
+<p>2. ZIP を書き込み可能なローカルフォルダへ展開する。ZIP 内を直接実行しない。</p>
+<p>3. EXE、DLL、通常版の LibreOffice runtime、<code>pdf_workspace_setup.json</code> は同じ配布フォルダに置いたままにする。</p>
+<p>4. 配布フォルダとは別のローカルフォルダをワークスペースとして開く。</p>
+<p>5. 更新時は新しい ZIP を別フォルダへ展開して起動を確認し、ワークスペースを新しいアプリから開く。</p>
+<p>通常版は DOCX/PPTX のローカル PDF 変換を含む。Lite版はその変換を含まない。変換は試験的なため、結果を確認してから使う。</p>
+<p>EVIDENCE:</p>
+<ul>
+<li><code>docs/public/How_to_Setup.md</code></li>
+<li><code>docs/public/Index.md</code></li>
+<li><code>README.md</code></li>
+</ul>
+<h2>2. 利用者が変更できる範囲</h2>
+<p>利用者がアプリ内の設定画面から調整できる項目には、一般設定、ノート設定、マークアップ設定、注釈設定、カラーパレット設定がある。ノート、PDFテキスト、IME変換中は入力を優先する。注釈ツールのショートカットは設定画面で確認でき、設定ファイルはワークスペース内の <code>__resource__/__settings__/tool_shortcuts.json</code> に置かれる。</p>
+<p>ノートと注釈では、既定の選択肢にあるフォントを選べる。ノート内の <code>font</code> / <code>f</code> タグによる部分的なフォント指定も扱う。フォントの字幅により折り返し位置が変わることがある。</p>
+<p>次はカスタマイズの対象として案内しない。</p>
+<ul>
+<li>配布フォルダ内の EXE、DLL、runtime、<code>pdf_workspace_setup.json</code> を個別に移動・混在・改名すること</li>
+<li>stage、バックアップ、復旧用の <code>__resource__</code> 配下を、内容確認前に手動削除すること</li>
+<li>PDFの既定アプリを、利用者の明示操作なしに変更すること</li>
+</ul>
+<p>設定ファイルの手編集、未掲載の設定値、版ごとの画面差については、ファイル例だけから断定しない。該当版の設定画面、設定の読込・保存コード、テストを確認する。</p>
+<p>EVIDENCE:</p>
+<ul>
+<li><code>src/settings/settings.h</code></li>
+<li><code>src/help/help.cpp</code></li>
+<li><code>docs/public/How_to_Setup.md</code></li>
+<li><code>docs/public/How_to_Troubleshoot.md</code></li>
+</ul>
+<h2>3. 保存・復元の段階</h2>
+<p>保存は、編集内容を原本へ即時に書く処理ではない。説明では次を区別する。</p>
+<table>
+<tr><th>段階</th><th>意味</th><th>利用者の操作・注意</th></tr>
+<tr><td>stage 保護</td><td>編集途中の内容を保護する</td><td>自動保護は原本への統合を意味しない</td></tr>
+<tr><td>差分確認</td><td>未統合の変更を確認する</td><td>「操作 > 差分管理...」または「保存 > 差分管理...」を使う</td></tr>
+<tr><td>統合保存</td><td><code>Ctrl+S</code> または保存メニューで、バックアップ作成後に原本へ安全に反映する</td><td>区切りのよい時点で行う</td></tr>
+<tr><td>復元</td><td>保存済みバックアップへ戻す</td><td>未統合 stage との関係を確認してから「保存 > 復元/バックアップ...」を使う</td></tr>
+<tr><td>失敗時の退避</td><td>ノート保存に失敗した内容を退避する</td><td>stage、バックアップ、退避データを削除せず、表示内容と時刻を控える</td></tr>
+</table>
+<p>主な保護領域は次の通りである。</p>
+<pre><code>stage: __resource__/__tmp__/__stage__/
+backup: __resource__/__escape__/backup/
+note recovery: __resource__/__escape__/note_recovery/</code></pre>
+<p>保存後の undo/redo と、保存済みの以前の状態への復元は別である。前者は編集画面の undo/redo、後者は復元/バックアップを案内する。</p>
+<p>EVIDENCE:</p>
+<ul>
+<li><code>docs/public/How_to_Save_and_Recovery.md</code></li>
+<li><code>docs/public/How_to_Use.md</code></li>
+<li><code>docs/public/How_to_Troubleshoot.md</code></li>
+<li><code>src/help/help.cpp</code></li>
+</ul>
+<h2>4. 支援依頼と開発者への連絡</h2>
+<p>このリポジトリには、利用者向けのメールアドレスや、常時利用できる問い合わせフォームは文書化されていない。AIは、開発者が返信すること、新規 Issue を作成できること、特定の外部連絡手段が使えることを保証してはならない。</p>
+<p>GitHubリポジトリの Issues や Discussions を案内する場合は、案内時点で投稿可否と利用規約を確認する。問題を整理する支援では、外部送信を実行せず、次を利用者に確認する。</p>
+<ul>
+<li>アプリの版、通常版かLite版か、Windows の版</li>
+<li>対象ファイルの種類と、保存前・保存後・未統合 stage のどの状態か</li>
+<li>再現手順、期待した結果、実際の結果、表示されたエラー文</li>
+<li>原本、stage、バックアップを削除・改名・上書きしていないこと</li>
+</ul>
+<p>セキュリティ上の問題は、通常の公開報告を促す前に <code>.github/SECURITY.md</code> を確認する。</p>
+<p>EVIDENCE:</p>
+<ul>
+<li><code>docs/public/How_to_Troubleshoot.md</code></li>
+<li><code>.github/SECURITY.md</code></li>
+<li><code>https://github.com/soone-y/OPEN_PDF-Note-Workspace</code></li>
+</ul>
+  </main>
+
+  <footer>
+    PDF Note Workspace Documentation &copy; 2026
+  </footer>
+</div>
+
+</body>
+</html>

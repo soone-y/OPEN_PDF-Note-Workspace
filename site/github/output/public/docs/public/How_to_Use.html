@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>使い方 – PDF Note Workspace</title>
+  <style>
+    :root {
+      --bg-main: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --border-color: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --pre-bg: #0f172a;
+      --pre-text: #f8fafc;
+      --note-bg: #f0f9ff;
+      --note-border: #0284c7;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-main: #0f172a;
+        --card-bg: #1e293b;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0284c7;
+        --border-color: #334155;
+        --code-bg: #0f172a;
+        --pre-bg: #020617;
+        --pre-text: #f8fafc;
+        --note-bg: rgba(56, 189, 248, 0.1);
+        --note-border: #38bdf8;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.75;
+      padding: 24px 12px;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 28px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+
+    .doc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 14px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--accent);
+      flex-wrap: wrap;
+    }
+
+    .site-menu { position: relative; }
+
+    .site-menu summary {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      list-style: none;
+      padding: 6px 12px;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 0.88em;
+      font-weight: 600;
+    }
+
+    .site-menu summary::-webkit-details-marker { display: none; }
+    .menu-icon {
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      margin-right: 7px;
+      border-top: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      position: relative;
+    }
+    .menu-icon::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 3px;
+      border-top: 2px solid currentColor;
+    }
+    .site-menu summary:hover {
+      background-color: var(--border-color);
+    }
+
+    .site-menu nav {
+      position: absolute;
+      z-index: 1;
+      top: calc(100% + 8px);
+      left: 0;
+      min-width: 200px;
+      padding: 8px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .site-menu nav a {
+      display: block;
+      padding: 7px 9px;
+      color: var(--text-main);
+      font-size: 0.9em;
+      text-decoration: none;
+    }
+
+    .site-menu nav a:hover { background-color: var(--code-bg); }
+
+    .raw-md-link {
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+
+    h1 { font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }
+    h2 { font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }
+    h3 { font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }
+
+    p { margin-bottom: 1.1em; word-break: break-word; }
+
+    a { color: var(--accent); text-decoration: none; font-weight: 500; }
+    a:hover { text-decoration: underline; color: var(--accent-hover); }
+
+    code {
+      background-color: var(--code-bg);
+      color: var(--text-main);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      border: 1px solid var(--border-color);
+    }
+
+    pre {
+      background-color: var(--pre-bg);
+      color: var(--pre-text);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1.2em 0;
+      font-size: 0.9em;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background-color: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+
+    blockquote {
+      border-left: 4px solid var(--note-border);
+      background-color: var(--note-bg);
+      margin: 1.2em 0;
+      padding: 12px 16px;
+      color: var(--text-main);
+      border-radius: 0 6px 6px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      font-size: 0.92em;
+      overflow-x: auto;
+      display: block;
+    }
+
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--code-bg);
+      font-weight: 600;
+    }
+
+    ul, ol {
+      padding-left: 1.6em;
+      margin-bottom: 1.1em;
+    }
+
+    li { margin-bottom: 0.3em; }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 1em 0;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px dashed var(--border-color);
+      margin: 2em 0;
+    }
+
+    footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border-color);
+      text-align: center;
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="doc-header">
+    <details class="site-menu">
+      <summary aria-label="文書メニューを開く"><span class="menu-icon" aria-hidden="true"></span>文書メニュー</summary>
+      <nav aria-label="文書メニュー">
+        <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace" target="_blank" rel="noopener noreferrer">GitHub リポジトリ</a>
+        <a href="../../index.html">ポータルへ戻る</a>
+        <a href="../../README.html">README</a>
+        <a href="../../docs/public/Index.html">文書案内</a>
+        <a href="../../docs/public/How_to_Setup.html">セットアップ</a>
+        <a href="../../docs/public/How_to_Use.html">基本操作</a>
+        <a href="../../LICENSE.html">ライセンス</a>
+        <a href="../../THIRD_PARTY_NOTICES.html">第三者通知</a>
+      </nav>
+    </details>
+    <div class="raw-md-link">
+      <a href="How_to_Use.md" target="_blank">Raw Markdown</a>
+    </div>
+  </div>
+
+  <main>
+<h1>使い方</h1>
+<p>同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)</p>
+<p>この文書では、PDF とノートを安全に扱い始めるための基本操作を案内します。迷ったときは、まず保存せずに画面の表示とファイル名を確認してください。</p>
+<p><img src="../images/app_overview.png" alt="PDF Note Workspace メイン画面"><br><em>PDF Note Workspace メイン画面</em></p>
+<p>*（PDF閲覧・非破壊注釈・手書きメモ・ノート編集を1画面で行えるメイン操作画面）*</p>
+<h2>1. 最初にすること</h2>
+<p>1. 配布物を、書き込み可能なフォルダへ展開します。ZIP の中から直接起動しないでください。展開、ショートカット、関連付け、更新の詳細は <a href="How_to_Setup.html">How_to_Setup.md</a> を参照してください。</p>
+<p>2. 通常は <code>pdf_note_workspace.exe</code> を起動します。PDF やノートを閲覧だけしたい場合は、<code>readonly_viewer.exe</code> を使えます。</p>
+<p>3. 初回確認には <code>sample_workspace/</code> を使えます。自分の資料で作業を始める前に、必要ならこのフォルダを複製して別名のワークスペースとして使ってください。</p>
+<p><code>readonly_viewer.exe</code> は、同梱文書や一般的なテキストを確認するための簡易ビューアです。PDF への注釈やノート編集には通常版を使います。</p>
+<h2>Office ファイルや画像を PDF にする</h2>
+<p>通常版では <code>.docx</code> と <code>.pptx</code> を PDF へ変換して、現在のワークスペースの PDF 欄へ取り込めます。メニューの「LibreOfficeでDOCX/PPTXをPDFに変換（試験的）...」を使うか、ワークスペースへファイルをドロップします。ドロップ時は対象一覧と確認が表示され、「変換する」を選んだ場合だけ変換します。</p>
+<p>また、画像ファイル（<code>.png</code> / <code>.jpg</code> / <code>.jpeg</code>）も 1 ページの PDF へ変換してワークスペースへ取り込めます。PDF 一覧の右クリックメニューから「画像をPDFに変換（1ページPDF作成）」を選ぶか、ファイルをドロップして取り込みます。元の画像ファイルは変更せず、画像の解像度・サイズに基づき 1 ページの PDF を生成します。</p>
+<p>変換は同梱 LibreOffice やローカルライブラリを使う完全なローカル処理です。Microsoft Office や外部オンライン変換サービスには接続しません。元の DOCX/PPTX や画像は変更せず、変換結果の PDF を確認してから使ってください。Office 文書のフォント、図形、数式などによっては、見た目が元の Office 文書と完全には一致しないことがあります。</p>
+<p>Lite版はウィンドウ名に <code>Lite</code> と表示され、Office-to-PDF 変換 runtime を含みません。Lite版へ DOCX/PPTX をドロップしても変換・取込みは行わず、使えないことを表示します（画像からの 1 ページ PDF 作成および既存の PDF の取り込みは利用できます）。</p>
+<p><code>.md</code> の Mermaid flowchart は、ビューアで「図表  Ctrl+4」を選ぶと図として確認できます。初期対応は <code>flowchart</code> / <code>graph</code> の基本的なノード、矢印、<code>subgraph</code> に限られます。ノードはラベル量に応じて大きさを調節します。1つの文書に対応済みの図表が複数ある場合は、まとめて表示します。図表上ではマウスホイールで上下へ移動し、<code>Ctrl</code> を押しながらホイールを回すと縮小・拡大できます。右クリックすると専用の図表ウィンドウを開き、拡大・縮小・等倍ボタンとスクロールで詳しく確認できます。未対応の構文やエラーがある場合は、Raw または装飾表示で原文を確認してください。図表の表示は読み取り専用で、Markdown ファイルを変更・保存しません。</p>
+<h2>2. ワークスペースを開く</h2>
+<p>メニューの「ワークスペースを開く...」から、作業フォルダを選びます。PDF、ノート、注釈はワークスペース内でまとめて扱います。</p>
+<p>PDF 本体には直接書き込まず、注釈は別データとして保存します。そのため、元の PDF を保ったまま注釈作業ができます。</p>
+<p>作業用フォルダは、授業・資料・案件など、あとで見分けられる単位で分けると管理しやすくなります。アプリが管理する <code>__resource__</code> フォルダは、復旧や編集途中の保護にも使われるため、通常は手動で移動・削除しないでください。</p>
+<h2>注釈入り PDF を別ファイルとして書き出す</h2>
+<p>注釈を反映した PDF を共有・提出したいときは、次の手順で注釈入り PDF を作成します。</p>
+<p>1. 注釈を付けた PDF を開きます。</p>
+<p>2. メニューバーの <strong>出力</strong> から <strong>簡単: 注釈を統合してPDF出力...</strong> を選びます。</p>
+<p>3. 出力先とファイル名を指定して、出力します。</p>
+<p>書き出し時には、未保存の注釈を先に保存してから出力します。元の PDF と <code>.clrop</code> は上書きされず、注釈を反映した別の PDF ファイルが作られます。既にあるファイル名には出力できないため、新しい名前を指定してください。</p>
+<blockquote><p>[!NOTE]</p></blockquote>
+<blockquote><p>文字色変更注釈を含む PDF は、現在は注釈入り PDF として書き出せません。この場合は出力ファイルを作成せず、理由を表示します。</p></blockquote>
+<h2>3. ノートを作る</h2>
+<p>「ノート作成」で新しいノートを作れます。既定の拡張子は <code>.clro</code> です。</p>
+<ul>
+<li><code>.clro</code> は本ソフトで作成・管理する標準ノートです。</li>
+<li><code>.md</code> / <code>.markdown</code> は他の Markdown ツールとの互換性を優先したい場合に選べます。</li>
+<li><code>.tex</code> は TeX の数式を含むノートに使えます。</li>
+<li><code>.txt</code> / <code>.csv</code> は書式を解釈しないプレーンテキストです。<code>.csv</code> の表計算用の特別な処理は行いません。</li>
+</ul>
+<p>詳しくは <a href="What_is_File_Formats.html">What_is_File_Formats.md</a> を参照してください。</p>
+<p>ファイル名は、内容が分かる短い名前にします。既にある <code>.md</code> や <code>.txt</code> を開いて編集しても、アプリが勝手に <code>.clro</code> に変更することはありません。</p>
+<h2>4. 編集内容を保存する</h2>
+<p>編集途中の内容は、まず stage（編集途中を保護する領域）へ保存されます。原本へ反映するには、区切りのよいタイミングで <code>Ctrl+S</code> または保存メニューを使います。</p>
+<p>保存前にはバックアップが作られます。保存中にエラーが出た場合は、何度も上書きしようとせず、表示内容を控えてから <a href="How_to_Troubleshoot.html">How_to_Troubleshoot.md</a> を確認してください。保存と復元の仕組みは <a href="How_to_Save_and_Recovery.html">How_to_Save_and_Recovery.md</a> にまとめています。</p>
+<h2>5. 困ったとき</h2>
+<p>アプリ内の「ヘルプ」では、カテゴリを選んで必要な説明を確認できます。「ヘルプ > 独自拡張子 (.clro)」はノート拡張子の説明を直接開きます。</p>
+<p>保存失敗、復元、開けないファイルなどは <a href="How_to_Troubleshoot.html">How_to_Troubleshoot.md</a> を参照してください。</p>
+<p>ヘルプはアプリに同梱されており、外部サイトへ接続しません。</p>
+  </main>
+
+  <footer>
+    PDF Note Workspace Documentation &copy; 2026
+  </footer>
+</div>
+
+</body>
+</html>

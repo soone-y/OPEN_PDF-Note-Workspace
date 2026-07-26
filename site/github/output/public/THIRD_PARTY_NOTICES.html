@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Third-Party Notices – PDF Note Workspace</title>
+  <style>
+    :root {
+      --bg-main: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --border-color: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --pre-bg: #0f172a;
+      --pre-text: #f8fafc;
+      --note-bg: #f0f9ff;
+      --note-border: #0284c7;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-main: #0f172a;
+        --card-bg: #1e293b;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0284c7;
+        --border-color: #334155;
+        --code-bg: #0f172a;
+        --pre-bg: #020617;
+        --pre-text: #f8fafc;
+        --note-bg: rgba(56, 189, 248, 0.1);
+        --note-border: #38bdf8;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.75;
+      padding: 24px 12px;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 28px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+
+    .doc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 14px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--accent);
+      flex-wrap: wrap;
+    }
+
+    .site-menu { position: relative; }
+
+    .site-menu summary {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      list-style: none;
+      padding: 6px 12px;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 0.88em;
+      font-weight: 600;
+    }
+
+    .site-menu summary::-webkit-details-marker { display: none; }
+    .menu-icon {
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      margin-right: 7px;
+      border-top: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      position: relative;
+    }
+    .menu-icon::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 3px;
+      border-top: 2px solid currentColor;
+    }
+    .site-menu summary:hover {
+      background-color: var(--border-color);
+    }
+
+    .site-menu nav {
+      position: absolute;
+      z-index: 1;
+      top: calc(100% + 8px);
+      left: 0;
+      min-width: 200px;
+      padding: 8px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    }
+
+    .site-menu nav a {
+      display: block;
+      padding: 7px 9px;
+      color: var(--text-main);
+      font-size: 0.9em;
+      text-decoration: none;
+    }
+
+    .site-menu nav a:hover { background-color: var(--code-bg); }
+
+    .raw-md-link {
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+
+    h1 { font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }
+    h2 { font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }
+    h3 { font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }
+
+    p { margin-bottom: 1.1em; word-break: break-word; }
+
+    a { color: var(--accent); text-decoration: none; font-weight: 500; }
+    a:hover { text-decoration: underline; color: var(--accent-hover); }
+
+    code {
+      background-color: var(--code-bg);
+      color: var(--text-main);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      border: 1px solid var(--border-color);
+    }
+
+    pre {
+      background-color: var(--pre-bg);
+      color: var(--pre-text);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1.2em 0;
+      font-size: 0.9em;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background-color: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+
+    blockquote {
+      border-left: 4px solid var(--note-border);
+      background-color: var(--note-bg);
+      margin: 1.2em 0;
+      padding: 12px 16px;
+      color: var(--text-main);
+      border-radius: 0 6px 6px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      font-size: 0.92em;
+      overflow-x: auto;
+      display: block;
+    }
+
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--code-bg);
+      font-weight: 600;
+    }
+
+    ul, ol {
+      padding-left: 1.6em;
+      margin-bottom: 1.1em;
+    }
+
+    li { margin-bottom: 0.3em; }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 1em 0;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px dashed var(--border-color);
+      margin: 2em 0;
+    }
+
+    footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border-color);
+      text-align: center;
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="doc-header">
+    <details class="site-menu">
+      <summary aria-label="文書メニューを開く"><span class="menu-icon" aria-hidden="true"></span>文書メニュー</summary>
+      <nav aria-label="文書メニュー">
+        <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace" target="_blank" rel="noopener noreferrer">GitHub リポジトリ</a>
+        <a href="./index.html">ポータルへ戻る</a>
+        <a href="./README.html">README</a>
+        <a href="./docs/public/Index.html">文書案内</a>
+        <a href="./docs/public/How_to_Setup.html">セットアップ</a>
+        <a href="./docs/public/How_to_Use.html">基本操作</a>
+        <a href="./LICENSE.html">ライセンス</a>
+        <a href="./THIRD_PARTY_NOTICES.html">第三者通知</a>
+      </nav>
+    </details>
+    <div class="raw-md-link">
+      <a href="THIRD_PARTY_NOTICES.md" target="_blank">Raw Markdown</a>
+    </div>
+  </div>
+
+  <main>
+<h1>Third-Party Notices</h1>
+<p>本書は、<code>PDF Note Workspace</code> が利用または配布時に同梱する第三者コンポーネントの実態を整理したものです。</p>
+<p>プロジェクト本体と、別ライセンス表記のないリポジトリ同梱素材のライセンスは <code>LICENSE.md</code> を参照してください。</p>
+<p>release パッケージ利用時は、まず <code>docs/THIRD_PARTY_NOTICES.md</code> と <code>licenses/</code> 配下を参照してください。本書中の <code>third_party/...</code> は、リポジトリ上の元配置を示します。</p>
+<h2>1. 同梱/配布する第三者コンポーネント</h2>
+<table>
+<tr><th>コンポーネント</th><th>用途</th><th>同梱形態</th><th>ライセンス参照</th></tr>
+<tr><td>PDFium package <code>145.0.7568.0</code></td><td>PDF の読み込み、描画、テキスト抽出、書き出し</td><td><code>third_party/pdfium/</code> を同梱。release では <code>pdfium.dll</code> と対応ライセンス文書を配布</td><td><code>third_party/pdfium/LICENSE</code>, <code>third_party/pdfium/licenses/</code></td></tr>
+<tr><td>MD4C</td><td>Markdown 解析</td><td><code>third_party/md4c/</code> をリポジトリへ配置。導入時は <code>md4c.c</code>, <code>md4c.h</code>, <code>LICENSE.md</code> を参照</td><td><code>third_party/md4c/LICENSE.md</code></td></tr>
+<tr><td>LibreOffice <code>26.2.3.2</code></td><td>同梱フォントのアプリ内 private font 利用。docx/pptx から PDF への headless 変換</td><td><code>third_party/libreoffice/image/</code> は比較・フォント・license 参照用。変換 runtime は通信機能を持たないカスタム build を標準 release へ配置する</td><td><code>third_party/libreoffice/image/license.txt</code>, <code>third_party/libreoffice/image/LICENSE.html</code>, <code>third_party/libreoffice/image/NOTICE</code></td></tr>
+<tr><td>MinGW-w64 runtime DLLs</td><td><code>pdf_note_workspace.exe</code> と <code>readonly_viewer.exe</code> 実行に必要な C++/GCC runtime</td><td><code>libstdc++-6.dll</code>, <code>libgcc_s_seh-1.dll</code>, <code>libwinpthread-1.dll</code> を <code>out/bin/</code> と release へコピー</td><td><code>third_party/mingw_runtime_licenses/mingw-w64/</code></td></tr>
+<tr><td>zlib runtime</td><td>DOCX staging copy の ZIP 展開/検証</td><td><code>zlib1.dll</code> を <code>out/bin/</code> と release へコピー</td><td><code>third_party/pdfium/licenses/zlib.txt</code></td></tr>
+</table>
+<h2>2. PDFium</h2>
+<h3>2.1 実装上の位置づけ</h3>
+<ul>
+<li>ビルド時:</li>
+</ul>
+<p>  - <code>third_party/pdfium/include/</code></p>
+<p>  - <code>third_party/pdfium/lib/pdfium.dll.lib</code></p>
+<ul>
+<li>実行時:</li>
+</ul>
+<p>  - <code>third_party/pdfium/bin/pdfium.dll</code></p>
+<p>  - release では <code>pdfium.dll</code></p>
+<ul>
+<li>バージョン:</li>
+</ul>
+<p>  - <code>third_party/pdfium/VERSION</code>: <code>145.0.7568.0</code></p>
+<p>  - <code>third_party/pdfium/PDFiumConfig.cmake</code>: <code>145.0.7568.0</code></p>
+<h3>2.2 ライセンス文書</h3>
+<ul>
+<li>パッケージ配布物そのもののライセンス:</li>
+</ul>
+<p>  - <code>third_party/pdfium/LICENSE</code></p>
+<p>  - 内容: MIT ライセンス系の文面</p>
+<p>  - 著作権表示: <code>Copyright 2014-2025 Benoit Blanchon</code></p>
+<ul>
+<li>PDFium 本体のライセンス:</li>
+</ul>
+<p>  - <code>third_party/pdfium/licenses/pdfium.txt</code></p>
+<ul>
+<li>PDFium 同梱コンポーネントのライセンス文書:</li>
+</ul>
+<p>  - <code>third_party/pdfium/licenses/abseil.txt</code> - Apache License 2.0</p>
+<p>  - <code>third_party/pdfium/licenses/agg23.txt</code> - Anti-Grain Geometry permissive notice</p>
+<p>  - <code>third_party/pdfium/licenses/fast_float.txt</code> - MIT License</p>
+<p>  - <code>third_party/pdfium/licenses/freetype.txt</code> - FreeType Project License</p>
+<p>  - <code>third_party/pdfium/licenses/icu.txt</code> - Unicode License V3 と ICU 内包 notices</p>
+<p>  - <code>third_party/pdfium/licenses/lcms.txt</code> - MIT License</p>
+<p>  - <code>third_party/pdfium/licenses/libjpeg_turbo.md</code> / <code>libjpeg_turbo.ijg</code> - libjpeg-turbo / IJG notices</p>
+<p>  - <code>third_party/pdfium/licenses/libopenjpeg.txt</code> - BSD 2-Clause</p>
+<p>  - <code>third_party/pdfium/licenses/libpng.txt</code> - PNG Reference Library License</p>
+<p>  - <code>third_party/pdfium/licenses/libtiff.txt</code> - libtiff permissive license</p>
+<p>  - <code>third_party/pdfium/licenses/llvm-libc.txt</code> - Apache License 2.0 with LLVM Exceptions</p>
+<p>  - <code>third_party/pdfium/licenses/zlib.txt</code> - zlib License</p>
+<h3>2.3 配布時の扱い</h3>
+<ul>
+<li><code>scripts/release/pack_release.ps1</code> は <code>third_party/pdfium/LICENSE</code> と <code>third_party/pdfium/licenses/</code> 配下の文書を release の <code>licenses/pdfium/</code> へコピーします。</li>
+<li><code>pdfium.dll</code> を配布する場合は、上記ライセンス文書群も一緒に配布してください。</li>
+</ul>
+<h3>2.4 ローカル方針</h3>
+<ul>
+<li>コンパイル済みの公式バイナリパッケージを直接配置して利用しており、本リポジトリ上でのソースビルドは行わないため、以下の標準ビルドツール用設定ファイルや過去のゴミファイルは削除済みです。</li>
+</ul>
+<p>  - <code>args.gn</code></p>
+<p>  - <code>PDFiumConfig.cmake</code></p>
+<p>  - <code>include/fpdfview.h.orig</code></p>
+<h2>3. MinGW-w64 runtime</h2>
+<h3>3.1 実装上の位置づけ</h3>
+<ul>
+<li><code>build.ps1</code> は <code>scripts/build/build_workspace.ps1</code> 経由で、<code>g++</code> のあるツールチェーンから次の DLL を <code>out/bin/</code> にコピーします。</li>
+</ul>
+<p>  - <code>libstdc++-6.dll</code></p>
+<p>  - <code>libgcc_s_seh-1.dll</code></p>
+<p>  - <code>libwinpthread-1.dll</code></p>
+<p>  - <code>zlib1.dll</code></p>
+<ul>
+<li><code>scripts/release/pack_release.ps1</code> は上記 DLL を release ルートへ配置します。</li>
+</ul>
+<h3>3.2 ライセンス文書</h3>
+<ul>
+<li>GCC runtime:</li>
+</ul>
+<p>  - <code>third_party/mingw_runtime_licenses/mingw-w64/gcc/COPYING3.txt</code> - GPLv3</p>
+<p>  - <code>third_party/mingw_runtime_licenses/mingw-w64/gcc/COPYING.RUNTIME.txt</code> - GCC Runtime Library Exception</p>
+<ul>
+<li>winpthreads:</li>
+</ul>
+<p>  - <code>third_party/mingw_runtime_licenses/mingw-w64/winpthreads/COPYING.txt</code> - MIT + BSD 系 notice</p>
+<ul>
+<li>zlib:</li>
+</ul>
+<p>  - <code>third_party/pdfium/licenses/zlib.txt</code> - zlib License</p>
+<h3>3.3 配布時の扱い</h3>
+<ul>
+<li><code>scripts/release/pack_release.ps1</code> は上記ライセンス文書を release の <code>licenses/mingw-w64/</code> へコピーします。</li>
+<li>上記 DLL を同梱して配布する場合は、対応するライセンス文書も同梱してください。</li>
+</ul>
+<h2>4. MD4C</h2>
+<h3>4.1 実装上の位置づけ</h3>
+<ul>
+<li><code>third_party/md4c/</code> には vendor 化した <code>MD4C</code> を配置します。</li>
+<li>保持対象は <code>src/</code>, <code>LICENSE.md</code>, <code>README.md</code>, <code>CHANGELOG.md</code> です。</li>
+<li>Markdown 解析移行では、現在次を build へ組み込み済みです。</li>
+</ul>
+<p>  - <code>third_party/md4c/src/md4c.c</code></p>
+<p>  - <code>third_party/md4c/src/md4c.h</code></p>
+<ul>
+<li><code>scripts/build/build_workspace.ps1</code> は <code>third_party/md4c/src/md4c.c</code> を直接コンパイルします。</li>
+<li><code>md4c-html.*</code> は現時点では使用前提にしません。</li>
+<li><code>MD4C_USE_UTF16</code> を MinGW で使うため、<code>third_party/md4c/src/md4c.c</code> に wide literal 化の局所パッチを 1 箇所適用しています。</li>
+</ul>
+<h3>4.2 ライセンス文書</h3>
+<ul>
+<li><code>third_party/md4c/LICENSE.md</code></li>
+</ul>
+<p>  - MIT License</p>
+<p>  - Copyright © 2016-2024 Martin Mitáš</p>
+<h3>4.3 配布時の扱い</h3>
+<ul>
+<li><code>MD4C</code> をビルドまたは release に含める場合は、対応するライセンス文書も一緒に保持・同梱してください。</li>
+<li><code>scripts/release/pack_release.ps1</code> は <code>third_party/md4c/LICENSE.md</code> を release の <code>licenses/md4c/LICENSE.md</code> へコピーします。</li>
+<li>現時点では source build と release パッケージの両方に反映済みです。</li>
+</ul>
+<h3>4.4 ローカル方針</h3>
+<ul>
+<li>当プロジェクトでは Markdown から AST への解析機能のみを利用し、HTML形式への出力機能やLinuxパッケージ管理、CMake構成は使用しないため、以下のファイルは削除済みです。</li>
+</ul>
+<p>  - <code>src/CMakeLists.txt</code></p>
+<p>  - <code>src/md4c-html.c</code>, <code>src/md4c-html.h</code></p>
+<p>  - <code>src/entity.c</code>, <code>src/entity.h</code></p>
+<p>  - <code>src/md4c-html.pc.in</code>, <code>src/md4c.pc.in</code></p>
+<h2>5. LibreOffice</h2>
+<h3>5.1 実装上の位置づけ</h3>
+<ul>
+<li><code>third_party/libreoffice/image/</code> には LibreOffice 26.2.3.2 の Windows x86_64 管理者展開イメージを配置しています。ただし、この管理者展開イメージは外部通信可能な import/marker が残るため、Office 変換 runtime として release 採用しません。</li>
+<li>取得元 MSI:</li>
+</ul>
+<p>  - <code>LibreOffice_26.2.3_Win_x86-64.msi</code></p>
+<p>  - SHA256: <code>468D1FB3880AF3BCDDAC002E9054155912C70B45D105BFA1C82036F33456133D</code></p>
+<ul>
+<li>ファイル取り込み時の docx/pptx 変換は、通信機能を持たないカスタム build runtime が見つかった場合に有効です。</li>
+<li><code>image/Fonts/</code> 配下から選んだ欧文・記号フォントは、アプリ起動時に <code>AddFontResourceExW(..., FR_PRIVATE, ...)</code> でプロセス private font として読み込み、システムへインストールしません。</li>
+<li>headless 変換専用とし、ユーザー原本ではなくアプリ管理下のコピーを入力にします。</li>
+<li>release パッケージでは、アプリ側 private font 利用のため選択したフォントファイルを <code>libreoffice/image/Fonts/</code> に置き、検証済みカスタム runtime を <code>libreoffice/custom_runtime/instdir/</code> 配置で標準同梱し、LibreOffice ライセンス/NOTICE 文書を同梱します。変換機能を含めない軽量配布は <code>-Lite</code> を指定します。</li>
+<li>カスタム Office 変換 runtime を release に含める場合は、<code>scripts/release/pack_release.ps1</code> が同梱 runtime 自身の <code>license.txt</code>, <code>LICENSE.html</code>, <code>NOTICE</code> を <code>licenses/libreoffice/</code> へコピーし、<code>third_party/libreoffice/custom_build/communication_free_options.input</code>、<code>release_reduction_manifest.json</code>、<code>patches/*.patch</code> も <code>licenses/libreoffice/custom_build/</code> へコピーします。</li>
+</ul>
+<h3>5.2 ローカル方針</h3>
+<ul>
+<li>外部通信禁止方針に合わせ、次の更新/送信系ファイルは管理者展開イメージから削除済みです。</li>
+</ul>
+<p>  - <code>image/LibreOffice_26.2.3_Win_x86-64.msi</code></p>
+<p>  - <code>image/program/updater.exe</code></p>
+<p>  - <code>image/program/update_service.exe</code></p>
+<p>  - <code>image/program/updatecheckuilo.dll</code></p>
+<p>  - <code>image/program/updater.ini</code></p>
+<p>  - <code>image/program/senddoc.exe</code></p>
+<p>  - <code>image/update-settings.ini</code></p>
+<p>  - <code>image/share/registry/onlineupdate.xcd</code></p>
+<p>  - <code>image/program/updchklo.dll</code></p>
+<p>  - <code>image/program/minidump_upload.exe</code></p>
+<p>  - <code>image/program/mar.exe</code></p>
+<p>  - <code>image/program/quickstart.exe</code></p>
+<p>  - <code>image/program/sweb.exe</code></p>
+<p>  - <code>image/program/mailmerge.py</code></p>
+<p>  - <code>image/program/classes/java_websocket.jar</code></p>
+<p>  - <code>image/**/__pycache__/</code></p>
+<ul>
+<li>LibreOffice を Word/PowerPoint から PDF への headless 変換専用にするため、次の PDF import / publish / solver / standalone launcher 類も削除済みです。</li>
+</ul>
+<p>  - <code>image/program/xpdfimport.exe</code></p>
+<p>  - <code>image/share/xpdfimport/</code></p>
+<p>  - <code>image/share/extensions/wiki-publisher/</code></p>
+<p>  - <code>image/share/extensions/nlpsolver/</code></p>
+<p>  - <code>image/program/sbase.exe</code></p>
+<p>  - <code>image/program/scalc.exe</code></p>
+<p>  - <code>image/program/sdraw.exe</code></p>
+<p>  - <code>image/program/simpress.exe</code></p>
+<p>  - <code>image/program/smath.exe</code></p>
+<p>  - <code>image/program/swriter.exe</code></p>
+<p>  - <code>image/program/soffice_safe.exe</code></p>
+<p>  - <code>image/program/gengal.exe</code></p>
+<p>  - <code>image/program/twain32shim.exe</code></p>
+<p>  - <code>image/program/unopkg.com</code></p>
+<p>  - <code>image/program/unopkg.exe</code></p>
+<p>  - <code>image/program/uno.exe</code></p>
+<p>  - <code>image/program/unoinfo.exe</code></p>
+<p>  - <code>image/program/regview.exe</code></p>
+<p>  - <code>image/program/odbcconfig.exe</code></p>
+<p>  - <code>image/program/opencltest.exe</code></p>
+<p>  - <code>image/program/spsupp_helper.exe</code></p>
+<p>  - <code>image/program/gpgme-w32spawn.exe</code></p>
+<ul>
+<li>headless 変換で LibreOffice UI や bundled macro/script samples を使わないため、次の GUI/resource/script 類も削除済みです。</li>
+</ul>
+<p>  - <code>image/share/gallery/</code></p>
+<p>  - <code>image/share/tipoftheday/</code></p>
+<p>  - <code>image/program/wizards/</code></p>
+<p>  - <code>image/share/wizards/</code></p>
+<p>  - <code>image/share/Scripts/</code></p>
+<p>  - <code>image/share/basic/</code></p>
+<ul>
+<li>新規 LibreOffice 文書作成は行わず、既存 Office ファイルの PDF 変換だけを行うため、次の template 類も削除済みです。</li>
+</ul>
+<p>  - <code>image/share/template/</code></p>
+<ul>
+<li><code>image/program/libcurl.dll</code> は <code>mergedlo.dll</code> と <code>LanguageToollo.dll</code> の import 依存があるため保持します。</li>
+<li>起動時は <code>PYTHONDONTWRITEBYTECODE=1</code> と <code>PYTHONPYCACHEPREFIX</code> を設定し、third_party 配下に Python bytecode を生成させないでください。</li>
+<li>変換前後に LibreOffice image 配下の <code>__pycache__</code> を削除し、変換生成物を <code>third_party/</code> に残さないでください。</li>
+<li><code>-env:UserInstallation=file:///...</code> で専用 profile を指定し、利用者の通常 LibreOffice profile を使わないでください。</li>
+</ul>
+<h3>5.3 ライセンス文書</h3>
+<ul>
+<li><code>third_party/libreoffice/image/license.txt</code></li>
+<li><code>third_party/libreoffice/image/LICENSE.html</code></li>
+<li><code>third_party/libreoffice/image/NOTICE</code></li>
+<li>LibreOffice 本体は MPL 2.0 ベースの OSS で、同梱コンポーネントの個別 notice は上記文書に従います。</li>
+<li><code>third_party/libreoffice/image/help/&lt;strong&gt;</code>, <code>share/extensions/dict-en/&lt;/strong&gt;</code>, <code>share/basic/**</code> などに含まれる個別 license 表示は、それらの実体を release へ配布しない限り release へコピーしません。必要になった場合だけ、対象ファイルと一緒に対応する license/notice を追加します。</li>
+</ul>
+<h3>5.4 配布時の扱い</h3>
+<ul>
+<li><code>scripts/release/pack_release.ps1</code> は <code>third_party/libreoffice/image/Fonts/</code> から英語・記号向けの選択フォントだけを release の <code>libreoffice/image/Fonts/</code> へコピーし、上記ライセンス/NOTICE 文書を release の <code>licenses/libreoffice/</code> へコピーします。</li>
+<li>標準 release には LibreOffice runtime 本体、runtime 側 license/NOTICE、custom build 入力を含めます。変換機能を含めない軽量配布は <code>scripts/release/pack_release.ps1 -Lite</code> を指定してください。<code>-NoLibreOfficeRuntime</code> は <code>-Lite</code> と併用する変換なし配布用の指定であり、標準 release では使用できません。</li>
+<li>release 同梱前に、外部通信経路、マクロ、外部リンク/リモート画像参照、クラッシュレポート、更新確認が実行されないことを実機で再確認してください。</li>
+<li>不要になった license/notice を削る判断は、対応する実体ファイルを release から除外済みであることを確認してから行います。現時点で Git 管理している LibreOffice license 文書3件は、選択フォントの配布に対応するため保持します。</li>
+</ul>
+<h2>6. フォントとその他の素材</h2>
+<h3>6.1 フォント</h3>
+<ul>
+<li>LibreOffice 管理者展開イメージ内の <code>image/Fonts/</code> は、LibreOffice 変換品質維持とアプリ内表示候補のため保持します。</li>
+<li>標準運用の日本語フォントは Windows 標準の <code>Meiryo</code> / <code>Meiryo UI</code> を使います。</li>
+<li>アプリは LibreOffice 同梱フォントを <code>FR_PRIVATE</code> でプロセス内に読み込み、英語・記号向けの選択候補として <code>Liberation Sans</code> / <code>Liberation Serif</code> / <code>Liberation Mono</code> / <code>Carlito</code> / <code>Caladea</code> / <code>OpenSymbol</code> を含めます。</li>
+<li>LibreOffice 側フォントは日本語既定フォントには使わず、日本語候補の後、Windows の Latin 候補より前に置きます。</li>
+<li>LibreOffice <code>license.txt</code> 内に同梱フォントの notice が含まれることを確認済みです。release では <code>licenses/libreoffice/</code> に <code>license.txt</code> / <code>LICENSE.html</code> / <code>NOTICE</code> を同梱します。</li>
+<li>標準テキスト注釈付き PDF 書き出しでは、書き出し元マシン上のフォントデータを取得して PDF 内に使う場合があります。</li>
+<li>そのため、フォントの利用条件は各 OS / 各フォントライセンスに従います。本リポジトリが第三者フォントの再配布権を与えるものではありません。</li>
+</ul>
+<h3>6.2 リポジトリ同梱素材</h3>
+<p>本リポジトリのうち、別個の第三者ライセンス文書が付いていない同梱素材は、現行文書ではプロジェクト素材として <code>LICENSE.md</code> の対象に含めています。外部由来素材を追加する場合は、その時点で出所と条件を明記してください。</p>
+  </main>
+
+  <footer>
+    PDF Note Workspace Documentation &copy; 2026
+  </footer>
+</div>
+
+</body>
+</html>

@@ -2,7 +2,7 @@
 """
 render_human_docs.py
 
-公開サイト成果物 (site/github/output/public/) 内の人間用ドキュメント (README.md, Document/*.md) から、
+公開サイト成果物 (site/github/output/public/) 内の人間用ドキュメント (README.md, docs/public/*.md) から、
 ブラウザで直接閲覧できる美しいセルフコンテインド HTML ページ (.html) を自動生成します。
 
 - 人間がアクセスした場合: 美しくデザインされた HTML ドキュメントとして表示。
@@ -412,9 +412,9 @@ def navigation_html(*, root_rel: str, is_ai_document: bool) -> str:
         <a href=\"https://github.com/soone-y/OPEN_PDF-Note-Workspace\" target=\"_blank\" rel=\"noopener noreferrer\">GitHub リポジトリ</a>
         <a href=\"{root_rel}index.html\">ポータルへ戻る</a>
         <a href=\"{root_rel}README.html\">README</a>
-        <a href=\"{root_rel}Document/Index.html\">文書案内</a>
-        <a href=\"{root_rel}Document/How_to_Setup.html\">セットアップ</a>
-        <a href=\"{root_rel}Document/How_to_Use.html\">基本操作</a>
+        <a href=\"{root_rel}docs/public/Index.html\">文書案内</a>
+        <a href=\"{root_rel}docs/public/How_to_Setup.html\">セットアップ</a>
+        <a href=\"{root_rel}docs/public/How_to_Use.html\">基本操作</a>
         <a href=\"{root_rel}LICENSE.html\">ライセンス</a>
         <a href=\"{root_rel}THIRD_PARTY_NOTICES.html\">第三者通知</a>
       </nav>
@@ -458,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     count = 0
-    for relative_dir in (Path("."), Path("Document"), Path("for_ai")):
+    for relative_dir in (Path("."), Path("docs/public"), Path("for_ai")):
         directory = site_dir / relative_dir
         if not directory.exists() or not directory.is_dir():
             continue

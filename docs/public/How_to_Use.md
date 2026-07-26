@@ -4,7 +4,7 @@
 
 この文書では、PDF とノートを安全に扱い始めるための基本操作を案内します。迷ったときは、まず保存せずに画面の表示とファイル名を確認してください。
 
-![PDF Note Workspace メイン画面](../docs/images/app_overview.png)
+![PDF Note Workspace メイン画面](../images/app_overview.png)
 *（PDF閲覧・非破壊注釈・手書きメモ・ノート編集を1画面で行えるメイン操作画面）*
 
 ## 1. 最初にすること
