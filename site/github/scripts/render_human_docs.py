@@ -2,7 +2,7 @@
 """
 render_human_docs.py
 
-公開サイト成果物 (site/output/public/) 内の人間用ドキュメント (README.md, Document/*.md) から、
+公開サイト成果物 (site/github/output/public/) 内の人間用ドキュメント (README.md, Document/*.md) から、
 ブラウザで直接閲覧できる美しいセルフコンテインド HTML ページ (.html) を自動生成します。
 
 - 人間がアクセスした場合: 美しくデザインされた HTML ドキュメントとして表示。

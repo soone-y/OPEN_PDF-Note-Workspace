@@ -9,7 +9,6 @@ on:
     paths:
       - "for_ai/**"
       - "For_AI.md"
-      - "index.html"
       - "README.md"
       - "LICENSE.md"
       - "LICENSES_INDEX.md"
@@ -17,10 +16,7 @@ on:
       - "Document/**"
       - "docs/images/**"
       - "REPO_VERSION.txt"
-      - "tools/dev/build_public_site.py"
-      - "tools/dev/validate_public_site.py"
-      - "site/**"
-      - "tools/dev/render_human_docs.py"
+      - "site/github/**"
       - ".github/workflows/static.yml"
 
   # Actions タブから手動実行できるようにする
@@ -49,10 +45,10 @@ jobs:
 
       # 公開snapshot内の正本から文書ポータルを生成する。紹介ページは使わない。
       - name: Build documentation portal
-        run: python3 site/scripts/build_public_site.py --replace --documentation-portal
+        run: python3 site/github/scripts/build_public_site.py --replace --documentation-portal
 
       - name: Validate selected documentation site
-        run: python3 site/scripts/validate_public_site.py --site site/output/public --profile documentation_portal
+        run: python3 site/github/scripts/validate_public_site.py --site site/github/output/public
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -61,7 +57,7 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           # ソース全体ではなく公開成果物だけをアップロード
-          path: 'site/output/public'
+          path: 'site/github/output/public'
 
       - name: Deploy to GitHub Pages
         id: deployment

@@ -1,15 +1,7 @@
 {
   "schema_version": 1,
-  "purpose": "紹介ページとAI文書ポータルそれぞれに含めてよいリポジトリ正本を明示する許可リスト",
+  "purpose": "GitHub PagesのAI文書ポータルに含めてよいリポジトリ正本を明示する許可リスト",
   "version_source": "REPO_VERSION.txt",
-  "introduction": {
-    "files": [
-      { "source": "site/src/index.html", "destination": "index.html" },
-      { "source": "site/src/assets/og.png", "destination": "og.png" },
-      { "source": "docs/images/app_overview.png", "destination": "assets/app_overview.png" }
-    ],
-    "trees": []
-  },
   "documentation_portal": {
     "files": [
       { "source": "For_AI.md", "destination": "For_AI.md" },
@@ -17,8 +9,7 @@
       { "source": "LICENSE.md", "destination": "LICENSE.md" },
       { "source": "LICENSES_INDEX.md", "destination": "LICENSES_INDEX.md" },
       { "source": "THIRD_PARTY_NOTICES.md", "destination": "THIRD_PARTY_NOTICES.md" },
-      { "source": ".github/SECURITY.md", "destination": ".github/SECURITY.md" },
-      { "source": "site/src/assets/og.png", "destination": "og.png" }
+      { "source": ".github/SECURITY.md", "destination": ".github/SECURITY.md" }
     ],
     "trees": [
       { "source": "for_ai", "destination": "for_ai" },

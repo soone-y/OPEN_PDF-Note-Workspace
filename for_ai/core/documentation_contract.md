@@ -30,11 +30,11 @@
 
 ## 公開前の必須確認
 
-公開物は次の順で生成・検査する。`site/output/public/` はローカルおよびCIで生成する公開成果物であり、Gitでは追跡せず、手で編集しない。
+GitHub Pagesの文書ポータルは次の順で生成・検査する。`site/github/output/public/` はローカルおよびCIで生成する公開成果物であり、Gitでは追跡せず、手で編集しない。Cloudflareの紹介ページはAI資料を含めず、`site/cloudflare/public/` をそのまま公開する。
 
 ```text
-python site/scripts/build_public_site.py --replace
-python site/scripts/validate_public_site.py --site site/output/public
+python site/github/scripts/build_public_site.py --replace --documentation-portal
+python site/github/scripts/validate_public_site.py --site site/github/output/public
 ```
 
 検査は、公開対象の限定、UTF-8復号、JSON/XML構文、ローカルのMarkdown/HTMLリンク・画像参照、manifestの経路、開発者専用資料の除外を確認する。意味内容や実装との一致は、変更者が一次資料を確認して判断する。サイトの更新は release や `publish.ps1 -Mode Submit` から切り離された手動作業であり、必要なときに上記の生成・検査を明示実行する。

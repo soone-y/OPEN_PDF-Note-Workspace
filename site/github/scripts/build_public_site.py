@@ -2,8 +2,8 @@
 """Build the deliberately limited static public site.
 
 The output directory is intentionally separate from application build output.
-It contains only files selected here and can be used by GitHub Pages or
-Cloudflare Pages.  Existing output is never overwritten by this tool.
+It contains only files selected here and is used by GitHub Pages. Existing
+output is never overwritten by this tool.
 """
 
 from __future__ import annotations
@@ -16,9 +16,10 @@ import json
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_DIR = REPO_ROOT / "site" / "output" / "public"
-ALLOWLIST_PATH = REPO_ROOT / "site" / "src" / "public_site_allowlist.json"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+GITHUB_SITE_ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_DIR = GITHUB_SITE_ROOT / "output" / "public"
+ALLOWLIST_PATH = GITHUB_SITE_ROOT / "documentation_portal_allowlist.json"
 VERSION_TOKEN = "__APP_VERSION__"
 DEVELOPER_BUILD_GUIDE_URL = (
     "https://github.com/soone-y/DEV_PDF-Note-Workspace/blob/dev/Document/How_to_Build.md"
@@ -66,10 +67,10 @@ def load_allowlist() -> dict:
     return allowlist
 
 
-def copy_allowlisted_content(staging_dir: Path, allowlist: dict, *, profile: str) -> None:
-    rules = allowlist.get(profile, allowlist)
+def copy_allowlisted_content(staging_dir: Path, allowlist: dict) -> None:
+    rules = allowlist.get("documentation_portal", allowlist)
     if not isinstance(rules, dict):
-        raise ValueError(f"Allowlist profile must be an object: {profile}")
+        raise ValueError("Allowlist documentation_portal profile must be an object")
 
     for entry in rules.get("files", []):
         if not isinstance(entry, dict):
@@ -132,7 +133,7 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
                 file=sys.stderr,
             )
             return 2
-        if OUTPUT_DIR.resolve() != (REPO_ROOT / "site" / "output" / "public").resolve():
+        if OUTPUT_DIR.resolve() != (GITHUB_SITE_ROOT / "output" / "public").resolve():
             print(f"Refusing to replace an unexpected output directory: {OUTPUT_DIR}", file=sys.stderr)
             return 2
 
@@ -141,11 +142,8 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
         staging_dir.mkdir()
 
         allowlist = load_allowlist()
-        profile = "documentation_portal" if documentation_portal else "introduction"
-        copy_allowlisted_content(staging_dir, allowlist, profile=profile)
-
-        if documentation_portal:
-            copy_file(REPO_ROOT / "index.html", staging_dir / "index.html")
+        copy_allowlisted_content(staging_dir, allowlist)
+        copy_file(GITHUB_SITE_ROOT / "index.html", staging_dir / "index.html")
 
         version_source = resolve_repo_relative_path(allowlist.get("version_source", ""), label="allowlist version source")
         version = version_source.read_text(encoding="utf-8").strip()
@@ -181,11 +179,11 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--replace", action="store_true", help="replace the generated site/output/public directory")
+    parser.add_argument("--replace", action="store_true", help="replace the generated site/github/output/public directory")
     parser.add_argument(
         "--documentation-portal",
         action="store_true",
-        help="use the repository documentation portal instead of the Cloudflare introduction page",
+        help="build the repository documentation portal (the only supported profile)",
     )
     arguments = parser.parse_args()
     raise SystemExit(build_site(replace=arguments.replace, documentation_portal=arguments.documentation_portal))
