@@ -1407,8 +1407,12 @@ static bool ResetSessionLastOpenTimes(std::filesystem::path* outBackupPath) {
 }
 
 bool IsPathUnderRoot(const std::filesystem::path& path, const std::filesystem::path& root) {
-    auto p = CanonicalOrSelf(path);
-    auto r = CanonicalOrSelf(root);
+    if (path.empty() || root.empty()) return false;
+    std::error_code ecP, ecR;
+    auto p = std::filesystem::weakly_canonical(path, ecP);
+    auto r = std::filesystem::weakly_canonical(root, ecR);
+    if (ecP) p = CanonicalOrSelf(path);
+    if (ecR) r = CanonicalOrSelf(root);
     if (p.empty() || r.empty()) return false;
     auto pIt = p.begin();
     for (auto rIt = r.begin(); rIt != r.end(); ++rIt, ++pIt) {
@@ -1438,7 +1442,51 @@ static bool OpenStartupDocumentPath(HWND hWnd, const std::wstring& rawPath) {
         return false;
     }
 
-    std::wstring openPath = CanonicalOrSelf(path).wstring();
+    if (!IsPathUnderRoot(path, g_workspaceRoot)) {
+        ShowSoftNotice(hWnd,
+                       IsEnglishUi()
+                           ? L"Only files inside the workspace can be opened by 'Open with' in the main software.\n"
+                             L"Files within the workspace can be opened directly.\n\n"
+                             L"To view external files outside the workspace, please use the Read-Only Viewer."
+                           : L"メインソフトで「プログラムから開く」が利用できるのはワークスペース内のファイルです。\n"
+                             L"ワークスペース内のファイルであれば直接開くことができます。\n\n"
+                             L"ワークスペース外のファイルを単体で閲覧する場合は、読み取り専用ソフト（Read-Only Viewer）をご利用ください。",
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+
+    std::filesystem::path canonPath = CanonicalOrSelf(path);
+    std::filesystem::path classesRoot = WorkspaceClassesPath(g_workspaceRoot, g_config);
+    if (IsPathUnderRoot(canonPath, classesRoot)) {
+        std::filesystem::path parentDir = canonPath.parent_path();
+        if (IsPathUnderRoot(parentDir, classesRoot) && parentDir != classesRoot) {
+            std::filesystem::path grandParent = parentDir.parent_path();
+            if (IsPathUnderRoot(grandParent, classesRoot) && grandParent != classesRoot) {
+                g_currentLecturePath = grandParent.wstring();
+                g_currentSessionPath = parentDir.wstring();
+            } else {
+                g_currentLecturePath = parentDir.wstring();
+                g_currentSessionPath = parentDir.wstring();
+            }
+            LoadLectures();
+            if (!g_currentLecturePath.empty()) {
+                LoadSessions(g_currentLecturePath);
+            }
+            if (!g_currentSessionPath.empty()) {
+                SessionEntry targetSession{ g_currentSessionPath };
+                for (const auto& s : g_sessions) {
+                    if (CanonicalOrSelf(std::filesystem::path(s.path)) == CanonicalOrSelf(std::filesystem::path(g_currentSessionPath))) {
+                        targetSession = s;
+                        break;
+                    }
+                }
+                std::wstring prefPdf, prefNote;
+                LoadFiles(targetSession, prefPdf, prefNote);
+            }
+        }
+    }
+
+    std::wstring openPath = canonPath.wstring();
     if (openPath.empty()) openPath = path.wstring();
     const bool opened = OpenPdfIfDifferent(hWnd, openPath);
     if (opened) {

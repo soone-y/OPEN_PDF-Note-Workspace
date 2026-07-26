@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [switch]$SkipBuild,
     [switch]$SkipReadOnlyViewerBuild,
@@ -298,8 +298,8 @@ function Assert-VersionTrackedDocumentation {
         if (-not (Test-Path -LiteralPath $path)) {
             throw "Version-tracked documentation file not found: $path"
         }
-        $text = Get-Content -LiteralPath $path -Raw
-        $markerPattern = '(?m)^' + [regex]::Escape('同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)') + '\r?$'
+        $text = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $path).Path, [System.Text.Encoding]::UTF8)
+        $markerPattern = '(?m)^.*?: \(ZIP.*\)\r?$'
         if ($text -notmatch $markerPattern) {
             throw "Version-tracked documentation is missing the ZIP placeholder marker: $path"
         }

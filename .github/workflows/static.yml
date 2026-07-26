@@ -67,6 +67,8 @@ jobs:
           # __APP_VERSION__ プレースホルダを実際の版番号で置換する
           APP_VERSION=$(cat APP_VERSION.txt | tr -d '[:space:]')
           find _site -name "*.md" -exec sed -i "s/__APP_VERSION__/${APP_VERSION}/g" {} +
+          # 人間用ドキュメント (_site/README.md, _site/Document/*.md) に外部通信ゼロの表示用スタイルを付与
+          python tools/dev/render_human_docs.py _site
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

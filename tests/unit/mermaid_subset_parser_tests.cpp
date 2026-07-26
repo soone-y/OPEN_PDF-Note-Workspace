@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include <string>
 
 #include "readonly_viewer/mermaid_subset_parser.h"
@@ -75,11 +75,11 @@ int main() {
     {
         const ParseResult result = ParseFlowchart(
             L"flowchart LR\n"
-            L"    Z[通常版またはLite版のZIP] --> E[書き込み可能な場所へ展開]\n"
-            L"    E --> A[pdf_note_workspace.exe]\n"
+            L"    Z[1. ZIPを入手<br>（通常版 / Lite版）] --> E[2. 書き込み可能な場所へ展開]\n"
+            L"    E --> A[3. pdf_note_workspace.exe を起動]\n"
+            L"    A --> W[4. 個人のワークスペースを開く<br>（展開先とは別の場所）]\n"
             L"    E -. 任意 .-> S[ショートカットを作成]\n"
-            L"    E -. 任意 .-> O[Windows の「プログラムから開く」で選択]\n"
-            L"    W[個人のワークスペース] -. 別の場所に保管 .-> A\n");
+            L"    E -. 任意 .-> O[Windows の「プログラムから開く」で選択]\n");
         Expect(result.can_render(), "setup guide flowchart is parsed");
         Expect(result.model.nodes.size() == 6 && result.model.edges.size() == 5,
                "setup guide flowchart retains all nodes and edges");

@@ -39,6 +39,31 @@ LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 #include "text_preview_panel.h"
 #include "fpdfview.h"
 
+class ScopedComInit {
+public:
+    ScopedComInit() {
+        m_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    }
+    ~ScopedComInit() {
+        if (SUCCEEDED(m_hr)) {
+            CoUninitialize();
+        }
+    }
+    bool IsSucceeded() const { return SUCCEEDED(m_hr); }
+private:
+    HRESULT m_hr;
+};
+
+class ScopedPdfiumLibrary {
+public:
+    ScopedPdfiumLibrary() {
+        FPDF_InitLibrary();
+    }
+    ~ScopedPdfiumLibrary() {
+        FPDF_DestroyLibrary();
+    }
+};
+
 std::wstring UTF8ToWide(const std::string& s) {
     if (s.empty()) return std::wstring();
     int size = MultiByteToWideChar(CP_UTF8, 0, &s[0], (int)s.size(), NULL, 0);
@@ -1965,6 +1990,79 @@ LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+void LayoutToolbarControls(HWND hWnd, int splitX, int rightPaneWidth, int height) {
+    const int tabHeight = 24;
+    const int modeBarHeight = 36;
+    const bool compactControls = rightPaneWidth < 840;
+
+    if (g_hwndTabControl) {
+        MoveWindow(g_hwndTabControl, splitX + 5, 0, rightPaneWidth, tabHeight, TRUE);
+    }
+
+    struct ToolbarItem {
+        HWND hwnd;
+        std::wstring text;
+        int widthNormal;
+        int widthCompact;
+        bool showNormal;
+        bool showCompact;
+    };
+
+    const bool isPdfMode = (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size()) &&
+                            g_tabs[g_currentTab].viewMode == ViewMode::Pdf);
+
+    std::vector<ToolbarItem> items;
+    items.push_back({ g_hwndOpenFileButton, compactControls ? L"開く" : L"ファイルを開く  Ctrl+O", 165, 70, true, true });
+    items.push_back({ g_hwndOpenFolderButton, L"フォルダーを開く", 135, 135, true, false });
+    items.push_back({ g_hwndViewMenuButton, L"表示 ▼", 76, 76, false, true });
+
+    if (isPdfMode) {
+        items.push_back({ g_hwndPdfRangeButton, L"ページ範囲...", 150, 110, true, true });
+    } else {
+        items.push_back({ g_hwndDecoratedButton, compactControls ? L"本文" : L"本文表示  Ctrl+1", 130, 64, true, false });
+        items.push_back({ g_hwndRawButton, L"Raw  Ctrl+2", 95, 58, true, false });
+        items.push_back({ g_hwndHexButton, L"Hex  Ctrl+3", 95, 58, true, false });
+        items.push_back({ g_hwndDiagramButton, compactControls ? L"図" : L"図一覧  Ctrl+4", 110, 58, true, false });
+    }
+
+    if (isPdfMode) {
+        if (g_hwndDecoratedButton) ShowWindow(g_hwndDecoratedButton, SW_HIDE);
+        if (g_hwndRawButton) ShowWindow(g_hwndRawButton, SW_HIDE);
+        if (g_hwndHexButton) ShowWindow(g_hwndHexButton, SW_HIDE);
+        if (g_hwndDiagramButton) ShowWindow(g_hwndDiagramButton, SW_HIDE);
+    } else {
+        if (g_hwndPdfRangeButton) ShowWindow(g_hwndPdfRangeButton, SW_HIDE);
+    }
+
+    int currentX = splitX + 10;
+    for (const auto& item : items) {
+        if (!item.hwnd) continue;
+        const bool visible = compactControls ? item.showCompact : item.showNormal;
+        if (visible) {
+            if (!item.text.empty()) SetWindowTextW(item.hwnd, item.text.c_str());
+            const int itemWidth = compactControls ? item.widthCompact : item.widthNormal;
+            ShowWindow(item.hwnd, SW_SHOW);
+            MoveWindow(item.hwnd, currentX, tabHeight + 5, itemWidth, 26, TRUE);
+            currentX += itemWidth + 8;
+        } else {
+            ShowWindow(item.hwnd, SW_HIDE);
+        }
+    }
+
+    if (g_hwndCancelLoadButton) {
+        MoveWindow(g_hwndCancelLoadButton, splitX + 10, tabHeight + 5, compactControls ? 100 : 120, 26, TRUE);
+    }
+
+    int highlightBarWidth = 12;
+    int editWidth = rightPaneWidth - highlightBarWidth;
+    const int contentTop = tabHeight + modeBarHeight;
+    if (g_hwndEditControl) MoveWindow(g_hwndEditControl, splitX + 5, contentTop, editWidth, height - contentTop, TRUE);
+    if (g_hwndHighlightBar) MoveWindow(g_hwndHighlightBar, splitX + 5 + editWidth, contentTop, highlightBarWidth, height - contentTop, TRUE);
+    if (g_hwndPdfPanel) MoveWindow(g_hwndPdfPanel, splitX + 5, contentTop, rightPaneWidth, height - contentTop, TRUE);
+    g_mermaidPreview.SetBounds(splitX + 5, contentTop, rightPaneWidth, height - contentTop);
+    UpdateInlineDiagramBounds();
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CREATE: {
@@ -2052,45 +2150,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (g_hwndFileTree) MoveWindow(g_hwndFileTree, 0, 0, splitX, fileTreeHeight, TRUE);
             if (g_hwndTocTree) MoveWindow(g_hwndTocTree, 0, fileTreeHeight, splitX, tocTreeHeight, TRUE);
 
-            int tabHeight = 24;
-            int modeBarHeight = 36;
-            const bool compactControls = rightPaneWidth < 840;
-            if (g_hwndTabControl) MoveWindow(g_hwndTabControl, splitX + 5, 0, rightPaneWidth, tabHeight, TRUE);
-            if (g_hwndOpenFileButton) {
-                SetWindowTextW(g_hwndOpenFileButton, compactControls ? L"開く" : L"ファイルを開く  Ctrl+O");
-                MoveWindow(g_hwndOpenFileButton, splitX + 13, tabHeight + 5, compactControls ? 80 : 165, 26, TRUE);
-            }
-            if (g_hwndOpenFolderButton) ShowWindow(g_hwndOpenFolderButton, compactControls ? SW_HIDE : SW_SHOW);
-            if (!compactControls && g_hwndOpenFolderButton) MoveWindow(g_hwndOpenFolderButton, splitX + 184, tabHeight + 5, 140, 26, TRUE);
-            const int modeLeft = splitX + (compactControls ? 99 : 330);
-            const int modeWidth = compactControls ? 58 : 110;
-            if (g_hwndDecoratedButton) { SetWindowTextW(g_hwndDecoratedButton, compactControls ? L"本文" : L"本文表示  Ctrl+1"); MoveWindow(g_hwndDecoratedButton, modeLeft, tabHeight + 5, compactControls ? 64 : 130, 26, TRUE); }
-            if (g_hwndRawButton) { SetWindowTextW(g_hwndRawButton, L"Raw"); MoveWindow(g_hwndRawButton, modeLeft + (compactControls ? 70 : 136), tabHeight + 5, modeWidth, 26, TRUE); }
-            if (g_hwndHexButton) { SetWindowTextW(g_hwndHexButton, L"Hex"); MoveWindow(g_hwndHexButton, modeLeft + (compactControls ? 134 : 252), tabHeight + 5, modeWidth, 26, TRUE); }
-            if (g_hwndDiagramButton) { SetWindowTextW(g_hwndDiagramButton, compactControls ? L"図" : L"図一覧  Ctrl+4"); MoveWindow(g_hwndDiagramButton, modeLeft + (compactControls ? 198 : 368), tabHeight + 5, modeWidth, 26, TRUE); }
-            if (g_hwndViewMenuButton) {
-                ShowWindow(g_hwndViewMenuButton, compactControls ? SW_SHOW : SW_HIDE);
-                MoveWindow(g_hwndViewMenuButton, splitX + 99, tabHeight + 5, 80, 26, TRUE);
-                if (compactControls) {
-                    ShowWindow(g_hwndDecoratedButton, SW_HIDE); ShowWindow(g_hwndRawButton, SW_HIDE);
-                    ShowWindow(g_hwndHexButton, SW_HIDE); ShowWindow(g_hwndDiagramButton, SW_HIDE);
-                } else if (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size()) &&
-                           g_tabs[g_currentTab].viewMode != ViewMode::Pdf) {
-                    ShowWindow(g_hwndDecoratedButton, SW_SHOW); ShowWindow(g_hwndRawButton, SW_SHOW);
-                    ShowWindow(g_hwndHexButton, SW_SHOW); ShowWindow(g_hwndDiagramButton, SW_SHOW);
-                }
-            }
-            if (g_hwndPdfRangeButton) MoveWindow(g_hwndPdfRangeButton, modeLeft, tabHeight + 5, compactControls ? 130 : 150, 26, TRUE);
-            if (g_hwndCancelLoadButton) MoveWindow(g_hwndCancelLoadButton, splitX + 13, tabHeight + 5, compactControls ? 100 : 120, 26, TRUE);
-            
-            int highlightBarWidth = 12;
-            int editWidth = rightPaneWidth - highlightBarWidth;
-            const int contentTop = tabHeight + modeBarHeight;
-            if (g_hwndEditControl) MoveWindow(g_hwndEditControl, splitX + 5, contentTop, editWidth, height - contentTop, TRUE);
-            if (g_hwndHighlightBar) MoveWindow(g_hwndHighlightBar, splitX + 5 + editWidth, contentTop, highlightBarWidth, height - contentTop, TRUE);
-            if (g_hwndPdfPanel) MoveWindow(g_hwndPdfPanel, splitX + 5, contentTop, rightPaneWidth, height - contentTop, TRUE);
-            g_mermaidPreview.SetBounds(splitX + 5, contentTop, rightPaneWidth, height - contentTop);
-            UpdateInlineDiagramBounds();
+            LayoutToolbarControls(hWnd, splitX, rightPaneWidth, height);
             return 0;
         }
         case WM_COMMAND: {
@@ -2308,7 +2368,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 g_loadCancelRequested = true;
                 return 0;
             }
-            break;
+            DestroyWindow(hWnd);
+            return 0;
         case WM_DESTROY:
             DragAcceptFiles(hWnd, FALSE);
             g_hwndMain = nullptr;
@@ -2321,9 +2382,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 }
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
-    const HRESULT coInitializeResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const bool comInitialized = SUCCEEDED(coInitializeResult);
-    FPDF_InitLibrary();
+    ScopedComInit scopedCom;
+    ScopedPdfiumLibrary scopedPdfium;
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
     icex.dwICC = ICC_WIN95_CLASSES | ICC_TAB_CLASSES | ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES;
@@ -2361,8 +2421,6 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
     );
 
     if (hwnd == NULL) {
-        FPDF_DestroyLibrary();
-        if (comInitialized) CoUninitialize();
         return 0;
     }
 
@@ -2396,8 +2454,6 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
             PopulateReleaseDocuments({});
             if (argv) LocalFree(argv);
             DestroyWindow(hwnd);
-            FPDF_DestroyLibrary();
-            if (comInitialized) CoUninitialize();
             return 0;
         }
         std::filesystem::path exePath(exePathBuf);
@@ -2467,7 +2523,5 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
         DispatchMessage(&msg);
     }
 
-    FPDF_DestroyLibrary();
-    if (comInitialized) CoUninitialize();
     return 0;
 }

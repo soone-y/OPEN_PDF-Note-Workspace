@@ -39,6 +39,7 @@ libreoffice_smoke_test = load_module("libreoffice_smoke_test", "tools/libreoffic
 libreoffice_conversion_quality_test = load_module(
     "libreoffice_conversion_quality_test", "tools/libreoffice/libreoffice_conversion_quality_test.py"
 )
+render_human_docs = load_module("render_human_docs", "tools/dev/render_human_docs.py")
 cpp_include_visualizer = load_module("cpp_include_visualizer", "tools/metrics/cpp_include_visualizer.py")
 md_structure_scanner = load_module("md_structure_scanner", "tools/dev/md_structure_scanner.py")
 persistence_index = load_module("persistence_index", "tools/dev/persistence_index.py")
