@@ -133,7 +133,14 @@ function Move-ItemStrict([string]$Source, [string]$Destination) {
         Write-Info "[dry-run] move: $Source -> $Destination"
         return
     }
-    Move-Item -LiteralPath $Source -Destination $Destination
+    try {
+        Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+    }
+    catch {
+        # Windows のプロセス排他ロック等の場合、Copy + Remove で安全フォールバック
+        Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
+        Remove-Item -LiteralPath $Source -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Remove-DirectoryIfEmpty([string]$Path) {
@@ -168,6 +175,7 @@ try {
     $setRoot = [System.IO.Path]::GetFullPath((Join-Path $outBasePath $folderName))
     Assert-OutsideRepoRoot -Path $setRoot
     $publicSnapshotDir = Join-Path $setRoot "public_snapshot"
+    $docsHtmlDir = Join-Path $setRoot "docs_html"
     $setManifestPath = Join-Path $setRoot "release_set_manifest.json"
     $stagingBaseDir = Join-Path $setRoot "_staging_release"
     $stagingBaseRel = Get-RelativeRepoPath -Path $stagingBaseDir
@@ -313,6 +321,46 @@ try {
         Copy-FileStrict -Source $releaseNotesSource -Destination $releaseNotesTarget
     }
 
+    # ローカル確認・閲覧用 docs_html ディレクトリの生成（提出物には含めない）
+    Ensure-Directory $docsHtmlDir
+    if (-not $DryRun) {
+        $docOutDir = Join-Path $docsHtmlDir "Document"
+        Ensure-Directory $docOutDir
+        Copy-FileStrict -Source (Join-Path $repoRoot "index.html") -Destination (Join-Path $docsHtmlDir "index.html")
+        Copy-FileStrict -Source (Join-Path $repoRoot "README.md") -Destination (Join-Path $docsHtmlDir "README.md")
+        $docFiles = Get-ChildItem -LiteralPath (Join-Path $repoRoot "Document") -Filter "*.md"
+        foreach ($file in $docFiles) {
+            $destFile = Join-Path $docOutDir $file.Name
+            Copy-FileStrict -Source $file.FullName -Destination $destFile
+        }
+        $imgOutDir = Join-Path $docsHtmlDir "docs/images"
+        Ensure-Directory $imgOutDir
+        $imgFiles = Get-ChildItem -LiteralPath (Join-Path $repoRoot "docs/images") -File -ErrorAction SilentlyContinue
+        foreach ($img in $imgFiles) {
+            Copy-FileStrict -Source $img.FullName -Destination (Join-Path $imgOutDir $img.Name)
+        }
+        # AI 向けドキュメント (For_AI.md, for_ai/*)
+        Copy-FileStrict -Source (Join-Path $repoRoot "For_AI.md") -Destination (Join-Path $docsHtmlDir "For_AI.md")
+        $forAiOutDir = Join-Path $docsHtmlDir "for_ai"
+        $forAiCoreOutDir = Join-Path $docsHtmlDir "for_ai/core"
+        Ensure-Directory $forAiCoreOutDir
+        Get-ChildItem -LiteralPath (Join-Path $repoRoot "for_ai") -File | ForEach-Object {
+            Copy-FileStrict -Source $_.FullName -Destination (Join-Path $forAiOutDir $_.Name)
+        }
+        Get-ChildItem -LiteralPath (Join-Path $repoRoot "for_ai/core") -File | ForEach-Object {
+            Copy-FileStrict -Source $_.FullName -Destination (Join-Path $forAiCoreOutDir $_.Name)
+        }
+        $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+        if (-not $pythonCommand) {
+            $pythonCommand = Get-Command py -ErrorAction SilentlyContinue
+        }
+        $renderScript = Join-Path $repoRoot "tools/dev/render_human_docs.py"
+        if ($pythonCommand -and (Test-Path -LiteralPath $renderScript)) {
+            Write-Info "Generating HTML documentation in docs_html..."
+            & $pythonCommand.Source $renderScript $docsHtmlDir
+        }
+    }
+
     $manifest = [PSCustomObject]@{
         created_at = (Get-Date).ToString("o")
         app_version = (Get-RepoVersionLabel)
@@ -321,6 +369,7 @@ try {
             release = $releaseComponentName
             release_lite = $releaseLiteComponentName
             public_snapshot = "public_snapshot"
+            docs_html = "docs_html"
             release_zip = $releaseZipComponentName
             release_lite_zip = $releaseLiteZipComponentName
             release_notes = $(if ($releaseNotesTarget) { [System.IO.Path]::GetFileName($releaseNotesTarget) } else { $null })

@@ -1,4 +1,4 @@
-# AI_CORE_NODE: FILE_FORMATS
+﻿# AI_CORE_NODE: FILE_FORMATS
 
 <ai_node_schema id="file_formats" type="format_and_persistence_spec">
   <target_audience>LLM / AI-Assistant</target_audience>

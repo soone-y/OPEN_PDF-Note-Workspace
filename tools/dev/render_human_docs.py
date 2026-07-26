@@ -2,221 +2,419 @@
 """
 render_human_docs.py
 
-GitHub Pages デプロイ用の静的サイトツリー (_site/) 内にある人間用ドキュメント
-(README.md, Document/*.md) に対して、外部通信ゼロのブラウザ閲覧用スタイルと
-超軽量インラインレンダラースクリプトを付加します。
+公開サイト成果物 (site/output/public/) 内の人間用ドキュメント (README.md, Document/*.md) から、
+ブラウザで直接閲覧できる美しいセルフコンテインド HTML ページ (.html) を自動生成します。
 
-AI 向け文書 (For_AI.md, for_ai/*) は変更せず、完全な Raw テキストのまま保護します。
+- 人間がアクセスした場合: 美しくデザインされた HTML ドキュメントとして表示。
+- AI がアクセスした場合: 生の .md ファイルがそのまま取得可能（AI 可読性 100% 保持）。
+- 外部通信ゼロ: 外部 CDN やフォントを一切使用せず、ローカル完結。
 """
 
 import sys
+import re
+import html
 from pathlib import Path
 
-# ブラウザ閲覧時に適用される外部通信ゼロのスタイルとレンダラースクリプト
-HUMAN_DOC_ENHANCER = """
-<!-- HUMAN_DOC_VIEWER_START -->
-<style>
-  @media screen {
-    html {
-      background-color: #f8fafc;
-      color: #0f172a;
-    }
-    body {
+# HTML テンプレート（外部通信ゼロ・モダンダーク/ライト対応デザイン）
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title} – PDF Note Workspace</title>
+  <style>
+    :root {{
+      --bg-main: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --border-color: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --pre-bg: #0f172a;
+      --pre-text: #f8fafc;
+      --note-bg: #f0f9ff;
+      --note-border: #0284c7;
+    }}
+
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --bg-main: #0f172a;
+        --card-bg: #1e293b;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #0284c7;
+        --border-color: #334155;
+        --code-bg: #0f172a;
+        --pre-bg: #020617;
+        --pre-text: #f8fafc;
+        --note-bg: rgba(56, 189, 248, 0.1);
+        --note-border: #38bdf8;
+      }}
+    }}
+
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+    body {{
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      max-width: 860px;
-      margin: 0 auto;
-      padding: 32px 24px;
+      background-color: var(--bg-main);
+      color: var(--text-main);
       line-height: 1.75;
-      background-color: #ffffff;
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
-      border: 1px solid #e2e8f0;
-      border-radius: 8px;
-    }
-    h1 {
-      font-size: 1.85em;
-      border-bottom: 2px solid #0284c7;
-      padding-bottom: 8px;
-      color: #0369a1;
-      margin-top: 0;
-      margin-bottom: 16px;
-    }
-    h2 {
-      font-size: 1.4em;
-      border-bottom: 1px solid #cbd5e1;
-      padding-bottom: 6px;
-      color: #0f172a;
-      margin-top: 1.8em;
-      margin-bottom: 12px;
-    }
-    h3 {
-      font-size: 1.15em;
-      color: #334155;
-      margin-top: 1.4em;
-      margin-bottom: 8px;
-    }
-    p {
-      margin-bottom: 1em;
-    }
-    a {
-      color: #0284c7;
+      padding: 24px 12px;
+    }}
+
+    .container {{
+      max-width: 880px;
+      margin: 0 auto;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 28px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }}
+
+    .doc-header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 14px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--accent);
+      flex-wrap: wrap;
+    }}
+
+    .doc-nav a {{
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 12px;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
       text-decoration: none;
-      font-weight: 500;
-    }
-    a:hover {
-      text-decoration: underline;
-      color: #0369a1;
-    }
-    code {
-      background-color: #f1f5f9;
-      color: #0f172a;
+      font-size: 0.88em;
+      font-weight: 600;
+      transition: background-color 0.15s;
+    }}
+
+    .doc-nav a:hover {{
+      background-color: var(--border-color);
+    }}
+
+    .raw-md-link {{
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }}
+
+    h1 {{ font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }}
+    h2 {{ font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }}
+    h3 {{ font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }}
+
+    p {{ margin-bottom: 1.1em; word-break: break-word; }}
+
+    a {{ color: var(--accent); text-decoration: none; font-weight: 500; }}
+    a:hover {{ text-decoration: underline; color: var(--accent-hover); }}
+
+    code {{
+      background-color: var(--code-bg);
+      color: var(--text-main);
       padding: 2px 6px;
       border-radius: 4px;
       font-size: 0.9em;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      border: 1px solid #e2e8f0;
-    }
-    pre {
-      background-color: #0f172a;
-      color: #f8fafc;
+      border: 1px solid var(--border-color);
+    }}
+
+    pre {{
+      background-color: var(--pre-bg);
+      color: var(--pre-text);
       padding: 16px;
       border-radius: 8px;
       overflow-x: auto;
       margin: 1.2em 0;
-    }
-    pre code {
+      font-size: 0.9em;
+      line-height: 1.5;
+    }}
+
+    pre code {{
       background-color: transparent;
       color: inherit;
       padding: 0;
       border: none;
-    }
-    blockquote {
-      border-left: 4px solid #0284c7;
-      background-color: #f0f9ff;
+    }}
+
+    blockquote {{
+      border-left: 4px solid var(--note-border);
+      background-color: var(--note-bg);
       margin: 1.2em 0;
       padding: 12px 16px;
-      color: #0369a1;
+      color: var(--text-main);
       border-radius: 0 6px 6px 0;
-    }
-    blockquote p {
-      margin: 0;
-    }
-    table {
+    }}
+
+    table {{
       width: 100%;
       border-collapse: collapse;
       margin: 1.2em 0;
-      font-size: 0.95em;
-    }
-    th, td {
-      border: 1px solid #cbd5e1;
-      padding: 10px 14px;
+      font-size: 0.92em;
+      overflow-x: auto;
+      display: block;
+    }}
+
+    th, td {{
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
       text-align: left;
-    }
-    th {
-      background-color: #f1f5f9;
+    }}
+
+    th {{
+      background-color: var(--code-bg);
       font-weight: 600;
-      color: #0f172a;
-    }
-    tr:nth-child(even) {
-      background-color: #f8fafc;
-    }
-    img {
+    }}
+
+    ul, ol {{
+      padding-left: 1.6em;
+      margin-bottom: 1.1em;
+    }}
+
+    li {{ margin-bottom: 0.3em; }}
+
+    img {{
       max-width: 100%;
       height: auto;
       border-radius: 6px;
       margin: 1em 0;
-    }
-    hr {
+    }}
+
+    hr {{
       border: none;
-      border-top: 1px dashed #cbd5e1;
+      border-top: 1px dashed var(--border-color);
       margin: 2em 0;
-    }
-    ul, ol {
-      padding-left: 1.6em;
-      margin-bottom: 1em;
-    }
-    li {
-      margin-bottom: 0.35em;
-    }
-    .doc-nav-top {
-      margin-bottom: 24px;
-      padding: 10px 14px;
-      background-color: #f1f5f9;
-      border-radius: 6px;
-      font-size: 0.9em;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .doc-nav-top a {
-      color: #0284c7;
-      text-decoration: none;
-    }
-  }
-</style>
-<script>
-(function() {
-  if (typeof window === 'undefined' || typeof document === 'undefined') return;
-  document.addEventListener('DOMContentLoaded', function() {
-    var body = document.body;
-    if (!body || body.getAttribute('data-doc-enhanced')) return;
-    body.setAttribute('data-doc-enhanced', 'true');
+    }}
 
-    // ブラウザがプレーンテキスト表示を行っている場合、簡易HTMLへと動的に見た目を向上
-    var rawText = body.innerText || body.textContent;
-    if (!rawText || rawText.indexOf('# ') === -1) return;
+    footer {{
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--border-color);
+      text-align: center;
+      font-size: 0.82em;
+      color: var(--text-muted);
+    }}
+  </style>
+</head>
+<body>
 
-    // トップナビゲーションバーの挿入
-    var nav = document.createElement('div');
-    nav.className = 'doc-nav-top';
-    nav.innerHTML = '<a href="/OPEN_PDF-Note-Workspace/index.html">&laquo; ドキュメントポータルへ戻る</a> | <a href="/OPEN_PDF-Note-Workspace/README.md">README</a> | <a href="/OPEN_PDF-Note-Workspace/Document/Index.md">文書案内</a>';
-    body.insertBefore(nav, body.firstChild);
-  });
-})();
-</script>
-<!-- HUMAN_DOC_VIEWER_END -->
+<div class="container">
+  <div class="doc-header">
+    <div class="doc-nav">
+      <a href="{root_rel}index.html">&laquo; ポータルへ戻る</a>
+      <a href="{root_rel}README.html">README</a>
+      <a href="{root_rel}Document/Index.html">文書案内</a>
+    </div>
+    <div class="raw-md-link">
+      <a href="{raw_md_name}" target="_blank">📄 Raw Markdown (.md)</a>
+    </div>
+  </div>
+
+  <main>
+{content_html}
+  </main>
+
+  <footer>
+    PDF Note Workspace Documentation &copy; 2026
+  </footer>
+</div>
+
+</body>
+</html>
 """
 
-def enhance_human_document(file_path: Path) -> bool:
-    """人間用ドキュメントファイルに閲覧用拡張ブロックを適用します。"""
-    try:
-        content = file_path.read_text(encoding="utf-8")
-        if "HUMAN_DOC_VIEWER_START" in content:
-            return False  # 適用済み
+def simple_markdown_to_html(md_text: str, root_rel: str) -> str:
+    """Markdown テキストを HTML に簡易変換します。"""
+    lines = md_text.splitlines()
+    html_lines = []
+    in_code_block = False
+    code_block_lines = []
+    in_list = False
+    in_table = False
+    is_mermaid = False
 
-        # 末尾に視覚拡張ブロックを追加
-        enhanced_content = content.rstrip() + "\n\n" + HUMAN_DOC_ENHANCER.strip() + "\n"
-        file_path.write_text(enhanced_content, encoding="utf-8")
-        return True
-    except Exception as e:
-        print(f"Error enhancing {file_path}: {e}", file=sys.stderr)
-        return False
+    for line in lines:
+        # コードブロック処理
+        if line.startswith("```"):
+            if in_code_block:
+                code_text = html.escape("\n".join(code_block_lines))
+                if is_mermaid:
+                    html_lines.append(f'<pre style="border: 1px solid var(--accent); background-color: var(--note-bg); color: var(--text-main); font-family: monospace;"><code>{code_text}</code></pre>')
+                else:
+                    html_lines.append(f"<pre><code>{code_text}</code></pre>")
+                code_block_lines = []
+                in_code_block = False
+                is_mermaid = False
+            else:
+                if in_list:
+                    html_lines.append("</ul>")
+                    in_list = False
+                if in_table:
+                    html_lines.append("</table>")
+                    in_table = False
+                in_code_block = True
+                is_mermaid = "mermaid" in line.lower()
+            continue
 
-def main() -> int:
-    if len(sys.argv) < 2:
+        if in_code_block:
+            code_block_lines.append(line)
+            continue
+
+        # リストの閉じ処理
+        if in_list and not (line.startswith("- ") or line.startswith("* ") or re.match(r"^\d+\.\s", line)):
+            html_lines.append("</ul>")
+            in_list = False
+
+        # テーブルの閉じ処理
+        if in_table and not line.startswith("|"):
+            html_lines.append("</table>")
+            in_table = False
+
+        # 空行
+        if not line.strip():
+            continue
+
+        # 見出し
+        if line.startswith("# "):
+            html_lines.append(f"<h1>{format_inline(line[2:], root_rel)}</h1>")
+        elif line.startswith("## "):
+            html_lines.append(f"<h2>{format_inline(line[3:], root_rel)}</h2>")
+        elif line.startswith("### "):
+            html_lines.append(f"<h3>{format_inline(line[4:], root_rel)}</h3>")
+        elif line.startswith("#### "):
+            html_lines.append(f"<h4>{format_inline(line[5:], root_rel)}</h4>")
+        # 引用注記 (GFM Callouts)
+        elif line.startswith("> "):
+            quote_text = format_inline(line[2:], root_rel)
+            html_lines.append(f"<blockquote><p>{quote_text}</p></blockquote>")
+        # リスト
+        elif line.startswith("- ") or line.startswith("* "):
+            if not in_list:
+                html_lines.append("<ul>")
+                in_list = True
+            item_text = format_inline(line[2:], root_rel)
+            html_lines.append(f"<li>{item_text}</li>")
+        # テーブル
+        elif line.startswith("|"):
+            if "---" in line:
+                continue  # 区切り行スキップ
+            cells = [format_inline(c.strip(), root_rel) for c in line.split("|")[1:-1]]
+            if not in_table:
+                html_lines.append("<table>")
+                in_table = True
+                tag = "th"
+            else:
+                tag = "td"
+            row_html = "".join([f"<{tag}>{c}</{tag}>" for c in cells])
+            html_lines.append(f"<tr>{row_html}</tr>")
+        # 水平線
+        elif line.strip() in ("---", "***", "___"):
+            html_lines.append("<hr>")
+        # 通常段落
+        else:
+            html_lines.append(f"<p>{format_inline(line, root_rel)}</p>")
+
+    if in_list:
+        html_lines.append("</ul>")
+    if in_table:
+        html_lines.append("</table>")
+
+    return "\n".join(html_lines)
+
+def format_inline(text: str, root_rel: str) -> str:
+    """インライン要素（リンク、太字、コード、画像）を変換します。"""
+    # エスケープ前に基本処理
+    # 画像
+    text = re.sub(
+        r'!\[(.*?)\]\((.*?)\)',
+        lambda m: f'<img src="{m.group(2)}" alt="{html.escape(m.group(1))}"><br><em>{html.escape(m.group(1))}</em>',
+        text
+    )
+    # リンク: 公開サイトでHTML化される README / Document 内文書だけを .html に変換する。
+    # AI向け資料、ライセンス類などは生の Markdown を参照させる。
+    def replace_link(m):
+        label = m.group(1)
+        url = m.group(2)
+        if "#" in url:
+            path_part, anchor_part = url.split("#", 1)
+            anchor_str = "#" + anchor_part
+        else:
+            path_part = url
+            anchor_str = ""
+
+        is_document_link = path_part.startswith("Document/") or (root_rel == "../" and "/" not in path_part)
+        if path_part.endswith(".md") and is_document_link and not path_part.startswith("http"):
+            path_part = path_part[:-3] + ".html"
+
+        url = path_part + anchor_str
+        return f'<a href="{url}">{label}</a>'
+
+    text = re.sub(r'\[(.*?)\]\((.*?)\)', replace_link, text)
+    # 太字
+    text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
+    # インラインコード
+    text = re.sub(r'`(.*?)`', lambda m: f'<code>{html.escape(m.group(1))}</code>', text)
+    return text
+
+def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
+    """Markdown ファイルを読み込み、対応する HTML ファイルを生成します。"""
+    content = md_path.read_text(encoding="utf-8").lstrip("\ufeff")
+    rel_path = md_path.relative_to(site_dir)
+    depth = len(rel_path.parts) - 1
+    root_rel = "../" * depth if depth > 0 else "./"
+
+    # タイトルの抽出
+    title_match = re.search(r"^#\s+(.*)$", content, re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else md_path.stem
+
+    body_html = simple_markdown_to_html(content, root_rel)
+    full_html = HTML_TEMPLATE.format(
+        title=html.escape(title),
+        root_rel=root_rel,
+        raw_md_name=md_path.name,
+        content_html=body_html
+    )
+
+    html_path = md_path.with_suffix(".html")
+    html_path.write_text(full_html, encoding="utf-8")
+    return html_path
+
+def main(argv: list[str] | None = None) -> int:
+    args = argv if argv is not None else sys.argv[1:]
+    if len(args) < 1:
         print("Usage: python render_human_docs.py <site_directory>", file=sys.stderr)
         return 1
 
-    site_dir = Path(sys.argv[1]).resolve()
+    site_dir = Path(args[0]).resolve()
     if not site_dir.exists() or not site_dir.is_dir():
         print(f"Directory not found: {site_dir}", file=sys.stderr)
         return 1
 
-    enhanced_count = 0
+    count = 0
+    # README.md
+    readme = site_dir / "README.md"
+    if readme.exists():
+        convert_md_file_to_html(readme, site_dir)
+        count += 1
 
-    # README.md の処理
-    readme_path = site_dir / "README.md"
-    if readme_path.exists():
-        if enhance_human_document(readme_path):
-            enhanced_count += 1
-
-    # Document/*.md の処理
+    # Document/*.md
     doc_dir = site_dir / "Document"
     if doc_dir.exists() and doc_dir.is_dir():
-        for doc_file in doc_dir.glob("*.md"):
-            if enhance_human_document(doc_file):
-                enhanced_count += 1
+        for doc in doc_dir.glob("*.md"):
+            convert_md_file_to_html(doc, site_dir)
+            count += 1
 
-    print(f"Successfully enhanced {enhanced_count} human documentation files in {site_dir}")
+    print(f"Successfully generated {count} HTML documentation pages in {site_dir}")
     return 0
 
 if __name__ == "__main__":

@@ -9,12 +9,18 @@ on:
     paths:
       - "for_ai/**"
       - "For_AI.md"
+      - "index.html"
       - "README.md"
       - "LICENSE.md"
       - "LICENSES_INDEX.md"
       - "THIRD_PARTY_NOTICES.md"
-      - "AGENTS.md"
       - "Document/**"
+      - "docs/images/**"
+      - "REPO_VERSION.txt"
+      - "tools/dev/build_public_site.py"
+      - "tools/dev/validate_public_site.py"
+      - "site/**"
+      - "tools/dev/render_human_docs.py"
       - ".github/workflows/static.yml"
 
   # Actions タブから手動実行できるようにする
@@ -41,34 +47,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 公開対象ファイルだけを _site/ に集める
-      # src/ tests/ out/ などソースコードは含めない
-      - name: Collect for_ai files
-        run: |
-          mkdir -p _site/for_ai/core
-          # エントリポイントと上位参照ファイル
-          cp index.html _site/
-          cp For_AI.md _site/
-          cp README.md _site/
-          cp LICENSE.md _site/
-          cp LICENSES_INDEX.md _site/
-          cp THIRD_PARTY_NOTICES.md _site/
-          cp AGENTS.md _site/ 2>/dev/null || true
-          # for_ai/ 本体
-          cp for_ai/manifest.json _site/for_ai/
-          cp for_ai/project_context.xml _site/for_ai/
-          cp "for_ai/AI共有用プロンプト.txt" "_site/for_ai/AI共有用プロンプト.txt"
-          cp for_ai/core/*.md _site/for_ai/core/
-          # Document/ (manifest.json の各ルートから参照される)
-          # How_to_Build.md は開発者専用のため除外する
-          mkdir -p _site/Document
-          cp Document/*.md _site/Document/ 2>/dev/null || true
-          rm -f _site/Document/How_to_Build.md
-          # __APP_VERSION__ プレースホルダを実際の版番号で置換する
-          APP_VERSION=$(cat APP_VERSION.txt | tr -d '[:space:]')
-          find _site -name "*.md" -exec sed -i "s/__APP_VERSION__/${APP_VERSION}/g" {} +
-          # 人間用ドキュメント (_site/README.md, _site/Document/*.md) に外部通信ゼロの表示用スタイルを付与
-          python tools/dev/render_human_docs.py _site
+      # 公開対象だけを site/output/public/ に集める。src/ tests/ out/ は含めない。
+      - name: Build selected documentation site
+        run: python3 site/scripts/build_public_site.py --replace
+
+      - name: Validate selected documentation site
+        run: python3 site/scripts/validate_public_site.py --site site/output/public
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -76,8 +60,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # ソース全体ではなく _site/ だけをアップロード
-          path: '_site'
+          # ソース全体ではなく公開成果物だけをアップロード
+          path: 'site/output/public'
 
       - name: Deploy to GitHub Pages
         id: deployment

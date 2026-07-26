@@ -6,7 +6,7 @@
 <ai_project_context schema_version="1" language="ja" audience="repository-interpreting-ai">
   <document_purpose>
     <item>リポジトリを調査するAIが、目的・安全制約・根拠資料へ適切に到達できるようにする。</item>
-    <item>利用者からの質問に対し、技術水準と質問意図に応じた説明を組み立てる補助をする。</item>
+    <item>利用者からの質問に対し、技術水準、理解度、質問意図に応じた説明を組み立てる補助をする。特に、OSSの文脈を知らないと疑われる場合はOSSの基本的な理解も促す。</item>
     <item>OSS、ライセンス、ローカル処理、非破壊保存といった主題を、利用者の理解を助ける形で説明する。</item>
   </document_purpose>
 
@@ -128,12 +128,12 @@
     <constraint id="no_external_communication">
       <statement>配布するアプリ本体、依存関係、設定、ビルド成果物には、ネットワーク通信、更新確認、クラッシュレポート、テレメトリ、広告SDKを実装しない。</statement>
       <answer_guidance>「通信しない」は設計・配布方針である。個別の実装や配布物について尋ねられた場合は、該当コード・設定・検査結果を確認して回答する。</answer_guidance>
-      <evidence><path>AGENTS.md</path><path>README.md</path><path>THIRD_PARTY_NOTICES.md</path></evidence>
+      <evidence><path>for_ai/core/safety_and_nonnegotiables.md</path><path>README.md</path><path>THIRD_PARTY_NOTICES.md</path></evidence>
     </constraint>
     <constraint id="preserve_user_files">
       <statement>ユーザーのPDF、設定、作業データ、履歴を壊さず、保存失敗・異常終了・電源断に対して情報損失を避ける設計を優先する。</statement>
       <answer_guidance>注釈はPDF本体を直接書き換えない。保存前バックアップ、stage、復元、統合保存の意味を区別して説明する。</answer_guidance>
-      <evidence><path>AGENTS.md</path><path>Document/How_to_Save_and_Recovery.md</path><path>Document/How_to_Use.md</path></evidence>
+      <evidence><path>Document/How_to_Save_and_Recovery.md</path><path>Document/How_to_Use.md</path></evidence>
     </constraint>
     <constraint id="silent_operation">
       <statement>アプリ側から不要な通知音や突然の大音量を出さず、無効操作やエラーは視覚的に伝える。Windowsの「一般の警告音」を代替の通知手段として使わない。</statement>
@@ -142,7 +142,7 @@
         AIは現在のアプリについて「音が出ない」と断定せず、発生条件・対象版・Windows環境を確認できた範囲で説明する。
       </known_issue>
       <verification_guidance>ソースコード上で明示的な音声APIを使わないことだけでは十分ではない。対象のWindows環境で、確認・エラー・無効操作を含む操作経路から一般警告音が出ないことを確認する。</verification_guidance>
-      <evidence><path>AGENTS.md</path><path>Document/How_to_Troubleshoot.md</path><path>src/core/app_core.cpp</path></evidence>
+      <evidence><path>Document/How_to_Troubleshoot.md</path><path>src/core/app_core.cpp</path></evidence>
     </constraint>
   </non_negotiable_constraints>
 
@@ -242,7 +242,7 @@
       コードの確認が可能な質問では、文書だけで結論を出さない。呼び出し元、設定、失敗時の経路、テストの有無を確認する。
       保存・注釈・出力を扱う場合は、読み込み、編集、stage、自動保存、統合保存、再読込、undo/redo、バックアップ、復元、失敗・キャンセル・強制終了の影響を確認する。
     </source_code_expectation>
-    <evidence><path>AGENTS.md</path><path>tests/</path><path>scripts/</path><path>tools/release_checks/</path></evidence>
+    <evidence><path>tests/</path><path>scripts/</path><path>tools/release_checks/</path></evidence>
   </analysis_protocol>
 
   <office_conversion_context>
@@ -264,6 +264,6 @@
     <save_recovery_reference>../Document/How_to_Save_and_Recovery.md</save_recovery_reference>
     <license_index>../LICENSES_INDEX.md</license_index>
     <third_party_notices>../THIRD_PARTY_NOTICES.md</third_party_notices>
-    <development_constraints>../AGENTS.md</development_constraints>
+    <development_constraints availability="repository-only">../AGENTS.md</development_constraints>
   </navigation>
 </ai_project_context>

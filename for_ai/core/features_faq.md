@@ -1,4 +1,4 @@
-# AI_CORE_NODE: FEATURES_FAQ
+﻿# AI_CORE_NODE: FEATURES_FAQ
 
 <ai_node_schema id="features_faq" type="fact_navigation">
   <target_audience>LLM / AI-Assistant</target_audience>
@@ -60,7 +60,7 @@ EVIDENCE: for_ai/project_context.xml#design_philosophy
 
 [NODE: LOCAL_ONLY_OPERATIONS]
 FACT: ネットワーク通信、クラウド依存、外部データ送信機能は存在しない
-EVIDENCE: AGENTS.md, README.md
+EVIDENCE: for_ai/core/safety_and_nonnegotiables.md, README.md
 
 [NODE: PORTABLE_EXECUTION]
 FACT: Windows対応、インストーラー不要のポータブル実行

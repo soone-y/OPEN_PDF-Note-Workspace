@@ -40,6 +40,7 @@ libreoffice_conversion_quality_test = load_module(
     "libreoffice_conversion_quality_test", "tools/libreoffice/libreoffice_conversion_quality_test.py"
 )
 render_human_docs = load_module("render_human_docs", "tools/dev/render_human_docs.py")
+build_public_site = load_module("build_public_site", "tools/dev/build_public_site.py")
 cpp_include_visualizer = load_module("cpp_include_visualizer", "tools/metrics/cpp_include_visualizer.py")
 md_structure_scanner = load_module("md_structure_scanner", "tools/dev/md_structure_scanner.py")
 persistence_index = load_module("persistence_index", "tools/dev/persistence_index.py")
@@ -1835,6 +1836,91 @@ class LibreOfficeConversionQualityToolTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 libreoffice_conversion_quality_test.ensure_output_outside_inputs(fixtures / "output", fixtures)
+
+
+class RenderHumanDocsTests(unittest.TestCase):
+    def test_generates_html_for_human_docs_only(self) -> None:
+        with repo_tempdir() as site_dir:
+            readme = site_dir / "README.md"
+            readme.write_text("# Project README\n\nSome text.", encoding="utf-8")
+
+            doc_dir = site_dir / "Document"
+            doc_dir.mkdir()
+            use_doc = doc_dir / "How_to_Use.md"
+            use_doc.write_text("# How to Use\n\nUsage steps.", encoding="utf-8")
+
+            for_ai = site_dir / "For_AI.md"
+            for_ai.write_text("# For AI\n\nAI rules.", encoding="utf-8")
+
+            code = render_human_docs.main([str(site_dir)])
+            self.assertEqual(code, 0)
+
+            # 人間用ドキュメントの .html が作られていること
+            self.assertTrue((site_dir / "README.html").exists())
+            self.assertTrue((site_dir / "Document" / "How_to_Use.html").exists())
+            # 生の .md も残っていること
+            self.assertTrue(readme.exists())
+            self.assertTrue(use_doc.exists())
+            # For_AI.html は作られないこと
+            self.assertFalse((site_dir / "For_AI.html").exists())
+
+
+class BuildPublicSiteTests(unittest.TestCase):
+    def test_builds_only_selected_files_and_keeps_machine_readable_index(self) -> None:
+        with repo_tempdir() as root:
+            (root / "for_ai" / "core").mkdir(parents=True)
+            (root / "Document").mkdir()
+            (root / "docs" / "images").mkdir(parents=True)
+            (root / "site" / "src").mkdir(parents=True)
+            (root / "site" / "src" / "assets").mkdir()
+
+            for name in (
+                "index.html", "For_AI.md", "README.md", "LICENSE.md", "LICENSES_INDEX.md",
+                "THIRD_PARTY_NOTICES.md", "AGENTS.md",
+            ):
+                (root / name).write_text("__APP_VERSION__", encoding="utf-8")
+            (root / "REPO_VERSION.txt").write_text("1.2.3\n", encoding="utf-8")
+            (root / "site" / "src" / "index.html").write_text("__APP_VERSION__", encoding="utf-8")
+            (root / "site" / "src" / "assets" / "og.png").write_bytes(b"og")
+            (root / "for_ai" / "core" / "semantic_search_index.json").write_text("{}", encoding="utf-8")
+            (root / "Document" / "How_to_Use.md").write_text("# Use __APP_VERSION__", encoding="utf-8")
+            (root / "Document" / "How_to_Build.md").write_text("private", encoding="utf-8")
+            (root / "docs" / "images" / "overview.png").write_bytes(b"image")
+            (root / "site" / "src" / "public_site_allowlist.json").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "version_source": "REPO_VERSION.txt",
+                    "files": [
+                        {
+                            "source": "site/src/index.html" if name == "index.html" else name,
+                            "destination": name,
+                        }
+                        for name in (
+                            "index.html", "For_AI.md", "README.md", "LICENSE.md",
+                            "LICENSES_INDEX.md", "THIRD_PARTY_NOTICES.md",
+                        )
+                    ] + [{"source": "site/src/assets/og.png", "destination": "og.png"}],
+                    "trees": [
+                        {"source": "for_ai", "destination": "for_ai"},
+                        {"source": "docs/images", "destination": "docs/images"},
+                    ],
+                    "document_markdown": {
+                        "source": "Document", "destination": "Document",
+                        "exclude": ["How_to_Build.md"],
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(build_public_site, "REPO_ROOT", root), \
+                 mock.patch.object(build_public_site, "OUTPUT_DIR", root / "_site"):
+                self.assertEqual(build_public_site.build_site(), 0)
+
+            site = root / "_site"
+            self.assertTrue((site / "for_ai" / "core" / "semantic_search_index.json").exists())
+            self.assertTrue((site / "Document" / "How_to_Use.md").exists())
+            self.assertFalse((site / "Document" / "How_to_Build.md").exists())
+            self.assertEqual((site / "Document" / "How_to_Use.md").read_text(encoding="utf-8"), "# Use 1.2.3")
 
 
 if __name__ == "__main__":

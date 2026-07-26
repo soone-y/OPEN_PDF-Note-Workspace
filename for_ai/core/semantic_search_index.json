@@ -1,0 +1,36 @@
+﻿{
+  "schema_version": 1,
+  "purpose": "AI検索（Web Search, RAG, セマンティック検索）がユーザーの質問意図から対応ノードを一発特定するためのセマンティックインデックス",
+  "queries": [
+    {
+      "intent": "PDF注釈の保存場所・保存形式を知りたい",
+      "keywords": ["注釈", "保存", "clrop", "PDF上書き", "非破壊"],
+      "target_node": "for_ai/core/data_schemas.md",
+      "evidence_path": "Document/What_is_File_Formats.md"
+    },
+    {
+      "intent": "Lite版と通常版の違い・どちらを選ぶべきか知りたい",
+      "keywords": ["Lite", "通常版", "LibreOffice", "Office変換", "DOCX", "PPTX"],
+      "target_node": "for_ai/core/features_faq.md",
+      "evidence_path": "README.md"
+    },
+    {
+      "intent": "外部通信を行わない安全性やセキュリティを知りたい",
+      "keywords": ["通信", "ネットワーク", "安全", "オフライン", "テレメトリ", "無通信"],
+      "target_node": "for_ai/core/safety_and_nonnegotiables.md",
+      "evidence_path": "for_ai/core/safety_and_nonnegotiables.md"
+    },
+    {
+      "intent": "C++ ソースコードのレイアー構造や関数位置を知りたい",
+      "keywords": ["C++", "Win32", "PDFium", "atomic_write", "コード構造", "関数"],
+      "target_node": "for_ai/core/code_symbol_index.md",
+      "evidence_path": "for_ai/core/architecture_layers.md"
+    },
+    {
+      "intent": "操作中にWindowsの警告音が鳴る原因を知りたい",
+      "keywords": ["音", "ビープ", "警告音", "一般の警告音", "静音"],
+      "target_node": "for_ai/core/troubleshooting_quick.md",
+      "evidence_path": "Document/How_to_Troubleshoot.md"
+    }
+  ]
+}

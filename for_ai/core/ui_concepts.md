@@ -1,4 +1,4 @@
-# AI_CORE_NODE: UI_CONCEPTS
+﻿# AI_CORE_NODE: UI_CONCEPTS
 
 <ai_node_schema id="ui_concepts" type="layout_and_terminology">
   <target_audience>LLM / AI-Assistant</target_audience>
@@ -26,6 +26,30 @@ EVIDENCE: Document/How_to_Use.md
 CONCEPT: ペン、ハイライト、テキスト入力、図形描画のモード切り替え部
 EVIDENCE: Document/How_to_Use.md
 ```
+
+### 画面レイアウト階層構造 (UI Layout Structure)
+
+```mermaid
+graph LR
+    WINDOW["Main Window"] --> MENU["Top Menu Bar"]
+    WINDOW --> TOOLBAR["Annotation Toolbar"]
+    WINDOW --> SPLITTER["Splitter Container"]
+    SPLITTER --> STAGE["PDF Stage Panel<br/>(PDFium View + Annotation Canvas)"]
+    SPLITTER --> NOTE_PANEL["Note Editor Panel<br/>(md4c Parser + Text Editor)"]
+```
+
+<ui_layout_hierarchy>
+  <component id="main_window" type="root_container">
+    <children>
+      <child id="top_menu_bar" type="menu" position="top" />
+      <child id="annotation_toolbar" type="toolbar" position="top_sub" />
+      <child id="splitter_container" type="split_view" position="center">
+        <panel id="pdf_stage_panel" position="left" role="pdf_render_and_draw" />
+        <panel id="note_editor_panel" position="right" role="markdown_note_edit" />
+      </child>
+    </children>
+  </component>
+</ui_layout_hierarchy>
 
 ---
 

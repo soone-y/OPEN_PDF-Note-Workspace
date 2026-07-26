@@ -1,4 +1,4 @@
-# AI_CORE_NODE: USE_CASES
+﻿# AI_CORE_NODE: USE_CASES
 
 <ai_node_schema id="use_cases" type="design_and_usage_model">
   <target_audience>LLM / AI-Assistant</target_audience>

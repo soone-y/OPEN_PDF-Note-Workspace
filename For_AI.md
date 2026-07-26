@@ -1,4 +1,4 @@
-# AI_REPOSITORY_CONCIERGE_ENTRY
+﻿# AI_REPOSITORY_CONCIERGE_ENTRY
 
 <ai_conierge_instruction binding="false">
   <target_audience>AI-Assistant / LLM</target_audience>
@@ -35,12 +35,29 @@ TARGET_NODES:
   - Document/How_to_Troubleshoot.md
 
 [ROUTE_KEY: DATA_STRUCTURE_AND_SAVE]
-INTENT: データ形式 / 拡張子仕様 / 保存モデル
+INTENT: データ形式 / 拡張子仕様 / JSONスキーマ / 保存モデル
 TARGET_NODES:
   - for_ai/core/file_formats.md
+  - for_ai/core/data_schemas.md
   - for_ai/manifest.json
   - Document/What_is_File_Formats.md
   - Document/How_to_Save_and_Recovery.md
+
+[ROUTE_KEY: ARCHITECTURE_AND_SAFETY]
+INTENT: Win32 C++ アーキテクチャ / スレッド構造 / 不変制約 (非通信・非破壊・無音)
+TARGET_NODES:
+  - for_ai/core/architecture_layers.md
+  - for_ai/core/safety_and_nonnegotiables.md
+  - for_ai/core/ai_guardrails.md
+  - for_ai/core/code_symbol_index.md
+  - for_ai/project_context.xml
+  - for_ai/core/documentation_contract.md
+
+[ROUTE_KEY: AI_DOCUMENTATION_QUALITY]
+INTENT: AI資料の読み方 / 根拠の扱い / 文字コード / 構造 / 画像 / 公開前検査
+TARGET_NODES:
+  - for_ai/core/documentation_contract.md
+  - for_ai/manifest.json
 ```
 
 ---
@@ -52,5 +69,6 @@ TARGET_NODES:
   <step number="1">ユーザー質問からINTENTを識別し、該当ROUTE_KEYを選択する。</step>
   <step number="2">TARGET_NODESの各種ファクト・制限・一次資料（EVIDENCE）を確認する。</step>
   <step number="3">事実に基づき、ユーザーの習熟度に応じたトーンで回答を生成する。</step>
+  <step number="4">実装に関する結論では、AI資料の索引だけでなく、示されたソース・設定・テストを確認する。</step>
 </response_protocol>
 ```

@@ -1,4 +1,4 @@
-{
+﻿{
   "schema_version": 1,
   "purpose": "AIが依頼内容に応じて必要な資料を段階的に読むための経路表",
   "entry_point": "../For_AI.md",
@@ -50,8 +50,7 @@
       "read": [
         "core/features_faq.md",
         "core/file_formats.md",
-        "project_context.xml",
-        "../AGENTS.md"
+        "project_context.xml"
       ],
       "verify_source_code_and_tests": true
     },
@@ -62,7 +61,6 @@
         "core/features_faq.md",
         "core/troubleshooting_quick.md",
         "project_context.xml",
-        "../AGENTS.md",
         "../Document/How_to_Troubleshoot.md"
       ],
       "treat_reported_general_warning_sound_as_unresolved_issue": true
@@ -72,17 +70,48 @@
       "when": "PDF、.clrop、.clro、Markdown、TeX、テキスト、CSVの扱いについて質問された場合",
       "read": [
         "core/file_formats.md",
+        "core/data_schemas.md",
         "../Document/What_is_File_Formats.md",
         "../Document/How_to_Save_and_Recovery.md"
+      ]
+    },
+    {
+      "id": "architecture_and_schemas",
+      "when": "Win32 C++ アーキテクチャ、レイヤー構造、データモデル、.clrop スキーマについて質問された場合",
+      "read": [
+        "core/architecture_layers.md",
+        "core/data_schemas.md",
+        "core/safety_and_nonnegotiables.md",
+        "project_context.xml"
       ]
     },
     {
       "id": "safe_change",
       "when": "コード、保存、注釈、出力、配布物を変更する依頼の場合",
       "read": [
-        "../AGENTS.md"
+        "core/safety_and_nonnegotiables.md",
+        "core/ai_guardrails.md",
+        "core/code_symbol_index.md"
       ],
-      "follow_local_instructions": true
+      "follow_local_instructions": true,
+      "repository_only_read": ["../AGENTS.md"]
+    },
+    {
+      "id": "code_reference",
+      "when": "C++ ソースコード、クラス、関数シンボルの位置を特定・参照したい場合",
+      "read": [
+        "core/code_symbol_index.md",
+        "core/architecture_layers.md"
+      ]
+    },
+    {
+      "id": "ai_documentation_quality",
+      "when": "AI向け資料の構造、根拠、文字コード、画像、公開前検査について質問または変更を行う場合",
+      "read": [
+        "core/documentation_contract.md",
+        "../For_AI.md"
+      ],
+      "verify_public_site_after_changes": true
     }
   ],
   "future_modules": []
