@@ -1,6 +1,6 @@
-# for_ai/ ディレクトリの AI 向け文書を GitHub Pages (静的 HTML) で公開する
+# 公開snapshot内のAI向け文書を GitHub Pages (静的 HTML) で公開する
 # ベース: GitHub 公式 "Deploy static content to Pages" テンプレート
-name: Deploy for_ai to GitHub Pages
+name: Deploy documentation portal to GitHub Pages
 
 on:
   push:
@@ -47,9 +47,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 公開対象だけを site/output/public/ に集める。src/ tests/ out/ は含めない。
-      - name: Build selected documentation site
-        run: python3 site/scripts/build_public_site.py --replace
+      # 公開snapshot内の正本から文書ポータルを生成する。紹介ページは使わない。
+      - name: Build documentation portal
+        run: python3 site/scripts/build_public_site.py --replace --documentation-portal
 
       - name: Validate selected documentation site
         run: python3 site/scripts/validate_public_site.py --site site/output/public

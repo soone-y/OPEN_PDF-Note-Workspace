@@ -212,6 +212,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="doc-header">
     <div class="doc-nav">
       <a href="{root_rel}index.html">&laquo; ポータルへ戻る</a>
+      <a href="{root_rel}For_AI.html">AI資料</a>
       <a href="{root_rel}README.html">README</a>
       <a href="{root_rel}Document/Index.html">文書案内</a>
     </div>
@@ -340,8 +341,8 @@ def format_inline(text: str, root_rel: str) -> str:
         lambda m: f'<img src="{m.group(2)}" alt="{html.escape(m.group(1))}"><br><em>{html.escape(m.group(1))}</em>',
         text
     )
-    # リンク: 公開サイトでHTML化される README / Document 内文書だけを .html に変換する。
-    # AI向け資料、ライセンス類などは生の Markdown を参照させる。
+    # 公開サイトでHTML化されるローカル Markdown は .html を参照する。
+    # 生の Markdown も同じ場所に残し、各HTMLページから直接開ける。
     def replace_link(m):
         label = m.group(1)
         url = m.group(2)
@@ -352,8 +353,7 @@ def format_inline(text: str, root_rel: str) -> str:
             path_part = url
             anchor_str = ""
 
-        is_document_link = path_part.startswith("Document/") or (root_rel == "../" and "/" not in path_part)
-        if path_part.endswith(".md") and is_document_link and not path_part.startswith("http"):
+        if path_part.endswith(".md") and not path_part.startswith("http"):
             path_part = path_part[:-3] + ".html"
 
         url = path_part + anchor_str
@@ -401,18 +401,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     count = 0
-    # README.md
-    readme = site_dir / "README.md"
-    if readme.exists():
-        convert_md_file_to_html(readme, site_dir)
-        count += 1
-
-    # Document/*.md
-    doc_dir = site_dir / "Document"
-    if doc_dir.exists() and doc_dir.is_dir():
-        for doc in doc_dir.glob("*.md"):
-            convert_md_file_to_html(doc, site_dir)
-            count += 1
+    for relative_dir in (Path("."), Path("Document"), Path("for_ai")):
+        directory = site_dir / relative_dir
+        if not directory.exists() or not directory.is_dir():
+            continue
+        markdown_files = (
+            sorted(site_dir.glob("*.md"))
+            if relative_dir == Path(".")
+            else sorted(directory.rglob("*.md"))
+        )
+        for markdown_file in markdown_files:
+            if markdown_file.is_file():
+                convert_md_file_to_html(markdown_file, site_dir)
+                count += 1
 
     print(f"Successfully generated {count} HTML documentation pages in {site_dir}")
     return 0

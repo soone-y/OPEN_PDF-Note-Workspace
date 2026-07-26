@@ -117,7 +117,7 @@ def replace_developer_only_links(site_dir: Path) -> None:
         markdown_file.write_text(text, encoding="utf-8")
 
 
-def build_site(*, replace: bool = False) -> int:
+def build_site(*, replace: bool = False, documentation_portal: bool = False) -> int:
     if OUTPUT_DIR.exists():
         if not replace:
             print(
@@ -136,6 +136,9 @@ def build_site(*, replace: bool = False) -> int:
 
         allowlist = load_allowlist()
         copy_allowlisted_content(staging_dir, allowlist)
+
+        if documentation_portal:
+            copy_file(REPO_ROOT / "index.html", staging_dir / "index.html")
 
         version_source = resolve_repo_relative_path(allowlist.get("version_source", ""), label="allowlist version source")
         version = version_source.read_text(encoding="utf-8").strip()
@@ -172,5 +175,10 @@ def build_site(*, replace: bool = False) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--replace", action="store_true", help="replace the tracked site/output/public output")
+    parser.add_argument(
+        "--documentation-portal",
+        action="store_true",
+        help="use the repository documentation portal instead of the Cloudflare introduction page",
+    )
     arguments = parser.parse_args()
-    raise SystemExit(build_site(replace=arguments.replace))
+    raise SystemExit(build_site(replace=arguments.replace, documentation_portal=arguments.documentation_portal))

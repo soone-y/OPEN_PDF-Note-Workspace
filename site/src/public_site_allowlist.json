@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "purpose": "site/output/public に含めてよいリポジトリ正本を明示する許可リスト",
+  "version_source": "REPO_VERSION.txt",
+  "files": [
+    { "source": "site/src/index.html", "destination": "index.html" },
+    { "source": "For_AI.md", "destination": "For_AI.md" },
+    { "source": "README.md", "destination": "README.md" },
+    { "source": "LICENSE.md", "destination": "LICENSE.md" },
+    { "source": "LICENSES_INDEX.md", "destination": "LICENSES_INDEX.md" },
+    { "source": "THIRD_PARTY_NOTICES.md", "destination": "THIRD_PARTY_NOTICES.md" },
+    { "source": "site/src/assets/og.png", "destination": "og.png" }
+  ],
+  "trees": [
+    { "source": "for_ai", "destination": "for_ai" },
+    { "source": "docs/images", "destination": "docs/images" }
+  ],
+  "document_markdown": {
+    "source": "Document",
+    "destination": "Document",
+    "exclude": ["How_to_Build.md"]
+  }
+}

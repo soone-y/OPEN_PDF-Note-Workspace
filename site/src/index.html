@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="PDFを読み、注釈とノートを残すためのWindows向けローカルワークスペース。">
+  <meta property="og:title" content="PDF Note Workspace">
+  <meta property="og:description" content="PDFを読み、注釈とノートを残すためのWindows向けローカルワークスペース。">
+  <meta property="og:image" content="og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="ai-agent-entrypoint" content="For_AI.md">
+  <title>PDF Note Workspace</title>
+  <style>
+    :root {
+      --page: #fbfbf8;
+      --ink: #27302e;
+      --subtle: #66706c;
+      --line: #dfe3df;
+      --link: #35675e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--ink);
+      font-family: "Yu Gothic UI", "Hiragino Sans", Meiryo, sans-serif;
+      font-size: 16px;
+      line-height: 1.9;
+    }
+    a { color: var(--link); }
+    .wrap { width: min(760px, calc(100% - 40px)); margin: 0 auto; }
+    header { padding: 25px 0; border-bottom: 1px solid var(--line); }
+    .name { color: var(--ink); font-size: 15px; font-weight: 700; text-decoration: none; }
+    main { padding: 70px 0 40px; }
+    h1, h2 { font-weight: 600; line-height: 1.5; }
+    h1 { margin: 0; font-size: clamp(30px, 6vw, 46px); letter-spacing: .02em; }
+    h2 { margin: 0 0 14px; font-size: 21px; }
+    .lead { margin: 24px 0 0; color: var(--subtle); font-size: 17px; }
+    .links { display: flex; flex-wrap: wrap; gap: 14px 20px; margin-top: 25px; font-size: 14px; }
+    .screen { margin: 48px 0 0; border: 1px solid var(--line); background: #fff; }
+    .screen img { display: block; width: 100%; height: auto; }
+    .caption { margin: 8px 0 0; color: var(--subtle); font-size: 12px; }
+    section { padding: 48px 0; border-top: 1px solid var(--line); }
+    p { margin: 0; }
+    p + p { margin-top: 14px; }
+    .plain-list { margin: 18px 0 0; padding-left: 1.3em; }
+    .plain-list li + li { margin-top: 6px; }
+    .note { margin-top: 18px; color: var(--subtle); font-size: 14px; }
+    footer { padding: 22px 0 36px; border-top: 1px solid var(--line); color: var(--subtle); font-size: 13px; }
+    footer p { margin: 0; }
+    @media (max-width: 560px) {
+      .wrap { width: min(100% - 28px, 760px); }
+      main { padding-top: 52px; }
+      section { padding: 38px 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap"><a class="name" href="#top">PDF Note Workspace</a></div>
+  </header>
+
+  <main id="top" class="wrap">
+    <h1>PDFを読みながら、<br>考えたことを書き残す。</h1>
+    <p class="lead">PDF Note Workspace は、PDFの閲覧・注釈・ノートをひとつの場所で扱う、Windows向けのローカルワークスペースです。</p>
+    <div class="links">
+      <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases">配布物を入手する</a>
+      <a href="Document/How_to_Setup.html">セットアップ方法</a>
+      <a href="Document/How_to_Use.html">基本操作</a>
+    </div>
+
+    <figure class="screen">
+      <img src="docs/images/app_overview.png" alt="PDF、注釈一覧、ノートを同時に表示しているPDF Note Workspaceの画面">
+    </figure>
+    <p class="caption">PDFと注釈、ノートを同じワークスペースに並べて扱います。</p>
+
+    <section>
+      <h2>資料を読む時間を、途切れさせないために。</h2>
+      <p>PDFを読んでいるときに浮かんだことを、その場で注釈やノートに残せるようにします。資料とメモを何度も行き来するのではなく、同じ作業空間で見比べながら考えを育てるためのソフトです。</p>
+    </section>
+
+    <section>
+      <h2>できること</h2>
+      <ul class="plain-list">
+        <li>PDFを開き、マーカー・ペン・テキスト・図形で注釈する</li>
+        <li>PDFと並べてノートを書き、資料ごとに整理する</li>
+        <li>必要に応じて、注釈入りPDFを別ファイルとして書き出す</li>
+      </ul>
+      <p class="note">通常版はDOCX / PPTXをローカルでPDFに変換して扱えます。Lite版はPDF中心の、より小さな配布物です。</p>
+    </section>
+
+    <section>
+      <h2>使う人の資料と作業を尊重する。</h2>
+      <p>原本のPDFを直接書き換えず、注釈は別のデータとして扱います。外部通信を前提にせず、保存や復元にも配慮します。これは宣伝のための機能ではなく、安心して日々の資料読みを続けるための土台です。</p>
+    </section>
+
+    <section>
+      <h2>詳しく知る</h2>
+      <div class="links">
+        <a href="Document/How_to_Save_and_Recovery.html">保存と復元</a>
+        <a href="Document/What_is_File_Formats.html">ファイル形式</a>
+        <a href="Document/How_to_Troubleshoot.html">困ったとき</a>
+        <a href="README.html">README</a>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap"><p>PDF Note Workspace · <a href="For_AI.md">AI / 開発者向け資料</a></p></div>
+  </footer>
+</body>
+</html>

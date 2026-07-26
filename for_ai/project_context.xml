@@ -67,6 +67,15 @@
       中心課題は、単なる「PDF編集」ではない。PDF資料を読む作業と、注釈・ノート・数式・資料整理が別々の道具に分断され、
       学習時の文脈と対応関係が失われることである。
     </central_challenge>
+    <development_motivation provenance="user-reported-observations">
+      <scope>以下は開発の動機となった具体的な観察である。特定のブラウザや注釈機能一般についての普遍的な性能・品質の断定ではなく、長期にわたり多数の利用者に見られた不便と不安定さを記録する。</scope>
+      <observation id="browser_resource_use">PDF読解をブラウザで行うと、利用資源の占有が大きく感じられる。</observation>
+      <observation id="browser_text_rendering">ブラウザ上の注釈では文字表示が適切でないことがある。日本語で見慣れない漢字の字形が表示される、または文字が表示から消失する事例がある。</observation>
+      <observation id="separated_tools">ノート作成とPDFへの加筆を別々のソフトで行うため、読解中の文脈が分断される。</observation>
+      <observation id="workspace_organization">授業ごとの保存、ディレクトリ構造の整備、関連資料の管理に手間がかかる。</observation>
+      <observation id="annotation_text_box">ブラウザ注釈のテキストボックスが、原因を特定できないまま使えなくなることがある。</observation>
+      <design_response>これらを受け、PDF・注釈・ノート・関連資料を一つのローカルワークスペースで扱い、日本語表示、直接的な注釈操作、作業単位での整理と再開を設計課題とした。</design_response>
+    </development_motivation>
     <project_definition>
       PDFを中心に、原本を壊さず、読解・注釈・ノート・数式・資料間の関係を一つの文脈として扱う、テキスト指向の学習ワークスペース。
     </project_definition>
