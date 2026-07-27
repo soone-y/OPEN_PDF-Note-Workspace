@@ -5,40 +5,60 @@
   "documentation_portal": {
     "files": [
       { "source": "For_AI.md", "destination": "For_AI.md" },
+      { "source": "REPO_VERSION.txt", "destination": "REPO_VERSION.txt" },
       { "source": "README.md", "destination": "README.md" },
       { "source": "LICENSE.md", "destination": "LICENSE.md" },
       { "source": "LICENSES_INDEX.md", "destination": "LICENSES_INDEX.md" },
       { "source": "THIRD_PARTY_NOTICES.md", "destination": "THIRD_PARTY_NOTICES.md" },
-      { "source": ".github/SECURITY.md", "destination": ".github/SECURITY.md" }
-    ],
-    "trees": [
-      { "source": "for_ai", "destination": "for_ai" },
-      { "source": "docs/images", "destination": "docs/images" }
-    ],
-    "document_markdown": {
-      "source": "docs/public",
-      "destination": "docs/public",
-      "exclude": ["How_to_Build.md"]
-    }
+      { "source": ".github/SECURITY.md", "destination": ".github/SECURITY.md" },
+      { "source": "for_ai/AI共有用プロンプト.txt", "destination": "for_ai/AI共有用プロンプト.txt" },
+      { "source": "for_ai/manifest.json", "destination": "for_ai/manifest.json" },
+      { "source": "for_ai/core/features_faq.md", "destination": "for_ai/core/features_faq.md" },
+      { "source": "for_ai/core/file_formats.md", "destination": "for_ai/core/file_formats.md" },
+      { "source": "for_ai/core/safety_and_nonnegotiables.md", "destination": "for_ai/core/safety_and_nonnegotiables.md" },
+      { "source": "for_ai/core/troubleshooting_quick.md", "destination": "for_ai/core/troubleshooting_quick.md" },
+      { "source": "for_ai/core/ui_concepts.md", "destination": "for_ai/core/ui_concepts.md" },
+      { "source": "for_ai/core/use_cases.md", "destination": "for_ai/core/use_cases.md" },
+      { "source": "for_ai/core/user_guidance_reference.md", "destination": "for_ai/core/user_guidance_reference.md" },
+      { "source": "docs/public/How_to_Save_and_Recovery.md", "destination": "docs/public/How_to_Save_and_Recovery.md" },
+      { "source": "docs/public/How_to_Setup.md", "destination": "docs/public/How_to_Setup.md" },
+      { "source": "docs/public/How_to_Troubleshoot.md", "destination": "docs/public/How_to_Troubleshoot.md" },
+      { "source": "docs/public/How_to_Use.md", "destination": "docs/public/How_to_Use.md" },
+      { "source": "docs/public/Index.md", "destination": "docs/public/Index.md" },
+      { "source": "docs/public/What_is_File_Formats.md", "destination": "docs/public/What_is_File_Formats.md" },
+      { "source": "docs/images/app_overview.png", "destination": "docs/images/app_overview.png" }
+    ]
   },
   "pages_submission": {
     "files": [
-      { "source": ".github/workflows/static.yml", "destination": ".github/workflows/static.yml" }
-    ],
-    "trees": [
+      { "source": ".github/workflows/static.yml", "destination": ".github/workflows/static.yml" },
       {
-        "source": "site/github",
-        "destination": "site/github",
-        "exclude_prefixes": ["output/", "scripts/__pycache__/"]
+        "source": "site/github/public.gitignore",
+        "destination": ".gitignore"
+      },
+      {
+        "source": "site/github/index.html",
+        "destination": "site/github/index.html"
+      },
+      {
+        "source": "site/github/documentation_portal_allowlist.json",
+        "destination": "site/github/documentation_portal_allowlist.json"
+      },
+      {
+        "source": "site/github/scripts/build_public_site.py",
+        "destination": "site/github/scripts/build_public_site.py"
+      },
+      {
+        "source": "site/github/scripts/render_human_docs.py",
+        "destination": "site/github/scripts/render_human_docs.py"
+      },
+      {
+        "source": "site/github/scripts/validate_public_site.py",
+        "destination": "site/github/scripts/validate_public_site.py"
       }
     ],
     "retired_paths": [
-      "index.html",
-      "tools/dev/build_public_site.py",
-      "tools/dev/validate_public_site.py",
-      "tools/dev/render_human_docs.py",
-      "site/scripts",
-      "site/src"
+      "index.html"
     ]
   }
 }

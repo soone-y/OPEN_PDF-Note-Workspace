@@ -17,14 +17,12 @@ GitHub のアカウントや Git の知識は必要ありません。リポジ�
 
 `Source code (zip)` や `Source code (tar.gz)` は開発用のソースコードで、アプリとしては使えません。選んだ ZIP をダウンロードした後は、[GitHub から取得した後のセットアップ手順](docs/public/How_to_Setup.md#github-から-入手する) に従って展開してください。
 
-## 最初に読む文書
+## 文書と案内
 
-- 利用者向け文書の入口: [docs/public/Index.md](docs/public/Index.md)
-- ZIP 配布のセットアップ: [docs/public/How_to_Setup.md](docs/public/How_to_Setup.md)
-- まず使い始める: [docs/public/How_to_Use.md](docs/public/How_to_Use.md)
-- ソースからビルドする: [docs/public/How_to_Build.md](docs/public/How_to_Build.md)
-- AI にリポジトリを共有する入口: [For_AI.md](For_AI.md)
-- AI 向け文書の Web 公開版: https://soone-y.github.io/OPEN_PDF-Note-Workspace/For_AI.md
+- 紹介サイト: https://pdf-note-workspace.soone-y.com/
+- 配布物を入手する: https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases
+- 使い方・セットアップの詳細一覧: [docs/public/Index.md](docs/public/Index.md)
+- AI向け資料を含む公開文書ポータル: https://soone-y.github.io/OPEN_PDF-Note-Workspace/
 
 配布物では `docs/README.md` から同じ文書案内を開けます。アプリ内のヘルプも外部通信なしで利用できます。
 
@@ -73,20 +71,12 @@ PDF に書き込んだ注釈は、PDF 本体ではなく、同じフォルダに
 
 ノートは PDF 注釈とは別のファイルです。一般的な `.txt` / `.csv`、Markdown の `.md` / `.markdown`、TeX 用の `.tex`、Markdown で修飾できる本ソフトの標準ノート `.clro` を開けます。`.csv` は表計算として特別には処理せず、プレーンテキストとして扱います。PDF を表示・注釈しながら、選んだノートを開いて編集できます。
 
-## リポジトリの入口
+## 文書ポータルの構成
 
-- `src/`: アプリ本体の C++ / Win32 実装
-- `tests/`: 単体・統合・スクリプトテスト
-- `scripts/`: ビルド、配布、検証スクリプト
-- `docs/public/`: 利用者・開発者向けの目的別文書
-- `docs/internal/`: 開発用の設計、調査、運用文書
-- `release_assets/`: 配布用サンプルワークスペースなど
+- `docs/public/`: 導入、使い方、保存・復元、トラブル対処の案内
+- `for_ai/`: AIが公開資料を参照して案内するための経路表と補助資料
 
-## 全体ビルドと配布
-
-- `./build.ps1`: 通常版、Lite版、閲覧専用ビューアを Release 構成でまとめてビルドする入口です（`-Lite` で Lite版のみのビルドも可能）。引数なしで実行すると、配布準備済みの実行ファイルを `out/` に作成します。
-- `./release.ps1`: 上記のビルド後、配布フォルダと ZIP、チェックサム、公開スナップショットをまとめて作る入口です（実機テスト等で早めに試作したい場合は `-Lite` を指定すると Lite版のみ短時間で作成できます）。引数なしで実行すると、配布可能な release set をリポジトリ外の `../PDF-Note-ReleaseSet/` に作成します。
-- 個別のビルド条件や配布構成は、`scripts/build/build_workspace.ps1`、`scripts/build/build_readonly_viewer.ps1`、`scripts/release/make_release_set.ps1`、`scripts/release/pack_release.ps1` を直接使います。
+開発用のソース、テスト、内部設計文書、公開作業用ツールはこの公開文書ポータルには含めません。
 
 ## ライセンス
 

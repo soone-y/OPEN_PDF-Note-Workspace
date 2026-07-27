@@ -12,9 +12,15 @@ from pathlib import Path
 
 
 TEXT_EXTENSIONS = {".html", ".json", ".md", ".txt", ".xml"}
+FORBIDDEN_PUBLIC_REFERENCES = (
+    "DEV" + "_PDF-Note-Workspace",
+    "docs/internal/",
+    "site/cloudflare/",
+    "C:\\Users\\",
+    "/Users/",
+)
 DOCUMENTATION_PORTAL_REQUIRED_FILES = (
     "index.html", "For_AI.md", "README.md", "for_ai/manifest.json",
-    "for_ai/project_context.xml", "for_ai/core/semantic_search_index.json",
 )
 MARKDOWN_LINK = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HTML_LINK = re.compile(r"(?:href|src)=[\"']([^\"'#]+)", re.IGNORECASE)
@@ -24,6 +30,16 @@ def local_target(value: str) -> str | None:
     if value.startswith(("#", "data:", "http:", "https:", "mailto:")):
         return None
     return value.split("#", 1)[0]
+
+
+def validate_local_target(site: Path, source_path: Path, target: str, *, kind: str, errors: list[str]) -> None:
+    """Require local references to remain inside the generated public site."""
+    site_root = site.resolve()
+    resolved = (source_path.parent / target).resolve()
+    if resolved != site_root and site_root not in resolved.parents:
+        errors.append(f"local {kind} escapes public site: {source_path.relative_to(site)} -> {target}")
+    elif not resolved.is_file():
+        errors.append(f"broken {kind}: {source_path.relative_to(site)} -> {target}")
 
 
 def validate_text_encoding(site: Path, errors: list[str]) -> None:
@@ -37,6 +53,11 @@ def validate_text_encoding(site: Path, errors: list[str]) -> None:
             continue
         if "\ufffd" in text:
             errors.append(f"replacement character indicates possible mojibake: {path.relative_to(site)}")
+        for reference in FORBIDDEN_PUBLIC_REFERENCES:
+            if reference in text:
+                errors.append(
+                    f"development-only reference in public site: {path.relative_to(site)} ({reference})"
+                )
 
 
 def validate_structured_files(site: Path, errors: list[str]) -> None:
@@ -57,14 +78,26 @@ def validate_local_links(site: Path, errors: list[str]) -> None:
         text = path.read_text(encoding="utf-8-sig")
         for match in MARKDOWN_LINK.finditer(text):
             target = local_target(match.group(1))
-            if target and not (path.parent / target).resolve().is_file():
-                errors.append(f"broken Markdown link or image: {path.relative_to(site)} -> {target}")
+            if target:
+                validate_local_target(site, path, target, kind="Markdown link or image", errors=errors)
     for path in site.rglob("*.html"):
         text = path.read_text(encoding="utf-8-sig")
         for match in HTML_LINK.finditer(text):
             target = local_target(match.group(1))
-            if target and not (path.parent / target).resolve().is_file():
-                errors.append(f"broken HTML link or asset: {path.relative_to(site)} -> {target}")
+            if target:
+                validate_local_target(site, path, target, kind="HTML link or asset", errors=errors)
+
+
+def validate_rendered_human_docs(site: Path, errors: list[str]) -> None:
+    """Ensure raw documents and their browser-readable HTML are published together."""
+    markdown_paths = list(site.glob("*.md"))
+    for directory in (site / "docs" / "public", site / "for_ai"):
+        if directory.is_dir():
+            markdown_paths.extend(directory.rglob("*.md"))
+    for markdown_path in markdown_paths:
+        rendered = markdown_path.with_suffix(".html")
+        if not rendered.is_file():
+            errors.append(f"rendered HTML is missing for public Markdown: {markdown_path.relative_to(site)}")
 
 
 def validate_manifest(site: Path, errors: list[str]) -> None:
@@ -73,10 +106,40 @@ def validate_manifest(site: Path, errors: list[str]) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return
-    for route in manifest.get("routes", []):
-        for relative_path in route.get("read", []):
-            if not (manifest_path.parent / relative_path).resolve().is_file():
-                errors.append(f"manifest route '{route.get('id', '<unknown>')}' references missing file: {relative_path}")
+    if manifest.get("schema_version") != 1:
+        errors.append("for_ai/manifest.json must use schema_version 1")
+    entry_point = manifest.get("entry_point")
+    if not isinstance(entry_point, str) or not entry_point:
+        errors.append("for_ai/manifest.json must define a non-empty entry_point")
+    else:
+        validate_local_target(site, manifest_path, entry_point, kind="manifest entry_point", errors=errors)
+    routes = manifest.get("routes")
+    if not isinstance(routes, list) or not routes:
+        errors.append("for_ai/manifest.json must define at least one route")
+        return
+    route_ids: set[str] = set()
+    for route in routes:
+        if not isinstance(route, dict):
+            errors.append("for_ai/manifest.json routes must contain objects")
+            continue
+        route_id = route.get("id")
+        if not isinstance(route_id, str) or not route_id:
+            errors.append("manifest route has no non-empty id")
+            route_id = "<unknown>"
+        elif route_id in route_ids:
+            errors.append(f"manifest route id is duplicated: {route_id}")
+        route_ids.add(route_id)
+        if not isinstance(route.get("when"), str) or not route["when"].strip():
+            errors.append(f"manifest route '{route_id}' has no non-empty when")
+        read_paths = route.get("read")
+        if not isinstance(read_paths, list) or not read_paths:
+            errors.append(f"manifest route '{route_id}' has no read paths")
+            continue
+        for relative_path in read_paths:
+            if not isinstance(relative_path, str) or not relative_path:
+                errors.append(f"manifest route '{route_id}' has an invalid read path")
+                continue
+            validate_local_target(site, manifest_path, relative_path, kind=f"manifest route '{route_id}'", errors=errors)
 
 
 def validate_site(site: Path) -> list[str]:
@@ -92,6 +155,7 @@ def validate_site(site: Path) -> list[str]:
     validate_structured_files(site, errors)
     validate_local_links(site, errors)
     validate_manifest(site, errors)
+    validate_rendered_human_docs(site, errors)
     return errors
 
 

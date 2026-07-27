@@ -5,29 +5,43 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="ai-agent-entrypoint" content="For_AI.md">
   <meta name="ai-manifest" content="for_ai/manifest.json">
-  <title>PDF Note Workspace: AI Reference</title>
+  <title>PDF Note Workspace 文書ポータル</title>
+  <style>
+    :root { --page: #f8fafc; --card: #fff; --ink: #0f172a; --subtle: #475569; --line: #cbd5e1; --link: #0369a1; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px 12px; background: var(--page); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.7; }
+    main { width: min(100%, 760px); margin: 0 auto; padding: clamp(24px, 6vw, 48px); background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+    h1 { margin: 0; font-size: clamp(28px, 5vw, 40px); line-height: 1.35; }
+    .lead { margin: 16px 0 0; color: var(--subtle); }
+    .external-links { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 20px 0 0; font-size: 14px; }
+    a { color: var(--link); }
+    .entry-list { display: grid; gap: 12px; margin: 32px 0 0; padding: 0; list-style: none; }
+    .entry-list a { display: block; padding: 18px 20px; border: 1px solid var(--line); border-radius: 8px; color: inherit; text-decoration: none; }
+    .entry-list a:hover, .entry-list a:focus-visible { border-color: var(--link); background: #f0f9ff; }
+    .entry-list strong { display: block; color: var(--link); font-size: 17px; }
+    .entry-list span { display: block; margin-top: 4px; color: var(--subtle); font-size: 14px; }
+    .note { margin: 28px 0 0; color: var(--subtle); font-size: 14px; }
+    @media (max-width: 560px) { body { padding: 0; } main { border: 0; border-radius: 0; min-height: 100vh; padding: 28px 20px; } }
+  </style>
 </head>
 <body>
   <main>
-    <h1>PDF Note Workspace: AI Reference</h1>
-    <p>公開リポジトリのAI向け正本資料への入口です。</p>
+    <h1>PDF Note Workspace<br>文書ポータル</h1>
+    <p class="lead">目的を一つ選ぶと、次のページで必要な資料をまとめて確認できます。</p>
+    <div class="external-links">
+      <a href="https://pdf-note-workspace.soone-y.com/">紹介サイト</a>
+      <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases">配布物を入手する</a>
+      <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace">GitHub リポジトリ</a>
+    </div>
 
-    <h2>読む順序</h2>
-    <ol>
-      <li><a href="For_AI.md">For_AI.md</a> — 読取規約、検証方針、基本制約</li>
-      <li><a href="for_ai/manifest.json">for_ai/manifest.json</a> — 質問別の読取対象を定義する唯一の経路表</li>
-      <li>重要な結論は、経路表が示す一次資料で確認する。</li>
-    </ol>
-
-    <h2>検索・参照用データ</h2>
-    <ul>
-      <li><a href="for_ai/core/semantic_search_index.json">for_ai/core/semantic_search_index.json</a> — 質問意図から資料を絞るための検索索引</li>
-      <li><a href="for_ai/core/repository_reference_map.md">for_ai/core/repository_reference_map.md</a> — 文書・ソース・テスト・公開経路の資料地図</li>
-      <li><a href="for_ai/project_context.xml">for_ai/project_context.xml</a> — プロジェクト文脈と開発動機の構造化データ</li>
-      <li><a href="for_ai/core/documentation_contract.md">for_ai/core/documentation_contract.md</a> — AI向け文書の役割と検証規約</li>
+    <ul class="entry-list">
+      <li><a href="docs/public/Index.html"><strong>使い方・セットアップ</strong><span>導入、操作、保存・復元、ファイル形式、トラブル対処の詳細一覧</span></a></li>
+      <li><a href="README.html"><strong>プロジェクトの概要</strong><span>配布物、通常版とLite版、基本方針を確認する</span></a></li>
+      <li><a href="For_AI.html"><strong>AI向け資料</strong><span>AIが資料を読む順序と、質問別の参照経路を確認する</span></a></li>
+      <li><a href="LICENSES_INDEX.html"><strong>ライセンスと第三者通知</strong><span>利用条件と、利用している第三者コンポーネントを確認する</span></a></li>
     </ul>
 
-    <p>このサイトは生Markdown、JSON、XMLをそのまま公開します。ブラウザ内検索以外の検索UIやJavaScriptは提供しません。</p>
+    <p class="note">生の Markdown、JSON、XML も同じ場所で公開しています。ブラウザで読む場合は、この入口から目的別に進んでください。</p>
   </main>
 </body>
 </html>

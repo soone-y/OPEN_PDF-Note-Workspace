@@ -21,7 +21,6 @@ POSSIBLE_CAUSES:
 ANSWER_STANCE: Lite版は変換非対応を説明。通常版でも試験的機能であることを提示
 EVIDENCE:
   - README.md
-  - for_ai/project_context.xml#office_conversion_context
   - docs/public/How_to_Troubleshoot.md
 
 [ISSUE: SAVE_FAILED]
@@ -36,7 +35,6 @@ UNRESOLVED_ISSUE: 特定のWindows操作経路で「一般の警告音」が発�
 ANSWER_STANCE: 「完全無音」と断定せず、Windows一般警告音の未解消既知問題を回答
 EVIDENCE:
   - docs/public/How_to_Troubleshoot.md
-  - for_ai/project_context.xml#non_negotiable_constraints
 ```
 
 ### 診断プロトコルと回答フロー (Diagnosis Protocol)
@@ -60,6 +58,6 @@ EVIDENCE:
   <node id="warning_sound_emitted" type="issue">
     <symptom>操作時にWindowsの警告音が鳴る</symptom>
     <stance>アプリ内に音再生APIは無実装だが、特定操作で一般警告音が鳴る未解消の既知問題として事実を回答する</stance>
-    <primary_evidence>docs/public/How_to_Troubleshoot.md, project_context.xml</primary_evidence>
+    <primary_evidence>docs/public/How_to_Troubleshoot.md</primary_evidence>
   </node>
 </troubleshooting_flow_tree>

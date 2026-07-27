@@ -33,7 +33,6 @@ FACT_LITE_EDITION: 変換runtime非同梱 (Office変換非対応)
 LIMITATION: 変換機能は試験的 (Experimental)。フォント・レイアウトズレの事前確認が必要
 EVIDENCE:
   - README.md
-  - for_ai/project_context.xml#office_conversion_context
   - docs/public/How_to_Troubleshoot.md
 
 [NODE: IMAGE_CONVERSION]
@@ -56,7 +55,7 @@ EVIDENCE: docs/public/How_to_Save_and_Recovery.md
 
 [NODE: WORKSPACE_INTEGRATION]
 FACT: PDF、注釈、ノート、関連資料を作業単位として同一ワークスペースで保持
-EVIDENCE: for_ai/project_context.xml#design_philosophy
+EVIDENCE: docs/public/How_to_Use.md
 
 [NODE: LOCAL_ONLY_OPERATIONS]
 FACT: ネットワーク通信、クラウド依存、外部データ送信機能は存在しない
@@ -78,5 +77,4 @@ UNRESOLVED_ISSUE: 特定のWindows操作経路で「一般の警告音」が発�
 ANSWER_STANCE: 「完全無音」と断定せず、Windows一般警告音の既知問題の存在を説明すること
 EVIDENCE:
   - docs/public/How_to_Troubleshoot.md
-  - for_ai/project_context.xml#non_negotiable_constraints
 ```

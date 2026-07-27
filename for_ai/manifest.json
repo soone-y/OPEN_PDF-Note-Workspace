@@ -3,7 +3,6 @@
   "purpose": "AIが依頼内容に応じて必要な資料を段階的に読むための経路表",
   "entry_point": "../For_AI.md",
   "status": "active",
-  "shared_context": "project_context.xml",
   "route_definition_policy": "この routes 配列は質問別の読取対象を定義する唯一の経路表である。For_AI.md は読取順と検証規約だけを持ち、質問別の経路定義を重複して持たない。",
   "routes": [
     {
@@ -37,10 +36,8 @@
       "read": [
         "core/user_guidance_reference.md",
         "core/ui_concepts.md",
-        "core/data_schemas.md",
         "../docs/public/How_to_Setup.md"
-      ],
-      "verify_source_code_and_tests_for_unlisted_settings": true
+      ]
     },
     {
       "id": "save_and_recovery_procedures",
@@ -48,11 +45,9 @@
       "read": [
         "core/user_guidance_reference.md",
         "core/file_formats.md",
-        "core/data_schemas.md",
         "../docs/public/How_to_Save_and_Recovery.md",
         "../docs/public/How_to_Troubleshoot.md"
-      ],
-      "verify_source_code_and_tests": true
+      ]
     },
     {
       "id": "support_and_feedback",
@@ -70,7 +65,6 @@
       "when": "OSS、このソフトの目的、利用できること、利用資源、ライセンス、第三者コンポーネントについて質問された場合",
       "read": [
         "core/features_faq.md",
-        "project_context.xml",
         "../README.md",
         "../LICENSE.md",
         "../LICENSES_INDEX.md",
@@ -83,7 +77,6 @@
       "read": [
         "core/use_cases.md",
         "core/ui_concepts.md",
-        "project_context.xml",
         "../README.md",
         "../docs/public/How_to_Use.md",
         "../docs/public/What_is_File_Formats.md"
@@ -96,9 +89,8 @@
       "read": [
         "core/features_faq.md",
         "core/file_formats.md",
-        "project_context.xml"
-      ],
-      "verify_source_code_and_tests": true
+        "../docs/public/How_to_Save_and_Recovery.md"
+      ]
     },
     {
       "id": "sound_behavior",
@@ -106,7 +98,6 @@
       "read": [
         "core/features_faq.md",
         "core/troubleshooting_quick.md",
-        "project_context.xml",
         "../docs/public/How_to_Troubleshoot.md"
       ],
       "treat_reported_general_warning_sound_as_unresolved_issue": true
@@ -116,57 +107,9 @@
       "when": "PDF、.clrop、.clro、Markdown、TeX、テキスト、CSVの扱いについて質問された場合",
       "read": [
         "core/file_formats.md",
-        "core/data_schemas.md",
         "../docs/public/What_is_File_Formats.md",
         "../docs/public/How_to_Save_and_Recovery.md"
       ]
-    },
-    {
-      "id": "architecture_and_schemas",
-      "when": "Win32 C++ アーキテクチャ、レイヤー構造、データモデル、.clrop スキーマについて質問された場合",
-      "read": [
-        "core/architecture_layers.md",
-        "core/data_schemas.md",
-        "core/safety_and_nonnegotiables.md",
-        "project_context.xml"
-      ]
-    },
-    {
-      "id": "safe_change",
-      "when": "コード、保存、注釈、出力、配布物を変更する依頼の場合",
-      "read": [
-        "core/safety_and_nonnegotiables.md",
-        "core/ai_guardrails.md",
-        "core/code_symbol_index.md"
-      ],
-      "follow_local_instructions": true,
-      "repository_only_read": ["../AGENTS.md"]
-    },
-    {
-      "id": "code_reference",
-      "when": "C++ ソースコード、クラス、関数シンボルの位置を特定・参照したい場合",
-      "read": [
-        "core/code_symbol_index.md",
-        "core/architecture_layers.md"
-      ]
-    },
-    {
-      "id": "ai_documentation_quality",
-      "when": "AI向け資料の構造、根拠、文字コード、画像、公開前検査について質問または変更を行う場合",
-      "read": [
-        "core/documentation_contract.md",
-        "../For_AI.md"
-      ],
-      "verify_public_site_after_changes": true
-    },
-    {
-      "id": "repository_navigation_and_evidence",
-      "when": "どの文書、ソース、テスト、設定を読めばよいか、DEVとOPEN、GitHub PagesとCloudflare Pagesの役割、または公開snapshotで検証できる範囲について質問された場合",
-      "read": [
-        "core/repository_reference_map.md",
-        "core/documentation_contract.md"
-      ],
-      "do_not_claim_unpublished_source_or_tests_were_verified": true
     }
   ],
   "future_modules": []

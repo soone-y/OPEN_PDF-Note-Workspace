@@ -35,12 +35,10 @@ EVIDENCE:
 - stage、バックアップ、復旧用の `__resource__` 配下を、内容確認前に手動削除すること
 - PDFの既定アプリを、利用者の明示操作なしに変更すること
 
-設定ファイルの手編集、未掲載の設定値、版ごとの画面差については、ファイル例だけから断定しない。該当版の設定画面、設定の読込・保存コード、テストを確認する。
+設定ファイルの手編集、未掲載の設定値、版ごとの画面差については、ファイル例だけから断定しない。該当版の設定画面と利用者向け文書を確認する。
 
 EVIDENCE:
 
-- `src/settings/settings.h`
-- `src/help/help.cpp`
 - `docs/public/How_to_Setup.md`
 - `docs/public/How_to_Troubleshoot.md`
 
@@ -71,7 +69,6 @@ EVIDENCE:
 - `docs/public/How_to_Save_and_Recovery.md`
 - `docs/public/How_to_Use.md`
 - `docs/public/How_to_Troubleshoot.md`
-- `src/help/help.cpp`
 
 ## 4. 支援依頼と開発者への連絡
 

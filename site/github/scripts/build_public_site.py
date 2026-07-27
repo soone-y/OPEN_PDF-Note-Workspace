@@ -30,10 +30,18 @@ def copy_file(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
-def copy_tree(source: Path, destination: Path) -> None:
+def copy_tree(source: Path, destination: Path, *, exclude_prefixes: tuple[str, ...] = ()) -> None:
     if not source.is_dir():
         raise FileNotFoundError(f"Required public-site input directory is missing: {source}")
-    shutil.copytree(source, destination, dirs_exist_ok=True)
+    if not all(isinstance(prefix, str) and prefix for prefix in exclude_prefixes):
+        raise ValueError("allowlist tree exclude_prefixes must contain non-empty strings")
+    for source_file in source.rglob("*"):
+        if not source_file.is_file():
+            continue
+        relative = source_file.relative_to(source).as_posix()
+        if any(relative.startswith(prefix) for prefix in exclude_prefixes):
+            continue
+        copy_file(source_file, destination / relative)
 
 
 def resolve_repo_relative_path(relative_path: str, *, label: str) -> Path:
@@ -85,7 +93,8 @@ def copy_allowlisted_content(staging_dir: Path, allowlist: dict) -> None:
         destination = resolve_staging_relative_path(
             staging_dir, entry.get("destination", ""), label="allowlist tree destination"
         )
-        copy_tree(source, destination)
+        excluded = tuple(entry.get("exclude_prefixes", []))
+        copy_tree(source, destination, exclude_prefixes=excluded)
 
     document_rule = rules.get("document_markdown")
     if document_rule is None:
@@ -111,20 +120,23 @@ def replace_version_tokens(site_dir: Path, version: str) -> None:
 
 def replace_developer_only_references(site_dir: Path) -> None:
     """Remove developer-only build-guide links from the public documentation portal."""
-    targets = (site_dir / "README.md", site_dir / "docs" / "public" / "Index.md")
-    for markdown_file in targets:
-        if not markdown_file.is_file():
-            continue
-        text = markdown_file.read_text(encoding="utf-8-sig")
+    readme_path = site_dir / "README.md"
+    if readme_path.is_file():
+        text = readme_path.read_text(encoding="utf-8-sig")
         text = text.replace(
             "[docs/public/How_to_Build.md](docs/public/How_to_Build.md)",
             "開発用のビルド手順は公開していません",
         )
-        text = text.replace(
-            "[How_to_Build.md](How_to_Build.md)",
-            "How_to_Build.md（開発用の手順は公開していません）",
-        )
-        markdown_file.write_text(text, encoding="utf-8")
+        readme_path.write_text(text, encoding="utf-8")
+
+    index_path = site_dir / "docs" / "public" / "Index.md"
+    if index_path.is_file():
+        text = index_path.read_text(encoding="utf-8-sig")
+        developer_section = "## 開発者向け\n\n| 文書 | 読む場面 |\n| --- | --- |\n| [How_to_Build.md](How_to_Build.md) | ソースからビルド、テスト、release 作成を行いたい |\n\n"
+        if developer_section not in text:
+            raise ValueError("Public document index has an unexpected developer section")
+        text = text.replace(developer_section, "", 1)
+        index_path.write_text(text, encoding="utf-8")
 
 
 def build_site(*, replace: bool = False, documentation_portal: bool = False) -> int:

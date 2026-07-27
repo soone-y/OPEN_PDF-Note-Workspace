@@ -409,14 +409,13 @@ def navigation_html(*, root_rel: str, is_ai_document: bool) -> str:
     return f"""    <details class=\"site-menu\">
       <summary aria-label=\"文書メニューを開く\"><span class=\"menu-icon\" aria-hidden=\"true\"></span>文書メニュー</summary>
       <nav aria-label=\"文書メニュー\">
-        <a href=\"https://github.com/soone-y/OPEN_PDF-Note-Workspace\" target=\"_blank\" rel=\"noopener noreferrer\">GitHub リポジトリ</a>
-        <a href=\"{root_rel}index.html\">ポータルへ戻る</a>
-        <a href=\"{root_rel}README.html\">README</a>
-        <a href=\"{root_rel}docs/public/Index.html\">文書案内</a>
-        <a href=\"{root_rel}docs/public/How_to_Setup.html\">セットアップ</a>
-        <a href=\"{root_rel}docs/public/How_to_Use.html\">基本操作</a>
-        <a href=\"{root_rel}LICENSE.html\">ライセンス</a>
-        <a href=\"{root_rel}THIRD_PARTY_NOTICES.html\">第三者通知</a>
+        <a href=\"https://pdf-note-workspace.soone-y.com/\">紹介サイト</a>
+        <a href=\"{root_rel}index.html\">文書ポータル</a>
+        <a href=\"{root_rel}docs/public/Index.html\">使い方・セットアップ</a>
+        <a href=\"{root_rel}README.html\">プロジェクトの概要</a>
+        <a href=\"{root_rel}LICENSES_INDEX.html\">ライセンスと第三者通知</a>
+        <a href=\"https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases\">配布物を入手する</a>
+        <a href=\"https://github.com/soone-y/OPEN_PDF-Note-Workspace\">GitHub リポジトリ</a>
       </nav>
     </details>"""
 

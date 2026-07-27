@@ -9,6 +9,7 @@ Desktop.ini
 /out/
 /build/
 /release/
+/site/github/output/
 *.exe
 *.obj
 *.pdb
