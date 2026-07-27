@@ -1,0 +1,37 @@
+diff --git a/sd/Library_sd.mk b/sd/Library_sd.mk
+index 9b9a2e204f0a..0c47024bf337 100644
+--- a/sd/Library_sd.mk
++++ b/sd/Library_sd.mk
+@@ -67,7 +67,7 @@ $(eval $(call gb_Library_use_custom_headers,sd,\
+ $(eval $(call gb_Library_use_sdk_api,sd))
+ 
+ $(eval $(call gb_Library_use_libraries,sd,\
+-	avmedia \
++	$(call gb_Helper_optional,AVMEDIA,avmedia) \
+ 	basegfx \
+ 	canvastools \
+ 	comphelper \
+diff --git a/slideshow/source/engine/shapes/viewmediashape.cxx b/slideshow/source/engine/shapes/viewmediashape.cxx
+index 511603d4cc0d..e99453e65cf8 100644
+--- a/slideshow/source/engine/shapes/viewmediashape.cxx
++++ b/slideshow/source/engine/shapes/viewmediashape.cxx
+@@ -407,6 +407,11 @@ namespace slideshow::internal
+                                                                  const uno::Sequence< uno::Any >& rVCLDeviceParams )
+         {
+             SAL_INFO("slideshow", "ViewMediaShape::implInitializePlayerWindow" );
++#if !HAVE_FEATURE_AVMEDIA
++            (void) rBounds;
++            (void) rVCLDeviceParams;
++            return;
++#else
+             if( mpMediaWindow || rBounds.isEmpty() )
+                 return;
+ 
+@@ -512,6 +517,7 @@ namespace slideshow::internal
+             {
+                 TOOLS_WARN_EXCEPTION( "slideshow", "" );
+             }
++#endif
+         }
+ }
+ 

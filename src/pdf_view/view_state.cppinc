@@ -1,0 +1,818 @@
+struct PdfViewRestorePoint {
+    std::wstring path;
+    int pageIndex = 0;
+    double xPt = 0.0;
+    double yPt = 0.0;
+    std::wstring flowMode;
+};
+
+static std::optional<PdfViewRestorePoint> g_pendingPdfRestore;
+
+static std::filesystem::path LastPdfViewFilePath() {
+    if (g_workspaceRoot.empty()) return {};
+    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__tmp__" / L"pdf_view_positions.txt";
+}
+
+static std::filesystem::path WorkspaceEscapeDir() {
+    if (g_workspaceRoot.empty()) return {};
+    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
+}
+
+static std::wstring NormalizePathKey(const std::filesystem::path& p) {
+    if (p.empty()) return L"";
+    std::error_code ec;
+    auto canon = std::filesystem::weakly_canonical(p, ec);
+    std::wstring w = ec ? p.wstring() : canon.wstring();
+    std::transform(w.begin(), w.end(), w.begin(), ::towlower);
+    return w;
+}
+
+// file: pdf_view/view_state.cppinc
+#include "core/preview_trace.h"
+
+void UpdateScrollDirectionMenuChecks(); // settings.cpp; avoid settings.h from pdf_view TU
+
+static std::unordered_map<std::wstring, PdfViewRestorePoint> LoadPdfViewRecordMap() {
+    std::unordered_map<std::wstring, PdfViewRestorePoint> out;
+    auto path = LastPdfViewFilePath();
+    if (path.empty()) return out;
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) return out;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::istringstream iss(line);
+        std::string pathUtf8;
+        int page = 0;
+        double xpt = 0.0;
+        double ypt = 0.0;
+        std::string flow;
+        if (!(iss >> std::quoted(pathUtf8))) continue;
+        if (!(iss >> page)) continue;
+        double first = 0.0;
+        if (!(iss >> first)) continue;
+        double second = 0.0;
+        if (iss >> second) {
+            xpt = first;
+            ypt = second;
+            if (iss >> flow) {
+                // flow optional
+            }
+        } else {
+            // legacy: page + yPt only
+            xpt = 0.0;
+            ypt = first;
+        }
+        std::wstring key = NormalizePathKey(UTF8ToWide(pathUtf8));
+        if (key.empty()) continue;
+        PdfViewRestorePoint rec;
+        rec.path = key;
+        rec.pageIndex = page;
+        rec.xPt = xpt;
+        rec.yPt = ypt;
+        if (!flow.empty()) {
+            rec.flowMode = UTF8ToWide(flow);
+        }
+        out[key] = rec;
+    }
+    return out;
+}
+
+static bool WritePdfViewRecordMap(const std::unordered_map<std::wstring, PdfViewRestorePoint>& entries) {
+    auto path = LastPdfViewFilePath();
+    if (path.empty()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    auto escapeDir = WorkspaceEscapeDir();
+    if (!escapeDir.empty()) {
+        std::filesystem::create_directories(escapeDir, ec);
+    }
+    std::vector<std::pair<std::wstring, PdfViewRestorePoint>> ordered(entries.begin(), entries.end());
+    std::sort(ordered.begin(), ordered.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::ostringstream oss;
+    for (const auto& kv : ordered) {
+        const auto& rec = kv.second;
+        std::wstring flow = rec.flowMode.empty() ? g_config.pdfFlowMode : rec.flowMode;
+        oss << std::quoted(WideToUTF8(kv.first)) << "\t" << rec.pageIndex << "\t"
+            << std::setprecision(17) << rec.xPt << "\t" << rec.yPt;
+        if (!flow.empty()) {
+            oss << "\t" << WideToUTF8(flow);
+        }
+        oss << "\n";
+    }
+    std::wstring err;
+    return atomic_write::AtomicWriteUtf8(path, oss.str(), path.parent_path(), escapeDir, &err);
+}
+
+static bool ReadPdfViewRecordForPath(const std::wstring& path, PdfViewRestorePoint& out) {
+    out = {};
+    std::wstring key = NormalizePathKey(std::filesystem::path(path));
+    if (key.empty()) return false;
+    auto entries = LoadPdfViewRecordMap();
+    auto it = entries.find(key);
+    if (it == entries.end()) return false;
+    out = it->second;
+    return true;
+}
+
+static bool BuildCurrentPdfViewRecord(PdfViewRestorePoint& out) {
+    out = {};
+    if (g_pdf.kind != DocKind::Pdf || g_pdf.pages.empty()) return false;
+    if (g_pdf.path.empty()) return false;
+    out.path = NormalizePathKey(std::filesystem::path(g_pdf.path));
+    if (out.path.empty()) return false;
+
+    PdfFlowMode mode = CurrentFlowMode();
+    RECT rc{};
+    GetClientRect(g_hPdfView, &rc);
+    int viewW = std::max(0, static_cast<int>(rc.right - rc.left));
+    int viewH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+    double padX = FlowCrossPaddingX(mode);
+    double padY = FlowCrossPaddingY(mode);
+
+    double refClientX = 0.0;
+    double refClientY = 0.0;
+    if (FlowIsVertical(mode)) {
+        refClientX = padX;
+        refClientY = FlowPrimaryDirPositive(mode) ? 0.0 : static_cast<double>(viewH);
+    } else {
+        refClientX = FlowPrimaryDirPositive(mode) ? 0.0 : static_cast<double>(viewW);
+        refClientY = padY;
+    }
+
+    double docX = g_pdf.scrollX + refClientX - padX;
+    double docY = g_pdf.scrollY + refClientY - padY;
+
+    int bestIndex = 0;
+    double bestDist = std::numeric_limits<double>::max();
+    double bestLocalX = 0.0;
+    double bestLocalY = 0.0;
+    for (size_t i = 0; i < g_pdf.pages.size(); ++i) {
+        const auto& rect = g_pdf.pageRects[i];
+        double clampedX = std::clamp(docX, rect.left, rect.right);
+        double clampedY = std::clamp(docY, rect.top, rect.bottom);
+        double dx = docX - clampedX;
+        double dy = docY - clampedY;
+        double dist = dx * dx + dy * dy;
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = static_cast<int>(i);
+            bestLocalX = clampedX - rect.left;
+            bestLocalY = clampedY - rect.top;
+        }
+    }
+    const auto& page = g_pdf.pages[static_cast<size_t>(bestIndex)];
+    double scale = (g_pdf.scale > 0.0) ? g_pdf.scale : 1.0;
+    double xPt = (bestLocalX / scale) * 72.0 / kDpi;
+    double yPt = page.heightPt - (bestLocalY / scale) * 72.0 / kDpi;
+    xPt = std::clamp(xPt, 0.0, page.widthPt);
+    yPt = std::clamp(yPt, 0.0, page.heightPt);
+    out.pageIndex = bestIndex;
+    out.xPt = xPt;
+    out.yPt = yPt;
+    out.flowMode = g_config.pdfFlowMode;
+    return true;
+}
+
+static bool ApplyPdfViewAnchor(HWND pdfWnd, int pageIndex, double xPt, double yPt) {
+    if (!pdfWnd) return false;
+    if (g_pdf.pages.empty() || g_pdf.pageRects.empty()) return false;
+    pageIndex = std::clamp(pageIndex, 0, static_cast<int>(g_pdf.pages.size()) - 1);
+    const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    const auto& rect = g_pdf.pageRects[static_cast<size_t>(pageIndex)];
+    xPt = std::clamp(xPt, 0.0, page.widthPt);
+    yPt = std::clamp(yPt, 0.0, page.heightPt);
+    if (PdfSinglePageModeActive()) {
+        g_pdf.singlePageIndex = pageIndex;
+        g_pdf.scrollX = 0.0;
+        g_pdf.scrollY = 0.0;
+        UpdatePageLayout(pdfWnd);
+        return true;
+    }
+    double scale = (g_pdf.scale > 0.0) ? g_pdf.scale : 1.0;
+    double localX = xPt * kDpi / 72.0 * scale;
+    double localY = (page.heightPt - yPt) * kDpi / 72.0 * scale;
+
+    RECT rc{};
+    GetClientRect(pdfWnd, &rc);
+    int viewW = std::max(0, static_cast<int>(rc.right - rc.left));
+    int viewH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+
+    PdfFlowMode mode = CurrentFlowMode();
+    double padX = FlowCrossPaddingX(mode);
+    double padY = FlowCrossPaddingY(mode);
+    double refClientX = 0.0;
+    double refClientY = 0.0;
+    if (FlowIsVertical(mode)) {
+        refClientX = padX;
+        refClientY = FlowPrimaryDirPositive(mode) ? 0.0 : static_cast<double>(viewH);
+    } else {
+        refClientX = FlowPrimaryDirPositive(mode) ? 0.0 : static_cast<double>(viewW);
+        refClientY = padY;
+    }
+
+    double docX = rect.left + localX;
+    double docY = rect.top + localY;
+    g_pdf.scrollX = docX + padX - refClientX;
+    g_pdf.scrollY = docY + padY - refClientY;
+    ClampPdfScroll(viewH, viewW);
+    return true;
+}
+
+static void QueuePendingPdfRestoreForPath(const std::wstring& path) {
+    g_pendingPdfRestore.reset();
+    PdfViewRestorePoint record;
+    if (!ReadPdfViewRecordForPath(path, record)) return;
+    if (record.path.empty()) return;
+    g_pendingPdfRestore = record;
+}
+
+static bool ApplyPendingPdfRestore(HWND pdfWnd) {
+    if (!g_pendingPdfRestore) return false;
+    if (!pdfWnd) {
+        g_pendingPdfRestore.reset();
+        return false;
+    }
+    if (g_pdf.pages.empty()) {
+        g_pendingPdfRestore.reset();
+        return false;
+    }
+    std::wstring currentKey = NormalizePathKey(std::filesystem::path(g_pdf.path));
+    std::wstring storedKey = NormalizePathKey(std::filesystem::path(g_pendingPdfRestore->path));
+    if (currentKey.empty() || storedKey.empty() || currentKey != storedKey) {
+        g_pendingPdfRestore.reset();
+        return false;
+    }
+
+    std::wstring restoreMode = NormalizeFlowModeString(g_pendingPdfRestore->flowMode);
+    if (restoreMode != g_config.pdfFlowMode) {
+        g_config.pdfFlowMode = restoreMode;
+        UpdatePageLayout(pdfWnd);
+        UpdateScrollDirectionMenuChecks();
+    }
+
+    if (!ApplyPdfViewAnchor(pdfWnd, g_pendingPdfRestore->pageIndex,
+                            g_pendingPdfRestore->xPt, g_pendingPdfRestore->yPt)) {
+        g_pendingPdfRestore.reset();
+        return false;
+    }
+    g_scrollVelocity = 0.0;
+    g_pendingPdfRestore.reset();
+    InvalidateRect(pdfWnd, nullptr, FALSE);
+    return true;
+}
+
+void SaveLastPdfViewInfo() {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    SaveOperationGuard guard;
+    PdfViewRestorePoint record;
+    if (!BuildCurrentPdfViewRecord(record)) {
+        preview_trace::Append(
+            L"SaveLastPdfViewInfo",
+            L"skip=no_record elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        return;
+    }
+    auto entries = LoadPdfViewRecordMap();
+    entries[record.path] = record;
+    WritePdfViewRecordMap(entries);
+    preview_trace::Append(
+        L"SaveLastPdfViewInfo",
+        L"end path=" + record.path +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+}
+
+bool MovePdfViewInfoPath(const std::wstring& oldPath, const std::wstring& newPath) {
+    if (oldPath.empty() || newPath.empty()) return false;
+    std::wstring oldKey = NormalizePathKey(std::filesystem::path(oldPath));
+    std::wstring newKey = NormalizePathKey(std::filesystem::path(newPath));
+    if (oldKey.empty() || newKey.empty()) return false;
+    if (oldKey == newKey) return true;
+
+    auto entries = LoadPdfViewRecordMap();
+    auto it = entries.find(oldKey);
+    if (it == entries.end()) return false;
+
+    PdfViewRestorePoint record = it->second;
+    record.path = newKey;
+    entries.erase(it);
+    entries[newKey] = record;
+    return WritePdfViewRecordMap(entries);
+}
+
+void ClearLastPdfViewInfo() {
+    g_pendingPdfRestore.reset();
+    auto path = LastPdfViewFilePath();
+    if (path.empty()) return;
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+static SelectionStyleMode GetSelectionStyleMode() {
+    std::wstring style = g_config.selectionStyle;
+    std::transform(style.begin(), style.end(), style.begin(), ::towlower);
+    if (style == L"theme" || style == L"themed" || style == L"tone") return SelectionStyleMode::Theme;
+    if (style == L"legacy" || style == L"classic") return SelectionStyleMode::Windows;
+    return SelectionStyleMode::Windows;
+}
+
+static COLORREF SelectionFillColor() {
+    return (GetSelectionStyleMode() == SelectionStyleMode::Theme)
+        ? g_theme.selectionBg
+        : kPdfSelectionColor;
+}
+// NOTE: Timer IDs must be unique per HWND to avoid collisions in PdfViewProc.
+// Keep this in sync with the PdfViewProc timer registry in core/app_core.h.
+static constexpr UINT_PTR kZoomTimerId = 0x2005;
+static_assert(AllUniqueValues(std::array<UINT_PTR, 4>{
+    kScrollTimerId,
+    kPdfVirtualRenderTimerId,
+    kZoomTimerId,
+    kAutoScrollTimerId,
+}));
+static constexpr int kZoomTimerIntervalMs = 24; // debounce heavy rerender after direct zoom feedback
+static bool g_zoomAnimating = false;
+static double g_zoomTargetScale = 1.0;
+static POINT g_zoomFocusPoint{};
+struct ZoomAnchor {
+    bool valid = false;
+    int pageIndex = -1;
+    double xPt = 0.0;
+    double yPt = 0.0;
+    POINT focusClient{};
+};
+static ZoomAnchor g_zoomAnchor{};
+
+static double NormalizeZoomScaleValue(double scale) {
+    if (!std::isfinite(scale) || scale <= 0.0) return 1.0;
+    return std::clamp(scale, kMinScale, kMaxScale);
+}
+
+static double ZoomInputBaseScale() {
+    double base = g_zoomAnimating ? g_zoomTargetScale : g_pdf.scale;
+    if (!std::isfinite(base) || base <= 0.0) {
+        base = (g_pdf.scale > 0.0) ? g_pdf.scale : 1.0;
+    }
+    return NormalizeZoomScaleValue(base);
+}
+
+static void StopPdfZoomAnimation(HWND pdfWnd) {
+    g_zoomAnimating = false;
+    if (pdfWnd) {
+        KillTimer(pdfWnd, kZoomTimerId);
+    }
+}
+
+static void StepPdfZoomAnimation(HWND pdfWnd) {
+    if (g_pdf.kind == DocKind::None) {
+        StopPdfZoomAnimation(pdfWnd);
+        return;
+    }
+
+    if (!g_zoomAnimating) {
+        StopPdfZoomAnimation(pdfWnd);
+        return;
+    }
+
+    ApplyPdfScaleDirect(pdfWnd, NormalizeZoomScaleValue(g_zoomTargetScale), g_zoomFocusPoint, true);
+    StopPdfZoomAnimation(pdfWnd);
+}
+static constexpr double kPanAxisAngleDeg = 6.0;
+static constexpr int kPanAxisLockDeadPx = 3;
+
+static inline int PtToLayoutPx(double pt) {
+    return static_cast<int>(std::lround(pt * kTextBoxLayoutDpi / 72.0));
+}
+
+static inline double LayoutPxToPt(int px) {
+    return static_cast<double>(px) * 72.0 / kTextBoxLayoutDpi;
+}
+
+static inline double LayoutToClientScale() {
+    const double scale = (g_pdf.scale > 0.0) ? g_pdf.scale : 1.0;
+    return (kDpi * scale) / kTextBoxLayoutDpi;
+}
+
+static inline int LayoutPadPx() {
+    return std::max(1, static_cast<int>(std::lround(kTextPadPx * kTextBoxLayoutDpi / kDpi)));
+}
+
+static double ComputePdfRenderScale(double displayScale) {
+    if (displayScale <= 0.0) return 1.0;
+    double renderScale = displayScale;
+    if (displayScale < 1.0) {
+        renderScale = std::max(displayScale, kPdfRenderMinScale);
+        double maxScale = displayScale * kPdfRenderMaxUpscale;
+        if (renderScale > maxScale) renderScale = maxScale;
+    }
+    return renderScale;
+}
+
+static bool g_pendingInitialFitWidth = false;
+static double g_pendingInitialFitWidthPt = 0.0;
+static bool g_pendingInitialFitHeight = false;
+static double g_pendingInitialFitHeightPt = 0.0;
+
+static std::optional<double> CalcFitWidthScale(HWND pdfWnd, double pageWidthPt) {
+    if (!pdfWnd) return std::nullopt;
+    if (pageWidthPt <= 0.0) return std::nullopt;
+
+    RECT rc{};
+    GetClientRect(pdfWnd, &rc);
+    int viewW = rc.right - rc.left;
+    if (viewW <= 0) return std::nullopt;
+
+    double padX = FlowCrossPaddingX(CurrentFlowMode());
+    int availW = viewW - static_cast<int>(std::lround(padX * 2.0)) - kFitWidthSlackPx;
+    if (availW <= 0) return std::nullopt;
+
+    double baseWpx = pageWidthPt * kDpi / 72.0;
+    if (baseWpx <= 0.0) return std::nullopt;
+
+    double scale = static_cast<double>(availW) / baseWpx;
+    return std::clamp(scale, kMinScale, kMaxScale);
+}
+
+static std::optional<double> CalcFitHeightScale(HWND pdfWnd, double pageHeightPt) {
+    if (!pdfWnd) return std::nullopt;
+    if (pageHeightPt <= 0.0) return std::nullopt;
+
+    RECT rc{};
+    GetClientRect(pdfWnd, &rc);
+    int viewH = rc.bottom - rc.top;
+    if (viewH <= 0) return std::nullopt;
+
+    double padY = FlowCrossPaddingY(CurrentFlowMode());
+    int availH = viewH - static_cast<int>(std::lround(padY * 2.0)) - kFitHeightSlackPx;
+    if (availH <= 0) return std::nullopt;
+
+    double baseHpx = pageHeightPt * kDpi / 72.0;
+    if (baseHpx <= 0.0) return std::nullopt;
+
+    double scale = static_cast<double>(availH) / baseHpx;
+    return std::clamp(scale, kMinScale, kMaxScale);
+}
+
+static int ClampPageIndex(int index) {
+    if (g_pdf.pages.empty()) return 0;
+    return std::clamp(index, 0, static_cast<int>(g_pdf.pages.size()) - 1);
+}
+
+static double MaxPageWidthPtAround(int centerIndex, int radius = 1) {
+    if (g_pdf.pages.empty()) return 0.0;
+    centerIndex = ClampPageIndex(centerIndex);
+    int start = std::max(0, centerIndex - radius);
+    int end = std::min(static_cast<int>(g_pdf.pages.size()) - 1, centerIndex + radius);
+    double maxW = 0.0;
+    for (int i = start; i <= end; ++i) {
+        maxW = std::max(maxW, g_pdf.pages[static_cast<size_t>(i)].widthPt);
+    }
+    return maxW;
+}
+
+static double MaxPageHeightPtAround(int centerIndex, int radius = 1) {
+    if (g_pdf.pages.empty()) return 0.0;
+    centerIndex = ClampPageIndex(centerIndex);
+    int start = std::max(0, centerIndex - radius);
+    int end = std::min(static_cast<int>(g_pdf.pages.size()) - 1, centerIndex + radius);
+    double maxH = 0.0;
+    for (int i = start; i <= end; ++i) {
+        maxH = std::max(maxH, g_pdf.pages[static_cast<size_t>(i)].heightPt);
+    }
+    return maxH;
+}
+
+static double PrimaryPageScrollAmount(int viewH, int viewW) {
+    int primarySpan = FlowIsVertical(CurrentFlowMode()) ? viewH : viewW;
+    return static_cast<double>(std::max(0, primarySpan)) * 0.9;
+}
+
+static void AddPrimaryScroll(double delta, int viewH, int viewW) {
+    if (FlowIsVertical(CurrentFlowMode())) {
+        g_pdf.scrollY += delta;
+    } else {
+        g_pdf.scrollX += delta;
+    }
+    ClampPdfScroll(viewH, viewW);
+}
+
+static void UpdatePendingFitSizeFromPages() {
+    if (g_pdf.pages.empty()) return;
+    int centerIndex = 0;
+    if (g_pendingInitialFitWidth) {
+        double maxW = MaxPageWidthPtAround(centerIndex);
+        if (maxW > 0.0) g_pendingInitialFitWidthPt = maxW;
+    }
+    if (g_pendingInitialFitHeight) {
+        double maxH = MaxPageHeightPtAround(centerIndex);
+        if (maxH > 0.0) g_pendingInitialFitHeightPt = maxH;
+    }
+}
+
+static int MeasureTextLineHeightPx(double fontPt, const std::wstring& fontName, double scale) {
+    if (scale <= 0.0) scale = 1.0;
+    if (!g_hPdfView) return 0;
+    HDC hdc = GetDC(g_hPdfView);
+    if (!hdc) return 0;
+    LOGFONTW lf{};
+    lf.lfHeight = -MulDiv(static_cast<int>(std::round(fontPt * scale)), static_cast<int>(kDpi), 72);
+    lf.lfCharSet = DEFAULT_CHARSET;
+    if (!fontName.empty()) {
+        wcsncpy_s(lf.lfFaceName, fontName.c_str(), LF_FACESIZE - 1);
+    }
+    HFONT hFont = CreateFontIndirectW(&lf);
+    HGDIOBJ oldFont = nullptr;
+    if (hFont) oldFont = SelectObject(hdc, hFont);
+    TEXTMETRICW tm{};
+    bool ok = (GetTextMetricsW(hdc, &tm) != 0);
+    if (oldFont) SelectObject(hdc, oldFont);
+    if (hFont) DeleteObject(hFont);
+    ReleaseDC(g_hPdfView, hdc);
+    return ok ? static_cast<int>(tm.tmHeight) : 0;
+}
+
+struct AdaptiveTextPreset {
+    double fontPt = 14.0;
+    double widthPt = kDefaultTextWidthPt;
+    double heightPt = kDefaultTextHeightPt;
+};
+
+static double ResolveTextToolBaseFontPt(double preferredPt) {
+    constexpr double kFallbackTextFontPt = 14.0;
+    return (preferredPt > 0.0) ? preferredPt : kFallbackTextFontPt;
+}
+
+static AdaptiveTextPreset ComputeAdaptiveTextPresetForPage(int pageIndex, double preferredBasePt) {
+    AdaptiveTextPreset preset;
+    const double baseFontPt = ResolveTextToolBaseFontPt(preferredBasePt);
+    preset.fontPt = baseFontPt;
+    if (!g_textFontUseA4Scale) {
+        return preset;
+    }
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) {
+        return preset;
+    }
+
+    const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    constexpr double kA4WidthPt = 595.0;
+    constexpr double kA4HeightPt = 842.0;
+    constexpr double kAdaptivePageScaleMax = 6.0;
+    constexpr double kAdaptiveFontPtMin = 8.0;
+    constexpr double kAdaptiveFontPtMax = 192.0;
+
+    const double refAreaPt = kA4WidthPt * kA4HeightPt;
+    const double pageAreaPt = std::max(1.0, page.widthPt * page.heightPt);
+    double pageScale = std::sqrt(pageAreaPt / refAreaPt);
+    pageScale = std::clamp(pageScale, 1.0, kAdaptivePageScaleMax);
+
+    preset.fontPt = std::clamp(baseFontPt * pageScale, kAdaptiveFontPtMin, kAdaptiveFontPtMax);
+
+    double boxScale = preset.fontPt / std::max(1.0, baseFontPt);
+    double maxWidthPt = std::max(kDefaultTextWidthPt, page.widthPt - 8.0);
+    double maxHeightPt = std::max(kDefaultTextHeightPt, page.heightPt - 8.0);
+    preset.widthPt = std::clamp(kDefaultTextWidthPt * boxScale, kDefaultTextWidthPt, maxWidthPt);
+    preset.heightPt = std::clamp(kDefaultTextHeightPt * boxScale, kDefaultTextHeightPt, maxHeightPt);
+    return preset;
+}
+
+static double ResolveAdaptiveTextFontPtForPage(int pageIndex, double preferredBasePt) {
+    return ComputeAdaptiveTextPresetForPage(pageIndex, preferredBasePt).fontPt;
+}
+
+static int CaretThicknessForLineHeight(int lineHeightClient) {
+    int h = std::max(1, lineHeightClient);
+    int thickness = (h + 7) / 12;
+    return std::clamp(thickness, 1, 5);
+}
+
+static double NewTextBoxTopFromClickY(double clickYpt, double fontPt, const std::wstring& fontName, double scale) {
+    if (scale <= 0.0) scale = 1.0;
+    int lineHeightPx = MeasureTextLineHeightPx(fontPt, fontName, scale);
+    if (lineHeightPx <= 0) {
+        int fallbackPx = std::max(1, static_cast<int>(std::round(fontPt * kDpi / 72.0 * scale)));
+        lineHeightPx = fallbackPx;
+    }
+    int padPx = std::max(1, static_cast<int>(std::round(kTextPadPx * scale)));
+    int offsetPx = padPx + lineHeightPx;
+    double offsetPt = offsetPx * 72.0 / kDpi / scale;
+    return clickYpt + offsetPt;
+}
+
+static double PanAxisAngleTan() {
+    static const double rad = kPanAxisAngleDeg * (3.14159265358979323846 / 180.0);
+    static const double tanValue = std::tan(rad);
+    return tanValue;
+}
+
+static PanAxisLock DetectPanAxisLock(int dx, int dy) {
+    double absDx = std::abs(static_cast<double>(dx));
+    double absDy = std::abs(static_cast<double>(dy));
+    if (absDx < kPanAxisLockDeadPx && absDy < kPanAxisLockDeadPx) {
+        return PanAxisLock::None;
+    }
+    double axisTan = PanAxisAngleTan();
+    if (absDy >= kPanAxisLockDeadPx && (absDy > 0.0) && (absDx / absDy) < axisTan) {
+        return PanAxisLock::Vertical;
+    }
+    if (absDx >= kPanAxisLockDeadPx && (absDx > 0.0) && (absDy / absDx) < axisTan) {
+        return PanAxisLock::Horizontal;
+    }
+    return PanAxisLock::None;
+}
+
+static void FlattenImageAlphaToWhite(std::vector<uint8_t>& pixels) {
+    if (pixels.empty()) return;
+    bool hasAlpha = false;
+    for (size_t i = 3; i < pixels.size(); i += 4) {
+        if (pixels[i] != 255) {
+            hasAlpha = true;
+            break;
+        }
+    }
+    if (!hasAlpha) return;
+    for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+        int b = pixels[i];
+        int g = pixels[i + 1];
+        int r = pixels[i + 2];
+        int a = pixels[i + 3];
+        if (a == 255) {
+            pixels[i + 3] = 255;
+            continue;
+        }
+        int inv = 255 - a;
+        pixels[i]     = static_cast<uint8_t>((b * a + 255 * inv + 127) / 255);
+        pixels[i + 1] = static_cast<uint8_t>((g * a + 255 * inv + 127) / 255);
+        pixels[i + 2] = static_cast<uint8_t>((r * a + 255 * inv + 127) / 255);
+        pixels[i + 3] = 255;
+    }
+}
+
+static bool LoadImagePixelsWic(const std::wstring& path,
+                               std::vector<uint8_t>& pixels,
+                               int& outW,
+                               int& outH,
+                               int& outStride,
+                               double& outDpiX,
+                               double& outDpiY,
+                               std::wstring* err) {
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    auto cleanup = [&]() {
+        if (converter) converter->Release();
+        if (frame) frame->Release();
+        if (decoder) decoder->Release();
+        if (factory) factory->Release();
+    };
+
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&factory));
+    if (FAILED(hr) || !factory) {
+        if (err) *err = L"WIC factory creation failed.";
+        cleanup();
+        return false;
+    }
+    hr = factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                            WICDecodeMetadataCacheOnLoad, &decoder);
+    if (FAILED(hr) || !decoder) {
+        if (err) *err = L"WIC decoder creation failed.";
+        cleanup();
+        return false;
+    }
+    hr = decoder->GetFrame(0, &frame);
+    if (FAILED(hr) || !frame) {
+        if (err) *err = L"WIC frame load failed.";
+        cleanup();
+        return false;
+    }
+    UINT w = 0, h = 0;
+    if (FAILED(frame->GetSize(&w, &h)) || w == 0 || h == 0) {
+        if (err) *err = L"WIC frame size failed.";
+        cleanup();
+        return false;
+    }
+    double dpiX = 0.0, dpiY = 0.0;
+    if (FAILED(frame->GetResolution(&dpiX, &dpiY)) || dpiX <= 0.0 || dpiY <= 0.0) {
+        dpiX = kDpi;
+        dpiY = kDpi;
+    }
+    hr = factory->CreateFormatConverter(&converter);
+    if (FAILED(hr) || !converter) {
+        if (err) *err = L"WIC converter creation failed.";
+        cleanup();
+        return false;
+    }
+    hr = converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
+                               WICBitmapDitherTypeNone, nullptr, 0.0,
+                               WICBitmapPaletteTypeCustom);
+    if (FAILED(hr)) {
+        if (err) *err = L"WIC converter init failed.";
+        cleanup();
+        return false;
+    }
+
+    int stride = static_cast<int>(w) * 4;
+    pixels.assign(static_cast<size_t>(stride) * h, 0);
+    hr = converter->CopyPixels(nullptr, static_cast<UINT>(stride),
+                               static_cast<UINT>(stride) * h,
+                               reinterpret_cast<BYTE*>(pixels.data()));
+    if (FAILED(hr)) {
+        if (err) *err = L"WIC pixel copy failed.";
+        cleanup();
+        return false;
+    }
+    cleanup();
+
+    FlattenImageAlphaToWhite(pixels);
+
+    outW = static_cast<int>(w);
+    outH = static_cast<int>(h);
+    outStride = stride;
+    outDpiX = dpiX;
+    outDpiY = dpiY;
+    return true;
+}
+
+static bool ScaleImagePixelsWic(const uint8_t* src,
+                                int srcW,
+                                int srcH,
+                                int srcStride,
+                                int destW,
+                                int destH,
+                                std::vector<uint8_t>& out,
+                                std::wstring* err) {
+    if (!src || srcW <= 0 || srcH <= 0 || destW <= 0 || destH <= 0) return false;
+    int destStride = destW * 4;
+    if (srcW == destW && srcH == destH) {
+        out.assign(static_cast<size_t>(destStride) * destH, 0);
+        if (srcStride == destStride) {
+            memcpy(out.data(), src, out.size());
+        } else {
+            for (int y = 0; y < destH; ++y) {
+                memcpy(out.data() + static_cast<size_t>(y) * destStride,
+                       src + static_cast<size_t>(y) * srcStride,
+                       static_cast<size_t>(destStride));
+            }
+        }
+        return true;
+    }
+
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmap* srcBitmap = nullptr;
+    IWICBitmapScaler* scaler = nullptr;
+    auto cleanup = [&]() {
+        if (scaler) scaler->Release();
+        if (srcBitmap) srcBitmap->Release();
+        if (factory) factory->Release();
+    };
+
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&factory));
+    if (FAILED(hr) || !factory) {
+        if (err) *err = L"WIC factory creation failed.";
+        cleanup();
+        return false;
+    }
+    hr = factory->CreateBitmapFromMemory(static_cast<UINT>(srcW), static_cast<UINT>(srcH),
+                                         GUID_WICPixelFormat32bppBGRA,
+                                         static_cast<UINT>(srcStride),
+                                         static_cast<UINT>(srcStride) * srcH,
+                                         const_cast<BYTE*>(reinterpret_cast<const BYTE*>(src)),
+                                         &srcBitmap);
+    if (FAILED(hr) || !srcBitmap) {
+        if (err) *err = L"WIC bitmap creation failed.";
+        cleanup();
+        return false;
+    }
+
+    IWICBitmapSource* source = srcBitmap;
+    if (srcW != destW || srcH != destH) {
+        hr = factory->CreateBitmapScaler(&scaler);
+        if (FAILED(hr) || !scaler) {
+            if (err) *err = L"WIC scaler creation failed.";
+            cleanup();
+            return false;
+        }
+        hr = scaler->Initialize(srcBitmap, static_cast<UINT>(destW), static_cast<UINT>(destH),
+                                WICBitmapInterpolationModeFant);
+        if (FAILED(hr)) {
+            if (err) *err = L"WIC scaler init failed.";
+            cleanup();
+            return false;
+        }
+        source = scaler;
+    }
+
+    out.assign(static_cast<size_t>(destStride) * destH, 0);
+    hr = source->CopyPixels(nullptr, static_cast<UINT>(destStride),
+                            static_cast<UINT>(destStride) * destH,
+                            reinterpret_cast<BYTE*>(out.data()));
+    if (FAILED(hr)) {
+        if (err) *err = L"WIC scale copy failed.";
+        cleanup();
+        return false;
+    }
+    cleanup();
+    return true;
+}

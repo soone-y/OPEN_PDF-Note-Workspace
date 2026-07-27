@@ -1,0 +1,24 @@
+diff --git a/basic/Library_sb.mk b/basic/Library_sb.mk
+--- a/basic/Library_sb.mk
++++ b/basic/Library_sb.mk
+@@ -44,6 +44,7 @@ $(eval $(call gb_Library_use_api,sb,oovbaapi))
+ 
+ $(eval $(call gb_Library_add_defs,sb,\
+ 	-DBASIC_DLLIMPLEMENTATION \
++	-DHAVE_FEATURE_SCRIPTING=1 \
+ ))
+ 
+ $(eval $(call gb_Library_use_libraries,sb,\
+diff --git a/config_host/config_features.h.in b/config_host/config_features.h.in
+--- a/config_host/config_features.h.in
++++ b/config_host/config_features.h.in
+@@ -33,7 +33,9 @@
+  * implemented in some scripting language. Later, if necessary.
+  */
+ 
++#ifndef HAVE_FEATURE_SCRIPTING
+ #define HAVE_FEATURE_SCRIPTING 0
++#endif
+ 
+ /* MULTIUSER_ENVIRONMENT - Whether running on a "normal" multi-user
+  * desktop (or server) OS

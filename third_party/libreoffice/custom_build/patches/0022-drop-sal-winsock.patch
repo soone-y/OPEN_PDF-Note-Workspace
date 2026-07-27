@@ -1,0 +1,411 @@
+diff --git a/sal/Library_sal.mk b/sal/Library_sal.mk
+index ee4c28cfafcf..e4655eaa4877 100644
+--- a/sal/Library_sal.mk
++++ b/sal/Library_sal.mk
+@@ -59,7 +59,6 @@ $(eval $(call gb_Library_use_system_win32_libs,sal,\
+ 	user32 \
+ 	userenv \
+ 	wer \
+-	ws2_32 \
+ ))
+ 
+ $(eval $(call gb_Library_add_libs,sal,\
+@@ -236,12 +235,12 @@ $(eval $(call gb_Library_add_exception_objects,sal,\
+ 	sal/osl/w32/process \
+ 	sal/osl/w32/procimpl \
+ 	sal/osl/w32/profile \
+ 	sal/osl/w32/random \
+ 	sal/osl/w32/salinit \
+ 	sal/osl/w32/security \
+ 	sal/osl/w32/signal \
+-	sal/osl/w32/socket \
++	sal/osl/w32/socket_no_network \
+ 	sal/osl/w32/tempfile \
+ 	sal/osl/w32/thread \
+ 	sal/osl/w32/time \
+ ))
+diff --git a/sal/osl/w32/socket_no_network.cxx b/sal/osl/w32/socket_no_network.cxx
+new file mode 100644
+index 000000000000..bbdf00c66500
+--- /dev/null
++++ b/sal/osl/w32/socket_no_network.cxx
+@@ -0,0 +1,379 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++/*
++ * This file is part of the LibreOffice project.
++ *
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
++ */
++
++#include <sal/config.h>
++
++#include <cstring>
++
++#include <osl/interlck.h>
++#include <osl/socket.h>
++#include <rtl/byteseq.h>
++#include <rtl/ustring.h>
++
++struct oslSocketImpl
++{
++    oslInterlockedCount m_refCount;
++    oslSocketType m_type;
++    oslSocketError m_lastError;
++    sal_Bool m_nonBlocking;
++};
++
++struct oslSocketAddrImpl
++{
++    oslAddrFamily m_family;
++    sal_Int32 m_port;
++    sal_uInt32 m_addr;
++    rtl_uString* m_hostname;
++};
++
++struct oslHostAddrImpl
++{
++    rtl_uString* m_hostname;
++    oslSocketAddr m_addr;
++};
++
++namespace
++{
++constexpr sal_uInt32 AnyAddr = 0;
++constexpr sal_uInt32 BroadcastAddr = 0xffffffff;
++
++oslSocketAddr makeAddr(oslAddrFamily family, sal_Int32 port, sal_uInt32 addr, rtl_uString* hostname)
++{
++    auto* result = new oslSocketAddrImpl{ family, port, addr, nullptr };
++    if (hostname)
++        rtl_uString_assign(&result->m_hostname, hostname);
++    return result;
++}
++
++void assignAscii(rtl_uString** target, const char* value)
++{
++    rtl_uString_newFromAscii(target, value);
++}
++
++void setUnsupported(rtl_uString** error)
++{
++    rtl_uString_newFromAscii(error, "Network sockets are disabled in this build.");
++}
++}
++
++oslSocketAddr SAL_CALL osl_createEmptySocketAddr(oslAddrFamily family)
++{
++    return makeAddr(family, 0, AnyAddr, nullptr);
++}
++
++oslSocketAddr SAL_CALL osl_copySocketAddr(oslSocketAddr addr)
++{
++    if (!addr)
++        return nullptr;
++    return makeAddr(addr->m_family, addr->m_port, addr->m_addr, addr->m_hostname);
++}
++
++sal_Bool SAL_CALL osl_isEqualSocketAddr(oslSocketAddr addr1, oslSocketAddr addr2)
++{
++    if (addr1 == addr2)
++        return true;
++    if (!addr1 || !addr2)
++        return false;
++    return addr1->m_family == addr2->m_family && addr1->m_port == addr2->m_port
++           && addr1->m_addr == addr2->m_addr;
++}
++
++oslSocketAddr SAL_CALL osl_createInetBroadcastAddr(rtl_uString* dottedAddr, sal_Int32 port)
++{
++    return makeAddr(osl_Socket_FamilyInet, port, dottedAddr ? AnyAddr : BroadcastAddr, dottedAddr);
++}
++
++oslSocketAddr SAL_CALL osl_createInetSocketAddr(rtl_uString* dottedAddr, sal_Int32 port)
++{
++    return makeAddr(osl_Socket_FamilyInet, port, AnyAddr, dottedAddr);
++}
++
++oslSocketResult SAL_CALL osl_setAddrOfSocketAddr(oslSocketAddr addr, sal_Sequence* byteSeq)
++{
++    if (!addr || !byteSeq || byteSeq->nElements < 4)
++        return osl_Socket_Error;
++
++    const auto* bytes = reinterpret_cast<const sal_uInt8*>(byteSeq->elements);
++    addr->m_addr = (sal_uInt32(bytes[0]) << 24) | (sal_uInt32(bytes[1]) << 16)
++                   | (sal_uInt32(bytes[2]) << 8) | sal_uInt32(bytes[3]);
++    return osl_Socket_Ok;
++}
++
++oslSocketResult SAL_CALL osl_getAddrOfSocketAddr(oslSocketAddr addr, sal_Sequence** byteSeq)
++{
++    if (!addr || !byteSeq)
++        return osl_Socket_Error;
++
++    const sal_uInt8 bytes[4] = {
++        sal_uInt8((addr->m_addr >> 24) & 0xff),
++        sal_uInt8((addr->m_addr >> 16) & 0xff),
++        sal_uInt8((addr->m_addr >> 8) & 0xff),
++        sal_uInt8(addr->m_addr & 0xff),
++    };
++    rtl_byte_sequence_constructFromArray(byteSeq, reinterpret_cast<const sal_Int8*>(bytes), 4);
++    return osl_Socket_Ok;
++}
++
++oslHostAddr SAL_CALL osl_createHostAddr(rtl_uString* hostname, const oslSocketAddr addr)
++{
++    if (!hostname)
++        return nullptr;
++
++    auto* result = new oslHostAddrImpl{ nullptr, osl_copySocketAddr(addr) };
++    rtl_uString_assign(&result->m_hostname, hostname);
++    return result;
++}
++
++oslHostAddr SAL_CALL osl_createHostAddrByName(rtl_uString*)
++{
++    return nullptr;
++}
++
++oslHostAddr SAL_CALL osl_createHostAddrByAddr(const oslSocketAddr)
++{
++    return nullptr;
++}
++
++oslHostAddr SAL_CALL osl_copyHostAddr(const oslHostAddr addr)
++{
++    if (!addr)
++        return nullptr;
++    return osl_createHostAddr(addr->m_hostname, addr->m_addr);
++}
++
++void SAL_CALL osl_getHostnameOfHostAddr(const oslHostAddr addr, rtl_uString** hostname)
++{
++    if (!hostname)
++        return;
++    if (addr && addr->m_hostname)
++        rtl_uString_assign(hostname, addr->m_hostname);
++    else
++        *hostname = nullptr;
++}
++
++oslSocketAddr SAL_CALL osl_getSocketAddrOfHostAddr(const oslHostAddr addr)
++{
++    return addr ? osl_copySocketAddr(addr->m_addr) : nullptr;
++}
++
++void SAL_CALL osl_destroyHostAddr(oslHostAddr addr)
++{
++    if (!addr)
++        return;
++    if (addr->m_hostname)
++        rtl_uString_release(addr->m_hostname);
++    osl_destroySocketAddr(addr->m_addr);
++    delete addr;
++}
++
++oslSocketResult SAL_CALL osl_getLocalHostname(rtl_uString** hostname)
++{
++    if (!hostname)
++        return osl_Socket_Error;
++    assignAscii(hostname, "localhost");
++    return osl_Socket_Ok;
++}
++
++oslSocketAddr SAL_CALL osl_resolveHostname(rtl_uString*)
++{
++    return nullptr;
++}
++
++sal_Int32 SAL_CALL osl_getServicePort(rtl_uString*, rtl_uString*)
++{
++    return OSL_INVALID_PORT;
++}
++
++void SAL_CALL osl_destroySocketAddr(oslSocketAddr addr)
++{
++    if (!addr)
++        return;
++    if (addr->m_hostname)
++        rtl_uString_release(addr->m_hostname);
++    delete addr;
++}
++
++oslAddrFamily SAL_CALL osl_getFamilyOfSocketAddr(oslSocketAddr addr)
++{
++    return addr ? addr->m_family : osl_Socket_FamilyInvalid;
++}
++
++sal_Int32 SAL_CALL osl_getInetPortOfSocketAddr(oslSocketAddr addr)
++{
++    return addr && addr->m_family == osl_Socket_FamilyInet ? addr->m_port : OSL_INVALID_PORT;
++}
++
++sal_Bool SAL_CALL osl_setInetPortOfSocketAddr(oslSocketAddr addr, sal_Int32 port)
++{
++    if (!addr || addr->m_family != osl_Socket_FamilyInet)
++        return false;
++    addr->m_port = port;
++    return true;
++}
++
++oslSocketResult SAL_CALL osl_getHostnameOfSocketAddr(oslSocketAddr addr, rtl_uString** hostname)
++{
++    if (!addr || !hostname || !addr->m_hostname)
++        return osl_Socket_Error;
++    rtl_uString_assign(hostname, addr->m_hostname);
++    return osl_Socket_Ok;
++}
++
++oslSocketResult SAL_CALL osl_getDottedInetAddrOfSocketAddr(oslSocketAddr addr, rtl_uString** dottedAddr)
++{
++    if (!addr || !dottedAddr || addr->m_family != osl_Socket_FamilyInet)
++        return osl_Socket_Error;
++
++    const char text[] = "0.0.0.0";
++    assignAscii(dottedAddr, text);
++    return osl_Socket_Ok;
++}
++
++oslSocket SAL_CALL osl_createSocket(oslAddrFamily, oslSocketType, oslProtocol)
++{
++    return nullptr;
++}
++
++void SAL_CALL osl_acquireSocket(oslSocket socket)
++{
++    if (socket)
++        osl_atomic_increment(&socket->m_refCount);
++}
++
++void SAL_CALL osl_releaseSocket(oslSocket socket)
++{
++    if (socket && osl_atomic_decrement(&socket->m_refCount) == 0)
++        delete socket;
++}
++
++void SAL_CALL osl_closeSocket(oslSocket socket)
++{
++    osl_releaseSocket(socket);
++}
++
++oslSocketAddr SAL_CALL osl_getLocalAddrOfSocket(oslSocket)
++{
++    return nullptr;
++}
++
++oslSocketAddr SAL_CALL osl_getPeerAddrOfSocket(oslSocket)
++{
++    return nullptr;
++}
++
++sal_Bool SAL_CALL osl_bindAddrToSocket(oslSocket, oslSocketAddr)
++{
++    return false;
++}
++
++oslSocketResult SAL_CALL osl_connectSocketTo(oslSocket, oslSocketAddr, const TimeValue*)
++{
++    return osl_Socket_Error;
++}
++
++sal_Bool SAL_CALL osl_listenOnSocket(oslSocket, sal_Int32)
++{
++    return false;
++}
++
++oslSocket SAL_CALL osl_acceptConnectionOnSocket(oslSocket, oslSocketAddr*)
++{
++    return nullptr;
++}
++
++sal_Int32 SAL_CALL osl_receiveSocket(oslSocket, void*, sal_uInt32, oslSocketMsgFlag)
++{
++    return -1;
++}
++
++sal_Int32 SAL_CALL osl_receiveFromSocket(oslSocket, oslSocketAddr, void*, sal_uInt32, oslSocketMsgFlag)
++{
++    return -1;
++}
++
++sal_Int32 SAL_CALL osl_sendSocket(oslSocket, const void*, sal_uInt32, oslSocketMsgFlag)
++{
++    return -1;
++}
++
++sal_Int32 SAL_CALL osl_sendToSocket(oslSocket, oslSocketAddr, const void*, sal_uInt32, oslSocketMsgFlag)
++{
++    return -1;
++}
++
++sal_Int32 SAL_CALL osl_readSocket(oslSocket, void*, sal_Int32)
++{
++    return -1;
++}
++
++sal_Int32 SAL_CALL osl_writeSocket(oslSocket, const void*, sal_Int32)
++{
++    return -1;
++}
++
++sal_Bool SAL_CALL osl_isReceiveReady(oslSocket, const TimeValue*)
++{
++    return false;
++}
++
++sal_Bool SAL_CALL osl_isSendReady(oslSocket, const TimeValue*)
++{
++    return false;
++}
++
++sal_Bool SAL_CALL osl_isExceptionPending(oslSocket, const TimeValue*)
++{
++    return false;
++}
++
++sal_Bool SAL_CALL osl_shutdownSocket(oslSocket, oslSocketDirection)
++{
++    return false;
++}
++
++sal_Int32 SAL_CALL osl_getSocketOption(oslSocket, oslSocketOptionLevel, oslSocketOption, void*, sal_uInt32)
++{
++    return -1;
++}
++
++sal_Bool SAL_CALL osl_setSocketOption(oslSocket, oslSocketOptionLevel, oslSocketOption, void*, sal_uInt32)
++{
++    return false;
++}
++
++sal_Bool SAL_CALL osl_enableNonBlockingMode(oslSocket socket, sal_Bool on)
++{
++    if (!socket)
++        return false;
++    socket->m_nonBlocking = on;
++    return true;
++}
++
++sal_Bool SAL_CALL osl_isNonBlockingMode(oslSocket socket)
++{
++    return socket ? socket->m_nonBlocking : false;
++}
++
++oslSocketType SAL_CALL osl_getSocketType(oslSocket socket)
++{
++    return socket ? socket->m_type : osl_Socket_TypeInvalid;
++}
++
++void SAL_CALL osl_getLastSocketErrorDescription(oslSocket, rtl_uString** error)
++{
++    if (error)
++        setUnsupported(error);
++}
++
++oslSocketError SAL_CALL osl_getLastSocketError(oslSocket)
++{
++    return osl_Socket_E_OpNotSupport;
++}
++
++/* vim:set shiftwidth=4 softtabstop=4 expandtab: */

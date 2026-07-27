@@ -1,0 +1,59 @@
+diff --git a/filter/source/pdf/pdffilter.cxx b/filter/source/pdf/pdffilter.cxx
+--- a/filter/source/pdf/pdffilter.cxx
++++ b/filter/source/pdf/pdffilter.cxx
+@@ -92,9 +92,11 @@ bool PDFFilter::implExport( const Sequence< PropertyValue >& rDescriptor )
+         }
+     }
+ 
++    const bool bUseDefaultFilterData = !aFilterData.hasElements();
++
+     /* we don't get FilterData if we are exporting directly
+        to pdf, but we have to use the last user settings (especially for the CompressMode) */
+-    if ( !aFilterData.hasElements() )
++    if (bUseDefaultFilterData)
+     {
+         FilterConfigItem aCfgItem( u"Office.Common/Filter/PDF/Export/" );
+         aCfgItem.ReadBool(  u"UseLosslessCompression"_ustr, false );
+@@ -148,6 +150,26 @@ bool PDFFilter::implExport( const Sequence< PropertyValue >& rDescriptor )
+         aFilterData = aCfgItem.GetFilterData();
+     }
+ 
++    // Microsoft Word's direct PDF conversion does not create an outline from
++    // heading styles by default. Match that behavior for unattended Writer
++    // conversion, while preserving explicitly supplied PDF filter options.
++    if (bUseDefaultFilterData && mxSrcDoc.is())
++    {
++        Reference<XServiceInfo> xServiceInfo(mxSrcDoc, UNO_QUERY);
++        if (xServiceInfo.is()
++            && xServiceInfo->supportsService(u"com.sun.star.text.TextDocument"_ustr))
++        {
++            for (PropertyValue& rProp : asNonConstRange(aFilterData))
++            {
++                if (rProp.Name == "ExportBookmarks")
++                {
++                    rProp.Value <<= false;
++                    break;
++                }
++            }
++        }
++    }
++
+ 
+     if (bIsRedactMode)
+     {
+diff --git a/sd/source/ui/unoidl/unomodel.cxx b/sd/source/ui/unoidl/unomodel.cxx
+--- a/sd/source/ui/unoidl/unomodel.cxx
++++ b/sd/source/ui/unoidl/unomodel.cxx
+@@ -3758,6 +3758,12 @@ void SAL_CALL SdXImpressDocument::render( sal_Int32 nRenderer, const uno::Any& r
+                 //---> #i56629, #i40318
+                 //get the page name, will be used as outline element in PDF bookmark pane
+                 OUString aPageName = mpDoc->GetSdPage( static_cast<sal_uInt16>(nPageNumber) - 1 , PageKind::Standard )->GetName();
++                // The minimized Japanese runtime does not ship the full UI
++                // language pack. Keep generated slide outline names compatible
++                // with PDF output from Japanese Microsoft PowerPoint.
++                const OUString aDefaultEnglishName = u"Slide "_ustr + OUString::number(nPageNumber);
++                if (aPageName == aDefaultEnglishName)
++                    aPageName = u"スライド "_ustr + OUString::number(nPageNumber);
+                 if( !aPageName.isEmpty() )
+                 {
+                     // Destination PageNum

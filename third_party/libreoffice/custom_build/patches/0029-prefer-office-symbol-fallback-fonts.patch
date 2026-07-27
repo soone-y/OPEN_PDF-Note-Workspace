@@ -1,0 +1,40 @@
+diff --git a/vcl/win/gdi/salfont.cxx b/vcl/win/gdi/salfont.cxx
+--- a/vcl/win/gdi/salfont.cxx
++++ b/vcl/win/gdi/salfont.cxx
+@@ -190,10 +190,34 @@ bool WinGlyphFallbackSubstititution::FindFontSubstitute(vcl::font::FontSelectPat
+     if( eLang == LANGUAGE_DONTKNOW )
+         aLanguageTag = Application::GetSettings().GetUILanguageTag();
+ 
+-    // first level fallback:
++    // Office-compatible symbol fallback:
++    // Match the fonts selected by Microsoft Office for common document symbols.
++    // Keeping these glyphs in the same font also aligns their metrics and
++    // embedded PDF font identity with Office output.
++    const vcl::font::PhysicalFontCollection* pFontCollection = ImplGetSVData()->maGDIData.mxScreenFontList.get();
++    OUString aPreferredSymbolFont;
++    if (rMissingChars.indexOf(u'\u207B') >= 0 || rMissingChars.indexOf(u'\u27C2') >= 0)
++        aPreferredSymbolFont = u"Cambria Math"_ustr;
++    else if (rMissingChars.indexOf(u'\u2610') >= 0 || rMissingChars.indexOf(u'\u2611') >= 0
++             || rMissingChars.indexOf(u'\u2612') >= 0)
++        aPreferredSymbolFont = u"Segoe UI Symbol"_ustr;
++
++    if (!aPreferredSymbolFont.isEmpty())
++    {
++        if (vcl::font::PhysicalFontFamily* pPreferredFamily
++            = pFontCollection->FindFontFamily(aPreferredSymbolFont))
++        {
++            vcl::font::PhysicalFontFace* pFace = pPreferredFamily->FindBestFontFace(rFontSelData);
++            if (HasMissingChars(pFace, rMissingChars))
++            {
++                rFontSelData.maSearchName = pPreferredFamily->GetSearchName();
++                return true;
++            }
++        }
++    }
++
+     // first level fallback:
+     // try use the locale specific default fonts defined in VCL.xcu
+-    const vcl::font::PhysicalFontCollection* pFontCollection = ImplGetSVData()->maGDIData.mxScreenFontList.get();
+     vcl::font::PhysicalFontFamily* pFontFamily = findDevFontListByLocale(*pFontCollection, aLanguageTag);
+     if( pFontFamily )
+     {

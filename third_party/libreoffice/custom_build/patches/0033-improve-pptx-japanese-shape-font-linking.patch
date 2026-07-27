@@ -1,0 +1,58 @@
+diff --git a/oox/source/drawingml/textrun.cxx b/oox/source/drawingml/textrun.cxx
+--- a/oox/source/drawingml/textrun.cxx
++++ b/oox/source/drawingml/textrun.cxx
+@@ -32,6 +32,7 @@
+ #include <oox/helper/helper.hxx>
+ #include <oox/helper/propertyset.hxx>
+ #include <oox/core/xmlfilterbase.hxx>
++#include <oox/drawingml/theme.hxx>
+ #include <oox/token/properties.hxx>
+ #include <oox/token/tokens.hxx>
+ #include <comphelper/diagnose_ex.hxx>
+@@ -67,14 +68,41 @@ void lclApplyOfficeJapaneseFontLink(const ::oox::core::XmlFilterBase& rFilterBas
+     OUString aAsianFontName;
+     sal_Int16 nFontPitch = 0;
+     sal_Int16 nFontFamily = 0;
+-    if (rTextCharacterProps.maAsianFont.getFontData(aAsianFontName, nFontPitch, nFontFamily,
+-                                                    nullptr, rFilterBase)
+-        && aAsianFontName.equalsIgnoreAsciiCase(u"Courier New"))
++    const bool bHasDirectAsianFont
++        = rTextCharacterProps.maAsianFont.getFontData(aAsianFontName, nFontPitch, nFontFamily,
++                                                      nullptr, rFilterBase);
++    if (bHasDirectAsianFont
++        && (aAsianFontName.equalsIgnoreAsciiCase(u"Courier New")
++            || aAsianFontName.equalsIgnoreAsciiCase(u"Cambria Math")))
+     {
+-        // Windows PowerPoint links Japanese glyphs in Courier New runs to MS Mincho.
+-        // LibreOffice otherwise falls through to Noto Sans JP and changes the baseline.
++        // Windows PowerPoint links Japanese glyphs in these Latin-only fonts to MS Mincho.
++        // LibreOffice otherwise falls through to Noto Sans JP and changes the metrics.
+         rTextCharacterProps.maAsianFont.setAttributes(u"MS Mincho"_ustr);
++        return;
+     }
++
++    if (bHasDirectAsianFont
++        || rTextCharacterProps.maAsianThemeFont.getFontData(aAsianFontName, nFontPitch,
++                                                            nFontFamily, nullptr, rFilterBase))
++        return;
++
++    const Theme* pTheme = rFilterBase.getCurrentTheme();
++    if (!pTheme || !pTheme->getTheme())
++        return;
++
++    OUString aJapaneseTypeface
++        = pTheme->getTheme()->getFontScheme().findMinorSupplementalTypeface(u"Jpan");
++    if (aJapaneseTypeface.isEmpty())
++        return;
++
++    // PowerPoint uses MS Gothic for classic theme text without a Japanese language tag,
++    // while explicitly Japanese runs retain the theme's MS PGothic supplemental font.
++    const bool bHasJapaneseLanguage
++        = rTextCharacterProps.moLang
++          && rTextCharacterProps.moLang->startsWithIgnoreAsciiCase("ja");
++    if (!bHasJapaneseLanguage && aJapaneseTypeface == u"ＭＳ Ｐゴシック")
++        aJapaneseTypeface = u"MS Gothic"_ustr;
++    rTextCharacterProps.maAsianFont.setAttributes(aJapaneseTypeface);
+ }
+ 
+ } // namespace

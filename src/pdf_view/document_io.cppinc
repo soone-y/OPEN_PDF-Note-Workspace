@@ -1,0 +1,374 @@
+// file: pdf_view/document_io.cpp
+// NOTE: This file is intentionally included by `src/pdf_view/pdf_view.cpp` to keep the build as a
+// single translation unit while physically splitting responsibilities.
+
+#include "core/preview_trace.h"
+
+static std::wstring ToExtendedPathIfAbsolute(const std::wstring& path) {
+    if (path.rfind(L"\\\\?\\", 0) == 0) return path;
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\') {
+        // UNC path: \\server\share -> \\?\UNC\server\share
+        return std::wstring(L"\\\\?\\UNC\\") + path.substr(2);
+    }
+    if (path.size() >= 3 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/')) {
+        return std::wstring(L"\\\\?\\") + path;
+    }
+    return path; // relative path
+}
+
+static int GetPdfBlockFromHandle(void* param,
+                                 unsigned long position,
+                                 unsigned char* outBuffer,
+                                 unsigned long size) {
+    if (!param || !outBuffer || size == 0) return 0;
+    HANDLE h = reinterpret_cast<HANDLE>(param);
+    if (!h || h == INVALID_HANDLE_VALUE) return 0;
+
+    OVERLAPPED ov{};
+    ov.Offset = static_cast<DWORD>(position);
+    ov.OffsetHigh = static_cast<DWORD>(static_cast<unsigned long long>(position) >> 32);
+    DWORD read = 0;
+    if (ReadFile(h, outBuffer, size, &read, &ov)) {
+        return (read == size) ? 1 : 0;
+    }
+    DWORD e = GetLastError();
+    if (e == ERROR_IO_PENDING) {
+        if (GetOverlappedResult(h, &ov, &read, TRUE)) {
+            return (read == size) ? 1 : 0;
+        }
+    }
+    return 0;
+}
+
+static std::wstring TrimForNotice(const std::wstring& s, size_t maxChars) {
+    if (s.size() <= maxChars) return s;
+    if (maxChars <= 1) return L"…";
+    return s.substr(0, maxChars - 1) + L"…";
+}
+
+static std::wstring GetPdfJavaScriptNoticeText(FPDF_DOCUMENT doc, const std::wstring& pdfPath) {
+    if (!doc) return L"";
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    int n = FPDFDoc_GetJavaScriptActionCount(doc);
+    if (n <= 0) return L"";
+
+    std::wstring msg;
+    msg += IsEnglishUi()
+               ? L"This PDF contains embedded JavaScript. It will NOT be executed.\n"
+               : L"このPDFには埋め込みJavaScript（スクリプト）が含まれています。実行しません。\n";
+
+    msg += IsEnglishUi() ? L"Location: document-level JavaScript actions.\n" : L"場所: ドキュメントレベル（文書全体）のJavaScriptアクション。\n";
+
+    try {
+        std::filesystem::path p(pdfPath);
+        msg += IsEnglishUi() ? L"PDF: " : L"PDF: ";
+        msg += p.filename().empty() ? pdfPath : p.filename().wstring();
+        msg += L"\n";
+    } catch (...) {
+        msg += IsEnglishUi() ? L"PDF: " : L"PDF: ";
+        msg += pdfPath;
+        msg += L"\n";
+    }
+
+    const int showMax = 3;
+    msg += IsEnglishUi() ? L"Actions:\n" : L"アクション:\n";
+    for (int i = 0; i < n && i < showMax; ++i) {
+        FPDF_JAVASCRIPT_ACTION js = FPDFDoc_GetJavaScriptAction(doc, i);
+        std::wstring name;
+        std::wstring script;
+        if (js) {
+            unsigned long nameLen = FPDFJavaScriptAction_GetName(js, nullptr, 0);
+            if (nameLen > 0 && nameLen < 1024 * 1024) {
+                name.resize(static_cast<size_t>(nameLen));
+                unsigned long got = FPDFJavaScriptAction_GetName(
+                    js, reinterpret_cast<FPDF_WCHAR*>(name.data()), nameLen);
+                if (got > 0 && !name.empty() && name.back() == L'\0') name.pop_back();
+            }
+            unsigned long scriptLen = FPDFJavaScriptAction_GetScript(js, nullptr, 0);
+            if (scriptLen > 0 && scriptLen < 1024 * 1024) {
+                script.resize(static_cast<size_t>(scriptLen));
+                unsigned long got = FPDFJavaScriptAction_GetScript(
+                    js, reinterpret_cast<FPDF_WCHAR*>(script.data()), scriptLen);
+                if (got > 0 && !script.empty() && script.back() == L'\0') script.pop_back();
+            }
+            FPDFDoc_CloseJavaScriptAction(js);
+        }
+        if (name.empty()) name = IsEnglishUi() ? L"(no name)" : L"(名前なし)";
+        msg += L"  [" + std::to_wstring(i + 1) + L"] " + TrimForNotice(name, 48);
+        if (!script.empty()) {
+            msg += IsEnglishUi() ? L"  script: " : L"  スクリプト: ";
+            msg += TrimForNotice(script, 64);
+        }
+        msg += L"\n";
+    }
+    if (n > showMax) {
+        msg += IsEnglishUi()
+                   ? L"  ... (more actions omitted)\n"
+                   : L"  ...（他のアクションは省略）\n";
+    }
+
+    msg += L"\n";
+    msg += IsEnglishUi()
+               ? L"Alternative: open this PDF in another viewer (e.g. a browser or Adobe Reader) if you need those features.\n"
+               : L"代替手段: これらの機能が必要なら、別のPDFビューア（例: ブラウザ/Adobe Reader等）で開いてください。\n";
+    msg += IsEnglishUi()
+               ? L"(Note: other viewers may execute scripts; use caution.)"
+               : L"（注意: 他ビューアではスクリプトが実行される可能性があります。注意してください。）";
+    return msg;
+}
+
+static bool PromptPasswordForPdfOpen(HWND pdfWnd,
+                                     const std::wstring& path,
+                                     bool previousPasswordFailed,
+                                     std::string* outPasswordUtf8) {
+    if (!outPasswordUtf8) return false;
+    std::filesystem::path filePath(path);
+    const std::wstring fileName = filePath.filename().empty() ? path : filePath.filename().wstring();
+    std::wstring message;
+    if (previousPasswordFailed) {
+        message =
+            IsEnglishUi()
+                ? L"The password was incorrect.\nEnter the PDF password again.\nFile: " + fileName +
+                      L"\n\nThe password is kept only in memory for the current session."
+                : L"パスワードが正しくありませんでした。\nPDFのパスワードを再入力してください。\nファイル: " + fileName +
+                      L"\n\nパスワードは現在のセッション中だけメモリに保持します。";
+    } else {
+        message =
+            IsEnglishUi()
+                ? L"This PDF requires a password to open.\nFile: " + fileName +
+                      L"\n\nThe password is kept only in memory for the current session."
+                : L"このPDFを開くにはパスワードが必要です。\nファイル: " + fileName +
+                      L"\n\nパスワードは現在のセッション中だけメモリに保持します。";
+    }
+
+    std::wstring password;
+    SecureWideStringScope passwordScope(&password);
+    if (!PromptPasswordText(PdfDialogOwner(pdfWnd),
+                            IsEnglishUi() ? L"PDF Password" : L"PDFパスワード",
+                            message,
+                            password)) {
+        return false;
+    }
+    *outPasswordUtf8 = WideToUTF8(password);
+    return true;
+}
+
+static bool LoadImageDocument(HWND pdfWnd, const std::wstring& path) {
+    ClearPdfState();
+    g_pdf.kind = DocKind::Image;
+    std::wstring err;
+    if (!LoadImagePixelsWic(path, g_pdf.imagePixels, g_pdf.imageWidth, g_pdf.imageHeight,
+                            g_pdf.imageStride, g_pdf.imageDpiX, g_pdf.imageDpiY, &err)) {
+        std::wstring msg = IsEnglishUi()
+            ? L"Failed to open image. Check path and permissions."
+            : L"画像を開けません。パスと権限を確認してください。";
+        if (!err.empty()) msg += L"\n" + err;
+        ShowPdfMessageDialog(pdfWnd, L"Image", msg, SoftNoticeKind::Error);
+        ClearPdfState();
+        return false;
+    }
+    g_pdf.pageCount = 1;
+    g_pdf.path = path;
+    g_pdf.scale = 1.0;
+    g_pdf.scrollY = 0.0;
+    g_pdf.scrollX = 0.0;
+    BuildPageCaches(pdfWnd);
+    JumpToPage(pdfWnd, 0);
+    return true;
+}
+
+bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    preview_trace::Append(L"LoadPdfDocument", L"begin path=" + path);
+    std::optional<std::string> openPasswordUtf8 = ConsumePendingPdfOpenPasswordUtf8();
+    SecureOptionalStringScope openPasswordScope(&openPasswordUtf8);
+    int passwordPromptCount = 0;
+    for (;;) {
+        ClearPdfState();
+
+        // Open with generous sharing so we can load PDFs even if another app has the file open.
+        std::wstring openPath = ToExtendedPathIfAbsolute(path);
+        HANDLE hFile = CreateFileW(openPath.c_str(),
+                                   GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   nullptr,
+                                   OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS | FILE_FLAG_OVERLAPPED,
+                                   nullptr);
+        if (hFile == INVALID_HANDLE_VALUE) {
+            DWORD e = GetLastError();
+            preview_trace::Append(
+                L"LoadPdfDocument",
+                L"open_failed path=" + path + L" error=" + std::to_wstring(e));
+            std::wstring msg = IsEnglishUi()
+                ? L"Failed to open PDF. Check path and permissions."
+                : L"PDFを開けません。パスと権限を確認してください。";
+            std::wstring detail = L"(" + std::to_wstring(e) + L") " + atomic_write::Win32ErrorMessage(e);
+            if (!detail.empty()) msg += L"\n" + detail;
+            ShowPdfMessageDialog(pdfWnd, L"PDF", msg, SoftNoticeKind::Error);
+            return false;
+        }
+
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(hFile, &size) || size.QuadPart <= 0 ||
+            size.QuadPart > static_cast<LONGLONG>(std::numeric_limits<unsigned long>::max())) {
+            CloseHandle(hFile);
+            preview_trace::Append(L"LoadPdfDocument", L"size_invalid path=" + path);
+            std::wstring msg = IsEnglishUi()
+                ? L"Failed to open PDF. File is empty or too large."
+                : L"PDFを開けません（ファイルが空か大きすぎます）。";
+            ShowPdfMessageDialog(pdfWnd, L"PDF", msg, SoftNoticeKind::Error);
+            return false;
+        }
+
+        FPDF_FILEACCESS access{};
+        access.m_FileLen = static_cast<unsigned long>(size.QuadPart);
+        access.m_GetBlock = GetPdfBlockFromHandle;
+        access.m_Param = reinterpret_cast<void*>(hFile);
+
+        g_pdf.fileHandle = hFile;
+        const char* passwordCstr =
+            (openPasswordUtf8.has_value() && !openPasswordUtf8->empty())
+                ? openPasswordUtf8->c_str()
+                : nullptr;
+        int pdfiumLoadErr = 0;
+        {
+            std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+            g_pdf.doc = FPDF_LoadCustomDocument(&access, passwordCstr);
+            if (!g_pdf.doc) {
+                pdfiumLoadErr = FPDF_GetLastError();
+            }
+        }
+        if (!g_pdf.doc) {
+            CloseHandle(g_pdf.fileHandle);
+            g_pdf.fileHandle = INVALID_HANDLE_VALUE;
+            int err = pdfiumLoadErr;
+            preview_trace::Append(
+                L"LoadPdfDocument",
+                L"pdfium_load_failed path=" + path + L" error=" + std::to_wstring(err));
+            if (err == FPDF_ERR_PASSWORD && passwordPromptCount < 3) {
+                std::string promptedPasswordUtf8;
+                SecureStringScope promptedPasswordScope(&promptedPasswordUtf8);
+                if (PromptPasswordForPdfOpen(pdfWnd,
+                                             path,
+                                             openPasswordUtf8.has_value(),
+                                             &promptedPasswordUtf8)) {
+                    openPasswordUtf8 = std::move(promptedPasswordUtf8);
+                    ++passwordPromptCount;
+                    continue;
+                }
+                preview_trace::Append(
+                    L"LoadPdfDocument",
+                    L"password_prompt_canceled path=" + path +
+                    L" attempts=" + std::to_wstring(passwordPromptCount));
+                return false;
+            }
+
+            std::wstring detail;
+            switch (err) {
+            case FPDF_ERR_FILE:
+                detail = IsEnglishUi()
+                    ? L"File not found or not accessible."
+                    : L"ファイルが見つからないか読み込めません。";
+                break;
+            case FPDF_ERR_FORMAT:
+                detail = IsEnglishUi()
+                    ? L"The PDF is corrupt or invalid. Loading was skipped for safety."
+                    : L"PDFが破損しているか不正な形式のため、安全のため読み込みを中止しました。";
+                break;
+            case FPDF_ERR_PASSWORD:
+                detail = IsEnglishUi()
+                    ? L"Failed to unlock the PDF with the provided password."
+                    : L"入力したパスワードではPDFを開けませんでした。";
+                break;
+            case FPDF_ERR_SECURITY:
+                detail = IsEnglishUi()
+                    ? L"Unsupported security settings in the PDF."
+                    : L"PDFのセキュリティ設定により開けません。";
+                break;
+            case FPDF_ERR_PAGE:
+                detail = IsEnglishUi()
+                    ? L"Failed to load pages from the PDF."
+                    : L"PDFのページ読み込みに失敗しました。";
+                break;
+            default:
+                detail = IsEnglishUi()
+                    ? L"The PDF may be corrupt or unsafe to open."
+                    : L"PDFが破損している可能性があるため開けません。";
+                break;
+            }
+            std::wstring msg = IsEnglishUi() ? L"Failed to open PDF." : L"PDFを開けません。";
+            if (!detail.empty()) msg += L"\n" + detail;
+            ShowPdfMessageDialog(pdfWnd, L"PDF", msg, SoftNoticeKind::Error);
+            return false;
+        }
+        SecureClearString(g_pdf.openPasswordUtf8);
+        g_pdf.openPasswordUtf8 = openPasswordUtf8.value_or(std::string{});
+        break;
+    }
+    g_pdf.kind = DocKind::Pdf;
+    {
+        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+        g_pdf.pageCount = FPDF_GetPageCount(g_pdf.doc);
+    }
+    g_pdf.path = path;
+    g_pdf.scale = 1.0;
+    g_pdf.scrollY = 0.0;
+    g_pdf.scrollX = 0.0;
+
+    {
+        std::wstring warn = GetPdfJavaScriptNoticeText(g_pdf.doc, g_pdf.path);
+        if (!warn.empty()) ShowSoftNotice(pdfWnd, warn);
+    }
+
+    // Defer initial "fit" scale until the view is actually displayed/sized.
+    g_pendingInitialFitWidth = false;
+    g_pendingInitialFitWidthPt = 0.0;
+    g_pendingInitialFitHeight = false;
+    g_pendingInitialFitHeightPt = 0.0;
+    if (g_pdf.pageCount > 0) {
+        double wPt = 0.0, hPt = 0.0;
+        bool gotPageSize = false;
+        {
+            std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+            gotPageSize = FPDF_GetPageSizeByIndex(g_pdf.doc, 0, &wPt, &hPt);
+        }
+        if (gotPageSize) {
+            PdfFlowMode mode = CurrentFlowMode();
+            if (FlowIsVertical(mode)) {
+                if (wPt > 0.0) {
+                    g_pendingInitialFitWidth = true;
+                    g_pendingInitialFitWidthPt = wPt;
+                }
+            } else {
+                if (hPt > 0.0) {
+                    g_pendingInitialFitHeight = true;
+                    g_pendingInitialFitHeightPt = hPt;
+                }
+            }
+        }
+    }
+    // NOTE(user request(u-za-dayo)): Keep the first layout pass at scale=1.0 before initial fit.
+    // This can briefly show the horizontal scrollbar, and we intentionally keep it
+    // as a lightweight "loading in progress" visual cue during PDF switching.
+    const ULONGLONG buildStartTick = preview_trace::TickNow();
+    BuildPageCaches(pdfWnd);
+    preview_trace::Append(
+        L"LoadPdfDocument",
+        L"build_page_caches_elapsed_ms=" + preview_trace::ElapsedMs(buildStartTick) +
+        L" path=" + path +
+        L" pageCount=" + std::to_wstring(g_pdf.pageCount));
+    InvalidateRect(pdfWnd, nullptr, FALSE);
+    if (g_pendingInitialFitWidth) {
+        PostMessageW(pdfWnd, kMsgApplyInitialPdfFitWidth, 0, 0);
+    } else if (g_pendingInitialFitHeight) {
+        PostMessageW(pdfWnd, kMsgApplyInitialPdfFitHeight, 0, 0);
+    }
+    preview_trace::Append(
+        L"LoadPdfDocument",
+        L"end ok path=" + path +
+        L" pageCount=" + std::to_wstring(g_pdf.pageCount) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+    return true;
+}
+

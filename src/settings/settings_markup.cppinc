@@ -1,0 +1,821 @@
+// file: settings/settings_markup.cppinc
+// Included by settings.cpp (single TU).
+
+// ---------------------------------------------------------------------
+// Settings: Markup options
+// ---------------------------------------------------------------------
+namespace {
+constexpr int kMarkupDlgWidth = 920;
+constexpr int kMarkupDlgHeight = 760;
+
+enum : int {
+    IDC_MARKUP_HEADING_FONT = 4201,
+    IDC_MARKUP_HEADING_COLOR,
+    IDC_MARKUP_HEADING_COLOR_PREVIEW,
+    IDC_MARKUP_HEADING_BOLD,
+    IDC_MARKUP_HEADING_UNDERLINE,
+    IDC_MARKUP_HEADING_LEFT_BAR,
+    IDC_MARKUP_MARK_FONT,
+    IDC_MARKUP_MARK_COLOR,
+    IDC_MARKUP_MARK_COLOR_PREVIEW,
+    IDC_MARKUP_CUSTOM_TAG_PRESET_SELECT,
+    IDC_MARKUP_CUSTOM_TAG_BOLD,
+    IDC_MARKUP_CUSTOM_TAG_ITALIC,
+    IDC_MARKUP_CUSTOM_TAG_UNDERLINE,
+    IDC_MARKUP_CUSTOM_TAG_STRIKE,
+    IDC_MARKUP_CUSTOM_TAG_BACKCOLOR,
+    IDC_MARKUP_CUSTOM_TAG_TEXTCOLOR,
+    IDC_MARKUP_SECTION_LIST = 4259,
+    IDC_MARKUP_CUSTOM_TAG_PRESET_BASE = 4260
+};
+
+constexpr int kMarkupSectionCount = 3;
+constexpr int IDC_MARKUP_CATEGORY_BUTTON_BASE = 4300;
+enum MarkupSectionIndex : int {
+    kMarkupSectionHeading = 0,
+    kMarkupSectionMark = 1,
+    kMarkupSectionCustomTag = 2,
+};
+
+struct MarkupSettingsCtx {
+    HWND owner = nullptr;
+    bool done = false;
+    bool ok = false;
+    bool embedded = false;
+    HWND headerTitle = nullptr;
+    HWND headerSubtitle = nullptr;
+    std::array<HWND, kSettingsCategoryButtonCount> categoryButtons{};
+    HWND navList = nullptr;
+    HWND scrollPanel = nullptr;
+    HWND btnOk = nullptr;
+    HWND btnCancel = nullptr;
+    bool reopenOnCancel = false;
+    bool notifyCancelDiscard = false;
+    int nextDialog = kSettingsNavNone;
+    HWND cbHeadingFont = nullptr;
+    HWND cbHeadingColor = nullptr;
+    HWND previewHeadingColor = nullptr;
+    HWND chkHeadingBold = nullptr;
+    HWND chkHeadingUnderline = nullptr;
+    HWND chkHeadingLeftBar = nullptr;
+    HWND cbMarkFont = nullptr;
+    HWND cbMarkColor = nullptr;
+    HWND previewMarkColor = nullptr;
+    HWND cbCustomTagPreset = nullptr;
+    HWND chkCustomTagBold = nullptr;
+    HWND chkCustomTagItalic = nullptr;
+    HWND chkCustomTagUnderline = nullptr;
+    HWND chkCustomTagStrike = nullptr;
+    HWND chkCustomTagBackColor = nullptr;
+    HWND chkCustomTagTextColor = nullptr;
+    std::array<int, kNoteCustomTagPresetCount> customPresetMasks{};
+    COLORREF headingPreviewColor = kDefaultHeadingColor;
+    COLORREF markPreviewColor = kDefaultMarkColor;
+    int activeCustomTagPreset = 0;
+    int sectionTops[kMarkupSectionCount]{};
+    int sectionCount = 0;
+    int scrollPos = 0;
+    int scrollMax = 0;
+    int wheelRemainder = 0;
+    int contentHeight = 0;
+    int clientHeight = 0;
+};
+
+static void UpdateMarkupSectionNavUi(MarkupSettingsCtx* ctx, int sectionIndex) {
+    if (!ctx) return;
+    int clamped = std::clamp(sectionIndex, 0, std::max(0, ctx->sectionCount - 1));
+    if (ctx->navList) {
+        SendMessageW(ctx->navList, LB_SETCURSEL, clamped, 0);
+    }
+}
+
+static int BuildCustomTagStyleMaskFromChecks(const std::array<HWND, 6>& checks) {
+    int mask = 0;
+    if (checks[0] && SendMessageW(checks[0], BM_GETCHECK, 0, 0) == BST_CHECKED) mask |= kNoteCustomTagStyleBold;
+    if (checks[1] && SendMessageW(checks[1], BM_GETCHECK, 0, 0) == BST_CHECKED) mask |= kNoteCustomTagStyleItalic;
+    if (checks[2] && SendMessageW(checks[2], BM_GETCHECK, 0, 0) == BST_CHECKED) mask |= kNoteCustomTagStyleUnderline;
+    if (checks[3] && SendMessageW(checks[3], BM_GETCHECK, 0, 0) == BST_CHECKED) mask |= kNoteCustomTagStyleStrike;
+    if (checks[4] && SendMessageW(checks[4], BM_GETCHECK, 0, 0) == BST_CHECKED) mask |= kNoteCustomTagStyleBackColor;
+    if (checks[5] && SendMessageW(checks[5], BM_GETCHECK, 0, 0) == BST_CHECKED) mask |= kNoteCustomTagStyleTextColor;
+    return mask;
+}
+
+static void SetMarkupCustomTagChecksFromMask(MarkupSettingsCtx* ctx, int mask) {
+    if (!ctx) return;
+    auto setCheck = [](HWND h, bool on) {
+        if (!h) return;
+        SendMessageW(h, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+    };
+    setCheck(ctx->chkCustomTagBold, (mask & kNoteCustomTagStyleBold) != 0);
+    setCheck(ctx->chkCustomTagItalic, (mask & kNoteCustomTagStyleItalic) != 0);
+    setCheck(ctx->chkCustomTagUnderline, (mask & kNoteCustomTagStyleUnderline) != 0);
+    setCheck(ctx->chkCustomTagStrike, (mask & kNoteCustomTagStyleStrike) != 0);
+    setCheck(ctx->chkCustomTagBackColor, (mask & kNoteCustomTagStyleBackColor) != 0);
+    setCheck(ctx->chkCustomTagTextColor, (mask & kNoteCustomTagStyleTextColor) != 0);
+}
+
+static int BuildMarkupCustomTagMaskFromCtx(const MarkupSettingsCtx* ctx) {
+    if (!ctx) return 0;
+    std::array<HWND, 6> checks = {
+        ctx->chkCustomTagBold,
+        ctx->chkCustomTagItalic,
+        ctx->chkCustomTagUnderline,
+        ctx->chkCustomTagStrike,
+        ctx->chkCustomTagBackColor,
+        ctx->chkCustomTagTextColor,
+    };
+    return BuildCustomTagStyleMaskFromChecks(checks) & kNoteCustomTagStyleAllMask;
+}
+
+static void StoreActiveMarkupCustomTagPreset(MarkupSettingsCtx* ctx) {
+    if (!ctx) return;
+    int idx = std::clamp(ctx->activeCustomTagPreset, 0, kNoteCustomTagPresetCount - 1);
+    ctx->customPresetMasks[static_cast<size_t>(idx)] = BuildMarkupCustomTagMaskFromCtx(ctx);
+}
+
+static void LoadActiveMarkupCustomTagPreset(MarkupSettingsCtx* ctx) {
+    if (!ctx) return;
+    int idx = std::clamp(ctx->activeCustomTagPreset, 0, kNoteCustomTagPresetCount - 1);
+    SetMarkupCustomTagChecksFromMask(ctx, ctx->customPresetMasks[static_cast<size_t>(idx)] & kNoteCustomTagStyleAllMask);
+}
+
+static void ScrollMarkupSettingsTo(HWND hWnd, MarkupSettingsCtx* ctx, int newPos) {
+    if (!hWnd || !ctx || !ctx->scrollPanel) return;
+    int clamped = std::clamp(newPos, 0, ctx->scrollMax);
+    if (clamped == ctx->scrollPos) return;
+    int delta = ctx->scrollPos - clamped;
+    ctx->scrollPos = clamped;
+    ScrollWindowEx(ctx->scrollPanel, 0, delta, nullptr, nullptr, nullptr, nullptr,
+                   SW_INVALIDATE | SW_ERASE | SW_SCROLLCHILDREN);
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_POS;
+    si.nPos = clamped;
+    SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+}
+
+static void JumpMarkupSettingsToSection(HWND hWnd, MarkupSettingsCtx* ctx, int sectionIndex) {
+    if (!ctx) return;
+    if (sectionIndex < 0 || sectionIndex >= ctx->sectionCount) return;
+    ScrollMarkupSettingsTo(hWnd, ctx, ctx->sectionTops[sectionIndex]);
+}
+
+static void LayoutMarkupSettingsChrome(HWND hWnd, MarkupSettingsCtx* ctx) {
+    if (!hWnd || !ctx) return;
+    const int pad = ScaleY(hWnd, 12);
+    const int rowH = std::max(ScaleY(hWnd, 24), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
+    const int navW = ScaleY(hWnd, ctx->embedded ? 170 : 200);
+    const int columnGap = ScaleY(hWnd, 18);
+    const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
+    const int titleH = std::max(rowH, ScaleY(hWnd, 30));
+    RECT rc{};
+    GetClientRect(hWnd, &rc);
+    int clientW = std::max(0, static_cast<int>(rc.right - rc.left));
+    int clientH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+    int subtitleH = 0;
+    int sectionButtonH = 0;
+    int sectionButtonTop = pad;
+    int headerH = 0;
+    if (!ctx->embedded) {
+        std::wstring subtitle = IsEnglishUi()
+            ? L"Adjust heading, emphasis, and c-tag rendering rules. Jump by category on the left."
+            : L"見出し、強調、cタグの描画ルールを調整します。左のカテゴリから移動できます。";
+        subtitleH = std::max(FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 4),
+                             MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
+        sectionButtonH = std::max(ScaleY(hWnd, 28), rowH);
+        sectionButtonTop = pad + titleH + subtitleH + ScaleY(hWnd, 8);
+        headerH = titleH + subtitleH + sectionButtonH + ScaleY(hWnd, 20);
+    }
+    int panelTop = pad + headerH;
+    int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
+    int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
+    int contentPaneX = pad + navW + columnGap;
+    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - contentPaneX - pad);
+    if (!ctx->embedded && ctx->headerTitle) {
+        SetWindowPos(ctx->headerTitle, nullptr, pad, pad, clientW - pad * 2, titleH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (!ctx->embedded && ctx->headerSubtitle) {
+        SetWindowPos(ctx->headerSubtitle, nullptr, pad, pad + titleH, clientW - pad * 2, subtitleH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (!ctx->embedded) {
+        LayoutHeaderSectionButtons(hWnd, ctx->categoryButtons, pad, sectionButtonTop, clientW - pad * 2, sectionButtonH);
+    }
+    if (ctx->navList) {
+        SetWindowPos(ctx->navList, nullptr, pad, panelTop, navW, panelH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (ctx->scrollPanel) {
+        SetWindowPos(ctx->scrollPanel, nullptr, contentPaneX, panelTop, contentPaneW, panelH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (!ctx->embedded) {
+        int btnH = std::max(ScaleY(hWnd, 32), rowH);
+        int okW = ScaleY(hWnd, 88);
+        int cancelW = ScaleY(hWnd, 108);
+        int btnGap = ScaleY(hWnd, 10);
+        int btnY = clientH - pad - btnH;
+        int xCancel = std::max(pad, clientW - pad - cancelW);
+        int xOk = std::max(pad, xCancel - btnGap - okW);
+        if (ctx->btnOk) SetWindowPos(ctx->btnOk, nullptr, xOk, btnY, okW, btnH, SWP_NOZORDER | SWP_NOACTIVATE);
+        if (ctx->btnCancel) SetWindowPos(ctx->btnCancel, nullptr, xCancel, btnY, cancelW, btnH, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+static void ApplyMarkupSettings(MarkupSettingsCtx* ctx) {
+    if (!ctx) return;
+    StoreActiveMarkupCustomTagPreset(ctx);
+    if (ctx->cbHeadingFont) {
+        g_headingFontPx = static_cast<int>(SelectedComboItemData(ctx->cbHeadingFont, g_headingFontPx));
+        g_config.headingFontPx = g_headingFontPx;
+    }
+    if (ctx->cbMarkFont) {
+        g_markFontPx = static_cast<int>(SelectedComboItemData(ctx->cbMarkFont, g_markFontPx));
+        g_config.markFontPx = g_markFontPx;
+    }
+    if (ctx->cbHeadingColor) {
+        DWORD_PTR data = SelectedComboItemData(ctx->cbHeadingColor, kColorDefaultData);
+        if (data == kColorDefaultData) {
+            g_config.headingColor = -1;
+            g_highlightHeadingColor = kDefaultHeadingColor;
+        } else {
+            COLORREF c = static_cast<COLORREF>(data);
+            g_config.headingColor = ColorRefToConfig(c);
+            g_highlightHeadingColor = c;
+        }
+    }
+    if (ctx->chkHeadingBold) {
+        g_config.headingBold =
+            (SendMessageW(ctx->chkHeadingBold, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkHeadingUnderline) {
+        g_config.headingUnderline =
+            (SendMessageW(ctx->chkHeadingUnderline, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->chkHeadingLeftBar) {
+        g_config.headingLeftBar =
+            (SendMessageW(ctx->chkHeadingLeftBar, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (ctx->cbMarkColor) {
+        DWORD_PTR data = SelectedComboItemData(ctx->cbMarkColor, kColorDefaultData);
+        if (data == kColorDefaultData) {
+            g_config.markColor = -1;
+            g_highlightMarkColor = kDefaultMarkColor;
+        } else {
+            COLORREF c = static_cast<COLORREF>(data);
+            g_config.markColor = ColorRefToConfig(c);
+            g_highlightMarkColor = c;
+        }
+    }
+    g_config.noteCustomTagKey = L"c";
+    for (int i = 0; i < kNoteCustomTagPresetCount; ++i) {
+        g_config.noteCustomTagPresetMasks[static_cast<size_t>(i)] =
+            ctx->customPresetMasks[static_cast<size_t>(i)] & kNoteCustomTagStyleAllMask;
+    }
+
+    UpdateNoteLineSpacing();
+    PersistConfig();
+    if (g_hNoteEdit) {
+        InvalidateRect(g_hNoteEdit, nullptr, TRUE);
+    }
+}
+
+static int PointsToPixelsY(HWND hWnd, int points) {
+    if (points <= 0) return 0;
+    HDC hdc = hWnd ? GetDC(hWnd) : nullptr;
+    const int dpiY = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc) ReleaseDC(hWnd, hdc);
+    return std::max(1, MulDiv(points, std::max(1, dpiY), 72));
+}
+
+static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<MarkupSettingsCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        LogPanelEvent(L"Markup", L"WM_CREATE", 0, 0, nullptr);
+        auto cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = reinterpret_cast<MarkupSettingsCtx*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+
+        EnsureSettingsScrollPanelClass();
+
+        const int pad = ScaleY(hWnd, 12);
+        const int gapY = ScaleY(hWnd, 8);
+        const int labelGap = ScaleY(hWnd, 4);
+        const int uiTextH = FontLineHeightPx(hWnd, g_hUIFont);
+        const int sectionTextH = FontLineHeightPx(hWnd, SettingsSectionFont());
+        const int rowH = std::max(ScaleY(hWnd, 24), uiTextH + ScaleY(hWnd, 10));
+        const int comboDropH = ScaleY(hWnd, 240);
+        const int previewW = ScaleY(hWnd, 32);
+        const int previewGap = ScaleY(hWnd, 8);
+        const int previewH = std::max(ScaleY(hWnd, 18), rowH - ScaleY(hWnd, 6));
+
+        RECT work{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+        int workH = std::max(0, static_cast<int>(work.bottom - work.top));
+        int margin = ScaleY(hWnd, 32);
+
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        int clientW = std::max(0, static_cast<int>(rc.right - rc.left));
+        int clientH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+        const int navW = ScaleY(hWnd, ctx->embedded ? 170 : 200);
+        const int columnGap = ScaleY(hWnd, 18);
+        const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
+        const int titleH = std::max(rowH, ScaleY(hWnd, 30));
+        const std::wstring subtitle = IsEnglishUi()
+            ? L"Adjust heading, emphasis, and c-tag rendering rules. Jump by category on the left."
+            : L"見出し、強調、cタグの描画ルールを調整します。左のカテゴリから移動できます。";
+        const int subtitleH = ctx->embedded ? 0
+                                            : std::max(uiTextH + ScaleY(hWnd, 4),
+                                                       MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
+        const int sectionButtonH = ctx->embedded ? 0 : std::max(ScaleY(hWnd, 28), rowH);
+        const int headerH = ctx->embedded ? 0 : (titleH + subtitleH + sectionButtonH + ScaleY(hWnd, 20));
+        const int panelTop = pad + headerH;
+        const int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
+        const int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
+        const int contentPaneX = pad + navW + columnGap;
+        const int contentPaneW = std::max(ScaleY(hWnd, 340), clientW - contentPaneX - pad);
+        int contentW = std::max(0, contentPaneW - pad * 2);
+        int controlW = SettingsControlWidth(hWnd, contentW, ctx->embedded, 240, 420);
+        int y = pad;
+
+        if (!ctx->embedded) {
+            const std::wstring headerTitle = SettingsCategoryDialogTitle(kSettingsNavMarkup);
+            ctx->headerTitle = CreateWindowExW(0, L"STATIC", headerTitle.c_str(),
+                                               WS_CHILD | WS_VISIBLE,
+                                               pad, pad, clientW - pad * 2, titleH,
+                                               hWnd, nullptr, g_hInst, nullptr);
+            ctx->headerSubtitle = CreateWindowExW(0, L"STATIC", subtitle.c_str(),
+                                                  WS_CHILD | WS_VISIBLE,
+                                                  pad, pad + titleH, clientW - pad * 2, subtitleH,
+                                                  hWnd, nullptr, g_hInst, nullptr);
+            SetUIFont(ctx->headerTitle);
+            SetUIFont(ctx->headerSubtitle);
+
+            const auto sectionButtonLabels = SettingsCategoryButtonLabels();
+            for (int i = 0; i < kSettingsCategoryButtonCount; ++i) {
+                ctx->categoryButtons[static_cast<size_t>(i)] =
+                    CreateWindowExW(0, L"BUTTON", sectionButtonLabels[static_cast<size_t>(i)].c_str(),
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                    pad, pad + titleH + subtitleH + ScaleY(hWnd, 8), ScaleY(hWnd, 96), sectionButtonH,
+                                    hWnd,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MARKUP_CATEGORY_BUTTON_BASE + i)),
+                                    g_hInst, nullptr);
+                SetUIFont(ctx->categoryButtons[static_cast<size_t>(i)]);
+            }
+            UpdateSettingsCategoryButtons(ctx->categoryButtons, kSettingsNavMarkup);
+        }
+
+        ctx->navList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                                       pad, panelTop, navW, panelH,
+                                       hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MARKUP_SECTION_LIST)),
+                                       g_hInst, nullptr);
+        SetUIFont(ctx->navList);
+        SetSettingsNavFont(ctx->navList);
+        SetWindowSubclass(ctx->navList, SettingsNavListSubclassProc, 1, 0);
+
+        ctx->scrollPanel = CreateWindowExW(0, L"SettingsScrollPanelClass", L"",
+                                           WS_CHILD | WS_VISIBLE,
+                                           contentPaneX, panelTop, contentPaneW, panelH,
+                                           hWnd, nullptr, g_hInst, nullptr);
+
+        WorkspaceConfig defaults;
+        double notePt = (defaults.noteFontPt > 0.0) ? defaults.noteFontPt : 10.0;
+        double headingPt = notePt * 1.35;
+        std::wstring headingDefault = FormatPtLabel(headingPt);
+        std::wstring markDefault = FormatPtLabel(notePt);
+        std::wstring headingDefaultLabel = L"初期: " + headingDefault;
+        std::wstring markDefaultLabel = L"初期: " + markDefault;
+
+        HWND contentParent = ctx->scrollPanel ? ctx->scrollPanel : hWnd;
+        auto addLabel = [&](const std::wstring& text) -> HWND {
+            int labelH = std::max(uiTextH + ScaleY(hWnd, 2),
+                                  MeasureTextHeight(hWnd, text, contentW, g_hUIFont));
+            HWND h = CreateWindowExW(0, L"STATIC", text.c_str(),
+                                     WS_CHILD | WS_VISIBLE,
+                                     pad, y, contentW, labelH, contentParent, nullptr, g_hInst, nullptr);
+            SetUIFont(h);
+            y += labelH + labelGap;
+            return h;
+        };
+        auto addCombo = [&](int id, int w) -> HWND {
+            int x = pad + std::max(0, contentW - w);
+            HWND cb = CreateWindowExW(0, L"COMBOBOX", L"",
+                                      WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                      x, y, w, comboDropH, contentParent,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                      g_hInst, nullptr);
+            SetUIFont(cb);
+            ui::GuardComboAgainstAccidentalChange(cb);
+            y += rowH + gapY;
+            return cb;
+        };
+        auto addCheck = [&](int id, const wchar_t* text, int w) -> HWND {
+            int x = pad + std::max(0, contentW - w);
+            HWND chk = CreateWindowExW(0, L"BUTTON", text,
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                       x, y, w, rowH, contentParent,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                       g_hInst, nullptr);
+            SetUIFont(chk);
+            y += rowH + gapY;
+            return chk;
+        };
+
+        int sectionTop = y;
+        std::wstring sectionTitle;
+        const int sectionMargin = ScaleY(hWnd, 10);
+        const int groupTitlePad = sectionTextH + ScaleY(hWnd, 8);
+        const int sectionGap = std::max(gapY, ScaleY(hWnd, 18));
+        auto finalizeSection = [&]() {
+            if (sectionTitle.empty()) return;
+            int sectionBottom = std::max(sectionTop + rowH + gapY, y - gapY);
+            int sectionHeight = std::max(rowH + gapY, sectionBottom - sectionTop);
+            int boxTop = std::max(0, sectionTop - sectionMargin);
+            HWND box = CreateWindowExW(0, L"BUTTON", sectionTitle.c_str(),
+                                       WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                                       std::max(0, pad - sectionMargin), boxTop,
+                                       contentW + sectionMargin * 2, sectionHeight + sectionMargin * 2 + ScaleY(hWnd, 2),
+                                       contentParent, nullptr, g_hInst, nullptr);
+            SetSettingsSectionFont(box);
+            SetWindowPos(box, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            sectionTitle.clear();
+            y += sectionGap;
+        };
+        auto beginSection = [&](int index, const wchar_t* title) {
+            if (!sectionTitle.empty()) finalizeSection();
+            sectionTitle = title;
+            sectionTop = y;
+            if (index >= 0 && index < kMarkupSectionCount) {
+                ctx->sectionTops[index] = std::max(0, y - sectionMargin);
+                ctx->sectionCount = std::max(ctx->sectionCount, index + 1);
+            }
+            y += groupTitlePad;
+        };
+
+        beginSection(kMarkupSectionHeading, L"見出し");
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Heading size" : L"見出しサイズ", headingDefault));
+        ctx->cbHeadingFont = addCombo(IDC_MARKUP_HEADING_FONT, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Heading color" : L"見出し色", GenHexColorW(kDefaultHeadingColor)));
+        {
+            int groupW = controlW + previewGap + previewW;
+            int xCombo = pad + std::max(0, contentW - groupW);
+            ctx->cbHeadingColor = CreateWindowExW(0, L"COMBOBOX", L"",
+                                                  WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                                  xCombo, y, controlW, comboDropH, contentParent,
+                                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MARKUP_HEADING_COLOR)),
+                                                  g_hInst, nullptr);
+            SetUIFont(ctx->cbHeadingColor);
+            ui::GuardComboAgainstAccidentalChange(ctx->cbHeadingColor);
+            int previewY = y + std::max(ScaleY(hWnd, 2), (rowH - previewH) / 2);
+            ctx->previewHeadingColor = CreateWindowExW(0, L"STATIC", L"",
+                                                       WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+                                                       xCombo + controlW + previewGap, previewY,
+                                                       previewW, previewH, contentParent,
+                                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MARKUP_HEADING_COLOR_PREVIEW)),
+                                                       g_hInst, nullptr);
+            y += rowH + gapY;
+        }
+        addLabel(IsEnglishUi() ? L"Heading style" : L"見出し修飾");
+        ctx->chkHeadingBold = addCheck(IDC_MARKUP_HEADING_BOLD,
+                                       IsEnglishUi() ? L"Bold" : L"太字", controlW);
+        ctx->chkHeadingUnderline = addCheck(IDC_MARKUP_HEADING_UNDERLINE,
+                                            IsEnglishUi() ? L"Underline H1" : L"H1に下線", controlW);
+        ctx->chkHeadingLeftBar = addCheck(IDC_MARKUP_HEADING_LEFT_BAR,
+                                          IsEnglishUi() ? L"Left bar" : L"左バー", controlW);
+
+        beginSection(kMarkupSectionMark, L"強調");
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Emphasis size" : L"強調サイズ", markDefault));
+        ctx->cbMarkFont = addCombo(IDC_MARKUP_MARK_FONT, controlW);
+
+        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Emphasis color" : L"強調色", GenHexColorW(kDefaultMarkColor)));
+        {
+            int groupW = controlW + previewGap + previewW;
+            int xCombo = pad + std::max(0, contentW - groupW);
+            ctx->cbMarkColor = CreateWindowExW(0, L"COMBOBOX", L"",
+                                               WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                               xCombo, y, controlW, comboDropH, contentParent,
+                                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MARKUP_MARK_COLOR)),
+                                               g_hInst, nullptr);
+            SetUIFont(ctx->cbMarkColor);
+            ui::GuardComboAgainstAccidentalChange(ctx->cbMarkColor);
+            int previewY = y + std::max(ScaleY(hWnd, 2), (rowH - previewH) / 2);
+            ctx->previewMarkColor = CreateWindowExW(0, L"STATIC", L"",
+                                                    WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+                                                    xCombo + controlW + previewGap, previewY,
+                                                    previewW, previewH, contentParent,
+                                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MARKUP_MARK_COLOR_PREVIEW)),
+                                                    g_hInst, nullptr);
+            y += rowH + gapY;
+        }
+
+        beginSection(kMarkupSectionCustomTag, L"cタグ");
+        addLabel(IsEnglishUi() ? L"Target tag number" : L"対象タグ番号");
+        ctx->cbCustomTagPreset = addCombo(IDC_MARKUP_CUSTOM_TAG_PRESET_SELECT, controlW);
+        ctx->chkCustomTagBold = addCheck(IDC_MARKUP_CUSTOM_TAG_BOLD, L"太字", controlW);
+        ctx->chkCustomTagItalic = addCheck(IDC_MARKUP_CUSTOM_TAG_ITALIC, L"斜体", controlW);
+        ctx->chkCustomTagUnderline = addCheck(IDC_MARKUP_CUSTOM_TAG_UNDERLINE, L"下線", controlW);
+        ctx->chkCustomTagStrike = addCheck(IDC_MARKUP_CUSTOM_TAG_STRIKE, L"取り消し線", controlW);
+        ctx->chkCustomTagBackColor = addCheck(IDC_MARKUP_CUSTOM_TAG_BACKCOLOR, L"背景色にショートカット色を使う", controlW);
+        ctx->chkCustomTagTextColor = addCheck(IDC_MARKUP_CUSTOM_TAG_TEXTCOLOR, L"文字色にショートカット色を使う", controlW);
+
+        finalizeSection();
+        y += ScaleY(hWnd, 12);
+
+        if (!ctx->embedded) {
+            int btnH = std::max(ScaleY(hWnd, 32), rowH);
+            int okW = ScaleY(hWnd, 88);
+            int cancelW = ScaleY(hWnd, 108);
+            int btnGap = ScaleY(hWnd, 10);
+            int btnY = clientH - pad - btnH;
+            int xCancel = std::max(pad, clientW - pad - cancelW);
+            int xOk = std::max(pad, xCancel - btnGap - okW);
+            ctx->btnOk = CreateWindowExW(0, L"BUTTON", UiApplyLabel(), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                                         xOk, btnY, okW, btnH, hWnd,
+                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
+            ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel(), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                             xCancel, btnY, cancelW, btnH, hWnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
+            SetUIFont(ctx->btnOk);
+            SetUIFont(ctx->btnCancel);
+        }
+        ctx->contentHeight = y + pad;
+        RECT winRc{};
+        GetWindowRect(hWnd, &winRc);
+        int winH = std::max(0, static_cast<int>(winRc.bottom - winRc.top));
+        int frameH = std::max(0, winH - clientH);
+        int desiredClientH = headerH + std::max(ctx->contentHeight, ScaleY(hWnd, 360)) + panelBottomPad;
+        int desiredHeight = std::max(ScaleY(hWnd, kMarkupDlgHeight), desiredClientH + frameH);
+        int maxHeight = (workH > 0) ? std::max(0, workH - margin) : desiredHeight;
+        if (maxHeight > 0) desiredHeight = std::min(desiredHeight, maxHeight);
+        SetWindowPos(hWnd, nullptr, 0, 0, winRc.right - winRc.left, desiredHeight,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        LayoutMarkupSettingsChrome(hWnd, ctx);
+        RECT panelRc{};
+        if (ctx->scrollPanel) GetClientRect(ctx->scrollPanel, &panelRc);
+        ctx->clientHeight = std::max(0, static_cast<int>(panelRc.bottom - panelRc.top));
+        ctx->scrollPos = 0;
+        UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
+                           &ctx->scrollPos, &ctx->scrollMax);
+
+        auto fillFont = [&](HWND cb, std::initializer_list<int> pts, int current, const std::wstring& defaultLabel) {
+            if (!cb) return;
+            SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+            int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(defaultLabel.c_str())));
+            if (idx >= 0) SendMessageW(cb, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
+            for (int pt : pts) {
+                std::wstring label = std::to_wstring(pt) + L"pt";
+                int i = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+                if (i >= 0) {
+                    SendMessageW(cb, CB_SETITEMDATA, i,
+                                 static_cast<LPARAM>(PointsToPixelsY(hWnd, pt)));
+                }
+            }
+            GenSelectComboByItemData(cb, static_cast<DWORD_PTR>(current));
+        };
+        fillFont(ctx->cbHeadingFont, {12, 14, 16, 18, 20, 24, 28}, g_headingFontPx, headingDefaultLabel);
+        fillFont(ctx->cbMarkFont, {12, 14, 16, 18, 20, 24}, g_markFontPx, markDefaultLabel);
+
+        FillHighlightColorCombo(ctx->cbHeadingColor, kDefaultHeadingColor);
+        FillHighlightColorCombo(ctx->cbMarkColor, kDefaultMarkColor);
+        SelectHighlightColor(ctx->cbHeadingColor, g_config.headingColor);
+        SelectHighlightColor(ctx->cbMarkColor, g_config.markColor);
+        ctx->headingPreviewColor = (g_config.headingColor >= 0)
+            ? ConfigColorToRef(g_config.headingColor)
+            : kDefaultHeadingColor;
+        ctx->markPreviewColor = (g_config.markColor >= 0)
+            ? ConfigColorToRef(g_config.markColor)
+            : kDefaultMarkColor;
+        if (ctx->chkHeadingBold) {
+            SendMessageW(ctx->chkHeadingBold, BM_SETCHECK,
+                         g_config.headingBold ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        if (ctx->chkHeadingUnderline) {
+            SendMessageW(ctx->chkHeadingUnderline, BM_SETCHECK,
+                         g_config.headingUnderline ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        if (ctx->chkHeadingLeftBar) {
+            SendMessageW(ctx->chkHeadingLeftBar, BM_SETCHECK,
+                         g_config.headingLeftBar ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        for (int i = 0; i < kNoteCustomTagPresetCount; ++i) {
+            ctx->customPresetMasks[static_cast<size_t>(i)] =
+                g_config.noteCustomTagPresetMasks[static_cast<size_t>(i)] & kNoteCustomTagStyleAllMask;
+        }
+        if (ctx->cbCustomTagPreset) {
+            SendMessageW(ctx->cbCustomTagPreset, CB_RESETCONTENT, 0, 0);
+            for (int i = 0; i < kNoteCustomTagPresetCount; ++i) {
+                std::wstring label = L"c" + std::to_wstring(i + 1);
+                int idx = static_cast<int>(SendMessageW(ctx->cbCustomTagPreset, CB_ADDSTRING, 0,
+                                                        reinterpret_cast<LPARAM>(label.c_str())));
+                if (idx >= 0) {
+                    SendMessageW(ctx->cbCustomTagPreset, CB_SETITEMDATA, idx, static_cast<LPARAM>(i));
+                }
+            }
+            ctx->activeCustomTagPreset = 0;
+            SendMessageW(ctx->cbCustomTagPreset, CB_SETCURSEL, 0, 0);
+        }
+        LoadActiveMarkupCustomTagPreset(ctx);
+
+        if (ctx->navList) {
+            SendMessageW(ctx->navList, LB_RESETCONTENT, 0, 0);
+            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Headings" : L"見出し"));
+            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Emphasis" : L"強調"));
+            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"cタグ"));
+            UpdateMarkupSectionNavUi(ctx, 0);
+        }
+
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    }
+    case WM_SHOWWINDOW:
+        LogPanelEvent(L"Markup", L"WM_SHOWWINDOW", static_cast<int>(wParam), 0, nullptr);
+        break;
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        return ThemeCtlColorPanel(ctl, hdc);
+    }
+    case WM_SIZE:
+        if (ctx) {
+            LayoutMarkupSettingsChrome(hWnd, ctx);
+            RECT panelRc{};
+            if (ctx->scrollPanel) GetClientRect(ctx->scrollPanel, &panelRc);
+            ctx->clientHeight = std::max(0, static_cast<int>(panelRc.bottom - panelRc.top));
+            if (ctx->contentHeight > 0) {
+                UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
+                                   &ctx->scrollPos, &ctx->scrollMax);
+            }
+        }
+        break;
+    case WM_VSCROLL:
+        if (ctx && ctx->scrollMax > 0) {
+            int code = LOWORD(wParam);
+            int pos = ctx->scrollPos;
+            int line = ScaleY(hWnd, 24);
+            int page = std::max(line, ctx->clientHeight - line);
+            switch (code) {
+            case SB_LINEUP: pos -= line; break;
+            case SB_LINEDOWN: pos += line; break;
+            case SB_PAGEUP: pos -= page; break;
+            case SB_PAGEDOWN: pos += page; break;
+            case SB_TOP: pos = 0; break;
+            case SB_BOTTOM: pos = ctx->scrollMax; break;
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION: {
+                SCROLLINFO si{};
+                si.cbSize = sizeof(si);
+                si.fMask = SIF_TRACKPOS;
+                if (GetScrollInfo(hWnd, SB_VERT, &si)) {
+                    pos = si.nTrackPos;
+                }
+                break;
+            }
+            default:
+                break;
+            }
+            ScrollMarkupSettingsTo(hWnd, ctx, pos);
+            return 0;
+        }
+        break;
+    case WM_MOUSEWHEEL:
+        if (ForwardWheelToDroppedComboInTree(hWnd, WM_MOUSEWHEEL, wParam, lParam)) return 0;
+        if (ctx && ctx->scrollMax > 0) {
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            int step = ScaleY(hWnd, 32);
+            int pixels = SettingsWheelDeltaToPixels(delta, step, &ctx->wheelRemainder);
+            if (pixels != 0) {
+                ScrollMarkupSettingsTo(hWnd, ctx, ctx->scrollPos - pixels);
+            }
+            return 0;
+        }
+        break;
+    case WM_DRAWITEM: {
+        if (!ctx) break;
+        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (dis->CtlID == IDC_MARKUP_HEADING_COLOR_PREVIEW || dis->CtlID == IDC_MARKUP_MARK_COLOR_PREVIEW) {
+            COLORREF color = (dis->CtlID == IDC_MARKUP_HEADING_COLOR_PREVIEW)
+                ? ctx->headingPreviewColor
+                : ctx->markPreviewColor;
+            HBRUSH br = CreateSolidBrush(color);
+            FillRect(dis->hDC, &dis->rcItem, br);
+            DeleteObject(br);
+            FrameRect(dis->hDC, &dis->rcItem, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            return TRUE;
+        }
+        if (DrawThemeButton(dis)) return TRUE;
+        break;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        int code = HIWORD(wParam);
+        if (!ctx) break;
+        if (id == IDC_MARKUP_SECTION_LIST && code == LBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(ctx->navList, LB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                UpdateMarkupSectionNavUi(ctx, sel);
+                JumpMarkupSettingsToSection(hWnd, ctx, sel);
+            }
+            return 0;
+        }
+        if (id >= IDC_MARKUP_CATEGORY_BUTTON_BASE &&
+            id < IDC_MARKUP_CATEGORY_BUTTON_BASE + kSettingsCategoryButtonCount) {
+            int category = id - IDC_MARKUP_CATEGORY_BUTTON_BASE;
+            if (category == kSettingsNavMarkup) return 0;
+            if (ctx->embedded) {
+                HWND parent = GetParent(hWnd);
+                if (parent) SendMessageW(parent, kUnifiedSettingsNavigateMsg, static_cast<WPARAM>(category), 0);
+                return 0;
+            }
+            ctx->nextDialog = category;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (id == IDC_MARKUP_HEADING_COLOR && code == CBN_SELCHANGE) {
+            UpdateColorPreview(ctx->cbHeadingColor, kDefaultHeadingColor, ctx->headingPreviewColor);
+            InvalidateRect(ctx->previewHeadingColor, nullptr, TRUE);
+            return 0;
+        }
+        if (id == IDC_MARKUP_MARK_COLOR && code == CBN_SELCHANGE) {
+            UpdateColorPreview(ctx->cbMarkColor, kDefaultMarkColor, ctx->markPreviewColor);
+            InvalidateRect(ctx->previewMarkColor, nullptr, TRUE);
+            return 0;
+        }
+        if (id == IDC_MARKUP_CUSTOM_TAG_PRESET_SELECT && code == CBN_SELCHANGE) {
+            StoreActiveMarkupCustomTagPreset(ctx);
+            int sel = static_cast<int>(SendMessageW(ctx->cbCustomTagPreset, CB_GETCURSEL, 0, 0));
+            if (sel >= 0) {
+                int itemData = static_cast<int>(SendMessageW(ctx->cbCustomTagPreset, CB_GETITEMDATA, sel, 0));
+                ctx->activeCustomTagPreset = std::clamp(itemData, 0, kNoteCustomTagPresetCount - 1);
+            }
+            LoadActiveMarkupCustomTagPreset(ctx);
+            return 0;
+        }
+        if (id == IDOK) {
+            if (!ctx->embedded) {
+                ApplyMarkupSettings(ctx);
+                ctx->ok = true;
+                ShowSoftNotice(hWnd, IsEnglishUi() ? L"Settings applied." : L"設定を反映しました。");
+            }
+            return 0;
+        }
+        if (id == IDCANCEL || id == 0) {
+            if (!ctx->embedded) {
+                ctx->notifyCancelDiscard = true;
+                DestroyWindow(hWnd);
+            }
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        if (ctx && ctx->embedded) return 0;
+        DestroyWindow(hWnd);
+        return 0;
+    case WM_DESTROY:
+        if (ctx) RestoreOwnerAfterModal(ctx->owner);
+        if (ctx) ctx->done = true;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+static void EnsureMarkupSettingsClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = MarkupSettingsProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush
+                                           : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"MarkupSettingsDlgClass";
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+} // namespace
+
+void ShowMarkupSettingsDialog(HWND owner) {
+    ShowUnifiedSettingsDialog(owner, kSettingsNavMarkup);
+}
+

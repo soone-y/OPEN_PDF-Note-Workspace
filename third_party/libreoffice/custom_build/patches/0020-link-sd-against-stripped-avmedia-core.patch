@@ -1,0 +1,13 @@
+diff --git a/sd/Library_sd.mk b/sd/Library_sd.mk
+index 0c47024bf337..9b9a2e204f0a 100644
+--- a/sd/Library_sd.mk
++++ b/sd/Library_sd.mk
+@@ -67,7 +67,7 @@ $(eval $(call gb_Library_use_custom_headers,sd,\
+ $(eval $(call gb_Library_use_sdk_api,sd))
+ 
+ $(eval $(call gb_Library_use_libraries,sd,\
+-	$(call gb_Helper_optional,AVMEDIA,avmedia) \
++	avmedia \
+ 	basegfx \
+ 	canvastools \
+ 	comphelper \

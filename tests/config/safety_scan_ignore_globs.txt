@@ -1,0 +1,7 @@
+# One glob per line. These paths are excluded from repo safety scans.
+third_party/pdfium/**
+third_party/md4c/**
+third_party/mingw_runtime_licenses/**
+docs/**
+tests/bin/**
+tests/scripts/run_repo_checks.ps1

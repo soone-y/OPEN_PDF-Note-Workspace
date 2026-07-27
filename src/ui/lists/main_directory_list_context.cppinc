@@ -1,0 +1,470 @@
+// file: main/main_directory_list_context.cppinc
+
+static bool ShowDirectoryHierarchyItemContextMenu(HWND list, LPARAM lParam) {
+    if (!list) return false;
+    HWND popup = GetAncestor(list, GA_ROOT);
+    if (!popup) return false;
+    auto* data = reinterpret_cast<DirectoryHierarchyPopupData*>(GetWindowLongPtrW(popup, GWLP_USERDATA));
+    if (!data) return false;
+
+    POINT screenPt{};
+    int index = -1;
+    if (lParam == -1) {
+        index = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
+        if (index < 0) return false;
+        RECT itemRect{};
+        if (SendMessageW(list, LB_GETITEMRECT, static_cast<WPARAM>(index),
+                         reinterpret_cast<LPARAM>(&itemRect)) != LB_ERR) {
+            screenPt = {itemRect.left + 18, (itemRect.top + itemRect.bottom) / 2};
+            ClientToScreen(list, &screenPt);
+        } else {
+            GetCursorPos(&screenPt);
+        }
+    } else {
+        screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        POINT clientPt = screenPt;
+        ScreenToClient(list, &clientPt);
+        DWORD hit = static_cast<DWORD>(
+            SendMessageW(list, LB_ITEMFROMPOINT, 0, MAKELPARAM(clientPt.x, clientPt.y)));
+        if (HIWORD(hit) != 0) return false;
+        index = static_cast<int>(LOWORD(hit));
+        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
+    }
+    if (index < 0 || index >= static_cast<int>(data->items.size())) return false;
+
+    const auto item = data->items[static_cast<size_t>(index)];
+    if (item.path.empty() || !IsDirectoryHierarchyExplorerOpenable(item.kind)) return false;
+
+    HWND owner = GetWindow(popup, GW_OWNER);
+    if (!owner) owner = GetParent(popup);
+    if (!owner) owner = g_hMainWnd;
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return false;
+    constexpr UINT kCmdOpenInApp = 1;
+    constexpr UINT kCmdOpenReadOnly = 2;
+    constexpr UINT kCmdOpenExplorer = 3;
+    constexpr UINT kCmdCopyPath = 4;
+    const bool appOpenable = IsDirectoryHierarchyAppOpenable(item.kind);
+    const bool readOnlyOpenable = item.kind == DirectoryHierarchyItemKind::Pdf;
+    AppendMenuW(menu,
+                appOpenable ? MF_STRING : (MF_STRING | MF_GRAYED),
+                kCmdOpenInApp,
+                IsEnglishUi() ? L"Open in this app" : L"このソフトで開く");
+    AppendMenuW(menu,
+                readOnlyOpenable ? MF_STRING : (MF_STRING | MF_GRAYED),
+                kCmdOpenReadOnly,
+                IsEnglishUi() ? L"Open in read-only app" : L"読み取り専用ビューアで開く");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdOpenExplorer,
+                IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示");
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdCopyPath,
+                IsEnglishUi() ? L"Copy path" : L"パスをコピー");
+    SetForegroundWindow(popup);
+    s_directoryHierarchyContextMenuActive = true;
+    const UINT cmd = TrackPopupMenu(menu,
+                                    TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+                                    screenPt.x,
+                                    screenPt.y,
+                                    0,
+                                    popup,
+                                    nullptr);
+    s_directoryHierarchyContextMenuActive = false;
+    DestroyMenu(menu);
+    if (cmd == kCmdOpenInApp) {
+        bool ok = OpenDirectoryHierarchySelection(list);
+        if (ok && IsWindow(popup)) DestroyWindow(popup);
+        return ok;
+    }
+    if (cmd == kCmdOpenReadOnly) {
+        bool ok = LaunchReadOnlyViewerForPdf(owner ? owner : popup, item.path);
+        if (ok && IsWindow(popup)) DestroyWindow(popup);
+        return ok;
+    }
+    if (cmd == kCmdOpenExplorer) {
+        bool ok = OpenDirectoryHierarchyItemInExplorer(owner ? owner : popup, item);
+        if (ok && IsWindow(popup)) DestroyWindow(popup);
+        return ok;
+    }
+    if (cmd == kCmdCopyPath) {
+        return CopyPathToClipboard(owner ? owner : popup, item.path);
+    }
+    if (cmd == 0 && IsWindow(popup)) {
+        SetActiveWindow(popup);
+        if (IsWindow(list)) SetFocus(list);
+    }
+    return cmd != 0;
+}
+
+static LRESULT CALLBACK DirectoryHierarchyListProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                                   UINT_PTR, DWORD_PTR) {
+    if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
+        HWND popup = GetAncestor(hWnd, GA_ROOT);
+        if (popup) DestroyWindow(popup);
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
+        OpenDirectoryHierarchySelection(hWnd);
+        return 0;
+    }
+    if (msg == WM_LBUTTONUP) {
+        LRESULT res = DefSubclassProc(hWnd, msg, wParam, lParam);
+        POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        DWORD hit = static_cast<DWORD>(
+            SendMessageW(hWnd, LB_ITEMFROMPOINT, 0, MAKELPARAM(pt.x, pt.y)));
+        if (HIWORD(hit) == 0) {
+            int idx = static_cast<int>(LOWORD(hit));
+            int sel = static_cast<int>(SendMessageW(hWnd, LB_GETCURSEL, 0, 0));
+            if (idx == sel) {
+                OpenDirectoryHierarchySelection(hWnd);
+            }
+        }
+        return res;
+    }
+    if (msg == WM_CONTEXTMENU) {
+        if (ShowDirectoryHierarchyItemContextMenu(hWnd, lParam)) {
+            return 0;
+        }
+    }
+    if (msg == WM_CHAR) {
+        return 0;
+    }
+    return DefSubclassProc(hWnd, msg, wParam, lParam);
+}
+
+static void LayoutDirectoryHierarchyPopup(HWND hWnd) {
+    auto* data = reinterpret_cast<DirectoryHierarchyPopupData*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    if (!data) return;
+    RECT rc{};
+    GetClientRect(hWnd, &rc);
+    const int pad = 8;
+    const int titleH = 22;
+    const int gap = 6;
+    int w = std::max(0, static_cast<int>(rc.right - rc.left) - pad * 2);
+    if (data->hTitle) MoveWindow(data->hTitle, pad, pad, w, titleH, TRUE);
+    if (data->hList) {
+        int listY = pad + titleH + gap;
+        MoveWindow(data->hList, pad, listY, w,
+                   std::max(0, static_cast<int>(rc.bottom) - listY - pad), TRUE);
+    }
+}
+
+static LRESULT CALLBACK DirectoryHierarchyPopupProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        auto* data = reinterpret_cast<DirectoryHierarchyPopupData*>(cs ? cs->lpCreateParams : nullptr);
+        if (!data) return -1;
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(data));
+        data->hTitle = CreateWindowExW(0, L"STATIC", data->title.c_str(),
+                                       WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
+                                       0, 0, 100, 20, hWnd, nullptr, g_hInst, nullptr);
+        data->hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+                                          LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS,
+                                      0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
+        SetUIFont(data->hTitle);
+        SetUIFont(data->hList);
+        SetWindowSubclass(data->hList, DirectoryHierarchyListProc, 9, 0);
+        for (const auto& item : data->items) {
+            SendMessageW(data->hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.text.c_str()));
+        }
+        SendMessageW(data->hList, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+        SetListWide(data->hList);
+        LayoutDirectoryHierarchyPopup(hWnd);
+        return 0;
+    }
+    case WM_SIZE:
+        LayoutDirectoryHierarchyPopup(hWnd);
+        return 0;
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        FillRect(hdc, &rc, g_hThemePanelBrush ? g_hThemePanelBrush : GetSysColorBrush(COLOR_WINDOW));
+        return 1;
+    }
+    case WM_ACTIVATE:
+        if (LOWORD(wParam) == WA_INACTIVE) {
+            if (s_directoryHierarchyContextMenuActive) {
+                return 0;
+            }
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) {
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORLISTBOX: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(hdc, g_theme.panelText);
+        SetBkColor(hdc, g_theme.panelBg);
+        return reinterpret_cast<LRESULT>(g_hThemePanelBrush ? g_hThemePanelBrush : GetSysColorBrush(COLOR_WINDOW));
+    }
+    case WM_DESTROY:
+        if (s_hDirectoryHierarchyPopup == hWnd) s_hDirectoryHierarchyPopup = nullptr;
+        break;
+    case WM_NCDESTROY: {
+        auto* data = reinterpret_cast<DirectoryHierarchyPopupData*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
+        delete data;
+        break;
+    }
+    default:
+        break;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static void EnsureDirectoryHierarchyPopupClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = DirectoryHierarchyPopupProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;
+    wc.lpszClassName = kDirectoryHierarchyPopupClass;
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+static void ClampPopupRectToWorkArea(RECT& rect, POINT anchor) {
+    HMONITOR monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(monitor, &mi)) return;
+    const int w = rect.right - rect.left;
+    const int h = rect.bottom - rect.top;
+    if (rect.right > mi.rcWork.right) {
+        rect.left = mi.rcWork.right - w;
+        rect.right = rect.left + w;
+    }
+    if (rect.bottom > mi.rcWork.bottom) {
+        rect.top = mi.rcWork.bottom - h;
+        rect.bottom = rect.top + h;
+    }
+    if (rect.left < mi.rcWork.left) {
+        rect.left = mi.rcWork.left;
+        rect.right = rect.left + w;
+    }
+    if (rect.top < mi.rcWork.top) {
+        rect.top = mi.rcWork.top;
+        rect.bottom = rect.top + h;
+    }
+}
+
+static bool ShowDirectoryHierarchyPopup(HWND owner,
+                                        const std::filesystem::path& root,
+                                        const std::wstring& label,
+                                        POINT screenPt) {
+    if (!owner) return false;
+    if (s_hDirectoryHierarchyPopup && IsWindow(s_hDirectoryHierarchyPopup)) {
+        DestroyWindow(s_hDirectoryHierarchyPopup);
+    }
+    EnsureDirectoryHierarchyPopupClass();
+
+    auto* data = new DirectoryHierarchyPopupData();
+    data->title = (IsEnglishUi() ? L"Folder hierarchy: " : L"フォルダ階層: ") + label;
+    data->items = BuildDirectoryHierarchyItems(root);
+
+    const int itemH = std::max(18, CalcListItemHeight());
+    const int rows = std::clamp(static_cast<int>(data->items.size()), 6, 24);
+    int width = 420;
+    int height = 52 + rows * itemH;
+    RECT rect{screenPt.x, screenPt.y, screenPt.x + width, screenPt.y + height};
+    AdjustWindowRectEx(&rect, WS_POPUP | WS_CAPTION | WS_THICKFRAME, FALSE, WS_EX_TOOLWINDOW);
+    ClampPopupRectToWorkArea(rect, screenPt);
+
+    HWND popup = CreateWindowExW(WS_EX_TOOLWINDOW,
+                                 kDirectoryHierarchyPopupClass,
+                                 data->title.c_str(),
+                                 WS_POPUP | WS_CAPTION | WS_THICKFRAME,
+                                 rect.left,
+                                 rect.top,
+                                 rect.right - rect.left,
+                                 rect.bottom - rect.top,
+                                 owner,
+                                 nullptr,
+                                 g_hInst,
+                                 data);
+    if (!popup) {
+        delete data;
+        return false;
+    }
+    s_hDirectoryHierarchyPopup = popup;
+    ApplyThemeToDialog(popup);
+    ShowWindow(popup, SW_SHOWNORMAL);
+    UpdateWindow(popup);
+    auto* popupData = reinterpret_cast<DirectoryHierarchyPopupData*>(GetWindowLongPtrW(popup, GWLP_USERDATA));
+    if (popupData && popupData->hList) SetFocus(popupData->hList);
+    return true;
+}
+
+static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
+    if (list != g_hLectureList && list != g_hSessionList) return false;
+    HWND owner = list ? GetParent(list) : nullptr;
+    if (!owner) return false;
+    const bool isLectureList = (list == g_hLectureList);
+
+    POINT screenPt{};
+    int index = -1;
+    if (lParam == -1) {
+        index = CurrentLogicalListIndex(list);
+        if (index < 0) {
+            index = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
+        }
+        if (index < 0) return false;
+        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
+        InvalidateRect(list, nullptr, FALSE);
+        RECT itemRect{};
+        if (SendMessageW(list, LB_GETITEMRECT, static_cast<WPARAM>(index),
+                         reinterpret_cast<LPARAM>(&itemRect)) != LB_ERR) {
+            screenPt = {itemRect.left + 18, (itemRect.top + itemRect.bottom) / 2};
+            ClientToScreen(list, &screenPt);
+        } else {
+            GetCursorPos(&screenPt);
+        }
+    } else {
+        screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        POINT clientPt = screenPt;
+        ScreenToClient(list, &clientPt);
+        DWORD hit = static_cast<DWORD>(
+            SendMessageW(list, LB_ITEMFROMPOINT, 0, MAKELPARAM(clientPt.x, clientPt.y)));
+        if (HIWORD(hit) != 0) {
+            index = CurrentLogicalListIndex(list);
+            if (index < 0) {
+                index = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
+            }
+            if (index < 0) return false;
+        } else {
+            index = static_cast<int>(LOWORD(hit));
+        }
+        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
+        InvalidateRect(list, nullptr, FALSE);
+    }
+
+    std::filesystem::path root;
+    if (isLectureList) {
+        if (index < 0 || index >= static_cast<int>(g_lectures.size())) return false;
+        root = std::filesystem::path(g_lectures[static_cast<size_t>(index)]);
+    } else {
+        if (index < 0 || index >= static_cast<int>(g_sessions.size())) return false;
+        root = std::filesystem::path(g_sessions[static_cast<size_t>(index)].path);
+    }
+    if (root.empty()) return false;
+
+    std::wstring label = ListBoxTextAt(list, index);
+    if (label.empty()) label = DirectoryHierarchyDisplayName(root);
+    const bool isTempExternalLecture = isLectureList && IsTempExternalLecturePath(root.wstring());
+    const bool isDirectFilesSession =
+        (!isLectureList && IsDirectFilesSessionPath(root.wstring(), g_currentLecturePath));
+    const bool canRename = isLectureList
+        ? (IsWorkspaceManagedDirectoryTarget(root) && !isTempExternalLecture)
+        : (IsWorkspaceManagedDirectoryTarget(root) && !isDirectFilesSession);
+    const bool canDelete = isLectureList
+        ? (isTempExternalLecture || IsWorkspaceManagedDirectoryTarget(root))
+        : (IsWorkspaceManagedDirectoryTarget(root) && !isDirectFilesSession);
+    const std::wstring deleteLabel = isTempExternalLecture
+        ? GetUiText().menuRemoveTempExternalLecture
+        : (IsEnglishUi() ? L"Delete" : L"削除");
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return false;
+    constexpr UINT kCmdOpenInApp = 1;
+    constexpr UINT kCmdOpenExplorer = 2;
+    constexpr UINT kCmdShowPath = 3;
+    constexpr UINT kCmdCopyPath = 4;
+    constexpr UINT kCmdShowHierarchy = 5;
+    constexpr UINT kCmdConvertOffice = 6;
+    constexpr UINT kCmdRename = 7;
+    constexpr UINT kCmdDelete = 8;
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdOpenInApp,
+                IsEnglishUi() ? L"Open in this app" : L"このソフトで開く");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdOpenExplorer,
+                IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示");
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdShowHierarchy,
+                IsEnglishUi() ? L"Show directory hierarchy" : L"フォルダ階層を確認");
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdShowPath,
+                IsEnglishUi() ? L"Show work path" : L"作業パスを表示");
+    AppendMenuW(menu,
+                MF_STRING,
+                kCmdCopyPath,
+                IsEnglishUi() ? L"Copy path" : L"パスをコピー");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    if (!kIsLiteEdition) {
+        AppendMenuW(menu,
+                    MF_STRING,
+                    kCmdConvertOffice,
+                    IsEnglishUi() ? L"Convert Office files to PDF" : L"OfficeファイルをPDFに変換");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+    AppendMenuW(menu,
+                canRename ? MF_STRING : (MF_STRING | MF_GRAYED),
+                kCmdRename,
+                IsEnglishUi() ? L"Rename" : L"名前の変更");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu,
+                canDelete ? MF_STRING : (MF_STRING | MF_GRAYED),
+                kCmdDelete,
+                deleteLabel.c_str());
+    SetForegroundWindow(owner);
+    const UINT cmd = TrackPopupMenu(menu,
+                                    TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+                                    screenPt.x,
+                                    screenPt.y,
+                                    0,
+                                    owner,
+                                    nullptr);
+    DestroyMenu(menu);
+    if (cmd == kCmdOpenInApp) {
+        return OpenSelectionForList(list);
+    }
+    if (cmd == kCmdOpenExplorer) {
+        return ShowPathInExplorer(owner, root.wstring());
+    }
+    if (cmd == kCmdShowPath) {
+        ShowSelectedPathDialog(owner, label, root.wstring());
+        return true;
+    }
+    if (cmd == kCmdCopyPath) {
+        return CopyPathToClipboard(owner, root.wstring());
+    }
+    if (cmd == kCmdShowHierarchy) {
+        return ShowDirectoryHierarchyPopup(owner, root, label, screenPt);
+    }
+    if (cmd == kCmdConvertOffice) {
+        return ConvertMissingOfficeFilesUnderDirectory(owner, root);
+    }
+    if (cmd == kCmdRename && canRename) {
+        if (isLectureList) {
+            return RenameLectureDirectoryFromContext(owner, root, label);
+        }
+        return RenameSessionDirectoryFromContext(owner, root, g_currentLecturePath, label);
+    }
+    if (cmd == kCmdDelete && canDelete) {
+        if (isLectureList) {
+            return DeleteLectureDirectoryFromContext(owner, index, root, label);
+        }
+        return DeleteSessionDirectoryFromContext(owner, index, root, g_currentLecturePath);
+    }
+    return cmd != 0;
+}

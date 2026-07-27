@@ -1,0 +1,1390 @@
+﻿// file: main/file_ops_move_rename.cppinc
+// NOTE: Included by operations.cppinc. This fragment owns safe rename/move flows
+// and any linked note-path rewrites needed to keep data consistent.
+static std::wstring OperationMenuTitle() {
+    return GetUiText().menuOperation.empty() ? GetUiText().menuFile : GetUiText().menuOperation;
+}
+
+static bool AreSameLocalPath(const std::filesystem::path& a, const std::filesystem::path& b) {
+    if (a.empty() || b.empty()) return false;
+    return CanonicalOrSelf(a) == CanonicalOrSelf(b);
+}
+
+static std::filesystem::path PdfAnnotHistoryPathForPdf(const std::filesystem::path& pdfPath) {
+    if (pdfPath.empty()) return {};
+    std::filesystem::path p(pdfPath);
+    p.replace_extension(L".annot_history.json");
+    return p;
+}
+
+static bool ValidateOperationFileTarget(HWND owner,
+                                        const std::filesystem::path& path,
+                                        const std::wstring& title) {
+    if (path.empty()) return false;
+    if (IsUncPath(path)) {
+        const wchar_t* msg = IsEnglishUi()
+            ? L"UNC/device paths are not supported."
+            : L"UNC/デバイスパスは使用できません。";
+        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    bool isReparse = false;
+    if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) {
+        const wchar_t* msg = IsEnglishUi()
+            ? L"Reparse point files are not supported."
+            : L"ジャンクション/シンボリックリンク等（reparse point）のファイルは使用できません。";
+        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec || !std::filesystem::is_regular_file(path, ec) || ec) {
+        std::wstring msg = IsEnglishUi()
+            ? L"Target file was not found:\n\n"
+            : L"対象ファイルが見つかりません:\n\n";
+        msg += path.wstring();
+        ShowSilentMessageDialog(owner, title, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    return true;
+}
+
+static bool ValidateOperationDestinationFolder(HWND owner,
+                                               const std::filesystem::path& dir,
+                                               const std::wstring& title,
+                                               const wchar_t* labelJa,
+                                               const wchar_t* labelEn) {
+    if (dir.empty()) return false;
+    if (IsUncPath(dir)) {
+        const wchar_t* msg = IsEnglishUi()
+            ? L"UNC/device paths are not supported."
+            : L"UNC/デバイスパスは使用できません。";
+        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    bool isReparse = false;
+    if (TryIsReparsePointNoFollow(dir, isReparse) && isReparse) {
+        const wchar_t* msg = IsEnglishUi()
+            ? L"Reparse point folders are not supported."
+            : L"ジャンクション/シンボリックリンク等（reparse point）のフォルダは使用できません。";
+        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    return VerifyDirReadableWritableForEditing(owner, dir, labelJa, labelEn);
+}
+
+static bool ValidateOperationNewFileStem(HWND owner,
+                                         const std::wstring& input,
+                                         const std::wstring& title) {
+    const bool invalid =
+        input.empty() || input == L"." || input == L".." ||
+        input.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos ||
+        input.back() == L'.' || input.back() == L' ';
+    if (!invalid) return true;
+    ShowSilentMessageDialog(
+        owner, title,
+        IsEnglishUi()
+            ? L"The new name contains characters or an ending that Windows cannot use in a file name."
+            : L"新しい名前に、Windows のファイル名として使用できない文字または末尾が含まれています。",
+        SoftNoticeKind::Warning);
+    return false;
+}
+
+static std::filesystem::path OperationPreferredTmpDir() {
+    if (g_workspaceRoot.empty()) return {};
+    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__tmp__";
+}
+
+static std::filesystem::path OperationQuarantineDir() {
+    if (g_workspaceRoot.empty()) return {};
+    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
+}
+
+static bool ReadOperationFileBytes(const std::filesystem::path& path,
+                                   std::string& out,
+                                   std::wstring* outErr) {
+    out.clear();
+    if (outErr) outErr->clear();
+
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) {
+        if (outErr) *outErr = L"Failed to open file:\n" + path.wstring();
+        return false;
+    }
+    ifs.seekg(0, std::ios::end);
+    std::streamsize size = ifs.tellg();
+    if (size < 0) size = 0;
+    ifs.seekg(0, std::ios::beg);
+    out.resize(static_cast<size_t>(size));
+    if (size > 0) {
+        ifs.read(out.data(), size);
+        if (!ifs) {
+            out.clear();
+            if (outErr) *outErr = L"Failed to read file:\n" + path.wstring();
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool RestoreOperationFileBytes(const std::filesystem::path& path,
+                                      const std::string& bytes,
+                                      std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    const auto preferredTmp = OperationPreferredTmpDir();
+    const auto quarantineDir = OperationQuarantineDir();
+    if (!atomic_write::AtomicWriteBytes(path, bytes.data(), bytes.size(),
+                                        preferredTmp, quarantineDir, outErr)) {
+        return false;
+    }
+    return true;
+}
+
+static size_t ReplaceLinkedNotePathInAnnotations(std::vector<Annotation>& annots,
+                                                 const std::filesystem::path& oldNotePath,
+                                                 const std::filesystem::path& newNotePath) {
+    if (oldNotePath.empty() || newNotePath.empty()) return 0;
+    const std::wstring oldKey = NormalizePathKey(oldNotePath.wstring());
+    if (oldKey.empty()) return 0;
+
+    size_t replaced = 0;
+    for (auto& ann : annots) {
+        if (ann.linkNotePath.empty()) continue;
+        if (NormalizePathKey(ann.linkNotePath) != oldKey) continue;
+        ann.linkNotePath = newNotePath.wstring();
+        ++replaced;
+    }
+    return replaced;
+}
+
+static void CollectSessionPdfPathsRecursive(const std::filesystem::path& root,
+                                            std::vector<std::filesystem::path>& out) {
+    out.clear();
+    if (root.empty()) return;
+
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(root, ec);
+    std::filesystem::recursive_directory_iterator end;
+    if (ec) return;
+
+    for (; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const std::filesystem::path path = it->path();
+        bool isReparse = false;
+        if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) {
+            std::error_code dirEc;
+            if (it->is_directory(dirEc) && !dirEc) {
+                it.disable_recursion_pending();
+            }
+            continue;
+        }
+
+        std::error_code typeEc;
+        if (it->is_directory(typeEc) && !typeEc) {
+            if (ToLowerAscii(path.filename().wstring()) == L"__resource__") {
+                it.disable_recursion_pending();
+            }
+            continue;
+        }
+        if (typeEc) continue;
+
+        std::error_code regEc;
+        if (!it->is_regular_file(regEc) || regEc) continue;
+        if (IsPdfFile(path)) {
+            out.push_back(path);
+        }
+    }
+}
+
+struct OperationNoteChange {
+    bool enabled = false;
+    std::filesystem::path src;
+    std::filesystem::path dest;
+};
+
+struct NoteLinkRewriteFile {
+    std::filesystem::path filePath;
+    std::wstring pdfPath;
+    std::vector<Annotation> updatedAnnots;
+    std::string originalBytes;
+};
+
+struct NoteLinkRewritePlan {
+    std::filesystem::path oldNotePath;
+    std::filesystem::path newNotePath;
+    std::vector<NoteLinkRewriteFile> files;
+    std::vector<std::wstring> affectedPdfPaths;
+    std::wstring currentPdfPath;
+    std::vector<Annotation> previousCurrentAnnots;
+    bool previousCurrentAnnotsDirty = false;
+    bool previousCurrentAnnotsNeedsIntegrate = false;
+    bool touchesCurrentPdf = false;
+    bool applied = false;
+
+    bool HasWork() const {
+        return !files.empty() || touchesCurrentPdf;
+    }
+};
+
+struct OperationTransactionMove {
+    std::filesystem::path src;
+    std::filesystem::path dest;
+    std::filesystem::path backup;
+};
+
+struct OperationTransactionRewrite {
+    std::filesystem::path target;
+    std::filesystem::path backup;
+};
+
+struct OperationTransaction {
+    std::filesystem::path dir;
+    std::filesystem::path manifest;
+    std::vector<OperationTransactionMove> moves;
+    std::vector<OperationTransactionRewrite> rewrites;
+};
+
+static std::filesystem::path OperationTransactionsRoot() {
+    return OperationQuarantineDir() / L"operation_transactions";
+}
+
+static std::string EncodeOperationTransactionPath(const std::filesystem::path& path) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    const std::string utf8 = WideToUTF8(path.wstring());
+    std::string encoded;
+    encoded.reserve(utf8.size() * 2);
+    for (const unsigned char value : utf8) {
+        encoded.push_back(kHex[value >> 4]);
+        encoded.push_back(kHex[value & 0x0f]);
+    }
+    return encoded;
+}
+
+static bool DecodeOperationTransactionPath(const std::string& encoded,
+                                           std::filesystem::path* out) {
+    if (!out || (encoded.size() % 2) != 0) return false;
+    auto fromHex = [](char value) -> int {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return -1;
+    };
+    std::string bytes;
+    bytes.reserve(encoded.size() / 2);
+    for (size_t i = 0; i < encoded.size(); i += 2) {
+        const int hi = fromHex(encoded[i]);
+        const int lo = fromHex(encoded[i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        bytes.push_back(static_cast<char>((hi << 4) | lo));
+    }
+    const std::wstring decoded = UTF8ToWide(bytes);
+    if (!bytes.empty() && decoded.empty()) return false;
+    *out = std::filesystem::path(decoded);
+    return !out->empty();
+}
+
+static bool WriteOperationTransactionManifest(const OperationTransaction& tx,
+                                              const char* state,
+                                              std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    std::ostringstream oss;
+    oss << "PDF_NOTE_OPERATION_TRANSACTION_V1\n";
+    oss << "state=" << (state ? state : "pending") << "\n";
+    for (const auto& move : tx.moves) {
+        oss << "move\t" << EncodeOperationTransactionPath(move.src)
+            << "\t" << EncodeOperationTransactionPath(move.dest)
+            << "\t" << EncodeOperationTransactionPath(move.backup) << "\n";
+    }
+    for (const auto& rewrite : tx.rewrites) {
+        oss << "rewrite\t" << EncodeOperationTransactionPath(rewrite.target)
+            << "\t" << EncodeOperationTransactionPath(rewrite.backup) << "\n";
+    }
+    return atomic_write::AtomicWriteUtf8(tx.manifest, oss.str(),
+                                         OperationPreferredTmpDir(),
+                                         OperationQuarantineDir(), outErr);
+}
+
+static bool CreateOperationTransactionDirectory(OperationTransaction* tx,
+                                                std::wstring* outErr) {
+    if (!tx) return false;
+    if (outErr) outErr->clear();
+    if (!EnsureWorkspaceResourceDirs(nullptr)) {
+        if (outErr) {
+            *outErr = IsEnglishUi()
+                ? L"Failed to prepare safe operation storage."
+                : L"安全な操作退避領域を準備できません。";
+        }
+        return false;
+    }
+    const std::filesystem::path root = OperationTransactionsRoot();
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
+    if (ec) {
+        if (outErr) *outErr = root.wstring() + L"\n\n" + UTF8ToWide(ec.message());
+        return false;
+    }
+    const std::wstring prefix =
+        L"op_" + std::to_wstring(static_cast<unsigned long long>(GetCurrentProcessId())) +
+        L"_" + std::to_wstring(static_cast<unsigned long long>(GetTickCount64()));
+    for (unsigned int index = 0; index < 1000; ++index) {
+        const std::filesystem::path candidate =
+            root / (prefix + L"_" + std::to_wstring(index));
+        ec.clear();
+        if (std::filesystem::create_directory(candidate, ec)) {
+            tx->dir = candidate;
+            tx->manifest = candidate / L"manifest.tsv";
+            return true;
+        }
+        if (ec && ec != std::errc::file_exists) {
+            if (outErr) *outErr = candidate.wstring() + L"\n\n" + UTF8ToWide(ec.message());
+            return false;
+        }
+    }
+    if (outErr) {
+        *outErr = IsEnglishUi()
+            ? L"Failed to allocate safe operation storage."
+            : L"安全な操作退避領域を確保できません。";
+    }
+    return false;
+}
+
+static bool PrepareOperationTransaction(
+    const std::vector<std::pair<std::filesystem::path, std::filesystem::path>>& moves,
+    const NoteLinkRewritePlan& rewritePlan,
+    OperationTransaction* outTx,
+    std::wstring* outErr) {
+    if (outTx) *outTx = {};
+    if (outErr) outErr->clear();
+    OperationTransaction tx;
+    if (!CreateOperationTransactionDirectory(&tx, outErr)) return false;
+
+    for (size_t index = 0; index < moves.size(); ++index) {
+        OperationTransactionMove entry;
+        entry.src = moves[index].first;
+        entry.dest = moves[index].second;
+        entry.backup = tx.dir / (L"move_" + std::to_wstring(index) + L".bak");
+        if (!CopyFileForImportSafely(entry.src, entry.backup, outErr)) return false;
+        tx.moves.push_back(std::move(entry));
+    }
+    for (size_t index = 0; index < rewritePlan.files.size(); ++index) {
+        OperationTransactionRewrite entry;
+        entry.target = rewritePlan.files[index].filePath;
+        entry.backup = tx.dir / (L"rewrite_" + std::to_wstring(index) + L".bak");
+        if (!CopyFileForImportSafely(entry.target, entry.backup, outErr)) return false;
+        tx.rewrites.push_back(std::move(entry));
+    }
+    if (!WriteOperationTransactionManifest(tx, "pending", outErr)) return false;
+    if (outTx) *outTx = std::move(tx);
+    return true;
+}
+
+static bool ReadOperationTransactionManifest(const std::filesystem::path& manifest,
+                                             OperationTransaction* outTx,
+                                             std::string* outState) {
+    if (!outTx || !outState) return false;
+    std::ifstream input(manifest, std::ios::binary);
+    if (!input) return false;
+    OperationTransaction tx;
+    tx.manifest = manifest;
+    tx.dir = manifest.parent_path();
+    std::string line;
+    if (!std::getline(input, line) || line != "PDF_NOTE_OPERATION_TRANSACTION_V1") return false;
+    if (!std::getline(input, line) || line.rfind("state=", 0) != 0) return false;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    *outState = line.substr(6);
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        std::vector<std::string> fields;
+        std::istringstream record(line);
+        std::string field;
+        while (std::getline(record, field, '\t')) fields.push_back(field);
+        if (fields.size() == 4 && fields[0] == "move") {
+            OperationTransactionMove move;
+            if (!DecodeOperationTransactionPath(fields[1], &move.src) ||
+                !DecodeOperationTransactionPath(fields[2], &move.dest) ||
+                !DecodeOperationTransactionPath(fields[3], &move.backup)) {
+                return false;
+            }
+            tx.moves.push_back(std::move(move));
+        } else if (fields.size() == 3 && fields[0] == "rewrite") {
+            OperationTransactionRewrite rewrite;
+            if (!DecodeOperationTransactionPath(fields[1], &rewrite.target) ||
+                !DecodeOperationTransactionPath(fields[2], &rewrite.backup)) {
+                return false;
+            }
+            tx.rewrites.push_back(std::move(rewrite));
+        } else {
+            return false;
+        }
+    }
+    if (tx.moves.empty()) return false;
+    *outTx = std::move(tx);
+    return true;
+}
+
+static bool ValidateOperationTransactionPaths(const OperationTransaction& tx,
+                                              const std::filesystem::path& sessionRoot) {
+    if (sessionRoot.empty() || g_workspaceRoot.empty() || tx.dir.empty()) return false;
+    const std::filesystem::path stageRoot = OperationPreferredTmpDir();
+    for (const auto& move : tx.moves) {
+        if (!IsPathUnderRoot(move.src, sessionRoot) ||
+            !IsPathUnderRoot(move.dest, sessionRoot) ||
+            !IsPathUnderRoot(move.backup, tx.dir)) {
+            return false;
+        }
+    }
+    for (const auto& rewrite : tx.rewrites) {
+        if ((!IsPathUnderRoot(rewrite.target, sessionRoot) &&
+             !IsPathUnderRoot(rewrite.target, stageRoot)) ||
+            !IsPathUnderRoot(rewrite.backup, tx.dir)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool PreserveRecoveryOverwriteTarget(const std::filesystem::path& target,
+                                            const std::filesystem::path& txDir,
+                                            size_t index,
+                                            std::wstring* outErr) {
+    std::error_code ec;
+    if (!std::filesystem::exists(target, ec) || ec) return !ec;
+    const std::filesystem::path observed =
+        txDir / (L"observed_" + std::to_wstring(index) + L"_" +
+                 std::to_wstring(static_cast<unsigned long long>(GetTickCount64())) + L".bak");
+    return CopyFileForImportSafely(target, observed, outErr);
+}
+
+static bool RecoverOperationTransactionToOriginalState(OperationTransaction* tx,
+                                                       const std::filesystem::path& sessionRoot,
+                                                       std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (!tx || !ValidateOperationTransactionPaths(*tx, sessionRoot)) {
+        if (outErr) *outErr = IsEnglishUi() ? L"Invalid pending operation record." : L"保留中の操作記録が不正です。";
+        return false;
+    }
+    for (auto it = tx->moves.rbegin(); it != tx->moves.rend(); ++it) {
+        std::error_code srcEc;
+        std::error_code destEc;
+        const bool hasSrc = std::filesystem::exists(it->src, srcEc);
+        const bool hasDest = std::filesystem::exists(it->dest, destEc);
+        if (srcEc || destEc || (hasSrc && hasDest)) {
+            if (outErr) {
+                *outErr = IsEnglishUi()
+                    ? L"Cannot safely recover a pending file move because both file locations need inspection."
+                    : L"保留中のファイル移動は両方の場所にファイルがあるため、安全に自動復旧できません。";
+            }
+            return false;
+        }
+        if (!hasSrc && hasDest) {
+            std::error_code moveEc;
+            std::filesystem::rename(it->dest, it->src, moveEc);
+            if (moveEc) {
+                if (outErr) *outErr = it->dest.wstring() + L"\n->\n" + it->src.wstring() +
+                                      L"\n\n" + atomic_write::Win32ErrorMessage(moveEc.value());
+                return false;
+            }
+        } else if (!hasSrc && !hasDest) {
+            if (!CopyFileForImportSafely(it->backup, it->src, outErr)) return false;
+        }
+    }
+    for (size_t index = 0; index < tx->rewrites.size(); ++index) {
+        const auto& rewrite = tx->rewrites[index];
+        if (!PreserveRecoveryOverwriteTarget(rewrite.target, tx->dir, index, outErr) ||
+            !CopyFileForImportSafely(rewrite.backup, rewrite.target, outErr)) {
+            return false;
+        }
+    }
+    return WriteOperationTransactionManifest(*tx, "recovered", outErr);
+}
+
+bool RecoverPendingFileOperationTransactionsForSession(
+    HWND owner, const std::filesystem::path& sessionRoot) {
+    const std::filesystem::path root = OperationTransactionsRoot();
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec) || ec) return true;
+    bool recoveredAny = false;
+    bool allOk = true;
+    std::filesystem::directory_iterator it(root, ec);
+    const std::filesystem::directory_iterator end;
+    if (ec) return false;
+    for (; it != end; it.increment(ec)) {
+        if (ec) {
+            allOk = false;
+            break;
+        }
+        std::error_code typeEc;
+        if (!it->is_directory(typeEc) || typeEc) continue;
+        OperationTransaction tx;
+        std::string state;
+        if (!ReadOperationTransactionManifest(it->path() / L"manifest.tsv", &tx, &state) ||
+            state != "pending" ||
+            !ValidateOperationTransactionPaths(tx, sessionRoot)) {
+            continue;
+        }
+        std::wstring recoverErr;
+        if (!RecoverOperationTransactionToOriginalState(&tx, sessionRoot, &recoverErr)) {
+            allOk = false;
+            std::wstring msg = IsEnglishUi()
+                ? L"A previous rename/move could not be safely recovered automatically.\nNo additional changes were made.\n\n"
+                : L"以前の名前変更/移動を安全に自動復旧できませんでした。\n追加の変更は行っていません。\n\n";
+            msg += recoverErr;
+            ShowSilentMessageDialog(owner, OperationMenuTitle(), msg, SoftNoticeKind::Error);
+            continue;
+        }
+        recoveredAny = true;
+    }
+    if (recoveredAny) {
+        ShowSoftNotice(owner,
+                       IsEnglishUi()
+                           ? L"Recovered an interrupted rename/move to its original state."
+                           : L"中断された名前変更/移動を元の状態へ復旧しました。",
+                       SoftNoticeKind::Info);
+    }
+    return allOk;
+}
+
+static bool AppendCombinedMoveSet(
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>>& destMoves,
+    const std::vector<std::pair<std::filesystem::path, std::filesystem::path>>& extraMoves,
+    std::wstring* outErr) {
+    if (outErr) outErr->clear();
+
+    std::unordered_map<std::wstring, std::wstring> srcToDest;
+    std::unordered_map<std::wstring, std::wstring> destToSrc;
+    auto remember = [&](const std::filesystem::path& from, const std::filesystem::path& to) {
+        srcToDest[NormalizePathKey(from.wstring())] = NormalizePathKey(to.wstring());
+        destToSrc[NormalizePathKey(to.wstring())] = NormalizePathKey(from.wstring());
+    };
+    for (const auto& move : destMoves) {
+        remember(move.first, move.second);
+    }
+
+    for (const auto& move : extraMoves) {
+        const std::wstring srcKey = NormalizePathKey(move.first.wstring());
+        const std::wstring destKey = NormalizePathKey(move.second.wstring());
+        if (srcKey.empty() || destKey.empty()) continue;
+
+        auto srcIt = srcToDest.find(srcKey);
+        if (srcIt != srcToDest.end()) {
+            if (srcIt->second != destKey) {
+                if (outErr) {
+                    *outErr = IsEnglishUi()
+                        ? L"One source file would be moved to two different destinations."
+                        : L"1つの元ファイルに対して移動先が複数あります。";
+                }
+                return false;
+            }
+            continue;
+        }
+        auto destIt = destToSrc.find(destKey);
+        if (destIt != destToSrc.end() && destIt->second != srcKey) {
+            if (outErr) {
+                *outErr = (IsEnglishUi()
+                    ? L"Two files would collide at the same destination:\n\n"
+                    : L"2つのファイルが同じ移動先に競合します:\n\n") + move.second.wstring();
+            }
+            return false;
+        }
+
+        destMoves.push_back(move);
+        srcToDest[srcKey] = destKey;
+        destToSrc[destKey] = srcKey;
+    }
+    return true;
+}
+
+static bool PrepareNoteLinkRewritePlan(HWND owner,
+                                       const std::filesystem::path& oldNotePath,
+                                       const std::filesystem::path& newNotePath,
+                                       NoteLinkRewritePlan* outPlan,
+                                       std::wstring* outErr) {
+    if (outPlan) *outPlan = {};
+    if (outErr) outErr->clear();
+    if (oldNotePath.empty() || newNotePath.empty() || AreSameLocalPath(oldNotePath, newNotePath)) {
+        return true;
+    }
+
+    NoteLinkRewritePlan plan;
+    plan.oldNotePath = oldNotePath;
+    plan.newNotePath = newNotePath;
+    if (g_pdf.kind == DocKind::Pdf && !CurrentLogicalPdfPath().empty()) {
+        plan.currentPdfPath = CurrentLogicalPdfPath();
+    }
+
+    const std::filesystem::path sessionRoot(g_currentSessionPath);
+    std::vector<std::filesystem::path> pdfPaths;
+    CollectSessionPdfPathsRecursive(sessionRoot, pdfPaths);
+
+    struct Candidate {
+        std::filesystem::path filePath;
+        std::wstring pdfPath;
+    };
+
+    std::vector<Candidate> candidates;
+    std::unordered_set<std::wstring> seen;
+    auto pushCandidate = [&](const std::filesystem::path& filePath, const std::wstring& pdfPath) {
+        if (filePath.empty() || pdfPath.empty()) return;
+        const std::wstring fileKey = NormalizePathKey(filePath.wstring());
+        if (fileKey.empty() || !seen.insert(fileKey).second) return;
+        candidates.push_back({filePath, pdfPath});
+    };
+
+    for (const auto& pdfPath : pdfPaths) {
+        std::filesystem::path clropPath(clrop_bridge::ClropPathForPdf(pdfPath.wstring()));
+        std::error_code ec;
+        if (clropPath.empty() || !std::filesystem::exists(clropPath, ec) || ec) continue;
+        bool isReparse = false;
+        if (TryIsReparsePointNoFollow(clropPath, isReparse) && isReparse) continue;
+        std::error_code regEc;
+        if (!std::filesystem::is_regular_file(clropPath, regEc) || regEc) continue;
+        pushCandidate(clropPath, pdfPath.wstring());
+    }
+
+    for (const auto& entry : file_output::ListStagedDiffEntries()) {
+        if (entry.kind != file_output::StagedDiffKind::Clrop) continue;
+        if (entry.targetPath.empty()) continue;
+        if (!IsPathUnderRoot(std::filesystem::path(entry.targetPath), sessionRoot)) continue;
+
+        std::error_code ec;
+        if (entry.stagePath.empty() || !std::filesystem::exists(entry.stagePath, ec) || ec) continue;
+        bool isReparse = false;
+        if (TryIsReparsePointNoFollow(entry.stagePath, isReparse) && isReparse) continue;
+        std::error_code regEc;
+        if (!std::filesystem::is_regular_file(entry.stagePath, regEc) || regEc) continue;
+        pushCandidate(entry.stagePath, entry.targetPath);
+    }
+
+    std::unordered_set<std::wstring> affectedPdfKeys;
+    for (const auto& candidate : candidates) {
+        bool mismatch = false;
+        std::wstring err;
+        clrop::PdfId loadedId{};
+        std::vector<Annotation> loaded;
+        if (!clrop_bridge::LoadAnnotations(candidate.filePath.wstring(), candidate.pdfPath,
+                                           loaded, mismatch, &loadedId, err,
+                                           clrop_bridge::LoadAnnotationsValidation::Strong)) {
+            if (outErr) {
+                *outErr = (IsEnglishUi()
+                    ? L"Failed to inspect linked annotations before renaming/moving the note.\n\n"
+                    : L"ノート移動前の注釈リンク確認に失敗しました。\n\n");
+                *outErr += candidate.filePath.wstring();
+                if (!err.empty()) *outErr += L"\n\n" + err;
+            }
+            return false;
+        }
+
+        const size_t replaced = ReplaceLinkedNotePathInAnnotations(loaded, oldNotePath, newNotePath);
+        if (replaced == 0) continue;
+
+        std::error_code pdfEc;
+        const bool targetPdfExists =
+            std::filesystem::exists(candidate.pdfPath, pdfEc) && !pdfEc &&
+            std::filesystem::is_regular_file(candidate.pdfPath, pdfEc) && !pdfEc;
+        if (!targetPdfExists) {
+            if (outErr) {
+                *outErr = (IsEnglishUi()
+                    ? L"A staged annotation file still points to this note, but its target PDF is missing.\nResolve it in Diff Manager first.\n\n"
+                    : L"このノートを参照する注釈 stage の対象PDFが見つかりません。先に差分管理で整理してください。\n\n");
+                *outErr += candidate.filePath.wstring();
+            }
+            return false;
+        }
+        if (mismatch) {
+            if (outErr) {
+                *outErr = (IsEnglishUi()
+                    ? L"A mismatched clrop/stage still points to this note.\nResolve it before renaming/moving the note.\n\n"
+                    : L"pdf_id 不一致の clrop/stage がこのノートを参照しています。ノート移動前に整理してください。\n\n");
+                *outErr += candidate.filePath.wstring();
+            }
+            return false;
+        }
+
+        std::string originalBytes;
+        std::wstring readErr;
+        if (!ReadOperationFileBytes(candidate.filePath, originalBytes, &readErr)) {
+            if (outErr) {
+                *outErr = readErr;
+            }
+            return false;
+        }
+
+        plan.files.push_back({candidate.filePath, candidate.pdfPath, std::move(loaded), std::move(originalBytes)});
+        const std::wstring pdfKey = NormalizePathKey(candidate.pdfPath);
+        if (!pdfKey.empty() && affectedPdfKeys.insert(pdfKey).second) {
+            plan.affectedPdfPaths.push_back(candidate.pdfPath);
+        }
+    }
+
+    if (!plan.currentPdfPath.empty()) {
+        std::vector<Annotation> currentAnnots = g_annots;
+        if (ReplaceLinkedNotePathInAnnotations(currentAnnots, oldNotePath, newNotePath) > 0) {
+            plan.previousCurrentAnnots = g_annots;
+            plan.previousCurrentAnnotsDirty = g_annotsDirty;
+            plan.previousCurrentAnnotsNeedsIntegrate = g_annotsNeedsIntegrate;
+            plan.touchesCurrentPdf = true;
+            const std::wstring currentKey = NormalizePathKey(plan.currentPdfPath);
+            if (!currentKey.empty() && affectedPdfKeys.insert(currentKey).second) {
+                plan.affectedPdfPaths.push_back(plan.currentPdfPath);
+            }
+        }
+    }
+
+    if (outPlan) *outPlan = std::move(plan);
+    return true;
+}
+
+static bool ApplyNoteLinkRewritePlan(NoteLinkRewritePlan* plan,
+                                     std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (!plan || !plan->HasWork()) return true;
+
+    std::vector<size_t> written;
+    written.reserve(plan->files.size());
+    for (size_t i = 0; i < plan->files.size(); ++i) {
+        std::wstring err;
+        const auto& file = plan->files[i];
+        if (!clrop_bridge::SaveAnnotations(file.filePath.wstring(), file.pdfPath, file.updatedAnnots, err)) {
+            for (auto it = written.rbegin(); it != written.rend(); ++it) {
+                std::wstring rollbackErr;
+                RestoreOperationFileBytes(plan->files[*it].filePath,
+                                          plan->files[*it].originalBytes,
+                                          &rollbackErr);
+            }
+            if (outErr) {
+                *outErr = (IsEnglishUi()
+                    ? L"Failed to update linked note paths in clrop data.\n\n"
+                    : L"clrop 内のノート参照更新に失敗しました。\n\n");
+                *outErr += file.filePath.wstring();
+                if (!err.empty()) *outErr += L"\n\n" + err;
+            }
+            return false;
+        }
+        written.push_back(i);
+    }
+
+    if (plan->touchesCurrentPdf &&
+        !plan->currentPdfPath.empty() &&
+        AreSameLocalPath(std::filesystem::path(plan->currentPdfPath), std::filesystem::path(CurrentLogicalPdfPath()))) {
+        ReplaceLinkedNotePathInAnnotations(g_annots, plan->oldNotePath, plan->newNotePath);
+        if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+        RefreshAnnotPanel();
+        RefreshMainWindowUiState(g_hMainWnd);
+    }
+
+    plan->applied = true;
+    return true;
+}
+
+static void RestoreCurrentNoteLinkRewriteMemoryState(NoteLinkRewritePlan* plan) {
+    if (!plan || !plan->applied) return;
+    if (plan->touchesCurrentPdf &&
+        !plan->currentPdfPath.empty() &&
+        AreSameLocalPath(std::filesystem::path(plan->currentPdfPath), std::filesystem::path(CurrentLogicalPdfPath()))) {
+        g_annots = plan->previousCurrentAnnots;
+        g_annotsDirty = plan->previousCurrentAnnotsDirty;
+        g_annotsNeedsIntegrate = plan->previousCurrentAnnotsNeedsIntegrate;
+        if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+        RefreshAnnotPanel();
+        RefreshMainWindowUiState(g_hMainWnd);
+    }
+    plan->applied = false;
+}
+
+static void InvalidateHistoriesAfterNoteRewriteSuccess(const NoteLinkRewritePlan& plan,
+                                                       bool mainOpIsPdf,
+                                                       const std::filesystem::path& mainSrc,
+                                                       const std::filesystem::path& mainDest) {
+    for (const auto& pdfPath : plan.affectedPdfPaths) {
+        std::filesystem::path invalidatePath(pdfPath);
+        if (mainOpIsPdf && !mainSrc.empty() && !mainDest.empty() && AreSameLocalPath(invalidatePath, mainSrc)) {
+            invalidatePath = mainDest;
+        }
+        InvalidateAnnotHistoryForPath(invalidatePath.wstring());
+    }
+}
+
+static bool TryBuildFollowNoteRenameDestination(const std::filesystem::path& pdfSrc,
+                                                const std::filesystem::path& pdfDest,
+                                                const std::filesystem::path& noteSrc,
+                                                std::filesystem::path* outDest) {
+    if (outDest) *outDest = std::filesystem::path();
+    if (pdfSrc.empty() || pdfDest.empty() || noteSrc.empty()) return false;
+
+    const std::wstring noteStem = noteSrc.stem().wstring();
+    const std::wstring oldPdfStem = pdfSrc.stem().wstring();
+    const std::wstring newPdfStem = pdfDest.stem().wstring();
+    if (noteStem.empty() || oldPdfStem.empty() || newPdfStem.empty()) return false;
+
+    const std::wstring noteStemLower = ToLowerAscii(noteStem);
+    const std::wstring oldPdfStemLower = ToLowerAscii(oldPdfStem);
+    if (noteStemLower.size() < oldPdfStemLower.size()) return false;
+    if (noteStemLower.compare(0, oldPdfStemLower.size(), oldPdfStemLower) != 0) return false;
+
+    const std::wstring suffix = noteStem.substr(oldPdfStem.size());
+    if (outDest) {
+        *outDest = noteSrc.parent_path() / (newPdfStem + suffix + noteSrc.extension().wstring());
+    }
+    return true;
+}
+
+static bool MaybePreparePairedNoteChangeForPdf(HWND owner,
+                                               const std::filesystem::path& pdfSrc,
+                                               const std::filesystem::path& pdfDest,
+                                               bool renameOnly,
+                                               const std::wstring& title,
+                                               OperationNoteChange* outChange) {
+    if (outChange) *outChange = {};
+    if (pdfSrc.empty() || pdfDest.empty()) return true;
+
+    const std::wstring matched = BestMatchByStem(pdfSrc, g_noteFiles);
+    if (matched.empty()) return true;
+
+    const std::filesystem::path noteSrc(matched);
+    if (noteSrc.empty()) return true;
+
+    std::filesystem::path noteDest;
+    if (renameOnly) {
+        if (!TryBuildFollowNoteRenameDestination(pdfSrc, pdfDest, noteSrc, &noteDest)) {
+            std::wstring msg = IsEnglishUi()
+                ? L"A paired note was found, but its name does not follow the PDF stem closely enough to rename automatically.\nRename the note separately if needed.\n\n"
+                : L"対応するノートは見つかりましたが、名前規則が一致しないため自動では名前変更しません。\n必要ならノート側から変更してください。\n\n";
+            msg += noteSrc.wstring();
+            ShowSilentMessageDialog(owner, title, msg, SoftNoticeKind::Info);
+            return true;
+        }
+    } else {
+        noteDest = pdfDest.parent_path() / noteSrc.filename();
+    }
+
+    if (noteDest.empty() || AreSameLocalPath(noteSrc, noteDest)) return true;
+
+    std::wstring msg = renameOnly
+        ? (IsEnglishUi()
+            ? L"A paired note was found. Rename it too and update linked note paths in clrop files?\n\n"
+            : L"対応するノートが見つかりました。ノートも一緒に名前変更し、clrop 内のリンク先も更新しますか？\n\n")
+        : (IsEnglishUi()
+            ? L"A paired note was found. Move it too and update linked note paths in clrop files?\n\n"
+            : L"対応するノートが見つかりました。ノートも一緒に移動し、clrop 内のリンク先も更新しますか？\n\n");
+    msg += noteSrc.wstring();
+    msg += L"\n->\n";
+    msg += noteDest.wstring();
+    SilentDialogOptions dialog;
+    dialog.title = title;
+    dialog.message = msg;
+    dialog.kind = SoftNoticeKind::Info;
+    dialog.buttons = SilentDialogButtons::YesNoCancel;
+    dialog.defaultResult = SilentDialogResult::Yes;
+    dialog.escapeResult = SilentDialogResult::Cancel;
+    const SilentDialogResult res = ShowSilentDialog(owner, dialog);
+    if (res == SilentDialogResult::Cancel || res == SilentDialogResult::None) return false;
+    if (res != SilentDialogResult::Yes) return true;
+
+    if (!EnsureOperationReadyForPath(owner, noteSrc, /*isPdf=*/false, title)) {
+        return false;
+    }
+    if (!ValidateOperationDestinationFolder(owner, noteDest.parent_path(), title,
+                                            L"ノート保存先フォルダ", L"Note folder")) {
+        return false;
+    }
+
+    if (outChange) {
+        outChange->enabled = true;
+        outChange->src = noteSrc;
+        outChange->dest = noteDest;
+    }
+    return true;
+}
+
+static bool BuildOperationMoveSet(const std::filesystem::path& src,
+                                  const std::filesystem::path& dest,
+                                  bool isPdf,
+                                  std::vector<std::pair<std::filesystem::path, std::filesystem::path>>& moves,
+                                  std::wstring* outErr) {
+    moves.clear();
+    if (outErr) outErr->clear();
+
+    auto pushIfExists = [&](const std::filesystem::path& from, const std::filesystem::path& to) -> bool {
+        if (from.empty() || to.empty()) return true;
+        std::error_code ec;
+        if (!std::filesystem::exists(from, ec) || ec) return true;
+        if (!ValidateOperationFileTarget(g_hMainWnd, from, OperationMenuTitle())) return false;
+        if (std::filesystem::exists(to, ec) && !ec) {
+            if (outErr) {
+                *outErr = (IsEnglishUi() ? L"Destination already exists:\n\n" : L"移動先が既に存在します:\n\n") +
+                          to.wstring();
+            }
+            return false;
+        }
+        moves.push_back({from, to});
+        return true;
+    };
+
+    if (!pushIfExists(src, dest)) return false;
+    if (!isPdf) return true;
+
+    std::filesystem::path srcClrop(clrop_bridge::ClropPathForPdf(src.wstring()));
+    std::filesystem::path destClrop(clrop_bridge::ClropPathForPdf(dest.wstring()));
+    if (!pushIfExists(srcClrop, destClrop)) return false;
+
+    std::filesystem::path srcHistory = PdfAnnotHistoryPathForPdf(src);
+    std::filesystem::path destHistory = PdfAnnotHistoryPathForPdf(dest);
+    if (!pushIfExists(srcHistory, destHistory)) return false;
+
+    return true;
+}
+
+static bool MovePathSetWithRollback(
+    const std::vector<std::pair<std::filesystem::path, std::filesystem::path>>& moves,
+    std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> completed;
+    for (const auto& move : moves) {
+        std::error_code ec;
+        std::filesystem::rename(move.first, move.second, ec);
+        if (!ec) {
+            completed.push_back(move);
+            continue;
+        }
+
+        for (auto it = completed.rbegin(); it != completed.rend(); ++it) {
+            std::error_code rollbackEc;
+            std::filesystem::rename(it->second, it->first, rollbackEc);
+            if (rollbackEc && outErr && outErr->empty()) {
+                *outErr = (IsEnglishUi()
+                    ? L"Move failed and rollback also failed.\n\n"
+                    : L"移動に失敗し、ロールバックにも失敗しました。\n\n");
+                *outErr += it->second.wstring() + L"\n->\n" + it->first.wstring();
+            }
+        }
+        if (outErr && outErr->empty()) {
+            *outErr = (IsEnglishUi() ? L"Failed to move file.\n\n" : L"ファイルの移動に失敗しました。\n\n");
+            *outErr += move.first.wstring() + L"\n->\n" + move.second.wstring();
+            *outErr += L"\n\n" + atomic_write::Win32ErrorMessage(ec.value());
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool EnsureOperationReadyForPath(HWND owner,
+                                        const std::filesystem::path& src,
+                                        bool isPdf,
+                                        const std::wstring& title) {
+    if (g_currentSessionPath.empty()) {
+        const wchar_t* msg = IsEnglishUi()
+            ? L"No session is open."
+            : (g_config.studentMode ? L"回次が開かれていません。" : L"下位項目が開かれていません。");
+        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    if (!ValidateOperationFileTarget(owner, src, title)) return false;
+    if (!IsPathUnderRoot(src, std::filesystem::path(g_currentSessionPath))) {
+        const wchar_t* msg = IsEnglishUi()
+            ? L"Only files inside the current session can be changed here."
+            : (g_config.studentMode ? L"ここでは現在の回次内のファイルだけを変更できます。"
+                                    : L"ここでは現在の下位項目内のファイルだけを変更できます。");
+        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    if (isPdf) {
+        if (!file_output::SaveAnnotationsIfDirty(owner)) return false;
+        std::filesystem::path stage = file_output::FindLatestStagedClropPathForPdf(src.wstring());
+        if (!stage.empty() && !file_output::IntegrateStagedDiff(owner, stage)) {
+            return false;
+        }
+    } else {
+        if (!file_output::SaveNoteFile(owner)) return false;
+    }
+
+    for (const auto& entry : file_output::ListStagedDiffEntries()) {
+        if ((isPdf && entry.kind != file_output::StagedDiffKind::Clrop) ||
+            (!isPdf && entry.kind != file_output::StagedDiffKind::Note)) {
+            continue;
+        }
+        if (!AreSameLocalPath(std::filesystem::path(entry.targetPath), src)) continue;
+        const wchar_t* msg = IsEnglishUi()
+            ? L"There is still a staged diff for this file. Save/integrate it before renaming or moving."
+            : L"このファイルには未統合の差分が残っています。名前変更や移動の前に統合保存してください。";
+        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    return true;
+}
+
+static void AfterOperationReopenCurrentTarget(HWND owner,
+                                              const std::filesystem::path& dest,
+                                              bool isPdf,
+                                              const OperationNoteChange* noteChange = nullptr) {
+    if (isPdf) {
+        EndIntegratedPdfPreviewMode(owner, true);
+        OpenPdfWithAnnotations(owner, dest.wstring());
+    } else {
+        LoadNoteFile(owner, dest.wstring());
+        SyncBottomPaneAfterNoteLoad(owner);
+    }
+    const bool reopenPairedNote =
+        isPdf && noteChange && noteChange->enabled &&
+        !g_currentNotePath.empty() &&
+        AreSameLocalPath(std::filesystem::path(g_currentNotePath), noteChange->src);
+    if (reopenPairedNote) {
+        LoadNoteFile(owner, noteChange->dest.wstring());
+        SyncBottomPaneAfterNoteLoad(owner);
+    }
+    RefreshCurrentSessionFiles();
+    SyncLeftPaneSelection();
+    RefreshMainWindowUiState(owner);
+    RememberCurrentSessionFiles();
+}
+
+bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly) {
+    const auto& ui = GetUiText();
+    const std::wstring title = renameOnly
+        ? (isPdf ? ui.menuRenamePdf : ui.menuRenameNote)
+        : (isPdf ? ui.menuMovePdf : ui.menuMoveNote);
+    const std::filesystem::path src = isPdf
+        ? std::filesystem::path(CurrentLogicalPdfPath())
+        : std::filesystem::path(g_currentNotePath);
+    if (src.empty()) {
+        const wchar_t* msg = IsEnglishUi()
+            ? (isPdf ? L"No PDF is open." : L"No note is open.")
+            : (isPdf ? L"PDFが開かれていません。" : L"ノートが開かれていません。");
+        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    if (!EnsureOperationReadyForPath(owner, src, isPdf, title)) return false;
+    CancelPendingLinkMode(owner);
+
+    std::filesystem::path dest;
+    if (renameOnly) {
+        std::wstring input;
+        std::wstring initial = src.stem().wstring();
+        if (!PromptSimpleText(owner, title, initial, input)) return false;
+        input = TrimWhitespace(input);
+        if (!ValidateOperationNewFileStem(owner, input, title)) return false;
+        dest = src.parent_path() / (input + src.extension().wstring());
+    } else {
+        auto picked = PickFolderWithInitial(owner, src.parent_path(), title);
+        if (!picked) return false;
+        dest = std::filesystem::path(*picked) / src.filename();
+    }
+
+    if (AreSameLocalPath(src, dest)) return true;
+    if (!IsPathUnderRoot(dest, std::filesystem::path(g_currentSessionPath))) {
+        const wchar_t* msg = IsEnglishUi()
+            ? L"Destination must stay inside the current session."
+            : (g_config.studentMode ? L"移動先は現在の回次フォルダ内である必要があります。"
+                                    : L"移動先は現在の下位項目フォルダ内である必要があります。");
+        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    if (!ValidateOperationDestinationFolder(owner, dest.parent_path(), title,
+                                            isPdf ? L"PDF保存先フォルダ" : L"ノート保存先フォルダ",
+                                            isPdf ? L"PDF folder" : L"Note folder")) {
+        return false;
+    }
+    std::wstring err;
+
+    OperationNoteChange noteChange;
+    if (isPdf && !MaybePreparePairedNoteChangeForPdf(owner, src, dest, renameOnly, title, &noteChange)) {
+        return false;
+    }
+
+    if ((!isPdf || noteChange.enabled) && !file_output::SaveAnnotationsIfDirty(owner)) {
+        return false;
+    }
+
+    NoteLinkRewritePlan noteRewritePlan;
+    if (!isPdf || noteChange.enabled) {
+        const std::filesystem::path noteSrc = isPdf ? noteChange.src : src;
+        const std::filesystem::path noteDest = isPdf ? noteChange.dest : dest;
+        if (!PrepareNoteLinkRewritePlan(owner, noteSrc, noteDest, &noteRewritePlan, &err)) {
+            if (!err.empty()) {
+                ShowSilentMessageDialog(owner, title, err, SoftNoticeKind::Warning);
+            }
+            return false;
+        }
+    }
+
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moves;
+    if (!BuildOperationMoveSet(src, dest, isPdf, moves, &err)) {
+        if (!err.empty()) {
+            ShowSilentMessageDialog(owner, title, err, SoftNoticeKind::Warning);
+        }
+        return false;
+    }
+    if (noteChange.enabled) {
+        std::vector<std::pair<std::filesystem::path, std::filesystem::path>> noteMoves;
+        std::wstring moveErr;
+        if (!BuildOperationMoveSet(noteChange.src, noteChange.dest, /*isPdf=*/false, noteMoves, &moveErr)) {
+            ShowSilentMessageDialog(owner,
+                                    title,
+                                    moveErr.empty() ? (IsEnglishUi() ? L"Failed to prepare paired note move."
+                                                                     : L"対応ノートの移動準備に失敗しました。")
+                                                    : moveErr,
+                                    SoftNoticeKind::Warning);
+            return false;
+        }
+        if (!AppendCombinedMoveSet(moves, noteMoves, &moveErr)) {
+            ShowSilentMessageDialog(owner,
+                                    title,
+                                    moveErr.empty() ? (IsEnglishUi() ? L"Failed to combine move targets."
+                                                                     : L"移動対象の組み合わせに失敗しました。")
+                                                    : moveErr,
+                                    SoftNoticeKind::Warning);
+            return false;
+        }
+    }
+
+    struct NoteIdentityMove {
+        note::NoteId noteId{};
+        std::filesystem::path src;
+        std::filesystem::path dest;
+    };
+    std::vector<NoteIdentityMove> noteIdentityMoves;
+    for (const auto& move : moves) {
+        if (!IsNoteFile(move.first)) continue;
+        std::wstring identityErr;
+        const note::NoteIdentity identity =
+            note::ResolveRuntimeNoteIdentityPath(move.first.wstring(), &identityErr);
+        if (!identity.valid() || !identityErr.empty()) {
+            if (identityErr.empty()) {
+                identityErr = IsEnglishUi()
+                    ? L"Failed to prepare the persistent note identity."
+                    : L"ノートの永続identityを準備できませんでした。";
+            }
+            ShowSilentMessageDialog(owner, title, identityErr, SoftNoticeKind::Error);
+            return false;
+        }
+        noteIdentityMoves.push_back({identity.note_id, move.first, move.second});
+    }
+
+    OperationTransaction transaction;
+    if (!PrepareOperationTransaction(moves, noteRewritePlan, &transaction, &err)) {
+        ShowSilentMessageDialog(
+            owner, title,
+            err.empty()
+                ? (IsEnglishUi()
+                    ? L"Failed to create a safety backup for the operation."
+                    : L"操作の安全退避を作成できませんでした。")
+                : err,
+            SoftNoticeKind::Error);
+        return false;
+    }
+
+    if (noteRewritePlan.HasWork() && !ApplyNoteLinkRewritePlan(&noteRewritePlan, &err)) {
+        std::wstring recoveryErr;
+        RecoverOperationTransactionToOriginalState(&transaction,
+                                                   std::filesystem::path(g_currentSessionPath),
+                                                   &recoveryErr);
+        if (!recoveryErr.empty()) {
+            if (!err.empty()) err += L"\n\n";
+            err += recoveryErr;
+        }
+        if (!err.empty()) {
+            ShowSilentMessageDialog(owner, title, err, SoftNoticeKind::Error);
+        }
+        return false;
+    }
+    if (isPdf) {
+        SaveLastPdfViewInfo();
+    }
+    if (!MovePathSetWithRollback(moves, &err)) {
+        std::wstring recoveryErr;
+        if (!RecoverOperationTransactionToOriginalState(&transaction,
+                                                        std::filesystem::path(g_currentSessionPath),
+                                                        &recoveryErr) &&
+            !recoveryErr.empty()) {
+            if (!err.empty()) err += L"\n\n";
+            err += recoveryErr;
+        }
+        RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
+        if (!err.empty()) {
+            ShowSilentMessageDialog(owner, title, err, SoftNoticeKind::Error);
+        }
+        return false;
+    }
+
+    size_t reboundIdentityCount = 0;
+    for (; reboundIdentityCount < noteIdentityMoves.size(); ++reboundIdentityCount) {
+        const NoteIdentityMove& identityMove = noteIdentityMoves[reboundIdentityCount];
+        std::wstring identityErr;
+        if (!note::RebindRuntimeNoteIdentityPath(identityMove.noteId,
+                                                 identityMove.src.wstring(),
+                                                 identityMove.dest.wstring(),
+                                                 &identityErr)) {
+            std::wstring recoveryErr;
+            const bool recovered = RecoverOperationTransactionToOriginalState(
+                &transaction, std::filesystem::path(g_currentSessionPath), &recoveryErr);
+            if (recovered) {
+                for (size_t i = reboundIdentityCount; i > 0; --i) {
+                    const NoteIdentityMove& completed = noteIdentityMoves[i - 1];
+                    std::wstring reverseErr;
+                    if (!note::RebindRuntimeNoteIdentityPath(completed.noteId,
+                                                             completed.dest.wstring(),
+                                                             completed.src.wstring(),
+                                                             &reverseErr) &&
+                        !reverseErr.empty()) {
+                        if (!recoveryErr.empty()) recoveryErr += L"\n";
+                        recoveryErr += reverseErr;
+                    }
+                }
+            }
+            RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
+            err = identityErr.empty()
+                ? (IsEnglishUi()
+                    ? L"Failed to update the persistent note identity."
+                    : L"ノートの永続identityを更新できませんでした。")
+                : identityErr;
+            if (!recoveryErr.empty()) err += L"\n\n" + recoveryErr;
+            ShowSilentMessageDialog(owner, title, err, SoftNoticeKind::Error);
+            return false;
+        }
+    }
+    if (isPdf) {
+        MovePdfViewInfoPath(src.wstring(), dest.wstring());
+    }
+
+    if (!WriteOperationTransactionManifest(transaction, "committed", &err)) {
+        std::wstring recoveryErr;
+        bool recovered = RecoverOperationTransactionToOriginalState(&transaction,
+                                                                    std::filesystem::path(g_currentSessionPath),
+                                                                    &recoveryErr);
+        if (isPdf && recovered) {
+            MovePdfViewInfoPath(dest.wstring(), src.wstring());
+        }
+        if (recovered) {
+            for (size_t i = noteIdentityMoves.size(); i > 0; --i) {
+                const NoteIdentityMove& completed = noteIdentityMoves[i - 1];
+                std::wstring identityErr;
+                if (!note::RebindRuntimeNoteIdentityPath(completed.noteId,
+                                                         completed.dest.wstring(),
+                                                         completed.src.wstring(),
+                                                         &identityErr) &&
+                    !identityErr.empty()) {
+                    if (!recoveryErr.empty()) recoveryErr += L"\n";
+                    recoveryErr += identityErr;
+                }
+            }
+        }
+        if (!recoveryErr.empty()) {
+            if (!err.empty()) err += L"\n\n";
+            err += recoveryErr;
+        }
+        RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
+        ShowSilentMessageDialog(
+            owner, title,
+            err.empty()
+                ? (IsEnglishUi()
+                    ? L"Failed to safely complete the operation. The original state was restored."
+                    : L"操作を安全に完了できなかったため、元の状態へ戻しました。")
+                : err,
+            SoftNoticeKind::Error);
+        return false;
+    }
+
+    AfterOperationReopenCurrentTarget(owner, dest, isPdf, noteChange.enabled ? &noteChange : nullptr);
+    if (isPdf) {
+        MovePdfViewInfoPath(src.wstring(), dest.wstring());
+    }
+    if (noteRewritePlan.HasWork()) {
+        InvalidateHistoriesAfterNoteRewriteSuccess(noteRewritePlan, isPdf, src, dest);
+    }
+    std::wstring done = renameOnly
+        ? (IsEnglishUi()
+               ? (isPdf ? L"Renamed the current PDF." : L"Renamed the current note.")
+               : (isPdf ? L"現在のPDF名を変更しました。" : L"現在のノート名を変更しました。"))
+        : (IsEnglishUi()
+               ? (isPdf ? L"Moved the current PDF." : L"Moved the current note.")
+               : (isPdf ? L"現在のPDFを移動しました。" : L"現在のノートを移動しました。"));
+    if (noteChange.enabled) {
+        done += IsEnglishUi()
+            ? L" The paired note was updated too."
+            : L" 対応するノートも追従更新しました。";
+    } else if (!isPdf && noteRewritePlan.HasWork()) {
+        done += IsEnglishUi()
+            ? L" Linked PDF note paths were updated too."
+            : L" 参照しているPDF注釈のリンク先も更新しました。";
+    }
+    ShowSoftNotice(owner, done);
+    return true;
+}
+
+bool RunUiAutomationOperationTransactionRecoveryScenario(std::wstring* outError) {
+    if (g_currentSessionPath.empty()) {
+        if (outError) *outError = L"Operation recovery automation requires an open session.";
+        return false;
+    }
+    const std::filesystem::path sessionRoot(g_currentSessionPath);
+    const std::filesystem::path source = sessionRoot / L"__ui_operation_tx_source.clro";
+    const std::filesystem::path destination = sessionRoot / L"__ui_operation_tx_destination.clro";
+    const std::filesystem::path rewriteTarget = sessionRoot / L"__ui_operation_tx_rewrite.clrop";
+    const std::string sourceOriginal = "operation-source-original";
+    const std::string rewriteOriginal = "operation-rewrite-original";
+    const std::string rewriteObserved = "operation-rewrite-observed-after-pending";
+    std::wstring err;
+    auto writeFixture = [&](const std::filesystem::path& path, const std::string& value) {
+        return atomic_write::AtomicWriteUtf8(path, value, sessionRoot, OperationQuarantineDir(), &err);
+    };
+    if (!writeFixture(source, sourceOriginal) || !writeFixture(rewriteTarget, rewriteOriginal)) {
+        if (outError) *outError = L"Failed to prepare operation recovery fixture.\n" + err;
+        return false;
+    }
+
+    NoteLinkRewritePlan rewritePlan;
+    NoteLinkRewriteFile rewriteFile;
+    rewriteFile.filePath = rewriteTarget;
+    rewritePlan.files.push_back(std::move(rewriteFile));
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moves{{source, destination}};
+    OperationTransaction transaction;
+    if (!PrepareOperationTransaction(moves, rewritePlan, &transaction, &err)) {
+        if (outError) *outError = L"Failed to prepare operation recovery transaction.\n" + err;
+        return false;
+    }
+
+    std::error_code moveEc;
+    std::filesystem::rename(source, destination, moveEc);
+    if (moveEc || !writeFixture(rewriteTarget, rewriteObserved)) {
+        if (outError) *outError = L"Failed to simulate interrupted operation transaction.";
+        return false;
+    }
+    if (!RecoverOperationTransactionToOriginalState(&transaction, sessionRoot, &err)) {
+        if (outError) *outError = L"Failed to recover interrupted operation transaction.\n" + err;
+        return false;
+    }
+
+    std::string recoveredSource;
+    std::string recoveredRewrite;
+    std::error_code destinationEc;
+    const bool destinationExists = std::filesystem::exists(destination, destinationEc);
+    if (!ReadOperationFileBytes(source, recoveredSource, &err) ||
+        !ReadOperationFileBytes(rewriteTarget, recoveredRewrite, &err) ||
+        recoveredSource != sourceOriginal ||
+        recoveredRewrite != rewriteOriginal ||
+        destinationEc || destinationExists) {
+        if (outError) *outError = L"Recovered operation transaction did not restore original files.";
+        return false;
+    }
+
+    bool preservedObserved = false;
+    std::error_code iterEc;
+    for (std::filesystem::directory_iterator it(transaction.dir, iterEc), end;
+         !iterEc && it != end; it.increment(iterEc)) {
+        const std::wstring name = it->path().filename().wstring();
+        if (name.rfind(L"observed_", 0) != 0) continue;
+        std::string observedBytes;
+        if (ReadOperationFileBytes(it->path(), observedBytes, &err) &&
+            observedBytes == rewriteObserved) {
+            preservedObserved = true;
+            break;
+        }
+    }
+    if (iterEc || !preservedObserved) {
+        if (outError) *outError = L"Recovery did not retain the observed intermediate rewrite bytes.";
+        return false;
+    }
+    return true;
+}

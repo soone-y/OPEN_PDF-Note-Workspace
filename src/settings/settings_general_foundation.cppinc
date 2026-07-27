@@ -1,0 +1,1254 @@
+// file: settings/settings_general_foundation.cppinc
+// Included by settings_general.cppinc; contains foundation, option tables, theme editor.
+
+// file: settings/settings_general.cppinc
+// Included by settings.cpp (single TU).
+
+// Settings: General options
+// ---------------------------------------------------------------------
+namespace {
+constexpr COLORREF kDefaultMarkColor = RGB(255, 245, 200);
+constexpr COLORREF kDefaultHeadingColor = RGB(220, 240, 255);
+constexpr DWORD_PTR kColorDefaultData = 0xFFFFFFFFu;
+constexpr DWORD_PTR kComboBoxErrData = static_cast<DWORD_PTR>(CB_ERR);
+constexpr int kGeneralDlgWidth = 920;
+constexpr int kGeneralDlgHeight = 780;
+constexpr int kGeneralSectionCount = 6;
+constexpr int IDC_GENERAL_CATEGORY_BUTTON_BASE = 1600;
+constexpr int IDC_GENERAL_SECTION_LIST = 4188;
+constexpr const wchar_t* kDefaultNameRule = L"回数_授業名_ノート1(連番).clro";
+constexpr int kScheduleDayCount = 7;
+constexpr int kScheduleMaxPeriods = 13;
+constexpr int kDefaultScheduleMask = 0x1F;
+
+enum GeneralSectionIndex : int {
+    kGeneralSectionDisplay = 0,
+    kGeneralSectionNote = 1,
+    kGeneralSectionSave = 2,
+    kGeneralSectionSchedule = 3,
+    kGeneralSectionLayout = 4,
+    kGeneralSectionDebug = 5,
+};
+
+static void EnsureScheduleStartTimesCapacity(std::vector<std::wstring>& times) {
+    size_t total = static_cast<size_t>(kScheduleDayCount * kScheduleMaxPeriods);
+    if (times.size() < total) {
+        times.resize(total);
+    } else if (times.size() > total) {
+        times.resize(total);
+    }
+}
+
+static void ShowScheduleTimeDialog(HWND owner);
+static void ShowAnnotToolShortcutEditor(HWND owner);
+
+// General settings child control IDs are scoped to GeneralSettingsProc.
+// Reused numeric values in other dialogs are allowed only across different HWNDs.
+enum : int {
+    IDC_TONE = 4101,
+    IDC_TONE_VARIANT_PURE,
+    IDC_TONE_VARIANT_GUARD,
+    IDC_TONE_VARIANT_EMPHASIS,
+    IDC_TONE_VARIANT_WHITE,
+    IDC_TONE_VARIANT_BLACK,
+    IDC_BOTTOM_PANE,
+    IDC_SELECTION_STYLE,
+    IDC_QUICKANNOT_POPUP_PLACEMENT,
+    IDC_SHORTCUT_TEXT_TAG_KEY,
+    IDC_SHORTCUT_HEADING_ARROW_INVERT,
+    IDC_SHORTCUT_EDIT,
+    IDC_NOTE_FONT_FACE,
+    IDC_NOTE_FONT,
+    IDC_NOTE_RENDER_FONT_FACE,
+    IDC_NOTE_SYSTEM,
+    IDC_NOTE_PREVIEW,
+    IDC_SHOW_MATH,
+    IDC_LECTURE_SORT,
+    IDC_SESSION_AUTOOPEN_MODE,
+    IDC_SESSION_AUTOOPEN_PAIR,
+    IDC_LAYOUT_DEFAULT_LABEL,
+    IDC_LAYOUT_DEFAULT_SAVE,
+    IDC_AUTOSAVE,
+    IDC_AUTOINTEGRATE,
+    IDC_NAME_PATTERN,
+    IDC_DOWNKEY_LASTLINE_ACTION = 4116,
+    IDC_LRKEY_LINE_MOVE_ACTION = 4117,
+    IDC_WHEEL_INVERT_VERTICAL = 4118,
+    IDC_WHEEL_INVERT_HORIZONTAL = 4119,
+    IDC_TOUCHPAD_INVERT_VERTICAL = 4120,
+    IDC_TOUCHPAD_INVERT_HORIZONTAL = 4121,
+    IDC_PDF_SINGLE_PAGE_MODE = 4140,
+    IDC_PDF_FLOW_MODE = 4184,
+    IDC_SCHEDULE_PERIODS = 4160,
+    IDC_SCHEDULE_TIME_EDIT,
+    IDC_SCHEDULE_EDIT,
+    IDC_SCHEDULE_DAY_BASE = 4170,
+    IDC_NOTE_FONT_CUSTOMIZATION = 4122,
+    IDC_NOTE_RENDER_JP_FONT_FACE,
+    IDC_NOTE_FONT_DIGIT_TARGET,
+    IDC_TONE_CREATE = 4185,
+    IDC_TONE_EDIT = 4187,
+    IDC_NOTE_RENDER_MODE = 4189,
+    IDC_NOTE_WRAP_ENABLED,
+    IDC_NOTE_VIM_MODE,
+    IDC_NOTE_VIM_CARET_LINE_RAW_TEXT,
+    IDC_NOTE_VIM_CLICK_INSERT,
+    IDC_NOTE_GRID_ENABLED,
+    IDC_NOTE_GRID_PITCH,
+    IDC_NOTE_BG_MODE,
+    IDC_NOTE_BG_CUSTOM,
+    IDC_NOTE_MATH_MARGIN,
+    IDC_NOTE_MATH_SUPSUB,
+    IDC_DEBUG_LOG_PREVIEW_TRACE,
+    IDC_DEBUG_LOG_SWITCH_TIMING,
+    IDC_DEBUG_LOG_CRASH,
+    IDC_DEBUG_LOG_STARTUP_WATCHDOG,
+    IDC_AUTO_PAIR_BRACKETS,
+    IDC_FULLWIDTH_PAREN_CARET_INSIDE,
+    IDC_FULLWIDTH_PAREN_CANCEL_NEXT_LEFT,
+    IDC_USE_NATIVE_FILE_DIALOGS,
+    IDC_DEVELOPER_MODE,
+    IDC_STUDENT_MODE,
+    IDC_SESSION_SORT = 4210,
+    IDC_SESSION_NUMBERING = 4211,
+    IDC_POINTER_OFFSET_X = 4212,
+    IDC_POINTER_OFFSET_Y = 4213
+};
+
+enum class GeneralSettingsPageMode {
+    Basic,
+    Note
+};
+
+struct BottomPaneOption {
+    const wchar_t* label;
+    BottomPanePin pin;
+    BottomNoteMode noteMode;
+};
+
+struct ShortcutLayoutOption {
+    const wchar_t* label;
+    const wchar_t* value;
+};
+
+struct LectureSortOption {
+    const wchar_t* label;
+    const wchar_t* value;
+};
+
+struct SessionAutoOpenOption {
+    const wchar_t* label;
+    const wchar_t* value;
+};
+
+struct NoteSystemOption {
+    const wchar_t* label;
+    NoteSystem value;
+};
+
+struct AutoSaveOption {
+    const wchar_t* label;
+    int seconds;
+};
+
+struct DownKeyLastLineOption {
+    const wchar_t* label;
+    const wchar_t* value;
+};
+
+struct LeftRightLineMoveOption {
+    const wchar_t* label;
+    const wchar_t* value;
+};
+
+enum class NoteBackgroundChoiceKind {
+    ThemeCurrent,
+    ThemeNamed,
+    Explicit
+};
+
+struct NoteBackgroundChoice {
+    NoteBackgroundChoiceKind kind = NoteBackgroundChoiceKind::Explicit;
+    std::wstring themeName;
+    COLORREF color = RGB(255, 255, 255);
+    std::wstring label;
+    bool isCustom = false;
+};
+
+static const BottomPaneOption kBottomPaneOptions[] = {
+    { L"ノートテキストの延長", BottomPanePin::Note, BottomNoteMode::Legacy },
+    { L"見出し表示", BottomPanePin::Note, BottomNoteMode::Headings },
+    { L"MathBox入力", BottomPanePin::Math, BottomNoteMode::Legacy },
+    { L"ノートアシスト", BottomPanePin::Note, BottomNoteMode::Assist }
+};
+
+static const ShortcutLayoutOption kQuickAnnotPopupPlacementOptions[] = {
+    { L"自動", L"auto" },
+    { L"境界依存", L"boundary" },
+    { L"常に上", L"up" },
+    { L"常に下", L"down" }
+};
+
+static const ShortcutLayoutOption kShortcutTextTagKeyOptions[] = {
+    { L"char (標準)", L"char" },
+    { L"c (短縮)", L"c" }
+};
+
+static const LectureSortOption kLectureSortOptions[] = {
+    { L"授業スケジュール優先", L"schedule" },
+    { L"名前順", L"name" },
+    { L"最後に触った順", L"recent" }
+};
+
+
+static const ShortcutLayoutOption kSessionSortOptions[] = {
+    { L"数字昇順", L"numeric_asc" },
+    { L"数字降順", L"numeric_desc" },
+    { L"名前順", L"name" }
+};
+
+static const ShortcutLayoutOption kSessionNumberingOptions[] = {
+    { L"ファイル数+1", L"count" },
+    { L"最大番号+1", L"max_number" }
+};
+static const wchar_t* LectureSortOptionLabel(size_t index) {
+    if (index == 0 && !g_config.studentMode) {
+        return IsEnglishUi() ? L"Parent item schedule first" : L"上位項目スケジュール優先";
+    }
+    return kLectureSortOptions[index].label;
+}
+
+static const SessionAutoOpenOption kSessionAutoOpenOptions[] = {
+    { L"オフ", L"off" },
+    { L"編集（更新時刻ベース）", L"edit" },
+    { L"閲覧（最後に開いた順）", L"view" }
+};
+
+static const NoteSystemOption kNoteSystemOptions[] = {
+    { L"legacy (従来)", NoteSystem::Legacy }
+};
+
+static const AutoSaveOption kAutoSaveOptions[] = {
+    { L"オフ", kAutoSaveModeOff },
+    { L"5秒", 5 },
+    { L"30秒", 30 },
+    { L"1分", 60 },
+    { L"5分", 300 }
+};
+
+static const AutoSaveOption kAutoIntegrateOptions[] = {
+    { L"オフ（自動統合なし）", kAutoIntegrateModeOffSwitchExit },
+    { L"5分", 300 },
+    { L"20分", 1200 },
+    { L"カスタマイズ", kAutoIntegrateModeCustom }
+};
+
+static bool IsFixedAutoIntegrateTimerSeconds(int seconds) {
+    return seconds == 300 || seconds == 1200;
+}
+
+static int EffectiveAutoIntegrateCustomMinutes(int minutes) {
+    return std::clamp(minutes,
+                      kAutoIntegrateCustomMinutesMin,
+                      kAutoIntegrateCustomMinutesMax);
+}
+
+static int NormalizeAutoIntegrateModeForUi(int rawSeconds, int* inoutCustomMinutes) {
+    if (rawSeconds == kAutoIntegrateModeOffSwitchExit ||
+        rawSeconds == kAutoIntegrateModeCustom ||
+        IsFixedAutoIntegrateTimerSeconds(rawSeconds)) {
+        return rawSeconds;
+    }
+    if (rawSeconds > 0) {
+        if (inoutCustomMinutes) {
+            int mins = (rawSeconds + 59) / 60;
+            *inoutCustomMinutes = EffectiveAutoIntegrateCustomMinutes(mins);
+        }
+        return kAutoIntegrateModeCustom;
+    }
+    return kAutoIntegrateModeOffSwitchExit;
+}
+
+static bool PromptAutoIntegrateCustomMinutes(HWND owner, int currentMinutes, int* outMinutes) {
+    if (!outMinutes) return false;
+    currentMinutes = EffectiveAutoIntegrateCustomMinutes(currentMinutes);
+    std::wstring input;
+    std::wstring defaultValue = std::to_wstring(currentMinutes);
+    while (true) {
+        std::wstring title = IsEnglishUi()
+            ? L"Auto integrate staged diffs: minutes (1-1440)"
+            : L"未統合差分を自動統合する間隔：分を入力（1〜1440）";
+        if (!PromptSimpleText(owner, title, defaultValue, input)) {
+            return false;
+        }
+        input = TrimWhitespace(input);
+        if (input.empty()) continue;
+        try {
+            int minutes = std::stoi(input);
+            if (minutes < kAutoIntegrateCustomMinutesMin || minutes > kAutoIntegrateCustomMinutesMax) {
+                const wchar_t* err = IsEnglishUi()
+                    ? L"Please enter an integer between 1 and 1440."
+                    : L"1〜1440 の整数を入力してください。";
+                ShowSoftNotice(owner, err, SoftNoticeKind::Warning);
+                defaultValue = input;
+                continue;
+            }
+            *outMinutes = minutes;
+            return true;
+        } catch (...) {
+            const wchar_t* err = IsEnglishUi()
+                ? L"Please enter an integer between 1 and 1440."
+                : L"1〜1440 の整数を入力してください。";
+            ShowSoftNotice(owner, err, SoftNoticeKind::Warning);
+            defaultValue = input;
+        }
+    }
+}
+
+static const DownKeyLastLineOption kDownKeyLastLineOptions[] = {
+    { L"行末に飛ぶ", L"lineend" },
+    { L"行末で改行を追加", L"newline" },
+    { L"しない", L"none" }
+};
+
+static const LeftRightLineMoveOption kLeftRightLineMoveOptions[] = {
+    { L"行移動を許可する", L"allow" },
+    { L"行に留まる", L"stay" }
+};
+
+struct PdfFlowModeOption {
+    const wchar_t* labelJa;
+    const wchar_t* labelEn;
+    const wchar_t* value;
+};
+
+static const PdfFlowModeOption kPdfFlowModeOptions[] = {
+    { L"縦: 上から下", L"Vertical: top to bottom", L"v_ttb" },
+    { L"縦: 下から上", L"Vertical: bottom to top", L"v_btu" },
+    { L"横: 左から右", L"Horizontal: left to right", L"h_ltr" },
+    { L"横: 右から左", L"Horizontal: right to left", L"h_rtl" },
+};
+
+static std::wstring NormalizePdfFlowModeValue(const std::wstring& mode) {
+    std::wstring normalized = mode;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::towlower);
+    if (normalized == L"v_btu" || normalized == L"h_ltr" || normalized == L"h_rtl") {
+        return normalized;
+    }
+    return L"v_ttb";
+}
+
+static std::wstring PdfFlowModeLabel(const std::wstring& mode) {
+    std::wstring normalized = NormalizePdfFlowModeValue(mode);
+    for (const auto& option : kPdfFlowModeOptions) {
+        if (normalized == option.value) {
+            return IsEnglishUi() ? option.labelEn : option.labelJa;
+        }
+    }
+    return IsEnglishUi() ? kPdfFlowModeOptions[0].labelEn : kPdfFlowModeOptions[0].labelJa;
+}
+
+static const wchar_t* kNoteFontCustomizationLabels[] = {
+    L"オフ (メイリオUI / Segoe UI)",
+    L"統一フォント",
+    L"別フォント"
+};
+
+static const wchar_t* kNoteFontDigitTargetLabels[] = {
+    L"英字フォントに従う",
+    L"日本語フォントに従う"
+};
+
+struct GeneralSettingsCtx {
+    HWND owner = nullptr;
+    bool done = false;
+    bool ok = false;
+    bool embedded = false;
+    GeneralSettingsPageMode pageMode = GeneralSettingsPageMode::Basic;
+    int initialSection = 0;
+    HWND headerTitle = nullptr;
+    HWND headerSubtitle = nullptr;
+    std::array<HWND, kSettingsCategoryButtonCount> categoryButtons{};
+    HWND navList = nullptr;
+    HWND scrollPanel = nullptr;
+    HWND btnOk = nullptr;
+    HWND btnCancel = nullptr;
+    bool reopenOnCancel = false;
+    bool notifyCancelDiscard = false;
+    int reopenSection = kGeneralSectionDisplay;
+    int nextDialog = kSettingsNavNone;
+    HWND cbTone = nullptr;
+    HWND radTonePure = nullptr;
+    HWND radToneGuard = nullptr;
+    HWND radToneEmphasis = nullptr;
+    HWND radToneWhite = nullptr;
+    HWND radToneBlack = nullptr;
+    HWND btnToneCreate = nullptr;
+    HWND btnToneEdit = nullptr;
+    HWND cbBottomPane = nullptr;
+    HWND cbPdfFlowMode = nullptr;
+    HWND cbSelectionStyle = nullptr;
+    HWND cbPointerOffsetX = nullptr;
+    HWND cbPointerOffsetY = nullptr;
+    HWND chkShowMath = nullptr;
+    HWND chkWheelInvertVertical = nullptr;
+    HWND chkWheelInvertHorizontal = nullptr;
+    HWND chkTouchpadInvertVertical = nullptr;
+    HWND chkTouchpadInvertHorizontal = nullptr;
+    HWND chkPdfSinglePageMode = nullptr;
+    HWND chkAutoPairBrackets = nullptr;
+    HWND chkFullWidthParenCaretInside = nullptr;
+    HWND chkFullWidthParenCancelNextLeft = nullptr;
+    HWND cbDownKeyAction = nullptr;
+    HWND cbLeftRightLineMoveAction = nullptr;
+    HWND chkNoteRender = nullptr;
+    HWND cbNoteSystem = nullptr;
+    HWND cbQuickAnnotPopupPlacement = nullptr;
+    HWND cbShortcutTextTagKey = nullptr;
+    HWND chkShortcutHeadingArrowInvert = nullptr;
+    HWND cbLectureSort = nullptr;
+    HWND cbSessionSort = nullptr;
+    HWND cbSessionNumbering = nullptr;
+    HWND cbSessionAutoOpenMode = nullptr;
+    HWND chkSessionAutoOpenPair = nullptr;
+    HWND btnShortcutEdit = nullptr;
+    HWND cbNoteFontFace = nullptr;
+    HWND cbNoteFont = nullptr;
+    HWND cbNoteRenderFontFace = nullptr;
+    HWND cbNoteFontCustomization = nullptr;
+    HWND cbNoteRenderJpFontFace = nullptr;
+    HWND cbNoteFontDigitTarget = nullptr;
+    HWND cbNoteRenderMode = nullptr;
+    HWND chkNoteWrapEnabled = nullptr;
+    HWND chkNoteVimMode = nullptr;
+    HWND chkNoteVimCaretLineRawText = nullptr;
+    HWND chkNoteVimClickInsert = nullptr;
+    HWND chkNoteGridEnabled = nullptr;
+    HWND cbNoteGridPitch = nullptr;
+    HWND cbNoteBgMode = nullptr;
+    HWND btnNoteBgCustom = nullptr;
+    HWND cbNoteMathMargin = nullptr;
+    HWND cbNoteMathSupSub = nullptr;
+    HWND lblNoteRenderLatin = nullptr;
+    HWND lblNoteRenderJp = nullptr;
+    HWND lblNoteFontDigit = nullptr;
+    HWND previewNote = nullptr;
+    HWND cbAutoSave = nullptr;
+    HWND cbAutoIntegrate = nullptr;
+    HWND editNameRule = nullptr;
+    HWND chkUseNativeFileDialogs = nullptr;
+    HWND chkDeveloperMode = nullptr;
+    HWND chkStudentMode = nullptr;
+    HWND chkDebugLogPreviewTrace = nullptr;
+    HWND chkDebugLogSwitchTiming = nullptr;
+    HWND chkDebugLogCrash = nullptr;
+    HWND chkDebugLogStartupWatchdog = nullptr;
+    HWND cbSchedulePeriods = nullptr;
+    HWND btnScheduleTimeEdit = nullptr;
+    HWND btnScheduleEdit = nullptr;
+    std::vector<HWND> scheduleDayChecks;
+    std::vector<NoteBackgroundChoice> noteBgChoices;
+    COLORREF noteBgCustomColor = RGB(255, 255, 255);
+    HWND lblLayoutDefaults = nullptr;
+    HFONT previewFont = nullptr;
+    int sectionTops[kGeneralSectionCount]{};
+    int sectionCount = 0;
+    int scrollPos = 0;
+    int scrollMax = 0;
+    int wheelRemainder = 0;
+    int contentHeight = 0;
+    int clientHeight = 0;
+};
+
+static void UpdateGeneralSectionNavUi(GeneralSettingsCtx* ctx, int sectionIndex) {
+    if (!ctx) return;
+    int clamped = std::clamp(sectionIndex, 0, std::max(0, ctx->sectionCount - 1));
+    if (ctx->navList) {
+        SendMessageW(ctx->navList, LB_SETCURSEL, clamped, 0);
+    }
+}
+
+static std::wstring NormalizeNoteBgSourceUi(const std::wstring& source) {
+    std::wstring s = source;
+    std::transform(s.begin(), s.end(), s.begin(), ::towlower);
+    if (s == L"theme" || s == L"theme_current" || s == L"theme-follow") return L"theme_current";
+    if (s == L"theme_named" || s == L"theme_name" || s == L"theme_fixed") return L"theme_named";
+    return L"explicit";
+}
+
+static int CurrentNoteRenderModeValue(bool enabled, bool math) {
+    if (!enabled) return 0;
+    return math ? 2 : 1;
+}
+
+static std::wstring NoteRenderModeLabel(bool enabled, bool math) {
+    const int mode = CurrentNoteRenderModeValue(enabled, math);
+    if (IsEnglishUi()) {
+        if (mode == 2) return L"ON + Math";
+        if (mode == 1) return L"ON";
+        return L"OFF";
+    }
+    if (mode == 2) return L"ON + 数式";
+    if (mode == 1) return L"ON";
+    return L"OFF";
+}
+
+static std::wstring NoteRatioLabel(int topPercent) {
+    int top = std::clamp(topPercent, 5, 95);
+    return std::to_wstring(top) + L":" + std::to_wstring(100 - top);
+}
+
+static std::wstring NoteSupSubDistributionLabel(int supPercent) {
+    if (supPercent <= 0) return IsEnglishUi() ? L"Auto" : L"自動";
+    return NoteRatioLabel(supPercent);
+}
+
+static COLORREF ResolveNoteBackgroundColor(const std::wstring& source,
+                                           const std::wstring& themeName,
+                                           COLORREF explicitColor) {
+    std::wstring normalized = NormalizeNoteBgSourceUi(source);
+    if (normalized == L"theme_current") {
+        return g_theme.noteBg;
+    }
+    if (normalized == L"theme_named" && !themeName.empty()) {
+        for (const auto& t : g_themeCatalog) {
+            if (t.name == themeName) return t.noteBg;
+        }
+        return g_theme.noteBg;
+    }
+    return explicitColor;
+}
+
+static std::wstring GenHexColorW(COLORREF c);
+
+static std::wstring NoteBackgroundLabel(const std::wstring& source,
+                                        const std::wstring& themeName,
+                                        COLORREF explicitColor) {
+    const std::wstring normalized = NormalizeNoteBgSourceUi(source);
+    const COLORREF resolved = ResolveNoteBackgroundColor(source, themeName, explicitColor);
+    if (normalized == L"theme_current") {
+        if (IsEnglishUi()) {
+            std::wstring name = g_theme.name.empty() ? L"(default)" : g_theme.name;
+            return L"Current theme " + name + L" " + GenHexColorW(resolved);
+        }
+        std::wstring name = g_theme.nameJp.empty() ? (g_theme.name.empty() ? L"(既定)" : g_theme.name) : g_theme.nameJp;
+        return L"現在のテーマ " + name + L" " + GenHexColorW(resolved);
+    }
+    if (normalized == L"theme_named") {
+        const ThemeColors* picked = nullptr;
+        for (const auto& t : g_themeCatalog) {
+            if (t.name == themeName) {
+                picked = &t;
+                break;
+            }
+        }
+        std::wstring name = IsEnglishUi()
+            ? (picked ? (picked->name.empty() ? themeName : picked->name) : themeName)
+            : (picked ? (!picked->nameJp.empty() ? picked->nameJp : picked->name) : themeName);
+        if (name.empty()) name = IsEnglishUi() ? L"(unknown)" : L"(不明)";
+        return name + L" " + GenHexColorW(resolved);
+    }
+    return GenHexColorW(explicitColor);
+}
+
+static void FillNoteRenderModeCombo(HWND cb, bool enabled, bool math) {
+    if (!cb) return;
+    SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+    struct Item { const wchar_t* ja; const wchar_t* en; int value; };
+    const Item items[] = {
+        { L"OFF", L"OFF", 0 },
+        { L"ON", L"ON", 1 },
+        { L"ON + 数式", L"ON + Math", 2 },
+    };
+    const int current = CurrentNoteRenderModeValue(enabled, math);
+    int sel = 0;
+    for (int i = 0; i < static_cast<int>(std::size(items)); ++i) {
+        const wchar_t* label = IsEnglishUi() ? items[i].en : items[i].ja;
+        int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label)));
+        if (idx >= 0) {
+            SendMessageW(cb, CB_SETITEMDATA, idx, static_cast<LPARAM>(items[i].value));
+            if (items[i].value == current) sel = idx;
+        }
+    }
+    SendMessageW(cb, CB_SETCURSEL, sel, 0);
+}
+
+static void FillNoteGridPitchCombo(HWND cb, int currentPitch) {
+    if (!cb) return;
+    SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+    const int values[] = { 8, 12, 16, 20, 24, 28, 32, 40, 48 };
+    int sel = 0;
+    for (int i = 0; i < static_cast<int>(std::size(values)); ++i) {
+        std::wstring label = std::to_wstring(values[i]) + L"px";
+        int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+        if (idx >= 0) {
+            SendMessageW(cb, CB_SETITEMDATA, idx, static_cast<LPARAM>(values[i]));
+            if (values[i] == currentPitch) sel = idx;
+        }
+    }
+    SendMessageW(cb, CB_SETCURSEL, sel, 0);
+}
+
+static void FillNoteRatioCombo(HWND cb, int currentPercent, bool withAuto) {
+    if (!cb) return;
+    SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+    int sel = 0;
+    if (withAuto) {
+        int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>((IsEnglishUi() ? L"Auto" : L"自動"))));
+        if (idx >= 0) {
+            SendMessageW(cb, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
+            if (currentPercent <= 0) sel = idx;
+        }
+    }
+    int clamped = std::clamp(currentPercent <= 0 ? 75 : currentPercent, 5, 95);
+    for (int top = 95; top >= 5; top -= 5) {
+        std::wstring label = NoteRatioLabel(top);
+        int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+        if (idx >= 0) {
+            SendMessageW(cb, CB_SETITEMDATA, idx, static_cast<LPARAM>(top));
+            if (top == clamped && currentPercent > 0) sel = idx;
+        }
+    }
+    SendMessageW(cb, CB_SETCURSEL, sel, 0);
+}
+
+static void UpdateNoteBackgroundButtonLabel(GeneralSettingsCtx* ctx) {
+    if (!ctx || !ctx->btnNoteBgCustom) return;
+    std::wstring text = (IsEnglishUi() ? L"Custom color..." : L"カスタム色...")
+        + std::wstring(L" ") + GenHexColorW(ctx->noteBgCustomColor);
+    SetWindowTextW(ctx->btnNoteBgCustom, text.c_str());
+}
+
+static void FillNoteBackgroundCombo(GeneralSettingsCtx* ctx) {
+    if (!ctx || !ctx->cbNoteBgMode) return;
+    ctx->noteBgChoices.clear();
+    SendMessageW(ctx->cbNoteBgMode, CB_RESETCONTENT, 0, 0);
+
+    auto addChoice = [&](const NoteBackgroundChoice& choice) -> int {
+        int idx = static_cast<int>(SendMessageW(ctx->cbNoteBgMode, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(choice.label.c_str())));
+        if (idx >= 0) {
+            ctx->noteBgChoices.push_back(choice);
+            SendMessageW(ctx->cbNoteBgMode, CB_SETITEMDATA, idx,
+                         static_cast<LPARAM>(ctx->noteBgChoices.size() - 1));
+        }
+        return idx;
+    };
+
+    int sel = 0;
+    const std::wstring normalized = NormalizeNoteBgSourceUi(g_config.noteBgSource);
+    const COLORREF explicitColor = ctx->noteBgCustomColor;
+
+    {
+        NoteBackgroundChoice choice;
+        choice.kind = NoteBackgroundChoiceKind::ThemeCurrent;
+        choice.color = g_theme.noteBg;
+        choice.label = IsEnglishUi()
+            ? (L"Current theme: " + (g_theme.name.empty() ? L"(default)" : g_theme.name) + L" " + GenHexColorW(choice.color))
+            : (L"現在のテーマ: " + (g_theme.nameJp.empty() ? (g_theme.name.empty() ? L"(既定)" : g_theme.name) : g_theme.nameJp) + L" " + GenHexColorW(choice.color));
+        int idx = addChoice(choice);
+        if (normalized == L"theme_current") sel = idx;
+    }
+    for (const auto& theme : g_themeCatalog) {
+        NoteBackgroundChoice choice;
+        choice.kind = NoteBackgroundChoiceKind::ThemeNamed;
+        choice.themeName = theme.name;
+        choice.color = theme.noteBg;
+        std::wstring name = IsEnglishUi()
+            ? (theme.name.empty() ? L"(unnamed)" : theme.name)
+            : (!theme.nameJp.empty() ? theme.nameJp : (theme.name.empty() ? L"(名称なし)" : theme.name));
+        choice.label = (IsEnglishUi() ? L"Theme: " : L"テーマ: ") + name + L" " + GenHexColorW(choice.color);
+        int idx = addChoice(choice);
+        if (normalized == L"theme_named" && theme.name == g_config.noteBgThemeName) sel = idx;
+    }
+    struct Preset { COLORREF color; const wchar_t* ja; const wchar_t* en; };
+    const Preset presets[] = {
+        { RGB(255, 255, 255), L"白", L"White" },
+        { RGB(255, 250, 235), L"クリーム", L"Cream" },
+        { RGB(245, 245, 245), L"薄グレー", L"Light gray" },
+        { RGB(255, 255, 230), L"薄イエロー", L"Soft yellow" },
+    };
+    for (const auto& preset : presets) {
+        NoteBackgroundChoice choice;
+        choice.kind = NoteBackgroundChoiceKind::Explicit;
+        choice.color = preset.color;
+        choice.label = std::wstring(IsEnglishUi() ? preset.en : preset.ja) + L" " + GenHexColorW(choice.color);
+        int idx = addChoice(choice);
+        if (normalized == L"explicit" && explicitColor == preset.color) sel = idx;
+    }
+    {
+        NoteBackgroundChoice choice;
+        choice.kind = NoteBackgroundChoiceKind::Explicit;
+        choice.color = explicitColor;
+        choice.isCustom = true;
+        choice.label = (IsEnglishUi() ? L"Custom color " : L"カスタム色 ") + GenHexColorW(choice.color);
+        int idx = addChoice(choice);
+        if (normalized == L"explicit") {
+            bool isPreset = false;
+            for (const auto& preset : presets) {
+                if (explicitColor == preset.color) {
+                    isPreset = true;
+                    break;
+                }
+            }
+            if (!isPreset) sel = idx;
+        }
+    }
+    SendMessageW(ctx->cbNoteBgMode, CB_SETCURSEL, std::max(0, sel), 0);
+    UpdateNoteBackgroundButtonLabel(ctx);
+}
+
+static void UpdateGeneralNoteControlStates(GeneralSettingsCtx* ctx) {
+    if (!ctx) return;
+    int renderMode = static_cast<int>(SelectedComboItemData(
+        ctx->cbNoteRenderMode, static_cast<DWORD_PTR>(CurrentNoteRenderModeValue(g_noteRenderEnabled, g_noteRenderMath))));
+    bool rawMode = (renderMode == 0);
+    if (ctx->chkNoteWrapEnabled) {
+        EnableWindow(ctx->chkNoteWrapEnabled, rawMode);
+    }
+    bool vimEnabled = ctx->chkNoteVimMode &&
+        (SendMessageW(ctx->chkNoteVimMode, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    if (ctx->chkNoteVimCaretLineRawText) {
+        EnableWindow(ctx->chkNoteVimCaretLineRawText, vimEnabled);
+    }
+    if (ctx->chkNoteVimClickInsert) {
+        EnableWindow(ctx->chkNoteVimClickInsert, vimEnabled);
+    }
+    bool gridEnabled = ctx->chkNoteGridEnabled &&
+        (SendMessageW(ctx->chkNoteGridEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    if (ctx->cbNoteGridPitch) {
+        EnableWindow(ctx->cbNoteGridPitch, gridEnabled);
+    }
+}
+
+static void RefreshNoteBackgroundUi(HWND owner) {
+    if (g_hThemeNoteBrush) {
+        DeleteObject(g_hThemeNoteBrush);
+        g_hThemeNoteBrush = nullptr;
+    }
+    g_hThemeNoteBrush = CreateSolidBrush(g_noteBgColor);
+    ApplyThemeToUI(owner);
+    if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
+    if (g_hNoteEdit) InvalidateRect(g_hNoteEdit, nullptr, FALSE);
+}
+
+static std::wstring FormatThemeLabel(const ThemeColors& theme);
+static bool TryParseHex6FromThemeFileId(const std::wstring& fileId, std::wstring* outHex6 = nullptr);
+static bool IsEditableThemeSelection(const std::wstring& themeName);
+static std::wstring GetSelectedToneThemeName(const GeneralSettingsCtx* ctx);
+static void UpdateToneEditButtonEnabled(GeneralSettingsCtx* ctx);
+
+static void FillToneComboFromCatalog(HWND cb) {
+    if (!cb) return;
+    SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+    int sel = 0;
+    for (size_t i = 0; i < g_themeCatalog.size(); ++i) {
+        std::wstring label = FormatThemeLabel(g_themeCatalog[i]);
+        int comboIndex = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+        if (comboIndex >= 0) {
+            SendMessageW(cb, CB_SETITEMDATA, comboIndex, static_cast<LPARAM>(i));
+            if (!g_themeName.empty() && g_themeName == g_themeCatalog[i].name) {
+                sel = comboIndex;
+            }
+        }
+    }
+    SendMessageW(cb, CB_SETCURSEL, sel, 0);
+}
+
+static LRESULT CALLBACK SettingsScrollPanelProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        return ThemeCtlColorPanel(ctl, hdc);
+    }
+    case WM_COMMAND:
+    case WM_DRAWITEM:
+    case WM_MEASUREITEM:
+        return SendMessageW(GetParent(hWnd), msg, wParam, lParam);
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+        return SendMessageW(GetParent(hWnd), msg, wParam, lParam);
+    default:
+        break;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static LRESULT CALLBACK SettingsNavListSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
+                                                    LPARAM lParam, UINT_PTR subclassId,
+                                                    DWORD_PTR refData) {
+    (void)wParam;
+    (void)lParam;
+    (void)subclassId;
+    (void)refData;
+    switch (msg) {
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+        // The left navigation is for explicit jumps only; wheel should scroll the content pane instead.
+        if (HWND parent = GetParent(hWnd)) {
+            return SendMessageW(parent, msg, wParam, lParam);
+        }
+        return 0;
+    default:
+        break;
+    }
+    return DefSubclassProc(hWnd, msg, wParam, lParam);
+}
+
+static void EnsureSettingsScrollPanelClass() {
+    static bool registered = false;
+    if (registered) return;
+
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = SettingsScrollPanelProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush
+                                           : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"SettingsScrollPanelClass";
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+static void ScrollGeneralSettingsTo(HWND hWnd, GeneralSettingsCtx* ctx, int newPos) {
+    if (!hWnd || !ctx || !ctx->scrollPanel) return;
+    int clamped = std::clamp(newPos, 0, ctx->scrollMax);
+    if (clamped == ctx->scrollPos) return;
+    int delta = ctx->scrollPos - clamped;
+    ctx->scrollPos = clamped;
+    ScrollWindowEx(ctx->scrollPanel, 0, delta, nullptr, nullptr, nullptr, nullptr,
+                   SW_INVALIDATE | SW_ERASE | SW_SCROLLCHILDREN);
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_POS;
+    si.nPos = clamped;
+    SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+}
+
+static void JumpGeneralSettingsToSection(HWND hWnd, GeneralSettingsCtx* ctx, int sectionIndex) {
+    if (!ctx) return;
+    if (sectionIndex < 0 || sectionIndex >= ctx->sectionCount) return;
+    ScrollGeneralSettingsTo(hWnd, ctx, ctx->sectionTops[sectionIndex]);
+}
+
+static void LayoutGeneralSettingsChrome(HWND hWnd, GeneralSettingsCtx* ctx) {
+    if (!hWnd || !ctx) return;
+
+    const bool showNoteSectionOnly = ctx->pageMode == GeneralSettingsPageMode::Note;
+    (void)showNoteSectionOnly;
+    const bool useSectionNav = true;
+    const int pad = ScaleY(hWnd, 12);
+    const int rowH = std::max(ScaleY(hWnd, 24), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
+    const int navW = useSectionNav ? ScaleY(hWnd, ctx->embedded ? 170 : 200) : 0;
+    const int columnGap = useSectionNav ? ScaleY(hWnd, 18) : 0;
+    const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
+    const int titleH = std::max(rowH, ScaleY(hWnd, 30));
+
+    RECT rc{};
+    GetClientRect(hWnd, &rc);
+    int clientW = std::max(0, static_cast<int>(rc.right - rc.left));
+    int clientH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+
+    int subtitleH = 0;
+    int sectionButtonH = 0;
+    int sectionButtonTop = pad;
+    int headerH = 0;
+    if (!ctx->embedded) {
+        std::wstring subtitle = IsEnglishUi()
+            ? L"Use the buttons below or the list on the left to move. Changes apply only when you press Apply."
+            : L"下のボタンまたは左のカテゴリで移動できます。変更は「反映」を押すまで反映されません。";
+        subtitleH = std::max(FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 4),
+                             MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
+        sectionButtonH = std::max(ScaleY(hWnd, 28), rowH);
+        sectionButtonTop = pad + titleH + subtitleH + ScaleY(hWnd, 8);
+        headerH = titleH + subtitleH + sectionButtonH + ScaleY(hWnd, 20);
+    }
+    int panelTop = pad + headerH;
+    int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
+    int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
+    int contentPaneX = pad + navW + columnGap;
+    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - contentPaneX - pad);
+
+    if (!ctx->embedded && ctx->headerTitle) {
+        SetWindowPos(ctx->headerTitle, nullptr, pad, pad, clientW - pad * 2, titleH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (!ctx->embedded && ctx->headerSubtitle) {
+        SetWindowPos(ctx->headerSubtitle, nullptr, pad, pad + titleH, clientW - pad * 2, subtitleH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (!ctx->embedded) {
+        LayoutHeaderSectionButtons(hWnd, ctx->categoryButtons, pad, sectionButtonTop, clientW - pad * 2, sectionButtonH);
+    }
+    if (ctx->navList && useSectionNav) {
+        SetWindowPos(ctx->navList, nullptr, pad, panelTop, navW, panelH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(ctx->navList, SW_SHOW);
+    } else if (ctx->navList) {
+        ShowWindow(ctx->navList, SW_HIDE);
+    }
+    if (ctx->scrollPanel) {
+        SetWindowPos(ctx->scrollPanel, nullptr, contentPaneX, panelTop, contentPaneW, panelH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (!ctx->embedded) {
+        int btnH = std::max(ScaleY(hWnd, 32), rowH);
+        int okW = ScaleY(hWnd, 88);
+        int cancelW = ScaleY(hWnd, 108);
+        int btnGap = ScaleY(hWnd, 10);
+        int btnY = clientH - pad - btnH;
+        int xCancel = std::max(pad, clientW - pad - cancelW);
+        int xOk = std::max(pad, xCancel - btnGap - okW);
+        if (ctx->btnOk) {
+            SetWindowPos(ctx->btnOk, nullptr, xOk, btnY, okW, btnH,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if (ctx->btnCancel) {
+            SetWindowPos(ctx->btnCancel, nullptr, xCancel, btnY, cancelW, btnH,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
+// Theme editor (colors)
+namespace {
+constexpr int kThemeEditDlgWidth = 520;
+constexpr int kThemeEditDlgHeight = 760;
+constexpr int kThemeEditBtnBase = 6200;
+constexpr int kThemeEditBtnCountMax = 64;
+
+struct ThemeColorFieldDesc {
+    const wchar_t* en;
+    const wchar_t* ja;
+    COLORREF ThemeColors::*member;
+};
+
+static const ThemeColorFieldDesc kThemeColorFields[] = {
+    { L"Window background",  L"ウィンドウ背景",     &ThemeColors::windowBg },
+    { L"Window text",        L"ウィンドウ文字",     &ThemeColors::windowText },
+    { L"Panel background",   L"パネル背景",         &ThemeColors::panelBg },
+    { L"Panel text",         L"パネル文字",         &ThemeColors::panelText },
+    { L"Menu background",    L"メニュー背景",       &ThemeColors::menuBg },
+    { L"Menu text",          L"メニュー文字",       &ThemeColors::menuText },
+    { L"Menu selection bg",  L"メニュー選択背景",   &ThemeColors::menuSelBg },
+    { L"Menu selection text",L"メニュー選択文字",   &ThemeColors::menuSelText },
+    { L"Toolbar background", L"ツールバー背景",     &ThemeColors::toolbarBg },
+    { L"Toolbar text",       L"ツールバー文字",     &ThemeColors::toolbarText },
+    { L"Button background",  L"ボタン背景",         &ThemeColors::buttonBg },
+    { L"Button text",        L"ボタン文字",         &ThemeColors::buttonText },
+    { L"Button border",      L"ボタン枠",           &ThemeColors::buttonBorder },
+    { L"Button hot",         L"ボタンホバー",       &ThemeColors::buttonHot },
+    { L"Button pressed",     L"ボタン押下",         &ThemeColors::buttonPressed },
+    { L"Splitter background",L"スプリッター背景",   &ThemeColors::splitterBg },
+    { L"Splitter line",      L"スプリッター線",     &ThemeColors::splitterLine },
+    { L"PDF background",     L"PDF背景",            &ThemeColors::pdfBg },
+    { L"PDF page bg",        L"PDFページ背景",      &ThemeColors::pdfPageBg },
+    { L"Note background",    L"ノート背景",         &ThemeColors::noteBg },
+    { L"Note text",          L"ノート文字",         &ThemeColors::noteText },
+    { L"Selection background",L"選択背景",          &ThemeColors::selectionBg },
+    { L"Selection text",     L"選択文字",           &ThemeColors::selectionText },
+    { L"Accent",             L"アクセント",         &ThemeColors::accent },
+};
+
+struct ThemeEditCtx {
+    HWND owner = nullptr;
+    bool done = false;
+    bool ok = false;
+    size_t themeIndex = static_cast<size_t>(-1);
+    ThemeColors editing;
+    int scrollPos = 0;
+    int scrollMax = 0;
+    int contentHeight = 0;
+    int clientHeight = 0;
+};
+
+static double ColorLuminanceForText(COLORREF c) {
+    return 0.299 * GetRValue(c) + 0.587 * GetGValue(c) + 0.114 * GetBValue(c);
+}
+
+static void DrawColorPickButton(LPDRAWITEMSTRUCT dis, COLORREF color) {
+    if (!dis) return;
+    RECT rc = dis->rcItem;
+    HBRUSH brush = CreateSolidBrush(color);
+    FillRect(dis->hDC, &rc, brush);
+    DeleteObject(brush);
+
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
+    HGDIOBJ oldPen = SelectObject(dis->hDC, pen);
+    HGDIOBJ oldBrush = SelectObject(dis->hDC, GetStockObject(HOLLOW_BRUSH));
+    Rectangle(dis->hDC, rc.left, rc.top, rc.right, rc.bottom);
+    SelectObject(dis->hDC, oldBrush);
+    SelectObject(dis->hDC, oldPen);
+    DeleteObject(pen);
+
+    wchar_t buf[16]{};
+    swprintf(buf, 16, L"#%02X%02X%02X", GetRValue(color), GetGValue(color), GetBValue(color));
+    std::wstring text(buf);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    COLORREF textCol = (ColorLuminanceForText(color) < 140.0) ? RGB(255, 255, 255) : RGB(0, 0, 0);
+    SetTextColor(dis->hDC, textCol);
+    DrawTextW(dis->hDC, text.c_str(), -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+static size_t FindThemeIndexByName(const std::wstring& name) {
+    for (size_t i = 0; i < g_themeCatalog.size(); ++i) {
+        if (g_themeCatalog[i].name == name) return i;
+    }
+    return static_cast<size_t>(-1);
+}
+
+static LRESULT CALLBACK ThemeEditDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<ThemeEditCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = reinterpret_cast<ThemeEditCtx*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        ApplyThemeToDialog(hWnd);
+
+        const bool isEn = IsEnglishUi();
+        int pad = ScaleY(hWnd, 12);
+        int gapY = ScaleY(hWnd, 8);
+        int rowH = std::max(ScaleY(hWnd, 26), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 8));
+        int btnW = ScaleY(hWnd, 140);
+        int gapX = ScaleY(hWnd, 12);
+        int colGap = ScaleY(hWnd, 18);
+
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        int clientW = std::max(0, static_cast<int>(rc.right - rc.left));
+        int contentW = std::max(0, clientW - pad * 2);
+        int colW = std::max(0, (contentW - colGap) / 2);
+        int labelW = std::max(0, colW - btnW - gapX);
+
+        int y = pad;
+        std::wstring title = (isEn ? L"Theme editor: " : L"テーマ編集: ") + FormatThemeLabel(ctx->editing);
+        HWND lblTitle = CreateWindowExW(0, L"STATIC", title.c_str(),
+                                        WS_CHILD | WS_VISIBLE,
+                                        pad, y, contentW, rowH, hWnd, nullptr, g_hInst, nullptr);
+        SetUIFont(lblTitle);
+        y += rowH + gapY;
+
+        size_t count = std::min<size_t>(std::size(kThemeColorFields), kThemeEditBtnCountMax);
+        size_t rows = (count + 1) / 2;
+        for (size_t r = 0; r < rows; ++r) {
+            for (size_t c = 0; c < 2; ++c) {
+                size_t i = r + rows * c;
+                if (i >= count) continue;
+                const auto& f = kThemeColorFields[i];
+                const wchar_t* label = isEn ? f.en : f.ja;
+
+                int baseX = pad + static_cast<int>(c) * (colW + colGap);
+                HWND lbl = CreateWindowExW(0, L"STATIC", label,
+                                           WS_CHILD | WS_VISIBLE,
+                                           baseX, y, labelW, rowH, hWnd, nullptr, g_hInst, nullptr);
+                SetUIFont(lbl);
+                HWND btn = CreateWindowExW(0, L"BUTTON", L"",
+                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                           baseX + labelW + gapX, y, btnW, rowH,
+                                           hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kThemeEditBtnBase + i)),
+                                           g_hInst, nullptr);
+                SetUIFont(btn);
+            }
+            y += rowH + gapY;
+        }
+
+        int btnH = rowH;
+        int okW = ScaleY(hWnd, 90);
+        int cancelW = ScaleY(hWnd, 90);
+        int totalW = okW + ScaleY(hWnd, 12) + cancelW;
+        int x = pad + std::max(0, contentW - totalW);
+            HWND ok = CreateWindowExW(0, L"BUTTON", UiOkLabel(),
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                 x, y + ScaleY(hWnd, 6), okW, btnH, hWnd,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
+            HWND cancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel(),
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                     x + okW + ScaleY(hWnd, 12), y + ScaleY(hWnd, 6), cancelW, btnH, hWnd,
+                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
+        SetUIFont(ok);
+        SetUIFont(cancel);
+
+        // Scroll (for small screens / high DPI)
+        if (ctx) {
+            ctx->contentHeight = y + btnH + ScaleY(hWnd, 40);
+            RECT clientRc{};
+            GetClientRect(hWnd, &clientRc);
+            ctx->clientHeight = std::max(0, static_cast<int>(clientRc.bottom - clientRc.top));
+            ctx->scrollPos = 0;
+            UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
+                               &ctx->scrollPos, &ctx->scrollMax);
+        }
+        return 0;
+    }
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_SIZE: {
+        if (!ctx) break;
+        RECT clientRc{};
+        GetClientRect(hWnd, &clientRc);
+        ctx->clientHeight = std::max(0, static_cast<int>(clientRc.bottom - clientRc.top));
+        UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
+                           &ctx->scrollPos, &ctx->scrollMax);
+        return 0;
+    }
+    case WM_VSCROLL: {
+        if (!ctx) break;
+        int action = LOWORD(wParam);
+        int newPos = ctx->scrollPos;
+        if (action == SB_LINEUP) newPos -= ScaleY(hWnd, 24);
+        else if (action == SB_LINEDOWN) newPos += ScaleY(hWnd, 24);
+        else if (action == SB_PAGEUP) newPos -= std::max(1, ctx->clientHeight - ScaleY(hWnd, 24));
+        else if (action == SB_PAGEDOWN) newPos += std::max(1, ctx->clientHeight - ScaleY(hWnd, 24));
+        else if (action == SB_THUMBTRACK || action == SB_THUMBPOSITION) {
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_TRACKPOS;
+            GetScrollInfo(hWnd, SB_VERT, &si);
+            newPos = si.nTrackPos;
+        } else if (action == SB_TOP) newPos = 0;
+        else if (action == SB_BOTTOM) newPos = ctx->scrollMax;
+        ScrollDialogTo(hWnd, newPos, &ctx->scrollPos, ctx->scrollMax);
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        if (!ctx) break;
+        const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        int step = ScaleY(hWnd, 48);
+        int newPos = ctx->scrollPos - MulDiv(delta, step, WHEEL_DELTA);
+        ScrollDialogTo(hWnd, newPos, &ctx->scrollPos, ctx->scrollMax);
+        return 0;
+    }
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        return ThemeCtlColorPanel(ctl, hdc);
+    }
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (!dis || !ctx) break;
+        int id = static_cast<int>(dis->CtlID);
+        if (id >= kThemeEditBtnBase && id < kThemeEditBtnBase + static_cast<int>(std::size(kThemeColorFields))) {
+            size_t idx = static_cast<size_t>(id - kThemeEditBtnBase);
+            if (idx < std::size(kThemeColorFields)) {
+                COLORREF c = ctx->editing.*(kThemeColorFields[idx].member);
+                DrawColorPickButton(dis, c);
+                return TRUE;
+            }
+        }
+        break;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        if (!ctx) break;
+        if (id == IDOK) {
+            ctx->ok = true;
+            ctx->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (id == IDCANCEL || id == 0) {
+            ctx->ok = false;
+            ctx->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (id >= kThemeEditBtnBase && id < kThemeEditBtnBase + static_cast<int>(std::size(kThemeColorFields))) {
+            size_t idx = static_cast<size_t>(id - kThemeEditBtnBase);
+            if (idx < std::size(kThemeColorFields)) {
+                COLORREF cur = ctx->editing.*(kThemeColorFields[idx].member);
+                COLORREF picked = cur;
+                if (PickColorDialog(hWnd, picked, &picked)) {
+                    ctx->editing.*(kThemeColorFields[idx].member) = picked;
+                    HWND btn = GetDlgItem(hWnd, id);
+                    if (btn) InvalidateRect(btn, nullptr, TRUE);
+                }
+            }
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        if (ctx) ctx->done = true;
+        DestroyWindow(hWnd);
+        return 0;
+    case WM_DESTROY:
+        if (ctx) ctx->done = true;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static bool ShowThemeEditDialog(HWND owner, const std::wstring& themeName, ThemeColors* outEdited) {
+    if (outEdited) *outEdited = ThemeColors{};
+    if (themeName.empty()) return false;
+    size_t idx = FindThemeIndexByName(themeName);
+    if (idx == static_cast<size_t>(-1) || idx >= g_themeCatalog.size()) return false;
+
+    ThemeEditCtx ctx{};
+    ctx.owner = owner;
+    ctx.themeIndex = idx;
+    ctx.editing = g_themeCatalog[idx];
+
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = ThemeEditDlgProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush
+                                           : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"ThemeEditDlgClass";
+    RegisterClassW(&wc);
+
+    int dpi = GetDpiY(owner);
+    int wPx = MulDiv(kThemeEditDlgWidth, dpi, 96);
+    int hPx = MulDiv(kThemeEditDlgHeight, dpi, 96);
+    HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName,
+                             IsEnglishUi() ? L"Theme editor" : L"テーマ編集",
+                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE | WS_VSCROLL,
+                             CW_USEDEFAULT, CW_USEDEFAULT, wPx, hPx,
+                             owner, nullptr, g_hInst, &ctx);
+    if (!w) return false;
+
+    ShowWindow(w, SW_SHOW);
+    UpdateWindow(w);
+    MSG msg;
+    while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (ShouldSkipImeMessageInLoop(msg)) continue;
+        if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
+        if (!IsDialogMessageW(w, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    if (!ctx.ok) return false;
+    if (outEdited) *outEdited = ctx.editing;
+    return true;
+}
+} // namespace
