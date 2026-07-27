@@ -20,10 +20,11 @@ FORBIDDEN_PUBLIC_REFERENCES = (
     "/Users/",
 )
 DOCUMENTATION_PORTAL_REQUIRED_FILES = (
-    "index.html", "For_AI.md", "README.md", "for_ai/manifest.json",
+    "index.html", "For_AI.md", "README.md", "for_ai/manifest.json", "for_ai/project_context.xml",
 )
 MARKDOWN_LINK = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HTML_LINK = re.compile(r"(?:href|src)=[\"']([^\"'#]+)", re.IGNORECASE)
+HTML_META = re.compile(r"<meta\s+[^>]*?name=[\"']([^\"']+)[\"'][^>]*?content=[\"']([^\"']*)[\"']", re.IGNORECASE)
 
 
 def local_target(value: str) -> str | None:
@@ -142,6 +143,27 @@ def validate_manifest(site: Path, errors: list[str]) -> None:
             validate_local_target(site, manifest_path, relative_path, kind=f"manifest route '{route_id}'", errors=errors)
 
 
+def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
+    """Keep the HTML portal entrypoint aligned with the machine-readable AI entrypoints."""
+    index_path = site / "index.html"
+    if not index_path.is_file():
+        return
+    try:
+        text = index_path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        return
+    metadata = {name.lower(): value for name, value in HTML_META.findall(text)}
+    expected = {
+        "ai-agent-entrypoint": "For_AI.md",
+        "ai-manifest": "for_ai/manifest.json",
+    }
+    for name, target in expected.items():
+        if metadata.get(name) != target:
+            errors.append(f"index.html must declare {name}={target}")
+        else:
+            validate_local_target(site, index_path, target, kind=f"index metadata '{name}'", errors=errors)
+
+
 def validate_site(site: Path) -> list[str]:
     errors: list[str] = []
     if not site.is_dir():
@@ -155,6 +177,7 @@ def validate_site(site: Path) -> list[str]:
     validate_structured_files(site, errors)
     validate_local_links(site, errors)
     validate_manifest(site, errors)
+    validate_portal_entrypoint(site, errors)
     validate_rendered_human_docs(site, errors)
     return errors
 

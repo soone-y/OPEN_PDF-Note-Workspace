@@ -13,6 +13,7 @@
       { "source": ".github/SECURITY.md", "destination": ".github/SECURITY.md" },
       { "source": "for_ai/AI共有用プロンプト.txt", "destination": "for_ai/AI共有用プロンプト.txt" },
       { "source": "for_ai/manifest.json", "destination": "for_ai/manifest.json" },
+      { "source": "for_ai/project_context.xml", "destination": "for_ai/project_context.xml" },
       { "source": "for_ai/core/features_faq.md", "destination": "for_ai/core/features_faq.md" },
       { "source": "for_ai/core/file_formats.md", "destination": "for_ai/core/file_formats.md" },
       { "source": "for_ai/core/safety_and_nonnegotiables.md", "destination": "for_ai/core/safety_and_nonnegotiables.md" },
