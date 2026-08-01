@@ -3,6 +3,7 @@
 #pragma once
 
 #include "core/app_core.h"
+#include "core/text_encoding.h"
 #include "note/note_identity.h"
 
 #include <optional>
@@ -20,6 +21,11 @@ void RefreshCurrentNotePersistenceIdentity(const std::wstring& path);
 bool CaptureCurrentNoteTextCoreUtf8(const std::wstring& expectedPath,
                                     std::string* outBytes,
                                     note::SnapshotIdentity* outIdentity = nullptr);
+bool CaptureCurrentNoteTextCoreForStorage(const std::wstring& expectedPath,
+                                          std::string* outBytes,
+                                          note::SnapshotIdentity* outIdentity = nullptr,
+                                          std::wstring* outError = nullptr);
+text_encoding::Encoding CurrentNoteStorageEncoding();
 note::SnapshotIdentity CaptureCurrentNoteSnapshotIdentity();
 bool CheckCurrentNoteFileExternalChange(HWND owner);
 bool JumpToNoteLinkId(const std::wstring& linkId,

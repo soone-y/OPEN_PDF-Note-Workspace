@@ -334,6 +334,24 @@ try {
     Write-JsonFile -Destination $setManifestPath -Value $manifest
     if (-not $DryRun) {
         Assert-ReleaseSetManifestComponents -SetRoot $setRoot -Components $manifest.components
+        if (-not $SnapshotOnly -and -not $Lite) {
+            $licenseGateScript = Join-Path $repoRoot "tools\release_checks\release_license_gate.py"
+            if (-not (Test-Path -LiteralPath $licenseGateScript -PathType Leaf)) {
+                throw "Missing release license gate: $licenseGateScript"
+            }
+            & python $licenseGateScript --release-set $setRoot
+            if ($LASTEXITCODE -ne 0) {
+                throw "Release license gate failed. The release set will not be used."
+            }
+            $textGateScript = Join-Path $repoRoot "tools\release_checks\release_text_gate.py"
+            if (-not (Test-Path -LiteralPath $textGateScript -PathType Leaf)) {
+                throw "Missing release text gate: $textGateScript"
+            }
+            & python $textGateScript --release-set $setRoot
+            if ($LASTEXITCODE -ne 0) {
+                throw "Release text gate failed. The release set will not be used."
+            }
+        }
     }
 
     Write-Info "Done."

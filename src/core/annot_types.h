@@ -207,6 +207,8 @@ struct PageCache {
     int bitmapFailedW = 0;
     int bitmapFailedH = 0;
     bool bitmapFailedCoarse = false;
+    uint32_t bitmapFailureCount = 0;
+    ULONGLONG bitmapRetryAfterTick = 0;
     std::vector<uint8_t> pixels;
     struct CharBox {
         float left = 0.0f;

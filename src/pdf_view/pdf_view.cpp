@@ -3421,7 +3421,12 @@ static void RecalcEditingTextboxSize(bool includeComp) {
     double top = std::max(g_pdf.editY1, g_pdf.editY2);
     const auto& page = g_pdf.pages[static_cast<size_t>(g_pdf.editPage)];
     double pageAvailWidthPt = std::max(10.0, page.widthPt - 8.0);
-    double maxWidthPt = pageAvailWidthPt;
+    // The default mode preserves the insertion anchor and starts wrapping at
+    // the page edge. The legacy mode keeps its whole-page measure/left-shift
+    // behavior for users who explicitly select it.
+    double maxWidthPt = g_textBoxAutoWrap
+        ? std::max(10.0, page.widthPt - left - 4.0)
+        : pageAvailWidthPt;
     double maxHeightPt = std::max(8.0, top);
     int maxPxW = PtToLayoutPx(maxWidthPt);
     if (maxPxW <= 0) maxPxW = 1;
@@ -3479,7 +3484,7 @@ static void RecalcEditingTextboxSize(bool includeComp) {
     double newRight = newLeft + wCalcPt;
     double newBottom = newTop - hCalcPt;
 
-    if (newRight > page.widthPt) {
+    if (!g_textBoxAutoWrap && newRight > page.widthPt) {
         double shift = newRight - page.widthPt;
         newLeft = std::max(0.0, newLeft - shift);
         newRight = page.widthPt;
@@ -3572,6 +3577,9 @@ void SetModeButtons() {
     if (g_hRadioTextReadableBackgroundInverted)
         SendMessageW(g_hRadioTextReadableBackgroundInverted, BM_SETCHECK,
                      g_textBoxReadableBackgroundInverted ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_hChkTextAutoWrap)
+        SendMessageW(g_hChkTextAutoWrap, BM_SETCHECK,
+                     g_textBoxAutoWrap ? BST_CHECKED : BST_UNCHECKED, 0);
 
     const BOOL previewAllowsAnnot = previewReadOnly ? FALSE : TRUE;
     if (g_hBtnModeMarker) EnableWindow(g_hBtnModeMarker, previewAllowsAnnot);
@@ -3587,6 +3595,7 @@ void SetModeButtons() {
     if (g_hChkTextReadableBackground) EnableWindow(g_hChkTextReadableBackground, previewAllowsAnnot);
     if (g_hRadioTextReadableBackgroundNormal) EnableWindow(g_hRadioTextReadableBackgroundNormal, previewAllowsAnnot);
     if (g_hRadioTextReadableBackgroundInverted) EnableWindow(g_hRadioTextReadableBackgroundInverted, previewAllowsAnnot);
+    if (g_hChkTextAutoWrap) EnableWindow(g_hChkTextAutoWrap, previewAllowsAnnot);
     if (g_hComboWidth) EnableWindow(g_hComboWidth, previewAllowsAnnot);
     if (g_hComboMarkerAlpha) EnableWindow(g_hComboMarkerAlpha, previewAllowsAnnot);
     if (g_hComboAnnotMethod) EnableWindow(g_hComboAnnotMethod, previewAllowsAnnot);

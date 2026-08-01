@@ -91,6 +91,9 @@ static bool HandleNoteCtrlUndoRedo(HWND hWnd, WPARAM wParam, bool* outTextChange
     // Consume a recognized undo/redo chord even when this note is read-only or
     // has no history. Otherwise RichEdit's default processing could mutate a
     // background/read-only note outside the shared eligibility check.
+    // EN_CHANGE can be deferred by RichEdit. Capture that last user edit
+    // before judging history availability so Ctrl+Z never silently loses it.
+    RecordCurrentNoteTextEditForUndo(hWnd);
     if (!CanExecuteNoteUndoRedoFromFocus(wantUndo)) return true;
 
     const std::wstring beforeText = GetEditText(hWnd);

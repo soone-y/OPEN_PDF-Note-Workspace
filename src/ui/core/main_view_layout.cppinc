@@ -393,6 +393,14 @@ static void CreateChildren(HWND hWnd) {
                  g_textBoxReadableBackgroundInverted ? BST_UNCHECKED : BST_CHECKED, 0);
     SendMessageW(g_hRadioTextReadableBackgroundInverted, BM_SETCHECK,
                  g_textBoxReadableBackgroundInverted ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_hChkTextAutoWrap = CreateWindowExW(0, L"BUTTON",
+                                         IsEnglishUi() ? L"Wrap at page edge" : L"右端で折り返す",
+                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                         0, 0, 160, 24, g_hPdfToolbar,
+                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TEXT_AUTO_WRAP)),
+                                         g_hInst, nullptr);
+    SendMessageW(g_hChkTextAutoWrap, BM_SETCHECK,
+                 g_textBoxAutoWrap ? BST_CHECKED : BST_UNCHECKED, 0);
     SyncToolbarFontSizeCombo();
 
     // Single "width" option; values are tool-specific, but the UI control is shared.
@@ -758,6 +766,7 @@ static void CreateChildren(HWND hWnd) {
     SetUIFont(g_hChkTextReadableBackground);
     SetUIFont(g_hRadioTextReadableBackgroundNormal);
     SetUIFont(g_hRadioTextReadableBackgroundInverted);
+    SetUIFont(g_hChkTextAutoWrap);
     SetUIFont(g_hComboWidth);
     SetUIFont(g_hComboMarkerAlpha);
     SetUIFont(g_hComboAnnotMethod);

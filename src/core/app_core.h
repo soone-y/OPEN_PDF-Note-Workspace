@@ -666,6 +666,8 @@ extern bool g_textFontUseA4ScaleSlotA;
 extern bool g_textFontUseA4ScaleSlotB;
 extern bool g_textBoxReadableBackground;
 extern bool g_textBoxReadableBackgroundInverted;
+extern bool g_textBoxAutoWrap;
+extern HWND g_hChkTextAutoWrap;
 
 struct SavedToolbarState {
     bool valid = false;

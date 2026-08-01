@@ -10,6 +10,7 @@
 #include "note/note_identity.h"
 #include "note/note_identity_store.h"
 #include "note/note_persistence.h"
+#include "note_view/note_view.h"
 
 
 #include <richedit.h>
@@ -52,6 +53,7 @@ ULONGLONG g_autoStagePauseTick = 0;
 ULONGLONG g_noteStageLastEditTick = 0;
 int g_noteStagePersistedCharCount = 0;
 bool g_noteStagePersistedCharCountKnown = false;
+std::wstring g_lastNoteTextEncodingError;
 
 struct PreparedNoteStageSnapshot {
   std::wstring targetPath;
@@ -698,8 +700,6 @@ std::wstring ReadCurrentNoteText() {
   return text;
 }
 
-bool IsNoteSaveBlockedByIme() { return IsNoteImeComposing(); }
-
 bool IsAnnotationSaveBlockedByIme() { return g_pdf.imeComposing; }
 
 void ShowImeBlockedSaveNotice(HWND owner, bool noteTarget) {
@@ -777,14 +777,23 @@ bool EnsureFastLoadedAnnotationsStrongValidatedBeforeSave(
 
 std::string
 CaptureCurrentNoteBytes(note::SnapshotIdentity *outIdentity = nullptr) {
+  g_lastNoteTextEncodingError.clear();
   if (outIdentity)
     *outIdentity = {};
   std::string textCoreBytes;
-  if (CaptureCurrentNoteTextCoreUtf8(g_currentNotePath, &textCoreBytes,
-                                     outIdentity)) {
+  if (CaptureCurrentNoteTextCoreForStorage(g_currentNotePath, &textCoreBytes,
+                                           outIdentity, &g_lastNoteTextEncodingError)) {
     return textCoreBytes;
   }
-  std::string bytes = WideToUTF8(ReadCurrentNoteText());
+  // The normal path above also detects unrepresentable CP932 edits.  Do not
+  // silently fall back to UTF-8 in that case: it would change the user's file
+  // format without consent.
+  if (!g_lastNoteTextEncodingError.empty()) return {};
+  std::string bytes;
+  if (!text_encoding::EncodeText(ReadCurrentNoteText(), CurrentNoteStorageEncoding(),
+                                 &bytes, &g_lastNoteTextEncodingError)) {
+    return {};
+  }
   if (outIdentity) {
     note::SnapshotIdentity current = CaptureCurrentNoteSnapshotIdentity();
     *outIdentity =
@@ -799,6 +808,7 @@ PrepareNoteStageSnapshotFromCurrentState() {
   PreparedNoteStageSnapshot snapshot;
   snapshot.targetPath = g_currentNotePath;
   snapshot.bytes = CaptureCurrentNoteBytes(&snapshot.identity);
+  if (!g_lastNoteTextEncodingError.empty()) return std::nullopt;
   snapshot.revision = CurrentEditRevision();
   return snapshot;
 }
@@ -2780,11 +2790,16 @@ std::optional<StageMeta> StageNoteSnapshotWithBytes(
   meta.destinationFingerprintAtStage = destinationFingerprint;
   std::string textCoreBytes;
   note::SnapshotIdentity textCoreIdentity;
+  std::wstring storageEncodingError;
   const bool textCoreMatches =
-      CaptureCurrentNoteTextCoreUtf8(notePath, &textCoreBytes,
-                                     &textCoreIdentity) &&
+      CaptureCurrentNoteTextCoreForStorage(notePath, &textCoreBytes,
+                                           &textCoreIdentity, &storageEncodingError) &&
       note::FingerprintSnapshotBytes(textCoreBytes) ==
           note::FingerprintSnapshotBytes(bytes);
+  if (!storageEncodingError.empty()) {
+    if (outErr) *outErr = storageEncodingError;
+    return std::nullopt;
+  }
   std::wstring identityErr;
   const note::NoteIdentity identity =
       note::ResolveRuntimeNoteIdentityPath(notePath, &identityErr);
@@ -3544,8 +3559,8 @@ bool StageDeferredCurrentNoteForExplicitSave(HWND owner) {
     return true;
   if (g_currentSessionPath.empty())
     return true;
-  if (IsNoteSaveBlockedByIme()) {
-    TraceSaveFailure(L"StageSave", L"deferred_note_ime_blocked",
+  if (!SynchronizeActiveNoteEditorToKernel(owner)) {
+    TraceSaveFailure(L"StageSave", L"deferred_note_editor_sync_failed",
                      g_currentNotePath);
     ShowImeBlockedSaveNotice(owner, true);
     return false;
@@ -3632,7 +3647,7 @@ bool SaveNoteFile(HWND owner) {
                         SoftNoticeKind::Warning);
     return false;
   }
-  if (IsNoteSaveBlockedByIme()) {
+  if (!SynchronizeActiveNoteEditorToKernel(owner)) {
     ShowImeBlockedSaveNotice(owner, true);
     return false;
   }
@@ -3673,13 +3688,17 @@ bool SaveNoteFile(HWND owner) {
 bool SaveNoteIfDirty(HWND owner) {
   const ULONGLONG saveStartTick = preview_trace::TickNow();
   SaveOperationGuard guard;
-  if (g_currentNotePath.empty() && !g_noteDirty)
-    return true;
-  if (IsNoteSaveBlockedByIme()) {
-    TraceSaveFailure(L"StageSave", L"note_ime_blocked", g_currentNotePath);
+  // Saving is an observation boundary. Reconcile a deferred RichEdit or IME
+  // mutation before consulting dirty state so every save and switch sees the
+  // same document kernel as undo/redo.
+  if (!SynchronizeActiveNoteEditorToKernel(owner)) {
+    TraceSaveFailure(L"StageSave", L"note_editor_sync_failed",
+                     g_currentNotePath);
     ShowImeBlockedSaveNotice(owner, true);
     return false;
   }
+  if (g_currentNotePath.empty() && !g_noteDirty)
+    return true;
   if (g_currentNotePath.empty() && !EnsureCurrentNotePathForStageImpl(owner)) {
     TraceSaveFailure(L"StageSave", L"deferred_note_path_failed",
                      g_currentNotePath);
@@ -3715,6 +3734,10 @@ bool SaveNoteIfDirty(HWND owner) {
   if (!prepared.has_value()) {
     TraceSaveFailure(L"StageSave", L"prepare_note_snapshot_failed",
                      g_currentNotePath);
+    if (!g_lastNoteTextEncodingError.empty()) {
+      ShowStageMessageDialog(owner, IsEnglishUi() ? L"Save note" : L"ノート保存",
+                             g_lastNoteTextEncodingError, SoftNoticeKind::Warning);
+    }
     return false;
   }
   if (DiscardDeferredEmptyNotePersistenceIfNeeded(owner, prepared->targetPath,

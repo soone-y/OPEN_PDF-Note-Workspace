@@ -261,6 +261,8 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_ANNOTATION, ui.menuAnnotSettings.c_str());
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_MARKUP, ui.menuMarkupSettings.c_str());
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_PALETTE, ui.menuPaletteSettings.c_str());
+    AppendMenuW(settings, MF_STRING, ID_GLOBAL_MEMOS,
+                IsEnglishUi() ? L"Global deadlines and memos..." : L"全体メモ・締切管理...");
     AppendMenuW(settings, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_PRESET_SAVE, ui.menuSettingsPresetSave.c_str());
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_PRESET_LOAD, ui.menuSettingsPresetLoad.c_str());

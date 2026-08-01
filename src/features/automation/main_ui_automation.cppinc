@@ -541,22 +541,22 @@ static bool RunUiAutomationNoteSaveScenario(HWND owner, std::wstring* outError) 
         if (outError) *outError = L"Direct note save left staged note diffs behind.";
         return false;
     }
-
-    if (!SelectNoteTextSnippet(directSaveToken)) {
-        if (outError) *outError = L"Could not reselect the direct-save token for cleanup.";
-        return false;
-    }
-    SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
-    if (!file_output::SaveNoteFile(owner)) {
-        if (outError) *outError = L"Cleanup direct note save failed during UI automation.";
+    // A successful save establishes persistence, not a new document. The
+    // kernel history must remain available so users can undo the saved edit.
+    if (!SendUiAutomationNoteUndoChangedText()) {
+        if (outError) *outError = L"Direct note save cleared the note undo history.";
         return false;
     }
     if (FindNoteTextSnippetStart(directSaveToken) >= 0) {
-        if (outError) *outError = L"Cleanup direct-save token remained in the note.";
+        if (outError) *outError = L"Undo after direct note save did not remove the saved token.";
+        return false;
+    }
+    if (!file_output::SaveNoteFile(owner)) {
+        if (outError) *outError = L"Saving the undo result after direct note save failed.";
         return false;
     }
     if (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0) {
-        if (outError) *outError = L"Cleanup direct note save left the editor modified flag set.";
+        if (outError) *outError = L"Saving the undo result left the editor modified flag set.";
         return false;
     }
     return true;
@@ -2344,6 +2344,8 @@ static bool RunUiAutomationWorkspaceConfigRoundTripScenario(std::wstring* outErr
     g_config.pdfBitmapBudgetMiB = kPdfBitmapBudgetMiBMin;
     g_config.pointerOffsetX = 17;
     g_config.pointerOffsetY = -13;
+    g_config.noteOverlayRefreshDelayMs = 600;
+    g_config.noteFullReparseDelayMs = 1200;
     g_config.debugLogs.previewTrace = true;
     g_config.debugLogs.switchTiming = true;
     g_config.debugLogs.crash = false;
@@ -2359,6 +2361,8 @@ static bool RunUiAutomationWorkspaceConfigRoundTripScenario(std::wstring* outErr
         loaded->pdfBitmapBudgetMiB == kPdfBitmapBudgetMiBMin &&
         loaded->pointerOffsetX == 17 &&
         loaded->pointerOffsetY == -13 &&
+        loaded->noteOverlayRefreshDelayMs == 600 &&
+        loaded->noteFullReparseDelayMs == 1200 &&
         loaded->debugLogs.previewTrace &&
         loaded->debugLogs.switchTiming &&
         !loaded->debugLogs.crash &&

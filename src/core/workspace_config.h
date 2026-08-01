@@ -82,7 +82,7 @@ struct WorkspaceConfig {
     std::wstring lectureSortMode = L"recent"; // "recent" | "name" | "schedule"
     std::wstring sessionSortMode = L"numeric_asc"; // "numeric_asc" | "numeric_desc" | "name"
     std::wstring sessionNumberingMode = L"count"; // "count" | "max_number"
-    std::wstring sessionAutoOpenMode = L"off"; // legacy setting, auto-open is disabled
+    std::wstring sessionAutoOpenMode = L"edit"; // auto-open the sole PDF and note in a session
     bool sessionAutoOpenPairLinked = false;
     bool noteRenderEnabled = true;
     bool noteRawOnly = false;
@@ -91,6 +91,10 @@ struct WorkspaceConfig {
     bool noteVimModeEnabled = true;
     bool noteVimCaretLineRawTextVisible = false;
     bool noteVimClickEntersInsertMode = true;
+    // Delay after the latest edit before refreshing the rendered note overlay.
+    int noteOverlayRefreshDelayMs = 400;
+    // Idle delay before a deferred full note parse is allowed to run.
+    int noteFullReparseDelayMs = 900;
     int noteMathMarginTopPercent = 75;
     // 0 = auto, 5..95 = allocate this percent of additional super/sub gap to superscripts.
     int noteMathSupSubGapSupPercent = 0;
@@ -137,6 +141,9 @@ struct WorkspaceConfig {
     bool textFontUseA4ScaleSlotB = true;
     bool textBoxReadableBackground = false;
     bool textBoxReadableBackgroundInverted = false;
+    // Keep the TextBox anchor fixed and wrap at the page edge. Disable only to
+    // retain the legacy behavior that shifts a growing box left.
+    bool textBoxAutoWrap = true;
     // Line-like tools (Line / Arrow / Wave)
     // Default behavior: share style across these tools.
     bool lineToolsShareStyle = true;

@@ -27,7 +27,10 @@ static constexpr size_t kTextEditHistoryLimit = 100;
 // Render at a slightly higher scale when zoomed out to keep text crisp.
 static constexpr double kPdfRenderMinScale = 0.75;
 static constexpr double kPdfRenderMaxUpscale = 2.0;
-static constexpr double kMarkerTextAlphaScaleOnText = 0.4;
+// Text markers must keep one uniform opacity. Reducing only the pixels under
+// source glyphs makes the inside of letters visibly lighter than the rest of
+// the selected region.
+static constexpr double kMarkerTextAlphaScaleOnText = 1.0;
 static constexpr int kMarkerTextDarkMax = 210;
 static constexpr int kMarkerTextBrightMin = 250;
 static constexpr int kMarkerTextBrightMinChannel = 40;

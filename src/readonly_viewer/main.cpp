@@ -1,5 +1,6 @@
 #include "theme/built_in_theme.h"
 #include "clrop/json.h"
+#include "core/text_encoding.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -111,6 +112,7 @@ constexpr int kDiagramButtonId = 111;
 constexpr int kPdfRangeButtonId = 112;
 constexpr int kCancelLoadButtonId = 113;
 constexpr int kViewMenuButtonId = 114;
+constexpr int kPdfButtonId = 115;
 constexpr int kDetachedDiagramZoomInButtonId = 201;
 constexpr int kDetachedDiagramZoomOutButtonId = 202;
 constexpr int kDetachedDiagramResetButtonId = 203;
@@ -464,32 +466,13 @@ void EndCancellableLoad() {
 }
 
 std::wstring DecodeTextBytes(const std::vector<unsigned char>& bytes) {
-    if (bytes.size() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
-        const int wsize = MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(bytes.data()) + 3,
-                                              static_cast<int>(bytes.size()) - 3, nullptr, 0);
-        std::wstring result(wsize, 0);
-        if (wsize > 0) MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(bytes.data()) + 3,
-                                           static_cast<int>(bytes.size()) - 3, result.data(), wsize);
-        return result;
+    text_encoding::DecodedText decoded;
+    std::wstring error;
+    const std::string_view source(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    if (text_encoding::DecodeExternalText(source, &decoded, &error)) {
+        return decoded.text;
     }
-    bool is_utf8 = true;
-    for (size_t i = 0; i < bytes.size();) {
-        const unsigned char c = bytes[i];
-        if (c <= 0x7F) { ++i; continue; }
-        const size_t tail = c >= 0xC2 && c <= 0xDF ? 1 : (c >= 0xE0 && c <= 0xEF ? 2 : (c >= 0xF0 && c <= 0xF4 ? 3 : 0));
-        if (tail == 0 || i + tail >= bytes.size()) { is_utf8 = false; break; }
-        bool valid = true;
-        for (size_t j = 1; j <= tail; ++j) valid = valid && (bytes[i + j] & 0xC0) == 0x80;
-        if (!valid) { is_utf8 = false; break; }
-        i += tail + 1;
-    }
-    const UINT code_page = is_utf8 ? CP_UTF8 : 932;
-    const int wsize = MultiByteToWideChar(code_page, 0, reinterpret_cast<const char*>(bytes.data()),
-                                          static_cast<int>(bytes.size()), nullptr, 0);
-    std::wstring result(wsize, 0);
-    if (wsize > 0) MultiByteToWideChar(code_page, 0, reinterpret_cast<const char*>(bytes.data()),
-                                       static_cast<int>(bytes.size()), result.data(), wsize);
-    return result;
+    return L"Error: " + (error.empty() ? L"Text encoding could not be recognized." : error);
 }
 
 LoadFileResult LoadTextFile(const std::wstring& path, const std::optional<ByteRange>& requested_range = std::nullopt) {
@@ -2014,7 +1997,7 @@ void LayoutToolbarControls(HWND hWnd, int splitX, int rightPaneWidth, int height
     std::vector<ToolbarItem> items;
     items.push_back({ g_hwndOpenFileButton, compactControls ? L"開く" : L"ファイルを開く  Ctrl+O", 165, 70, true, true });
     items.push_back({ g_hwndOpenFolderButton, L"フォルダーを開く", 135, 135, true, false });
-    items.push_back({ g_hwndViewMenuButton, L"表示 ▼", 76, 76, false, true });
+    items.push_back({ g_hwndViewMenuButton, L"表示 ▼", 76, 76, isPdfMode, true });
 
     if (isPdfMode) {
         items.push_back({ g_hwndPdfRangeButton, L"ページ範囲...", 150, 110, true, true });
@@ -2190,6 +2173,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     g_tabs[g_currentTab].viewMode = ViewMode::Diagram;
                     ShowCurrentTab();
                     return 0;
+                case kPdfButtonId:
+                    if (g_currentTab < 0 || g_currentTab >= static_cast<int>(g_tabs.size()) ||
+                        !g_tabs[g_currentTab].isPdf) return 0;
+                    g_tabs[g_currentTab].viewMode = ViewMode::Pdf;
+                    ShowCurrentTab();
+                    return 0;
                 case kPdfRangeButtonId:
                     if (g_hwndPdfPanel) readonly_viewer::PdfPreviewPanel_ChoosePageRange(g_hwndPdfPanel);
                     return 0;
@@ -2206,6 +2195,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     AppendMenuW(menu, MF_STRING, kRawButtonId, L"Raw\tCtrl+2");
                     AppendMenuW(menu, MF_STRING, kHexButtonId, L"Hex\tCtrl+3");
                     AppendMenuW(menu, MF_STRING | (g_hwndDiagramButton && IsWindowEnabled(g_hwndDiagramButton) ? 0 : MF_GRAYED), kDiagramButtonId, L"図一覧\tCtrl+4");
+                    const bool currentTabIsPdf = g_currentTab >= 0 &&
+                        g_currentTab < static_cast<int>(g_tabs.size()) && g_tabs[g_currentTab].isPdf;
+                    AppendMenuW(menu, MF_STRING | (currentTabIsPdf ? 0 : MF_GRAYED), kPdfButtonId, L"PDF表示");
                     RECT rect{}; GetWindowRect(g_hwndViewMenuButton, &rect);
                     const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN, rect.left, rect.bottom, 0, hWnd, nullptr);
                     DestroyMenu(menu);

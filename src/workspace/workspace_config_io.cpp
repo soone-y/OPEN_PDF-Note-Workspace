@@ -88,6 +88,7 @@ void ApplyConfigToUI(HWND hWnd) {
     }
     g_textBoxReadableBackground = g_config.textBoxReadableBackground;
     g_textBoxReadableBackgroundInverted = g_config.textBoxReadableBackgroundInverted;
+    g_textBoxAutoWrap = g_config.textBoxAutoWrap;
     if (!g_config.noteFontName.empty()) g_noteFontName = g_config.noteFontName;
     if (g_noteFontName.empty()) g_noteFontName = GetDefaultFontFaceName();
     g_noteFontName = ResolveFontFaceName(g_noteFontName);
@@ -263,6 +264,10 @@ void ApplyConfigToUI(HWND hWnd) {
         SendMessageW(g_hRadioTextReadableBackgroundInverted, BM_SETCHECK,
                      g_textBoxReadableBackgroundInverted ? BST_CHECKED : BST_UNCHECKED, 0);
     }
+    if (g_hChkTextAutoWrap) {
+        SendMessageW(g_hChkTextAutoWrap, BM_SETCHECK,
+                     g_textBoxAutoWrap ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
     selectComboByData(g_hComboMarkerAlpha, static_cast<DWORD_PTR>(std::llround(ToolAlphaForMode(g_toolMode) * 1000.0)));
     selectComboByData(g_hComboMarkerTextStyle, static_cast<DWORD_PTR>(g_markerTextUnderline ? 1 : 0));
     selectComboByData(g_hComboLineDashStyle, static_cast<DWORD_PTR>(g_lineDashStyle == L"dash" ? 1 : 0));
@@ -342,10 +347,9 @@ void FinalizeManualSaveUi(HWND hWnd, bool updateWindowTitleAfterSave) {
             L"after_update_title elapsed_ms=" + preview_trace::ElapsedMs(startTick));
     }
     RefreshCurrentNoteFileSnapshot();
-    ClearCurrentNoteUndoHistory();
     preview_trace::Append(
         L"FinalizeManualSaveUi",
-        L"after_clear_note_undo elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        L"after_refresh_note_snapshot elapsed_ms=" + preview_trace::ElapsedMs(startTick));
     RefreshStatusDisplay(hWnd);
     preview_trace::Append(
         L"FinalizeManualSaveUi",
@@ -1434,6 +1438,9 @@ void ImportAllUserSettings(HWND hWnd) {
 
 void SaveAllManual(HWND hWnd) {
     try {
+    // A manual save is an explicit boundary: commit the active TextBox before
+    // taking the annotation snapshot, including any active IME composition.
+    CommitActiveTextEditing(true);
     preview_trace::Append(
         L"SaveAllManual",
         L"begin noteDirty=" + preview_trace::Bool(g_noteDirty) +

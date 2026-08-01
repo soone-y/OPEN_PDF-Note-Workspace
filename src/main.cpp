@@ -229,8 +229,12 @@ static bool PromptStayOrOpenDiffManager(HWND hWnd,
     if (!file_output::HasAnyStagedDiffs()) {
         std::wstring msg = blockedAction;
         msg += L"を中止しました。\n現在のファイルはそのままです。";
-        if (!failureDetail.empty()) msg += L"\n\n" + failureDetail;
-        msg += L"\n\n差分管理で扱える未統合差分はまだありません。";
+        // A save/stage preparation error can occur before a diff exists.  Do
+        // not direct the user to Diff Manager in that case: it cannot resolve
+        // the problem and made an IME-state failure look like a missing diff.
+        msg += IsEnglishUi()
+            ? L"\n\nThere are no staged diffs. The switch was stopped because the current edit could not be prepared safely."
+            : L"\n\n未統合差分はありません。現在の編集を安全に保存準備できなかったため、切替を中止しました。";
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
         return false;
     }
@@ -306,6 +310,9 @@ struct StatusDisplayStateSnapshot {
 
 static std::optional<MainMenuStateSnapshot> s_lastMainMenuStateSnapshot;
 static std::optional<StatusDisplayStateSnapshot> s_lastStatusDisplayStateSnapshot;
+// Once the top-level menu has actually wrapped, keep the compact status for
+// the remainder of this run so the menu bar does not oscillate between rows.
+static bool s_statusDisplayUseCompactText = false;
 static int s_deferredMainWindowUiRefreshDepth = 0;
 static bool s_deferredMainWindowUiRefreshPending = false;
 static HWND s_deferredMainWindowUiRefreshOwner = nullptr;
@@ -4676,6 +4683,7 @@ static void RemoveOwnerDrawButtonsOnly(HWND hWnd) {
     RestoreButtonType(g_hChkTextReadableBackground, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hRadioTextReadableBackgroundNormal, BS_AUTORADIOBUTTON);
     RestoreButtonType(g_hRadioTextReadableBackgroundInverted, BS_AUTORADIOBUTTON);
+    RestoreButtonType(g_hChkTextAutoWrap, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hAnnotSettings, BS_PUSHBUTTON);
     RestoreButtonType(g_hAnnotClear, BS_PUSHBUTTON);
     RestoreButtonType(g_hChkShortcutHeading1, BS_AUTOCHECKBOX);
@@ -5397,7 +5405,7 @@ void ApplyPaletteCustomColor(HWND hWnd, COLORREF color) {
     if (hWnd) UpdateToolbarUI(hWnd);
 }
 
-enum class WidthProfile { None, LineLike, MarkerFree, MarkerText, Eraser };
+enum class WidthProfile { None, LineLike, Arrow, MarkerFree, MarkerText, Eraser };
 enum class AlphaProfile { None, Marker, LineLike, ShapeTransparency };
 
 static WidthProfile WidthProfileForMode(ToolMode mode) {
@@ -5407,10 +5415,11 @@ static WidthProfile WidthProfileForMode(ToolMode mode) {
     case ToolMode::MarkerWave:
         return WidthProfile::MarkerFree;
     case ToolMode::Line:
-    case ToolMode::Arrow:
     case ToolMode::Wave:
     case ToolMode::Freehand:
         return WidthProfile::LineLike;
+    case ToolMode::Arrow:
+        return WidthProfile::Arrow;
     case ToolMode::MarkerFree:
         return WidthProfile::MarkerFree;
     case ToolMode::MarkerTextUnderline:
@@ -5506,6 +5515,11 @@ bool SyncWidthComboToMode(ToolMode mode) {
             add(L"細", 15);
             add(L"中", 25);
             add(L"太", 40);
+        } else if (profile == WidthProfile::Arrow) {
+            add(L"細", 15);
+            add(L"中", 25);
+            add(L"太", 40);
+            add(L"極太", 60);
         } else if (profile == WidthProfile::Eraser) {
             add(L"細", 20);
             add(L"中", 40);
@@ -5747,44 +5761,6 @@ static bool SyncAnnotMethodCombo(ToolMode mode) {
 
     int after = SelectedComboData(g_hComboAnnotMethod);
     return after != before;
-}
-
-static std::wstring ShapeGeometryLabel(AnnotToolGeometry geometry) {
-    switch (geometry) {
-    case AnnotToolGeometry::Line: return IsEnglishUi() ? L"Line" : L"直線";
-    case AnnotToolGeometry::Wave: return IsEnglishUi() ? L"Wave" : L"波線";
-    case AnnotToolGeometry::Arrow: return IsEnglishUi() ? L"Arrow" : L"矢印";
-    case AnnotToolGeometry::Shape: return IsEnglishUi() ? L"Shape" : L"図形";
-    default: return IsEnglishUi() ? L"Shape" : L"図形";
-    }
-}
-
-static bool SyncShapeGeometryCombo(ToolMode mode) {
-    if (!g_hComboShapeGeometry) return false;
-    (void)mode;
-    int before = SelectedComboData(g_hComboShapeGeometry);
-    const AnnotToolPresentation presentation = g_shapeToolSelection.presentation;
-    const AnnotToolGeometry current = g_shapeToolSelection.geometry;
-    SendMessageW(g_hComboShapeGeometry, WM_SETREDRAW, FALSE, 0);
-    SendMessageW(g_hComboShapeGeometry, CB_RESETCONTENT, 0, 0);
-    int matchIdx = -1;
-    int firstIdx = -1;
-    for (AnnotToolGeometry geometry : OrderedShapeToolGeometries()) {
-        const auto target = ToolModeForShapeToolSelection({ presentation, geometry });
-        if (!target || AnnotToolModeUiStateFor(*target) != AnnotToolUiState::Enabled) continue;
-        int idx = static_cast<int>(SendMessageW(g_hComboShapeGeometry, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(ShapeGeometryLabel(geometry).c_str())));
-        if (idx < 0) continue;
-        SendMessageW(g_hComboShapeGeometry, CB_SETITEMDATA, idx, static_cast<LPARAM>(geometry));
-        if (firstIdx < 0) firstIdx = idx;
-        if (geometry == current) matchIdx = idx;
-    }
-    if (matchIdx < 0) matchIdx = firstIdx;
-    if (matchIdx >= 0) SendMessageW(g_hComboShapeGeometry, CB_SETCURSEL, matchIdx, 0);
-    SendMessageW(g_hComboShapeGeometry, CB_SETDROPPEDWIDTH, 140, 0);
-    SendMessageW(g_hComboShapeGeometry, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(g_hComboShapeGeometry, nullptr, FALSE);
-    return SelectedComboData(g_hComboShapeGeometry) != before;
 }
 
 static bool SyncFreehandCorrectionCombo() {
@@ -7076,6 +7052,9 @@ void RefreshMainMenuBar(HWND hWnd) {
 }
 
 std::wstring BuildStatusDisplayText() {
+    if (s_statusDisplayUseCompactText) {
+        return std::wstring(IsEnglishUi() ? L"… | " : L"… | ") + BuildSaveStateStatusText();
+    }
     std::wstring lecture = g_currentLecturePath.empty()
         ? L"-"
         : LectureDisplayLabelForPath(g_currentLecturePath, g_lectures);
@@ -7115,6 +7094,27 @@ std::wstring BuildStatusDisplayText() {
     }
     text += L" | " + BuildSaveStateStatusText();
     return text;
+}
+
+static bool IsStatusDisplayOnSecondMenuRow(HWND hWnd, HMENU menu) {
+    if (!hWnd || !menu) return false;
+    RECT firstItem{};
+    RECT statusItem{};
+    bool foundFirstItem = false;
+    bool foundStatusItem = false;
+    const int count = GetMenuItemCount(menu);
+    for (int index = 0; index < count; ++index) {
+        RECT rect{};
+        if (!GetMenuItemRect(hWnd, menu, static_cast<UINT>(index), &rect)) continue;
+        if (GetMenuItemID(menu, index) == ID_STATUS_DISPLAY) {
+            statusItem = rect;
+            foundStatusItem = true;
+        } else if (!foundFirstItem) {
+            firstItem = rect;
+            foundFirstItem = true;
+        }
+    }
+    return foundFirstItem && foundStatusItem && statusItem.top > firstItem.top;
 }
 
 void RefreshMainWindowUiState(HWND hWnd) {
@@ -8105,6 +8105,20 @@ void RefreshStatusDisplay(HWND hWnd) {
         L"RefreshStatusDisplay",
         L"after_modify_menu elapsed_ms=" + preview_trace::ElapsedMs(startTick));
     DrawMenuBar(hWnd);
+    if (!s_statusDisplayUseCompactText && IsStatusDisplayOnSecondMenuRow(hWnd, menu)) {
+        s_statusDisplayUseCompactText = true;
+        text = BuildStatusDisplayText();
+        if (g_config.ownerDrawUi) {
+            UpdateMenuItemText(menu, ID_STATUS_DISPLAY, text);
+        } else {
+            ModifyMenuW(menu, ID_STATUS_DISPLAY,
+                        MF_BYCOMMAND | MF_STRING | MF_DISABLED | MFT_RIGHTJUSTIFY,
+                        ID_STATUS_DISPLAY, text.c_str());
+        }
+        s_lastStatusDisplayStateSnapshot = StatusDisplayStateSnapshot{std::move(text)};
+        DrawMenuBar(hWnd);
+        preview_trace::Append(L"RefreshStatusDisplay", L"switched_to_compact_after_menu_wrap");
+    }
     preview_trace::Append(
         L"RefreshStatusDisplay",
         L"end elapsed_ms=" + preview_trace::ElapsedMs(startTick));

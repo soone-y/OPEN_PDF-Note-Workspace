@@ -1,6 +1,7 @@
 #include <richedit.h>
 // file: core/app_core.cpp
 #include "core/app_core.h"
+#include "core/text_encoding.h"
 #include "app/startup_instance.h"
 #include "core/font_list.h"
 #include "core/atomic_write.h"
@@ -242,6 +243,7 @@ HWND g_hRadioFontSizeSlotB = nullptr;
 HWND g_hChkTextReadableBackground = nullptr;
 HWND g_hRadioTextReadableBackgroundNormal = nullptr;
 HWND g_hRadioTextReadableBackgroundInverted = nullptr;
+HWND g_hChkTextAutoWrap = nullptr;
 HWND g_hComboWidth = nullptr;
 HWND g_hComboMarkerAlpha = nullptr;
 HWND g_hComboAnnotMethod = nullptr;
@@ -592,6 +594,7 @@ bool g_textFontUseA4ScaleSlotA = true;
 bool g_textFontUseA4ScaleSlotB = true;
 bool g_textBoxReadableBackground = false;
 bool g_textBoxReadableBackgroundInverted = false;
+bool g_textBoxAutoWrap = true;
 SavedToolbarState g_preEditToolbarState;
 bool g_lineToolsShareStyle = true;
 double g_lineWidthPt = 2.0;
@@ -1288,6 +1291,10 @@ static bool ReadTextFileUtf8Limited(const std::filesystem::path& p,
         static_cast<unsigned char>(buf[1]) == 0xBB &&
         static_cast<unsigned char>(buf[2]) == 0xBF) {
         buf.erase(0, 3);
+    }
+    if (!text_encoding::DecodeUtf8Strict(buf).has_value()) {
+        if (outErr) *outErr = L"invalid UTF-8";
+        return false;
     }
     if (out) *out = std::move(buf);
     return true;
@@ -2600,7 +2607,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.lectureSortMode = L"recent";
     cfg.sessionSortMode = L"numeric_asc";
     cfg.sessionNumberingMode = L"count";
-    cfg.sessionAutoOpenMode = L"off";
+    cfg.sessionAutoOpenMode = L"edit";
     cfg.sessionAutoOpenPairLinked = false;
     cfg.noteRenderEnabled = true;
     cfg.noteRawOnly = false;
@@ -2609,6 +2616,8 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.noteVimModeEnabled = true;
     cfg.noteVimCaretLineRawTextVisible = false;
     cfg.noteVimClickEntersInsertMode = true;
+    cfg.noteOverlayRefreshDelayMs = 400;
+    cfg.noteFullReparseDelayMs = 900;
     cfg.noteMathMarginTopPercent = 75;
     cfg.noteMathSupSubGapSupPercent = 0;
     cfg.noteGridEnabled = false;
@@ -2646,6 +2655,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.textFontUseA4ScaleSlotB = g_textFontUseA4ScaleSlotB;
     cfg.textBoxReadableBackground = g_textBoxReadableBackground;
     cfg.textBoxReadableBackgroundInverted = g_textBoxReadableBackgroundInverted;
+    cfg.textBoxAutoWrap = g_textBoxAutoWrap;
     cfg.lineToolsShareStyle = true;
     cfg.lineWidthPt = (g_lineWidthPt > 0.0) ? g_lineWidthPt : 2.5;
     cfg.arrowWidthPt = (g_arrowWidthPt > 0.0) ? g_arrowWidthPt : cfg.lineWidthPt;
@@ -2707,7 +2717,11 @@ static std::string ReadTextFileUtf8(const std::filesystem::path& p) {
     ifs.seekg(0, std::ios::beg);
     std::string buf(static_cast<size_t>(size), '\0');
     ifs.read(buf.data(), size);
-    return buf;
+    if (buf.size() >= 3 && static_cast<unsigned char>(buf[0]) == 0xEF &&
+        static_cast<unsigned char>(buf[1]) == 0xBB && static_cast<unsigned char>(buf[2]) == 0xBF) {
+        buf.erase(0, 3);
+    }
+    return text_encoding::DecodeUtf8Strict(buf).has_value() ? buf : std::string{};
 }
 
 static bool IsAsciiSpace(char c) {
@@ -2765,7 +2779,7 @@ static bool LooksLikeWorkspaceJson(const std::string& rawJson) {
     if (json.front() != '{' || json.back() != '}') return false;
     if (!IsSyntacticallyValidJsonLite(json)) return false;
     // NOTE: shortcuts are no longer persisted in workspace.json.
-    static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfBitmapBudgetMiB|pdfSinglePageMode|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|sessionSortMode|sessionNumberingMode|sessionAutoOpenMode|sessionAutoOpenPairLinked|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
+    static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfBitmapBudgetMiB|pdfSinglePageMode|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|sessionSortMode|sessionNumberingMode|sessionAutoOpenMode|sessionAutoOpenPairLinked|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
     return std::regex_search(json, keyRe);
 }
 
@@ -2877,7 +2891,8 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "noteFontName", "noteFontPt", "noteRenderFontName", "noteRenderJpFontName",
         "noteRenderFontPt", "noteSystem", "noteRenderEnabled", "noteRawOnly", "noteRenderMath",
         "noteWrapEnabled", "noteVimModeEnabled", "noteVimCaretLineRawTextVisible",
-        "noteVimClickEntersInsertMode", "noteMathMarginTopPercent",
+        "noteVimClickEntersInsertMode", "noteOverlayRefreshDelayMs", "noteFullReparseDelayMs",
+        "noteMathMarginTopPercent",
         "noteMathSupSubGapSupPercent", "noteGridEnabled", "noteGridPitch", "noteBgColor",
         "noteFgColor", "noteBgSource", "noteBgThemeName", "noteShortcutBackColor",
         "noteShortcutTextColor", "noteShortcutTextTagKey", "noteShortcutHeadingArrowInvert",
@@ -2886,7 +2901,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "noteFontCustomization", "noteFontDigitTarget", "autoSaveSeconds", "autoIntegrateSeconds",
         "autoIntegrateCustomMinutes", "clroNamePattern", "textFontName", "textFontPt",
         "textFontUseA4Scale", "textFontActiveSizeSlot", "textFontPtSlotA", "textFontPtSlotB",
-        "textFontUseA4ScaleSlotA", "textFontUseA4ScaleSlotB", "textBoxReadableBackground", "textBoxReadableBackgroundInverted",
+        "textFontUseA4ScaleSlotA", "textFontUseA4ScaleSlotB", "textBoxReadableBackground", "textBoxReadableBackgroundInverted", "textBoxAutoWrap",
         "lineToolsShareStyle", "lineWidthPt", "arrowWidthPt", "arrowHead", "waveWidthPt", "lineDashStyle", "freehandWidthPt",
         "markerFreeWidthPt", "markerTextWidthPt", "markerTextUnderline", "eraserWidthPt",
         "markerAlpha", "lineAlpha", "arrowAlpha", "waveAlpha", "freehandAlpha", "shapeAlpha",
@@ -4680,6 +4695,7 @@ static bool ButtonIsCheckbox(LONG_PTR style) {
 static bool ButtonIsKnownCheckbox(HWND hWnd) {
     return hWnd == g_hAnnotShow ||
            hWnd == g_hChkTextReadableBackground ||
+           hWnd == g_hChkTextAutoWrap ||
            hWnd == g_hChkShortcutHeading1 ||
            hWnd == g_hChkShortcutBack ||
            hWnd == g_hChkShortcutChar ||
@@ -5135,7 +5151,8 @@ static void AddQuickAnnotContextOptions(std::vector<QuickAnnotPopupItem>& items)
     }
 
     if (ToolbarHasWidthOptions(g_toolMode)) {
-        int widthPt10[3]{ 15, 25, 40 };
+        int widthPt10[4]{ 15, 25, 40, 60 };
+        int widthCount = g_toolMode == ToolMode::Arrow ? 4 : 3;
         if (g_toolMode == ToolMode::MarkerFree ||
             g_toolMode == ToolMode::MarkerLine ||
             g_toolMode == ToolMode::MarkerArrow ||
@@ -5153,10 +5170,10 @@ static void AddQuickAnnotContextOptions(std::vector<QuickAnnotPopupItem>& items)
             widthPt10[1] = 40;
             widthPt10[2] = 80;
         }
-        const wchar_t* labelsJa[] = { L"太さ 細", L"太さ 中", L"太さ 太" };
-        const wchar_t* labelsEn[] = { L"Width Thin", L"Width Medium", L"Width Thick" };
+        const wchar_t* labelsJa[] = { L"太さ 細", L"太さ 中", L"太さ 太", L"太さ 極太" };
+        const wchar_t* labelsEn[] = { L"Width Thin", L"Width Medium", L"Width Thick", L"Width Extra thick" };
         const int currentPt10 = static_cast<int>(std::llround(ToolWidthPtForMode(g_toolMode) * 10.0));
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < widthCount; ++i) {
             const double pt = static_cast<double>(widthPt10[i]) / 10.0;
             addItem(ID_ANNOT_CONTEXT_WIDTH_BASE + i,
                     QuickAnnotPtLabel(IsEnglishUi() ? labelsEn[i] : labelsJa[i], pt),
@@ -6185,6 +6202,12 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     if (auto b = ParseJsonBoolField(json, "noteVimClickEntersInsertMode")) {
         cfg.noteVimClickEntersInsertMode = *b;
     }
+    if (auto v = ParseJsonIntField(json, "noteOverlayRefreshDelayMs")) {
+        cfg.noteOverlayRefreshDelayMs = std::clamp(*v, 100, 2000);
+    }
+    if (auto v = ParseJsonIntField(json, "noteFullReparseDelayMs")) {
+        cfg.noteFullReparseDelayMs = std::clamp(*v, 250, 5000);
+    }
     if (auto v = ParseJsonIntField(json, "noteMathMarginTopPercent")) {
         cfg.noteMathMarginTopPercent = std::clamp(*v, 5, 95);
     }
@@ -6290,6 +6313,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto b = ParseJsonBoolField(json, "textBoxReadableBackgroundInverted")) {
         cfg.textBoxReadableBackgroundInverted = *b;
+    }
+    if (auto b = ParseJsonBoolField(json, "textBoxAutoWrap")) {
+        cfg.textBoxAutoWrap = *b;
     }
     if (cfg.textFontActiveSizeSlot == 1) {
         cfg.textFontPt = cfg.textFontPtSlotB;
@@ -6982,6 +7008,8 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"noteVimModeEnabled\": " << (cfg.noteVimModeEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteVimCaretLineRawTextVisible\": " << (cfg.noteVimCaretLineRawTextVisible ? "true" : "false") << ",\n";
     ofs << "  \"noteVimClickEntersInsertMode\": " << (cfg.noteVimClickEntersInsertMode ? "true" : "false") << ",\n";
+    ofs << "  \"noteOverlayRefreshDelayMs\": " << std::clamp(cfg.noteOverlayRefreshDelayMs, 100, 2000) << ",\n";
+    ofs << "  \"noteFullReparseDelayMs\": " << std::clamp(cfg.noteFullReparseDelayMs, 250, 5000) << ",\n";
     ofs << "  \"noteMathMarginTopPercent\": " << std::clamp(cfg.noteMathMarginTopPercent, 5, 95) << ",\n";
     ofs << "  \"noteMathSupSubGapSupPercent\": "
         << ((cfg.noteMathSupSubGapSupPercent <= 0) ? 0 : std::clamp(cfg.noteMathSupSubGapSupPercent, 5, 95)) << ",\n";
@@ -7024,6 +7052,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"textFontUseA4ScaleSlotB\": " << (cfg.textFontUseA4ScaleSlotB ? "true" : "false") << ",\n";
     ofs << "  \"textBoxReadableBackground\": " << (cfg.textBoxReadableBackground ? "true" : "false") << ",\n";
     ofs << "  \"textBoxReadableBackgroundInverted\": " << (cfg.textBoxReadableBackgroundInverted ? "true" : "false") << ",\n";
+    ofs << "  \"textBoxAutoWrap\": " << (cfg.textBoxAutoWrap ? "true" : "false") << ",\n";
     ofs << "  \"lineToolsShareStyle\": " << (cfg.lineToolsShareStyle ? "true" : "false") << ",\n";
     ofs << "  \"lineWidthPt\": " << cfg.lineWidthPt << ",\n";
     ofs << "  \"arrowWidthPt\": " << cfg.arrowWidthPt << ",\n";
@@ -7109,6 +7138,7 @@ void PersistConfig() {
         g_config.textFontUseA4ScaleSlotB = g_textFontUseA4ScaleSlotB;
         g_config.textBoxReadableBackground = g_textBoxReadableBackground;
         g_config.textBoxReadableBackgroundInverted = g_textBoxReadableBackgroundInverted;
+        g_config.textBoxAutoWrap = g_textBoxAutoWrap;
         g_config.noteFontName = g_noteFontName;
         g_config.noteFontPt = g_noteFontPt;
         g_config.noteRenderFontName = g_noteRenderFontName;

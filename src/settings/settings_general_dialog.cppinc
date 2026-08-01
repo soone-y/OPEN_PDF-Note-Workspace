@@ -482,6 +482,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             std::wstring defaultBgLabel = NoteBackgroundLabel(defaults.noteBgSource, defaults.noteBgThemeName, defaults.noteBgColor);
             std::wstring defaultMathMarginLabel = NoteRatioLabel(defaults.noteMathMarginTopPercent);
             std::wstring defaultSupSubLabel = NoteSupSubDistributionLabel(defaults.noteMathSupSubGapSupPercent);
+            std::wstring defaultOverlayRefreshDelayLabel = std::to_wstring(defaults.noteOverlayRefreshDelayMs) + L" ms";
+            std::wstring defaultFullReparseDelayLabel = std::to_wstring(defaults.noteFullReparseDelayMs) + L" ms";
 
             beginSection(0, IsEnglishUi() ? L"Text / Font" : L"文字・フォント");
             addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Note font" : L"ノート文字フォント", defaultNoteFontLabel));
@@ -558,6 +560,13 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
 
             addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Sup/sub distribution" : L"上付き/下付き 配分", defaultSupSubLabel));
             ctx->cbNoteMathSupSub = addCombo(IDC_NOTE_MATH_SUPSUB, false, controlW);
+
+            beginSection(3, IsEnglishUi() ? L"Performance" : L"動作速度");
+            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Render refresh after input" : L"入力後のレンダリング更新", defaultOverlayRefreshDelayLabel));
+            ctx->cbNoteOverlayRefreshDelay = addCombo(IDC_NOTE_OVERLAY_REFRESH_DELAY, false, controlW);
+
+            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Full reparse after input" : L"入力後の完全再解析", defaultFullReparseDelayLabel));
+            ctx->cbNoteFullReparseDelay = addCombo(IDC_NOTE_FULL_REPARSE_DELAY, false, controlW);
         }
 
         if (showBasicSections) {
@@ -1007,6 +1016,39 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->cbNoteMathSupSub) {
             FillNoteRatioCombo(ctx->cbNoteMathSupSub, g_config.noteMathSupSubGapSupPercent, true);
         }
+        auto fillDelayCombo = [](HWND combo, std::initializer_list<int> options, int current) {
+            if (!combo) return;
+            int selected = 0;
+            int index = 0;
+            bool currentFound = false;
+            for (int delayMs : options) {
+                const std::wstring label = std::to_wstring(delayMs) + L" ms";
+                const int added = static_cast<int>(SendMessageW(
+                    combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+                if (added >= 0) {
+                    SendMessageW(combo, CB_SETITEMDATA, added, static_cast<LPARAM>(delayMs));
+                    if (delayMs == current) {
+                        selected = index;
+                        currentFound = true;
+                    }
+                }
+                ++index;
+            }
+            if (!currentFound) {
+                const std::wstring label = std::to_wstring(current) + L" ms";
+                const int added = static_cast<int>(SendMessageW(
+                    combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+                if (added >= 0) {
+                    SendMessageW(combo, CB_SETITEMDATA, added, static_cast<LPARAM>(current));
+                    selected = added;
+                }
+            }
+            SendMessageW(combo, CB_SETCURSEL, selected, 0);
+        };
+        fillDelayCombo(ctx->cbNoteOverlayRefreshDelay, {100, 200, 400, 600, 800, 1000},
+                       std::clamp(g_config.noteOverlayRefreshDelayMs, 100, 2000));
+        fillDelayCombo(ctx->cbNoteFullReparseDelay, {250, 500, 700, 900, 1200, 1500, 2000},
+                       std::clamp(g_config.noteFullReparseDelayMs, 250, 5000));
         ctx->noteBgCustomColor = g_config.noteBgColor;
         if (ctx->cbNoteBgMode) {
             FillNoteBackgroundCombo(ctx);
@@ -1109,6 +1151,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                     IsEnglishUi() ? L"Text / Font" : L"文字・フォント",
                     IsEnglishUi() ? L"Display" : L"表示",
                     IsEnglishUi() ? L"Assist" : L"補助表示",
+                    IsEnglishUi() ? L"Performance" : L"動作速度",
                 };
                 const int noteSectionCount = std::min<int>(ctx->sectionCount,
                                                            static_cast<int>(std::size(noteSectionLabels)));

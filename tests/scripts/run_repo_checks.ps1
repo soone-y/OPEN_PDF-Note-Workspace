@@ -10,6 +10,7 @@ param(
     [switch]$SkipClropJsonDirectParseTests,
     [switch]$SkipClropFileSafetyTests,
     [switch]$SkipDocxSpaceProtectionTests,
+    [switch]$SkipTextEncodingTests,
     [switch]$SkipRuntimeDependencyTests,
     [switch]$SkipThemeSwitchingTests,
     [switch]$SkipWorkspaceConfigTests,
@@ -19,6 +20,7 @@ param(
     [switch]$SkipPythonToolTests,
     [switch]$SkipSiteValidation,
     [switch]$SkipCodebaseValidation,
+    [switch]$SkipScriptAndTextGate,
     [switch]$SkipSafetyScan,
     [switch]$SkipLibreOfficeRuntimeGate,
     [switch]$SkipBinaryArtifactScan,
@@ -47,6 +49,7 @@ $mermaidSubsetParserScript = Join-Path $PSScriptRoot "run_mermaid_subset_parser_
 $clropJsonDirectParseScript = Join-Path $PSScriptRoot "run_clrop_json_direct_parse_tests.ps1"
 $clropFileSafetyScript = Join-Path $PSScriptRoot "run_clrop_file_safety_tests.ps1"
 $docxSpaceProtectionScript = Join-Path $PSScriptRoot "run_docx_space_protection_tests.ps1"
+$textEncodingScript = Join-Path $PSScriptRoot "run_text_encoding_tests.ps1"
 $runtimeDependencyScript = Join-Path $PSScriptRoot "run_runtime_dependency_tests.ps1"
 $themeSwitchingScript = Join-Path $PSScriptRoot "run_theme_switching_tests.ps1"
 $workspaceConfigTestScript = Join-Path $PSScriptRoot "run_workspace_config_tests.ps1"
@@ -59,6 +62,7 @@ $cloudflareSiteValidationScript = Join-Path $repoRoot "site\cloudflare\scripts\v
 $githubSiteBuildScript = Join-Path $repoRoot "site\github\scripts\build_public_site.py"
 $githubSiteValidationScript = Join-Path $repoRoot "site\github\scripts\validate_public_site.py"
 $codebaseValidationScript = Join-Path $repoRoot "tests\python\validate_codebase.py"
+$scriptAndTextGateScript = Join-Path $repoRoot "tools\release_checks\repo_hygiene_gate.py"
 $safetyScanIgnoreFile = Join-Path $repoRoot "tests\config\safety_scan_ignore_globs.txt"
 $binaryScanScript = Join-Path $repoRoot "tools\release_checks\binary_scan.py"
 $libreOfficeRuntimeGateScript = Join-Path $repoRoot "tools\release_checks\libreoffice_runtime_gate.py"
@@ -588,6 +592,7 @@ try {
     Assert-ScriptExists -Path $clropJsonDirectParseScript
     Assert-ScriptExists -Path $clropFileSafetyScript
     Assert-ScriptExists -Path $docxSpaceProtectionScript
+    Assert-ScriptExists -Path $textEncodingScript
     Assert-ScriptExists -Path $runtimeDependencyScript
     Assert-ScriptExists -Path $themeSwitchingScript
     Assert-ScriptExists -Path $workspaceConfigTestScript
@@ -599,6 +604,7 @@ try {
     Assert-ScriptExists -Path $githubSiteBuildScript
     Assert-ScriptExists -Path $githubSiteValidationScript
     Assert-ScriptExists -Path $codebaseValidationScript
+    Assert-ScriptExists -Path $scriptAndTextGateScript
     Assert-ScriptExists -Path $safetyScanIgnoreFile
     Assert-ScriptExists -Path $binaryScanScript
     Assert-ScriptExists -Path $libreOfficeRuntimeGateScript
@@ -698,6 +704,12 @@ try {
         }
     }
 
+    if (-not $SkipTextEncodingTests) {
+        Invoke-Step -Name "Text Encoding Tests" -Action {
+            Invoke-ChildPowerShellScript -ScriptPath $textEncodingScript
+        }
+    }
+
     if (-not $SkipRuntimeDependencyTests) {
         Invoke-Step -Name "Runtime Dependency Tests" -Action {
             Invoke-ChildPowerShellScript -ScriptPath $runtimeDependencyScript
@@ -768,6 +780,12 @@ try {
     if (-not $SkipCodebaseValidation) {
         Invoke-Step -Name "Codebase Validation" -Action {
             Invoke-PythonScript -ScriptPath $codebaseValidationScript
+        }
+    }
+
+    if (-not $SkipScriptAndTextGate) {
+        Invoke-Step -Name "Repository Script and Text Gate" -Action {
+            Invoke-PythonScript -ScriptPath $scriptAndTextGateScript
         }
     }
 

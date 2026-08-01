@@ -200,25 +200,70 @@ static void RegisterExpectedCurrentNoteSelectionReplacement(HWND hEdit,
                                  afterSelStart, afterSelEnd, allowCoalesce);
 }
 
+bool SynchronizeActiveNoteEditorToKernel(HWND owner) {
+    if (!g_hNoteEdit || !IsWindow(g_hNoteEdit)) return true;
+    if (!owner) owner = g_hMainWnd;
+    if (!owner) owner = GetParent(g_hNoteEdit);
+
+    if (IsNoteImeComposing()) {
+        if (!CommitNoteImeCompositionNow() || IsNoteImeComposing()) {
+            return false;
+        }
+    }
+
+    // A deferred new note has no kernel identity yet. Its IME result is now
+    // committed, and the normal path-assignment flow will synchronize it once
+    // the target note exists.
+    if (g_currentNotePath.empty()) return true;
+
+    const bool editorModified = (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0);
+    note::LocalNoteKernel* kernel = CurrentNoteKernel();
+    const std::wstring editorText = GetEditTextForIndexing(g_hNoteEdit);
+    const bool kernelWasOutOfSync =
+        kernel && !kernel->text_core().MatchesRaw(editorText);
+    if (kernelWasOutOfSync) {
+        RecordCurrentNoteTextEditForUndo(g_hNoteEdit);
+        if (!kernel->text_core().MatchesRaw(GetEditTextForIndexing(g_hNoteEdit))) {
+            // A freshly loaded RichEdit can normalize its text (notably line
+            // endings) before the undo snapshot exists.  In that first-sync
+            // case RecordCurrentNoteTextEditForUndo correctly creates the
+            // snapshot but has no delta to apply to the kernel yet.  Reset the
+            // kernel from the still-visible editor contents instead of
+            // rejecting an otherwise clean note as an IME/save failure.
+            const std::wstring stableEditorText = GetEditTextForIndexing(g_hNoteEdit);
+            SynchronizeCurrentNoteTextCore(stableEditorText);
+            kernel = CurrentNoteKernel();
+            if (!kernel || !kernel->text_core().MatchesRaw(stableEditorText)) {
+                preview_trace::Append(L"NoteEditorSync",
+                                      L"kernel_reconcile_failed path=" + g_currentNotePath);
+                return false;
+            }
+            preview_trace::Append(L"NoteEditorSync",
+                                  L"kernel_reconciled_from_editor path=" + g_currentNotePath);
+        }
+    }
+
+    if ((editorModified || kernelWasOutOfSync) && !IsNoteChangeSuppressed()) {
+        const bool wasClean = !g_noteDirty;
+        g_noteDirty = true;
+        g_noteNeedsIntegrate = true;
+        if (wasClean || kernelWasOutOfSync) {
+            NotifyEditRevisionChanged();
+        }
+        file_output::NotifyNoteStageEdit(owner);
+    }
+
+    return true;
+}
+
 bool CommitActiveNoteEditBoundary(HWND owner) {
+    if (!SynchronizeActiveNoteEditorToKernel(owner)) return false;
     if (!g_hNoteEdit || !IsWindow(g_hNoteEdit)) return true;
     if (g_currentNotePath.empty()) return true;
     if (!owner) owner = g_hMainWnd;
     if (!owner) owner = GetParent(g_hNoteEdit);
 
-    if (IsNoteImeComposing()) {
-        CommitNoteImeCompositionNow();
-    }
-
     const bool editorModified = (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0);
-    if (editorModified && !g_noteDirty && !IsNoteChangeSuppressed()) {
-        g_noteDirty = true;
-        g_noteNeedsIntegrate = true;
-        NotifyEditRevisionChanged();
-        RecordCurrentNoteTextEditForUndo(g_hNoteEdit);
-        file_output::NotifyNoteStageEdit(owner);
-    }
-
     if (g_noteDirty || g_noteNeedsIntegrate || editorModified) {
         return file_output::SaveNoteIfDirty(owner);
     }
@@ -309,9 +354,15 @@ bool CanExecuteNoteUndoRedoFromFocus(bool undo) {
 
 bool ExecuteNoteUndoRedoFromFocus(HWND owner, bool undo) {
     (void)owner;
-    if (!CanExecuteNoteUndoRedoFromFocus(undo)) return false;
     note::LocalNoteKernel* kernel = CurrentNoteKernel();
-    if (!kernel || !kernel->text_core().MatchesRaw(GetEditTextForIndexing(g_hNoteEdit))) return false;
+    if (!kernel || !IsEditableNoteUndoRedoFocusOwner()) return false;
+    if (!kernel->text_core().MatchesRaw(GetEditTextForIndexing(g_hNoteEdit))) {
+        // Recover the final deferred RichEdit mutation before replaying the
+        // shared history. This preserves history instead of discarding it.
+        RecordCurrentNoteTextEditForUndo(g_hNoteEdit);
+    }
+    if (!kernel->text_core().MatchesRaw(GetEditTextForIndexing(g_hNoteEdit))) return false;
+    if (!(undo ? kernel->CanUndo() : kernel->CanRedo())) return false;
     const auto replay = undo ? kernel->Undo(IsNoteRenderActive()) : kernel->Redo(IsNoteRenderActive());
     if (!replay.has_value() || !replay->applied()) return false;
     const note::TextEdit& edit = replay->apply_result.dirty_graph.edit;
@@ -1203,9 +1254,14 @@ static bool InsertMarkdownLinkAtSelection(HWND hWnd) {
     return ReplaceNoteSelectionAndSetSelection(hWnd, selStart, selEnd, replacement, caret, caret);
 }
 
-static bool TryHandleMarkdownShortcut(HWND hWnd, WPARAM vkey) {
+static bool TryHandleMarkdownShortcut(HWND hWnd, WPARAM vkey, bool shiftDown) {
     if (!hWnd) return false;
     if (CurrentNoteContentRoute() != NoteContentRoute::MarkdownMd4c) return false;
+    // Ctrl+Shift+X is the conventional strikethrough shortcut. Do not consume
+    // Ctrl+X itself: RichEdit must retain its normal Cut behavior.
+    if (shiftDown) {
+        return vkey == 'X' && SurroundNoteSelectionWithMarkdown(hWnd, L"~~", L"~~");
+    }
     switch (vkey) {
     case 'B':
         return SurroundNoteSelectionWithMarkdown(hWnd, L"**", L"**");
@@ -1436,8 +1492,12 @@ static void UpdateNotePreviewFromEdit(HWND hEdit) {
     if (!hEdit) return;
     std::wstring next;
     if (!ReadCurrentNoteLinePreview(hEdit, &next)) return;
+    if (next == g_previewNote) return;
     g_previewNote = std::move(next);
-    RefreshBottomPaneView();
+    // The note refresh timer runs on the UI thread.  Do not make its input
+    // path wait for the bottom pane's paint; the normal paint cycle will draw
+    // the already-updated projection.
+    RefreshBottomPaneView(false);
 }
 
 static void ResetNoteUndoBuffer(HWND hEdit) {
@@ -1715,6 +1775,7 @@ struct NoteSyntaxRefreshResult {
 static NoteSyntaxRefreshResult RefreshNoteSyntaxStage(
     const std::wstring& text,
     ULONGLONG startTick) {
+    const ULONGLONG syntaxStartTick = preview_trace::TickNow();
     NoteSyntaxRefreshResult result;
     // RecomputeParsedNoteDocument calls kernel->RefreshDerived() exactly once and returns
     // the result so we can propagate kind and consumedDirtyGraph to the Render/Layout stage.
@@ -1739,7 +1800,8 @@ static NoteSyntaxRefreshResult RefreshNoteSyntaxStage(
         L" styles=" + std::to_wstring(CurrentNoteDocument().style_spans.size()) +
         L" math=" + std::to_wstring(CurrentNoteDocument().math_spans.size()) +
         L" diagnostics=" + std::to_wstring(CurrentNoteDocument().diagnostics.size()) +
-        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        L" stage_ms=" + preview_trace::ElapsedMs(syntaxStartTick) +
+        L" total_ms=" + preview_trace::ElapsedMs(startTick));
     if (result.current) {
         g_highlightRanges = note::BuildHighlightRanges(CurrentNoteDocument());
     } else {
@@ -1752,6 +1814,12 @@ static void RefreshNoteRenderAndLayoutStage(
     const std::wstring& text,
     const NoteSyntaxRefreshResult& syntax,
     bool needRenderPlan) {
+    const ULONGLONG renderLayoutStartTick = preview_trace::TickNow();
+    const size_t lineCacheBefore = g_lineCache.size();
+    const size_t mathDisplayCacheBefore = g_mathDisplayCache.size();
+    const size_t mathEntriesBefore = g_mathEntries.size();
+    const bool hasDirtyGraph = syntax.consumedDirtyGraph.has_value();
+    std::wstring action = L"skip";
     using Kind = note::NoteKernelRefreshKind;
     //
     // Decide how to update the render (LineCache) based on what the Kernel reported:
@@ -1784,24 +1852,41 @@ static void RefreshNoteRenderAndLayoutStage(
             // Syntax is unavailable or this is a plain-text clear; wipe the render
             // state so we do not paint stale content from a different note or revision.
             ClearLegacyRenderCache();
+            action = L"clear";
         } else {
             // Incremental, Full, Deferred, or Unchanged-with-stale-cache:
             // RefreshMarkdownRenderCache selects incremental or full rebuild
             // as appropriate based on syntax.consumedDirtyGraph and cache state.
             RefreshMarkdownRenderCache(text, syntax.consumedDirtyGraph);
+            action = L"refresh";
         }
     } else if (needRenderPlan) {
         ClearLegacyRenderCache();
+        action = L"clear_non_markdown";
     }
     g_mathDisplayCache.clear();
     g_mathEntries.clear();
+    const ULONGLONG lineSpacingStartTick = preview_trace::TickNow();
     UpdateNoteLineSpacing(syntax.consumedDirtyGraph);
+    const std::wstring lineSpacingElapsed = preview_trace::ElapsedMs(lineSpacingStartTick);
     if (!ConsumeNoteLineSpacingInvalidatedNote()) {
         InvalidateRect(g_hNoteEdit, nullptr, FALSE);
     }
+    preview_trace::Append(
+        L"NotePerformance",
+        L"stage=render_layout action=" + action +
+        L" syntax_kind=" + std::to_wstring(static_cast<int>(syntax.kind)) +
+        L" dirty_graph=" + preview_trace::Bool(hasDirtyGraph) +
+        L" cache_lines_before=" + std::to_wstring(lineCacheBefore) +
+        L" cache_lines_after=" + std::to_wstring(g_lineCache.size()) +
+        L" math_display_entries_cleared=" + std::to_wstring(mathDisplayCacheBefore) +
+        L" math_entries_cleared=" + std::to_wstring(mathEntriesBefore) +
+        L" line_spacing_ms=" + lineSpacingElapsed +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(renderLayoutStartTick));
 }
 
 static void RefreshNoteAssistStage() {
+    const ULONGLONG assistStartTick = preview_trace::TickNow();
     UpdateNotePreviewFromEdit(g_hNoteEdit);
     if (g_hBottomNote) {
         if (g_bottomPanePin != BottomPanePin::Math &&
@@ -1812,6 +1897,9 @@ static void RefreshNoteAssistStage() {
     if (g_hBottomMath) {
         InvalidateRect(g_hBottomMath, nullptr, FALSE);
     }
+    preview_trace::Append(
+        L"NotePerformance",
+        L"stage=assist elapsed_ms=" + preview_trace::ElapsedMs(assistStartTick));
 }
 
 static void RefreshNoteLightweightStage() {
@@ -1842,15 +1930,28 @@ void RecomputeMathFromNote() {
         return;
     }
 
+    const ULONGLONG textReadStartTick = preview_trace::TickNow();
     const std::wstring text = GetEditTextForIndexing(g_hNoteEdit);
     preview_trace::Append(
         L"RecomputeMathFromNote",
         L"begin chars=" + std::to_wstring(text.size()) +
-        L" stable_math_cache=true");
+        L" stable_math_cache=true" +
+        L" text_read_ms=" + preview_trace::ElapsedMs(textReadStartTick));
 
+    const ULONGLONG syntaxStageStartTick = preview_trace::TickNow();
     const NoteSyntaxRefreshResult syntax = RefreshNoteSyntaxStage(text, startTick);
+    preview_trace::Append(
+        L"NotePerformance",
+        L"stage=syntax kind=" + std::to_wstring(static_cast<int>(syntax.kind)) +
+        L" current=" + preview_trace::Bool(syntax.current) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(syntaxStageStartTick));
+
+    const ULONGLONG renderLayoutStageStartTick = preview_trace::TickNow();
     RefreshNoteRenderAndLayoutStage(
         text, syntax, refreshPlan.refresh_render_plan);
+    preview_trace::Append(
+        L"NotePerformance",
+        L"stage=render_layout_total elapsed_ms=" + preview_trace::ElapsedMs(renderLayoutStageStartTick));
     if (refreshPlan.refresh_assist) RefreshNoteAssistStage();
     preview_trace::Append(
         L"RecomputeMathFromNote",
@@ -1865,16 +1966,57 @@ struct NoteTextReadSnapshot {
     std::filesystem::path stagePath;
 };
 
+static bool DecodeNoteTextForLoad(const std::wstring& path, const std::string& bytes,
+                                  text_encoding::DecodedText* out,
+                                  std::wstring* outError = nullptr);
+
 static std::optional<NoteTextReadSnapshot> LoadLatestNoteTextSnapshotForRead(const std::wstring& path) {
     note_snapshot::LatestTextSnapshot snapshot = note_snapshot::LoadLatestTextSnapshot(path);
     if (!snapshot.ok) return std::nullopt;
+    text_encoding::DecodedText decoded;
+    std::wstring decodeError;
+    if (!DecodeNoteTextForLoad(path, snapshot.bytes, &decoded, &decodeError)) {
+        preview_trace::Append(L"LoadLatestNoteTextSnapshot", L"decode_failed path=" + path + L" err=" + decodeError);
+        return std::nullopt;
+    }
     NoteTextReadSnapshot result;
     result.targetPath = std::move(snapshot.targetPath);
-    result.text = UTF8ToWide(snapshot.bytes);
+    result.text = std::move(decoded.text);
     result.source = snapshot.source;
     result.identity = snapshot.identity;
     result.stagePath = std::move(snapshot.stagePath);
     return result;
+}
+
+static bool IsAppManagedUtf8NotePath(const std::wstring& path) {
+    std::wstring extension = std::filesystem::path(path).extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(ch));
+    });
+    return extension == L".clro";
+}
+
+static bool DecodeNoteTextForLoad(const std::wstring& path, const std::string& bytes,
+                                  text_encoding::DecodedText* out,
+                                  std::wstring* outError) {
+    if (IsAppManagedUtf8NotePath(path)) {
+        const bool hasBom = bytes.size() >= 3 &&
+            static_cast<unsigned char>(bytes[0]) == 0xEF &&
+            static_cast<unsigned char>(bytes[1]) == 0xBB &&
+            static_cast<unsigned char>(bytes[2]) == 0xBF;
+        const auto decoded = text_encoding::DecodeUtf8Strict(
+            hasBom ? std::string_view(bytes).substr(3) : std::string_view(bytes));
+        if (!decoded.has_value()) {
+            if (outError) *outError = L".clro は UTF-8 である必要があります。";
+            return false;
+        }
+        if (out) {
+            out->text = *decoded;
+            out->encoding = hasBom ? text_encoding::Encoding::Utf8Bom : text_encoding::Encoding::Utf8;
+        }
+        return true;
+    }
+    return text_encoding::DecodeExternalText(bytes, out, outError);
 }
 
 static void ApplyStagedNoteRestoreViewState(HWND hEdit,
@@ -2001,7 +2143,19 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
         return;
     }
 
-    std::wstring text = UTF8ToWide(buffer);
+    text_encoding::DecodedText decoded;
+    std::wstring decodeError;
+    if (!DecodeNoteTextForLoad(path, buffer, &decoded, &decodeError)) {
+        preview_trace::Append(L"LoadNoteFile", L"abort=decode_failed path=" + path + L" err=" + decodeError);
+        ShowSilentMessageDialog(hWnd, L"Note", decodeError, SoftNoticeKind::Error);
+        return;
+    }
+    std::wstring text = std::move(decoded.text);
+    g_currentNoteStorageEncoding = decoded.encoding;
+    if (decoded.encoding != text_encoding::Encoding::Utf8) {
+        preview_trace::Append(L"LoadNoteFile", L"decoded=" +
+            std::wstring(text_encoding::Name(decoded.encoding)) + L" path=" + path);
+    }
     const note::SnapshotIdentity loadedSnapshot = note::BuildSnapshotIdentity(
         storageSnapshot.noteIdentity.note_id,
         selectedStageSnapshot ? storageSnapshot.stageContentRevision : 0,
@@ -3250,6 +3404,10 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
                     drawX += MeasureRenderedSegmentWidth(hdc, fonts, cache, prevSeg, baseLineHeight, nullptr, nullptr);
                 }
             }
+            if (!SegmentUsesAnchoredLayout(seg) && runX == 0) {
+                drawX += FirstGlyphLeftBearingAlignmentPx(hdc, fonts, seg.text, effectiveBold,
+                                                          seg.style.italic, extraPx, fontFaceOverride);
+            }
             int drawY = lineY;
             if (drawAsMath) {
                 drawY = baselineY - mathLayout.baseline;
@@ -3840,6 +3998,47 @@ static void DrawStyledSegmentText(HDC hdc,
         if (oldFont) SelectObject(hdc, oldFont);
         runStart = runEnd;
     }
+}
+
+// The logical x origin is shared by every rendered line, but the first glyph's
+// left side bearing can differ between regular and bold fonts.  Without
+// compensating for that difference, a line beginning with **2.** can look a
+// pixel left or right of a neighbouring unstyled line despite the same layout
+// origin.  Align its inked left edge to the regular-font equivalent instead.
+static int FirstGlyphLeftBearingAlignmentPx(HDC hdc,
+                                            MarkupFontProvider& fonts,
+                                            const std::wstring& text,
+                                            bool bold,
+                                            bool italic,
+                                            int extraPx,
+                                            const std::wstring* fontFaceOverride) {
+    if (!hdc || !bold || text.empty()) return 0;
+
+    const wchar_t first = text.front();
+    if (first >= 0xD800 && first <= 0xDFFF) return 0;
+
+    const bool japanese = IsJapaneseRenderChar(first);
+    HFONT regularFont = fonts.Acquire(hdc, false, italic, extraPx, nullptr, japanese, fontFaceOverride);
+    HFONT boldFont = fonts.Acquire(hdc, true, italic, extraPx, nullptr, japanese, fontFaceOverride);
+    if (!regularFont || !boldFont) return 0;
+
+    ABC regular{};
+    ABC boldMetrics{};
+    HFONT original = static_cast<HFONT>(GetCurrentObject(hdc, OBJ_FONT));
+    SelectObject(hdc, regularFont);
+    const bool hasRegular = GetCharABCWidthsW(hdc, first, first, &regular) != 0;
+    SelectObject(hdc, boldFont);
+    const bool hasBold = GetCharABCWidthsW(hdc, first, first, &boldMetrics) != 0;
+    if (original) SelectObject(hdc, original);
+    if (!hasRegular || !hasBold) return 0;
+
+    // A positive bold side bearing means that the bold ink begins to the right;
+    // this subtraction is then negative and shifts it left.  The opposite
+    // font-metric difference is handled symmetrically.
+    const int alignment = static_cast<int>(regular.abcA - boldMetrics.abcA);
+    // A large difference indicates an unusual fallback font rather than the
+    // small optical shift this correction is intended to address.
+    return std::clamp(alignment, -2, 2);
 }
 
 static bool QueryNativeEditScrollPos(HWND hWnd, POINT* out) {

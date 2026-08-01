@@ -1,6 +1,7 @@
 // file: note_view/note_view.h
 #pragma once
 #include "core/app_core.h"
+#include "core/text_encoding.h"
 #include "bridge/view_bridge.h"
 #include "file_output/file_output.h"
 #include "note/note_identity.h"
@@ -39,6 +40,9 @@ bool SaveNoteFile(HWND hWnd);
 void ClearCurrentNoteUndoHistory();
 void ResetNoteEditHistorySnapshot(HWND hEdit);
 void RecordCurrentNoteTextEditForUndo(HWND hEdit);
+// Reconcile any RichEdit mutation with the document-local kernel before a
+// command observes, saves, or replaces the current note.
+[[nodiscard]] bool SynchronizeActiveNoteEditorToKernel(HWND owner);
 // Undo/redo is document-local and may only change the focused editable note.
 bool CanExecuteNoteUndoRedoFromFocus(bool undo);
 bool ExecuteNoteUndoRedoFromFocus(HWND owner, bool undo);
@@ -46,7 +50,9 @@ void InsertSnippetIntoNote(const std::wstring& snippet);
 bool InsertSnippetIntoCurrentNoteAt(size_t pos, const std::wstring& snippet);
 void CommitPendingNoteClickCaret();
 bool ShouldShowBottomNotePane();
-void RefreshBottomPaneView();
+// Input-driven updates must not block the RichEdit input path waiting for a
+// bottom-pane paint.  State changes can still request an immediate repaint.
+void RefreshBottomPaneView(bool synchronousPaint = true);
 void UpdateNoteViewMode();
 void EnsureInactiveCachedNoteEditWindowsParked();
 void UpdateNoteLineSpacing(std::optional<note::NoteDirtyGraph> pendingGraph = std::nullopt);
@@ -79,6 +85,13 @@ void SetNoteSearchResultMarker(size_t start, size_t end);
 void ClearNoteSearchResultMarker();
 NoteUiSnapshot CaptureNoteUiSnapshot();
 note::SnapshotIdentity CaptureCurrentNoteSnapshotIdentity();
+// Encode the active note for persistence using the encoding that was detected
+// when this external text file was loaded.
+bool CaptureCurrentNoteTextCoreForStorage(const std::wstring& expectedPath,
+                                          std::string* outBytes,
+                                          note::SnapshotIdentity* outIdentity,
+                                          std::wstring* outError);
+text_encoding::Encoding CurrentNoteStorageEncoding();
 void FocusMainWindowForNoteNormalMode();
 void CancelNoteCmdline();
 LRESULT CALLBACK BottomNoteProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);

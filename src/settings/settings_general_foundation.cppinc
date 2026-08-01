@@ -99,6 +99,8 @@ enum : int {
     IDC_NOTE_BG_CUSTOM,
     IDC_NOTE_MATH_MARGIN,
     IDC_NOTE_MATH_SUPSUB,
+    IDC_NOTE_OVERLAY_REFRESH_DELAY,
+    IDC_NOTE_FULL_REPARSE_DELAY,
     IDC_DEBUG_LOG_PREVIEW_TRACE,
     IDC_DEBUG_LOG_SWITCH_TIMING,
     IDC_DEBUG_LOG_CRASH,
@@ -429,6 +431,8 @@ struct GeneralSettingsCtx {
     HWND btnNoteBgCustom = nullptr;
     HWND cbNoteMathMargin = nullptr;
     HWND cbNoteMathSupSub = nullptr;
+    HWND cbNoteOverlayRefreshDelay = nullptr;
+    HWND cbNoteFullReparseDelay = nullptr;
     HWND lblNoteRenderLatin = nullptr;
     HWND lblNoteRenderJp = nullptr;
     HWND lblNoteFontDigit = nullptr;

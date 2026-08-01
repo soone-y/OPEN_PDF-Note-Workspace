@@ -295,6 +295,7 @@ static int LayoutAnnotToolbar(int baseX, int baseY, int areaW, PlaceFn place) {
             placeCtl(g_hRadioTextReadableBackgroundInverted, x + assistCheckW + assistRadioW, y,
                      std::max(0, w - assistCheckW - assistRadioW), comboH);
             y += comboH + rowGap;
+            placeFull(g_hChkTextAutoWrap, comboH);
         }
     }
 
@@ -756,6 +757,7 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
     hideToolbarOptionIfUnused(g_hChkTextReadableBackground);
     hideToolbarOptionIfUnused(g_hRadioTextReadableBackgroundNormal);
     hideToolbarOptionIfUnused(g_hRadioTextReadableBackgroundInverted);
+    hideToolbarOptionIfUnused(g_hChkTextAutoWrap);
     hideToolbarOptionIfUnused(g_hComboWidth);
     hideToolbarOptionIfUnused(g_hComboMarkerAlpha);
     hideToolbarOptionIfUnused(g_hComboMagnifierShape);

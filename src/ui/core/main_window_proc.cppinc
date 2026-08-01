@@ -22,11 +22,23 @@ static bool s_initialWorkspaceFocusSet = false;
 static bool s_uiAutomationPosted = false;
 static bool s_uiAutomationFinished = false;
 static bool s_noteOverlayRefreshPending = false;
-static constexpr UINT kNoteOverlayRefreshDelayMs = 35;
-static constexpr UINT kNoteFullReparseDelayMs = 600;
+static constexpr UINT kDefaultNoteOverlayRefreshDelayMs = 400;
+static constexpr UINT kDefaultNoteFullReparseDelayMs = 900;
 static ULONGLONG s_noteLastRefreshRequestTick = 0;
 
 static uint64_t s_noteOverlayRefreshTargetRevision = 0;
+
+static UINT NoteOverlayRefreshDelayMs() {
+    return static_cast<UINT>(std::clamp(
+        g_config.noteOverlayRefreshDelayMs,
+        static_cast<int>(kDefaultNoteOverlayRefreshDelayMs / 4), 2000));
+}
+
+static UINT NoteFullReparseDelayMs() {
+    return static_cast<UINT>(std::clamp(
+        g_config.noteFullReparseDelayMs,
+        static_cast<int>(kDefaultNoteFullReparseDelayMs / 4), 5000));
+}
 
 static HWND ResolveStartupMainFocusTarget(HWND hWnd) {
     if (g_leftPaneCollapsed) {
@@ -54,7 +66,7 @@ static void RefreshNoteOverlayNow() {
     SetNoteTyping(false);
     RecomputeMathFromNote();
     if (HasDeferredNoteFullReparse() && g_hMainWnd) {
-        SetTimer(g_hMainWnd, kNoteFullReparseTimerId, kNoteFullReparseDelayMs, nullptr);
+        SetTimer(g_hMainWnd, kNoteFullReparseTimerId, NoteFullReparseDelayMs(), nullptr);
     }
 }
 
@@ -70,7 +82,7 @@ static void ScheduleNoteOverlayRefresh(HWND hWnd, bool immediate, uint64_t targe
     }
     s_noteLastRefreshRequestTick = GetTickCount64();
     s_noteOverlayRefreshPending = true;
-    SetTimer(hWnd, kNoteOverlayRefreshTimerId, kNoteOverlayRefreshDelayMs, nullptr);
+    SetTimer(hWnd, kNoteOverlayRefreshTimerId, NoteOverlayRefreshDelayMs(), nullptr);
 }
 
 LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -311,6 +323,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         if (wParam == SIZE_MAXIMIZED || (wParam == SIZE_RESTORED && !s_inSizeMove)) {
             RedrawWorkspaceLayout(hWnd);
+            // Menu items can wrap only after the new client width is applied.
+            // Let the status item observe that actual layout and compact itself
+            // permanently for this run if it has moved to a second row.
+            RefreshStatusDisplay(hWnd);
         }
         return 0;
     case WM_ENTERSIZEMOVE:
@@ -323,6 +339,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             PersistConfig();
         }
         RedrawWorkspaceLayout(hWnd);
+        RefreshStatusDisplay(hWnd);
         return 0;
     case WM_ERASEBKGND:
         // Avoid background erase flicker; we paint the background in WM_PAINT.
@@ -875,10 +892,11 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             KillTimer(hWnd, kNoteFullReparseTimerId);
             const ULONGLONG now = GetTickCount64();
             if (HasDeferredNoteFullReparse()) {
+                const UINT fullReparseDelayMs = NoteFullReparseDelayMs();
                 if (IsNoteTyping() ||
                     (s_noteLastRefreshRequestTick != 0 &&
-                     now - s_noteLastRefreshRequestTick < kNoteFullReparseDelayMs)) {
-                    SetTimer(hWnd, kNoteFullReparseTimerId, kNoteFullReparseDelayMs, nullptr);
+                     now - s_noteLastRefreshRequestTick < fullReparseDelayMs)) {
+                    SetTimer(hWnd, kNoteFullReparseTimerId, fullReparseDelayMs, nullptr);
                 } else {
                     RunDeferredNoteFullReparseNow();
                 }

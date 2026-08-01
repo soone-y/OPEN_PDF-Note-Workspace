@@ -19,17 +19,16 @@
 #include <cmath>
 #include <climits>
 #include <optional>
-#include <unordered_map>
 
 namespace {
 
-enum class SearchRange { CurrentLecture = 0, CurrentSession, WholeWorkspace, WorkspaceAndTempExternal };
+enum class SearchRange { CurrentLecture = 0, CurrentSession, WholeWorkspace };
 enum SearchTargetMask : unsigned {
     TargetNote = 1u << 0,
     TargetPdf = 1u << 1,
     TargetAnnot = 1u << 2,
 };
-constexpr int kSearchRangeCount = 4;
+constexpr int kSearchRangeCount = 3;
 constexpr int kSearchTargetCount = 3;
 constexpr SearchRange kInvalidSearchRange = static_cast<SearchRange>(-1);
 // Search window child control IDs are scoped to SearchWndProc. The same numeric
@@ -39,6 +38,7 @@ constexpr int IDC_SEARCH_RUN = 4102;
 constexpr int IDC_SEARCH_RESULTS = 4103;
 constexpr int IDC_SEARCH_STATUS = 4104;
 constexpr int IDC_SEARCH_RANGE_BASE = 4110;
+constexpr int IDC_SEARCH_INCLUDE_TEMP_EXTERNAL = 4119;
 constexpr int IDC_SEARCH_TARGET_BASE = 4130;
 constexpr int IDC_SEARCH_OPTION_BASE = 4140;
 constexpr UINT kSearchTimerId = 4120;
@@ -91,6 +91,7 @@ struct SearchUiStrings {
     std::wstring statusFiles;
     std::wstring statusPages;
     std::vector<std::wstring> ranges;
+    std::wstring includeTempExternalLabel;
     std::vector<std::wstring> targets;
     std::wstring msgNeedQuery;
     std::wstring msgNeedRange;
@@ -139,7 +140,8 @@ static SearchUiStrings GetSearchUiStrings() {
             L"Hits: ",
             L"Files: ",
             L"Pages: ",
-            { L"Open lecture", L"Open session", L"Whole workspace", L"Whole workspace + temporary paths" },
+            { L"Open parent item", L"Open child item", L"Whole workspace" },
+            L"Also include temporarily added external parent items",
             { L"Note", L"PDF", L"Annotations" },
             L"Enter a search term.",
             L"Select a range.",
@@ -159,8 +161,10 @@ static SearchUiStrings GetSearchUiStrings() {
             L"hits",
             L"Current"
         };
-        if (!g_config.studentMode) {
-            s.ranges = { L"Open parent item", L"Open child item", L"Whole workspace", L"Whole workspace + temporary paths" };
+        if (g_config.studentMode) {
+            s.ranges = { L"Open lecture", L"Open session", L"Whole workspace" };
+            s.includeTempExternalLabel = L"Also include temporarily added external lectures";
+        } else {
             s.msgNoSession = L"No child item is open.";
             s.msgNoLecture = L"No parent item is open.";
         }
@@ -192,7 +196,8 @@ static SearchUiStrings GetSearchUiStrings() {
         L"一致: ",
         L"ファイル: ",
         L"ページ: ",
-        { L"開いている授業", L"開いている回次", L"ワークスペース全体", L"ワークスペース+一時パス全体" },
+        { L"開いている上位項目", L"開いている下位項目", L"ワークスペース全体" },
+        L"一時的に追加した外部の上位項目も含める",
         { L"ノート", L"PDF", L"注釈" },
         L"検索語を入力してください。",
         L"検索範囲を選択してください。",
@@ -212,8 +217,10 @@ static SearchUiStrings GetSearchUiStrings() {
         L"件",
         L"現在"
     };
-    if (!g_config.studentMode) {
-        s.ranges = { L"開いている上位項目", L"開いている下位項目", L"ワークスペース全体", L"ワークスペース+一時パス全体" };
+    if (g_config.studentMode) {
+        s.ranges = { L"開いている授業", L"開いている回次", L"ワークスペース全体" };
+        s.includeTempExternalLabel = L"一時的に追加した外部の授業も含める";
+    } else {
         s.msgNoSession = L"下位項目が開かれていません。";
         s.msgNoLecture = L"上位項目が開かれていません。";
     }
@@ -306,6 +313,7 @@ struct SearchCtx {
     HWND labelSummary = nullptr;
     HWND labelRange = nullptr;
     std::vector<HWND> rangeRadios;
+    HWND includeTempExternal = nullptr;
     HWND labelTarget = nullptr;
     std::vector<HWND> targetChecks;
     HWND labelOptions = nullptr;
@@ -377,6 +385,7 @@ static double ColorLuminance(COLORREF c) {
 
 static bool IsSearchToggleButtonId(int id) {
     if (id >= IDC_SEARCH_RANGE_BASE && id < IDC_SEARCH_RANGE_BASE + kSearchRangeCount) return true;
+    if (id == IDC_SEARCH_INCLUDE_TEMP_EXTERNAL) return true;
     return id >= IDC_SEARCH_TARGET_BASE && id < IDC_SEARCH_TARGET_BASE + kSearchTargetCount;
 }
 
@@ -1819,6 +1828,11 @@ static void SetSearchControlsEnabled(SearchCtx* ctx, bool enabled) {
     for (HWND radio : ctx->rangeRadios) {
         if (radio) EnableWindow(radio, enabled);
     }
+    if (ctx->includeTempExternal) {
+        const bool workspaceSelected = ctx->rangeRadios.size() > static_cast<size_t>(SearchRange::WholeWorkspace) &&
+            SendMessageW(ctx->rangeRadios[static_cast<size_t>(SearchRange::WholeWorkspace)], BM_GETCHECK, 0, 0) == BST_CHECKED;
+        EnableWindow(ctx->includeTempExternal, enabled && workspaceSelected);
+    }
     for (HWND btn : ctx->targetChecks) {
         if (btn) EnableWindow(btn, enabled);
     }
@@ -1919,34 +1933,24 @@ static std::filesystem::path GetWorkspaceClassesPath() {
     return classesPath;
 }
 
-static std::vector<std::filesystem::path> CollectLectureRoots(const std::filesystem::path& lecturePath) {
+// A lecture is the search boundary displayed in the UI.  Search from the
+// lecture folder itself so that its direct files (including pdf/ and note/)
+// are not omitted when the lecture also has session subfolders.
+static std::vector<std::filesystem::path> CollectLectureSearchRoots(const std::filesystem::path& lecturePath) {
     std::vector<std::filesystem::path> roots;
     if (lecturePath.empty()) return roots;
 
     std::error_code ec;
-    auto norm = [](std::wstring s) {
-        s = TrimWhitespace(s);
-        std::transform(s.begin(), s.end(), s.begin(), ::towlower);
-        return s;
-    };
-
-    std::unordered_map<std::wstring, std::filesystem::path> sessionMap;
-    for (const auto& entry : std::filesystem::directory_iterator(lecturePath, ec)) {
-        bool isReparse = false;
-        if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
-        std::error_code stEc;
-        if (!entry.is_directory(stEc) || stEc) continue;
-        auto key = norm(entry.path().filename().wstring());
-        if (sessionMap.find(key) != sessionMap.end()) continue;
-        sessionMap[key] = entry.path();
-    }
-    for (const auto& kv : sessionMap) {
-        roots.push_back(kv.second);
-    }
+    if (!std::filesystem::exists(lecturePath, ec) || ec) return roots;
+    ec.clear();
+    if (!std::filesystem::is_directory(lecturePath, ec) || ec) return roots;
+    bool isReparse = false;
+    if (TryIsReparsePointNoFollow(lecturePath, isReparse) && isReparse) return roots;
+    roots.push_back(lecturePath);
     return roots;
 }
 
-static std::vector<std::filesystem::path> CollectSessionRoots() {
+static std::vector<std::filesystem::path> CollectWorkspaceLectureSearchRoots() {
     std::vector<std::filesystem::path> roots;
     std::filesystem::path classesPath = GetWorkspaceClassesPath();
     if (classesPath.empty()) return roots;
@@ -1961,7 +1965,7 @@ static std::vector<std::filesystem::path> CollectSessionRoots() {
         auto lectureName = lecture.path().filename().wstring();
         if (!cacheName.empty() && lectureName == cacheName) continue;
 
-        auto lectureRoots = CollectLectureRoots(lecture.path());
+        auto lectureRoots = CollectLectureSearchRoots(lecture.path());
         roots.insert(roots.end(), lectureRoots.begin(), lectureRoots.end());
     }
     return roots;
@@ -1982,8 +1986,8 @@ static void AppendUniqueRoots(std::vector<std::filesystem::path>& roots,
     }
 }
 
-static std::vector<std::filesystem::path> CollectSessionRootsIncludingVisibleLectures() {
-    std::vector<std::filesystem::path> roots = CollectSessionRoots();
+static std::vector<std::filesystem::path> CollectWorkspaceLectureSearchRootsIncludingVisibleExternal() {
+    std::vector<std::filesystem::path> roots = CollectWorkspaceLectureSearchRoots();
     for (const auto& lecturePath : g_lectures) {
         if (lecturePath.empty()) continue;
         std::filesystem::path path(lecturePath);
@@ -1993,7 +1997,7 @@ static std::vector<std::filesystem::path> CollectSessionRootsIncludingVisibleLec
         if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) continue;
         std::error_code stEc;
         if (!std::filesystem::is_directory(path, stEc) || stEc) continue;
-        AppendUniqueRoots(roots, CollectLectureRoots(path));
+        AppendUniqueRoots(roots, CollectLectureSearchRoots(path));
     }
     return roots;
 }
@@ -2119,6 +2123,11 @@ static void ApplySearchWindowTranslucency(HWND hWnd, const SearchCtx* ctx) {
     SetLayeredWindowAttributes(hWnd, 0, static_cast<BYTE>(translucent ? 224 : 255), LWA_ALPHA);
 }
 
+static void UpdateTemporaryExternalScopeControl(SearchCtx* ctx) {
+    if (!ctx || !ctx->includeTempExternal) return;
+    EnableWindow(ctx->includeTempExternal, GetSelectedRange(*ctx) == SearchRange::WholeWorkspace);
+}
+
 static void FocusSearchWindowQuery(HWND hWnd) {
     if (!hWnd || !IsWindow(hWnd)) return;
     ShowWindow(hWnd, SW_SHOWNORMAL);
@@ -2132,6 +2141,7 @@ static void FocusSearchWindowQuery(HWND hWnd) {
 }
 
 static bool PrepareSearchRoots(SearchRange range,
+                               bool includeTempExternal,
                                std::vector<std::filesystem::path>& roots,
                                const SearchUiStrings& ui,
                                SearchCtx* ctx) {
@@ -2154,7 +2164,7 @@ static bool PrepareSearchRoots(SearchRange range,
             AppendInfo(ctx, ui.msgNoLecture);
             return false;
         }
-        roots = CollectLectureRoots(lecturePath);
+        roots = CollectLectureSearchRoots(lecturePath);
         if (roots.empty()) {
             AppendInfo(ctx, ui.msgNoSearchableFiles);
             return false;
@@ -2162,14 +2172,8 @@ static bool PrepareSearchRoots(SearchRange range,
         return true;
     }
     case SearchRange::WholeWorkspace:
-        roots = CollectSessionRoots();
-        if (roots.empty()) {
-            AppendInfo(ctx, ui.msgNoSearchableFiles);
-            return false;
-        }
-        return true;
-    case SearchRange::WorkspaceAndTempExternal:
-        roots = CollectSessionRootsIncludingVisibleLectures();
+        roots = includeTempExternal ? CollectWorkspaceLectureSearchRootsIncludingVisibleExternal()
+                                    : CollectWorkspaceLectureSearchRoots();
         if (roots.empty()) {
             AppendInfo(ctx, ui.msgNoSearchableFiles);
             return false;
@@ -2602,7 +2606,8 @@ static void RunSearch(HWND hWnd, SearchCtx* ctx) {
     ctx->job.includeNotes = TargetMaskIncludesNotes(targetMask);
     ctx->job.includePdfs = TargetMaskIncludesPdfs(targetMask);
     ctx->job.includeAnnots = TargetMaskIncludesAnnotations(targetMask);
-    if (!PrepareSearchRoots(range, ctx->job.roots, ui, ctx)) {
+    const bool includeTempExternal = range == SearchRange::WholeWorkspace && IsChecked(ctx->includeTempExternal);
+    if (!PrepareSearchRoots(range, includeTempExternal, ctx->job.roots, ui, ctx)) {
         if (!ctx->job.results.empty()) {
             const auto& last = ctx->job.results.back();
             if (!last.display.empty()) SetIdleStatus(ctx, last.display);
@@ -2702,6 +2707,10 @@ static void LayoutSearchWindow(HWND hWnd, SearchCtx* ctx) {
     }
     y += statusH + gap;
     layoutRadioGroup(ctx->labelRange, ctx->rangeRadios);
+    if (ctx->includeTempExternal) {
+        MoveWindow(ctx->includeTempExternal, x, y, contentW, radioH, TRUE);
+    }
+    y += radioH + gap;
     layoutRadioGroup(ctx->labelTarget, ctx->targetChecks);
     if (ctx->labelOptions) {
         MoveWindow(ctx->labelOptions, x, y, contentW, labelH, TRUE);
@@ -2781,6 +2790,13 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
                 SendMessageW(radio, BM_SETCHECK, BST_CHECKED, 0);
             }
         }
+        ctx->includeTempExternal = CreateWindowExW(0, L"BUTTON", ui.includeTempExternalLabel.c_str(),
+                                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                                   0, 0, 0, 0, hWnd,
+                                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCH_INCLUDE_TEMP_EXTERNAL)),
+                                                   g_hInst, nullptr);
+        EnableSearchOwnerDrawButton(ctx->includeTempExternal);
+        UpdateTemporaryExternalScopeControl(ctx);
         ctx->labelTarget = CreateWindowExW(0, L"STATIC", ui.targetLabel.c_str(),
                                            WS_CHILD | WS_VISIBLE,
                                            0, 0, 0, 0, hWnd, nullptr, g_hInst, nullptr);
@@ -2846,6 +2862,7 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         SetUIFont(ctx->labelSummary);
         SetUIFont(ctx->labelRange);
         for (HWND radio : ctx->rangeRadios) SetUIFont(radio);
+        SetUIFont(ctx->includeTempExternal);
         SetUIFont(ctx->labelTarget);
         for (HWND btn : ctx->targetChecks) SetUIFont(btn);
         SetUIFont(ctx->labelOptions);
@@ -2879,7 +2896,7 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
         if (mmi) {
             mmi->ptMinTrackSize.x = 620;
-            mmi->ptMinTrackSize.y = 560;
+            mmi->ptMinTrackSize.y = 600;
             return 0;
         }
         break;
@@ -2963,7 +2980,11 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             ApplySearchWindowTranslucency(hWnd, ctx);
             return 0;
         }
-        if ((id >= IDC_SEARCH_RANGE_BASE && id < IDC_SEARCH_RANGE_BASE + kSearchRangeCount) ||
+        if (id >= IDC_SEARCH_RANGE_BASE && id < IDC_SEARCH_RANGE_BASE + kSearchRangeCount) {
+            UpdateTemporaryExternalScopeControl(ctx);
+            return 0;
+        }
+        if (id == IDC_SEARCH_INCLUDE_TEMP_EXTERNAL ||
             (id >= IDC_SEARCH_TARGET_BASE && id < IDC_SEARCH_TARGET_BASE + kSearchTargetCount) ||
             (id >= IDC_SEARCH_OPTION_BASE && id < IDC_SEARCH_OPTION_BASE + 3)) {
             return 0;
@@ -3044,20 +3065,28 @@ void ShowSearchWindowWithPreset(HWND parent, int rangeIndex, unsigned targetMask
     try {
     fault_injection::MaybeThrow(L"ShowSearchWindowWithPreset:start");
     // Keep this function independent from internal SearchCtx types by using control IDs.
-    constexpr int kSearchRangeCountPublic = 4;
+    constexpr int kSearchRangeCountPublic = 3;
     constexpr int kSearchTargetCountPublic = 3;
     constexpr int IDC_SEARCH_QUERY_PUBLIC = 4101;
     constexpr int IDC_SEARCH_RANGE_BASE_PUBLIC = 4110;
+    constexpr int IDC_SEARCH_INCLUDE_TEMP_EXTERNAL_PUBLIC = 4119;
     constexpr int IDC_SEARCH_TARGET_BASE_PUBLIC = 4130;
 
     ShowSearchWindow(parent);
     if (!g_hSearchWnd) return;
 
-    if (rangeIndex >= 0 && rangeIndex < kSearchRangeCountPublic) {
+    const bool includeTempExternal = rangeIndex == 3;
+    const int baseRangeIndex = includeTempExternal ? 2 : rangeIndex;
+    if (baseRangeIndex >= 0 && baseRangeIndex < kSearchRangeCountPublic) {
         for (int i = 0; i < kSearchRangeCountPublic; ++i) {
             HWND radio = GetDlgItem(g_hSearchWnd, IDC_SEARCH_RANGE_BASE_PUBLIC + i);
             if (!radio) continue;
-            SendMessageW(radio, BM_SETCHECK, (i == rangeIndex) ? BST_CHECKED : BST_UNCHECKED, 0);
+            SendMessageW(radio, BM_SETCHECK, (i == baseRangeIndex) ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        HWND temporaryExternal = GetDlgItem(g_hSearchWnd, IDC_SEARCH_INCLUDE_TEMP_EXTERNAL_PUBLIC);
+        if (temporaryExternal) {
+            SendMessageW(temporaryExternal, BM_SETCHECK, includeTempExternal ? BST_CHECKED : BST_UNCHECKED, 0);
+            EnableWindow(temporaryExternal, baseRangeIndex == 2);
         }
     }
 

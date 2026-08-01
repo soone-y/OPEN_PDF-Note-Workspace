@@ -613,6 +613,18 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         g_config.noteMathSupSubGapSupPercent = (supPercent <= 0) ? 0 : std::clamp(supPercent, 5, 95);
         mathrender::SetSupSubGapSupPercent(g_config.noteMathSupSubGapSupPercent);
     }
+    if (ctx->cbNoteOverlayRefreshDelay) {
+        g_config.noteOverlayRefreshDelayMs = std::clamp(
+            static_cast<int>(SelectedComboItemData(
+                ctx->cbNoteOverlayRefreshDelay, g_config.noteOverlayRefreshDelayMs)),
+            100, 2000);
+    }
+    if (ctx->cbNoteFullReparseDelay) {
+        g_config.noteFullReparseDelayMs = std::clamp(
+            static_cast<int>(SelectedComboItemData(
+                ctx->cbNoteFullReparseDelay, g_config.noteFullReparseDelayMs)),
+            250, 5000);
+    }
     if (ctx->cbNoteBgMode) {
         size_t bgIndex = static_cast<size_t>(SelectedComboItemData(ctx->cbNoteBgMode, 0));
         if (bgIndex < ctx->noteBgChoices.size()) {

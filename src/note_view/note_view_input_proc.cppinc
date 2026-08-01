@@ -76,6 +76,11 @@ private:
     DWORD m_selEnd = 0;
 };
 
+// Precision touchpads can send wheel deltas smaller than WHEEL_DELTA.  Keep
+// the unconsumed fraction so rendered notes retain the device's continuous
+// motion instead of being quantized to RichEdit's line-scroll steps.
+static int s_noteVerticalWheelRemainder = 0;
+
 LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     ScopedNoteViewContextBinding viewContextBinding(hWnd);
     NoteInputLatencyTrace inputLatencyTrace(hWnd, msg, wParam);
@@ -565,7 +570,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
         }
         if (ctrlDown && !altDown && !g_noteImeComposing) {
-            if (TryHandleMarkdownShortcut(hWnd, wParam)) {
+            if (TryHandleMarkdownShortcut(hWnd, wParam, shiftDown)) {
                 return 0;
             }
         }
@@ -858,6 +863,41 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 }
             }
         }
+        if (IsNoteRenderActive() && msg == WM_MOUSEWHEEL &&
+            (GET_KEYSTATE_WPARAM(wParam) & (MK_SHIFT | MK_CONTROL)) == 0) {
+            const short delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            if (delta != 0) {
+                UINT wheelLines = 3;
+                SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &wheelLines, 0);
+                RECT client{};
+                GetClientRect(hWnd, &client);
+                const int linePx = std::max(8, ScaleY(hWnd, 16));
+                const int clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
+                const int pixelsPerWheel = (wheelLines == WHEEL_PAGESCROLL)
+                    ? std::max(linePx, clientHeight - linePx)
+                    : std::max(linePx, static_cast<int>(wheelLines) * linePx);
+                const int numerator =
+                    s_noteVerticalWheelRemainder - static_cast<int>(delta) * pixelsPerWheel;
+                const int deltaY = numerator / WHEEL_DELTA;
+                s_noteVerticalWheelRemainder = numerator % WHEEL_DELTA;
+
+                POINT nativeScroll{};
+                if (QueryNativeEditScrollPos(hWnd, &nativeScroll)) {
+                    nativeScroll.x = 0;
+                    nativeScroll.y = std::max<LONG>(
+                        0, nativeScroll.y + static_cast<LONG>(deltaY));
+                    if (SendMessageW(hWnd, EM_SETSCROLLPOS, 0,
+                                     reinterpret_cast<LPARAM>(&nativeScroll))) {
+                        InvalidateRect(hWnd, nullptr, FALSE);
+                        if (g_noteImeComposing) SyncNoteImeCandidateWindowToCaret(hWnd);
+                        return 0;
+                    }
+                }
+                // Do not combine a partially accumulated precision delta with
+                // RichEdit's fallback line scrolling.
+                s_noteVerticalWheelRemainder = 0;
+            }
+        }
         break;
     }
     case WM_RBUTTONDOWN: {
@@ -883,6 +923,9 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MaybeReleaseNoteChangeSuppression(hWnd);
         if (msg == WM_UNDO || msg == EM_REDO) {
             const bool undo = msg == WM_UNDO;
+            // Match the Ctrl+Z path: an edit notification may still be queued
+            // when an IME or RichEdit command immediately requests undo.
+            RecordCurrentNoteTextEditForUndo(hWnd);
             if (!CanExecuteNoteUndoRedoFromFocus(undo)) return 0;
             const bool manageRedraw = !g_noteImeComposing && !IsNoteRenderSwitchInProgress();
             if (manageRedraw) SendMessageW(hWnd, WM_SETREDRAW, FALSE, 0);
@@ -925,19 +968,13 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 RegisterExpectedNoteTextEdit(hWnd, selStart, selEnd, L"", start, start);
             }
         }
-        const bool manageRedraw = !g_noteImeComposing && !IsNoteRenderSwitchInProgress();
-        if (manageRedraw) {
-            SendMessageW(hWnd, WM_SETREDRAW, FALSE, 0);
-        }
-
-        // Execute the action first
+        // RichEdit emits EN_CHANGE synchronously while processing clipboard edits.
+        // Keep redraw enabled: that notification may refresh the render snapshot and
+        // line metrics before this call returns. Suspending painting here left the
+        // old transparent render overlay on the surface after Ctrl+X/WM_CUT.
+        // Execute the action first.
         const uint64_t beforeDefaultEditRevision = CurrentEditRevision();
         LRESULT res = CallWindowProcW(g_oldNoteProc, hWnd, msg, wParam, lParam);
-
-        if (manageRedraw) {
-            SendMessageW(hWnd, WM_SETREDRAW, TRUE, 0);
-            RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_NOERASE);
-        }
 
         // Then immediately update the cache to prevent visual glitches due to line count changes
         if (CurrentEditRevision() == beforeDefaultEditRevision) {
@@ -1387,6 +1424,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     }
     case WM_NCDESTROY:
+        s_noteVerticalWheelRemainder = 0;
         g_noteVisualAssistMarginByHwnd.erase(hWnd);
         ForgetNoteViewState(hWnd);
         forgetViewContextAfterDefault = true;

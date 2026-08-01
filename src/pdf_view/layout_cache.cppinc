@@ -207,6 +207,10 @@ static bool RenderPdfPageBitmap(int pageIndex, int targetW, int targetH, std::ve
     std::vector<uint8_t> pixels;
     pixels.assign(static_cast<size_t>(stride) * targetH, 255);
     FPDF_BITMAP bmp = FPDFBitmap_CreateEx(targetW, targetH, FPDFBitmap_BGRA, pixels.data(), stride);
+    if (!bmp) {
+        FPDF_ClosePage(page);
+        return false;
+    }
     FPDFBitmap_FillRect(bmp, 0, 0, targetW, targetH, 0xFFFFFFFF);
     FPDF_RenderPageBitmap(bmp, page, 0, 0, targetW, targetH, 0, FPDF_ANNOT | FPDF_LCD_TEXT);
     FPDFBitmap_Destroy(bmp);
@@ -395,6 +399,10 @@ static bool RenderPdfPageBitmapOnWorker(FPDF_DOCUMENT doc, int pageIndex, int ta
     std::vector<uint8_t> pixels;
     pixels.assign(static_cast<size_t>(stride) * targetH, 255);
     FPDF_BITMAP bmp = FPDFBitmap_CreateEx(targetW, targetH, FPDFBitmap_BGRA, pixels.data(), stride);
+    if (!bmp) {
+        FPDF_ClosePage(page);
+        return false;
+    }
     FPDFBitmap_FillRect(bmp, 0, 0, targetW, targetH, 0xFFFFFFFF);
     FPDF_RenderPageBitmap(bmp, page, 0, 0, targetW, targetH, 0, FPDF_ANNOT | FPDF_LCD_TEXT);
     FPDFBitmap_Destroy(bmp);
@@ -559,10 +567,40 @@ static PdfVirtualUpdateResult ApplyPdfVirtualRenderResults(HWND hwnd) {
         if (item.targetW <= 0 || item.targetH <= 0) continue;
         PageCache& page = g_pdf.pages[static_cast<size_t>(item.pageIndex)];
         if (!item.success || item.pixels.empty() || item.stride <= 0) {
+            // A worker document can fail transiently even though the primary
+            // document remains open. Retry once through the primary document
+            // before leaving a page on its empty background.
+            std::vector<uint8_t> fallbackPixels;
+            int fallbackStride = 0;
+            if (RenderPdfPageBitmap(item.pageIndex, item.targetW, item.targetH,
+                                    fallbackPixels, fallbackStride)) {
+                page.bmpW = item.targetW;
+                page.bmpH = item.targetH;
+                page.stride = fallbackStride;
+                page.pixelsGeneration = item.generation;
+                page.bitmapCoarse = item.coarse;
+                page.bitmapFailedGeneration = 0;
+                page.bitmapFailedW = 0;
+                page.bitmapFailedH = 0;
+                page.bitmapFailedCoarse = false;
+                page.bitmapFailureCount = 0;
+                page.bitmapRetryAfterTick = 0;
+                page.pixels = std::move(fallbackPixels);
+                result.changed = true;
+                if (hwnd) {
+                    InvalidatePdfVirtualPageRect(hwnd, item.pageIndex);
+                    result.invalidated = true;
+                }
+                continue;
+            }
             page.bitmapFailedGeneration = item.generation;
             page.bitmapFailedW = item.targetW;
             page.bitmapFailedH = item.targetH;
             page.bitmapFailedCoarse = item.coarse;
+            page.bitmapFailureCount = std::min<uint32_t>(page.bitmapFailureCount + 1, 5);
+            const ULONGLONG retryDelayMs = 100ull << page.bitmapFailureCount;
+            page.bitmapRetryAfterTick = GetTickCount64() + std::min<ULONGLONG>(retryDelayMs, 2000);
+            result.pending = true;
             continue;
         }
         page.bmpW = item.targetW;
@@ -574,6 +612,8 @@ static PdfVirtualUpdateResult ApplyPdfVirtualRenderResults(HWND hwnd) {
         page.bitmapFailedW = 0;
         page.bitmapFailedH = 0;
         page.bitmapFailedCoarse = false;
+        page.bitmapFailureCount = 0;
+        page.bitmapRetryAfterTick = 0;
         page.pixels = std::move(item.pixels);
         result.changed = true;
         if (hwnd) {
@@ -812,6 +852,8 @@ static void EvictPageBitmap(PageCache& page) {
     page.bitmapFailedW = 0;
     page.bitmapFailedH = 0;
     page.bitmapFailedCoarse = false;
+    page.bitmapFailureCount = 0;
+    page.bitmapRetryAfterTick = 0;
 }
 
 static void EvictPageCharBoxes(PageCache& page) {
@@ -1216,8 +1258,20 @@ static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
                 EvictPageBitmap(page);
                 result.changed = true;
             }
-        } else if (!PageBitmapMatchesTarget(page, targetW, targetH, useCoarseTarget) &&
-                   !PageBitmapFailedTarget(page, targetW, targetH, useCoarseTarget)) {
+        } else if (!PageBitmapMatchesTarget(page, targetW, targetH, useCoarseTarget)) {
+            if (PageBitmapFailedTarget(page, targetW, targetH, useCoarseTarget) &&
+                now < page.bitmapRetryAfterTick) {
+                // Keep the render timer armed until this transient failure is
+                // eligible for retry; do not freeze the page permanently.
+                result.pending = true;
+                continue;
+            }
+            if (PageBitmapFailedTarget(page, targetW, targetH, useCoarseTarget)) {
+                page.bitmapFailedGeneration = 0;
+                page.bitmapFailedW = 0;
+                page.bitmapFailedH = 0;
+                page.bitmapFailedCoarse = false;
+            }
             renderCandidates.push_back({ i, inVisibleRange, visibleDistance, targetW, targetH, targetPixels,
                                          useCoarseTarget });
         }

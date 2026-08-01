@@ -45,6 +45,9 @@ validate_public_site = load_module("validate_public_site", "site/github/scripts/
 validate_introduction_site = load_module(
     "validate_introduction_site", "site/cloudflare/scripts/validate_introduction_site.py"
 )
+release_license_gate = load_module("release_license_gate", "tools/release_checks/release_license_gate.py")
+release_text_gate = load_module("release_text_gate", "tools/release_checks/release_text_gate.py")
+repo_hygiene_gate = load_module("repo_hygiene_gate", "tools/release_checks/repo_hygiene_gate.py")
 sync_publication_inputs = load_module(
     "sync_publication_inputs", "tools/dev/sync_publication_inputs.py"
 )
@@ -2021,6 +2024,86 @@ class IntroductionSiteValidationTests(unittest.TestCase):
 
             self.assertTrue(any("unapproved public file" in error for error in errors))
             self.assertTrue(any("escapes introduction site" in error for error in errors))
+
+
+class ReleaseLicenseGateTests(unittest.TestCase):
+    @staticmethod
+    def write_release(release_dir: Path) -> None:
+        for relative_path in release_license_gate.REQUIRED_LICENSE_FILES:
+            target = release_dir / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"License material: {relative_path}\n", encoding="utf-8")
+
+    def test_rejects_missing_license_in_zip(self) -> None:
+        with repo_tempdir() as root:
+            release_dir = root / "release_1.0.0"
+            self.write_release(release_dir)
+            zip_path = root / "release_1.0.0.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                for path in release_dir.rglob("*"):
+                    if path.is_file() and path.relative_to(release_dir).as_posix() != "licenses/zlib/zlib.txt":
+                        archive.write(path, Path(release_dir.name) / path.relative_to(release_dir))
+
+            errors = release_license_gate.validate_release_zip(release_dir, zip_path)
+
+            self.assertTrue(any("licenses/zlib/zlib.txt" in error for error in errors))
+
+    def test_rejects_zip_license_with_different_contents(self) -> None:
+        with repo_tempdir() as root:
+            release_dir = root / "release_1.0.0"
+            self.write_release(release_dir)
+            zip_path = root / "release_1.0.0.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                for path in release_dir.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    arcname = Path(release_dir.name) / path.relative_to(release_dir)
+                    archive.writestr(arcname.as_posix(), "tampered" if path.name == "LICENSE.md" else path.read_bytes())
+
+            errors = release_license_gate.validate_release_zip(release_dir, zip_path)
+
+            self.assertTrue(any("differs from unpacked release" in error for error in errors))
+
+
+class ReleaseTextGateTests(unittest.TestCase):
+    def test_rejects_invalid_utf8_and_replacement_character(self) -> None:
+        with repo_tempdir() as root:
+            docs = root / "docs"
+            docs.mkdir()
+            (docs / "invalid.md").write_bytes(b"\xff\xfe")
+            (docs / "replacement.md").write_text("broken \ufffd text", encoding="utf-8")
+
+            errors = release_text_gate.validate_release_directory(root)
+
+            self.assertTrue(any("invalid UTF-8: docs/invalid.md" in error for error in errors))
+            self.assertTrue(any("replacement character" in error for error in errors))
+
+    def test_rejects_reversible_windows_1252_mojibake(self) -> None:
+        with repo_tempdir() as root:
+            docs = root / "docs"
+            docs.mkdir()
+            (docs / "garbled.md").write_text("Ã©", encoding="utf-8")
+
+            errors = release_text_gate.validate_release_directory(root)
+
+            self.assertTrue(any("likely Windows-1252/UTF-8 mojibake" in error for error in errors))
+
+
+class RepositoryScriptAndTextGateTests(unittest.TestCase):
+    def test_rejects_utf16_nul_and_mojibake(self) -> None:
+        _, utf16_errors = repo_hygiene_gate.validate_text_bytes(b"\xff\xfeA\x00", label="script.ps1")
+        _, nul_errors = repo_hygiene_gate.validate_text_bytes(b"a\x00b", label="script.ps1")
+        _, mojibake_errors = repo_hygiene_gate.validate_text_bytes("Ã©".encode("utf-8"), label="script.ps1")
+
+        self.assertTrue(any("UTF-16" in error for error in utf16_errors))
+        self.assertTrue(any("NUL byte" in error for error in nul_errors))
+        self.assertTrue(any("mojibake" in error for error in mojibake_errors))
+
+    def test_rejects_python_and_json_syntax_errors(self) -> None:
+        self.assertTrue(repo_hygiene_gate.validate_python_syntax(
+            Path("broken.py"), "def broken(:\n", "broken.py"
+        ))
+        self.assertTrue(repo_hygiene_gate.validate_json_syntax("{", "broken.json"))
 
 
 class BuildPublicSiteTests(unittest.TestCase):

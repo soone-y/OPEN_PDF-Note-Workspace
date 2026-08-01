@@ -2,12 +2,16 @@
 #include "schedule/schedule.h"
 
 #include "core/app_core.h"
+#include "core/atomic_write.h"
 #include "ui/combobox_guard.h"
 
 #include <algorithm>
 #include <filesystem>
 #include <vector>
 #include <commctrl.h>
+#include <fstream>
+#include <regex>
+#include <sstream>
 
 namespace {
 constexpr int kScheduleMaxDays = 7;
@@ -23,6 +27,70 @@ constexpr int kGap = 6;
 constexpr int kComboDropHeight = 200;
 static constexpr wchar_t kScheduleWndClass[] = L"LectureScheduleWnd";
 static HWND g_hScheduleWnd = nullptr;
+static HWND g_hGlobalMemoWnd = nullptr;
+constexpr int kMemoListId = 6300;
+constexpr int kMemoDeadlineId = 6301;
+constexpr int kMemoTextId = 6302;
+constexpr int kMemoDoneId = 6303;
+constexpr int kMemoNewId = 6304;
+constexpr int kMemoSaveId = 6305;
+constexpr int kMemoDeleteId = 6306;
+
+struct GlobalMemo { std::wstring deadline; std::wstring text; bool done = false; };
+struct GlobalMemoCtx { std::vector<GlobalMemo> items; HWND list = nullptr, deadline = nullptr, text = nullptr, done = nullptr; };
+
+static std::filesystem::path GlobalMemoPath() {
+    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__settings__" / L"global_memos.json";
+}
+static std::string MemoUtf8(const std::wstring& text) {
+    std::string value = WideToUTF8(text); std::string out;
+    for (char c : value) { if (c == '\\' || c == '"') out += '\\'; if (c == '\n' || c == '\r') out += ' '; else out += c; }
+    return out;
+}
+static std::wstring MemoWide(const std::string& text) { return UTF8ToWide(text); }
+static bool IsValidMemoDeadline(const std::wstring& value) {
+    if (value.size() != 16) return false;
+    int y=0,m=0,d=0,h=0,min=0; wchar_t tail=0;
+    if (swscanf_s(value.c_str(), L"%d-%d-%d %d:%d%c", &y,&m,&d,&h,&min,&tail,1) != 5) return false;
+    SYSTEMTIME st{}; st.wYear=static_cast<WORD>(y); st.wMonth=static_cast<WORD>(m); st.wDay=static_cast<WORD>(d); st.wHour=static_cast<WORD>(h); st.wMinute=static_cast<WORD>(min);
+    FILETIME ft{}; return SystemTimeToFileTime(&st, &ft) != FALSE;
+}
+static void LoadGlobalMemos(std::vector<GlobalMemo>* out) {
+    if (!out) return;
+    out->clear();
+    std::ifstream in(GlobalMemoPath(), std::ios::binary);
+    if (!in) return;
+    std::string json((std::istreambuf_iterator<char>(in)), {});
+    const std::regex entry(R"memo(\{\s*"deadline"\s*:\s*"([^"]*)"\s*,\s*"text"\s*:\s*"([^"]*)"\s*,\s*"done"\s*:\s*(true|false)\s*\})memo");
+    for (std::sregex_iterator it(json.begin(), json.end(), entry), end; it != end; ++it) {
+        GlobalMemo memo{MemoWide((*it)[1].str()), MemoWide((*it)[2].str()), (*it)[3] == "true"};
+        if (IsValidMemoDeadline(memo.deadline) && !memo.text.empty()) out->push_back(std::move(memo));
+    }
+}
+static bool SaveGlobalMemos(const std::vector<GlobalMemo>& items) {
+    if (g_workspaceRoot.empty()) return false;
+    std::ostringstream out;
+    out << "{\n  \"items\": [\n";
+    for (size_t i=0;i<items.size();++i) { const auto& m=items[i]; out << "    {\"deadline\":\"" << MemoUtf8(m.deadline) << "\",\"text\":\"" << MemoUtf8(m.text) << "\",\"done\":" << (m.done ? "true" : "false") << "}" << (i+1<items.size()?",":"") << "\n"; }
+    out << "  ]\n}\n"; std::wstring error; const auto path=GlobalMemoPath();
+    return atomic_write::AtomicWriteUtf8(path, out.str(), path.parent_path(), &error);
+}
+static int CompareMemo(const GlobalMemo& a, const GlobalMemo& b) { if (a.done != b.done) return a.done ? 1 : -1; return _wcsicmp(a.deadline.c_str(), b.deadline.c_str()); }
+static void RefreshGlobalMemoList(GlobalMemoCtx* ctx) {
+    if (!ctx || !ctx->list) return;
+    std::sort(ctx->items.begin(), ctx->items.end(), [](const auto& a, const auto& b) {
+        return CompareMemo(a, b) < 0;
+    });
+    SendMessageW(ctx->list, LB_RESETCONTENT, 0, 0);
+    SYSTEMTIME now{}; GetLocalTime(&now); FILETIME nowFt{}; SystemTimeToFileTime(&now,&nowFt); ULARGE_INTEGER nowU{}; nowU.LowPart=nowFt.dwLowDateTime; nowU.HighPart=nowFt.dwHighDateTime;
+    for (const auto& m:ctx->items) { std::wstring label=(m.done?L"[完了] ":L"[未完了] ")+m.deadline+L"  "+m.text; if(!m.done){int y,mo,d,h,mi; swscanf_s(m.deadline.c_str(),L"%d-%d-%d %d:%d",&y,&mo,&d,&h,&mi); SYSTEMTIME st{};st.wYear=y;st.wMonth=mo;st.wDay=d;st.wHour=h;st.wMinute=mi;FILETIME f{};SystemTimeToFileTime(&st,&f);ULARGE_INTEGER u{};u.LowPart=f.dwLowDateTime;u.HighPart=f.dwHighDateTime; long long days=static_cast<long long>(u.QuadPart-nowU.QuadPart)/(10000000LL*86400); label+=days<0?L"  (期限超過)":L"  (残り"+std::to_wstring(days)+L"日)";} SendMessageW(ctx->list,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())); }
+}
+static LRESULT CALLBACK GlobalMemoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* ctx=reinterpret_cast<GlobalMemoCtx*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
+    if(msg==WM_CREATE){auto* c=new GlobalMemoCtx; LoadGlobalMemos(&c->items);SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(c));c->list=CreateWindowW(L"LISTBOX",L"",WS_CHILD|WS_VISIBLE|WS_BORDER|LBS_NOTIFY|WS_VSCROLL,12,12,650,220,hwnd,(HMENU)kMemoListId,g_hInst,nullptr);c->deadline=CreateWindowW(L"EDIT",L"2026-08-03 23:59",WS_CHILD|WS_VISIBLE|WS_BORDER,12,244,180,24,hwnd,(HMENU)kMemoDeadlineId,g_hInst,nullptr);c->text=CreateWindowW(L"EDIT",L"",WS_CHILD|WS_VISIBLE|WS_BORDER,202,244,460,24,hwnd,(HMENU)kMemoTextId,g_hInst,nullptr);c->done=CreateWindowW(L"BUTTON",L"完了",WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX,12,278,70,24,hwnd,(HMENU)kMemoDoneId,g_hInst,nullptr);CreateWindowW(L"BUTTON",L"新規",WS_CHILD|WS_VISIBLE,92,278,80,24,hwnd,(HMENU)kMemoNewId,g_hInst,nullptr);CreateWindowW(L"BUTTON",L"保存",WS_CHILD|WS_VISIBLE,182,278,80,24,hwnd,(HMENU)kMemoSaveId,g_hInst,nullptr);CreateWindowW(L"BUTTON",L"削除",WS_CHILD|WS_VISIBLE,272,278,80,24,hwnd,(HMENU)kMemoDeleteId,g_hInst,nullptr);RefreshGlobalMemoList(c);return 0;}
+    if(msg==WM_COMMAND && ctx){int id=LOWORD(wp); if(id==kMemoListId&&HIWORD(wp)==LBN_SELCHANGE){int n=(int)SendMessageW(ctx->list,LB_GETCURSEL,0,0);if(n>=0&&n<(int)ctx->items.size()){SetWindowTextW(ctx->deadline,ctx->items[n].deadline.c_str());SetWindowTextW(ctx->text,ctx->items[n].text.c_str());SendMessageW(ctx->done,BM_SETCHECK,ctx->items[n].done?BST_CHECKED:BST_UNCHECKED,0);}return 0;}if(id==kMemoNewId){SetWindowTextW(ctx->text,L"");SendMessageW(ctx->done,BM_SETCHECK,BST_UNCHECKED,0);return 0;}if(id==kMemoSaveId){wchar_t d[32]{},t[1024]{};GetWindowTextW(ctx->deadline,d,32);GetWindowTextW(ctx->text,t,1024);if(!IsValidMemoDeadline(d)||!t[0])return 0;int n=(int)SendMessageW(ctx->list,LB_GETCURSEL,0,0);GlobalMemo m{d,t,SendMessageW(ctx->done,BM_GETCHECK,0,0)==BST_CHECKED};if(n>=0&&n<(int)ctx->items.size())ctx->items[n]=m;else ctx->items.push_back(m);if(SaveGlobalMemos(ctx->items))RefreshGlobalMemoList(ctx);return 0;}if(id==kMemoDeleteId){int n=(int)SendMessageW(ctx->list,LB_GETCURSEL,0,0);if(n>=0&&n<(int)ctx->items.size()){auto copy=ctx->items;copy.erase(copy.begin()+n);if(SaveGlobalMemos(copy)){ctx->items=std::move(copy);RefreshGlobalMemoList(ctx);}}return 0;}}
+    if(msg==WM_NCDESTROY){delete ctx;if(g_hGlobalMemoWnd==hwnd)g_hGlobalMemoWnd=nullptr;} return DefWindowProcW(hwnd,msg,wp,lp);
+}
 
 struct ScheduleCtx {
     int columns = 5;
@@ -364,6 +432,25 @@ void ShowScheduleWindow(HWND parent) {
         ShowWindow(g_hScheduleWnd, SW_SHOW);
         UpdateWindow(g_hScheduleWnd);
     }
+}
+
+void ShowGlobalMemoWindow(HWND parent) {
+    if (g_hGlobalMemoWnd) {
+        ShowWindow(g_hGlobalMemoWnd, SW_SHOW);
+        SetForegroundWindow(g_hGlobalMemoWnd);
+        return;
+    }
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = GlobalMemoProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"PdfNoteGlobalMemoWnd";
+    RegisterClassW(&wc);
+    g_hGlobalMemoWnd = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName,
+        IsEnglishUi() ? L"Global deadlines and memos" : L"全体メモ・締切管理",
+        WS_CAPTION | WS_SYSMENU | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 690, 360,
+        parent, nullptr, g_hInst, nullptr);
 }
 
 

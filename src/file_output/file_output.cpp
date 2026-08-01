@@ -43,7 +43,9 @@ Overloaded(Ts...) -> Overloaded<Ts...>;
 
 static constexpr int kTextPadPx = 4;
 static constexpr double kExportStandardTextMinPt = 9.0;
-static constexpr double kMarkerTextAlphaScaleOnText = 0.4;
+// Keep exported text markers visually consistent with the on-screen overlay:
+// source glyph pixels receive the same marker opacity as their surroundings.
+static constexpr double kMarkerTextAlphaScaleOnText = 1.0;
 static constexpr int kMarkerTextDarkMax = 210;
 
 static HWND FileOutputNoticeOwner(HWND owner) {
@@ -597,11 +599,15 @@ static note_snapshot::CurrentEditTextSnapshot CurrentEditSnapshotForNotePath(con
     note_snapshot::CurrentEditTextSnapshot snapshot;
     if (!g_currentNotePath.empty() && g_hNoteEdit &&
         IsSamePath(std::filesystem::path(notePath), std::filesystem::path(g_currentNotePath))) {
-        std::wstring text = GetEditText(g_hNoteEdit);
         snapshot.available = true;
         snapshot.targetPath = notePath;
-        snapshot.bytes = WideToUTF8(text);
-        snapshot.identity = CaptureCurrentNoteSnapshotIdentity();
+        std::wstring encodeError;
+        if (!CaptureCurrentNoteTextCoreForStorage(notePath, &snapshot.bytes,
+                                                  &snapshot.identity, &encodeError)) {
+            snapshot.available = false;
+            snapshot.bytes.clear();
+            snapshot.identity = {};
+        }
     }
     return snapshot;
 }
@@ -613,6 +619,32 @@ static bool IsPlainTextNotePath(const std::wstring& notePath) {
         return static_cast<wchar_t>(towlower(ch));
     });
     return ext == L".txt" || ext == L".csv";
+}
+
+static bool IsAppManagedUtf8NotePath(const std::wstring& notePath) {
+    std::wstring ext = std::filesystem::path(notePath).extension().wstring();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(towlower(ch));
+    });
+    return ext == L".clro";
+}
+
+static bool DecodeNoteSnapshotText(const std::wstring& notePath, const std::string& bytes,
+                                   std::wstring* out) {
+    if (!out) return false;
+    if (IsAppManagedUtf8NotePath(notePath)) {
+        const bool hasBom = bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF &&
+            static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF;
+        const auto decoded = text_encoding::DecodeUtf8Strict(
+            hasBom ? std::string_view(bytes).substr(3) : std::string_view(bytes));
+        if (!decoded.has_value()) return false;
+        *out = *decoded;
+        return true;
+    }
+    text_encoding::DecodedText decoded;
+    if (!text_encoding::DecodeExternalText(bytes, &decoded)) return false;
+    *out = std::move(decoded.text);
+    return true;
 }
 
 static bool IsSamePath(const std::filesystem::path& a, const std::filesystem::path& b) {
@@ -649,7 +681,9 @@ static std::optional<ResolvedNoteExportSource> ResolveNoteExportSource(
     if (!source.snapshot.ok || !source.snapshot.identity.valid()) {
         return std::nullopt;
     }
-    source.raw = UTF8ToWide(source.snapshot.bytes);
+    if (!DecodeNoteSnapshotText(source.snapshot.targetPath, source.snapshot.bytes, &source.raw)) {
+        return std::nullopt;
+    }
     source.plain_text = IsPlainTextNotePath(source.snapshot.targetPath);
     note::NoteMetadata meta;
     meta.file_name =

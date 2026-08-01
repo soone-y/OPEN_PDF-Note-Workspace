@@ -35,6 +35,7 @@ static void RestoreNoteViewState(HWND hWnd,
                                  bool contentMatchesCachedView,
                                  const note::SnapshotIdentity& loadedSnapshot = {});
 #include "core/preview_trace.h"
+#include "core/text_encoding.h"
 #include "core/font_list.h"
 #include <richedit.h>
 #include <commctrl.h>
@@ -140,10 +141,15 @@ static bool g_noteSearchHitFromSearchWindow = false;
 static bool g_noteShowLineNumbers = false;
 static ULONGLONG g_noteNoOpenNoticeTick = 0;
 static uint64_t g_noteDocumentRevisionSeed = 0;
+static text_encoding::Encoding g_currentNoteStorageEncoding = text_encoding::Encoding::Utf8;
 static thread_local HWND g_boundNoteViewContextHwnd = nullptr;
 static HWND CurrentNoteViewContextWindow();
 static note::ViewIdentity CurrentNoteViewIdentity();
 static note::ViewIdentity CurrentActiveNoteViewIdentity();
+
+text_encoding::Encoding CurrentNoteStorageEncoding() {
+    return g_currentNoteStorageEncoding;
+}
 
 static note::LocalNoteKernel* CurrentNoteKernel() {
     return note::RuntimeNoteWorkspaceService().FindKernelForView(
@@ -3105,6 +3111,13 @@ static void DrawStyledSegmentText(HDC hdc,
                                   bool italic,
                                   int extraPx,
                                   const std::wstring* fontFaceOverride = nullptr);
+static int FirstGlyphLeftBearingAlignmentPx(HDC hdc,
+                                            MarkupFontProvider& fonts,
+                                            const std::wstring& text,
+                                            bool bold,
+                                            bool italic,
+                                            int extraPx,
+                                            const std::wstring* fontFaceOverride = nullptr);
 
 static bool QueryEditScrollPos(HWND hWnd, POINT* out);
 static int ResolveHeadingLevel(const LineCache& cache, const Segment& seg);
@@ -3779,7 +3792,12 @@ void RefreshCurrentNotePersistenceIdentity(const std::wstring& path) {
         stateIt->second.identity.note_id != identity.note_id) {
         return;
     }
-    const std::string editorBytes = WideToUTF8(GetEditText(g_hNoteEdit));
+    std::string editorBytes;
+    std::wstring encodeError;
+    if (!text_encoding::EncodeText(GetEditText(g_hNoteEdit), g_currentNoteStorageEncoding,
+                                   &editorBytes, &encodeError)) {
+        return;
+    }
     const uint64_t editorFingerprint = note::FingerprintSnapshotBytes(editorBytes);
     if (editorFingerprint != record->disk_fingerprint) return;
     note::NoteTextCore* core = CurrentNoteTextCore();
@@ -4139,7 +4157,22 @@ bool IsNoteChangeSuppressed() {
 }
 
 bool IsNoteImeComposing() {
-    return g_noteImeComposing;
+    // A list/toolbar click moves focus before its selection handler saves the
+    // note. RichEdit can retain GCS_COMPSTR after that focus transition, even
+    // though it no longer owns an editable IME composition. Treat it as live
+    // only while the note edit control (or one of its children) owns focus.
+    // This keeps an actual in-place composition protected while preventing a
+    // stale composition buffer from blocking switching or exit indefinitely.
+    HWND focus = GetFocus();
+    const bool noteEditOwnsFocus =
+        g_hNoteEdit && focus && (focus == g_hNoteEdit || IsChild(g_hNoteEdit, focus));
+    const bool liveComposition =
+        noteEditOwnsFocus && IsImeComposingOnEditWindow(g_hNoteEdit);
+    if (g_noteImeComposing && !liveComposition) {
+        preview_trace::Append(L"NoteIme", L"cleared_stale_composition_flag");
+    }
+    g_noteImeComposing = liveComposition;
+    return liveComposition;
 }
 
 void ReleaseNoteChangeSuppressionForUserEdit() {
@@ -8053,6 +8086,8 @@ static LineCache BuildMarkdownRenderCacheLine(const std::wstring& text,
 }
 
 static void RebuildMarkdownRenderCache(const std::wstring& text) {
+    const ULONGLONG startTick = preview_trace::TickNow();
+    const size_t previousLineCount = g_lineCache.size();
     const int baseFontHeightPx = ComputeNoteRenderBaseFontHeightPx();
     RebuildRenderLineIndex(text);
     const std::vector<std::wstring>& lines = g_renderLines;
@@ -8066,6 +8101,11 @@ static void RebuildMarkdownRenderCache(const std::wstring& text) {
     g_lineCache = std::move(nextCache);
     SetLineCacheSourceRevision(CurrentNoteSyntaxSource().revision);
     ResetMarkdownRenderDerivedState(text, baseFontHeightPx, true);
+    preview_trace::Append(
+        L"NotePerformance",
+        L"stage=render_cache mode=full lines_before=" + std::to_wstring(previousLineCount) +
+        L" lines_after=" + std::to_wstring(g_lineCache.size()) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
 }
 
 static bool FindCachedRenderLineForRawEdit(const note::TextEdit& edit,
@@ -8093,6 +8133,7 @@ static bool FindCachedRenderLineForRawEdit(const note::TextEdit& edit,
 static bool TryRefreshMarkdownRenderCacheForDirtyGraph(const std::wstring& text,
                                                        int baseFontHeightPx,
                                                        const note::NoteDirtyGraph& graph) {
+    const ULONGLONG startTick = preview_trace::TickNow();
     if (g_lineCache.empty()) return false;
     if (!graph.has_edit || !graph.render_dirty) return false;
     const note::TextEdit& edit = graph.edit;
@@ -8126,8 +8167,6 @@ static bool TryRefreshMarkdownRenderCacheForDirtyGraph(const std::wstring& text,
     SeedMarkdownFenceStateFromPreviousLine(oldCache, startLine, &fenceState);
 
     const bool lineCountChanged = oldCount != newCount;
-    const bool allowEarlyStop =
-        note::NoteDirtyGraphAllowsRenderEarlyStop(graph, lineCountChanged);
     const ptrdiff_t oldIndexShift =
         static_cast<ptrdiff_t>(oldCount) - static_cast<ptrdiff_t>(newCount);
     auto oldIndexForNewLine = [&](size_t lineIndex) -> std::optional<size_t> {
@@ -8164,7 +8203,11 @@ static bool TryRefreshMarkdownRenderCacheForDirtyGraph(const std::wstring& text,
         g_lineCache[lineIndex] = std::move(nextCache);
         rebuiltAny = true;
         rebuiltLastLine = lineIndex;
-        if (allowEarlyStop && lineIndex >= lastLine && matchesOld) {
+        // For syntax-neutral plain-text edits, an identical rebuilt line
+        // proves the downstream render state has converged. Structural edits
+        // rebuild through the tail so inherited parser state cannot be stale.
+        if (note::NoteDirtyGraphAllowsRenderEarlyStop(graph, lineCountChanged) &&
+            lineIndex >= lastLine && matchesOld) {
             break;
         }
         if (lineCountChanged && lineIndex > lastLine && matchesOld &&
@@ -8179,6 +8222,52 @@ static bool TryRefreshMarkdownRenderCacheForDirtyGraph(const std::wstring& text,
     }
     SetLineCacheSourceRevision(CurrentNoteSyntaxSource().revision);
     ResetMarkdownRenderDerivedState(text, baseFontHeightPx, true);
+    preview_trace::Append(
+        L"NotePerformance",
+        L"stage=render_cache mode=incremental edit_start=" +
+        std::to_wstring(graph.edit.start.value) +
+        L" deleted=" + std::to_wstring(graph.edit.deleted_len) +
+        L" inserted=" + std::to_wstring(graph.edit.inserted_text.size()) +
+        L" first_line=" + std::to_wstring(startLine) +
+        L" rebuilt_last_line=" + std::to_wstring(rebuiltLastLine) +
+        L" line_count_changed=" + preview_trace::Bool(lineCountChanged) +
+        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+    return true;
+}
+
+bool CaptureCurrentNoteTextCoreForStorage(const std::wstring& expectedPath,
+                                          std::string* outBytes,
+                                          note::SnapshotIdentity* outIdentity,
+                                          std::wstring* outError) {
+    if (outBytes) outBytes->clear();
+    if (outIdentity) *outIdentity = {};
+    if (outError) outError->clear();
+    note::NoteTextCore* core = CurrentNoteTextCore();
+    if (!g_hNoteEdit || !core || expectedPath.empty() ||
+        NormalizePathKey(expectedPath) != NormalizePathKey(g_currentNotePath)) {
+        if (outError) *outError = L"現在のノート本文を取得できません。";
+        return false;
+    }
+    const std::wstring editorText = GetEditTextForIndexing(g_hNoteEdit);
+    SynchronizeCurrentNoteTextCore(editorText);
+    core = CurrentNoteTextCore();
+    const note::ViewIdentity view = CurrentActiveNoteViewIdentity();
+    if (!core || !view.valid() || view.note_id != core->note_id() ||
+        !core->MatchesRaw(editorText)) {
+        if (outError) *outError = L"ノート編集状態を保存用に同期できません。";
+        return false;
+    }
+
+    std::string bytes;
+    if (!text_encoding::EncodeText(core->BuildStorageTextCrlf(),
+                                   g_currentNoteStorageEncoding, &bytes, outError)) {
+        return false;
+    }
+    if (outIdentity) {
+        *outIdentity = note::BuildSnapshotIdentity(
+            core->note_id(), core->content_revision(), core->persistence_revision(), bytes);
+    }
+    if (outBytes) *outBytes = std::move(bytes);
     return true;
 }
 
@@ -8315,7 +8404,7 @@ static std::wstring MathEntryDelimLabel(const MathEntry& entry) {
 
 // v0-only note view: keep the edit control visible and standard.
 
-void RefreshBottomPaneView() {
+void RefreshBottomPaneView(bool synchronousPaint) {
     if (!g_hBottomNote || !g_hBottomMath) return;
     auto redrawBottomPaneHost = [&]() {
         HWND parent = GetParent(g_hBottomNote);
@@ -8328,18 +8417,26 @@ void RefreshBottomPaneView() {
         POINT br{ wr.right, wr.bottom };
         if (!ScreenToClient(parent, &tl) || !ScreenToClient(parent, &br)) return;
         RECT rc{ tl.x, tl.y, br.x, br.y };
-        RedrawWindow(parent, &rc, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        if (synchronousPaint) {
+            RedrawWindow(parent, &rc, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        } else {
+            InvalidateRect(parent, &rc, FALSE);
+        }
     };
-    auto redrawChildNow = [](HWND child) {
+    auto redrawChild = [synchronousPaint](HWND child) {
         if (!child || !IsWindowVisible(child)) return;
-        RedrawWindow(child, nullptr, nullptr,
-                     RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+        if (synchronousPaint) {
+            RedrawWindow(child, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+        } else {
+            InvalidateRect(child, nullptr, FALSE);
+        }
     };
     if (g_bottomPanePin == BottomPanePin::Math) {
         ShowWindow(g_hBottomNote, SW_HIDE);
         ShowWindow(g_hBottomMath, SW_SHOW);
         redrawBottomPaneHost();
-        redrawChildNow(g_hBottomMath);
+        redrawChild(g_hBottomMath);
         return;
     }
     ShowWindow(g_hBottomMath, SW_HIDE);
@@ -8355,7 +8452,7 @@ void RefreshBottomPaneView() {
     }
     ShowWindow(g_hBottomNote, SW_SHOW);
     redrawBottomPaneHost();
-    redrawChildNow(g_hBottomNote);
+    redrawChild(g_hBottomNote);
 }
 
 void UpdateNoteViewMode() {

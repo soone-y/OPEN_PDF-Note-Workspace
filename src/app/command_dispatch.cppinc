@@ -68,6 +68,11 @@ static void InsertNoteAssistSnippet(const NoteAssistSelection& selection, const 
 }
 
 static bool ExecuteFocusedUndoRedo(HWND owner, bool undo) {
+    // A menu command can arrive before RichEdit's EN_CHANGE. Bring the shared
+    // document kernel current before asking either history whether it can run.
+    if (!SynchronizeActiveNoteEditorToKernel(owner)) {
+        return false;
+    }
     if (CanExecuteNoteUndoRedoFromFocus(undo)) {
         return ExecuteNoteUndoRedoFromFocus(owner, undo);
     }
@@ -745,8 +750,9 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     }
 
     if (id >= ID_ANNOT_CONTEXT_WIDTH_BASE &&
-        id < ID_ANNOT_CONTEXT_WIDTH_BASE + 3) {
-        int widthPt10[3]{ 15, 25, 40 };
+        id < ID_ANNOT_CONTEXT_WIDTH_BASE + 4) {
+        int widthPt10[4]{ 15, 25, 40, 60 };
+        const int widthCount = g_toolMode == ToolMode::Arrow ? 4 : 3;
         if (g_toolMode == ToolMode::MarkerFree ||
             g_toolMode == ToolMode::MarkerLine ||
             g_toolMode == ToolMode::MarkerArrow ||
@@ -765,6 +771,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
             widthPt10[2] = 80;
         }
         const int index = id - ID_ANNOT_CONTEXT_WIDTH_BASE;
+        if (index >= widthCount) return;
         StoreToolWidthPtForMode(g_toolMode, static_cast<double>(widthPt10[index]) / 10.0);
         PersistConfig();
         SyncWidthComboToMode(g_toolMode);
@@ -1541,6 +1548,9 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_LECTURE_SCHEDULE:
         ShowScheduleWindow(hWnd);
         break;
+    case ID_GLOBAL_MEMOS:
+        ShowGlobalMemoWindow(hWnd);
+        break;
     case ID_SEARCH:
         ToggleSearchWindow(hWnd);
         break;
@@ -1729,6 +1739,11 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
                 InvalidateRect(g_hPdfView, nullptr, FALSE);
                 SetFocus(g_hPdfView);
             }
+        } else if (id == ID_TOOL_TEXT_AUTO_WRAP && code == BN_CLICKED) {
+            g_textBoxAutoWrap =
+                SendMessageW(g_hChkTextAutoWrap, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            PersistConfig();
+            if (g_hPdfView) SetFocus(g_hPdfView);
         } else if (id == ID_TOOL_WIDTH && code == CBN_SELCHANGE) {
             int sel = static_cast<int>(SendMessageW(g_hComboWidth, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {

@@ -198,9 +198,14 @@ static void DrawReadableTextOverlay(HDC hdc, const RECT& client) {
             if (ReadableGlyphHasVisibleInk(pageWithGlyphs, glyph, bg)) continue;
 
             const double pxPerPt = kDpi / 72.0 * g_pdf.scale;
-            int fontPx = glyph.fontPt > 0.0f
-                ? static_cast<int>(std::lround(glyph.fontPt * kDpi / 72.0 * g_pdf.scale))
-                : static_cast<int>(std::lround((glyph.top - glyph.bottom) * pxPerPt));
+            // PDF font-size metadata can describe the untransformed font and
+            // is therefore wrong for scaled/rotated glyphs. The extracted
+            // glyph box is the size actually visible on this page.
+            const int glyphBoxPx = static_cast<int>(std::lround(
+                std::abs(glyph.top - glyph.bottom) * pxPerPt));
+            int fontPx = glyphBoxPx > 0
+                ? glyphBoxPx
+                : static_cast<int>(std::lround(glyph.fontPt * kDpi / 72.0 * g_pdf.scale));
             fontPx = std::clamp(fontPx, 5, 240);
             std::wstring fontName = ReadableOverlayFontName(glyph.codePoint);
             HFONT font = nullptr;
