@@ -106,10 +106,10 @@ static void CreateChildren(HWND hWnd) {
     static HMODULE s_msftedit = nullptr;
     static HMODULE s_riched20 = nullptr;
     if (!s_msftedit) {
-        s_msftedit = LoadLibraryW(L"Msftedit.dll");
+        s_msftedit = LoadLibraryExW(L"Msftedit.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     }
     if (!s_msftedit && !s_riched20) {
-        s_riched20 = LoadLibraryW(L"Riched20.dll");
+        s_riched20 = LoadLibraryExW(L"Riched20.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     }
     const wchar_t* noteClass = s_msftedit ? MSFTEDIT_CLASS : (s_riched20 ? RICHEDIT_CLASSW : L"EDIT");
     g_hNoteEdit = CreateWindowExW(WS_EX_CLIENTEDGE, noteClass, L"",

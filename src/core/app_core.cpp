@@ -4497,7 +4497,7 @@ static SetWindowThemeFn ResolveSetWindowTheme() {
     static bool s_tried = false;
     if (s_tried) return s_fn;
     s_tried = true;
-    s_uxtheme = LoadLibraryW(L"uxtheme.dll");
+    s_uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!s_uxtheme) return nullptr;
     s_fn = reinterpret_cast<SetWindowThemeFn>(GetProcAddress(s_uxtheme, "SetWindowTheme"));
     return s_fn;

@@ -3854,6 +3854,8 @@ static constexpr size_t kDirectoryHierarchyMaxLines = 600;
 static constexpr int kDirectoryHierarchyMaxDepth = 6;
 static std::unordered_set<std::wstring> s_hierarchyTempPdfKeys;
 static std::unordered_set<std::wstring> s_hierarchyTempNoteKeys;
+static std::unordered_set<std::wstring> s_pinnedTempPdfKeys;
+static std::unordered_set<std::wstring> s_pinnedTempNoteKeys;
 static std::wstring s_hierarchyTempOriginLectureKey;
 
 static bool StartsWithInsensitive(const std::wstring& text, const std::wstring& prefix) {
@@ -4072,6 +4074,98 @@ static void AddTemporaryOpenedFileToFileList(const std::wstring& path,
     SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(targetIndex), 0);
     SetListWide(list);
     InvalidateRect(list, nullptr, TRUE);
+}
+
+bool IsPinnedTemporaryFilePath(const std::wstring& path, bool isNote) {
+    const std::wstring key = NormalizePathKeyForList(path);
+    if (key.empty()) return false;
+    const auto& keys = isNote ? s_pinnedTempNoteKeys : s_pinnedTempPdfKeys;
+    return keys.find(key) != keys.end();
+}
+
+bool IsTemporaryFilePathInCurrentList(const std::wstring& path, bool isNote) {
+    const std::wstring key = NormalizePathKeyForList(path);
+    if (key.empty()) return false;
+    const auto& searchKeys = isNote ? s_searchTempNoteKeys : s_searchTempPdfKeys;
+    const auto& hierarchyKeys = isNote ? s_hierarchyTempNoteKeys : s_hierarchyTempPdfKeys;
+    const auto& pinnedKeys = isNote ? s_pinnedTempNoteKeys : s_pinnedTempPdfKeys;
+    return searchKeys.find(key) != searchKeys.end() ||
+           hierarchyKeys.find(key) != hierarchyKeys.end() ||
+           pinnedKeys.find(key) != pinnedKeys.end();
+}
+
+bool PinTemporaryFilePath(const std::wstring& path, bool isNote) {
+    const std::filesystem::path file(path);
+    if (path.empty() || (isNote ? !IsNoteFile(file) : !IsPdfOrImageFile(file))) return false;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(file, ec) || ec) return false;
+    const std::wstring key = NormalizePathKeyForList(path);
+    if (key.empty()) return false;
+    auto& keys = isNote ? s_pinnedTempNoteKeys : s_pinnedTempPdfKeys;
+    keys.insert(key);
+    return true;
+}
+
+bool UnpinTemporaryFilePath(const std::wstring& path, bool isNote) {
+    const std::wstring key = NormalizePathKeyForList(path);
+    if (key.empty()) return false;
+    auto& keys = isNote ? s_pinnedTempNoteKeys : s_pinnedTempPdfKeys;
+    return keys.erase(key) != 0;
+}
+
+bool KeepCurrentNoteOpenAcrossDirectoryChange() {
+    return !g_currentNotePath.empty() && IsPinnedTemporaryFilePath(g_currentNotePath, true);
+}
+
+void AppendPinnedTemporaryFilesToCurrentLists() {
+    auto append = [](std::vector<FileEntry>& files,
+                     const std::unordered_set<std::wstring>& keys,
+                     bool isNote) {
+        for (const auto& key : keys) {
+            if (key.empty()) continue;
+            const std::filesystem::path path(key);
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(path, ec) || ec) continue;
+            if (isNote ? !IsNoteFile(path) : !IsPdfOrImageFile(path)) continue;
+            const bool found = std::any_of(files.begin(), files.end(), [&](const FileEntry& entry) {
+                return NormalizePathKeyForList(entry.path) == key;
+            });
+            if (!found) files.push_back({path.wstring(), IsPdfFile(path)});
+        }
+    };
+    append(g_pdfFiles, s_pinnedTempPdfKeys, false);
+    append(g_noteFiles, s_pinnedTempNoteKeys, true);
+}
+
+bool RemoveTemporaryFilePathFromCurrentList(const std::wstring& path, bool isNote) {
+    const std::wstring key = NormalizePathKeyForList(path);
+    if (key.empty()) return false;
+    auto& files = isNote ? g_noteFiles : g_pdfFiles;
+    auto& searchKeys = isNote ? s_searchTempNoteKeys : s_searchTempPdfKeys;
+    auto& hierarchyKeys = isNote ? s_hierarchyTempNoteKeys : s_hierarchyTempPdfKeys;
+    auto& pinnedKeys = isNote ? s_pinnedTempNoteKeys : s_pinnedTempPdfKeys;
+    const bool wasTemporary = searchKeys.erase(key) != 0 ||
+                              hierarchyKeys.erase(key) != 0 ||
+                              pinnedKeys.erase(key) != 0;
+    if (!wasTemporary) return false;
+
+    files.erase(std::remove_if(files.begin(), files.end(), [&](const FileEntry& entry) {
+        return NormalizePathKeyForList(entry.path) == key;
+    }), files.end());
+    HWND list = isNote ? g_hNoteList : g_hPdfList;
+    if (list) {
+        SendMessageW(list, LB_RESETCONTENT, 0, 0);
+        const std::filesystem::path displayRoot = !g_currentSessionPath.empty()
+            ? std::filesystem::path(g_currentSessionPath)
+            : std::filesystem::path(g_currentLecturePath);
+        for (const auto& entry : files) {
+            const std::wstring label = FileDisplayLabelForPath(entry.path, files, displayRoot);
+            SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+        SetListWide(list);
+        InvalidateRect(list, nullptr, TRUE);
+    }
+    return true;
 }
 
 static void AddHierarchyOpenedFileToFileList(const std::wstring& path,
@@ -4858,7 +4952,13 @@ static void OnLectureSelChange(HWND hWnd) {
         if (g_pdfPreviewActive) {
             DisableIntegratedPdfPreview(hWnd, true);
         }
-        ClearPdfAndNoteSelection();
+        const bool keepPinnedNote = KeepCurrentNoteOpenAcrossDirectoryChange();
+        if (keepPinnedNote) {
+            ClearPdfState();
+            if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+        } else {
+            ClearPdfAndNoteSelection();
+        }
         g_currentSessionPath.clear();
         g_currentLecturePath = nextLecture;
         LoadSessions(g_currentLecturePath);
@@ -4881,6 +4981,11 @@ static void OnLectureSelChange(HWND hWnd) {
             SendMessageW(g_hNoteList, LB_RESETCONTENT, 0, 0);
             g_pdfFiles.clear();
             g_noteFiles.clear();
+            if (keepPinnedNote) {
+                AppendPinnedTemporaryFilesToCurrentLists();
+                RebuildFileListBox(g_hPdfList, g_pdfFiles);
+                RebuildFileListBox(g_hNoteList, g_noteFiles);
+            }
             InvalidateRect(g_hPdfList, nullptr, TRUE);
             InvalidateRect(g_hNoteList, nullptr, TRUE);
             timing.Mark(L"ClearFileLists");
@@ -4971,13 +5076,19 @@ static void OnSessionSelChange(HWND hWnd) {
         if (g_pdfPreviewActive) {
             DisableIntegratedPdfPreview(hWnd, true);
         }
-        ClearPdfAndNoteSelection();
+        const bool keepPinnedNote = KeepCurrentNoteOpenAcrossDirectoryChange();
+        if (keepPinnedNote) {
+            ClearPdfState();
+            if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+        } else {
+            ClearPdfAndNoteSelection();
+        }
         std::wstring preferredPdf;
         std::wstring preferredNote;
         ApplySessionAutoOpenPreference(target, preferredPdf, preferredNote);
         LoadFiles(target, preferredPdf, preferredNote);
         timing.Mark(L"LoadFiles");
-        AutoOpenSingleSessionFiles(hWnd);
+        if (!keepPinnedNote) AutoOpenSingleSessionFiles(hWnd);
         timing.Mark(L"AutoOpenPdf");
         timing.Mark(L"AutoOpenNote");
         SyncLeftPaneSelection();

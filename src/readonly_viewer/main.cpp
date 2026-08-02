@@ -2065,7 +2065,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
         g_OriginalTabProc = (WNDPROC)SetWindowLongPtrW(g_hwndTabControl, GWLP_WNDPROC, (LONG_PTR)TabSubclassProc);
             g_originalTabProc = (WNDPROC)SetWindowLongPtrW(g_hwndTabControl, GWLP_WNDPROC, (LONG_PTR)TabProc);
-            g_richEditModule = LoadLibraryW(L"Msftedit.dll");
+            g_richEditModule = LoadLibraryExW(L"Msftedit.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
             const wchar_t* editClass = g_richEditModule ? MSFTEDIT_CLASS : L"EDIT";
             g_isRichEdit = g_richEditModule != NULL;
             g_hwndEditControl = CreateWindowExW(0, editClass, L"",

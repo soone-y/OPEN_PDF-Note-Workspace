@@ -1287,6 +1287,8 @@ def find_note_auto_pair_bracket_regressions() -> list[str]:
 def find_workspace_config_compatibility_regressions() -> list[str]:
     errors: list[str] = []
     text = (REPO_ROOT / "src/core/app_core.cpp").read_text(encoding="utf-8", errors="ignore")
+    config_text = (REPO_ROOT / "src/core/workspace_config.h").read_text(encoding="utf-8", errors="ignore")
+    office_actions_text = (REPO_ROOT / "src/workspace/workspace_actions.cpp").read_text(encoding="utf-8", errors="ignore")
     required = {
         '"debugLogOfficeConversion",\n        "leftWidth"':
             "workspace.json writer compatibility key must remain in the known-field allowlist",
@@ -1298,6 +1300,62 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
     for needle, message in required.items():
         if needle not in text:
             errors.append(f"src/core/app_core.cpp: {message}")
+    if "bool officeConversion = false;" not in config_text:
+        errors.append("src/core/workspace_config.h: Office conversion diagnostics must be disabled by default")
+    prohibited_office_log_fragments = (
+        'L"start source="',
+        'L" command="',
+        'L"output_dir="',
+        'L" expected="',
+        'L"output_identification_failed detail="',
+    )
+    for fragment in prohibited_office_log_fragments:
+        if fragment in office_actions_text:
+            errors.append(
+                "src/workspace/workspace_actions.cpp: Office conversion diagnostics must not retain paths or command lines"
+            )
+            break
+    import_text = office_actions_text
+    required_import_no_follow = (
+        "FILE_FLAG_OPEN_REPARSE_POINT",
+        "GetFileInformationByHandle(srcHandle, &sourceInfo)",
+        "FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY",
+    )
+    for needle in required_import_no_follow:
+        if needle not in import_text:
+            errors.append(
+                "src/workspace/workspace_actions.cpp: import source handles must reject reparse points after opening"
+            )
+            break
+
+    system_dll_load_contracts = {
+        "src/core/app_core.cpp": ("uxtheme.dll",),
+        "src/readonly_viewer/main.cpp": ("Msftedit.dll",),
+        "src/ui/core/main_view_layout.cppinc": ("Msftedit.dll", "Riched20.dll"),
+    }
+    for relative_path, dll_names in system_dll_load_contracts.items():
+        dll_load_text = (REPO_ROOT / relative_path).read_text(encoding="utf-8", errors="ignore")
+        for dll_name in dll_names:
+            required_load = f'LoadLibraryExW(L"{dll_name}", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)'
+            bare_load = f'LoadLibraryW(L"{dll_name}")'
+            if required_load not in dll_load_text or bare_load in dll_load_text:
+                errors.append(
+                    f"{relative_path}: {dll_name} must be loaded only from System32 to prevent DLL search-path hijacking"
+                )
+
+    publish_text = (REPO_ROOT / "publish.ps1").read_text(encoding="utf-8", errors="ignore")
+    verify_read_only_contract = (
+        'if ($Mode -eq "Verify") {',
+        'Verify mode is read-only; no checklist was created or updated.',
+        'exit 0',
+    )
+    for needle in verify_read_only_contract:
+        if needle not in publish_text:
+            errors.append("publish.ps1: Verify mode must validate without creating or updating a checklist")
+            break
+    submit_checklist_contract = 'No publish checklist exists for this release set.'
+    if submit_checklist_contract not in publish_text:
+        errors.append("publish.ps1: Submit and Resubmit must require an existing checklist")
     return errors
 
 

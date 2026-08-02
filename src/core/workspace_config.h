@@ -22,7 +22,7 @@ struct AppDebugLogConfig {
     bool switchTiming = false;
     bool crash = true;
     bool startupWatchdog = true;
-    bool officeConversion = true;
+    bool officeConversion = false;
 };
 
 struct WorkspaceConfig {

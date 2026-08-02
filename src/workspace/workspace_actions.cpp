@@ -1376,7 +1376,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
                                    FILE_SHARE_READ,
                                    nullptr,
                                    OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT,
                                    nullptr);
     if (srcHandle == INVALID_HANDLE_VALUE) {
         if (outErr) {
@@ -1384,6 +1384,17 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
             *outErr = (IsEnglishUi() ? L"Failed to open source file:\n" : L"取り込み元ファイルを開けません:\n") +
                       src.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
         }
+        CleanupImportTempFile(&tmpHandle, tmp);
+        return false;
+    }
+
+    BY_HANDLE_FILE_INFORMATION sourceInfo{};
+    if (!GetFileInformationByHandle(srcHandle, &sourceInfo) ||
+        (sourceInfo.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        if (outErr) *outErr = IsEnglishUi()
+            ? L"Reparse point or non-regular source files are not supported."
+            : L"リパースポイントまたは通常ファイル以外は取り込めません。";
+        CloseHandle(srcHandle);
         CleanupImportTempFile(&tmpHandle, tmp);
         return false;
     }
@@ -2612,21 +2623,20 @@ void AppendOfficeConversionDiagnostic(const std::wstring& message) {
 }
 
 void AppendOfficeConversionOutputSnapshot(const std::filesystem::path& outputDir) {
-    std::wstring message = L"output_dir=" + outputDir.wstring();
+    std::wstring message = L"output_snapshot";
     std::error_code ec;
     size_t count = 0;
     for (std::filesystem::directory_iterator it(outputDir, ec), end;
          !ec && it != end && count < 32; it.increment(ec), ++count) {
-        const std::filesystem::path path = it->path();
         std::error_code fileEc;
         const bool regular = it->is_regular_file(fileEc) && !fileEc;
-        message += L" | entry=" + path.filename().wstring();
         if (regular) {
-            const uintmax_t size = std::filesystem::file_size(path, fileEc);
-            if (!fileEc) message += L" size=" + std::to_wstring(size);
+            const uintmax_t size = std::filesystem::file_size(it->path(), fileEc);
+            if (!fileEc) message += L" | file_size=" + std::to_wstring(size);
         }
     }
-    if (ec) message += L" | enumerate_error=" + UTF8ToWide(ec.message());
+    message += L" | entries=" + std::to_wstring(count);
+    if (ec) message += L" | enumerate_error=" + std::to_wstring(ec.value());
     AppendOfficeConversionDiagnostic(message);
 }
 
@@ -2715,11 +2725,7 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
         L" --convert-to pdf" +
         L" --outdir " + QuoteWindowsCommandLineArg(outDir.wstring()) +
         L" " + QuoteWindowsCommandLineArg(sourceOfficeCopy.wstring());
-    AppendOfficeConversionDiagnostic(L"start source=" + sourceOfficeCopy.wstring() +
-                                     L" soffice=" + soffice.wstring() +
-                                     L" profile=" + profileDir.wstring() +
-                                     L" output=" + outDir.wstring() +
-                                     L" command=" + cmd);
+    AppendOfficeConversionDiagnostic(L"start");
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -2799,8 +2805,7 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     const bool outputReady = WaitForExpectedLibreOfficePdf(expectedPdf, 30 * 1000, &outputWaitCanceled);
     AppendOfficeConversionDiagnostic(L"process_exit_code=0 output_ready=" +
                                      std::to_wstring(outputReady ? 1 : 0) +
-                                     L" output_wait_canceled=" + std::to_wstring(outputWaitCanceled ? 1 : 0) +
-                                     L" expected=" + expectedPdf.wstring());
+                                     L" output_wait_canceled=" + std::to_wstring(outputWaitCanceled ? 1 : 0));
     if (!outputReady) AppendOfficeConversionOutputSnapshot(outDir);
     if (outputWaitCanceled) {
         CleanupLibreOfficePythonCacheBestEffort(soffice);
@@ -2979,7 +2984,7 @@ ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
     std::filesystem::path generatedPdf;
     std::wstring outputErr;
     if (!FindLibreOfficeGeneratedPdf(outputDir, expectedPdf, &generatedPdf, &outputErr)) {
-        AppendOfficeConversionDiagnostic(L"output_identification_failed detail=" + outputErr);
+        AppendOfficeConversionDiagnostic(L"output_identification_failed");
         AppendOfficeConversionOutputSnapshot(outputDir);
         if (outFailure) *outFailure = outputErr;
         RemoveOfficeImportTempDirBestEffort(tempDir);

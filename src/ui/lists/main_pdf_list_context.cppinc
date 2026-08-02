@@ -122,6 +122,8 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     const bool officeFile = !isNoteList && IsOfficeFileListPath(file.path);
     const bool canRename = isNoteList || (!officeFile && file.isPdf);
     const bool canDeleteEmptyClro = isNoteList && IsEmptyClroNoteEligibleForDeletion(selectedPath);
+    const bool isPinnedTemporaryPath = IsPinnedTemporaryFilePath(file.path, isNoteList);
+    const bool isTemporaryPath = IsTemporaryFilePathInCurrentList(file.path, isNoteList);
 
     HMENU menu = CreatePopupMenu();
     if (!menu) return false;
@@ -134,6 +136,9 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdDeleteEmptyClro = 7;
     constexpr UINT kCmdRename = 8;
     constexpr UINT kCmdConvertImageToPdf = 9;
+    constexpr UINT kCmdPinTemporaryPath = 10;
+    constexpr UINT kCmdUnpinTemporaryPath = 11;
+    constexpr UINT kCmdRemoveTemporaryPath = 12;
     AppendMenuW(menu,
                 MF_STRING,
                 kCmdOpenInApp,
@@ -169,6 +174,19 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
                 MF_STRING,
                 kCmdCopyPath,
                 IsEnglishUi() ? L"Copy path" : L"パスをコピー");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu,
+                MF_STRING,
+                isPinnedTemporaryPath ? kCmdUnpinTemporaryPath : kCmdPinTemporaryPath,
+                isPinnedTemporaryPath
+                    ? (IsEnglishUi() ? L"Remove temporary path" : L"一時パスから外す")
+                    : (IsEnglishUi() ? L"Always keep open (temporary path)" : L"常に開ける（一時パスに追加）"));
+    if (isTemporaryPath) {
+        AppendMenuW(menu,
+                    MF_STRING,
+                    kCmdRemoveTemporaryPath,
+                    IsEnglishUi() ? L"Remove from temporary list" : L"一時リストから消す");
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu,
                 canRename ? MF_STRING : (MF_STRING | MF_GRAYED),
@@ -215,6 +233,37 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     }
     if (cmd == kCmdCopyPath) {
         return CopyPathToClipboard(owner, file.path);
+    }
+    if (cmd == kCmdPinTemporaryPath) {
+        if (!PinTemporaryFilePath(file.path, isNoteList)) {
+            ShowSoftNotice(owner,
+                           IsEnglishUi() ? L"This file could not be added as a temporary path."
+                                         : L"このファイルを一時パスに追加できませんでした。",
+                           SoftNoticeKind::Warning);
+        } else {
+            ShowSoftNotice(owner,
+                           IsEnglishUi() ? L"Added as a temporary path. It will remain available while changing directories."
+                                         : L"一時パスに追加しました。ディレクトリを変えても開いたままにできます。",
+                           SoftNoticeKind::Info);
+        }
+        return true;
+    }
+    if (cmd == kCmdUnpinTemporaryPath) {
+        UnpinTemporaryFilePath(file.path, isNoteList);
+        ShowSoftNotice(owner,
+                       IsEnglishUi() ? L"Removed the temporary path."
+                                     : L"一時パスから外しました。",
+                       SoftNoticeKind::Info);
+        return true;
+    }
+    if (cmd == kCmdRemoveTemporaryPath) {
+        if (RemoveTemporaryFilePathFromCurrentList(file.path, isNoteList)) {
+            ShowSoftNotice(owner,
+                           IsEnglishUi() ? L"Removed from the temporary list."
+                                         : L"一時リストから消しました。",
+                           SoftNoticeKind::Info);
+        }
+        return true;
     }
     if (cmd == kCmdShowHierarchy && canShowHierarchy) {
         return ShowDirectoryHierarchyPopup(owner, hierarchyRoot, hierarchyLabel, screenPt);

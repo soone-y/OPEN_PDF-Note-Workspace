@@ -64,6 +64,22 @@ $zlibImportHits = @($imports | Select-String -SimpleMatch "DLL Name: zlib1.dll")
 if ($zlibImportHits.Count -eq 0) {
     throw "pdf_note_workspace.exe does not import zlib1.dll"
 }
+# zlib 1.3.1 is currently supplied by the MinGW toolchain. CVE-2026-27171
+# affects crc32_combine*; this application must not import those APIs until the
+# bundled runtime is upgraded and the vulnerability is reviewed again.
+$forbiddenZlibImports = @(
+    "crc32_combine",
+    "crc32_combine64",
+    "crc32_combine_gen",
+    "crc32_combine_gen64",
+    "crc32_combine_op"
+)
+foreach ($functionName in $forbiddenZlibImports) {
+    $functionHits = @($imports | Select-String -Pattern ("\s" + [regex]::Escape($functionName) + "\s*$"))
+    if ($functionHits.Count -gt 0) {
+        throw "pdf_note_workspace.exe imports zlib API blocked pending CVE-2026-27171 remediation: $functionName"
+    }
+}
 $networkImportDlls = @(
     ("win" + "http.dll"),
     ("win" + "inet.dll"),

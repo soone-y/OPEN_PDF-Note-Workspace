@@ -241,7 +241,6 @@ inline bool AtomicReplaceFile(const std::filesystem::path& dest,
                              /*lpReserved=*/nullptr)) {
                 return true;
             }
-            lastErr = GetLastError();
             if (MoveFileExW(wTmp.c_str(), wDest.c_str(),
                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
                 return true;

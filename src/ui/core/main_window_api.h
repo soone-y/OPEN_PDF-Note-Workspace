@@ -28,6 +28,15 @@ void ApplyActiveColorForMode(HWND hWnd, ToolMode mode);
 #include <unordered_set>
 extern std::unordered_set<std::wstring> s_searchTempPdfKeys;
 extern std::unordered_set<std::wstring> s_searchTempNoteKeys;
+// File paths intentionally kept in the file lists while switching directories.
+// They are process-local temporary paths and never modify the source files.
+bool PinTemporaryFilePath(const std::wstring& path, bool isNote);
+bool UnpinTemporaryFilePath(const std::wstring& path, bool isNote);
+bool IsPinnedTemporaryFilePath(const std::wstring& path, bool isNote);
+bool IsTemporaryFilePathInCurrentList(const std::wstring& path, bool isNote);
+bool KeepCurrentNoteOpenAcrossDirectoryChange();
+void AppendPinnedTemporaryFilesToCurrentLists();
+bool RemoveTemporaryFilePathFromCurrentList(const std::wstring& path, bool isNote);
 struct TempExternalLecture {
     std::wstring path; // canonical path
 };

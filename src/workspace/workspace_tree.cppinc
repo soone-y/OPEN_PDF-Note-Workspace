@@ -370,6 +370,11 @@ void LoadFiles(const SessionEntry& session, std::wstring& preferredPdf, std::wst
         g_pdfFiles.push_back(officeFile);
     }
 
+    // Pinned paths are deliberately independent from the selected session.
+    // Add them after scanning the session so a path which belongs to the
+    // session itself is not duplicated.
+    AppendPinnedTemporaryFilesToCurrentLists();
+
     // If no explicit preference, align PDF/Note to whichever was updated most recently.
     // - Newest note vs newest PDF decides the "anchor".
     // - The other side tries to follow by filename stem heuristic; if no match, fall back to newest.
