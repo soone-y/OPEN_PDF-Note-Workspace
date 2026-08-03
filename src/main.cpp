@@ -51,6 +51,7 @@ bool HandleMainPdfZoomShortcutInLoop(HWND owner, const MSG& msg);
 #include <commctrl.h>
 #include <shlobj.h>
 #include <imm.h>
+#include <wincodec.h>
 #include <climits>
 #include <chrono>
 #include <iterator>
@@ -4209,6 +4210,11 @@ static void RebuildFileListBox(HWND list, const std::vector<FileEntry>& files) {
     SetListWide(list);
 }
 
+void RefreshTemporaryFileListDisplay(bool isNote) {
+    RebuildFileListBox(isNote ? g_hNoteList : g_hPdfList,
+                       isNote ? g_noteFiles : g_pdfFiles);
+}
+
 static int FindFileListIndexByPath(const std::vector<FileEntry>& files, const std::wstring& path) {
     if (path.empty()) return -1;
     const std::wstring key = NormalizePathKeyForList(path);
@@ -7066,8 +7072,14 @@ std::wstring FileDisplayLabelForPath(const std::wstring& filePath,
         (!pathKey.empty() &&
          (s_hierarchyTempPdfKeys.find(pathKey) != s_hierarchyTempPdfKeys.end() ||
           s_hierarchyTempNoteKeys.find(pathKey) != s_hierarchyTempNoteKeys.end()));
+    const bool pinnedTemp =
+        (!pathKey.empty() &&
+         (s_pinnedTempPdfKeys.find(pathKey) != s_pinnedTempPdfKeys.end() ||
+          s_pinnedTempNoteKeys.find(pathKey) != s_pinnedTempNoteKeys.end()));
     std::wstring prefix;
-    if (searchTemp) {
+    if (pinnedTemp) {
+        prefix = IsEnglishUi() ? L"[Always] " : L"[常] ";
+    } else if (searchTemp) {
         prefix = IsEnglishUi() ? L"[Search] " : L"[検索] ";
     } else if (hierarchyTemp) {
         prefix = IsEnglishUi() ? L"[Temp] " : L"[一時] ";
@@ -8374,8 +8386,13 @@ static bool DrawLeftPaneListItem(const DRAWITEMSTRUCT* dis) {
     COLORREF baseText = g_theme.panelText;
     const bool isSelected = (dis->itemState & ODS_SELECTED) != 0;
     const bool isOpen = IsOpenItemInList(list, idx);
+    const bool isOfficeSource =
+        list == g_hPdfList && idx >= 0 && idx < static_cast<int>(g_pdfFiles.size()) &&
+        IsOfficeFileListPath(g_pdfFiles[static_cast<size_t>(idx)].path);
 
     COLORREF openBg = BlendColor(g_theme.selectionBg, g_theme.panelBg, 0.50);
+    const COLORREF officeBg = BlendColor(g_theme.panelBg, g_theme.accent, 0.07);
+    const COLORREF officeText = BlendColor(g_theme.panelText, g_theme.panelBg, 0.42);
 
     // Keep the explicit selection colors exact.  An open but unselected item
     // remains a subdued version of that same theme-defined selection color.
@@ -8385,7 +8402,10 @@ static bool DrawLeftPaneListItem(const DRAWITEMSTRUCT* dis) {
         bg = g_theme.selectionBg;
         text = g_theme.selectionText;
     } else if (isOpen) {
-        bg = openBg;
+        bg = isOfficeSource ? BlendColor(openBg, officeBg, 0.35) : openBg;
+    } else if (isOfficeSource) {
+        bg = officeBg;
+        text = officeText;
     }
 
     HBRUSH bgBrush = CreateSolidBrush(bg);

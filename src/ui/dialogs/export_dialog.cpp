@@ -437,6 +437,11 @@ static void UpdateExportDialogSizeUi(ExportDialogState* ctx, int changedId) {
     const bool isPdfOut = (kind == ExportDialogKind::PdfAll || kind == ExportDialogKind::PdfPages);
     const bool isPngOut = (kind == ExportDialogKind::PdfPng);
 
+    if (ctx->labelOutSize) SetWindowTextW(ctx->labelOutSize, isPngOut ? L"画像品質・サイズ:" : L"出力サイズ:");
+    if (ctx->radioOutSizeHalf) SetWindowTextW(ctx->radioOutSizeHalf, isPngOut ? L"72 DPI" : L"半分");
+    if (ctx->radioOutSizeOne) SetWindowTextW(ctx->radioOutSizeOne, isPngOut ? L"144 DPI (標準)" : L"そのまま（推奨）");
+    if (ctx->radioOutSizeTwo) SetWindowTextW(ctx->radioOutSizeTwo, isPngOut ? L"288 DPI" : L"倍");
+    if (ctx->radioOutSizeCustom) SetWindowTextW(ctx->radioOutSizeCustom, L"指定");
     if (ctx->labelOutSizeW) SetWindowTextW(ctx->labelOutSizeW, isPdfOut ? L"横(pt):" : L"横(px):");
     if (ctx->labelOutSizeH) SetWindowTextW(ctx->labelOutSizeH, isPdfOut ? L"縦(pt):" : L"縦(px):");
 
@@ -512,7 +517,7 @@ static void UpdateExportDialogSizeUi(ExportDialogState* ctx, int changedId) {
     }
 
     if (isPngOut) {
-        constexpr double kBaseDpi = 144.0;
+        constexpr double kBaseDpi = static_cast<double>(file_output::kPdfPngDefaultDpi);
         int baseW = std::max(1, static_cast<int>(std::lround(wPt * kBaseDpi / 72.0)));
         int baseH = std::max(1, static_cast<int>(std::lround(hPt * kBaseDpi / 72.0)));
 
@@ -570,7 +575,13 @@ static void UpdateExportDialogSizeUi(ExportDialogState* ctx, int changedId) {
         }
 
         if (ctx->labelOutSizeMm) {
-            SetWindowTextW(ctx->labelOutSizeMm, L"");
+            const double dpi = (wPt > 0.0) ? (static_cast<double>(outW) * 72.0 / wPt) : kBaseDpi;
+            const double megapixels = static_cast<double>(outW) * static_cast<double>(outH) / 1'000'000.0;
+            std::wstring msg = L"可逆PNG / 約 " + FormatDoubleCompact(dpi, 0) + L" DPI / 約 " +
+                               FormatDoubleCompact(megapixels, 1) + L" MP（上限 " +
+                               FormatDoubleCompact(static_cast<double>(file_output::kPdfPngMaxPixels) / 1'000'000.0, 0) +
+                               L" MP）";
+            SetWindowTextW(ctx->labelOutSizeMm, msg.c_str());
         }
     }
 }
@@ -720,7 +731,7 @@ static void UpdateExportDialogUi(ExportDialogState* ctx) {
     ShowWindow(ctx->editOutSizeW, showOutSize ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->labelOutSizeH, showOutSize ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->editOutSizeH, showOutSize ? SW_SHOW : SW_HIDE);
-    ShowWindow(ctx->labelOutSizeMm, showPaper ? SW_SHOW : SW_HIDE);
+    ShowWindow(ctx->labelOutSizeMm, showOutSize ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->labelPaper, showPaper ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->comboPaper, showPaper ? SW_SHOW : SW_HIDE);
 
@@ -806,7 +817,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
         }
         result.pdfScale = scale;
     } else if (kind == ExportDialogKind::PdfPng) {
-        constexpr double kBaseDpi = 144.0;
+        constexpr double kBaseDpi = static_cast<double>(file_output::kPdfPngDefaultDpi);
         int refPage = ReferencePageIndexForSizePreview(ctx, kind);
         double wPt = 0.0, hPt = 0.0;
         if (!TryGetPageSizePt(refPage, wPt, hPt)) {
@@ -851,9 +862,11 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
             return RejectExportDialogInput(ctx, L"出力サイズが範囲外です。", ctx->editOutSizeW, true);
         }
 
-        constexpr int64_t kMaxPixels = 8'000'000;
-        int64_t total = static_cast<int64_t>(outW) * static_cast<int64_t>(outH);
-        if (outW <= 0 || outH <= 0 || total <= 0 || total > kMaxPixels) {
+        uint64_t total = static_cast<uint64_t>(outW) * static_cast<uint64_t>(outH);
+        if (outW <= 0 || outH <= 0 ||
+            outW > file_output::kPdfPngMaxDimensionPx ||
+            outH > file_output::kPdfPngMaxDimensionPx ||
+            total == 0 || total > file_output::kPdfPngMaxPixels) {
             return RejectExportDialogInput(ctx, L"指定サイズが大きすぎます（PNG出力）。", ctx->editOutSizeW, true);
         }
         result.pngWidthPx = outW;

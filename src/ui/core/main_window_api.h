@@ -37,6 +37,7 @@ bool IsTemporaryFilePathInCurrentList(const std::wstring& path, bool isNote);
 bool KeepCurrentNoteOpenAcrossDirectoryChange();
 void AppendPinnedTemporaryFilesToCurrentLists();
 bool RemoveTemporaryFilePathFromCurrentList(const std::wstring& path, bool isNote);
+void RefreshTemporaryFileListDisplay(bool isNote);
 struct TempExternalLecture {
     std::wstring path; // canonical path
 };

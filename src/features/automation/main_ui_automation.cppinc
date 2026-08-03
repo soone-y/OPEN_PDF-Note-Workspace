@@ -95,6 +95,38 @@ static bool SendUiAutomationNoteRedoChangedText() {
     return GetNoteAutomationIndexingText() != beforeText;
 }
 
+static bool SendUiAutomationNoteMenuUndoRedoChangedText(HWND owner, bool undo) {
+    if (!owner || !g_hNoteEdit) return false;
+    SetFocus(g_hNoteEdit);
+    if (GetFocus() != g_hNoteEdit) return false;
+    const std::wstring beforeText = GetNoteAutomationIndexingText();
+    const UINT command = undo ? ID_EDIT_UNDO : ID_EDIT_REDO;
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(command, 0), 0);
+    return GetNoteAutomationIndexingText() != beforeText;
+}
+
+static bool SendUiAutomationNoteTextInput(const std::wstring& text) {
+    if (!g_hNoteEdit || text.empty()) return false;
+    SetFocus(g_hNoteEdit);
+    if (GetFocus() != g_hNoteEdit) return false;
+    for (const wchar_t ch : text) {
+        SendMessageW(g_hNoteEdit, WM_CHAR, static_cast<WPARAM>(ch), 0);
+    }
+    return true;
+}
+
+static bool SendUiAutomationNoteBackspace(size_t count) {
+    if (!g_hNoteEdit || count == 0) return false;
+    SetFocus(g_hNoteEdit);
+    if (GetFocus() != g_hNoteEdit) return false;
+    for (size_t i = 0; i < count; ++i) {
+        // RichEdit receives Backspace as a key message; unlike text input it
+        // does not rely on a synthetic WM_CHAR for the deletion itself.
+        SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_BACK, 1);
+    }
+    return true;
+}
+
 static std::wstring DescribeNoteUiSnapshot(const NoteUiSnapshot& snapshot) {
     auto boolText = [](bool value) -> const wchar_t* {
         return value ? L"true" : L"false";
@@ -337,6 +369,94 @@ static bool HasPngFileSignature(const std::string& bytes) {
            std::equal(std::begin(kSignature), std::end(kSignature), bytes.begin());
 }
 
+static bool ReadPngDimensions(const std::string& bytes, int* outWidth, int* outHeight) {
+    if (!outWidth || !outHeight || !HasPngFileSignature(bytes) || bytes.size() < 24 ||
+        bytes.compare(12, 4, "IHDR") != 0) {
+        return false;
+    }
+    const auto readBigEndianU32 = [&bytes](size_t offset) -> uint32_t {
+        return (static_cast<uint32_t>(static_cast<unsigned char>(bytes[offset])) << 24) |
+               (static_cast<uint32_t>(static_cast<unsigned char>(bytes[offset + 1])) << 16) |
+               (static_cast<uint32_t>(static_cast<unsigned char>(bytes[offset + 2])) << 8) |
+               static_cast<uint32_t>(static_cast<unsigned char>(bytes[offset + 3]));
+    };
+    const uint32_t width = readBigEndianU32(16);
+    const uint32_t height = readBigEndianU32(20);
+    if (width == 0 || height == 0 || width > static_cast<uint32_t>(INT_MAX) ||
+        height > static_cast<uint32_t>(INT_MAX)) {
+        return false;
+    }
+    *outWidth = static_cast<int>(width);
+    *outHeight = static_cast<int>(height);
+    return true;
+}
+
+static bool InspectPngRasterWithWic(const std::filesystem::path& path, int expectedWidth,
+                                    int expectedHeight, bool* outHasVisibleContent) {
+    if (!outHasVisibleContent || expectedWidth <= 0 || expectedHeight <= 0) return false;
+    *outHasVisibleContent = false;
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    const auto cleanup = [&]() {
+        if (converter) converter->Release();
+        if (frame) frame->Release();
+        if (decoder) decoder->Release();
+        if (factory) factory->Release();
+    };
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&factory));
+    if (FAILED(hr) || !factory) return false;
+    hr = factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                            WICDecodeMetadataCacheOnLoad, &decoder);
+    if (FAILED(hr) || !decoder || FAILED(decoder->GetFrame(0, &frame)) || !frame) {
+        cleanup();
+        return false;
+    }
+    UINT width = 0;
+    UINT height = 0;
+    double dpiX = 0.0;
+    double dpiY = 0.0;
+    if (FAILED(frame->GetSize(&width, &height)) ||
+        width != static_cast<UINT>(expectedWidth) || height != static_cast<UINT>(expectedHeight) ||
+        FAILED(frame->GetResolution(&dpiX, &dpiY)) || dpiX <= 1.0 || dpiY <= 1.0 ||
+        std::abs(dpiX - dpiY) > 0.5) {
+        cleanup();
+        return false;
+    }
+    hr = factory->CreateFormatConverter(&converter);
+    if (FAILED(hr) || !converter ||
+        FAILED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
+                                     WICBitmapDitherTypeNone, nullptr, 0.0,
+                                     WICBitmapPaletteTypeCustom))) {
+        cleanup();
+        return false;
+    }
+    const size_t stride = static_cast<size_t>(width) * 4;
+    const size_t byteCount = stride * static_cast<size_t>(height);
+    if (stride / 4 != width || byteCount / stride != height || byteCount > 64u * 1024u * 1024u) {
+        cleanup();
+        return false;
+    }
+    std::vector<uint8_t> pixels(byteCount);
+    if (FAILED(converter->CopyPixels(nullptr, static_cast<UINT>(stride),
+                                     static_cast<UINT>(byteCount), pixels.data()))) {
+        cleanup();
+        return false;
+    }
+    size_t visiblePixelCount = 0;
+    for (size_t offset = 0; offset < pixels.size(); offset += 4) {
+        const uint8_t b = pixels[offset];
+        const uint8_t g = pixels[offset + 1];
+        const uint8_t r = pixels[offset + 2];
+        if (r < 245 || g < 245 || b < 245) ++visiblePixelCount;
+    }
+    *outHasVisibleContent = visiblePixelCount >= 64;
+    cleanup();
+    return true;
+}
+
 static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outError) {
     if (!owner || g_workspaceRoot.empty() || CurrentLogicalPdfPath().empty() ||
         g_currentNotePath.empty() || g_pdf.pages.empty()) {
@@ -375,9 +495,12 @@ static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outErr
         if (outError) *outError = L"PDF export failed during output export automation.";
         return false;
     }
+    constexpr int kExportPngWidth = 1200;
+    constexpr int kExportPngHeight = 900;
     if (!file_output::ExportPdfPagePng(owner, 0, pngOut.wstring(),
                                         file_output::PdfPngStyle::PdfLike,
-                                        /*includeAnnotations=*/false, 320, 240)) {
+                                        /*includeAnnotations=*/false,
+                                        kExportPngWidth, kExportPngHeight)) {
         if (outError) *outError = L"PNG export failed during output export automation.";
         return false;
     }
@@ -396,9 +519,17 @@ static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outErr
     std::string exportedText;
     std::string exportedMarkdown;
     std::string exportedHtml;
+    int exportedPngWidth = 0;
+    int exportedPngHeight = 0;
+    bool exportedPngHasVisibleContent = false;
     if (!ReadUiAutomationFileBytes(pdfOut, &exportedPdf) || exportedPdf.size() < 5 ||
         exportedPdf.compare(0, 5, "%PDF-") != 0 ||
         !ReadUiAutomationFileBytes(pngOut, &exportedPng) || !HasPngFileSignature(exportedPng) ||
+        !ReadPngDimensions(exportedPng, &exportedPngWidth, &exportedPngHeight) ||
+        exportedPngWidth != kExportPngWidth || exportedPngHeight != kExportPngHeight ||
+        !InspectPngRasterWithWic(pngOut, kExportPngWidth, kExportPngHeight,
+                                 &exportedPngHasVisibleContent) ||
+        !exportedPngHasVisibleContent ||
         !ReadUiAutomationFileBytes(textOut, &exportedText) || exportedText.empty() ||
         !ReadUiAutomationFileBytes(markdownOut, &exportedMarkdown) || exportedMarkdown.empty() ||
         !ReadUiAutomationFileBytes(htmlOut, &exportedHtml) || exportedHtml.empty()) {
@@ -541,22 +672,279 @@ static bool RunUiAutomationNoteSaveScenario(HWND owner, std::wstring* outError) 
         if (outError) *outError = L"Direct note save left staged note diffs behind.";
         return false;
     }
-    // A successful save establishes persistence, not a new document. The
-    // kernel history must remain available so users can undo the saved edit.
-    if (!SendUiAutomationNoteUndoChangedText()) {
-        if (outError) *outError = L"Direct note save cleared the note undo history.";
+    // A successful original-file save establishes a new history boundary.
+    // Neither Ctrl+Z nor Ctrl+Y may alter the just-saved note.
+    if (CanExecuteNoteUndoRedoFromFocus(true) ||
+        CanExecuteNoteUndoRedoFromFocus(false) ||
+        SendUiAutomationNoteUndoChangedText() ||
+        SendUiAutomationNoteRedoChangedText()) {
+        if (outError) *outError = L"Direct note save did not clear note undo/redo history.";
+        return false;
+    }
+    if (FindNoteTextSnippetStart(directSaveToken) < 0) {
+        if (outError) *outError = L"Direct note save changed the saved token while checking history.";
+        return false;
+    }
+    if (!SelectNoteTextSnippet(directSaveToken)) {
+        if (outError) *outError = L"Could not select the direct-save token for cleanup.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    if (!file_output::SaveNoteFile(owner)) {
+        if (outError) *outError = L"Saving direct note cleanup failed.";
         return false;
     }
     if (FindNoteTextSnippetStart(directSaveToken) >= 0) {
-        if (outError) *outError = L"Undo after direct note save did not remove the saved token.";
+        if (outError) *outError = L"Direct note cleanup token remained after saving.";
         return false;
     }
-    if (!file_output::SaveNoteFile(owner)) {
-        if (outError) *outError = L"Saving the undo result after direct note save failed.";
+    return true;
+}
+
+static bool RunUiAutomationNoteIntegratedSaveHistoryScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_currentNotePath.empty() || !g_hNoteEdit) {
+        if (outError) *outError = L"Integrated-save history automation requires an open note editor.";
         return false;
     }
-    if (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0) {
-        if (outError) *outError = L"Saving the undo result left the editor modified flag set.";
+
+    const std::wstring notePath = g_currentNotePath;
+    const std::wstring token = L"ui-automation-integrated-save-history-token";
+    SendMessageW(g_hNoteEdit, EM_SETSEL,
+                 static_cast<WPARAM>(GetNoteAutomationIndexingText().size()),
+                 static_cast<LPARAM>(GetNoteAutomationIndexingText().size()));
+    if (!SendUiAutomationNoteTextInput(token) || FindNoteTextSnippetStart(token) < 0) {
+        if (outError) *outError = L"Could not create the integrated-save history token.";
+        return false;
+    }
+    if (!file_output::RunSaveAndIntegrateTransaction(owner) ||
+        CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) != 0) {
+        if (outError) *outError = L"Integrated note save did not complete cleanly.";
+        return false;
+    }
+    if (CanExecuteNoteUndoRedoFromFocus(true) ||
+        CanExecuteNoteUndoRedoFromFocus(false) ||
+        SendUiAutomationNoteUndoChangedText() ||
+        SendUiAutomationNoteRedoChangedText() ||
+        FindNoteTextSnippetStart(token) < 0) {
+        if (outError) *outError = L"Integrated note save did not establish an undo/redo history boundary.";
+        return false;
+    }
+    if (!SelectNoteTextSnippet(token)) {
+        if (outError) *outError = L"Could not select the integrated-save token for cleanup.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    if (!file_output::SaveNoteFile(owner) || FindNoteTextSnippetStart(token) >= 0) {
+        if (outError) *outError = L"Integrated-save history cleanup failed.";
+        return false;
+    }
+    return true;
+}
+
+static bool RunUiAutomationNoteInputUndoRedoScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_currentNotePath.empty() || !g_hNoteEdit) {
+        if (outError) *outError = L"Note input undo/redo automation requires an open note editor.";
+        return false;
+    }
+
+    const std::wstring originalText = GetNoteAutomationIndexingText();
+    const std::wstring typedToken = L"ui-automation-typed-input-token";
+    // One character makes this a selection replacement (rather than a second
+    // contiguous typing run), while keeping the expected history boundary exact.
+    const std::wstring replacementToken = L"@";
+    SendMessageW(g_hNoteEdit, EM_SETSEL,
+                 static_cast<WPARAM>(originalText.size()),
+                 static_cast<LPARAM>(originalText.size()));
+    if (!SendUiAutomationNoteTextInput(typedToken) ||
+        FindNoteTextSnippetStart(typedToken) < 0) {
+        if (outError) *outError = L"WM_CHAR note input did not insert the typed token.";
+        return false;
+    }
+
+    if (!SendUiAutomationNoteMenuUndoRedoChangedText(owner, true) ||
+        FindNoteTextSnippetStart(typedToken) >= 0) {
+        if (outError) *outError = L"Menu undo did not reverse WM_CHAR note input.";
+        return false;
+    }
+    if (!SendUiAutomationNoteRedoChangedText() ||
+        FindNoteTextSnippetStart(typedToken) < 0) {
+        if (outError) *outError = L"EM_REDO did not restore WM_CHAR note input.";
+        return false;
+    }
+
+    if (!SelectNoteTextSnippet(typedToken) ||
+        !SendUiAutomationNoteTextInput(replacementToken) ||
+        FindNoteTextSnippetStart(typedToken) >= 0 ||
+        FindNoteTextSnippetStart(replacementToken) < 0) {
+        if (outError) *outError = L"Typing over a selection did not replace the selected note text.";
+        return false;
+    }
+    if (!SendUiAutomationNoteUndoChangedText() ||
+        FindNoteTextSnippetStart(typedToken) < 0 ||
+        FindNoteTextSnippetStart(replacementToken) >= 0) {
+        if (outError) *outError = L"WM_UNDO did not restore the selected note text.";
+        return false;
+    }
+    if (!SendUiAutomationNoteMenuUndoRedoChangedText(owner, false) ||
+        FindNoteTextSnippetStart(replacementToken) < 0) {
+        if (outError) *outError = L"Menu redo did not restore the replacement note text.";
+        return false;
+    }
+
+    if (!SelectNoteTextSnippet(replacementToken)) {
+        if (outError) *outError = L"Could not select the replacement text for WM_CLEAR.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, WM_CLEAR, 0, 0);
+    if (FindNoteTextSnippetStart(replacementToken) >= 0) {
+        if (outError) *outError = L"WM_CLEAR did not remove the selected note text.";
+        return false;
+    }
+    if (!SendUiAutomationNoteUndoChangedText() ||
+        FindNoteTextSnippetStart(replacementToken) < 0) {
+        if (outError) *outError = L"WM_UNDO did not restore text removed by WM_CLEAR.";
+        return false;
+    }
+    if (!SendUiAutomationNoteRedoChangedText() ||
+        FindNoteTextSnippetStart(replacementToken) >= 0) {
+        if (outError) *outError = L"EM_REDO did not reapply WM_CLEAR.";
+        return false;
+    }
+
+    // Typing coalesces only compatible adjacent text units, so punctuation in
+    // the token can legitimately create more than one history entry. Unwind
+    // until the exact pre-test snapshot is restored, without touching storage.
+    size_t cleanupUndoCount = 0;
+    const size_t maxCleanupUndoCount = typedToken.size() + 3;
+    while (GetNoteAutomationIndexingText() != originalText &&
+           cleanupUndoCount < maxCleanupUndoCount) {
+        if (!SendUiAutomationNoteUndoChangedText()) break;
+        ++cleanupUndoCount;
+    }
+    if (GetNoteAutomationIndexingText() != originalText) {
+        if (outError) *outError = L"Undo cleanup did not restore the original note text.";
+        return false;
+    }
+
+    // Exercise an ordinary editing sequence: repeated Backspace, repeated
+    // undo/redo, then a fresh input that must invalidate the redo branch.
+    const std::wstring backspaceToken = L"abcde";
+    SendMessageW(g_hNoteEdit, EM_SETSEL,
+                 static_cast<WPARAM>(originalText.size()),
+                 static_cast<LPARAM>(originalText.size()));
+    if (!SendUiAutomationNoteTextInput(backspaceToken) ||
+        GetNoteAutomationIndexingText() != originalText + backspaceToken) {
+        if (outError) *outError = L"Could not prepare repeated Backspace input.";
+        return false;
+    }
+    if (!SendUiAutomationNoteBackspace(3) ||
+        GetNoteAutomationIndexingText() != originalText + L"ab") {
+        if (outError) *outError = L"Repeated Backspace did not remove the expected characters.";
+        return false;
+    }
+    for (size_t restored = 1; restored <= 3; ++restored) {
+        if (!SendUiAutomationNoteUndoChangedText() ||
+            GetNoteAutomationIndexingText() !=
+                originalText + backspaceToken.substr(0, 2 + restored)) {
+            if (outError) *outError = L"Repeated undo did not restore one Backspace step at a time.";
+            return false;
+        }
+    }
+    for (size_t reapplied = 1; reapplied <= 3; ++reapplied) {
+        if (!SendUiAutomationNoteRedoChangedText() ||
+            GetNoteAutomationIndexingText() !=
+                originalText + backspaceToken.substr(0, backspaceToken.size() - reapplied)) {
+            if (outError) *outError = L"Repeated redo did not reapply one Backspace step at a time.";
+            return false;
+        }
+    }
+    if (!SendUiAutomationNoteMenuUndoRedoChangedText(owner, true) ||
+        GetNoteAutomationIndexingText() != originalText + L"abc") {
+        if (outError) *outError = L"Menu undo did not restore one Backspace step.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_SETSEL,
+                 static_cast<WPARAM>(originalText.size() + 3),
+                 static_cast<LPARAM>(originalText.size() + 3));
+    if (!SendUiAutomationNoteTextInput(L"x") ||
+        GetNoteAutomationIndexingText() != originalText + L"abcx") {
+        if (outError) *outError = L"New input after undo was not applied.";
+        return false;
+    }
+    if (SendUiAutomationNoteRedoChangedText() ||
+        GetNoteAutomationIndexingText() != originalText + L"abcx") {
+        if (outError) *outError = L"Redo remained available after new input following undo.";
+        return false;
+    }
+
+    cleanupUndoCount = 0;
+    const size_t maxBackspaceCleanupUndoCount = backspaceToken.size() + 3;
+    while (GetNoteAutomationIndexingText() != originalText &&
+           cleanupUndoCount < maxBackspaceCleanupUndoCount) {
+        if (!SendUiAutomationNoteUndoChangedText()) break;
+        ++cleanupUndoCount;
+    }
+    if (GetNoteAutomationIndexingText() != originalText) {
+        if (outError) *outError = L"Backspace undo/redo cleanup did not restore the original note text.";
+        return false;
+    }
+
+    // Combine input, Backspace, undo, redo, and a new branch. Every state is
+    // checked because this sequence catches stack-order and redo-invalidation
+    // mistakes that a simple undo/redo round trip cannot expose.
+    const std::wstring mixedToken = L"abc";
+    SendMessageW(g_hNoteEdit, EM_SETSEL,
+                 static_cast<WPARAM>(originalText.size()),
+                 static_cast<LPARAM>(originalText.size()));
+    if (!SendUiAutomationNoteTextInput(mixedToken) ||
+        !SendUiAutomationNoteBackspace(2) ||
+        GetNoteAutomationIndexingText() != originalText + L"a") {
+        if (outError) *outError = L"Mixed input and Backspace sequence did not reach its expected state.";
+        return false;
+    }
+    if (!SendUiAutomationNoteTextInput(L"x") ||
+        GetNoteAutomationIndexingText() != originalText + L"ax") {
+        if (outError) *outError = L"Mixed sequence did not append input after Backspace.";
+        return false;
+    }
+    if (!SendUiAutomationNoteUndoChangedText() ||
+        GetNoteAutomationIndexingText() != originalText + L"a") {
+        if (outError) *outError = L"Mixed sequence undo did not remove the latest input.";
+        return false;
+    }
+    if (!SendUiAutomationNoteMenuUndoRedoChangedText(owner, true) ||
+        GetNoteAutomationIndexingText() != originalText + L"ab") {
+        if (outError) *outError = L"Mixed sequence menu undo did not restore one Backspace step.";
+        return false;
+    }
+    if (!SendUiAutomationNoteRedoChangedText() ||
+        GetNoteAutomationIndexingText() != originalText + L"a") {
+        if (outError) *outError = L"Mixed sequence redo did not reapply the Backspace step.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_SETSEL,
+                 static_cast<WPARAM>(originalText.size() + 1),
+                 static_cast<LPARAM>(originalText.size() + 1));
+    if (!SendUiAutomationNoteTextInput(L"y") ||
+        GetNoteAutomationIndexingText() != originalText + L"ay") {
+        if (outError) *outError = L"Mixed sequence branch input was not applied.";
+        return false;
+    }
+    if (SendUiAutomationNoteRedoChangedText() ||
+        GetNoteAutomationIndexingText() != originalText + L"ay") {
+        if (outError) *outError = L"Mixed sequence retained redo after branching input.";
+        return false;
+    }
+
+    cleanupUndoCount = 0;
+    const size_t maxMixedCleanupUndoCount = mixedToken.size() + 3;
+    while (GetNoteAutomationIndexingText() != originalText &&
+           cleanupUndoCount < maxMixedCleanupUndoCount) {
+        if (!SendUiAutomationNoteUndoChangedText()) break;
+        ++cleanupUndoCount;
+    }
+    if (GetNoteAutomationIndexingText() != originalText) {
+        if (outError) *outError = L"Mixed input undo/redo cleanup did not restore the original note text.";
         return false;
     }
     return true;
@@ -2379,6 +2767,40 @@ static bool RunUiAutomationWorkspaceConfigRoundTripScenario(std::wstring* outErr
     return true;
 }
 
+static bool RunUiAutomationWorkspaceConfigUnknownFieldScenario(std::wstring* outError) {
+    if (g_workspaceRoot.empty()) {
+        if (outError) *outError = L"Workspace configuration automation requires a workspace.";
+        return false;
+    }
+
+    const std::filesystem::path configPath = std::filesystem::path(g_workspaceRoot) / L"workspace.json";
+    auto readBytes = [&](std::string* out) {
+        if (!out) return false;
+        out->clear();
+        std::ifstream input(configPath, std::ios::binary);
+        if (!input) return false;
+        *out = std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        return static_cast<bool>(input) || input.eof();
+    };
+    std::string original;
+    if (!readBytes(&original) || original.find("\"futureVersionOption\"") == std::string::npos) {
+        if (outError) *outError = L"Unknown-field automation fixture was not loaded as expected.";
+        return false;
+    }
+
+    const std::wstring originalLanguage = g_config.language;
+    g_config.language = (originalLanguage == L"ja") ? L"en" : L"ja";
+    PersistConfig();
+    g_config.language = originalLanguage;
+
+    std::string afterPersist;
+    if (!readBytes(&afterPersist) || afterPersist != original) {
+        if (outError) *outError = L"Unknown workspace.json fields were not protected from auto-persist.";
+        return false;
+    }
+    return true;
+}
+
 static bool WriteUiAutomationTextFile(const std::filesystem::path& path, const std::string& text, std::wstring* outError) {
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
@@ -2655,11 +3077,14 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
     std::wstring configRecoveryOnlyValue;
     const bool configRecoveryOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_RECOVERY_ONLY", &configRecoveryOnlyValue) &&
                                     (configRecoveryOnlyValue == L"1" || configRecoveryOnlyValue == L"true");
+    std::wstring configUnknownFieldOnlyValue;
+    const bool configUnknownFieldOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_UNKNOWN_FIELD_ONLY", &configUnknownFieldOnlyValue) &&
+                                        (configUnknownFieldOnlyValue == L"1" || configUnknownFieldOnlyValue == L"true");
     std::wstring settingsBundleOnlyValue;
     const bool settingsBundleOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY", &settingsBundleOnlyValue) &&
                                     (settingsBundleOnlyValue == L"1" || settingsBundleOnlyValue == L"true");
     if ((configOnly ? 1 : 0) + (logContractOnly ? 1 : 0) + (configRecoveryOnly ? 1 : 0) +
-        (settingsBundleOnly ? 1 : 0) > 1) {
+        (configUnknownFieldOnly ? 1 : 0) + (settingsBundleOnly ? 1 : 0) > 1) {
         if (outError) *outError = L"Only one focused UI automation mode may be selected.";
         return false;
     }
@@ -2685,6 +3110,14 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
             return false;
         }
         AppendUiAutomationTrace(L"automation:workspace_config_recovery_ok");
+        return true;
+    }
+    if (configUnknownFieldOnly) {
+        if (!RunUiAutomationWorkspaceConfigUnknownFieldScenario(outError)) {
+            AppendUiAutomationTrace(L"automation:workspace_config_unknown_field_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:workspace_config_unknown_field_ok");
         return true;
     }
     if (settingsBundleOnly) {
@@ -2730,11 +3163,21 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
         return false;
     }
     AppendUiAutomationTrace(L"automation:theme_switch_ok");
+    if (!RunUiAutomationNoteInputUndoRedoScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:note_input_undo_redo_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:note_input_undo_redo_ok");
     if (!RunUiAutomationNoteSaveScenario(owner, outError)) {
         AppendUiAutomationTrace(L"automation:note_save_failed");
         return false;
     }
     AppendUiAutomationTrace(L"automation:note_save_ok");
+    if (!RunUiAutomationNoteIntegratedSaveHistoryScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:note_integrated_save_history_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:note_integrated_save_history_ok");
     if (!RunUiAutomationNoteSwitchUndoScenario(owner, outError)) {
         AppendUiAutomationTrace(L"automation:note_switch_undo_failed");
         return false;

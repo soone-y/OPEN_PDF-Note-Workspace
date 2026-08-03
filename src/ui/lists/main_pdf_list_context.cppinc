@@ -241,6 +241,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
                                          : L"このファイルを一時パスに追加できませんでした。",
                            SoftNoticeKind::Warning);
         } else {
+            RefreshTemporaryFileListDisplay(isNoteList);
             ShowSoftNotice(owner,
                            IsEnglishUi() ? L"Added as a temporary path. It will remain available while changing directories."
                                          : L"一時パスに追加しました。ディレクトリを変えても開いたままにできます。",
@@ -250,6 +251,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     }
     if (cmd == kCmdUnpinTemporaryPath) {
         UnpinTemporaryFilePath(file.path, isNoteList);
+        RefreshTemporaryFileListDisplay(isNoteList);
         ShowSoftNotice(owner,
                        IsEnglishUi() ? L"Removed the temporary path."
                                      : L"一時パスから外しました。",

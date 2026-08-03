@@ -68,6 +68,7 @@ public:
         bool renderActive);
     [[nodiscard]] std::optional<NoteKernelHistoryResult> Undo(bool renderActive);
     [[nodiscard]] std::optional<NoteKernelHistoryResult> Redo(bool renderActive);
+    void ClearHistory();
     [[nodiscard]] NoteKernelRefreshResult RefreshDerived(bool forceFull = false);
     void RequestFullRefresh();
     void DiscardPendingEditAndRequireFullRefresh();

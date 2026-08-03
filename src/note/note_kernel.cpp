@@ -177,6 +177,10 @@ std::optional<NoteKernelHistoryResult> LocalNoteKernel::Redo(bool renderActive) 
     return result;
 }
 
+void LocalNoteKernel::ClearHistory() {
+    history_.Clear();
+}
+
 NoteKernelRefreshResult LocalNoteKernel::RefreshDerived(bool forceFull) {
     if (!text_core_.valid()) return {};
 

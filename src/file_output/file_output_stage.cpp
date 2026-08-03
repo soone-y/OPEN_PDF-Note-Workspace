@@ -3370,6 +3370,7 @@ bool IntegrateStageMetaToDestination(HWND owner, const StageMeta &meta,
                  NormalizePathKey(g_currentNotePath)) {
     AddIntegratedCurrentNoteToListIfNeeded(owner, meta.targetPath);
     RefreshCurrentNoteFileSnapshot();
+    ClearCurrentNoteUndoHistory();
   }
   RefreshDirtyUi(owner);
   preview_trace::Append(L"IntegrateStage",
@@ -3664,6 +3665,7 @@ bool SaveNoteFile(HWND owner) {
     ResetNoteStageEditTracking();
     ClearCurrentNoteEditorModifiedFlag(g_currentNotePath);
     RefreshCurrentNoteFileSnapshot();
+    ClearCurrentNoteUndoHistory();
     RefreshDirtyUi(owner);
     return true;
   }
@@ -3681,6 +3683,7 @@ bool SaveNoteFile(HWND owner) {
   ResetNoteStageEditTracking();
   ClearCurrentNoteEditorModifiedFlag(g_currentNotePath);
   RefreshCurrentNoteFileSnapshot();
+  ClearCurrentNoteUndoHistory();
   RefreshDirtyUi(owner);
   return true;
 }
@@ -4628,6 +4631,7 @@ CompleteBackgroundSaveAndIntegrateTransaction(HWND owner, void *rawResult) {
         NormalizePathKey(entry.targetPath) ==
             NormalizePathKey(g_currentNotePath)) {
       RefreshCurrentNoteFileSnapshot();
+      ClearCurrentNoteUndoHistory();
     }
     ++completion.integratedCount;
   }

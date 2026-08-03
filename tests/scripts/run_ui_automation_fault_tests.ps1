@@ -100,6 +100,7 @@ $savedEnv = @{
     "PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_LOG_CONTRACT_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_LOG_CONTRACT_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_RECOVERY_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_RECOVERY_ONLY", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_UNKNOWN_FIELD_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_UNKNOWN_FIELD_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY", "Process")
 }
 
@@ -115,9 +116,10 @@ try {
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_AUTOMATION_WORKSPACE_ROOT", $workspaceRoot, "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_RESULT_FILE", $resultFile, "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_INSTANCE_SUFFIX", $instanceSuffix, "Process")
-    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_ONLY", $(if ($ConfigOnly -or $ConfigUnknownFieldOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_ONLY", $(if ($ConfigOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_LOG_CONTRACT_ONLY", $(if ($LogContractOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_RECOVERY_ONLY", $(if ($ConfigRecoveryOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_UNKNOWN_FIELD_ONLY", $(if ($ConfigUnknownFieldOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY", $(if ($SettingsBundleOnly) { "1" } else { $null }), "Process")
 
     $proc = Start-Process -FilePath $exePath -WorkingDirectory $binDir -PassThru
@@ -199,7 +201,7 @@ try {
         }
     }
     }
-    if (-not ($LogContractOnly -or $ConfigRecoveryOnly -or $SettingsBundleOnly) -and $result -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
+    if (-not ($LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly) -and $result -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
             throw "UI automation did not complete the workspace configuration round-trip scenario."
@@ -246,6 +248,12 @@ try {
     if ($ConfigUnknownFieldOnly -and
         (Get-Content -LiteralPath $workspaceConfigPath -Raw -Encoding UTF8) -notmatch '"futureVersionOption"\s*:\s*\{\s*"keep"\s*:\s*true\s*\}') {
         throw "An unknown workspace.json field was lost despite auto-persist protection."
+    }
+    if ($ConfigUnknownFieldOnly) {
+        $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
+        if ($traceText -notmatch "(?m)^automation:workspace_config_unknown_field_ok$") {
+            throw "UI automation did not complete the workspace configuration unknown-field preservation scenario."
+        }
     }
     if ($SettingsBundleOnly) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }

@@ -1508,6 +1508,9 @@ static void ResetNoteUndoBuffer(HWND hEdit) {
 
 void ClearCurrentNoteUndoHistory() {
     ResetNoteUndoBuffer(g_hNoteEdit);
+    if (note::LocalNoteKernel* kernel = CurrentNoteKernel()) {
+        kernel->ClearHistory();
+    }
     if (g_hNoteEdit) {
         SendMessageW(g_hNoteEdit, EM_SETMODIFY, FALSE, 0);
     }

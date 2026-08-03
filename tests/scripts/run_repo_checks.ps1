@@ -15,6 +15,7 @@ param(
     [switch]$SkipThemeSwitchingTests,
     [switch]$SkipWorkspaceConfigTests,
     [switch]$SkipWorkspaceConfigRecoveryTests,
+    [switch]$SkipWorkspaceConfigUnknownFieldTests,
     [switch]$SkipAppLogContractTests,
     [switch]$SkipUiAutomation,
     [switch]$SkipPythonToolTests,
@@ -54,6 +55,7 @@ $runtimeDependencyScript = Join-Path $PSScriptRoot "run_runtime_dependency_tests
 $themeSwitchingScript = Join-Path $PSScriptRoot "run_theme_switching_tests.ps1"
 $workspaceConfigTestScript = Join-Path $PSScriptRoot "run_workspace_config_tests.ps1"
 $workspaceConfigRecoveryTestScript = Join-Path $PSScriptRoot "run_workspace_config_recovery_tests.ps1"
+$workspaceConfigUnknownFieldTestScript = Join-Path $PSScriptRoot "run_workspace_config_unknown_field_tests.ps1"
 $appLogContractTestScript = Join-Path $PSScriptRoot "run_app_log_contract_tests.ps1"
 $officeConversionFixtureScript = Join-Path $PSScriptRoot "run_office_conversion_fixture_tests.ps1"
 $uiAutomationScript = Join-Path $PSScriptRoot "run_ui_automation_fault_tests.ps1"
@@ -596,6 +598,8 @@ try {
     Assert-ScriptExists -Path $runtimeDependencyScript
     Assert-ScriptExists -Path $themeSwitchingScript
     Assert-ScriptExists -Path $workspaceConfigTestScript
+    Assert-ScriptExists -Path $workspaceConfigRecoveryTestScript
+    Assert-ScriptExists -Path $workspaceConfigUnknownFieldTestScript
     Assert-ScriptExists -Path $appLogContractTestScript
     Assert-ScriptExists -Path $officeConversionFixtureScript
     Assert-ScriptExists -Path $uiAutomationScript
@@ -731,6 +735,12 @@ try {
     if (-not $SkipWorkspaceConfigRecoveryTests) {
         Invoke-Step -Name "Workspace Configuration Recovery Tests" -Action {
             Invoke-ChildPowerShellScript -ScriptPath $workspaceConfigRecoveryTestScript
+        }
+    }
+
+    if (-not $SkipWorkspaceConfigUnknownFieldTests) {
+        Invoke-Step -Name "Workspace Configuration Unknown-Field Preservation Tests" -Action {
+            Invoke-ChildPowerShellScript -ScriptPath $workspaceConfigUnknownFieldTestScript
         }
     }
 

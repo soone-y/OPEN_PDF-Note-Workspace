@@ -2,6 +2,7 @@
 #pragma once
 
 #include "core/app_core.h"
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -77,6 +78,11 @@ enum class PdfPngStyle {
     PdfLike,
     ViewerLike
 };
+
+// PNG is lossless. These limits bound the temporary 32-bit raster buffer.
+inline constexpr int kPdfPngDefaultDpi = 144;
+inline constexpr int kPdfPngMaxDimensionPx = 16384;
+inline constexpr uint64_t kPdfPngMaxPixels = 32'000'000;
 
 enum class StagedDiffKind {
     Note,

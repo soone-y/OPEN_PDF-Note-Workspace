@@ -921,6 +921,10 @@ int main() {
         Expect(redo.has_value() && redo->selection.caret.value == 2 &&
                    historyKernel.text_core().MatchesRaw(L"ab"),
                "kernel history redo restores merged typing and final caret");
+        historyKernel.ClearHistory();
+        Expect(!historyKernel.CanUndo() && !historyKernel.CanRedo() &&
+                   historyKernel.text_core().MatchesRaw(L"ab"),
+               "clearing kernel history preserves saved text while disabling undo and redo");
 
         note::LocalNoteKernel lineHistoryKernel;
         lineHistoryKernel.Reset(note::NoteId{79}, metadata, L"", 1, 0,

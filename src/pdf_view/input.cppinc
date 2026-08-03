@@ -847,7 +847,11 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         PdfFlowMode mode = CurrentFlowMode();
         bool ctrlDown = (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0;
         bool shiftDown = (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0;
-        if (ctrlDown) {
+        // Pan is a navigation-only mode, so the vertical wheel adjusts zoom at
+        // the pointer without requiring a modifier. Other tools retain their
+        // established scroll behavior; Ctrl+wheel continues to zoom everywhere.
+        const bool zoomWithWheel = ctrlDown || g_toolMode == ToolMode::Pan;
+        if (zoomWithWheel) {
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
 

@@ -962,6 +962,43 @@ def find_existing_pdf_annotation_policy_regressions() -> list[str]:
                 if needle in text:
                     errors.append(f"{rel}: native PDF annotation mutation API must not be used without an explicit read-only/import policy: {needle}")
     return errors
+
+
+def find_png_export_quality_regressions() -> list[str]:
+    errors: list[str] = []
+    required_by_file = {
+        "src/file_output/file_output.h": {
+            "kPdfPngDefaultDpi = 144": "PNG export must retain an explicit standard-DPI contract",
+            "kPdfPngMaxDimensionPx = 16384": "PNG export must bound a single raster dimension",
+            "kPdfPngMaxPixels = 32'000'000": "PNG export must bound total raster allocation",
+        },
+        "src/file_output/file_output.cpp": {
+            "pixelCount > file_output::kPdfPngMaxPixels": "PNG export API must reject oversized rasters before allocation",
+            "kPdfPngMaxDimensionPx": "PNG export API must reject oversized dimensions before allocation",
+            "SavePngWic(outPath, pixels.data(), outWidthPx, outHeightPx, stride, dpi": "PNG export must preserve the calculated DPI in output metadata",
+        },
+        "src/ui/dialogs/export_dialog.cpp": {
+            "288 DPI": "PNG export UI must present a high-detail preset",
+            "可逆PNG / 約 ": "PNG export UI must show format, DPI, and pixel-count guidance",
+            "file_output::kPdfPngMaxPixels": "PNG export UI must use the same safe pixel limit as the export API",
+        },
+        "src/features/automation/main_ui_automation.cppinc": {
+            "ReadPngDimensions": "PNG automation must inspect the encoded image dimensions",
+            "InspectPngRasterWithWic": "PNG automation must decode the image rather than trusting its signature",
+            "frame->GetResolution(&dpiX, &dpiY)": "PNG automation must verify exported DPI metadata",
+            "visiblePixelCount >= 64": "PNG automation must reject an all-white raster",
+            "kExportPngWidth = 1200": "PNG automation must render a meaningful high-resolution artifact",
+            "exportedPngWidth != kExportPngWidth": "PNG automation must reject silently resized output",
+        },
+    }
+    for rel, needles in required_by_file.items():
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8", errors="ignore")
+        for needle, message in needles.items():
+            if needle not in text:
+                errors.append(f"{rel}: {message}")
+    return errors
+
+
 def find_slide_crop_export_regressions() -> list[str]:
     errors: list[str] = []
     required_by_file = {
@@ -1552,6 +1589,52 @@ def find_layout_flicker_regressions() -> list[str]:
         errors.append("src/settings/settings_general_controls.cppinc: settings apply effects must keep layout, bottom pane, and PDF invalidation separate")
 
     return errors
+def find_note_save_history_regressions() -> list[str]:
+    errors: list[str] = []
+    required_by_file = {
+        "src/note/note_kernel.h": {
+            "void ClearHistory();": "the note kernel must expose explicit history clearing",
+        },
+        "src/note/note_kernel.cpp": {
+            "void LocalNoteKernel::ClearHistory()": "the note kernel must implement history clearing",
+            "history_.Clear();": "kernel history clearing must clear both undo and redo stacks",
+        },
+        "src/note_view/note_view_note_ops.cppinc": {
+            "kernel->ClearHistory();": "clearing the current note history must clear the kernel history",
+            "EM_EMPTYUNDOBUFFER": "clearing the current note history must clear RichEdit history",
+        },
+        "src/features/automation/main_ui_automation.cppinc": {
+            "Direct note save did not clear note undo/redo history.": "UI automation must reject undo/redo surviving a direct note save",
+            "RunUiAutomationNoteIntegratedSaveHistoryScenario": "UI automation must cover integrated-save history clearing",
+            "Integrated note save did not establish an undo/redo history boundary.": "UI automation must reject undo/redo surviving an integrated save",
+        },
+    }
+    for rel, needles in required_by_file.items():
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8", errors="ignore")
+        for needle, message in needles.items():
+            if needle not in text:
+                errors.append(f"{rel}: {message}")
+
+    stage_text = (REPO_ROOT / "src/file_output/file_output_stage.cpp").read_text(encoding="utf-8", errors="ignore")
+    direct_start = stage_text.find("bool SaveNoteFile(HWND owner)")
+    direct_end = stage_text.find("bool SaveNoteIfDirty(HWND owner)", direct_start)
+    direct_save = stage_text[direct_start:direct_end] if direct_start >= 0 and direct_end >= 0 else ""
+    if direct_save.count("ClearCurrentNoteUndoHistory();") < 2:
+        errors.append("src/file_output/file_output_stage.cpp: every successful direct note-save path must clear undo/redo history")
+
+    integrate_start = stage_text.find("bool IntegrateStageMetaToDestination")
+    integrate_end = stage_text.find("struct BackgroundSaveWorkerResult", integrate_start)
+    integrate_save = stage_text[integrate_start:integrate_end] if integrate_start >= 0 and integrate_end >= 0 else ""
+    if "ClearCurrentNoteUndoHistory();" not in integrate_save:
+        errors.append("src/file_output/file_output_stage.cpp: foreground stage integration must clear current-note undo/redo history")
+
+    background_start = stage_text.find("for (const auto &entry : result->integrated)")
+    background_end = stage_text.find("completion.ok = result->ok;", background_start)
+    background_save = stage_text[background_start:background_end] if background_start >= 0 and background_end >= 0 else ""
+    if "ClearCurrentNoteUndoHistory();" not in background_save:
+        errors.append("src/file_output/file_output_stage.cpp: background stage integration must clear current-note undo/redo history")
+    return errors
+
 def main() -> int:
     problems: list[str] = []
 
@@ -1629,6 +1712,10 @@ def main() -> int:
     if annotation_layer_problems:
         problems.append("annotation layer regression(s) detected:")
         problems.extend(annotation_layer_problems)
+    png_export_quality_problems = find_png_export_quality_regressions()
+    if png_export_quality_problems:
+        problems.append("PNG export quality regression(s) detected:")
+        problems.extend(png_export_quality_problems)
     pdf_textbox_visibility_problems = find_pdf_textbox_visibility_regressions()
     if pdf_textbox_visibility_problems:
         problems.append("pdf text box visibility regression(s) detected:")
@@ -1665,6 +1752,10 @@ def main() -> int:
     if note_input_latency_problems:
         problems.append("note input latency regression(s) detected:")
         problems.extend(note_input_latency_problems)
+    note_save_history_problems = find_note_save_history_regressions()
+    if note_save_history_problems:
+        problems.append("note save-history regression(s) detected:")
+        problems.extend(note_save_history_problems)
     note_render_incremental_problems = find_note_render_incremental_regressions()
     if note_render_incremental_problems:
         problems.append("note render incremental regression(s) detected:")

@@ -43,9 +43,9 @@ Overloaded(Ts...) -> Overloaded<Ts...>;
 
 static constexpr int kTextPadPx = 4;
 static constexpr double kExportStandardTextMinPt = 9.0;
-// Keep exported text markers visually consistent with the on-screen overlay:
-// source glyph pixels receive the same marker opacity as their surroundings.
-static constexpr double kMarkerTextAlphaScaleOnText = 1.0;
+// Match the viewer: retain strong page highlighting while reducing the overlay
+// on non-black source glyphs. Black glyphs remain clear for readability.
+static constexpr double kMarkerTextAlphaScaleOnText = 0.55;
 static constexpr int kMarkerTextDarkMax = 210;
 
 static HWND FileOutputNoticeOwner(HWND owner) {
@@ -182,16 +182,15 @@ static void RememberPickedSavePathDirectory(const std::wstring& filePath) {
 
 static double CapAnnotBitmapExportDpi(double widthPt, double heightPt, double desiredDpi) {
     constexpr double kMinDpi = 72.0;
-    constexpr double kMaxPixels = 8'000'000.0;
-    constexpr double kMaxDimPx = 8192.0;
 
     widthPt = std::max(0.01, widthPt);
     heightPt = std::max(0.01, heightPt);
     desiredDpi = std::max(kMinDpi, desiredDpi);
 
-    double dpiFromPixels = 72.0 * std::sqrt(kMaxPixels / (widthPt * heightPt));
-    double dpiFromDimW = 72.0 * (kMaxDimPx / widthPt);
-    double dpiFromDimH = 72.0 * (kMaxDimPx / heightPt);
+    double dpiFromPixels = 72.0 * std::sqrt(static_cast<double>(file_output::kPdfPngMaxPixels) /
+                                             (widthPt * heightPt));
+    double dpiFromDimW = 72.0 * (static_cast<double>(file_output::kPdfPngMaxDimensionPx) / widthPt);
+    double dpiFromDimH = 72.0 * (static_cast<double>(file_output::kPdfPngMaxDimensionPx) / heightPt);
     double dpi = std::min({ desiredDpi, dpiFromPixels, dpiFromDimW, dpiFromDimH });
     return std::clamp(dpi, kMinDpi, desiredDpi);
 }
@@ -3924,9 +3923,23 @@ bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, Pd
     double heightPt = 0.0;
     if (!ResolvePdfPageSize(pageIndex, &widthPt, &heightPt)) return false;
     if (outWidthPx <= 0 || outHeightPx <= 0) {
-        constexpr double kBaseDpi = 144.0;
-        outWidthPx = std::max(1, static_cast<int>(std::lround(widthPt * kBaseDpi / 72.0)));
-        outHeightPx = std::max(1, static_cast<int>(std::lround(heightPt * kBaseDpi / 72.0)));
+        outWidthPx = std::max(1, static_cast<int>(std::lround(
+            widthPt * file_output::kPdfPngDefaultDpi / 72.0)));
+        outHeightPx = std::max(1, static_cast<int>(std::lround(
+            heightPt * file_output::kPdfPngDefaultDpi / 72.0)));
+    }
+    const uint64_t pixelCount = static_cast<uint64_t>(outWidthPx) *
+                                static_cast<uint64_t>(outHeightPx);
+    if (outWidthPx > file_output::kPdfPngMaxDimensionPx ||
+        outHeightPx > file_output::kPdfPngMaxDimensionPx ||
+        pixelCount > file_output::kPdfPngMaxPixels) {
+        ShowFileOutputMessageDialog(
+            owner, ExperimentalExportDialogTitle(GetUiText().menuExportPngPage),
+            IsEnglishUi()
+                ? L"The requested PNG is too large. Choose a smaller image size."
+                : L"指定したPNG画像は大きすぎます。出力サイズを小さくしてください。",
+            SoftNoticeKind::Warning);
+        return false;
     }
     const double dpi = (widthPt > 0.0) ? (static_cast<double>(outWidthPx) * 72.0 / widthPt) : 144.0;
     const auto* annots = CurrentLogicalPdfAnnotations() ? CurrentLogicalPdfAnnotations() : &g_annots;
