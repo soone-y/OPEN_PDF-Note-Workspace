@@ -847,10 +847,12 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         PdfFlowMode mode = CurrentFlowMode();
         bool ctrlDown = (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0;
         bool shiftDown = (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0;
-        // Pan is a navigation-only mode, so the vertical wheel adjusts zoom at
-        // the pointer without requiring a modifier. Other tools retain their
-        // established scroll behavior; Ctrl+wheel continues to zoom everywhere.
-        const bool zoomWithWheel = ctrlDown || g_toolMode == ToolMode::Pan;
+        // In Pan mode, a conventional mouse wheel zooms at the pointer while
+        // precise wheel deltas (touchpad scrolling) retain normal navigation.
+        // Ctrl+wheel remains an explicit zoom gesture for every input device.
+        const bool precise = IsPreciseWheelDelta(delta);
+        const bool zoomWithWheel = ctrlDown ||
+            (g_toolMode == ToolMode::Pan && !precise);
         if (zoomWithWheel) {
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
@@ -862,7 +864,6 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             const int viewH = rc.bottom - rc.top;
             const int viewW = rc.right - rc.left;
             MarkPdfVirtualScrollInput();
-            const bool precise = IsPreciseWheelDelta(delta);
             if (precise) {
                 HandleTouchpadScroll(false, delta, hwnd, viewH, viewW);
             } else {
@@ -1080,14 +1081,19 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
             if (msg == WM_POINTERDOWN) {
+                // A second finger is commonly used to steady a tablet.  Do
+                // not let it reset the drag anchor of the finger already
+                // scrolling the document.
+                if (g_pdf.panning) return 0;
                 SetCapture(hwnd);
                 g_pdf.panning = true;
+                g_pdf.touchPanPointerId = pointerId;
                 g_pdf.panAnchor = pt;
                 g_pdf.panStartY = g_pdf.scrollY;
                 g_pdf.panStartX = g_pdf.scrollX;
                 g_pdf.panAxisLock = PanAxisLock::None;
             } else if (msg == WM_POINTERUPDATE) {
-                if (g_pdf.panning) {
+                if (g_pdf.panning && pointerId == g_pdf.touchPanPointerId) {
                     int rawDx = pt.x - g_pdf.panAnchor.x;
                     int rawDy = pt.y - g_pdf.panAnchor.y;
                     int dx = rawDx;
@@ -1111,8 +1117,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             } else if (msg == WM_POINTERUP) {
-                if (g_pdf.panning) {
+                if (g_pdf.panning && pointerId == g_pdf.touchPanPointerId) {
                     g_pdf.panning = false;
+                    g_pdf.touchPanPointerId = 0;
+                    g_pdf.panAxisLock = PanAxisLock::None;
                     ReleaseCapture();
                 }
             }
@@ -1583,6 +1591,14 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
     }
     case WM_CAPTURECHANGED: {
+        // A modal system gesture, another control, or an interrupted contact
+        // can take capture without a matching pointer-up.  Never leave the
+        // view in a panning state after that interruption.
+        if (g_pdf.panning) {
+            g_pdf.panning = false;
+            g_pdf.touchPanPointerId = 0;
+            g_pdf.panAxisLock = PanAxisLock::None;
+        }
         if (g_pdf.pendingTextBoxHit && !g_pdf.movingAnnot) {
             // Some touchpad drivers can transfer capture before delivering a
             // matching button-up. A stationary pending TextBox hit is a tap,

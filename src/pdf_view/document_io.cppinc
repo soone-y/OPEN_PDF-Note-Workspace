@@ -154,17 +154,23 @@ static bool PromptPasswordForPdfOpen(HWND pdfWnd,
 }
 
 static bool LoadImageDocument(HWND pdfWnd, const std::wstring& path) {
-    ClearPdfState();
-    g_pdf.kind = DocKind::Image;
-    std::wstring err;
-    if (!LoadImagePixelsWic(path, g_pdf.imagePixels, g_pdf.imageWidth, g_pdf.imageHeight,
-                            g_pdf.imageStride, g_pdf.imageDpiX, g_pdf.imageDpiY, &err)) {
+    int reloadPromptCount = 0;
+    for (;;) {
+        ClearPdfState();
+        g_pdf.kind = DocKind::Image;
+        std::wstring err;
+        if (LoadImagePixelsWic(path, g_pdf.imagePixels, g_pdf.imageWidth, g_pdf.imageHeight,
+                               g_pdf.imageStride, g_pdf.imageDpiX, g_pdf.imageDpiY, &err)) {
+            break;
+        }
         std::wstring msg = IsEnglishUi()
             ? L"Failed to open image. Check path and permissions."
             : L"画像を開けません。パスと権限を確認してください。";
         if (!err.empty()) msg += L"\n" + err;
-        ShowPdfMessageDialog(pdfWnd, L"Image", msg, SoftNoticeKind::Error);
         ClearPdfState();
+        if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"Image", msg)) {
+            continue;
+        }
         return false;
     }
     g_pdf.pageCount = 1;
@@ -183,6 +189,7 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
     std::optional<std::string> openPasswordUtf8 = ConsumePendingPdfOpenPasswordUtf8();
     SecureOptionalStringScope openPasswordScope(&openPasswordUtf8);
     int passwordPromptCount = 0;
+    int reloadPromptCount = 0;
     for (;;) {
         ClearPdfState();
 
@@ -205,7 +212,9 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
                 : L"PDFを開けません。パスと権限を確認してください。";
             std::wstring detail = L"(" + std::to_wstring(e) + L") " + atomic_write::Win32ErrorMessage(e);
             if (!detail.empty()) msg += L"\n" + detail;
-            ShowPdfMessageDialog(pdfWnd, L"PDF", msg, SoftNoticeKind::Error);
+            if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
+                continue;
+            }
             return false;
         }
 
@@ -217,7 +226,9 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
             std::wstring msg = IsEnglishUi()
                 ? L"Failed to open PDF. File is empty or too large."
                 : L"PDFを開けません（ファイルが空か大きすぎます）。";
-            ShowPdfMessageDialog(pdfWnd, L"PDF", msg, SoftNoticeKind::Error);
+            if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
+                continue;
+            }
             return false;
         }
 
@@ -299,7 +310,9 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
             }
             std::wstring msg = IsEnglishUi() ? L"Failed to open PDF." : L"PDFを開けません。";
             if (!detail.empty()) msg += L"\n" + detail;
-            ShowPdfMessageDialog(pdfWnd, L"PDF", msg, SoftNoticeKind::Error);
+            if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
+                continue;
+            }
             return false;
         }
         SecureClearString(g_pdf.openPasswordUtf8);

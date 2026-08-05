@@ -295,6 +295,9 @@ void SetPdfSearchPointMarker(int pageIndex, double xPt, double yPt) {
 }
 
 void ClearPdfState() {
+    if (!IsDocumentOpenLockTransitionActive() && !g_pdf.path.empty()) {
+        ReleaseDocumentOpenLock(std::filesystem::path(g_pdf.path));
+    }
     g_pdfSearchResultMarker = {};
     ShutdownPdfVirtualRenderWorker();
     if (g_pdf.doc) {
@@ -318,6 +321,7 @@ void ClearPdfState() {
     g_pdf.scrollX = 0.0;
     g_pdf.singlePageIndex = 0;
     g_pdf.panning = false;
+    g_pdf.touchPanPointerId = 0;
     g_pdf.panAnchor = {};
     g_pdf.panStartY = 0.0;
     g_pdf.panStartX = 0.0;

@@ -1635,6 +1635,60 @@ def find_note_save_history_regressions() -> list[str]:
         errors.append("src/file_output/file_output_stage.cpp: background stage integration must clear current-note undo/redo history")
     return errors
 
+def find_multi_instance_launch_regressions() -> list[str]:
+    errors: list[str] = []
+    required_by_file = {
+        "src/app/startup_instance.cpp": {
+            'IsNewInstanceLaunchRequested()': "explicit additional-window launch mode must remain available",
+            'L"--new-instance"': "additional-window launch must use a distinct command-line flag",
+            'L"--workspace"': "additional-window launch must pass an explicit workspace root",
+            'L"--choose-workspace"': "taskbar launch must require an explicit workspace choice",
+            'RegisterNewWindowJumpListTask': "taskbar Jump List task must remain registered",
+            'CreateProcessW(executable.c_str()': "menu additional-window launch must start the local executable directly",
+        },
+        "src/app/bootstrap.cppinc": {
+            'if (newInstanceRequested)': "additional windows must retain the normal-launch mutex lifetime",
+            'CreateMutexW(nullptr, FALSE, SingleInstanceMutexName().c_str())': "additional windows must not own the normal-launch mutex",
+            '    } else {': "ordinary launches must keep single-instance activation behavior",
+        },
+        "src/ui/core/main_window_proc.cppinc": {
+            'TryGetStartupWorkspaceRoot(&g_workspaceRoot)': "additional windows must use their explicit workspace root",
+            'ShouldChooseStartupWorkspace()': "taskbar additional-window launch must prompt for a workspace",
+        },
+        "src/workspace/workspace_write_lock.cpp": {
+            'ERROR_ALREADY_EXISTS': "the per-workspace writer lock must reject a second writer",
+            'DocumentOpenLockCandidate::DocumentOpenLockCandidate': "opened files must acquire a process-wide document lock",
+            'Local\\\\PdfNoteDocumentOpenLock_': "opened files must use a distinct named mutex",
+            'ReleaseAllDocumentOpenLocks': "all document locks must be released during shutdown",
+        },
+        "src/pdf_view/annotation_store.cppinc": {
+            'DocumentOpenLockCandidate documentLock': "PDF and image opens must acquire the document lock",
+            'documentLock.CommitReplacing': "a successful PDF/image switch must release only the previous document lock",
+        },
+        "src/note_view/note_view_note_ops.cppinc": {
+            'DocumentOpenLockCandidate documentLock': "note opens must acquire the document lock",
+            'documentLock.CommitReplacing': "a successful note switch must release only the previous document lock",
+        },
+        "src/pdf_view/navigation.cppinc": {
+            'ReleaseDocumentOpenLock(std::filesystem::path(g_pdf.path))': "closing a PDF/image must release its document lock",
+        },
+        "src/app/bootstrap.cppinc": {
+            'ReleaseAllDocumentOpenLocks();': "application shutdown must release document locks",
+        },
+        "src/ui/menus/menu_build.cpp": {
+            'ID_FILE_NEW_WINDOW': "the menu must expose the explicit additional-window command",
+        },
+        "src/app/command_dispatch.cppinc": {
+            'LaunchNewMainWindow(*picked)': "the menu must start additional windows only after workspace selection",
+        },
+    }
+    for rel, needles in required_by_file.items():
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8", errors="ignore")
+        for needle, message in needles.items():
+            if needle not in text:
+                errors.append(f"{rel}: {message}")
+    return errors
+
 def main() -> int:
     problems: list[str] = []
 
@@ -1792,6 +1846,10 @@ def main() -> int:
     if runtime_safety_problems:
         problems.append("runtime safety regression(s) detected:")
         problems.extend(runtime_safety_problems)
+    multi_instance_problems = find_multi_instance_launch_regressions()
+    if multi_instance_problems:
+        problems.append("multi-instance launch regression(s) detected:")
+        problems.extend(multi_instance_problems)
 
     if problems:
         for item in problems:

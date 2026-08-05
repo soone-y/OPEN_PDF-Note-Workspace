@@ -1,6 +1,7 @@
 // file: search.cpp
 #include "search/search.h"
 #include "ui/noop_nav_guard.h"
+#include "ui/menus/context_menu_helpers.h"
 
 #include "resources/app_resource.h"
 #include "core/app_core.h"
@@ -788,50 +789,31 @@ static LRESULT CALLBACK SearchResultsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
     }
     case WM_CONTEXTMENU: {
         if (!ctx) return DefSubclassProc(hWnd, msg, wParam, lParam);
-        POINT screenPt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        int index = -1;
-        if (screenPt.x == -1 && screenPt.y == -1) {
-            index = static_cast<int>(SendMessageW(hWnd, LB_GETCURSEL, 0, 0));
-            if (index < 0) return 0;
-            RECT itemRect{};
-            if (SendMessageW(hWnd, LB_GETITEMRECT, static_cast<WPARAM>(index),
-                             reinterpret_cast<LPARAM>(&itemRect)) != LB_ERR) {
-                screenPt = {itemRect.left + 18, (itemRect.top + itemRect.bottom) / 2};
-                ClientToScreen(hWnd, &screenPt);
-            } else {
-                GetCursorPos(&screenPt);
-            }
-        } else {
-            POINT clientPt = screenPt;
-            ScreenToClient(hWnd, &clientPt);
-            DWORD hit = static_cast<DWORD>(
-                SendMessageW(hWnd, LB_ITEMFROMPOINT, 0, MAKELPARAM(clientPt.x, clientPt.y)));
-            if (HIWORD(hit) != 0) return 0;
-            index = static_cast<int>(LOWORD(hit));
-            SendMessageW(hWnd, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
-        }
+        const bool keyboardInvocation = GET_X_LPARAM(lParam) == -1 && GET_Y_LPARAM(lParam) == -1;
+        const auto target = ui::context_menu::ResolveListBoxContextTarget(
+            hWnd, lParam, ctx->job.results.size(), keyboardInvocation);
+        if (!target) return 0;
+        const int index = target->index;
+        const POINT screenPt = target->screenPoint;
         if (index < 0 || index >= static_cast<int>(ctx->job.results.size()) ||
             ctx->job.results[static_cast<size_t>(index)].kind == SearchResultKind::Info) {
             return 0;
         }
 
-        HMENU menu = CreatePopupMenu();
+        ui::context_menu::PopupMenu menu;
         if (!menu) return 0;
         const auto ui = GetSearchUiStrings();
         const auto& item = ctx->job.results[static_cast<size_t>(index)];
         const UINT readonlyFlags = CanOpenSearchResultInReadonlyViewer(item) ? MF_STRING : (MF_STRING | MF_GRAYED);
-        AppendMenuW(menu, readonlyFlags, kSearchResultOpenReadonlyCommand, ui.openReadonlyLabel.c_str());
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kSearchResultHideCommand, ui.hideResultLabel.c_str());
+        ui::context_menu::AppendPathContextMenuItems(menu.get(), {
+            {kSearchResultOpenReadonlyCommand, ui.openReadonlyLabel.c_str(), readonlyFlags == MF_STRING},
+        });
+        AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu.get(), MF_STRING, kSearchResultHideCommand, ui.hideResultLabel.c_str());
         SetForegroundWindow(GetParent(hWnd));
-        const UINT cmd = TrackPopupMenu(menu,
-                                        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-                                        screenPt.x,
-                                        screenPt.y,
-                                        0,
-                                        GetParent(hWnd),
-                                        nullptr);
-        DestroyMenu(menu);
+        const UINT cmd = menu.TrackCommand(GetParent(hWnd), screenPt,
+                                           TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
+        menu.Close();
         if (cmd == kSearchResultOpenReadonlyCommand) {
             OpenSearchResultInReadonlyViewer(GetParent(hWnd), item);
             return 0;

@@ -4,6 +4,7 @@
 
 #include "core/ui_prompts.h"
 #include "ui/noop_nav_guard.h"
+#include "workspace/workspace_write_lock.h"
 
 enum class PaneNavContext {
     LeftPaneList,

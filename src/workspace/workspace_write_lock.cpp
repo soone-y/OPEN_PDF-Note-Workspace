@@ -4,11 +4,14 @@
 
 #include <cstdint>
 #include <cwctype>
+#include <unordered_map>
 
 namespace {
 
 HANDLE g_workspaceWriteLock = nullptr;
 std::wstring g_workspaceWriteLockKey;
+std::unordered_map<std::wstring, HANDLE> g_documentOpenLocks;
+int g_documentOpenLockTransitionDepth = 0;
 
 std::wstring NormalizeWorkspaceWriteLockKey(const std::filesystem::path& root) {
     if (root.empty()) return {};
@@ -44,6 +47,24 @@ std::wstring WorkspaceWriteLockName(const std::wstring& key) {
     wchar_t hash[17]{};
     swprintf_s(hash, L"%016llx", static_cast<unsigned long long>(WorkspaceWriteLockHash(key)));
     return L"Local\\PdfNoteWorkspaceWriteLock_" + std::wstring(hash);
+}
+
+std::wstring NormalizeDocumentOpenLockKey(const std::filesystem::path& path) {
+    return NormalizeWorkspaceWriteLockKey(path);
+}
+
+std::wstring DocumentOpenLockName(const std::wstring& key) {
+    wchar_t hash[17]{};
+    swprintf_s(hash, L"%016llx", static_cast<unsigned long long>(WorkspaceWriteLockHash(key)));
+    return L"Local\\PdfNoteDocumentOpenLock_" + std::wstring(hash);
+}
+
+void ReleaseDocumentOpenLockByKey(const std::wstring& key) {
+    const auto found = g_documentOpenLocks.find(key);
+    if (found == g_documentOpenLocks.end()) return;
+    ReleaseMutex(found->second);
+    CloseHandle(found->second);
+    g_documentOpenLocks.erase(found);
 }
 
 }  // namespace
@@ -85,4 +106,68 @@ void ReleaseWorkspaceWriteLock() {
     CloseHandle(g_workspaceWriteLock);
     g_workspaceWriteLock = nullptr;
     g_workspaceWriteLockKey.clear();
+}
+
+DocumentOpenLockCandidate::DocumentOpenLockCandidate(const std::filesystem::path& path,
+                                                     std::wstring* outError) {
+    if (outError) outError->clear();
+    key_ = NormalizeDocumentOpenLockKey(path);
+    if (key_.empty()) {
+        if (outError) *outError = L"開くファイルのパスを正規化できません。";
+        return;
+    }
+
+    ++g_documentOpenLockTransitionDepth;
+    if (g_documentOpenLocks.find(key_) != g_documentOpenLocks.end()) {
+        acquired_ = true;
+        return;
+    }
+
+    const std::wstring name = DocumentOpenLockName(key_);
+    HANDLE candidate = CreateMutexW(nullptr, TRUE, name.c_str());
+    if (!candidate) {
+        if (outError) *outError = L"ファイル排他を作成できません。";
+        --g_documentOpenLockTransitionDepth;
+        return;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(candidate);
+        if (outError) *outError = L"このファイルは別の PDF Note Workspace ウィンドウで開かれています。";
+        --g_documentOpenLockTransitionDepth;
+        return;
+    }
+
+    g_documentOpenLocks.emplace(key_, candidate);
+    acquired_ = true;
+    newlyAcquired_ = true;
+}
+
+DocumentOpenLockCandidate::~DocumentOpenLockCandidate() {
+    if (g_documentOpenLockTransitionDepth > 0) --g_documentOpenLockTransitionDepth;
+    if (newlyAcquired_) ReleaseDocumentOpenLockByKey(key_);
+}
+
+void DocumentOpenLockCandidate::CommitReplacing(const std::filesystem::path& previousPath) {
+    if (!acquired_) return;
+    const std::wstring previousKey = NormalizeDocumentOpenLockKey(previousPath);
+    if (!previousKey.empty() && previousKey != key_) {
+        ReleaseDocumentOpenLockByKey(previousKey);
+    }
+    newlyAcquired_ = false;
+}
+
+bool IsDocumentOpenLockTransitionActive() {
+    return g_documentOpenLockTransitionDepth > 0;
+}
+
+void ReleaseDocumentOpenLock(const std::filesystem::path& path) {
+    ReleaseDocumentOpenLockByKey(NormalizeDocumentOpenLockKey(path));
+}
+
+void ReleaseAllDocumentOpenLocks() {
+    for (const auto& [key, handle] : g_documentOpenLocks) {
+        ReleaseMutex(handle);
+        CloseHandle(handle);
+    }
+    g_documentOpenLocks.clear();
 }

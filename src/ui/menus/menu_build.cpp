@@ -39,6 +39,8 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, ID_FILE_OPEN_WS, ui.menuOpenWs.c_str());
     AppendMenuW(file, MF_STRING, ID_FILE_RELOAD_WS, ui.menuReloadWs.c_str());
+    AppendMenuW(file, MF_STRING, ID_FILE_NEW_WINDOW,
+                IsEnglishUi() ? L"New Window..." : L"新しいウィンドウ...");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
 
     HMENU temp = CreatePopupMenu();

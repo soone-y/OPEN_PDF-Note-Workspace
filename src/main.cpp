@@ -28,6 +28,7 @@
 #include "workspace/workspace_write_lock.h"
 #include "app/main_close_policy.h"
 #include "ui/menus/main_debug_menu.h"
+#include "ui/menus/context_menu_helpers.h"
 #include "app/main_escape_backup.h"
 
 bool HandleAnnotToolShortcutInLoop(HWND owner, const MSG& msg);
@@ -2139,6 +2140,54 @@ static bool LaunchReadOnlyViewerForPdf(HWND owner, const std::wstring& pdfPath) 
     return LaunchReadOnlyViewerForPdfAt(owner, pdfPath, -1, 0.0, false);
 }
 
+static bool LaunchReadOnlyViewerForFolder(HWND owner, const std::wstring& folderPath) {
+    if (folderPath.empty()) return false;
+    std::error_code ec;
+    const std::filesystem::path folder = CanonicalOrSelf(std::filesystem::path(folderPath));
+    if (folder.empty() || !std::filesystem::is_directory(folder, ec) || ec ||
+        folder.wstring().rfind(L"\\\\", 0) == 0) {
+        ShowSoftNotice(owner,
+                       IsEnglishUi() ? L"The selected folder cannot be opened in the read-only viewer."
+                                     : L"選択したフォルダを読み取り専用ビューアで開けません。",
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+    std::wstring params = L"--folder " + QuoteProcessArg(folder.wstring());
+    const std::wstring themeParams = BuildReadonlyViewerThemeParams();
+    if (!themeParams.empty()) params += L" " + themeParams;
+    return LaunchReadOnlyViewerWithParams(owner, params);
+}
+
+static bool IsClropFilePath(const std::filesystem::path& path) {
+    std::wstring extension = path.extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
+    return extension == L".clro" || extension == L".clrop";
+}
+
+static bool LaunchReadOnlyViewerForNote(HWND owner, const std::wstring& notePath) {
+    const std::filesystem::path path = CanonicalOrSelf(std::filesystem::path(notePath));
+    std::error_code ec;
+    if (path.empty() || !std::filesystem::is_regular_file(path, ec) || ec) return false;
+    if (IsClropFilePath(path)) {
+        SilentDialogOptions dialog;
+        dialog.title = IsEnglishUi() ? L"Open annotation data" : L"注釈データを開く";
+        dialog.message = IsEnglishUi()
+            ? L"This CLROP file can contain annotation data and references to a PDF.\n\nIt will be opened for read-only inspection only; this operation does not modify the file.\n\nOpen it?"
+            : L"この CLROP ファイルには、注釈データや PDF への参照が含まれる場合があります。\n\n読み取り専用で内容を確認するだけで、ファイルは変更しません。\n\n開きますか？";
+        dialog.kind = SoftNoticeKind::Info;
+        dialog.buttons = SilentDialogButtons::YesNo;
+        dialog.yesLabel = IsEnglishUi() ? L"Open read-only" : L"読み取り専用で開く";
+        dialog.noLabel = IsEnglishUi() ? L"Cancel" : L"キャンセル";
+        dialog.defaultResult = SilentDialogResult::No;
+        dialog.escapeResult = SilentDialogResult::No;
+        if (ShowSilentDialog(owner, dialog) != SilentDialogResult::Yes) return false;
+    }
+    std::wstring params = L"--open " + QuoteProcessArg(path.wstring());
+    const std::wstring themeParams = BuildReadonlyViewerThemeParams();
+    if (!themeParams.empty()) params += L" " + themeParams;
+    return LaunchReadOnlyViewerWithParams(owner, params);
+}
+
 static bool SetMainClipboardUnicodeText(HWND owner, const std::wstring& text) {
     HWND clipOwner = owner ? owner : g_hMainWnd;
     if (!OpenClipboard(clipOwner)) return false;
@@ -3832,7 +3881,8 @@ enum class DirectoryHierarchyItemKind {
     Folder,
     Pdf,
     Image,
-    Note
+    Note,
+    Clrop
 };
 
 struct DirectoryHierarchyItem {
@@ -3955,6 +4005,8 @@ static void AppendDirectoryHierarchyChildren(const std::filesystem::path& dir,
             children.push_back({path, DirectoryHierarchyDisplayName(path), DirectoryHierarchyItemKind::Pdf});
         } else if (IsImageFile(path)) {
             children.push_back({path, DirectoryHierarchyDisplayName(path), DirectoryHierarchyItemKind::Image});
+        } else if (IsClropFilePath(path)) {
+            children.push_back({path, DirectoryHierarchyDisplayName(path), DirectoryHierarchyItemKind::Clrop});
         } else if (IsNoteFile(path)) {
             children.push_back({path, DirectoryHierarchyDisplayName(path), DirectoryHierarchyItemKind::Note});
         }
@@ -3979,6 +4031,7 @@ static void AppendDirectoryHierarchyChildren(const std::filesystem::path& dir,
         case DirectoryHierarchyItemKind::Pdf: prefix = L"[P] "; break;
         case DirectoryHierarchyItemKind::Image: prefix = L"[I] "; break;
         case DirectoryHierarchyItemKind::Note: prefix = L"[N] "; break;
+        case DirectoryHierarchyItemKind::Clrop: prefix = L"[C] "; break;
         case DirectoryHierarchyItemKind::Info: break;
         }
         items.push_back({DirectoryHierarchyTreePrefix(ancestorLast, isLast) + prefix + child.name,
@@ -4301,7 +4354,8 @@ static bool IsDirectoryHierarchyExplorerOpenable(DirectoryHierarchyItemKind kind
     return kind == DirectoryHierarchyItemKind::Folder ||
            kind == DirectoryHierarchyItemKind::Pdf ||
            kind == DirectoryHierarchyItemKind::Image ||
-           kind == DirectoryHierarchyItemKind::Note;
+           kind == DirectoryHierarchyItemKind::Note ||
+           kind == DirectoryHierarchyItemKind::Clrop;
 }
 
 static bool OpenDirectoryHierarchyItemInExplorer(HWND owner, const DirectoryHierarchyItem& item) {

@@ -94,12 +94,14 @@ HWND g_hwndOpenFolderButton = NULL;
 HWND g_hwndPdfRangeButton = NULL;
 HWND g_hwndCancelLoadButton = NULL;
 HWND g_hwndViewMenuButton = NULL;
+HWND g_hwndToggleLeftPaneButton = NULL;
 HWND g_hwndMain = NULL;
 HWND g_hwndPdfPanel = NULL;
 HWND g_hwndDetachedDiagram = NULL;
 WNDPROC g_originalEditProc = nullptr;
 int g_splitX = 250;
 bool g_isDraggingSplitter = false;
+bool g_leftPaneVisible = true;
 bool g_isRichEdit = false;
 HMODULE g_richEditModule = NULL;
 
@@ -113,6 +115,7 @@ constexpr int kPdfRangeButtonId = 112;
 constexpr int kCancelLoadButtonId = 113;
 constexpr int kViewMenuButtonId = 114;
 constexpr int kPdfButtonId = 115;
+constexpr int kToggleLeftPaneButtonId = 116;
 constexpr int kDetachedDiagramZoomInButtonId = 201;
 constexpr int kDetachedDiagramZoomOutButtonId = 202;
 constexpr int kDetachedDiagramResetButtonId = 203;
@@ -128,6 +131,10 @@ constexpr UINT kTabMenuMoveRight = 407;
 constexpr UINT kTabMenuChangeRange = 408;
 constexpr UINT kTabMenuReopenClosed = 409;
 constexpr UINT kTabMenuListBase = 500;
+constexpr UINT kTabMenuMoveToNewWindow = 700;
+constexpr UINT kTabMenuMoveToWindowBase = 720;
+constexpr ULONG_PTR kCopyDataOpenReadonlyTab = 0x504E5254; // "PNRT"
+constexpr ULONG_PTR kCopyDataTransferAck = 0x504E414B; // "PNAK"
 
 enum class ViewMode {
     Decorated,
@@ -172,6 +179,11 @@ struct ByteRange {
 
 std::vector<std::wstring> g_filePaths;
 
+struct FileSnapshot {
+    uintmax_t size = 0;
+    std::filesystem::file_time_type lastWriteTime{};
+};
+
 struct OpenTab {
     std::wstring title;
     std::wstring path;
@@ -183,12 +195,17 @@ struct OpenTab {
     bool isPartialText = false;
     ByteRange textRange{};
     uintmax_t sourceSize = 0;
+    std::optional<FileSnapshot> sourceSnapshot;
     ViewMode viewMode = ViewMode::Raw;
     std::vector<int> jpLines;
     int totalLines = 1;
 };
 std::vector<OpenTab> g_tabs;
 std::vector<OpenTab> g_closedTabs;
+std::vector<HWND> g_tabTransferTargets;
+struct PendingTabTransfer { ULONG_PTR token; std::wstring path; };
+std::vector<PendingTabTransfer> g_pendingTabTransfers;
+ULONG_PTR g_nextTabTransferToken = 1;
 int g_currentTab = -1;
 textviewer::mermaid::MermaidSubsetPreview g_mermaidPreview;
 textviewer::mermaid::MermaidSubsetPreview g_detachedMermaidPreview;
@@ -207,6 +224,12 @@ void PopulateFileTree(const std::wstring& directoryPath);
 void OpenDetachedDiagramWindow();
 void UpdateInlineDiagramBounds();
 void SetViewerStatus(HWND owner, const std::wstring& message);
+bool OpenPathInTab(HWND owner, const std::wstring& path);
+bool MoveTabToNewWindow(HWND owner, int index);
+bool MoveTabToWindow(HWND owner, int index, HWND target);
+void CollectOtherViewerWindows(HWND owner);
+bool IsTrustedReadonlyViewerWindow(HWND hwnd);
+void SendTabTransferAcknowledgement(HWND source, ULONG_PTR token);
 
 void ParseJapaneseLines(OpenTab& tab) {
     tab.jpLines.clear();
@@ -303,6 +326,21 @@ LRESULT CALLBACK TabProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         kTabMenuMoveLeft, L"左へ移動");
             AppendMenuW(menu, index + 1 < static_cast<int>(g_tabs.size()) ? MF_STRING : MF_STRING | MF_GRAYED,
                         kTabMenuMoveRight, L"右へ移動");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_STRING, kTabMenuMoveToNewWindow, L"新しいウィンドウへ移す");
+            CollectOtherViewerWindows(GetParent(hWnd));
+            HMENU transferMenu = CreatePopupMenu();
+            for (size_t targetIndex = 0; targetIndex < g_tabTransferTargets.size(); ++targetIndex) {
+                wchar_t title[160]{};
+                GetWindowTextW(g_tabTransferTargets[targetIndex], title,
+                               static_cast<int>(sizeof(title) / sizeof(title[0])));
+                std::wstring label = title[0] ? title : L"閲覧専用ウィンドウ";
+                label += L" （別ウィンドウ）";
+                AppendMenuW(transferMenu, MF_STRING,
+                            kTabMenuMoveToWindowBase + static_cast<UINT>(targetIndex), label.c_str());
+            }
+            AppendMenuW(menu, MF_POPUP | (g_tabTransferTargets.empty() ? MF_GRAYED : 0),
+                        reinterpret_cast<UINT_PTR>(transferMenu), L"他のウィンドウへ移す");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, MF_STRING, kTabMenuCloseAll, L"すべてのタブを閉じる");
             if (!g_closedTabs.empty()) AppendMenuW(menu, MF_STRING, kTabMenuReopenClosed, L"閉じたタブを再度開く");
@@ -694,6 +732,73 @@ std::optional<ByteRange> ChooseLargeTextRange(HWND owner, uintmax_t file_size, c
     }
     EnableWindow(owner, TRUE); SetForegroundWindow(owner);
     return state.accepted ? std::optional<ByteRange>(state.selected) : std::nullopt;
+}
+
+struct FileChangeDialogState {
+    bool reload = false;
+};
+
+constexpr int kFileChangeKeepButtonId = 621;
+constexpr int kFileChangeReloadButtonId = 622;
+constexpr wchar_t kFileChangeDialogClass[] = L"PdfNoteReadonlyFileChangedDialog";
+
+LRESULT CALLBACK FileChangeDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<FileChangeDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        state = static_cast<FileChangeDialogState*>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
+    if (!state) return DefWindowProcW(hwnd, message, wParam, lParam);
+    if (message == WM_CREATE) {
+        const HINSTANCE instance = GetModuleHandleW(nullptr);
+        CreateWindowExW(0, L"STATIC", L"開いているファイルが外部で更新された可能性があります。",
+                        WS_CHILD | WS_VISIBLE, 18, 18, 470, 22, hwnd, nullptr, instance, nullptr);
+        CreateWindowExW(0, L"STATIC", L"再読み込みすると、現在の表示をファイルの最新内容に置き換えます。",
+                        WS_CHILD | WS_VISIBLE, 18, 48, 470, 40, hwnd, nullptr, instance, nullptr);
+        CreateWindowExW(0, L"BUTTON", L"今回はそのまま", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                        222, 118, 125, 30, hwnd, reinterpret_cast<HMENU>(kFileChangeKeepButtonId), instance, nullptr);
+        CreateWindowExW(0, L"BUTTON", L"再読み込み", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        357, 118, 115, 30, hwnd, reinterpret_cast<HMENU>(kFileChangeReloadButtonId), instance, nullptr);
+        return 0;
+    }
+    if (message == WM_COMMAND) {
+        if (LOWORD(wParam) == kFileChangeReloadButtonId) state->reload = true;
+        if (LOWORD(wParam) == kFileChangeKeepButtonId || LOWORD(wParam) == kFileChangeReloadButtonId) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+    }
+    if (message == WM_KEYDOWN && wParam == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+    if (message == WM_CLOSE) { DestroyWindow(hwnd); return 0; }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+bool ConfirmReloadChangedFile(HWND owner) {
+    static ATOM atom = 0;
+    if (!atom) {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = FileChangeDialogProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.lpszClassName = kFileChangeDialogClass;
+        atom = RegisterClassW(&wc);
+    }
+    if (!atom) return false;
+    FileChangeDialogState state{};
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, kFileChangeDialogClass, L"ファイルの更新を確認",
+                                  WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 510, 195, owner, nullptr,
+                                  GetModuleHandleW(nullptr), &state);
+    if (!dialog) return false;
+    EnableWindow(owner, FALSE);
+    MSG message{};
+    while (IsWindow(dialog) && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    return state.reload;
 }
 
 void AppendStyledText(RenderedDocument& document, std::wstring_view text, unsigned int style, int headingLevel) {
@@ -1548,6 +1653,7 @@ void CloseTabAt(int index) {
     } else {
         SelectTab(previously_selected > index ? previously_selected - 1 : previously_selected);
     }
+    SetViewerStatus(g_hwndMain, L"");
 }
 
 void CloseOtherTabs(int index) {
@@ -1617,7 +1723,14 @@ void ChangePartialTextRange(HWND owner, int index) {
 }
 
 void SetViewerStatus(HWND owner, const std::wstring& message) {
-    const std::wstring title = message.empty() ? L"Text Viewer" : L"Text Viewer - " + message;
+    std::wstring title = L"閲覧専用";
+    if (!g_tabs.empty()) {
+        title += L"（" + std::to_wstring(g_tabs.size()) + L" タブ）";
+    }
+    if (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size())) {
+        title += L" - " + g_tabs[static_cast<size_t>(g_currentTab)].title;
+    }
+    if (!message.empty()) title += L" - " + message;
     SetWindowTextW(owner, title.c_str());
 }
 
@@ -1720,6 +1833,87 @@ std::vector<std::wstring> PromptForLocalPaths(HWND owner, bool pickFolder) {
     return paths;
 }
 
+std::optional<FileSnapshot> CaptureFileSnapshot(const std::wstring& path) {
+    std::error_code ec;
+    const uintmax_t size = std::filesystem::file_size(path, ec);
+    if (ec) return std::nullopt;
+    const std::filesystem::file_time_type lastWriteTime = std::filesystem::last_write_time(path, ec);
+    if (ec) return std::nullopt;
+    return FileSnapshot{size, lastWriteTime};
+}
+
+bool HasSourceFileChanged(const OpenTab& tab) {
+    const std::optional<FileSnapshot> current = CaptureFileSnapshot(tab.path);
+    return !current || !tab.sourceSnapshot || current->size != tab.sourceSnapshot->size ||
+        current->lastWriteTime != tab.sourceSnapshot->lastWriteTime;
+}
+
+bool ReloadOpenTab(HWND owner, int index) {
+    if (index < 0 || index >= static_cast<int>(g_tabs.size())) return false;
+    const OpenTab previous = g_tabs[static_cast<size_t>(index)];
+    if (!IsSupportedLocalPath(previous.path)) {
+        SetViewerStatus(owner, L"Only local, non-link files can be opened.");
+        return false;
+    }
+
+    std::optional<ByteRange> selectedRange;
+    if (previous.isPartialText) selectedRange = previous.textRange;
+    BeginCancellableLoad(owner, L"更新したファイルを読み込み中…");
+    LoadFileResult loaded = LoadTextFile(previous.path, selectedRange);
+    EndCancellableLoad();
+    if (loaded.cancelled || loaded.hasError) {
+        SetViewerStatus(owner, loaded.text.empty() ? L"ファイルを再読み込みできませんでした。" : loaded.text);
+        return false;
+    }
+    if (loaded.requires_range_selection) {
+        selectedRange = ChooseLargeTextRange(owner, loaded.source_size);
+        if (!selectedRange) { SetViewerStatus(owner, L""); return false; }
+        BeginCancellableLoad(owner, L"選択範囲を読み込み中…");
+        loaded = LoadTextFile(previous.path, selectedRange);
+        EndCancellableLoad();
+        if (loaded.cancelled || loaded.hasError) {
+            SetViewerStatus(owner, loaded.text.empty() ? L"ファイルを再読み込みできませんでした。" : loaded.text);
+            return false;
+        }
+    }
+
+    OpenTab refreshed = previous;
+    refreshed.rawText = std::move(loaded.text);
+    refreshed.bytes = std::move(loaded.bytes);
+    refreshed.isBinary = loaded.isBinary;
+    refreshed.isPdf = loaded.isPdf;
+    refreshed.loadError = false;
+    refreshed.isPartialText = selectedRange.has_value();
+    refreshed.textRange = selectedRange.value_or(ByteRange{});
+    refreshed.sourceSize = loaded.source_size;
+    refreshed.sourceSnapshot = CaptureFileSnapshot(refreshed.path);
+    refreshed.title = std::filesystem::path(refreshed.path).filename().wstring();
+    if (refreshed.isPartialText) refreshed.title += L" （一部）";
+    ParseJapaneseLines(refreshed);
+    g_tabs[static_cast<size_t>(index)] = std::move(refreshed);
+    TCITEMW item{};
+    item.mask = TCIF_TEXT;
+    item.pszText = const_cast<LPWSTR>(g_tabs[static_cast<size_t>(index)].title.c_str());
+    TabCtrl_SetItem(g_hwndTabControl, index, &item);
+    if (g_tabs[static_cast<size_t>(index)].isPdf && g_hwndPdfPanel) {
+        readonly_viewer::PdfPreviewPanel_ClosePdf(g_hwndPdfPanel);
+    }
+    if (g_currentTab == index) ShowCurrentTab();
+    SetViewerStatus(owner, L"");
+    return true;
+}
+
+bool ConfirmAndReloadChangedTab(HWND owner, int index) {
+    if (index < 0 || index >= static_cast<int>(g_tabs.size()) || !HasSourceFileChanged(g_tabs[static_cast<size_t>(index)])) {
+        return false;
+    }
+    if (!ConfirmReloadChangedFile(owner)) {
+        SetViewerStatus(owner, L"外部更新された可能性があるため、現在の表示を維持しています。");
+        return false;
+    }
+    return ReloadOpenTab(owner, index);
+}
+
 bool OpenPathInTab(HWND owner, const std::wstring& path) {
     if (!IsSupportedLocalPath(path)) {
         SetViewerStatus(owner, L"Only local, non-link files can be opened.");
@@ -1735,8 +1929,9 @@ bool OpenPathInTab(HWND owner, const std::wstring& path) {
         if (_wcsicmp(g_tabs[i].path.c_str(), path.c_str()) == 0) {
             TabCtrl_SetCurSel(g_hwndTabControl, static_cast<int>(i));
             g_currentTab = static_cast<int>(i);
+            ConfirmAndReloadChangedTab(owner, static_cast<int>(i));
             ShowCurrentTab();
-            SetViewerStatus(owner, L"");
+            if (!HasSourceFileChanged(g_tabs[i])) SetViewerStatus(owner, L"");
             return true;
         }
     }
@@ -1775,6 +1970,7 @@ bool OpenPathInTab(HWND owner, const std::wstring& path) {
     tab.isPartialText = selected_range.has_value() && !tab.loadError;
     tab.textRange = selected_range.value_or(ByteRange{});
     tab.sourceSize = loaded.source_size;
+    tab.sourceSnapshot = CaptureFileSnapshot(path);
     tab.viewMode = tab.loadError ? ViewMode::Raw :
         (tab.isPdf ? ViewMode::Pdf : (tab.isBinary ? ViewMode::Hex : (IsMarkdownPath(path) ? ViewMode::Decorated : ViewMode::Raw)));
     ParseJapaneseLines(tab);
@@ -1789,6 +1985,79 @@ bool OpenPathInTab(HWND owner, const std::wstring& path) {
     g_currentTab = newIndex;
     ShowCurrentTab();
     SetViewerStatus(owner, L"");
+    return true;
+}
+
+BOOL CALLBACK CollectOtherViewerWindowsProc(HWND hwnd, LPARAM ownerParam) {
+    const HWND owner = reinterpret_cast<HWND>(ownerParam);
+    if (!hwnd || hwnd == owner || !IsWindowVisible(hwnd)) return TRUE;
+    wchar_t className[64]{};
+    if (GetClassNameW(hwnd, className, static_cast<int>(sizeof(className) / sizeof(className[0]))) <= 0 ||
+        wcscmp(className, L"PdfReadonlyViewerWindow") != 0) return TRUE;
+    g_tabTransferTargets.push_back(hwnd);
+    return TRUE;
+}
+
+void CollectOtherViewerWindows(HWND owner) {
+    g_tabTransferTargets.clear();
+    EnumWindows(CollectOtherViewerWindowsProc, reinterpret_cast<LPARAM>(owner));
+}
+
+bool IsTrustedReadonlyViewerWindow(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return false;
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    if (processId == 0) return false;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process) return false;
+    wchar_t senderPath[MAX_PATH]{};
+    DWORD senderPathLength = MAX_PATH;
+    const bool gotSenderPath = QueryFullProcessImageNameW(process, 0, senderPath, &senderPathLength) != FALSE;
+    CloseHandle(process);
+    wchar_t currentPath[MAX_PATH]{};
+    const DWORD currentPathLength = GetModuleFileNameW(nullptr, currentPath, MAX_PATH);
+    return gotSenderPath && currentPathLength > 0 && currentPathLength < MAX_PATH &&
+           _wcsicmp(senderPath, currentPath) == 0;
+}
+
+void SendTabTransferAcknowledgement(HWND source, ULONG_PTR token) {
+    if (!IsTrustedReadonlyViewerWindow(source)) return;
+    COPYDATASTRUCT data{};
+    data.dwData = kCopyDataTransferAck;
+    data.cbData = sizeof(token);
+    data.lpData = &token;
+    SendMessageTimeoutW(source, WM_COPYDATA, reinterpret_cast<WPARAM>(g_hwndMain),
+                        reinterpret_cast<LPARAM>(&data), SMTO_ABORTIFHUNG, 3000, nullptr);
+}
+
+bool MoveTabToWindow(HWND owner, int index, HWND target) {
+    if (index < 0 || index >= static_cast<int>(g_tabs.size()) || !IsWindow(target)) return false;
+    const std::wstring& path = g_tabs[static_cast<size_t>(index)].path;
+    if (!IsSupportedLocalPath(path)) return false;
+    COPYDATASTRUCT data{};
+    data.dwData = kCopyDataOpenReadonlyTab;
+    data.cbData = static_cast<DWORD>((path.size() + 1) * sizeof(wchar_t));
+    data.lpData = const_cast<wchar_t*>(path.c_str());
+    DWORD_PTR received = 0;
+    if (!SendMessageTimeoutW(target, WM_COPYDATA, reinterpret_cast<WPARAM>(owner),
+                             reinterpret_cast<LPARAM>(&data), SMTO_ABORTIFHUNG, 3000, &received) ||
+        received == 0) return false;
+    CloseTabAt(index);
+    return true;
+}
+
+bool MoveTabToNewWindow(HWND owner, int index) {
+    if (index < 0 || index >= static_cast<int>(g_tabs.size())) return false;
+    wchar_t exePath[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return false;
+    const ULONG_PTR token = g_nextTabTransferToken++;
+    const std::wstring params = L"--open \"" + g_tabs[static_cast<size_t>(index)].path +
+        L"\" --transfer-source " + std::to_wstring(reinterpret_cast<UINT_PTR>(owner)) +
+        L" --transfer-token " + std::to_wstring(token);
+    const HINSTANCE result = ShellExecuteW(owner, L"open", exePath, params.c_str(), nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) return false;
+    g_pendingTabTransfers.push_back({token, g_tabs[static_cast<size_t>(index)].path});
     return true;
 }
 
@@ -1995,8 +2264,13 @@ void LayoutToolbarControls(HWND hWnd, int splitX, int rightPaneWidth, int height
                             g_tabs[g_currentTab].viewMode == ViewMode::Pdf);
 
     std::vector<ToolbarItem> items;
+    items.push_back({ g_hwndToggleLeftPaneButton,
+                      g_leftPaneVisible ? L"一覧を閉じる" : L"一覧を表示",
+                      112, 82, true, true });
     items.push_back({ g_hwndOpenFileButton, compactControls ? L"開く" : L"ファイルを開く  Ctrl+O", 165, 70, true, true });
-    items.push_back({ g_hwndOpenFolderButton, L"フォルダーを開く", 135, 135, true, false });
+    items.push_back({ g_hwndOpenFolderButton,
+                      compactControls ? L"フォルダ" : L"フォルダーを開く",
+                      135, 76, true, true });
     items.push_back({ g_hwndViewMenuButton, L"表示 ▼", 76, 76, isPdfMode, true });
 
     if (isPdfMode) {
@@ -2111,6 +2385,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             g_hwndViewMenuButton = CreateWindowExW(0, L"BUTTON", L"表示 ▼",
                 WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
                 0, 0, 0, 0, hWnd, (HMENU)kViewMenuButtonId, hInst, NULL);
+            g_hwndToggleLeftPaneButton = CreateWindowExW(0, L"BUTTON", L"一覧を閉じる",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                0, 0, 0, 0, hWnd, (HMENU)kToggleLeftPaneButtonId, hInst, NULL);
             g_mermaidPreview.Create(hWnd, hInst, 112);
             g_mermaidPreview.SetDetachedWindowTarget(hWnd);
             UpdateModeButtons(ViewMode::Raw);
@@ -2120,24 +2397,39 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case WM_SIZE: {
             int width = LOWORD(lParam);
             int height = HIWORD(lParam);
-            int splitX = g_splitX;
-            if (splitX > width - 50) splitX = width - 50;
-            if (splitX < 50) splitX = 50;
+            int splitX = g_leftPaneVisible ? g_splitX : 0;
+            if (g_leftPaneVisible) {
+                if (splitX > width - 50) splitX = width - 50;
+                if (splitX < 50) splitX = 50;
+            }
 
             int leftPaneHeight = height;
-            int rightPaneWidth = width - splitX - 5; // 5px for splitter
+            int rightPaneWidth = g_leftPaneVisible ? width - splitX - 5 : width;
 
             int fileTreeHeight = leftPaneHeight / 2;
             int tocTreeHeight = leftPaneHeight - fileTreeHeight;
 
-            if (g_hwndFileTree) MoveWindow(g_hwndFileTree, 0, 0, splitX, fileTreeHeight, TRUE);
-            if (g_hwndTocTree) MoveWindow(g_hwndTocTree, 0, fileTreeHeight, splitX, tocTreeHeight, TRUE);
+            if (g_hwndFileTree) ShowWindow(g_hwndFileTree, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
+            if (g_hwndTocTree) ShowWindow(g_hwndTocTree, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
+            if (g_leftPaneVisible) {
+                if (g_hwndFileTree) MoveWindow(g_hwndFileTree, 0, 0, splitX, fileTreeHeight, TRUE);
+                if (g_hwndTocTree) MoveWindow(g_hwndTocTree, 0, fileTreeHeight, splitX, tocTreeHeight, TRUE);
+            }
 
-            LayoutToolbarControls(hWnd, splitX, rightPaneWidth, height);
+            LayoutToolbarControls(hWnd, g_leftPaneVisible ? splitX : -5, rightPaneWidth, height);
             return 0;
         }
         case WM_COMMAND: {
             switch (LOWORD(wParam)) {
+                case kToggleLeftPaneButtonId:
+                    g_leftPaneVisible = !g_leftPaneVisible;
+                    {
+                        RECT client{};
+                        GetClientRect(hWnd, &client);
+                        SendMessageW(hWnd, WM_SIZE, 0,
+                                     MAKELPARAM(client.right - client.left, client.bottom - client.top));
+                    }
+                    return 0;
                 case kOpenFileButtonId: {
                     const std::vector<std::wstring> paths = PromptForLocalPaths(hWnd, false);
                     for (const std::wstring& path : paths) OpenPathInTab(hWnd, path);
@@ -2146,6 +2438,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 case kOpenFolderButtonId: {
                     const std::vector<std::wstring> paths = PromptForLocalPaths(hWnd, true);
                     if (!paths.empty() && IsSupportedLocalPath(paths.front())) {
+                        // A selected folder is represented by the left file tree.  Reopen it
+                        // when necessary so the newly selected root is immediately visible.
+                        g_leftPaneVisible = true;
+                        RECT client{};
+                        GetClientRect(hWnd, &client);
+                        SendMessageW(hWnd, WM_SIZE, SIZE_RESTORED,
+                                     MAKELPARAM(client.right - client.left, client.bottom - client.top));
                         PopulateFileTree(paths.front());
                         SetViewerStatus(hWnd, L"");
                     } else if (!paths.empty()) {
@@ -2209,7 +2508,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         case WM_LBUTTONDOWN: {
             int xPos = GET_X_LPARAM(lParam);
-            if (xPos >= g_splitX && xPos <= g_splitX + 5) {
+            if (g_leftPaneVisible && xPos >= g_splitX && xPos <= g_splitX + 5) {
                 g_isDraggingSplitter = true;
                 SetCapture(hWnd);
             }
@@ -2249,7 +2548,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 SendMessage(hWnd, WM_SIZE, 0, MAKELPARAM(rc.right - rc.left, rc.bottom - rc.top));
             } else {
                 int xPos = GET_X_LPARAM(lParam);
-                if (xPos >= g_splitX && xPos <= g_splitX + 5) {
+                if (g_leftPaneVisible && xPos >= g_splitX && xPos <= g_splitX + 5) {
                     SetCursor(LoadCursor(NULL, IDC_SIZEWE));
                 }
             }
@@ -2274,6 +2573,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 int idx = TabCtrl_GetCurSel(g_hwndTabControl);
                 if (idx >= 0 && idx < (int)g_tabs.size()) {
                     g_currentTab = idx;
+                    ConfirmAndReloadChangedTab(hWnd, idx);
                     ShowCurrentTab();
                 }
             }
@@ -2319,6 +2619,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             MoveTab(static_cast<int>(wParam), static_cast<int>(lParam));
             return 0;
         }
+        case WM_COPYDATA: {
+            const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+            const HWND sender = reinterpret_cast<HWND>(wParam);
+            if (!data || !IsTrustedReadonlyViewerWindow(sender)) return FALSE;
+            if (data->dwData == kCopyDataTransferAck) {
+                if (!data->lpData || data->cbData != sizeof(ULONG_PTR)) return FALSE;
+                const ULONG_PTR token = *static_cast<const ULONG_PTR*>(data->lpData);
+                const auto pending = std::find_if(g_pendingTabTransfers.begin(), g_pendingTabTransfers.end(),
+                    [token](const PendingTabTransfer& item) { return item.token == token; });
+                if (pending == g_pendingTabTransfers.end()) return FALSE;
+                for (int tabIndex = 0; tabIndex < static_cast<int>(g_tabs.size()); ++tabIndex) {
+                    if (_wcsicmp(g_tabs[static_cast<size_t>(tabIndex)].path.c_str(), pending->path.c_str()) == 0) {
+                        CloseTabAt(tabIndex);
+                        break;
+                    }
+                }
+                g_pendingTabTransfers.erase(pending);
+                return TRUE;
+            }
+            if (data->dwData != kCopyDataOpenReadonlyTab || !data->lpData ||
+                data->cbData < sizeof(wchar_t) || (data->cbData % sizeof(wchar_t)) != 0) {
+                return FALSE;
+            }
+            const size_t charCount = data->cbData / sizeof(wchar_t);
+            const auto* pathData = static_cast<const wchar_t*>(data->lpData);
+            if (pathData[charCount - 1] != L'\0') return FALSE;
+            return OpenPathInTab(hWnd, std::wstring(pathData)) ? TRUE : FALSE;
+        }
         case kTabContextMenuMessage: {
             const int index = static_cast<int>(lParam);
             switch (static_cast<UINT>(wParam)) {
@@ -2348,6 +2676,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     break;
                 case kTabMenuReopenClosed:
                     ReopenLastClosedTab();
+                    break;
+                case kTabMenuMoveToNewWindow:
+                    MoveTabToNewWindow(hWnd, index);
+                    break;
+                default:
+                    if (static_cast<UINT>(wParam) >= kTabMenuMoveToWindowBase) {
+                        const size_t targetIndex = static_cast<UINT>(wParam) - kTabMenuMoveToWindowBase;
+                        if (targetIndex < g_tabTransferTargets.size()) {
+                            MoveTabToWindow(hWnd, index, g_tabTransferTargets[targetIndex]);
+                        }
+                    }
                     break;
             }
             return 0;
@@ -2419,11 +2758,22 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::wstring startup_path;
+    std::wstring startup_folder;
+    HWND transferSource = nullptr;
+    ULONG_PTR transferToken = 0;
     if (argv) {
         for (int index = 1; index < argc; ++index) {
             const std::wstring argument = argv[index] ? argv[index] : L"";
             if ((argument == L"--pdf" || argument == L"--open") && index + 1 < argc) {
                 startup_path = argv[++index] ? argv[index] : L"";
+            } else if (argument == L"--folder" && index + 1 < argc) {
+                startup_folder = argv[++index] ? argv[index] : L"";
+            } else if (argument == L"--transfer-source" && index + 1 < argc) {
+                try { transferSource = reinterpret_cast<HWND>(static_cast<UINT_PTR>(std::stoull(argv[++index]))); }
+                catch (...) { transferSource = nullptr; }
+            } else if (argument == L"--transfer-token" && index + 1 < argc) {
+                try { transferToken = static_cast<ULONG_PTR>(std::stoull(argv[++index])); }
+                catch (...) { transferToken = 0; }
             } else if (argument == L"--page" || argument == L"--pdf-y-pt" || argument == L"--annotations" ||
                        argument == L"--theme" || argument == L"--theme-id" || argument == L"--theme-inline") {
                 if (index + 1 < argc) ++index;
@@ -2432,13 +2782,23 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
             }
         }
     }
-    if (!startup_path.empty()) {
+    if (!startup_folder.empty()) {
+        std::error_code folderEc;
+        if (IsSupportedLocalPath(startup_folder) &&
+            std::filesystem::is_directory(startup_folder, folderEc) && !folderEc) {
+            PopulateFileTree(startup_folder);
+            SetViewerStatus(hwnd, L"");
+        }
+    } else if (!startup_path.empty()) {
         std::filesystem::path p(startup_path);
         std::wstring dirPath = p.parent_path().wstring();
         if (dirPath.empty()) dirPath = L".";
         PopulateFileTree(dirPath);
 
-        OpenPathInTab(hwnd, startup_path);
+        const bool opened = OpenPathInTab(hwnd, startup_path);
+        if (opened && transferSource && transferToken != 0) {
+            SendTabTransferAcknowledgement(transferSource, transferToken);
+        }
     } else {
         wchar_t exePathBuf[MAX_PATH]{};
         const DWORD exePathLength = GetModuleFileNameW(NULL, exePathBuf, MAX_PATH);

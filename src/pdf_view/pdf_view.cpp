@@ -17,6 +17,7 @@
 #include "core/atomic_write.h"
 #include "core/preview_trace.h"
 #include "core/secure_memory.h"
+#include "workspace/workspace_write_lock.h"
 #include <algorithm>
 #include <array>
 #include <filesystem>
@@ -214,6 +215,30 @@ static void ShowPdfCopySuccessNotice(HWND owner) {
 static void ShowPdfMessageDialog(HWND owner, const std::wstring& title,
                                  const std::wstring& message, SoftNoticeKind kind) {
     ShowSilentMessageDialog(PdfDialogOwner(owner), title, message, kind);
+}
+
+// Returns true only when the user explicitly requests a non-destructive reload.
+static bool PromptPdfOpenFailureReload(HWND owner, const std::wstring& title,
+                                       const std::wstring& message) {
+    const HWND dialogOwner = PdfDialogOwner(owner);
+    const bool offerAbnormalExit = CanRequestManagedAbnormalExitFromDialog(dialogOwner,
+                                                                             SoftNoticeKind::Error);
+    SilentDialogOptions options;
+    options.title = title;
+    options.message = message;
+    options.kind = SoftNoticeKind::Error;
+    options.buttons = offerAbnormalExit ? SilentDialogButtons::YesNoCancel
+                                        : SilentDialogButtons::YesNo;
+    options.yesLabel = IsEnglishUi() ? L"Reload" : L"再読み込み";
+    options.noLabel = IsEnglishUi() ? L"Cancel" : L"キャンセル";
+    options.cancelLabel = IsEnglishUi() ? L"Force Exit (Non-destructive)" : L"非破壊・強制終了";
+    options.defaultResult = SilentDialogResult::No;
+    options.escapeResult = SilentDialogResult::No;
+    const SilentDialogResult result = ShowSilentDialog(dialogOwner, options);
+    if (offerAbnormalExit && result == SilentDialogResult::Cancel) {
+        RequestManagedAbnormalExitFromDialog(dialogOwner, title, message);
+    }
+    return result == SilentDialogResult::Yes;
 }
 
 static SilentDialogResult ShowPdfDialog(HWND owner, const SilentDialogOptions& options) {

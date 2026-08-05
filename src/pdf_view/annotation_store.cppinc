@@ -1428,6 +1428,17 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
     };
     try {
         fault_injection::MaybeThrow(L"OpenPdfWithAnnotations:start");
+        std::wstring documentLockError;
+        DocumentOpenLockCandidate documentLock(std::filesystem::path(path), &documentLockError);
+        if (!documentLock.acquired()) {
+            const std::wstring message = IsEnglishUi()
+                ? L"This file is already open in another PDF Note Workspace window."
+                : L"このファイルは別の PDF Note Workspace ウィンドウで開かれています。";
+            ShowPdfMessageDialog(owner ? owner : g_hMainWnd, L"PDF",
+                                 documentLockError.empty() ? message : message + L"\n\n" + documentLockError,
+                                 SoftNoticeKind::Warning);
+            return false;
+        }
         if (!SaveAnnotationsIfDirty(owner)) {
             SaveLastPdfViewInfo();
             preview_trace::Append(
@@ -1496,6 +1507,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
                 InvalidateRect(g_hPdfView, nullptr, FALSE);
             }
             UpdateSessionLastOpenTargetsAfterOpen();
+            documentLock.CommitReplacing(std::filesystem::path(previousPath));
             syncOwnerUi();
             notifyLectureOpened();
             preview_trace::Append(
@@ -1542,6 +1554,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
                 L"after_restore_or_jump elapsed_ms=" + preview_trace::ElapsedMs(startTick) +
                 L" restored=" + preview_trace::Bool(restored));
             UpdateSessionLastOpenTargetsAfterOpen();
+            documentLock.CommitReplacing(std::filesystem::path(previousPath));
             syncOwnerUi();
             preview_trace::Append(
                 L"OpenPdfWithAnnotations",
@@ -1565,6 +1578,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
             UpdateToolbarUI(g_hMainWnd);
             SyncLeftPaneSelection();
             UpdateSessionLastOpenTargetsAfterOpen();
+            documentLock.CommitReplacing(std::filesystem::path(previousPath));
             syncOwnerUi();
             notifyLectureOpened();
             preview_trace::Append(

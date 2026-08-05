@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -32,7 +34,8 @@ std::wstring ParseStartupDocumentPathFromCommandLine() {
         if ((arg == L"--pdf" || arg == L"--open") && i + 1 < argc) {
             path = argv[++i] ? argv[i] : L"";
         } else if ((arg == L"--page" || arg == L"--theme" || arg == L"--theme-id" ||
-                    arg == L"--theme-inline" || arg == L"--clrop") && i + 1 < argc) {
+                    arg == L"--theme-inline" || arg == L"--clrop" ||
+                    arg == L"--workspace") && i + 1 < argc) {
             ++i;
         } else if (!IsStartupOptionName(arg) && path.empty()) {
             path = arg;
@@ -40,6 +43,46 @@ std::wstring ParseStartupDocumentPathFromCommandLine() {
     }
     LocalFree(argv);
     return AbsoluteOrOriginalPath(path);
+}
+
+bool CommandLineHasOption(const wchar_t* option) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool found = false;
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i] && option && wcscmp(argv[i], option) == 0) {
+            found = true;
+            break;
+        }
+    }
+    LocalFree(argv);
+    return found;
+}
+
+std::wstring ParseStartupWorkspaceRoot() {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return {};
+    std::wstring root;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (argv[i] && wcscmp(argv[i], L"--workspace") == 0) {
+            root = argv[++i] ? argv[i] : L"";
+        }
+    }
+    LocalFree(argv);
+    return AbsoluteOrOriginalPath(root);
+}
+
+std::wstring CurrentExecutablePath() {
+    std::vector<wchar_t> buffer(512);
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) return {};
+        if (length < buffer.size() - 1) return std::wstring(buffer.data(), length);
+        if (buffer.size() >= 32768) return {};
+        buffer.resize(buffer.size() * 2);
+    }
 }
 
 std::wstring ReadOptionalInstanceSuffix() {
@@ -82,6 +125,69 @@ std::wstring AbsoluteOrOriginalPath(const std::wstring& path) {
     std::error_code ec;
     auto abs = std::filesystem::absolute(std::filesystem::path(path), ec);
     return ec ? path : abs.wstring();
+}
+
+bool IsNewInstanceLaunchRequested() {
+    return CommandLineHasOption(L"--new-instance");
+}
+
+bool ShouldChooseStartupWorkspace() {
+    return CommandLineHasOption(L"--choose-workspace");
+}
+
+bool TryGetStartupWorkspaceRoot(std::wstring* out) {
+    if (!out) return false;
+    *out = ParseStartupWorkspaceRoot();
+    return !out->empty();
+}
+
+bool LaunchNewMainWindow(const std::wstring& workspaceRoot) {
+    if (workspaceRoot.empty()) return false;
+    const std::wstring executable = CurrentExecutablePath();
+    if (executable.empty()) return false;
+    std::wstring commandLine = L"\"" + executable + L"\" --new-instance --workspace \"" + workspaceRoot + L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(executable.c_str(), commandLine.data(), nullptr, nullptr, FALSE, 0,
+                        nullptr, nullptr, &startup, &process)) return false;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+}
+
+void RegisterNewWindowJumpListTask() {
+    const std::wstring executable = CurrentExecutablePath();
+    if (executable.empty()) return;
+    ICustomDestinationList* list = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_DestinationList, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&list))) || !list) return;
+    UINT slots = 0;
+    IObjectArray* removed = nullptr;
+    if (FAILED(list->BeginList(&slots, IID_PPV_ARGS(&removed)))) {
+        if (removed) removed->Release();
+        list->Release();
+        return;
+    }
+    if (removed) removed->Release();
+    IObjectCollection* tasks = nullptr;
+    IShellLinkW* task = nullptr;
+    IObjectArray* taskArray = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_EnumerableObjectCollection, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&tasks));
+    if (SUCCEEDED(hr)) hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                             IID_PPV_ARGS(&task));
+    if (SUCCEEDED(hr)) hr = task->SetPath(executable.c_str());
+    if (SUCCEEDED(hr)) hr = task->SetArguments(L"--new-instance --choose-workspace");
+    if (SUCCEEDED(hr)) hr = task->SetDescription(L"新しいウィンドウ...");
+    if (SUCCEEDED(hr)) hr = tasks->AddObject(task);
+    if (SUCCEEDED(hr)) hr = tasks->QueryInterface(IID_PPV_ARGS(&taskArray));
+    if (SUCCEEDED(hr)) hr = list->AddUserTasks(taskArray);
+    if (SUCCEEDED(hr)) list->CommitList(); else list->AbortList();
+    if (taskArray) taskArray->Release();
+    if (task) task->Release();
+    if (tasks) tasks->Release();
+    list->Release();
 }
 
 std::wstring SingleInstanceMutexName() {

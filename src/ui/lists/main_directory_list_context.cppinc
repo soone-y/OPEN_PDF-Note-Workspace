@@ -7,30 +7,11 @@ static bool ShowDirectoryHierarchyItemContextMenu(HWND list, LPARAM lParam) {
     auto* data = reinterpret_cast<DirectoryHierarchyPopupData*>(GetWindowLongPtrW(popup, GWLP_USERDATA));
     if (!data) return false;
 
-    POINT screenPt{};
-    int index = -1;
-    if (lParam == -1) {
-        index = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
-        if (index < 0) return false;
-        RECT itemRect{};
-        if (SendMessageW(list, LB_GETITEMRECT, static_cast<WPARAM>(index),
-                         reinterpret_cast<LPARAM>(&itemRect)) != LB_ERR) {
-            screenPt = {itemRect.left + 18, (itemRect.top + itemRect.bottom) / 2};
-            ClientToScreen(list, &screenPt);
-        } else {
-            GetCursorPos(&screenPt);
-        }
-    } else {
-        screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        POINT clientPt = screenPt;
-        ScreenToClient(list, &clientPt);
-        DWORD hit = static_cast<DWORD>(
-            SendMessageW(list, LB_ITEMFROMPOINT, 0, MAKELPARAM(clientPt.x, clientPt.y)));
-        if (HIWORD(hit) != 0) return false;
-        index = static_cast<int>(LOWORD(hit));
-        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
-    }
-    if (index < 0 || index >= static_cast<int>(data->items.size())) return false;
+    const auto target = ui::context_menu::ResolveListBoxContextTarget(
+        list, lParam, data->items.size(), lParam == -1);
+    if (!target) return false;
+    const int index = target->index;
+    const POINT screenPt = target->screenPoint;
 
     const auto item = data->items[static_cast<size_t>(index)];
     if (item.path.empty() || !IsDirectoryHierarchyExplorerOpenable(item.kind)) return false;
@@ -39,49 +20,50 @@ static bool ShowDirectoryHierarchyItemContextMenu(HWND list, LPARAM lParam) {
     if (!owner) owner = GetParent(popup);
     if (!owner) owner = g_hMainWnd;
 
-    HMENU menu = CreatePopupMenu();
+    ui::context_menu::PopupMenu menu;
     if (!menu) return false;
     constexpr UINT kCmdOpenInApp = 1;
     constexpr UINT kCmdOpenReadOnly = 2;
     constexpr UINT kCmdOpenExplorer = 3;
     constexpr UINT kCmdCopyPath = 4;
     const bool appOpenable = IsDirectoryHierarchyAppOpenable(item.kind);
-    const bool readOnlyOpenable = item.kind == DirectoryHierarchyItemKind::Pdf;
-    AppendMenuW(menu,
-                appOpenable ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdOpenInApp,
-                IsEnglishUi() ? L"Open in this app" : L"このソフトで開く");
-    AppendMenuW(menu,
-                readOnlyOpenable ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdOpenReadOnly,
-                IsEnglishUi() ? L"Open in read-only app" : L"読み取り専用ビューアで開く");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdOpenExplorer,
-                IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示");
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdCopyPath,
-                IsEnglishUi() ? L"Copy path" : L"パスをコピー");
+    const bool readOnlyOpenable = item.kind == DirectoryHierarchyItemKind::Pdf ||
+                                  item.kind == DirectoryHierarchyItemKind::Folder ||
+                                  item.kind == DirectoryHierarchyItemKind::Note ||
+                                  item.kind == DirectoryHierarchyItemKind::Clrop;
+    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
+        {kCmdOpenInApp, IsEnglishUi() ? L"Open in this app" : L"このソフトで開く", appOpenable},
+        {kCmdOpenReadOnly,
+         IsEnglishUi() ? (item.kind == DirectoryHierarchyItemKind::Folder ? L"Open folder in read-only app"
+                       : item.kind == DirectoryHierarchyItemKind::Clrop ? L"Inspect annotation data in read-only app"
+                                                                         : L"Open in read-only app")
+                       : (item.kind == DirectoryHierarchyItemKind::Folder ? L"読み取り専用ビューアでフォルダを開く"
+                       : item.kind == DirectoryHierarchyItemKind::Clrop ? L"読み取り専用ビューアで注釈データを確認"
+                                                                         : L"読み取り専用ビューアで開く"),
+         readOnlyOpenable},
+    });
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
+        {kCmdOpenExplorer, IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示"},
+        {kCmdCopyPath, IsEnglishUi() ? L"Copy path" : L"パスをコピー"},
+    });
     SetForegroundWindow(popup);
     s_directoryHierarchyContextMenuActive = true;
-    const UINT cmd = TrackPopupMenu(menu,
-                                    TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-                                    screenPt.x,
-                                    screenPt.y,
-                                    0,
-                                    popup,
-                                    nullptr);
+    const UINT cmd = menu.TrackCommand(popup, screenPt,
+                                       TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
     s_directoryHierarchyContextMenuActive = false;
-    DestroyMenu(menu);
+    menu.Close();
     if (cmd == kCmdOpenInApp) {
         bool ok = OpenDirectoryHierarchySelection(list);
         if (ok && IsWindow(popup)) DestroyWindow(popup);
         return ok;
     }
     if (cmd == kCmdOpenReadOnly) {
-        bool ok = LaunchReadOnlyViewerForPdf(owner ? owner : popup, item.path);
+        bool ok = item.kind == DirectoryHierarchyItemKind::Folder
+            ? LaunchReadOnlyViewerForFolder(owner ? owner : popup, item.path)
+            : (item.kind == DirectoryHierarchyItemKind::Note || item.kind == DirectoryHierarchyItemKind::Clrop)
+                ? LaunchReadOnlyViewerForNote(owner ? owner : popup, item.path)
+            : LaunchReadOnlyViewerForPdf(owner ? owner : popup, item.path);
         if (ok && IsWindow(popup)) DestroyWindow(popup);
         return ok;
     }
@@ -165,7 +147,7 @@ static LRESULT CALLBACK DirectoryHierarchyPopupProc(HWND hWnd, UINT msg, WPARAM 
                                        0, 0, 100, 20, hWnd, nullptr, g_hInst, nullptr);
         data->hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
-                                          LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS,
+                                          LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED,
                                       0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
         SetUIFont(data->hTitle);
         SetUIFont(data->hList);
@@ -209,6 +191,37 @@ static LRESULT CALLBACK DirectoryHierarchyPopupProc(HWND hWnd, UINT msg, WPARAM 
         SetTextColor(hdc, g_theme.panelText);
         SetBkColor(hdc, g_theme.panelBg);
         return reinterpret_cast<LRESULT>(g_hThemePanelBrush ? g_hThemePanelBrush : GetSysColorBrush(COLOR_WINDOW));
+    }
+    case WM_DRAWITEM: {
+        auto* data = reinterpret_cast<DirectoryHierarchyPopupData*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+        const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (!data || !draw || draw->hwndItem != data->hList || draw->itemID >= data->items.size()) break;
+        const auto& item = data->items[draw->itemID];
+        const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+        const COLORREF background = selected ? g_theme.selectionBg : g_theme.panelBg;
+        COLORREF text = g_theme.panelText;
+        if (selected) {
+            text = g_theme.selectionText;
+        } else {
+            switch (item.kind) {
+            case DirectoryHierarchyItemKind::Folder: text = RGB(190, 120, 0); break;
+            case DirectoryHierarchyItemKind::Pdf: text = RGB(35, 105, 185); break;
+            case DirectoryHierarchyItemKind::Image: text = RGB(140, 70, 170); break;
+            case DirectoryHierarchyItemKind::Note: text = RGB(25, 125, 80); break;
+            case DirectoryHierarchyItemKind::Clrop: text = RGB(150, 80, 30); break;
+            case DirectoryHierarchyItemKind::Info: break;
+            }
+        }
+        HBRUSH brush = CreateSolidBrush(background);
+        FillRect(draw->hDC, &draw->rcItem, brush);
+        DeleteObject(brush);
+        SetBkMode(draw->hDC, TRANSPARENT);
+        SetTextColor(draw->hDC, text);
+        RECT textRect = draw->rcItem;
+        textRect.left += 5;
+        DrawTextW(draw->hDC, item.text.c_str(), -1, &textRect,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        return TRUE;
     }
     case WM_DESTROY:
         if (s_hDirectoryHierarchyPopup == hWnd) s_hDirectoryHierarchyPopup = nullptr;
@@ -316,42 +329,18 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     if (!owner) return false;
     const bool isLectureList = (list == g_hLectureList);
 
-    POINT screenPt{};
-    int index = -1;
-    if (lParam == -1) {
-        index = CurrentLogicalListIndex(list);
-        if (index < 0) {
-            index = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
-        }
-        if (index < 0) return false;
-        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
-        InvalidateRect(list, nullptr, FALSE);
-        RECT itemRect{};
-        if (SendMessageW(list, LB_GETITEMRECT, static_cast<WPARAM>(index),
-                         reinterpret_cast<LPARAM>(&itemRect)) != LB_ERR) {
-            screenPt = {itemRect.left + 18, (itemRect.top + itemRect.bottom) / 2};
-            ClientToScreen(list, &screenPt);
-        } else {
-            GetCursorPos(&screenPt);
-        }
-    } else {
-        screenPt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        POINT clientPt = screenPt;
-        ScreenToClient(list, &clientPt);
-        DWORD hit = static_cast<DWORD>(
-            SendMessageW(list, LB_ITEMFROMPOINT, 0, MAKELPARAM(clientPt.x, clientPt.y)));
-        if (HIWORD(hit) != 0) {
-            index = CurrentLogicalListIndex(list);
-            if (index < 0) {
-                index = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
-            }
-            if (index < 0) return false;
-        } else {
-            index = static_cast<int>(LOWORD(hit));
-        }
-        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
-        InvalidateRect(list, nullptr, FALSE);
+    const int logicalIndex = CurrentLogicalListIndex(list);
+    const bool keyboardInvocation = lParam == -1;
+    if (keyboardInvocation) {
+        if (logicalIndex >= 0) SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(logicalIndex), 0);
     }
+    const std::size_t itemCount = isLectureList ? g_lectures.size() : g_sessions.size();
+    const auto target = ui::context_menu::ResolveListBoxContextTarget(
+        list, lParam, itemCount, keyboardInvocation,
+        ui::context_menu::ListBoxContextOptions{true, logicalIndex, true, true, true});
+    if (!target) return false;
+    const int index = target->index;
+    const POINT screenPt = target->screenPoint;
 
     std::filesystem::path root;
     if (isLectureList) {
@@ -378,7 +367,7 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
         ? GetUiText().menuRemoveTempExternalLecture
         : (IsEnglishUi() ? L"Delete" : L"削除");
 
-    HMENU menu = CreatePopupMenu();
+    ui::context_menu::PopupMenu menu;
     if (!menu) return false;
     constexpr UINT kCmdOpenInApp = 1;
     constexpr UINT kCmdOpenExplorer = 2;
@@ -388,53 +377,37 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdConvertOffice = 6;
     constexpr UINT kCmdRename = 7;
     constexpr UINT kCmdDelete = 8;
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdOpenInApp,
-                IsEnglishUi() ? L"Open in this app" : L"このソフトで開く");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdOpenExplorer,
-                IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示");
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdShowHierarchy,
-                IsEnglishUi() ? L"Show directory hierarchy" : L"フォルダ階層を確認");
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdShowPath,
-                IsEnglishUi() ? L"Show work path" : L"作業パスを表示");
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdCopyPath,
-                IsEnglishUi() ? L"Copy path" : L"パスをコピー");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
+        {kCmdOpenInApp, IsEnglishUi() ? L"Open in this app" : L"このソフトで開く"},
+    });
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
+        {kCmdOpenExplorer, IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示"},
+        {kCmdShowHierarchy, IsEnglishUi() ? L"Show directory hierarchy" : L"フォルダ階層を確認"},
+        {kCmdShowPath, IsEnglishUi() ? L"Show work path" : L"作業パスを表示"},
+        {kCmdCopyPath, IsEnglishUi() ? L"Copy path" : L"パスをコピー"},
+    });
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     if (!kIsLiteEdition) {
-        AppendMenuW(menu,
+        AppendMenuW(menu.get(),
                     MF_STRING,
                     kCmdConvertOffice,
                     IsEnglishUi() ? L"Convert Office files to PDF" : L"OfficeファイルをPDFに変換");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     }
-    AppendMenuW(menu,
+    AppendMenuW(menu.get(),
                 canRename ? MF_STRING : (MF_STRING | MF_GRAYED),
                 kCmdRename,
                 IsEnglishUi() ? L"Rename" : L"名前の変更");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu,
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu.get(),
                 canDelete ? MF_STRING : (MF_STRING | MF_GRAYED),
                 kCmdDelete,
                 deleteLabel.c_str());
     SetForegroundWindow(owner);
-    const UINT cmd = TrackPopupMenu(menu,
-                                    TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-                                    screenPt.x,
-                                    screenPt.y,
-                                    0,
-                                    owner,
-                                    nullptr);
-    DestroyMenu(menu);
+    const UINT cmd = menu.TrackCommand(owner, screenPt,
+                                       TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
+    menu.Close();
     if (cmd == kCmdOpenInApp) {
         return OpenSelectionForList(list);
     }

@@ -2384,16 +2384,9 @@ static void SyncLeftPaneSelectionNow() {
         L" needSessionReconcile=" + preview_trace::Bool(needSessionReconcile) +
         L" needPdfReconcile=" + preview_trace::Bool(needPdfReconcile) +
         L" needNoteReconcile=" + preview_trace::Bool(needNoteReconcile));
-    if (!needLectureReconcile &&
-        !needSessionReconcile &&
-        !needPdfReconcile &&
-        !needNoteReconcile) {
-        RefreshLeftPaneOpenStateNow();
-        preview_trace::Append(
-            L"SyncLeftPaneSelection",
-            L"fast_path=refresh_only elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-        return;
-    }
+    // A listbox can still have a valid index even when it points to a file
+    // whose opening failed. Always reconcile the logical selection with the
+    // successfully open paths; otherwise that failed item remains selected.
     int normalizeCallCount = 0;
     auto normalizePathKey = [&](const std::wstring& path) -> std::wstring {
         if (path.empty()) return L"";

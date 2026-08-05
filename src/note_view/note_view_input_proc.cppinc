@@ -80,6 +80,11 @@ private:
 // the unconsumed fraction so rendered notes retain the device's continuous
 // motion instead of being quantized to RichEdit's line-scroll steps.
 static int s_noteVerticalWheelRemainder = 0;
+// Touch input is handled separately from mouse selection.  These are kept at
+// procedure scope so capture-loss can reliably cancel an interrupted drag.
+static bool s_noteTouchPanning = false;
+static UINT32 s_noteTouchPanPointerId = 0;
+static POINT s_noteTouchPanAnchor = {0, 0};
 
 LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     ScopedNoteViewContextBinding viewContextBinding(hWnd);
@@ -986,28 +991,38 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_POINTERDOWN:
     case WM_POINTERUPDATE:
     case WM_POINTERUP: {
-        static bool s_noteTouchPanning = false;
-        static POINT s_noteTouchPanAnchor = {0, 0};
         UINT32 pointerId = GET_POINTERID_WPARAM(wParam);
         POINTER_INPUT_TYPE pointerType = PT_POINTER;
         if (GetPointerType(pointerId, &pointerType) && pointerType == PT_TOUCH) {
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            // WM_POINTER coordinates are screen-relative. Convert once so
+            // drag distance is independent of the note pane's position.
+            ScreenToClient(hWnd, &pt);
             if (msg == WM_POINTERDOWN) {
+                // Keep the original contact in control when another finger
+                // touches down during a one-finger scroll.
+                if (s_noteTouchPanning) return 0;
                 SetCapture(hWnd);
                 s_noteTouchPanning = true;
+                s_noteTouchPanPointerId = pointerId;
                 s_noteTouchPanAnchor = pt;
             } else if (msg == WM_POINTERUPDATE) {
-                if (s_noteTouchPanning) {
+                if (s_noteTouchPanning && pointerId == s_noteTouchPanPointerId) {
                     int dy = pt.y - s_noteTouchPanAnchor.y;
-                    if (std::abs(dy) >= 15) {
-                        int lines = dy / 15;
+                    // Keep the increment close to a rendered text line. This
+                    // avoids both the old large dead zone and an exaggerated
+                    // scroll distance on high-density touch screens.
+                    constexpr int kTouchScrollIncrementPx = 12;
+                    if (std::abs(dy) >= kTouchScrollIncrementPx) {
+                        int lines = dy / kTouchScrollIncrementPx;
                         SendMessageW(hWnd, EM_LINESCROLL, 0, static_cast<LPARAM>(-lines));
-                        s_noteTouchPanAnchor.y += lines * 15;
+                        s_noteTouchPanAnchor.y += lines * kTouchScrollIncrementPx;
                     }
                 }
             } else if (msg == WM_POINTERUP) {
-                if (s_noteTouchPanning) {
+                if (s_noteTouchPanning && pointerId == s_noteTouchPanPointerId) {
                     s_noteTouchPanning = false;
+                    s_noteTouchPanPointerId = 0;
                     ReleaseCapture();
                 }
             }
@@ -1245,6 +1260,11 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MaybeFlushNoteStageOnCaretOrFocusChange(hWnd, false);
         break;
     case WM_CAPTURECHANGED:
+        // Pointer-up is not guaranteed when Windows transfers capture (for
+        // example during a system gesture).  Drop the private touch state so
+        // the next contact always starts a fresh scroll.
+        s_noteTouchPanning = false;
+        s_noteTouchPanPointerId = 0;
         g_noteLineSelectionActive = false;
         g_noteLineSelectionAnchorLine = -1;
         g_noteLineSelectionLastLine = -1;

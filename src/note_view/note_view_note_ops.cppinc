@@ -2070,7 +2070,19 @@ static bool IsNoteStageCreatedDuringCurrentProcess(const std::filesystem::path& 
 
 void LoadNoteFile(HWND hWnd, const std::wstring& path) {
     const ULONGLONG startTick = preview_trace::TickNow();
+    const std::wstring previousNotePath = g_currentNotePath;
     preview_trace::Append(L"LoadNoteFile", L"begin path=" + path);
+    std::wstring documentLockError;
+    DocumentOpenLockCandidate documentLock(std::filesystem::path(path), &documentLockError);
+    if (!documentLock.acquired()) {
+        const std::wstring message = IsEnglishUi()
+            ? L"This file is already open in another PDF Note Workspace window."
+            : L"このファイルは別の PDF Note Workspace ウィンドウで開かれています。";
+        ShowSilentMessageDialog(hWnd, L"Note",
+                                documentLockError.empty() ? message : message + L"\n\n" + documentLockError,
+                                SoftNoticeKind::Warning);
+        return;
+    }
     const bool hasCachedEditForTarget = FindCachedNoteEditWindow(path) != nullptr;
     note_snapshot::TextStorageSnapshot storageSnapshot =
         note_snapshot::LoadTextStorageSnapshot(
@@ -2253,6 +2265,7 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
         RefreshCurrentNoteFileSnapshot();
     }
     g_noteTransactions.Commit(loadTransaction);
+    documentLock.CommitReplacing(std::filesystem::path(previousNotePath));
     preview_trace::Append(
         L"LoadNoteFile",
         L"after_note_switch_guard elapsed_ms=" + preview_trace::ElapsedMs(startTick));
@@ -2277,6 +2290,9 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
 }
 
 void ClearNoteEditorSilently(HWND hWnd, const std::wstring& nextNotePath) {
+    if (!g_currentNotePath.empty()) {
+        ReleaseDocumentOpenLock(std::filesystem::path(g_currentNotePath));
+    }
     if (g_hNoteEdit && IsWindow(g_hNoteEdit)) {
         CaptureNoteViewState(g_hNoteEdit, NoteEditCacheKey(g_currentNotePath));
         CaptureNoteUndoHistoryForWindow(g_hNoteEdit);
@@ -4236,12 +4252,21 @@ static int MeasureRenderedContentRightPx(HWND hWnd, HDC hdc) {
             lineBaseX = anchorScrollX + linePos.x;
         }
         const LineCache& cache = g_lineCache[static_cast<size_t>(line)];
-        // In render mode the cache is the source of truth for hard lines. Depending on when
-        // RichEdit has recomputed its format rectangle, EM_LINEINDEX/GetCharPos can still reflect
-        // a stale soft-wrapped layout; measuring from g_lineCache avoids a too-small first width.
-        int flowRight = lineBaseX + MeasureRenderedLineVisualWidth(hdc, fonts, cache);
+        // In render mode the active editing/selection line can switch to its raw
+        // Markdown text. Its width can exceed the corresponding rendered line
+        // (for example, due to markup tokens), so the canvas must use the width
+        // of the representation that is actually on screen.
+        const bool rawLineVisible = renderActive && IsNoteLineRawHelper(hWnd, line);
+        const int lineWidth = rawLineVisible
+            ? MeasureStyledSegmentTextWidth(hdc, fonts, cache.rawLine, false, false, 0, nullptr, nullptr)
+            // In render mode the cache is the source of truth for hard lines. Depending on when
+            // RichEdit has recomputed its format rectangle, EM_LINEINDEX/GetCharPos can still reflect
+            // a stale soft-wrapped layout; measuring from g_lineCache avoids a too-small first width.
+            : MeasureRenderedLineVisualWidth(hdc, fonts, cache);
+        int flowRight = lineBaseX + lineWidth;
         maxRight = std::max(maxRight, flowRight);
 
+        if (rawLineVisible) continue;
         const int baseFontHeight = std::max<int>(1, static_cast<int>(fonts.baseMetrics.tmHeight));
         for (size_t segIndex = 0; segIndex < cache.segments.size(); ++segIndex) {
             const auto& seg = cache.segments[segIndex];

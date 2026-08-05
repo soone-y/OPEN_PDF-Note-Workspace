@@ -81,32 +81,13 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     const bool isNoteList = (list == g_hNoteList);
     const auto& files = isNoteList ? g_noteFiles : g_pdfFiles;
 
-    POINT screenPt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-    int index = -1;
-    if (screenPt.x == -1 && screenPt.y == -1) {
-        index = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
-        if (index < 0) return false;
-        RECT itemRect{};
-        if (SendMessageW(list, LB_GETITEMRECT, static_cast<WPARAM>(index),
-                         reinterpret_cast<LPARAM>(&itemRect)) != LB_ERR) {
-            POINT center{(itemRect.left + itemRect.right) / 2, (itemRect.top + itemRect.bottom) / 2};
-            ClientToScreen(list, &center);
-            screenPt = center;
-        } else {
-            GetCursorPos(&screenPt);
-        }
-    } else {
-        POINT clientPt = screenPt;
-        ScreenToClient(list, &clientPt);
-        DWORD hit = static_cast<DWORD>(
-            SendMessageW(list, LB_ITEMFROMPOINT, 0, MAKELPARAM(clientPt.x, clientPt.y)));
-        if (HIWORD(hit) != 0) return false;
-        index = static_cast<int>(LOWORD(hit));
-        if (index < 0 || index >= static_cast<int>(files.size())) return false;
-        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
-        InvalidateRect(list, nullptr, FALSE);
-    }
-    if (index < 0 || index >= static_cast<int>(files.size())) return false;
+    const bool keyboardInvocation = GET_X_LPARAM(lParam) == -1 && GET_Y_LPARAM(lParam) == -1;
+    const auto target = ui::context_menu::ResolveListBoxContextTarget(
+        list, lParam, files.size(), keyboardInvocation,
+        ui::context_menu::ListBoxContextOptions{false, -1, true, false, true});
+    if (!target) return false;
+    const int index = target->index;
+    const POINT screenPt = target->screenPoint;
 
     const auto& file = files[static_cast<size_t>(index)];
     if (file.path.empty()) return false;
@@ -125,7 +106,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     const bool isPinnedTemporaryPath = IsPinnedTemporaryFilePath(file.path, isNoteList);
     const bool isTemporaryPath = IsTemporaryFilePathInCurrentList(file.path, isNoteList);
 
-    HMENU menu = CreatePopupMenu();
+    ui::context_menu::PopupMenu menu;
     if (!menu) return false;
     constexpr UINT kCmdOpenInApp = 1;
     constexpr UINT kCmdOpenReadOnly = 2;
@@ -139,75 +120,60 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdPinTemporaryPath = 10;
     constexpr UINT kCmdUnpinTemporaryPath = 11;
     constexpr UINT kCmdRemoveTemporaryPath = 12;
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdOpenInApp,
-                officeFile
-                    ? (IsEnglishUi() ? L"Convert to PDF" : L"PDFに変換")
-                    : (IsEnglishUi() ? L"Open in this app" : L"このソフトで開く"));
+    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
+        {kCmdOpenInApp,
+         officeFile
+             ? (IsEnglishUi() ? L"Convert to PDF" : L"PDFに変換")
+             : (IsEnglishUi() ? L"Open in this app" : L"このソフトで開く")},
+    });
     if (!isNoteList && !officeFile) {
         const UINT readOnlyFlags = file.isPdf ? MF_STRING : (MF_STRING | MF_GRAYED);
-        AppendMenuW(menu,
-                    readOnlyFlags,
-                    kCmdOpenReadOnly,
-                    IsEnglishUi() ? L"Open in read-only app" : L"読み取り専用ビューアで開く");
+        ui::context_menu::AppendPathContextMenuItems(menu.get(), {
+            {kCmdOpenReadOnly, IsEnglishUi() ? L"Open in read-only app" : L"読み取り専用ビューアで開く",
+             readOnlyFlags == MF_STRING},
+        });
     }
     const bool imageFile = !isNoteList && IsImageFile(selectedPath);
     if (imageFile) {
-        AppendMenuW(menu, MF_STRING, kCmdConvertImageToPdf,
+        AppendMenuW(menu.get(), MF_STRING, kCmdConvertImageToPdf,
                     IsEnglishUi() ? L"Convert image to PDF..." : L"画像をPDFに変換...");
     }
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdOpenExplorer,
-                IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示");
-    AppendMenuW(menu,
-                canShowHierarchy ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdShowHierarchy,
-                IsEnglishUi() ? L"Show directory hierarchy" : L"フォルダ階層を確認");
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdShowPath,
-                IsEnglishUi() ? L"Show work path" : L"作業パスを表示");
-    AppendMenuW(menu,
-                MF_STRING,
-                kCmdCopyPath,
-                IsEnglishUi() ? L"Copy path" : L"パスをコピー");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu,
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
+        {kCmdOpenExplorer, IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示"},
+        {kCmdShowHierarchy, IsEnglishUi() ? L"Show directory hierarchy" : L"フォルダ階層を確認", canShowHierarchy},
+        {kCmdShowPath, IsEnglishUi() ? L"Show work path" : L"作業パスを表示"},
+        {kCmdCopyPath, IsEnglishUi() ? L"Copy path" : L"パスをコピー"},
+    });
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu.get(),
                 MF_STRING,
                 isPinnedTemporaryPath ? kCmdUnpinTemporaryPath : kCmdPinTemporaryPath,
                 isPinnedTemporaryPath
                     ? (IsEnglishUi() ? L"Remove temporary path" : L"一時パスから外す")
                     : (IsEnglishUi() ? L"Always keep open (temporary path)" : L"常に開ける（一時パスに追加）"));
     if (isTemporaryPath) {
-        AppendMenuW(menu,
+        AppendMenuW(menu.get(),
                     MF_STRING,
                     kCmdRemoveTemporaryPath,
                     IsEnglishUi() ? L"Remove from temporary list" : L"一時リストから消す");
     }
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu,
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu.get(),
                 canRename ? MF_STRING : (MF_STRING | MF_GRAYED),
                 kCmdRename,
                 IsEnglishUi() ? L"Rename" : L"名前の変更");
     if (canDeleteEmptyClro) {
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu,
+        AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu.get(),
                     MF_STRING,
                     kCmdDeleteEmptyClro,
                     IsEnglishUi() ? L"Delete empty .clro file" : L"空の .clro ファイルを削除");
     }
     SetForegroundWindow(owner);
-    const UINT cmd = TrackPopupMenu(menu,
-                                    TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-                                    screenPt.x,
-                                    screenPt.y,
-                                    0,
-                                    owner,
-                                    nullptr);
-    DestroyMenu(menu);
+    const UINT cmd = menu.TrackCommand(owner, screenPt,
+                                       TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
+    menu.Close();
     if (cmd == kCmdOpenInApp) {
         if (officeFile) {
             return ConvertOfficeFileToCurrentSession(owner, selectedPath);

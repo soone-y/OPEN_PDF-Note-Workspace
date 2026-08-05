@@ -877,6 +877,18 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         ReloadWorkspaceFromRoot(hWnd, *picked, true, true);
         break;
     }
+    case ID_FILE_NEW_WINDOW: {
+        auto picked = PickWorkspaceFolder(hWnd);
+        if (!picked) break;
+        if (!LaunchNewMainWindow(*picked)) {
+            ShowMainSoftNotice(hWnd,
+                               IsEnglishUi()
+                                   ? L"Could not start a new window."
+                                   : L"新しいウィンドウを起動できませんでした。",
+                               SoftNoticeKind::Warning);
+        }
+        break;
+    }
     case ID_FILE_RELOAD_WS:
         if (g_workspaceRoot.empty()) break;
         if (!PrepareWorkspaceRestart(hWnd)) break;

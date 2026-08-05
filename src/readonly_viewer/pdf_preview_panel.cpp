@@ -57,6 +57,9 @@ constexpr UINT_PTR kTextSelectionAutoScrollTimerId = 0x7102;
 constexpr UINT kTextSelectionAutoScrollIntervalMs = 16;
 constexpr double kTextSelectionAutoScrollMaxSpeedPx = 28.0;
 constexpr ULONGLONG kReloadDebounceMs = 700;
+// Keep the Shift-drag pan behavior consistent with the main PDF view.
+constexpr double kPanAxisAngleDeg = 6.0;
+constexpr int kPanAxisLockDeadPx = 3;
 
 HICON LoadReadonlyViewerIcon(HINSTANCE instance, int width, int height) {
     HICON icon = static_cast<HICON>(LoadImageW(instance,
@@ -83,6 +86,8 @@ constexpr UINT kCmdTempMarker = 1103;
 constexpr UINT kCmdTempPen = 1104;
 constexpr UINT kCmdClearTempDrawing = 1105;
 constexpr UINT kCmdToggleGrayscale = 1106;
+constexpr UINT kCmdSelectTool = 1107;
+constexpr UINT kCmdPanTool = 1108;
 constexpr UINT kCmdZoomIn = 1111;
 constexpr UINT kCmdZoomOut = 1112;
 constexpr UINT kCmdZoomReset = 1113;
@@ -156,6 +161,17 @@ enum class TempDrawTool {
     Pen
 };
 
+enum class ViewerToolMode {
+    Select,
+    Pan
+};
+
+enum class PanAxisLock {
+    None,
+    Horizontal,
+    Vertical
+};
+
 struct TempStroke {
     TempDrawTool tool = TempDrawTool::None;
     int pageIndex = -1;
@@ -219,13 +235,16 @@ struct ViewerState {
     double panY = 0.0;
     double scrollY = 0.0;
     bool panning = false;
+    UINT32 touchPanPointerId = 0;
     bool drawingTempStroke = false;
+    ViewerToolMode toolMode = ViewerToolMode::Select;
     TempDrawTool tempTool = TempDrawTool::None;
     TempStroke activeTempStroke;
     std::vector<TempStroke> tempStrokes;
     POINT panStart{};
     double panStartX = 0.0;
     double panStartY = 0.0;
+    PanAxisLock panAxisLock = PanAxisLock::None;
     POINT lastMouse{0, 0};
     int selectedPage = -1;
     int selectedItem = -1;
@@ -3518,6 +3537,15 @@ HMENU BuildViewerMenu() {
     AppendMenuW(view, MF_STRING | (g_state.showGrayscale ? MF_CHECKED : 0), kCmdToggleGrayscale, L"白黒表示");
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(view,
+                MF_STRING | (g_state.toolMode == ViewerToolMode::Select ? MF_CHECKED : 0),
+                kCmdSelectTool,
+                L"選択ツール");
+    AppendMenuW(view,
+                MF_STRING | (g_state.toolMode == ViewerToolMode::Pan ? MF_CHECKED : 0),
+                kCmdPanTool,
+                L"パンツール");
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(view,
                 MF_STRING | (g_state.tempTool == TempDrawTool::Marker ? MF_CHECKED : 0),
                 kCmdTempMarker,
                 L"一時マーカー");
@@ -3610,19 +3638,62 @@ void ClearTemporaryDrawing(HWND hwnd) {
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
+PanAxisLock DetectPanAxisLock(int dx, int dy) {
+    const double absDx = std::abs(static_cast<double>(dx));
+    const double absDy = std::abs(static_cast<double>(dy));
+    if (absDx < kPanAxisLockDeadPx && absDy < kPanAxisLockDeadPx) {
+        return PanAxisLock::None;
+    }
+    const double axisTan = std::tan(kPanAxisAngleDeg * (3.14159265358979323846 / 180.0));
+    if (absDy >= kPanAxisLockDeadPx && absDx / absDy < axisTan) {
+        return PanAxisLock::Vertical;
+    }
+    if (absDx >= kPanAxisLockDeadPx && absDy / absDx < axisTan) {
+        return PanAxisLock::Horizontal;
+    }
+    return PanAxisLock::None;
+}
+
 void BeginPagePan(HWND hwnd, POINT pt) {
     if (!g_state.pdf || !g_state.pdf->document) return;
+    // Stop only an unfinished selection drag. A completed selection remains
+    // available for copying after navigation.
+    if (g_state.selectingRect) {
+        KillTimer(hwnd, kTextSelectionAutoScrollTimerId);
+        g_state.selectingRect = false;
+    }
     g_state.panning = true;
+    g_state.touchPanPointerId = 0;
     g_state.panStart = pt;
     g_state.panStartX = g_state.panX;
     g_state.panStartY = g_state.scrollY;
+    g_state.panAxisLock = PanAxisLock::None;
     SetCapture(hwnd);
 }
 
 void UpdatePagePan(HWND hwnd, POINT pt) {
     if (!g_state.panning) return;
-    g_state.panX = g_state.panStartX + static_cast<double>(pt.x - g_state.panStart.x);
-    g_state.scrollY = g_state.panStartY - static_cast<double>(pt.y - g_state.panStart.y);
+    const int rawDx = pt.x - g_state.panStart.x;
+    const int rawDy = pt.y - g_state.panStart.y;
+    int dx = rawDx;
+    int dy = rawDy;
+    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+        const PanAxisLock detected = DetectPanAxisLock(rawDx, rawDy);
+        if (detected != PanAxisLock::None) {
+            g_state.panAxisLock = detected;
+        } else if (g_state.panAxisLock != PanAxisLock::None) {
+            g_state.panAxisLock = PanAxisLock::None;
+        }
+        if (g_state.panAxisLock == PanAxisLock::Horizontal) {
+            dy = 0;
+        } else if (g_state.panAxisLock == PanAxisLock::Vertical) {
+            dx = 0;
+        }
+    } else {
+        g_state.panAxisLock = PanAxisLock::None;
+    }
+    g_state.panX = g_state.panStartX + static_cast<double>(dx);
+    g_state.scrollY = g_state.panStartY - static_cast<double>(dy);
     ClampContinuousScroll(hwnd);
     SyncCurrentPageFromScroll(hwnd);
     InvalidateRect(hwnd, nullptr, FALSE);
@@ -3631,6 +3702,8 @@ void UpdatePagePan(HWND hwnd, POINT pt) {
 void EndPagePan(HWND hwnd) {
     if (!g_state.panning) return;
     g_state.panning = false;
+    g_state.touchPanPointerId = 0;
+    g_state.panAxisLock = PanAxisLock::None;
     if (GetCapture() == hwnd) ReleaseCapture();
 }
 
@@ -3687,6 +3760,16 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             ClearRenderCaches();
             RefreshViewerMenu(hwnd);
             InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (id == kCmdSelectTool) {
+            g_state.toolMode = ViewerToolMode::Select;
+            RefreshViewerMenu(hwnd);
+            return 0;
+        }
+        if (id == kCmdPanTool) {
+            g_state.toolMode = ViewerToolMode::Pan;
+            RefreshViewerMenu(hwnd);
             return 0;
         }
         if (id == kCmdTempMarker) {
@@ -3816,7 +3899,12 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
         bool ctrlDown = (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0;
-        if (ctrlDown) {
+        // Match the main viewer: mouse-wheel detents zoom in Pan mode, while
+        // the precise deltas emitted by touchpads continue to scroll.
+        const bool precise = (delta % WHEEL_DELTA) != 0;
+        const bool zoomWithWheel = ctrlDown ||
+            (g_state.toolMode == ViewerToolMode::Pan && !precise);
+        if (zoomWithWheel) {
             double steps = static_cast<double>(delta) / WHEEL_DELTA;
             double factor = std::pow(1.15, steps);
             AdjustZoom(hwnd, factor);
@@ -3824,6 +3912,34 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             ScrollContinuousBy(hwnd,
                                (static_cast<double>(-delta) / WHEEL_DELTA) *
                                    kWheelScrollStepPx);
+        }
+        return 0;
+    }
+    case WM_POINTERDOWN:
+    case WM_POINTERUPDATE:
+    case WM_POINTERUP: {
+        const UINT32 pointerId = GET_POINTERID_WPARAM(wParam);
+        POINTER_INPUT_TYPE pointerType = PT_POINTER;
+        if (!GetPointerType(pointerId, &pointerType) || pointerType != PT_TOUCH) break;
+
+        // Pointer coordinates are screen-relative; using the same client
+        // coordinate system as mouse panning keeps direct manipulation stable
+        // across multi-monitor and high-DPI setups.
+        POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        ScreenToClient(hwnd, &pt);
+        if (msg == WM_POINTERDOWN) {
+            // Ignore extra contacts so a resting second finger cannot make a
+            // document jump to a new pan anchor.
+            if (!g_state.panning) {
+                BeginPagePan(hwnd, pt);
+                if (g_state.panning) g_state.touchPanPointerId = pointerId;
+            }
+        } else if (msg == WM_POINTERUPDATE) {
+            if (g_state.panning && pointerId == g_state.touchPanPointerId) {
+                UpdatePagePan(hwnd, pt);
+            }
+        } else if (g_state.panning && pointerId == g_state.touchPanPointerId) {
+            EndPagePan(hwnd);
         }
         return 0;
     }
@@ -3846,6 +3962,10 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     case WM_LBUTTONDOWN: {
         g_state.lastMouse = POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         if (BeginTempStroke(hwnd, g_state.lastMouse)) {
+            return 0;
+        }
+        if (g_state.toolMode == ViewerToolMode::Pan) {
+            BeginPagePan(hwnd, g_state.lastMouse);
             return 0;
         }
         if (BeginTextSelection(hwnd, g_state.lastMouse)) {
@@ -3891,6 +4011,8 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             KillTimer(hwnd, kTextSelectionAutoScrollTimerId);
             g_state.selectingRect = false;
             g_state.panning = false;
+            g_state.touchPanPointerId = 0;
+            g_state.panAxisLock = PanAxisLock::None;
             g_state.drawingTempStroke = false;
             g_state.activeTempStroke = TempStroke{};
         }
