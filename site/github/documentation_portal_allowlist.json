@@ -4,7 +4,7 @@
   "version_source": "REPO_VERSION.txt",
   "documentation_portal": {
     "files": [
-      { "source": "for_ai/ai_context.md", "destination": "for_ai/ai_context.md" },
+      { "source": "For_AI.md", "destination": "For_AI.md" },
       { "source": "REPO_VERSION.txt", "destination": "REPO_VERSION.txt" },
       { "source": "README.md", "destination": "README.md" },
       { "source": "LICENSE.md", "destination": "LICENSE.md" },
@@ -18,6 +18,9 @@
       { "source": "docs/public/Index.md", "destination": "docs/public/Index.md" },
       { "source": "docs/public/What_is_File_Formats.md", "destination": "docs/public/What_is_File_Formats.md" },
       { "source": "docs/images/app_overview.png", "destination": "docs/images/app_overview.png" }
+    ],
+    "trees": [
+      { "source": "for_ai", "destination": "for_ai" }
     ]
   },
   "pages_submission": {

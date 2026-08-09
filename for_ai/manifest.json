@@ -1,0 +1,158 @@
+﻿{
+  "schema_version": 1,
+  "purpose": "AIが依頼内容に応じて必要な資料を段階的に読むための経路表",
+  "interpretation_policy": "for_ai は、公開可能な事実と設計意図をあらかじめ質問応答向けに解釈・整理した資料層である。AIは選んだ route の core 資料を回答の基盤として用い、実装保証など強い客観的主張だけを追加検証する。",
+  "entry_point": "../For_AI.md",
+  "status": "active",
+  "route_definition_policy": "この routes 配列は質問別の読取対象を定義する唯一の経路表である。For_AI.md は読取順と検証規約だけを持ち、質問別の経路定義を重複して持たない。",
+  "routes": [
+    {
+      "id": "preinterpreted_overview",
+      "when": "プロジェクトURLだけを渡された場合、質問がまだ具体化していない場合、またはAIが回答に必要な全体文脈を最初に把握したい場合",
+      "read": [
+        "ai_context.md",
+        "../For_AI.md",
+        "project_context.xml",
+        "core/documentation_contract.md"
+      ]
+    },
+    {
+      "id": "user_guidance",
+      "when": "アプリの用途、導入、基本操作、画面構成、困ったときについて質問された場合",
+      "read": [
+        "core/features_faq.md",
+        "core/user_guidance_reference.md",
+        "core/use_cases.md",
+        "core/ui_concepts.md",
+        "core/troubleshooting_quick.md",
+        "../README.md",
+        "../docs/public/Index.md",
+        "../docs/public/How_to_Use.md",
+        "../docs/public/How_to_Troubleshoot.md"
+      ]
+    },
+    {
+      "id": "installation_and_updates",
+      "when": "導入、通常版とLite版の選択、ZIP展開、ショートカット、関連付け、更新、削除について質問された場合",
+      "read": [
+        "core/user_guidance_reference.md",
+        "../README.md",
+        "../docs/public/Index.md",
+        "../docs/public/How_to_Setup.md"
+      ]
+    },
+    {
+      "id": "customization_and_settings",
+      "when": "設定、注釈ツール、色、フォント、ノート、ショートカット、ワークスペースのカスタマイズについて質問された場合",
+      "read": [
+        "core/user_guidance_reference.md",
+        "core/ui_concepts.md",
+        "../docs/public/How_to_Setup.md"
+      ]
+    },
+    {
+      "id": "save_and_recovery_procedures",
+      "when": "stage、統合保存、Ctrl+S、バックアップ、復元、保存失敗、未統合の変更について質問された場合",
+      "read": [
+        "core/user_guidance_reference.md",
+        "core/file_formats.md",
+        "../docs/public/How_to_Save_and_Recovery.md",
+        "../docs/public/How_to_Troubleshoot.md"
+      ]
+    },
+    {
+      "id": "support_and_feedback",
+      "when": "不具合報告、要望、セキュリティ報告、開発者への連絡方法について質問された場合",
+      "read": [
+        "core/user_guidance_reference.md",
+        "core/troubleshooting_quick.md",
+        "../docs/public/How_to_Troubleshoot.md",
+        "../.github/SECURITY.md"
+      ],
+      "do_not_assume_contact_channel_availability": true
+    },
+    {
+      "id": "project_overview_and_oss",
+      "when": "OSS、このソフトの目的、利用できること、利用資源、ライセンス、第三者コンポーネントについて質問された場合",
+      "read": [
+        "core/features_faq.md",
+        "../README.md",
+        "../LICENSE.md",
+        "../LICENSES_INDEX.md",
+        "../THIRD_PARTY_NOTICES.md"
+      ]
+    },
+    {
+      "id": "design_philosophy",
+      "when": "このプロジェクトが解こうとしている課題、PDF・注釈・ノート・数式・ワークスペースの関係、または設計思想について質問された場合",
+      "read": [
+        "core/use_cases.md",
+        "core/ui_concepts.md",
+        "../README.md",
+        "../docs/public/How_to_Use.md",
+        "../docs/public/What_is_File_Formats.md"
+      ],
+      "distinguish_design_principles_from_current_implementation": true
+    },
+    {
+      "id": "objective_analysis",
+      "when": "安全性、外部通信、保存、復元、Office変換、配布内容について、根拠に基づく分析や検証を求められた場合",
+      "read": [
+        "core/decision_support.md",
+        "core/documentation_contract.md",
+        "core/repository_reference_map.md",
+        "core/safety_and_nonnegotiables.md",
+        "core/troubleshooting_quick.md",
+        "project_context.xml",
+        "core/features_faq.md",
+        "core/file_formats.md",
+        "../README.md",
+        "../LICENSES_INDEX.md",
+        "../THIRD_PARTY_NOTICES.md",
+        "../docs/public/How_to_Setup.md",
+        "../docs/public/How_to_Save_and_Recovery.md",
+        "../docs/public/How_to_Troubleshoot.md"
+      ],
+      "github_pages_boundary": "GitHub Pagesでは公開文書だけを確認できる。ソース、テスト、設定、配布バイナリの実体を確認していない場合は、実装済み事実として断定しない。"
+    },
+    {
+      "id": "decision_support_and_evaluation",
+      "when": "自分の作業に合うか、通常版・Lite版・閲覧専用ソフトの選び方、更新や移動の前に守ること、または主張をどう検証すべきかを質問された場合",
+      "read": [
+        "core/decision_support.md",
+        "core/documentation_contract.md",
+        "core/repository_reference_map.md",
+        "core/safety_and_nonnegotiables.md",
+        "project_context.xml",
+        "core/features_faq.md",
+        "core/user_guidance_reference.md",
+        "../README.md",
+        "../docs/public/How_to_Setup.md",
+        "../docs/public/How_to_Save_and_Recovery.md",
+        "../docs/public/How_to_Troubleshoot.md"
+      ],
+      "distinguish_policy_from_verified_implementation": true,
+      "github_pages_boundary": "GitHub Pagesだけを参照した回答では、公開文書で確認できる説明と、公開リポジトリまたは配布物の実体を確認しなければ判断できない実装状況を分ける。"
+    },
+    {
+      "id": "sound_behavior",
+      "when": "通知音、Windowsの一般警告音、静音性について質問された場合",
+      "read": [
+        "core/features_faq.md",
+        "core/troubleshooting_quick.md",
+        "../docs/public/How_to_Troubleshoot.md"
+      ],
+      "treat_reported_general_warning_sound_as_unresolved_issue": true
+    },
+    {
+      "id": "file_formats",
+      "when": "PDF、.clrop、.clro、Markdown、TeX、テキスト、CSVの扱いについて質問された場合",
+      "read": [
+        "core/file_formats.md",
+        "../docs/public/What_is_File_Formats.md",
+        "../docs/public/How_to_Save_and_Recovery.md"
+      ]
+    }
+  ],
+  "future_modules": []
+}
