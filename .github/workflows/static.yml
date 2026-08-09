@@ -9,6 +9,7 @@ on:
     paths:
       - "for_ai/**"
       - "For_AI.md"
+      - "llms.txt"
       - "README.md"
       - "LICENSE.md"
       - "LICENSES_INDEX.md"

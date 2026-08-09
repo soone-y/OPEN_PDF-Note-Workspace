@@ -1,5 +1,0 @@
-# DOCX/PPTX inputs in this directory are tracked conversion fixtures.
-# Generated conversion outputs remain local-only.
-*.pdf
-*.tmp
-*.bak
