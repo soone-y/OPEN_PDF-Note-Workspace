@@ -22,7 +22,7 @@ FORBIDDEN_PUBLIC_REFERENCES = (
 DOCUMENTATION_PORTAL_REQUIRED_FILES = (
     "index.html", "llms.txt", "For_AI.md", "README.md", "for_ai/ai_context.md", "for_ai/manifest.json", "for_ai/project_context.xml",
 )
-PORTAL_AI_ENTRY_LINKS = ("llms.txt",)
+PORTAL_AI_ENTRY_LINKS = ("for_ai/ai_context.html",)
 LLMS_REQUIRED_LINKS = ("for_ai/ai_context.md", "For_AI.md", "for_ai/manifest.json", "for_ai/project_context.xml")
 MARKDOWN_LINK = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HTML_LINK = re.compile(r"(?:href|src)=[\"']([^\"'#]+)", re.IGNORECASE)
