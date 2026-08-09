@@ -829,8 +829,8 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
                                   SilentDialogResult::No, SilentDialogResult::No)) {
                 break;
             }
-            SaveAllManual(hWnd);
-            if (file_output::HasPendingOrStagedDiffsUnderPath(std::filesystem::path(target))) {
+            if (!file_output::RunSaveAndIntegrateTransaction(hWnd) ||
+                file_output::HasPendingOrStagedDiffsUnderPath(std::filesystem::path(target))) {
                 const wchar_t* msg = IsEnglishUi()
                     ? L"Some unsaved or staged changes still remain under this temporary external lecture. The path was not removed."
                     : (g_config.studentMode
@@ -875,18 +875,6 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         // setup.json(pdf_workspace_setup.json)のworkspaceRootを更新
         UpdateSetupJsonWorkspaceRoot(*picked);
         ReloadWorkspaceFromRoot(hWnd, *picked, true, true);
-        break;
-    }
-    case ID_FILE_NEW_WINDOW: {
-        auto picked = PickWorkspaceFolder(hWnd);
-        if (!picked) break;
-        if (!LaunchNewMainWindow(*picked)) {
-            ShowMainSoftNotice(hWnd,
-                               IsEnglishUi()
-                                   ? L"Could not start a new window."
-                                   : L"新しいウィンドウを起動できませんでした。",
-                               SoftNoticeKind::Warning);
-        }
         break;
     }
     case ID_FILE_RELOAD_WS:

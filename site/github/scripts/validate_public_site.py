@@ -20,8 +20,10 @@ FORBIDDEN_PUBLIC_REFERENCES = (
     "/Users/",
 )
 DOCUMENTATION_PORTAL_REQUIRED_FILES = (
-    "index.html", "For_AI.md", "README.md", "for_ai/manifest.json", "for_ai/project_context.xml",
+    "index.html", "llms.txt", "For_AI.md", "README.md", "for_ai/ai_context.md", "for_ai/manifest.json", "for_ai/project_context.xml",
 )
+PORTAL_AI_ENTRY_LINKS = ("llms.txt",)
+LLMS_REQUIRED_LINKS = ("for_ai/ai_context.md", "For_AI.md", "for_ai/manifest.json", "for_ai/project_context.xml")
 MARKDOWN_LINK = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HTML_LINK = re.compile(r"(?:href|src)=[\"']([^\"'#]+)", re.IGNORECASE)
 HTML_META = re.compile(r"<meta\s+[^>]*?name=[\"']([^\"']+)[\"'][^>]*?content=[\"']([^\"']*)[\"']", re.IGNORECASE)
@@ -75,7 +77,11 @@ def validate_structured_files(site: Path, errors: list[str]) -> None:
 
 
 def validate_local_links(site: Path, errors: list[str]) -> None:
-    for path in site.rglob("*.md"):
+    markdown_like_paths = list(site.rglob("*.md"))
+    llms_path = site / "llms.txt"
+    if llms_path.is_file():
+        markdown_like_paths.append(llms_path)
+    for path in markdown_like_paths:
         text = path.read_text(encoding="utf-8-sig")
         for match in MARKDOWN_LINK.finditer(text):
             target = local_target(match.group(1))
@@ -162,6 +168,30 @@ def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
             errors.append(f"index.html must declare {name}={target}")
         else:
             validate_local_target(site, index_path, target, kind=f"index metadata '{name}'", errors=errors)
+    linked_targets = {
+        local_target(match.group(1))
+        for match in HTML_LINK.finditer(text)
+        if local_target(match.group(1))
+    }
+    for target in PORTAL_AI_ENTRY_LINKS:
+        if target not in linked_targets:
+            errors.append(f"index.html must visibly link to AI entry document: {target}")
+
+
+def validate_llms_entrypoint(site: Path, errors: list[str]) -> None:
+    """Keep the single visible AI entrypoint connected to its required raw documents."""
+    llms_path = site / "llms.txt"
+    if not llms_path.is_file():
+        return
+    text = llms_path.read_text(encoding="utf-8-sig")
+    linked_targets = {
+        local_target(match.group(1))
+        for match in MARKDOWN_LINK.finditer(text)
+        if local_target(match.group(1))
+    }
+    for target in LLMS_REQUIRED_LINKS:
+        if target not in linked_targets:
+            errors.append(f"llms.txt must link to AI document: {target}")
 
 
 def validate_site(site: Path) -> list[str]:
@@ -178,6 +208,7 @@ def validate_site(site: Path) -> list[str]:
     validate_local_links(site, errors)
     validate_manifest(site, errors)
     validate_portal_entrypoint(site, errors)
+    validate_llms_entrypoint(site, errors)
     validate_rendered_human_docs(site, errors)
     return errors
 

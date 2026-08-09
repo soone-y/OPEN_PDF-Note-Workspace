@@ -11,6 +11,7 @@
 #include "note/note_identity_store.h"
 #include "note/note_persistence.h"
 #include "note_view/note_view.h"
+#include "workspace/workspace_write_lock.h"
 
 
 #include <richedit.h>
@@ -4422,6 +4423,16 @@ bool IntegrateStagedNoteAndAnnotations(HWND owner) {
 
 bool RunSaveAndIntegrateTransaction(HWND owner) {
   const ULONGLONG startTick = preview_trace::TickNow();
+  std::wstring workspaceLockError;
+  WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
+  if (!workspaceLock.acquired()) {
+    ShowStageSoftNotice(owner,
+                        IsEnglishUi()
+                            ? L"Another shared workspace operation is in progress. Your staged changes were kept."
+                            : L"別の共有ワークスペース操作が進行中です。stage の変更は保持しました。",
+                        SoftNoticeKind::Warning);
+    return false;
+  }
   uint64_t snapshotRevision = 0;
   if (!TryBeginSaveTransaction(&snapshotRevision)) {
     ShowStageSoftNotice(owner,

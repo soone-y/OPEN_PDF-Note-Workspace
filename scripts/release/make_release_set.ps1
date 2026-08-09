@@ -334,6 +334,15 @@ try {
     Write-JsonFile -Destination $setManifestPath -Value $manifest
     if (-not $DryRun) {
         Assert-ReleaseSetManifestComponents -SetRoot $setRoot -Components $manifest.components
+        $integrityGateScript = Join-Path $repoRoot "tools\release_checks\release_set_integrity_gate.py"
+        if (-not (Test-Path -LiteralPath $integrityGateScript -PathType Leaf)) {
+            throw "Missing release set integrity gate: $integrityGateScript"
+        }
+        $allowlistForManifest = if ([string]::IsNullOrWhiteSpace($PublicAllowlist)) { $releasePublicAllowlist } else { $PublicAllowlist }
+        & python $integrityGateScript --release-set $setRoot --write-snapshot-manifest --allowlist $allowlistForManifest
+        if ($LASTEXITCODE -ne 0) {
+            throw "Release set integrity gate failed. The release set will not be used."
+        }
         if (-not $SnapshotOnly -and -not $Lite) {
             $licenseGateScript = Join-Path $repoRoot "tools\release_checks\release_license_gate.py"
             if (-not (Test-Path -LiteralPath $licenseGateScript -PathType Leaf)) {

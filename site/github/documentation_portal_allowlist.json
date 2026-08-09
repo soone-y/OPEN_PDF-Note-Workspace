@@ -4,6 +4,7 @@
   "version_source": "REPO_VERSION.txt",
   "documentation_portal": {
     "files": [
+      { "source": "llms.txt", "destination": "llms.txt" },
       { "source": "For_AI.md", "destination": "For_AI.md" },
       { "source": "REPO_VERSION.txt", "destination": "REPO_VERSION.txt" },
       { "source": "README.md", "destination": "README.md" },
@@ -11,16 +12,6 @@
       { "source": "LICENSES_INDEX.md", "destination": "LICENSES_INDEX.md" },
       { "source": "THIRD_PARTY_NOTICES.md", "destination": "THIRD_PARTY_NOTICES.md" },
       { "source": ".github/SECURITY.md", "destination": ".github/SECURITY.md" },
-      { "source": "for_ai/AI共有用プロンプト.txt", "destination": "for_ai/AI共有用プロンプト.txt" },
-      { "source": "for_ai/manifest.json", "destination": "for_ai/manifest.json" },
-      { "source": "for_ai/project_context.xml", "destination": "for_ai/project_context.xml" },
-      { "source": "for_ai/core/features_faq.md", "destination": "for_ai/core/features_faq.md" },
-      { "source": "for_ai/core/file_formats.md", "destination": "for_ai/core/file_formats.md" },
-      { "source": "for_ai/core/safety_and_nonnegotiables.md", "destination": "for_ai/core/safety_and_nonnegotiables.md" },
-      { "source": "for_ai/core/troubleshooting_quick.md", "destination": "for_ai/core/troubleshooting_quick.md" },
-      { "source": "for_ai/core/ui_concepts.md", "destination": "for_ai/core/ui_concepts.md" },
-      { "source": "for_ai/core/use_cases.md", "destination": "for_ai/core/use_cases.md" },
-      { "source": "for_ai/core/user_guidance_reference.md", "destination": "for_ai/core/user_guidance_reference.md" },
       { "source": "docs/public/How_to_Save_and_Recovery.md", "destination": "docs/public/How_to_Save_and_Recovery.md" },
       { "source": "docs/public/How_to_Setup.md", "destination": "docs/public/How_to_Setup.md" },
       { "source": "docs/public/How_to_Troubleshoot.md", "destination": "docs/public/How_to_Troubleshoot.md" },
@@ -28,10 +19,14 @@
       { "source": "docs/public/Index.md", "destination": "docs/public/Index.md" },
       { "source": "docs/public/What_is_File_Formats.md", "destination": "docs/public/What_is_File_Formats.md" },
       { "source": "docs/images/app_overview.png", "destination": "docs/images/app_overview.png" }
+    ],
+    "trees": [
+      { "source": "for_ai", "destination": "for_ai" }
     ]
   },
   "pages_submission": {
     "files": [
+      { "source": "llms.txt", "destination": "llms.txt" },
       { "source": ".github/workflows/static.yml", "destination": ".github/workflows/static.yml" },
       {
         "source": "site/github/public.gitignore",

@@ -20,6 +20,10 @@ ThemeColors PdfPreviewPanel_GetTheme();
 // Open a PDF (and optionally a CLROP) in the given PDF preview panel
 void PdfPreviewPanel_OpenPdf(HWND hwnd, const std::wstring& pdfPath, const std::wstring& clropPath = L"");
 
+// Move an already loaded PDF to a search result location. pageIndex is zero-based;
+// when hasYPt is true, yPt is a PDF-space coordinate measured from the bottom.
+void PdfPreviewPanel_JumpToPdfLocation(HWND hwnd, int pageIndex, double yPt, bool hasYPt);
+
 // Let the reader choose the contiguous PDF page range that is kept in the
 // continuous view.  This reduces layout and render-cache work for large PDFs.
 void PdfPreviewPanel_ChoosePageRange(HWND hwnd);

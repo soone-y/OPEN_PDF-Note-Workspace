@@ -107,12 +107,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         std::wstring automationWorkspaceRoot;
         if (TryGetUiAutomationWorkspaceRoot(&automationWorkspaceRoot)) {
             g_workspaceRoot = automationWorkspaceRoot;
-        } else if (TryGetStartupWorkspaceRoot(&g_workspaceRoot)) {
-            // An explicitly launched additional window must not alter setup.json.
-        } else if (ShouldChooseStartupWorkspace()) {
-            auto picked = PickWorkspaceFolder(hWnd);
-            if (!picked) return -1;
-            g_workspaceRoot = *picked;
         } else if (auto setupRoot = LoadSetupWorkspaceRoot()) {
             g_workspaceRoot = *setupRoot;
         } else {
@@ -128,8 +122,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (!AcquireWorkspaceWriteLock(std::filesystem::path(g_workspaceRoot),
                                        &workspaceLockError)) {
             std::wstring message = IsEnglishUi()
-                ? L"This workspace is already open in another PDF Note Workspace process."
-                : L"このワークスペースは別の PDF Note Workspace プロセスで開かれています。";
+                ? L"The workspace path could not be prepared."
+                : L"ワークスペースのパスを準備できません。";
             if (!workspaceLockError.empty()) message += L"\n\n" + workspaceLockError;
             ShowSilentMessageDialog(hWnd, L"PDF Note Workspace", message,
                                     SoftNoticeKind::Warning);

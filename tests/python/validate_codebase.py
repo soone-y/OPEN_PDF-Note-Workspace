@@ -1393,6 +1393,11 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
     submit_checklist_contract = 'No publish checklist exists for this release set.'
     if submit_checklist_contract not in publish_text:
         errors.append("publish.ps1: Submit and Resubmit must require an existing checklist")
+    integrity_contract = ('release_set_integrity_gate.py', 'SnapshotTreeHash', 'SnapshotAllowlistHash')
+    for needle in integrity_contract:
+        if needle not in publish_text:
+            errors.append("publish.ps1: confirmation must bind the public snapshot manifest and allowlist hash")
+            break
     return errors
 
 
@@ -1639,24 +1644,21 @@ def find_multi_instance_launch_regressions() -> list[str]:
     errors: list[str] = []
     required_by_file = {
         "src/app/startup_instance.cpp": {
-            'IsNewInstanceLaunchRequested()': "explicit additional-window launch mode must remain available",
-            'L"--new-instance"': "additional-window launch must use a distinct command-line flag",
-            'L"--workspace"': "additional-window launch must pass an explicit workspace root",
-            'L"--choose-workspace"': "taskbar launch must require an explicit workspace choice",
-            'RegisterNewWindowJumpListTask': "taskbar Jump List task must remain registered",
-            'CreateProcessW(executable.c_str()': "menu additional-window launch must start the local executable directly",
+            'CanonicalPackageKey()': "single-instance scope must derive from the package setup path",
+            'L"pdf_workspace_setup.json"': "single-instance scope must include the adjacent setup file",
+            'PackageInstanceSuffix()': "mutex and events must be namespaced per package",
+            'CanonicalPackageKeyForExecutablePath': "package identity must be reusable for target-process validation",
+            'QueryFullProcessImageNameW': "window activation must verify the target process package",
         },
         "src/app/bootstrap.cppinc": {
-            'if (newInstanceRequested)': "additional windows must retain the normal-launch mutex lifetime",
-            'CreateMutexW(nullptr, FALSE, SingleInstanceMutexName().c_str())': "additional windows must not own the normal-launch mutex",
-            '    } else {': "ordinary launches must keep single-instance activation behavior",
-        },
-        "src/ui/core/main_window_proc.cppinc": {
-            'TryGetStartupWorkspaceRoot(&g_workspaceRoot)': "additional windows must use their explicit workspace root",
-            'ShouldChooseStartupWorkspace()': "taskbar additional-window launch must prompt for a workspace",
+            'CreateMutexW(nullptr, TRUE, mutexName.c_str())': "main windows must keep normal single-instance activation behavior",
+            'EnumWindows(FindCurrentPackageMainWindowProc': "activation must search only current-package windows",
+            'IsProcessInCurrentMainPackage(processId)': "activation must reject windows from another package",
+            'ReleaseAllDocumentOpenLocks();': "application shutdown must release document locks",
         },
         "src/workspace/workspace_write_lock.cpp": {
-            'ERROR_ALREADY_EXISTS': "the per-workspace writer lock must reject a second writer",
+            'WorkspaceOperationLock::WorkspaceOperationLock': "shared workspace operations must acquire a short-lived lock",
+            'g_workspaceWriteLockKey = key;': "same-workspace windows must register a normalized workspace key without lifetime exclusion",
             'DocumentOpenLockCandidate::DocumentOpenLockCandidate': "opened files must acquire a process-wide document lock",
             'Local\\\\PdfNoteDocumentOpenLock_': "opened files must use a distinct named mutex",
             'ReleaseAllDocumentOpenLocks': "all document locks must be released during shutdown",
@@ -1672,14 +1674,17 @@ def find_multi_instance_launch_regressions() -> list[str]:
         "src/pdf_view/navigation.cppinc": {
             'ReleaseDocumentOpenLock(std::filesystem::path(g_pdf.path))': "closing a PDF/image must release its document lock",
         },
-        "src/app/bootstrap.cppinc": {
-            'ReleaseAllDocumentOpenLocks();': "application shutdown must release document locks",
+        "src/core/app_core.cpp": {
+            'WorkspaceOperationLock workspaceLock(path.parent_path(), &workspaceLockError)': "workspace configuration writes must be serialized",
         },
-        "src/ui/menus/menu_build.cpp": {
-            'ID_FILE_NEW_WINDOW': "the menu must expose the explicit additional-window command",
+        "src/file_output/file_output_stage.cpp": {
+            'WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError)': "stage integration must be serialized per workspace",
         },
-        "src/app/command_dispatch.cppinc": {
-            'LaunchNewMainWindow(*picked)': "the menu must start additional windows only after workspace selection",
+        "src/workspace/workspace_actions.cpp": {
+            'WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError)': "workspace imports must be serialized",
+        },
+        "src/workspace/file_ops_move_rename.cppinc": {
+            'WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError)': "workspace moves and renames must be serialized",
         },
     }
     for rel, needles in required_by_file.items():
@@ -1687,6 +1692,19 @@ def find_multi_instance_launch_regressions() -> list[str]:
         for needle, message in needles.items():
             if needle not in text:
                 errors.append(f"{rel}: {message}")
+    forbidden_by_file = {
+        "src/app/startup_instance.cpp": (
+            'L"--new-instance"', 'L"--choose-workspace"', 'CreateProcessW(executable.c_str()'),
+        "src/app/bootstrap.cppinc": ('newInstanceRequested', 'FindWindowW(kMainClass, nullptr)'),
+        "src/ui/menus/menu_build.cpp": ('ID_FILE_NEW_WINDOW',),
+        "src/app/command_dispatch.cppinc": ('ID_FILE_NEW_WINDOW', 'LaunchNewMainWindow'),
+        "src/ui/core/main_window_proc.cppinc": ('TryGetStartupWorkspaceRoot', 'ShouldChooseStartupWorkspace'),
+    }
+    for rel, needles in forbidden_by_file.items():
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8", errors="ignore")
+        for needle in needles:
+            if needle in text:
+                errors.append(f"{rel}: general main-window multi-instance route must remain removed ({needle})")
     return errors
 
 def main() -> int:

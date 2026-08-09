@@ -1319,8 +1319,8 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
     std::wstring workspaceLockError;
     if (!AcquireWorkspaceWriteLock(std::filesystem::path(root), &workspaceLockError)) {
         std::wstring msg = IsEnglishUi()
-            ? L"Workspace switch was canceled because the target workspace is open in another PDF Note Workspace process."
-            : L"切り替え先ワークスペースが別の PDF Note Workspace プロセスで開かれているため、切り替えを中断しました。";
+            ? L"Workspace switch was canceled because the target workspace path could not be prepared."
+            : L"切り替え先ワークスペースのパスを準備できないため、切り替えを中断しました。";
         if (!workspaceLockError.empty()) msg += L"\n\n" + workspaceLockError;
         ShowSilentMessageDialog(hWnd, GetUiText().menuFile, msg, SoftNoticeKind::Warning);
         preview_trace::Append(

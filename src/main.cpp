@@ -2399,7 +2399,8 @@ static bool IsWorkspaceManagedDirectoryTarget(const std::filesystem::path& path)
 
 static bool EnsureDirectoryMutationReady(HWND owner,
                                          const std::filesystem::path& target,
-                                         const std::wstring& blockedAction) {
+                                         const std::wstring& blockedAction,
+                                         bool requireIntegratedSave = false) {
     if (target.empty()) return false;
 
     const bool touchesCurrentLecture = IsCurrentLectureTargetPath(target);
@@ -2441,8 +2442,15 @@ static bool EnsureDirectoryMutationReady(HWND owner,
         return false;
     }
 
-    SaveAllManual(owner);
-    if (file_output::HasPendingOrStagedDiffsUnderPath(target)) {
+    // Deletion must not race a background save. Complete the integration
+    // before moving the directory into the recovery area.
+    bool saved = true;
+    if (requireIntegratedSave) {
+        saved = file_output::RunSaveAndIntegrateTransaction(owner);
+    } else {
+        SaveAllManual(owner);
+    }
+    if (!saved || file_output::HasPendingOrStagedDiffsUnderPath(target)) {
         ShowSoftNotice(owner,
                        IsEnglishUi() ? L"Some unsaved or staged changes still remain under this directory. The operation was canceled."
                                      : L"このフォルダ配下に未保存または未統合の差分がまだ残っているため、操作を中止しました。",
@@ -2514,8 +2522,8 @@ static bool RemoveTempExternalLectureFromContext(HWND owner, const std::wstring&
                               SilentDialogResult::No, SilentDialogResult::No)) {
             return false;
         }
-        SaveAllManual(owner);
-        if (file_output::HasPendingOrStagedDiffsUnderPath(std::filesystem::path(lecturePath))) {
+        if (!file_output::RunSaveAndIntegrateTransaction(owner) ||
+            file_output::HasPendingOrStagedDiffsUnderPath(std::filesystem::path(lecturePath))) {
             ShowSoftNotice(owner,
                            IsEnglishUi() ? L"Some unsaved or staged changes still remain under this temporary external lecture. The path was not removed."
                                          : (g_config.studentMode
@@ -2736,7 +2744,8 @@ static bool DeleteLectureDirectoryFromContext(HWND owner,
     if (!IsWorkspaceManagedDirectoryTarget(lecturePath)) return false;
     if (!EnsureDirectoryMutationReady(owner, lecturePath,
                                       IsEnglishUi() ? L"Deleting lecture"
-                                                    : (g_config.studentMode ? L"授業削除" : L"上位項目削除"))) {
+                                                    : (g_config.studentMode ? L"授業削除" : L"上位項目削除"),
+                                      /*requireIntegratedSave=*/true)) {
         return false;
     }
 
@@ -2802,7 +2811,8 @@ static bool DeleteSessionDirectoryFromContext(HWND owner,
         return false;
     }
     if (!EnsureDirectoryMutationReady(owner, sessionPath,
-                                      IsEnglishUi() ? L"Deleting session" : L"セッション削除")) {
+                                      IsEnglishUi() ? L"Deleting session" : L"セッション削除",
+                                      /*requireIntegratedSave=*/true)) {
         return false;
     }
 

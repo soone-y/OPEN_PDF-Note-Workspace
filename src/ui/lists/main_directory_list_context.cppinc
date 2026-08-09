@@ -363,22 +363,60 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     const bool canDelete = isLectureList
         ? (isTempExternalLecture || IsWorkspaceManagedDirectoryTarget(root))
         : (IsWorkspaceManagedDirectoryTarget(root) && !isDirectFilesSession);
+    const bool canCreateSession = isLectureList
+        ? (IsWorkspaceManagedDirectoryTarget(root) && !isTempExternalLecture)
+        : (!g_currentLecturePath.empty() &&
+           IsWorkspaceManagedDirectoryTarget(std::filesystem::path(g_currentLecturePath)));
+    const bool canCreateNote = !isLectureList &&
+        IsWorkspaceManagedDirectoryTarget(root) && !isDirectFilesSession;
     const std::wstring deleteLabel = isTempExternalLecture
         ? GetUiText().menuRemoveTempExternalLecture
         : (IsEnglishUi() ? L"Delete" : L"削除");
 
     ui::context_menu::PopupMenu menu;
     if (!menu) return false;
-    constexpr UINT kCmdOpenInApp = 1;
-    constexpr UINT kCmdOpenExplorer = 2;
-    constexpr UINT kCmdShowPath = 3;
-    constexpr UINT kCmdCopyPath = 4;
-    constexpr UINT kCmdShowHierarchy = 5;
-    constexpr UINT kCmdConvertOffice = 6;
-    constexpr UINT kCmdRename = 7;
-    constexpr UINT kCmdDelete = 8;
+    constexpr UINT kCmdNewLecture = 1;
+    constexpr UINT kCmdNewSession = 2;
+    constexpr UINT kCmdNewNoteClro = 3;
+    constexpr UINT kCmdNewNoteMarkdown = 4;
+    constexpr UINT kCmdNewNoteText = 5;
+    constexpr UINT kCmdNewNoteTex = 6;
+    constexpr UINT kCmdNewNoteCsv = 7;
+    constexpr UINT kCmdOpenInApp = 8;
+    constexpr UINT kCmdOpenReadOnly = 9;
+    constexpr UINT kCmdOpenExplorer = 10;
+    constexpr UINT kCmdShowPath = 11;
+    constexpr UINT kCmdCopyPath = 12;
+    constexpr UINT kCmdShowHierarchy = 13;
+    constexpr UINT kCmdConvertOffice = 14;
+    constexpr UINT kCmdRename = 15;
+    constexpr UINT kCmdDelete = 16;
+    if (isLectureList) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdNewLecture,
+                    IsEnglishUi() ? L"Create lecture..." : L"授業を作成...");
+    }
+    AppendMenuW(menu.get(),
+                canCreateSession ? MF_STRING : (MF_STRING | MF_GRAYED),
+                kCmdNewSession,
+                IsEnglishUi() ? L"Create session..." : L"回次を作成...");
+    if (!isLectureList) {
+        HMENU noteMenu = CreatePopupMenu();
+        if (noteMenu) {
+            AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteClro, L".clro");
+            AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteMarkdown, L".md");
+            AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteText, L".txt");
+            AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteTex, L".tex");
+            AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteCsv, L".csv");
+            AppendMenuW(menu.get(),
+                        canCreateNote ? MF_POPUP : (MF_POPUP | MF_GRAYED),
+                        reinterpret_cast<UINT_PTR>(noteMenu),
+                        IsEnglishUi() ? L"Create note" : L"ノートを作成");
+        }
+    }
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     ui::context_menu::AppendPathContextMenuItems(menu.get(), {
         {kCmdOpenInApp, IsEnglishUi() ? L"Open in this app" : L"このソフトで開く"},
+        {kCmdOpenReadOnly, IsEnglishUi() ? L"Open folder in read-only viewer" : L"読み取り専用ビューアでフォルダを開く"},
     });
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     ui::context_menu::AppendPathContextMenuItems(menu.get(), {
@@ -408,8 +446,54 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     const UINT cmd = menu.TrackCommand(owner, screenPt,
                                        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
     menu.Close();
+    if (cmd == kCmdNewLecture) {
+        ShowNewLectureDialog(owner);
+        RefreshMainMenuBar(owner);
+        return true;
+    }
+    if (cmd == kCmdNewSession && canCreateSession) {
+        if (isLectureList) {
+            const bool lectureChanged = SetListboxSelAndNotify(g_hLectureList, index);
+            if (!lectureChanged &&
+                NormalizePathKeyForList(g_currentLecturePath) != NormalizePathKeyForList(root.wstring())) {
+                NotifyListboxSelChange(g_hLectureList);
+            }
+            if (NormalizePathKeyForList(g_currentLecturePath) != NormalizePathKeyForList(root.wstring())) {
+                return true;
+            }
+        }
+        ShowNewSessionDialog(owner);
+        RefreshMainMenuBar(owner);
+        return true;
+    }
+    const wchar_t* noteExtension = nullptr;
+    switch (cmd) {
+    case kCmdNewNoteClro: noteExtension = L".clro"; break;
+    case kCmdNewNoteMarkdown: noteExtension = L".md"; break;
+    case kCmdNewNoteText: noteExtension = L".txt"; break;
+    case kCmdNewNoteTex: noteExtension = L".tex"; break;
+    case kCmdNewNoteCsv: noteExtension = L".csv"; break;
+    default: break;
+    }
+    if (noteExtension && canCreateNote) {
+        if (!SaveNoteIfDirty(owner)) return true;
+        const bool sessionChanged = SetListboxSelAndNotify(g_hSessionList, index);
+        if (!sessionChanged &&
+            NormalizePathKeyForList(g_currentSessionPath) != NormalizePathKeyForList(root.wstring())) {
+            NotifyListboxSelChange(g_hSessionList);
+        }
+        if (NormalizePathKeyForList(g_currentSessionPath) != NormalizePathKeyForList(root.wstring())) {
+            return true;
+        }
+        CreateNewNoteWithExtensionInSession(owner, noteExtension);
+        RefreshMainMenuBar(owner);
+        return true;
+    }
     if (cmd == kCmdOpenInApp) {
         return OpenSelectionForList(list);
+    }
+    if (cmd == kCmdOpenReadOnly) {
+        return LaunchReadOnlyViewerForFolder(owner, root.wstring());
     }
     if (cmd == kCmdOpenExplorer) {
         return ShowPathInExplorer(owner, root.wstring());

@@ -3,9 +3,10 @@
 #include "core/fault_injection.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <cwctype>
 #include <filesystem>
 #include <shellapi.h>
-#include <shobjidl.h>
 #include <utility>
 #include <vector>
 
@@ -45,35 +46,6 @@ std::wstring ParseStartupDocumentPathFromCommandLine() {
     return AbsoluteOrOriginalPath(path);
 }
 
-bool CommandLineHasOption(const wchar_t* option) {
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) return false;
-    bool found = false;
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i] && option && wcscmp(argv[i], option) == 0) {
-            found = true;
-            break;
-        }
-    }
-    LocalFree(argv);
-    return found;
-}
-
-std::wstring ParseStartupWorkspaceRoot() {
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) return {};
-    std::wstring root;
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (argv[i] && wcscmp(argv[i], L"--workspace") == 0) {
-            root = argv[++i] ? argv[i] : L"";
-        }
-    }
-    LocalFree(argv);
-    return AbsoluteOrOriginalPath(root);
-}
-
 std::wstring CurrentExecutablePath() {
     std::vector<wchar_t> buffer(512);
     for (;;) {
@@ -83,6 +55,69 @@ std::wstring CurrentExecutablePath() {
         if (buffer.size() >= 32768) return {};
         buffer.resize(buffer.size() * 2);
     }
+}
+
+std::wstring CanonicalPackageKeyForExecutablePath(const std::wstring& executable) {
+    if (executable.empty()) return {};
+
+    std::error_code ec;
+    std::filesystem::path packageSetup = std::filesystem::path(executable).parent_path() /
+                                        L"pdf_workspace_setup.json";
+    std::filesystem::path normalized = std::filesystem::weakly_canonical(packageSetup, ec);
+    if (ec || normalized.empty()) {
+        ec.clear();
+        normalized = std::filesystem::absolute(packageSetup, ec);
+    }
+    if (ec || normalized.empty()) return {};
+
+    std::wstring key = normalized.lexically_normal().wstring();
+    std::transform(key.begin(), key.end(), key.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(static_cast<wint_t>(ch)));
+    });
+    return key;
+}
+
+std::wstring CanonicalPackageKey() {
+    return CanonicalPackageKeyForExecutablePath(CurrentExecutablePath());
+}
+
+std::wstring ExecutablePathForProcess(DWORD processId) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process) return {};
+
+    std::vector<wchar_t> buffer(512);
+    std::wstring path;
+    for (;;) {
+        DWORD length = static_cast<DWORD>(buffer.size());
+        if (QueryFullProcessImageNameW(process, 0, buffer.data(), &length)) {
+            path.assign(buffer.data(), length);
+            break;
+        }
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || buffer.size() >= 32768) break;
+        buffer.resize(buffer.size() * 2);
+    }
+    CloseHandle(process);
+    return path;
+}
+
+std::uint64_t PackageKeyHash(const std::wstring& value) {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (wchar_t ch : value) {
+        const std::uint16_t codeUnit = static_cast<std::uint16_t>(ch);
+        hash ^= static_cast<std::uint8_t>(codeUnit & 0xffu);
+        hash *= 1099511628211ull;
+        hash ^= static_cast<std::uint8_t>(codeUnit >> 8u);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+std::wstring PackageInstanceSuffix() {
+    const std::wstring key = CanonicalPackageKey();
+    if (key.empty()) return L"_fallback";
+    wchar_t hash[17]{};
+    swprintf_s(hash, L"%016llx", static_cast<unsigned long long>(PackageKeyHash(key)));
+    return L"_" + std::wstring(hash);
 }
 
 std::wstring ReadOptionalInstanceSuffix() {
@@ -127,88 +162,33 @@ std::wstring AbsoluteOrOriginalPath(const std::wstring& path) {
     return ec ? path : abs.wstring();
 }
 
-bool IsNewInstanceLaunchRequested() {
-    return CommandLineHasOption(L"--new-instance");
-}
-
-bool ShouldChooseStartupWorkspace() {
-    return CommandLineHasOption(L"--choose-workspace");
-}
-
-bool TryGetStartupWorkspaceRoot(std::wstring* out) {
-    if (!out) return false;
-    *out = ParseStartupWorkspaceRoot();
-    return !out->empty();
-}
-
-bool LaunchNewMainWindow(const std::wstring& workspaceRoot) {
-    if (workspaceRoot.empty()) return false;
-    const std::wstring executable = CurrentExecutablePath();
-    if (executable.empty()) return false;
-    std::wstring commandLine = L"\"" + executable + L"\" --new-instance --workspace \"" + workspaceRoot + L"\"";
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(executable.c_str(), commandLine.data(), nullptr, nullptr, FALSE, 0,
-                        nullptr, nullptr, &startup, &process)) return false;
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    return true;
-}
-
-void RegisterNewWindowJumpListTask() {
-    const std::wstring executable = CurrentExecutablePath();
-    if (executable.empty()) return;
-    ICustomDestinationList* list = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_DestinationList, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&list))) || !list) return;
-    UINT slots = 0;
-    IObjectArray* removed = nullptr;
-    if (FAILED(list->BeginList(&slots, IID_PPV_ARGS(&removed)))) {
-        if (removed) removed->Release();
-        list->Release();
-        return;
-    }
-    if (removed) removed->Release();
-    IObjectCollection* tasks = nullptr;
-    IShellLinkW* task = nullptr;
-    IObjectArray* taskArray = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_EnumerableObjectCollection, nullptr, CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&tasks));
-    if (SUCCEEDED(hr)) hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
-                                             IID_PPV_ARGS(&task));
-    if (SUCCEEDED(hr)) hr = task->SetPath(executable.c_str());
-    if (SUCCEEDED(hr)) hr = task->SetArguments(L"--new-instance --choose-workspace");
-    if (SUCCEEDED(hr)) hr = task->SetDescription(L"新しいウィンドウ...");
-    if (SUCCEEDED(hr)) hr = tasks->AddObject(task);
-    if (SUCCEEDED(hr)) hr = tasks->QueryInterface(IID_PPV_ARGS(&taskArray));
-    if (SUCCEEDED(hr)) hr = list->AddUserTasks(taskArray);
-    if (SUCCEEDED(hr)) list->CommitList(); else list->AbortList();
-    if (taskArray) taskArray->Release();
-    if (task) task->Release();
-    if (tasks) tasks->Release();
-    list->Release();
-}
-
 std::wstring SingleInstanceMutexName() {
-    std::wstring name = kSingleInstanceMutexNameBase;
+    std::wstring name = kSingleInstanceMutexNameBase + PackageInstanceSuffix();
     const std::wstring suffix = ReadOptionalInstanceSuffix();
     if (!suffix.empty()) name += suffix;
     return name;
 }
 
 std::wstring SingleInstanceReadyEventName() {
-    std::wstring name = kSingleInstanceReadyEventNameBase;
+    std::wstring name = kSingleInstanceReadyEventNameBase + PackageInstanceSuffix();
     const std::wstring suffix = ReadOptionalInstanceSuffix();
     if (!suffix.empty()) name += suffix;
     return name;
 }
 
 std::wstring SingleInstanceShutdownRequestEventName() {
-    std::wstring name = kSingleInstanceShutdownRequestEventNameBase;
+    std::wstring name = kSingleInstanceShutdownRequestEventNameBase + PackageInstanceSuffix();
     const std::wstring suffix = ReadOptionalInstanceSuffix();
     if (!suffix.empty()) name += suffix;
     return name;
+}
+
+bool IsProcessInCurrentMainPackage(DWORD processId) {
+    const std::wstring currentPackageKey = CanonicalPackageKey();
+    if (currentPackageKey.empty()) return false;
+    const std::wstring processPath = ExecutablePathForProcess(processId);
+    return !processPath.empty() &&
+           CanonicalPackageKeyForExecutablePath(processPath) == currentPackageKey;
 }
 
 bool SignalSingleInstanceShutdownRequest() {

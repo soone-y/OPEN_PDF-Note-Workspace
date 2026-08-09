@@ -34,6 +34,7 @@ bool IsSupportedNewNoteExtension(const std::wstring& ext);
 std::wstring DefaultNewNoteStem();
 bool ValidateNewNoteFileName(HWND owner, const std::wstring& name);
 bool TryCreateEmptyNoteFile(const std::filesystem::path& target, DWORD* outError);
+void CreateNewNoteWithExtensionInSession(HWND hWnd, const std::wstring& extension);
 void CreateNewClroInSession(HWND hWnd);
 std::filesystem::path CurrentNoteDirectory();
 std::wstring DefaultBlankPdfFileName();

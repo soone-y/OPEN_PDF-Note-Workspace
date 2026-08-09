@@ -14,14 +14,11 @@ int UiAutomationExitCode();
 void SetUiAutomationExitCode(int code);
 
 std::wstring AbsoluteOrOriginalPath(const std::wstring& path);
-bool IsNewInstanceLaunchRequested();
-bool ShouldChooseStartupWorkspace();
-bool TryGetStartupWorkspaceRoot(std::wstring* out);
-bool LaunchNewMainWindow(const std::wstring& workspaceRoot);
-void RegisterNewWindowJumpListTask();
 std::wstring SingleInstanceMutexName();
 std::wstring SingleInstanceReadyEventName();
 std::wstring SingleInstanceShutdownRequestEventName();
+// True only when processId belongs to an executable packaged with this executable's setup file.
+bool IsProcessInCurrentMainPackage(DWORD processId);
 bool SignalSingleInstanceShutdownRequest();
 
 void CaptureStartupDocumentPathFromCommandLine();

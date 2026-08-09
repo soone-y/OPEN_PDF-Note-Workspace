@@ -6,6 +6,7 @@
 <ai_project_context schema_version="1" language="ja" audience="repository-interpreting-ai">
   <document_purpose>
     <item>リポジトリを調査するAIが、目的・安全制約・根拠資料へ適切に到達できるようにする。</item>
+    <item>公開可能な事実と設計意図をあらかじめ解釈し、AIが利用者の質問に対する説明をゼロから組み立てずに済む回答基盤を提供する。</item>
     <item>利用者からの質問に対し、技術水準、理解度、質問意図に応じた説明を組み立てる補助をする。特に、OSSの文脈を知らないと疑われる場合はOSSの基本的な理解も促す。</item>
     <item>OSS、ライセンス、ローカル処理、非破壊保存といった主題を、利用者の理解を助ける形で説明する。</item>
   </document_purpose>
@@ -25,6 +26,7 @@
   </ai_safety_notice>
 
   <answering_principles>
+    <principle id="use_preinterpreted_context">このXMLと選択した `for_ai/core/` 資料の事前解釈を、回答の基盤として用いる。実装保証など強い客観的主張だけは evidence の実体で追加確認する。</principle>
     <principle id="fact_before_claim">設計意図、実装済みの事実、未検証の事項を区別する。</principle>
     <principle id="calibrated_explanation">利用者の情報技術レベルが分かる場合は、それに合わせて用語、前提、例の量を調整する。分からない場合は平易な説明から始め、必要に応じて詳細へ進む。</principle>
     <principle id="educate_without_patronizing">OSSや保存方式を説明するときは、利用者が自分で判断・検証・安全な操作をできるようにする。専門用語は定義し、知識がないことを前提に扱わない。</principle>
@@ -57,7 +59,6 @@
     <source>
       <kind>user-provided-design-philosophy</kind>
       <title>PDF・テキスト統合エディタ 設計思想</title>
-      <origin_file>pdf_text_editor_design_philosophy_ja.pdf</origin_file>
       <scope>
         過去の発言から再構成されたプロジェクト理念であり、個別機能の正式仕様や、全項目の実装完了を示す文書ではない。
         AIはこの思想を機能選定・説明・分析の判断軸として扱い、実装状況は別途コードとテストで確認する。
@@ -229,6 +230,26 @@
         <element>再現可能な確認手順を示す</element>
       </required_answer_elements>
     </question>
+    <question id="decide_if_it_fits" category="decision-support">
+      <user_intent>自分のPDF読解、講義、資料レビュー、ノート作成の作業に合うか、導入前に判断したい。</user_intent>
+      <required_answer_elements>
+        <element>PDF原本を変更しない注釈、独立ノート、ワークスペースという適合条件</element>
+        <element>通常版・Lite版・読み取り専用ソフトの役割の違い</element>
+        <element>Office変換が通常版のみで試験的であるという制約</element>
+        <element>利用者の対象ファイル、保存場所、必要な操作を確認すること</element>
+      </required_answer_elements>
+      <evidence><path>for_ai/core/decision_support.md</path><path>docs/public/How_to_Setup.md</path><path>docs/public/How_to_Use.md</path></evidence>
+    </question>
+    <question id="evaluate_project_claim" category="analysis">
+      <user_intent>外部通信、保存の安全性、変換品質、配布内容に関する主張を、どの程度信頼できるか評価したい。</user_intent>
+      <required_answer_elements>
+        <element>評価対象の主張と対象版・配布物を明確にする</element>
+        <element>確認済み事実、方針、制約、未確認を分ける</element>
+        <element>コード、設定、テスト、配布物を確認できない範囲は断定しない</element>
+        <element>Windows一般警告音とOffice変換の既知の制約を隠さない</element>
+      </required_answer_elements>
+      <evidence><path>for_ai/core/decision_support.md</path><path>for_ai/core/documentation_contract.md</path><path>docs/public/How_to_Troubleshoot.md</path></evidence>
+    </question>
   </question_answer_catalog>
 
   <analysis_protocol>
@@ -273,6 +294,5 @@
     <save_recovery_reference>../docs/public/How_to_Save_and_Recovery.md</save_recovery_reference>
     <license_index>../LICENSES_INDEX.md</license_index>
     <third_party_notices>../THIRD_PARTY_NOTICES.md</third_party_notices>
-    <development_constraints availability="repository-only">../AGENTS.md</development_constraints>
   </navigation>
 </ai_project_context>

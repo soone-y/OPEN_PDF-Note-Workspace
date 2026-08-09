@@ -129,7 +129,7 @@ static SearchUiStrings GetSearchUiStrings() {
             L"Ignore case",
             L"Translucent window",
             L"Results",
-            L"Enter/double-click=open, right-click=more, Delete=hide",
+            L"Enter/double-click=open, colored=opened, right-click=more, Delete=hide",
             L"Hide from results",
             L"Open in read-only viewer",
             L"Status",
@@ -185,7 +185,7 @@ static SearchUiStrings GetSearchUiStrings() {
         L"大文字/小文字を同一視",
         L"検索ウィンドウを半透明",
         L"結果",
-        L"Enter/ダブルクリック=開く、右クリック=操作、Delete=下げる",
+        L"Enter/ダブルクリック=開く、色付き=移動済み、右クリック=操作、Delete=下げる",
         L"検索結果から下げる",
         L"読み取り専用ビューアで開く",
         L"状態",
@@ -248,6 +248,7 @@ struct SearchResultItem {
     double focusX = 0.0;
     double focusY = 0.0;
     bool hasFocusPoint = false;
+    bool openedFromSearch = false;
 };
 
 struct PdfScanState {
@@ -328,6 +329,9 @@ struct SearchCtx {
     int maxResultWidth = 0;
     double hWheelRemainderPx = 0.0;
     int vWheelRemainder1000 = 0;
+    ULONGLONG lastVWheelTick = 0;
+    int lastVWheelDirection = 0;
+    int rapidVWheelInputCount = 0;
     std::wstring idleStatusText;
     SearchJob job;
 };
@@ -335,7 +339,7 @@ struct SearchCtx {
 static std::wstring ToLowerCopy(std::wstring s);
 
 static void RunSearch(HWND hWnd, SearchCtx* ctx);
-static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex);
+static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex, bool navigationRetry = false);
 static void CancelSearchJob(HWND hWnd, SearchCtx* ctx, bool silent);
 static bool HideSearchResultAt(HWND hWnd, SearchCtx* ctx, int listIndex);
 static void UpdateStatusLabel(SearchCtx* ctx, const SearchUiStrings& ui);
@@ -589,49 +593,34 @@ static int WheelStepPxForList(HWND hWnd, int aveCharWidth) {
     return std::max(8, c * std::max(1, aveCharWidth));
 }
 
-static int ListBoxVisibleCount(HWND list) {
-    if (!list) return 1;
-    RECT rc{};
-    GetClientRect(list, &rc);
-    int h = std::max(1, static_cast<int>(rc.bottom - rc.top));
-    int itemH = static_cast<int>(SendMessageW(list, LB_GETITEMHEIGHT, 0, 0));
-    if (itemH <= 0) itemH = 16;
-    return std::max(1, h / itemH);
-}
+static void ScrollListBoxByWheel(HWND list, int delta, SearchCtx* ctx) {
+    if (!list || !IsWindow(list) || !ctx || delta == 0) return;
 
-static void ScrollListBoxByWheel(HWND list, int delta, int* remainder1000) {
-    if (!list || !IsWindow(list) || !remainder1000) return;
-
-    UINT lines = 3;
-    SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
-
-    if (lines == WHEEL_PAGESCROLL) {
-        // Page-scroll uses full notches; no fractional smoothness available.
-        *remainder1000 += static_cast<int>((static_cast<long long>(-delta) * 1000) / WHEEL_DELTA);
-        int notches = *remainder1000 / 1000;
-        if (notches == 0) return;
-        *remainder1000 -= notches * 1000;
-
-        int step = std::max(1, ListBoxVisibleCount(list) - 1);
-        int top = static_cast<int>(SendMessageW(list, LB_GETTOPINDEX, 0, 0));
-        int count = static_cast<int>(SendMessageW(list, LB_GETCOUNT, 0, 0));
-        if (top < 0 || count <= 0) return;
-
-        int move = std::abs(notches) * step;
-        int newTop = top + ((notches >= 0) ? move : -move);
-        newTop = std::clamp(newTop, 0, std::max(0, count - 1));
-        if (newTop != top) {
-            SendMessageW(list, LB_SETTOPINDEX, static_cast<WPARAM>(newTop), 0);
-        }
-        return;
+    // A single or deliberate wheel movement advances one result.  Consecutive
+    // movements in the same direction accelerate in stages for fast browsing.
+    // Accumulating thousandths still supports high-resolution wheels/touchpads.
+    constexpr ULONGLONG kRapidWheelIntervalMs = 70;
+    const int direction = delta < 0 ? 1 : -1;
+    const ULONGLONG now = GetTickCount64();
+    if (ctx->lastVWheelDirection == direction &&
+        now - ctx->lastVWheelTick <= kRapidWheelIntervalMs) {
+        ctx->rapidVWheelInputCount = std::min(ctx->rapidVWheelInputCount + 1, 16);
+    } else {
+        ctx->rapidVWheelInputCount = 1;
     }
+    ctx->lastVWheelTick = now;
+    ctx->lastVWheelDirection = direction;
 
-    // Smooth(ish) scrolling: accumulate fractional lines from high-resolution wheel/touchpad.
-    int step = std::max(1, static_cast<int>(lines));
-    *remainder1000 += static_cast<int>((static_cast<long long>(-delta) * step * 1000) / WHEEL_DELTA);
-    int moveLines = *remainder1000 / 1000;
+    ctx->vWheelRemainder1000 += static_cast<int>((static_cast<long long>(-delta) * 1000) / WHEEL_DELTA);
+    int moveLines = ctx->vWheelRemainder1000 / 1000;
     if (moveLines == 0) return;
-    *remainder1000 -= moveLines * 1000;
+    ctx->vWheelRemainder1000 -= moveLines * 1000;
+
+    int multiplier = 1;
+    if (ctx->rapidVWheelInputCount >= 11) multiplier = 8;
+    else if (ctx->rapidVWheelInputCount >= 7) multiplier = 4;
+    else if (ctx->rapidVWheelInputCount >= 4) multiplier = 2;
+    moveLines *= multiplier;
 
     int top = static_cast<int>(SendMessageW(list, LB_GETTOPINDEX, 0, 0));
     int count = static_cast<int>(SendMessageW(list, LB_GETCOUNT, 0, 0));
@@ -686,7 +675,7 @@ static LRESULT CALLBACK SearchResultsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         if (!horizWheel) {
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             if (ctx) {
-                ScrollListBoxByWheel(hWnd, delta, &ctx->vWheelRemainder1000);
+                ScrollListBoxByWheel(hWnd, delta, ctx);
                 return 0;
             }
             return DefSubclassProc(hWnd, msg, wParam, lParam);
@@ -1043,12 +1032,21 @@ static void DrawSearchResultsItem(const SearchCtx* ctx, const DRAWITEMSTRUCT* di
     const bool selected = (dis->itemState & ODS_SELECTED) != 0;
     const bool focused = (dis->itemState & ODS_FOCUS) != 0;
 
-    const COLORREF bg = selected ? g_theme.selectionBg : g_theme.panelBg;
+    const COLORREF bg = selected ? g_theme.selectionBg
+                                 : (item.openedFromSearch ? BlendColor(g_theme.panelBg, g_theme.accent, 0.10)
+                                                          : g_theme.panelBg);
     const COLORREF fg = selected ? g_theme.selectionText : g_theme.panelText;
 
     HBRUSH bgBrush = CreateSolidBrush(bg);
     FillRect(dis->hDC, &dis->rcItem, bgBrush);
     DeleteObject(bgBrush);
+    if (item.openedFromSearch && !selected) {
+        RECT openedMark = dis->rcItem;
+        openedMark.right = std::min(openedMark.right, openedMark.left + 4);
+        HBRUSH openedBrush = CreateSolidBrush(g_theme.accent);
+        FillRect(dis->hDC, &openedMark, openedBrush);
+        DeleteObject(openedBrush);
+    }
 
     HFONT font = reinterpret_cast<HFONT>(SendMessageW(ctx->results, WM_GETFONT, 0, 0));
     HGDIOBJ oldFont = nullptr;
@@ -2211,6 +2209,9 @@ static void ResetSearchState(SearchCtx* ctx, const SearchUiStrings& ui) {
     ctx->maxResultWidth = 0;
     ctx->hWheelRemainderPx = 0.0;
     ctx->vWheelRemainder1000 = 0;
+    ctx->lastVWheelTick = 0;
+    ctx->lastVWheelDirection = 0;
+    ctx->rapidVWheelInputCount = 0;
     SendMessageW(ctx->results, WM_SETREDRAW, FALSE, 0);
     SendMessageW(ctx->results, LB_RESETCONTENT, 0, 0);
     SendMessageW(ctx->results, LB_SETHORIZONTALEXTENT, 0, 0);
@@ -2487,7 +2488,15 @@ static void ProcessSearchTick(HWND hWnd, SearchCtx* ctx) {
     }
 }
 
-static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex) {
+static void MarkSearchResultOpened(SearchCtx* ctx, int listIndex) {
+    if (!ctx || !ctx->results || listIndex < 0) return;
+    const size_t idx = static_cast<size_t>(listIndex);
+    if (idx >= ctx->job.results.size()) return;
+    ctx->job.results[idx].openedFromSearch = true;
+    InvalidateRect(ctx->results, nullptr, FALSE);
+}
+
+static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex, bool navigationRetry) {
     if (!ctx || !ctx->results || listIndex < 0) return;
     size_t idx = static_cast<size_t>(listIndex);
     if (idx >= ctx->job.results.size()) return;
@@ -2505,32 +2514,48 @@ static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex) {
         if (IsPdfOrImageFile(item.path)) {
             if (OpenSearchResultFileInCurrentFileList(owner, item.path.wstring())) {
                 if (item.pageIndex >= 0 && g_hPdfView) JumpToPage(g_hPdfView, item.pageIndex);
+                MarkSearchResultOpened(ctx, listIndex);
             }
             return;
         }
         if (IsNoteFile(item.path)) {
             if (!OpenSearchResultFileInCurrentFileList(owner, item.path.wstring())) return;
             if (item.lineNumber >= 1) JumpToNoteLine(item.lineNumber);
+            MarkSearchResultOpened(ctx, listIndex);
             return;
         }
         return;
     }
 
     if (item.kind == SearchResultKind::NoteLine) {
+        const bool openingDifferentNote = !item.path.empty() && item.path.wstring() != g_currentNotePath;
         if (!item.path.empty()) {
             if (!OpenSearchResultFileInCurrentFileList(owner, item.path.wstring())) return;
+        }
+        if (openingDifferentNote && !navigationRetry) {
+            PostMessageW(hWnd, kMsgOpenSearchResult, static_cast<WPARAM>(listIndex), 1);
+            return;
         }
         if (!CurrentOpenNoteMatchesSnapshot(item.noteSnapshotIdentity)) return;
         if (item.lineNumber >= 1) JumpToNoteLine(item.lineNumber);
         if (item.textStart != std::wstring::npos && item.textEnd > item.textStart) {
             SetNoteSearchResultMarker(item.textStart, item.textEnd);
         }
+        MarkSearchResultOpened(ctx, listIndex);
         return;
     }
 
     if (item.kind == SearchResultKind::PdfPage || item.kind == SearchResultKind::Annot) {
+        const bool openingDifferentPdf = !item.path.empty() && item.path.wstring() != CurrentLogicalPdfPath();
         if (!item.path.empty()) {
             if (!OpenSearchResultFileInCurrentFileList(owner, item.path.wstring())) return;
+        }
+        // Loading a different PDF can queue its initial fit, which otherwise
+        // resets the view to page 1 after this handler returns. Apply the
+        // search jump on the next message after that initialization settles.
+        if (openingDifferentPdf && !navigationRetry) {
+            PostMessageW(hWnd, kMsgOpenSearchResult, static_cast<WPARAM>(listIndex), 1);
+            return;
         }
         if (g_hPdfView) {
             if (item.kind == SearchResultKind::Annot && item.hasFocusPoint && item.pageIndex >= 0) {
@@ -2543,6 +2568,7 @@ static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex) {
                 }
             }
         }
+        MarkSearchResultOpened(ctx, listIndex);
         return;
     }
 }
@@ -2938,7 +2964,7 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             size_t idx = static_cast<size_t>(sel);
             if (sel >= 0 && idx < ctx->job.results.size() &&
                 ctx->job.results[idx].kind != SearchResultKind::Info) {
-                OpenSearchResult(hWnd, ctx, sel);
+                OpenSearchResult(hWnd, ctx, sel, lParam != 0);
             }
         }
         return 0;

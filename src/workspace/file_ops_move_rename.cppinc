@@ -1086,6 +1086,15 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
                                             isPdf ? L"PDF folder" : L"Note folder")) {
         return false;
     }
+    std::wstring workspaceLockError;
+    WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
+    if (!workspaceLock.acquired()) {
+        ShowSoftNotice(owner, IsEnglishUi()
+            ? L"Another shared workspace operation is in progress. Rename or move was not started."
+            : L"別の共有ワークスペース操作が進行中のため、名前変更または移動を開始しませんでした。",
+            SoftNoticeKind::Warning);
+        return false;
+    }
     std::wstring err;
 
     OperationNoteChange noteChange;

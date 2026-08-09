@@ -4,6 +4,7 @@
 #include "workspace/workspace_tree.h"
 #include "workspace/workspace_actions.h"
 #include "workspace/workspace_config_io.h"
+#include "workspace/workspace_write_lock.h"
 #include "ui/dialogs/dialogs.h"
 #include "core/app_core.h"
 #include "core/atomic_write.h"

@@ -1,16 +1,31 @@
 #pragma once
 
+#include <windows.h>
+
 #include <filesystem>
 #include <string>
 
-// Holds one local-process mutex for the active workspace.  A second writer
-// must not start using the same workspace because stage integration and file
-// replacement are intentionally local, crash-safe transactions rather than a
-// multi-writer merge protocol.
+// Registers the active workspace path for this window. Multiple windows may
+// register the same canonical workspace path; destructive shared operations
+// must use WorkspaceOperationLock below.
 [[nodiscard]] bool AcquireWorkspaceWriteLock(const std::filesystem::path& workspaceRoot,
                                              std::wstring* outError);
 
 void ReleaseWorkspaceWriteLock();
+
+class WorkspaceOperationLock {
+public:
+    WorkspaceOperationLock(const std::filesystem::path& workspaceRoot, std::wstring* outError);
+    ~WorkspaceOperationLock();
+
+    WorkspaceOperationLock(const WorkspaceOperationLock&) = delete;
+    WorkspaceOperationLock& operator=(const WorkspaceOperationLock&) = delete;
+
+    [[nodiscard]] bool acquired() const { return handle_ != nullptr; }
+
+private:
+    HANDLE handle_ = nullptr;
+};
 
 // An opened PDF, image, or note is exclusively owned by one application
 // process. Unlike the workspace lock, this permits independent workspaces

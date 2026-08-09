@@ -68,7 +68,7 @@ graph TD
 5. **Persistence & Atomic I/O (`src/core/atomic_write.h`, `src/clrop/`)**:
    - 注釈の `.clrop` (JSON) パース・シリアライズ。
    - `atomic_write::AtomicWriteUtf8` / `AtomicWriteBytes` による安全な置換処理。
-   - パスと書込先は各呼び出し元で検証する。リポジトリで変更するときはローカルの `AGENTS.md` の保存・パス安全要件を確認する。
+   - パスと書込先は各呼び出し元で検証し、失敗時に元ファイルを損なわないことを確認する。
 
 ## 3. スレッドと制御フロー (Threading & Control Flow)
 

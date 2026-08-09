@@ -1,6 +1,7 @@
 #include "theme/built_in_theme.h"
 #include "clrop/json.h"
 #include "core/text_encoding.h"
+#include "core/atomic_write.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -20,6 +21,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cwctype>
+#include <limits>
 
 #include "note/note_model.h"
 #include "note/note_parser.h"
@@ -29,12 +31,6 @@
 
 #include <windowsx.h>
 #include <algorithm>
-
-WNDPROC g_OriginalTabProc = nullptr;
-bool g_isDraggingTab = false;
-int g_draggedTabIndex = -1;
-
-LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 #include "pdf_preview_panel.h"
 #include "text_preview_panel.h"
@@ -65,6 +61,34 @@ public:
     }
 };
 
+// Keep the standalone viewer visually quiet and close to the main application's
+// conventional Win32 frame. DWM attributes are available only on newer Windows;
+// loading the API at runtime keeps older systems on their normal system frame.
+using DwmSetWindowAttributeFn = HRESULT (WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+constexpr DWORD kDwmWindowCornerPreference = 33;
+constexpr DWORD kDwmBorderColor = 34;
+constexpr DWORD kDwmCaptionColor = 35;
+constexpr DWORD kDwmTextColor = 36;
+constexpr DWORD kDwmDoNotRound = 1;
+
+void ApplyNeutralWindowFrame(HWND hwnd) {
+    HMODULE dwmapi = LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!dwmapi) return;
+    const auto setAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(
+        GetProcAddress(dwmapi, "DwmSetWindowAttribute"));
+    if (setAttribute) {
+        const DWORD cornerPreference = kDwmDoNotRound;
+        const COLORREF captionColor = RGB(248, 248, 248);
+        const COLORREF borderColor = RGB(210, 210, 210);
+        const COLORREF textColor = RGB(32, 32, 32);
+        setAttribute(hwnd, kDwmWindowCornerPreference, &cornerPreference, sizeof(cornerPreference));
+        setAttribute(hwnd, kDwmCaptionColor, &captionColor, sizeof(captionColor));
+        setAttribute(hwnd, kDwmBorderColor, &borderColor, sizeof(borderColor));
+        setAttribute(hwnd, kDwmTextColor, &textColor, sizeof(textColor));
+    }
+    FreeLibrary(dwmapi);
+}
+
 std::wstring UTF8ToWide(const std::string& s) {
     if (s.empty()) return std::wstring();
     int size = MultiByteToWideChar(CP_UTF8, 0, &s[0], (int)s.size(), NULL, 0);
@@ -83,18 +107,10 @@ std::string WideToUTF8(const std::wstring& w) {
 
 HWND g_hwndFileTree = NULL;
 HWND g_hwndTocTree = NULL;
+HWND g_hwndFileTreeLabel = NULL;
+HWND g_hwndTocTreeLabel = NULL;
 HWND g_hwndTabControl = NULL;
 HWND g_hwndEditControl = NULL;
-HWND g_hwndDecoratedButton = NULL;
-HWND g_hwndRawButton = NULL;
-HWND g_hwndHexButton = NULL;
-HWND g_hwndDiagramButton = NULL;
-HWND g_hwndOpenFileButton = NULL;
-HWND g_hwndOpenFolderButton = NULL;
-HWND g_hwndPdfRangeButton = NULL;
-HWND g_hwndCancelLoadButton = NULL;
-HWND g_hwndViewMenuButton = NULL;
-HWND g_hwndToggleLeftPaneButton = NULL;
 HWND g_hwndMain = NULL;
 HWND g_hwndPdfPanel = NULL;
 HWND g_hwndDetachedDiagram = NULL;
@@ -102,6 +118,7 @@ WNDPROC g_originalEditProc = nullptr;
 int g_splitX = 250;
 bool g_isDraggingSplitter = false;
 bool g_leftPaneVisible = true;
+bool g_persistSessionEnabled = false;
 bool g_isRichEdit = false;
 HMODULE g_richEditModule = NULL;
 
@@ -113,9 +130,12 @@ constexpr int kOpenFolderButtonId = 110;
 constexpr int kDiagramButtonId = 111;
 constexpr int kPdfRangeButtonId = 112;
 constexpr int kCancelLoadButtonId = 113;
-constexpr int kViewMenuButtonId = 114;
-constexpr int kPdfButtonId = 115;
 constexpr int kToggleLeftPaneButtonId = 116;
+constexpr int kPersistSessionMenuId = 117;
+constexpr int kPathMarkTabPersistentMenuId = 118;
+constexpr int kPathMarkTabTemporaryMenuId = 119;
+constexpr int kPathMarkFolderPersistentMenuId = 120;
+constexpr int kPathMarkFolderTemporaryMenuId = 121;
 constexpr int kDetachedDiagramZoomInButtonId = 201;
 constexpr int kDetachedDiagramZoomOutButtonId = 202;
 constexpr int kDetachedDiagramResetButtonId = 203;
@@ -199,6 +219,7 @@ struct OpenTab {
     ViewMode viewMode = ViewMode::Raw;
     std::vector<int> jpLines;
     int totalLines = 1;
+    bool persistent = false;
 };
 std::vector<OpenTab> g_tabs;
 std::vector<OpenTab> g_closedTabs;
@@ -207,6 +228,8 @@ struct PendingTabTransfer { ULONG_PTR token; std::wstring path; };
 std::vector<PendingTabTransfer> g_pendingTabTransfers;
 ULONG_PTR g_nextTabTransferToken = 1;
 int g_currentTab = -1;
+std::wstring g_sessionFolder;
+bool g_sessionFolderPersistent = false;
 textviewer::mermaid::MermaidSubsetPreview g_mermaidPreview;
 textviewer::mermaid::MermaidSubsetPreview g_detachedMermaidPreview;
 
@@ -230,6 +253,42 @@ bool MoveTabToWindow(HWND owner, int index, HWND target);
 void CollectOtherViewerWindows(HWND owner);
 bool IsTrustedReadonlyViewerWindow(HWND hwnd);
 void SendTabTransferAcknowledgement(HWND source, ULONG_PTR token);
+void RelayoutViewer();
+[[nodiscard]] bool SaveReadonlySession(std::wstring* error = nullptr);
+void RestoreReadonlySession(HWND owner);
+
+void BuildViewerMenu(HWND hwnd) {
+    HMENU bar = CreateMenu();
+    HMENU file = CreatePopupMenu();
+    HMENU view = CreatePopupMenu();
+    HMENU paths = CreatePopupMenu();
+    HMENU settings = CreatePopupMenu();
+    if (!bar || !file || !view || !paths || !settings) return;
+    AppendMenuW(file, MF_STRING, kOpenFileButtonId, L"ファイルを開く\tCtrl+O");
+    AppendMenuW(file, MF_STRING, kOpenFolderButtonId, L"フォルダーを開く");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, kTabMenuCloseAll, L"すべてのタブを閉じる");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, SC_CLOSE, L"終了");
+    AppendMenuW(view, MF_STRING, kToggleLeftPaneButtonId, L"一覧ペインを表示/非表示");
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(view, MF_STRING, kDecoratedButtonId, L"本文表示\tCtrl+1");
+    AppendMenuW(view, MF_STRING, kRawButtonId, L"Raw\tCtrl+2");
+    AppendMenuW(view, MF_STRING, kHexButtonId, L"Hex\tCtrl+3");
+    AppendMenuW(view, MF_STRING, kDiagramButtonId, L"図一覧\tCtrl+4");
+    AppendMenuW(view, MF_STRING, kPdfRangeButtonId, L"PDFページ範囲...");
+    AppendMenuW(paths, MF_STRING, kPathMarkTabPersistentMenuId, L"現在のタブを永続化");
+    AppendMenuW(paths, MF_STRING, kPathMarkTabTemporaryMenuId, L"現在のタブを一時扱い");
+    AppendMenuW(paths, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(paths, MF_STRING, kPathMarkFolderPersistentMenuId, L"現在のフォルダーを永続化");
+    AppendMenuW(paths, MF_STRING, kPathMarkFolderTemporaryMenuId, L"現在のフォルダーを一時扱い");
+    AppendMenuW(settings, MF_STRING, kPersistSessionMenuId, L"前回の閲覧状態を復元");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"ファイル");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"表示");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(paths), L"パス管理");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), L"設定");
+    SetMenu(hwnd, bar);
+}
 
 void ParseJapaneseLines(OpenTab& tab) {
     tab.jpLines.clear();
@@ -399,9 +458,28 @@ LRESULT CALLBACK TabProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     return 0;
                 }
             }
-            
-            if (g_draggingTab >= 0 && idx >= 0 && idx != g_draggingTab) {
-                SendMessageW(GetParent(hWnd), WM_APP + 2, g_draggingTab, idx);
+
+            if (g_draggingTab >= 0) {
+                POINT screen_point{x, y};
+                ClientToScreen(hWnd, &screen_point);
+                const HWND owner = GetParent(hWnd);
+                const HWND pointedWindow = WindowFromPoint(screen_point);
+                const HWND targetWindow = pointedWindow ? GetAncestor(pointedWindow, GA_ROOT) : nullptr;
+                wchar_t targetClass[64]{};
+                const bool targetIsViewer = targetWindow && targetWindow != owner &&
+                    GetClassNameW(targetWindow, targetClass,
+                                  static_cast<int>(sizeof(targetClass) / sizeof(targetClass[0]))) > 0 &&
+                    wcscmp(targetClass, L"PdfReadonlyViewerWindow") == 0 &&
+                    IsTrustedReadonlyViewerWindow(targetWindow);
+
+                if (targetIsViewer) {
+                    // MoveTabToWindow only closes the source after the recipient accepts the path.
+                    MoveTabToWindow(owner, g_draggingTab, targetWindow);
+                } else if (!targetWindow || targetWindow != owner) {
+                    MoveTabToNewWindow(owner, g_draggingTab);
+                } else if (idx >= 0 && idx != g_draggingTab) {
+                    SendMessageW(owner, WM_APP + 2, g_draggingTab, idx);
+                }
             }
             g_draggingTab = -1;
             break;
@@ -491,16 +569,11 @@ void BeginCancellableLoad(HWND owner, const std::wstring& status) {
     g_loadCancelRequested = false;
     g_loadInProgress = true;
     SetViewerStatus(owner, status);
-    if (g_hwndCancelLoadButton) {
-        EnableWindow(g_hwndCancelLoadButton, TRUE);
-        ShowWindow(g_hwndCancelLoadButton, SW_SHOW);
-    }
     UpdateWindow(owner);
 }
 
 void EndCancellableLoad() {
     g_loadInProgress = false;
-    if (g_hwndCancelLoadButton) ShowWindow(g_hwndCancelLoadButton, SW_HIDE);
 }
 
 std::wstring DecodeTextBytes(const std::vector<unsigned char>& bytes) {
@@ -1500,18 +1573,7 @@ LRESULT CALLBACK InlineDiagramEditProc(HWND hwnd, UINT message, WPARAM wParam, L
 }
 
 void UpdateModeButtons(ViewMode mode) {
-    if (g_hwndDecoratedButton) {
-        SendMessageW(g_hwndDecoratedButton, BM_SETCHECK, mode == ViewMode::Decorated ? BST_CHECKED : BST_UNCHECKED, 0);
-    }
-    if (g_hwndRawButton) {
-        SendMessageW(g_hwndRawButton, BM_SETCHECK, mode == ViewMode::Raw ? BST_CHECKED : BST_UNCHECKED, 0);
-    }
-    if (g_hwndHexButton) {
-        SendMessageW(g_hwndHexButton, BM_SETCHECK, mode == ViewMode::Hex ? BST_CHECKED : BST_UNCHECKED, 0);
-    }
-    if (g_hwndDiagramButton) {
-        SendMessageW(g_hwndDiagramButton, BM_SETCHECK, mode == ViewMode::Diagram ? BST_CHECKED : BST_UNCHECKED, 0);
-    }
+    (void)mode;
 }
 
 void ShowCurrentTab() {
@@ -1519,13 +1581,12 @@ void ShowCurrentTab() {
         ClearInlineDiagramPreviews();
         g_mermaidPreview.SetVisible(false);
         if (g_hwndPdfPanel) ShowWindow(g_hwndPdfPanel, SW_HIDE);
-        if (g_hwndPdfRangeButton) ShowWindow(g_hwndPdfRangeButton, SW_HIDE);
         if (g_hwndEditControl) ShowWindow(g_hwndEditControl, SW_SHOW);
         if (g_hwndHighlightBar) ShowWindow(g_hwndHighlightBar, SW_SHOW);
         ApplyEditorText(L"", {}, false);
         UpdateModeButtons(ViewMode::Raw);
-        if (g_hwndDiagramButton) EnableWindow(g_hwndDiagramButton, FALSE);
         TreeView_DeleteAllItems(g_hwndTocTree);
+        RelayoutViewer();
         return;
     }
 
@@ -1533,21 +1594,8 @@ void ShowCurrentTab() {
     textviewer::mermaid::DiagramModel mermaid_model;
     const bool has_renderable_mermaid = !tab.isBinary && IsMarkdownPath(tab.path) &&
         TryBuildRenderableMermaid(tab.rawText, &mermaid_model);
-    if (g_hwndDiagramButton) EnableWindow(g_hwndDiagramButton, has_renderable_mermaid ? TRUE : FALSE);
     const bool showDiagram = (tab.viewMode == ViewMode::Diagram && has_renderable_mermaid);
     const bool showPdf = (tab.viewMode == ViewMode::Pdf);
-    if (g_hwndPdfRangeButton) ShowWindow(g_hwndPdfRangeButton, showPdf ? SW_SHOW : SW_HIDE);
-    if (showPdf) {
-        if (g_hwndDecoratedButton) ShowWindow(g_hwndDecoratedButton, SW_HIDE);
-        if (g_hwndRawButton) ShowWindow(g_hwndRawButton, SW_HIDE);
-        if (g_hwndHexButton) ShowWindow(g_hwndHexButton, SW_HIDE);
-        if (g_hwndDiagramButton) ShowWindow(g_hwndDiagramButton, SW_HIDE);
-    } else {
-        if (g_hwndDecoratedButton) ShowWindow(g_hwndDecoratedButton, SW_SHOW);
-        if (g_hwndRawButton) ShowWindow(g_hwndRawButton, SW_SHOW);
-        if (g_hwndHexButton) ShowWindow(g_hwndHexButton, SW_SHOW);
-        if (g_hwndDiagramButton) ShowWindow(g_hwndDiagramButton, SW_SHOW);
-    }
     
     g_mermaidPreview.SetVisible(showDiagram);
     if (g_hwndPdfPanel) {
@@ -1610,6 +1658,7 @@ void ShowCurrentTab() {
         TreeView_DeleteAllItems(g_hwndTocTree);
     }
     if (g_hwndHighlightBar) InvalidateRect(g_hwndHighlightBar, NULL, TRUE);
+    RelayoutViewer();
 }
 
 void RebuildTabControl() {
@@ -1739,8 +1788,219 @@ bool IsSupportedLocalPath(const std::wstring& path) {
     const std::filesystem::path filePath(path);
     const std::filesystem::path root = filePath.root_path();
     if (!root.empty() && GetDriveTypeW(root.c_str()) == DRIVE_REMOTE) return false;
-    const DWORD attributes = GetFileAttributesW(path.c_str());
-    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    std::filesystem::path current = root;
+    for (auto it = filePath.relative_path().begin(); it != filePath.relative_path().end(); ++it) {
+        current /= *it;
+        const DWORD attributes = GetFileAttributesW(current.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return false;
+    }
+    return true;
+}
+
+struct StoredReadonlySession {
+    bool persistenceEnabled = false;
+    std::wstring folder;
+    bool folderPersistent = false;
+    std::vector<std::pair<std::wstring, bool>> tabs;
+    int selectedTab = -1;
+};
+
+std::filesystem::path ViewerExeDirectory() {
+    std::vector<wchar_t> buffer(512, L'\0');
+    for (;;) {
+        const DWORD size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (size == 0) return {};
+        if (size + 1 < buffer.size()) return std::filesystem::path(std::wstring(buffer.data(), size)).parent_path();
+        if (buffer.size() >= 32768) return {};
+        buffer.resize(buffer.size() * 2, L'\0');
+    }
+}
+
+std::string EscapeJsonString(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (unsigned char c : value) {
+        switch (c) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20) { const char hex[] = "0123456789abcdef"; out += "\\u00"; out += hex[c >> 4]; out += hex[c & 15]; }
+            else out += static_cast<char>(c);
+        }
+    }
+    return out;
+}
+
+size_t SkipJsonString(const std::string& text, size_t pos) {
+    if (pos >= text.size() || text[pos] != '"') return std::string::npos;
+    for (++pos; pos < text.size(); ++pos) {
+        if (text[pos] == '\\') { ++pos; continue; }
+        if (text[pos] == '"') return pos + 1;
+    }
+    return std::string::npos;
+}
+
+size_t SkipJsonValue(const std::string& text, size_t pos) {
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) ++pos;
+    if (pos >= text.size()) return std::string::npos;
+    if (text[pos] == '"') return SkipJsonString(text, pos);
+    if (text[pos] != '{' && text[pos] != '[') {
+        while (pos < text.size() && text[pos] != ',' && text[pos] != '}' && text[pos] != ']') ++pos;
+        return pos;
+    }
+    const char open = text[pos], close = open == '{' ? '}' : ']';
+    int depth = 0;
+    for (; pos < text.size(); ++pos) {
+        if (text[pos] == '"') { pos = SkipJsonString(text, pos); if (pos == std::string::npos) return pos; --pos; continue; }
+        if (text[pos] == open) ++depth;
+        else if (text[pos] == close && --depth == 0) return pos + 1;
+    }
+    return std::string::npos;
+}
+
+bool JsonObjectMember(const std::string& object, const char* key, std::string* value) {
+    if (!value) return false;
+    const std::string quoted = std::string("\"") + key + "\"";
+    size_t pos = 0;
+    while ((pos = object.find(quoted, pos)) != std::string::npos) {
+        const size_t afterKey = pos + quoted.size();
+        size_t colon = afterKey;
+        while (colon < object.size() && std::isspace(static_cast<unsigned char>(object[colon]))) ++colon;
+        if (colon >= object.size() || object[colon] != ':') { pos = afterKey; continue; }
+        ++colon;
+        while (colon < object.size() && std::isspace(static_cast<unsigned char>(object[colon]))) ++colon;
+        const size_t end = SkipJsonValue(object, colon);
+        if (end == std::string::npos) return false;
+        *value = object.substr(colon, end - colon);
+        return true;
+    }
+    return false;
+}
+
+bool JsonStringMember(const std::string& object, const char* key, std::wstring* value) {
+    std::string raw;
+    if (!value || !JsonObjectMember(object, key, &raw) || raw.size() < 2 || raw.front() != '"' || raw.back() != '"') return false;
+    std::string decoded;
+    for (size_t i = 1; i + 1 < raw.size(); ++i) {
+        if (raw[i] != '\\') { decoded += raw[i]; continue; }
+        if (++i + 1 >= raw.size()) return false;
+        switch (raw[i]) { case '"': decoded += '"'; break; case '\\': decoded += '\\'; break; case '/': decoded += '/'; break;
+        case 'b': decoded += '\b'; break; case 'f': decoded += '\f'; break; case 'n': decoded += '\n'; break; case 'r': decoded += '\r'; break; case 't': decoded += '\t'; break;
+        default: return false; }
+    }
+    *value = UTF8ToWide(decoded);
+    return true;
+}
+
+bool JsonBoolMember(const std::string& object, const char* key, bool* value) {
+    std::string raw;
+    if (!value || !JsonObjectMember(object, key, &raw)) return false;
+    if (raw == "true") { *value = true; return true; }
+    if (raw == "false") { *value = false; return true; }
+    return false;
+}
+
+bool JsonIntMember(const std::string& object, const char* key, int* value) {
+    std::string raw;
+    if (!value || !JsonObjectMember(object, key, &raw)) return false;
+    try { const long long parsed = std::stoll(raw); if (parsed < -1 || parsed > std::numeric_limits<int>::max()) return false; *value = static_cast<int>(parsed); return true; }
+    catch (...) { return false; }
+}
+
+bool ParseReadonlySession(const std::string& json, StoredReadonlySession* out) {
+    if (!out || json.size() > 4 * 1024 * 1024) return false;
+    StoredReadonlySession parsed;
+    std::string root = json, nested;
+    if (JsonObjectMember(json, "readonlyViewer", &nested)) root = nested;
+    if (!JsonBoolMember(root, "persistenceEnabled", &parsed.persistenceEnabled) &&
+        !JsonBoolMember(root, "enabled", &parsed.persistenceEnabled)) return false;
+    JsonIntMember(root, "selectedTab", &parsed.selectedTab);
+    std::string folder;
+    if (JsonObjectMember(root, "folder", &folder)) {
+        JsonStringMember(folder, "path", &parsed.folder);
+        JsonBoolMember(folder, "persistent", &parsed.folderPersistent);
+    }
+    std::string tabs;
+    if (JsonObjectMember(root, "tabs", &tabs) && tabs.size() >= 2 && tabs.front() == '[') {
+        for (size_t pos = 1; pos < tabs.size();) {
+            while (pos < tabs.size() && (std::isspace(static_cast<unsigned char>(tabs[pos])) || tabs[pos] == ',')) ++pos;
+            if (pos >= tabs.size() || tabs[pos] == ']') break;
+            const size_t end = SkipJsonValue(tabs, pos); if (end == std::string::npos) return false;
+            const std::string item = tabs.substr(pos, end - pos);
+            std::wstring path; bool persistent = false;
+            if (JsonStringMember(item, "path", &path) && JsonBoolMember(item, "persistent", &persistent)) parsed.tabs.emplace_back(std::move(path), persistent);
+            pos = end;
+        }
+    }
+    *out = std::move(parsed);
+    return true;
+}
+
+bool ReadReadonlySessionFile(const std::filesystem::path& path, StoredReadonlySession* out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    return ParseReadonlySession(text, out);
+}
+
+[[nodiscard]] bool SaveReadonlySession(std::wstring* error) {
+    const std::filesystem::path dir = ViewerExeDirectory();
+    if (dir.empty()) { if (error) *error = L"設定の保存先を決定できませんでした。"; return false; }
+    std::ostringstream json;
+    json << "{\n  \"format\": \"readonly_viewer_session_v1\",\n  \"persistenceEnabled\": "
+         << (g_persistSessionEnabled ? "true" : "false") << ",\n  \"folder\": {\"path\": \"";
+    if (g_persistSessionEnabled && g_sessionFolderPersistent) json << EscapeJsonString(WideToUTF8(g_sessionFolder));
+    json << "\", \"persistent\": " << (g_persistSessionEnabled && g_sessionFolderPersistent ? "true" : "false") << "},\n"
+         << "  \"selectedTab\": " << (g_persistSessionEnabled ? g_currentTab : -1) << ",\n  \"tabs\": [";
+    bool first = true;
+    if (g_persistSessionEnabled) for (const OpenTab& tab : g_tabs) if (tab.persistent) {
+        if (!first) json << ',';
+        first = false;
+        json << "\n    {\"path\": \"" << EscapeJsonString(WideToUTF8(tab.path)) << "\", \"persistent\": true}";
+    }
+    if (!first) json << '\n';
+    json << "  ]\n}\n";
+    return atomic_write::AtomicWriteUtf8(dir / L"readonly_setup.json", json.str(), dir, error);
+}
+
+void RestoreReadonlySession(HWND owner) {
+    const std::filesystem::path dir = ViewerExeDirectory();
+    if (dir.empty()) return;
+    StoredReadonlySession shared, privateState;
+    const bool hasShared = ReadReadonlySessionFile(dir / L"pdf_workspace_setup.json", &shared);
+    const bool hasPrivate = ReadReadonlySessionFile(dir / L"readonly_setup.json", &privateState);
+    // The dedicated file is the user's explicit choice.  It can disable restoration
+    // even when a previously distributed/shared setup still contains old paths.
+    if (hasPrivate ? !privateState.persistenceEnabled : (!hasShared || !shared.persistenceEnabled)) return;
+    g_persistSessionEnabled = true;
+    const StoredReadonlySession* folderState =
+        hasPrivate && privateState.folderPersistent ? &privateState : (hasShared ? &shared : nullptr);
+    if (folderState && folderState->folderPersistent && IsSupportedLocalPath(folderState->folder)) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(folderState->folder, ec) && !ec) {
+            g_sessionFolder = folderState->folder;
+            g_sessionFolderPersistent = true;
+            PopulateFileTree(folderState->folder);
+        }
+    }
+    std::vector<std::wstring> restored;
+    const auto restoreTabs = [&](const StoredReadonlySession& state) {
+        for (const auto& [path, persistent] : state.tabs) {
+            if (!persistent || !IsSupportedLocalPath(path)) continue;
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(path, ec) || ec) continue;
+            const std::wstring normalized = std::filesystem::absolute(path, ec).lexically_normal().wstring();
+            if (ec || std::find_if(restored.begin(), restored.end(), [&](const std::wstring& item) { return _wcsicmp(item.c_str(), normalized.c_str()) == 0; }) != restored.end()) continue;
+            if (OpenPathInTab(owner, normalized)) { g_tabs.back().persistent = true; restored.push_back(normalized); }
+        }
+    };
+    if (hasShared && shared.persistenceEnabled) restoreTabs(shared);
+    if (hasPrivate) restoreTabs(privateState);
+    const int selected = hasPrivate ? privateState.selectedTab : shared.selectedTab;
+    if (selected >= 0 && selected < static_cast<int>(g_tabs.size())) SelectTab(selected);
 }
 
 std::filesystem::path InitialDialogFolder() {
@@ -2144,6 +2404,8 @@ void PopulateReleaseDocuments(const std::vector<std::wstring>& paths) {
 }
 
 void PopulateFileTree(const std::wstring& directoryPath) {
+    g_sessionFolder = directoryPath;
+    if (!g_persistSessionEnabled) g_sessionFolderPersistent = false;
     TreeView_DeleteAllItems(g_hwndFileTree);
     g_filePaths.clear();
     
@@ -2174,150 +2436,36 @@ void PopulateFileTree(const std::wstring& directoryPath) {
 }
 
 
-LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_LBUTTONDOWN: {
-            TCHITTESTINFO hitinfo = {};
-            hitinfo.pt.x = GET_X_LPARAM(lParam);
-            hitinfo.pt.y = GET_Y_LPARAM(lParam);
-            int idx = TabCtrl_HitTest(hwnd, &hitinfo);
-            if (idx >= 0 && g_tabs.size() > 1) {
-                g_isDraggingTab = true;
-                g_draggedTabIndex = idx;
-                SetCapture(hwnd);
-            }
-            break;
-        }
-        case WM_MOUSEMOVE: {
-            if (g_isDraggingTab) {
-                // nothing
-            }
-            break;
-        }
-        case WM_LBUTTONUP: {
-            if (g_isDraggingTab) {
-                g_isDraggingTab = false;
-                ReleaseCapture();
-
-                POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-                ClientToScreen(hwnd, &pt);
-                HWND targetWnd = WindowFromPoint(pt);
-                
-                if (targetWnd != g_hwndMain && targetWnd != g_hwndTabControl && targetWnd != g_hwndEditControl && targetWnd != g_hwndTocTree && targetWnd != g_hwndPdfPanel && !IsChild(g_hwndMain, targetWnd)) {
-                    if (g_draggedTabIndex >= 0 && g_draggedTabIndex < (int)g_tabs.size()) {
-                        std::wstring path = g_tabs[g_draggedTabIndex].path;
-                        
-                        wchar_t exePath[MAX_PATH];
-                        GetModuleFileNameW(NULL, exePath, MAX_PATH);
-                        std::wstring cmdLine = L"\"" + std::wstring(exePath) + L"\" \"" + path + L"\"";
-                        
-                        STARTUPINFOW si = { sizeof(si) };
-                        PROCESS_INFORMATION pi = { 0 };
-                        if (CreateProcessW(NULL, &cmdLine[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-                            CloseHandle(pi.hProcess);
-                            CloseHandle(pi.hThread);
-                            
-                            g_tabs.erase(g_tabs.begin() + g_draggedTabIndex);
-                            TabCtrl_DeleteItem(g_hwndTabControl, g_draggedTabIndex);
-                            if (g_tabs.empty()) {
-                                PostMessageW(g_hwndMain, WM_CLOSE, 0, 0);
-                            } else {
-                                if (g_currentTab >= (int)g_tabs.size()) g_currentTab = (int)g_tabs.size() - 1;
-                                else if (g_currentTab > g_draggedTabIndex) g_currentTab--;
-                                else if (g_currentTab == g_draggedTabIndex) g_currentTab = std::max(0, g_currentTab - 1);
-                                
-                                TabCtrl_SetCurSel(g_hwndTabControl, g_currentTab);
-                                ShowCurrentTab();
-                            }
-                        }
-                    }
-                }
-            }
-            break;
-        }
-    }
-    if (g_OriginalTabProc) {
-        return CallWindowProc(g_OriginalTabProc, hwnd, msg, wParam, lParam);
-    }
-    return DefWindowProc(hwnd, msg, wParam, lParam);
-}
-
 void LayoutToolbarControls(HWND hWnd, int splitX, int rightPaneWidth, int height) {
-    const int tabHeight = 24;
-    const int modeBarHeight = 36;
-    const bool compactControls = rightPaneWidth < 840;
+    constexpr int commandBarHeight = 0;
+    constexpr int tabHeight = 28;
+    constexpr int modeBarHeight = 36;
+    constexpr int contentMargin = 5;
 
     if (g_hwndTabControl) {
-        MoveWindow(g_hwndTabControl, splitX + 5, 0, rightPaneWidth, tabHeight, TRUE);
-    }
-
-    struct ToolbarItem {
-        HWND hwnd;
-        std::wstring text;
-        int widthNormal;
-        int widthCompact;
-        bool showNormal;
-        bool showCompact;
-    };
-
-    const bool isPdfMode = (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size()) &&
-                            g_tabs[g_currentTab].viewMode == ViewMode::Pdf);
-
-    std::vector<ToolbarItem> items;
-    items.push_back({ g_hwndToggleLeftPaneButton,
-                      g_leftPaneVisible ? L"一覧を閉じる" : L"一覧を表示",
-                      112, 82, true, true });
-    items.push_back({ g_hwndOpenFileButton, compactControls ? L"開く" : L"ファイルを開く  Ctrl+O", 165, 70, true, true });
-    items.push_back({ g_hwndOpenFolderButton,
-                      compactControls ? L"フォルダ" : L"フォルダーを開く",
-                      135, 76, true, true });
-    items.push_back({ g_hwndViewMenuButton, L"表示 ▼", 76, 76, isPdfMode, true });
-
-    if (isPdfMode) {
-        items.push_back({ g_hwndPdfRangeButton, L"ページ範囲...", 150, 110, true, true });
-    } else {
-        items.push_back({ g_hwndDecoratedButton, compactControls ? L"本文" : L"本文表示  Ctrl+1", 130, 64, true, false });
-        items.push_back({ g_hwndRawButton, L"Raw  Ctrl+2", 95, 58, true, false });
-        items.push_back({ g_hwndHexButton, L"Hex  Ctrl+3", 95, 58, true, false });
-        items.push_back({ g_hwndDiagramButton, compactControls ? L"図" : L"図一覧  Ctrl+4", 110, 58, true, false });
-    }
-
-    if (isPdfMode) {
-        if (g_hwndDecoratedButton) ShowWindow(g_hwndDecoratedButton, SW_HIDE);
-        if (g_hwndRawButton) ShowWindow(g_hwndRawButton, SW_HIDE);
-        if (g_hwndHexButton) ShowWindow(g_hwndHexButton, SW_HIDE);
-        if (g_hwndDiagramButton) ShowWindow(g_hwndDiagramButton, SW_HIDE);
-    } else {
-        if (g_hwndPdfRangeButton) ShowWindow(g_hwndPdfRangeButton, SW_HIDE);
-    }
-
-    int currentX = splitX + 10;
-    for (const auto& item : items) {
-        if (!item.hwnd) continue;
-        const bool visible = compactControls ? item.showCompact : item.showNormal;
-        if (visible) {
-            if (!item.text.empty()) SetWindowTextW(item.hwnd, item.text.c_str());
-            const int itemWidth = compactControls ? item.widthCompact : item.widthNormal;
-            ShowWindow(item.hwnd, SW_SHOW);
-            MoveWindow(item.hwnd, currentX, tabHeight + 5, itemWidth, 26, TRUE);
-            currentX += itemWidth + 8;
-        } else {
-            ShowWindow(item.hwnd, SW_HIDE);
-        }
-    }
-
-    if (g_hwndCancelLoadButton) {
-        MoveWindow(g_hwndCancelLoadButton, splitX + 10, tabHeight + 5, compactControls ? 100 : 120, 26, TRUE);
+        MoveWindow(g_hwndTabControl, splitX + contentMargin, commandBarHeight,
+                   std::max(0, rightPaneWidth - contentMargin), tabHeight, TRUE);
     }
 
     int highlightBarWidth = 12;
-    int editWidth = rightPaneWidth - highlightBarWidth;
-    const int contentTop = tabHeight + modeBarHeight;
-    if (g_hwndEditControl) MoveWindow(g_hwndEditControl, splitX + 5, contentTop, editWidth, height - contentTop, TRUE);
-    if (g_hwndHighlightBar) MoveWindow(g_hwndHighlightBar, splitX + 5 + editWidth, contentTop, highlightBarWidth, height - contentTop, TRUE);
-    if (g_hwndPdfPanel) MoveWindow(g_hwndPdfPanel, splitX + 5, contentTop, rightPaneWidth, height - contentTop, TRUE);
-    g_mermaidPreview.SetBounds(splitX + 5, contentTop, rightPaneWidth, height - contentTop);
+    int editWidth = std::max(0, rightPaneWidth - contentMargin - highlightBarWidth);
+    const int contentTop = commandBarHeight + tabHeight + modeBarHeight;
+    const int contentHeight = std::max(0, height - contentTop);
+    if (g_hwndEditControl) MoveWindow(g_hwndEditControl, splitX + contentMargin, contentTop, editWidth, contentHeight, TRUE);
+    if (g_hwndHighlightBar) MoveWindow(g_hwndHighlightBar, splitX + contentMargin + editWidth, contentTop, highlightBarWidth, contentHeight, TRUE);
+    if (g_hwndPdfPanel) MoveWindow(g_hwndPdfPanel, splitX + contentMargin, contentTop,
+                                   std::max(0, rightPaneWidth - contentMargin), contentHeight, TRUE);
+    g_mermaidPreview.SetBounds(splitX + contentMargin, contentTop,
+                              std::max(0, rightPaneWidth - contentMargin), contentHeight);
     UpdateInlineDiagramBounds();
+}
+
+void RelayoutViewer() {
+    if (!g_hwndMain) return;
+    RECT client{};
+    GetClientRect(g_hwndMain, &client);
+    SendMessageW(g_hwndMain, WM_SIZE, SIZE_RESTORED,
+                 MAKELPARAM(client.right - client.left, client.bottom - client.top));
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -2325,6 +2473,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case WM_CREATE: {
             HINSTANCE hInst = ((LPCREATESTRUCT)lParam)->hInstance;
             g_hwndMain = hWnd;
+            ApplyNeutralWindowFrame(hWnd);
+            BuildViewerMenu(hWnd);
             g_hwndPdfPanel = readonly_viewer::CreatePdfPreviewPanel(hWnd, hInst, 1002);
             if (g_hwndPdfPanel) ShowWindow(g_hwndPdfPanel, SW_HIDE);
             g_hwndFileTree = CreateWindowExW(0, WC_TREEVIEWW, L"",
@@ -2333,11 +2483,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             g_hwndTocTree = CreateWindowExW(0, WC_TREEVIEWW, L"",
                 WS_CHILD | WS_VISIBLE | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS,
                 0, 0, 0, 0, hWnd, (HMENU)102, hInst, NULL);
+            g_hwndFileTreeLabel = CreateWindowExW(0, L"STATIC", L"ファイル",
+                WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+                0, 0, 0, 0, hWnd, nullptr, hInst, nullptr);
+            g_hwndTocTreeLabel = CreateWindowExW(0, L"STATIC", L"目次",
+                WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+                0, 0, 0, 0, hWnd, nullptr, hInst, nullptr);
             g_hwndTabControl = CreateWindowExW(0, WC_TABCONTROLW, L"",
                 WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED | TCS_FOCUSNEVER | TCS_SCROLLOPPOSITE,
                 0, 0, 0, 0, hWnd, (HMENU)103, hInst, NULL);
-
-        g_OriginalTabProc = (WNDPROC)SetWindowLongPtrW(g_hwndTabControl, GWLP_WNDPROC, (LONG_PTR)TabSubclassProc);
             g_originalTabProc = (WNDPROC)SetWindowLongPtrW(g_hwndTabControl, GWLP_WNDPROC, (LONG_PTR)TabProc);
             g_richEditModule = LoadLibraryExW(L"Msftedit.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
             const wchar_t* editClass = g_richEditModule ? MSFTEDIT_CLASS : L"EDIT";
@@ -2358,43 +2512,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             g_hwndHighlightBar = CreateWindowExW(0, L"HighlightBarClass", L"",
                 WS_CHILD | WS_VISIBLE,
                 0, 0, 0, 0, hWnd, (HMENU)105, hInst, NULL);
-            g_hwndOpenFileButton = CreateWindowExW(0, L"BUTTON", L"ファイルを開く  Ctrl+O",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                0, 0, 0, 0, hWnd, (HMENU)kOpenFileButtonId, hInst, NULL);
-            g_hwndOpenFolderButton = CreateWindowExW(0, L"BUTTON", L"フォルダーを開く",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                0, 0, 0, 0, hWnd, (HMENU)kOpenFolderButtonId, hInst, NULL);
-            g_hwndDecoratedButton = CreateWindowExW(0, L"BUTTON", L"本文表示  Ctrl+1",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | WS_GROUP,
-                0, 0, 0, 0, hWnd, (HMENU)kDecoratedButtonId, hInst, NULL);
-            g_hwndRawButton = CreateWindowExW(0, L"BUTTON", L"Raw  Ctrl+2",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                0, 0, 0, 0, hWnd, (HMENU)kRawButtonId, hInst, NULL);
-            g_hwndHexButton = CreateWindowExW(0, L"BUTTON", L"Hex  Ctrl+3",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                0, 0, 0, 0, hWnd, (HMENU)kHexButtonId, hInst, NULL);
-            g_hwndDiagramButton = CreateWindowExW(0, L"BUTTON", L"図一覧  Ctrl+4",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                0, 0, 0, 0, hWnd, (HMENU)kDiagramButtonId, hInst, NULL);
-            g_hwndPdfRangeButton = CreateWindowExW(0, L"BUTTON", L"ページ範囲...",
-                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-                0, 0, 0, 0, hWnd, (HMENU)kPdfRangeButtonId, hInst, NULL);
-            g_hwndCancelLoadButton = CreateWindowExW(0, L"BUTTON", L"読み込み中止",
-                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-                0, 0, 0, 0, hWnd, (HMENU)kCancelLoadButtonId, hInst, NULL);
-            g_hwndViewMenuButton = CreateWindowExW(0, L"BUTTON", L"表示 ▼",
-                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-                0, 0, 0, 0, hWnd, (HMENU)kViewMenuButtonId, hInst, NULL);
-            g_hwndToggleLeftPaneButton = CreateWindowExW(0, L"BUTTON", L"一覧を閉じる",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                0, 0, 0, 0, hWnd, (HMENU)kToggleLeftPaneButtonId, hInst, NULL);
-            g_mermaidPreview.Create(hWnd, hInst, 112);
+            if (!g_mermaidPreview.Create(hWnd, hInst, 112)) {
+                SetViewerStatus(hWnd, L"図表プレビューを初期化できませんでした。");
+            }
             g_mermaidPreview.SetDetachedWindowTarget(hWnd);
             UpdateModeButtons(ViewMode::Raw);
             DragAcceptFiles(hWnd, TRUE);
             return 0;
         }
         case WM_SIZE: {
+            constexpr int commandBarHeight = 0;
+            constexpr int paneLabelHeight = 24;
             int width = LOWORD(lParam);
             int height = HIWORD(lParam);
             int splitX = g_leftPaneVisible ? g_splitX : 0;
@@ -2403,17 +2531,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 if (splitX < 50) splitX = 50;
             }
 
-            int leftPaneHeight = height;
+            int leftPaneHeight = std::max(0, height - commandBarHeight);
             int rightPaneWidth = g_leftPaneVisible ? width - splitX - 5 : width;
 
-            int fileTreeHeight = leftPaneHeight / 2;
-            int tocTreeHeight = leftPaneHeight - fileTreeHeight;
+            int availableTreeHeight = std::max(0, leftPaneHeight - paneLabelHeight * 2);
+            int fileTreeHeight = availableTreeHeight / 2;
+            int tocTreeHeight = availableTreeHeight - fileTreeHeight;
 
             if (g_hwndFileTree) ShowWindow(g_hwndFileTree, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
             if (g_hwndTocTree) ShowWindow(g_hwndTocTree, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
+            if (g_hwndFileTreeLabel) ShowWindow(g_hwndFileTreeLabel, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
+            if (g_hwndTocTreeLabel) ShowWindow(g_hwndTocTreeLabel, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
             if (g_leftPaneVisible) {
-                if (g_hwndFileTree) MoveWindow(g_hwndFileTree, 0, 0, splitX, fileTreeHeight, TRUE);
-                if (g_hwndTocTree) MoveWindow(g_hwndTocTree, 0, fileTreeHeight, splitX, tocTreeHeight, TRUE);
+                if (g_hwndFileTreeLabel) MoveWindow(g_hwndFileTreeLabel, 8, commandBarHeight, splitX - 8, paneLabelHeight, TRUE);
+                if (g_hwndFileTree) MoveWindow(g_hwndFileTree, 0, commandBarHeight + paneLabelHeight, splitX, fileTreeHeight, TRUE);
+                if (g_hwndTocTreeLabel) MoveWindow(g_hwndTocTreeLabel, 8, commandBarHeight + paneLabelHeight + fileTreeHeight,
+                                                    splitX - 8, paneLabelHeight, TRUE);
+                if (g_hwndTocTree) MoveWindow(g_hwndTocTree, 0, commandBarHeight + paneLabelHeight * 2 + fileTreeHeight,
+                                               splitX, tocTreeHeight, TRUE);
             }
 
             LayoutToolbarControls(hWnd, g_leftPaneVisible ? splitX : -5, rightPaneWidth, height);
@@ -2429,6 +2564,44 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         SendMessageW(hWnd, WM_SIZE, 0,
                                      MAKELPARAM(client.right - client.left, client.bottom - client.top));
                     }
+                    return 0;
+                case kPersistSessionMenuId: {
+                    g_persistSessionEnabled = !g_persistSessionEnabled;
+                    HMENU menu = GetMenu(hWnd);
+                    HMENU settings = menu ? GetSubMenu(menu, 3) : nullptr;
+                    if (settings) CheckMenuItem(settings, kPersistSessionMenuId,
+                                                MF_BYCOMMAND | (g_persistSessionEnabled ? MF_CHECKED : MF_UNCHECKED));
+                    if (!g_persistSessionEnabled) {
+                        g_sessionFolderPersistent = false;
+                        for (OpenTab& tab : g_tabs) tab.persistent = false;
+                        std::wstring error;
+                        if (!SaveReadonlySession(&error)) SetViewerStatus(hWnd, L"閲覧状態を無効化しましたが、設定を保存できませんでした。");
+                    }
+                    DrawMenuBar(hWnd);
+                    SetViewerStatus(hWnd, g_persistSessionEnabled ? L"閲覧状態の復元を有効にしました。パス管理から復元対象を選択してください。" : L"閲覧状態の復元を無効にしました。");
+                    return 0;
+                }
+                case kPathMarkTabPersistentMenuId:
+                    if (!g_persistSessionEnabled || g_currentTab < 0 || g_currentTab >= static_cast<int>(g_tabs.size())) {
+                        SetViewerStatus(hWnd, L"先に設定で閲覧状態の復元を有効にしてください。"); return 0;
+                    }
+                    g_tabs[g_currentTab].persistent = true;
+                    SetViewerStatus(hWnd, L"現在のタブを永続化対象にしました。");
+                    return 0;
+                case kPathMarkTabTemporaryMenuId:
+                    if (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size())) g_tabs[g_currentTab].persistent = false;
+                    SetViewerStatus(hWnd, L"現在のタブを一時扱いにしました。");
+                    return 0;
+                case kPathMarkFolderPersistentMenuId:
+                    if (!g_persistSessionEnabled || g_sessionFolder.empty()) {
+                        SetViewerStatus(hWnd, L"先に設定で閲覧状態の復元を有効にし、ローカルフォルダーを開いてください。"); return 0;
+                    }
+                    g_sessionFolderPersistent = true;
+                    SetViewerStatus(hWnd, L"現在のフォルダーを永続化対象にしました。");
+                    return 0;
+                case kPathMarkFolderTemporaryMenuId:
+                    g_sessionFolderPersistent = false;
+                    SetViewerStatus(hWnd, L"現在のフォルダーを一時扱いにしました。");
                     return 0;
                 case kOpenFileButtonId: {
                     const std::vector<std::wstring> paths = PromptForLocalPaths(hWnd, false);
@@ -2472,37 +2645,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     g_tabs[g_currentTab].viewMode = ViewMode::Diagram;
                     ShowCurrentTab();
                     return 0;
-                case kPdfButtonId:
-                    if (g_currentTab < 0 || g_currentTab >= static_cast<int>(g_tabs.size()) ||
-                        !g_tabs[g_currentTab].isPdf) return 0;
-                    g_tabs[g_currentTab].viewMode = ViewMode::Pdf;
-                    ShowCurrentTab();
-                    return 0;
                 case kPdfRangeButtonId:
                     if (g_hwndPdfPanel) readonly_viewer::PdfPreviewPanel_ChoosePageRange(g_hwndPdfPanel);
                     return 0;
                 case kCancelLoadButtonId:
                     if (g_loadInProgress) {
                         g_loadCancelRequested = true;
-                        EnableWindow(g_hwndCancelLoadButton, FALSE);
                     }
                     return 0;
-                case kViewMenuButtonId: {
-                    HMENU menu = CreatePopupMenu();
-                    if (!menu) return 0;
-                    AppendMenuW(menu, MF_STRING, kDecoratedButtonId, L"本文表示\tCtrl+1");
-                    AppendMenuW(menu, MF_STRING, kRawButtonId, L"Raw\tCtrl+2");
-                    AppendMenuW(menu, MF_STRING, kHexButtonId, L"Hex\tCtrl+3");
-                    AppendMenuW(menu, MF_STRING | (g_hwndDiagramButton && IsWindowEnabled(g_hwndDiagramButton) ? 0 : MF_GRAYED), kDiagramButtonId, L"図一覧\tCtrl+4");
-                    const bool currentTabIsPdf = g_currentTab >= 0 &&
-                        g_currentTab < static_cast<int>(g_tabs.size()) && g_tabs[g_currentTab].isPdf;
-                    AppendMenuW(menu, MF_STRING | (currentTabIsPdf ? 0 : MF_GRAYED), kPdfButtonId, L"PDF表示");
-                    RECT rect{}; GetWindowRect(g_hwndViewMenuButton, &rect);
-                    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN, rect.left, rect.bottom, 0, hWnd, nullptr);
-                    DestroyMenu(menu);
-                    if (command) SendMessageW(hWnd, WM_COMMAND, command, 0);
-                    return 0;
-                }
             }
             break;
         }
@@ -2702,6 +2852,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             DestroyWindow(hWnd);
             return 0;
         case WM_DESTROY:
+            if (g_persistSessionEnabled) {
+                std::wstring ignored;
+                const bool saved = SaveReadonlySession(&ignored);
+                (void)saved;
+            }
             DragAcceptFiles(hWnd, FALSE);
             g_hwndMain = nullptr;
             PostQuitMessage(0);
@@ -2759,6 +2914,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::wstring startup_path;
     std::wstring startup_folder;
+    int startupPageIndex = -1;
+    double startupPdfYPt = 0.0;
+    bool hasStartupPdfY = false;
     HWND transferSource = nullptr;
     ULONG_PTR transferToken = 0;
     if (argv) {
@@ -2774,8 +2932,27 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
             } else if (argument == L"--transfer-token" && index + 1 < argc) {
                 try { transferToken = static_cast<ULONG_PTR>(std::stoull(argv[++index])); }
                 catch (...) { transferToken = 0; }
-            } else if (argument == L"--page" || argument == L"--pdf-y-pt" || argument == L"--annotations" ||
-                       argument == L"--theme" || argument == L"--theme-id" || argument == L"--theme-inline") {
+            } else if (argument == L"--page" && index + 1 < argc) {
+                try {
+                    const std::wstring value = argv[++index] ? argv[index] : L"";
+                    size_t parsed = 0;
+                    const int oneBased = std::stoi(value, &parsed);
+                    if (parsed == value.size() && oneBased > 0) startupPageIndex = oneBased - 1;
+                } catch (...) {
+                }
+            } else if (argument == L"--pdf-y-pt" && index + 1 < argc) {
+                try {
+                    const std::wstring value = argv[++index] ? argv[index] : L"";
+                    size_t parsed = 0;
+                    const double yPt = std::stod(value, &parsed);
+                    if (parsed == value.size() && std::isfinite(yPt)) {
+                        startupPdfYPt = std::clamp(yPt, -50000.0, 50000.0);
+                        hasStartupPdfY = true;
+                    }
+                } catch (...) {
+                }
+            } else if (argument == L"--annotations" || argument == L"--theme" ||
+                       argument == L"--theme-id" || argument == L"--theme-inline") {
                 if (index + 1 < argc) ++index;
             } else if (argument.rfind(L"--", 0) != 0 && startup_path.empty()) {
                 startup_path = argument;
@@ -2796,10 +2973,25 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
         PopulateFileTree(dirPath);
 
         const bool opened = OpenPathInTab(hwnd, startup_path);
+        if (opened && g_hwndPdfPanel && startupPageIndex >= 0) {
+            readonly_viewer::PdfPreviewPanel_JumpToPdfLocation(g_hwndPdfPanel,
+                                                                startupPageIndex,
+                                                                startupPdfYPt,
+                                                                hasStartupPdfY);
+        }
         if (opened && transferSource && transferToken != 0) {
             SendTabTransferAcknowledgement(transferSource, transferToken);
         }
     } else {
+        RestoreReadonlySession(hwnd);
+        HMENU menu = GetMenu(hwnd);
+        HMENU settings = menu ? GetSubMenu(menu, 3) : nullptr;
+        if (settings) CheckMenuItem(settings, kPersistSessionMenuId,
+                                    MF_BYCOMMAND | (g_persistSessionEnabled ? MF_CHECKED : MF_UNCHECKED));
+        if (!g_tabs.empty() || !g_sessionFolder.empty()) {
+            // A restored session already chose the folder/tab state; never replace it
+            // with a release-directory scan.
+        } else {
         wchar_t exePathBuf[MAX_PATH]{};
         const DWORD exePathLength = GetModuleFileNameW(NULL, exePathBuf, MAX_PATH);
         if (exePathLength == 0 || exePathLength >= MAX_PATH) {
@@ -2844,6 +3036,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
                 PopulateReleaseDocuments({});
             }
         }
+        }
     }
     if (argv) {
         LocalFree(argv);
@@ -2856,10 +3049,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
     while (GetMessage(&msg, NULL, 0, 0)) {
         if (g_hwndEditControl && (msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST)) {
             bool isTabTarget = false;
-            if (msg.hwnd == g_hwndTabControl || msg.hwnd == g_hwndFileTree || msg.hwnd == g_hwndTocTree || 
-                msg.hwnd == g_hwndDecoratedButton || msg.hwnd == g_hwndRawButton || 
-                msg.hwnd == g_hwndHexButton || msg.hwnd == g_hwndDiagramButton ||
-                msg.hwnd == g_hwndOpenFileButton || msg.hwnd == g_hwndOpenFolderButton) {
+            if (msg.hwnd == g_hwndTabControl || msg.hwnd == g_hwndFileTree || msg.hwnd == g_hwndTocTree) {
                 isTabTarget = true;
             }
             if (msg.message == WM_KEYDOWN && msg.wParam == VK_TAB) {

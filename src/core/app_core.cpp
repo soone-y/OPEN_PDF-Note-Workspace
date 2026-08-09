@@ -1,6 +1,7 @@
 #include <richedit.h>
 // file: core/app_core.cpp
 #include "core/app_core.h"
+#include "workspace/workspace_write_lock.h"
 #include "core/text_encoding.h"
 #include "app/startup_instance.h"
 #include "core/font_list.h"
@@ -4650,8 +4651,37 @@ LRESULT ThemeCtlColorPanel(HWND ctl, HDC hdc) {
     return reinterpret_cast<LRESULT>(br);
 }
 
+namespace {
+
+// DWM corner preferences were introduced after older supported Windows
+// releases. Resolve the API at runtime so unsupported systems retain their
+// native frame unchanged.
+using DwmSetWindowAttributeFn = HRESULT (WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+constexpr DWORD kDwmWindowCornerPreference = 33;
+constexpr DWORD kDwmDoNotRound = 1;
+
+static DwmSetWindowAttributeFn ResolveDwmSetWindowAttribute() {
+    static const DwmSetWindowAttributeFn fn = []() -> DwmSetWindowAttributeFn {
+        HMODULE module = LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!module) return nullptr;
+        return reinterpret_cast<DwmSetWindowAttributeFn>(GetProcAddress(module, "DwmSetWindowAttribute"));
+    }();
+    return fn;
+}
+
+static void DisableRoundedTopLevelWindowCorners(HWND hWnd) {
+    if (!hWnd || (GetWindowLongPtrW(hWnd, GWL_STYLE) & WS_CHILD) != 0) return;
+    const auto setAttribute = ResolveDwmSetWindowAttribute();
+    if (!setAttribute) return;
+    const DWORD preference = kDwmDoNotRound;
+    if (FAILED(setAttribute(hWnd, kDwmWindowCornerPreference, &preference, sizeof(preference)))) return;
+}
+
+} // namespace
+
 void ApplyThemeToDialog(HWND hWnd) {
     if (!hWnd) return;
+    DisableRoundedTopLevelWindowCorners(hWnd);
     if (g_config.ownerDrawUi) {
         EnableOwnerDrawButtonsRecursive(hWnd);
     } else {
@@ -6904,6 +6934,9 @@ std::optional<WorkspaceConfig> LoadWorkspaceConfigFromFile(const std::filesystem
 }
 
 bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const WorkspaceConfig& cfg) {
+    std::wstring workspaceLockError;
+    WorkspaceOperationLock workspaceLock(path.parent_path(), &workspaceLockError);
+    if (!workspaceLock.acquired()) return false;
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) return false;

@@ -16,6 +16,9 @@ inline bool IsKnownTopLevelField(const std::string& key) {
     return key == "workspaceRoot" ||
            key == "workspaceRootMode" ||
            key == "tempExternalLectureDirs" ||
+           // Optional read-only viewer state. Keep it known so main-app setup
+           // updates preserve a shared setup supplied by the user.
+           key == "readonlyViewer" ||
            key == "annotToolModeOrder" ||
            key == "annotToolModeState" ||
            // Legacy setup keys are known so old files can be migrated intentionally.

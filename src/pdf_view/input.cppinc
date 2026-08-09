@@ -1081,19 +1081,51 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
             if (msg == WM_POINTERDOWN) {
-                // A second finger is commonly used to steady a tablet.  Do
-                // not let it reset the drag anchor of the finger already
-                // scrolling the document.
-                if (g_pdf.panning) return 0;
-                SetCapture(hwnd);
-                g_pdf.panning = true;
-                g_pdf.touchPanPointerId = pointerId;
-                g_pdf.panAnchor = pt;
-                g_pdf.panStartY = g_pdf.scrollY;
-                g_pdf.panStartX = g_pdf.scrollX;
-                g_pdf.panAxisLock = PanAxisLock::None;
+                if (!g_pdf.panning) {
+                    SetCapture(hwnd);
+                    g_pdf.panning = true;
+                    g_pdf.touchPanPointerId = pointerId;
+                    g_pdf.touchPanCurrent = pt;
+                    g_pdf.panAnchor = pt;
+                    g_pdf.panStartY = g_pdf.scrollY;
+                    g_pdf.panStartX = g_pdf.scrollX;
+                    g_pdf.panAxisLock = PanAxisLock::None;
+                } else if (!g_pdf.touchPinching && pointerId != g_pdf.touchPanPointerId) {
+                    // Switching from one finger to two fingers turns the
+                    // same direct manipulation into pinch zoom.  The initial
+                    // scale stays fixed for this gesture, preventing repeated
+                    // rounding from making a pinch drift.
+                    const double dx = static_cast<double>(pt.x - g_pdf.touchPanCurrent.x);
+                    const double dy = static_cast<double>(pt.y - g_pdf.touchPanCurrent.y);
+                    const double distance = std::hypot(dx, dy);
+                    if (distance >= 8.0) {
+                        g_pdf.touchPinching = true;
+                        g_pdf.touchPinchPointerId = pointerId;
+                        g_pdf.touchPinchCurrent = pt;
+                        g_pdf.touchPinchStartDistance = distance;
+                        g_pdf.touchPinchStartScale = ZoomInputBaseScale();
+                        g_pdf.panAxisLock = PanAxisLock::None;
+                    }
+                }
             } else if (msg == WM_POINTERUPDATE) {
-                if (g_pdf.panning && pointerId == g_pdf.touchPanPointerId) {
+                if (g_pdf.touchPinching &&
+                    (pointerId == g_pdf.touchPanPointerId || pointerId == g_pdf.touchPinchPointerId)) {
+                    if (pointerId == g_pdf.touchPanPointerId) {
+                        g_pdf.touchPanCurrent = pt;
+                    } else {
+                        g_pdf.touchPinchCurrent = pt;
+                    }
+                    const double dx = static_cast<double>(g_pdf.touchPinchCurrent.x - g_pdf.touchPanCurrent.x);
+                    const double dy = static_cast<double>(g_pdf.touchPinchCurrent.y - g_pdf.touchPanCurrent.y);
+                    const double distance = std::hypot(dx, dy);
+                    if (g_pdf.touchPinchStartDistance > 0.0) {
+                        POINT focus{(g_pdf.touchPanCurrent.x + g_pdf.touchPinchCurrent.x) / 2,
+                                    (g_pdf.touchPanCurrent.y + g_pdf.touchPinchCurrent.y) / 2};
+                        SetPdfScale(hwnd, g_pdf.touchPinchStartScale * distance / g_pdf.touchPinchStartDistance,
+                                    focus);
+                    }
+                } else if (g_pdf.panning && pointerId == g_pdf.touchPanPointerId) {
+                    g_pdf.touchPanCurrent = pt;
                     int rawDx = pt.x - g_pdf.panAnchor.x;
                     int rawDy = pt.y - g_pdf.panAnchor.y;
                     int dx = rawDx;
@@ -1117,7 +1149,22 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             } else if (msg == WM_POINTERUP) {
-                if (g_pdf.panning && pointerId == g_pdf.touchPanPointerId) {
+                if (g_pdf.touchPinching &&
+                    (pointerId == g_pdf.touchPanPointerId || pointerId == g_pdf.touchPinchPointerId)) {
+                    // Continue naturally as a one-finger pan when either
+                    // contact remains on the screen.
+                    if (pointerId == g_pdf.touchPanPointerId) {
+                        g_pdf.touchPanPointerId = g_pdf.touchPinchPointerId;
+                        g_pdf.touchPanCurrent = g_pdf.touchPinchCurrent;
+                    }
+                    g_pdf.touchPinching = false;
+                    g_pdf.touchPinchPointerId = 0;
+                    g_pdf.touchPinchStartDistance = 0.0;
+                    g_pdf.panAnchor = g_pdf.touchPanCurrent;
+                    g_pdf.panStartY = g_pdf.scrollY;
+                    g_pdf.panStartX = g_pdf.scrollX;
+                    g_pdf.panAxisLock = PanAxisLock::None;
+                } else if (g_pdf.panning && pointerId == g_pdf.touchPanPointerId) {
                     g_pdf.panning = false;
                     g_pdf.touchPanPointerId = 0;
                     g_pdf.panAxisLock = PanAxisLock::None;
@@ -1597,6 +1644,11 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (g_pdf.panning) {
             g_pdf.panning = false;
             g_pdf.touchPanPointerId = 0;
+            g_pdf.touchPanCurrent = {};
+            g_pdf.touchPinchPointerId = 0;
+            g_pdf.touchPinchCurrent = {};
+            g_pdf.touchPinching = false;
+            g_pdf.touchPinchStartDistance = 0.0;
             g_pdf.panAxisLock = PanAxisLock::None;
         }
         if (g_pdf.pendingTextBoxHit && !g_pdf.movingAnnot) {

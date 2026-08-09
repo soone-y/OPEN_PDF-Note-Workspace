@@ -10,6 +10,7 @@
 #include <fpdf_edit.h>
 #include "app/main_escape_backup.h"
 #include "workspace/workspace_actions.h"
+#include "workspace/workspace_write_lock.h"
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -25,7 +26,9 @@
 // NOTE: Included by workspace_controller.cppinc. This fragment owns user-triggered
 // workspace mutations such as create/import/open helpers.
 void ShowNewLectureDialog(HWND owner) {
-    SaveNoteIfDirty(owner);
+    // Creating and selecting a new lecture clears the current session state.
+    // Do not continue if preserving the active note failed.
+    if (!SaveNoteIfDirty(owner)) return;
     std::wstring name;
     if (!PromptNewLectureName(owner, name)) return;
     name = TrimWhitespace(name);
@@ -250,7 +253,9 @@ std::optional<std::wstring> PromptSessionNameWithSaveDialog(HWND owner,
 }
 
 void ShowNewSessionDialog(HWND owner) {
-    SaveNoteIfDirty(owner);
+    // Creating and selecting a session can replace the active note context.
+    // Do not continue if preserving the active note failed.
+    if (!SaveNoteIfDirty(owner)) return;
     // determine lecture
     if (g_currentLecturePath.empty()) {
         int sel = static_cast<int>(SendMessageW(g_hLectureList, LB_GETCURSEL, 0, 0));
@@ -658,6 +663,10 @@ void CreateNewNoteInSession(HWND hWnd,
 
 void CreateNewClroInSession(HWND hWnd) {
     CreateNewNoteInSession(hWnd, s_newNoteExtension, nullptr);
+}
+
+void CreateNewNoteWithExtensionInSession(HWND hWnd, const std::wstring& extension) {
+    CreateNewNoteInSession(hWnd, extension, nullptr);
 }
 
 std::filesystem::path CurrentNoteDirectory() {
@@ -1818,6 +1827,16 @@ bool ImportDirectoryAsLecture(HWND hWnd) {
     auto src = PickDirectoryImportSource(hWnd, title, DialogDownloadsInitialFolder());
     if (!src) return false;
 
+    std::wstring workspaceLockError;
+    WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
+    if (!workspaceLock.acquired()) {
+        ShowSoftNotice(hWnd, IsEnglishUi()
+            ? L"Another shared workspace operation is in progress. Import was not started."
+            : L"別の共有ワークスペース操作が進行中のため、取り込みを開始しませんでした。",
+            SoftNoticeKind::Warning);
+        return false;
+    }
+
     std::filesystem::path dest = classesPath / src->filename();
     DirectoryImportPlan plan;
     std::wstring err;
@@ -1859,6 +1878,16 @@ bool ImportDirectoryAsSession(HWND hWnd) {
     }
     auto src = PickDirectoryImportSource(hWnd, title, DialogDownloadsInitialFolder());
     if (!src) return false;
+
+    std::wstring workspaceLockError;
+    WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
+    if (!workspaceLock.acquired()) {
+        ShowSoftNotice(hWnd, IsEnglishUi()
+            ? L"Another shared workspace operation is in progress. Import was not started."
+            : L"別の共有ワークスペース操作が進行中のため、取り込みを開始しませんでした。",
+            SoftNoticeKind::Warning);
+        return false;
+    }
 
     std::filesystem::path dest = lectureDir / src->filename();
     DirectoryImportPlan plan;
@@ -3642,6 +3671,15 @@ bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstrin
         ShowSilentMessageDialog(hWnd, ui.menuImportFile, msg, SoftNoticeKind::Error);
         return false;
     }
+    std::wstring workspaceLockError;
+    WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
+    if (!workspaceLock.acquired()) {
+        ShowSoftNotice(hWnd, IsEnglishUi()
+            ? L"Another shared workspace operation is in progress. Import was not started."
+            : L"別の共有ワークスペース操作が進行中のため、取り込みを開始しませんでした。",
+            SoftNoticeKind::Warning);
+        return false;
+    }
 
     std::vector<std::filesystem::path> regularFiles;
     std::vector<std::filesystem::path> officeFiles;
@@ -3733,6 +3771,16 @@ bool ImportFileToCurrentSession(HWND hWnd) {
 
     auto picked = PickFilesUnder(hWnd, initial, ui.menuImportFile);
     if (picked.empty()) return false;
+
+    std::wstring workspaceLockError;
+    WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
+    if (!workspaceLock.acquired()) {
+        ShowSoftNotice(hWnd, IsEnglishUi()
+            ? L"Another shared workspace operation is in progress. Import was not started."
+            : L"別の共有ワークスペース操作が進行中のため、取り込みを開始しませんでした。",
+            SoftNoticeKind::Warning);
+        return false;
+    }
 
     ImportBatchStats stats;
     for (size_t i = 0; i < picked.size(); ++i) {

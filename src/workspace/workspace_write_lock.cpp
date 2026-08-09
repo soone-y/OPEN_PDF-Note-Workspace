@@ -8,7 +8,6 @@
 
 namespace {
 
-HANDLE g_workspaceWriteLock = nullptr;
 std::wstring g_workspaceWriteLockKey;
 std::unordered_map<std::wstring, HANDLE> g_documentOpenLocks;
 int g_documentOpenLockTransitionDepth = 0;
@@ -78,34 +77,42 @@ bool AcquireWorkspaceWriteLock(const std::filesystem::path& workspaceRoot,
         if (outError) *outError = L"ワークスペースのパスを正規化できません。";
         return false;
     }
-    if (g_workspaceWriteLock && key == g_workspaceWriteLockKey) return true;
-
-    const std::wstring name = WorkspaceWriteLockName(key);
-    HANDLE candidate = CreateMutexW(nullptr, TRUE, name.c_str());
-    if (!candidate) {
-        if (outError) *outError = L"ワークスペース排他を作成できません。";
-        return false;
-    }
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(candidate);
-        if (outError) {
-            *outError = L"このワークスペースは別の PDF Note Workspace プロセスが使用中です。";
-        }
-        return false;
-    }
-
-    ReleaseWorkspaceWriteLock();
-    g_workspaceWriteLock = candidate;
     g_workspaceWriteLockKey = key;
     return true;
 }
 
 void ReleaseWorkspaceWriteLock() {
-    if (!g_workspaceWriteLock) return;
-    ReleaseMutex(g_workspaceWriteLock);
-    CloseHandle(g_workspaceWriteLock);
-    g_workspaceWriteLock = nullptr;
     g_workspaceWriteLockKey.clear();
+}
+
+WorkspaceOperationLock::WorkspaceOperationLock(const std::filesystem::path& workspaceRoot,
+                                               std::wstring* outError) {
+    if (outError) outError->clear();
+    const std::wstring key = NormalizeWorkspaceWriteLockKey(workspaceRoot);
+    if (key.empty()) {
+        if (outError) *outError = L"ワークスペースのパスを正規化できません。";
+        return;
+    }
+
+    const std::wstring name = WorkspaceWriteLockName(key);
+    HANDLE candidate = CreateMutexW(nullptr, TRUE, name.c_str());
+    if (!candidate) {
+        if (outError) *outError = L"ワークスペース操作の排他を作成できません。";
+        return;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(candidate);
+        if (outError) *outError = L"このワークスペースでは別の共有操作が進行中です。";
+        return;
+    }
+    handle_ = candidate;
+}
+
+WorkspaceOperationLock::~WorkspaceOperationLock() {
+    if (!handle_) return;
+    ReleaseMutex(handle_);
+    CloseHandle(handle_);
+    handle_ = nullptr;
 }
 
 DocumentOpenLockCandidate::DocumentOpenLockCandidate(const std::filesystem::path& path,

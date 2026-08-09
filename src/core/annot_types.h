@@ -324,6 +324,12 @@ struct PdfViewState {
     // Touch panning owns one contact at a time.  Keeping its id prevents a
     // second resting finger from stealing the active drag.
     UINT32 touchPanPointerId = 0;
+    POINT touchPanCurrent{};
+    UINT32 touchPinchPointerId = 0;
+    POINT touchPinchCurrent{};
+    bool touchPinching = false;
+    double touchPinchStartDistance = 0.0;
+    double touchPinchStartScale = 1.0;
     POINT panAnchor{};
     double panStartY = 0.0;
     double panStartX = 0.0;

@@ -236,6 +236,12 @@ struct ViewerState {
     double scrollY = 0.0;
     bool panning = false;
     UINT32 touchPanPointerId = 0;
+    POINT touchPanCurrent{};
+    UINT32 touchPinchPointerId = 0;
+    POINT touchPinchCurrent{};
+    bool touchPinching = false;
+    double touchPinchStartDistance = 0.0;
+    double touchPinchStartScale = 1.0;
     bool drawingTempStroke = false;
     ViewerToolMode toolMode = ViewerToolMode::Select;
     TempDrawTool tempTool = TempDrawTool::None;
@@ -1429,12 +1435,18 @@ void LoadAdjacentClropForPdf(HWND hwnd, const std::wstring& explicitClropPath = 
 }
 
 void ScrollToPageTop(HWND hwnd, int pageIndex, double pageOffsetY);
+RECT ViewerAvailableRect(HWND hwnd);
+void ClampContinuousScroll(HWND hwnd);
+bool PageLayoutForIndex(HWND hwnd, int pageIndex, PageLayout& out);
+void SyncCurrentPageFromScroll(HWND hwnd);
 
 void SetCurrentPage(HWND hwnd, int pageIndex) {
     if (!g_state.pdf || g_state.pdf->pageCount <= 0) return;
     const int clamped = std::clamp(pageIndex, FirstDisplayedPage(), LastDisplayedPage());
     ScrollToPageTop(hwnd, clamped, 0.0);
 }
+
+bool PageLayoutAtPoint(HWND hwnd, POINT pt, PageLayout& out);
 
 void AdjustZoom(HWND hwnd, double factor) {
     const double next = std::clamp(g_state.zoomFactor * factor, 0.25, 4.0);
@@ -1446,6 +1458,33 @@ void AdjustZoom(HWND hwnd, double factor) {
     }
     ClearRenderCaches();
     ScrollToPageTop(hwnd, g_state.currentPage, 0.0);
+}
+
+void AdjustZoomAroundPoint(HWND hwnd, double scale, POINT focus) {
+    PageLayout before{};
+    if (!PageLayoutAtPoint(hwnd, focus, before) || before.width <= 0 || before.height <= 0) {
+        AdjustZoom(hwnd, scale / std::max(0.001, g_state.zoomFactor));
+        return;
+    }
+    const double xRatio = std::clamp(
+        static_cast<double>(focus.x - before.rect.left) / static_cast<double>(before.width), 0.0, 1.0);
+    const double yRatio = std::clamp(
+        static_cast<double>(focus.y - before.rect.top) / static_cast<double>(before.height), 0.0, 1.0);
+    const double next = std::clamp(scale, 0.25, 4.0);
+    if (std::abs(next - g_state.zoomFactor) < 0.0001) return;
+
+    g_state.zoomFactor = next;
+    ClearRenderCaches();
+    PageLayout after{};
+    if (!PageLayoutForIndex(hwnd, before.pageIndex, after) || after.width <= 0 || after.height <= 0) return;
+    g_state.panX += static_cast<double>(focus.x) -
+                    (static_cast<double>(after.rect.left) + xRatio * static_cast<double>(after.width));
+    RECT avail = ViewerAvailableRect(hwnd);
+    g_state.scrollY = after.docTop + yRatio * static_cast<double>(after.height) -
+                      static_cast<double>(focus.y - avail.top);
+    ClampContinuousScroll(hwnd);
+    SyncCurrentPageFromScroll(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 void ResetZoom(HWND hwnd) {
@@ -2904,8 +2943,6 @@ void DrawClropAnnotations(HDC hdc,
     }
 }
 
-bool PageLayoutAtPoint(HWND hwnd, POINT pt, PageLayout& out);
-
 void DrawTextSelection(HDC hdc, const PageLayout& layout) {
     if (g_state.hasRectSelection && g_state.selectionPage == layout.pageIndex) {
         POINT p1 = PdfPointToClient(layout.rect,
@@ -3664,6 +3701,7 @@ void BeginPagePan(HWND hwnd, POINT pt) {
     }
     g_state.panning = true;
     g_state.touchPanPointerId = 0;
+    g_state.touchPanCurrent = pt;
     g_state.panStart = pt;
     g_state.panStartX = g_state.panX;
     g_state.panStartY = g_state.scrollY;
@@ -3703,6 +3741,9 @@ void EndPagePan(HWND hwnd) {
     if (!g_state.panning) return;
     g_state.panning = false;
     g_state.touchPanPointerId = 0;
+    g_state.touchPinchPointerId = 0;
+    g_state.touchPinching = false;
+    g_state.touchPinchStartDistance = 0.0;
     g_state.panAxisLock = PanAxisLock::None;
     if (GetCapture() == hwnd) ReleaseCapture();
 }
@@ -3928,16 +3969,56 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         ScreenToClient(hwnd, &pt);
         if (msg == WM_POINTERDOWN) {
-            // Ignore extra contacts so a resting second finger cannot make a
-            // document jump to a new pan anchor.
             if (!g_state.panning) {
                 BeginPagePan(hwnd, pt);
                 if (g_state.panning) g_state.touchPanPointerId = pointerId;
+            } else if (!g_state.touchPinching && pointerId != g_state.touchPanPointerId) {
+                const double distance = std::hypot(
+                    static_cast<double>(pt.x - g_state.touchPanCurrent.x),
+                    static_cast<double>(pt.y - g_state.touchPanCurrent.y));
+                if (distance >= 8.0) {
+                    g_state.touchPinching = true;
+                    g_state.touchPinchPointerId = pointerId;
+                    g_state.touchPinchCurrent = pt;
+                    g_state.touchPinchStartDistance = distance;
+                    g_state.touchPinchStartScale = g_state.zoomFactor;
+                }
             }
         } else if (msg == WM_POINTERUPDATE) {
-            if (g_state.panning && pointerId == g_state.touchPanPointerId) {
+            if (g_state.touchPinching &&
+                (pointerId == g_state.touchPanPointerId || pointerId == g_state.touchPinchPointerId)) {
+                if (pointerId == g_state.touchPanPointerId) {
+                    g_state.touchPanCurrent = pt;
+                } else {
+                    g_state.touchPinchCurrent = pt;
+                }
+                const double distance = std::hypot(
+                    static_cast<double>(g_state.touchPinchCurrent.x - g_state.touchPanCurrent.x),
+                    static_cast<double>(g_state.touchPinchCurrent.y - g_state.touchPanCurrent.y));
+                if (g_state.touchPinchStartDistance > 0.0) {
+                    POINT focus{(g_state.touchPanCurrent.x + g_state.touchPinchCurrent.x) / 2,
+                                (g_state.touchPanCurrent.y + g_state.touchPinchCurrent.y) / 2};
+                    AdjustZoomAroundPoint(hwnd,
+                                          g_state.touchPinchStartScale * distance / g_state.touchPinchStartDistance,
+                                          focus);
+                }
+            } else if (g_state.panning && pointerId == g_state.touchPanPointerId) {
+                g_state.touchPanCurrent = pt;
                 UpdatePagePan(hwnd, pt);
             }
+        } else if (g_state.touchPinching &&
+                   (pointerId == g_state.touchPanPointerId || pointerId == g_state.touchPinchPointerId)) {
+            if (pointerId == g_state.touchPanPointerId) {
+                g_state.touchPanPointerId = g_state.touchPinchPointerId;
+                g_state.touchPanCurrent = g_state.touchPinchCurrent;
+            }
+            g_state.touchPinching = false;
+            g_state.touchPinchPointerId = 0;
+            g_state.touchPinchStartDistance = 0.0;
+            g_state.panStart = g_state.touchPanCurrent;
+            g_state.panStartX = g_state.panX;
+            g_state.panStartY = g_state.scrollY;
+            g_state.panAxisLock = PanAxisLock::None;
         } else if (g_state.panning && pointerId == g_state.touchPanPointerId) {
             EndPagePan(hwnd);
         }
@@ -4012,6 +4093,9 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             g_state.selectingRect = false;
             g_state.panning = false;
             g_state.touchPanPointerId = 0;
+            g_state.touchPinchPointerId = 0;
+            g_state.touchPinching = false;
+            g_state.touchPinchStartDistance = 0.0;
             g_state.panAxisLock = PanAxisLock::None;
             g_state.drawingTempStroke = false;
             g_state.activeTempStroke = TempStroke{};
@@ -4094,6 +4178,30 @@ ThemeColors PdfPreviewPanel_GetTheme() {
 
 void PdfPreviewPanel_OpenPdf(HWND hwnd, const std::wstring& pdfPath, const std::wstring& clropPath) {
     pdf_panel::OpenPdfInViewer(hwnd, pdfPath, clropPath);
+}
+
+void PdfPreviewPanel_JumpToPdfLocation(HWND hwnd, int pageIndex, double yPt, bool hasYPt) {
+    using namespace pdf_panel;
+    if (!hwnd || !g_state.pdf || !g_state.pdf->document ||
+        pageIndex < 0 || pageIndex >= g_state.pdf->pageCount) {
+        return;
+    }
+
+    // Search results may point outside the compact range initially used for a
+    // very large PDF. Center a small render range around the requested page.
+    if (!IsDisplayedPage(pageIndex)) {
+        constexpr int kSearchResultPageRadius = 10;
+        g_state.pageRangeFirst = std::max(0, pageIndex - kSearchResultPageRadius);
+        g_state.pageRangeLast = std::min(g_state.pdf->pageCount - 1,
+                                         pageIndex + kSearchResultPageRadius);
+        ClearRenderCaches();
+    }
+
+    if (hasYPt && std::isfinite(yPt)) {
+        ScrollToPdfY(hwnd, pageIndex, yPt);
+    } else {
+        ScrollToPageTop(hwnd, pageIndex, 0.0);
+    }
 }
 
 void PdfPreviewPanel_ChoosePageRange(HWND hwnd) {

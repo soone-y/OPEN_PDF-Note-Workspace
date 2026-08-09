@@ -322,6 +322,12 @@ void ClearPdfState() {
     g_pdf.singlePageIndex = 0;
     g_pdf.panning = false;
     g_pdf.touchPanPointerId = 0;
+    g_pdf.touchPanCurrent = {};
+    g_pdf.touchPinchPointerId = 0;
+    g_pdf.touchPinchCurrent = {};
+    g_pdf.touchPinching = false;
+    g_pdf.touchPinchStartDistance = 0.0;
+    g_pdf.touchPinchStartScale = 1.0;
     g_pdf.panAnchor = {};
     g_pdf.panStartY = 0.0;
     g_pdf.panStartX = 0.0;

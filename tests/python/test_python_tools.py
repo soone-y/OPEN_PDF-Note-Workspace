@@ -32,6 +32,7 @@ def load_module(name: str, rel_path: str):
 
 migrate_clrop_v1 = load_module("migrate_clrop_v1", "tools/migration/migrate_clrop_v1.py")
 analyze_build_logs = load_module("analyze_build_logs", "tools/metrics/analyze_build_logs.py")
+analyze_document_language = load_module("analyze_document_language", "tools/metrics/analyze_document_language.py")
 analyze_repo = load_module("analyze_repo", "tools/metrics/code_metrics/analyze_repo.py")
 code_metrics_gui = load_module("code_metrics_gui", "tools/metrics/code_metrics/gui.py")
 libreoffice_reduce = load_module("libreoffice_reduce", "tools/libreoffice/libreoffice_reduce.py")
@@ -47,6 +48,8 @@ validate_introduction_site = load_module(
 )
 release_license_gate = load_module("release_license_gate", "tools/release_checks/release_license_gate.py")
 release_text_gate = load_module("release_text_gate", "tools/release_checks/release_text_gate.py")
+release_set_integrity_gate = load_module("release_set_integrity_gate", "tools/release_checks/release_set_integrity_gate.py")
+release_startup_smoke_gate = load_module("release_startup_smoke_gate", "tools/release_checks/release_startup_smoke_gate.py")
 repo_hygiene_gate = load_module("repo_hygiene_gate", "tools/release_checks/repo_hygiene_gate.py")
 sync_publication_inputs = load_module(
     "sync_publication_inputs", "tools/dev/sync_publication_inputs.py"
@@ -496,6 +499,79 @@ class AnalyzeBuildLogsTests(unittest.TestCase):
             self.assertTrue(report.exists())
             self.assertIn("# Build Log Analysis", report.read_text(encoding="utf-8"))
             self.assertIn("## Summary", stdout.getvalue())
+
+
+class AnalyzeDocumentLanguageTests(unittest.TestCase):
+    def test_analyze_documents_keeps_groups_separate_and_applies_filters(self) -> None:
+        with repo_tempdir() as root:
+            (root / "docs" / "internal").mkdir(parents=True)
+            (root / "docs" / "public").mkdir(parents=True)
+            (root / "docs" / "internal" / "guide.md").write_text(
+                "PDF 注釈 PDF 注釈 の です\n", encoding="utf-8"
+            )
+            (root / "docs" / "internal" / "LICENSE.md").write_text(
+                "ignored license words\n", encoding="utf-8"
+            )
+            (root / "docs" / "public" / "guide.md").write_text(
+                "保存 復元 保存\n", encoding="utf-8"
+            )
+
+            data = analyze_document_language.analyze_documents(
+                root,
+                [("internal", Path("docs/internal")), ("public", Path("docs/public"))],
+                {".md"},
+                list(analyze_document_language.DEFAULT_EXCLUDES),
+                set(analyze_document_language.DEFAULT_STOP_WORDS),
+                top=5,
+            )
+
+            internal, public = data["groups"]
+            self.assertEqual(internal["file_count"], 1)
+            self.assertEqual(public["file_count"], 1)
+            self.assertEqual(internal["unigrams"][0]["term"], "pdf")
+            self.assertEqual(public["unigrams"][0]["term"], "保存")
+            self.assertEqual(internal["unigrams"][0]["source_files"], ["docs/internal/guide.md"])
+
+    def test_main_refuses_to_overwrite_report(self) -> None:
+        with repo_tempdir() as root:
+            (root / "docs" / "public").mkdir(parents=True)
+            (root / "docs" / "public" / "guide.md").write_text("PDF 注釈\n", encoding="utf-8")
+            report = root / "out" / "report.md"
+            report.parent.mkdir()
+            report.write_text("keep this report", encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                code = analyze_document_language.main(
+                    ["--root", str(root), "--group", "public=docs/public", "--report", str(report)]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertEqual(report.read_text(encoding="utf-8"), "keep this report")
+
+    def test_theme_candidates_use_document_coverage_headings_and_locations(self) -> None:
+        with repo_tempdir() as root:
+            internal = root / "docs" / "internal"
+            public = root / "docs" / "public"
+            internal.mkdir(parents=True)
+            public.mkdir(parents=True)
+            (internal / "a.md").write_text("# 保存 復元\n本文\n", encoding="utf-8")
+            (internal / "b.md").write_text("# 保存 復元\n本文\n", encoding="utf-8")
+            (public / "guide.md").write_text("# 保存 復元\n> 引用 固有語\n```\nコード 固有語\n```\n", encoding="utf-8")
+
+            data = analyze_document_language.analyze_documents(
+                root,
+                [("internal", Path("docs/internal")), ("public", Path("docs/public"))],
+                {".md"}, [], set(), top=5, theme_top=5, theme_min_docs=2,
+            )
+
+            candidate = next(row for row in data["theme_candidates"] if row["term"] == "保存復元")
+            self.assertEqual(candidate["document_count"], 3)
+            self.assertEqual(candidate["heading_document_count"], 3)
+            self.assertEqual(candidate["groups"], ["internal", "public"])
+            self.assertEqual(candidate["source_locations"][0], {"file": "docs/internal/a.md", "line": 1})
+            all_terms = {row["term"] for row in data["groups"][1]["unigrams"]}
+            self.assertNotIn("引用", all_terms)
+            self.assertNotIn("コード", all_terms)
 
 
 class CodeMetricsGuiTests(unittest.TestCase):
@@ -1916,13 +1992,26 @@ class PublicSiteValidationTests(unittest.TestCase):
             "index.html": (
                 '<html><meta name="ai-agent-entrypoint" content="For_AI.md">'
                 '<meta name="ai-manifest" content="for_ai/manifest.json">'
-                '<a href="For_AI.md">AI</a></html>'
+                '<a href="llms.txt">LLMs</a>'
+                '<a href="for_ai/ai_context.md">Context summary</a>'
+                '<a href="For_AI.md">AI</a>'
+                '<a href="for_ai/manifest.json">Manifest</a>'
+                '<a href="for_ai/project_context.xml">Context</a></html>'
+            ),
+            "llms.txt": (
+                "# Test\n\n"
+                "- [Context](for_ai/ai_context.md)\n"
+                "- [AI](For_AI.md)\n"
+                "- [Manifest](for_ai/manifest.json)\n"
+                "- [Project context](for_ai/project_context.xml)"
             ),
             "For_AI.md": "# AI",
             "For_AI.html": "<html></html>",
             "README.md": "# README",
             "README.html": "<html></html>",
             "for_ai/project_context.xml": "<context/>",
+            "for_ai/ai_context.md": "# AI context",
+            "for_ai/ai_context.html": "<html></html>",
             "for_ai/manifest.json": json.dumps({
                 "schema_version": 1,
                 "entry_point": "../For_AI.md",
@@ -1982,6 +2071,29 @@ class PublicSiteValidationTests(unittest.TestCase):
 
             self.assertTrue(any("ai-agent-entrypoint" in error for error in errors))
             self.assertTrue(any("ai-manifest" in error for error in errors))
+
+    def test_rejects_missing_visible_ai_entry_link(self) -> None:
+        with repo_tempdir() as root:
+            self.write_minimal_site(root)
+            (root / "index.html").write_text(
+                '<html><meta name="ai-agent-entrypoint" content="For_AI.md">'
+                '<meta name="ai-manifest" content="for_ai/manifest.json">'
+                '<a href="For_AI.md">AI</a></html>',
+                encoding="utf-8",
+            )
+
+            errors = validate_public_site.validate_site(root)
+
+            self.assertTrue(any("must visibly link to AI entry document" in error for error in errors))
+
+    def test_rejects_missing_llms_ai_document_link(self) -> None:
+        with repo_tempdir() as root:
+            self.write_minimal_site(root)
+            (root / "llms.txt").write_text("# Test\n\n- [AI](For_AI.md)", encoding="utf-8")
+
+            errors = validate_public_site.validate_site(root)
+
+            self.assertTrue(any("llms.txt must link to AI document" in error for error in errors))
 
 
 class IntroductionSiteValidationTests(unittest.TestCase):
@@ -2087,6 +2199,105 @@ class ReleaseTextGateTests(unittest.TestCase):
             errors = release_text_gate.validate_release_directory(root)
 
             self.assertTrue(any("likely Windows-1252/UTF-8 mojibake" in error for error in errors))
+
+
+class ReleaseSetIntegrityGateTests(unittest.TestCase):
+    @staticmethod
+    def write_zip(release_dir: Path, zip_path: Path) -> None:
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            for path in release_dir.rglob("*"):
+                if path.is_file():
+                    archive.write(path, Path(release_dir.name) / path.relative_to(release_dir))
+
+    def make_release_set(self, root: Path) -> tuple[Path, Path, Path]:
+        release_set = root / "release_set"
+        snapshot = release_set / "public_snapshot"
+        snapshot.mkdir(parents=True)
+        (snapshot / "README.md").write_text("public snapshot\n", encoding="utf-8")
+        full = release_set / "release_full"
+        lite = release_set / "release_lite"
+        for directory, text in ((full, "full\n"), (lite, "lite\n")):
+            (directory / "docs").mkdir(parents=True)
+            (directory / "docs" / "README.md").write_text(text, encoding="utf-8")
+            executable = directory / "pdf_note_workspace.exe"
+            executable.write_bytes(("app-" + text).encode("utf-8"))
+            edition = "full" if directory == full else "lite"
+            (directory / "pdf_note_workspace.exe.buildinfo.txt").write_text(
+                "format\tpdf-note-build-info-v1\n"
+                "version\t1.0.0\n"
+                f"edition\t{edition}\n"
+                f"artifact\tpdf_note_workspace.exe\t{release_set_integrity_gate.sha256_file(executable)}\n",
+                encoding="utf-8",
+            )
+        (full / "libreoffice" / "custom_runtime" / "instdir").mkdir(parents=True)
+        full_zip = release_set / "release_full.zip"
+        lite_zip = release_set / "release_lite.zip"
+        self.write_zip(full, full_zip)
+        self.write_zip(lite, lite_zip)
+        (release_set / "release_set_manifest.json").write_text(json.dumps({
+            "app_version": "1.0.0",
+            "components": {
+                "release": full.name,
+                "release_lite": lite.name,
+                "public_snapshot": snapshot.name,
+                "release_zip": full_zip.name,
+                "release_lite_zip": lite_zip.name,
+            }
+        }), encoding="utf-8")
+        allowlist = root / "allowlist.txt"
+        allowlist.write_text("README.md\n", encoding="utf-8")
+        release_set_integrity_gate.write_snapshot_manifest(release_set, allowlist)
+        return release_set, snapshot, full_zip
+
+    def test_accepts_recorded_snapshot_and_exact_zip_contents(self) -> None:
+        with repo_tempdir() as root:
+            release_set, _, _ = self.make_release_set(root)
+
+            self.assertEqual(release_set_integrity_gate.validate_release_set(release_set), [])
+
+    def test_rejects_snapshot_change_after_manifest_creation(self) -> None:
+        with repo_tempdir() as root:
+            release_set, snapshot, _ = self.make_release_set(root)
+            (snapshot / "README.md").write_text("changed after confirmation\n", encoding="utf-8")
+
+            errors = release_set_integrity_gate.validate_release_set(release_set)
+
+            self.assertTrue(any("snapshot files differ" in error for error in errors))
+            self.assertTrue(any("snapshot tree hash differs" in error for error in errors))
+
+    def test_rejects_unexpected_zip_file(self) -> None:
+        with repo_tempdir() as root:
+            release_set, _, full_zip = self.make_release_set(root)
+            with zipfile.ZipFile(full_zip, "a") as archive:
+                archive.writestr("release_full/unexpected.txt", "not in the extracted release")
+
+            errors = release_set_integrity_gate.validate_release_set(release_set)
+
+            self.assertTrue(any("unexpected files" in error for error in errors))
+
+    def test_rejects_lite_runtime_or_wrong_build_version(self) -> None:
+        with repo_tempdir() as root:
+            release_set, _, _ = self.make_release_set(root)
+            lite = release_set / "release_lite"
+            (lite / "libreoffice" / "custom_runtime").mkdir(parents=True)
+            build_info = lite / "pdf_note_workspace.exe.buildinfo.txt"
+            build_info.write_text(build_info.read_text(encoding="utf-8").replace("version\t1.0.0", "version\t9.9.9"), encoding="utf-8")
+
+            errors = release_set_integrity_gate.validate_release_set(release_set)
+
+            self.assertTrue(any("Lite: LibreOffice custom runtime" in error for error in errors))
+            self.assertTrue(any("Lite: application build-info version" in error for error in errors))
+
+
+class ReleaseStartupSmokeGateTests(unittest.TestCase):
+    def test_rejects_zip_path_traversal(self) -> None:
+        with repo_tempdir() as root:
+            archive = root / "bad.zip"
+            with zipfile.ZipFile(archive, "w") as output:
+                output.writestr("../outside.txt", "unsafe")
+
+            with self.assertRaises(ValueError):
+                release_startup_smoke_gate.safe_extract(archive, root / "extract")
 
 
 class RepositoryScriptAndTextGateTests(unittest.TestCase):
