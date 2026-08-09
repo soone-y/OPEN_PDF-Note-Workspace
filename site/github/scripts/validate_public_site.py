@@ -20,10 +20,9 @@ FORBIDDEN_PUBLIC_REFERENCES = (
     "/Users/",
 )
 DOCUMENTATION_PORTAL_REQUIRED_FILES = (
-    "index.html", "llms.txt", "For_AI.md", "README.md", "for_ai/ai_context.md", "for_ai/manifest.json", "for_ai/project_context.xml",
+    "index.html", "README.md", "for_ai/ai_context.md",
 )
 PORTAL_AI_ENTRY_LINKS = ("for_ai/ai_context.html",)
-LLMS_REQUIRED_LINKS = ("for_ai/ai_context.md", "For_AI.md", "for_ai/manifest.json", "for_ai/project_context.xml")
 MARKDOWN_LINK = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HTML_LINK = re.compile(r"(?:href|src)=[\"']([^\"'#]+)", re.IGNORECASE)
 HTML_META = re.compile(r"<meta\s+[^>]*?name=[\"']([^\"']+)[\"'][^>]*?content=[\"']([^\"']*)[\"']", re.IGNORECASE)
@@ -77,11 +76,7 @@ def validate_structured_files(site: Path, errors: list[str]) -> None:
 
 
 def validate_local_links(site: Path, errors: list[str]) -> None:
-    markdown_like_paths = list(site.rglob("*.md"))
-    llms_path = site / "llms.txt"
-    if llms_path.is_file():
-        markdown_like_paths.append(llms_path)
-    for path in markdown_like_paths:
+    for path in site.rglob("*.md"):
         text = path.read_text(encoding="utf-8-sig")
         for match in MARKDOWN_LINK.finditer(text):
             target = local_target(match.group(1))
@@ -107,50 +102,8 @@ def validate_rendered_human_docs(site: Path, errors: list[str]) -> None:
             errors.append(f"rendered HTML is missing for public Markdown: {markdown_path.relative_to(site)}")
 
 
-def validate_manifest(site: Path, errors: list[str]) -> None:
-    manifest_path = site / "for_ai" / "manifest.json"
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return
-    if manifest.get("schema_version") != 1:
-        errors.append("for_ai/manifest.json must use schema_version 1")
-    entry_point = manifest.get("entry_point")
-    if not isinstance(entry_point, str) or not entry_point:
-        errors.append("for_ai/manifest.json must define a non-empty entry_point")
-    else:
-        validate_local_target(site, manifest_path, entry_point, kind="manifest entry_point", errors=errors)
-    routes = manifest.get("routes")
-    if not isinstance(routes, list) or not routes:
-        errors.append("for_ai/manifest.json must define at least one route")
-        return
-    route_ids: set[str] = set()
-    for route in routes:
-        if not isinstance(route, dict):
-            errors.append("for_ai/manifest.json routes must contain objects")
-            continue
-        route_id = route.get("id")
-        if not isinstance(route_id, str) or not route_id:
-            errors.append("manifest route has no non-empty id")
-            route_id = "<unknown>"
-        elif route_id in route_ids:
-            errors.append(f"manifest route id is duplicated: {route_id}")
-        route_ids.add(route_id)
-        if not isinstance(route.get("when"), str) or not route["when"].strip():
-            errors.append(f"manifest route '{route_id}' has no non-empty when")
-        read_paths = route.get("read")
-        if not isinstance(read_paths, list) or not read_paths:
-            errors.append(f"manifest route '{route_id}' has no read paths")
-            continue
-        for relative_path in read_paths:
-            if not isinstance(relative_path, str) or not relative_path:
-                errors.append(f"manifest route '{route_id}' has an invalid read path")
-                continue
-            validate_local_target(site, manifest_path, relative_path, kind=f"manifest route '{route_id}'", errors=errors)
-
-
 def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
-    """Keep the HTML portal entrypoint aligned with the machine-readable AI entrypoints."""
+    """Keep the HTML portal entrypoint aligned with the single AI document."""
     index_path = site / "index.html"
     if not index_path.is_file():
         return
@@ -159,10 +112,7 @@ def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
     except UnicodeDecodeError:
         return
     metadata = {name.lower(): value for name, value in HTML_META.findall(text)}
-    expected = {
-        "ai-agent-entrypoint": "For_AI.md",
-        "ai-manifest": "for_ai/manifest.json",
-    }
+    expected = {"ai-agent-entrypoint": "for_ai/ai_context.html"}
     for name, target in expected.items():
         if metadata.get(name) != target:
             errors.append(f"index.html must declare {name}={target}")
@@ -178,22 +128,6 @@ def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
             errors.append(f"index.html must visibly link to AI entry document: {target}")
 
 
-def validate_llms_entrypoint(site: Path, errors: list[str]) -> None:
-    """Keep the single visible AI entrypoint connected to its required raw documents."""
-    llms_path = site / "llms.txt"
-    if not llms_path.is_file():
-        return
-    text = llms_path.read_text(encoding="utf-8-sig")
-    linked_targets = {
-        local_target(match.group(1))
-        for match in MARKDOWN_LINK.finditer(text)
-        if local_target(match.group(1))
-    }
-    for target in LLMS_REQUIRED_LINKS:
-        if target not in linked_targets:
-            errors.append(f"llms.txt must link to AI document: {target}")
-
-
 def validate_site(site: Path) -> list[str]:
     errors: list[str] = []
     if not site.is_dir():
@@ -206,9 +140,7 @@ def validate_site(site: Path) -> list[str]:
     validate_text_encoding(site, errors)
     validate_structured_files(site, errors)
     validate_local_links(site, errors)
-    validate_manifest(site, errors)
     validate_portal_entrypoint(site, errors)
-    validate_llms_entrypoint(site, errors)
     validate_rendered_human_docs(site, errors)
     return errors
 

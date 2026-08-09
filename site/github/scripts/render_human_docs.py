@@ -253,9 +253,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="container">
   <div class="doc-header">
 {navigation_html}
-    <div class="raw-md-link">
-      <a href="{raw_md_name}" target="_blank">Raw Markdown</a>
-    </div>
+{raw_markdown_html}
   </div>
 
   <main>
@@ -427,6 +425,9 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
     depth = len(rel_path.parts) - 1
     root_rel = "../" * depth if depth > 0 else "./"
     is_ai_document = rel_path.name == "For_AI.md" or rel_path.parts[0] == "for_ai"
+    raw_markdown_html = "" if is_ai_document else f'''    <div class="raw-md-link">
+      <a href="{md_path.name}" target="_blank">Raw Markdown</a>
+    </div>'''
 
     # タイトルの抽出
     title_match = re.search(r"^#\s+(.*)$", content, re.MULTILINE)
@@ -436,7 +437,7 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
     full_html = HTML_TEMPLATE.format(
         title=html.escape(title),
         root_rel=root_rel,
-        raw_md_name=md_path.name,
+        raw_markdown_html=raw_markdown_html,
         navigation_html=navigation_html(root_rel=root_rel, is_ai_document=is_ai_document),
         content_html=body_html
     )

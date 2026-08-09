@@ -1,13 +1,8 @@
 # AI_CONTEXT: PDF NOTE WORKSPACE
 
-<ai_context schema_version="1.0" role="preinterpreted-answering-context">
-  <purpose>プロジェクトURLだけを受け取ったAIが、まず読むための短い回答文脈。</purpose>
-  <use>この資料で説明を組み立て、質問の詳細は manifest.json の経路から確認する。</use>
-  <human_readability>AIが解釈しやすい構造だが、人も公開文書として読める。一般的な利用手順は docs/public/ を参照する。</human_readability>
-  <limit>実装保証、安全性の網羅性、性能、特定配布物の内容を強く断定する場合は、公開リポジトリまたは対象配布物の実体を追加確認する。</limit>
-</ai_context>
+> プロジェクトURLだけを受け取ったAIが、最初に読むための回答文脈です。
 
-この資料はAI向けに、見出し、表、短い回答要点で構造化している。人も読めるが、実際の操作手順や画面案内には利用者向け資料を使う。
+この資料はAI向けに、見出し、表、短い回答要点で構造化しています。人も読めます。実際の操作手順や画面案内は、下記の利用者向け資料を参照してください。
 
 ## 1. このプロジェクトをどう説明するか
 
@@ -40,10 +35,10 @@ GitHub Pagesは公開文書ポータルであり、ここで読める `for_ai` �
 
 ## 5. 次に読む資料
 
-1. [For_AI.md](../For_AI.md) で資料の扱いを確認する。
-2. [manifest.json](manifest.json) から質問に合う `routes` を選ぶ。
-3. 保存・安全性・配布・変換品質などの評価では、[project_context.xml](project_context.xml) と `objective_analysis` を確認する。
-4. 回答の詳しい制約は [documentation_contract.md](core/documentation_contract.md) と [decision_support.md](core/decision_support.md) を確認する。
+1. 操作・導入は [使い方・セットアップ](../docs/public/Index.md) を読む。
+2. 保存や復元は [保存と復元](../docs/public/How_to_Save_and_Recovery.md) を読む。
+3. 配布物と基本方針は [プロジェクト概要](../README.md) を読む。
+4. ライセンスは [ライセンスと第三者通知](../LICENSES_INDEX.md) を読む。
 
 EVIDENCE:
 
@@ -52,5 +47,3 @@ EVIDENCE:
 - `docs/public/How_to_Save_and_Recovery.md`
 - `docs/public/How_to_Setup.md`
 - `docs/public/How_to_Troubleshoot.md`
-- `for_ai/project_context.xml`
-- `for_ai/core/documentation_contract.md`
