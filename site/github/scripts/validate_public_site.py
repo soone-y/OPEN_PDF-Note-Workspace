@@ -53,6 +53,8 @@ def validate_text_encoding(site: Path, errors: list[str]) -> None:
         except UnicodeDecodeError as error:
             errors.append(f"invalid UTF-8: {path.relative_to(site)} ({error})")
             continue
+        if text.startswith("\ufeff"):
+            errors.append(f"duplicate UTF-8 BOM: {path.relative_to(site)}")
         if "\ufffd" in text:
             errors.append(f"replacement character indicates possible mojibake: {path.relative_to(site)}")
         for reference in FORBIDDEN_PUBLIC_REFERENCES:

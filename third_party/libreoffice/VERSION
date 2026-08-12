@@ -1,6 +1,0 @@
-LibreOffice 26.2.5.2
-Custom Windows x86_64 runtime
-Official core source archive SHA256 8EC785EE1FD1A1D9B9D8EBA1C8FF7556695CA8F02E1F7A26BEF8CD540F669FEA
-Custom patch series 0001 through 0041 and 0043 through 0047 (0042 reserved; not applied)
-Runtime soffice.bin SHA256 F5D9D9DB414F5A75928659EA5384CC7FDDD5C75DB0737202D7A722FE7CF55503
-Built with communication, update, crash-reporting, AVMedia, OpenCL, PDFium, Poppler, and scripting features disabled.

@@ -1,5 +1,0 @@
-#pragma once
-
-#define IDI_APP_ICON 101
-#define IDI_READONLY_VIEWER_ICON 102
-#define IDI_TEXT_VIEWER_ICON 103

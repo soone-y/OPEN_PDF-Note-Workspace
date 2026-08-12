@@ -1,4 +1,4 @@
-﻿﻿# PDF Note Workspace 文書案内
+# PDF Note Workspace 文書案内
 
 同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)
 

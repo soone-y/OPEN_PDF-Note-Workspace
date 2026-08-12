@@ -1,9 +1,0 @@
-Package version: 153.0.7988.0
-Distribution: PDFium binaries by Benoit Blanchon
-Release: https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F7988
-Asset: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7988/pdfium-win-x64.tgz
-Asset SHA256: 654daf488d9357d2787cec439d0dbdb93d7e180e2cb28e5f1d41c66d2645daec
-Runtime SHA256: 03cc8de22238ea9ffbbf41703f8ef8aae77faeab735583815481f5c2c70a63c7
-Import library SHA256: c86725642362d4f3bd32e67729579096395e87c04e60113d2a4f49fbd0eec908
-Release attestation subject SHA256: 654daf488d9357d2787cec439d0dbdb93d7e180e2cb28e5f1d41c66d2645daec
-Release attestation source commit: c6529b58791d142002f819beb46e370e668797d7
