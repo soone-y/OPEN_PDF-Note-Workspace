@@ -1,0 +1,41 @@
+--- a/external/skia/UnpackedTarball_skia.mk
++++ b/external/skia/UnpackedTarball_skia.mk
+@@ -46,6 +46,7 @@ skia_patches := \
+     msvc-unknown-attributes.patch.1 \
+ 	fix-semaphore-include.patch.1 \
+ 	fix-xputimage-depth.patch.1 \
++    windows-avoid-interface-macro.patch.1 \
+ 
+ ifneq ($(MSYSTEM),)
+ # use binary flag so patch from git-bash won't choke on mixed line-endings in patches
+--- /dev/null
++++ b/external/skia/windows-avoid-interface-macro.patch.1
+@@ -0,0 +1,25 @@
++--- a/src/gpu/vk/vulkanmemoryallocator/VulkanAMDMemoryAllocator.h
+++++ b/src/gpu/vk/vulkanmemoryallocator/VulkanAMDMemoryAllocator.h
++@@ -31,7 +31,7 @@ public:
++                                              VkDevice device,
++                                              uint32_t physicalDeviceVersion,
++                                              const VulkanExtensions* extensions,
++-                                             const VulkanInterface* interface,
+++                                             const VulkanInterface* vkInterface,
++                                              ThreadSafe,
++                                              std::optional<VkDeviceSize> blockSize);
++ 
++--- a/src/gpu/vk/vulkanmemoryallocator/VulkanAMDMemoryAllocator.cpp
+++++ b/src/gpu/vk/vulkanmemoryallocator/VulkanAMDMemoryAllocator.cpp
++@@ -27,10 +27,10 @@ sk_sp<VulkanMemoryAllocator> VulkanAMDMemoryAllocator::Make(VkInstance instance,
++                                                             VkDevice device,
++                                                             uint32_t physicalDeviceVersion,
++                                                             const VulkanExtensions* extensions,
++-                                                            const VulkanInterface* interface,
+++                                                            const VulkanInterface* vkInterface,
++                                                             ThreadSafe threadSafe,
++                                                             std::optional<VkDeviceSize> blockSize) {
++-#define SKGPU_COPY_FUNCTION(NAME) functions.vk##NAME = interface->fFunctions.f##NAME
++-#define SKGPU_COPY_FUNCTION_KHR(NAME) functions.vk##NAME##KHR = interface->fFunctions.f##NAME
+++#define SKGPU_COPY_FUNCTION(NAME) functions.vk##NAME = vkInterface->fFunctions.f##NAME
+++#define SKGPU_COPY_FUNCTION_KHR(NAME) functions.vk##NAME##KHR = vkInterface->fFunctions.f##NAME
++ 
++     VmaVulkanFunctions functions;
++     // We should be setting all the required functions (at least through vulkan 1.1), but this is

@@ -1,0 +1,120 @@
+diff --git a/oox/source/drawingml/table/tablecell.cxx b/oox/source/drawingml/table/tablecell.cxx
+--- a/oox/source/drawingml/table/tablecell.cxx
++++ b/oox/source/drawingml/table/tablecell.cxx
+@@ -47,6 +47,53 @@ using ::com::sun::star::table::BorderLine2;
+ 
+ namespace oox::drawingml::table {
+ 
++namespace
++{
++
++bool lclContainsJapaneseText(const OUString& rText)
++{
++    for (sal_Int32 i = 0; i < rText.getLength(); ++i)
++    {
++        const sal_Unicode c = rText[i];
++        if ((c >= 0x3040 && c <= 0x30ff) || (c >= 0x3400 && c <= 0x9fff))
++            return true;
++    }
++    return false;
++}
++
++void lclApplyJapaneseTableFallback(const ::oox::core::XmlFilterBase& rFilterBase,
++                                   const TextBody& rTextBody,
++                                   TextCharacterProperties& rTextStyleProps)
++{
++    OUString aFontName;
++    sal_Int16 nFontPitch = 0;
++    sal_Int16 nFontFamily = 0;
++    if (!lclContainsJapaneseText(rTextBody.toString())
++        || rTextStyleProps.maAsianFont.getFontData(aFontName, nFontPitch, nFontFamily,
++                                                   nullptr, rFilterBase))
++    {
++        return;
++    }
++
++    const Theme* pTheme = rFilterBase.getCurrentTheme();
++    if (!pTheme || !pTheme->getTheme())
++        return;
++
++    OUString aJapaneseTypeface
++        = pTheme->getTheme()->getFontScheme().findMinorSupplementalTypeface(u"Jpan");
++    if (aJapaneseTypeface.isEmpty())
++        return;
++
++    // PowerPoint's classic Office table styles use the non-proportional MS Gothic
++    // fallback even though the theme advertises MS PGothic as its Japanese minor font.
++    // Modern themes keep their own Japanese supplemental typeface.
++    if (aJapaneseTypeface == u"ＭＳ Ｐゴシック")
++        aJapaneseTypeface = u"MS Gothic"_ustr;
++    rTextStyleProps.maAsianFont.setAttributes(aJapaneseTypeface);
++}
++
++} // namespace
++
+ TableCell::TableCell()
+ : mpTextBody( std::make_shared<TextBody>() )
+ , mnRowSpan ( 1 )
+@@ -577,6 +624,8 @@ void TableCell::pushToXCell( const ::oox::core::XmlFilterBase& rFilterBase, cons
+     if (!aFillProperties.moFillType.has_value())
+         aFillProperties.moFillType = XML_noFill;
+ 
++    lclApplyJapaneseTableFallback(rFilterBase, *getTextBody(), aTextStyleProps);
++
+     // TODO: phClr?
+     aFillProperties.pushToPropMap( aPropMap, rFilterBase.getGraphicHelper() );
+     PropertySet aPropSet{xPropSet};
+diff --git a/oox/source/drawingml/textrun.cxx b/oox/source/drawingml/textrun.cxx
+--- a/oox/source/drawingml/textrun.cxx
++++ b/oox/source/drawingml/textrun.cxx
+@@ -43,6 +43,42 @@ using namespace ::com::sun::star::lang;
+ 
+ namespace oox::drawingml {
+ 
++namespace
++{
++
++bool lclContainsJapaneseText(const OUString& rText)
++{
++    for (sal_Int32 i = 0; i < rText.getLength(); ++i)
++    {
++        const sal_Unicode c = rText[i];
++        if ((c >= 0x3040 && c <= 0x30ff) || (c >= 0x3400 && c <= 0x9fff))
++            return true;
++    }
++    return false;
++}
++
++void lclApplyOfficeJapaneseFontLink(const ::oox::core::XmlFilterBase& rFilterBase,
++                                    const OUString& rText,
++                                    TextCharacterProperties& rTextCharacterProps)
++{
++    if (!lclContainsJapaneseText(rText))
++        return;
++
++    OUString aAsianFontName;
++    sal_Int16 nFontPitch = 0;
++    sal_Int16 nFontFamily = 0;
++    if (rTextCharacterProps.maAsianFont.getFontData(aAsianFontName, nFontPitch, nFontFamily,
++                                                    nullptr, rFilterBase)
++        && aAsianFontName.equalsIgnoreAsciiCase(u"Courier New"))
++    {
++        // Windows PowerPoint links Japanese glyphs in Courier New runs to MS Mincho.
++        // LibreOffice otherwise falls through to Noto Sans JP and changes the baseline.
++        rTextCharacterProps.maAsianFont.setAttributes(u"MS Mincho"_ustr);
++    }
++}
++
++} // namespace
++
+ TextRun::TextRun() :
+     mbIsLineBreak( false )
+ {
+@@ -78,6 +114,7 @@ sal_Int32 TextRun::insertAt(
+             aTextCharacterProps.maFillProperties.moFillType = XML_solidFill;
+ 
+         aTextCharacterProps.assignUsed(maTextCharacterProperties);
++        lclApplyOfficeJapaneseFontLink(rFilterBase, getText(), aTextCharacterProps);
+         if ( aTextCharacterProps.moHeight.has_value() )
+             nCharHeight = aTextCharacterProps.moHeight.value();
+         else

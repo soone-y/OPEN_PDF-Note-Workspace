@@ -1,0 +1,3 @@
+fixture note 2
+
+second note body for UI automation rollback checks.

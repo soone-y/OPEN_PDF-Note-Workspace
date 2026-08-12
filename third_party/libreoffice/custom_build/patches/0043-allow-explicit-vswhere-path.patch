@@ -1,0 +1,24 @@
+--- a/configure.ac
++++ b/configure.ac
+@@ -4268,7 +4268,9 @@ find_msvc()
+     unset vctest vctoolset vcnumwithdot vcbuildnumber
+ 
+     vs_versions_to_check "$1"
+-    if test "$build_os" = wsl; then
++    if test -n "$LIBO_VSWHERE"; then
++        vswhere="$LIBO_VSWHERE"
++    elif test "$build_os" = wsl; then
+         vswhere="$PROGRAMFILESX86"
+         if test -z "$vswhere"; then
+             vswhere="c:\\Program Files (x86)"
+@@ -4277,7 +4279,9 @@ find_msvc()
+     else
+         vswhere="$(perl -e 'print $ENV{"ProgramFiles(x86)"}')"
+     fi
+-    vswhere+="\\Microsoft Visual Studio\\Installer\\vswhere.exe"
++    if test -z "$LIBO_VSWHERE"; then
++        vswhere+="\\Microsoft Visual Studio\\Installer\\vswhere.exe"
++    fi
+     PathFormat "$vswhere"
+     vswhere=$formatted_path_unix
+     for ver in $vsversions; do

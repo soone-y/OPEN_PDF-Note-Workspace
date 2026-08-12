@@ -1,0 +1,311 @@
+// file: settings/settings_shortcut_editor.cppinc
+// Editor for annotation category/detail shortcuts.
+
+namespace {
+
+constexpr int kShortcutEditorList = 5201;
+constexpr int kShortcutEditorKey = 5202;
+constexpr int kShortcutEditorTarget = 5203;
+constexpr int kShortcutEditorAdd = 5204;
+constexpr int kShortcutEditorDelete = 5205;
+
+struct AnnotShortcutEditorCtx {
+    HWND owner = nullptr;
+    bool done = false;
+    bool ok = false;
+    HWND list = nullptr;
+    HWND key = nullptr;
+    HWND target = nullptr;
+    int currentIndex = -1;
+    std::vector<AnnotToolShortcutBinding> bindings;
+};
+
+static std::wstring ShortcutEditorTargetLabel(AnnotToolShortcutTargetKind kind,
+                                              AnnotToolFamily family, ToolMode mode) {
+    const bool en = IsEnglishUi();
+    if (kind == AnnotToolShortcutTargetKind::Category) {
+        switch (family) {
+        case AnnotToolFamily::Select: return en ? L"Category: Select" : L"カテゴリ: 選択";
+        case AnnotToolFamily::Pan: return en ? L"Category: Pan" : L"カテゴリ: パン";
+        case AnnotToolFamily::Magnifier: return en ? L"Category: Magnifier" : L"カテゴリ: 拡大鏡";
+        case AnnotToolFamily::Text: return en ? L"Category: Text" : L"カテゴリ: テキスト";
+        case AnnotToolFamily::Marker: return en ? L"Category: Marker" : L"カテゴリ: マーカー";
+        case AnnotToolFamily::Pen: return en ? L"Category: Pen" : L"カテゴリ: ペン";
+        case AnnotToolFamily::Shape: return en ? L"Category: Shape" : L"カテゴリ: 図形";
+        case AnnotToolFamily::Eraser: return en ? L"Category: Eraser" : L"カテゴリ: 消しゴム";
+        default: return en ? L"Category" : L"カテゴリ";
+        }
+    }
+    if (family == AnnotToolFamily::Shape) {
+        if (AnnotToolUsesGeometry(mode, AnnotToolGeometry::Shape)) {
+            return en ? L"Detail: Shape (outline / fill)" : L"詳細: 図形（枠線／強調）";
+        }
+        const bool emphasis = IsEmphasisAnnotToolMode(mode, g_shapeDrawMode);
+        const std::wstring branch = emphasis
+            ? (en ? L"Detail: Emphasis / " : L"詳細: 強調 / ")
+            : (en ? L"Detail: Stroke / " : L"詳細: 線 / ");
+        if (IsArrowAnnotToolMode(mode)) return branch + (en ? L"Arrow" : L"矢印");
+        if (IsWaveAnnotToolMode(mode)) return branch + (en ? L"Wave" : L"波線");
+        return branch + (en ? L"Line" : L"直線");
+    }
+    switch (mode) {
+    case ToolMode::MarkerText: return en ? L"Detail: Marker" : L"詳細: マーカー";
+    case ToolMode::MarkerTextUnderline: return en ? L"Detail: Marker underline" : L"詳細: マーカー下線";
+    case ToolMode::MarkerTextColor: return en ? L"Detail: Marker text color" : L"詳細: マーカー文字色";
+    case ToolMode::MarkerFree: return en ? L"Detail: Free marker" : L"詳細: フリーマーカー";
+    case ToolMode::TextBox: return en ? L"Detail: Text" : L"詳細: テキスト";
+    case ToolMode::Freehand: return en ? L"Detail: Pen" : L"詳細: ペン";
+    case ToolMode::Select: return en ? L"Detail: Select" : L"詳細: 選択";
+    case ToolMode::Pan: return en ? L"Detail: Pan" : L"詳細: パン";
+    case ToolMode::Magnifier: return en ? L"Detail: Magnifier" : L"詳細: 拡大鏡";
+    case ToolMode::Eraser: return en ? L"Detail: Eraser" : L"詳細: 消しゴム";
+    default: return en ? L"Detail" : L"詳細";
+    }
+}
+
+static std::wstring ShortcutEditorText(HWND hWnd) {
+    if (!hWnd) return {};
+    int len = GetWindowTextLengthW(hWnd);
+    if (len <= 0) return {};
+    std::wstring text(static_cast<size_t>(len), L'\0');
+    GetWindowTextW(hWnd, text.data(), len + 1);
+    return text;
+}
+
+static void RefreshShortcutEditorList(AnnotShortcutEditorCtx* ctx, int select = -1) {
+    if (!ctx || !ctx->list) return;
+    SendMessageW(ctx->list, LB_RESETCONTENT, 0, 0);
+    for (const auto& binding : ctx->bindings) {
+        std::wstring text = binding.key + L"  →  " +
+            ShortcutEditorTargetLabel(binding.targetKind, binding.family, binding.mode);
+        SendMessageW(ctx->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+    }
+    if (!ctx->bindings.empty()) {
+        int index = select >= 0 ? std::min(select, static_cast<int>(ctx->bindings.size()) - 1) : 0;
+        SendMessageW(ctx->list, LB_SETCURSEL, index, 0);
+    }
+}
+
+static void LoadShortcutEditorRow(AnnotShortcutEditorCtx* ctx, int index) {
+    if (!ctx || index < 0 || index >= static_cast<int>(ctx->bindings.size())) return;
+    ctx->currentIndex = index;
+    const auto& binding = ctx->bindings[static_cast<size_t>(index)];
+    SetWindowTextW(ctx->key, binding.key.c_str());
+    DWORD_PTR target = (binding.targetKind == AnnotToolShortcutTargetKind::Category)
+        ? (0x100000u + static_cast<DWORD_PTR>(binding.family))
+        : (0x200000u + static_cast<DWORD_PTR>(binding.mode));
+    int count = static_cast<int>(SendMessageW(ctx->target, CB_GETCOUNT, 0, 0));
+    for (int i = 0; i < count; ++i) {
+        if (static_cast<DWORD_PTR>(SendMessageW(ctx->target, CB_GETITEMDATA, i, 0)) == target) {
+            SendMessageW(ctx->target, CB_SETCURSEL, i, 0);
+            break;
+        }
+    }
+}
+
+static bool StoreShortcutEditorRow(AnnotShortcutEditorCtx* ctx, int index) {
+    if (!ctx || index < 0 || index >= static_cast<int>(ctx->bindings.size())) return false;
+    AnnotToolShortcutBinding parsed;
+    const std::wstring key = ShortcutEditorText(ctx->key);
+    if (!ParseAnnotToolShortcutKeyForUser(key, parsed)) {
+        ShowSoftNotice(ctx->owner, L"ショートカット形式が正しくありません。例: Ctrl+Alt+1 または Numpad1",
+                       SoftNoticeKind::Warning);
+        SetFocus(ctx->key);
+        return false;
+    }
+    if (IsFixedAnnotToolNavigationShortcut(parsed)) {
+        ShowSoftNotice(ctx->owner, L"Ctrl+Alt+矢印キーはカテゴリ・詳細種の固定循環に予約されています。",
+                       SoftNoticeKind::Warning);
+        SetFocus(ctx->key);
+        return false;
+    }
+    int targetIndex = static_cast<int>(SendMessageW(ctx->target, CB_GETCURSEL, 0, 0));
+    if (targetIndex < 0) return false;
+    DWORD_PTR data = static_cast<DWORD_PTR>(SendMessageW(ctx->target, CB_GETITEMDATA, targetIndex, 0));
+    auto& binding = ctx->bindings[static_cast<size_t>(index)];
+    binding.key = key;
+    binding.vk = parsed.vk;
+    binding.ctrl = parsed.ctrl;
+    binding.alt = parsed.alt;
+    binding.shift = parsed.shift;
+    if ((data & 0xF00000u) == 0x100000u) {
+        binding.targetKind = AnnotToolShortcutTargetKind::Category;
+        binding.family = static_cast<AnnotToolFamily>(data - 0x100000u);
+        binding.mode = ToolMode::Select;
+    } else if ((data & 0xF00000u) == 0x200000u) {
+        binding.targetKind = AnnotToolShortcutTargetKind::Detail;
+        binding.mode = static_cast<ToolMode>(data - 0x200000u);
+        binding.family = AnnotToolFamilyForMode(binding.mode);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static LRESULT CALLBACK AnnotShortcutEditorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<AnnotShortcutEditorCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = reinterpret_cast<AnnotShortcutEditorCtx*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        const int pad = ScaleY(hWnd, 12);
+        const int rowH = std::max(ScaleY(hWnd, 24), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 8));
+        const int labelW = ScaleY(hWnd, 86);
+        const int fieldX = pad + labelW;
+        const int fieldW = ScaleY(hWnd, 300);
+        HWND label = CreateWindowExW(0, L"STATIC", L"割り当て一覧", WS_CHILD | WS_VISIBLE,
+                                     pad, pad, fieldW, rowH, hWnd, nullptr, g_hInst, nullptr);
+        ctx->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY,
+                                    pad, pad + rowH, ScaleY(hWnd, 440), ScaleY(hWnd, 190), hWnd,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorList)), g_hInst, nullptr);
+        HWND keyLabel = CreateWindowExW(0, L"STATIC", L"キー", WS_CHILD | WS_VISIBLE,
+                                        pad, pad + rowH + ScaleY(hWnd, 205), labelW, rowH, hWnd, nullptr, g_hInst, nullptr);
+        ctx->key = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                   fieldX, pad + rowH + ScaleY(hWnd, 202), fieldW, rowH, hWnd,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorKey)), g_hInst, nullptr);
+        HWND targetLabel = CreateWindowExW(0, L"STATIC", L"対象", WS_CHILD | WS_VISIBLE,
+                                           pad, pad + rowH + ScaleY(hWnd, 245), labelW, rowH, hWnd, nullptr, g_hInst, nullptr);
+        ctx->target = CreateWindowExW(0, L"COMBOBOX", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+                                      fieldX, pad + rowH + ScaleY(hWnd, 242), fieldW, ScaleY(hWnd, 300), hWnd,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorTarget)), g_hInst, nullptr);
+        for (AnnotToolFamily family : AnnotToolFamilyUiOrder()) {
+            int item = static_cast<int>(SendMessageW(ctx->target, CB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(ShortcutEditorTargetLabel(AnnotToolShortcutTargetKind::Category, family, ToolMode::Select).c_str())));
+            SendMessageW(ctx->target, CB_SETITEMDATA, item, 0x100000u + static_cast<DWORD_PTR>(family));
+        }
+        for (ToolMode mode : AnnotToolModeUiOrder()) {
+            int item = static_cast<int>(SendMessageW(ctx->target, CB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(ShortcutEditorTargetLabel(AnnotToolShortcutTargetKind::Detail, AnnotToolFamilyForMode(mode), mode).c_str())));
+            SendMessageW(ctx->target, CB_SETITEMDATA, item, 0x200000u + static_cast<DWORD_PTR>(mode));
+        }
+        HWND add = CreateWindowExW(0, L"BUTTON", L"追加", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                   pad, pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 80), rowH, hWnd,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorAdd)), g_hInst, nullptr);
+        HWND del = CreateWindowExW(0, L"BUTTON", L"削除", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                   pad + ScaleY(hWnd, 90), pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 80), rowH, hWnd,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorDelete)), g_hInst, nullptr);
+        HWND ok = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                  ScaleY(hWnd, 355), pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 80), rowH, hWnd,
+                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
+        HWND cancel = CreateWindowExW(0, L"BUTTON", L"キャンセル", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                      ScaleY(hWnd, 445), pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 100), rowH, hWnd,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
+        for (HWND control : { label, ctx->list, keyLabel, ctx->key, targetLabel, ctx->target, add, del, ok, cancel }) SetUIFont(control);
+        RefreshShortcutEditorList(ctx);
+        LoadShortcutEditorRow(ctx, 0);
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        int code = HIWORD(wParam);
+        if (!ctx) break;
+        if (id == kShortcutEditorList && code == LBN_SELCHANGE) {
+            int nextIndex = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
+            if (ctx->currentIndex >= 0 && !StoreShortcutEditorRow(ctx, ctx->currentIndex)) {
+                SendMessageW(ctx->list, LB_SETCURSEL, ctx->currentIndex, 0);
+                return 0;
+            }
+            LoadShortcutEditorRow(ctx, nextIndex);
+            return 0;
+        }
+        if (id == kShortcutEditorAdd) {
+            if (ctx->currentIndex >= 0 && !StoreShortcutEditorRow(ctx, ctx->currentIndex)) return 0;
+            AnnotToolShortcutBinding binding;
+            if (!ParseAnnotToolShortcutKeyForUser(L"Ctrl+Alt+F1", binding)) return 0;
+            binding.targetKind = AnnotToolShortcutTargetKind::Category;
+            binding.family = AnnotToolFamily::Select;
+            ctx->bindings.push_back(binding);
+            RefreshShortcutEditorList(ctx, static_cast<int>(ctx->bindings.size()) - 1);
+            LoadShortcutEditorRow(ctx, static_cast<int>(ctx->bindings.size()) - 1);
+            return 0;
+        }
+        if (id == kShortcutEditorDelete) {
+            int index = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
+            if (index >= 0 && index < static_cast<int>(ctx->bindings.size())) {
+                if (!StoreShortcutEditorRow(ctx, index)) return 0;
+                ctx->bindings.erase(ctx->bindings.begin() + index);
+                RefreshShortcutEditorList(ctx, std::max(0, index - 1));
+                LoadShortcutEditorRow(ctx, std::max(0, index - 1));
+            }
+            return 0;
+        }
+        if (id == IDOK) {
+            int index = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
+            if (index >= 0 && !StoreShortcutEditorRow(ctx, index)) return 0;
+            if (!ReplaceAnnotToolShortcutBindings(ctx->bindings)) {
+                ShowSoftNotice(ctx->owner, L"ショートカットの保存に失敗しました。キーの重複や形式を確認してください。",
+                               SoftNoticeKind::Warning);
+                return 0;
+            }
+            ctx->ok = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (id == IDCANCEL) {
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+    case WM_DESTROY:
+        if (ctx) { ctx->done = true; RestoreOwnerAfterModal(ctx->owner); }
+        return 0;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+        return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
+    case WM_DRAWITEM:
+        if (DrawThemeButton(reinterpret_cast<LPDRAWITEMSTRUCT>(lParam))) return TRUE;
+        break;
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static void EnsureAnnotShortcutEditorClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = AnnotShortcutEditorProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"AnnotShortcutEditorDlgClass";
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+static void ShowAnnotToolShortcutEditor(HWND owner) {
+    EnsureAnnotShortcutEditorClass();
+    AnnotShortcutEditorCtx ctx;
+    ctx.owner = owner;
+    ctx.bindings = AnnotToolShortcutBindings();
+    const std::wstring title = IsEnglishUi() ? L"Annotation shortcuts" : L"注釈ツールショートカット";
+    if (owner) EnableWindow(owner, FALSE);
+    int dpi = GetDpiY(owner);
+    HWND hWnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"AnnotShortcutEditorDlgClass", title.c_str(),
+                                WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
+                                MulDiv(570, dpi, 96), MulDiv(390, dpi, 96), owner, nullptr, g_hInst, &ctx);
+    if (!hWnd) { if (owner) EnableWindow(owner, TRUE); return; }
+    ShowWindow(hWnd, SW_SHOW);
+    UpdateWindow(hWnd);
+    MSG msg;
+    while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (ShouldSkipImeMessageInModalLoop(msg)) continue;
+        if (!IsDialogMessageW(hWnd, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    }
+    RestoreOwnerAfterModal(owner);
+}
+
+} // namespace

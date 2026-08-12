@@ -1,0 +1,51 @@
+diff --git a/sw/source/core/text/inftxt.hxx b/sw/source/core/text/inftxt.hxx
+--- a/sw/source/core/text/inftxt.hxx
++++ b/sw/source/core/text/inftxt.hxx
+@@ -783,12 +783,6 @@ inline sal_uInt16 SwTextSizeInfo::GetAscent() const
+     return const_cast<SwFont*>(GetFont())->GetAscent( m_pVsh, *GetOut() );
+ }
+ 
+-inline sal_uInt16 SwTextSizeInfo::GetTextHeight() const
+-{
+-    assert(GetOut());
+-    return const_cast<SwFont*>(GetFont())->GetHeight( m_pVsh, *GetOut() );
+-}
+-
+ inline sal_uInt16 SwTextSizeInfo::GetHangingBaseline() const
+ {
+     assert(GetOut());
+diff --git a/sw/source/core/text/inftxt.cxx b/sw/source/core/text/inftxt.cxx
+--- a/sw/source/core/text/inftxt.cxx
++++ b/sw/source/core/text/inftxt.cxx
+@@ -103,6 +103,31 @@ using namespace ::com::sun::star::beans;
+ #define DRAW_SPECIAL_OPTIONS_CENTER 1
+ #define DRAW_SPECIAL_OPTIONS_ROTATE 2
+ 
++sal_uInt16 SwTextSizeInfo::GetTextHeight() const
++{
++    assert(GetOut());
++    sal_uInt16 nHeight = const_cast<SwFont*>(GetFont())->GetHeight(m_pVsh, *GetOut());
++
++    if (!m_pFrame || !m_pFrame->IsInTab()
++        || !m_pFrame->GetDoc().getIDocumentSettingAccess().get(
++            DocumentSettingId::MS_WORD_COMP_GRID_METRICS))
++    {
++        return nHeight;
++    }
++
++    const OUString& rFamilyName = GetFont()->GetName(GetFont()->GetActual());
++    if (!rFamilyName.equalsIgnoreAsciiCase(u"Yu Gothic") && rFamilyName != u"游ゴシック")
++        return nHeight;
++
++    if (GetFont()->GetHeight() > 150)
++        return nHeight;
++
++    // Word uses tighter Yu Gothic line metrics for small text inside automatically sized table rows.
++    // Keep the general ascent and line metrics unchanged because inline-anchored objects
++    // also use them to calculate their vertical position.
++    return (nHeight * 213) / 216;
++}
++
+ SwLineInfo::SwLineInfo()
+     : m_pSpace( nullptr ),
+       m_nVertAlign( SvxParaVertAlignItem::Align::Automatic ),

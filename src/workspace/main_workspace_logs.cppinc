@@ -1,0 +1,739 @@
+// file: main/main_workspace_logs.cppinc
+
+static std::filesystem::path WorkspaceLogDirectory() {
+    if (g_workspaceRoot.empty()) return {};
+    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__log__";
+}
+
+static std::wstring WorkspaceLogArchiveBaseName() {
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t buf[64]{};
+    swprintf_s(buf, L"logs_%04u%02u%02u_%02u%02u%02u.zip",
+               st.wYear, st.wMonth, st.wDay,
+               st.wHour, st.wMinute, st.wSecond);
+    return buf;
+}
+
+struct WorkspaceLogFileIdentity {
+    DWORD volumeSerialNumber = 0;
+    DWORD linkCount = 0;
+    uint64_t fileIndex = 0;
+    uint64_t fileSize = 0;
+    uint64_t lastWriteTime = 0;
+};
+
+struct WorkspaceLogFileInfo {
+    AppLogKind kind = AppLogKind::Crash;
+    std::filesystem::path path;
+    std::wstring displayName;
+    WorkspaceLogFileIdentity identity;
+};
+
+static const std::array<AppLogKind, 4>& WorkspaceManagedLogKinds() {
+    static const std::array<AppLogKind, 4> kKinds = {
+        AppLogKind::PreviewTrace,
+        AppLogKind::SwitchTiming,
+        AppLogKind::Crash,
+        AppLogKind::StartupWatchdog,
+    };
+    return kKinds;
+}
+
+static std::filesystem::path WorkspaceManagedLogPath(AppLogKind kind) {
+    const std::filesystem::path logDir = WorkspaceLogDirectory();
+    if (logDir.empty()) return {};
+    return logDir / AppLogPath(kind).filename();
+}
+
+static bool ReadWorkspaceLogFileIdentity(const std::filesystem::path& path,
+                                         WorkspaceLogFileIdentity* outIdentity,
+                                         std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (!outIdentity) {
+        if (outErr) *outErr = IsEnglishUi() ? L"Internal error." : L"内部エラーです。";
+        return false;
+    }
+
+    HANDLE handle = CreateFileW(path.c_str(),
+                                FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr,
+                                OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL,
+                                nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        if (outErr) {
+            const DWORD e = GetLastError();
+            *outErr = (IsEnglishUi() ? L"Failed to inspect log file:\n" : L"ログファイルの確認に失敗しました:\n") +
+                      path.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
+        }
+        return false;
+    }
+
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(handle, &info)) {
+        const DWORD e = GetLastError();
+        CloseHandle(handle);
+        if (outErr) {
+            *outErr = (IsEnglishUi() ? L"Failed to inspect log file:\n" : L"ログファイルの確認に失敗しました:\n") +
+                      path.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
+        }
+        return false;
+    }
+    CloseHandle(handle);
+
+    ULARGE_INTEGER fileSize{};
+    fileSize.HighPart = info.nFileSizeHigh;
+    fileSize.LowPart = info.nFileSizeLow;
+    ULARGE_INTEGER lastWrite{};
+    lastWrite.HighPart = info.ftLastWriteTime.dwHighDateTime;
+    lastWrite.LowPart = info.ftLastWriteTime.dwLowDateTime;
+
+    outIdentity->volumeSerialNumber = info.dwVolumeSerialNumber;
+    outIdentity->linkCount = info.nNumberOfLinks;
+    outIdentity->fileIndex =
+        (static_cast<uint64_t>(info.nFileIndexHigh) << 32) |
+        static_cast<uint64_t>(info.nFileIndexLow);
+    outIdentity->fileSize = fileSize.QuadPart;
+    outIdentity->lastWriteTime = lastWrite.QuadPart;
+    return true;
+}
+
+static bool SameWorkspaceLogIdentity(const WorkspaceLogFileIdentity& a,
+                                     const WorkspaceLogFileIdentity& b) {
+    return a.volumeSerialNumber == b.volumeSerialNumber &&
+           a.linkCount == b.linkCount &&
+           a.fileIndex == b.fileIndex &&
+           a.fileSize == b.fileSize &&
+           a.lastWriteTime == b.lastWriteTime;
+}
+
+static bool ValidateWorkspaceLogCandidate(const std::filesystem::path& path,
+                                          AppLogKind kind,
+                                          WorkspaceLogFileInfo* outInfo,
+                                          std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    const std::filesystem::path logDir = WorkspaceLogDirectory();
+    if (logDir.empty()) {
+        if (outErr) {
+            *outErr = IsEnglishUi()
+                ? L"No workspace log folder is available."
+                : L"ワークスペースのログフォルダが見つかりません。";
+        }
+        return false;
+    }
+    if (NormalizePathKey(path.parent_path().wstring()) != NormalizePathKey(logDir.wstring())) {
+        if (outErr) {
+            *outErr = IsEnglishUi()
+                ? L"Refusing to operate on a log outside the workspace log folder:\n" + path.wstring()
+                : L"ワークスペースのログフォルダ外にあるため操作を拒否しました:\n" + path.wstring();
+        }
+        return false;
+    }
+
+    bool isReparse = false;
+    if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) {
+        if (outErr) {
+            *outErr = IsEnglishUi()
+                ? L"Reparse-point log files are not supported:\n" + path.wstring()
+                : L"reparse point のログファイルは使用できません:\n" + path.wstring();
+        }
+        return false;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+        if (outErr) {
+            *outErr = ec
+                ? ((IsEnglishUi() ? L"Failed to inspect log file:\n" : L"ログファイルの確認に失敗しました:\n") +
+                   path.wstring())
+                : ((IsEnglishUi() ? L"Refusing to operate on a non-file log path:\n"
+                                  : L"ファイルではないログパスのため操作を拒否しました:\n") +
+                   path.wstring());
+        }
+        return false;
+    }
+
+    WorkspaceLogFileIdentity identity;
+    if (!ReadWorkspaceLogFileIdentity(path, &identity, outErr)) {
+        return false;
+    }
+    if (identity.linkCount != 1) {
+        if (outErr) {
+            *outErr = (IsEnglishUi()
+                ? L"Refusing to operate on a log file with multiple hard links:\n"
+                : L"hard link を持つログファイルのため操作を拒否しました:\n") +
+                path.wstring();
+        }
+        return false;
+    }
+
+    if (outInfo) {
+        outInfo->kind = kind;
+        outInfo->path = path;
+        outInfo->displayName = path.filename().wstring();
+        outInfo->identity = identity;
+    }
+    return true;
+}
+
+static std::wstring BuildWorkspaceLogDisplayList(const std::vector<WorkspaceLogFileInfo>& logFiles) {
+    std::wstring out;
+    for (const auto& logFile : logFiles) {
+        out += L"\n- " + logFile.displayName;
+    }
+    return out;
+}
+
+static std::vector<WorkspaceLogFileInfo> EnumerateWorkspaceLogFiles(std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    std::vector<WorkspaceLogFileInfo> out;
+    const std::filesystem::path logDir = WorkspaceLogDirectory();
+    if (logDir.empty()) return out;
+    if (IsUncPath(logDir)) {
+        if (outErr) {
+            *outErr = IsEnglishUi()
+                ? L"UNC log paths are not supported:\n" + logDir.wstring()
+                : L"UNC のログパスは使用できません:\n" + logDir.wstring();
+        }
+        return out;
+    }
+
+    bool isReparse = false;
+    if (TryIsReparsePointNoFollow(logDir, isReparse) && isReparse) {
+        if (outErr) {
+            *outErr = IsEnglishUi()
+                ? L"Reparse-point log folders are not supported:\n" + logDir.wstring()
+                : L"reparse point のログフォルダは使用できません:\n" + logDir.wstring();
+        }
+        return out;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(logDir, ec)) {
+        if (ec && outErr) {
+            *outErr = IsEnglishUi()
+                ? L"Failed to inspect the log folder:\n" + logDir.wstring()
+                : L"ログフォルダの確認に失敗しました:\n" + logDir.wstring();
+        }
+        return out;
+    }
+    if (!std::filesystem::is_directory(logDir, ec)) {
+        if (ec && outErr) {
+            *outErr = IsEnglishUi()
+                ? L"The log path is not a directory:\n" + logDir.wstring()
+                : L"ログパスがフォルダではありません:\n" + logDir.wstring();
+        }
+        return out;
+    }
+
+    for (AppLogKind kind : WorkspaceManagedLogKinds()) {
+        const std::filesystem::path path = WorkspaceManagedLogPath(kind);
+        ec.clear();
+        const bool exists = std::filesystem::exists(path, ec);
+        if (ec) {
+            if (outErr) {
+                *outErr = IsEnglishUi()
+                    ? L"Failed to inspect the log file:\n" + path.wstring()
+                    : L"ログファイルの確認に失敗しました:\n" + path.wstring();
+            }
+            out.clear();
+            return out;
+        }
+        if (!exists) continue;
+
+        WorkspaceLogFileInfo info;
+        if (!ValidateWorkspaceLogCandidate(path, kind, &info, outErr)) {
+            out.clear();
+            return out;
+        }
+        out.push_back(std::move(info));
+    }
+    std::sort(out.begin(), out.end(), [](const WorkspaceLogFileInfo& a, const WorkspaceLogFileInfo& b) {
+        return ToLowerAscii(a.displayName) < ToLowerAscii(b.displayName);
+    });
+    return out;
+}
+
+bool HasWorkspaceLogFiles() {
+    return !EnumerateWorkspaceLogFiles(nullptr).empty();
+}
+
+static void DosDateTimeFromSystemTime(const SYSTEMTIME& st, WORD* outDate, WORD* outTime) {
+    const WORD year = (st.wYear < 1980) ? 1980 : st.wYear;
+    if (outDate) {
+        *outDate = static_cast<WORD>(((year - 1980) << 9) |
+                                     ((st.wMonth & 0x0F) << 5) |
+                                     (st.wDay & 0x1F));
+    }
+    if (outTime) {
+        *outTime = static_cast<WORD>(((st.wHour & 0x1F) << 11) |
+                                     ((st.wMinute & 0x3F) << 5) |
+                                     ((st.wSecond / 2) & 0x1F));
+    }
+}
+
+static void AppendLe16(std::vector<uint8_t>& out, uint16_t value) {
+    out.push_back(static_cast<uint8_t>(value & 0xFFu));
+    out.push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
+}
+
+static void AppendLe32(std::vector<uint8_t>& out, uint32_t value) {
+    out.push_back(static_cast<uint8_t>(value & 0xFFu));
+    out.push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
+    out.push_back(static_cast<uint8_t>((value >> 16) & 0xFFu));
+    out.push_back(static_cast<uint8_t>((value >> 24) & 0xFFu));
+}
+
+struct WorkspaceLogArchiveEntry {
+    std::filesystem::path sourcePath;
+    std::wstring displayName;
+    WorkspaceLogFileIdentity sourceIdentity;
+    std::string archiveNameUtf8;
+    uint32_t crc32 = 0;
+    uint32_t sizeBytes = 0;
+    WORD dosTime = 0;
+    WORD dosDate = 0;
+    uint32_t localHeaderOffset = 0;
+};
+
+static uint32_t UpdateZipCrc32(uint32_t crc, const uint8_t* data, size_t size) {
+    static const std::array<uint32_t, 256> table = [] {
+        std::array<uint32_t, 256> values{};
+        for (uint32_t i = 0; i < values.size(); ++i) {
+            uint32_t value = i;
+            for (int bit = 0; bit < 8; ++bit) {
+                value = (value & 1u) ? (0xEDB88320u ^ (value >> 1)) : (value >> 1);
+            }
+            values[i] = value;
+        }
+        return values;
+    }();
+
+    uint32_t value = crc ^ 0xFFFFFFFFu;
+    for (size_t i = 0; i < size; ++i) {
+        value = table[(value ^ data[i]) & 0xFFu] ^ (value >> 8);
+    }
+    return value ^ 0xFFFFFFFFu;
+}
+
+static bool WriteAllToHandle(HANDLE handle,
+                             const std::filesystem::path& pathForErr,
+                             const void* data,
+                             size_t size,
+                             std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (handle == INVALID_HANDLE_VALUE) {
+        if (outErr) *outErr = IsEnglishUi() ? L"Invalid file handle." : L"ファイルハンドルが無効です。";
+        return false;
+    }
+    const uint8_t* ptr = reinterpret_cast<const uint8_t*>(data);
+    size_t remaining = size;
+    while (remaining > 0) {
+        const DWORD chunk = static_cast<DWORD>(std::min<size_t>(remaining, 1u << 20));
+        DWORD written = 0;
+        if (!WriteFile(handle, ptr, chunk, &written, nullptr) || written != chunk) {
+            if (outErr) {
+                DWORD e = GetLastError();
+                *outErr = (IsEnglishUi() ? L"Failed to write archive:\n" : L"アーカイブの書き込みに失敗しました:\n") +
+                          pathForErr.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
+            }
+            return false;
+        }
+        ptr += written;
+        remaining -= written;
+    }
+    return true;
+}
+
+static void CleanupFailedArchiveTempFile(HANDLE* handle,
+                                         const std::filesystem::path& tmp,
+                                         const std::filesystem::path& quarantineDir,
+                                         std::wstring* err) {
+    if (handle && *handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(*handle);
+        *handle = INVALID_HANDLE_VALUE;
+    }
+    if (tmp.empty()) return;
+
+    std::filesystem::path moved;
+    if (!atomic_write::QuarantineFileBestEffort(tmp, quarantineDir, &moved)) {
+        std::error_code rmEc;
+        std::filesystem::remove(tmp, rmEc);
+        return;
+    }
+    if (err && !moved.empty()) {
+        *err += IsEnglishUi()
+            ? L"\n\nTemporary archive was quarantined here:\n" + moved.wstring()
+            : L"\n\n一時アーカイブを退避しました:\n" + moved.wstring();
+    }
+}
+
+static bool DeleteWorkspaceLogFile(const WorkspaceLogFileInfo& logFile, std::wstring* outErr) {
+    if (outErr) outErr->clear();
+
+    HANDLE handle = CreateFileW(logFile.path.c_str(),
+                                DELETE | FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr,
+                                OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL,
+                                nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        if (outErr) {
+            const DWORD e = GetLastError();
+            *outErr = atomic_write::Win32ErrorMessage(e);
+        }
+        return false;
+    }
+
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(handle, &info)) {
+        const DWORD e = GetLastError();
+        CloseHandle(handle);
+        if (outErr) {
+            *outErr = atomic_write::Win32ErrorMessage(e);
+        }
+        return false;
+    }
+
+    ULARGE_INTEGER fileSize{};
+    fileSize.HighPart = info.nFileSizeHigh;
+    fileSize.LowPart = info.nFileSizeLow;
+    ULARGE_INTEGER lastWrite{};
+    lastWrite.HighPart = info.ftLastWriteTime.dwHighDateTime;
+    lastWrite.LowPart = info.ftLastWriteTime.dwLowDateTime;
+
+    WorkspaceLogFileIdentity currentIdentity;
+    currentIdentity.volumeSerialNumber = info.dwVolumeSerialNumber;
+    currentIdentity.linkCount = info.nNumberOfLinks;
+    currentIdentity.fileIndex =
+        (static_cast<uint64_t>(info.nFileIndexHigh) << 32) |
+        static_cast<uint64_t>(info.nFileIndexLow);
+    currentIdentity.fileSize = fileSize.QuadPart;
+    currentIdentity.lastWriteTime = lastWrite.QuadPart;
+
+    if (!SameWorkspaceLogIdentity(currentIdentity, logFile.identity)) {
+        CloseHandle(handle);
+        if (outErr) {
+            *outErr = IsEnglishUi()
+                ? L"The log file changed before deletion."
+                : L"削除前にログファイルが変化しました。";
+        }
+        return false;
+    }
+
+    FILE_DISPOSITION_INFO disposition{};
+    disposition.DeleteFile = TRUE;
+    if (!SetFileInformationByHandle(handle, FileDispositionInfo, &disposition, sizeof(disposition))) {
+        const DWORD e = GetLastError();
+        CloseHandle(handle);
+        if (outErr) {
+            *outErr = atomic_write::Win32ErrorMessage(e);
+        }
+        return false;
+    }
+
+    if (!CloseHandle(handle)) {
+        if (outErr) {
+            const DWORD e = GetLastError();
+            *outErr = atomic_write::Win32ErrorMessage(e);
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool BuildWorkspaceLogArchiveEntries(const std::vector<WorkspaceLogFileInfo>& logFiles,
+                                            std::vector<WorkspaceLogArchiveEntry>* outEntries,
+                                            std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (!outEntries) {
+        if (outErr) *outErr = IsEnglishUi() ? L"Internal error." : L"内部エラーです。";
+        return false;
+    }
+    outEntries->clear();
+    outEntries->reserve(logFiles.size());
+
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    WORD dosDate = 0;
+    WORD dosTime = 0;
+    DosDateTimeFromSystemTime(now, &dosDate, &dosTime);
+
+    std::array<uint8_t, 64 * 1024> buffer{};
+    for (const auto& logFile : logFiles) {
+        WorkspaceLogFileIdentity currentIdentity;
+        if (!ReadWorkspaceLogFileIdentity(logFile.path, &currentIdentity, outErr)) {
+            return false;
+        }
+        if (!SameWorkspaceLogIdentity(currentIdentity, logFile.identity)) {
+            if (outErr) {
+                *outErr = (IsEnglishUi()
+                    ? L"Refusing to archive a log file that changed during the operation:\n"
+                    : L"処理中に変化したログファイルのため ZIP 保存を拒否しました:\n") +
+                    logFile.path.wstring();
+            }
+            return false;
+        }
+
+        std::ifstream file(logFile.path, std::ios::binary);
+        if (!file) {
+            if (outErr) {
+                *outErr = (IsEnglishUi() ? L"Failed to read log file:\n" : L"ログファイルを読み取れませんでした:\n") +
+                          logFile.path.wstring();
+            }
+            return false;
+        }
+
+        WorkspaceLogArchiveEntry entry;
+        entry.sourcePath = logFile.path;
+        entry.displayName = logFile.displayName;
+        entry.sourceIdentity = logFile.identity;
+        entry.archiveNameUtf8 = WideToUTF8(entry.displayName);
+        entry.dosDate = dosDate;
+        entry.dosTime = dosTime;
+
+        uint64_t totalRead = 0;
+        uint32_t crc32 = 0;
+        while (file) {
+            file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize got = file.gcount();
+            if (got <= 0) break;
+            totalRead += static_cast<uint64_t>(got);
+            if (totalRead > 0xFFFFFFFFull) {
+                if (outErr) {
+                    *outErr = (IsEnglishUi() ? L"ZIP64 is not supported for log archives:\n"
+                                             : L"ログアーカイブでは ZIP64 を未対応としています:\n") +
+                              logFile.path.wstring();
+                }
+                return false;
+            }
+            crc32 = UpdateZipCrc32(crc32, buffer.data(), static_cast<size_t>(got));
+        }
+        if (file.bad()) {
+            if (outErr) {
+                *outErr = (IsEnglishUi() ? L"Failed while reading log file:\n" : L"ログファイルの読み取り中に失敗しました:\n") +
+                          logFile.path.wstring();
+            }
+            return false;
+        }
+
+        entry.crc32 = crc32;
+        entry.sizeBytes = static_cast<uint32_t>(totalRead);
+        outEntries->push_back(std::move(entry));
+    }
+    return true;
+}
+
+static std::vector<uint8_t> BuildZipLocalHeader(const WorkspaceLogArchiveEntry& entry) {
+    std::vector<uint8_t> out;
+    out.reserve(30 + entry.archiveNameUtf8.size());
+    AppendLe32(out, 0x04034B50u);
+    AppendLe16(out, 20);
+    AppendLe16(out, 0x0800);
+    AppendLe16(out, 0);
+    AppendLe16(out, entry.dosTime);
+    AppendLe16(out, entry.dosDate);
+    AppendLe32(out, entry.crc32);
+    AppendLe32(out, entry.sizeBytes);
+    AppendLe32(out, entry.sizeBytes);
+    AppendLe16(out, static_cast<uint16_t>(entry.archiveNameUtf8.size()));
+    AppendLe16(out, 0);
+    out.insert(out.end(), entry.archiveNameUtf8.begin(), entry.archiveNameUtf8.end());
+    return out;
+}
+
+static std::vector<uint8_t> BuildZipCentralHeader(const WorkspaceLogArchiveEntry& entry) {
+    std::vector<uint8_t> out;
+    out.reserve(46 + entry.archiveNameUtf8.size());
+    AppendLe32(out, 0x02014B50u);
+    AppendLe16(out, 20);
+    AppendLe16(out, 20);
+    AppendLe16(out, 0x0800);
+    AppendLe16(out, 0);
+    AppendLe16(out, entry.dosTime);
+    AppendLe16(out, entry.dosDate);
+    AppendLe32(out, entry.crc32);
+    AppendLe32(out, entry.sizeBytes);
+    AppendLe32(out, entry.sizeBytes);
+    AppendLe16(out, static_cast<uint16_t>(entry.archiveNameUtf8.size()));
+    AppendLe16(out, 0);
+    AppendLe16(out, 0);
+    AppendLe16(out, 0);
+    AppendLe16(out, 0);
+    AppendLe32(out, 0);
+    AppendLe32(out, entry.localHeaderOffset);
+    out.insert(out.end(), entry.archiveNameUtf8.begin(), entry.archiveNameUtf8.end());
+    return out;
+}
+
+static std::vector<uint8_t> BuildZipEndOfCentralDirectory(uint16_t entryCount,
+                                                           uint32_t centralSize,
+                                                           uint32_t centralOffset) {
+    std::vector<uint8_t> out;
+    out.reserve(22);
+    AppendLe32(out, 0x06054B50u);
+    AppendLe16(out, 0);
+    AppendLe16(out, 0);
+    AppendLe16(out, entryCount);
+    AppendLe16(out, entryCount);
+    AppendLe32(out, centralSize);
+    AppendLe32(out, centralOffset);
+    AppendLe16(out, 0);
+    return out;
+}
+
+static bool CopyWorkspaceLogFileBytes(HANDLE handle,
+                                      const WorkspaceLogArchiveEntry& entry,
+                                      const std::filesystem::path& archivePathForErr,
+                                      std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    WorkspaceLogFileIdentity currentIdentity;
+    if (!ReadWorkspaceLogFileIdentity(entry.sourcePath, &currentIdentity, outErr)) {
+        return false;
+    }
+    if (!SameWorkspaceLogIdentity(currentIdentity, entry.sourceIdentity)) {
+        if (outErr) {
+            *outErr = (IsEnglishUi()
+                ? L"Refusing to archive a log file that changed during the operation:\n"
+                : L"処理中に変化したログファイルのため ZIP 保存を拒否しました:\n") +
+                entry.sourcePath.wstring();
+        }
+        return false;
+    }
+
+    std::ifstream file(entry.sourcePath, std::ios::binary);
+    if (!file) {
+        if (outErr) {
+            *outErr = (IsEnglishUi() ? L"Failed to reopen log file:\n" : L"ログファイルを再オープンできませんでした:\n") +
+                      entry.sourcePath.wstring();
+        }
+        return false;
+    }
+
+    std::array<uint8_t, 64 * 1024> buffer{};
+    while (file) {
+        file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize got = file.gcount();
+        if (got <= 0) break;
+        if (!WriteAllToHandle(handle, archivePathForErr, buffer.data(), static_cast<size_t>(got), outErr)) {
+            return false;
+        }
+    }
+    if (file.bad()) {
+        if (outErr) {
+            *outErr = (IsEnglishUi() ? L"Failed while copying log file:\n" : L"ログファイルのコピー中に失敗しました:\n") +
+                      entry.sourcePath.wstring();
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool WriteWorkspaceLogZipArchive(const std::vector<WorkspaceLogFileInfo>& logFiles,
+                                        const std::filesystem::path& dest,
+                                        std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (logFiles.empty()) {
+        if (outErr) *outErr = IsEnglishUi() ? L"No log files to archive." : L"ZIP保存するログがありません。";
+        return false;
+    }
+    if (logFiles.size() > 0xFFFFu) {
+        if (outErr) *outErr = IsEnglishUi() ? L"Too many log files for ZIP." : L"ZIPに入れるログ数が多すぎます。";
+        return false;
+    }
+
+    std::vector<WorkspaceLogArchiveEntry> entries;
+    if (!BuildWorkspaceLogArchiveEntries(logFiles, &entries, outErr)) {
+        return false;
+    }
+
+    std::filesystem::path tmp;
+    HANDLE tmpHandle = INVALID_HANDLE_VALUE;
+    if (!atomic_write::CreateUniqueTempFile(dest, dest.parent_path(), &tmp, &tmpHandle, outErr)) {
+        return false;
+    }
+
+    uint64_t bytesWritten = 0;
+    uint64_t centralSize64 = 0;
+    for (auto& entry : entries) {
+        if (bytesWritten > 0xFFFFFFFFull) {
+            if (outErr) *outErr = IsEnglishUi() ? L"ZIP64 is not supported." : L"ZIP64 は未対応です。";
+            CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
+            return false;
+        }
+        entry.localHeaderOffset = static_cast<uint32_t>(bytesWritten);
+
+        std::vector<uint8_t> localHeader = BuildZipLocalHeader(entry);
+        if (!WriteAllToHandle(tmpHandle, tmp, localHeader.data(), localHeader.size(), outErr)) {
+            CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
+            return false;
+        }
+        bytesWritten += localHeader.size();
+
+        if (!CopyWorkspaceLogFileBytes(tmpHandle, entry, tmp, outErr)) {
+            CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
+            return false;
+        }
+        bytesWritten += entry.sizeBytes;
+    }
+
+    if (bytesWritten > 0xFFFFFFFFull) {
+        if (outErr) *outErr = IsEnglishUi() ? L"ZIP64 is not supported." : L"ZIP64 は未対応です。";
+        CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
+        return false;
+    }
+    const uint32_t centralOffset = static_cast<uint32_t>(bytesWritten);
+
+    for (const auto& entry : entries) {
+        std::vector<uint8_t> centralHeader = BuildZipCentralHeader(entry);
+        centralSize64 += centralHeader.size();
+        if (centralSize64 > 0xFFFFFFFFull) {
+            if (outErr) *outErr = IsEnglishUi() ? L"ZIP64 is not supported." : L"ZIP64 は未対応です。";
+            CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
+            return false;
+        }
+        if (!WriteAllToHandle(tmpHandle, tmp, centralHeader.data(), centralHeader.size(), outErr)) {
+            CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
+            return false;
+        }
+        bytesWritten += centralHeader.size();
+    }
+
+    std::vector<uint8_t> endOfCentralDir = BuildZipEndOfCentralDirectory(
+        static_cast<uint16_t>(entries.size()),
+        static_cast<uint32_t>(centralSize64),
+        centralOffset);
+    if (!WriteAllToHandle(tmpHandle, tmp, endOfCentralDir.data(), endOfCentralDir.size(), outErr)) {
+        CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
+        return false;
+    }
+
+    if (!FlushFileBuffers(tmpHandle)) {
+        if (outErr) {
+            DWORD e = GetLastError();
+            *outErr = (IsEnglishUi() ? L"Failed to flush archive:\n" : L"アーカイブのフラッシュに失敗しました:\n") +
+                      tmp.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
+        }
+        CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
+        return false;
+    }
+    if (!CloseHandle(tmpHandle)) {
+        tmpHandle = INVALID_HANDLE_VALUE;
+        if (outErr) {
+            DWORD e = GetLastError();
+            *outErr = (IsEnglishUi() ? L"Failed to close archive temp file:\n" : L"アーカイブ一時ファイルを閉じられませんでした:\n") +
+                      tmp.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
+        }
+        CleanupFailedArchiveTempFile(nullptr, tmp, dest.parent_path(), outErr);
+        return false;
+    }
+    tmpHandle = INVALID_HANDLE_VALUE;
+
+    if (!atomic_write::AtomicReplaceFile(dest, tmp, dest.parent_path(), outErr)) {
+        return false;
+    }
+    return true;
+}

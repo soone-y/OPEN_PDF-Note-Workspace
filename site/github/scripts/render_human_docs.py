@@ -424,8 +424,10 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
     rel_path = md_path.relative_to(site_dir)
     depth = len(rel_path.parts) - 1
     root_rel = "../" * depth if depth > 0 else "./"
-    is_ai_document = rel_path.name == "For_AI.md" or rel_path.parts[0] == "for_ai"
-    raw_markdown_html = "" if is_ai_document else f'''    <div class="raw-md-link">
+    # introduction/ も人と AI が共通して使う公開資料である。ほかの公開文書と
+    # 同じナビゲーションと原文リンクを提供し、HTML と Markdown のどちらからでも読める。
+    is_ai_document = False
+    raw_markdown_html = f'''    <div class="raw-md-link">
       <a href="{md_path.name}" target="_blank">Raw Markdown</a>
     </div>'''
 
@@ -458,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     count = 0
-    for relative_dir in (Path("."), Path("docs/public"), Path("for_ai")):
+    for relative_dir in (Path("."), Path("docs/public"), Path("introduction")):
         directory = site_dir / relative_dir
         if not directory.exists() or not directory.is_dir():
             continue

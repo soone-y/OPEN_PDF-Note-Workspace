@@ -1,0 +1,19 @@
+diff --git a/basic/source/inc/sbintern.hxx b/basic/source/inc/sbintern.hxx
+--- a/basic/source/inc/sbintern.hxx
++++ b/basic/source/inc/sbintern.hxx
+@@ -102,7 +102,6 @@ struct SbiGlobals
+ {
+     static SbiGlobals* pGlobals;
+     SbiInstance*    pInst;          // all active runtime instances
+-#if HAVE_FEATURE_SCRIPTING
+     std::optional<SbiFactory>   pSbFac;    // StarBASIC-Factory
+     std::optional<SbUnoFactory> pUnoFac;   // Factory for Uno-Structs at DIM AS NEW
+     std::optional<SbTypeFactory>
+@@ -113,7 +112,6 @@ struct SbiGlobals
+     std::optional<SbFormFactory>
+                     pFormFac;       // Factory for user forms
+     std::unique_ptr<BasicManager> pAppBasMgr;
+-#endif
+     SbModule*       pMod;           // currently active module
+     SbModule*       pCompMod;       // currently compiled module
+     short           nInst;          // number of BASICs

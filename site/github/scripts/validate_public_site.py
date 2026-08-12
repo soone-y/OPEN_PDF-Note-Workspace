@@ -20,9 +20,9 @@ FORBIDDEN_PUBLIC_REFERENCES = (
     "/Users/",
 )
 DOCUMENTATION_PORTAL_REQUIRED_FILES = (
-    "index.html", "README.md", "for_ai/ai_context.md",
+    "index.html", "README.md", "introduction/index.md", "introduction/project_overview.md",
 )
-PORTAL_AI_ENTRY_LINKS = ("for_ai/ai_context.html",)
+PORTAL_ENTRY_LINKS = ("introduction/index.html",)
 MARKDOWN_LINK = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HTML_LINK = re.compile(r"(?:href|src)=[\"']([^\"'#]+)", re.IGNORECASE)
 HTML_META = re.compile(r"<meta\s+[^>]*?name=[\"']([^\"']+)[\"'][^>]*?content=[\"']([^\"']*)[\"']", re.IGNORECASE)
@@ -93,7 +93,7 @@ def validate_local_links(site: Path, errors: list[str]) -> None:
 def validate_rendered_human_docs(site: Path, errors: list[str]) -> None:
     """Ensure raw documents and their browser-readable HTML are published together."""
     markdown_paths = list(site.glob("*.md"))
-    for directory in (site / "docs" / "public", site / "for_ai"):
+    for directory in (site / "docs" / "public", site / "introduction"):
         if directory.is_dir():
             markdown_paths.extend(directory.rglob("*.md"))
     for markdown_path in markdown_paths:
@@ -103,7 +103,7 @@ def validate_rendered_human_docs(site: Path, errors: list[str]) -> None:
 
 
 def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
-    """Keep the HTML portal entrypoint aligned with the single AI document."""
+    """Keep the HTML portal entrypoint aligned with the single common document."""
     index_path = site / "index.html"
     if not index_path.is_file():
         return
@@ -112,7 +112,7 @@ def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
     except UnicodeDecodeError:
         return
     metadata = {name.lower(): value for name, value in HTML_META.findall(text)}
-    expected = {"ai-agent-entrypoint": "for_ai/ai_context.html"}
+    expected = {"ai-agent-entrypoint": "introduction/index.html"}
     for name, target in expected.items():
         if metadata.get(name) != target:
             errors.append(f"index.html must declare {name}={target}")
@@ -123,9 +123,9 @@ def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
         for match in HTML_LINK.finditer(text)
         if local_target(match.group(1))
     }
-    for target in PORTAL_AI_ENTRY_LINKS:
+    for target in PORTAL_ENTRY_LINKS:
         if target not in linked_targets:
-            errors.append(f"index.html must visibly link to AI entry document: {target}")
+            errors.append(f"index.html must visibly link to common entry document: {target}")
 
 
 def validate_site(site: Path) -> list[str]:

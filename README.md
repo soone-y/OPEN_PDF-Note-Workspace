@@ -17,12 +17,14 @@ GitHub のアカウントや Git の知識は必要ありません。リポジ�
 
 `Source code (zip)` や `Source code (tar.gz)` は開発用のソースコードで、アプリとしては使えません。選んだ ZIP をダウンロードした後は、[GitHub から取得した後のセットアップ手順](docs/public/How_to_Setup.md#github-から-入手する) に従って展開してください。
 
+GitHubアカウントを使う場合は、Starでこのプロジェクトをあとで見つけやすくできます。配布物・公開文書・ライセンスの確認にもGitHubを利用できます。
+
 ## 文書と案内
 
 - 紹介サイト: https://pdf-note-workspace.soone-y.com/
 - 配布物を入手する: https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases
 - 使い方・セットアップの詳細一覧: [docs/public/Index.md](docs/public/Index.md)
-- AI向け資料を含む公開文書ポータル: https://soone-y.github.io/OPEN_PDF-Note-Workspace/
+- 利用者とAIが共通して使う公開文書ポータル: https://soone-y.github.io/OPEN_PDF-Note-Workspace/
 
 配布物では `docs/README.md` から同じ文書案内を開けます。アプリ内のヘルプも外部通信なしで利用できます。
 
@@ -74,7 +76,7 @@ PDF に書き込んだ注釈は、PDF 本体ではなく、同じフォルダに
 ## 文書ポータルの構成
 
 - `docs/public/`: 導入、使い方、保存・復元、トラブル対処の案内
-- `for_ai/`: AIが公開資料を参照して案内するための経路表と補助資料
+- `introduction/`: 設計、制約、根拠を整理した詳細資料。利用者とAIが共通して参照する
 
 開発用のソース、テスト、内部設計文書、公開作業用ツールはこの公開文書ポータルには含めません。
 

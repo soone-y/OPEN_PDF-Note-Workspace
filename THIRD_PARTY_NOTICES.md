@@ -9,11 +9,11 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 
 | コンポーネント | 用途 | 同梱形態 | ライセンス参照 |
 | --- | --- | --- | --- |
-| PDFium package `145.0.7568.0` | PDF の読み込み、描画、テキスト抽出、書き出し | `third_party/pdfium/` を同梱。release では `pdfium.dll` と対応ライセンス文書を配布 | `third_party/pdfium/LICENSE`, `third_party/pdfium/licenses/` |
+| PDFium package `153.0.7988.0` | PDF の読み込み、描画、テキスト抽出、書き出し | `third_party/pdfium/` を同梱。release では `pdfium.dll` と対応ライセンス文書を配布 | `third_party/pdfium/LICENSE`, `third_party/pdfium/licenses/` |
 | MD4C | Markdown 解析 | `third_party/md4c/` をリポジトリへ配置。導入時は `md4c.c`, `md4c.h`, `LICENSE.md` を参照 | `third_party/md4c/LICENSE.md` |
-| LibreOffice `26.2.3.2` | 同梱フォントのアプリ内 private font 利用。docx/pptx から PDF への headless 変換 | `third_party/libreoffice/image/` は比較・フォント・license 参照用。変換 runtime は通信機能を持たないカスタム build を標準 release へ配置する | `third_party/libreoffice/image/license.txt`, `third_party/libreoffice/image/LICENSE.html`, `third_party/libreoffice/image/NOTICE` |
+| LibreOffice custom runtime `26.2.5.2` / 比較用 image `26.2.3.2` | 同梱フォントのアプリ内 private font 利用。docx/pptx から PDF への headless 変換 | `image/` は比較・フォント・license 参照用。通信機能を除いた custom runtime を標準 release へ配置する | runtime および `third_party/libreoffice/image/` の `license.txt`, `LICENSE.html`, `NOTICE` |
 | MinGW-w64 runtime DLLs | `pdf_note_workspace.exe` と `readonly_viewer.exe` 実行に必要な C++/GCC runtime | `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` を `out/bin/` と release へコピー | `third_party/mingw_runtime_licenses/mingw-w64/` |
-| zlib runtime | DOCX staging copy の ZIP 展開/検証 | `zlib1.dll` を `out/bin/` と release へコピー | `third_party/pdfium/licenses/zlib.txt` |
+| zlib runtime `1.3.2` | DOCX staging copy の ZIP 展開/検証 | `third_party/zlib/` の固定成果物から `zlib1.dll` を `out/bin/` と release へコピー | `third_party/zlib/LICENSE` |
 
 ## 2. PDFium
 
@@ -26,8 +26,8 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
   - `third_party/pdfium/bin/pdfium.dll`
   - release では `pdfium.dll`
 - バージョン:
-  - `third_party/pdfium/VERSION`: `145.0.7568.0`
-  - `third_party/pdfium/PDFiumConfig.cmake`: `145.0.7568.0`
+  - `third_party/pdfium/VERSION`: `153.0.7988.0`
+  - `third_party/pdfium/PDFiumConfig.cmake`: `153.0.7988.0`
 
 ### 2.2 ライセンス文書
 
@@ -49,6 +49,7 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
   - `third_party/pdfium/licenses/libpng.txt` - PNG Reference Library License
   - `third_party/pdfium/licenses/libtiff.txt` - libtiff permissive license
   - `third_party/pdfium/licenses/llvm-libc.txt` - Apache License 2.0 with LLVM Exceptions
+  - `third_party/pdfium/licenses/simdutf.txt` - MIT License
   - `third_party/pdfium/licenses/zlib.txt` - zlib License
 
 ### 2.3 配布時の扱い
@@ -59,10 +60,9 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 
 ### 2.4 ローカル方針
 
-- コンパイル済みの公式バイナリパッケージを直接配置して利用しており、本リポジトリ上でのソースビルドは行わないため、以下の標準ビルドツール用設定ファイルや過去のゴミファイルは削除済みです。
-  - `args.gn`
-  - `PDFiumConfig.cmake`
-  - `include/fpdfview.h.orig`
+- コンパイル済みの公式バイナリパッケージを直接配置して利用し、本リポジトリ上で PDFium 自体のソースビルドは行いません。
+- package provenance と標準利用情報として `SOURCE.txt`, `args.gn`, `PDFiumConfig.cmake` を保持します。
+- `include/fpdfview.h.orig` のような作業バックアップは保持・公開しません。
 ## 3. MinGW-w64 runtime
 
 ### 3.1 実装上の位置づけ
@@ -71,7 +71,6 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
   - `libstdc++-6.dll`
   - `libgcc_s_seh-1.dll`
   - `libwinpthread-1.dll`
-  - `zlib1.dll`
 - `scripts/release/pack_release.ps1` は上記 DLL を release ルートへ配置します。
 
 ### 3.2 ライセンス文書
@@ -81,8 +80,6 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
   - `third_party/mingw_runtime_licenses/mingw-w64/gcc/COPYING.RUNTIME.txt` - GCC Runtime Library Exception
 - winpthreads:
   - `third_party/mingw_runtime_licenses/mingw-w64/winpthreads/COPYING.txt` - MIT + BSD 系 notice
-- zlib:
-  - `third_party/pdfium/licenses/zlib.txt` - zlib License
 
 ### 3.3 配布時の扱い
 
@@ -100,7 +97,7 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
   - `third_party/md4c/src/md4c.h`
 - `scripts/build/build_workspace.ps1` は `third_party/md4c/src/md4c.c` を直接コンパイルします。
 - `md4c-html.*` は現時点では使用前提にしません。
-- `MD4C_USE_UTF16` を MinGW で使うため、`third_party/md4c/src/md4c.c` に wide literal 化の局所パッチを 1 箇所適用しています。
+- `VERSION` で 0.5.3 以後の upstream commit を固定し、全角空白・日本語句読点対応だけを `patches/` の局所パッチとして保持します。
 
 ### 4.2 ライセンス文書
 
@@ -117,11 +114,9 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 
 ### 4.4 ローカル方針
 
-- 当プロジェクトでは Markdown から AST への解析機能のみを利用し、HTML形式への出力機能やLinuxパッケージ管理、CMake構成は使用しないため、以下のファイルは削除済みです。
-  - `src/CMakeLists.txt`
-  - `src/md4c-html.c`, `src/md4c-html.h`
-  - `src/entity.c`, `src/entity.h`
-  - `src/md4c-html.pc.in`, `src/md4c.pc.in`
+- 当プロジェクトでは Markdown から AST への解析機能のみを利用します。
+- vendor tree は必要な `src/md4c.c` と `src/md4c.h` に限定し、全角空白・日本語句読点対応は `patches/0001-japanese-whitespace-and-punctuation.patch` で再現可能にしています。
+- HTML 出力、Linux package metadata、upstream CMake 構成はアプリのビルド・配布へ組み込みません。
 ## 5. LibreOffice
 
 ### 5.1 実装上の位置づけ

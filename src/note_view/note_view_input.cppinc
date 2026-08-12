@@ -1,0 +1,5 @@
+// file: note_view/note_view_input.cppinc
+// Included by note_view.cpp. Keep helper fragment before NoteEditProc.
+
+#include "note_view_input_helpers.cppinc"
+#include "note_view_input_proc.cppinc"

@@ -7,7 +7,7 @@ on:
     # main ブランチへの push のうち、公開対象ファイルが変更された場合のみ実行
     branches: ["main"]
     paths:
-      - "for_ai/**"
+      - "introduction/**"
       - "README.md"
       - "LICENSE.md"
       - "LICENSES_INDEX.md"

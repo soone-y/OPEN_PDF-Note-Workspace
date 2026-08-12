@@ -1,0 +1,54 @@
+diff --git a/oox/source/drawingml/chart/objectformatter.cxx b/oox/source/drawingml/chart/objectformatter.cxx
+--- a/oox/source/drawingml/chart/objectformatter.cxx
++++ b/oox/source/drawingml/chart/objectformatter.cxx
+@@ -664,6 +664,7 @@ public:
+ 
+ private:
+     TextCharacterPropertiesPtr mxAutoText;  /// Automatic text properties.
++    bool                mbJapaneseChart;    /// Chart language or title indicates Japanese.
+ };
+ 
+ /** Formatter for a specific object type. */
+@@ -924,7 +925,8 @@ TextFormatter::TextFormatter( ObjectFormatterData& rData, const AutoTextEntry* p
+                               const ModelRef< TextBody >& rxGlobalTextProp,
+                               bool bJapaneseChartLanguage, bool bHasJapaneseChartTitle,
+                               bool bChartTitleObject ) :
+-    DetailFormatterBase( rData, pAutoTextEntry )
++    DetailFormatterBase( rData, pAutoTextEntry ),
++    mbJapaneseChart( bJapaneseChartLanguage || bHasJapaneseChartTitle )
+ {
+     if( !pAutoTextEntry )
+         return;
+@@ -934,7 +936,7 @@ TextFormatter::TextFormatter( ObjectFormatterData& rData, const AutoTextEntry* p
+     OUString aAsianFontName;
+     sal_Int16 nAsianFontPitch = 0;
+     sal_Int16 nAsianFontFamily = 0;
+-    if ((bJapaneseChartLanguage || bHasJapaneseChartTitle)
++    if (mbJapaneseChart
+         && !mxAutoText->maAsianFont.getFontData(aAsianFontName, nAsianFontPitch,
+                                                 nAsianFontFamily, nullptr,
+                                                 mrData.mrFilter))
+@@ -989,6 +991,23 @@ void TextFormatter::convertFormatting( PropertySet& rPropSet, const TextCharacte
+         aTextProps.assignUsed( *mxAutoText );
+     if( pTextProps )
+         aTextProps.assignUsed( *pTextProps );
++
++    OUString aAsianFontName;
++    sal_Int16 nAsianFontPitch = 0;
++    sal_Int16 nAsianFontFamily = 0;
++    if (mbJapaneseChart && mxAutoText
++        && !aTextProps.maAsianFont.getFontData(aAsianFontName, nAsianFontPitch,
++                                               nAsianFontFamily, nullptr,
++                                               mrData.mrFilter)
++        && mxAutoText->maAsianFont.getFontData(aAsianFontName, nAsianFontPitch,
++                                               nAsianFontFamily, nullptr,
++                                               mrData.mrFilter))
++    {
++        // Office chart text commonly specifies +mn-ea while the base East Asian
++        // theme typeface is blank. Keep the language-derived supplemental Jpan
++        // typeface instead of falling through to a generic CJK replacement.
++        aTextProps.maAsianFont.setAttributes(aAsianFontName);
++    }
+     aTextProps.pushToPropSet( rPropSet, mrData.mrFilter );
+ }
+ 

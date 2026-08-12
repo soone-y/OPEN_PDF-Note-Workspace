@@ -33,6 +33,7 @@ Lite版はウィンドウ名に `Lite` と表示されます。Lite版へ DOCX/P
 | --- | --- |
 | [How_to_Setup.md](How_to_Setup.md) | ZIP の展開、ショートカット、関連付け、更新、削除を行いたい |
 | [How_to_Use.md](How_to_Use.md) | 起動、ワークスペース、ノート作成、基本保存を知りたい |
+| [Help_Reference.md](Help_Reference.md) | アプリ内ヘルプの全項目、メニュー、設定、出力を詳しく調べたい |
 | [What_is_File_Formats.md](What_is_File_Formats.md) | `.clro`、`.md`、`.txt`、`.clrop` の違いを知りたい |
 | [How_to_Save_and_Recovery.md](How_to_Save_and_Recovery.md) | 保存、stage、バックアップ、復元を理解したい |
 | [How_to_Troubleshoot.md](How_to_Troubleshoot.md) | 困ったときの一次対応と、解決のための知識を得たい |

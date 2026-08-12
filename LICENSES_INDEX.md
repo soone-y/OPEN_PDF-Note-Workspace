@@ -26,7 +26,7 @@ release パッケージを受け取った利用者は、`docs/` と `licenses/` 
 | PDFium 本体・依存 | `licenses/pdfium/` | `third_party/pdfium/licenses/*.txt`, `*.md`, `*.ijg` | PDFium と PDFium 同梱コンポーネントのライセンス原文 |
 | MinGW-w64 runtime | `licenses/mingw-w64/gcc/` | `COPYING3.txt`, `COPYING.RUNTIME.txt` | GCC runtime / GPLv3 / GCC Runtime Library Exception |
 | MinGW-w64 winpthreads | `licenses/mingw-w64/winpthreads/` | `COPYING.txt` | winpthreads の MIT + BSD 系 notice |
-| zlib runtime | `licenses/zlib/zlib.txt` | `zlib.txt` | zlib1.dll の zlib License |
+| zlib runtime | `licenses/zlib/LICENSE` | `third_party/zlib/LICENSE` | zlib1.dll の zlib License |
 | MD4C | `licenses/md4c/LICENSE.md` | `third_party/md4c/LICENSE.md` | MD4C の MIT License |
 | LibreOffice | `licenses/libreoffice/` | `license.txt`, `LICENSE.html`, `NOTICE` | LibreOffice 本体、第三者コンポーネント、Apache NOTICE、フォント notice |
 
@@ -34,7 +34,7 @@ release パッケージを受け取った利用者は、`docs/` と `licenses/` 
 
 | コンポーネント | 主な用途 | 同梱/利用形態 | 主なライセンス | 注意度 | 必要な対応 |
 | --- | --- | --- | --- | --- | --- |
-| PDFium package `145.0.7568.0` | PDFium バイナリ/ヘッダのパッケージ | `third_party/pdfium/`、release では `pdfium.dll` | MIT 系 | 低 | `third_party/pdfium/LICENSE` を同梱 |
+| PDFium package `153.0.7988.0` | PDFium バイナリ/ヘッダのパッケージ | `third_party/pdfium/`、release では `pdfium.dll` | MIT 系 | 低 | `third_party/pdfium/LICENSE` を同梱 |
 | PDFium 本体 | PDF 読み込み、描画、テキスト抽出、書き出し | `pdfium.dll` | BSD 3-Clause + Apache 2.0 系 | 中 | `pdfium.txt` と関連 license 群を同梱 |
 | Abseil | PDFium 依存 | PDFium 同梱 | Apache License 2.0 | 中 | LICENSE、NOTICE がある場合は NOTICE、改変表示 |
 | Anti-Grain Geometry / AGG 2.3 | PDFium 依存 | PDFium 同梱 | permissive notice | 低 | 著作権表示を保持 |
@@ -47,11 +47,12 @@ release パッケージを受け取った利用者は、`docs/` と `licenses/` 
 | libpng | PNG 画像処理 | PDFium / LibreOffice 依存で含まれる可能性 | PNG Reference Library License / zlib 系 | 低 | 出所詐称禁止、改変表示、通知保持 |
 | libtiff | TIFF 画像処理 | PDFium / LibreOffice 依存で含まれる可能性 | permissive / BSD 風 | 低 | 著作権表示、名称の広告利用禁止 |
 | LLVM libc | PDFium 依存 | PDFium 同梱 | Apache 2.0 with LLVM Exceptions | 中 | Apache 文、LLVM 例外、NOTICE がある場合は保持 |
+| simdutf | PDFium 依存 | PDFium 同梱 | MIT License | 低 | 著作権表示とライセンス文を保持 |
 | zlib | 圧縮 | PDFium 依存等 | zlib License | 低 | 出所詐称禁止、改変表示、通知保持 |
 | MinGW-w64 runtime DLLs | C++/GCC runtime | `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` | GPLv3 + GCC Runtime Library Exception / MIT + BSD 系 | 中 | `COPYING3.txt`, `COPYING.RUNTIME.txt`, `COPYING.txt` を同梱 |
-| zlib runtime | DOCX staging copy の ZIP 展開/検証 | `zlib1.dll` | zlib License | 低 | `zlib.txt` を同梱 |
+| zlib runtime `1.3.2` | DOCX staging copy の ZIP 展開/検証 | `third_party/zlib/` の固定成果物から `zlib1.dll` を同梱 | zlib License | 低 | `third_party/zlib/LICENSE` を同梱 |
 | MD4C | Markdown 解析 | `third_party/md4c/src/md4c.c`, `md4c.h` をビルドに使用 | MIT License | 低 | `LICENSE.md` を同梱。局所パッチを管理 |
-| LibreOffice `26.2.3.2` | 同梱フォントの private font 利用。docx/pptx から PDF への headless 変換 | `third_party/libreoffice/image/` は比較・フォント・license 参照用。変換エンジン本体は検証済みカスタム runtime を release 配置または環境変数で指定 | MPL 2.0 中心 + LGPL/GPL/MPL/Apache 等多数 | 中〜高 | `license.txt`, `LICENSE.html`, `NOTICE` を同梱。runtime を含める場合は同梱 runtime 自身の文書を使い、改変 patch を提示可能にする |
+| LibreOffice custom runtime `26.2.5.2` | docx/pptx から PDF への headless 変換 | 検証済みカスタム runtime を標準 release へ配置。`image/` の 26.2.3.2 管理者展開物は比較・フォント・license 参照専用 | MPL 2.0 中心 + LGPL/GPL/MPL/Apache 等多数 | 中〜高 | `license.txt`, `LICENSE.html`, `NOTICE` と custom build 入力・patch を同梱 |
 | LibreOffice 同梱フォント | 英語・記号向けフォント候補 | `FR_PRIVATE` でプロセス内読み込み | LibreOffice の各フォント notice に従う | 中 | `license.txt`, `LICENSE.html`, `NOTICE` を同梱。再配布範囲を選択フォントに限定 |
 | Windows / OS フォント | 日本語表示、注釈、PDF 書き出し | 利用者環境にインストール済みのフォントをフェイス名で利用 | 各 OS / 各フォントのライセンス | 中 | フォントファイルを本リポジトリの権利として扱わない。再配布権を与えない |
 
@@ -75,6 +76,7 @@ PDFium を配布する場合、少なくとも次を release の `licenses/pdfiu
 | `libpng.txt` | PNG | PNG Reference Library License |
 | `libtiff.txt` | TIFF | permissive license |
 | `llvm-libc.txt` | LLVM libc | Apache 2.0 with LLVM Exceptions |
+| `simdutf.txt` | simdutf | MIT License |
 | `zlib.txt` | zlib | zlib License |
 
 ## 5. MinGW-w64 runtime チェックリスト
@@ -86,7 +88,7 @@ MinGW-w64 の DLL を release に含める場合、次を同梱します。
 | `libstdc++-6.dll` | `COPYING3.txt`, `COPYING.RUNTIME.txt` | GPLv3 + GCC Runtime Library Exception | 通常の GCC コンパイル成果物としての利用なら、自作アプリ全体を GPL にする趣旨ではない |
 | `libgcc_s_seh-1.dll` | `COPYING3.txt`, `COPYING.RUNTIME.txt` | GPLv3 + GCC Runtime Library Exception | 同上 |
 | `libwinpthread-1.dll` | `COPYING.txt` | MIT + BSD 系 notice | 著作権表示・免責文を保持 |
-| `zlib1.dll` | `zlib.txt` | zlib License | DOCX staging copy の ZIP 展開/検証で利用 |
+| `zlib1.dll` | `third_party/zlib/LICENSE` | zlib License | DOCX staging copy の ZIP 展開/検証で利用 |
 
 ## 6. MD4C チェックリスト
 
@@ -95,7 +97,7 @@ MinGW-w64 の DLL を release に含める場合、次を同梱します。
 | 使用箇所 | Markdown 解析 |
 | 使用ファイル | `third_party/md4c/src/md4c.c`, `third_party/md4c/src/md4c.h` |
 | 不使用方針 | `md4c-html.*` は現時点では使用前提にしない |
-| ローカル変更 | `MD4C_USE_UTF16` を MinGW で使うため、wide literal 化の局所パッチを 1 箇所適用 |
+| ローカル変更 | upstream commit を `VERSION` に固定し、全角空白・日本語句読点対応を `patches/0001-japanese-whitespace-and-punctuation.patch` で再現 |
 | ライセンス | MIT License、`Copyright © 2016-2024 Martin Mitáš` |
 | 配布対応 | `licenses/md4c/LICENSE.md` を同梱 |
 
@@ -103,7 +105,7 @@ MinGW-w64 の DLL を release に含める場合、次を同梱します。
 
 | 項目 | 内容 |
 | --- | --- |
-| バージョン | LibreOffice `26.2.3.2` Windows x86_64 管理者展開イメージ、および A経路カスタム build |
+| バージョン | custom runtime は LibreOffice `26.2.5.2`、比較・選択フォント用の管理者展開イメージは `26.2.3.2` |
 | 取得元 MSI | `LibreOffice_26.2.3_Win_x86-64.msi` |
 | SHA256 | `468D1FB3880AF3BCDDAC002E9054155912C70B45D105BFA1C82036F33456133D` |
 | 主用途 | 同梱フォントの private font 利用。docx/pptx から PDF への headless 変換 |
@@ -217,12 +219,13 @@ PDF Note Workspace release/
     md4c/
       LICENSE.md
     zlib/
-      zlib.txt
+      LICENSE
     libreoffice/
       license.txt
       LICENSE.html
       NOTICE
       custom_build/
+        autogen_26.2.5.2.input
         communication_free_options.input
         release_reduction_manifest.json
         patches/
