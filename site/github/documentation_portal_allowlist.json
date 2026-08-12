@@ -25,6 +25,7 @@
   },
   "pages_submission": {
     "files": [
+      { "source": ".github/FUNDING.yml", "destination": ".github/FUNDING.yml" },
       { "source": ".github/workflows/static.yml", "destination": ".github/workflows/static.yml" },
       {
         "source": "site/github/public.gitignore",
