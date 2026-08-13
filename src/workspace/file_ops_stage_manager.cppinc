@@ -1,0 +1,438 @@
+// file: main/file_ops_stage_manager.cppinc
+// NOTE: Included by operations.cppinc. This fragment owns staged diff inspection
+// and dialog-driven activation/integration/discard actions.
+struct StageManagerDialogState {
+    HWND hwnd = nullptr;
+    HWND summary = nullptr;
+    HWND list = nullptr;
+    HWND detail = nullptr;
+    HWND btnActivate = nullptr;
+    HWND btnIntegrate = nullptr;
+    HWND btnMerge = nullptr;
+    HWND btnDiscard = nullptr;
+    std::vector<file_output::StagedDiffEntry> entries;
+    bool done = false;
+};
+
+enum : int {
+    kStageMgrList = 6101,
+    kStageMgrActivate = 6102,
+    kStageMgrIntegrate = 6103,
+    kStageMgrMerge = 6104,
+    kStageMgrDiscard = 6105,
+    kStageMgrIntegrateNoBackup = 6106
+};
+
+static bool StageDiffTargetsCurrentFile(const file_output::StagedDiffEntry& entry) {
+    if (entry.kind == file_output::StagedDiffKind::Note) {
+        return !g_currentNotePath.empty() &&
+               AreSameLocalPath(std::filesystem::path(entry.targetPath), std::filesystem::path(g_currentNotePath));
+    }
+    return g_pdf.kind == DocKind::Pdf &&
+           !CurrentLogicalPdfPath().empty() &&
+           AreSameLocalPath(std::filesystem::path(entry.targetPath), std::filesystem::path(CurrentLogicalPdfPath()));
+}
+
+static bool StageDiffCanMergeIntoCurrentPdf(const file_output::StagedDiffEntry& entry) {
+    return entry.kind == file_output::StagedDiffKind::Clrop &&
+           g_pdf.kind == DocKind::Pdf &&
+           !CurrentLogicalPdfPath().empty() &&
+           AreSameLocalPath(std::filesystem::path(entry.targetPath), std::filesystem::path(CurrentLogicalPdfPath()));
+}
+
+static bool StageDiffCanActivate(const file_output::StagedDiffEntry& entry) {
+    return entry.kind == file_output::StagedDiffKind::Note;
+}
+
+static std::wstring StageDiffKindDisplayName(file_output::StagedDiffKind kind) {
+    if (kind == file_output::StagedDiffKind::Note) {
+        return IsEnglishUi() ? L"Note" : L"ノート";
+    }
+    return IsEnglishUi() ? L"Annotations" : L"注釈";
+}
+
+static std::wstring StageDiffStatusDisplayName(const file_output::StagedDiffEntry& entry) {
+    if (entry.kind == file_output::StagedDiffKind::Clrop) {
+        return entry.isLatest
+            ? (IsEnglishUi() ? L"latest checkpoint" : L"最新checkpoint")
+            : (IsEnglishUi() ? L"old checkpoint" : L"旧checkpoint");
+    }
+    return entry.isLatest
+        ? (IsEnglishUi() ? L"latest" : L"最新")
+        : (IsEnglishUi() ? L"old" : L"旧");
+}
+
+static std::wstring StageDiffEntryLabel(const file_output::StagedDiffEntry& entry) {
+    std::wstring label = StageDiffKindDisplayName(entry.kind);
+    label += L" | ";
+    label += StageDiffStatusDisplayName(entry);
+    label += L" | ";
+    label += std::filesystem::path(entry.targetPath).filename().wstring();
+    if (entry.revision.has_value()) {
+        label += L" | rev=" + std::to_wstring(*entry.revision);
+    }
+    return label;
+}
+
+static std::wstring StageDiffSummaryText(const std::vector<file_output::StagedDiffEntry>& entries) {
+    size_t noteCount = 0;
+    size_t clropCount = 0;
+    for (const auto& entry : entries) {
+        if (entry.kind == file_output::StagedDiffKind::Note) {
+            ++noteCount;
+        } else if (entry.kind == file_output::StagedDiffKind::Clrop) {
+            ++clropCount;
+        }
+    }
+    if (entries.empty()) {
+        return IsEnglishUi()
+            ? L"No staged diffs."
+            : L"【未統合の差分はありません】";
+    }
+    if (IsEnglishUi()) {
+        return L"[Staged Diffs Summary] Notes: " + std::to_wstring(noteCount) +
+               L", Annotations: " + std::to_wstring(clropCount) +
+               L"\n* Normal save will integrate only the latest diff for each target.";
+    }
+    return L"【未統合差分の状況】 ノート: " + std::to_wstring(noteCount) +
+           L" 件 / 注釈: " + std::to_wstring(clropCount) +
+           L" 件\n※通常保存では、各対象の「最新差分」のみが原本へ自動で統合されます。";
+}
+
+static std::wstring StageDiffDefaultHandlingText(const file_output::StagedDiffEntry& entry) {
+    if (entry.isLatest) {
+        return IsEnglishUi()
+            ? L"[Normal Save Handling]\nThis diff is LATEST and will be integrated into the original file.\n\n"
+            : L"【通常保存時の扱い】\n最新差分として扱われ、原本へ統合（反映）されます。\n\n";
+    }
+    return IsEnglishUi()
+        ? L"[Normal Save Handling]\nThis diff is OLD and will NOT be integrated. Use actions below to manage it.\n\n"
+        : L"【通常保存時の扱い】\n無視されます（旧差分）。明示的な復旧や統合・破棄が必要な場合のみ操作してください。\n\n";
+}
+
+static std::wstring StageDiffEntryDetail(const file_output::StagedDiffEntry& entry) {
+    std::wstring text = StageDiffDefaultHandlingText(entry);
+    text += IsEnglishUi() ? L"Kind: " : L"種類: ";
+    text += StageDiffKindDisplayName(entry.kind) + L"\n";
+    text += IsEnglishUi() ? L"Status: " : L"状態: ";
+    text += StageDiffStatusDisplayName(entry) + L"\n";
+    if (entry.revision.has_value()) {
+        text += IsEnglishUi() ? L"Revision: " : L"リビジョン: ";
+        text += std::to_wstring(*entry.revision) + L"\n";
+    }
+    text += IsEnglishUi() ? L"Target: " : L"対象: ";
+    text += entry.targetPath + L"\n";
+    text += IsEnglishUi() ? L"Stage: " : L"stage: ";
+    text += entry.stagePath.wstring() + L"\n";
+    if (!entry.destPath.empty()) {
+        text += IsEnglishUi() ? L"Destination: " : L"統合先: ";
+        text += entry.destPath.wstring() + L"\n";
+    }
+    if (entry.kind == file_output::StagedDiffKind::Note &&
+        entry.noteRestoreView.has_value()) {
+        const auto& restore = *entry.noteRestoreView;
+        text += IsEnglishUi() ? L"Restore position:\n" : L"復元位置:\n";
+        text += IsEnglishUi() ? L"- Content revision: " : L"- 本文revision: ";
+        text += std::to_wstring(restore.contentRevision) + L"\n";
+        text += IsEnglishUi() ? L"- Selection: " : L"- 選択範囲: ";
+        text += std::to_wstring(restore.selectionStart) + L"-" +
+                std::to_wstring(restore.selectionEnd) + L"\n";
+        text += IsEnglishUi() ? L"- First visible line: " : L"- 先頭表示行: ";
+        text += std::to_wstring(restore.firstVisibleLine) + L"\n";
+        text += IsEnglishUi() ? L"- Scroll: " : L"- スクロール: ";
+        text += L"x=" + std::to_wstring(restore.scrollX) +
+                L", y=" + std::to_wstring(restore.scrollY) + L"\n";
+    }
+    if (StageDiffTargetsCurrentFile(entry)) {
+        text += IsEnglishUi()
+            ? L"\nThis target is open now."
+            : L"\nこの対象は現在開いています。";
+    }
+    if (StageDiffCanMergeIntoCurrentPdf(entry)) {
+        text += IsEnglishUi()
+            ? L"\n\"Merge into current\" adds only annotations that are not exactly identical."
+            : L"\n「現在へ追加」は完全一致しない注釈だけを追記します。";
+    }
+    if (entry.kind == file_output::StagedDiffKind::Clrop) {
+        if (!entry.isLatest) {
+            text += IsEnglishUi()
+                ? L"\n\nThis checkpoint is not the current annotation base. It remains only for explicit recovery/discard work while the old snapshot-first design is being retired."
+                : L"\n\n※この checkpoint は現行の注釈基底ではありません。明示的な復旧または破棄のためだけに残っています。";
+        }
+        text += IsEnglishUi()
+            ? L"\n\nAnnotation stage activation is disabled. Use integrate, merge, or discard."
+            : L"\n\n※注釈 stage の「最新にする」は無効です。統合・追加・破棄のいずれかを選んでください。";
+        text += IsEnglishUi()
+            ? L"\n\n[Actions]\n- Integrate to original: reconstructs the latest state, verifies, and writes to original file (with backup).\n- Integrate without backup: bypasses backup creation (use if backup fails due to permissions).\n- Add to current PDF: appends only annotations not already present in the view.\n- Discard: removes this diff only. Original file remains unchanged."
+            : L"\n\n【操作の案内】\n・原本へ統合: 差分から最新状態を復元し、バックアップと検証を経て原本へ反映します。\n・バックアップなしで直接統合: 権限エラー等でバックアップが作れない場合に強制保存を試みます。\n・現在PDFへ注釈追加: 現在の表示にない注釈だけを抽出して追記します。\n・破棄: この差分データのみを削除します。原本は変わりません。";
+        return text;
+    }
+    text += IsEnglishUi()
+        ? L"\n\n[Actions]\n- Make latest: marks this stage as the latest one without writing to original.\n- Integrate to original: verifies and writes to original file (with backup).\n- Integrate without backup: bypasses backup creation (use if backup fails).\n- Discard: removes this diff only. Original file remains unchanged."
+        : L"\n\n【操作の案内】\n・最新にする: 原本は変更せず、この差分を「最新の編集状態」として扱います。\n・原本へ統合: バックアップと検証を経て、この差分を原本へ反映します。\n・バックアップなしで直接統合: バックアップを行わずに原本への強制保存を試みます。\n・破棄: この差分データのみを削除します。原本は変わりません。";
+    return text;
+}
+
+static void StageManagerApplySelection(StageManagerDialogState* ctx, int selectedIndex) {
+    if (!ctx) return;
+    std::wstring detail;
+    bool hasSelection = false;
+    bool canActivate = false;
+    bool canMerge = false;
+    if (selectedIndex >= 0 && selectedIndex < static_cast<int>(ctx->entries.size())) {
+        const auto& entry = ctx->entries[static_cast<size_t>(selectedIndex)];
+        detail = StageDiffEntryDetail(entry);
+        hasSelection = true;
+        canActivate = StageDiffCanActivate(entry);
+        canMerge = StageDiffCanMergeIntoCurrentPdf(entry);
+    } else {
+        detail = IsEnglishUi() ? L"No staged diffs." : L"未統合の差分はありません。";
+    }
+    if (ctx->detail) SetWindowTextW(ctx->detail, detail.c_str());
+    EnableWindow(ctx->btnActivate, canActivate);
+    EnableWindow(ctx->btnIntegrate, hasSelection);
+    EnableWindow(ctx->btnMerge, canMerge);
+    EnableWindow(ctx->btnDiscard, hasSelection);
+    if (HWND btnIntegrateNoBackup = GetDlgItem(ctx->hwnd, kStageMgrIntegrateNoBackup)) {
+        EnableWindow(btnIntegrateNoBackup, hasSelection);
+    }
+}
+
+static void StageManagerRefreshList(StageManagerDialogState* ctx,
+                                    const std::filesystem::path& preferredStage = {}) {
+    if (!ctx || !ctx->list) return;
+    ctx->entries = file_output::ListStagedDiffEntries();
+    if (ctx->summary) {
+        SetWindowTextW(ctx->summary, StageDiffSummaryText(ctx->entries).c_str());
+    }
+    SendMessageW(ctx->list, LB_RESETCONTENT, 0, 0);
+    int preferredIndex = -1;
+    for (size_t i = 0; i < ctx->entries.size(); ++i) {
+        const auto label = StageDiffEntryLabel(ctx->entries[i]);
+        SendMessageW(ctx->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        if (!preferredStage.empty() && ctx->entries[i].stagePath == preferredStage) {
+            preferredIndex = static_cast<int>(i);
+        }
+    }
+    if (preferredIndex < 0 && !ctx->entries.empty()) {
+        preferredIndex = 0;
+    }
+    SendMessageW(ctx->list, LB_SETCURSEL, preferredIndex, 0);
+    StageManagerApplySelection(ctx, preferredIndex);
+    InvalidateRect(ctx->list, nullptr, TRUE);
+}
+
+static void StageManagerHandleAction(StageManagerDialogState* ctx, int actionId) {
+    if (!ctx || !ctx->list) return;
+    int sel = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
+    if (sel < 0 || sel >= static_cast<int>(ctx->entries.size())) return;
+    const auto entry = ctx->entries[static_cast<size_t>(sel)];
+    const std::wstring title = GetUiText().menuDiffManager;
+    bool ok = false;
+
+    if (actionId == kStageMgrDiscard && entry.isLatest && StageDiffTargetsCurrentFile(entry)) {
+        const bool inUse = (entry.kind == file_output::StagedDiffKind::Note)
+            ? g_noteNeedsIntegrate
+            : g_annotsNeedsIntegrate;
+        if (inUse) {
+            const wchar_t* msg = IsEnglishUi()
+                ? L"This staged diff is currently applied in the editor/viewer. Integrate it or switch away before discarding."
+                : L"この差分は現在の編集欄/表示に適用中です。破棄する前に統合するか、別の状態へ切り替えてください。";
+            ShowSoftNotice(ctx->hwnd, msg, SoftNoticeKind::Warning);
+            return;
+        }
+    }
+
+    switch (actionId) {
+    case kStageMgrActivate:
+        if (!StageDiffCanActivate(entry)) {
+            ShowSoftNotice(ctx->hwnd,
+                           IsEnglishUi()
+                               ? L"Activate is unavailable for annotation staged diffs."
+                               : L"注釈の stage 差分では「採用」は使えません。",
+                           SoftNoticeKind::Warning);
+            return;
+        }
+        ok = file_output::PromoteStagedDiff(entry.stagePath);
+        if (ok && StageDiffTargetsCurrentFile(entry)) {
+            ShowSoftNotice(ctx->hwnd,
+                           IsEnglishUi()
+                               ? L"The selected stage is now active. Reopen the current file if you want to reload it immediately."
+                               : L"選択した stage を最新扱いにしました。すぐ反映したい場合は現在のファイルを開き直してください。");
+        }
+        break;
+    case kStageMgrIntegrate:
+        ok = file_output::IntegrateStagedDiff(ctx->hwnd, entry.stagePath, false);
+        break;
+    case kStageMgrIntegrateNoBackup: {
+        SilentDialogOptions options;
+        options.title = IsEnglishUi() ? L"Warning" : L"警告";
+        options.message = IsEnglishUi() ? L"If you bypass the backup and the save fails, you might lose the file. Are you sure?"
+                                        : L"万が一ファイルへの書き込み中に破損した場合、復元できなくなる可能性があります。本当によろしいですか？";
+        options.kind = SoftNoticeKind::Warning;
+        options.buttons = SilentDialogButtons::YesNo;
+        options.defaultResult = SilentDialogResult::No;
+        
+        if (ShowSilentDialog(ctx->hwnd, options) != SilentDialogResult::Yes) return;
+        ok = file_output::IntegrateStagedDiff(ctx->hwnd, entry.stagePath, true);
+        break;
+    }
+    case kStageMgrMerge:
+        ok = MergeStagedAnnotationsIntoCurrentPdf(ctx->hwnd, entry.stagePath);
+        break;
+    case kStageMgrDiscard:
+        ok = file_output::DiscardStagedDiff(entry.stagePath);
+        break;
+    default:
+        return;
+    }
+
+    if (!ok) {
+        std::wstring msg = IsEnglishUi()
+            ? L"Operation failed."
+            : L"操作に失敗しました。";
+        msg += IsEnglishUi() ? L"\n\nTarget: " : L"\n\n対象: ";
+        msg += entry.targetPath.empty() ? L"(unknown)" : entry.targetPath;
+        msg += IsEnglishUi() ? L"\nStage: " : L"\n差分ファイル: ";
+        msg += entry.stagePath.empty() ? L"(unknown)" : entry.stagePath.wstring();
+        ShowSoftNotice(ctx->hwnd, msg, SoftNoticeKind::Warning);
+    }
+    RefreshMainWindowUiState(ctx->hwnd);
+    StageManagerRefreshList(ctx, entry.stagePath);
+}
+
+static LRESULT CALLBACK StageManagerDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<StageManagerDialogState*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = reinterpret_cast<StageManagerDialogState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        ctx->hwnd = hWnd;
+
+        ctx->summary = CreateWindowExW(0, L"STATIC", L"",
+                                       WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                       12, 12, 772, 42, hWnd, nullptr,
+                                       g_hInst, nullptr);
+        ctx->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY,
+                                    12, 64, 360, 300, hWnd, reinterpret_cast<HMENU>(kStageMgrList),
+                                    g_hInst, nullptr);
+        ctx->detail = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
+                                          ES_AUTOVSCROLL | ES_READONLY,
+                                      384, 64, 400, 300, hWnd, nullptr, g_hInst, nullptr);
+
+        const wchar_t* activateLabel = IsEnglishUi() ? L"Make latest" : L"最新にする";
+        const wchar_t* integrateLabel = IsEnglishUi() ? L"Integrate to original" : L"原本へ統合";
+        const wchar_t* mergeLabel = IsEnglishUi() ? L"Add to current PDF" : L"現在PDFへ注釈追加";
+        const wchar_t* discardLabel = IsEnglishUi() ? L"Discard" : L"破棄";
+        const wchar_t* noBackupLabel = IsEnglishUi() ? L"Integrate without backup" : L"バックアップなしで直接統合";
+        const wchar_t* closeLabel = IsEnglishUi() ? L"Close" : L"閉じる";
+
+        ctx->btnActivate = CreateWindowExW(0, L"BUTTON", activateLabel,
+                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                           12, 376, 120, 28, hWnd, reinterpret_cast<HMENU>(kStageMgrActivate),
+                                           g_hInst, nullptr);
+        ctx->btnIntegrate = CreateWindowExW(0, L"BUTTON", integrateLabel,
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                            142, 376, 140, 28, hWnd, reinterpret_cast<HMENU>(kStageMgrIntegrate),
+                                            g_hInst, nullptr);
+        ctx->btnMerge = CreateWindowExW(0, L"BUTTON", mergeLabel,
+                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                        292, 376, 180, 28, hWnd, reinterpret_cast<HMENU>(kStageMgrMerge),
+                                        g_hInst, nullptr);
+        CreateWindowExW(0, L"BUTTON", noBackupLabel,
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        482, 376, 180, 28, hWnd, reinterpret_cast<HMENU>(kStageMgrIntegrateNoBackup),
+                        g_hInst, nullptr);
+        ctx->btnDiscard = CreateWindowExW(0, L"BUTTON", discardLabel,
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                          672, 376, 80, 28, hWnd, reinterpret_cast<HMENU>(kStageMgrDiscard),
+                                          g_hInst, nullptr);
+        CreateWindowExW(0, L"BUTTON", closeLabel,
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        762, 376, 80, 28, hWnd, reinterpret_cast<HMENU>(IDOK),
+                        g_hInst, nullptr);
+        ApplyThemeToDialog(hWnd);
+        StageManagerRefreshList(ctx);
+        if (ctx->list) SetFocus(ctx->list);
+        return 0;
+    }
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        return ThemeCtlColorPanel(ctl, hdc);
+    }
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (DrawThemeButton(dis)) return TRUE;
+        break;
+    }
+    case WM_COMMAND:
+        if (!ctx) break;
+        if (LOWORD(wParam) == kStageMgrList && HIWORD(wParam) == LBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
+            StageManagerApplySelection(ctx, sel);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+            ctx->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == kStageMgrActivate || LOWORD(wParam) == kStageMgrIntegrate ||
+            LOWORD(wParam) == kStageMgrIntegrateNoBackup ||
+            LOWORD(wParam) == kStageMgrMerge || LOWORD(wParam) == kStageMgrDiscard) {
+            StageManagerHandleAction(ctx, LOWORD(wParam));
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        if (ctx) ctx->done = true;
+        DestroyWindow(hWnd);
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+void ShowStageManagerDialog(HWND owner) {
+    StageManagerDialogState ctx;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = StageManagerDialogProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = L"PdfWorkspaceStageManagerDlg";
+    RegisterClassW(&wc);
+
+    HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, GetUiText().menuDiffManager.c_str(),
+                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             CW_USEDEFAULT, CW_USEDEFAULT, 870, 455,
+                             owner, nullptr, g_hInst, &ctx);
+    if (!w) return;
+    ShowWindow(w, SW_SHOW);
+    UpdateWindow(w);
+    MSG msg;
+    while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (ShouldSkipImeMessageInLoop(msg)) continue;
+        if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
+        if (!IsDialogMessageW(w, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}

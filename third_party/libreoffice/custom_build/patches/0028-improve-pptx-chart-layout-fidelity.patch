@@ -1,0 +1,135 @@
+diff --git a/oox/source/drawingml/chart/objectformatter.cxx b/oox/source/drawingml/chart/objectformatter.cxx
+--- a/oox/source/drawingml/chart/objectformatter.cxx
++++ b/oox/source/drawingml/chart/objectformatter.cxx
+@@ -649,7 +649,8 @@ public:
+                             ObjectFormatterData& rData,
+                             const AutoTextEntry* pAutoTextEntry,
+                             const ModelRef< TextBody >& rxGlobalTextProp,
+-                            bool bJapaneseChart );
++                            bool bJapaneseChart,
++                            bool bJapaneseChartTitle );
+ 
+     /** Converts text formatting to the passed property set. */
+     void                convertFormatting(
+@@ -918,7 +919,7 @@ bool lclHasJapaneseChartTitle(const ChartSpaceModel& rChartSpace)
+ 
+ TextFormatter::TextFormatter( ObjectFormatterData& rData, const AutoTextEntry* pAutoTextEntry,
+                               const ModelRef< TextBody >& rxGlobalTextProp,
+-                              bool bJapaneseChart ) :
++                              bool bJapaneseChart, bool bJapaneseChartTitle ) :
+     DetailFormatterBase( rData, pAutoTextEntry )
+ {
+     if( !pAutoTextEntry )
+@@ -936,10 +937,10 @@ TextFormatter::TextFormatter( ObjectFormatterData& rData, const AutoTextEntry* p
+                                                 nAsianFontFamily, nullptr,
+                                                 mrData.mrFilter))
+     {
+-        // PowerPoint uses the Japanese Office fallback for automatic chart labels when the
+-        // East Asian theme font is blank. Keep the correction chart-local and require kana
+-        // in the title so Chinese and Korean charts retain their own fallback behavior.
+-        mxAutoText->maAsianFont.setAttributes(u"Yu Gothic"_ustr);
++        // PowerPoint's classic Japanese chart style uses MS Gothic for the title. Other
++        // generated chart labels use the Office-compatible Japanese sans fallback.
++        mxAutoText->maAsianFont.setAttributes(
++            bJapaneseChartTitle ? u"MS Gothic"_ustr : u"Yu Gothic"_ustr);
+     }
+     ::Color nTextColor = getPhColor( -1 );
+     if( sal_Int32(nTextColor) >= 0 ) {
+@@ -953,7 +954,9 @@ TextFormatter::TextFormatter( ObjectFormatterData& rData, const AutoTextEntry* p
+     {
+         mxAutoText->assignUsed( *pTextProps );
+         if( pTextProps->moHeight.has_value() )
+-            mxAutoText->moHeight = pTextProps->moHeight.value() * pAutoTextEntry->mnRelFontSize / 100;
++            // An explicit chart-wide font size is absolute in PowerPoint. Applying the
++            // chart-style relative multiplier again makes titles 120% too large.
++            mxAutoText->moHeight = pTextProps->moHeight.value();
+     }
+ }
+ 
+@@ -976,7 +979,8 @@ ObjectTypeFormatter::ObjectTypeFormatter( ObjectFormatterData& rData, const Obje
+     maLineFormatter(   rData, lclGetAutoFormatEntry( rEntry.mpAutoLines,   rChartSpace.mnStyle ), eObjType ),
+     maFillFormatter(   rData, lclGetAutoFormatEntry( rEntry.mpAutoFills,   rChartSpace.mnStyle ), eObjType ),
+     maTextFormatter(   rData, lclGetAutoTextEntry(   rEntry.mpAutoTexts,   rChartSpace.mnStyle ),
+-                       rChartSpace.mxTextProp, lclHasJapaneseChartTitle(rChartSpace) ),
++                       rChartSpace.mxTextProp, lclHasJapaneseChartTitle(rChartSpace),
++                       eObjType == OBJECTTYPE_CHARTTITLE ),
+     mrModelObjHelper( rData.maModelObjHelper ),
+     mrEntry( rEntry )
+ {
+diff --git a/chart2/source/view/main/ChartView.cxx b/chart2/source/view/main/ChartView.cxx
+--- a/chart2/source/view/main/ChartView.cxx
++++ b/chart2/source/view/main/ChartView.cxx
+@@ -919,7 +919,8 @@ constexpr double constPageLayoutDistancePercentage = 0.02;
+ constexpr sal_Int32 constPageLayoutFixedDistance = 350;
+ 
+ bool getAvailablePosAndSizeForDiagram(
+-    CreateShapeParam2D& rParam, const awt::Size & rPageSize, rtl::Reference<Diagram> const& xDiagram)
++    CreateShapeParam2D& rParam, const awt::Size & rPageSize,
++    rtl::Reference<Diagram> const& xDiagram, ChartModel& rChartModel)
+ {
+     rParam.mbUseFixedInnerSize = false;
+ 
+@@ -928,20 +929,33 @@ bool getAvailablePosAndSizeForDiagram(
+     if (xDiagram)
+         xChartType = xDiagram->getChartTypeByIndex(0);
+ 
+-    sal_Int32 nXDistance = sal_Int32(rPageSize.Width * constPageLayoutDistancePercentage);
+-    sal_Int32 nYDistance = sal_Int32(rPageSize.Height * constPageLayoutDistancePercentage);
++    sal_Int32 nXLeftDistance = sal_Int32(rPageSize.Width * 0.0385);
++    sal_Int32 nXRightDistance = sal_Int32(rPageSize.Width * 0.027);
++    sal_Int32 nYTopDistance = sal_Int32(rPageSize.Height * constPageLayoutDistancePercentage);
++    double fBottomDistancePercentage = 0.05;
++    if (rtl::Reference<Legend> xLegend = LegendHelper::getLegend(rChartModel))
++    {
++        bool bOverlay = false;
++        xLegend->getPropertyValue(u"Overlay"_ustr) >>= bOverlay;
++        if (bOverlay)
++            fBottomDistancePercentage = 0.043;
++    }
++    sal_Int32 nYBottomDistance
++        = sal_Int32(rPageSize.Height * fBottomDistancePercentage);
+ 
+     // Only pie chart uses fixed size margins
+     if (xChartType.is() && xChartType->getChartType() == CHART2_SERVICE_NAME_CHARTTYPE_PIE)
+     {
+-        nXDistance = constPageLayoutFixedDistance;
+-        nYDistance = constPageLayoutFixedDistance;
++        nXLeftDistance = constPageLayoutFixedDistance;
++        nXRightDistance = constPageLayoutFixedDistance;
++        nYTopDistance = constPageLayoutFixedDistance;
++        nYBottomDistance = constPageLayoutFixedDistance;
+     }
+ 
+-    rParam.maRemainingSpace.X += nXDistance;
+-    rParam.maRemainingSpace.Width -= 2*nXDistance;
+-    rParam.maRemainingSpace.Y += nYDistance;
+-    rParam.maRemainingSpace.Height -= 2*nYDistance;
++    rParam.maRemainingSpace.X += nXLeftDistance;
++    rParam.maRemainingSpace.Width -= nXLeftDistance + nXRightDistance;
++    rParam.maRemainingSpace.Y += nYTopDistance;
++    rParam.maRemainingSpace.Height -= nYTopDistance + nYBottomDistance;
+ 
+     bool bPosSizeExcludeAxes = false;
+     if( xDiagram.is() )
+@@ -1056,11 +1070,7 @@ std::shared_ptr<VTitle> lcl_createTitle( TitleHelper::eTitleType eType
+     double fPercentage = constPageLayoutDistancePercentage;
+     sal_Int32 nXDistance = static_cast< sal_Int32 >( rPageSize.Width * fPercentage );
+     sal_Int32 nYDistance = static_cast< sal_Int32 >( rPageSize.Height * fPercentage );
+-    if ( eType == TitleHelper::MAIN_TITLE )
+-    {
+-        nYDistance += 135; // 1/100 mm
+-    }
+-    else if ( eType == TitleHelper::TITLE_AT_STANDARD_X_AXIS_POSITION )
++    if ( eType == TitleHelper::TITLE_AT_STANDARD_X_AXIS_POSITION )
+     {
+         nYDistance = 420; // 1/100 mm
+     }
+@@ -1974,7 +1984,7 @@ void ChartView::createShapes2D( const awt::Size& rPageSize )
+     bool bDummy = false;
+     bool bIsVertical = xDiagram && xDiagram->getVertical(bDummy, bDummy);
+ 
+-    if (getAvailablePosAndSizeForDiagram(aParam, rPageSize, xDiagram))
++    if (getAvailablePosAndSizeForDiagram(aParam, rPageSize, xDiagram, mrChartModel))
+     {
+         awt::Rectangle aUsedOuterRect = impl_createDiagramAndContent(aParam, rPageSize);
+ 

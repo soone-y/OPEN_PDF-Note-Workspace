@@ -1,0 +1,20 @@
+{
+  "classesDir": ".",
+  "cacheDir": "__resource__/__tmp__",
+  "showAnnots": true,
+  "pdfFlowMode": "v_ttb",
+  "pdfBitmapBudgetMiB": 128,
+  "developerMode": false,
+  "studentMode": true,
+  "debugLogPreviewTrace": false,
+  "debugLogSwitchTiming": false,
+  "debugLogCrash": true,
+  "debugLogStartupWatchdog": true,
+  "language": "ja",
+  "noteSystem": "legacy",
+  "noteRenderEnabled": true,
+  "noteRenderMath": true,
+  "noteWrapEnabled": true,
+  "autoSaveSeconds": 5,
+  "autoIntegrateSeconds": 0
+}

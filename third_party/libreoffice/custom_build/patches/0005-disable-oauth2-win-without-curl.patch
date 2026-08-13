@@ -1,0 +1,35 @@
+diff --git a/config_host/config_oauth2.h.in b/config_host/config_oauth2.h.in
+--- a/config_host/config_oauth2.h.in
++++ b/config_host/config_oauth2.h.in
+@@ -46,10 +46,6 @@
+ #define ONEDRIVE_REDIRECT_URI "http://localhost/LibreOffice"
+ #define ONEDRIVE_SCOPE "Files.ReadWrite offline_access"
+ 
+-#if defined _WIN32
+-#define OAUTH2REQUEST_SUPPORTED
+-#endif
+-
+ #endif
+ 
+ /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+diff --git a/uui/Library_uui.mk b/uui/Library_uui.mk
+--- a/uui/Library_uui.mk
++++ b/uui/Library_uui.mk
+@@ -18,6 +18,6 @@ $(eval $(call gb_Library_set_componentfile,uui,uui/util/uui,services))
+ 
+ $(eval $(call gb_Library_use_external,uui,boost_headers))
+-$(eval $(call gb_Library_use_external,uui,curl))
++$(if $(ENABLE_CURL),$(eval $(call gb_Library_use_external,uui,curl)))
+ 
+ $(eval $(call gb_Library_use_custom_headers,uui,\
+     officecfg/registry \
+@@ -52,8 +52,8 @@ $(eval $(call gb_Library_add_exception_objects,uui,\
+ 	uui/source/iahndl-errorhandler \
+ 	uui/source/iahndl-filter \
+ 	uui/source/iahndl-ioexceptions \
+ 	uui/source/iahndl-locking \
+-	$(if $(filter MSC,$(COM)),uui/source/iahndl-oauth2-win) \
++	$(if $(ENABLE_CURL),$(if $(filter MSC,$(COM)),uui/source/iahndl-oauth2-win)) \
+ 	uui/source/iahndl-ssl \
+ 	uui/source/interactionhandler \
+ 	uui/source/lockfailed \

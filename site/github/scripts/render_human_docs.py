@@ -124,28 +124,69 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       background-color: var(--border-color);
     }}
 
+    .menu-current {{
+      margin-left: 8px;
+      color: var(--text-muted);
+      font-size: 0.9em;
+      font-weight: 400;
+    }}
+
     .site-menu nav {{
       position: absolute;
       z-index: 1;
       top: calc(100% + 8px);
       left: 0;
-      min-width: 200px;
-      padding: 8px;
+      width: min(360px, calc(100vw - 32px));
+      padding: 14px;
       background-color: var(--card-bg);
       border: 1px solid var(--border-color);
       border-radius: 6px;
       box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
     }}
 
+    .menu-heading {{
+      margin: 12px 0 5px;
+      color: var(--text-muted);
+      font-size: 0.74em;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }}
+
+    .menu-heading:first-child {{ margin-top: 0; }}
+
+    .menu-location {{
+      margin: 0;
+      padding: 9px 10px;
+      border-left: 3px solid var(--accent);
+      background-color: var(--note-bg);
+      color: var(--text-main);
+      font-size: 0.88em;
+    }}
+
     .site-menu nav a {{
       display: block;
-      padding: 7px 9px;
+      padding: 9px 10px;
       color: var(--text-main);
       font-size: 0.9em;
       text-decoration: none;
+      border-radius: 5px;
     }}
 
     .site-menu nav a:hover {{ background-color: var(--code-bg); }}
+    .site-menu nav a[aria-current="page"] {{
+      background-color: var(--note-bg);
+      color: var(--accent);
+      font-weight: 700;
+    }}
+    .menu-link-title {{ display: block; }}
+    .menu-link-detail {{
+      display: block;
+      margin-top: 1px;
+      color: var(--text-muted);
+      font-size: 0.84em;
+      font-weight: 400;
+    }}
 
     .raw-md-link {{
       font-size: 0.82em;
@@ -401,19 +442,43 @@ def format_inline(text: str, root_rel: str) -> str:
     text = re.sub(r'`(.*?)`', lambda m: f'<code>{html.escape(m.group(1))}</code>', text)
     return text
 
-def navigation_html(*, root_rel: str, is_ai_document: bool) -> str:
-    if is_ai_document:
-        return ""
+def navigation_html(*, root_rel: str, rel_path: Path, title: str) -> str:
+    """現在地と各リンクの目的を示す文書ポータル用メニューを生成する。"""
+    if rel_path.parts[0] == "introduction":
+        current_section = "プロジェクトと文書案内"
+    elif rel_path.parts[:2] == ("docs", "public"):
+        current_section = "使い方・セットアップ"
+    elif rel_path.name == "README.md":
+        current_section = "プロジェクトの概要"
+    elif rel_path.name in {"LICENSE.md", "LICENSES_INDEX.md", "THIRD_PARTY_NOTICES.md"}:
+        current_section = "ライセンスと第三者通知"
+    else:
+        current_section = "公開文書"
+
+    entries = (
+        ("紹介サイト", "ソフトの概要と配布先を見る", "https://pdf-note-workspace.soone-y.com/", None),
+        ("文書ポータル", "目的別の資料一覧へ戻る", f"{root_rel}index.html", "文書ポータル"),
+        ("プロジェクトと文書案内", "詳細資料の共通入口", f"{root_rel}introduction/index.html", "プロジェクトと文書案内"),
+        ("使い方・セットアップ", "導入・操作・保存・トラブル対処", f"{root_rel}docs/public/Index.html", "使い方・セットアップ"),
+        ("プロジェクトの概要", "配布物、通常版・Lite版、基本方針", f"{root_rel}README.html", "プロジェクトの概要"),
+        ("ライセンスと第三者通知", "利用条件と第三者コンポーネント", f"{root_rel}LICENSES_INDEX.html", "ライセンスと第三者通知"),
+        ("配布物を入手する", "GitHub Releases を開く", "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases", None),
+        ("GitHub リポジトリ", "ソース、Issue、公開履歴を見る", "https://github.com/soone-y/OPEN_PDF-Note-Workspace", None),
+    )
+    entry_html = "\n".join(
+        f'''        <a href="{href}"{' aria-current="page"' if section == current_section else ''}>
+          <span class="menu-link-title">{html.escape(label)}</span>
+          <span class="menu-link-detail">{html.escape(detail)}</span>
+        </a>'''
+        for label, detail, href, section in entries
+    )
     return f"""    <details class=\"site-menu\">
-      <summary aria-label=\"文書メニューを開く\"><span class=\"menu-icon\" aria-hidden=\"true\"></span>文書メニュー</summary>
+      <summary aria-label=\"文書メニューを開く\"><span class=\"menu-icon\" aria-hidden=\"true\"></span>文書メニュー<span class=\"menu-current\">現在: {html.escape(current_section)}</span></summary>
       <nav aria-label=\"文書メニュー\">
-        <a href=\"https://pdf-note-workspace.soone-y.com/\">紹介サイト</a>
-        <a href=\"{root_rel}index.html\">文書ポータル</a>
-        <a href=\"{root_rel}docs/public/Index.html\">使い方・セットアップ</a>
-        <a href=\"{root_rel}README.html\">プロジェクトの概要</a>
-        <a href=\"{root_rel}LICENSES_INDEX.html\">ライセンスと第三者通知</a>
-        <a href=\"https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases\">配布物を入手する</a>
-        <a href=\"https://github.com/soone-y/OPEN_PDF-Note-Workspace\">GitHub リポジトリ</a>
+        <div class=\"menu-heading\">現在地</div>
+        <p class=\"menu-location\">{html.escape(title)}<br><strong>{html.escape(current_section)}</strong></p>
+        <div class=\"menu-heading\">移動先</div>
+{entry_html}
       </nav>
     </details>"""
 
@@ -424,9 +489,6 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
     rel_path = md_path.relative_to(site_dir)
     depth = len(rel_path.parts) - 1
     root_rel = "../" * depth if depth > 0 else "./"
-    # introduction/ も人と AI が共通して使う公開資料である。ほかの公開文書と
-    # 同じナビゲーションと原文リンクを提供し、HTML と Markdown のどちらからでも読める。
-    is_ai_document = False
     raw_markdown_html = f'''    <div class="raw-md-link">
       <a href="{md_path.name}" target="_blank">Raw Markdown</a>
     </div>'''
@@ -440,7 +502,7 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
         title=html.escape(title),
         root_rel=root_rel,
         raw_markdown_html=raw_markdown_html,
-        navigation_html=navigation_html(root_rel=root_rel, is_ai_document=is_ai_document),
+        navigation_html=navigation_html(root_rel=root_rel, rel_path=rel_path, title=title),
         content_html=body_html
     )
 

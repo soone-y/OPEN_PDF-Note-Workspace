@@ -1,0 +1,67 @@
+diff --git a/configure.ac b/configure.ac
+--- a/configure.ac
++++ b/configure.ac
+@@ -173,32 +173,41 @@ PathFormat()
+         fp_count_slash=`echo "$formatted_path" | $GREP -c "[/]"`
+         if test "$fp_count_slash$fp_count_colon" != "00"; then
+             if test "$fp_count_colon" = "0"; then
+-                new_formatted_path=`realpath "$formatted_path"`
+-                if test $? -ne 0;  then
+-                    AC_MSG_WARN([realpath failed for "$formatted_path", not necessarily a problem.])
+-                else
+-                    formatted_path="$new_formatted_path"
+-                fi
++                case "$formatted_path" in
++                    /mnt/@<:@a-zA-Z@:>@/*)
++                        # Keep the spelling of a Windows junction.  realpath
++                        # would resolve it to an installation path containing
++                        # spaces before the short-path validation below.
++                        ;;
++                    *)
++                        new_formatted_path=`realpath "$formatted_path"`
++                        if test $? -ne 0;  then
++                            AC_MSG_WARN([realpath failed for "$formatted_path", not necessarily a problem.])
++                        else
++                            formatted_path="$new_formatted_path"
++                        fi
++                        ;;
++                esac
+             fi
+             if test "$build_os" = "wsl"; then
+                 if test "$fp_count_colon" != "0"; then
+-                    formatted_path=$(wslpath "$formatted_path")
+-                    local final_slash=
+-                    case "$formatted_path" in
+-                        */)
+-                            final_slash=/
+-                            ;;
+-                    esac
+-                    formatted_path=$(wslpath -m $formatted_path)
+-                    case "$formatted_path" in
+-                        */)
+-                            ;;
+-                        *)
+-                            formatted_path="$formatted_path"$final_slash
+-                            ;;
+-                    esac
++                    # wslpath -m canonicalizes Windows junctions.  Keep the
++                    # helper's no-space path intact, or a Visual Studio
++                    # junction is converted back to its space-containing
++                    # target before it can be executed.
++                    formatted_path="${formatted_path//\\//}"
+                 else
+-                    formatted_path=$(wslpath -m "$formatted_path")
++                    case "$formatted_path" in
++                        /mnt/@<:@a-zA-Z@:>@/*)
++                            drive=${formatted_path#/mnt/}
++                            drive=${drive%%/*}
++                            remainder=${formatted_path#"/mnt/$drive/"}
++                            formatted_path="${drive^^}:/$remainder"
++                            ;;
++                        *)
++                            formatted_path=$(wslpath -m "$formatted_path")
++                            ;;
++                    esac
+                 fi
+             else
+                 formatted_path=`cygpath -m "$formatted_path"`

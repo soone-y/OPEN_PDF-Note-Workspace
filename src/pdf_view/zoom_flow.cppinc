@@ -1,0 +1,302 @@
+﻿// file: pdf_view/zoom_flow.cppinc
+// NOTE: Included by `src/pdf_view/navigation.cppinc` for zoom, fit, and flow-mode transitions.
+
+static void ApplyPdfScaleDirect(HWND pdfWnd, double newScale, POINT focusInClient, bool renderPages) {
+    newScale = std::clamp(newScale, kMinScale, kMaxScale);
+    if (g_pdf.kind == DocKind::None) return;
+    MarkPdfVirtualViewportChange();
+    PdfFlowMode mode = CurrentFlowMode();
+    double padX = FlowCrossPaddingX(mode);
+    double padY = FlowCrossPaddingY(mode);
+    double oldTotalW = g_pdf.contentWidth + padX * 2.0;
+    double oldTotalH = g_pdf.contentHeight + padY * 2.0;
+    double focusXDoc = g_pdf.scrollX + focusInClient.x;
+    double focusYDoc = g_pdf.scrollY + focusInClient.y;
+    double focusRatioX = (oldTotalW > 0.0) ? (focusXDoc / oldTotalW) : 0.0;
+    double focusRatioY = (oldTotalH > 0.0) ? (focusYDoc / oldTotalH) : 0.0;
+
+    g_pdf.scale = newScale;
+    g_pdf.hasSelection = false;
+    g_pdf.selectionStartPage = -1;
+    g_pdf.selectionEndPage = -1;
+    g_pdf.selectingText = false;
+    bool hasPages = !g_pdf.pages.empty();
+    if (!hasPages) {
+        g_pdf.renderScale = ComputePdfRenderScale(g_pdf.scale);
+        BuildPageCaches(pdfWnd);
+    } else {
+        if (renderPages) {
+            g_pdf.renderScale = ComputePdfRenderScale(g_pdf.scale);
+            InvalidatePdfRenderGeneration();
+        }
+        UpdatePageLayout(pdfWnd);
+    }
+
+    double newTotalW = g_pdf.contentWidth + padX * 2.0;
+    double newTotalH = g_pdf.contentHeight + padY * 2.0;
+
+    if (PdfSinglePageModeActive()) {
+        g_pdf.scrollX = 0.0;
+        g_pdf.scrollY = 0.0;
+    } else if (g_zoomAnchor.valid && !g_pdf.pages.empty() && !g_pdf.pageRects.empty()) {
+        int idx = std::clamp(g_zoomAnchor.pageIndex, 0, static_cast<int>(g_pdf.pages.size()) - 1);
+        const auto& page = g_pdf.pages[static_cast<size_t>(idx)];
+        const auto& rect = g_pdf.pageRects[static_cast<size_t>(idx)];
+        double localX = g_zoomAnchor.xPt * kDpi / 72.0 * g_pdf.scale;
+        double localY = (page.heightPt - g_zoomAnchor.yPt) * kDpi / 72.0 * g_pdf.scale;
+        double docX = rect.left + localX;
+        double docY = rect.top + localY;
+        g_pdf.scrollX = docX + padX - g_zoomAnchor.focusClient.x;
+        g_pdf.scrollY = docY + padY - g_zoomAnchor.focusClient.y;
+    } else {
+        g_pdf.scrollX = focusRatioX * newTotalW - focusInClient.x;
+        g_pdf.scrollY = focusRatioY * newTotalH - focusInClient.y;
+    }
+
+    RECT rc;
+    GetClientRect(pdfWnd, &rc);
+    ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+
+    if (renderPages) {
+        UpdatePdfVirtualScrollCaches(pdfWnd);
+    }
+    
+    // Recalculate text box size during zoom to keep it synchronized with PDF scale
+    if (g_pdf.editingText) {
+        // Include IME composition text too, so the box size/wrapping stays stable while composing.
+        RecalcEditingTextboxSize(true);
+        EnsureEditingTextBoxVisible(pdfWnd, L"zoom_edit_box");
+    }
+    
+    InvalidateRect(pdfWnd, nullptr, FALSE);
+}
+
+static bool TryApplyInitialFitWidth(HWND pdfWnd) {
+    if (!g_pendingInitialFitWidth) return false;
+    if (!FlowIsVertical(CurrentFlowMode())) {
+        g_pendingInitialFitWidth = false;
+        g_pendingInitialFitWidthPt = 0.0;
+        return false;
+    }
+    if (g_pdf.kind != DocKind::Pdf || g_pdf.pageCount <= 0 || !g_pdf.doc) {
+        g_pendingInitialFitWidth = false;
+        g_pendingInitialFitWidthPt = 0.0;
+        return false;
+    }
+
+    auto fit = CalcFitWidthScale(pdfWnd, g_pendingInitialFitWidthPt);
+    if (!fit) return false;
+
+    g_pendingInitialFitWidth = false;
+    g_pendingInitialFitWidthPt = 0.0;
+
+    RECT rc{};
+    GetClientRect(pdfWnd, &rc);
+
+    // If scale stays the same, we still need to render pages (BuildPageCaches skipped it while pending).
+    if (std::abs(*fit - g_pdf.scale) < 1e-6) {
+        UpdatePdfVirtualScrollCaches(pdfWnd);
+        ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+        if (!ApplyPendingPdfRestore(pdfWnd)) {
+            JumpToPage(pdfWnd, 0);
+        }
+        return true;
+    }
+
+    // Cancel any in-flight zoom animation; this should apply immediately.
+    g_zoomAnimating = false;
+    KillTimer(pdfWnd, kZoomTimerId);
+    g_zoomAnchor = {};
+
+    POINT focus{ 0, 0 };
+    ApplyPdfScaleDirect(pdfWnd, *fit, focus, true);
+    g_pdf.scrollX = 0.0;
+    g_pdf.scrollY = 0.0;
+    ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+    if (!ApplyPendingPdfRestore(pdfWnd)) {
+        JumpToPage(pdfWnd, 0);
+    }
+    return true;
+}
+
+static bool TryApplyInitialFitHeight(HWND pdfWnd) {
+    if (!g_pendingInitialFitHeight) return false;
+    if (FlowIsVertical(CurrentFlowMode())) {
+        g_pendingInitialFitHeight = false;
+        g_pendingInitialFitHeightPt = 0.0;
+        return false;
+    }
+    if (g_pdf.kind != DocKind::Pdf || g_pdf.pageCount <= 0 || !g_pdf.doc) {
+        g_pendingInitialFitHeight = false;
+        g_pendingInitialFitHeightPt = 0.0;
+        return false;
+    }
+
+    auto fit = CalcFitHeightScale(pdfWnd, g_pendingInitialFitHeightPt);
+    if (!fit) return false;
+
+    g_pendingInitialFitHeight = false;
+    g_pendingInitialFitHeightPt = 0.0;
+
+    RECT rc{};
+    GetClientRect(pdfWnd, &rc);
+
+    if (std::abs(*fit - g_pdf.scale) < 1e-6) {
+        UpdatePdfVirtualScrollCaches(pdfWnd);
+        ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+        if (!ApplyPendingPdfRestore(pdfWnd)) {
+            JumpToPage(pdfWnd, 0);
+        }
+        return true;
+    }
+
+    g_zoomAnimating = false;
+    KillTimer(pdfWnd, kZoomTimerId);
+    g_zoomAnchor = {};
+
+    POINT focus{ 0, 0 };
+    ApplyPdfScaleDirect(pdfWnd, *fit, focus, true);
+    g_pdf.scrollX = 0.0;
+    g_pdf.scrollY = 0.0;
+    ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+    if (!ApplyPendingPdfRestore(pdfWnd)) {
+        JumpToPage(pdfWnd, 0);
+    }
+    return true;
+}
+
+void SetPdfScale(HWND pdfWnd, double newScale, POINT focusInClient) {
+    if (g_pdf.kind == DocKind::None) return;
+    newScale = NormalizeZoomScaleValue(newScale);
+    if (std::abs(newScale - g_pdf.scale) < 1e-6 && !g_zoomAnimating) return;
+
+    g_zoomTargetScale = newScale;
+    g_zoomFocusPoint = focusInClient;
+    g_zoomAnchor = {};
+    g_zoomAnchor.focusClient = focusInClient;
+    int pageIndex = -1;
+    double xPt = 0.0, yPt = 0.0, pageTopOut = 0.0;
+    if (HitTestPagePoint(focusInClient, pageIndex, xPt, yPt, pageTopOut)) {
+        g_zoomAnchor.valid = true;
+        g_zoomAnchor.pageIndex = pageIndex;
+        g_zoomAnchor.xPt = xPt;
+        g_zoomAnchor.yPt = yPt;
+    }
+    
+    ApplyPdfScaleDirect(pdfWnd, newScale, focusInClient, false);
+    g_zoomAnimating = true;
+    SetTimer(pdfWnd, kZoomTimerId, kZoomTimerIntervalMs, nullptr);
+}
+
+void SetPdfFlowMode(HWND pdfWnd, const std::wstring& mode) {
+    if (g_pdf.kind == DocKind::None) {
+        g_config.pdfFlowMode = NormalizeFlowModeString(mode);
+        return;
+    }
+    std::wstring newMode = NormalizeFlowModeString(mode);
+    if (newMode.empty()) newMode = L"v_ttb";
+    if (g_config.pdfFlowMode == newMode) return;
+
+    PdfViewRestorePoint anchor;
+    bool hasAnchor = BuildCurrentPdfViewRecord(anchor);
+    g_config.pdfFlowMode = newMode;
+    MarkPdfVirtualViewportChange();
+
+    if (!pdfWnd) pdfWnd = g_hPdfView;
+    if (pdfWnd) {
+        bool layoutUpdated = false;
+        if (g_pdf.kind == DocKind::Pdf && !g_pdf.pages.empty()) {
+            PdfFlowMode parsed = ParsePdfFlowMode(newMode);
+            int centerIndex = hasAnchor ? anchor.pageIndex : 0;
+            std::optional<double> fit;
+            if (FlowIsVertical(parsed)) {
+                double wPt = MaxPageWidthPtAround(centerIndex);
+                fit = CalcFitWidthScale(pdfWnd, wPt);
+            } else {
+                double hPt = MaxPageHeightPtAround(centerIndex);
+                fit = CalcFitHeightScale(pdfWnd, hPt);
+            }
+            if (fit && std::abs(*fit - g_pdf.scale) >= 1e-6) {
+                g_zoomAnimating = false;
+                KillTimer(pdfWnd, kZoomTimerId);
+                g_zoomAnchor = {};
+                POINT focus{ 0, 0 };
+                ApplyPdfScaleDirect(pdfWnd, *fit, focus, true);
+                layoutUpdated = true;
+            }
+        }
+        if (!layoutUpdated) {
+            UpdatePageLayout(pdfWnd);
+        }
+        if (hasAnchor) {
+            ApplyPdfViewAnchor(pdfWnd, anchor.pageIndex, anchor.xPt, anchor.yPt);
+        } else {
+            JumpToPage(pdfWnd, 0);
+        }
+        g_scrollVelocity = 0.0;
+        KillTimer(pdfWnd, kScrollTimerId);
+        UpdatePdfVirtualScrollCaches(pdfWnd);
+        InvalidateRect(pdfWnd, nullptr, FALSE);
+    }
+}
+
+static int PageAtPrimaryDocPos(double pos) {
+    if (g_pdf.pageRects.empty()) return 0;
+    if (!std::isfinite(pos)) return 0;
+    PdfFlowMode mode = CurrentFlowMode();
+    const bool vertical = FlowIsVertical(mode);
+    const size_t count = g_pdf.pageRects.size();
+    int nearestIndex = 0;
+    double nearestDistance = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < count; ++i) {
+        const auto& rect = g_pdf.pageRects[i];
+        double start = vertical ? rect.top : rect.left;
+        double end = vertical ? rect.bottom : rect.right;
+        if (pos >= start && pos < end) {
+            return static_cast<int>(i);
+        }
+        double distance = (pos < start) ? (start - pos) : (pos - end);
+        if (distance < nearestDistance) {
+            nearestDistance = distance;
+            nearestIndex = static_cast<int>(i);
+        }
+    }
+    return nearestIndex;
+}
+
+int PageAtCurrentView() {
+    if (g_pdf.pages.empty() || !g_hPdfView) return 0;
+    if (PdfSinglePageModeActive()) {
+        return std::clamp(g_pdf.singlePageIndex, 0, std::max(0, g_pdf.pageCount - 1));
+    }
+    PdfFlowMode mode = CurrentFlowMode();
+    RECT rc{};
+    GetClientRect(g_hPdfView, &rc);
+    int viewW = std::max(0, static_cast<int>(rc.right - rc.left));
+    int viewH = std::max(0, static_cast<int>(rc.bottom - rc.top));
+
+    double pos = FlowIsVertical(mode)
+        ? (g_pdf.scrollY + static_cast<double>(viewH) * 0.22)
+        : (g_pdf.scrollX + static_cast<double>(viewW) * 0.5);
+    return PageAtPrimaryDocPos(pos);
+}
+
+void ApplyPdfDisplayMode(HWND pdfWnd) {
+    if (!pdfWnd || g_pdf.pages.empty()) return;
+    const int current = std::clamp(g_pdf.singlePageIndex, 0, std::max(0, g_pdf.pageCount - 1));
+    g_pdf.singlePageIndex = current;
+    g_scrollVelocity = 0.0;
+    KillTimer(pdfWnd, kScrollTimerId);
+    if (PdfSinglePageModeActive()) {
+        g_pdf.scrollX = 0.0;
+        g_pdf.scrollY = 0.0;
+        UpdatePageLayout(pdfWnd);
+        UpdatePdfVirtualScrollCaches(pdfWnd);
+        InvalidateRect(pdfWnd, nullptr, FALSE);
+        return;
+    }
+    UpdatePageLayout(pdfWnd);
+    JumpToPage(pdfWnd, current);
+    UpdatePdfVirtualScrollCaches(pdfWnd);
+    InvalidateRect(pdfWnd, nullptr, FALSE);
+}

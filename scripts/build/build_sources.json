@@ -1,0 +1,108 @@
+{
+    "ReadOnlyViewerSourceFiles":  [
+                                      "src/readonly_viewer/main.cpp",
+                                      "src/readonly_viewer/pdf_preview_panel.cpp",
+                                      "src/readonly_viewer/text_preview_panel.cpp",
+                                      "src/readonly_viewer/mermaid_subset_parser.cpp",
+                                      "src/readonly_viewer/mermaid_subset_preview.cpp",
+                                      "src/theme/built_in_theme.cpp",
+                                      "src/clrop/json.cpp",
+                                      "third_party/md4c/src/md4c.c",
+                                      "src/note/note_model.cpp",
+                                      "src/note/note_parser.cpp",
+                                      "src/note/note_md4c_adapter.cpp"
+                                  ],
+    "TranslationUnitDesign":  {
+                                  "Notes":  [
+                                                "Standalone .cpp TU: settings, settings_core_api, main/startup_instance, main/wheel_routing, note_view/bottom_math_panel, file_output, clrop, note/*, core/app_core, etc.",
+                                                "Unity roots aggregate .cppinc only when shared static state must stay in one TU.",
+                                                "Prefer new .cpp TU over new .cppinc when splitting; see docs/internal/refactoring/コード健全化・モジュール分割計画_2026-05-22.md."
+                                            ],
+                                  "UnityBuildFragments":  {
+                                                              "src/main.cpp":  [
+                                                                                   "workspace/workspace_controller.cppinc",
+                                                                                   "ui/core/main_view_layout.cppinc",
+                                                                                   "app/operations.cppinc",
+                                                                                   "app/command_dispatch.cppinc",
+                                                                                   "ui/core/main_window_proc.cppinc",
+                                                                                   "app/bootstrap.cppinc"
+                                                                               ],
+                                                              "src/pdf_view/pdf_view.cpp":  [
+                                                                                                "pdf_view/navigation.cppinc",
+                                                                                                "pdf_view/render.cppinc",
+                                                                                                "pdf_view/input.cppinc"
+                                                                                            ],
+                                                              "src/note_view/note_view.cpp":  [
+                                                                                                  "note_view/note_view_shared.cppinc",
+                                                                                                  "note_view/note_view_note_ops.cppinc",
+                                                                                                  "note_view/note_view_bottom_panes.cppinc",
+                                                                                                  "note_view/note_view_input.cppinc"
+                                                                                              ]
+                                                          },
+                                  "IntentionalUnityBuildRoots":  [
+                                                                     "src/main.cpp",
+                                                                     "src/note_view/note_view.cpp",
+                                                                     "src/pdf_view/pdf_view.cpp"
+                                                                 ],
+                                  "Strategy":  "Hybrid"
+                              },
+    "BuildSourceFiles":  [
+                             "src/main.cpp",
+                             "src/workspace/workspace_config_io.cpp",
+                             "src/workspace/workspace_actions.cpp",
+                             "src/workspace/workspace_tree.cpp",
+                             "src/workspace/file_ops.cpp",
+                             "src/workspace/workspace_write_lock.cpp",
+                             "src/ui/dialogs/dialogs.cpp",
+                             "src/ui/dialogs/annot_math_panel.cpp",
+                             "src/ui/dialogs/export_dialog.cpp",
+                             "src/app/main_escape_backup.cpp",
+                             "src/ui/menus/main_menu_snapshot.cpp",
+                             "src/ui/menus/main_debug_menu.cpp",
+                             "src/ui/menus/menu_build.cpp",
+                             "src/app/startup_instance.cpp",
+                             "src/ui/core/wheel_routing.cpp",
+                             "src/help/help.cpp",
+                             "src/search/search.cpp",
+                             "src/schedule/schedule.cpp",
+                             "src/office/docx_space_protection.cpp",
+                             "src/settings/settings.cpp",
+                             "src/settings/settings_core_api.cpp",
+                             "src/ui/layout.cpp",
+                             "src/ui/splitter.cpp",
+                             "src/core/app_core.cpp",
+                             "src/core/private_fonts.cpp",
+                             "src/theme/built_in_theme.cpp",
+                             "src/pdf_view/pdf_view.cpp",
+                             "src/note_view/note_view.cpp",
+                             "src/note_view/bottom_math_panel.cpp",
+                             "third_party/md4c/src/md4c.c",
+                             "src/note/note_model.cpp",
+                             "src/note/note_dirty_graph.cpp",
+                             "src/note/note_history.cpp",
+                             "src/note/note_layout.cpp",
+                             "src/note/note_kernel.cpp",
+                             "src/note/note_identity.cpp",
+                             "src/note/note_identity_store.cpp",
+                             "src/note/note_persistence.cpp",
+                             "src/note/note_presentation.cpp",
+                             "src/note/note_revision_gate.cpp",
+                             "src/note/note_transaction.cpp",
+                             "src/note/note_text_core.cpp",
+                             "src/note/note_text_boundaries.cpp",
+                             "src/note/note_workspace_index.cpp",
+                             "src/note/note_workspace_service.cpp",
+                             "src/note/note_semantic_index.cpp",
+                             "src/note/note_math.cpp",
+                             "src/note/note_export.cpp",
+                             "src/note/note_highlight.cpp",
+                             "src/note/note_md4c_adapter.cpp",
+                             "src/note/note_parser.cpp",
+                             "src/math/math_render.cpp",
+                             "src/clrop/json.cpp",
+                             "src/clrop/hash.cpp",
+                             "src/clrop/bridge.cpp",
+                             "src/file_output/file_output.cpp",
+                             "src/file_output/file_output_stage.cpp"
+                         ]
+}

@@ -1,0 +1,64 @@
+diff --git a/sal/osl/w32/dllentry.cxx b/sal/osl/w32/dllentry.cxx
+--- a/sal/osl/w32/dllentry.cxx
++++ b/sal/osl/w32/dllentry.cxx
+@@ -21,7 +21,6 @@
+ #include <process.h>
+ #include <tlhelp32.h>
+ #include <rpc.h>
+-#include <winsock.h>
+ #ifdef _DEBUG
+ #include <crtdbg.h>
+ #endif
+@@ -92,8 +91,6 @@ static BOOL WINAPI RawDllMain( HINSTANCE, DWORD fdwReason, LPVOID )
+             }
+ 
+         case DLL_PROCESS_DETACH:
+-            WSACleanup( );
+-
+             /*
+ 
+             On a product build memory management finalization might
+diff --git a/sal/osl/w32/salinit.cxx b/sal/osl/w32/salinit.cxx
+--- a/sal/osl/w32/salinit.cxx
++++ b/sal/osl/w32/salinit.cxx
+@@ -42,40 +42,12 @@ void sal_detail_initialize(int argc, char ** argv)
+ #endif
+     SetDllDirectoryW(L""); // remove the current directory from the default DLL search order
+     SetSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE | BASE_SEARCH_PATH_PERMANENT);
+-
+-    WSADATA wsaData;
+-    int     error;
+-    WORD    wVersionRequested;
+-
+-    wVersionRequested = MAKEWORD(1, 1);
+-
+-    error = WSAStartup(wVersionRequested, &wsaData);
+-    if ( 0 == error )
+-    {
+-        WORD const wMajorVersionRequired = 1;
+-        WORD const wMinorVersionRequired = 1;
+-
+-        if ((LOBYTE(wsaData.wVersion) <  wMajorVersionRequired) ||
+-            ((LOBYTE(wsaData.wVersion) == wMajorVersionRequired) &&
+-             (HIBYTE(wsaData.wVersion) < wMinorVersionRequired)))
+-        {
+-            // How to handle a very unlikely error ???
+-        }
+-    }
+-    else
+-    {
+-        // How to handle a very unlikely error ???
+-    }
+ 
+     osl_setCommandArgs(argc, argv);
+ }
+ 
+ void sal_detail_deinitialize()
+ {
+-    if ( SOCKET_ERROR == WSACleanup() )
+-    {
+-        // We should never reach this point or we did wrong elsewhere
+-    }
+ }
+ 
+ }   // extern "C"

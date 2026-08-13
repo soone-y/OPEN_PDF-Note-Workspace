@@ -1,0 +1,10 @@
+0.5.3+git.c4be8625eb11725d604232b028df10c2ddf9b577
+
+Upstream: https://github.com/mity/md4c
+Commit: c4be8625eb11725d604232b028df10c2ddf9b577
+Commit date: 2026-08-06
+Release baseline: release-0.5.3
+Local changes: patches/0001-japanese-whitespace-and-punctuation.patch
+Security status: OSV-2022-126 omits its fixed event; introduced by 62b60979f6a281b2b3cf883abc84299431fe2f76 and corrected upstream by descendant commit f7c8db7588573f3b0de166166a6f6756baf222dc
+Ancestry evidence: pinned commit is 246 commits ahead of f7c8db7588573f3b0de166166a6f6756baf222dc
+Local evidence: the public regression input completed under GCC ASan/UBSan on 2026-08-12; the discontinued old-version comparison was not used as evidence

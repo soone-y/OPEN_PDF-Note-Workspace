@@ -1,0 +1,13 @@
+diff --git a/external/libxml2/ExternalProject_libxml2.mk b/external/libxml2/ExternalProject_libxml2.mk
+index 2dd2b1f2cc0b..9409d29f8b9f 100644
+--- a/external/libxml2/ExternalProject_libxml2.mk
++++ b/external/libxml2/ExternalProject_libxml2.mk
+@@ -25,7 +25,7 @@ $(call gb_ExternalProject_get_state_target,libxml2,build):
+ 	$(call gb_Trace_StartRange,libxml2,EXTERNAL)
+ 	$(call gb_ExternalProject_run,build,\
+ 		cscript /e:javascript configure.js \
+-			iconv=no icu=yes sax1=yes $(if $(MSVC_USE_DEBUG_RUNTIME),cruntime=/MDd) \
++			iconv=no icu=yes sax1=yes http=no $(if $(MSVC_USE_DEBUG_RUNTIME),cruntime=/MDd) \
+ 			$(if $(filter TRUE,$(ENABLE_DBGUTIL)),debug=yes) \
+ 		&& nmake \
+ 	,win32)

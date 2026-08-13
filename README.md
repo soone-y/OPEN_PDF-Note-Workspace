@@ -4,6 +4,8 @@
 
 Windows 向けの PDF 学習ワークスペースです。PDF 閲覧、非破壊注釈、ノート編集を 1 つのアプリにまとめています。
 
+この配布物は **Windows x64（64-bit）向け**です。32-bit Windows 向けの配布物はありません。
+
 ![PDF Note Workspace メイン画面](docs/images/app_overview.png)
 
 ## GitHub から入手する

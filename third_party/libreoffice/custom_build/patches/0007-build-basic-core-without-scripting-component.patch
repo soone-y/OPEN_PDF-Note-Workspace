@@ -1,0 +1,23 @@
+diff --git a/basic/Library_sb.mk b/basic/Library_sb.mk
+--- a/basic/Library_sb.mk
++++ b/basic/Library_sb.mk
+@@ -61,7 +61,9 @@ ifneq ($(filter SCRIPTING,$(BUILD_TYPE)),)
+ 
+ $(eval $(call gb_Library_set_componentfile,sb,basic/util/sb,services))
+ 
+-$(eval $(call gb_Library_add_exception_objects,sb,\
++endif
++
++$(eval $(call gb_Library_add_exception_objects,sb,\
+ 	basic/source/basmgr/basicmanagerrepository \
+ 	basic/source/basmgr/basmgr \
+ 	basic/source/basmgr/vbahelper \
+@@ -100,7 +102,6 @@ $(eval $(call gb_Library_add_exception_objects,sb,\
+ 	basic/source/runtime/stdobj \
+ 	basic/source/runtime/stdobj1 \
+ 	basic/source/classes/errobject \
+ ))
+-endif
+ 
+ $(eval $(call gb_Library_add_exception_objects,sb,\
+ 	basic/source/classes/global \
