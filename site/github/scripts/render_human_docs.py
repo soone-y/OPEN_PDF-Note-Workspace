@@ -155,6 +155,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     .menu-heading:first-child {{ margin-top: 0; }}
 
+    .menu-outside {{
+      margin-top: 14px;
+      padding: 10px 6px 6px;
+      border-top: 3px double var(--border-color);
+      background-color: var(--code-bg);
+    }}
+
+    .menu-outside a {{
+      position: relative;
+      padding-right: 30px;
+    }}
+
+    .menu-outside a::after {{
+      content: "↗";
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      color: var(--text-muted);
+      font-size: 0.9em;
+    }}
+
     .menu-location {{
       margin: 0;
       padding: 9px 10px;
@@ -455,30 +476,43 @@ def navigation_html(*, root_rel: str, rel_path: Path, title: str) -> str:
     else:
         current_section = "公開文書"
 
-    entries = (
-        ("紹介サイト", "ソフトの概要と配布先を見る", "https://pdf-note-workspace.soone-y.com/", None),
-        ("文書ポータル", "目的別の資料一覧へ戻る", f"{root_rel}index.html", "文書ポータル"),
+    portal_entries = (
         ("プロジェクトと文書案内", "詳細資料の共通入口", f"{root_rel}introduction/index.html", "プロジェクトと文書案内"),
         ("使い方・セットアップ", "導入・操作・保存・トラブル対処", f"{root_rel}docs/public/Index.html", "使い方・セットアップ"),
         ("プロジェクトの概要", "配布物、通常版・Lite版、基本方針", f"{root_rel}README.html", "プロジェクトの概要"),
         ("ライセンスと第三者通知", "利用条件と第三者コンポーネント", f"{root_rel}LICENSES_INDEX.html", "ライセンスと第三者通知"),
+    )
+    outside_entries = (
+        ("文書ポータルのトップ", "目的別の入口へ戻る", f"{root_rel}index.html"),
+        ("紹介サイト", "ソフトの概要と配布先を見る", "https://pdf-note-workspace.soone-y.com/"),
         ("配布物を入手する", "GitHub Releases を開く", "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases", None),
         ("GitHub リポジトリ", "ソース、Issue、公開履歴を見る", "https://github.com/soone-y/OPEN_PDF-Note-Workspace", None),
     )
-    entry_html = "\n".join(
+    portal_entry_html = "\n".join(
         f'''        <a href="{href}"{' aria-current="page"' if section == current_section else ''}>
           <span class="menu-link-title">{html.escape(label)}</span>
           <span class="menu-link-detail">{html.escape(detail)}</span>
         </a>'''
-        for label, detail, href, section in entries
+        for label, detail, href, section in portal_entries
+    )
+    outside_entry_html = "\n".join(
+        f'''        <a href="{href}">
+          <span class="menu-link-title">{html.escape(label)}</span>
+          <span class="menu-link-detail">{html.escape(detail)}</span>
+        </a>'''
+        for label, detail, href, *_ in outside_entries
     )
     return f"""    <details class=\"site-menu\">
       <summary aria-label=\"文書メニューを開く\"><span class=\"menu-icon\" aria-hidden=\"true\"></span>文書メニュー<span class=\"menu-current\">現在: {html.escape(current_section)}</span></summary>
       <nav aria-label=\"文書メニュー\">
         <div class=\"menu-heading\">現在地</div>
         <p class=\"menu-location\">{html.escape(title)}<br><strong>{html.escape(current_section)}</strong></p>
-        <div class=\"menu-heading\">移動先</div>
-{entry_html}
+        <div class=\"menu-links\">
+{portal_entry_html}
+        </div>
+        <div class=\"menu-outside\">
+{outside_entry_html}
+        </div>
       </nav>
     </details>"""
 
