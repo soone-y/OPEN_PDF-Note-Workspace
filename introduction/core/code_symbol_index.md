@@ -1,10 +1,5 @@
 # コード参照索引
 
-<ai_node_schema id="code_symbol_index" type="verified-code-reference-index">
-  <target_audience>LLM / AI-Coding-Agent</target_audience>
-  <verification_rule>各エントリの path はリポジトリに実在し、symbol は記載されたファイルで確認したものだけを載せる。</verification_rule>
-</ai_node_schema>
-
 ## 調査の前提
 
 この索引は入口を絞るためのものです。呼び出し元・失敗経路・関連テストを読まずに変更してはいけません。保存、注釈、出力、配布の変更では `introduction/core/documentation_contract.md` を読み、公開されている一次資料と実装を確認すること。

@@ -9,6 +9,7 @@ import re
 import sys
 import xml.etree.ElementTree as element_tree
 from pathlib import Path
+from urllib.parse import unquote
 
 
 TEXT_EXTENSIONS = {".html", ".json", ".md", ".txt", ".xml"}
@@ -23,9 +24,11 @@ DOCUMENTATION_PORTAL_REQUIRED_FILES = (
     "index.html", "README.md", "introduction/index.md", "introduction/project_overview.md",
 )
 PORTAL_ENTRY_LINKS = ("introduction/index.html",)
+HIGH_CONTRAST_STORAGE_KEY = "pdf-note-workspace-high-contrast"
 MARKDOWN_LINK = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HTML_LINK = re.compile(r"(?:href|src)=[\"']([^\"'#]+)", re.IGNORECASE)
 HTML_META = re.compile(r"<meta\s+[^>]*?name=[\"']([^\"']+)[\"'][^>]*?content=[\"']([^\"']*)[\"']", re.IGNORECASE)
+HTML_ID = re.compile(r"\bid=[\"']([^\"']+)[\"']", re.IGNORECASE)
 
 
 def local_target(value: str) -> str | None:
@@ -102,6 +105,41 @@ def validate_rendered_human_docs(site: Path, errors: list[str]) -> None:
         rendered = markdown_path.with_suffix(".html")
         if not rendered.is_file():
             errors.append(f"rendered HTML is missing for public Markdown: {markdown_path.relative_to(site)}")
+            continue
+        rendered_text = rendered.read_text(encoding="utf-8-sig")
+        if 'class="contrast-toggle"' not in rendered_text or HIGH_CONTRAST_STORAGE_KEY not in rendered_text:
+            errors.append(f"rendered HTML is missing the persistent high-contrast control: {rendered.relative_to(site)}")
+
+
+def validate_rendered_fragments(site: Path, errors: list[str]) -> None:
+    """Keep Markdown heading links usable in the browser-rendered documents."""
+    markdown_paths = list(site.glob("*.md"))
+    for directory in (site / "docs" / "public", site / "introduction"):
+        if directory.is_dir():
+            markdown_paths.extend(directory.rglob("*.md"))
+
+    for markdown_path in markdown_paths:
+        text = markdown_path.read_text(encoding="utf-8-sig")
+        for match in MARKDOWN_LINK.finditer(text):
+            raw_target = match.group(1)
+            if "#" not in raw_target or raw_target.startswith(("http:", "https:", "mailto:")):
+                continue
+            target, fragment = raw_target.split("#", 1)
+            if not fragment:
+                continue
+            source_document = markdown_path if not target else markdown_path.parent / target
+            if source_document.suffix.lower() != ".md":
+                continue
+            rendered = source_document.with_suffix(".html")
+            if not rendered.is_file():
+                continue
+            ids = set(HTML_ID.findall(rendered.read_text(encoding="utf-8-sig")))
+            decoded_fragment = unquote(fragment)
+            if decoded_fragment not in ids:
+                errors.append(
+                    "broken rendered heading link: "
+                    f"{markdown_path.relative_to(site)} -> {raw_target}"
+                )
 
 
 def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
@@ -114,6 +152,8 @@ def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
     except UnicodeDecodeError:
         return
     metadata = {name.lower(): value for name, value in HTML_META.findall(text)}
+    if 'class="contrast-toggle"' not in text or HIGH_CONTRAST_STORAGE_KEY not in text:
+        errors.append("index.html must provide the persistent high-contrast control")
     expected = {"ai-agent-entrypoint": "introduction/index.html"}
     for name, target in expected.items():
         if metadata.get(name) != target:
@@ -144,6 +184,7 @@ def validate_site(site: Path) -> list[str]:
     validate_local_links(site, errors)
     validate_portal_entrypoint(site, errors)
     validate_rendered_human_docs(site, errors)
+    validate_rendered_fragments(site, errors)
     return errors
 
 

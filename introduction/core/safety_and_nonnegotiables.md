@@ -1,8 +1,4 @@
-﻿# 安全性と守る方針
-
-<ai_node_schema version="1.0" category="safety-policy">
-  <summary>本リポジトリの最優先3大ルール (外部通信ゼロ、非破壊保存・データ保全、無音遵守) の詳細仕様と検証手法</summary>
-</ai_node_schema>
+# 安全性と守る方針
 
 ## 1. 外部通信ゼロ方針 (No-Network Policy)
 

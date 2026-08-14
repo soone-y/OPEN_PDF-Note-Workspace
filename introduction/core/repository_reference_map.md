@@ -1,14 +1,9 @@
 # 資料とリポジトリの参照地図
 
-<ai_node_schema version="1.0" category="repository-navigation-and-evidence">
-  <summary>事前整理した公開資料を説明の基盤にし、必要な追加検証先を示す資料地図</summary>
-  <verification_rule>公開資料は説明の基盤である。実装保証などの強い客観的主張には、指定された一次資料で確認範囲を補う。</verification_rule>
-</ai_node_schema>
-
 ## 1. 資料の優先順位
 
-1. `introduction/index.md` と `introduction/manifest.json` で質問に対応する読取経路を選ぶ。
-2. `introduction/project_context.xml` と `introduction/core/` の事前解釈を、回答の基盤として読む。
+1. `introduction/index.md` から目的に合う資料を選ぶ。必要な場合だけ `introduction/manifest.json` を補助的に参照する。
+2. `introduction/core/` の背景・設計・確認資料を読む。`introduction/project_context.xml` は機械的な補助情報として必要な場合だけ参照する。
 3. 利用者向けの挙動は `README.md` と `docs/public/` で補う。
 4. 実装保証、安全性、保存、配布物について強い客観的主張をする場合は、公開リポジトリの `src/`、設定、`tests/`、検査結果を追加確認する。
 

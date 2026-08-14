@@ -1,9 +1,4 @@
-﻿# ファイル形式と保存
-
-<ai_node_schema id="file_formats" type="format_and_persistence_spec">
-  <target_audience>LLM / AI-Assistant</target_audience>
-  <data_density>high</data_density>
-</ai_node_schema>
+# ファイル形式と保存
 
 ---
 

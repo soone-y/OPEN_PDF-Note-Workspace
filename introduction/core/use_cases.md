@@ -1,9 +1,4 @@
-﻿# 利用場面と設計の考え方
-
-<ai_node_schema id="use_cases" type="design_and_usage_model">
-  <target_audience>LLM / AI-Assistant</target_audience>
-  <data_density>high</data_density>
-</ai_node_schema>
+# 利用場面と設計の考え方
 
 ---
 

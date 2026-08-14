@@ -1,9 +1,4 @@
-﻿# トラブルの確認観点
-
-<ai_node_schema id="troubleshooting_quick" type="issue_diagnosis_map">
-  <target_audience>LLM / AI-Assistant</target_audience>
-  <data_density>high</data_density>
-</ai_node_schema>
+# トラブルの確認観点
 
 ---
 

@@ -17,7 +17,7 @@ GitHub のアカウントや Git の知識は必要ありません。リポジ�
 | `.docx` / `.pptx` をアプリ内で PDF に変換したい | ファイル名に `Lite` が付かない通常版 |
 | PDF だけを扱う、または小さい配布物を使いたい | ファイル名に `Lite` が付く Lite版 |
 
-`Source code (zip)` や `Source code (tar.gz)` は開発用のソースコードで、アプリとしては使えません。選んだ ZIP をダウンロードした後は、[GitHub から取得した後のセットアップ手順](docs/public/How_to_Setup.md#github-から-入手する) に従って展開してください。
+`Source code (zip)` や `Source code (tar.gz)` は開発用のソースコードで、アプリとしては使えません。選んだ ZIP をダウンロードした後は、[GitHub から取得した後のセットアップ手順](docs/public/How_to_Setup.md#0-github-から入手する) に従って展開してください。
 
 GitHubアカウントを使う場合は、Starでこのプロジェクトをあとで見つけやすくできます。配布物・公開文書・ライセンスの確認にもGitHubを利用できます。
 
@@ -26,7 +26,7 @@ GitHubアカウントを使う場合は、Starでこのプロジェクトをあ�
 - 紹介サイト: https://pdf-note-workspace.soone-y.com/
 - 配布物を入手する: https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases
 - 使い方・セットアップの詳細一覧: [docs/public/Index.md](docs/public/Index.md)
-- 利用者とAIが共通して使う公開文書ポータル: https://soone-y.github.io/OPEN_PDF-Note-Workspace/
+- 公開文書ポータル（概要、使い方、背景資料）: https://soone-y.github.io/OPEN_PDF-Note-Workspace/
 
 配布物では `docs/README.md` から同じ文書案内を開けます。アプリ内のヘルプも外部通信なしで利用できます。
 
@@ -78,7 +78,7 @@ PDF に書き込んだ注釈は、PDF 本体ではなく、同じフォルダに
 ## 文書ポータルの構成
 
 - `docs/public/`: 導入、使い方、保存・復元、トラブル対処の案内
-- `introduction/`: 設計、制約、根拠を整理した詳細資料。利用者とAIが共通して参照する
+- `introduction/`: 背景、設計、確認範囲を整理した補足資料。人が読みやすい見出しと表で構成し、同じ本文をAIも参照できる
 
 開発用のソース、テスト、内部設計文書、公開作業用ツールはこの公開文書ポータルには含めません。
 

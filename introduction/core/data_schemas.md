@@ -1,8 +1,4 @@
-﻿# データ構造
-
-<ai_node_schema version="1.0" category="data-schemas">
-  <summary>.clrop (JSON注釈データ), .clro (標準ノート), pdf_workspace_setup.json (設定) のデータモデル・スキーマ仕様</summary>
-</ai_node_schema>
+# データ構造
 
 ## 1. 注釈保存ファイル (`.clrop` - ClassRoom PDF Annotation)
 

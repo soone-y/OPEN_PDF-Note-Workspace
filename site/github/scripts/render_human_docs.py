@@ -15,7 +15,7 @@ import re
 import html
 from pathlib import Path
 
-# HTML テンプレート（外部通信ゼロ・モダンダーク/ライト対応デザイン）
+# HTML テンプレート（外部通信ゼロ・落ち着いたライト/ダーク対応デザイン）
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -24,34 +24,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <title>{title} – PDF Note Workspace</title>
   <style>
     :root {{
-      --bg-main: #f8fafc;
+      --bg-main: #f6f8f7;
       --card-bg: #ffffff;
-      --text-main: #0f172a;
-      --text-muted: #475569;
-      --accent: #0284c7;
-      --accent-hover: #0369a1;
-      --border-color: #cbd5e1;
-      --code-bg: #f1f5f9;
-      --pre-bg: #0f172a;
-      --pre-text: #f8fafc;
-      --note-bg: #f0f9ff;
-      --note-border: #0284c7;
+      --text-main: #24312f;
+      --text-muted: #5d6c68;
+      --accent: #00AA7B;
+      --link: #1D50DD;
+      --accent-hover: #08745b;
+      --border-color: #d4deda;
+      --code-bg: #f1f5f3;
+      --pre-bg: #24312f;
+      --pre-text: #f8fbfa;
+      --note-bg: #fff4ea;
+      --note-border: #FFBD85;
     }}
 
     @media (prefers-color-scheme: dark) {{
       :root {{
-        --bg-main: #0f172a;
-        --card-bg: #1e293b;
-        --text-main: #f8fafc;
-        --text-muted: #94a3b8;
-        --accent: #38bdf8;
-        --accent-hover: #0284c7;
-        --border-color: #334155;
-        --code-bg: #0f172a;
-        --pre-bg: #020617;
-        --pre-text: #f8fafc;
-        --note-bg: rgba(56, 189, 248, 0.1);
-        --note-border: #38bdf8;
+        --bg-main: #18201f;
+        --card-bg: #202b29;
+        --text-main: #f2f7f5;
+        --text-muted: #b5c5c0;
+        --accent: #42cda5;
+        --link: #9eb2ff;
+        --accent-hover: #7fe0c3;
+        --border-color: #3a4b47;
+        --code-bg: #17211f;
+        --pre-bg: #101817;
+        --pre-text: #f2f7f5;
+        --note-bg: #3b3027;
+        --note-border: #ffc99b;
       }}
     }}
 
@@ -70,9 +72,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       margin: 0 auto;
       background-color: var(--card-bg);
       border: 1px solid var(--border-color);
+      border-top: 4px solid var(--note-border);
       border-radius: 12px;
       padding: 36px 28px;
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08);
     }}
 
     .doc-header {{
@@ -121,7 +124,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border-top: 2px solid currentColor;
     }}
     .site-menu summary:hover {{
-      background-color: var(--border-color);
+      background-color: var(--note-bg);
     }}
 
     .site-menu nav {{
@@ -167,10 +170,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border-radius: 5px;
     }}
 
-    .site-menu nav a:hover {{ background-color: var(--code-bg); }}
+    .site-menu nav a:hover {{ background-color: var(--note-bg); }}
     .site-menu nav a[aria-current="page"] {{
       background-color: var(--note-bg);
-      color: var(--accent);
+      color: var(--link);
       font-weight: 700;
     }}
     .menu-link-title {{ display: block; }}
@@ -187,14 +190,38 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       color: var(--text-muted);
     }}
 
+    .header-tools {{ display: inline-flex; align-items: center; gap: 12px; }}
+    .contrast-toggle {{ display: inline-flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 0.82em; font-weight: 600; cursor: pointer; }}
+    .contrast-toggle input {{ inline-size: 15px; block-size: 15px; accent-color: var(--accent); }}
+
+    html[data-contrast="high"] {{
+      --bg-main: #ffffff;
+      --card-bg: #ffffff;
+      --text-main: #111111;
+      --text-muted: #2b2b2b;
+      --accent: #006b4d;
+      --link: #123bb1;
+      --accent-hover: #002f22;
+      --border-color: #202020;
+      --code-bg: #f4f4f4;
+      --pre-bg: #000000;
+      --pre-text: #ffffff;
+      --note-bg: #ffffff;
+      --note-border: #9a4e00;
+    }}
+    html[data-contrast="high"] .container {{ border-width: 2px; box-shadow: none; }}
+    html[data-contrast="high"] .site-menu nav, html[data-contrast="high"] code, html[data-contrast="high"] th, html[data-contrast="high"] td {{ border-width: 2px; }}
+    html[data-contrast="high"] .site-menu nav a:hover, html[data-contrast="high"] .site-menu nav a[aria-current="page"] {{ background-color: #ffffff; outline: 3px solid var(--note-border); outline-offset: -3px; }}
+
     h1 {{ font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }}
     h2 {{ font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }}
     h3 {{ font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }}
 
     p {{ margin-bottom: 1.1em; word-break: break-word; }}
 
-    a {{ color: var(--accent); text-decoration: none; font-weight: 500; }}
+    a {{ color: var(--link); text-decoration: none; font-weight: 500; text-underline-offset: 3px; }}
     a:hover {{ text-decoration: underline; color: var(--accent-hover); }}
+    a:focus-visible {{ outline: 3px solid var(--note-border); outline-offset: 3px; }}
 
     code {{
       background-color: var(--code-bg);
@@ -288,7 +315,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="container">
   <div class="doc-header">
 {navigation_html}
+    <div class="header-tools">
+      <label class="contrast-toggle"><input id="contrast-toggle" type="checkbox"><span>高コントラスト</span></label>
 {raw_markdown_html}
+    </div>
   </div>
 
   <main>
@@ -299,6 +329,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     PDF Note Workspace Documentation &copy; 2026
   </footer>
 </div>
+
+<script>
+  (() => {{
+    const storageKey = "pdf-note-workspace-high-contrast";
+    const toggle = document.querySelector("#contrast-toggle");
+    const apply = (enabled) => {{
+      document.documentElement.dataset.contrast = enabled ? "high" : "";
+      toggle.checked = enabled;
+    }};
+    let saved = null;
+    try {{ saved = localStorage.getItem(storageKey); }} catch (_) {{ /* Storage unavailable: keep this page's setting only. */ }}
+    apply(saved === "true");
+    toggle.addEventListener("change", () => {{
+      apply(toggle.checked);
+      try {{ localStorage.setItem(storageKey, String(toggle.checked)); }} catch (_) {{ /* Storage unavailable: keep this page's setting only. */ }}
+    }});
+  }})();
+</script>
 
 </body>
 </html>
@@ -313,6 +361,16 @@ def simple_markdown_to_html(md_text: str, root_rel: str) -> str:
     in_list = False
     in_table = False
     is_mermaid = False
+    heading_counts: dict[str, int] = {}
+
+    def heading_id(source: str) -> str:
+        normalized = re.sub(r"[`*_]", "", source).strip().lower()
+        normalized = re.sub(r"\s+", "-", normalized)
+        normalized = re.sub(r"[^\w\-\u3040-\u30ff\u3400-\u9fff]", "", normalized)
+        base = normalized or "section"
+        count = heading_counts.get(base, 0)
+        heading_counts[base] = count + 1
+        return base if count == 0 else f"{base}-{count}"
 
     for line in lines:
         # コードブロック処理
@@ -357,13 +415,13 @@ def simple_markdown_to_html(md_text: str, root_rel: str) -> str:
 
         # 見出し
         if line.startswith("# "):
-            html_lines.append(f"<h1>{format_inline(line[2:], root_rel)}</h1>")
+            html_lines.append(f'<h1 id="{heading_id(line[2:])}">{format_inline(line[2:], root_rel)}</h1>')
         elif line.startswith("## "):
-            html_lines.append(f"<h2>{format_inline(line[3:], root_rel)}</h2>")
+            html_lines.append(f'<h2 id="{heading_id(line[3:])}">{format_inline(line[3:], root_rel)}</h2>')
         elif line.startswith("### "):
-            html_lines.append(f"<h3>{format_inline(line[4:], root_rel)}</h3>")
+            html_lines.append(f'<h3 id="{heading_id(line[4:])}">{format_inline(line[4:], root_rel)}</h3>')
         elif line.startswith("#### "):
-            html_lines.append(f"<h4>{format_inline(line[5:], root_rel)}</h4>")
+            html_lines.append(f'<h4 id="{heading_id(line[5:])}">{format_inline(line[5:], root_rel)}</h4>')
         # 引用注記 (GFM Callouts)
         elif line.startswith("> "):
             quote_text = format_inline(line[2:], root_rel)
@@ -439,7 +497,7 @@ def format_inline(text: str, root_rel: str) -> str:
 def navigation_html(*, root_rel: str, rel_path: Path) -> str:
     """現在の項目をハイライトし、リンクの目的を示すポータル用メニューを生成する。"""
     if rel_path.parts[0] == "introduction":
-        current_section = "プロジェクトと文書案内"
+        current_section = "背景・設計・確認資料"
     elif rel_path.parts[:2] == ("docs", "public"):
         current_section = "使い方・セットアップ"
     elif rel_path.name == "README.md":
@@ -450,9 +508,9 @@ def navigation_html(*, root_rel: str, rel_path: Path) -> str:
         current_section = "公開文書"
 
     portal_entries = (
-        ("プロジェクトと文書案内", "詳細資料の共通入口", f"{root_rel}introduction/index.html", "プロジェクトと文書案内"),
         ("プロジェクトの概要", "配布物、通常版・Lite版、基本方針", f"{root_rel}README.html", "プロジェクトの概要"),
         ("使い方・セットアップ", "導入・操作・保存・トラブル対処", f"{root_rel}docs/public/Index.html", "使い方・セットアップ"),
+        ("背景・設計・確認資料", "設計の考え方、利用判断、根拠と確認範囲", f"{root_rel}introduction/index.html", "背景・設計・確認資料"),
         ("ライセンスと第三者通知", "利用条件と第三者コンポーネント", f"{root_rel}LICENSES_INDEX.html", "ライセンスと第三者通知"),
     )
     outside_entries = (

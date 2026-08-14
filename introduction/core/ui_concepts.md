@@ -1,9 +1,4 @@
-﻿# 画面と操作の考え方
-
-<ai_node_schema id="ui_concepts" type="layout_and_terminology">
-  <target_audience>LLM / AI-Assistant</target_audience>
-  <data_density>high</data_density>
-</ai_node_schema>
+# 画面と操作の考え方
 
 ---
 

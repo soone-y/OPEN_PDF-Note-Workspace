@@ -6,27 +6,49 @@
   <meta name="ai-agent-entrypoint" content="introduction/index.html">
   <title>PDF Note Workspace 文書ポータル</title>
   <style>
-    :root { --page: #f8fafc; --card: #fff; --ink: #0f172a; --subtle: #475569; --line: #cbd5e1; --link: #0369a1; }
+    :root {
+      --page: #f6f8f7;
+      --card: #ffffff;
+      --ink: #24312f;
+      --subtle: #5d6c68;
+      --line: #d4deda;
+      --green: #00AA7B;
+      --peach: #FFBD85;
+      --blue: #1D50DD;
+      --green-wash: #edf8f4;
+      --blue-wash: #eef2ff;
+    }
     * { box-sizing: border-box; }
     body { margin: 0; padding: 24px 12px; background: var(--page); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.7; }
-    main { width: min(100%, 760px); margin: 0 auto; padding: clamp(24px, 6vw, 48px); background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
-    h1 { margin: 0; font-size: clamp(28px, 5vw, 40px); line-height: 1.35; }
+    main { width: min(100%, 760px); margin: 0 auto; padding: clamp(24px, 6vw, 48px); background: var(--card); border: 1px solid var(--line); border-top: 4px solid var(--peach); border-radius: 12px; box-shadow: 0 12px 32px rgb(36 49 47 / 6%); }
+    h1 { margin: 0; color: var(--green); font-size: clamp(28px, 5vw, 40px); line-height: 1.35; }
     .lead { margin: 16px 0 0; color: var(--subtle); }
     .external-links { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 20px 0 0; font-size: 14px; }
-    a { color: var(--link); }
+    a { color: var(--blue); text-underline-offset: 3px; }
     .entry-list { display: grid; gap: 12px; margin: 32px 0 0; padding: 0; list-style: none; }
     .entry-list a { display: block; padding: 18px 20px; border: 1px solid var(--line); border-radius: 8px; color: inherit; text-decoration: none; }
-    .entry-list a:hover, .entry-list a:focus-visible { border-color: var(--link); background: #f0f9ff; }
-    .entry-list strong { display: block; color: var(--link); font-size: 17px; }
+    .entry-list a:hover, .entry-list a:focus-visible { border-color: var(--green); background: var(--green-wash); }
+    .entry-list strong { display: block; color: var(--blue); font-size: 17px; }
     .entry-list span { display: block; margin-top: 4px; color: var(--subtle); font-size: 14px; }
-    .note { margin: 28px 0 0; color: var(--subtle); font-size: 14px; }
+    .note { margin: 28px 0 0; padding-left: 14px; border-left: 3px solid var(--peach); color: var(--subtle); font-size: 14px; }
+    a:focus-visible { outline: 3px solid var(--peach); outline-offset: 3px; }
+    .utility-row { display: flex; justify-content: flex-end; margin: 0 0 18px; }
+    .contrast-toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--subtle); font-size: 14px; font-weight: 600; cursor: pointer; }
+    .contrast-toggle input { inline-size: 16px; block-size: 16px; accent-color: var(--green); }
+    html[data-contrast="high"] { --page: #ffffff; --card: #ffffff; --ink: #111111; --subtle: #2b2b2b; --line: #202020; --green: #006b4d; --peach: #9a4e00; --blue: #123bb1; --green-wash: #ffffff; --blue-wash: #ffffff; }
+    html[data-contrast="high"] main { box-shadow: none; border-width: 2px; }
+    html[data-contrast="high"] .entry-list a { border-width: 2px; }
+    html[data-contrast="high"] .entry-list a:hover, html[data-contrast="high"] .entry-list a:focus-visible { background: var(--blue-wash); outline: 3px solid var(--peach); outline-offset: 3px; }
     @media (max-width: 560px) { body { padding: 0; } main { border: 0; border-radius: 0; min-height: 100vh; padding: 28px 20px; } }
   </style>
 </head>
 <body>
   <main>
+    <div class="utility-row">
+      <label class="contrast-toggle"><input id="contrast-toggle" type="checkbox"><span>高コントラスト</span></label>
+    </div>
     <h1>PDF Note Workspace<br>文書ポータル</h1>
-    <p class="lead">利用者とAIが共通して使える公開文書を、目的別に案内しています。</p>
+    <p class="lead">人が読む公開文書を、目的別に案内しています。見出しとリンクを整えているため、AIも同じ本文を参照できます。</p>
     <div class="external-links">
       <a href="https://pdf-note-workspace.soone-y.com/">紹介サイト</a>
       <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases">配布物を入手する</a>
@@ -34,13 +56,30 @@
     </div>
 
     <ul class="entry-list">
-      <li><a href="introduction/index.html"><strong>プロジェクトと文書案内</strong><span>利用者とAIの共通入口。目的に合う公開資料を選ぶ</span></a></li>
-      <li><a href="docs/public/Index.html"><strong>使い方・セットアップ</strong><span>導入、操作、保存・復元、ファイル形式、トラブル対処の詳細一覧</span></a></li>
       <li><a href="README.html"><strong>プロジェクトの概要</strong><span>配布物、通常版とLite版、基本方針を確認する</span></a></li>
+      <li><a href="docs/public/Index.html"><strong>使い方・セットアップ</strong><span>導入、操作、保存・復元、ファイル形式、トラブル対処の詳細一覧</span></a></li>
+      <li><a href="introduction/index.html"><strong>背景・設計・確認資料</strong><span>設計の考え方、利用判断、根拠と確認範囲を読む</span></a></li>
       <li><a href="LICENSES_INDEX.html"><strong>ライセンスと第三者通知</strong><span>利用条件と、利用している第三者コンポーネントを確認する</span></a></li>
     </ul>
 
-    <p class="note">詳細資料は、見出し・表・構造化記法で整理しています。AIも人も同じ公開資料を参照し、操作は「使い方・セットアップ」を確認してください。</p>
+    <p class="note">背景・設計・確認資料は、見出し・表・構造化記法で整理しています。人が読める説明を正本とし、AIも同じ公開資料を参照できます。</p>
   </main>
+  <script>
+    (() => {
+      const storageKey = "pdf-note-workspace-high-contrast";
+      const toggle = document.querySelector("#contrast-toggle");
+      const apply = (enabled) => {
+        document.documentElement.dataset.contrast = enabled ? "high" : "";
+        toggle.checked = enabled;
+      };
+      let saved = null;
+      try { saved = localStorage.getItem(storageKey); } catch (_) { /* Storage unavailable: keep this page's setting only. */ }
+      apply(saved === "true");
+      toggle.addEventListener("change", () => {
+        apply(toggle.checked);
+        try { localStorage.setItem(storageKey, String(toggle.checked)); } catch (_) { /* Storage unavailable: keep this page's setting only. */ }
+      });
+    })();
+  </script>
 </body>
 </html>

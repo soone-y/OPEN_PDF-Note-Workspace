@@ -1,8 +1,4 @@
-﻿# 構成レイヤー
-
-<ai_node_schema version="1.0" category="architecture">
-  <summary>PDF Note Workspace の Win32 C++ アーキテクチャ階層、レイヤー設計、コンポーネント依存関係、データフローの解説</summary>
-</ai_node_schema>
+# 構成レイヤー
 
 ## 1. 概要 (Overview)
 

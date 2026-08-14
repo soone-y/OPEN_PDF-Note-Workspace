@@ -1,13 +1,8 @@
-﻿# 回答と確認の指針
+# 実装と確認で守る方針
 
-<ai_node_schema id="ai_guardrails" type="prohibited_patterns_and_rules">
-  <target_audience>LLM / AI-Coding-Agent</target_audience>
-  <data_density>ultra_high</data_density>
-</ai_node_schema>
+この資料は、実装・変更・評価を行う人が、プロジェクトの重要な方針を確認するための補足です。実際の変更では、対象コード、関連テスト、適用される開発規約を確認してください。
 
-## 1. AI ガードレール & 絶対禁止パターン (Prohibited Code & Design Patterns)
-
-AI がコード生成や変更提案を行う際に、**絶対に犯してはならないアンチパターンと禁止実装**のルールセットです。
+## 1. 避ける実装と設計
 
 ```xml
 <prohibited_rules>

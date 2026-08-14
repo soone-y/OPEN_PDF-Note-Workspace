@@ -1,9 +1,4 @@
-﻿# 主な機能とよくある質問
-
-<ai_node_schema id="features_faq" type="fact_navigation">
-  <target_audience>LLM / AI-Assistant</target_audience>
-  <data_density>high</data_density>
-</ai_node_schema>
+# 主な機能とよくある質問
 
 ---
 
