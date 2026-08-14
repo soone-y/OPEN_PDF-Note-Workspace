@@ -124,13 +124,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       background-color: var(--border-color);
     }}
 
-    .menu-current {{
-      margin-left: 8px;
-      color: var(--text-muted);
-      font-size: 0.9em;
-      font-weight: 400;
-    }}
-
     .site-menu nav {{
       position: absolute;
       z-index: 1;
@@ -143,17 +136,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border-radius: 6px;
       box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
     }}
-
-    .menu-heading {{
-      margin: 12px 0 5px;
-      color: var(--text-muted);
-      font-size: 0.74em;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-    }}
-
-    .menu-heading:first-child {{ margin-top: 0; }}
 
     .menu-outside {{
       margin-top: 14px;
@@ -174,15 +156,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       right: 10px;
       color: var(--text-muted);
       font-size: 0.9em;
-    }}
-
-    .menu-location {{
-      margin: 0;
-      padding: 9px 10px;
-      border-left: 3px solid var(--accent);
-      background-color: var(--note-bg);
-      color: var(--text-main);
-      font-size: 0.88em;
     }}
 
     .site-menu nav a {{
@@ -463,8 +436,8 @@ def format_inline(text: str, root_rel: str) -> str:
     text = re.sub(r'`(.*?)`', lambda m: f'<code>{html.escape(m.group(1))}</code>', text)
     return text
 
-def navigation_html(*, root_rel: str, rel_path: Path, title: str) -> str:
-    """現在地と各リンクの目的を示す文書ポータル用メニューを生成する。"""
+def navigation_html(*, root_rel: str, rel_path: Path) -> str:
+    """現在の項目をハイライトし、リンクの目的を示すポータル用メニューを生成する。"""
     if rel_path.parts[0] == "introduction":
         current_section = "プロジェクトと文書案内"
     elif rel_path.parts[:2] == ("docs", "public"):
@@ -503,10 +476,8 @@ def navigation_html(*, root_rel: str, rel_path: Path, title: str) -> str:
         for label, detail, href, *_ in outside_entries
     )
     return f"""    <details class=\"site-menu\">
-      <summary aria-label=\"文書メニューを開く\"><span class=\"menu-icon\" aria-hidden=\"true\"></span>文書メニュー<span class=\"menu-current\">現在: {html.escape(current_section)}</span></summary>
+      <summary aria-label=\"文書メニューを開く\"><span class=\"menu-icon\" aria-hidden=\"true\"></span>文書メニュー</summary>
       <nav aria-label=\"文書メニュー\">
-        <div class=\"menu-heading\">現在地</div>
-        <p class=\"menu-location\">{html.escape(title)}<br><strong>{html.escape(current_section)}</strong></p>
         <div class=\"menu-links\">
 {portal_entry_html}
         </div>
@@ -536,7 +507,7 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
         title=html.escape(title),
         root_rel=root_rel,
         raw_markdown_html=raw_markdown_html,
-        navigation_html=navigation_html(root_rel=root_rel, rel_path=rel_path, title=title),
+        navigation_html=navigation_html(root_rel=root_rel, rel_path=rel_path),
         content_html=body_html
     )
 
