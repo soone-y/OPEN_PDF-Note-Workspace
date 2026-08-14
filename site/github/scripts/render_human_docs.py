@@ -451,8 +451,8 @@ def navigation_html(*, root_rel: str, rel_path: Path) -> str:
 
     portal_entries = (
         ("プロジェクトと文書案内", "詳細資料の共通入口", f"{root_rel}introduction/index.html", "プロジェクトと文書案内"),
-        ("使い方・セットアップ", "導入・操作・保存・トラブル対処", f"{root_rel}docs/public/Index.html", "使い方・セットアップ"),
         ("プロジェクトの概要", "配布物、通常版・Lite版、基本方針", f"{root_rel}README.html", "プロジェクトの概要"),
+        ("使い方・セットアップ", "導入・操作・保存・トラブル対処", f"{root_rel}docs/public/Index.html", "使い方・セットアップ"),
         ("ライセンスと第三者通知", "利用条件と第三者コンポーネント", f"{root_rel}LICENSES_INDEX.html", "ライセンスと第三者通知"),
     )
     outside_entries = (
