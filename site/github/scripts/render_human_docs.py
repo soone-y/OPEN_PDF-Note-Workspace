@@ -212,6 +212,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     html[data-contrast="high"] .container {{ border-width: 2px; box-shadow: none; }}
     html[data-contrast="high"] .site-menu nav, html[data-contrast="high"] code, html[data-contrast="high"] th, html[data-contrast="high"] td {{ border-width: 2px; }}
     html[data-contrast="high"] .site-menu nav a:hover, html[data-contrast="high"] .site-menu nav a[aria-current="page"] {{ background-color: #ffffff; outline: 3px solid var(--note-border); outline-offset: -3px; }}
+    html[data-contrast="high"] .flowchart-diagram, html[data-contrast="high"] .flowchart-node {{ border-width: 2px; }}
 
     h1 {{ font-size: 1.85em; color: var(--accent); margin-top: 0; margin-bottom: 16px; line-height: 1.3; }}
     h2 {{ font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }}
@@ -250,6 +251,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       padding: 0;
       border: none;
     }}
+
+    .flowchart-diagram {{
+      display: grid;
+      gap: 10px;
+      margin: 1.2em 0;
+      padding: 16px;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      background: var(--note-bg);
+    }}
+    .flowchart-diagram figcaption {{ color: var(--text-muted); font-size: 0.84em; font-weight: 700; }}
+    .flowchart-edge {{ display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }}
+    .flowchart-node {{
+      max-width: min(100%, 320px);
+      padding: 8px 12px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: var(--card-bg);
+      color: var(--text-main);
+      font-size: 0.92em;
+      font-weight: 600;
+      line-height: 1.55;
+    }}
+    .flowchart-arrow {{ color: var(--accent); font-size: 1.3em; font-weight: 700; }}
+    .flowchart-branch {{ color: var(--text-muted); font-size: 0.82em; font-weight: 600; }}
 
     blockquote {{
       border-left: 4px solid var(--note-border);
@@ -307,6 +333,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       text-align: center;
       font-size: 0.82em;
       color: var(--text-muted);
+    }}
+
+    @media (max-width: 560px) {{
+      body {{ padding: 0; }}
+      .container {{ min-height: 100vh; padding: 26px 18px; border: 0; border-top: 4px solid var(--note-border); border-radius: 0; box-shadow: none; }}
+      .doc-header {{ align-items: flex-start; margin-bottom: 20px; }}
+      .header-tools {{ width: 100%; justify-content: space-between; gap: 8px; }}
+      .site-menu nav {{ width: min(360px, calc(100vw - 36px)); }}
+      h1 {{ font-size: 1.65em; }}
+      h2 {{ font-size: 1.24em; }}
+      pre {{ padding: 12px; font-size: 0.82em; }}
+      th, td {{ padding: 7px 9px; }}
+      .flowchart-diagram {{ padding: 12px; }}
+      .flowchart-edge {{ align-items: stretch; flex-direction: column; }}
+      .flowchart-node {{ max-width: 100%; }}
+      .flowchart-arrow {{ align-self: center; transform: rotate(90deg); }}
+      footer {{ margin-top: 26px; }}
     }}
   </style>
 </head>
@@ -378,7 +421,7 @@ def simple_markdown_to_html(md_text: str, root_rel: str) -> str:
             if in_code_block:
                 code_text = html.escape("\n".join(code_block_lines))
                 if is_mermaid:
-                    html_lines.append(f'<pre style="border: 1px solid var(--accent); background-color: var(--note-bg); color: var(--text-main); font-family: monospace;"><code>{code_text}</code></pre>')
+                    html_lines.append(render_mermaid_flowchart(code_block_lines) or f"<pre><code>{code_text}</code></pre>")
                 else:
                     html_lines.append(f"<pre><code>{code_text}</code></pre>")
                 code_block_lines = []
@@ -459,6 +502,54 @@ def simple_markdown_to_html(md_text: str, root_rel: str) -> str:
         html_lines.append("</table>")
 
     return "\n".join(html_lines)
+
+
+def render_mermaid_flowchart(lines: list[str]) -> str | None:
+    """Render basic Mermaid flowchart/graph edges as a local, accessible HTML diagram."""
+    content_lines = [line.strip() for line in lines if line.strip()]
+    if not content_lines or not re.match(r"(?:flowchart|graph)\s+(?:LR|RL|TD|TB|BT)\b", content_lines[0], re.IGNORECASE):
+        return None
+
+    def parse_node(value: str) -> tuple[str, str | None] | None:
+        match = re.fullmatch(r"\s*([A-Za-z0-9_]+)(?:\[(.*)\])?\s*", value)
+        if not match:
+            return None
+        node_id, label = match.groups()
+        return node_id, label.strip().strip('"') if label is not None else None
+
+    edges: list[tuple[str, str, str | None]] = []
+    node_labels: dict[str, str] = {}
+    for line in content_lines[1:]:
+        connector = re.search(r"\s*(-->|-\.\s*(.*?)\s*\.->)\s*", line)
+        if not connector:
+            continue
+        source = parse_node(line[:connector.start()])
+        target = parse_node(line[connector.end():])
+        if source is not None and target is not None:
+            source_id, source_label = source
+            target_id, target_label = target
+            if source_label is not None:
+                node_labels[source_id] = source_label
+            if target_label is not None:
+                node_labels[target_id] = target_label
+            edges.append((source_id, target_id, connector.group(2) or None))
+    if not edges:
+        return None
+
+    def node_html(label: str) -> str:
+        safe = html.escape(label)
+        safe = re.sub(r"&lt;br\s*/?&gt;", "<br>", safe, flags=re.IGNORECASE)
+        return f'<span class="flowchart-node">{safe}</span>'
+
+    edge_html = []
+    for source, target, branch_label in edges:
+        label_html = f'<span class="flowchart-branch">{html.escape(branch_label)}</span>' if branch_label else ""
+        edge_html.append(
+            f'<div class="flowchart-edge">{node_html(node_labels.get(source, source))}{label_html}'
+            f'<span class="flowchart-arrow" aria-hidden="true">→</span>{node_html(node_labels.get(target, target))}</div>'
+        )
+    return '<figure class="flowchart-diagram" aria-label="フロー図"><figcaption>フロー図</figcaption>' + "\n".join(edge_html) + "</figure>"
+
 
 def format_inline(text: str, root_rel: str) -> str:
     """インライン要素（リンク、太字、コード、画像）を変換します。"""

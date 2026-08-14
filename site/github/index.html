@@ -30,6 +30,20 @@
     .entry-list a:hover, .entry-list a:focus-visible { border-color: var(--green); background: var(--green-wash); }
     .entry-list strong { display: block; color: var(--blue); font-size: 17px; }
     .entry-list span { display: block; margin-top: 4px; color: var(--subtle); font-size: 14px; }
+    .site-map { margin: 36px 0 0; padding: 22px; border: 1px solid var(--line); border-radius: 10px; background: var(--green-wash); }
+    .site-map h2 { margin: 0; color: var(--ink); font-size: 18px; }
+    .site-map > p { margin: 6px 0 18px; color: var(--subtle); font-size: 14px; }
+    .site-map-flow { display: grid; gap: 10px; }
+    .site-map-row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: stretch; gap: 10px; }
+    .site-map-node { display: block; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: inherit; text-decoration: none; }
+    .site-map-node strong { display: block; color: var(--blue); font-size: 15px; }
+    .site-map-node span { display: block; margin-top: 3px; color: var(--subtle); font-size: 12px; line-height: 1.55; }
+    .site-map-node.portal { border-color: var(--green); }
+    .site-map-node.portal strong { color: var(--green); }
+    .site-map-arrow { display: grid; place-items: center; min-width: 42px; color: var(--green); font-size: 22px; font-weight: 700; }
+    .site-map-arrow span { color: var(--subtle); font-size: 11px; font-weight: 600; writing-mode: vertical-rl; }
+    .site-map-branch { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; color: var(--subtle); font-size: 12px; text-align: center; }
+    .site-map-branch::before, .site-map-branch::after { content: ""; border-top: 1px solid var(--line); }
     .note { margin: 28px 0 0; padding-left: 14px; border-left: 3px solid var(--peach); color: var(--subtle); font-size: 14px; }
     a:focus-visible { outline: 3px solid var(--peach); outline-offset: 3px; }
     .utility-row { display: flex; justify-content: flex-end; margin: 0 0 18px; }
@@ -38,8 +52,9 @@
     html[data-contrast="high"] { --page: #ffffff; --card: #ffffff; --ink: #111111; --subtle: #2b2b2b; --line: #202020; --green: #006b4d; --peach: #9a4e00; --blue: #123bb1; --green-wash: #ffffff; --blue-wash: #ffffff; }
     html[data-contrast="high"] main { box-shadow: none; border-width: 2px; }
     html[data-contrast="high"] .entry-list a { border-width: 2px; }
+    html[data-contrast="high"] .site-map, html[data-contrast="high"] .site-map-node { border-width: 2px; }
     html[data-contrast="high"] .entry-list a:hover, html[data-contrast="high"] .entry-list a:focus-visible { background: var(--blue-wash); outline: 3px solid var(--peach); outline-offset: 3px; }
-    @media (max-width: 560px) { body { padding: 0; } main { border: 0; border-radius: 0; min-height: 100vh; padding: 28px 20px; } }
+    @media (max-width: 560px) { body { padding: 0; } main { border: 0; border-radius: 0; min-height: 100vh; padding: 28px 20px; } .site-map { padding: 18px; } .site-map-row { grid-template-columns: 1fr; } .site-map-arrow { min-height: 28px; transform: rotate(90deg); } .site-map-arrow span { display: none; } }
   </style>
 </head>
 <body>
@@ -61,6 +76,24 @@
       <li><a href="introduction/index.html"><strong>背景・設計・確認資料</strong><span>設計の考え方、利用判断、根拠と確認範囲を読む</span></a></li>
       <li><a href="LICENSES_INDEX.html"><strong>ライセンスと第三者通知</strong><span>利用条件と、利用している第三者コンポーネントを確認する</span></a></li>
     </ul>
+
+    <section class="site-map" aria-labelledby="site-map-title">
+      <h2 id="site-map-title">公開ページの関係</h2>
+      <p>紹介、詳細な文書、公開リポジトリ、配布物は役割を分けて公開しています。</p>
+      <div class="site-map-flow">
+        <div class="site-map-row">
+          <a class="site-map-node" href="https://pdf-note-workspace.soone-y.com/"><strong>紹介サイト</strong><span>ソフトの概要と配布先を知る</span></a>
+          <div class="site-map-arrow" aria-hidden="true">→<span>詳しく読む</span></div>
+          <div class="site-map-node portal"><strong>文書ポータル</strong><span>概要、使い方、背景資料、ライセンスを読む</span></div>
+        </div>
+        <div class="site-map-branch">公開資料を生成・公開</div>
+        <div class="site-map-row">
+          <a class="site-map-node" href="https://github.com/soone-y/OPEN_PDF-Note-Workspace"><strong>GitHub リポジトリ</strong><span>ソース、公開資料、履歴を確認する</span></a>
+          <div class="site-map-arrow" aria-hidden="true">→<span>配布物</span></div>
+          <a class="site-map-node" href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases"><strong>GitHub Releases</strong><span>通常版・Lite版のZIPを入手する</span></a>
+        </div>
+      </div>
+    </section>
 
     <p class="note">背景・設計・確認資料は、見出し・表・構造化記法で整理しています。人が読める説明を正本とし、AIも同じ公開資料を参照できます。</p>
   </main>
