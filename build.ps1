@@ -11,6 +11,26 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:runLogPath = Join-Path $PSScriptRoot ("out\logs\build\build_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+$script:runTranscriptStarted = $false
+
+function Stop-RunLog {
+    if ($script:runTranscriptStarted) {
+        try { Stop-Transcript | Out-Null } catch { }
+        $script:runTranscriptStarted = $false
+    }
+}
+
+trap {
+    Write-Host "ビルドに失敗しました。実行ログ: $script:runLogPath" -ForegroundColor Yellow
+    Stop-RunLog
+    throw $_
+}
+
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:runLogPath) | Out-Null
+Start-Transcript -LiteralPath $script:runLogPath -Force | Out-Null
+$script:runTranscriptStarted = $true
+Write-Host "ビルド実行ログ: $script:runLogPath" -ForegroundColor DarkCyan
 
 function Write-Info([string]$Message) {
     Write-Host $Message -ForegroundColor Cyan
@@ -82,6 +102,7 @@ if ($AllLocales) {
         & $powerShellExe @arguments
         if ($LASTEXITCODE -ne 0) { throw "両言語ビルドに失敗しました（言語: $targetLocale、終了コード: $LASTEXITCODE）。" }
     }
+    Stop-RunLog
     exit 0
 }
 
@@ -128,4 +149,5 @@ else {
     Write-Host "ビルドが完了しました。" -ForegroundColor Green
 }
 
+Stop-RunLog
 exit 0

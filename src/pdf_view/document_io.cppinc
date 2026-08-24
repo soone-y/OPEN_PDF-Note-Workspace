@@ -152,7 +152,8 @@ static bool LoadImageDocument(HWND pdfWnd, const std::wstring& path) {
         std::wstring msg = localization::Text(L"pdf.open.image_failed");
         if (!err.empty()) msg += L"\n" + err;
         ClearPdfState();
-        if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"Image", msg)) {
+        if (ShouldPromptForPdfPassword() && reloadPromptCount++ < 3 &&
+            PromptPdfOpenFailureReload(pdfWnd, L"Image", msg)) {
             continue;
         }
         return false;
@@ -194,7 +195,8 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
             std::wstring msg = localization::Text(L"pdf.open.path_or_permission_failed");
             std::wstring detail = L"(" + std::to_wstring(e) + L") " + atomic_write::Win32ErrorMessage(e);
             if (!detail.empty()) msg += L"\n" + detail;
-            if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
+            if (ShouldPromptForPdfPassword() && reloadPromptCount++ < 3 &&
+                PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
                 continue;
             }
             return false;
@@ -206,7 +208,8 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
             CloseHandle(hFile);
             preview_trace::Append(L"LoadPdfDocument", L"size_invalid path=" + path);
             std::wstring msg = localization::Text(L"pdf.open.size_invalid");
-            if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
+            if (ShouldPromptForPdfPassword() && reloadPromptCount++ < 3 &&
+                PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
                 continue;
             }
             return false;
@@ -238,6 +241,12 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
                 L"LoadPdfDocument",
                 L"pdfium_load_failed path=" + path + L" error=" + std::to_wstring(err));
             if (err == FPDF_ERR_PASSWORD) {
+                if (!ShouldPromptForPdfPassword()) {
+                    preview_trace::Append(
+                        L"LoadPdfDocument",
+                        L"password_prompt_suppressed_for_startup_open path=" + path);
+                    return false;
+                }
                 if (passwordPromptCount < 3) {
                     std::string promptedPasswordUtf8;
                     SecureStringScope promptedPasswordScope(&promptedPasswordUtf8);
@@ -260,11 +269,13 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
                 // route this through the generic reload prompt, which used to
                 // show up to three more confirmations without another chance to
                 // enter a password.
-                const std::wstring message = localization::Text(L"pdf.open.password_attempts_exhausted");
-                ShowPdfMessageDialog(pdfWnd,
-                                     localization::Text(L"pdf.password.title"),
-                                     message,
-                                     SoftNoticeKind::Warning);
+                if (ShouldPromptForPdfPassword()) {
+                    const std::wstring message = localization::Text(L"pdf.open.password_attempts_exhausted");
+                    ShowPdfMessageDialog(pdfWnd,
+                                         localization::Text(L"pdf.password.title"),
+                                         message,
+                                         SoftNoticeKind::Warning);
+                }
                 return false;
             }
 
@@ -291,7 +302,8 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
             }
             std::wstring msg = localization::Text(L"pdf.open.failed");
             if (!detail.empty()) msg += L"\n" + detail;
-            if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
+            if (ShouldPromptForPdfPassword() && reloadPromptCount++ < 3 &&
+                PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
                 continue;
             }
             return false;

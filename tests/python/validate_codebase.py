@@ -455,6 +455,15 @@ def find_annotation_shortcut_regressions() -> list[str]:
             '{ "Numpad7", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Pen, ToolMode::Freehand }': "default annotation shortcuts must include standalone numpad tool switching",
             "std::set<UINT> chordSeen": "shortcut loading must reject duplicate chords",
         },
+        "src/pdf_view/document_io.cppinc": {
+            'ShouldPromptForPdfPassword()': "startup-driven PDF opens must not enter a password dialog loop",
+            'password_prompt_suppressed_for_startup_open': "suppressed automatic password opens must leave trace evidence",
+            'ShouldPromptForPdfPassword() && reloadPromptCount++ < 3': "startup-driven PDF failures must not open retry dialogs",
+        },
+        "src/note_view/note_view_note_ops.cppinc": {
+            'ShouldPromptForPdfPassword()': "startup-driven note recovery must not open a modal dialog",
+            'ShouldNotifyDocumentOpenLockFailure()': "startup-driven note errors must remain silent",
+        },
         "src/main.cpp": {
             "HandleAnnotColorCycleShortcutInLoop": "main loop must handle Ctrl+Up/Ctrl+Down annotation color cycling",
             "HandleFixedAnnotToolNavigationShortcutInLoop": "fixed annotation category/detail navigation shortcut must remain available",
@@ -1492,6 +1501,14 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         'function Get-ReleaseSetPair',
         'function Get-RequestedReleaseSetPair',
         'function Get-LatestReleaseSetPair',
+        'function Get-AllowlistDiffLines',
+        '公開snapshot allowlist 差分（コメント・空行を除いた有効エントリ）:',
+        '--- ALLOWLIST DIFF BEGIN ---',
+        'Confirmed checklist has no allowlist diff section; it is retained unchanged:',
+        '$allowlistDiffLines = Get-AllowlistDiffLines',
+        '$candidateDirectories += @(Get-ChildItem -LiteralPath $parentDirectory.FullName -Directory -Force)',
+        'ParentPath = $directory.Parent.FullName',
+        '$_.Version + "`n" + $_.ParentPath',
         'Specify exactly two release sets: one ja set and one en set.',
         'if ($ReleaseSetPath.Count -eq 0 -and $Mode -in @("ReleaseNotes", "Confirm", "Submit")) {',
         'return Get-LatestReleaseSetPair',
@@ -1505,6 +1522,7 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
             break
     unified_release_notes_contract = (
         'function Get-PairChecklistPath',
+        '$names = @($byLocale["ja"]; $byLocale["en"])',
         'function New-PairChecklist',
         'function Get-PairConfirmationWord',
         'function New-ReleaseNotesText',
@@ -1537,7 +1555,8 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
     release_pair_layout_contract = (
         'function Get-ReleasePairDirectory',
         'pdf_note_workspace_release_${safeVersion}_${stamp}',
-        'if ($AllLocales) { @("ja", "en") } else { @($Locale) }',
+        '$targetLocales = @(',
+        'if ($AllLocales) { "ja"; "en" } else { $Locale }',
         '"-ReleaseSetName", $targetLocale',
         'RELEASE_PAIR_PATH=$pairDirectory',
     )
@@ -1559,6 +1578,37 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
     )
     if any(needle not in release_set_text for needle in snapshot_reuse_gate_contract):
         errors.append("make_release_set.ps1: reused snapshots must be copied safely and still pass the release gates")
+    release_set_logging_contract = (
+        'function Initialize-ReleaseDetailLog',
+        'out\\logs\\release_set',
+        'function Invoke-ReleasePythonGate',
+        'function Write-ReleaseFailureLogTail',
+        'release set の詳細ログ:',
+    )
+    if any(needle not in release_set_text for needle in release_set_logging_contract):
+        errors.append("make_release_set.ps1: failed release gates must retain and display a dedicated detail log")
+    primary_run_log_contracts = {
+        "build.ps1": ('out\\logs\\build\\build_{0}.log', 'Start-Transcript -LiteralPath $script:runLogPath', 'Stop-RunLog'),
+        "release.ps1": ('out\\logs\\release\\release_{0}.log', 'Start-Transcript -LiteralPath $script:runLogPath', 'Stop-RunLog'),
+        "publish.ps1": ('out\\logs\\publish\\publish_{0}.log', 'Start-Transcript -LiteralPath $script:runLogPath', 'Stop-RunLog'),
+    }
+    for relative_path, contract in primary_run_log_contracts.items():
+        entry_text = (REPO_ROOT / relative_path).read_text(encoding="utf-8", errors="ignore")
+        if any(needle not in entry_text for needle in contract):
+            errors.append(f"{relative_path}: every invocation must create and close one primary run log")
+    package_text = (REPO_ROOT / "scripts/release/pack_release.ps1").read_text(encoding="utf-8", errors="ignore")
+    package_link_rewrite_contract = (
+        '$content.Replace("](DOCUMENTATION.md)", "](docs/README.md)")',
+        '$content.Replace("](docs/ja/README.md)", "](docs/README.md)")',
+        '$content.Replace("](docs/en/README.md)", "](docs/README.md)")',
+    )
+    if any(needle not in package_text for needle in package_link_rewrite_contract):
+        errors.append("pack_release.ps1: top-level README documentation links must resolve inside a locale package")
+    libjpeg_notice = (REPO_ROOT / "third_party/pdfium/licenses/libjpeg_turbo.md").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    if "[README.ijg](libjpeg_turbo.ijg)" not in libjpeg_notice:
+        errors.append("libjpeg-turbo notice: IJG license link must point to the shipped libjpeg_turbo.ijg file")
     if "function Get-LatestReleaseSet {" in publish_text:
         errors.append("publish.ps1: obsolete single-locale latest-release selection must not remain")
     if "function Get-LatestChecklistReleaseSet" in publish_text:

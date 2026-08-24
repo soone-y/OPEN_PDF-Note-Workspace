@@ -13,6 +13,26 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:runLogPath = Join-Path $PSScriptRoot ("out\logs\release\release_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+$script:runTranscriptStarted = $false
+
+function Stop-RunLog {
+    if ($script:runTranscriptStarted) {
+        try { Stop-Transcript | Out-Null } catch { }
+        $script:runTranscriptStarted = $false
+    }
+}
+
+trap {
+    Write-Host "release に失敗しました。実行ログ: $script:runLogPath" -ForegroundColor Yellow
+    Stop-RunLog
+    throw $_
+}
+
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:runLogPath) | Out-Null
+Start-Transcript -LiteralPath $script:runLogPath -Force | Out-Null
+$script:runTranscriptStarted = $true
+Write-Host "release 実行ログ: $script:runLogPath" -ForegroundColor DarkCyan
 
 function Write-Info([string]$Message) {
     Write-Host $Message -ForegroundColor Cyan
@@ -79,10 +99,16 @@ if ($Clean) {
         Invoke-RequiredScript -ScriptPath $buildScript -Arguments $buildArgs -Description "ビルド成果物の削除"
     }
     Write-Host "清掃が完了しました。release set は作成していません。" -ForegroundColor Green
+    Stop-RunLog
     exit 0
 }
 
-$targetLocales = if ($AllLocales) { @("ja", "en") } else { @($Locale) }
+# Keep this an array even for the default single locale.  A conditional
+# expression unwraps a one-item array during assignment; StrictMode would then
+# reject the .Count checks below on the resulting string.
+$targetLocales = @(
+    if ($AllLocales) { "ja"; "en" } else { $Locale }
+)
 $pairDirectory = ""
 $frozenPublicSnapshot = ""
 if ($targetLocales.Count -eq 2) {
@@ -116,4 +142,5 @@ foreach ($targetLocale in $targetLocales) {
 
 if ($targetLocales.Count -eq 2) { Write-Output "RELEASE_PAIR_PATH=$pairDirectory" }
 
+Stop-RunLog
 exit 0

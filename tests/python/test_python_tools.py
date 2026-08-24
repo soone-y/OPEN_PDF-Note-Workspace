@@ -2174,12 +2174,18 @@ class LibreOfficeConversionQualityToolTests(unittest.TestCase):
 class RenderHumanDocsTests(unittest.TestCase):
     def test_mermaid_labels_only_allow_exact_line_break_tags(self) -> None:
         rendered = render_human_docs.render_mermaid_flowchart(
-            ["flowchart LR", "A[One<BR />Two] --> B[<br onclick=alert(1)>]"]
+            [
+                "flowchart LR",
+                "A[One<BR />Two] --> B[<br onclick=alert(1)>]",
+                "B -. optional label .-> C[End]",
+            ]
         )
 
         self.assertIsNotNone(rendered)
         self.assertIn("One<br>Two", rendered)
         self.assertIn("&lt;br onclick=alert(1)&gt;", rendered)
+        self.assertIn('class="flowchart-branch">optional label</span>', rendered)
+        self.assertIn(">End</span>", rendered)
 
     def test_generates_html_for_language_docs_including_introduction(self) -> None:
         with repo_tempdir() as site_dir:
@@ -2215,6 +2221,7 @@ class RenderHumanDocsTests(unittest.TestCase):
             self.assertIn('GitHub リポジトリ', human_html)
             self.assertIn('導入・操作・保存・トラブル対処', human_html)
             self.assertIn('aria-current="page"', human_html)
+            self.assertIn('class="menu-current-label">（現在の文書）</span>', human_html)
             self.assertIn('<h1 id="how-to-use">How to Use</h1>', human_html)
             self.assertIn('<h2 id="section-one">Section One</h2>', human_html)
             self.assertIn('<h2 id="section-one-1">Section One</h2>', human_html)
@@ -2242,7 +2249,7 @@ class RenderHumanDocsTests(unittest.TestCase):
             introduction_html = (site_dir / "introduction" / "index.html").read_text(encoding="utf-8")
             self.assertIn('class="site-menu"', introduction_html)
             self.assertIn('Raw Markdown', introduction_html)
-            self.assertNotIn('現在:', introduction_html)
+            self.assertIn('class="menu-current-label">（現在の文書）</span>', introduction_html)
             self.assertIn('背景・設計・確認資料', introduction_html)
             self.assertIn('<h1 id="introduction">Introduction</h1>', introduction_html)
             self.assertNotIn('📄', introduction_html)
@@ -2349,12 +2356,17 @@ class PublicSiteValidationTests(unittest.TestCase):
         )
         positions = [portal.index(label) for label in labels]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn('id="site-map-title">公開ページの関係', portal)
+        self.assertIn('id="site-map-title">利用目的に応じた案内と確認先', portal)
+        self.assertIn("現在地：文書ポータルの案内ページ", portal)
+        self.assertIn("高度利用者・開発を検討する方", portal)
+        self.assertIn("ポータルだけでは確認できない事実の確認先", portal)
         self.assertIn("GitHub Releases", portal)
         self.assertIn('href="en/index.html"', portal)
         english_portal = (REPO_ROOT / "site/github/en/index.html").read_text(encoding="utf-8-sig")
         self.assertIn('href="../index.html" lang="ja">日本語</a>', english_portal)
         self.assertIn("User documentation", english_portal)
+        self.assertIn("Guides by purpose and where to verify", english_portal)
+        self.assertIn("Current page: documentation portal guide", english_portal)
 
     def test_public_site_sources_include_persistent_high_contrast_controls(self) -> None:
         github_portal = (REPO_ROOT / "site/github/index.html").read_text(encoding="utf-8-sig")

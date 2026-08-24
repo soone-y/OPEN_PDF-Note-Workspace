@@ -27,6 +27,13 @@ static constexpr UINT kDefaultNoteOverlayRefreshDelayMs = 400;
 static constexpr UINT kDefaultNoteFullReparseDelayMs = 900;
 static ULONGLONG s_noteLastRefreshRequestTick = 0;
 
+static void PostOtherPackageHeadlessProcessDiagnosticsOnce(HWND hWnd) {
+    if (s_otherPackageHeadlessProcessDiagnosticsShown || !hWnd) return;
+    s_otherPackageHeadlessProcessDiagnosticsShown = true;
+    constexpr UINT kMsgOtherPackageHeadlessProcessDiagnostics = WM_APP + 213;
+    PostMessageW(hWnd, kMsgOtherPackageHeadlessProcessDiagnostics, 0, 0);
+}
+
 static uint64_t s_noteOverlayRefreshTargetRevision = 0;
 
 static UINT NoteOverlayRefreshDelayMs() {
@@ -218,9 +225,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s_uiAutomationPosted = true;
             PostMessageW(hWnd, kMsgRunUiAutomation, 0, 0);
         }
-        if (!s_otherPackageHeadlessProcessDiagnosticsShown) {
-            s_otherPackageHeadlessProcessDiagnosticsShown = true;
-            PostMessageW(hWnd, kMsgOtherPackageHeadlessProcessDiagnostics, 0, 0);
+        if (!HasPendingStartupOpenDocumentPath()) {
+            PostOtherPackageHeadlessProcessDiagnosticsOnce(hWnd);
         }
         return 0;
     case kMsgOtherPackageHeadlessProcessDiagnostics:
@@ -275,6 +281,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 }
             }
         }
+        // The automatic open may have run a password dialog. Only queue other
+        // startup diagnostics after it returns to the normal message loop.
+        PostOtherPackageHeadlessProcessDiagnosticsOnce(hWnd);
         return 0;
     case kMsgRunUiAutomation: {
         if (s_uiAutomationFinished) return 0;

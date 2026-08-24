@@ -187,6 +187,10 @@ bool ShouldNotifyDocumentOpenLockFailure() {
     return g_documentOpenLockNoticeSuppressionDepth == 0;
 }
 
+bool ShouldPromptForPdfPassword() {
+    return g_documentOpenLockNoticeSuppressionDepth == 0;
+}
+
 bool IsDocumentOpenLockTransitionActive() {
     return g_documentOpenLockTransitionDepth > 0;
 }

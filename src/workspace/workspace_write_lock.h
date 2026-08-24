@@ -67,6 +67,8 @@ private:
 };
 
 [[nodiscard]] bool ShouldNotifyDocumentOpenLockFailure();
+// Startup-driven document opens must not enter a nested password dialog loop.
+[[nodiscard]] bool ShouldPromptForPdfPassword();
 [[nodiscard]] bool IsDocumentOpenLockTransitionActive();
 void ReleaseDocumentOpenLock(const std::filesystem::path& path);
 void ReleaseAllDocumentOpenLocks();

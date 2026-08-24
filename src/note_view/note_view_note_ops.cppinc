@@ -801,7 +801,7 @@ static AutoBulletLineContext AnalyzeAutoBulletLine(const std::wstring& text, siz
                 ctx.continuationPrefix = prefixBase + nextNumber +
                                          std::wstring(1, orderedDelimiter) +
                                          std::wstring(targetFieldWidth - nextMarkerWidth, L' ');
-            } else {
+            } else if (ShouldPromptForPdfPassword()) {
                 // Tabs are visually width-dependent, so preserve them exactly
                 // rather than guessing an alignment column.
                 ctx.continuationPrefix = prefixBase + nextNumber +
@@ -2212,8 +2212,10 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
         preview_trace::Append(
             L"LoadNoteFile",
             L"abort=disk_open_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-        ShowSilentMessageDialog(hWnd, L"Note", GetUiText().errNoteOpen, SoftNoticeKind::Error,
-                                {{L"", path}});
+        if (ShouldNotifyDocumentOpenLockFailure()) {
+            ShowSilentMessageDialog(hWnd, L"Note", GetUiText().errNoteOpen, SoftNoticeKind::Error,
+                                    {{L"", path}});
+        }
         return;
     }
 
@@ -2221,8 +2223,10 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
     std::wstring decodeError;
     if (!DecodeNoteTextForLoad(path, buffer, &decoded, &decodeError)) {
         preview_trace::Append(L"LoadNoteFile", L"abort=decode_failed path=" + path + L" err=" + decodeError);
-        ShowSilentMessageDialog(hWnd, L"Note", decodeError, SoftNoticeKind::Error,
-                                {{L"", path}});
+        if (ShouldNotifyDocumentOpenLockFailure()) {
+            ShowSilentMessageDialog(hWnd, L"Note", decodeError, SoftNoticeKind::Error,
+                                    {{L"", path}});
+        }
         return;
     }
     std::wstring text = std::move(decoded.text);
@@ -2257,7 +2261,9 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
         preview_trace::Append(
             L"LoadNoteFile",
             L"abort=edit_create_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-        ShowSilentMessageDialog(hWnd, L"Note", GetUiText().errNoteOpen, SoftNoticeKind::Error);
+        if (ShouldNotifyDocumentOpenLockFailure()) {
+            ShowSilentMessageDialog(hWnd, L"Note", GetUiText().errNoteOpen, SoftNoticeKind::Error);
+        }
         return;
     }
     const bool keepCachedUndo = reusedCachedWindow && GetEditText(targetEdit) == text;

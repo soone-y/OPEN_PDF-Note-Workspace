@@ -215,7 +215,9 @@ function Copy-ReleaseTopDocuments([string]$ReleaseRoot, [string]$RepositoryRoot,
         $utf8 = New-Object System.Text.UTF8Encoding($false)
         $content = [System.IO.File]::ReadAllText($destination, [System.Text.Encoding]::UTF8)
         # A package contains one selected docs tree as docs/. The common root
-        # README links to both source trees, so both targets resolve to it.
+        # README links to the public documentation map and both source trees;
+        # all three targets resolve to the selected documentation entry here.
+        $content = $content.Replace("](DOCUMENTATION.md)", "](docs/README.md)")
         $content = $content.Replace("](docs/ja/README.md)", "](docs/README.md)")
         $content = $content.Replace("](docs/en/README.md)", "](docs/README.md)")
         $content = $content.Replace("](THIRD_PARTY_NOTICES.md)", "](docs/legal/THIRD_PARTY_NOTICES.md)")

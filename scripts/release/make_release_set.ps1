@@ -39,8 +39,102 @@ $repoRoot = Split-Path -Parent $scriptsRoot
 if (-not $repoRoot) {
     $repoRoot = $scriptRoot
 }
+$script:releaseDetailLogPath = ""
 
 function Write-Info([string]$Message) { Write-Host $Message -ForegroundColor Cyan }
+
+function Initialize-ReleaseDetailLog([string]$SetRoot) {
+    $logDirectory = Join-Path $repoRoot "out\logs\release_set"
+    $logName = "release_set_{0}_{1}.log" -f $Locale, (Get-Date -Format "yyyyMMdd_HHmmss")
+    $candidatePath = Join-Path $logDirectory $logName
+    try {
+        New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+        New-Item -ItemType File -Force -Path $candidatePath | Out-Null
+        $script:releaseDetailLogPath = $candidatePath
+        Add-Content -LiteralPath $script:releaseDetailLogPath -Encoding UTF8 -Value @(
+            "== Release Set ==",
+            ("started: {0}" -f (Get-Date).ToString("o")),
+            ("locale: {0}" -f $Locale),
+            ("release_set: {0}" -f $SetRoot),
+            ""
+        )
+        Write-Info "Release set detail log: $script:releaseDetailLogPath"
+    }
+    catch {
+        $script:releaseDetailLogPath = ""
+        Write-Warning "release set 詳細ログを作成できませんでした。処理は継続します: $($_.Exception.Message)"
+    }
+}
+
+function Append-ReleaseDetailLog([AllowNull()]$Line) {
+    if ([string]::IsNullOrWhiteSpace($script:releaseDetailLogPath)) {
+        return
+    }
+    try {
+        Add-Content -LiteralPath $script:releaseDetailLogPath -Encoding UTF8 -Value $(if ($null -eq $Line) { "" } else { [string]$Line })
+    }
+    catch {
+        Write-Warning "release set 詳細ログへ書き込めませんでした。処理は継続します: $($_.Exception.Message)"
+        $script:releaseDetailLogPath = ""
+    }
+}
+
+function Write-ReleaseFailureLogTail {
+    if ([string]::IsNullOrWhiteSpace($script:releaseDetailLogPath) -or -not (Test-Path -LiteralPath $script:releaseDetailLogPath)) {
+        return
+    }
+    $tailCount = 80
+    Write-Host "release set の詳細ログ: $script:releaseDetailLogPath" -ForegroundColor Yellow
+    Write-Host "---- release set failure log tail ($tailCount lines) ----" -ForegroundColor Yellow
+    Get-Content -LiteralPath $script:releaseDetailLogPath -Tail $tailCount | ForEach-Object { Write-Host $_ }
+    Write-Host "---- end release set failure log tail ----" -ForegroundColor Yellow
+}
+
+function Invoke-ReleasePythonGate {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [string[]]$Arguments = @()
+    )
+
+    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
+        throw "$Name が見つかりません: $ScriptPath"
+    }
+    Append-ReleaseDetailLog ("> python {0} {1}" -f $ScriptPath, ($Arguments -join " "))
+    $savedErrorActionPreference = $ErrorActionPreference
+    $restoreNativeCommandErrorPreference = $false
+    $previousNativeCommandErrorPreference = $false
+    if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+        $restoreNativeCommandErrorPreference = $true
+        $previousNativeCommandErrorPreference = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+    $exitCode = 0
+    try {
+        $ErrorActionPreference = "Continue"
+        if ([string]::IsNullOrWhiteSpace($script:releaseDetailLogPath)) {
+            & python $ScriptPath @Arguments
+        }
+        else {
+            & python $ScriptPath @Arguments 2>&1 |
+                ForEach-Object {
+                    Write-Host $_
+                    $_
+                } |
+                Out-File -LiteralPath $script:releaseDetailLogPath -Append -Encoding UTF8 -Width 4096
+        }
+        $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+        if ($restoreNativeCommandErrorPreference) {
+            $PSNativeCommandUseErrorActionPreference = $previousNativeCommandErrorPreference
+        }
+    }
+    if ($exitCode -ne 0) {
+        throw "$Name に失敗しました（終了コード: $exitCode）。"
+    }
+}
 
 function Ensure-Directory([string]$Path) {
     if ($DryRun) {
@@ -242,6 +336,7 @@ try {
 
     Write-Info "Release set output: $setRoot"
     Ensure-Directory $setRoot
+    Initialize-ReleaseDetailLog -SetRoot $setRoot
 
     if (-not $SnapshotOnly) {
         $packScript = Join-Path $scriptRoot "pack_release.ps1"
@@ -398,11 +493,7 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "GitHub Pages snapshot validation failed." }
         }
         $snapshotContentGateScript = Join-Path $repoRoot "tools\release_checks\public_snapshot_content_gate.py"
-        if (-not (Test-Path -LiteralPath $snapshotContentGateScript -PathType Leaf)) {
-            throw "Missing public snapshot content gate: $snapshotContentGateScript"
-        }
-        & python $snapshotContentGateScript --snapshot $publicSnapshotDir
-        if ($LASTEXITCODE -ne 0) { throw "Public snapshot content gate failed." }
+        Invoke-ReleasePythonGate -Name "公開snapshot内容検査" -ScriptPath $snapshotContentGateScript -Arguments @("--snapshot", $publicSnapshotDir)
     }
 
     if ($releaseNotesTarget) {
@@ -430,9 +521,6 @@ try {
     if (-not $DryRun) {
         Assert-ReleaseSetManifestComponents -SetRoot $setRoot -Components $manifest.components
         $integrityGateScript = Join-Path $repoRoot "tools\release_checks\release_set_integrity_gate.py"
-        if (-not (Test-Path -LiteralPath $integrityGateScript -PathType Leaf)) {
-            throw "Missing release set integrity gate: $integrityGateScript"
-        }
         $allowlistForManifest = if ([string]::IsNullOrWhiteSpace($PublicAllowlist)) { $releasePublicAllowlist } else { $PublicAllowlist }
         $integrityArgs = @(
             $integrityGateScript, "--release-set", $setRoot,
@@ -440,35 +528,14 @@ try {
             "--artifact-manifest", $releaseArtifactManifest
         )
         if ($DeferPostCreationValidation) { $integrityArgs += "--skip-validation-after-write" }
-        & python @integrityArgs
-        if ($LASTEXITCODE -ne 0) {
-            throw "Release set integrity gate failed. The release set will not be used."
-        }
+        Invoke-ReleasePythonGate -Name "release set 整合性検査" -ScriptPath $integrityGateScript -Arguments $integrityArgs[1..($integrityArgs.Count - 1)]
         if (-not $DeferPostCreationValidation -and -not $SnapshotOnly -and -not $Lite) {
             $licenseGateScript = Join-Path $repoRoot "tools\release_checks\release_license_gate.py"
-            if (-not (Test-Path -LiteralPath $licenseGateScript -PathType Leaf)) {
-                throw "Missing release license gate: $licenseGateScript"
-            }
-            & python $licenseGateScript --release-set $setRoot
-            if ($LASTEXITCODE -ne 0) {
-                throw "Release license gate failed. The release set will not be used."
-            }
+            Invoke-ReleasePythonGate -Name "release ライセンス検査" -ScriptPath $licenseGateScript -Arguments @("--release-set", $setRoot)
             $textGateScript = Join-Path $repoRoot "tools\release_checks\release_text_gate.py"
-            if (-not (Test-Path -LiteralPath $textGateScript -PathType Leaf)) {
-                throw "Missing release text gate: $textGateScript"
-            }
-            & python $textGateScript --release-set $setRoot
-            if ($LASTEXITCODE -ne 0) {
-                throw "Release text gate failed. The release set will not be used."
-            }
+            Invoke-ReleasePythonGate -Name "release テキスト検査" -ScriptPath $textGateScript -Arguments @("--release-set", $setRoot)
             $localeContentGateScript = Join-Path $repoRoot "tools\release_checks\release_locale_content_gate.py"
-            if (-not (Test-Path -LiteralPath $localeContentGateScript -PathType Leaf)) {
-                throw "Missing release locale-content gate: $localeContentGateScript"
-            }
-            & python $localeContentGateScript --release-set $setRoot
-            if ($LASTEXITCODE -ne 0) {
-                throw "Release locale-content gate failed. The release set will not be used."
-            }
+            Invoke-ReleasePythonGate -Name "release 言語別内容検査" -ScriptPath $localeContentGateScript -Arguments @("--release-set", $setRoot)
         }
         if ($DeferPostCreationValidation) {
             Write-Info "Release-set validation was deferred to the publish caller; this set must not be used until that validation passes."
@@ -479,6 +546,11 @@ try {
     # Machine-readable handoff for callers. Emit only after every requested
     # creation-side operation has completed successfully.
     Write-Output "RELEASE_SET_PATH=$setRoot"
+}
+catch {
+    Append-ReleaseDetailLog ("error: {0}" -f $_.Exception.Message)
+    Write-ReleaseFailureLogTail
+    throw
 }
 finally {
     Pop-Location
