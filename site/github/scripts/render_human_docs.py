@@ -177,6 +177,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-weight: 700;
     }}
     .menu-link-title {{ display: block; }}
+    .menu-current-label {{
+      margin-left: 0.45em;
+      color: var(--text-muted);
+      font-size: 0.78em;
+      font-weight: 600;
+      white-space: nowrap;
+    }}
     .menu-link-detail {{
       display: block;
       margin-top: 1px;
@@ -519,14 +526,30 @@ def render_mermaid_flowchart(lines: list[str]) -> str | None:
         node_id, label = match.groups()
         return node_id, label.strip().strip('"') if label is not None else None
 
+    def split_connector(line: str) -> tuple[str, str, str | None] | None:
+        """Split the supported Mermaid connectors without treating them as HTML."""
+        dotted_end = line.find(".->")
+        if dotted_end >= 0:
+            dotted_start = line.rfind("-.", 0, dotted_end)
+            if dotted_start >= 0:
+                return (line[:dotted_start],
+                        line[dotted_end + len(".->"):],
+                        line[dotted_start + len("-."):dotted_end].strip() or None)
+
+        arrow_end = line.find("->")
+        if arrow_end > 0 and line[arrow_end - 1] == "-":
+            return line[:arrow_end - 1], line[arrow_end + len("->"):], None
+        return None
+
     edges: list[tuple[str, str, str | None]] = []
     node_labels: dict[str, str] = {}
     for line in content_lines[1:]:
-        connector = re.search(r"\s*(-->|-\.\s*(.*?)\s*\.->)\s*", line)
-        if not connector:
+        connector = split_connector(line)
+        if connector is None:
             continue
-        source = parse_node(line[:connector.start()])
-        target = parse_node(line[connector.end():])
+        source_text, target_text, branch_label = connector
+        source = parse_node(source_text)
+        target = parse_node(target_text)
         if source is not None and target is not None:
             source_id, source_label = source
             target_id, target_label = target
@@ -534,7 +557,7 @@ def render_mermaid_flowchart(lines: list[str]) -> str | None:
                 node_labels[source_id] = source_label
             if target_label is not None:
                 node_labels[target_id] = target_label
-            edges.append((source_id, target_id, connector.group(2) or None))
+            edges.append((source_id, target_id, branch_label))
     if not edges:
         return None
 
@@ -664,11 +687,21 @@ def navigation_html(*, root_rel: str, rel_path: Path) -> str:
         )
         menu_label = "文書メニュー"
         menu_aria_label = "文書メニューを開く"
-    portal_entry_html = "\n".join(
-        f'''        <a href="{href}"{' aria-current="page"' if section == current_section else ''}>
-          <span class="menu-link-title">{html.escape(label)}</span>
+    current_document_label = "(Current document)" if locale == "en" else "（現在の文書）"
+
+    def render_portal_entry(label: str, detail: str, href: str, section: str) -> str:
+        is_current = section == current_section
+        current_marker = (
+            f'<span class="menu-current-label">{current_document_label}</span>'
+            if is_current else ""
+        )
+        return f'''        <a href="{href}"{' aria-current="page"' if is_current else ''}>
+          <span class="menu-link-title">{html.escape(label)}{current_marker}</span>
           <span class="menu-link-detail">{html.escape(detail)}</span>
         </a>'''
+
+    portal_entry_html = "\n".join(
+        render_portal_entry(label, detail, href, section)
         for label, detail, href, section in portal_entries
     )
     outside_entry_html = "\n".join(
