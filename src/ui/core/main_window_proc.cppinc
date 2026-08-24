@@ -19,6 +19,7 @@ static_assert(AllUniqueValues(std::array<UINT_PTR, 9>{
 static std::wstring s_setupJsonExistenceVerifyPath;
 static int s_setupJsonExistenceVerifyAttempt = 0;
 static bool s_initialWorkspaceFocusSet = false;
+static bool s_otherPackageHeadlessProcessDiagnosticsShown = false;
 static bool s_uiAutomationPosted = false;
 static bool s_uiAutomationFinished = false;
 static bool s_noteOverlayRefreshPending = false;
@@ -89,7 +90,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     // MainWndProc-local WM_APP messages. Values are listed in core/app_core.h.
     constexpr UINT kMsgInitLayout = WM_APP + 1;
     constexpr UINT kMsgRunUiAutomation = WM_APP + 210;
-    static_assert(AllUniqueValues(std::array<UINT, 9>{
+    constexpr UINT kMsgOtherPackageHeadlessProcessDiagnostics = WM_APP + 213;
+    static_assert(AllUniqueValues(std::array<UINT, 10>{
         kMsgInitLayout,
         kMsgNoteOverlayUpdate,
         kMsgListMaybeScroll,
@@ -99,11 +101,13 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         kMsgNoteEnterInsertMode,
         kMsgOpenStartupDocument,
         kMsgBackgroundSaveComplete,
+        kMsgOtherPackageHeadlessProcessDiagnostics,
     }));
     switch (msg) {
     case WM_CREATE: {
         DebugAppendLayoutLog(L"WM_CREATE", hWnd, 0, 0);
         CreateChildren(hWnd);
+        DragAcceptFiles(hWnd, TRUE);
         std::wstring automationWorkspaceRoot;
         if (TryGetUiAutomationWorkspaceRoot(&automationWorkspaceRoot)) {
             g_workspaceRoot = automationWorkspaceRoot;
@@ -121,9 +125,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         std::wstring workspaceLockError;
         if (!AcquireWorkspaceWriteLock(std::filesystem::path(g_workspaceRoot),
                                        &workspaceLockError)) {
-            std::wstring message = IsEnglishUi()
-                ? L"The workspace path could not be prepared."
-                : L"ワークスペースのパスを準備できません。";
+            std::wstring message = localization::Text(L"ui.window_proc.3c8c61980ca3");
             if (!workspaceLockError.empty()) message += L"\n\n" + workspaceLockError;
             ShowSilentMessageDialog(hWnd, L"PDF Note Workspace", message,
                                     SoftNoticeKind::Warning);
@@ -140,12 +142,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         ApplyRuntimeLogConfigFromWorkspace(g_workspaceRoot, g_config);
         InitScheduleSortBaseTime();
         if (!EnsureWorkspaceResourceDirs(nullptr)) {
-            std::wstring msg = IsEnglishUi()
-                ? L"Workspace is not writable at startup.\nEdit/open operations that require write permission are canceled.\n\nroot:\n" + g_workspaceRoot
-                : L"起動時点でワークスペースに書き込みできません。\n書き込み権限が必要な編集/オープン処理は中断されます。\n\nroot:\n" + g_workspaceRoot;
-            msg += IsEnglishUi()
-                ? L"\n\nCheck access control / security policy for this folder."
-                : L"\n\nこのフォルダのアクセス権・セキュリティ制御を確認してください。";
+            std::wstring msg = localization::Format(L"ui.window.startup_workspace_not_writable",
+                                                    {{L"ROOT", g_workspaceRoot}});
+            msg += localization::Text(L"ui.window_proc.f9e597c9cfc2");
             ShowSoftNotice(hWnd, msg);
         }
         LoadThemeConfig(g_workspaceRoot);
@@ -164,6 +163,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         PostMessageW(hWnd, kMsgInitLayout, 0, 0);
         return 0;
     }
+    case WM_DROPFILES:
+        HandlePdfNoteListDrop(hWnd, reinterpret_cast<HDROP>(wParam));
+        return 0;
     case WM_SHOWWINDOW:
         if (wParam && g_hSingleInstanceReadyEvent) {
             SetEvent(g_hSingleInstanceReadyEvent);
@@ -216,6 +218,13 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s_uiAutomationPosted = true;
             PostMessageW(hWnd, kMsgRunUiAutomation, 0, 0);
         }
+        if (!s_otherPackageHeadlessProcessDiagnosticsShown) {
+            s_otherPackageHeadlessProcessDiagnosticsShown = true;
+            PostMessageW(hWnd, kMsgOtherPackageHeadlessProcessDiagnostics, 0, 0);
+        }
+        return 0;
+    case kMsgOtherPackageHeadlessProcessDiagnostics:
+        ShowOtherPackageHeadlessProcessDiagnostics(hWnd);
         return 0;
     case kMsgBackgroundSaveComplete: {
         auto completion = file_output::CompleteBackgroundSaveAndIntegrateTransaction(
@@ -227,7 +236,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (!completion.error.empty()) {
                 ShowSilentMessageDialog(
                     hWnd,
-                    IsEnglishUi() ? L"Save" : L"統合保存",
+                    localization::Text(L"ui.window_proc.752f19065484"),
                     completion.error,
                     SoftNoticeKind::Warning);
             }
@@ -257,6 +266,12 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             } else if (g_hLectureList && IsWindowVisible(hWnd)) {
                 if (!RestoreStartupLastOpenSelection(hWnd)) {
                     EnsureListboxSelection(g_hLectureList);
+                    // A workspace must opt in explicitly. This lets a sample
+                    // begin with its first course session without changing the
+                    // first-launch behavior of an ordinary user workspace.
+                    if (g_config.startupSelectFirstSession) {
+                        EnsureListboxSelection(g_hSessionList);
+                    }
                 }
             }
         }
@@ -822,33 +837,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (!ok) {
                 KillTimer(hWnd, kSetupJsonExistenceVerifyTimerId);
                 // Policy: fail-fast on first failed check. A second check after failure is intentionally skipped.
-                std::wstring msg;
-                if (IsEnglishUi()) {
-                    if (err == L"file not found") {
-                        msg = L"The setup JSON file is missing after creation.\n"
-                              L"It may have been quarantined/deleted by security software.\n\n"
-                              L"No automatic recreate/retry is performed in this check process.\n"
-                              L"Some settings may fail to persist.\n\npath:\n" + s_setupJsonExistenceVerifyPath;
-                    } else {
-                        msg = L"The setup JSON file existence/readability check failed.\n"
-                              L"The file may be locked or access may be restricted.\n\n"
-                              L"No automatic recreate/retry is performed in this check process.\n"
-                              L"Some settings may fail to persist.\n\npath:\n" + s_setupJsonExistenceVerifyPath;
-                    }
-                } else {
-                    if (err == L"file not found") {
-                        msg = L"設定JSONファイルが作成後に見つかりません。\n"
-                              L"セキュリティソフトにより隔離/削除された可能性があります。\n\n"
-                              L"この検証プロセスでは自動再作成・再試行は行いません。\n"
-                              L"一部設定が保存されない可能性があります。\n\npath:\n" + s_setupJsonExistenceVerifyPath;
-                    } else {
-                        msg = L"設定JSONファイルの存在/読み取り確認に失敗しました。\n"
-                              L"ファイルロックまたはアクセス制限の可能性があります。\n\n"
-                              L"この検証プロセスでは自動再作成・再試行は行いません。\n"
-                              L"一部設定が保存されない可能性があります。\n\npath:\n" + s_setupJsonExistenceVerifyPath;
-                    }
-                }
-                if (!err.empty()) msg += L"\n\n" + err;
+                std::wstring msg = localization::Format(err == L"file not found"
+                    ? L"ui.window.setup_json_missing" : L"ui.window.setup_json_unreadable",
+                    {{L"PATH", s_setupJsonExistenceVerifyPath},
+                     {L"DETAIL", err.empty() ? L"" : L"\n\n" + err}});
                 ShowSoftNotice(hWnd, msg);
                 s_setupJsonExistenceVerifyPath.clear();
                 s_setupJsonExistenceVerifyAttempt = 0;

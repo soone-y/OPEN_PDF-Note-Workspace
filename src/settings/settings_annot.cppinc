@@ -29,6 +29,8 @@ constexpr int IDC_ANNOT_FREEHAND_CORRECTION_STYLE = 1031;
 constexpr int IDC_ANNOT_FREEHAND_CORRECTION_FILL = 1032;
 constexpr int IDC_ANNOT_TEXT_READABLE_BACKGROUND = 1033;
 constexpr int IDC_ANNOT_ARROW_HEAD = 1034;
+constexpr int IDC_ANNOT_MAGNIFIER_ZOOM = 1035;
+constexpr int IDC_ANNOT_MAGNIFIER_SIZE = 1036;
 constexpr int IDC_ANNOT_CATEGORY_BUTTON_BASE = 1100;
 
 constexpr int kAnnotSectionCount = 6;
@@ -82,6 +84,8 @@ struct AnnotSettingsCtx {
     HWND cbShapeKind = nullptr;
     HWND cbShapeDrawMode = nullptr;
     HWND cbMagnifierShape = nullptr;
+    HWND cbMagnifierZoom = nullptr;
+    HWND cbMagnifierSize = nullptr;
     HWND btnPaletteCustom = nullptr;
     HWND previewPaletteCustom = nullptr;
     HWND lbTools = nullptr;
@@ -112,108 +116,108 @@ static void UpdateAnnotSectionNavUi(AnnotSettingsCtx* ctx, int sectionIndex) {
 static std::wstring ToolModeLabelW(ToolMode mode) {
     switch (mode) {
     case ToolMode::Select:
-        return IsEnglishUi() ? L"Select: tool" : L"選択: ツール";
+        return localization::Text(L"settings.annot.1029e15d0c3a").c_str();
     case ToolMode::Pan:
-        return IsEnglishUi() ? L"Pan: tool" : L"パン: ツール";
+        return localization::Text(L"settings.annot.3d6efc45e474").c_str();
     case ToolMode::Magnifier:
-        return IsEnglishUi() ? L"Magnifier: shape" : L"拡大鏡: 形";
+        return localization::Text(L"settings.annot.1c81d366ae61").c_str();
     case ToolMode::TextBox:
-        return IsEnglishUi() ? L"Text: size slot" : L"テキスト: サイズスロット";
+        return localization::Text(L"settings.annot.ae5917916e68").c_str();
     case ToolMode::MarkerText:
-        return IsEnglishUi() ? L"Text marker" : L"マーカー";
+        return localization::Text(L"settings.annot.da8270b3b20e").c_str();
     case ToolMode::MarkerTextUnderline:
-        return IsEnglishUi() ? L"Underline marker" : L"下線マーカー";
+        return localization::Text(L"settings.annot.12f314322f09").c_str();
     case ToolMode::MarkerTextColor:
-        return IsEnglishUi() ? L"Text color marker" : L"文字色マーカー";
+        return localization::Text(L"settings.annot.eda3c5479ccc").c_str();
     case ToolMode::MarkerFree:
-        return IsEnglishUi() ? L"Freehand marker" : L"フリーハンドマーカー";
+        return localization::Text(L"settings.annot.274178314ec4").c_str();
     case ToolMode::MarkerLine:
-        return IsEnglishUi() ? L"Shape: marker line" : L"図形: マーカー直線";
+        return localization::Text(L"settings.annot.bba30300636e").c_str();
     case ToolMode::MarkerArrow:
-        return IsEnglishUi() ? L"Shape: marker arrow" : L"図形: マーカー矢印";
+        return localization::Text(L"settings.annot.7431aa73e37c").c_str();
     case ToolMode::MarkerWave:
-        return IsEnglishUi() ? L"Shape: marker wave" : L"図形: マーカー波線";
+        return localization::Text(L"settings.annot.7ae1fe50f951").c_str();
     case ToolMode::Freehand:
-        return IsEnglishUi() ? L"Pen: freehand" : L"ペン: フリーハンド";
+        return localization::Text(L"settings.annot.ee24d13d5c6f").c_str();
     case ToolMode::Line:
-        return IsEnglishUi() ? L"Shape: line" : L"図形: 直線";
+        return localization::Text(L"settings.annot.8e3c1c1f01c3").c_str();
     case ToolMode::Arrow:
-        return IsEnglishUi() ? L"Shape: arrow" : L"図形: 矢印";
+        return localization::Text(L"settings.annot.31bbadd80adc").c_str();
     case ToolMode::Wave:
-        return IsEnglishUi() ? L"Shape: wave" : L"図形: 波線";
+        return localization::Text(L"settings.annot.c13635c41a7a").c_str();
     case ToolMode::Shape:
-        return IsEnglishUi() ? L"Shape: kind" : L"幾何形状: 種別";
+        return localization::Text(L"settings.annot.0f3aefb3db1d").c_str();
     case ToolMode::Eraser:
-        return IsEnglishUi() ? L"Eraser: width" : L"消しゴム: 太さ";
+        return localization::Text(L"settings.annot.62e5960a7468").c_str();
     default:
-        return IsEnglishUi() ? L"Tool: option" : L"ツール: オプション";
+        return localization::Text(L"settings.annot.b52464f2c715").c_str();
     }
 }
 
 static std::wstring ShapeKindLabelW(ShapeKind kind) {
     switch (kind) {
     case ShapeKind::Square:
-        return IsEnglishUi() ? L"Square" : L"正方形";
+        return localization::Text(L"settings.annot.06b65b92aa7f").c_str();
     case ShapeKind::Rectangle:
-        return IsEnglishUi() ? L"Rectangle" : L"長方形";
+        return localization::Text(L"settings.annot.9117e6d6ff5f").c_str();
     case ShapeKind::Diamond:
-        return IsEnglishUi() ? L"Diamond" : L"菱形";
+        return localization::Text(L"settings.annot.55914cda2140").c_str();
     case ShapeKind::EquilateralTriangle:
-        return IsEnglishUi() ? L"Equilateral triangle" : L"正三角形";
+        return localization::Text(L"settings.annot.99317e85b5db").c_str();
     case ShapeKind::Triangle:
-        return IsEnglishUi() ? L"Triangle" : L"三角形";
+        return localization::Text(L"settings.annot.b6ccd52bc893").c_str();
     case ShapeKind::Ellipse:
-        return IsEnglishUi() ? L"Ellipse" : L"円";
+        return localization::Text(L"settings.annot.3526a0625382").c_str();
     case ShapeKind::RotatedEllipse:
-        return IsEnglishUi() ? L"Rotated ellipse" : L"斜め円";
+        return localization::Text(L"settings.annot.e3f9e9d7366f").c_str();
     case ShapeKind::Circle:
     default:
-        return IsEnglishUi() ? L"Circle" : L"正円";
+        return localization::Text(L"settings.annot.60bceaee61a7").c_str();
     }
 }
 
 static std::wstring ShapeDrawModeLabelW(ShapeDrawMode mode) {
     switch (mode) {
     case ShapeDrawMode::Outline:
-        return IsEnglishUi() ? L"Outline only" : L"枠線のみ";
+        return localization::Text(L"settings.annot.645bb2dffd79").c_str();
     case ShapeDrawMode::Fill:
     default:
-        return IsEnglishUi() ? L"Fill" : L"塗りつぶし";
+        return localization::Text(L"settings.annot.7603e5dca6ed").c_str();
     }
 }
 
 static std::wstring FreehandCorrectionLabelW(const std::wstring& value) {
     std::wstring mode = NormalizeFreehandCorrection(value);
-    if (mode == L"auto") return IsEnglishUi() ? L"Auto" : L"自動";
-    if (mode == L"hold") return IsEnglishUi() ? L"Pause" : L"静止";
-    if (mode == L"smooth") return IsEnglishUi() ? L"Smooth" : L"ならす";
-    return IsEnglishUi() ? L"Off" : L"オフ";
+    if (mode == L"auto") return localization::Text(L"settings.annot.9957a2dbbd88").c_str();
+    if (mode == L"hold") return localization::Text(L"settings.annot.278244fc5bc0").c_str();
+    if (mode == L"smooth") return localization::Text(L"settings.annot.f037f17e4024").c_str();
+    return localization::Text(L"settings.annot.b5dc78ef1925").c_str();
 }
 
 static std::wstring FreehandCorrectionStyleLabelW(const std::wstring& value) {
     std::wstring mode = NormalizeFreehandCorrectionStyle(value);
-    if (mode == L"pen") return IsEnglishUi() ? L"Line style" : L"線設定";
-    if (mode == L"shape") return IsEnglishUi() ? L"Shape style" : L"幾何設定";
-    return IsEnglishUi() ? L"Auto" : L"自動";
+    if (mode == L"pen") return localization::Text(L"settings.annot.0e16427f9907").c_str();
+    if (mode == L"shape") return localization::Text(L"settings.annot.71be0f6f9c50").c_str();
+    return localization::Text(L"settings.annot.9957a2dbbd88").c_str();
 }
 
 static std::wstring FreehandCorrectionFillLabelW(const std::wstring& value) {
     std::wstring mode = NormalizeFreehandCorrectionFill(value);
-    if (mode == L"use_shape_setting") return IsEnglishUi() ? L"Use shape setting" : L"幾何設定を使う";
-    if (mode == L"always_fill") return IsEnglishUi() ? L"Always fill" : L"常に塗りつぶし";
-    return IsEnglishUi() ? L"Off" : L"オフ";
+    if (mode == L"use_shape_setting") return localization::Text(L"settings.annot.7a2ef9a6a75b").c_str();
+    if (mode == L"always_fill") return localization::Text(L"settings.annot.df8a0ce39bd9").c_str();
+    return localization::Text(L"settings.annot.b5dc78ef1925").c_str();
 }
 
 static std::wstring AnnotToolUiStateLabelW(AnnotToolUiState s) {
     switch (s) {
     case AnnotToolUiState::Enabled:
-        return IsEnglishUi() ? L"ON (enabled)" : L"ON (有効)";
+        return localization::Text(L"settings.annot.8a7107156558").c_str();
     case AnnotToolUiState::Disabled:
-        return IsEnglishUi() ? L"OFF (disabled)" : L"OFF (グレーアウト)";
+        return localization::Text(L"settings.annot.3f10e8fce2fd").c_str();
     case AnnotToolUiState::Hidden:
-        return IsEnglishUi() ? L"OFF (hidden)" : L"OFF (非表示)";
+        return localization::Text(L"settings.annot.8db746f7e72e").c_str();
     default:
-        return IsEnglishUi() ? L"ON" : L"ON";
+        return localization::Text(L"settings.annot.d6b8cb010d87").c_str();
     }
 }
 
@@ -234,7 +238,7 @@ static int ActiveToolCount(const AnnotSettingsCtx* ctx) {
 }
 
 static std::wstring ActiveToolLabelW(const AnnotSettingsCtx* ctx, int idx) {
-    if (idx < 0 || idx >= kToolModeCount) return IsEnglishUi() ? L"Tool" : L"ツール";
+    if (idx < 0 || idx >= kToolModeCount) return localization::Text(L"settings.annot.5d62153345b8").c_str();
     return ToolModeLabelW(static_cast<ToolMode>(idx));
 }
 
@@ -476,6 +480,15 @@ static COLORREF GetSelectedColor(HWND cb, COLORREF fallback) {
     return static_cast<COLORREF>(data);
 }
 
+static int GetSelectedComboInt(HWND cb, int fallback) {
+    if (!cb) return fallback;
+    int sel = static_cast<int>(SendMessageW(cb, CB_GETCURSEL, 0, 0));
+    if (sel < 0) return fallback;
+    LRESULT data = SendMessageW(cb, CB_GETITEMDATA, sel, 0);
+    if (data == CB_ERR) return fallback;
+    return static_cast<int>(data);
+}
+
 static bool IsLineToolsShareChecked(const AnnotSettingsCtx* ctx) {
     if (!ctx || !ctx->chkLineToolsShare) return true;
     return SendMessageW(ctx->chkLineToolsShare, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -564,9 +577,7 @@ static void LayoutAnnotSettingsChrome(HWND hWnd, AnnotSettingsCtx* ctx) {
     int sectionButtonTop = pad;
     int headerH = 0;
     if (!ctx->embedded) {
-        std::wstring subtitle = IsEnglishUi()
-            ? L"Use the buttons below or the list on the left to move. Changes apply only when you press Apply."
-            : L"下のボタンまたは左のカテゴリで移動できます。変更は「反映」を押すまで反映されません。";
+        std::wstring subtitle = localization::Text(L"settings.annot.151942ba553f").c_str();
         subtitleH = std::max(FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 4),
                              MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
         sectionButtonH = std::max(ScaleY(hWnd, 28), rowH);
@@ -714,6 +725,9 @@ static void ApplyAnnotationSettings(AnnotSettingsCtx* ctx) {
         DWORD_PTR data = SelectedComboItemData(ctx->cbMagnifierShape, static_cast<DWORD_PTR>(g_magnifierShape));
         g_magnifierShape = static_cast<MagnifierShape>(static_cast<int>(data));
     }
+    g_magnifierZoom = static_cast<double>(GetSelectedComboInt(ctx->cbMagnifierZoom,
+        static_cast<int>(std::llround(g_magnifierZoom * 100.0)))) / 100.0;
+    g_magnifierSizeDip = std::clamp(GetSelectedComboInt(ctx->cbMagnifierSize, g_magnifierSizeDip), 80, 240);
     // sync toolbar option selections (without relayout)
     EnsureComboSelectFontFace(g_hComboFont, g_textFontName);
     SyncToolbarFontSizeCombo();
@@ -765,9 +779,7 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         const int columnGap = ScaleY(hWnd, 18);
         const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
         const int titleH = std::max(rowH, ScaleY(hWnd, 30));
-        const std::wstring subtitle = IsEnglishUi()
-            ? L"Use the buttons below or the list on the left to move. Changes apply only when you press Apply."
-            : L"下のボタンまたは左のカテゴリで移動できます。変更は「反映」を押すまで反映されません。";
+        const std::wstring subtitle = localization::Text(L"settings.annot.151942ba553f").c_str();
         const int subtitleH = ctx->embedded ? 0
                                             : std::max(uiTextH + ScaleY(hWnd, 4),
                                                        MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
@@ -834,9 +846,9 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         std::wstring defaultLineColor = HexColorW(defaults.lineColor);
         std::wstring defaultArrowWidth = FormatSig2W(defaults.arrowWidthPt) + L"pt";
         std::wstring defaultArrowColor = HexColorW(defaults.arrowColor);
-        std::wstring defaultArrowHead = IsEnglishUi()
-            ? (ParseArrowHead(defaults.arrowHead) == ArrowHead::Double ? L"Double" : L"Single")
-            : (ParseArrowHead(defaults.arrowHead) == ArrowHead::Double ? L"双方向" : L"単方向");
+        std::wstring defaultArrowHead = ParseArrowHead(defaults.arrowHead) == ArrowHead::Double
+            ? localization::Text(L"settings.annot.arrow_head.double")
+            : localization::Text(L"settings.annot.arrow_head.single");
         std::wstring defaultWaveWidth = FormatSig2W(defaults.waveWidthPt) + L"pt";
         std::wstring defaultWaveColor = HexColorW(defaults.waveColor);
         std::wstring defaultFreeWidth = FormatSig2W(defaults.freehandWidthPt) + L"pt";
@@ -852,9 +864,13 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         std::wstring defaultShapeKindLabel = ShapeKindLabelW(ParseShapeKind(defaults.shapeKind));
         std::wstring defaultShapeDrawModeLabel = ShapeDrawModeLabelW(ParseShapeDrawMode(defaults.shapeDrawMode));
         MagnifierShape defaultShape = ParseMagnifierShape(defaults.magnifierShape);
-        std::wstring defaultMagnifierLabel = IsEnglishUi()
-            ? (defaultShape == MagnifierShape::Square ? L"Square" : L"Circle")
-            : (defaultShape == MagnifierShape::Square ? L"正方形" : L"正円");
+        std::wstring defaultMagnifierLabel = defaultShape == MagnifierShape::Horizontal
+            ? localization::Text(L"settings.annot.magnifier_shape.horizontal")
+            : (defaultShape == MagnifierShape::Square
+                ? localization::Text(L"settings.annot.magnifier_shape.square")
+                : localization::Text(L"settings.annot.magnifier_shape.circle"));
+        std::wstring defaultMagnifierZoom = FormatSig2W(defaults.magnifierZoom) + L"×";
+        std::wstring defaultMagnifierSize = std::to_wstring(defaults.magnifierSizeDip) + L" DIP";
         std::wstring defaultPaletteColor = HexColorW(defaults.paletteCustomColor);
 
         ctx->expandedToolOrder = AnnotToolModeUiOrder();
@@ -922,13 +938,11 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         };
 
         beginSection(kAnnotSectionText, L"テキスト");
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Color" : L"色", defaultTextColor));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.ffee4722a5be").c_str(), defaultTextColor));
         ctx->cbTextColor = addCombo(1003, false, controlW);
 
         {
-            std::wstring readableLabel = IsEnglishUi()
-                ? L"Add a readable background behind text boxes"
-                : L"テキストボックスに読みやすい背景を付ける";
+            std::wstring readableLabel = localization::Text(L"settings.annot.dbd168d6dad6").c_str();
             ctx->chkTextReadableBackground = CreateWindowExW(0, L"BUTTON", readableLabel.c_str(),
                                                              WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                                                              pad, y, contentW, rowH, contentParent,
@@ -940,61 +954,59 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             y += rowH + gapY;
         }
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Size" : L"サイズ", defaultTextSize));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.b9f7a52a255a").c_str(), defaultTextSize));
         ctx->cbTextSize = addCombo(1002, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Font" : L"フォント", defaultTextFontLabel));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.07b118e422a9").c_str(), defaultTextFontLabel));
         ctx->cbTextFont = addCombo(1001, true, fontControlW);
 
-        beginSection(kAnnotSectionMarker, IsEnglishUi() ? L"Markers" : L"マーカー");
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Free marker width" : L"フリーマーカーの太さ", defaultMarkerWidth));
+        beginSection(kAnnotSectionMarker, localization::Text(L"settings.annot.a42b0e79fa89").c_str());
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.c02171c12226").c_str(), defaultMarkerWidth));
         ctx->cbMarkerWidth = addCombo(1008, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Free marker color" : L"フリーマーカーの色", defaultMarkerColor));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.4f7485ec5c93").c_str(), defaultMarkerColor));
         ctx->cbMarkerColor = addCombo(1009, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Text marker width" : L"マーカーの太さ", defaultMarkerTextWidth));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.bd11ec508793").c_str(), defaultMarkerTextWidth));
         ctx->cbMarkerTextWidth = addCombo(IDC_ANNOT_MARKER_TEXT_WIDTH, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Text marker color" : L"マーカーの色", defaultMarkerTextColor));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.5ae8d8fe4add").c_str(), defaultMarkerTextColor));
         ctx->cbMarkerTextColor = addCombo(1010, false, controlW);
 
-        beginSection(kAnnotSectionShape, IsEnglishUi() ? L"Shapes" : L"図形");
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Shape kind" : L"幾何種別", defaultShapeKindLabel));
+        beginSection(kAnnotSectionShape, localization::Text(L"settings.annot.70981636c5aa").c_str());
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.dd057ef4ebef").c_str(), defaultShapeKindLabel));
         ctx->cbShapeKind = addCombo(IDC_ANNOT_SHAPE_KIND, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Shape draw mode" : L"幾何形状の描画", defaultShapeDrawModeLabel));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.8351cc1a8069").c_str(), defaultShapeDrawModeLabel));
         ctx->cbShapeDrawMode = addCombo(IDC_ANNOT_SHAPE_DRAW_MODE, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Shape color" : L"幾何形状の色", defaultShapeColor));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.87a999908dcf").c_str(), defaultShapeColor));
         ctx->cbShapeColor = addCombo(IDC_ANNOT_SHAPE_COLOR, false, controlW);
 
-        beginSection(kAnnotSectionStroke, IsEnglishUi() ? L"Line" : L"線");
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Freehand width" : L"フリーハンドの太さ", defaultFreeWidth));
+        beginSection(kAnnotSectionStroke, localization::Text(L"settings.annot.e1f1cd7db320").c_str());
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.e2c3f7660c5a").c_str(), defaultFreeWidth));
         ctx->cbFreehandWidth = addCombo(1006, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Freehand color" : L"フリーハンドの色", defaultFreeColor));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.f40187ce56d3").c_str(), defaultFreeColor));
         ctx->cbFreehandColor = addCombo(1007, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Freehand auto correction" : L"フリーハンド自動補正", defaultFreeCorrection));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.260b8374a281").c_str(), defaultFreeCorrection));
         ctx->cbFreehandCorrection = addCombo(IDC_ANNOT_FREEHAND_CORRECTION, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Auto correction style" : L"自動補正のスタイル", defaultFreeCorrectionStyle));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.a62d4598191f").c_str(), defaultFreeCorrectionStyle));
         ctx->cbFreehandCorrectionStyle = addCombo(IDC_ANNOT_FREEHAND_CORRECTION_STYLE, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Auto correction fill" : L"自動補正の塗りつぶし", defaultFreeCorrectionFill));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.dfba79694352").c_str(), defaultFreeCorrectionFill));
         ctx->cbFreehandCorrectionFill = addCombo(IDC_ANNOT_FREEHAND_CORRECTION_FILL, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Line width" : L"直線の太さ", defaultLineWidth));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.43f2032c7276").c_str(), defaultLineWidth));
         ctx->cbLineWidth = addCombo(1004, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Line color" : L"直線の色", defaultLineColor));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.771e8754829f").c_str(), defaultLineColor));
         ctx->cbLineColor = addCombo(1005, false, controlW);
 
         {
-            std::wstring shareLabel = IsEnglishUi()
-                ? L"Use one shared style for line / arrow / wave"
-                : L"直線 / 矢印 / 波線で色と太さを共通化する";
+            std::wstring shareLabel = localization::Text(L"settings.annot.4deee88c12fb").c_str();
             ctx->chkLineToolsShare = CreateWindowExW(0, L"BUTTON", shareLabel.c_str(),
                                                      WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                                                      pad, y, contentW, rowH, contentParent,
@@ -1006,26 +1018,30 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             y += rowH + gapY;
         }
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Arrow width" : L"矢印の太さ", defaultArrowWidth));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.e9deafbd5610").c_str(), defaultArrowWidth));
         ctx->cbArrowWidth = addCombo(IDC_ANNOT_ARROW_WIDTH, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Arrow color" : L"矢印の色", defaultArrowColor));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.3da665c90c1e").c_str(), defaultArrowColor));
         ctx->cbArrowColor = addCombo(IDC_ANNOT_ARROW_COLOR, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Arrow head" : L"矢印の頭", defaultArrowHead));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.6a683fbec5bc").c_str(), defaultArrowHead));
         ctx->cbArrowHead = addCombo(IDC_ANNOT_ARROW_HEAD, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Wave width" : L"波線の太さ", defaultWaveWidth));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.90d3799ed367").c_str(), defaultWaveWidth));
         ctx->cbWaveWidth = addCombo(IDC_ANNOT_WAVE_WIDTH, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Wave color" : L"波線の色", defaultWaveColor));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.5d234d7af1ae").c_str(), defaultWaveColor));
         ctx->cbWaveColor = addCombo(IDC_ANNOT_WAVE_COLOR, false, controlW);
 
-        beginSection(kAnnotSectionLensPalette, IsEnglishUi() ? L"Magnifier" : L"拡大鏡");
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Magnifier shape" : L"拡大鏡の形", defaultMagnifierLabel));
+        beginSection(kAnnotSectionLensPalette, localization::Text(L"settings.annot.f0829ac61c8d").c_str());
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.c15f771eac74").c_str(), defaultMagnifierLabel));
         ctx->cbMagnifierShape = addCombo(IDC_ANNOT_MAGNIFIER_SHAPE, false, controlW);
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.magnifier_zoom").c_str(), defaultMagnifierZoom));
+        ctx->cbMagnifierZoom = addCombo(IDC_ANNOT_MAGNIFIER_ZOOM, false, controlW);
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.magnifier_size").c_str(), defaultMagnifierSize));
+        ctx->cbMagnifierSize = addCombo(IDC_ANNOT_MAGNIFIER_SIZE, false, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Current custom color" : L"現在のカスタム色", defaultPaletteColor));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.6ae2fdfbdb43").c_str(), defaultPaletteColor));
         ctx->palettePreviewColor = g_paletteCustomColor;
         int paletteGroupW = previewW + previewGap + customBtnW;
         int paletteX = pad + std::max(0, contentW - paletteGroupW);
@@ -1036,7 +1052,7 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_PALETTE_CUSTOM_PREVIEW)),
                                                     g_hInst, nullptr);
         ctx->btnPaletteCustom = CreateWindowExW(0, L"BUTTON",
-                                                IsEnglishUi() ? L"Edit color palette..." : L"カラーパレットを編集...",
+                                                localization::Text(L"settings.annot.3c871498f34d").c_str(),
                                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                                 paletteX + previewW + previewGap, y, customBtnW, rowH, contentParent,
                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_PALETTE_CUSTOM)),
@@ -1044,21 +1060,19 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         SetUIFont(ctx->btnPaletteCustom);
         y += rowH + gapY;
 
-        beginSection(kAnnotSectionToolbar, IsEnglishUi() ? L"Top options" : L"topオプション");
-        addLabel(IsEnglishUi()
-                     ? L"Order and availability for each parent tool's top option (Up/Down changes the click cycle order)"
-                     : L"親ツールごとのtopオプションの順番と有効状態 (↑↓ でクリック時の切替順を変更)");
+        beginSection(kAnnotSectionToolbar, localization::Text(L"settings.annot.82b287bb6494").c_str());
+        addLabel(localization::Text(L"settings.annot.bdbc68365df8").c_str());
 
         int toolListHeaderH = std::max(uiTextH + ScaleY(hWnd, 2), ScaleY(hWnd, 18));
         int toolListHeaderPadX = ScaleY(hWnd, 6);
         int stateColW = AnnotToolListStateColWidthPx(hWnd, contentW);
         int stateColX = pad + std::max(0, contentW - stateColW);
-        HWND hdrTool = CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"Parent tool: option" : L"親ツール: オプション",
+        HWND hdrTool = CreateWindowExW(0, L"STATIC", localization::Text(L"settings.annot.baab400997d0").c_str(),
                                        WS_CHILD | WS_VISIBLE,
                                        pad + toolListHeaderPadX, y,
                                        std::max(0, contentW - stateColW - toolListHeaderPadX), toolListHeaderH,
                                        contentParent, nullptr, g_hInst, nullptr);
-        HWND hdrState = CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"State" : L"状態",
+        HWND hdrState = CreateWindowExW(0, L"STATIC", localization::Text(L"settings.annot.eeaa111e4ade").c_str(),
                                         WS_CHILD | WS_VISIBLE,
                                         stateColX + toolListHeaderPadX, y,
                                         std::max(0, stateColW - toolListHeaderPadX), toolListHeaderH,
@@ -1085,21 +1099,21 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         int btnGap = ScaleY(hWnd, 8);
         int xBtns = pad;
         ctx->btnToolUp = CreateWindowExW(0, L"BUTTON",
-                                         IsEnglishUi() ? L"Up" : L"上へ",
+                                         localization::Text(L"settings.annot.25fa8953067c").c_str(),
                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                          xBtns, y, btnW, btnH, contentParent,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_TOOL_UP)),
                                          g_hInst, nullptr);
         xBtns += btnW + btnGap;
         ctx->btnToolDown = CreateWindowExW(0, L"BUTTON",
-                                           IsEnglishUi() ? L"Down" : L"下へ",
+                                           localization::Text(L"settings.annot.77d5335527fe").c_str(),
                                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                            xBtns, y, btnW, btnH, contentParent,
                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_TOOL_DOWN)),
                                            g_hInst, nullptr);
         xBtns += btnW + btnGap;
         ctx->btnToolReset = CreateWindowExW(0, L"BUTTON",
-                                            IsEnglishUi() ? L"Reset" : L"リセット",
+                                            localization::Text(L"settings.annot.c6fcc1342683").c_str(),
                                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                             xBtns, y, btnW, btnH, contentParent,
                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_TOOL_RESET)),
@@ -1110,7 +1124,7 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         y += rowH + gapY;
 
         HWND lblState = CreateWindowExW(0, L"STATIC",
-                                        IsEnglishUi() ? L"State:" : L"状態:",
+                                        localization::Text(L"settings.annot.72b7f82e00e5").c_str(),
                                         WS_CHILD | WS_VISIBLE,
                                         pad, y, controlW, uiTextH, contentParent, nullptr, g_hInst, nullptr);
         SetUIFont(lblState);
@@ -1124,11 +1138,11 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         SetUIFont(ctx->cbToolState);
         if (ctx->cbToolState) {
             SendMessageW(ctx->cbToolState, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(IsEnglishUi() ? L"ON (enabled)" : L"ON (有効)"));
+                         reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.8a7107156558").c_str()));
             SendMessageW(ctx->cbToolState, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(IsEnglishUi() ? L"OFF (disabled)" : L"OFF (グレーアウト)"));
+                         reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.3f10e8fce2fd").c_str()));
             SendMessageW(ctx->cbToolState, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(IsEnglishUi() ? L"OFF (hidden)" : L"OFF (非表示)"));
+                         reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.8db746f7e72e").c_str()));
             SendMessageW(ctx->cbToolState, CB_SETCURSEL, 0, 0);
         }
         y += rowH + gapY;
@@ -1147,10 +1161,10 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             int btnY = clientH - pad - btnH;
             int xCancel = std::max(pad, clientW - pad - cancelW);
             int xOk = std::max(pad, xCancel - btnGap - okW);
-            ctx->btnOk = CreateWindowExW(0, L"BUTTON", UiApplyLabel(), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            ctx->btnOk = CreateWindowExW(0, L"BUTTON", UiApplyLabel().c_str(), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                          xOk, btnY, okW, btnH, hWnd,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
-            ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel(), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel().c_str(), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                              xCancel, btnY, cancelW, btnH, hWnd,
                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
             SetUIFont(ctx->btnOk);
@@ -1215,16 +1229,16 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         if (ctx->cbFreehandCorrection) {
             SendMessageW(ctx->cbFreehandCorrection, CB_RESETCONTENT, 0, 0);
             int idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
-                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Off" : L"オフ")));
+                                                    reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.b5dc78ef1925").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
             idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Smooth" : L"ならす")));
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.f037f17e4024").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(1));
             idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Pause to correct" : L"静止して補正")));
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.7525cc8169d2").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(2));
             idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Auto" : L"自動")));
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.9957a2dbbd88").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(3));
             std::wstring correctionMode = NormalizeFreehandCorrection(g_config.freehandCorrection);
             SelectComboByItemData(ctx->cbFreehandCorrection,
@@ -1236,13 +1250,13 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         if (ctx->cbFreehandCorrectionStyle) {
             SendMessageW(ctx->cbFreehandCorrectionStyle, CB_RESETCONTENT, 0, 0);
             int idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionStyle, CB_ADDSTRING, 0,
-                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Auto" : L"自動")));
+                                                    reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.9957a2dbbd88").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
             idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionStyle, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Line style" : L"線設定")));
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.0e16427f9907").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(1));
             idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionStyle, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Shape style" : L"幾何設定")));
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.71be0f6f9c50").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(2));
             std::wstring style = NormalizeFreehandCorrectionStyle(g_config.freehandCorrectionStyle);
             SelectComboByItemData(ctx->cbFreehandCorrectionStyle,
@@ -1252,13 +1266,13 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         if (ctx->cbFreehandCorrectionFill) {
             SendMessageW(ctx->cbFreehandCorrectionFill, CB_RESETCONTENT, 0, 0);
             int idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionFill, CB_ADDSTRING, 0,
-                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Off" : L"オフ")));
+                                                    reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.b5dc78ef1925").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionFill, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
             idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionFill, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Use shape setting" : L"幾何設定を使う")));
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.7a2ef9a6a75b").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionFill, CB_SETITEMDATA, idx, static_cast<LPARAM>(1));
             idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrectionFill, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Always fill" : L"常に塗りつぶし")));
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.df8a0ce39bd9").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbFreehandCorrectionFill, CB_SETITEMDATA, idx, static_cast<LPARAM>(2));
             std::wstring fill = NormalizeFreehandCorrectionFill(g_config.freehandCorrectionFill);
             SelectComboByItemData(ctx->cbFreehandCorrectionFill,
@@ -1268,10 +1282,10 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         if (ctx->cbMarkerTextStyle) {
             SendMessageW(ctx->cbMarkerTextStyle, CB_RESETCONTENT, 0, 0);
             int idx = static_cast<int>(SendMessageW(ctx->cbMarkerTextStyle, CB_ADDSTRING, 0,
-                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Text marker" : L"通常")));
+                                                    reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.016c62381789").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbMarkerTextStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
             idx = static_cast<int>(SendMessageW(ctx->cbMarkerTextStyle, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Underline style" : L"下線風")));
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.e01dcc32ec8c").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbMarkerTextStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(1));
             SelectComboByItemData(ctx->cbMarkerTextStyle, static_cast<DWORD_PTR>(g_markerTextUnderline ? 1 : 0));
         }
@@ -1304,10 +1318,10 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         if (ctx->cbArrowHead) {
             SendMessageW(ctx->cbArrowHead, CB_RESETCONTENT, 0, 0);
             int idx = static_cast<int>(SendMessageW(ctx->cbArrowHead, CB_ADDSTRING, 0,
-                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Single" : L"単方向")));
+                                                    reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.cc5e4bedabdf").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbArrowHead, CB_SETITEMDATA, idx, static_cast<LPARAM>(ArrowHead::Single));
             idx = static_cast<int>(SendMessageW(ctx->cbArrowHead, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Double" : L"双方向")));
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.05e6c4044ef0").c_str())));
             if (idx >= 0) SendMessageW(ctx->cbArrowHead, CB_SETITEMDATA, idx, static_cast<LPARAM>(ArrowHead::Double));
             SelectComboByItemData(ctx->cbArrowHead, static_cast<DWORD_PTR>(g_arrowHead));
         }
@@ -1315,16 +1329,39 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         if (ctx->cbMagnifierShape) {
             SendMessageW(ctx->cbMagnifierShape, CB_RESETCONTENT, 0, 0);
             int idx = static_cast<int>(SendMessageW(ctx->cbMagnifierShape, CB_ADDSTRING, 0,
-                                                    reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Circle" : L"正円")));
+                                                    reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.60bceaee61a7").c_str())));
             if (idx >= 0) {
                 SendMessageW(ctx->cbMagnifierShape, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierShape::Circle));
             }
             idx = static_cast<int>(SendMessageW(ctx->cbMagnifierShape, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Square" : L"正方形")));
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.06b65b92aa7f").c_str())));
             if (idx >= 0) {
                 SendMessageW(ctx->cbMagnifierShape, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierShape::Square));
             }
+            idx = static_cast<int>(SendMessageW(ctx->cbMagnifierShape, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.magnifier_shape.horizontal").c_str())));
+            if (idx >= 0) {
+                SendMessageW(ctx->cbMagnifierShape, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierShape::Horizontal));
+            }
             SelectComboByItemData(ctx->cbMagnifierShape, static_cast<DWORD_PTR>(g_magnifierShape));
+        }
+        if (ctx->cbMagnifierZoom) {
+            SendMessageW(ctx->cbMagnifierZoom, CB_RESETCONTENT, 0, 0);
+            for (int zoom100 : {125, 150, 200, 300, 400}) {
+                std::wstring label = FormatSig2W(static_cast<double>(zoom100) / 100.0) + L"×";
+                int idx = static_cast<int>(SendMessageW(ctx->cbMagnifierZoom, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+                if (idx >= 0) SendMessageW(ctx->cbMagnifierZoom, CB_SETITEMDATA, idx, zoom100);
+            }
+            SelectComboByItemData(ctx->cbMagnifierZoom, static_cast<DWORD_PTR>(std::llround(g_magnifierZoom * 100.0)));
+        }
+        if (ctx->cbMagnifierSize) {
+            SendMessageW(ctx->cbMagnifierSize, CB_RESETCONTENT, 0, 0);
+            for (int sizeDip : {80, 120, 160, 200, 240}) {
+                std::wstring label = std::to_wstring(sizeDip) + L" DIP";
+                int idx = static_cast<int>(SendMessageW(ctx->cbMagnifierSize, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+                if (idx >= 0) SendMessageW(ctx->cbMagnifierSize, CB_SETITEMDATA, idx, sizeDip);
+            }
+            SelectComboByItemData(ctx->cbMagnifierSize, static_cast<DWORD_PTR>(g_magnifierSizeDip));
         }
 
         if (ctx->cbShapeKind) {
@@ -1368,17 +1405,17 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         }
 
         if (ctx->navList) {
-            const wchar_t* sectionLabels[kAnnotSectionCount] = {
-                IsEnglishUi() ? L"Text" : L"テキスト",
-                IsEnglishUi() ? L"Markers" : L"マーカー",
-                IsEnglishUi() ? L"Shapes" : L"図形",
-                IsEnglishUi() ? L"Line" : L"線",
-                IsEnglishUi() ? L"Magnifier / Palette" : L"拡大鏡 / パレット",
-                IsEnglishUi() ? L"Top options" : L"topオプション",
+            const std::array<std::wstring, kAnnotSectionCount> sectionLabels = {
+                localization::Text(L"settings.annot.a197a17b5eec").c_str(),
+                localization::Text(L"settings.annot.a42b0e79fa89").c_str(),
+                localization::Text(L"settings.annot.70981636c5aa").c_str(),
+                localization::Text(L"settings.annot.e1f1cd7db320").c_str(),
+                localization::Text(L"settings.annot.bdf7dceea954").c_str(),
+                localization::Text(L"settings.annot.82b287bb6494").c_str(),
             };
             SendMessageW(ctx->navList, LB_RESETCONTENT, 0, 0);
             for (int i = 0; i < ctx->sectionCount && i < kAnnotSectionCount; ++i) {
-                SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(sectionLabels[i]));
+                SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(sectionLabels[i].c_str()));
             }
             UpdateAnnotSectionNavUi(ctx, 0);
         }
@@ -1528,7 +1565,7 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             if (!ctx->embedded) {
                 ApplyAnnotationSettings(ctx);
                 ctx->ok = true;
-                ShowSoftNotice(hWnd, IsEnglishUi() ? L"Settings applied." : L"設定を反映しました。");
+                ShowSoftNotice(hWnd, localization::Text(L"settings.annot.fca7cf56577e").c_str());
             }
             return 0;
         }
@@ -1992,12 +2029,12 @@ static LRESULT CALLBACK UnifiedSettingsShellProc(HWND hWnd, UINT msg, WPARAM wPa
                                      0, 0, 88, 32, hWnd,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)),
                                      g_hInst, nullptr);
-        ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel(),
+        ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel().c_str(),
                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                          0, 0, 108, 32, hWnd,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)),
                                          g_hInst, nullptr);
-        ctx->btnApply = CreateWindowExW(0, L"BUTTON", UiApplyLabel(),
+        ctx->btnApply = CreateWindowExW(0, L"BUTTON", UiApplyLabel().c_str(),
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                         0, 0, 88, 32, hWnd,
                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_UNIFIED_SETTINGS_APPLY)),
@@ -2061,7 +2098,7 @@ static LRESULT CALLBACK UnifiedSettingsShellProc(HWND hWnd, UINT msg, WPARAM wPa
         if (id == IDC_UNIFIED_SETTINGS_APPLY) {
             ApplyUnifiedSettings(ctx);
             ApplyThemeToDialog(hWnd);
-            ShowSoftNotice(hWnd, IsEnglishUi() ? L"Settings applied." : L"設定を反映しました。");
+            ShowSoftNotice(hWnd, localization::Text(L"settings.annot.fca7cf56577e").c_str());
             return 0;
         }
         if (id == IDCANCEL || id == 0) {

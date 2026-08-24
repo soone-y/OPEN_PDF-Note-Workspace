@@ -16,7 +16,9 @@ constexpr int kGeneralDlgHeight = 780;
 constexpr int kGeneralSectionCount = 6;
 constexpr int IDC_GENERAL_CATEGORY_BUTTON_BASE = 1600;
 constexpr int IDC_GENERAL_SECTION_LIST = 4188;
-constexpr const wchar_t* kDefaultNameRule = L"回数_授業名_ノート1(連番).clro";
+static std::wstring DefaultNameRule() {
+    return localization::Text(L"workspace.default_note_pattern");
+}
 constexpr int kScheduleDayCount = 7;
 constexpr int kScheduleMaxPeriods = 13;
 constexpr int kDefaultScheduleMask = 0x1F;
@@ -114,8 +116,7 @@ enum : int {
     IDC_SESSION_SORT = 4210,
     IDC_SESSION_NUMBERING = 4211,
     IDC_POINTER_OFFSET_X = 4212,
-    IDC_POINTER_OFFSET_Y = 4213,
-    IDC_PAN_MOUSE_WHEEL_ZOOM = 4214
+    IDC_POINTER_OFFSET_Y = 4213
 };
 
 enum class GeneralSettingsPageMode {
@@ -179,71 +180,71 @@ struct NoteBackgroundChoice {
 };
 
 static const BottomPaneOption kBottomPaneOptions[] = {
-    { L"ノートテキストの延長", BottomPanePin::Note, BottomNoteMode::Legacy },
-    { L"見出し表示", BottomPanePin::Note, BottomNoteMode::Headings },
-    { L"MathBox入力", BottomPanePin::Math, BottomNoteMode::Legacy },
-    { L"ノートアシスト", BottomPanePin::Note, BottomNoteMode::Assist }
+    { L"settings.general.bottom_pane_note", BottomPanePin::Note, BottomNoteMode::Legacy },
+    { L"settings.general.bottom_pane_headings", BottomPanePin::Note, BottomNoteMode::Headings },
+    { L"settings.general.bottom_pane_math", BottomPanePin::Math, BottomNoteMode::Legacy },
+    { L"settings.general.bottom_pane_assist", BottomPanePin::Note, BottomNoteMode::Assist }
 };
 
 static const ShortcutLayoutOption kQuickAnnotPopupPlacementOptions[] = {
-    { L"自動", L"auto" },
-    { L"境界依存", L"boundary" },
-    { L"常に上", L"up" },
-    { L"常に下", L"down" }
+    { L"settings.general.quick_annot_auto", L"auto" },
+    { L"settings.general.quick_annot_boundary", L"boundary" },
+    { L"settings.general.quick_annot_up", L"up" },
+    { L"settings.general.quick_annot_down", L"down" }
 };
 
 static const ShortcutLayoutOption kShortcutTextTagKeyOptions[] = {
-    { L"char (標準)", L"char" },
-    { L"c (短縮)", L"c" }
+    { L"settings.general.shortcut_text_tag_char", L"char" },
+    { L"settings.general.shortcut_text_tag_c", L"c" }
 };
 
 static const LectureSortOption kLectureSortOptions[] = {
-    { L"授業スケジュール優先", L"schedule" },
-    { L"名前順", L"name" },
-    { L"最後に触った順", L"recent" }
+    { L"settings.general.lecture_sort_schedule", L"schedule" },
+    { L"settings.general.sort_name", L"name" },
+    { L"settings.general.sort_recent", L"recent" }
 };
 
 
 static const ShortcutLayoutOption kSessionSortOptions[] = {
-    { L"数字昇順", L"numeric_asc" },
-    { L"数字降順", L"numeric_desc" },
-    { L"名前順", L"name" }
+    { L"settings.general.sort_numeric_asc", L"numeric_asc" },
+    { L"settings.general.sort_numeric_desc", L"numeric_desc" },
+    { L"settings.general.sort_name", L"name" }
 };
 
 static const ShortcutLayoutOption kSessionNumberingOptions[] = {
-    { L"ファイル数+1", L"count" },
-    { L"最大番号+1", L"max_number" }
+    { L"settings.general.session_number_count", L"count" },
+    { L"settings.general.session_number_max", L"max_number" }
 };
-static const wchar_t* LectureSortOptionLabel(size_t index) {
+static std::wstring LectureSortOptionLabel(size_t index) {
     if (index == 0 && !g_config.studentMode) {
-        return IsEnglishUi() ? L"Parent item schedule first" : L"上位項目スケジュール優先";
+        return localization::Text(L"settings.general_foundation.86743a3989ef");
     }
-    return kLectureSortOptions[index].label;
+    return localization::Text(kLectureSortOptions[index].label);
 }
 
 static const SessionAutoOpenOption kSessionAutoOpenOptions[] = {
-    { L"オフ", L"off" },
-    { L"編集（更新時刻ベース）", L"edit" },
-    { L"閲覧（最後に開いた順）", L"view" }
+    { L"settings.general.off", L"off" },
+    { L"settings.general.session_auto_open_edit", L"edit" },
+    { L"settings.general.session_auto_open_view", L"view" }
 };
 
 static const NoteSystemOption kNoteSystemOptions[] = {
-    { L"legacy (従来)", NoteSystem::Legacy }
+    { L"settings.general.note_system_legacy", NoteSystem::Legacy }
 };
 
 static const AutoSaveOption kAutoSaveOptions[] = {
-    { L"オフ", kAutoSaveModeOff },
-    { L"5秒", 5 },
-    { L"30秒", 30 },
-    { L"1分", 60 },
-    { L"5分", 300 }
+    { L"settings.general.off", kAutoSaveModeOff },
+    { L"settings.general.seconds_5", 5 },
+    { L"settings.general.seconds_30", 30 },
+    { L"settings.general.minute_1", 60 },
+    { L"settings.general.minutes_5", 300 }
 };
 
 static const AutoSaveOption kAutoIntegrateOptions[] = {
-    { L"オフ（自動統合なし）", kAutoIntegrateModeOffSwitchExit },
-    { L"5分", 300 },
-    { L"20分", 1200 },
-    { L"カスタマイズ", kAutoIntegrateModeCustom }
+    { L"settings.general.auto_integrate_off", kAutoIntegrateModeOffSwitchExit },
+    { L"settings.general.minutes_5", 300 },
+    { L"settings.general.minutes_20", 1200 },
+    { L"settings.general.customize", kAutoIntegrateModeCustom }
 };
 
 static bool IsFixedAutoIntegrateTimerSeconds(int seconds) {
@@ -278,9 +279,7 @@ static bool PromptAutoIntegrateCustomMinutes(HWND owner, int currentMinutes, int
     std::wstring input;
     std::wstring defaultValue = std::to_wstring(currentMinutes);
     while (true) {
-        std::wstring title = IsEnglishUi()
-            ? L"Auto integrate staged diffs: minutes (1-1440)"
-            : L"未統合差分を自動統合する間隔：分を入力（1〜1440）";
+        std::wstring title = localization::Text(L"settings.general_foundation.66de53c36208");
         if (!PromptSimpleText(owner, title, defaultValue, input)) {
             return false;
         }
@@ -289,9 +288,7 @@ static bool PromptAutoIntegrateCustomMinutes(HWND owner, int currentMinutes, int
         try {
             int minutes = std::stoi(input);
             if (minutes < kAutoIntegrateCustomMinutesMin || minutes > kAutoIntegrateCustomMinutesMax) {
-                const wchar_t* err = IsEnglishUi()
-                    ? L"Please enter an integer between 1 and 1440."
-                    : L"1〜1440 の整数を入力してください。";
+                const std::wstring err = localization::Text(L"settings.general_foundation.a71366e67a11");
                 ShowSoftNotice(owner, err, SoftNoticeKind::Warning);
                 defaultValue = input;
                 continue;
@@ -299,9 +296,7 @@ static bool PromptAutoIntegrateCustomMinutes(HWND owner, int currentMinutes, int
             *outMinutes = minutes;
             return true;
         } catch (...) {
-            const wchar_t* err = IsEnglishUi()
-                ? L"Please enter an integer between 1 and 1440."
-                : L"1〜1440 の整数を入力してください。";
+            const std::wstring err = localization::Text(L"settings.general_foundation.a71366e67a11");
             ShowSoftNotice(owner, err, SoftNoticeKind::Warning);
             defaultValue = input;
         }
@@ -309,27 +304,26 @@ static bool PromptAutoIntegrateCustomMinutes(HWND owner, int currentMinutes, int
 }
 
 static const DownKeyLastLineOption kDownKeyLastLineOptions[] = {
-    { L"行末に飛ぶ", L"lineend" },
-    { L"行末で改行を追加", L"newline" },
-    { L"しない", L"none" }
+    { L"settings.general.down_key_line_end", L"lineend" },
+    { L"settings.general.down_key_newline", L"newline" },
+    { L"settings.general.none", L"none" }
 };
 
 static const LeftRightLineMoveOption kLeftRightLineMoveOptions[] = {
-    { L"行移動を許可する", L"allow" },
-    { L"行に留まる", L"stay" }
+    { L"settings.general.left_right_allow", L"allow" },
+    { L"settings.general.left_right_stay", L"stay" }
 };
 
 struct PdfFlowModeOption {
-    const wchar_t* labelJa;
-    const wchar_t* labelEn;
+    const wchar_t* labelId;
     const wchar_t* value;
 };
 
 static const PdfFlowModeOption kPdfFlowModeOptions[] = {
-    { L"縦: 上から下", L"Vertical: top to bottom", L"v_ttb" },
-    { L"縦: 下から上", L"Vertical: bottom to top", L"v_btu" },
-    { L"横: 左から右", L"Horizontal: left to right", L"h_ltr" },
-    { L"横: 右から左", L"Horizontal: right to left", L"h_rtl" },
+    { L"settings.pdf_flow.v_ttb", L"v_ttb" },
+    { L"settings.pdf_flow.v_btu", L"v_btu" },
+    { L"settings.pdf_flow.h_ltr", L"h_ltr" },
+    { L"settings.pdf_flow.h_rtl", L"h_rtl" },
 };
 
 static std::wstring NormalizePdfFlowModeValue(const std::wstring& mode) {
@@ -345,21 +339,21 @@ static std::wstring PdfFlowModeLabel(const std::wstring& mode) {
     std::wstring normalized = NormalizePdfFlowModeValue(mode);
     for (const auto& option : kPdfFlowModeOptions) {
         if (normalized == option.value) {
-            return IsEnglishUi() ? option.labelEn : option.labelJa;
+            return localization::Text(option.labelId);
         }
     }
-    return IsEnglishUi() ? kPdfFlowModeOptions[0].labelEn : kPdfFlowModeOptions[0].labelJa;
+    return localization::Text(kPdfFlowModeOptions[0].labelId);
 }
 
 static const wchar_t* kNoteFontCustomizationLabels[] = {
-    L"オフ (メイリオUI / Segoe UI)",
-    L"統一フォント",
-    L"別フォント"
+    L"settings.general.font_customization_off",
+    L"settings.general.font_customization_unified",
+    L"settings.general.font_customization_separate"
 };
 
 static const wchar_t* kNoteFontDigitTargetLabels[] = {
-    L"英字フォントに従う",
-    L"日本語フォントに従う"
+    L"settings.general.font_digit_latin",
+    L"settings.general.font_digit_japanese"
 };
 
 struct GeneralSettingsCtx {
@@ -399,7 +393,6 @@ struct GeneralSettingsCtx {
     HWND chkTouchpadInvertVertical = nullptr;
     HWND chkTouchpadInvertHorizontal = nullptr;
     HWND chkPdfSinglePageMode = nullptr;
-    HWND chkPanMouseWheelZoom = nullptr;
     HWND chkAutoPairBrackets = nullptr;
     HWND chkFullWidthParenCaretInside = nullptr;
     HWND chkFullWidthParenCancelNextLeft = nullptr;
@@ -489,14 +482,9 @@ static int CurrentNoteRenderModeValue(bool enabled, bool math) {
 
 static std::wstring NoteRenderModeLabel(bool enabled, bool math) {
     const int mode = CurrentNoteRenderModeValue(enabled, math);
-    if (IsEnglishUi()) {
-        if (mode == 2) return L"ON + Math";
-        if (mode == 1) return L"ON";
-        return L"OFF";
-    }
-    if (mode == 2) return L"ON + 数式";
-    if (mode == 1) return L"ON";
-    return L"OFF";
+    if (mode == 2) return localization::Text(L"settings.note_render.on_math");
+    if (mode == 1) return localization::Text(L"settings.note_render.on");
+    return localization::Text(L"settings.note_render.off");
 }
 
 static std::wstring NoteRatioLabel(int topPercent) {
@@ -505,7 +493,7 @@ static std::wstring NoteRatioLabel(int topPercent) {
 }
 
 static std::wstring NoteSupSubDistributionLabel(int supPercent) {
-    if (supPercent <= 0) return IsEnglishUi() ? L"Auto" : L"自動";
+    if (supPercent <= 0) return localization::Text(L"settings.general_foundation.9957a2dbbd88");
     return NoteRatioLabel(supPercent);
 }
 
@@ -533,12 +521,12 @@ static std::wstring NoteBackgroundLabel(const std::wstring& source,
     const std::wstring normalized = NormalizeNoteBgSourceUi(source);
     const COLORREF resolved = ResolveNoteBackgroundColor(source, themeName, explicitColor);
     if (normalized == L"theme_current") {
-        if (IsEnglishUi()) {
-            std::wstring name = g_theme.name.empty() ? L"(default)" : g_theme.name;
-            return L"Current theme " + name + L" " + GenHexColorW(resolved);
-        }
-        std::wstring name = g_theme.nameJp.empty() ? (g_theme.name.empty() ? L"(既定)" : g_theme.name) : g_theme.nameJp;
-        return L"現在のテーマ " + name + L" " + GenHexColorW(resolved);
+        std::wstring name = localization::IsEnglishBuild()
+            ? (g_theme.name.empty() ? L"(default)" : g_theme.name)
+            : (g_theme.nameJp.empty() ? (g_theme.name.empty() ? L"(default)" : g_theme.name) : g_theme.nameJp);
+        return localization::Format(L"settings.note_background.current", {
+            { L"NAME", name }, { L"COLOR", GenHexColorW(resolved) }
+        });
     }
     if (normalized == L"theme_named") {
         const ThemeColors* picked = nullptr;
@@ -548,10 +536,10 @@ static std::wstring NoteBackgroundLabel(const std::wstring& source,
                 break;
             }
         }
-        std::wstring name = IsEnglishUi()
+        std::wstring name = localization::IsEnglishBuild()
             ? (picked ? (picked->name.empty() ? themeName : picked->name) : themeName)
             : (picked ? (!picked->nameJp.empty() ? picked->nameJp : picked->name) : themeName);
-        if (name.empty()) name = IsEnglishUi() ? L"(unknown)" : L"(不明)";
+        if (name.empty()) name = localization::Text(L"settings.general_foundation.3d72198bb6e9");
         return name + L" " + GenHexColorW(resolved);
     }
     return GenHexColorW(explicitColor);
@@ -560,17 +548,17 @@ static std::wstring NoteBackgroundLabel(const std::wstring& source,
 static void FillNoteRenderModeCombo(HWND cb, bool enabled, bool math) {
     if (!cb) return;
     SendMessageW(cb, CB_RESETCONTENT, 0, 0);
-    struct Item { const wchar_t* ja; const wchar_t* en; int value; };
+    struct Item { const wchar_t* labelId; int value; };
     const Item items[] = {
-        { L"OFF", L"OFF", 0 },
-        { L"ON", L"ON", 1 },
-        { L"ON + 数式", L"ON + Math", 2 },
+        { L"settings.note_render.off", 0 },
+        { L"settings.note_render.on", 1 },
+        { L"settings.note_render.on_math", 2 },
     };
     const int current = CurrentNoteRenderModeValue(enabled, math);
     int sel = 0;
     for (int i = 0; i < static_cast<int>(std::size(items)); ++i) {
-        const wchar_t* label = IsEnglishUi() ? items[i].en : items[i].ja;
-        int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label)));
+        const std::wstring label = localization::Text(items[i].labelId);
+        int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
         if (idx >= 0) {
             SendMessageW(cb, CB_SETITEMDATA, idx, static_cast<LPARAM>(items[i].value));
             if (items[i].value == current) sel = idx;
@@ -601,7 +589,7 @@ static void FillNoteRatioCombo(HWND cb, int currentPercent, bool withAuto) {
     int sel = 0;
     if (withAuto) {
         int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>((IsEnglishUi() ? L"Auto" : L"自動"))));
+                                                reinterpret_cast<LPARAM>((localization::Text(L"settings.general_foundation.9957a2dbbd88").c_str()))));
         if (idx >= 0) {
             SendMessageW(cb, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
             if (currentPercent <= 0) sel = idx;
@@ -621,7 +609,7 @@ static void FillNoteRatioCombo(HWND cb, int currentPercent, bool withAuto) {
 
 static void UpdateNoteBackgroundButtonLabel(GeneralSettingsCtx* ctx) {
     if (!ctx || !ctx->btnNoteBgCustom) return;
-    std::wstring text = (IsEnglishUi() ? L"Custom color..." : L"カスタム色...")
+    std::wstring text = (localization::Text(L"settings.general_foundation.b2fd77c3e2b0"))
         + std::wstring(L" ") + GenHexColorW(ctx->noteBgCustomColor);
     SetWindowTextW(ctx->btnNoteBgCustom, text.c_str());
 }
@@ -650,9 +638,12 @@ static void FillNoteBackgroundCombo(GeneralSettingsCtx* ctx) {
         NoteBackgroundChoice choice;
         choice.kind = NoteBackgroundChoiceKind::ThemeCurrent;
         choice.color = g_theme.noteBg;
-        choice.label = IsEnglishUi()
-            ? (L"Current theme: " + (g_theme.name.empty() ? L"(default)" : g_theme.name) + L" " + GenHexColorW(choice.color))
-            : (L"現在のテーマ: " + (g_theme.nameJp.empty() ? (g_theme.name.empty() ? L"(既定)" : g_theme.name) : g_theme.nameJp) + L" " + GenHexColorW(choice.color));
+        std::wstring name = localization::IsEnglishBuild()
+            ? (g_theme.name.empty() ? L"(default)" : g_theme.name)
+            : (g_theme.nameJp.empty() ? (g_theme.name.empty() ? L"(default)" : g_theme.name) : g_theme.nameJp);
+        choice.label = localization::Format(L"settings.note_background.current_colon", {
+            { L"NAME", name }, { L"COLOR", GenHexColorW(choice.color) }
+        });
         int idx = addChoice(choice);
         if (normalized == L"theme_current") sel = idx;
     }
@@ -661,25 +652,25 @@ static void FillNoteBackgroundCombo(GeneralSettingsCtx* ctx) {
         choice.kind = NoteBackgroundChoiceKind::ThemeNamed;
         choice.themeName = theme.name;
         choice.color = theme.noteBg;
-        std::wstring name = IsEnglishUi()
-            ? (theme.name.empty() ? L"(unnamed)" : theme.name)
-            : (!theme.nameJp.empty() ? theme.nameJp : (theme.name.empty() ? L"(名称なし)" : theme.name));
-        choice.label = (IsEnglishUi() ? L"Theme: " : L"テーマ: ") + name + L" " + GenHexColorW(choice.color);
+        std::wstring name = localization::IsEnglishBuild()
+            ? (theme.name.empty() ? localization::Text(L"settings.note_background.unnamed") : theme.name)
+            : (!theme.nameJp.empty() ? theme.nameJp : (theme.name.empty() ? localization::Text(L"settings.note_background.unnamed") : theme.name));
+        choice.label = (localization::Text(L"settings.general_foundation.54effd4efada")) + name + L" " + GenHexColorW(choice.color);
         int idx = addChoice(choice);
         if (normalized == L"theme_named" && theme.name == g_config.noteBgThemeName) sel = idx;
     }
-    struct Preset { COLORREF color; const wchar_t* ja; const wchar_t* en; };
+    struct Preset { COLORREF color; const wchar_t* labelId; };
     const Preset presets[] = {
-        { RGB(255, 255, 255), L"白", L"White" },
-        { RGB(255, 250, 235), L"クリーム", L"Cream" },
-        { RGB(245, 245, 245), L"薄グレー", L"Light gray" },
-        { RGB(255, 255, 230), L"薄イエロー", L"Soft yellow" },
+        { RGB(255, 255, 255), L"settings.note_background.white" },
+        { RGB(255, 250, 235), L"settings.note_background.cream" },
+        { RGB(245, 245, 245), L"settings.note_background.light_gray" },
+        { RGB(255, 255, 230), L"settings.note_background.soft_yellow" },
     };
     for (const auto& preset : presets) {
         NoteBackgroundChoice choice;
         choice.kind = NoteBackgroundChoiceKind::Explicit;
         choice.color = preset.color;
-        choice.label = std::wstring(IsEnglishUi() ? preset.en : preset.ja) + L" " + GenHexColorW(choice.color);
+        choice.label = localization::Text(preset.labelId) + L" " + GenHexColorW(choice.color);
         int idx = addChoice(choice);
         if (normalized == L"explicit" && explicitColor == preset.color) sel = idx;
     }
@@ -688,7 +679,7 @@ static void FillNoteBackgroundCombo(GeneralSettingsCtx* ctx) {
         choice.kind = NoteBackgroundChoiceKind::Explicit;
         choice.color = explicitColor;
         choice.isCustom = true;
-        choice.label = (IsEnglishUi() ? L"Custom color " : L"カスタム色 ") + GenHexColorW(choice.color);
+        choice.label = (localization::Text(L"settings.general_foundation.c59ea9ea2ae1")) + GenHexColorW(choice.color);
         int idx = addChoice(choice);
         if (normalized == L"explicit") {
             bool isPreset = false;
@@ -873,9 +864,7 @@ static void LayoutGeneralSettingsChrome(HWND hWnd, GeneralSettingsCtx* ctx) {
     int sectionButtonTop = pad;
     int headerH = 0;
     if (!ctx->embedded) {
-        std::wstring subtitle = IsEnglishUi()
-            ? L"Use the buttons below or the list on the left to move. Changes apply only when you press Apply."
-            : L"下のボタンまたは左のカテゴリで移動できます。変更は「反映」を押すまで反映されません。";
+        std::wstring subtitle = localization::Text(L"settings.general_foundation.151942ba553f");
         subtitleH = std::max(FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 4),
                              MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
         sectionButtonH = std::max(ScaleY(hWnd, 28), rowH);
@@ -937,36 +926,23 @@ constexpr int kThemeEditBtnBase = 6200;
 constexpr int kThemeEditBtnCountMax = 64;
 
 struct ThemeColorFieldDesc {
-    const wchar_t* en;
-    const wchar_t* ja;
+    const wchar_t* labelId;
     COLORREF ThemeColors::*member;
 };
 
 static const ThemeColorFieldDesc kThemeColorFields[] = {
-    { L"Window background",  L"ウィンドウ背景",     &ThemeColors::windowBg },
-    { L"Window text",        L"ウィンドウ文字",     &ThemeColors::windowText },
-    { L"Panel background",   L"パネル背景",         &ThemeColors::panelBg },
-    { L"Panel text",         L"パネル文字",         &ThemeColors::panelText },
-    { L"Menu background",    L"メニュー背景",       &ThemeColors::menuBg },
-    { L"Menu text",          L"メニュー文字",       &ThemeColors::menuText },
-    { L"Menu selection bg",  L"メニュー選択背景",   &ThemeColors::menuSelBg },
-    { L"Menu selection text",L"メニュー選択文字",   &ThemeColors::menuSelText },
-    { L"Toolbar background", L"ツールバー背景",     &ThemeColors::toolbarBg },
-    { L"Toolbar text",       L"ツールバー文字",     &ThemeColors::toolbarText },
-    { L"Button background",  L"ボタン背景",         &ThemeColors::buttonBg },
-    { L"Button text",        L"ボタン文字",         &ThemeColors::buttonText },
-    { L"Button border",      L"ボタン枠",           &ThemeColors::buttonBorder },
-    { L"Button hot",         L"ボタンホバー",       &ThemeColors::buttonHot },
-    { L"Button pressed",     L"ボタン押下",         &ThemeColors::buttonPressed },
-    { L"Splitter background",L"スプリッター背景",   &ThemeColors::splitterBg },
-    { L"Splitter line",      L"スプリッター線",     &ThemeColors::splitterLine },
-    { L"PDF background",     L"PDF背景",            &ThemeColors::pdfBg },
-    { L"PDF page bg",        L"PDFページ背景",      &ThemeColors::pdfPageBg },
-    { L"Note background",    L"ノート背景",         &ThemeColors::noteBg },
-    { L"Note text",          L"ノート文字",         &ThemeColors::noteText },
-    { L"Selection background",L"選択背景",          &ThemeColors::selectionBg },
-    { L"Selection text",     L"選択文字",           &ThemeColors::selectionText },
-    { L"Accent",             L"アクセント",         &ThemeColors::accent },
+    { L"settings.theme_editor.window_bg", &ThemeColors::windowBg }, { L"settings.theme_editor.window_text", &ThemeColors::windowText },
+    { L"settings.theme_editor.panel_bg", &ThemeColors::panelBg }, { L"settings.theme_editor.panel_text", &ThemeColors::panelText },
+    { L"settings.theme_editor.menu_bg", &ThemeColors::menuBg }, { L"settings.theme_editor.menu_text", &ThemeColors::menuText },
+    { L"settings.theme_editor.menu_sel_bg", &ThemeColors::menuSelBg }, { L"settings.theme_editor.menu_sel_text", &ThemeColors::menuSelText },
+    { L"settings.theme_editor.toolbar_bg", &ThemeColors::toolbarBg }, { L"settings.theme_editor.toolbar_text", &ThemeColors::toolbarText },
+    { L"settings.theme_editor.button_bg", &ThemeColors::buttonBg }, { L"settings.theme_editor.button_text", &ThemeColors::buttonText },
+    { L"settings.theme_editor.button_border", &ThemeColors::buttonBorder }, { L"settings.theme_editor.button_hot", &ThemeColors::buttonHot },
+    { L"settings.theme_editor.button_pressed", &ThemeColors::buttonPressed }, { L"settings.theme_editor.splitter_bg", &ThemeColors::splitterBg },
+    { L"settings.theme_editor.splitter_line", &ThemeColors::splitterLine }, { L"settings.theme_editor.pdf_bg", &ThemeColors::pdfBg },
+    { L"settings.theme_editor.pdf_page_bg", &ThemeColors::pdfPageBg }, { L"settings.theme_editor.note_bg", &ThemeColors::noteBg },
+    { L"settings.theme_editor.note_text", &ThemeColors::noteText }, { L"settings.theme_editor.selection_bg", &ThemeColors::selectionBg },
+    { L"settings.theme_editor.selection_text", &ThemeColors::selectionText }, { L"settings.theme_editor.accent", &ThemeColors::accent },
 };
 
 struct ThemeEditCtx {
@@ -1025,7 +1001,6 @@ static LRESULT CALLBACK ThemeEditDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
         ApplyThemeToDialog(hWnd);
 
-        const bool isEn = IsEnglishUi();
         int pad = ScaleY(hWnd, 12);
         int gapY = ScaleY(hWnd, 8);
         int rowH = std::max(ScaleY(hWnd, 26), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 8));
@@ -1041,7 +1016,9 @@ static LRESULT CALLBACK ThemeEditDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         int labelW = std::max(0, colW - btnW - gapX);
 
         int y = pad;
-        std::wstring title = (isEn ? L"Theme editor: " : L"テーマ編集: ") + FormatThemeLabel(ctx->editing);
+        std::wstring title = localization::Format(L"settings.theme_editor.title", {
+            { L"NAME", FormatThemeLabel(ctx->editing) }
+        });
         HWND lblTitle = CreateWindowExW(0, L"STATIC", title.c_str(),
                                         WS_CHILD | WS_VISIBLE,
                                         pad, y, contentW, rowH, hWnd, nullptr, g_hInst, nullptr);
@@ -1055,10 +1032,10 @@ static LRESULT CALLBACK ThemeEditDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                 size_t i = r + rows * c;
                 if (i >= count) continue;
                 const auto& f = kThemeColorFields[i];
-                const wchar_t* label = isEn ? f.en : f.ja;
+                const std::wstring label = localization::Text(f.labelId);
 
                 int baseX = pad + static_cast<int>(c) * (colW + colGap);
-                HWND lbl = CreateWindowExW(0, L"STATIC", label,
+                HWND lbl = CreateWindowExW(0, L"STATIC", label.c_str(),
                                            WS_CHILD | WS_VISIBLE,
                                            baseX, y, labelW, rowH, hWnd, nullptr, g_hInst, nullptr);
                 SetUIFont(lbl);
@@ -1081,7 +1058,7 @@ static LRESULT CALLBACK ThemeEditDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                  x, y + ScaleY(hWnd, 6), okW, btnH, hWnd,
                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
-            HWND cancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel(),
+            HWND cancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel().c_str(),
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                      x + okW + ScaleY(hWnd, 12), y + ScaleY(hWnd, 6), cancelW, btnH, hWnd,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
@@ -1236,11 +1213,12 @@ static bool ShowThemeEditDialog(HWND owner, const std::wstring& themeName, Theme
     int wPx = MulDiv(kThemeEditDlgWidth, dpi, 96);
     int hPx = MulDiv(kThemeEditDlgHeight, dpi, 96);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName,
-                             IsEnglishUi() ? L"Theme editor" : L"テーマ編集",
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE | WS_VSCROLL,
+                             localization::Text(L"settings.general_foundation.be94c18e20d3").c_str(),
+                             WS_CAPTION | WS_POPUPWINDOW | WS_VSCROLL,
                              CW_USEDEFAULT, CW_USEDEFAULT, wPx, hPx,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return false;
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
 
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);

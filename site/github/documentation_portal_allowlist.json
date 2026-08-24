@@ -20,7 +20,9 @@
       { "source": "docs/images/app_overview.png", "destination": "docs/images/app_overview.png" }
     ],
     "trees": [
-      { "source": "introduction", "destination": "introduction" }
+      { "source": "introduction", "destination": "introduction" },
+      { "source": "docs/ja", "destination": "docs/ja" },
+      { "source": "docs/en", "destination": "docs/en" }
     ]
   },
   "pages_submission": {

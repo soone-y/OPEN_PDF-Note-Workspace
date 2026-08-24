@@ -35,6 +35,12 @@ struct NoteUiSnapshot {
 
 void RecomputeMathFromNote();
 void LoadNoteFile(HWND hWnd, const std::wstring& path);
+// Keep the rendered note visible after an open/focus command until a text
+// editing input begins.
+void PreserveRenderedNoteOpeningView();
+// Emits focus, selection, and raw-line state to the opt-in preview trace.
+// No note text or full path is included.
+void TraceCurrentNoteFocusState(const wchar_t* origin);
 void ClearNoteEditorSilently(HWND hWnd, const std::wstring& nextNotePath = L"");
 bool SaveNoteFile(HWND hWnd);
 void ClearCurrentNoteUndoHistory();

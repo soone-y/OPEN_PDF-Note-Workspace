@@ -2,6 +2,8 @@
 #include "theme/built_in_theme.h"
 #include "clrop/json.h"
 #include "core/atomic_write.h"
+#include "core/localization.h"
+#include "core/secure_memory.h"
 #include "resources/app_resource.h"
 #include "fpdfview.h"
 #include "fpdf_text.h"
@@ -632,6 +634,19 @@ std::wstring Utf8ToWideLocal(const std::string& utf8) {
     return out;
 }
 
+std::string WideToUtf8Local(const std::wstring& wide) {
+    if (wide.empty()) return {};
+    const int len = WideCharToMultiByte(CP_UTF8, 0,
+                                        wide.data(), static_cast<int>(wide.size()),
+                                        nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string out(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0,
+                        wide.data(), static_cast<int>(wide.size()),
+                        out.data(), len, nullptr, nullptr);
+    return out;
+}
+
 std::wstring QuoteArg(const std::wstring& value) {
     std::wstring out = L"\"";
     for (wchar_t ch : value) {
@@ -914,22 +929,22 @@ LRESULT CALLBACK OpenPathPromptWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
         state = reinterpret_cast<OpenPathPromptState*>(create->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-        CreateWindowExW(0, L"STATIC", L"PDF / CLROP ファイルのパス",
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.pdf.open_path.label").c_str(),
                         WS_CHILD | WS_VISIBLE, 12, 10, 584, 20,
                         hwnd, nullptr, create->hInstance, nullptr);
         state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", state->initial.c_str(),
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                       12, 34, 584, 25, hwnd,
                                       reinterpret_cast<HMENU>(101), create->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"OS標準で開く",
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.pdf.open_path.use_system_picker").c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         12, 72, 120, 28, hwnd,
                         reinterpret_cast<HMENU>(102), create->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"開く",
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.pdf.open_path.open").c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                         412, 72, 86, 28, hwnd,
                         reinterpret_cast<HMENU>(IDOK), create->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"キャンセル",
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.common.cancel").c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         510, 72, 86, 28, hwnd,
                         reinterpret_cast<HMENU>(IDCANCEL), create->hInstance, nullptr);
@@ -988,7 +1003,7 @@ std::optional<std::wstring> PromptLocalOpenPath(HWND owner) {
     wc.lpszClassName = L"PdfReadonlyViewerOpenPathPrompt";
     RegisterClassW(&wc);
     if (owner) EnableWindow(owner, FALSE);
-    HWND prompt = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"読み込むファイルを開く",
+    HWND prompt = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, localization::Text(L"readonly.pdf.open_path.title").c_str(),
                                   WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 624, 146,
                                   owner, nullptr, instance, &state);
@@ -1061,7 +1076,7 @@ std::optional<std::wstring> PromptNativeOpenPath(HWND owner) {
         options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST;
         dialog->SetOptions(options);
     }
-    dialog->SetTitle(L"読み込むファイルを開く");
+    dialog->SetTitle(localization::Text(L"readonly.pdf.open_path.title").c_str());
     COMDLG_FILTERSPEC filters[] = {
         { L"PDF / CLROP", L"*.pdf;*.clrop" },
         { L"PDF", L"*.pdf" },
@@ -1154,14 +1169,12 @@ void UpdatePageRangePrompt(HWND hwnd, PageRangePromptState* state, bool showErro
     const UINT start = GetDlgItemInt(hwnd, 201, &startOk, FALSE);
     const UINT end = GetDlgItemInt(hwnd, 202, &endOk, FALSE);
     if (!startOk || !endOk || start == 0 || end == 0 || start > end || end > static_cast<UINT>(state->pageCount)) {
-        SetWindowTextW(state->summary, showError ? L"1 から総ページ数までの連続範囲を指定してください。" : L"開始・終了ページを指定してください。");
+        SetWindowTextW(state->summary, localization::Text(showError ? L"readonly.pdf.page_range.invalid" : L"readonly.pdf.page_range.prompt").c_str());
         return;
     }
     const UINT count = end - start + 1;
     SetWindowTextW(state->summary,
-                   (L"全 " + std::to_wstring(state->pageCount) + L" ページ中、" +
-                    std::to_wstring(start) + L" ～ " + std::to_wstring(end) + L" ページ（" +
-                    std::to_wstring(count) + L" ページ）を連続表示します。範囲外は描画しません。").c_str());
+                   localization::Format(L"readonly.pdf.page_range.summary", {{L"TOTAL", std::to_wstring(state->pageCount)}, {L"START", std::to_wstring(start)}, {L"END", std::to_wstring(end)}, {L"COUNT", std::to_wstring(count)}}).c_str());
 }
 
 LRESULT CALLBACK PageRangePromptWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1171,23 +1184,23 @@ LRESULT CALLBACK PageRangePromptWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
         state = reinterpret_cast<PageRangePromptState*>(create->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-        CreateWindowExW(0, L"STATIC", L"表示するページの連続範囲", WS_CHILD | WS_VISIBLE,
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.pdf.page_range.label").c_str(), WS_CHILD | WS_VISIBLE,
                         14, 12, 390, 20, hwnd, nullptr, create->hInstance, nullptr);
-        CreateWindowExW(0, L"STATIC", L"開始", WS_CHILD | WS_VISIBLE,
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.pdf.page_range.start").c_str(), WS_CHILD | WS_VISIBLE,
                         14, 44, 42, 22, hwnd, nullptr, create->hInstance, nullptr);
         HWND start = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", std::to_wstring(state->firstPage).c_str(),
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
                                      58, 40, 86, 26, hwnd, reinterpret_cast<HMENU>(201), create->hInstance, nullptr);
-        CreateWindowExW(0, L"STATIC", L"終了", WS_CHILD | WS_VISIBLE,
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.pdf.page_range.end").c_str(), WS_CHILD | WS_VISIBLE,
                         162, 44, 42, 22, hwnd, nullptr, create->hInstance, nullptr);
         CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", std::to_wstring(state->lastPage).c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
                         206, 40, 86, 26, hwnd, reinterpret_cast<HMENU>(202), create->hInstance, nullptr);
         state->summary = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
                                          14, 82, 500, 44, hwnd, nullptr, create->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"この範囲を表示", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.pdf.page_range.show").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                         296, 138, 118, 28, hwnd, reinterpret_cast<HMENU>(IDOK), create->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"キャンセル", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         426, 138, 90, 28, hwnd, reinterpret_cast<HMENU>(IDCANCEL), create->hInstance, nullptr);
         UpdatePageRangePrompt(hwnd, state);
         if (start) SetFocus(start);
@@ -1243,7 +1256,7 @@ bool PromptPageRange(HWND owner, int pageCount, int& firstPage, int& lastPage) {
     wc.lpszClassName = L"PdfReadonlyViewerPageRangePrompt";
     RegisterClassW(&wc);
     EnableWindow(owner, FALSE);
-    HWND prompt = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"PDF の表示範囲",
+    HWND prompt = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, localization::Text(L"readonly.pdf.page_range.title").c_str(),
                                   WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 540, 210,
                                   owner, nullptr, instance, &state);
@@ -1295,11 +1308,414 @@ void UpdateStatusFromPdf() {
                      std::to_wstring(g_state.currentPage + 1) +
                      L" / " +
                      std::to_wstring(g_state.pdf->pageCount) +
-                     L"  (表示 " + std::to_wstring(FirstDisplayedPage() + 1) + L"～" +
-                     std::to_wstring(LastDisplayedPage() + 1) + L")";
+                     localization::Format(L"readonly.pdf.status_range", {{L"FIRST", std::to_wstring(FirstDisplayedPage() + 1)}, {L"LAST", std::to_wstring(LastDisplayedPage() + 1)}});
 }
 
-bool LoadPdfReadOnly(const std::wstring& path, std::unique_ptr<LoadedPdf>& out, std::wstring& status) {
+struct PdfPasswordPromptState {
+    HWND owner = nullptr;
+    HWND panel = nullptr;
+    HWND label = nullptr;
+    HWND edit = nullptr;
+    HWND okButton = nullptr;
+    HWND cancelButton = nullptr;
+    RECT panelRect{};
+    std::wstring message;
+    std::wstring result;
+    DWORD createdMessageTime = 0;
+    ULONGLONG createdTick = 0;
+    bool accepted = false;
+    bool done = false;
+};
+
+int PasswordPromptScale(HWND hwnd, int pxAt96Dpi) {
+    HDC hdc = hwnd ? GetDC(hwnd) : nullptr;
+    const int dpi = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc && hwnd) ReleaseDC(hwnd, hdc);
+    return MulDiv(pxAt96Dpi, dpi > 0 ? dpi : 96, 96);
+}
+
+bool IsPasswordPromptMouseDown(UINT message) {
+    switch (message) {
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+    case WM_XBUTTONDOWN:
+    case WM_NCLBUTTONDOWN:
+    case WM_NCRBUTTONDOWN:
+    case WM_NCMBUTTONDOWN:
+    case WM_NCXBUTTONDOWN:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool IsInitialPasswordPromptMouseMessage(const PdfPasswordPromptState* state, const MSG& msg) {
+    if (!state || !IsPasswordPromptMouseDown(msg.message)) return false;
+    if (state->createdMessageTime != 0 && msg.time <= state->createdMessageTime) {
+        return true;
+    }
+    return state->createdTick != 0 && (GetTickCount64() - state->createdTick) < 150;
+}
+
+bool IsBlockedPasswordPromptBackgroundInput(const MSG& msg) {
+    switch (msg.message) {
+    case WM_COMMAND:
+    case WM_SYSCOMMAND:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+    case WM_CHAR:
+    case WM_SYSCHAR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool IsPasswordPromptControl(const PdfPasswordPromptState* state, HWND hwnd) {
+    return state && hwnd && (hwnd == state->panel || hwnd == state->label ||
+                             hwnd == state->edit || hwnd == state->okButton ||
+                             hwnd == state->cancelButton || IsChild(state->panel, hwnd));
+}
+
+bool IsPasswordPromptFocusableControl(const PdfPasswordPromptState* state, HWND hwnd) {
+    return state && hwnd && (hwnd == state->panel || hwnd == state->edit ||
+                             hwnd == state->okButton || hwnd == state->cancelButton ||
+                             IsChild(state->panel, hwnd));
+}
+
+bool IsPasswordPromptPoint(const PdfPasswordPromptState* state, POINT screenPt) {
+    return state && PtInRect(&state->panelRect, screenPt) != FALSE;
+}
+
+void ClearPasswordPromptEdit(PdfPasswordPromptState* state) {
+    if (!state || !state->edit || !IsWindow(state->edit)) return;
+    SendMessageW(state->edit, EM_SETSEL, 0, -1);
+    SendMessageW(state->edit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    SetWindowTextW(state->edit, L"");
+}
+
+void CancelPasswordPrompt(PdfPasswordPromptState* state) {
+    if (!state) return;
+    state->accepted = false;
+    state->done = true;
+}
+
+bool AcceptPasswordPrompt(PdfPasswordPromptState* state) {
+    if (!state || !state->edit || !IsWindow(state->edit)) return false;
+    const int textLength = GetWindowTextLengthW(state->edit);
+    std::wstring value;
+    if (textLength > 0) {
+        value.resize(static_cast<size_t>(textLength) + 1);
+        const int copied = GetWindowTextW(state->edit, value.data(), textLength + 1);
+        value.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
+    }
+    SecureWideStringScope valueScope(&value);
+    if (value.empty()) {
+        g_state.status = localization::Text(L"dialog.input.enter_password");
+        if (state->owner && IsWindow(state->owner)) InvalidateRect(state->owner, nullptr, FALSE);
+        return false;
+    }
+    SecureClearString(state->result);
+    state->result = std::move(value);
+    ClearPasswordPromptEdit(state);
+    state->accepted = true;
+    state->done = true;
+    return true;
+}
+
+LRESULT CALLBACK PdfPasswordPromptPanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    PdfPasswordPromptState* state =
+        reinterpret_cast<PdfPasswordPromptState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_COMMAND: {
+        const WORD id = LOWORD(wParam);
+        if (id == IDOK) {
+            AcceptPasswordPrompt(state);
+            return 0;
+        }
+        if (id == IDCANCEL) {
+            CancelPasswordPrompt(state);
+            return 0;
+        }
+        break;
+    }
+    case WM_SETFOCUS:
+        if (state && state->edit && IsWindow(state->edit)) {
+            SetFocus(state->edit);
+            return 0;
+        }
+        break;
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+        return 1;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+        HBRUSH border = CreateSolidBrush(RGB(210, 214, 220));
+        if (border) {
+            FrameRect(hdc, &rc, border);
+            DeleteObject(border);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(hdc, RGB(32, 32, 32));
+        SetBkColor(hdc, RGB(255, 255, 255));
+        return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
+    }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void EnsurePdfPasswordPromptPanelClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = PdfPasswordPromptPanelProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
+    wc.lpszClassName = L"ReadonlyPdfPasswordPromptPanel";
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+void LayoutPdfPasswordPrompt(PdfPasswordPromptState* state) {
+    if (!state || !state->owner || !IsWindow(state->owner)) return;
+    RECT host{};
+    GetWindowRect(state->owner, &host);
+    const int hostW = static_cast<int>(host.right - host.left);
+    const int hostH = static_cast<int>(host.bottom - host.top);
+    if (hostW <= 0 || hostH <= 0) return;
+    const int margin = PasswordPromptScale(state->owner, 10);
+    const int panelW = std::min(PasswordPromptScale(state->owner, 392),
+                                std::max(PasswordPromptScale(state->owner, 260),
+                                         hostW - margin * 2));
+    const int panelH = PasswordPromptScale(state->owner, 170);
+    const int x = host.left + (hostW - panelW) / 2;
+    const int y = host.top + (hostH - panelH) / 2;
+    state->panelRect = { x, y, x + panelW, y + panelH };
+
+    const int pad = PasswordPromptScale(state->owner, 10);
+    const int editH = PasswordPromptScale(state->owner, 24);
+    const int buttonW = PasswordPromptScale(state->owner, 80);
+    const int buttonH = PasswordPromptScale(state->owner, 26);
+    const int buttonGap = PasswordPromptScale(state->owner, 20);
+    const int contentW = panelW - pad * 2;
+    const int buttonY = PasswordPromptScale(state->owner, 100);
+    const int buttonsW = buttonW * 2 + buttonGap;
+    const int buttonX = (panelW - buttonsW) / 2;
+
+    if (state->panel) {
+        SetWindowPos(state->panel, HWND_TOP, x, y, panelW, panelH,
+                     SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+    if (state->label) {
+        SetWindowPos(state->label, HWND_TOP, pad, pad, contentW,
+                     PasswordPromptScale(state->owner, 48), SWP_NOACTIVATE);
+    }
+    if (state->edit) {
+        SetWindowPos(state->edit, HWND_TOP, pad, PasswordPromptScale(state->owner, 64),
+                     contentW, editH, SWP_NOACTIVATE);
+    }
+    if (state->okButton) {
+        SetWindowPos(state->okButton, HWND_TOP, buttonX, buttonY, buttonW, buttonH, SWP_NOACTIVATE);
+    }
+    if (state->cancelButton) {
+        SetWindowPos(state->cancelButton, HWND_TOP, buttonX + buttonW + buttonGap, buttonY,
+                     buttonW, buttonH, SWP_NOACTIVATE);
+    }
+}
+
+bool CreatePdfPasswordPrompt(PdfPasswordPromptState* state, HWND owner) {
+    if (!state || !owner || !IsWindow(owner)) return false;
+    state->owner = owner;
+    state->createdMessageTime = GetMessageTime();
+    state->createdTick = GetTickCount64();
+    EnsurePdfPasswordPromptPanelClass();
+    const HINSTANCE instance = GetModuleHandleW(nullptr);
+    state->panel = CreateWindowExW(WS_EX_TOOLWINDOW, L"ReadonlyPdfPasswordPromptPanel", L"",
+                                   WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
+                                   0, 0, 1, 1, owner, nullptr, instance, nullptr);
+    if (!state->panel) return false;
+    SetWindowLongPtrW(state->panel, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    state->label = CreateWindowExW(0, L"STATIC", state->message.c_str(),
+                                   WS_CHILD | WS_VISIBLE,
+                                   0, 0, 1, 1, state->panel, nullptr, instance, nullptr);
+    state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                  WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
+                                  0, 0, 1, 1, state->panel,
+                                  reinterpret_cast<HMENU>(101), instance, nullptr);
+    state->okButton = CreateWindowExW(0, L"BUTTON", L"OK",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                      0, 0, 1, 1, state->panel,
+                                      reinterpret_cast<HMENU>(IDOK), instance, nullptr);
+    state->cancelButton = CreateWindowExW(0, L"BUTTON",
+                                          localization::Text(L"readonly.common.cancel").c_str(),
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                          0, 0, 1, 1, state->panel,
+                                          reinterpret_cast<HMENU>(IDCANCEL), instance, nullptr);
+    if (!state->label || !state->edit || !state->okButton || !state->cancelButton) {
+        ClearPasswordPromptEdit(state);
+        HWND controls[] = { state->cancelButton, state->okButton, state->edit, state->label, state->panel };
+        for (HWND control : controls) {
+            if (control && IsWindow(control)) DestroyWindow(control);
+        }
+        return false;
+    }
+    HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    HWND fontControls[] = { state->label, state->edit, state->okButton, state->cancelButton };
+    for (HWND control : fontControls) {
+        if (font) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    }
+    SendMessageW(state->edit, EM_SETPASSWORDCHAR, static_cast<WPARAM>(L'*'), 0);
+    LayoutPdfPasswordPrompt(state);
+    SetFocus(state->edit);
+    return true;
+}
+
+void DestroyPdfPasswordPrompt(PdfPasswordPromptState* state) {
+    if (!state) return;
+    ClearPasswordPromptEdit(state);
+    HWND controls[] = { state->cancelButton, state->okButton, state->edit, state->label, state->panel };
+    for (HWND control : controls) {
+        if (control && IsWindow(control)) DestroyWindow(control);
+    }
+    state->panel = nullptr;
+    state->label = nullptr;
+    state->edit = nullptr;
+    state->okButton = nullptr;
+    state->cancelButton = nullptr;
+    if (state->owner && IsWindow(state->owner)) InvalidateRect(state->owner, nullptr, FALSE);
+}
+
+POINT CurrentPromptMessageScreenPoint() {
+    const DWORD pos = GetMessagePos();
+    return POINT{ GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
+}
+
+void RunPdfPasswordPromptLoop(PdfPasswordPromptState* state) {
+    if (!state || !state->owner) return;
+    MSG msg{};
+    while (!state->done) {
+        const BOOL gotMessage = GetMessageW(&msg, nullptr, 0, 0);
+        if (gotMessage == -1) return;
+        if (gotMessage == 0) {
+            PostQuitMessage(static_cast<int>(msg.wParam));
+            return;
+        }
+        if (msg.hwnd == state->owner && msg.message == WM_SIZE) {
+            LayoutPdfPasswordPrompt(state);
+        }
+        if (msg.message == WM_ACTIVATEAPP && msg.wParam == FALSE) {
+            CancelPasswordPrompt(state);
+            continue;
+        }
+        if (msg.message == WM_KILLFOCUS && IsPasswordPromptFocusableControl(state, msg.hwnd)) {
+            HWND nextFocus = reinterpret_cast<HWND>(msg.wParam);
+            if (!IsPasswordPromptFocusableControl(state, nextFocus)) {
+                CancelPasswordPrompt(state);
+                continue;
+            }
+        }
+        if (msg.message == WM_COMMAND) {
+            HWND commandHwnd = reinterpret_cast<HWND>(msg.lParam);
+            if (commandHwnd == state->okButton) {
+                AcceptPasswordPrompt(state);
+                continue;
+            }
+            if (commandHwnd == state->cancelButton) {
+                CancelPasswordPrompt(state);
+                continue;
+            }
+        }
+        if (msg.message == WM_KEYDOWN) {
+            if (msg.wParam == VK_RETURN && msg.hwnd == state->edit) {
+                AcceptPasswordPrompt(state);
+                continue;
+            }
+            if (msg.wParam == VK_ESCAPE &&
+                (msg.hwnd == state->owner || IsPasswordPromptControl(state, msg.hwnd))) {
+                CancelPasswordPrompt(state);
+                continue;
+            }
+            if (msg.wParam == VK_TAB && IsPasswordPromptControl(state, msg.hwnd)) {
+                const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                HWND order[] = { state->edit, state->okButton, state->cancelButton };
+                int index = 0;
+                for (int i = 0; i < 3; ++i) {
+                    if (msg.hwnd == order[i]) {
+                        index = i;
+                        break;
+                    }
+                }
+                index = shift ? (index + 2) % 3 : (index + 1) % 3;
+                SetFocus(order[index]);
+                continue;
+            }
+        }
+        if (IsPasswordPromptMouseDown(msg.message) &&
+            !IsPasswordPromptControl(state, msg.hwnd) &&
+            IsPasswordPromptPoint(state, CurrentPromptMessageScreenPoint())) {
+            continue;
+        }
+        if (IsPasswordPromptMouseDown(msg.message) &&
+            !IsPasswordPromptControl(state, msg.hwnd) &&
+            !IsPasswordPromptPoint(state, CurrentPromptMessageScreenPoint())) {
+            if (IsInitialPasswordPromptMouseMessage(state, msg)) {
+                continue;
+            }
+            CancelPasswordPrompt(state);
+            continue;
+        }
+        if (!IsPasswordPromptControl(state, msg.hwnd) &&
+            msg.hwnd != state->owner &&
+            IsBlockedPasswordPromptBackgroundInput(msg)) {
+            continue;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
+
+bool PromptPdfPasswordReadOnly(HWND owner,
+                               const std::wstring& path,
+                               bool previousPasswordFailed,
+                               std::wstring& outPassword) {
+    std::filesystem::path filePath(path);
+    const std::wstring fileName = filePath.filename().empty() ? path : filePath.filename().wstring();
+    PdfPasswordPromptState state;
+    state.message = previousPasswordFailed
+        ? localization::Format(L"pdf.password.retry_message", {{L"FILE", fileName}})
+        : localization::Format(L"pdf.password.required_message", {{L"FILE", fileName}});
+    HWND previousFocus = GetFocus();
+    if (!CreatePdfPasswordPrompt(&state, owner)) return false;
+    RunPdfPasswordPromptLoop(&state);
+    DestroyPdfPasswordPrompt(&state);
+    if (previousFocus && IsWindow(previousFocus)) SetFocus(previousFocus);
+    if (!state.accepted) {
+        SecureClearString(state.result);
+        return false;
+    }
+    SecureClearString(outPassword);
+    outPassword = state.result;
+    SecureClearString(state.result);
+    return true;
+}
+
+bool LoadPdfReadOnly(HWND owner, const std::wstring& path, std::unique_ptr<LoadedPdf>& out, std::wstring& status) {
     out.reset();
     if (path.empty()) {
         status = L"PDF / CLROP read-only viewer";
@@ -1315,10 +1731,43 @@ bool LoadPdfReadOnly(const std::wstring& path, std::unique_ptr<LoadedPdf>& out, 
     }
     std::string utf8_path(static_cast<size_t>(utf8_size), '\0');
     WideCharToMultiByte(CP_UTF8, 0, path.c_str(), static_cast<int>(path.size()), utf8_path.data(), utf8_size, nullptr, nullptr);
-    // Keep the source file on disk: do not duplicate a potentially huge PDF in process memory.
-    pdf->document = FPDF_LoadDocument(utf8_path.c_str(), nullptr);
-    if (!pdf->document) {
-        status = L"Could not open PDF (" + PdfiumErrorText(FPDF_GetLastError()) + L"): " +
+
+    std::string passwordUtf8;
+    SecureStringScope passwordUtf8Scope(&passwordUtf8);
+    int passwordPromptCount = 0;
+    for (;;) {
+        // Keep the source file on disk: do not duplicate a potentially huge PDF in process memory.
+        pdf->document = FPDF_LoadDocument(utf8_path.c_str(),
+                                          passwordUtf8.empty() ? nullptr : passwordUtf8.c_str());
+        if (pdf->document) {
+            break;
+        }
+
+        const unsigned long err = FPDF_GetLastError();
+        if (err == FPDF_ERR_PASSWORD) {
+            if (passwordPromptCount < 3) {
+                std::wstring password;
+                SecureWideStringScope passwordScope(&password);
+                if (!PromptPdfPasswordReadOnly(owner, path, !passwordUtf8.empty(), password)) {
+                    status = L"Password entry canceled: " + FileNameFromPath(path);
+                    return false;
+                }
+                std::string nextPasswordUtf8 = WideToUtf8Local(password);
+                SecureStringScope nextPasswordScope(&nextPasswordUtf8);
+                if (nextPasswordUtf8.empty()) {
+                    status = L"Could not encode PDF password: " + FileNameFromPath(path);
+                    return false;
+                }
+                SecureClearString(passwordUtf8);
+                passwordUtf8 = std::move(nextPasswordUtf8);
+                ++passwordPromptCount;
+                continue;
+            }
+            status = localization::Text(L"pdf.open.password_attempts_exhausted");
+            return false;
+        }
+
+        status = L"Could not open PDF (" + PdfiumErrorText(err) + L"): " +
                  FileNameFromPath(path);
         return false;
     }
@@ -1511,7 +1960,7 @@ void TryReloadChangedPdf(HWND hwnd) {
 
     std::unique_ptr<LoadedPdf> next;
     std::wstring status;
-    if (LoadPdfReadOnly(g_state.pdf->path, next, status)) {
+    if (LoadPdfReadOnly(hwnd, g_state.pdf->path, next, status)) {
         ReplaceLoadedPdf(hwnd, std::move(next), latest);
     } else {
         g_state.status = L"Could not reload updated PDF; keeping current view";
@@ -2270,7 +2719,7 @@ std::optional<std::filesystem::path> PromptAnnotatedPdfSavePath(HWND owner) {
     dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
     dialog->SetFileTypeIndex(1);
     dialog->SetDefaultExtension(L"pdf");
-    dialog->SetTitle(L"注釈合成PDFを書き出し");
+    dialog->SetTitle(localization::Text(L"readonly.pdf.export_annotated.title").c_str());
 
     std::filesystem::path source(g_state.pdf->path);
     std::wstring fileName = source.stem().wstring() + L"_annotated.pdf";
@@ -3315,7 +3764,7 @@ void SetWindowTitle(HWND hwnd) {
 void OpenPdfInViewer(HWND hwnd, const std::wstring& path, const std::wstring& clropPath = {}) {
     std::unique_ptr<LoadedPdf> next;
     std::wstring status;
-    if (!LoadPdfReadOnly(path, next, status)) {
+    if (!LoadPdfReadOnly(hwnd, path, next, status)) {
         g_state.status = status;
         InvalidateRect(hwnd, nullptr, FALSE);
         return;
@@ -3352,6 +3801,12 @@ void OpenPdfInViewer(HWND hwnd, const std::wstring& path, const std::wstring& cl
     if (g_state.pdf->pageCount > 500) {
         ChoosePageRange(hwnd);
     }
+}
+
+void ScrollHorizontalBy(HWND hwnd, double deltaX) {
+    if (!g_state.pdf || g_state.pdf->pageCount <= 0 || std::abs(deltaX) < 0.001) return;
+    g_state.panX += deltaX;
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 void OpenInputPath(HWND hwnd, const std::wstring& path) {
@@ -3523,47 +3978,47 @@ void CloseAllViewerWindows() {
 HMENU BuildViewerMenu() {
     HMENU menu = CreateMenu();
     HMENU file = CreatePopupMenu();
-    AppendMenuW(file, MF_STRING, kCmdNewWindow, L"読み取り新ウィンドウ");
-    AppendMenuW(file, MF_STRING, kCmdOpen, L"読み込み");
-    AppendMenuW(file, MF_STRING, kCmdLaunchMain, L"メインソフト起動");
+    AppendMenuW(file, MF_STRING, kCmdNewWindow, localization::Text(L"readonly.pdf.menu.new_window").c_str());
+    AppendMenuW(file, MF_STRING, kCmdOpen, localization::Text(L"readonly.pdf.menu.open").c_str());
+    AppendMenuW(file, MF_STRING, kCmdLaunchMain, localization::Text(L"readonly.pdf.menu.launch_main").c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     UINT exportFlags = MF_STRING;
     if (!g_state.pdf || !g_state.clrop) exportFlags |= MF_GRAYED;
-    AppendMenuW(file, exportFlags, kCmdExportAnnotatedPdf, L"注釈合成PDFを書き出し...");
-    AppendMenuW(file, MF_STRING, kCmdPageRange, L"表示ページ範囲...");
-    AppendMenuW(file, MF_STRING, kCmdPdfInfo, L"PDF情報");
+    AppendMenuW(file, exportFlags, kCmdExportAnnotatedPdf, localization::Text(L"readonly.pdf.menu.export_annotated").c_str());
+    AppendMenuW(file, MF_STRING, kCmdPageRange, localization::Text(L"readonly.pdf.menu.page_range").c_str());
+    AppendMenuW(file, MF_STRING, kCmdPdfInfo, localization::Text(L"readonly.pdf.menu.info").c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING, kCmdCloseAllViewers, L"すべての閲覧専用ビューアを閉じる");
-    AppendMenuW(file, MF_STRING, kCmdExit, L"終了");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"ファイル");
+    AppendMenuW(file, MF_STRING, kCmdCloseAllViewers, localization::Text(L"readonly.pdf.menu.close_all_viewers").c_str());
+    AppendMenuW(file, MF_STRING, kCmdExit, localization::Text(L"readonly.menu.exit").c_str());
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(file), localization::Text(L"readonly.menu.file").c_str());
 
     HMENU view = CreatePopupMenu();
-    AppendMenuW(view, MF_STRING | (g_state.showAnnotations ? MF_CHECKED : 0), kCmdToggleAnnots, L"注釈表示");
-    AppendMenuW(view, MF_STRING | (g_state.showMagnifier ? MF_CHECKED : 0), kCmdToggleMagnifier, L"拡大鏡");
-    AppendMenuW(view, MF_STRING | (g_state.showGrayscale ? MF_CHECKED : 0), kCmdToggleGrayscale, L"白黒表示");
+    AppendMenuW(view, MF_STRING | (g_state.showAnnotations ? MF_CHECKED : 0), kCmdToggleAnnots, localization::Text(L"readonly.pdf.menu.annotations").c_str());
+    AppendMenuW(view, MF_STRING | (g_state.showMagnifier ? MF_CHECKED : 0), kCmdToggleMagnifier, localization::Text(L"readonly.pdf.menu.magnifier").c_str());
+    AppendMenuW(view, MF_STRING | (g_state.showGrayscale ? MF_CHECKED : 0), kCmdToggleGrayscale, localization::Text(L"readonly.pdf.menu.grayscale").c_str());
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(view,
                 MF_STRING | (g_state.toolMode == ViewerToolMode::Select ? MF_CHECKED : 0),
                 kCmdSelectTool,
-                L"選択ツール");
+                localization::Text(L"readonly.pdf.menu.select_tool").c_str());
     AppendMenuW(view,
                 MF_STRING | (g_state.toolMode == ViewerToolMode::Pan ? MF_CHECKED : 0),
                 kCmdPanTool,
-                L"パンツール");
+                localization::Text(L"readonly.pdf.menu.pan_tool").c_str());
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(view,
                 MF_STRING | (g_state.tempTool == TempDrawTool::Marker ? MF_CHECKED : 0),
                 kCmdTempMarker,
-                L"一時マーカー");
+                localization::Text(L"readonly.pdf.menu.temp_marker").c_str());
     AppendMenuW(view,
                 MF_STRING | (g_state.tempTool == TempDrawTool::Pen ? MF_CHECKED : 0),
                 kCmdTempPen,
-                L"一時線");
-    AppendMenuW(view, MF_STRING, kCmdClearTempDrawing, L"一時描画を消去");
+                localization::Text(L"readonly.pdf.menu.temp_line").c_str());
+    AppendMenuW(view, MF_STRING, kCmdClearTempDrawing, localization::Text(L"readonly.pdf.menu.clear_temp_drawing").c_str());
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(view, MF_STRING, kCmdZoomIn, L"拡大\tCtrl++");
-    AppendMenuW(view, MF_STRING, kCmdZoomOut, L"縮小\tCtrl+-");
-    AppendMenuW(view, MF_STRING, kCmdZoomReset, L"倍率リセット\tCtrl+0");
+    AppendMenuW(view, MF_STRING, kCmdZoomIn, localization::Text(L"readonly.pdf.menu.zoom_in").c_str());
+    AppendMenuW(view, MF_STRING, kCmdZoomOut, localization::Text(L"readonly.pdf.menu.zoom_out").c_str());
+    AppendMenuW(view, MF_STRING, kCmdZoomReset, localization::Text(L"readonly.pdf.menu.zoom_reset").c_str());
     HMENU themeMenu = CreatePopupMenu();
     for (UINT i = 0; i < g_state.themeCatalog.size(); ++i) {
         const auto& theme = g_state.themeCatalog[static_cast<size_t>(i)];
@@ -3571,8 +4026,8 @@ HMENU BuildViewerMenu() {
         if (theme.name == g_state.theme.name) flags |= MF_CHECKED;
         AppendMenuW(themeMenu, flags, kCmdThemeBase + i, theme.name.c_str());
     }
-    AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(themeMenu), L"カラーテーマ");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"表示");
+    AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(themeMenu), localization::Text(L"readonly.pdf.menu.color_theme").c_str());
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(view), localization::Text(L"readonly.menu.view").c_str());
     return menu;
 }
 
@@ -3833,6 +4288,7 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     {
         const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (ctrlDown && !altDown && wParam == 'C') {
             CopyCurrentSelection(hwnd);
             return 0;
@@ -3878,9 +4334,17 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             ScrollContinuousBy(hwnd, -kKeyScrollStepPx);
             return 0;
         case VK_RIGHT:
+            if (shiftDown) {
+                ScrollHorizontalBy(hwnd, -kKeyScrollStepPx);
+                return 0;
+            }
             SetCurrentPage(hwnd, g_state.currentPage + 1);
             return 0;
         case VK_LEFT:
+            if (shiftDown) {
+                ScrollHorizontalBy(hwnd, kKeyScrollStepPx);
+                return 0;
+            }
             SetCurrentPage(hwnd, g_state.currentPage - 1);
             return 0;
         case VK_HOME:
@@ -3911,12 +4375,17 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
         bool ctrlDown = (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0;
+        bool shiftDown = (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0;
         // Match the main viewer: mouse-wheel detents zoom in Pan mode, while
         // the precise deltas emitted by touchpads continue to scroll.
         const bool precise = (delta % WHEEL_DELTA) != 0;
         const bool zoomWithWheel = ctrlDown ||
             (g_state.toolMode == ViewerToolMode::Pan && !precise);
-        if (zoomWithWheel) {
+        if (shiftDown && !ctrlDown) {
+            ScrollHorizontalBy(hwnd,
+                               (static_cast<double>(-delta) / WHEEL_DELTA) *
+                                   kWheelScrollStepPx);
+        } else if (zoomWithWheel) {
             double steps = static_cast<double>(delta) / WHEEL_DELTA;
             double factor = std::pow(1.15, steps);
             AdjustZoom(hwnd, factor);
@@ -3925,6 +4394,15 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                                (static_cast<double>(-delta) / WHEEL_DELTA) *
                                    kWheelScrollStepPx);
         }
+        return 0;
+    }
+    case WM_MOUSEHWHEEL: {
+        const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        // Windows reports a positive horizontal-wheel delta for a movement to
+        // the right.  Moving the document left exposes its right-hand area.
+        ScrollHorizontalBy(hwnd,
+                           (static_cast<double>(-delta) / WHEEL_DELTA) *
+                               kWheelScrollStepPx);
         return 0;
     }
     case WM_POINTERDOWN:

@@ -50,6 +50,23 @@ private:
     bool newlyAcquired_ = false;
 };
 
+// Suppresses only the user-facing conflict notice while a startup-driven open
+// is attempted. The document lock itself remains mandatory.
+class ScopedDocumentOpenLockNoticeSuppression {
+public:
+    ScopedDocumentOpenLockNoticeSuppression();
+    ~ScopedDocumentOpenLockNoticeSuppression();
+
+    ScopedDocumentOpenLockNoticeSuppression(const ScopedDocumentOpenLockNoticeSuppression&) = delete;
+    ScopedDocumentOpenLockNoticeSuppression& operator=(const ScopedDocumentOpenLockNoticeSuppression&) = delete;
+
+    [[nodiscard]] bool sawSuppressedConflict() const;
+
+private:
+    unsigned long long conflictSequenceAtEntry_ = 0;
+};
+
+[[nodiscard]] bool ShouldNotifyDocumentOpenLockFailure();
 [[nodiscard]] bool IsDocumentOpenLockTransitionActive();
 void ReleaseDocumentOpenLock(const std::filesystem::path& path);
 void ReleaseAllDocumentOpenLocks();

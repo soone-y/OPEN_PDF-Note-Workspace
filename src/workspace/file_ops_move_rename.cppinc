@@ -22,27 +22,22 @@ static bool ValidateOperationFileTarget(HWND owner,
                                         const std::wstring& title) {
     if (path.empty()) return false;
     if (IsUncPath(path)) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"UNC/device paths are not supported."
-            : L"UNC/デバイスパスは使用できません。";
+        const std::wstring msg = localization::Text(L"workspace.file_ops.fdb3da0b190c");
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"Reparse point files are not supported."
-            : L"ジャンクション/シンボリックリンク等（reparse point）のファイルは使用できません。";
+        const std::wstring msg = localization::Text(L"workspace.file_ops.c561ef5cdc8e");
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     std::error_code ec;
     if (!std::filesystem::exists(path, ec) || ec || !std::filesystem::is_regular_file(path, ec) || ec) {
-        std::wstring msg = IsEnglishUi()
-            ? L"Target file was not found:\n\n"
-            : L"対象ファイルが見つかりません:\n\n";
-        msg += path.wstring();
-        ShowSilentMessageDialog(owner, title, msg, SoftNoticeKind::Warning);
+        ShowSilentMessageDialog(owner, title,
+                                localization::Text(L"workspace.file_ops.5c899893610c"),
+                                SoftNoticeKind::Warning,
+                                {{L"", path.wstring()}});
         return false;
     }
     return true;
@@ -51,25 +46,20 @@ static bool ValidateOperationFileTarget(HWND owner,
 static bool ValidateOperationDestinationFolder(HWND owner,
                                                const std::filesystem::path& dir,
                                                const std::wstring& title,
-                                               const wchar_t* labelJa,
-                                               const wchar_t* labelEn) {
+                                               const wchar_t* labelId) {
     if (dir.empty()) return false;
     if (IsUncPath(dir)) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"UNC/device paths are not supported."
-            : L"UNC/デバイスパスは使用できません。";
+        const std::wstring msg = localization::Text(L"workspace.file_ops.fdb3da0b190c");
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(dir, isReparse) && isReparse) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"Reparse point folders are not supported."
-            : L"ジャンクション/シンボリックリンク等（reparse point）のフォルダは使用できません。";
+        const std::wstring msg = localization::Text(L"workspace.file_ops.24bbab748af4");
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
-    return VerifyDirReadableWritableForEditing(owner, dir, labelJa, labelEn);
+    return VerifyDirReadableWritableForEditing(owner, dir, labelId);
 }
 
 static bool ValidateOperationNewFileStem(HWND owner,
@@ -82,9 +72,7 @@ static bool ValidateOperationNewFileStem(HWND owner,
     if (!invalid) return true;
     ShowSilentMessageDialog(
         owner, title,
-        IsEnglishUi()
-            ? L"The new name contains characters or an ending that Windows cannot use in a file name."
-            : L"新しい名前に、Windows のファイル名として使用できない文字または末尾が含まれています。",
+        localization::Text(L"workspace.file_ops.2ae983d4d6ad"),
         SoftNoticeKind::Warning);
     return false;
 }
@@ -312,9 +300,7 @@ static bool CreateOperationTransactionDirectory(OperationTransaction* tx,
     if (outErr) outErr->clear();
     if (!EnsureWorkspaceResourceDirs(nullptr)) {
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"Failed to prepare safe operation storage."
-                : L"安全な操作退避領域を準備できません。";
+            *outErr = localization::Text(L"workspace.file_ops.ad0321939dd7");
         }
         return false;
     }
@@ -343,9 +329,7 @@ static bool CreateOperationTransactionDirectory(OperationTransaction* tx,
         }
     }
     if (outErr) {
-        *outErr = IsEnglishUi()
-            ? L"Failed to allocate safe operation storage."
-            : L"安全な操作退避領域を確保できません。";
+        *outErr = localization::Text(L"workspace.file_ops.781c6de4c411");
     }
     return false;
 }
@@ -463,7 +447,7 @@ static bool RecoverOperationTransactionToOriginalState(OperationTransaction* tx,
                                                        std::wstring* outErr) {
     if (outErr) outErr->clear();
     if (!tx || !ValidateOperationTransactionPaths(*tx, sessionRoot)) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Invalid pending operation record." : L"保留中の操作記録が不正です。";
+        if (outErr) *outErr = localization::Text(L"workspace.file_ops.c9073a50f949");
         return false;
     }
     for (auto it = tx->moves.rbegin(); it != tx->moves.rend(); ++it) {
@@ -473,9 +457,7 @@ static bool RecoverOperationTransactionToOriginalState(OperationTransaction* tx,
         const bool hasDest = std::filesystem::exists(it->dest, destEc);
         if (srcEc || destEc || (hasSrc && hasDest)) {
             if (outErr) {
-                *outErr = IsEnglishUi()
-                    ? L"Cannot safely recover a pending file move because both file locations need inspection."
-                    : L"保留中のファイル移動は両方の場所にファイルがあるため、安全に自動復旧できません。";
+                *outErr = localization::Text(L"workspace.file_ops.130971f0b58a");
             }
             return false;
         }
@@ -528,9 +510,7 @@ bool RecoverPendingFileOperationTransactionsForSession(
         std::wstring recoverErr;
         if (!RecoverOperationTransactionToOriginalState(&tx, sessionRoot, &recoverErr)) {
             allOk = false;
-            std::wstring msg = IsEnglishUi()
-                ? L"A previous rename/move could not be safely recovered automatically.\nNo additional changes were made.\n\n"
-                : L"以前の名前変更/移動を安全に自動復旧できませんでした。\n追加の変更は行っていません。\n\n";
+            std::wstring msg = localization::Text(L"workspace.file_ops.f1e1c2454b3f");
             msg += recoverErr;
             ShowSilentMessageDialog(owner, OperationMenuTitle(), msg, SoftNoticeKind::Error);
             continue;
@@ -539,9 +519,7 @@ bool RecoverPendingFileOperationTransactionsForSession(
     }
     if (recoveredAny) {
         ShowSoftNotice(owner,
-                       IsEnglishUi()
-                           ? L"Recovered an interrupted rename/move to its original state."
-                           : L"中断された名前変更/移動を元の状態へ復旧しました。",
+                       localization::Text(L"workspace.file_ops.583ebb4098ae"),
                        SoftNoticeKind::Info);
     }
     return allOk;
@@ -572,9 +550,7 @@ static bool AppendCombinedMoveSet(
         if (srcIt != srcToDest.end()) {
             if (srcIt->second != destKey) {
                 if (outErr) {
-                    *outErr = IsEnglishUi()
-                        ? L"One source file would be moved to two different destinations."
-                        : L"1つの元ファイルに対して移動先が複数あります。";
+                    *outErr = localization::Text(L"workspace.file_ops.1bc5da3d06b2");
                 }
                 return false;
             }
@@ -583,9 +559,7 @@ static bool AppendCombinedMoveSet(
         auto destIt = destToSrc.find(destKey);
         if (destIt != destToSrc.end() && destIt->second != srcKey) {
             if (outErr) {
-                *outErr = (IsEnglishUi()
-                    ? L"Two files would collide at the same destination:\n\n"
-                    : L"2つのファイルが同じ移動先に競合します:\n\n") + move.second.wstring();
+                *outErr = (localization::Text(L"workspace.file_ops.63144a3be52f")) + move.second.wstring();
             }
             return false;
         }
@@ -668,9 +642,7 @@ static bool PrepareNoteLinkRewritePlan(HWND owner,
                                            loaded, mismatch, &loadedId, err,
                                            clrop_bridge::LoadAnnotationsValidation::Strong)) {
             if (outErr) {
-                *outErr = (IsEnglishUi()
-                    ? L"Failed to inspect linked annotations before renaming/moving the note.\n\n"
-                    : L"ノート移動前の注釈リンク確認に失敗しました。\n\n");
+                *outErr = (localization::Text(L"workspace.file_ops.bf222cd92d3b"));
                 *outErr += candidate.filePath.wstring();
                 if (!err.empty()) *outErr += L"\n\n" + err;
             }
@@ -686,18 +658,14 @@ static bool PrepareNoteLinkRewritePlan(HWND owner,
             std::filesystem::is_regular_file(candidate.pdfPath, pdfEc) && !pdfEc;
         if (!targetPdfExists) {
             if (outErr) {
-                *outErr = (IsEnglishUi()
-                    ? L"A staged annotation file still points to this note, but its target PDF is missing.\nResolve it in Diff Manager first.\n\n"
-                    : L"このノートを参照する注釈 stage の対象PDFが見つかりません。先に差分管理で整理してください。\n\n");
+                *outErr = (localization::Text(L"workspace.file_ops.664f3c90f443"));
                 *outErr += candidate.filePath.wstring();
             }
             return false;
         }
         if (mismatch) {
             if (outErr) {
-                *outErr = (IsEnglishUi()
-                    ? L"A mismatched clrop/stage still points to this note.\nResolve it before renaming/moving the note.\n\n"
-                    : L"pdf_id 不一致の clrop/stage がこのノートを参照しています。ノート移動前に整理してください。\n\n");
+                *outErr = (localization::Text(L"workspace.file_ops.1d88a863ace8"));
                 *outErr += candidate.filePath.wstring();
             }
             return false;
@@ -755,9 +723,7 @@ static bool ApplyNoteLinkRewritePlan(NoteLinkRewritePlan* plan,
                                           &rollbackErr);
             }
             if (outErr) {
-                *outErr = (IsEnglishUi()
-                    ? L"Failed to update linked note paths in clrop data.\n\n"
-                    : L"clrop 内のノート参照更新に失敗しました。\n\n");
+                *outErr = (localization::Text(L"workspace.file_ops.a5f1e19eaae3"));
                 *outErr += file.filePath.wstring();
                 if (!err.empty()) *outErr += L"\n\n" + err;
             }
@@ -849,9 +815,7 @@ static bool MaybePreparePairedNoteChangeForPdf(HWND owner,
     std::filesystem::path noteDest;
     if (renameOnly) {
         if (!TryBuildFollowNoteRenameDestination(pdfSrc, pdfDest, noteSrc, &noteDest)) {
-            std::wstring msg = IsEnglishUi()
-                ? L"A paired note was found, but its name does not follow the PDF stem closely enough to rename automatically.\nRename the note separately if needed.\n\n"
-                : L"対応するノートは見つかりましたが、名前規則が一致しないため自動では名前変更しません。\n必要ならノート側から変更してください。\n\n";
+            std::wstring msg = localization::Text(L"workspace.file_ops.e5db1fb5c6a7");
             msg += noteSrc.wstring();
             ShowSilentMessageDialog(owner, title, msg, SoftNoticeKind::Info);
             return true;
@@ -863,12 +827,8 @@ static bool MaybePreparePairedNoteChangeForPdf(HWND owner,
     if (noteDest.empty() || AreSameLocalPath(noteSrc, noteDest)) return true;
 
     std::wstring msg = renameOnly
-        ? (IsEnglishUi()
-            ? L"A paired note was found. Rename it too and update linked note paths in clrop files?\n\n"
-            : L"対応するノートが見つかりました。ノートも一緒に名前変更し、clrop 内のリンク先も更新しますか？\n\n")
-        : (IsEnglishUi()
-            ? L"A paired note was found. Move it too and update linked note paths in clrop files?\n\n"
-            : L"対応するノートが見つかりました。ノートも一緒に移動し、clrop 内のリンク先も更新しますか？\n\n");
+        ? (localization::Text(L"workspace.file_ops.a626460ad08b"))
+        : (localization::Text(L"workspace.file_ops.f7b6e138dba0"));
     msg += noteSrc.wstring();
     msg += L"\n->\n";
     msg += noteDest.wstring();
@@ -887,7 +847,7 @@ static bool MaybePreparePairedNoteChangeForPdf(HWND owner,
         return false;
     }
     if (!ValidateOperationDestinationFolder(owner, noteDest.parent_path(), title,
-                                            L"ノート保存先フォルダ", L"Note folder")) {
+                                            L"workspace.directory.note")) {
         return false;
     }
 
@@ -914,7 +874,7 @@ static bool BuildOperationMoveSet(const std::filesystem::path& src,
         if (!ValidateOperationFileTarget(g_hMainWnd, from, OperationMenuTitle())) return false;
         if (std::filesystem::exists(to, ec) && !ec) {
             if (outErr) {
-                *outErr = (IsEnglishUi() ? L"Destination already exists:\n\n" : L"移動先が既に存在します:\n\n") +
+                *outErr = (localization::Text(L"workspace.file_ops.98a955a4fdbe")) +
                           to.wstring();
             }
             return false;
@@ -954,14 +914,12 @@ static bool MovePathSetWithRollback(
             std::error_code rollbackEc;
             std::filesystem::rename(it->second, it->first, rollbackEc);
             if (rollbackEc && outErr && outErr->empty()) {
-                *outErr = (IsEnglishUi()
-                    ? L"Move failed and rollback also failed.\n\n"
-                    : L"移動に失敗し、ロールバックにも失敗しました。\n\n");
+                *outErr = (localization::Text(L"workspace.file_ops.10235d55a6fc"));
                 *outErr += it->second.wstring() + L"\n->\n" + it->first.wstring();
             }
         }
         if (outErr && outErr->empty()) {
-            *outErr = (IsEnglishUi() ? L"Failed to move file.\n\n" : L"ファイルの移動に失敗しました。\n\n");
+            *outErr = (localization::Text(L"workspace.file_ops.aa70bb265fd8"));
             *outErr += move.first.wstring() + L"\n->\n" + move.second.wstring();
             *outErr += L"\n\n" + atomic_write::Win32ErrorMessage(ec.value());
         }
@@ -975,18 +933,16 @@ static bool EnsureOperationReadyForPath(HWND owner,
                                         bool isPdf,
                                         const std::wstring& title) {
     if (g_currentSessionPath.empty()) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"No session is open."
-            : (g_config.studentMode ? L"回次が開かれていません。" : L"下位項目が開かれていません。");
+        const std::wstring msg = localization::Text(g_config.studentMode
+            ? L"workspace.file_ops.no_session.student" : L"workspace.file_ops.no_session.parent");
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     if (!ValidateOperationFileTarget(owner, src, title)) return false;
     if (!IsPathUnderRoot(src, std::filesystem::path(g_currentSessionPath))) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"Only files inside the current session can be changed here."
-            : (g_config.studentMode ? L"ここでは現在の回次内のファイルだけを変更できます。"
-                                    : L"ここでは現在の下位項目内のファイルだけを変更できます。");
+        const std::wstring msg = localization::Text(g_config.studentMode
+            ? L"workspace.file_ops.source_outside_session.student"
+            : L"workspace.file_ops.source_outside_session.parent");
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
@@ -1006,9 +962,7 @@ static bool EnsureOperationReadyForPath(HWND owner,
             continue;
         }
         if (!AreSameLocalPath(std::filesystem::path(entry.targetPath), src)) continue;
-        const wchar_t* msg = IsEnglishUi()
-            ? L"There is still a staged diff for this file. Save/integrate it before renaming or moving."
-            : L"このファイルには未統合の差分が残っています。名前変更や移動の前に統合保存してください。";
+        const std::wstring msg = localization::Text(L"workspace.file_ops.4fbd8c49c4cd");
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
@@ -1049,9 +1003,8 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
         ? std::filesystem::path(CurrentLogicalPdfPath())
         : std::filesystem::path(g_currentNotePath);
     if (src.empty()) {
-        const wchar_t* msg = IsEnglishUi()
-            ? (isPdf ? L"No PDF is open." : L"No note is open.")
-            : (isPdf ? L"PDFが開かれていません。" : L"ノートが開かれていません。");
+        const std::wstring msg = localization::Text(isPdf
+            ? L"workspace.file_ops.no_pdf" : L"workspace.file_ops.no_note");
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
@@ -1074,24 +1027,21 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
 
     if (AreSameLocalPath(src, dest)) return true;
     if (!IsPathUnderRoot(dest, std::filesystem::path(g_currentSessionPath))) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"Destination must stay inside the current session."
-            : (g_config.studentMode ? L"移動先は現在の回次フォルダ内である必要があります。"
-                                    : L"移動先は現在の下位項目フォルダ内である必要があります。");
+        const std::wstring msg = localization::Text(g_config.studentMode
+            ? L"workspace.file_ops.destination_outside_session.student"
+            : L"workspace.file_ops.destination_outside_session.parent");
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     if (!ValidateOperationDestinationFolder(owner, dest.parent_path(), title,
-                                            isPdf ? L"PDF保存先フォルダ" : L"ノート保存先フォルダ",
-                                            isPdf ? L"PDF folder" : L"Note folder")) {
+                                            isPdf ? L"workspace.directory.pdf"
+                                                  : L"workspace.directory.note")) {
         return false;
     }
     std::wstring workspaceLockError;
     WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
     if (!workspaceLock.acquired()) {
-        ShowSoftNotice(owner, IsEnglishUi()
-            ? L"Another shared workspace operation is in progress. Rename or move was not started."
-            : L"別の共有ワークスペース操作が進行中のため、名前変更または移動を開始しませんでした。",
+        ShowSoftNotice(owner, localization::Text(L"workspace.file_ops.2ea69f43bd83"),
             SoftNoticeKind::Warning);
         return false;
     }
@@ -1131,8 +1081,7 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
         if (!BuildOperationMoveSet(noteChange.src, noteChange.dest, /*isPdf=*/false, noteMoves, &moveErr)) {
             ShowSilentMessageDialog(owner,
                                     title,
-                                    moveErr.empty() ? (IsEnglishUi() ? L"Failed to prepare paired note move."
-                                                                     : L"対応ノートの移動準備に失敗しました。")
+                                    moveErr.empty() ? (localization::Text(L"workspace.file_ops.0a2d28360150"))
                                                     : moveErr,
                                     SoftNoticeKind::Warning);
             return false;
@@ -1140,8 +1089,7 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
         if (!AppendCombinedMoveSet(moves, noteMoves, &moveErr)) {
             ShowSilentMessageDialog(owner,
                                     title,
-                                    moveErr.empty() ? (IsEnglishUi() ? L"Failed to combine move targets."
-                                                                     : L"移動対象の組み合わせに失敗しました。")
+                                    moveErr.empty() ? (localization::Text(L"workspace.file_ops.462c08e20cbc"))
                                                     : moveErr,
                                     SoftNoticeKind::Warning);
             return false;
@@ -1161,9 +1109,7 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
             note::ResolveRuntimeNoteIdentityPath(move.first.wstring(), &identityErr);
         if (!identity.valid() || !identityErr.empty()) {
             if (identityErr.empty()) {
-                identityErr = IsEnglishUi()
-                    ? L"Failed to prepare the persistent note identity."
-                    : L"ノートの永続identityを準備できませんでした。";
+                identityErr = localization::Text(L"workspace.file_ops.55004c4b137f");
             }
             ShowSilentMessageDialog(owner, title, identityErr, SoftNoticeKind::Error);
             return false;
@@ -1176,9 +1122,7 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
         ShowSilentMessageDialog(
             owner, title,
             err.empty()
-                ? (IsEnglishUi()
-                    ? L"Failed to create a safety backup for the operation."
-                    : L"操作の安全退避を作成できませんでした。")
+                ? (localization::Text(L"workspace.file_ops.c4d23695b8a0"))
                 : err,
             SoftNoticeKind::Error);
         return false;
@@ -1244,9 +1188,7 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
             }
             RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
             err = identityErr.empty()
-                ? (IsEnglishUi()
-                    ? L"Failed to update the persistent note identity."
-                    : L"ノートの永続identityを更新できませんでした。")
+                ? (localization::Text(L"workspace.file_ops.03f5d47ceb13"))
                 : identityErr;
             if (!recoveryErr.empty()) err += L"\n\n" + recoveryErr;
             ShowSilentMessageDialog(owner, title, err, SoftNoticeKind::Error);
@@ -1287,9 +1229,7 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
         ShowSilentMessageDialog(
             owner, title,
             err.empty()
-                ? (IsEnglishUi()
-                    ? L"Failed to safely complete the operation. The original state was restored."
-                    : L"操作を安全に完了できなかったため、元の状態へ戻しました。")
+                ? (localization::Text(L"workspace.file_ops.786bc09d44fd"))
                 : err,
             SoftNoticeKind::Error);
         return false;
@@ -1302,21 +1242,14 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
     if (noteRewritePlan.HasWork()) {
         InvalidateHistoriesAfterNoteRewriteSuccess(noteRewritePlan, isPdf, src, dest);
     }
-    std::wstring done = renameOnly
-        ? (IsEnglishUi()
-               ? (isPdf ? L"Renamed the current PDF." : L"Renamed the current note.")
-               : (isPdf ? L"現在のPDF名を変更しました。" : L"現在のノート名を変更しました。"))
-        : (IsEnglishUi()
-               ? (isPdf ? L"Moved the current PDF." : L"Moved the current note.")
-               : (isPdf ? L"現在のPDFを移動しました。" : L"現在のノートを移動しました。"));
+    const wchar_t* doneId = renameOnly
+        ? (isPdf ? L"workspace.file_ops.renamed_pdf" : L"workspace.file_ops.renamed_note")
+        : (isPdf ? L"workspace.file_ops.moved_pdf" : L"workspace.file_ops.moved_note");
+    std::wstring done = localization::Text(doneId);
     if (noteChange.enabled) {
-        done += IsEnglishUi()
-            ? L" The paired note was updated too."
-            : L" 対応するノートも追従更新しました。";
+        done += localization::Text(L"workspace.file_ops.9ee49c34857a");
     } else if (!isPdf && noteRewritePlan.HasWork()) {
-        done += IsEnglishUi()
-            ? L" Linked PDF note paths were updated too."
-            : L" 参照しているPDF注釈のリンク先も更新しました。";
+        done += localization::Text(L"workspace.file_ops.4d707f6ff451");
     }
     ShowSoftNotice(owner, done);
     return true;

@@ -1,6 +1,7 @@
 #include "ui/core/main_window_api.h"
 #include "workspace/workspace_config_io.h"
 #include "core/app_core.h"
+#include "core/localization.h"
 #include "core/ui_prompts.h"
 #include "core/ui_notify.h"
 #include "core/atomic_write.h"
@@ -129,9 +130,7 @@ bool ValidateCreateFileSystemName(HWND owner,
     if (!invalid) return true;
     ShowSilentMessageDialog(
         owner, title,
-        IsEnglishUi()
-            ? L"The name contains characters or an ending that Windows cannot use."
-            : L"名前に、Windows で使用できない文字または末尾が含まれています。",
+        localization::Text(L"workspace.actions.19659680818f").c_str(),
         SoftNoticeKind::Warning);
     return false;
 }
@@ -174,8 +173,7 @@ std::optional<std::filesystem::path> PromptCreatePathWithSaveDialog(
                                   IID_PPV_ARGS(&dialog));
     if (FAILED(hr) || !dialog) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Windows save dialog is not available."
-                                     : L"Windows標準の保存ダイアログを開けません。",
+                       localization::Text(L"workspace.actions.ed35ae62796a").c_str(),
                        SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -207,8 +205,7 @@ std::optional<std::filesystem::path> PromptCreatePathWithSaveDialog(
     if (FAILED(hr)) {
         dialog->Release();
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Windows save dialog failed."
-                                     : L"Windows標準の保存ダイアログで失敗しました。",
+                       localization::Text(L"workspace.actions.edff29fbf236").c_str(),
                        SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -233,8 +230,8 @@ std::optional<std::wstring> PromptSessionNameWithSaveDialog(HWND owner,
         owner,
         lectureDir,
         initialName,
-        IsEnglishUi() ? (g_config.studentMode ? L"Create Session" : L"Create Child Item")
-                      : (g_config.studentMode ? L"回次を作成" : L"下位項目を作成"),
+        localization::Text(g_config.studentMode ? L"workspace.actions.session.create_title.student"
+                                                 : L"workspace.actions.session.create_title.parent"),
         nullptr,
         0,
         0,
@@ -242,10 +239,8 @@ std::optional<std::wstring> PromptSessionNameWithSaveDialog(HWND owner,
     if (!picked) return std::nullopt;
     if (!IsPathDirectChildOf(*picked, lectureDir)) {
         ShowSoftNotice(owner,
-                        IsEnglishUi() ? L"Create sessions directly under the current lecture folder."
-                                      : (g_config.studentMode
-                                             ? L"回次は現在の授業フォルダ直下に作成してください。"
-                                             : L"下位項目は現在の上位項目フォルダ直下に作成してください。"),
+                        localization::Text(g_config.studentMode ? L"workspace.actions.session.outside_folder.student"
+                                                                 : L"workspace.actions.session.outside_folder.parent"),
                         SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -332,22 +327,20 @@ bool AddTempExternalLecture(HWND owner,
     const auto& ui = GetUiText();
     std::filesystem::path p = std::filesystem::path(lectureDir);
     if (lectureDir.rfind(L"\\\\", 0) == 0) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"UNC/device paths are not supported."
-            : L"UNC/デバイスパスは使用できません。";
+        const std::wstring msg = localization::Text(L"workspace.actions.fdb3da0b190c").c_str();
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     std::error_code ec;
     if (!std::filesystem::exists(p, ec) || !std::filesystem::is_directory(p, ec)) {
-        std::wstring msg = L"フォルダが見つかりません。\n\n" + p.wstring();
-        ShowSilentMessageDialog(owner, ui.menuFile, msg, SoftNoticeKind::Warning);
+        ShowSilentMessageDialog(owner, ui.menuFile, L"フォルダが見つかりません。",
+                                SoftNoticeKind::Warning, {{L"", p.wstring()}});
         return false;
     }
     if (!VerifyWorkspaceWritableForEditing(owner)) return false;
     if (!VerifyDirReadableWritableForEditing(
-            owner, p, g_config.studentMode ? L"外部授業フォルダ" : L"外部上位項目フォルダ",
-            g_config.studentMode ? L"External lecture folder" : L"External parent item folder")) {
+            owner, p, g_config.studentMode ? L"workspace.directory.external.student"
+                                           : L"workspace.directory.external.parent")) {
         return false;
     }
 
@@ -367,29 +360,25 @@ bool AddTempExternalLecture(HWND owner,
 
     if ((!workspaceCanon.empty() && canon == workspaceCanon) ||
         (!classesCanon.empty() && canon == classesCanon)) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"This path overlaps with the current workspace."
-            : L"このパスは現在のワークスペースと重複しています。";
+        const std::wstring msg = localization::Text(L"workspace.actions.b1780cc78837").c_str();
         ShowSoftNotice(owner, msg, SoftNoticeKind::Info);
         return false;
     }
 
     for (const auto& item : g_tempExternalLectures) {
         if (item.path == canon) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"This temporary external lecture is already added."
-                : (g_config.studentMode ? L"この一時外部授業はすでに追加されています。"
-                                        : L"この一時外部上位項目はすでに追加されています。");
+            const std::wstring msg = localization::Text(
+                g_config.studentMode ? L"workspace.actions.external.already_added.student"
+                                    : L"workspace.actions.external.already_added.parent");
             ShowSoftNotice(owner, msg, SoftNoticeKind::Info);
             return false;
         }
     }
     for (const auto& item : g_lectures) {
         if (item == canon) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"This lecture folder is already listed."
-                : (g_config.studentMode ? L"この授業フォルダはすでに一覧にあります。"
-                                        : L"この上位項目フォルダはすでに一覧にあります。");
+            const std::wstring msg = localization::Text(
+                g_config.studentMode ? L"workspace.actions.external.already_listed.student"
+                                    : L"workspace.actions.external.already_listed.parent");
             ShowSoftNotice(owner, msg, SoftNoticeKind::Info);
             return false;
         }
@@ -400,11 +389,9 @@ bool AddTempExternalLecture(HWND owner,
 
     if (!PersistTempExternalLecturesToSetup()) {
         if (owner) {
-            std::wstring msg = IsEnglishUi()
-                ? L"Failed to save external lecture path (it may not persist after exit)."
-                : (g_config.studentMode
-                       ? L"外部授業パスを保存できませんでした（次回終了後に消える可能性があります）。"
-                       : L"外部上位項目パスを保存できませんでした（次回終了後に消える可能性があります）。");
+            const std::wstring msg = localization::Text(
+                g_config.studentMode ? L"workspace.actions.external.save_failed.one.student"
+                                    : L"workspace.actions.external.save_failed.one.parent");
             ShowSilentMessageDialog(owner, GetUiText().menuAddTempExternalLecture, msg, SoftNoticeKind::Warning);
         }
     }
@@ -432,11 +419,9 @@ void AddTempExternalLectures(HWND owner, const std::vector<std::wstring>& lectur
 
     if (!PersistTempExternalLecturesToSetup()) {
         if (owner) {
-            std::wstring msg = IsEnglishUi()
-                ? L"Failed to save external lecture paths (they may not persist after exit)."
-                : (g_config.studentMode
-                       ? L"外部授業パスを保存できませんでした（次回終了後に消える可能性があります）。"
-                       : L"外部上位項目パスを保存できませんでした（次回終了後に消える可能性があります）。");
+            const std::wstring msg = localization::Text(
+                g_config.studentMode ? L"workspace.actions.external.save_failed.multiple.student"
+                                    : L"workspace.actions.external.save_failed.multiple.parent");
             ShowSilentMessageDialog(owner, GetUiText().menuAddTempExternalLecture, msg, SoftNoticeKind::Warning);
         }
     }
@@ -445,31 +430,28 @@ void AddTempExternalLectures(HWND owner, const std::vector<std::wstring>& lectur
     s_ignoreLectureSelChange = false;
     if (owner) {
         RefreshStatusDisplay(owner);
-        std::wstring msg = IsEnglishUi()
-            ? (L"Added temporary external lectures: " + std::to_wstring(added))
-            : ((g_config.studentMode ? L"一時外部授業を追加しました: " : L"一時外部上位項目を追加しました: ") +
-               std::to_wstring(added));
+        std::wstring msg = localization::Format(
+            g_config.studentMode ? L"workspace.actions.external.added.student"
+                                : L"workspace.actions.external.added.parent",
+            {{L"COUNT", std::to_wstring(added)}});
         ShowSoftNotice(owner, msg, SoftNoticeKind::Info);
     }
 }
 
 std::optional<std::wstring> PickWorkspaceFolder(HWND parent) {
-    auto result = PromptExistingLocalPath(parent, DialogWorkspaceInitialFolder(),
-                                          GetUiText().menuOpenWs, /*requireDirectory=*/true);
+    auto result = PromptExistingLocalPath(parent, DialogWorkspaceSelectionInitialFolder(),
+                                          GetUiText().menuOpenWs, /*requireDirectory=*/true,
+                                          std::filesystem::path(g_workspaceRoot));
     if (result) {
         // No-network requirement: block UNC / device prefix paths for workspace root selection.
         if (result->rfind(L"\\\\", 0) == 0) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"UNC/device paths are not supported as a workspace folder."
-                : L"UNC/デバイスパスはワークスペースフォルダとして使用できません。";
+            const std::wstring msg = localization::Text(L"workspace.actions.e36d2c0dd193").c_str();
             ShowSoftNotice(parent, msg, SoftNoticeKind::Warning);
             return std::nullopt;
         }
         bool isReparse = false;
         if (TryIsReparsePointNoFollow(std::filesystem::path(*result), isReparse) && isReparse) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"Reparse point folders (junction/symlink) are not supported as a workspace folder."
-                : L"ジャンクション/シンボリックリンク等（reparse point）のフォルダはワークスペースとして使用できません。";
+            const std::wstring msg = localization::Text(L"workspace.actions.0fe9e19f36a0").c_str();
             ShowSoftNotice(parent, msg, SoftNoticeKind::Warning);
             return std::nullopt;
         }
@@ -516,11 +498,11 @@ std::wstring DefaultNewNoteStem() {
         std::wstring lectureName = std::filesystem::path(g_currentLecturePath).filename().wstring();
         if (!lectureName.empty()) return lectureName;
     }
-    return IsEnglishUi() ? L"note" : L"ノート";
+    return localization::Text(L"workspace.actions.6e2cda623cf3").c_str();
 }
 
 bool ValidateNewNoteFileName(HWND owner, const std::wstring& name) {
-    return ValidateCreateFileSystemName(owner, name, IsEnglishUi() ? L"Create Note" : L"ノート作成");
+    return ValidateCreateFileSystemName(owner, name, localization::Text(L"workspace.actions.a06a1d412684").c_str());
 }
 
 bool TryCreateEmptyNoteFile(const std::filesystem::path& target, DWORD* outError) {
@@ -547,7 +529,7 @@ bool BuildNamedNoteFileName(HWND owner,
     input = TrimWhitespace(input);
     if (input.empty()) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Enter a note name." : L"ノート名を入力してください。",
+                       localization::Text(L"workspace.actions.6c9d4ec3a471").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -560,10 +542,8 @@ bool BuildNamedNoteFileName(HWND owner,
     } else if (!IsSupportedNewNoteExtension(ext)) {
         ShowSilentMessageDialog(
             owner,
-            IsEnglishUi() ? L"Create Note" : L"ノート作成",
-            IsEnglishUi()
-                ? L"Use one of these extensions: .md, .clro, .txt, .tex, .csv"
-                : L"拡張子は .md / .clro / .txt / .tex / .csv のいずれかにしてください。",
+            localization::Text(L"workspace.actions.a06a1d412684").c_str(),
+            localization::Text(L"workspace.actions.ac64a932d393").c_str(),
             SoftNoticeKind::Warning);
         return false;
     }
@@ -615,21 +595,19 @@ void CreateNewNoteInSession(HWND hWnd,
         target = noteDir / fileName;
         if (std::filesystem::exists(target, ec) && !ec) {
             ShowSoftNotice(hWnd,
-                           IsEnglishUi() ? L"A note with the same name already exists."
-                                         : L"同名のノートが存在します。",
+                           localization::Text(L"workspace.actions.48370412e312").c_str(),
                            SoftNoticeKind::Warning);
             return;
         }
         if (ec) {
-            ShowSilentMessageDialog(hWnd, IsEnglishUi() ? L"Error" : L"エラー", ui.errNewClroCreate, SoftNoticeKind::Error);
+            ShowSilentMessageDialog(hWnd, localization::Text(L"workspace.actions.f310a5e3cf9a").c_str(), ui.errNewClroCreate, SoftNoticeKind::Error);
             return;
         }
         DWORD createError = ERROR_SUCCESS;
         if (!TryCreateEmptyNoteFile(target, &createError)) {
-            ShowSilentMessageDialog(hWnd, IsEnglishUi() ? L"Error" : L"エラー",
+            ShowSilentMessageDialog(hWnd, localization::Text(L"workspace.actions.f310a5e3cf9a").c_str(),
                            createError == ERROR_FILE_EXISTS
-                               ? (IsEnglishUi() ? L"A note with the same name already exists."
-                                                : L"同名のノートが存在します。")
+                               ? (localization::Text(L"workspace.actions.48370412e312").c_str())
                                : ui.errNewClroCreate,
                            createError == ERROR_FILE_EXISTS ? SoftNoticeKind::Warning : SoftNoticeKind::Error);
             return;
@@ -649,7 +627,7 @@ void CreateNewNoteInSession(HWND hWnd,
         }
     }
     if (target.empty()) {
-        ShowSilentMessageDialog(hWnd, IsEnglishUi() ? L"Error" : L"エラー", ui.errNewClroCreate, SoftNoticeKind::Error);
+        ShowSilentMessageDialog(hWnd, localization::Text(L"workspace.actions.f310a5e3cf9a").c_str(), ui.errNewClroCreate, SoftNoticeKind::Error);
         return;
     }
 
@@ -658,7 +636,7 @@ void CreateNewNoteInSession(HWND hWnd,
     SyncBottomPaneAfterNoteLoad(hWnd);
     RefreshStatusDisplay(hWnd);
     ShowSoftNotice(hWnd,
-                   IsEnglishUi() ? L"Note created." : L"ノートを作成しました。");
+                   localization::Text(L"workspace.actions.dd0ff1e37f8e").c_str());
 }
 
 void CreateNewClroInSession(HWND hWnd) {
@@ -836,8 +814,8 @@ std::optional<std::filesystem::path> PromptBlankPdfPath(HWND owner,
     std::wstring fileName;
     PromptCreateNameResult prompt = PromptCreateName(
         owner,
-        IsEnglishUi() ? L"Create Blank PDF" : L"白紙PDFを作成",
-        IsEnglishUi() ? L"PDF file name" : L"PDFファイル名",
+        localization::Text(L"workspace.actions.1632a8d9e2b2").c_str(),
+        localization::Text(L"workspace.actions.509bc61f7926").c_str(),
         DefaultBlankPdfFileName(),
         suggestions,
         true,
@@ -858,11 +836,9 @@ std::optional<std::filesystem::path> PromptBlankPdfPath(HWND owner,
             L"pdf");
         if (!picked) return std::nullopt;
         if (!IsPathDirectChildOf(*picked, pdfDir)) {
-            ShowSoftNotice(owner,
-                            IsEnglishUi() ? L"Create PDFs inside the current session's pdf folder."
-                                          : (g_config.studentMode
-                                                 ? L"PDFは現在の回次の pdf フォルダ内に作成してください。"
-                                                 : L"PDFは現在の下位項目の pdf フォルダ内に作成してください。"),
+            ShowSoftNotice(owner, localization::Text(
+                g_config.studentMode ? L"workspace.actions.pdf.outside_folder.student"
+                                    : L"workspace.actions.pdf.outside_folder.parent"),
                             SoftNoticeKind::Warning);
             return std::nullopt;
         }
@@ -881,8 +857,7 @@ std::optional<std::filesystem::path> PromptBlankPdfPath(HWND owner,
     }
     if (ToLowerAscii(filePath.extension().wstring()) != L".pdf") {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Use the .pdf extension."
-                                     : L"拡張子は .pdf にしてください。",
+                       localization::Text(L"workspace.actions.1bdb54355ce8").c_str(),
                        SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -897,15 +872,13 @@ std::optional<std::filesystem::path> PromptBlankPdfPath(HWND owner,
     std::error_code ec;
     if (std::filesystem::exists(*picked, ec) && !ec) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"A PDF with the same name already exists."
-                                     : L"同名のPDFが存在します。",
+                       localization::Text(L"workspace.actions.d992635ac5cc").c_str(),
                        SoftNoticeKind::Warning);
         return std::nullopt;
     }
     if (ec) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Could not check the destination PDF path."
-                                     : L"PDF保存先を確認できませんでした。",
+                       localization::Text(L"workspace.actions.9ca7365c19be").c_str(),
                        SoftNoticeKind::Error);
         return std::nullopt;
     }
@@ -930,8 +903,7 @@ bool VerifyBlankPdfFile(const std::filesystem::path& path,
     if (!GetFileSizeEx(h, &size) || size.QuadPart <= 0 ||
         size.QuadPart > static_cast<LONGLONG>(std::numeric_limits<unsigned long>::max())) {
         CloseHandle(h);
-        if (outErr) *outErr = IsEnglishUi() ? L"Created PDF size is invalid."
-                                            : L"作成したPDFのサイズが不正です。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.90df9eb1a93b").c_str();
         return false;
     }
     auto readBlock = [](void* param,
@@ -959,8 +931,7 @@ bool VerifyBlankPdfFile(const std::filesystem::path& path,
     FPDF_DOCUMENT doc = FPDF_LoadCustomDocument(&access, nullptr);
     if (!doc) {
         CloseHandle(h);
-        if (outErr) *outErr = IsEnglishUi() ? L"PDFium could not reopen the created PDF."
-                                            : L"作成したPDFをPDFiumで再読み込みできませんでした。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.1062240cf162").c_str();
         return false;
     }
     bool ok = FPDF_GetPageCount(doc) == spec.pageCount;
@@ -974,8 +945,7 @@ bool VerifyBlankPdfFile(const std::filesystem::path& path,
     FPDF_CloseDocument(doc);
     CloseHandle(h);
     if (!ok && outErr) {
-        *outErr = IsEnglishUi() ? L"Created PDF validation failed."
-                                : L"作成したPDFの検証に失敗しました。";
+        *outErr = localization::Text(L"workspace.actions.cafe823212dd").c_str();
     }
     return ok;
 }
@@ -985,14 +955,12 @@ bool SaveBlankPdfDocumentAtomically(const std::filesystem::path& dest,
                                            std::wstring* outErr) {
     if (outErr) outErr->clear();
     if (dest.empty() || dest.parent_path().empty()) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Invalid PDF destination."
-                                            : L"PDF保存先が不正です。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.c1917fc7de7f").c_str();
         return false;
     }
     std::error_code ec;
     if (std::filesystem::exists(dest, ec) && !ec) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Destination PDF already exists."
-                                            : L"保存先PDFはすでに存在します。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.98eb9325bc9a").c_str();
         return false;
     }
     std::filesystem::path tmp;
@@ -1041,8 +1009,7 @@ bool SaveBlankPdfDocumentAtomically(const std::filesystem::path& dest,
     hFile = INVALID_HANDLE_VALUE;
     if (!ok) {
         if (outErr && outErr->empty()) {
-            *outErr = IsEnglishUi() ? L"Failed to create the blank PDF."
-                                    : L"白紙PDFを作成できませんでした。";
+            *outErr = localization::Text(L"workspace.actions.6b9703a9c4ba").c_str();
         }
         std::error_code rmEc;
         std::filesystem::remove(tmp, rmEc);
@@ -1056,8 +1023,7 @@ bool SaveBlankPdfDocumentAtomically(const std::filesystem::path& dest,
     if (std::filesystem::exists(dest, ec) && !ec) {
         std::error_code rmEc;
         std::filesystem::remove(tmp, rmEc);
-        if (outErr) *outErr = IsEnglishUi() ? L"Destination PDF already exists."
-                                            : L"保存先PDFはすでに存在します。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.98eb9325bc9a").c_str();
         return false;
     }
     return atomic_write::AtomicReplaceFile(dest, tmp, dest.parent_path(), outErr);
@@ -1074,8 +1040,7 @@ void CreateBlankPdfInCurrentSession(HWND hWnd) {
     std::filesystem::create_directories(pdfDir, ec);
     if (ec) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi() ? L"Failed to create the PDF folder."
-                                     : L"PDFフォルダを作成できませんでした。",
+                       localization::Text(L"workspace.actions.bfa5601b5176").c_str(),
                        SoftNoticeKind::Error);
         return;
     }
@@ -1083,15 +1048,12 @@ void CreateBlankPdfInCurrentSession(HWND hWnd) {
     std::wstring input;
     const std::wstring initial = L"A4, 1";
     const std::wstring title = ui.menuCreateBlankPdf +
-        (IsEnglishUi() ? L" (A4, pages / 210x297mm, pages)"
-                       : L"（A4, ページ数 / 210x297mm, ページ数）");
+        (localization::Text(L"workspace.actions.2199209545da").c_str());
     if (!PromptSimpleText(hWnd, title, initial, input)) return;
     BlankPdfSpec spec{};
     if (!TryParseBlankPdfSpec(input, &spec)) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi()
-                           ? L"Enter size and pages like: A4, 3 or 210x297mm, 3."
-                           : L"サイズとページ数は A4, 3 または 210x297mm, 3 のように入力してください。",
+                       localization::Text(L"workspace.actions.3b9424d6c649").c_str(),
                        SoftNoticeKind::Warning);
         return;
     }
@@ -1102,8 +1064,7 @@ void CreateBlankPdfInCurrentSession(HWND hWnd) {
     if (!SaveBlankPdfDocumentAtomically(*dest, spec, &err)) {
         ShowSilentMessageDialog(hWnd,
                                 ui.menuCreateBlankPdf,
-                                err.empty() ? (IsEnglishUi() ? L"Failed to create the blank PDF."
-                                                             : L"白紙PDFを作成できませんでした。")
+                                err.empty() ? (localization::Text(L"workspace.actions.6b9703a9c4ba").c_str())
                                             : err,
                                 SoftNoticeKind::Error);
         return;
@@ -1112,8 +1073,7 @@ void CreateBlankPdfInCurrentSession(HWND hWnd) {
     OpenPdfIfDifferent(hWnd, dest->wstring());
     RefreshStatusDisplay(hWnd);
     ShowSoftNotice(hWnd,
-                   IsEnglishUi() ? L"Blank PDF created."
-                                 : L"白紙PDFを作成しました。");
+                   localization::Text(L"workspace.actions.32aab0abf740").c_str());
 }
 
 std::optional<std::wstring> PromptNoteFileNameWithSaveDialog(HWND owner,
@@ -1142,18 +1102,16 @@ std::optional<std::wstring> PromptNoteFileNameWithSaveDialog(HWND owner,
         owner,
         noteDir,
         initialName,
-        IsEnglishUi() ? L"Create Note" : L"ノートを作成",
+        localization::Text(L"workspace.actions.ac4902b8a482").c_str(),
         filters,
         static_cast<UINT>(std::size(filters)),
         filterIndex,
         defaultExtNoDot);
     if (!picked) return std::nullopt;
     if (!IsPathDirectChildOf(*picked, noteDir)) {
-        ShowSoftNotice(owner,
-                        IsEnglishUi() ? L"Create notes inside the current session's note folder."
-                                      : (g_config.studentMode
-                                             ? L"ノートは現在の回次の note フォルダ内に作成してください。"
-                                             : L"ノートは現在の下位項目の note フォルダ内に作成してください。"),
+        ShowSoftNotice(owner, localization::Text(
+            g_config.studentMode ? L"workspace.actions.note.outside_folder.student"
+                                : L"workspace.actions.note.outside_folder.parent"),
                         SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -1164,8 +1122,7 @@ std::optional<std::wstring> PromptNoteFileNameWithSaveDialog(HWND owner,
         fileName += defaultExt;
     } else if (!IsSupportedNewNoteExtension(pickedExt)) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Use .md, .clro, .txt, .tex, or .csv."
-                                     : L"拡張子は .md / .clro / .txt / .tex / .csv のいずれかにしてください。",
+                       localization::Text(L"workspace.actions.31261ba9f8be").c_str(),
                        SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -1194,7 +1151,7 @@ std::vector<std::wstring> NewNoteNameSuggestions(const std::wstring& ext) {
     const std::wstring stem = DefaultNewNoteStem();
     PushUniqueSuggestion(suggestions, stem + ext);
     PushUniqueSuggestion(suggestions, TodayDateForName() + ext);
-    PushUniqueSuggestion(suggestions, (IsEnglishUi() ? L"note" : L"ノート") + ext);
+    PushUniqueSuggestion(suggestions, (localization::Text(L"workspace.actions.6e2cda623cf3").c_str()) + ext);
     if (!g_currentSessionPath.empty()) {
         std::wstring sessionName = std::filesystem::path(g_currentSessionPath).filename().wstring();
         PushUniqueSuggestion(suggestions, sessionName + ext);
@@ -1232,10 +1189,10 @@ bool ShowNewNoteButtonContextMenu(HWND hWnd, LPARAM lParam) {
         AppendMenuW(extMenu, flags, item.id, item.ext + 1);
     }
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(extMenu),
-                IsEnglishUi() ? L"Change extension" : L"拡張子を変更する");
+                localization::Text(L"workspace.actions.53cb693b4b81").c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 10,
-                IsEnglishUi() ? L"Create with name..." : L"名前を付けて作成...");
+                localization::Text(L"workspace.actions.2ae31ad840c1").c_str());
 
     POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
     if (pt.x == -1 && pt.y == -1) {
@@ -1253,9 +1210,8 @@ bool ShowNewNoteButtonContextMenu(HWND hWnd, LPARAM lParam) {
         if (cmd == item.id) {
             s_newNoteExtension = item.ext;
             ShowSoftNotice(hWnd,
-                           IsEnglishUi()
-                               ? (L"New note extension: " + s_newNoteExtension)
-                               : (L"新規ノートの拡張子: " + s_newNoteExtension),
+                           localization::Format(L"workspace.actions.note.extension",
+                                                {{L"EXT", s_newNoteExtension}}),
                            SoftNoticeKind::Info);
             return true;
         }
@@ -1267,8 +1223,8 @@ bool ShowNewNoteButtonContextMenu(HWND hWnd, LPARAM lParam) {
         std::wstring name;
         PromptCreateNameResult prompt = PromptCreateName(
             hWnd,
-            IsEnglishUi() ? L"Create Note" : L"ノート作成",
-            IsEnglishUi() ? L"Note name" : L"ノート名",
+            localization::Text(L"workspace.actions.a06a1d412684").c_str(),
+            localization::Text(L"workspace.actions.6c9910698a48").c_str(),
             input,
             suggestions,
             true,
@@ -1360,7 +1316,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
                                     std::wstring* outErr) {
     if (outErr) outErr->clear();
     if (src.empty() || dest.empty()) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Invalid import path." : L"取り込みパスが不正です。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.70e485841f70").c_str();
         return false;
     }
 
@@ -1368,7 +1324,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
         std::error_code ec;
         std::filesystem::create_directories(dest.parent_path(), ec);
         if (ec) {
-            if (outErr) *outErr = (IsEnglishUi() ? L"Failed to create destination folder:\n" : L"取り込み先フォルダを作成できません:\n") +
+            if (outErr) *outErr = (localization::Text(L"workspace.actions.af61d0579ff4").c_str()) +
                                   dest.parent_path().wstring();
             return false;
         }
@@ -1390,7 +1346,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
     if (srcHandle == INVALID_HANDLE_VALUE) {
         if (outErr) {
             DWORD e = GetLastError();
-            *outErr = (IsEnglishUi() ? L"Failed to open source file:\n" : L"取り込み元ファイルを開けません:\n") +
+            *outErr = (localization::Text(L"workspace.actions.4804e4b7f042").c_str()) +
                       src.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
         }
         CleanupImportTempFile(&tmpHandle, tmp);
@@ -1400,9 +1356,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
     BY_HANDLE_FILE_INFORMATION sourceInfo{};
     if (!GetFileInformationByHandle(srcHandle, &sourceInfo) ||
         (sourceInfo.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
-        if (outErr) *outErr = IsEnglishUi()
-            ? L"Reparse point or non-regular source files are not supported."
-            : L"リパースポイントまたは通常ファイル以外は取り込めません。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.ff84456beeca").c_str();
         CloseHandle(srcHandle);
         CleanupImportTempFile(&tmpHandle, tmp);
         return false;
@@ -1412,7 +1366,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
     if (!GetFileSizeEx(srcHandle, &expectedSize) || expectedSize.QuadPart < 0) {
         if (outErr) {
             DWORD e = GetLastError();
-            *outErr = (IsEnglishUi() ? L"Failed to read source file size:\n" : L"取り込み元ファイルサイズを確認できません:\n") +
+            *outErr = (localization::Text(L"workspace.actions.b92de0f5edfd").c_str()) +
                       src.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
         }
         CloseHandle(srcHandle);
@@ -1427,7 +1381,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
         if (!ReadFile(srcHandle, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr)) {
             if (outErr) {
                 DWORD e = GetLastError();
-                *outErr = (IsEnglishUi() ? L"Failed while reading source file:\n" : L"取り込み元ファイルの読み込み中に失敗しました:\n") +
+                *outErr = (localization::Text(L"workspace.actions.ecc0976805b1").c_str()) +
                           src.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
             }
             CloseHandle(srcHandle);
@@ -1440,7 +1394,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
         if (!WriteFile(tmpHandle, buffer.data(), read, &written, nullptr) || written != read) {
             if (outErr) {
                 DWORD e = GetLastError();
-                *outErr = (IsEnglishUi() ? L"Failed while writing imported file:\n" : L"取り込み先への書き込み中に失敗しました:\n") +
+                *outErr = (localization::Text(L"workspace.actions.63859a0cd226").c_str()) +
                           tmp.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
             }
             CloseHandle(srcHandle);
@@ -1452,14 +1406,14 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
     CloseHandle(srcHandle);
 
     if (copied != static_cast<unsigned long long>(expectedSize.QuadPart)) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Source file changed during import." : L"取り込み中に元ファイルが変化しました。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.d715db855a1b").c_str();
         CleanupImportTempFile(&tmpHandle, tmp);
         return false;
     }
     if (!FlushFileBuffers(tmpHandle)) {
         if (outErr) {
             DWORD e = GetLastError();
-            *outErr = (IsEnglishUi() ? L"Failed to flush imported file:\n" : L"取り込み一時ファイルのフラッシュに失敗しました:\n") +
+            *outErr = (localization::Text(L"workspace.actions.bfa46a3e7ff5").c_str()) +
                       tmp.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
         }
         CleanupImportTempFile(&tmpHandle, tmp);
@@ -1469,7 +1423,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
         tmpHandle = INVALID_HANDLE_VALUE;
         if (outErr) {
             DWORD e = GetLastError();
-            *outErr = (IsEnglishUi() ? L"Failed to close imported temp file:\n" : L"取り込み一時ファイルを閉じられません:\n") +
+            *outErr = (localization::Text(L"workspace.actions.964d288267b1").c_str()) +
                       tmp.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
         }
         CleanupImportTempFile(nullptr, tmp);
@@ -1480,7 +1434,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
     std::wstring replaceErr;
     if (!atomic_write::AtomicReplaceFile(dest, tmp, dest.parent_path(), &replaceErr)) {
         if (outErr) *outErr = replaceErr.empty()
-            ? (IsEnglishUi() ? L"Failed to replace imported file." : L"取り込み先ファイルの置換に失敗しました。")
+            ? (localization::Text(L"workspace.actions.11095a6f622f").c_str())
             : replaceErr;
         return false;
     }
@@ -1503,45 +1457,35 @@ bool ValidateDirectoryImportSource(HWND owner,
                                           const std::wstring& title) {
     if (src.empty()) return false;
     if (IsUnsupportedImportSourcePath(src)) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"UNC/device paths are not supported."
-            : L"UNC/デバイスパスは使用できません。";
+        const std::wstring msg = localization::Text(L"workspace.actions.fdb3da0b190c").c_str();
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(src, isReparse) && isReparse) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"Reparse point folders (junction/symlink) are not supported."
-            : L"ジャンクション/シンボリックリンク等（reparse point）のフォルダは使用できません。";
+        const std::wstring msg = localization::Text(L"workspace.actions.feeb29c6c55e").c_str();
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     if (IsWorkspaceReservedImportDirectoryName(src)) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"Directories named __resource__ cannot be imported because they are reserved by this app."
-            : L"__resource__ という名前のフォルダはアプリ予約領域のため取り込めません。";
+        const std::wstring msg = localization::Text(L"workspace.actions.484daf708787").c_str();
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     std::error_code ec;
     if (!std::filesystem::exists(src, ec) || ec ||
         !std::filesystem::is_directory(src, ec) || ec) {
-        std::wstring msg = IsEnglishUi()
-            ? L"Source directory was not found:\n\n"
-            : L"取り込み元フォルダが見つかりません:\n\n";
-        msg += src.wstring();
-        ShowSilentMessageDialog(owner, title, msg, SoftNoticeKind::Warning);
+        ShowSilentMessageDialog(owner, title,
+                                localization::Text(L"workspace.actions.740250a3ddc0"),
+                                SoftNoticeKind::Warning, {{L"", src.wstring()}});
         return false;
     }
     std::wstring readErr;
     if (!TryOpenDirForList(src, &readErr)) {
-        std::wstring msg = IsEnglishUi()
-            ? L"Source directory is not accessible:\n\n"
-            : L"取り込み元フォルダにアクセスできません:\n\n";
-        msg += src.wstring();
+        std::wstring msg = localization::Text(L"workspace.actions.1b1250fdd02b").c_str();
         if (!readErr.empty()) msg += L"\n\n" + readErr;
-        ShowSilentMessageDialog(owner, title, msg, SoftNoticeKind::Warning);
+        ShowSilentMessageDialog(owner, title, msg, SoftNoticeKind::Warning,
+                                {{L"", src.wstring()}});
         return false;
     }
     return true;
@@ -1554,7 +1498,7 @@ bool BuildDirectoryImportPlan(const std::filesystem::path& src,
     if (outPlan) *outPlan = {};
     if (outErr) outErr->clear();
     if (src.empty() || dest.empty()) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Invalid import path." : L"取り込みパスが不正です。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.70e485841f70").c_str();
         return false;
     }
 
@@ -1581,9 +1525,7 @@ bool BuildDirectoryImportPlan(const std::filesystem::path& src,
         bool isReparse = false;
         if (TryIsReparsePointNoFollow(p, isReparse) && isReparse) {
             if (outErr) {
-                *outErr = IsEnglishUi()
-                    ? L"Reparse point entries cannot be imported:\n\n"
-                    : L"ジャンクション/シンボリックリンク等（reparse point）は取り込めません:\n\n";
+                *outErr = localization::Text(L"workspace.actions.ffa85e221b63").c_str();
                 *outErr += p.wstring();
             }
             return false;
@@ -1594,9 +1536,7 @@ bool BuildDirectoryImportPlan(const std::filesystem::path& src,
         const bool relEscapesRoot = !rel.empty() && rel.begin()->wstring() == L"..";
         if (relEc || rel.empty() || relEscapesRoot) {
             if (outErr) {
-                *outErr = IsEnglishUi()
-                    ? L"Failed to resolve an import path safely:\n\n"
-                    : L"取り込みパスを安全に解決できません:\n\n";
+                *outErr = localization::Text(L"workspace.actions.115f58824162").c_str();
                 *outErr += p.wstring();
             }
             return false;
@@ -1606,9 +1546,7 @@ bool BuildDirectoryImportPlan(const std::filesystem::path& src,
         if (it->is_directory(stEc) && !stEc) {
             if (IsWorkspaceReservedImportDirectoryName(p)) {
                 if (outErr) {
-                    *outErr = IsEnglishUi()
-                        ? L"Directories named __resource__ cannot be imported because they are reserved by this app:\n\n"
-                        : L"__resource__ という名前のフォルダはアプリ予約領域のため取り込めません:\n\n";
+                    *outErr = localization::Text(L"workspace.actions.3a663010fdc5").c_str();
                     *outErr += p.wstring();
                 }
                 return false;
@@ -1652,9 +1590,7 @@ bool RollbackCreatedDirectoryImportEntries(
     if (outErr) outErr->clear();
     if (!IsDirectoryImportRollbackPathAllowed(destRoot, destRoot, allowedRoot)) {
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"Import rollback was skipped because the destination path is outside the allowed root."
-                : L"取り込み先が許可された範囲外のため、ロールバック削除を行いませんでした。";
+            *outErr = localization::Text(L"workspace.actions.523722630388").c_str();
         }
         return false;
     }
@@ -1671,9 +1607,8 @@ bool RollbackCreatedDirectoryImportEntries(
         if (!IsDirectoryImportRollbackPathAllowed(file, destRoot, allowedRoot)) {
             ok = false;
             if (!errors.empty()) errors += L"\n\n";
-            errors += IsEnglishUi()
-                ? L"Skipped rollback for an out-of-scope imported file:\n" + file.wstring()
-                : L"範囲外の取り込みファイルはロールバック削除しませんでした:\n" + file.wstring();
+            errors += localization::Format(L"workspace.actions.import.rollback_file_skipped",
+                                           {{L"PATH", file.wstring()}});
             continue;
         }
         std::error_code ec;
@@ -1691,9 +1626,8 @@ bool RollbackCreatedDirectoryImportEntries(
         if (!IsDirectoryImportRollbackPathAllowed(dir, destRoot, allowedRoot)) {
             ok = false;
             if (!errors.empty()) errors += L"\n\n";
-            errors += IsEnglishUi()
-                ? L"Skipped rollback for an out-of-scope imported folder:\n" + dir.wstring()
-                : L"範囲外の取り込みフォルダはロールバック削除しませんでした:\n" + dir.wstring();
+            errors += localization::Format(L"workspace.actions.import.rollback_folder_skipped",
+                                           {{L"PATH", dir.wstring()}});
             continue;
         }
         std::error_code ec;
@@ -1713,15 +1647,13 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
     if (plan.sourceRoot.empty() || plan.destRoot.empty() ||
         allowedDestRoot.empty() ||
         !IsPathUnderRoot(plan.destRoot, allowedDestRoot)) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Invalid import destination." : L"取り込み先が不正です。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.8f473bf6a3e9").c_str();
         return false;
     }
     if (IsPathUnderRoot(plan.destRoot, plan.sourceRoot) ||
         IsPathUnderRoot(plan.sourceRoot, plan.destRoot)) {
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"Source and destination overlap. Import was canceled."
-                : L"取り込み元と取り込み先が重複するため中止しました。";
+            *outErr = localization::Text(L"workspace.actions.41f55052d6b1").c_str();
         }
         return false;
     }
@@ -1729,7 +1661,7 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
     std::error_code ec;
     if (std::filesystem::exists(plan.destRoot, ec) && !ec) {
         if (outErr) {
-            *outErr = (IsEnglishUi() ? L"Destination already exists:\n\n" : L"取り込み先が既に存在します:\n\n") +
+            *outErr = (localization::Text(L"workspace.actions.3cf2beeadd3f").c_str()) +
                       plan.destRoot.wstring();
         }
         return false;
@@ -1742,7 +1674,7 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
     std::filesystem::create_directories(plan.destRoot, ec);
     if (ec) {
         if (outErr) {
-            *outErr = (IsEnglishUi() ? L"Failed to create destination folder:\n" : L"取り込み先フォルダを作成できません:\n") +
+            *outErr = (localization::Text(L"workspace.actions.af61d0579ff4").c_str()) +
                       plan.destRoot.wstring();
         }
         return false;
@@ -1769,7 +1701,7 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
         const std::filesystem::path createdDir = plan.destRoot / rel;
         std::filesystem::create_directories(createdDir, ec);
         if (ec) {
-            std::wstring err = (IsEnglishUi() ? L"Failed to create imported subfolder:\n" : L"取り込み先サブフォルダを作成できません:\n") +
+            std::wstring err = (localization::Text(L"workspace.actions.f5f02a8a236a").c_str()) +
                                createdDir.wstring();
             return rollback(err);
         }
@@ -1782,7 +1714,7 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
         std::wstring copyErr;
         if (!CopyFileForImportSafely(srcFile, destFile, &copyErr)) {
             std::wstring err = copyErr.empty()
-                ? (IsEnglishUi() ? L"Failed to copy an imported file." : L"取り込みファイルのコピーに失敗しました。")
+                ? (localization::Text(L"workspace.actions.67c8af2a773e").c_str())
                 : copyErr;
             return rollback(err);
         }
@@ -1812,16 +1744,17 @@ bool ImportDirectoryAsLecture(HWND hWnd) {
     std::filesystem::create_directories(classesPath, ec);
     if (ec) {
         ShowSilentMessageDialog(hWnd, title,
-                                (IsEnglishUi() ? L"Failed to create lecture destination folder:\n"
-                                               : (g_config.studentMode ? L"授業取り込み先フォルダを作成できません:\n"
-                                                                       : L"上位項目取り込み先フォルダを作成できません:\n")) +
-                                    classesPath.wstring(),
+                                localization::Format(
+                                    g_config.studentMode
+                                        ? L"workspace.actions.import.destination_folder_failed.student"
+                                        : L"workspace.actions.import.destination_folder_failed.parent",
+                                    {{L"PATH", classesPath.wstring()}}),
                                 SoftNoticeKind::Error);
         return false;
     }
     if (!VerifyDirReadableWritableForEditing(hWnd, classesPath,
-                                             g_config.studentMode ? L"授業取り込み先フォルダ" : L"上位項目取り込み先フォルダ",
-                                             g_config.studentMode ? L"Lecture import destination" : L"Parent item import destination")) {
+                                             g_config.studentMode ? L"workspace.directory.lecture_import.student"
+                                                                  : L"workspace.directory.lecture_import.parent")) {
         return false;
     }
     auto src = PickDirectoryImportSource(hWnd, title, DialogDownloadsInitialFolder());
@@ -1830,9 +1763,7 @@ bool ImportDirectoryAsLecture(HWND hWnd) {
     std::wstring workspaceLockError;
     WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
     if (!workspaceLock.acquired()) {
-        ShowSoftNotice(hWnd, IsEnglishUi()
-            ? L"Another shared workspace operation is in progress. Import was not started."
-            : L"別の共有ワークスペース操作が進行中のため、取り込みを開始しませんでした。",
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.4618bb4d74d4").c_str(),
             SoftNoticeKind::Warning);
         return false;
     }
@@ -1854,10 +1785,9 @@ bool ImportDirectoryAsLecture(HWND hWnd) {
     LoadLectures();
     SyncLeftPaneSelection();
     RefreshMainWindowUiState(hWnd);
-    ShowSoftNotice(hWnd,
-                   IsEnglishUi() ? L"Imported the directory as a lecture (copied)."
-                                  : (g_config.studentMode ? L"フォルダを授業として取り込みました（コピーを実行しました）。"
-                                                          : L"フォルダを上位項目として取り込みました（コピーを実行しました）。"),
+    ShowSoftNotice(hWnd, localization::Text(
+                       g_config.studentMode ? L"workspace.actions.import.directory_as_lecture.student"
+                                           : L"workspace.actions.import.directory_as_lecture.parent"),
                    SoftNoticeKind::Info);
     return true;
 }
@@ -1872,8 +1802,8 @@ bool ImportDirectoryAsSession(HWND hWnd) {
     const std::wstring title = ui.menuImportDirAsSession;
     std::filesystem::path lectureDir(g_currentLecturePath);
     if (!VerifyDirReadableWritableForEditing(hWnd, lectureDir,
-                                             g_config.studentMode ? L"回次取り込み先授業フォルダ" : L"下位項目取り込み先上位項目フォルダ",
-                                             g_config.studentMode ? L"Session import destination" : L"Child item import destination")) {
+                                             g_config.studentMode ? L"workspace.directory.session_import.student"
+                                                                  : L"workspace.directory.session_import.parent")) {
         return false;
     }
     auto src = PickDirectoryImportSource(hWnd, title, DialogDownloadsInitialFolder());
@@ -1882,9 +1812,7 @@ bool ImportDirectoryAsSession(HWND hWnd) {
     std::wstring workspaceLockError;
     WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
     if (!workspaceLock.acquired()) {
-        ShowSoftNotice(hWnd, IsEnglishUi()
-            ? L"Another shared workspace operation is in progress. Import was not started."
-            : L"別の共有ワークスペース操作が進行中のため、取り込みを開始しませんでした。",
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.4618bb4d74d4").c_str(),
             SoftNoticeKind::Warning);
         return false;
     }
@@ -1902,9 +1830,9 @@ bool ImportDirectoryAsSession(HWND hWnd) {
 
     ReloadSessionsAndSelect(g_currentLecturePath, dest.filename().wstring(), true);
     ShowSoftNotice(hWnd,
-                   IsEnglishUi() ? L"Imported the directory as a session (copied)."
-                                  : (g_config.studentMode ? L"フォルダを回次として取り込みました（コピーを実行しました）。"
-                                                          : L"フォルダを下位項目として取り込みました（コピーを実行しました）。"),
+                   localization::Text(g_config.studentMode
+                                          ? L"workspace.actions.import.directory_as_session.student"
+                                          : L"workspace.actions.import.directory_as_session.parent").c_str(),
                    SoftNoticeKind::Info);
     return true;
 }
@@ -1943,7 +1871,7 @@ bool ValidateImportPdfFile(const std::filesystem::path& pdfPath, std::wstring* o
     if (h == INVALID_HANDLE_VALUE) {
         if (outErr) {
             DWORD e = GetLastError();
-            *outErr = (IsEnglishUi() ? L"Failed to open converted PDF:\n" : L"変換後PDFを開けません:\n") +
+            *outErr = (localization::Text(L"workspace.actions.91db73f5380a").c_str()) +
                       pdfPath.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
         }
         return false;
@@ -1953,9 +1881,7 @@ bool ValidateImportPdfFile(const std::filesystem::path& pdfPath, std::wstring* o
     if (!GetFileSizeEx(h, &size) || size.QuadPart < 5 ||
         size.QuadPart > static_cast<LONGLONG>(std::numeric_limits<unsigned long>::max())) {
         CloseHandle(h);
-        if (outErr) *outErr = IsEnglishUi()
-            ? L"Converted PDF is empty or too large."
-            : L"変換後PDFが空、または大きすぎます。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.995575d4aacb").c_str();
         return false;
     }
 
@@ -1969,9 +1895,7 @@ bool ValidateImportPdfFile(const std::filesystem::path& pdfPath, std::wstring* o
     if (!magicRead || read != 5 ||
         magic[0] != '%' || magic[1] != 'P' || magic[2] != 'D' || magic[3] != 'F' || magic[4] != '-') {
         CloseHandle(h);
-        if (outErr) *outErr = IsEnglishUi()
-            ? L"Converted output is not a PDF."
-            : L"変換結果がPDFではありません。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.fe2df113e4fe").c_str();
         return false;
     }
 
@@ -1983,18 +1907,14 @@ bool ValidateImportPdfFile(const std::filesystem::path& pdfPath, std::wstring* o
     FPDF_DOCUMENT doc = FPDF_LoadCustomDocument(&access, nullptr);
     if (!doc) {
         CloseHandle(h);
-        if (outErr) *outErr = IsEnglishUi()
-            ? L"PDFium rejected the converted PDF."
-            : L"PDFiumで変換後PDFを検証できませんでした。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.447941b1dec5").c_str();
         return false;
     }
     const int pageCount = FPDF_GetPageCount(doc);
     FPDF_CloseDocument(doc);
     CloseHandle(h);
     if (pageCount <= 0) {
-        if (outErr) *outErr = IsEnglishUi()
-            ? L"Converted PDF has no pages."
-            : L"変換後PDFにページがありません。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.75e818157a0d").c_str();
         return false;
     }
     return true;
@@ -2028,16 +1948,14 @@ bool BackupImportOverwriteTarget(const std::filesystem::path& dest,
         return !ec;
     }
     if (g_workspaceRoot.empty() || !EnsureWorkspaceResourceDirs(nullptr)) {
-        if (outErr) *outErr = IsEnglishUi()
-            ? L"Failed to prepare backup folder."
-            : L"バックアップフォルダを準備できません。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.97457f438056").c_str();
         return false;
     }
 
     std::filesystem::path backupDir = EscapeRootPath() / L"import_overwrite" / NowTimestampString();
     std::filesystem::create_directories(backupDir, ec);
     if (ec) {
-        if (outErr) *outErr = (IsEnglishUi() ? L"Failed to create backup folder:\n" : L"バックアップフォルダを作成できません:\n") +
+        if (outErr) *outErr = (localization::Text(L"workspace.actions.6433f07a6a99").c_str()) +
                               backupDir.wstring();
         return false;
     }
@@ -2046,7 +1964,7 @@ bool BackupImportOverwriteTarget(const std::filesystem::path& dest,
     std::wstring copyErr;
     if (!CopyFileForImportSafely(dest, backupPath, &copyErr)) {
         if (outErr) *outErr = copyErr.empty()
-            ? (IsEnglishUi() ? L"Failed to back up existing file." : L"既存ファイルのバックアップに失敗しました。")
+            ? (localization::Text(L"workspace.actions.e116d079d96d").c_str())
             : copyErr;
         return false;
     }
@@ -2062,7 +1980,7 @@ ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
     if (outFailure) outFailure->clear();
 
     if (copySource.empty() || dest.empty()) {
-        if (outFailure) *outFailure = IsEnglishUi() ? L"Invalid import path." : L"取り込みパスが不正です。";
+        if (outFailure) *outFailure = localization::Text(L"workspace.actions.70e485841f70").c_str();
         return ImportOneResult::Failed;
     }
     if (IsSameImportPath(copySource, dest)) {
@@ -2072,16 +1990,12 @@ ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
     std::error_code ec;
     const bool destExists = std::filesystem::exists(dest, ec);
     if (ec) {
-        if (outFailure) *outFailure = IsEnglishUi()
-            ? L"Failed to check destination file."
-            : L"取り込み先ファイルを確認できません。";
+        if (outFailure) *outFailure = localization::Text(L"workspace.actions.9959cd2c9201").c_str();
         return ImportOneResult::Failed;
     }
     if (destExists) {
         if (IsCurrentOpenImportDestination(dest)) {
-            if (outFailure) *outFailure = IsEnglishUi()
-                ? L"Cannot overwrite the file that is currently open. Switch away from it first."
-                : L"現在開いているファイルは取り込みで上書きできません。別のファイルへ切り替えてから実行してください。";
+            if (outFailure) *outFailure = localization::Text(L"workspace.actions.33dcdb477f46").c_str();
             return ImportOneResult::Failed;
         }
         std::wstring msg = ui.msgImportFileOverwrite + L"\n" + dest.wstring();
@@ -2099,8 +2013,7 @@ ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
         std::wstring backupErr;
         if (!BackupImportOverwriteTarget(dest, &backupPath, &backupErr)) {
             if (outFailure) *outFailure = backupErr.empty()
-                ? (IsEnglishUi() ? L"Failed to back up existing destination. Import was canceled."
-                                 : L"既存の取り込み先をバックアップできないため、取り込みを中止しました。")
+                ? (localization::Text(L"workspace.actions.565d6c1fd36f").c_str())
                 : backupErr;
             return ImportOneResult::Failed;
         }
@@ -2109,7 +2022,7 @@ ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
     std::wstring copyErr;
     if (!CopyFileForImportSafely(copySource, dest, &copyErr)) {
         if (outFailure) *outFailure = copyErr.empty()
-            ? (IsEnglishUi() ? L"Failed to copy file." : L"ファイルのコピーに失敗しました。")
+            ? (localization::Text(L"workspace.actions.9f4d1364d7ec").c_str())
             : copyErr;
         return ImportOneResult::Failed;
     }
@@ -2180,8 +2093,7 @@ bool WriteLibreOfficeProfilePathConfig(const std::filesystem::path& profileDir,
     if (!ec) std::filesystem::create_directories(backupDir, ec);
     if (!ec) std::filesystem::create_directories(tempDir, ec);
     if (ec) {
-        if (outErr) *outErr = (IsEnglishUi() ? L"Failed to create LibreOffice local path folders:\n"
-                                            : L"LibreOffice用ローカルパスフォルダを作成できません:\n") +
+        if (outErr) *outErr = (localization::Text(L"workspace.actions.93a04e4e1379").c_str()) +
                               officeTempDir.wstring();
         return false;
     }
@@ -2230,8 +2142,7 @@ bool WriteLibreOfficeProfilePathConfig(const std::filesystem::path& profileDir,
     const std::filesystem::path configPath = userDir / L"registrymodifications.xcu";
     std::ofstream out(configPath, std::ios::binary | std::ios::trunc);
     if (!out) {
-        if (outErr) *outErr = (IsEnglishUi() ? L"Failed to write LibreOffice profile configuration:\n"
-                                            : L"LibreOfficeプロファイル設定を書き込めません:\n") +
+        if (outErr) *outErr = (localization::Text(L"workspace.actions.0e1e227b47da").c_str()) +
                               configPath.wstring();
         return false;
     }
@@ -2239,8 +2150,7 @@ bool WriteLibreOfficeProfilePathConfig(const std::filesystem::path& profileDir,
     out.write(data.data(), static_cast<std::streamsize>(data.size()));
     out.flush();
     if (!out) {
-        if (outErr) *outErr = (IsEnglishUi() ? L"Failed to finish LibreOffice profile configuration:\n"
-                                            : L"LibreOfficeプロファイル設定を確定できません:\n") +
+        if (outErr) *outErr = (localization::Text(L"workspace.actions.9b716b3f9fd8").c_str()) +
                               configPath.wstring();
         return false;
     }
@@ -2487,24 +2397,19 @@ std::filesystem::path MakeOfficeImportTempRoot(std::wstring* outErr) {
     if (outErr) outErr->clear();
     std::filesystem::path root = OfficeImportTempRootPath();
     if (root.empty()) {
-        if (outErr) *outErr = IsEnglishUi()
-            ? L"Failed to resolve the local conversion temp folder."
-            : L"ローカル変換用一時フォルダを解決できません。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.f6429af02b47").c_str();
         return {};
     }
     std::error_code ec;
     std::filesystem::create_directories(root, ec);
     if (ec) {
-        if (outErr) *outErr = (IsEnglishUi() ? L"Failed to create conversion temp folder:\n"
-                                            : L"変換用一時フォルダを作成できません:\n") +
+        if (outErr) *outErr = (localization::Text(L"workspace.actions.4296f2fa17ed").c_str()) +
                               root.wstring();
         return {};
     }
     bool isReparse = false;
     if (!TryIsReparsePointNoFollow(root, isReparse) || isReparse) {
-        if (outErr) *outErr = IsEnglishUi()
-            ? L"The local conversion temp folder is a reparse point."
-            : L"ローカル変換用一時フォルダが reparse point です。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.ee81c0d4841b").c_str();
         return {};
     }
     return root;
@@ -2528,9 +2433,7 @@ std::filesystem::path MakeUniqueOfficeImportTempDir(std::wstring* outErr) {
             std::filesystem::remove(dir, rmEc);
         }
     }
-    if (outErr) *outErr = IsEnglishUi()
-        ? L"Failed to create a unique conversion temp folder."
-        : L"一意な変換用一時フォルダを作成できません。";
+    if (outErr) *outErr = localization::Text(L"workspace.actions.c9a52caf90ee").c_str();
     return {};
 }
 
@@ -2721,9 +2624,7 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     if (outCanceled) *outCanceled = false;
     std::filesystem::path soffice = FindLibreOfficeSoffice();
     if (soffice.empty()) {
-        if (outErr) *outErr = IsEnglishUi()
-            ? L"The LibreOffice conversion runtime required by this standard edition was not found. Restore the complete standard release folder."
-            : L"通常版に必要なLibreOffice変換ランタイムが見つかりません。通常版の配布フォルダ一式を復元してください。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.94c16d03c7a1").c_str();
         return false;
     }
     CleanupLibreOfficePythonCacheBestEffort(soffice);
@@ -2731,15 +2632,13 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
     if (ec) {
-        if (outErr) *outErr = (IsEnglishUi() ? L"Failed to create PDF output folder:\n"
-                                            : L"PDF出力フォルダを作成できません:\n") +
+        if (outErr) *outErr = (localization::Text(L"workspace.actions.2b4708c6cff7").c_str()) +
                               outDir.wstring();
         return false;
     }
     std::filesystem::create_directories(profileDir, ec);
     if (ec) {
-        if (outErr) *outErr = (IsEnglishUi() ? L"Failed to create LibreOffice profile folder:\n"
-                                            : L"LibreOfficeプロファイルフォルダを作成できません:\n") +
+        if (outErr) *outErr = (localization::Text(L"workspace.actions.021e608ea70b").c_str()) +
                               profileDir.wstring();
         return false;
     }
@@ -2778,8 +2677,7 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     if (!created) {
         CleanupLibreOfficePythonCacheBestEffort(soffice);
         AppendOfficeConversionDiagnostic(L"CreateProcess failed error=" + std::to_wstring(createErr));
-        if (outErr) *outErr = (IsEnglishUi() ? L"Failed to start LibreOffice:\n"
-                                            : L"LibreOfficeを起動できません:\n") +
+        if (outErr) *outErr = (localization::Text(L"workspace.actions.77746f1852f2").c_str()) +
                               soffice.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(createErr);
         return false;
     }
@@ -2787,8 +2685,7 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
 
     constexpr DWORD kConvertTimeoutMs = 5 * 60 * 1000;
     ShowSoftNotice(g_hMainWnd,
-                   IsEnglishUi() ? L"Converting Office file to PDF with LibreOffice..."
-                                 : L"LibreOfficeでOfficeファイルをPDFに変換中...",
+                   localization::Text(L"workspace.actions.16e28f2bd7d3").c_str(),
                    SoftNoticeKind::Info);
     OfficeConversionWaitResult wait = WaitForLibreOfficeLauncher(pi.hProcess, kConvertTimeoutMs);
     if (wait != OfficeConversionWaitResult::Completed) {
@@ -2800,17 +2697,11 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
         AppendOfficeConversionDiagnostic(L"process_wait_failed result=" + std::to_wstring(static_cast<int>(wait)));
         if (wait == OfficeConversionWaitResult::Canceled) {
             if (outCanceled) *outCanceled = true;
-            if (outErr) *outErr = IsEnglishUi()
-                ? L"LibreOffice conversion was canceled."
-                : L"LibreOffice変換を中止しました。";
+            if (outErr) *outErr = localization::Text(L"workspace.actions.10e2c376855f").c_str();
         } else if (wait == OfficeConversionWaitResult::TimedOut) {
-            if (outErr) *outErr = IsEnglishUi()
-                ? L"LibreOffice conversion timed out."
-                : L"LibreOffice変換がタイムアウトしました。";
+            if (outErr) *outErr = localization::Text(L"workspace.actions.c64dc4973a9a").c_str();
         } else if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"Failed while waiting for the LibreOffice process tree to exit."
-                : L"LibreOfficeプロセスツリーの終了待機に失敗しました。";
+            *outErr = localization::Text(L"workspace.actions.71d5b158f91d").c_str();
         }
         return false;
     }
@@ -2821,8 +2712,7 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     if (exitCode != 0) {
         CleanupLibreOfficePythonCacheBestEffort(soffice);
         AppendOfficeConversionDiagnostic(L"process_exit_code=" + std::to_wstring(exitCode));
-        if (outErr) *outErr = (IsEnglishUi() ? L"LibreOffice conversion failed. Exit code: "
-                                            : L"LibreOffice変換に失敗しました。終了コード: ") +
+        if (outErr) *outErr = (localization::Text(L"workspace.actions.d64078e4d8b8").c_str()) +
                               std::to_wstring(exitCode);
         return false;
     }
@@ -2839,9 +2729,7 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     if (outputWaitCanceled) {
         CleanupLibreOfficePythonCacheBestEffort(soffice);
         if (outCanceled) *outCanceled = true;
-        if (outErr) *outErr = IsEnglishUi()
-            ? L"LibreOffice conversion was canceled."
-            : L"LibreOffice変換を中止しました。";
+        if (outErr) *outErr = localization::Text(L"workspace.actions.10e2c376855f").c_str();
         return false;
     }
     CleanupLibreOfficePythonCacheBestEffort(soffice);
@@ -2886,17 +2774,14 @@ bool FindLibreOfficeGeneratedPdf(const std::filesystem::path& outputDir,
     }
 
     if (outErr) {
-        *outErr = IsEnglishUi()
-            ? L"LibreOffice did not produce an identifiable PDF."
-            : L"LibreOfficeが変換結果のPDFを特定できませんでした。";
-        *outErr += IsEnglishUi() ? L"\nExpected:\n" : L"\n想定した出力:\n";
+        *outErr = localization::Text(L"workspace.actions.efb39a85323d").c_str();
+        *outErr += localization::Text(L"workspace.actions.c16fa891e7b4").c_str();
         *outErr += expectedPdf.wstring();
         if (ec) {
-            *outErr += IsEnglishUi() ? L"\n\nFailed to inspect output folder:\n"
-                                      : L"\n\n出力フォルダを確認できません:\n";
+            *outErr += localization::Text(L"workspace.actions.687bffd72ae9").c_str();
             *outErr += atomic_write::Win32ErrorMessage(ec.value());
         } else if (!candidates.empty()) {
-            *outErr += IsEnglishUi() ? L"\n\nPDF files found:\n" : L"\n\n出力されたPDF:\n";
+            *outErr += localization::Text(L"workspace.actions.5cf5a5862008").c_str();
             for (const auto& candidate : candidates) {
                 *outErr += L"- " + candidate.filename().wstring() + L"\n";
             }
@@ -2920,9 +2805,7 @@ bool ValidateLibreOfficeConversionPathBudget(const std::filesystem::path& tempDi
     for (const auto& path : paths) {
         if (path.wstring().size() <= kSafePathLength) continue;
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"Office conversion was not started because its temporary path is too long. Choose a shorter local temp path."
-                : L"Office変換用の一時パスが長すぎるため、変換を開始しませんでした。短いローカル一時パスを使用してください。";
+            *outErr = localization::Text(L"workspace.actions.2f67bd1d6fec").c_str();
             *outErr += L"\n" + path.wstring() + L"\nlength=" + std::to_wstring(path.wstring().size());
         }
         return false;
@@ -2966,9 +2849,7 @@ ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
     std::error_code ec;
     std::filesystem::create_directories(inputDir, ec);
     if (ec) {
-        if (outFailure) *outFailure = IsEnglishUi()
-            ? L"Failed to create Office conversion input folder."
-            : L"Office変換用の入力フォルダを作成できません。";
+        if (outFailure) *outFailure = localization::Text(L"workspace.actions.c529a2026b78").c_str();
         RemoveOfficeImportTempDirBestEffort(tempDir);
         return ImportOneResult::Failed;
     }
@@ -2981,8 +2862,7 @@ ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
     const bool staged = CopyFileForImportSafely(src, stagedOffice, &copyErr);
     if (!staged) {
         if (outFailure) *outFailure = copyErr.empty()
-            ? (IsEnglishUi() ? L"Failed to stage Office file for conversion."
-                             : L"Officeファイルを変換用にコピーできません。")
+            ? (localization::Text(L"workspace.actions.cea093a731c2").c_str())
             : copyErr;
         RemoveOfficeImportTempDirBestEffort(tempDir);
         return ImportOneResult::Failed;
@@ -2991,8 +2871,7 @@ ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
     std::wstring packageSafetyErr;
     if (!office::ValidateOfficePackageForOfflineConversion(stagedOffice, &packageSafetyErr)) {
         if (outFailure) *outFailure = packageSafetyErr.empty()
-            ? (IsEnglishUi() ? L"The Office file did not pass the offline safety check."
-                             : L"Officeファイルがオフライン安全性検査を通過しませんでした。")
+            ? (localization::Text(L"workspace.actions.217b4e58bb76").c_str())
             : packageSafetyErr;
         RemoveOfficeImportTempDirBestEffort(tempDir);
         return ImportOneResult::Failed;
@@ -3053,39 +2932,29 @@ ImportOneResult ImportOneFileToCurrentSession(HWND hWnd,
     if (outFailure) outFailure->clear();
 
     if (IsUnsupportedImportSourcePath(src)) {
-        if (outFailure) *outFailure = IsEnglishUi()
-            ? L"UNC/device paths are not supported."
-            : L"UNC/デバイスパスは使用できません。";
+        if (outFailure) *outFailure = localization::Text(L"workspace.actions.fdb3da0b190c").c_str();
         return ImportOneResult::Failed;
     }
 
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(src, isReparse) && isReparse) {
-        if (outFailure) *outFailure = IsEnglishUi()
-            ? L"Reparse point files are not supported."
-            : L"ジャンクション/シンボリックリンク等（reparse point）のファイルは使用できません。";
+        if (outFailure) *outFailure = localization::Text(L"workspace.actions.c561ef5cdc8e").c_str();
         return ImportOneResult::Failed;
     }
 
     std::error_code ec;
     if (!std::filesystem::exists(src, ec) || ec || !std::filesystem::is_regular_file(src, ec) || ec) {
-        if (outFailure) *outFailure = IsEnglishUi()
-            ? L"Source file was not found."
-            : L"取り込み元ファイルが見つかりません。";
+        if (outFailure) *outFailure = localization::Text(L"workspace.actions.a3425c84bc38").c_str();
         return ImportOneResult::Failed;
     }
 
     if (IsOfficeImportSourcePath(src) && convertOffice) {
         if (!kOfficePdfConversionApprovedForUse) {
-            if (outFailure) *outFailure = IsEnglishUi()
-                ? L"Office-to-PDF conversion is disabled until a communication-free conversion engine is verified."
-                : L"外部通信を持たない変換エンジンの検証が完了するまで、Office PDF変換は無効です。";
+            if (outFailure) *outFailure = localization::Text(L"workspace.actions.26e0e3687e5f").c_str();
             return ImportOneResult::Failed;
         }
         if (!HasOfficeConversionFeature()) {
-            if (outFailure) *outFailure = IsEnglishUi()
-                ? L"This version (Lite) does not have the Office-to-PDF conversion feature."
-                : L"このバージョン（Lite版）にはOfficeファイルのPDF変換機能がありません。";
+            if (outFailure) *outFailure = localization::Text(L"workspace.actions.98decb0bc01c").c_str();
             return ImportOneResult::Failed;
         }
         return ImportOfficeFileAsPdfToCurrentSession(hWnd, sessionRoot, src, outFailure);
@@ -3099,21 +2968,21 @@ ImportOneResult ImportOneFileToCurrentSession(HWND hWnd,
 void ShowImportBatchResult(HWND hWnd, const ImportBatchStats& stats, size_t selectedCount) {
     const auto& ui = GetUiText();
     if (stats.canceled) {
-        std::wstring msg = IsEnglishUi() ? L"Import was canceled." : L"取り込みを中止しました。";
-        msg += (IsEnglishUi() ? L"\nImported (copied): " : L"\n取り込み（コピーを実行しました）: ") + std::to_wstring(stats.imported);
-        msg += (IsEnglishUi() ? L"\nNot processed: " : L"\n未処理: ") + std::to_wstring(stats.skipped);
+        std::wstring msg = localization::Text(L"workspace.actions.21cca5c7f1a8").c_str();
+        msg += (localization::Text(L"workspace.actions.56bc3fd9cae5").c_str()) + std::to_wstring(stats.imported);
+        msg += (localization::Text(L"workspace.actions.a7f5466d8813").c_str()) + std::to_wstring(stats.skipped);
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Info);
         return;
     }
     if (stats.failed > 0) {
         std::wstring msg = (stats.imported > 0)
-            ? (IsEnglishUi() ? L"Import finished with warnings." : L"取り込みを完了しました（一部失敗あり）。")
+            ? (localization::Text(L"workspace.actions.790fe0cacd12").c_str())
             : ui.errImportFile;
-        msg += (IsEnglishUi() ? L"\nImported (copied): " : L"\n取り込み（コピーを実行しました）: ") + std::to_wstring(stats.imported);
-        msg += (IsEnglishUi() ? L"\nSkipped: " : L"\nスキップ: ") + std::to_wstring(stats.skipped);
-        msg += (IsEnglishUi() ? L"\nFailed: " : L"\n失敗: ") + std::to_wstring(stats.failed);
+        msg += (localization::Text(L"workspace.actions.56bc3fd9cae5").c_str()) + std::to_wstring(stats.imported);
+        msg += (localization::Text(L"workspace.actions.2b8f653eb11b").c_str()) + std::to_wstring(stats.skipped);
+        msg += (localization::Text(L"workspace.actions.69aba8f7920b").c_str()) + std::to_wstring(stats.failed);
         if (!stats.failures.empty()) {
-            msg += IsEnglishUi() ? L"\n\nDetails:\n" : L"\n\n詳細:\n";
+            msg += localization::Text(L"workspace.actions.09edf61e698c").c_str();
             const size_t limit = std::min<size_t>(stats.failures.size(), 8);
             for (size_t i = 0; i < limit; ++i) {
                 msg += L" - " + stats.failures[i] + L"\n";
@@ -3128,18 +2997,17 @@ void ShowImportBatchResult(HWND hWnd, const ImportBatchStats& stats, size_t sele
     }
 
     if (selectedCount > 1) {
-        std::wstring msg = (IsEnglishUi() ? L"Imported files (copied): " : L"取り込んだファイル（コピーを実行しました）: ") +
+        std::wstring msg = (localization::Text(L"workspace.actions.79e77c89e1fa").c_str()) +
                            std::to_wstring(stats.imported);
         if (stats.skipped > 0) {
-            msg += (IsEnglishUi() ? L"\nSkipped: " : L"\nスキップ: ") + std::to_wstring(stats.skipped);
+            msg += (localization::Text(L"workspace.actions.2b8f653eb11b").c_str()) + std::to_wstring(stats.skipped);
         }
         ShowSoftNotice(hWnd, msg);
     }
 }
 
 std::wstring OfficeOpenConversionTitle() {
-    return IsEnglishUi() ? L"LibreOffice: Office to PDF conversion (Experimental)"
-                         : L"LibreOfficeによるOfficeファイルのPDF変換（試験的）";
+    return localization::Text(L"workspace.actions.ed397541e841").c_str();
 }
 
 std::wstring OfficeOpenRelativePath(const std::filesystem::path& sessionRoot,
@@ -3247,23 +3115,21 @@ void CollectOfficeFilesMissingPdfForOpen(const std::filesystem::path& sessionRoo
 static void ShowOfficeOpenConversionResult(HWND hWnd, const ImportBatchStats& stats, size_t totalCount) {
     const std::wstring title = OfficeOpenConversionTitle();
     if (stats.canceled) {
-        std::wstring msg = IsEnglishUi() ? L"PDF conversion was canceled." : L"PDF変換を中止しました。";
-        msg += (IsEnglishUi() ? L"\nConverted: " : L"\n変換: ") + std::to_wstring(stats.imported);
-        msg += (IsEnglishUi() ? L"\nNot processed: " : L"\n未処理: ") + std::to_wstring(stats.skipped);
+        std::wstring msg = localization::Text(L"workspace.actions.f7430cb55ab9").c_str();
+        msg += (localization::Text(L"workspace.actions.cb818e7becbc").c_str()) + std::to_wstring(stats.imported);
+        msg += (localization::Text(L"workspace.actions.a7f5466d8813").c_str()) + std::to_wstring(stats.skipped);
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Info);
         return;
     }
     if (stats.failed > 0) {
         std::wstring msg = (stats.imported > 0)
-            ? (IsEnglishUi() ? L"PDF conversion finished with warnings."
-                             : L"PDF変換を完了しました（一部失敗あり）。")
-            : (IsEnglishUi() ? L"Failed to convert Office files to PDF."
-                             : L"OfficeファイルをPDFに変換できませんでした。");
-        msg += (IsEnglishUi() ? L"\nConverted: " : L"\n変換: ") + std::to_wstring(stats.imported);
-        msg += (IsEnglishUi() ? L"\nSkipped: " : L"\nスキップ: ") + std::to_wstring(stats.skipped);
-        msg += (IsEnglishUi() ? L"\nFailed: " : L"\n失敗: ") + std::to_wstring(stats.failed);
+            ? (localization::Text(L"workspace.actions.74776536e502").c_str())
+            : (localization::Text(L"workspace.actions.43223a01deaf").c_str());
+        msg += (localization::Text(L"workspace.actions.cb818e7becbc").c_str()) + std::to_wstring(stats.imported);
+        msg += (localization::Text(L"workspace.actions.2b8f653eb11b").c_str()) + std::to_wstring(stats.skipped);
+        msg += (localization::Text(L"workspace.actions.69aba8f7920b").c_str()) + std::to_wstring(stats.failed);
         if (!stats.failures.empty()) {
-            msg += IsEnglishUi() ? L"\n\nDetails:\n" : L"\n\n詳細:\n";
+            msg += localization::Text(L"workspace.actions.09edf61e698c").c_str();
             const size_t limit = std::min<size_t>(stats.failures.size(), 8);
             for (size_t i = 0; i < limit; ++i) {
                 msg += L" - " + stats.failures[i] + L"\n";
@@ -3278,10 +3144,10 @@ static void ShowOfficeOpenConversionResult(HWND hWnd, const ImportBatchStats& st
     }
 
     if (totalCount > 1) {
-        std::wstring msg = (IsEnglishUi() ? L"Converted to PDF: " : L"PDFに変換しました: ") +
+        std::wstring msg = (localization::Text(L"workspace.actions.95bd93f5ef87").c_str()) +
                            std::to_wstring(stats.imported);
         if (stats.skipped > 0) {
-            msg += (IsEnglishUi() ? L"\nSkipped: " : L"\nスキップ: ") + std::to_wstring(stats.skipped);
+            msg += (localization::Text(L"workspace.actions.2b8f653eb11b").c_str()) + std::to_wstring(stats.skipped);
         }
         ShowSoftNotice(hWnd, msg);
     }
@@ -3290,17 +3156,13 @@ static void ShowOfficeOpenConversionResult(HWND hWnd, const ImportBatchStats& st
 bool ConvertMissingOfficeFilesUnderDirectory(HWND hWnd, const std::filesystem::path& sessionRoot) {
     if (!kOfficePdfConversionApprovedForUse) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi()
-                           ? L"Office-to-PDF conversion is disabled until a communication-free conversion engine is verified."
-                           : L"外部通信を持たない変換エンジンの検証が完了するまで、Office PDF変換は無効です。",
+                       localization::Text(L"workspace.actions.26e0e3687e5f").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
     if (!HasOfficeConversionFeature()) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi()
-                           ? L"This version (Lite) does not have the Office-to-PDF conversion feature."
-                           : L"このバージョン（Lite版）にはOfficeファイルのPDF変換機能がありません。",
+                       localization::Text(L"workspace.actions.98decb0bc01c").c_str(),
                        SoftNoticeKind::Info);
         return false;
     }
@@ -3309,10 +3171,10 @@ bool ConvertMissingOfficeFilesUnderDirectory(HWND hWnd, const std::filesystem::p
     if (sessionRoot.empty() ||
         !std::filesystem::exists(sessionRoot, ec) || ec ||
         !std::filesystem::is_directory(sessionRoot, ec) || ec) {
-        std::wstring msg = (IsEnglishUi() ? L"Target folder is not accessible:\n"
-                                          : L"対象フォルダにアクセスできません:\n") +
+        std::wstring msg = (localization::Text(L"workspace.actions.7da86d07346c").c_str()) +
                            sessionRoot.wstring();
-        ShowSilentMessageDialog(hWnd, OfficeOpenConversionTitle(), msg, SoftNoticeKind::Error);
+        ShowSilentMessageDialog(hWnd, OfficeOpenConversionTitle(), msg, SoftNoticeKind::Error,
+                                {{L"", sessionRoot.wstring()}});
         return false;
     }
 
@@ -3320,9 +3182,7 @@ bool ConvertMissingOfficeFilesUnderDirectory(HWND hWnd, const std::filesystem::p
     CollectOfficeFilesMissingPdfForOpen(sessionRoot, pending);
     if (pending.empty()) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi()
-                           ? L"There are no Office files to convert in this folder."
-                           : L"このフォルダで変換対象のOfficeファイルはありません。",
+                       localization::Text(L"workspace.actions.4258d9b83683").c_str(),
                        SoftNoticeKind::Info);
         return false;
     }
@@ -3392,22 +3252,21 @@ void ShowOfficeConversionBatchResult(HWND hWnd,
     const auto& ui = GetUiText();
     const std::wstring title = ui.menuConvertOfficeToPdf;
     if (stats.canceled) {
-        std::wstring msg = IsEnglishUi() ? L"Conversion was canceled." : L"変換を中止しました。";
-        msg += (IsEnglishUi() ? L"\nConverted: " : L"\n変換: ") + std::to_wstring(stats.imported);
-        msg += (IsEnglishUi() ? L"\nNot processed: " : L"\n未処理: ") + std::to_wstring(stats.skipped);
+        std::wstring msg = localization::Text(L"workspace.actions.a48dae3b505b").c_str();
+        msg += (localization::Text(L"workspace.actions.cb818e7becbc").c_str()) + std::to_wstring(stats.imported);
+        msg += (localization::Text(L"workspace.actions.a7f5466d8813").c_str()) + std::to_wstring(stats.skipped);
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Info);
         return;
     }
     if (stats.failed > 0) {
         std::wstring msg = (stats.imported > 0)
-            ? (IsEnglishUi() ? L"Conversion finished with warnings." : L"変換を完了しました（一部失敗あり）。")
-            : (IsEnglishUi() ? L"Failed to convert Office files to PDF."
-                             : L"OfficeファイルをPDFに変換できませんでした。");
-        msg += (IsEnglishUi() ? L"\nConverted: " : L"\n変換: ") + std::to_wstring(stats.imported);
-        msg += (IsEnglishUi() ? L"\nSkipped: " : L"\nスキップ: ") + std::to_wstring(stats.skipped);
-        msg += (IsEnglishUi() ? L"\nFailed: " : L"\n失敗: ") + std::to_wstring(stats.failed);
+            ? (localization::Text(L"workspace.actions.f2c014dae5c2").c_str())
+            : (localization::Text(L"workspace.actions.43223a01deaf").c_str());
+        msg += (localization::Text(L"workspace.actions.cb818e7becbc").c_str()) + std::to_wstring(stats.imported);
+        msg += (localization::Text(L"workspace.actions.2b8f653eb11b").c_str()) + std::to_wstring(stats.skipped);
+        msg += (localization::Text(L"workspace.actions.69aba8f7920b").c_str()) + std::to_wstring(stats.failed);
         if (!stats.failures.empty()) {
-            msg += IsEnglishUi() ? L"\n\nDetails:\n" : L"\n\n詳細:\n";
+            msg += localization::Text(L"workspace.actions.09edf61e698c").c_str();
             const size_t limit = std::min<size_t>(stats.failures.size(), 8);
             for (size_t i = 0; i < limit; ++i) {
                 msg += L" - " + stats.failures[i] + L"\n";
@@ -3422,11 +3281,11 @@ void ShowOfficeConversionBatchResult(HWND hWnd,
     }
 
     std::wstring msg = (stats.imported > 0)
-        ? ((IsEnglishUi() ? L"Converted to PDF: " : L"PDFに変換しました: ") +
+        ? ((localization::Text(L"workspace.actions.95bd93f5ef87").c_str()) +
            std::to_wstring(stats.imported))
-        : (IsEnglishUi() ? L"No files were converted." : L"変換したファイルはありません。");
+        : (localization::Text(L"workspace.actions.dbd97e7d6086").c_str());
     if (stats.skipped > 0 || selectedCount > 1) {
-        msg += (IsEnglishUi() ? L"\nSkipped: " : L"\nスキップ: ") + std::to_wstring(stats.skipped);
+        msg += (localization::Text(L"workspace.actions.2b8f653eb11b").c_str()) + std::to_wstring(stats.skipped);
     }
     ShowSoftNotice(hWnd, msg, stats.imported > 0 ? SoftNoticeKind::Info : SoftNoticeKind::Warning);
 }
@@ -3435,17 +3294,13 @@ bool ConvertOfficeFilesToCurrentSession(HWND hWnd) {
     const auto& ui = GetUiText();
     if (!kOfficePdfConversionApprovedForUse) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi()
-                           ? L"Office-to-PDF conversion is disabled until a communication-free conversion engine is verified."
-                           : L"外部通信を持たない変換エンジンの検証が完了するまで、Office PDF変換は無効です。",
+                       localization::Text(L"workspace.actions.26e0e3687e5f").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
     if (!HasOfficeConversionFeature()) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi()
-                           ? L"This version (Lite) does not have the Office-to-PDF conversion feature."
-                           : L"このバージョン（Lite版）にはOfficeファイルのPDF変換機能がありません。",
+                       localization::Text(L"workspace.actions.98decb0bc01c").c_str(),
                        SoftNoticeKind::Info);
         return false;
     }
@@ -3458,11 +3313,12 @@ bool ConvertOfficeFilesToCurrentSession(HWND hWnd) {
     std::error_code ec;
     if (!std::filesystem::exists(sessionRoot, ec) || ec ||
         !std::filesystem::is_directory(sessionRoot, ec) || ec) {
-        std::wstring msg = (IsEnglishUi() ? L"Session folder is not accessible:\n"
-                                          : (g_config.studentMode ? L"回次フォルダにアクセスできません:\n"
-                                                                  : L"下位項目フォルダにアクセスできません:\n")) +
-                           sessionRoot.wstring();
-        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, msg, SoftNoticeKind::Error);
+        std::wstring msg = localization::Format(
+            g_config.studentMode ? L"workspace.actions.session.inaccessible.student"
+                                 : L"workspace.actions.session.inaccessible.parent",
+            {{L"PATH", sessionRoot.wstring()}});
+        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, msg, SoftNoticeKind::Error,
+                                {{L"", sessionRoot.wstring()}});
         return false;
     }
 
@@ -3476,21 +3332,18 @@ bool ConvertOfficeFilesToCurrentSession(HWND hWnd) {
         std::wstring failure;
 
         if (!IsOfficeImportSourcePath(src)) {
-            failure = IsEnglishUi() ? L"Only .docx and .pptx files can be converted."
-                                    : L"変換できるのは .docx / .pptx だけです。";
+            failure = localization::Text(L"workspace.actions.21b94e09fe6e").c_str();
             AddImportFailure(stats, src, failure);
             continue;
         }
         if (IsUnsupportedImportSourcePath(src)) {
-            failure = IsEnglishUi() ? L"UNC/device paths are not supported."
-                                    : L"UNC/デバイスパスは使用できません。";
+            failure = localization::Text(L"workspace.actions.fdb3da0b190c").c_str();
             AddImportFailure(stats, src, failure);
             continue;
         }
         bool isReparse = false;
         if (TryIsReparsePointNoFollow(src, isReparse) && isReparse) {
-            failure = IsEnglishUi() ? L"Reparse point files are not supported."
-                                    : L"ジャンクション/シンボリックリンク等（reparse point）のファイルは使用できません。";
+            failure = localization::Text(L"workspace.actions.c561ef5cdc8e").c_str();
             AddImportFailure(stats, src, failure);
             continue;
         }
@@ -3498,8 +3351,7 @@ bool ConvertOfficeFilesToCurrentSession(HWND hWnd) {
         if (!std::filesystem::exists(src, ec) || ec ||
             !std::filesystem::is_regular_file(src, ec) || ec) {
             ec.clear();
-            failure = IsEnglishUi() ? L"Source file was not found."
-                                    : L"変換元ファイルが見つかりません。";
+            failure = localization::Text(L"workspace.actions.dd51d40539be").c_str();
             AddImportFailure(stats, src, failure);
             continue;
         }
@@ -3536,17 +3388,13 @@ bool ConvertOfficeFileToCurrentSession(HWND hWnd, const std::filesystem::path& s
     const auto& ui = GetUiText();
     if (!kOfficePdfConversionApprovedForUse) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi()
-                           ? L"Office-to-PDF conversion is disabled until a communication-free conversion engine is verified."
-                           : L"外部通信を持たない変換エンジンの検証が完了するまで、Office PDF変換は無効です。",
+                       localization::Text(L"workspace.actions.26e0e3687e5f").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
     if (!HasOfficeConversionFeature()) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi()
-                           ? L"This version (Lite) does not have the Office-to-PDF conversion feature."
-                           : L"このバージョン（Lite版）にはOfficeファイルのPDF変換機能がありません。",
+                       localization::Text(L"workspace.actions.98decb0bc01c").c_str(),
                        SoftNoticeKind::Info);
         return false;
     }
@@ -3559,40 +3407,41 @@ bool ConvertOfficeFileToCurrentSession(HWND hWnd, const std::filesystem::path& s
     std::error_code ec;
     if (!std::filesystem::exists(sessionRoot, ec) || ec ||
         !std::filesystem::is_directory(sessionRoot, ec) || ec) {
-        std::wstring msg = (IsEnglishUi() ? L"Session folder is not accessible:\n"
-                                          : (g_config.studentMode ? L"回次フォルダにアクセスできません:\n"
-                                                                  : L"下位項目フォルダにアクセスできません:\n")) +
-                           sessionRoot.wstring();
-        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, msg, SoftNoticeKind::Error);
+        std::wstring msg = localization::Format(
+            g_config.studentMode ? L"workspace.actions.session.inaccessible.student"
+                                 : L"workspace.actions.session.inaccessible.parent",
+            {{L"PATH", sessionRoot.wstring()}});
+        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, msg, SoftNoticeKind::Error,
+                                {{L"", sessionRoot.wstring()}});
         return false;
     }
 
     std::wstring failure;
     if (!IsOfficeImportSourcePath(src)) {
-        failure = IsEnglishUi() ? L"Only .docx and .pptx files can be converted."
-                                : L"変換できるのは .docx / .pptx だけです。";
-        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, failure, SoftNoticeKind::Warning);
+        failure = localization::Text(L"workspace.actions.21b94e09fe6e").c_str();
+        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, failure, SoftNoticeKind::Warning,
+                                {{L"", src.wstring()}});
         return false;
     }
     if (IsUnsupportedImportSourcePath(src)) {
-        failure = IsEnglishUi() ? L"UNC/device paths are not supported."
-                                : L"UNC/デバイスパスは使用できません。";
-        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, failure, SoftNoticeKind::Warning);
+        failure = localization::Text(L"workspace.actions.fdb3da0b190c").c_str();
+        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, failure, SoftNoticeKind::Warning,
+                                {{L"", src.wstring()}});
         return false;
     }
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(src, isReparse) && isReparse) {
-        failure = IsEnglishUi() ? L"Reparse point files are not supported."
-                                : L"ジャンクション/シンボリックリンク等（reparse point）のファイルは使用できません。";
-        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, failure, SoftNoticeKind::Warning);
+        failure = localization::Text(L"workspace.actions.c561ef5cdc8e").c_str();
+        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, failure, SoftNoticeKind::Warning,
+                                {{L"", src.wstring()}});
         return false;
     }
     ec.clear();
     if (!std::filesystem::exists(src, ec) || ec ||
         !std::filesystem::is_regular_file(src, ec) || ec) {
-        failure = IsEnglishUi() ? L"Source file was not found."
-                                : L"変換元ファイルが見つかりません。";
-        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, failure, SoftNoticeKind::Warning);
+        failure = localization::Text(L"workspace.actions.dd51d40539be").c_str();
+        ShowSilentMessageDialog(hWnd, ui.menuConvertOfficeToPdf, failure, SoftNoticeKind::Warning,
+                                {{L"", src.wstring()}});
         return false;
     }
 
@@ -3601,25 +3450,24 @@ bool ConvertOfficeFileToCurrentSession(HWND hWnd, const std::filesystem::path& s
     case ImportOneResult::Imported:
         RefreshCurrentSessionFiles();
         ShowSoftNotice(hWnd,
-                       (IsEnglishUi() ? L"Converted to PDF: " : L"PDFに変換しました: ") + src.filename().wstring(),
+                       (localization::Text(L"workspace.actions.95bd93f5ef87").c_str()) + src.filename().wstring(),
                        SoftNoticeKind::Info);
         return true;
     case ImportOneResult::Skipped:
         ShowSoftNotice(hWnd,
-                       IsEnglishUi() ? L"Conversion was skipped." : L"変換をスキップしました。",
+                       localization::Text(L"workspace.actions.51cf4b2aba12").c_str(),
                        SoftNoticeKind::Info);
         return false;
     case ImportOneResult::Canceled:
         ShowSoftNotice(hWnd,
-                       IsEnglishUi() ? L"Conversion was canceled." : L"変換を中止しました。",
+                       localization::Text(L"workspace.actions.a48dae3b505b").c_str(),
                        SoftNoticeKind::Info);
         return false;
     case ImportOneResult::Failed:
         ShowSilentMessageDialog(hWnd,
                                 ui.menuConvertOfficeToPdf,
                                 failure.empty()
-                                    ? (IsEnglishUi() ? L"Failed to convert the Office file to PDF."
-                                                     : L"OfficeファイルをPDFに変換できませんでした。")
+                                    ? (localization::Text(L"workspace.actions.c9f1690f2821").c_str())
                                     : failure,
                                 SoftNoticeKind::Error);
         return false;
@@ -3640,18 +3488,13 @@ DroppedOfficeImportChoice ConfirmDroppedOfficeConversion(
     bool canConvert) {
     if (officeFiles.empty()) return DroppedOfficeImportChoice::Cancel;
 
-    const bool english = IsEnglishUi();
     std::wstring msg;
     if (canConvert) {
-        msg = english
-            ? L"Choose how to import the dropped Office files. PDF conversion is experimental."
-            : L"ドロップされたOfficeファイルの取り込み方法を選んでください。PDF変換は試験的です。";
+        msg = localization::Text(L"workspace.actions.office_drop.convert_prompt");
     } else {
-        msg = english
-            ? L"This edition cannot convert Office files to PDF. You can still copy the original files into the PDF area."
-            : L"この版ではOfficeファイルをPDFへ変換できません。元ファイルをPDF欄へコピーして取り込むことはできます。";
+        msg = localization::Text(L"workspace.actions.office_drop.copy_prompt");
     }
-    msg += english ? L"\n\nFiles:\n" : L"\n\n対象:\n";
+    msg += localization::Text(L"workspace.actions.file_list_header");
     const size_t limit = std::min<size_t>(officeFiles.size(), 8);
     for (size_t i = 0; i < limit; ++i) {
         msg += L" - " + OfficeOpenRelativePath(sessionRoot, officeFiles[i]) + L"\n";
@@ -3665,11 +3508,11 @@ DroppedOfficeImportChoice ConfirmDroppedOfficeConversion(
     confirm.message = msg;
     confirm.kind = SoftNoticeKind::Info;
     confirm.buttons = canConvert ? SilentDialogButtons::YesNoCancel : SilentDialogButtons::YesNo;
-    confirm.yesLabel = canConvert ? (english ? L"Convert to PDF" : L"PDFへ変換")
-                                  : (english ? L"Import original files" : L"元ファイルを取り込む");
-    confirm.noLabel = canConvert ? (english ? L"Import original files" : L"元ファイルを取り込む")
-                                 : (english ? L"Cancel" : L"キャンセル");
-    confirm.cancelLabel = english ? L"Cancel" : L"キャンセル";
+    confirm.yesLabel = localization::Text(canConvert ? L"workspace.actions.office_drop.convert"
+                                                      : L"workspace.actions.office_drop.import_original");
+    confirm.noLabel = localization::Text(canConvert ? L"workspace.actions.office_drop.import_original"
+                                                     : L"workspace.actions.common.cancel");
+    confirm.cancelLabel = localization::Text(L"workspace.actions.common.cancel");
     confirm.defaultResult = SilentDialogResult::No;
     confirm.escapeResult = SilentDialogResult::Cancel;
     const SilentDialogResult result = ShowSilentDialog(hWnd, confirm);
@@ -3679,6 +3522,30 @@ DroppedOfficeImportChoice ConfirmDroppedOfficeConversion(
         return DroppedOfficeImportChoice::ImportOriginal;
     }
     return DroppedOfficeImportChoice::Cancel;
+}
+
+static bool ConfirmDroppedFileImport(HWND hWnd, const std::vector<std::wstring>& paths) {
+    if (paths.empty()) return false;
+
+    std::wstring message = localization::Text(L"workspace.actions.drop_files.prompt");
+    message += localization::Text(L"workspace.actions.file_list_header");
+    const size_t limit = std::min<size_t>(paths.size(), 8);
+    for (size_t i = 0; i < limit; ++i) {
+        message += L" - " + std::filesystem::path(paths[i]).filename().wstring() + L"\n";
+    }
+    if (paths.size() > limit) message += L" - ...\n";
+    message += localization::Text(L"workspace.actions.drop_files.original_unchanged");
+
+    SilentDialogOptions confirm;
+    confirm.title = localization::Text(L"workspace.actions.drop_files.title");
+    confirm.message = message;
+    confirm.kind = SoftNoticeKind::Info;
+    confirm.buttons = SilentDialogButtons::YesNo;
+    confirm.yesLabel = localization::Text(L"workspace.actions.drop_files.copy_and_import");
+    confirm.noLabel = localization::Text(L"workspace.actions.common.cancel");
+    confirm.defaultResult = SilentDialogResult::No;
+    confirm.escapeResult = SilentDialogResult::No;
+    return ShowSilentDialog(hWnd, confirm) == SilentDialogResult::Yes;
 }
 
 bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstring>& paths) {
@@ -3692,16 +3559,15 @@ bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstrin
     std::filesystem::path sessionRoot(g_currentSessionPath);
     std::error_code ec;
     if (!std::filesystem::exists(sessionRoot, ec) || !std::filesystem::is_directory(sessionRoot, ec)) {
-        std::wstring msg = ui.errImportFile + L"\n" + sessionRoot.wstring();
-        ShowSilentMessageDialog(hWnd, ui.menuImportFile, msg, SoftNoticeKind::Error);
+        ShowSilentMessageDialog(hWnd, ui.menuImportFile, ui.errImportFile, SoftNoticeKind::Error,
+                                {{L"", sessionRoot.wstring()}});
         return false;
     }
+    if (!ConfirmDroppedFileImport(hWnd, paths)) return false;
     std::wstring workspaceLockError;
     WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
     if (!workspaceLock.acquired()) {
-        ShowSoftNotice(hWnd, IsEnglishUi()
-            ? L"Another shared workspace operation is in progress. Import was not started."
-            : L"別の共有ワークスペース操作が進行中のため、取り込みを開始しませんでした。",
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.4618bb4d74d4").c_str(),
             SoftNoticeKind::Warning);
         return false;
     }
@@ -3779,9 +3645,7 @@ bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstrin
             }
             EndOfficeConversionProgress(hWnd);
             if (!failedConversions.empty()) {
-                std::wstring message = IsEnglishUi()
-                    ? L"Some Office files could not be converted to PDF. Copy their original files into the PDF area instead?"
-                    : L"一部のOfficeファイルをPDFへ変換できませんでした。代わりに元ファイルをPDF欄へコピーして取り込みますか？";
+                std::wstring message = localization::Text(L"workspace.actions.b5dc9584dd5d").c_str();
                 const size_t limit = std::min<size_t>(failedConversions.size(), 8);
                 for (size_t i = 0; i < limit; ++i) {
                     message += L"\n - " + failedConversions[i].source.filename().wstring();
@@ -3792,8 +3656,8 @@ bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstrin
                 fallback.message = message;
                 fallback.kind = SoftNoticeKind::Warning;
                 fallback.buttons = SilentDialogButtons::YesNo;
-                fallback.yesLabel = IsEnglishUi() ? L"Import original files" : L"元ファイルを取り込む";
-                fallback.noLabel = IsEnglishUi() ? L"Do not import" : L"取り込まない";
+                fallback.yesLabel = localization::Text(L"workspace.actions.af160d2feda0").c_str();
+                fallback.noLabel = localization::Text(L"workspace.actions.8ccdf346762f").c_str();
                 fallback.defaultResult = SilentDialogResult::No;
                 fallback.escapeResult = SilentDialogResult::No;
                 if (ShowSilentDialog(hWnd, fallback) == SilentDialogResult::Yes) {
@@ -3814,7 +3678,7 @@ bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstrin
     }
     if (stats.imported == 0 && stats.failed == 0 && stats.skipped > 0 && paths.size() == 1) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi() ? L"Dropped file was not imported." : L"ドロップされたファイルは取り込みませんでした。",
+                       localization::Text(L"workspace.actions.a2757ce1ac82").c_str(),
                        SoftNoticeKind::Info);
     } else {
         ShowImportBatchResult(hWnd, stats, paths.size());
@@ -3831,8 +3695,8 @@ bool ImportFileToCurrentSession(HWND hWnd) {
     std::filesystem::path sessionRoot(g_currentSessionPath);
     std::error_code ec;
     if (!std::filesystem::exists(sessionRoot, ec) || !std::filesystem::is_directory(sessionRoot, ec)) {
-        std::wstring msg = ui.errImportFile + L"\n" + sessionRoot.wstring();
-        ShowSilentMessageDialog(hWnd, ui.menuImportFile, msg, SoftNoticeKind::Error);
+        ShowSilentMessageDialog(hWnd, ui.menuImportFile, ui.errImportFile, SoftNoticeKind::Error,
+                                {{L"", sessionRoot.wstring()}});
         return false;
     }
     auto initial = DialogDownloadsInitialFolder();
@@ -3843,9 +3707,7 @@ bool ImportFileToCurrentSession(HWND hWnd) {
     std::wstring workspaceLockError;
     WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
     if (!workspaceLock.acquired()) {
-        ShowSoftNotice(hWnd, IsEnglishUi()
-            ? L"Another shared workspace operation is in progress. Import was not started."
-            : L"別の共有ワークスペース操作が進行中のため、取り込みを開始しませんでした。",
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.4618bb4d74d4").c_str(),
             SoftNoticeKind::Warning);
         return false;
     }

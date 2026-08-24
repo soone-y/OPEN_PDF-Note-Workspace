@@ -19,7 +19,7 @@ bool EnsureWorkspaceResourceDirs(std::filesystem::path* settingsDir);
 bool EnsureWorkspaceResourceDirsWithErr(const std::wstring& root, std::filesystem::path* settingsDir, std::wstring* outErr);
 bool VerifyWorkspaceWritableForEditing(HWND owner);
 
-bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path& dir, const wchar_t* labelJa, const wchar_t* labelEn);
+bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path& dir, const wchar_t* labelId);
 bool TryOpenDirForList(const std::filesystem::path& dir, std::wstring* outErr);
 void ShowTempExternalLectureAccessWarning(HWND owner, const std::filesystem::path& dir, const std::wstring& readErr);
 void ForgetWritableProbe(const std::filesystem::path& dir);

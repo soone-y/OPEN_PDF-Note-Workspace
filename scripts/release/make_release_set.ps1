@@ -16,11 +16,17 @@ param(
     [switch]$SnapshotOnly,
     [switch]$DryRun,
     [switch]$Lite,
-    [switch]$DeferPostCreationValidation
+    [switch]$DeferPostCreationValidation,
+    [ValidateSet("ja", "en")]
+    [string]$Locale = "ja"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($Lite) {
+    throw "release set は通常版と Lite版を一組で作成するため、-Lite は指定できません。Lite版だけの開発用梱包は scripts\\release\\pack_release.ps1 -Lite を使用してください。"
+}
 
 $scriptRoot = $PSScriptRoot
 if (-not $scriptRoot) {
@@ -110,13 +116,13 @@ function Get-RepoVersionLabel {
     return (Convert-ToSafeLabel -Value $version)
 }
 
-function New-ReleaseSetFolderName([string]$Prefix) {
+function New-ReleaseSetFolderName([string]$Prefix, [string]$Locale) {
     $stamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
     $version = Get-RepoVersionLabel
     if ([string]::IsNullOrWhiteSpace($version)) {
-        return "${Prefix}_${stamp}"
+        return "${Prefix}_${Locale}_${stamp}"
     }
-    return "${Prefix}_${version}_${stamp}"
+    return "${Prefix}_${version}_${Locale}_${stamp}"
 }
 
 function Move-ItemStrict([string]$Source, [string]$Destination) {
@@ -171,7 +177,7 @@ function Assert-ReleaseSetManifestComponents([string]$SetRoot, [object]$Componen
 
 Push-Location -LiteralPath $repoRoot
 try {
-    $folderName = New-ReleaseSetFolderName -Prefix $NamePrefix
+    $folderName = New-ReleaseSetFolderName -Prefix $NamePrefix -Locale $Locale
     $outBasePath = Resolve-OutputBasePath -Path $OutBaseDir
     $setRoot = [System.IO.Path]::GetFullPath((Join-Path $outBasePath $folderName))
     Assert-OutsideRepoRoot -Path $setRoot
@@ -209,6 +215,7 @@ try {
             OutBaseDir = $stagingBaseRel
             NamePrefix = "release"
             Checksums = $Checksums
+            Locale = $Locale
         }
         if ($Zip) { $packArgsBase["Zip"] = $true }
         if ($IncludeWorkspace) { $packArgsBase["IncludeWorkspace"] = $true }
@@ -297,7 +304,7 @@ try {
     $snapshotScript = Join-Path $scriptRoot "export_public_snapshot.ps1"
     if (-not (Test-Path -LiteralPath $snapshotScript)) { throw "Missing public snapshot entry script: $snapshotScript" }
     $snapshotArgs = @("--dest", $publicSnapshotDir)
-    $releasePublicAllowlist = Join-Path $repoRoot "docs\internal\operations\public_repo_release_allowlist_2026-07-28.txt"
+    $releasePublicAllowlist = Join-Path $repoRoot "docs\internal\operations\public_repo_release_allowlist_2026-08-24.txt"
     $releaseArtifactManifest = Join-Path $repoRoot "docs\internal\operations\public_repo_release_artifact_manifest_2026-08-12.tsv"
     if ([string]::IsNullOrWhiteSpace($PublicAllowlist)) {
         if (-not (Test-Path -LiteralPath $releasePublicAllowlist -PathType Leaf)) {
@@ -349,6 +356,7 @@ try {
     $manifest = [PSCustomObject]@{
         created_at = (Get-Date).ToString("o")
         app_version = (Get-RepoVersionLabel)
+        locale = $Locale
         name = $folderName
         components = [PSCustomObject]@{
             release = $releaseComponentName
@@ -396,6 +404,14 @@ try {
             & python $textGateScript --release-set $setRoot
             if ($LASTEXITCODE -ne 0) {
                 throw "Release text gate failed. The release set will not be used."
+            }
+            $localeContentGateScript = Join-Path $repoRoot "tools\release_checks\release_locale_content_gate.py"
+            if (-not (Test-Path -LiteralPath $localeContentGateScript -PathType Leaf)) {
+                throw "Missing release locale-content gate: $localeContentGateScript"
+            }
+            & python $localeContentGateScript --release-set $setRoot
+            if ($LASTEXITCODE -ne 0) {
+                throw "Release locale-content gate failed. The release set will not be used."
             }
         }
         if ($DeferPostCreationValidation) {

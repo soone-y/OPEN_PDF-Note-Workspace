@@ -161,25 +161,24 @@ static int SettingsControlWidth(HWND hWnd, int contentW, bool embedded, int norm
 
 static std::wstring SettingLabelWithDefault(const std::wstring& label, const std::wstring& value) {
     if (value.empty()) return label;
-    return IsEnglishUi()
-        ? (label + L" (default: " + value + L")")
-        : (label + L" (初期: " + value + L")");
+    return localization::Format(L"settings.common.label_with_default",
+                                {{L"LABEL", label}, {L"VALUE", value}});
 }
 
-static const wchar_t* UiApplyLabel() {
-    return IsEnglishUi() ? L"Apply" : L"反映";
+static std::wstring UiApplyLabel() {
+    return localization::Text(L"settings.common.5e0e1efd1bae");
 }
 
 static const wchar_t* UiOkLabel() {
     return L"OK";
 }
 
-static const wchar_t* UiCancelLabel() {
-    return IsEnglishUi() ? L"Cancel" : L"キャンセル";
+static std::wstring UiCancelLabel() {
+    return localization::Text(L"settings.common.3672b0b92134");
 }
 
-static const wchar_t* UiCloseLabel() {
-    return IsEnglishUi() ? L"Close" : L"閉じる";
+static std::wstring UiCloseLabel() {
+    return localization::Text(L"settings.common.603bc62f3f34");
 }
 
 template <size_t N>
@@ -234,16 +233,16 @@ static std::wstring SettingsCategoryDialogTitle(int target) {
 static std::wstring SettingsCategoryHeaderLabel(int target) {
     switch (target) {
     case kSettingsNavNote:
-        return IsEnglishUi() ? L"Note" : L"ノート";
+        return localization::Text(L"settings.common.2a24383f6ef0");
     case kSettingsNavMarkup:
-        return IsEnglishUi() ? L"Markup" : L"マークアップ";
+        return localization::Text(L"settings.common.3c47c741e04d");
     case kSettingsNavAnnot:
-        return IsEnglishUi() ? L"Annotation" : L"注釈";
+        return localization::Text(L"settings.common.9aee0c26e8be");
     case kSettingsNavPalette:
-        return IsEnglishUi() ? L"Color Palette" : L"カラーパレット";
+        return localization::Text(L"settings.common.0daa4cb8f68a");
     case kSettingsNavGeneral:
     default:
-        return IsEnglishUi() ? L"Basic" : L"基本";
+        return localization::Text(L"settings.common.c34e9119321f");
     }
 }
 

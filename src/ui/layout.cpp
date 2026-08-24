@@ -299,6 +299,10 @@ static int LayoutAnnotToolbar(int baseX, int baseY, int areaW, PlaceFn place) {
         }
     }
 
+    if (g_toolMode == ToolMode::Pan) {
+        placeFull(g_hChkPanMouseWheelZoom, comboH);
+    }
+
     bool showAnnotMethod = ToolbarHasAnnotMethodOptions(g_toolMode);
     if (showAnnotMethod) {
         placeFull(g_hComboAnnotMethod, comboH);
@@ -758,6 +762,7 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
     hideToolbarOptionIfUnused(g_hRadioTextReadableBackgroundNormal);
     hideToolbarOptionIfUnused(g_hRadioTextReadableBackgroundInverted);
     hideToolbarOptionIfUnused(g_hChkTextAutoWrap);
+    hideToolbarOptionIfUnused(g_hChkPanMouseWheelZoom);
     hideToolbarOptionIfUnused(g_hComboWidth);
     hideToolbarOptionIfUnused(g_hComboMarkerAlpha);
     hideToolbarOptionIfUnused(g_hComboMagnifierShape);

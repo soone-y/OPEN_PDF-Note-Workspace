@@ -21,6 +21,23 @@ static const wchar_t* NoteInputLatencyAction(UINT msg, WPARAM wParam) {
     return nullptr;
 }
 
+static const wchar_t* NoteFocusTraceMessageName(UINT msg) {
+    switch (msg) {
+    case WM_SETFOCUS: return L"set_focus";
+    case WM_KILLFOCUS: return L"kill_focus";
+    case WM_KEYDOWN: return L"key_down";
+    case WM_CHAR: return L"char";
+    case WM_PASTE: return L"paste";
+    case WM_CUT: return L"cut";
+    case WM_CLEAR: return L"clear";
+    case WM_LBUTTONDOWN: return L"left_down";
+    case WM_LBUTTONDBLCLK: return L"left_double";
+    case WM_RBUTTONDOWN: return L"right_down";
+    case WM_MBUTTONDOWN: return L"middle_down";
+    default: return nullptr;
+    }
+}
+
 class NoteInputLatencyTrace {
 public:
     NoteInputLatencyTrace(HWND hwnd, UINT msg, WPARAM wParam)
@@ -96,8 +113,25 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     NoteInputLatencyTrace inputLatencyTrace(hWnd, msg, wParam);
     bool forgetViewContextAfterDefault = false;
 
-    if (BlockNoteEditInputDuringSave(hWnd, msg, wParam, lParam)) return 0;
-    if (!EnsureDeferredNoteTargetForInputMessage(hWnd, msg, wParam)) return 0;
+    if (const wchar_t* eventName = NoteFocusTraceMessageName(msg)) {
+        // Do not log the character itself: note content may be private.
+        preview_trace::Append(
+            L"NoteInputRoute",
+            L"event=" + std::wstring(eventName) +
+            L" keyCode=" + (msg == WM_KEYDOWN ? std::to_wstring(static_cast<unsigned long long>(wParam)) : L"redacted") +
+            L" target=" + preview_trace::Window(hWnd) +
+            L" focus=" + preview_trace::Window(GetFocus()));
+        TraceCurrentNoteFocusState(L"note_input_entry");
+    }
+
+    if (BlockNoteEditInputDuringSave(hWnd, msg, wParam, lParam)) {
+        preview_trace::Append(L"NoteInputRoute", L"blocked=save_transaction");
+        return 0;
+    }
+    if (!EnsureDeferredNoteTargetForInputMessage(hWnd, msg, wParam)) {
+        preview_trace::Append(L"NoteInputRoute", L"blocked=deferred_note_target");
+        return 0;
+    }
     if (!HasOpenNote()) {
         switch (msg) {
         case WM_LBUTTONDOWN:
@@ -124,6 +158,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 if (msg == WM_CHAR || msg == WM_KEYDOWN || msg == WM_PASTE || msg == WM_CUT) {
                     MaybeShowNoteOpenNotice(GetParent(hWnd));
                 }
+                preview_trace::Append(L"NoteInputRoute", L"blocked=no_open_note");
                 return 0;
             }
             break;
@@ -161,24 +196,29 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_IME_STARTCOMPOSITION:
         case WM_IME_ENDCOMPOSITION:
         case WM_IME_COMPOSITION:
+            preview_trace::Append(L"NoteInputRoute", L"blocked=render_switch");
             return 0;
         default:
             break;
         }
     }
     if (IsNoteOpeningFocusVisualHoldActive()) {
+        if (const wchar_t* eventName = NoteFocusTraceMessageName(msg)) {
+            preview_trace::Append(
+                L"NoteOpeningVisualHold",
+                L"release_event=" + std::wstring(eventName) +
+                L" keyCode=" + (msg == WM_KEYDOWN ? std::to_wstring(static_cast<unsigned long long>(wParam)) : L"redacted"));
+        }
         switch (msg) {
         case WM_CHAR:
         case WM_KEYDOWN:
         case WM_PASTE:
         case WM_CUT:
         case WM_CLEAR:
-        case WM_LBUTTONDOWN:
-        case WM_LBUTTONDBLCLK:
-        case WM_RBUTTONDOWN:
-        case WM_MBUTTONDOWN:
-        case WM_XBUTTONDOWN:
+            // Pointer interaction only changes the display caret or focus.
+            // Keep the opened note rendered until a text-editing input occurs.
             EndNoteOpeningFocusVisualHold(hWnd);
+            TraceCurrentNoteFocusState(L"opening_hold_released");
             break;
         default:
             break;
@@ -553,8 +593,8 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 InvalidateRect(hWnd, nullptr, FALSE);
                 ShowSoftNotice(GetParent(hWnd),
                                g_noteShowInvisibleChars
-                                   ? (IsEnglishUi() ? L"Invisible characters shown." : L"不可視文字を表示します。")
-                                   : (IsEnglishUi() ? L"Invisible characters hidden." : L"不可視文字を非表示にします。"));
+                                   ? (localization::Text(L"note.input_proc.71b21a9d8c42"))
+                                   : (localization::Text(L"note.input_proc.f9bb827b8766")));
                 return 0;
             }
             if (ctrlDown && !altDown && shiftDown && (wParam == 'N')) {
@@ -563,8 +603,8 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 InvalidateRect(hWnd, nullptr, FALSE);
                 ShowSoftNotice(GetParent(hWnd),
                                g_noteShowLineNumbers
-                                   ? (IsEnglishUi() ? L"Line numbers shown." : L"行番号を表示します。")
-                                   : (IsEnglishUi() ? L"Line numbers hidden." : L"行番号を非表示にします。"));
+                                   ? (localization::Text(L"note.input_proc.0b87f3cdc2ee"))
+                                   : (localization::Text(L"note.input_proc.c4b6cd9fc5d9")));
                 return 0;
             }
             if (ctrlDown && !altDown && !shiftDown && (wParam == 'F')) {
@@ -581,7 +621,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 } else if (!JumpToNoteSearchResult(GetParent(hWnd), g_noteLastSearchPattern,
                                                    !shiftDown, false, true)) {
                     ShowSoftNotice(GetParent(hWnd),
-                                   IsEnglishUi() ? L"Pattern not found." : L"見つかりませんでした。",
+                                   localization::Text(L"note.input_proc.ded3b61668bf"),
                                    SoftNoticeKind::Warning);
                 }
                 return 0;
@@ -1325,6 +1365,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         InvalidateRect(hWnd, nullptr, FALSE);
         g_noteStageObservedCaretLine = CurrentNoteCaretLine(hWnd);
+        TraceCurrentNoteFocusState(L"wm_setfocus");
         break;
     case WM_KILLFOCUS:
         ResetRenderSuppressedNativeCaretState(hWnd);
@@ -1338,6 +1379,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             InvalidateRect(g_hBottomMath, nullptr, FALSE);
         }
         InvalidateRect(hWnd, nullptr, FALSE);
+        TraceCurrentNoteFocusState(L"wm_killfocus");
         break;
     case WM_VSCROLL:
         InvalidateRect(hWnd, nullptr, FALSE);

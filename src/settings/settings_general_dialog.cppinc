@@ -55,9 +55,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         const int columnGap = useSectionNav ? ScaleY(hWnd, 18) : 0;
         const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
         const int titleH = std::max(rowH, ScaleY(hWnd, 30));
-        const std::wstring subtitle = IsEnglishUi()
-            ? L"Use the buttons below or the list on the left to move. Changes apply only when you press Apply."
-            : L"下のボタンまたは左のカテゴリで移動できます。変更は「反映」を押すまで反映されません。";
+        const std::wstring subtitle = localization::Text(L"settings.general.151942ba553f").c_str();
         const int subtitleH = ctx->embedded ? 0
                                             : std::max(uiTextH + ScaleY(hWnd, 4),
                                                        MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
@@ -122,7 +120,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         int wideW = std::min(contentW, std::max(controlW, ScaleY(hWnd, ctx->embedded ? 640 : 420)));
 
         WorkspaceConfig defaults;
-        std::wstring defaultThemeLabel = IsEnglishUi() ? L"Default" : L"デフォルト";
+        std::wstring defaultThemeLabel = localization::Text(L"settings.general.779a3b9d4381").c_str();
         for (const auto& theme : g_themeCatalog) {
             if (theme.name == defaults.colorTone) {
                 defaultThemeLabel = FormatThemeLabel(theme);
@@ -139,69 +137,75 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         std::wstring defaultNoteFontLabel = ResolveFontDisplayName(defaultNoteFont);
         std::wstring defaultRenderFontLabel = ResolveFontDisplayName(defaultNoteRenderFont);
 
-        const wchar_t* defaultShortcutTextTagKeyLabel = kShortcutTextTagKeyOptions[0].label;
+        std::wstring defaultShortcutTextTagKeyLabel = localization::Text(kShortcutTextTagKeyOptions[0].label);
         for (const auto& opt : kShortcutTextTagKeyOptions) {
             if (defaults.noteShortcutTextTagKey == opt.value) {
-                defaultShortcutTextTagKeyLabel = opt.label;
+                defaultShortcutTextTagKeyLabel = localization::Text(opt.label);
                 break;
             }
         }
-        const wchar_t* defaultLectureSortLabel = kLectureSortOptions[0].label;
+        std::wstring defaultLectureSortLabel = LectureSortOptionLabel(0);
         for (size_t i = 0; i < std::size(kLectureSortOptions); ++i) {
             if (defaults.lectureSortMode == kLectureSortOptions[i].value) {
                 defaultLectureSortLabel = LectureSortOptionLabel(i);
                 break;
             }
         }
-        const wchar_t* defaultSessionSortLabel = kSessionSortOptions[0].label;
+        std::wstring defaultSessionSortLabel = localization::Text(kSessionSortOptions[0].label);
         for (const auto& opt : kSessionSortOptions) {
             if (defaults.sessionSortMode == opt.value) {
-                defaultSessionSortLabel = opt.label;
+                defaultSessionSortLabel = localization::Text(opt.label);
                 break;
             }
         }
-        const wchar_t* defaultSessionNumberingLabel = kSessionNumberingOptions[0].label;
+        std::wstring defaultSessionNumberingLabel = localization::Text(kSessionNumberingOptions[0].label);
         for (const auto& opt : kSessionNumberingOptions) {
             if (defaults.sessionNumberingMode == opt.value) {
-                defaultSessionNumberingLabel = opt.label;
+                defaultSessionNumberingLabel = localization::Text(opt.label);
                 break;
             }
         }
-        const wchar_t* defaultNoteSystemLabel = kNoteSystemOptions[0].label;
+        std::wstring defaultNoteSystemLabel = localization::Text(kNoteSystemOptions[0].label);
         NoteSystem defaultNoteSystem = ParseNoteSystem(defaults.noteSystem);
         for (const auto& opt : kNoteSystemOptions) {
             if (opt.value == defaultNoteSystem) {
-                defaultNoteSystemLabel = opt.label;
+                defaultNoteSystemLabel = localization::Text(opt.label);
                 break;
             }
         }
-        const wchar_t* defaultAutoSaveLabel = kAutoSaveOptions[0].label;
+        std::wstring defaultAutoSaveLabel = localization::Text(kAutoSaveOptions[0].label);
         for (const auto& opt : kAutoSaveOptions) {
             if (NormalizeAutoStageSaveSeconds(defaults.autoSaveSeconds) == opt.seconds) {
-                defaultAutoSaveLabel = opt.label;
+                defaultAutoSaveLabel = localization::Text(opt.label);
                 break;
             }
         }
-        const wchar_t* defaultAutoIntegrateLabel = kAutoIntegrateOptions[0].label;
+        std::wstring defaultAutoIntegrateLabel = localization::Text(kAutoIntegrateOptions[0].label);
         for (const auto& opt : kAutoIntegrateOptions) {
             if (defaults.autoIntegrateSeconds == opt.seconds) {
-                defaultAutoIntegrateLabel = opt.label;
+                defaultAutoIntegrateLabel = localization::Text(opt.label);
                 break;
             }
         }
-        const wchar_t* defaultBottomPaneLabel = kBottomPaneOptions[0].label;
+        std::wstring defaultBottomPaneLabel = localization::Text(kBottomPaneOptions[0].label);
         BottomPanePin defaultPin = ParseBottomPanePin(defaults.bottomPanePin);
         BottomNoteMode defaultNoteMode = ParseBottomNoteMode(defaults.bottomNoteMode);
         for (const auto& opt : kBottomPaneOptions) {
             if (opt.pin == defaultPin && opt.noteMode == defaultNoteMode) {
-                defaultBottomPaneLabel = opt.label;
+                defaultBottomPaneLabel = localization::Text(opt.label);
                 break;
             }
         }
 
-        const wchar_t* dayLabelsJa[kScheduleDayCount] = { L"月", L"火", L"水", L"木", L"金", L"土", L"日" };
-        const wchar_t* dayLabelsEn[kScheduleDayCount] = { L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat", L"Sun" };
-        const wchar_t** dayLabels = IsEnglishUi() ? dayLabelsEn : dayLabelsJa;
+        const std::array<std::wstring, kScheduleDayCount> dayLabels = {
+            localization::Text(L"settings.schedule.day.mon"),
+            localization::Text(L"settings.schedule.day.tue"),
+            localization::Text(L"settings.schedule.day.wed"),
+            localization::Text(L"settings.schedule.day.thu"),
+            localization::Text(L"settings.schedule.day.fri"),
+            localization::Text(L"settings.schedule.day.sat"),
+            localization::Text(L"settings.schedule.day.sun"),
+        };
 
         std::wstring defaultScheduleDaysLabel;
         int defaultDayMask = defaults.scheduleDayMask & 0x7F;
@@ -213,18 +217,17 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             }
         }
         if (defaultScheduleDaysLabel.empty()) {
-            defaultScheduleDaysLabel = IsEnglishUi() ? L"Mon-Fri" : L"月-金";
+            defaultScheduleDaysLabel = localization::Text(L"settings.general.320d24d48eee").c_str();
         }
         int defaultPeriods = std::clamp(defaults.schedulePeriods, 1, kScheduleMaxPeriods);
-        std::wstring defaultSchedulePeriodsLabel = IsEnglishUi()
-            ? (std::wstring(L"P") + std::to_wstring(defaultPeriods))
-            : (std::to_wstring(defaultPeriods) + L"限");
-        std::wstring defaultUnsetLabel = IsEnglishUi() ? L"Unset" : L"未設定";
-        const wchar_t* defaultShowMathLabel = defaults.showMathList
-            ? (IsEnglishUi() ? L"Show" : L"表示")
-            : (IsEnglishUi() ? L"Hide" : L"非表示");
-        const wchar_t* defaultDownKeyLabel = DownKeyLastLineLabel(defaults.downKeyLastLineAction);
-        const wchar_t* defaultLeftRightLabel = LeftRightLineMoveLabel(defaults.leftRightLineMoveAction);
+        std::wstring defaultSchedulePeriodsLabel = localization::Format(
+            L"settings.schedule.period", {{L"COUNT", std::to_wstring(defaultPeriods)}});
+        std::wstring defaultUnsetLabel = localization::Text(L"settings.general.6e885e5bd098").c_str();
+        const std::wstring defaultShowMathLabel = defaults.showMathList
+            ? (localization::Text(L"settings.general.92b0b1833a5b").c_str())
+            : (localization::Text(L"settings.general.66a5fb46490f").c_str());
+        std::wstring defaultDownKeyLabel = DownKeyLastLineLabel(defaults.downKeyLastLineAction);
+        std::wstring defaultLeftRightLabel = LeftRightLineMoveLabel(defaults.leftRightLineMoveAction);
         std::wstring defaultSelectionStyleLabel = SelectionStyleLabel(defaults.selectionStyle);
         std::wstring defaultPointerOffsetLabel = L"0px";
         std::wstring defaultAutoPairLabel = defaults.autoPairBrackets ? L"ON" : L"OFF";
@@ -353,26 +356,24 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         };
 
         if (showBasicSections) {
-            beginSection(kGeneralSectionDisplay, L"表示と操作");
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Theme" : L"テーマ", defaultThemeLabel));
+            beginSection(kGeneralSectionDisplay, localization::Text(L"settings.general.section_display").c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.5c3d07c45ba5").c_str(), defaultThemeLabel));
             ctx->cbTone = addCombo(IDC_TONE, false, controlW);
             {
-                const bool en = IsEnglishUi();
-                auto pair = addTwoButtons(IDC_TONE_CREATE, en ? L"Create Theme..." : L"テーマ作成...", buttonW,
-                                          IDC_TONE_EDIT, en ? L"Edit..." : L"編集...", buttonW,
+                auto pair = addTwoButtons(IDC_TONE_CREATE, localization::Text(L"settings.general.create_theme").c_str(), buttonW,
+                                          IDC_TONE_EDIT, localization::Text(L"settings.general.edit").c_str(), buttonW,
                                           rowH);
                 ctx->btnToneCreate = pair.first;
                 ctx->btnToneEdit = pair.second;
                 if (ctx->btnToneCreate) EnableWindow(ctx->btnToneCreate, TRUE);
             }
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Color tendency" : L"カラー傾向", defaultToneVariantLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.e52cc8dfcb2e").c_str(), defaultToneVariantLabel));
             {
-                const bool en = IsEnglishUi();
-                ctx->radTonePure = addRadio(IDC_TONE_VARIANT_PURE, en ? L"Pure" : L"純", checkW, true);
-                ctx->radToneGuard = addRadio(IDC_TONE_VARIANT_GUARD, en ? L"Tone guard" : L"トーンガード", checkW, false);
-                ctx->radToneEmphasis = addRadio(IDC_TONE_VARIANT_EMPHASIS, en ? L"Tone emphasis" : L"トーン強調", checkW, false);
-                ctx->radToneWhite = addRadio(IDC_TONE_VARIANT_WHITE, en ? L"Theme white" : L"白へ補正", checkW, false);
-                ctx->radToneBlack = addRadio(IDC_TONE_VARIANT_BLACK, en ? L"Black correction" : L"黒へ補正", checkW, false);
+                ctx->radTonePure = addRadio(IDC_TONE_VARIANT_PURE, localization::Text(L"settings.general.tone_pure").c_str(), checkW, true);
+                ctx->radToneGuard = addRadio(IDC_TONE_VARIANT_GUARD, localization::Text(L"settings.general.tone_guard").c_str(), checkW, false);
+                ctx->radToneEmphasis = addRadio(IDC_TONE_VARIANT_EMPHASIS, localization::Text(L"settings.general.tone_emphasis").c_str(), checkW, false);
+                ctx->radToneWhite = addRadio(IDC_TONE_VARIANT_WHITE, localization::Text(L"settings.general.tone_white").c_str(), checkW, false);
+                ctx->radToneBlack = addRadio(IDC_TONE_VARIANT_BLACK, localization::Text(L"settings.general.tone_black").c_str(), checkW, false);
                 std::wstring v = NormalizeToneVariantValue(g_config.toneVariant);
                 if (v == L"guard" && ctx->radToneGuard) {
                     SendMessageW(ctx->radToneGuard, BM_SETCHECK, BST_CHECKED, 0);
@@ -387,103 +388,95 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 }
             }
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Annotation panel" : L"注釈機能欄", defaultShowMathLabel));
-            ctx->chkShowMath = addCheck(IDC_SHOW_MATH, L"表示する", checkW);
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.5b68f59d8849").c_str(), defaultShowMathLabel));
+            ctx->chkShowMath = addCheck(IDC_SHOW_MATH, localization::Text(L"settings.general.show").c_str(), checkW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"PDF scroll direction" : L"PDFスクロール方向",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b4162c55939c").c_str(),
                                              PdfFlowModeLabel(g_config.pdfFlowMode)));
             ctx->cbPdfFlowMode = addCombo(IDC_PDF_FLOW_MODE, false, controlW);
 
-            addLabel(IsEnglishUi() ? L"PDF display mode" : L"PDF表示モード");
+            addLabel(localization::Text(L"settings.general.a0e9ebb0bedf").c_str());
             ctx->chkPdfSinglePageMode = addCheck(
                 IDC_PDF_SINGLE_PAGE_MODE,
-                IsEnglishUi() ? L"Single-page mode" : L"1枚送り",
+                localization::Text(L"settings.general.ba5d74bf8466").c_str(),
                 wideW);
 
-            addLabel(IsEnglishUi() ? L"Mouse wheel while using Pan" : L"パン操作中のマウスホイール");
-            ctx->chkPanMouseWheelZoom = addCheck(
-                IDC_PAN_MOUSE_WHEEL_ZOOM,
-                IsEnglishUi() ? L"Zoom in/out" : L"拡大・縮小する",
-                wideW);
-
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Selection style" : L"選択表示", defaultSelectionStyleLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.d756a8fbd401").c_str(), defaultSelectionStyleLabel));
             ctx->cbSelectionStyle = addCombo(IDC_SELECTION_STYLE, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"PDF click correction X" : L"PDFクリック補正 X", defaultPointerOffsetLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.77a2cd7b241a").c_str(), defaultPointerOffsetLabel));
             ctx->cbPointerOffsetX = addCombo(IDC_POINTER_OFFSET_X, false, controlW);
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"PDF click correction Y" : L"PDFクリック補正 Y", defaultPointerOffsetLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.96521a019558").c_str(), defaultPointerOffsetLabel));
             ctx->cbPointerOffsetY = addCombo(IDC_POINTER_OFFSET_Y, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Auto pair brackets" : L"括弧ペア入力",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b07f8dab1085").c_str(),
                                              defaultAutoPairLabel));
             ctx->chkAutoPairBrackets = addCheck(IDC_AUTO_PAIR_BRACKETS,
-                                                IsEnglishUi() ? L"Enable" : L"有効にする", checkW);
+                                                localization::Text(L"settings.general.0b8b663d67e3").c_str(), checkW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Student mode" : L"学徒モード",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b437cb79e5a2").c_str(),
                                              defaultStudentModeLabel));
             ctx->chkStudentMode = addCheck(IDC_STUDENT_MODE,
-                                           IsEnglishUi()
-                                               ? L"Use lecture/session wording"
-                                               : L"授業/回次の表現を使う",
+                                           localization::Text(L"settings.general.acef35730ba0").c_str(),
                                            wideW);
 
-            addLabel(L"マウスホイール上下の向きを反転");
-            ctx->chkWheelInvertVertical = addCheck(IDC_WHEEL_INVERT_VERTICAL, L"反転する", checkW);
+            addLabel(localization::Text(L"settings.general.wheel_invert_vertical").c_str());
+            ctx->chkWheelInvertVertical = addCheck(IDC_WHEEL_INVERT_VERTICAL, localization::Text(L"settings.general.invert").c_str(), checkW);
 
-            addLabel(L"マウスホイール左右の向きを反転");
-            ctx->chkWheelInvertHorizontal = addCheck(IDC_WHEEL_INVERT_HORIZONTAL, L"反転する", checkW);
+            addLabel(localization::Text(L"settings.general.wheel_invert_horizontal").c_str());
+            ctx->chkWheelInvertHorizontal = addCheck(IDC_WHEEL_INVERT_HORIZONTAL, localization::Text(L"settings.general.invert").c_str(), checkW);
 
-            addLabel(L"タッチパッド上下の向きを反転");
-            ctx->chkTouchpadInvertVertical = addCheck(IDC_TOUCHPAD_INVERT_VERTICAL, L"反転する", checkW);
+            addLabel(localization::Text(L"settings.general.touchpad_invert_vertical").c_str());
+            ctx->chkTouchpadInvertVertical = addCheck(IDC_TOUCHPAD_INVERT_VERTICAL, localization::Text(L"settings.general.invert").c_str(), checkW);
 
-            addLabel(L"タッチパッド左右の向きを反転");
-            ctx->chkTouchpadInvertHorizontal = addCheck(IDC_TOUCHPAD_INVERT_HORIZONTAL, L"反転する", checkW);
+            addLabel(localization::Text(L"settings.general.touchpad_invert_horizontal").c_str());
+            ctx->chkTouchpadInvertHorizontal = addCheck(IDC_TOUCHPAD_INVERT_HORIZONTAL, localization::Text(L"settings.general.invert").c_str(), checkW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Down key on last line" : L"最下行での下キー", defaultDownKeyLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.c2c8853f9568").c_str(), defaultDownKeyLabel));
             ctx->cbDownKeyAction = addCombo(IDC_DOWNKEY_LASTLINE_ACTION, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Left / right keys in line" : L"行中の左右キー", defaultLeftRightLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.c0ea1bb8540b").c_str(), defaultLeftRightLabel));
             ctx->cbLeftRightLineMoveAction = addCombo(IDC_LRKEY_LINE_MOVE_ACTION, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Caret after committing （）" : L"「（）」確定後のキャレット",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.5bb4973da96e").c_str(),
                                              defaultFullWidthParenCaretLabel));
             ctx->chkFullWidthParenCaretInside = addCheck(IDC_FULLWIDTH_PAREN_CARET_INSIDE,
-                                                         IsEnglishUi() ? L"Move inside" : L"内側に移動する",
+                                                         localization::Text(L"settings.general.ae2b2ead1c80").c_str(),
                                                          checkW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Left key after moving into （）" : L"「（）」内への移動後の左キー",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.37e102c14dac").c_str(),
                                              defaultFullWidthParenCancelLeftLabel));
             ctx->chkFullWidthParenCancelNextLeft = addCheck(IDC_FULLWIDTH_PAREN_CANCEL_NEXT_LEFT,
-                                                             IsEnglishUi() ? L"Cancel once" : L"一度だけ打ち消す",
+                                                             localization::Text(L"settings.general.67dd379d0c70").c_str(),
                                                              checkW);
 
-            addLabel(IsEnglishUi() ? L"Popup position while moving" : L"移動中のポップアップ位置");
+            addLabel(localization::Text(L"settings.general.90bafe523784").c_str());
             ctx->cbQuickAnnotPopupPlacement = addCombo(IDC_QUICKANNOT_POPUP_PLACEMENT, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Text color tag key" : L"文字色タグ要素", defaultShortcutTextTagKeyLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.c3ceff37e484").c_str(), defaultShortcutTextTagKeyLabel));
             ctx->cbShortcutTextTagKey = addCombo(IDC_SHORTCUT_TEXT_TAG_KEY, false, controlW);
 
-            addLabel(IsEnglishUi() ? L"Reverse heading arrow direction" : L"見出し矢印の増減方向");
-            ctx->chkShortcutHeadingArrowInvert = addCheck(IDC_SHORTCUT_HEADING_ARROW_INVERT, L"反転する", checkW);
+            addLabel(localization::Text(L"settings.general.ea90dd967716").c_str());
+            ctx->chkShortcutHeadingArrowInvert = addCheck(IDC_SHORTCUT_HEADING_ARROW_INVERT, localization::Text(L"settings.general.invert").c_str(), checkW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Shortcut contents" : L"ショートカット内容", IsEnglishUi() ? L"Standard" : L"標準"));
-            ctx->btnShortcutEdit = addButton(IDC_SHORTCUT_EDIT, L"編集...", buttonW, rowH);
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b8780efbcc5b").c_str(), localization::Text(L"settings.general.1b861de2aac9").c_str()));
+            ctx->btnShortcutEdit = addButton(IDC_SHORTCUT_EDIT, localization::Text(L"settings.general.edit").c_str(), buttonW, rowH);
         }
 
         if (showNoteSectionOnly) {
             std::wstring defaultRenderModeLabel = NoteRenderModeLabel(defaults.noteRenderEnabled, defaults.noteRenderMath);
-            std::wstring defaultWrapLabel = defaults.noteWrapEnabled ? (IsEnglishUi() ? L"ON" : L"ON")
-                                                                     : (IsEnglishUi() ? L"OFF" : L"OFF");
-            std::wstring defaultVimLabel = defaults.noteVimModeEnabled ? (IsEnglishUi() ? L"ON" : L"ON")
-                                                                       : (IsEnglishUi() ? L"OFF" : L"OFF");
+            std::wstring defaultWrapLabel = defaults.noteWrapEnabled ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
+                                                                     : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
+            std::wstring defaultVimLabel = defaults.noteVimModeEnabled ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
+                                                                       : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
             std::wstring defaultCaretLineRawLabel = defaults.noteVimCaretLineRawTextVisible
-                ? (IsEnglishUi() ? L"ON" : L"ON")
-                : (IsEnglishUi() ? L"OFF" : L"OFF");
+                ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
+                : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
             std::wstring defaultClickInsertLabel = defaults.noteVimClickEntersInsertMode
-                ? (IsEnglishUi() ? L"ON" : L"ON")
-                : (IsEnglishUi() ? L"OFF" : L"OFF");
-            std::wstring defaultGridLabel = defaults.noteGridEnabled ? (IsEnglishUi() ? L"ON" : L"ON")
-                                                                     : (IsEnglishUi() ? L"OFF" : L"OFF");
+                ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
+                : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
+            std::wstring defaultGridLabel = defaults.noteGridEnabled ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
+                                                                     : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
             std::wstring defaultGridPitchLabel = std::to_wstring(defaults.noteGridPitch) + L"px";
             std::wstring defaultBgLabel = NoteBackgroundLabel(defaults.noteBgSource, defaults.noteBgThemeName, defaults.noteBgColor);
             std::wstring defaultMathMarginLabel = NoteRatioLabel(defaults.noteMathMarginTopPercent);
@@ -491,34 +484,35 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             std::wstring defaultOverlayRefreshDelayLabel = std::to_wstring(defaults.noteOverlayRefreshDelayMs) + L" ms";
             std::wstring defaultFullReparseDelayLabel = std::to_wstring(defaults.noteFullReparseDelayMs) + L" ms";
 
-            beginSection(0, IsEnglishUi() ? L"Text / Font" : L"文字・フォント");
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Note font" : L"ノート文字フォント", defaultNoteFontLabel));
+            beginSection(0, localization::Text(L"settings.general.d6ae379cb93d").c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.82962850fce5").c_str(), defaultNoteFontLabel));
             ctx->cbNoteFontFace = addCombo(IDC_NOTE_FONT_FACE, true, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Note font size" : L"ノート文字サイズ", FormatPtLabel(defaults.noteFontPt)));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.552cc3ea514a").c_str(), FormatPtLabel(defaults.noteFontPt)));
             ctx->cbNoteFont = addCombo(IDC_NOTE_FONT, false, controlW);
 
-            addLabel(IsEnglishUi() ? L"Font customization" : L"フォントカスタマイズ");
+            addLabel(localization::Text(L"settings.general.841e70de8f55").c_str());
             ctx->cbNoteFontCustomization = addCombo(IDC_NOTE_FONT_CUSTOMIZATION, false, controlW);
 
-            ctx->lblNoteRenderLatin = addLabel(IsEnglishUi() ? L"Separate font (Latin / symbols)" : L"別フォント(英字・記号)");
+            ctx->lblNoteRenderLatin = addLabel(localization::Text(L"settings.general.5754fa41b4ed").c_str());
             ctx->cbNoteRenderFontFace = addCombo(IDC_NOTE_RENDER_FONT_FACE, true, controlW);
 
-            ctx->lblNoteRenderJp = addLabel(IsEnglishUi() ? L"Separate font (Japanese)" : L"別フォント(日本語)");
+            ctx->lblNoteRenderJp = addLabel(localization::Text(L"settings.general.ba2add668dd1").c_str());
             ctx->cbNoteRenderJpFontFace = addCombo(IDC_NOTE_RENDER_JP_FONT_FACE, true, controlW);
 
-            ctx->lblNoteFontDigit = addLabel(IsEnglishUi() ? L"Font used for digits" : L"数字に使用するフォント");
+            ctx->lblNoteFontDigit = addLabel(localization::Text(L"settings.general.ebf1c0d5b4d6").c_str());
             ctx->cbNoteFontDigitTarget = addCombo(IDC_NOTE_FONT_DIGIT_TARGET, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Note system" : L"ノートシステム", defaultNoteSystemLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.e6064a080888").c_str(), defaultNoteSystemLabel));
             ctx->cbNoteSystem = addCombo(IDC_NOTE_SYSTEM, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Preview" : L"ノート文字プレビュー", FormatPtLabel(defaults.noteFontPt)));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.9e709e2eff10").c_str(), FormatPtLabel(defaults.noteFontPt)));
             int previewH = std::max(ScaleY(hWnd, 44), rowH * 2);
             int previewW = contentW;
             int previewX = pad + std::max(0, contentW - previewW);
+            const std::wstring notePreviewLabel = localization::Text(L"settings.general.note_preview");
             ctx->previewNote = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC",
-                                               L"プレビュー: ノート文字サイズ",
+                                               notePreviewLabel.c_str(),
                                                WS_CHILD | WS_VISIBLE,
                                                previewX, y, previewW, previewH, contentParent,
                                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_NOTE_PREVIEW)),
@@ -526,70 +520,66 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             SetUIFont(ctx->previewNote);
             y += previewH + gapY;
 
-            beginSection(1, IsEnglishUi() ? L"Display" : L"表示");
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Note rendering" : L"ノートレンダリング", defaultRenderModeLabel));
+            beginSection(1, localization::Text(L"settings.general.4c8d20a2540f").c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b87fc8e786dc").c_str(), defaultRenderModeLabel));
             ctx->cbNoteRenderMode = addCombo(IDC_NOTE_RENDER_MODE, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Auto wrap in raw mode" : L"自動折り返し(生表示時)", defaultWrapLabel));
-            ctx->chkNoteWrapEnabled = addCheck(IDC_NOTE_WRAP_ENABLED, IsEnglishUi() ? L"Enable" : L"有効にする", checkW);
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.db92a1a5fee5").c_str(), defaultWrapLabel));
+            ctx->chkNoteWrapEnabled = addCheck(IDC_NOTE_WRAP_ENABLED, localization::Text(L"settings.general.0b8b663d67e3").c_str(), checkW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Soft keyboard controls" : L"ソフトキーボード操作", defaultVimLabel));
-            ctx->chkNoteVimMode = addCheck(IDC_NOTE_VIM_MODE, IsEnglishUi() ? L"Enable" : L"有効にする", checkW);
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.4c0160f87cbd").c_str(), defaultVimLabel));
+            ctx->chkNoteVimMode = addCheck(IDC_NOTE_VIM_MODE, localization::Text(L"settings.general.0b8b663d67e3").c_str(), checkW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Show caret line as raw text in note pane (soft keyboard controls)"
-                                                           : L"ソフトキーボード操作時にノート欄でキャレット行を生テキスト表示",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.41c2ad241b39").c_str(),
                                              defaultCaretLineRawLabel));
             ctx->chkNoteVimCaretLineRawText = addCheck(IDC_NOTE_VIM_CARET_LINE_RAW_TEXT,
-                                                       IsEnglishUi() ? L"Show" : L"表示する", checkW);
+                                                       localization::Text(L"settings.general.35d0b7d2eebe").c_str(), checkW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Enter insert mode on note click (soft keyboard controls)"
-                                                           : L"ソフトキーボード操作時にノートクリックでインサート移行",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.0ce3a3a105dc").c_str(),
                                              defaultClickInsertLabel));
             ctx->chkNoteVimClickInsert = addCheck(IDC_NOTE_VIM_CLICK_INSERT,
-                                                  IsEnglishUi() ? L"Enable" : L"有効にする", checkW);
+                                                  localization::Text(L"settings.general.0b8b663d67e3").c_str(), checkW);
 
-            beginSection(2, IsEnglishUi() ? L"Assist" : L"補助表示");
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Note background" : L"ノート背景", defaultBgLabel));
+            beginSection(2, localization::Text(L"settings.general.16a547980a7a").c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.111e520d0d01").c_str(), defaultBgLabel));
             ctx->cbNoteBgMode = addCombo(IDC_NOTE_BG_MODE, false, controlW);
             ctx->btnNoteBgCustom = addButton(IDC_NOTE_BG_CUSTOM,
-                                             IsEnglishUi() ? L"Custom color..." : L"カスタム色...",
+                                             localization::Text(L"settings.general.b2fd77c3e2b0").c_str(),
                                              wideW, rowH);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Grid overlay" : L"グリッド表示", defaultGridLabel));
-            ctx->chkNoteGridEnabled = addCheck(IDC_NOTE_GRID_ENABLED, IsEnglishUi() ? L"Show grid" : L"グリッドを表示", checkW);
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.6eadaeb59789").c_str(), defaultGridLabel));
+            ctx->chkNoteGridEnabled = addCheck(IDC_NOTE_GRID_ENABLED, localization::Text(L"settings.general.84c82e82e1cc").c_str(), checkW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Grid pitch" : L"グリッド間隔", defaultGridPitchLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.226e33eec6b1").c_str(), defaultGridPitchLabel));
             ctx->cbNoteGridPitch = addCombo(IDC_NOTE_GRID_PITCH, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Math margin (top:bottom)" : L"数式マージン比(上:下)", defaultMathMarginLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.4468bb0e2582").c_str(), defaultMathMarginLabel));
             ctx->cbNoteMathMargin = addCombo(IDC_NOTE_MATH_MARGIN, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Sup/sub distribution" : L"上付き/下付き 配分", defaultSupSubLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.e1164e3af8c7").c_str(), defaultSupSubLabel));
             ctx->cbNoteMathSupSub = addCombo(IDC_NOTE_MATH_SUPSUB, false, controlW);
 
-            beginSection(3, IsEnglishUi() ? L"Performance" : L"動作速度");
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Render refresh after input" : L"入力後のレンダリング更新", defaultOverlayRefreshDelayLabel));
+            beginSection(3, localization::Text(L"settings.general.f669fef9c21a").c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.0f0d1e700cd7").c_str(), defaultOverlayRefreshDelayLabel));
             ctx->cbNoteOverlayRefreshDelay = addCombo(IDC_NOTE_OVERLAY_REFRESH_DELAY, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Full reparse after input" : L"入力後の完全再解析", defaultFullReparseDelayLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.7370854705ec").c_str(), defaultFullReparseDelayLabel));
             ctx->cbNoteFullReparseDelay = addCombo(IDC_NOTE_FULL_REPARSE_DELAY, false, controlW);
         }
 
         if (showBasicSections) {
-            beginSection(kGeneralSectionSave, L"ファイル / 保存");
-            ctx->lblLayoutDefaults = addLabel(std::wstring(L"カラム境界位置 (") + LayoutDefaultsLabelText() + L")");
-            addButton(IDC_LAYOUT_DEFAULT_SAVE, L"現在の位置を初期値に保存", contentW, rowH);
+            beginSection(kGeneralSectionSave, localization::Text(L"settings.general.section_save").c_str());
+            ctx->lblLayoutDefaults = addLabel(localization::Format(L"settings.general.layout_defaults", {{L"VALUE", LayoutDefaultsLabelText()}}));
+            addButton(IDC_LAYOUT_DEFAULT_SAVE, localization::Text(L"settings.general.save_layout_defaults").c_str(), contentW, rowH);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Auto annotation stage save" : L"注釈 stage 保存の自動保護", defaultAutoSaveLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.0decd4e66de6").c_str(), defaultAutoSaveLabel));
             ctx->cbAutoSave = addCombo(IDC_AUTOSAVE, false, controlW);
-            addLabel(IsEnglishUi()
-                         ? L"Note stage protection is fixed: line move, focus leave, save, or idle 6-20s."
-                         : L"ノート stage 保護は固定です: 行移動・フォーカス離脱・保存前・6〜20秒無操作で保護します。");
+            addLabel(localization::Text(L"settings.general.bee182ab69e9").c_str());
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Auto integrate staged diffs" : L"未統合差分の自動統合", defaultAutoIntegrateLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.cf96ac0a658a").c_str(), defaultAutoIntegrateLabel));
             ctx->cbAutoIntegrate = addCombo(IDC_AUTOINTEGRATE, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"File naming rule" : L"命名規則", kDefaultNameRule));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.f7252c3f810f"), DefaultNameRule()));
             int editW = std::min(contentW, wideW);
             int editX = pad + std::max(0, contentW - editW);
             ctx->editNameRule = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
@@ -600,31 +590,31 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             SetUIFont(ctx->editNameRule);
             y += rowH + gapY;
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"File picker" : L"ファイル選択方式",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.a138760d8332").c_str(),
                                              defaultNativeFileDialogsLabel));
             ctx->chkUseNativeFileDialogs = addCheck(
                 IDC_USE_NATIVE_FILE_DIALOGS,
-                IsEnglishUi() ? L"Use Windows file/folder picker" : L"Windows標準のファイル/フォルダ選択を使う",
+                localization::Text(L"settings.general.e6370a2e1c70").c_str(),
                 wideW);
-            addLabel(IsEnglishUi()
-                         ? L"If checked, always uses Windows standard dialog when adding or selecting files."
-                         : L"チェックを入れると、ファイルやフォルダを追加・選択する際に常にWindows標準のダイアログを使用します。");
+            addLabel(localization::Text(L"settings.general.b6fba6677e9b").c_str());
 
+            const auto scheduleTextId = [](const wchar_t* studentId, const wchar_t* parentId) {
+                return g_config.studentMode ? studentId : parentId;
+            };
             beginSection(kGeneralSectionSchedule,
-                         IsEnglishUi()
-                             ? L"Schedule"
-                             : (g_config.studentMode ? L"授業スケジュール" : L"上位項目スケジュール"));
-            addLabel(SettingLabelWithDefault(IsEnglishUi()
-                                                  ? L"Schedule days"
-                                                  : (g_config.studentMode ? L"授業スケジュールの曜日" : L"上位項目スケジュールの曜日"),
-                                             defaultScheduleDaysLabel));
+                         localization::Text(scheduleTextId(L"settings.general.schedule_student",
+                                                           L"settings.general.schedule_parent")).c_str());
+            addLabel(SettingLabelWithDefault(
+                         localization::Text(scheduleTextId(L"settings.general.schedule_days_student",
+                                                           L"settings.general.schedule_days_parent")).c_str(),
+                         defaultScheduleDaysLabel));
             ctx->scheduleDayChecks.assign(kScheduleDayCount, nullptr);
             int dayTotalW = kScheduleDayCount * dayW + (kScheduleDayCount - 1) * dayGap;
             int dayX = pad + std::max(0, contentW - dayTotalW);
             for (int i = 0; i < kScheduleDayCount; ++i) {
                 int dx = dayX + i * (dayW + dayGap);
                 ctx->scheduleDayChecks[static_cast<size_t>(i)] = CreateWindowExW(
-                    0, L"BUTTON", dayLabels[i],
+                    0, L"BUTTON", dayLabels[i].c_str(),
                     WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                     dx, y, dayW, rowH, contentParent,
                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SCHEDULE_DAY_BASE + i)),
@@ -633,85 +623,79 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             }
             y += rowH + gapY;
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Periods per day" : L"何限まで表示するか", defaultSchedulePeriodsLabel));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.f13e50a4a779").c_str(), defaultSchedulePeriodsLabel));
             ctx->cbSchedulePeriods = addCombo(IDC_SCHEDULE_PERIODS, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi()
-                                                  ? L"Period start times"
-                                                  : (g_config.studentMode ? L"授業開始時刻" : L"開始時刻"),
-                                             defaultUnsetLabel));
-            ctx->btnScheduleTimeEdit = addButton(IDC_SCHEDULE_TIME_EDIT, L"編集...", buttonW, rowH);
+            addLabel(SettingLabelWithDefault(
+                         localization::Text(scheduleTextId(L"settings.general.schedule_start_time_student",
+                                                           L"settings.general.schedule_start_time_parent")).c_str(),
+                         defaultUnsetLabel));
+            ctx->btnScheduleTimeEdit = addButton(IDC_SCHEDULE_TIME_EDIT,
+                                                 localization::Text(L"settings.general.edit").c_str(), buttonW, rowH);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi()
-                                                  ? L"Timetable assignment"
-                                                  : (g_config.studentMode ? L"時間割の授業割当" : L"時間割の上位項目割当"),
-                                             defaultUnsetLabel));
+            addLabel(SettingLabelWithDefault(
+                         localization::Text(scheduleTextId(L"settings.general.timetable_assignment_student",
+                                                           L"settings.general.timetable_assignment_parent")).c_str(),
+                         defaultUnsetLabel));
             ctx->btnScheduleEdit = addButton(IDC_SCHEDULE_EDIT,
-                                             IsEnglishUi() ? L"Edit..." : L"編集...",
+                                             localization::Text(L"settings.general.0365d40764d8").c_str(),
                                              buttonW, rowH);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi()
-                                                  ? (g_config.studentMode ? L"Lecture list order" : L"Parent item list order")
-                                                  : (g_config.studentMode ? L"授業フォルダの並び順" : L"上位項目フォルダの並び順"),
-                                             defaultLectureSortLabel));
+            addLabel(SettingLabelWithDefault(
+                         localization::Text(scheduleTextId(L"settings.general.lecture_sort_student",
+                                                           L"settings.general.lecture_sort_parent")).c_str(),
+                         defaultLectureSortLabel));
             ctx->cbLectureSort = addCombo(IDC_LECTURE_SORT, false, controlW);
-            addLabel(SettingLabelWithDefault(IsEnglishUi()
-                                                  ? (g_config.studentMode ? L"Session list order" : L"Child item list order")
-                                                  : (g_config.studentMode ? L"回次フォルダの並び順" : L"下位項目フォルダの並び順"),
-                                             defaultSessionSortLabel));
+            addLabel(SettingLabelWithDefault(
+                         localization::Text(scheduleTextId(L"settings.general.session_sort_student",
+                                                           L"settings.general.session_sort_parent")).c_str(),
+                         defaultSessionSortLabel));
             ctx->cbSessionSort = addCombo(IDC_SESSION_SORT, false, controlW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi()
-                                                  ? (g_config.studentMode ? L"New session numbering" : L"New child item numbering")
-                                                  : (g_config.studentMode ? L"新規回次の採番" : L"新規下位項目の採番"),
-                                             defaultSessionNumberingLabel));
+            addLabel(SettingLabelWithDefault(
+                         localization::Text(scheduleTextId(L"settings.general.session_numbering_student",
+                                                           L"settings.general.session_numbering_parent")).c_str(),
+                         defaultSessionNumberingLabel));
             ctx->cbSessionNumbering = addCombo(IDC_SESSION_NUMBERING, false, controlW);
-            addLabel(IsEnglishUi()
-                         ? L"PDF and note are opened independently. Select each file manually from the list."
-                         : L"PDF とノートは自動連携しません。必要なファイルを一覧から個別に開いてください。");
+            addLabel(localization::Text(L"settings.general.e28bd1fb61a4").c_str());
 
-            beginSection(kGeneralSectionLayout, L"画面構成");
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Bottom-right panel" : L"右下の表示", defaultBottomPaneLabel));
+            beginSection(kGeneralSectionLayout, localization::Text(L"settings.general.section_layout").c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.caeaed7a80fa").c_str(), defaultBottomPaneLabel));
             ctx->cbBottomPane = addCombo(IDC_BOTTOM_PANE, false, controlW);
 
-            beginSection(kGeneralSectionDebug, IsEnglishUi() ? L"Developer" : L"開発者");
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Developer mode" : L"開発者モード",
+            beginSection(kGeneralSectionDebug, localization::Text(L"settings.general.4b6e39f0a93f").c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.08ddd9365fa2").c_str(),
                                              defaultDeveloperModeLabel));
             ctx->chkDeveloperMode = addCheck(IDC_DEVELOPER_MODE,
-                                             IsEnglishUi() ? L"Show developer diagnostics in Help"
-                                                            : L"ヘルプに開発者向け診断を表示",
+                                             localization::Text(L"settings.general.c20789fd5dd9").c_str(),
                                              wideW);
 
-            addLabel(IsEnglishUi() ? L"Debug logs" : L"デバッグログ");
-            std::wstring logDirLabelEn = L"Output path:\n" + AppLogPath(AppLogKind::Crash).parent_path().wstring() + L"\nChanges apply on the next launch.";
-            std::wstring logDirLabelJp = L"出力先:\n" + AppLogPath(AppLogKind::Crash).parent_path().wstring() + L"\n変更は次回起動時に反映されます。";
-            addLabel(IsEnglishUi() ? logDirLabelEn : logDirLabelJp);
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Preview trace log" : L"preview trace ログ",
+            addLabel(localization::Text(L"settings.general.bb7f4156d3cd").c_str());
+            addLabel(localization::Format(
+                L"settings.general.log_output_path",
+                {{L"PATH", AppLogPath(AppLogKind::Crash).parent_path().wstring()}}));
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.3b1738001136").c_str(),
                                              defaultDebugPreviewTraceLabel));
             ctx->chkDebugLogPreviewTrace = addCheck(IDC_DEBUG_LOG_PREVIEW_TRACE,
-                                                    IsEnglishUi() ? L"Write preview_trace.log"
-                                                                   : L"preview_trace.log を出力",
+                                                    localization::Text(L"settings.general.7d220355c967").c_str(),
                                                     wideW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Switch timing log" : L"切り替え時間ログ",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.e2e27df2ab4d").c_str(),
                                              defaultDebugSwitchTimingLabel));
             ctx->chkDebugLogSwitchTiming = addCheck(IDC_DEBUG_LOG_SWITCH_TIMING,
-                                                    IsEnglishUi() ? L"Write switch_timing.log"
-                                                                   : L"switch_timing.log を出力",
+                                                    localization::Text(L"settings.general.52b2e3e70bda").c_str(),
                                                     wideW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Crash log" : L"クラッシュログ",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.3a0307bb1ce0").c_str(),
                                              defaultDebugCrashLabel));
             ctx->chkDebugLogCrash = addCheck(IDC_DEBUG_LOG_CRASH,
-                                             IsEnglishUi() ? L"Write crash.log"
-                                                            : L"crash.log を出力",
+                                             localization::Text(L"settings.general.ccafa2c85628").c_str(),
                                              wideW);
 
-            addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Startup watchdog log" : L"起動監視ログ",
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.7807706e5c13").c_str(),
                                              defaultDebugStartupWatchdogLabel));
             ctx->chkDebugLogStartupWatchdog = addCheck(IDC_DEBUG_LOG_STARTUP_WATCHDOG,
-                                                       IsEnglishUi() ? L"Write startup_watchdog.log"
-                                                                      : L"startup_watchdog.log を出力",
+                                                       localization::Text(L"settings.general.7bb5d414f0b8").c_str(),
                                                        wideW);
         }
 
@@ -726,10 +710,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             int btnY = clientH - pad - btnH;
             int xCancel = std::max(pad, clientW - pad - cancelW);
             int xOk = std::max(pad, xCancel - btnGap - okW);
-            ctx->btnOk = CreateWindowExW(0, L"BUTTON", UiApplyLabel(), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            ctx->btnOk = CreateWindowExW(0, L"BUTTON", UiApplyLabel().c_str(), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                          xOk, btnY, okW, btnH, hWnd,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
-            ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel(), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel().c_str(), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                              xCancel, btnY, cancelW, btnH, hWnd,
                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
             SetUIFont(ctx->btnOk);
@@ -763,7 +747,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             int sel = 0;
             for (size_t i = 0; i < std::size(kBottomPaneOptions); ++i) {
                 SendMessageW(ctx->cbBottomPane, CB_ADDSTRING, 0,
-                             reinterpret_cast<LPARAM>(kBottomPaneOptions[i].label));
+                             reinterpret_cast<LPARAM>(localization::Text(kBottomPaneOptions[i].label).c_str()));
                 if (kBottomPaneOptions[i].pin == g_bottomPanePin &&
                     kBottomPaneOptions[i].noteMode == g_bottomNoteMode) {
                     sel = static_cast<int>(i);
@@ -774,7 +758,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->cbQuickAnnotPopupPlacement) {
             int sel = 0;
             for (size_t i = 0; i < std::size(kQuickAnnotPopupPlacementOptions); ++i) {
-                SendMessageW(ctx->cbQuickAnnotPopupPlacement, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kQuickAnnotPopupPlacementOptions[i].label));
+                SendMessageW(ctx->cbQuickAnnotPopupPlacement, CB_ADDSTRING, 0,
+                             reinterpret_cast<LPARAM>(localization::Text(kQuickAnnotPopupPlacementOptions[i].label).c_str()));
                 if (!g_config.quickAnnotPopupPlacement.empty() &&
                     g_config.quickAnnotPopupPlacement == kQuickAnnotPopupPlacementOptions[i].value) {
                     sel = static_cast<int>(i);
@@ -786,7 +771,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             int sel = 0;
             for (size_t i = 0; i < std::size(kShortcutTextTagKeyOptions); ++i) {
                 SendMessageW(ctx->cbShortcutTextTagKey, CB_ADDSTRING, 0,
-                             reinterpret_cast<LPARAM>(kShortcutTextTagKeyOptions[i].label));
+                             reinterpret_cast<LPARAM>(localization::Text(kShortcutTextTagKeyOptions[i].label).c_str()));
                 if (!g_config.noteShortcutTextTagKey.empty() &&
                     g_config.noteShortcutTextTagKey == kShortcutTextTagKeyOptions[i].value) {
                     sel = static_cast<int>(i);
@@ -803,7 +788,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             std::transform(mode.begin(), mode.end(), mode.begin(), ::towlower);
             int sel = 0;
             for (size_t i = 0; i < std::size(kLectureSortOptions); ++i) {
-                SendMessageW(ctx->cbLectureSort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(LectureSortOptionLabel(i)));
+                const std::wstring label = LectureSortOptionLabel(i);
+                SendMessageW(ctx->cbLectureSort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
                 if (!mode.empty() && mode == kLectureSortOptions[i].value) {
                     sel = static_cast<int>(i);
                 }
@@ -815,7 +801,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             std::transform(mode.begin(), mode.end(), mode.begin(), ::towlower);
             int sel = 0;
             for (size_t i = 0; i < std::size(kSessionSortOptions); ++i) {
-                SendMessageW(ctx->cbSessionSort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kSessionSortOptions[i].label));
+                SendMessageW(ctx->cbSessionSort, CB_ADDSTRING, 0,
+                             reinterpret_cast<LPARAM>(localization::Text(kSessionSortOptions[i].label).c_str()));
                 if (!mode.empty() && mode == kSessionSortOptions[i].value) {
                     sel = static_cast<int>(i);
                 }
@@ -827,7 +814,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             std::transform(mode.begin(), mode.end(), mode.begin(), ::towlower);
             int sel = 0;
             for (size_t i = 0; i < std::size(kSessionNumberingOptions); ++i) {
-                SendMessageW(ctx->cbSessionNumbering, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kSessionNumberingOptions[i].label));
+                SendMessageW(ctx->cbSessionNumbering, CB_ADDSTRING, 0,
+                             reinterpret_cast<LPARAM>(localization::Text(kSessionNumberingOptions[i].label).c_str()));
                 if (!mode.empty() && mode == kSessionNumberingOptions[i].value) {
                     sel = static_cast<int>(i);
                 }
@@ -840,7 +828,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             int sel = 0;
             for (size_t i = 0; i < std::size(kSessionAutoOpenOptions); ++i) {
                 SendMessageW(ctx->cbSessionAutoOpenMode, CB_ADDSTRING, 0,
-                             reinterpret_cast<LPARAM>(kSessionAutoOpenOptions[i].label));
+                             reinterpret_cast<LPARAM>(localization::Text(kSessionAutoOpenOptions[i].label).c_str()));
                 if (!mode.empty() && mode == kSessionAutoOpenOptions[i].value) {
                     sel = static_cast<int>(i);
                 }
@@ -855,9 +843,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             std::wstring flowMode = NormalizePdfFlowModeValue(g_config.pdfFlowMode);
             int sel = 0;
             for (size_t i = 0; i < std::size(kPdfFlowModeOptions); ++i) {
-                const wchar_t* label = IsEnglishUi() ? kPdfFlowModeOptions[i].labelEn
-                                                     : kPdfFlowModeOptions[i].labelJa;
-                SendMessageW(ctx->cbPdfFlowMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+                const std::wstring label = localization::Text(kPdfFlowModeOptions[i].labelId);
+                SendMessageW(ctx->cbPdfFlowMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
                 if (flowMode == kPdfFlowModeOptions[i].value) {
                     sel = static_cast<int>(i);
                 }
@@ -867,10 +854,6 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->chkPdfSinglePageMode) {
             SendMessageW(ctx->chkPdfSinglePageMode, BM_SETCHECK,
                          g_config.pdfSinglePageMode ? BST_CHECKED : BST_UNCHECKED, 0);
-        }
-        if (ctx->chkPanMouseWheelZoom) {
-            SendMessageW(ctx->chkPanMouseWheelZoom, BM_SETCHECK,
-                         g_config.panMouseWheelZoom ? BST_CHECKED : BST_UNCHECKED, 0);
         }
         if (ctx->cbSelectionStyle) {
             std::wstring style = g_config.selectionStyle;
@@ -938,7 +921,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             int sel = 0;
             for (size_t i = 0; i < std::size(kDownKeyLastLineOptions); ++i) {
                 SendMessageW(ctx->cbDownKeyAction, CB_ADDSTRING, 0,
-                             reinterpret_cast<LPARAM>(kDownKeyLastLineOptions[i].label));
+                             reinterpret_cast<LPARAM>(localization::Text(kDownKeyLastLineOptions[i].label).c_str()));
                 if (action == kDownKeyLastLineOptions[i].value) sel = static_cast<int>(i);
             }
             SendMessageW(ctx->cbDownKeyAction, CB_SETCURSEL, sel, 0);
@@ -949,7 +932,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             int sel = 0;
             for (size_t i = 0; i < std::size(kLeftRightLineMoveOptions); ++i) {
                 SendMessageW(ctx->cbLeftRightLineMoveAction, CB_ADDSTRING, 0,
-                             reinterpret_cast<LPARAM>(kLeftRightLineMoveOptions[i].label));
+                             reinterpret_cast<LPARAM>(localization::Text(kLeftRightLineMoveOptions[i].label).c_str()));
                 if (action == kLeftRightLineMoveOptions[i].value) sel = static_cast<int>(i);
             }
             SendMessageW(ctx->cbLeftRightLineMoveAction, CB_SETCURSEL, sel, 0);
@@ -977,7 +960,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->cbNoteFontCustomization) {
             SendMessageW(ctx->cbNoteFontCustomization, CB_RESETCONTENT, 0, 0);
             for (size_t i = 0; i < std::size(kNoteFontCustomizationLabels); ++i) {
-                SendMessageW(ctx->cbNoteFontCustomization, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kNoteFontCustomizationLabels[i]));
+                SendMessageW(ctx->cbNoteFontCustomization, CB_ADDSTRING, 0,
+                             reinterpret_cast<LPARAM>(localization::Text(kNoteFontCustomizationLabels[i]).c_str()));
             }
             SendMessageW(ctx->cbNoteFontCustomization, CB_SETCURSEL, std::clamp(g_config.noteFontCustomization, 0, 2), 0);
         }
@@ -990,7 +974,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->cbNoteFontDigitTarget) {
             SendMessageW(ctx->cbNoteFontDigitTarget, CB_RESETCONTENT, 0, 0);
             for (size_t i = 0; i < std::size(kNoteFontDigitTargetLabels); ++i) {
-                SendMessageW(ctx->cbNoteFontDigitTarget, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kNoteFontDigitTargetLabels[i]));
+                SendMessageW(ctx->cbNoteFontDigitTarget, CB_ADDSTRING, 0,
+                             reinterpret_cast<LPARAM>(localization::Text(kNoteFontDigitTargetLabels[i]).c_str()));
             }
             SendMessageW(ctx->cbNoteFontDigitTarget, CB_SETCURSEL, std::clamp(g_config.noteFontDigitTarget, 0, 1), 0);
         }
@@ -1069,7 +1054,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             int sel = 0;
             NoteSystem current = ParseNoteSystem(g_config.noteSystem);
             for (size_t i = 0; i < std::size(kNoteSystemOptions); ++i) {
-                SendMessageW(ctx->cbNoteSystem, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kNoteSystemOptions[i].label));
+                SendMessageW(ctx->cbNoteSystem, CB_ADDSTRING, 0,
+                             reinterpret_cast<LPARAM>(localization::Text(kNoteSystemOptions[i].label).c_str()));
                 if (current == kNoteSystemOptions[i].value) sel = static_cast<int>(i);
             }
             SendMessageW(ctx->cbNoteSystem, CB_SETCURSEL, sel, 0);
@@ -1079,7 +1065,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             int sel = 0;
             const int autoSaveSeconds = NormalizeAutoStageSaveSeconds(g_config.autoSaveSeconds);
             for (size_t i = 0; i < std::size(kAutoSaveOptions); ++i) {
-                int idx = static_cast<int>(SendMessageW(ctx->cbAutoSave, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kAutoSaveOptions[i].label)));
+                int idx = static_cast<int>(SendMessageW(ctx->cbAutoSave, CB_ADDSTRING, 0,
+                    reinterpret_cast<LPARAM>(localization::Text(kAutoSaveOptions[i].label).c_str())));
                 if (idx >= 0) SendMessageW(ctx->cbAutoSave, CB_SETITEMDATA, idx, static_cast<LPARAM>(kAutoSaveOptions[i].seconds));
                 if (autoSaveSeconds == kAutoSaveOptions[i].seconds) sel = static_cast<int>(i);
             }
@@ -1091,7 +1078,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             int modeForUi = NormalizeAutoIntegrateModeForUi(g_config.autoIntegrateSeconds, &customMinutes);
             g_config.autoIntegrateCustomMinutes = EffectiveAutoIntegrateCustomMinutes(customMinutes);
             for (size_t i = 0; i < std::size(kAutoIntegrateOptions); ++i) {
-                int idx = static_cast<int>(SendMessageW(ctx->cbAutoIntegrate, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kAutoIntegrateOptions[i].label)));
+                int idx = static_cast<int>(SendMessageW(ctx->cbAutoIntegrate, CB_ADDSTRING, 0,
+                    reinterpret_cast<LPARAM>(localization::Text(kAutoIntegrateOptions[i].label).c_str())));
                 if (idx >= 0) SendMessageW(ctx->cbAutoIntegrate, CB_SETITEMDATA, idx, static_cast<LPARAM>(kAutoIntegrateOptions[i].seconds));
                 if (modeForUi == kAutoIntegrateOptions[i].seconds) sel = static_cast<int>(i);
             }
@@ -1102,7 +1090,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             int sel = 0;
             int current = std::clamp(g_config.schedulePeriods, 1, kScheduleMaxPeriods);
             for (int p = 1; p <= kScheduleMaxPeriods; ++p) {
-                std::wstring label = IsEnglishUi() ? (L"P" + std::to_wstring(p)) : (std::to_wstring(p) + L"限");
+                std::wstring label = localization::Format(
+                    L"settings.schedule.period", {{L"COUNT", std::to_wstring(p)}});
                 int idx = static_cast<int>(SendMessageW(ctx->cbSchedulePeriods, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
                 if (idx >= 0) SendMessageW(ctx->cbSchedulePeriods, CB_SETITEMDATA, idx, static_cast<LPARAM>(p));
                 if (p == current) sel = idx;
@@ -1122,7 +1111,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->editNameRule) {
             std::wstring rule = g_config.clroNamePattern;
             if (rule.empty()) {
-                rule = kDefaultNameRule;
+                rule = DefaultNameRule();
             }
             SetWindowTextW(ctx->editNameRule, rule.c_str());
         }
@@ -1157,30 +1146,29 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->navList) {
             SendMessageW(ctx->navList, LB_RESETCONTENT, 0, 0);
             if (showNoteSectionOnly) {
-                const wchar_t* noteSectionLabels[] = {
-                    IsEnglishUi() ? L"Text / Font" : L"文字・フォント",
-                    IsEnglishUi() ? L"Display" : L"表示",
-                    IsEnglishUi() ? L"Assist" : L"補助表示",
-                    IsEnglishUi() ? L"Performance" : L"動作速度",
+                const std::array<std::wstring, 4> noteSectionLabels = {
+                    localization::Text(L"settings.general.d6ae379cb93d").c_str(),
+                    localization::Text(L"settings.general.4c8d20a2540f").c_str(),
+                    localization::Text(L"settings.general.16a547980a7a").c_str(),
+                    localization::Text(L"settings.general.f669fef9c21a").c_str(),
                 };
                 const int noteSectionCount = std::min<int>(ctx->sectionCount,
                                                            static_cast<int>(std::size(noteSectionLabels)));
                 for (int i = 0; i < noteSectionCount; ++i) {
-                    SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(noteSectionLabels[i]));
+                    SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(noteSectionLabels[i].c_str()));
                 }
             } else {
-                const wchar_t* sectionLabels[kGeneralSectionCount] = {
-                    IsEnglishUi() ? L"Display / Input" : L"表示と操作",
-                    IsEnglishUi() ? L"Note View" : L"ノート表示",
-                    IsEnglishUi() ? L"Files / Save" : L"ファイル / 保存",
-                    IsEnglishUi()
-                        ? (g_config.studentMode ? L"Lecture Schedule" : L"Parent Item Schedule")
-                        : (g_config.studentMode ? L"授業スケジュール" : L"上位項目スケジュール"),
-                    IsEnglishUi() ? L"Layout" : L"画面構成",
-                    IsEnglishUi() ? L"Developer" : L"開発者",
+                const std::array<std::wstring, kGeneralSectionCount> sectionLabels = {
+                    localization::Text(L"settings.general.b79a5a7510fe").c_str(),
+                    localization::Text(L"settings.general.6be6c84101c7").c_str(),
+                    localization::Text(L"settings.general.bb3c59ed98e5").c_str(),
+                    localization::Text(g_config.studentMode ? L"settings.general.schedule_nav_student"
+                                                            : L"settings.general.schedule_nav_parent").c_str(),
+                    localization::Text(L"settings.general.aa88cca5f6ab").c_str(),
+                    localization::Text(L"settings.general.4b6e39f0a93f").c_str(),
                 };
                 for (int i = 0; i < ctx->sectionCount && i < kGeneralSectionCount; ++i) {
-                    SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(sectionLabels[i]));
+                    SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(sectionLabels[i].c_str()));
                 }
             }
             int initialSection = showNoteSectionOnly ? 0
@@ -1340,13 +1328,13 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         }
         if (id == IDC_TONE_CREATE) {
             if (g_workspaceRoot.empty()) {
-                ShowSoftNotice(hWnd, IsEnglishUi() ? L"No workspace is open." : L"ワークスペースが開かれていません。",
+                ShowSoftNotice(hWnd, localization::Text(L"settings.general.55c168692754").c_str(),
                                SoftNoticeKind::Warning);
                 return 0;
             }
             std::wstring name;
             if (!PromptSimpleText(hWnd,
-                                  IsEnglishUi() ? L"New Theme (from current)" : L"新規テーマ（現在のテーマから複製）",
+                                  localization::Text(L"settings.general.7cf1ef1629f9").c_str(),
                                   L"",
                                   name)) {
                 return 0;
@@ -1358,7 +1346,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             std::wstring err;
             HWND applyOwner = ctx->owner ? ctx->owner : hWnd;
             if (!CreateThemeFromCurrent(applyOwner, name, &themeId, &err)) {
-                if (err.empty()) err = IsEnglishUi() ? L"Failed to create theme." : L"テーマ作成に失敗しました。";
+                if (err.empty()) err = localization::Text(L"settings.general.81948065d7fd").c_str();
                 ShowSoftNotice(hWnd, err, SoftNoticeKind::Warning);
                 return 0;
             }
@@ -1367,7 +1355,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             UpdateToneEditButtonEnabled(ctx);
             ApplyThemeToDialog(hWnd);
             if (ctx->owner) EnsureOwnerDrawUi(ctx->owner);
-            std::wstring msg = (IsEnglishUi() ? L"Theme created: " : L"テーマを作成しました: ") + name + L" (" + themeId + L")";
+            std::wstring msg = (localization::Text(L"settings.general.657ba2778bc4").c_str()) + name + L" (" + themeId + L")";
             ShowSoftNotice(hWnd, msg);
             return 0;
         }
@@ -1377,14 +1365,13 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         }
         if (id == IDC_TONE_EDIT) {
             if (g_workspaceRoot.empty()) {
-                ShowSoftNotice(hWnd, IsEnglishUi() ? L"No workspace is open." : L"ワークスペースが開かれていません。",
+                ShowSoftNotice(hWnd, localization::Text(L"settings.general.55c168692754").c_str(),
                                SoftNoticeKind::Warning);
                 return 0;
             }
             std::wstring targetTheme = GetSelectedToneThemeName(ctx);
             if (!IsEditableThemeSelection(targetTheme)) {
-                ShowSoftNotice(hWnd, IsEnglishUi() ? L"This theme cannot be edited. Create your own theme first."
-                                                   : L"このテーマは編集できません。先に作成してください。",
+                ShowSoftNotice(hWnd, localization::Text(L"settings.general.839ff3571bca").c_str(),
                                SoftNoticeKind::Warning);
                 return 0;
             }
@@ -1394,7 +1381,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             }
             size_t idx = FindThemeIndexByName(edited.name);
             if (idx == static_cast<size_t>(-1) || idx >= g_themeCatalog.size()) {
-                ShowSoftNotice(hWnd, IsEnglishUi() ? L"Theme not found." : L"テーマが見つかりません。",
+                ShowSoftNotice(hWnd, localization::Text(L"settings.general.61c466bc7bd4").c_str(),
                                SoftNoticeKind::Warning);
                 return 0;
             }
@@ -1406,7 +1393,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             ApplyThemeToDialog(hWnd);
             if (ctx->cbTone) FillToneComboFromCatalog(ctx->cbTone);
             UpdateToneEditButtonEnabled(ctx);
-            ShowSoftNotice(hWnd, IsEnglishUi() ? L"Theme updated." : L"テーマを更新しました。");
+            ShowSoftNotice(hWnd, localization::Text(L"settings.general.efb30d3fe0e3").c_str());
             return 0;
         }
         if ((id == IDC_NOTE_FONT || id == IDC_NOTE_FONT_FACE) && code == CBN_SELCHANGE) {
@@ -1484,7 +1471,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             }
             PersistConfig();
             if (ctx->lblLayoutDefaults) {
-                std::wstring label = std::wstring(L"カラム境界位置 (") + LayoutDefaultsLabelText() + L")";
+                std::wstring label = localization::Format(L"settings.general.layout_defaults", {{L"VALUE", LayoutDefaultsLabelText()}});
                 SetWindowTextW(ctx->lblLayoutDefaults, label.c_str());
             }
             return 0;
@@ -1494,7 +1481,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 ApplyGeneralSettings(ctx);
                 ApplyThemeToDialog(hWnd);
                 ctx->ok = true;
-                ShowSoftNotice(hWnd, IsEnglishUi() ? L"Settings applied." : L"設定を反映しました。");
+                ShowSoftNotice(hWnd, localization::Text(L"settings.general.fca7cf56577e").c_str());
             }
             return 0;
         }

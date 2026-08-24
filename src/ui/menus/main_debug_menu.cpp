@@ -1,6 +1,7 @@
 ﻿#include "ui/menus/main_debug_menu.h"
 
 #include "core/app_core.h"
+#include "core/localization.h"
 #include "pdf_view/pdf_view.h"
 #include "ui/noop_nav_guard.h"
 
@@ -906,28 +907,25 @@ static LRESULT CALLBACK DebugResourceMonitorWndProc(HWND hWnd, UINT msg, WPARAM 
 } // namespace
 
 std::wstring DebugMenuLabel() {
-    return IsEnglishUi() ? L"Debug" : L"デバッグ";
+    return localization::Text(L"menu.debug.0a797a24e275");
 }
 
 std::wstring DebugArchiveLogsMenuLabel() {
-    return IsEnglishUi() ? L"Archive Logs as ZIP" : L"ログをZIP保存";
+    return localization::Text(L"menu.debug.e273ce36fb33");
 }
 
 std::wstring DebugDeleteLogsMenuLabel() {
-    return IsEnglishUi() ? L"Delete Log Files" : L"ログを削除";
+    return localization::Text(L"menu.debug.a9e963df65df");
 }
 
 std::wstring DebugToggleLogsMenuLabel(bool allEnabled, bool anyEnabled) {
-    if (IsEnglishUi()) {
-        if (anyEnabled && !allEnabled) return L"Debug Logs on Next Start: MIXED";
-        return allEnabled ? L"Debug Logs on Next Start: ON" : L"Debug Logs on Next Start: OFF";
-    }
-    if (anyEnabled && !allEnabled) return L"次回起動時のデバッグログ: 一部ON";
-    return allEnabled ? L"次回起動時のデバッグログ: ON" : L"次回起動時のデバッグログ: OFF";
+    if (anyEnabled && !allEnabled) return localization::Text(L"menu.debug.logs_next_start.mixed");
+    return localization::Text(allEnabled ? L"menu.debug.logs_next_start.on"
+                                         : L"menu.debug.logs_next_start.off");
 }
 
 std::wstring DebugResourceMonitorMenuLabel() {
-    return IsEnglishUi() ? L"Resource Monitor" : L"リソースモニター";
+    return localization::Text(L"menu.debug.fbe501d11c86");
 }
 
 std::wstring BuildDebugResourceMonitorText() {
@@ -971,6 +969,7 @@ void ShowDebugResourceMonitorWindow(HWND owner, const std::wstring& initialText)
         CW_USEDEFAULT, CW_USEDEFAULT, 560, 520,
         effectiveOwner, nullptr, g_hInst, &create);
     if (g_hDebugResourceMonitorWnd) {
+        PlaceOwnedPopupAtAppTopLeft(g_hDebugResourceMonitorWnd, effectiveOwner);
         ShowWindow(g_hDebugResourceMonitorWnd, SW_SHOWNOACTIVATE);
         UpdateWindow(g_hDebugResourceMonitorWnd);
     }

@@ -1,0 +1,12 @@
+{
+  "classesDir": ".",
+  "cacheDir": "__resource__/__tmp__",
+  "studentMode": true,
+  "language": "en",
+  "lectureSortMode": "name",
+  "sessionAutoOpenMode": "edit",
+  "startupSelectFirstSession": true,
+  "noteSystem": "legacy",
+  "autoSaveSeconds": 5,
+  "autoIntegrateSeconds": 0
+}

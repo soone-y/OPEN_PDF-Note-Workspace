@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include <string>
+#include <vector>
 
 enum class SoftNoticeKind {
     Info,
@@ -39,6 +40,14 @@ enum class SilentDialogPlacement {
     OwnerUpperLeft
 };
 
+// A display-only path.  `value` is never used for file operations; it lets a
+// diagnostic show a compact, expandable representation without losing the
+// exact path that the operation reported.
+struct SilentDialogPath {
+    std::wstring label;
+    std::wstring value;
+};
+
 struct SilentDialogOptions {
     std::wstring title;
     std::wstring message;
@@ -52,8 +61,10 @@ struct SilentDialogOptions {
     SilentDialogResult escapeResult = SilentDialogResult::None;
     int preferredWidthPx = 0;
     SilentDialogPlacement placement = SilentDialogPlacement::CenterOwner;
+    std::vector<SilentDialogPath> paths;
 };
 
 SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& options);
 void ShowSilentMessageDialog(HWND owner, const std::wstring& title, const std::wstring& message,
-                             SoftNoticeKind kind = SoftNoticeKind::Info);
+                             SoftNoticeKind kind = SoftNoticeKind::Info,
+                             const std::vector<SilentDialogPath>& paths = {});

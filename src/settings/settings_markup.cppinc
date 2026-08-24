@@ -177,9 +177,7 @@ static void LayoutMarkupSettingsChrome(HWND hWnd, MarkupSettingsCtx* ctx) {
     int sectionButtonTop = pad;
     int headerH = 0;
     if (!ctx->embedded) {
-        std::wstring subtitle = IsEnglishUi()
-            ? L"Adjust heading, emphasis, and c-tag rendering rules. Jump by category on the left."
-            : L"見出し、強調、cタグの描画ルールを調整します。左のカテゴリから移動できます。";
+        std::wstring subtitle = localization::Text(L"settings.markup.subtitle");
         subtitleH = std::max(FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 4),
                              MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
         sectionButtonH = std::max(ScaleY(hWnd, 28), rowH);
@@ -324,9 +322,7 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         const int columnGap = ScaleY(hWnd, 18);
         const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
         const int titleH = std::max(rowH, ScaleY(hWnd, 30));
-        const std::wstring subtitle = IsEnglishUi()
-            ? L"Adjust heading, emphasis, and c-tag rendering rules. Jump by category on the left."
-            : L"見出し、強調、cタグの描画ルールを調整します。左のカテゴリから移動できます。";
+        const std::wstring subtitle = localization::Text(L"settings.markup.subtitle");
         const int subtitleH = ctx->embedded ? 0
                                             : std::max(uiTextH + ScaleY(hWnd, 4),
                                                        MeasureTextHeight(hWnd, subtitle, std::max(100, clientW - pad * 2), g_hUIFont));
@@ -413,9 +409,9 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
             y += rowH + gapY;
             return cb;
         };
-        auto addCheck = [&](int id, const wchar_t* text, int w) -> HWND {
+        auto addCheck = [&](int id, const std::wstring& text, int w) -> HWND {
             int x = pad + std::max(0, contentW - w);
-            HWND chk = CreateWindowExW(0, L"BUTTON", text,
+            HWND chk = CreateWindowExW(0, L"BUTTON", text.c_str(),
                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                        x, y, w, rowH, contentParent,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
@@ -445,7 +441,7 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
             sectionTitle.clear();
             y += sectionGap;
         };
-        auto beginSection = [&](int index, const wchar_t* title) {
+        auto beginSection = [&](int index, const std::wstring& title) {
             if (!sectionTitle.empty()) finalizeSection();
             sectionTitle = title;
             sectionTop = y;
@@ -456,11 +452,11 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
             y += groupTitlePad;
         };
 
-        beginSection(kMarkupSectionHeading, L"見出し");
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Heading size" : L"見出しサイズ", headingDefault));
+        beginSection(kMarkupSectionHeading, localization::Text(L"settings.markup.section_heading"));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.markup.heading_size"), headingDefault));
         ctx->cbHeadingFont = addCombo(IDC_MARKUP_HEADING_FONT, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Heading color" : L"見出し色", GenHexColorW(kDefaultHeadingColor)));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.markup.heading_color"), GenHexColorW(kDefaultHeadingColor)));
         {
             int groupW = controlW + previewGap + previewW;
             int xCombo = pad + std::max(0, contentW - groupW);
@@ -480,19 +476,19 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
                                                        g_hInst, nullptr);
             y += rowH + gapY;
         }
-        addLabel(IsEnglishUi() ? L"Heading style" : L"見出し修飾");
+        addLabel(localization::Text(L"settings.markup.heading_style"));
         ctx->chkHeadingBold = addCheck(IDC_MARKUP_HEADING_BOLD,
-                                       IsEnglishUi() ? L"Bold" : L"太字", controlW);
+                                       localization::Text(L"settings.markup.bold"), controlW);
         ctx->chkHeadingUnderline = addCheck(IDC_MARKUP_HEADING_UNDERLINE,
-                                            IsEnglishUi() ? L"Underline H1" : L"H1に下線", controlW);
+                                            localization::Text(L"settings.markup.underline_h1"), controlW);
         ctx->chkHeadingLeftBar = addCheck(IDC_MARKUP_HEADING_LEFT_BAR,
-                                          IsEnglishUi() ? L"Left bar" : L"左バー", controlW);
+                                          localization::Text(L"settings.markup.left_bar"), controlW);
 
-        beginSection(kMarkupSectionMark, L"強調");
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Emphasis size" : L"強調サイズ", markDefault));
+        beginSection(kMarkupSectionMark, localization::Text(L"settings.markup.section_emphasis"));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.markup.emphasis_size"), markDefault));
         ctx->cbMarkFont = addCombo(IDC_MARKUP_MARK_FONT, controlW);
 
-        addLabel(SettingLabelWithDefault(IsEnglishUi() ? L"Emphasis color" : L"強調色", GenHexColorW(kDefaultMarkColor)));
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.markup.emphasis_color"), GenHexColorW(kDefaultMarkColor)));
         {
             int groupW = controlW + previewGap + previewW;
             int xCombo = pad + std::max(0, contentW - groupW);
@@ -513,15 +509,15 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
             y += rowH + gapY;
         }
 
-        beginSection(kMarkupSectionCustomTag, L"cタグ");
-        addLabel(IsEnglishUi() ? L"Target tag number" : L"対象タグ番号");
+        beginSection(kMarkupSectionCustomTag, localization::Text(L"settings.markup.section_custom_tag"));
+        addLabel(localization::Text(L"settings.markup.target_tag_number"));
         ctx->cbCustomTagPreset = addCombo(IDC_MARKUP_CUSTOM_TAG_PRESET_SELECT, controlW);
-        ctx->chkCustomTagBold = addCheck(IDC_MARKUP_CUSTOM_TAG_BOLD, L"太字", controlW);
-        ctx->chkCustomTagItalic = addCheck(IDC_MARKUP_CUSTOM_TAG_ITALIC, L"斜体", controlW);
-        ctx->chkCustomTagUnderline = addCheck(IDC_MARKUP_CUSTOM_TAG_UNDERLINE, L"下線", controlW);
-        ctx->chkCustomTagStrike = addCheck(IDC_MARKUP_CUSTOM_TAG_STRIKE, L"取り消し線", controlW);
-        ctx->chkCustomTagBackColor = addCheck(IDC_MARKUP_CUSTOM_TAG_BACKCOLOR, L"背景色にショートカット色を使う", controlW);
-        ctx->chkCustomTagTextColor = addCheck(IDC_MARKUP_CUSTOM_TAG_TEXTCOLOR, L"文字色にショートカット色を使う", controlW);
+        ctx->chkCustomTagBold = addCheck(IDC_MARKUP_CUSTOM_TAG_BOLD, localization::Text(L"settings.markup.bold"), controlW);
+        ctx->chkCustomTagItalic = addCheck(IDC_MARKUP_CUSTOM_TAG_ITALIC, localization::Text(L"settings.markup.italic"), controlW);
+        ctx->chkCustomTagUnderline = addCheck(IDC_MARKUP_CUSTOM_TAG_UNDERLINE, localization::Text(L"settings.markup.underline"), controlW);
+        ctx->chkCustomTagStrike = addCheck(IDC_MARKUP_CUSTOM_TAG_STRIKE, localization::Text(L"settings.markup.strike"), controlW);
+        ctx->chkCustomTagBackColor = addCheck(IDC_MARKUP_CUSTOM_TAG_BACKCOLOR, localization::Text(L"settings.markup.shortcut_background"), controlW);
+        ctx->chkCustomTagTextColor = addCheck(IDC_MARKUP_CUSTOM_TAG_TEXTCOLOR, localization::Text(L"settings.markup.shortcut_text"), controlW);
 
         finalizeSection();
         y += ScaleY(hWnd, 12);
@@ -534,10 +530,10 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
             int btnY = clientH - pad - btnH;
             int xCancel = std::max(pad, clientW - pad - cancelW);
             int xOk = std::max(pad, xCancel - btnGap - okW);
-            ctx->btnOk = CreateWindowExW(0, L"BUTTON", UiApplyLabel(), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            ctx->btnOk = CreateWindowExW(0, L"BUTTON", UiApplyLabel().c_str(), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                          xOk, btnY, okW, btnH, hWnd,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
-            ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel(), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel().c_str(), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                              xCancel, btnY, cancelW, btnH, hWnd,
                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
             SetUIFont(ctx->btnOk);
@@ -623,9 +619,9 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
 
         if (ctx->navList) {
             SendMessageW(ctx->navList, LB_RESETCONTENT, 0, 0);
-            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Headings" : L"見出し"));
-            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(IsEnglishUi() ? L"Emphasis" : L"強調"));
-            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"cタグ"));
+            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(L"settings.markup.section_heading").c_str()));
+            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(L"settings.markup.section_emphasis").c_str()));
+            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(L"settings.markup.section_custom_tag").c_str()));
             UpdateMarkupSectionNavUi(ctx, 0);
         }
 
@@ -773,7 +769,7 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
             if (!ctx->embedded) {
                 ApplyMarkupSettings(ctx);
                 ctx->ok = true;
-                ShowSoftNotice(hWnd, IsEnglishUi() ? L"Settings applied." : L"設定を反映しました。");
+                ShowSoftNotice(hWnd, localization::Text(L"settings.markup.applied"));
             }
             return 0;
         }

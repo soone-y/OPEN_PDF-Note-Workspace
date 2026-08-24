@@ -4,6 +4,7 @@
 #include "note_view/note_view.h"
 #include "bridge/view_bridge.h"
 #include "core/ui_notify.h"
+#include "core/localization.h"
 #include "core/ui_prompts.h"
 #include "math/math_render.h"
 #include "file_output/file_output.h"
@@ -127,9 +128,14 @@ static int FindAnnotIndexById(std::wstring_view id);
 static int FindAnnotIndexByIdOrFallback(const std::wstring& id, int fallbackIndex);
 
 static HWND PdfDialogOwner(HWND owner) {
-    if (owner) return owner;
-    if (g_hPdfView) {
-        HWND parent = GetParent(g_hPdfView);
+    HWND candidate = owner ? owner : g_hPdfView;
+    if (candidate && IsWindow(candidate)) {
+        // Password and failure dialogs must disable the actual top-level owner.
+        // Passing g_hPdfView directly would otherwise disable only that child
+        // control, leaving the main window able to start a second open action.
+        HWND rootOwner = GetAncestor(candidate, GA_ROOTOWNER);
+        if (rootOwner) return rootOwner;
+        HWND parent = GetParent(candidate);
         if (parent) return parent;
     }
     return g_hMainWnd;
@@ -209,12 +215,13 @@ static void ShowPdfSoftNotice(HWND owner, const std::wstring& text,
 
 static void ShowPdfCopySuccessNotice(HWND owner) {
     ShowPdfSoftNotice(owner,
-                      IsEnglishUi() ? L"Copied text." : L"テキストをコピーしました。",
+                      localization::Text(L"pdf.view.5b2faff96caf"),
                       SoftNoticeKind::Info);
 }
 static void ShowPdfMessageDialog(HWND owner, const std::wstring& title,
-                                 const std::wstring& message, SoftNoticeKind kind) {
-    ShowSilentMessageDialog(PdfDialogOwner(owner), title, message, kind);
+                                 const std::wstring& message, SoftNoticeKind kind,
+                                 const std::vector<SilentDialogPath>& paths = {}) {
+    ShowSilentMessageDialog(PdfDialogOwner(owner), title, message, kind, paths);
 }
 
 // Returns true only when the user explicitly requests a non-destructive reload.
@@ -229,9 +236,9 @@ static bool PromptPdfOpenFailureReload(HWND owner, const std::wstring& title,
     options.kind = SoftNoticeKind::Error;
     options.buttons = offerAbnormalExit ? SilentDialogButtons::YesNoCancel
                                         : SilentDialogButtons::YesNo;
-    options.yesLabel = IsEnglishUi() ? L"Reload" : L"再読み込み";
-    options.noLabel = IsEnglishUi() ? L"Cancel" : L"キャンセル";
-    options.cancelLabel = IsEnglishUi() ? L"Force Exit (Non-destructive)" : L"非破壊・強制終了";
+    options.yesLabel = localization::Text(L"pdf.view.018a2719c366");
+    options.noLabel = localization::Text(L"pdf.view.3672b0b92134");
+    options.cancelLabel = localization::Text(L"pdf.view.fea723590aa2");
     options.defaultResult = SilentDialogResult::No;
     options.escapeResult = SilentDialogResult::No;
     const SilentDialogResult result = ShowSilentDialog(dialogOwner, options);
@@ -293,13 +300,11 @@ bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
     options.title = title;
     options.message =
         blockedMessage +
-        (IsEnglishUi()
-             ? L"\n\nEnter a password and reopen this PDF?"
-             : L"\n\nパスワードを入力してこのPDFを再オープンしますか。");
+        (localization::Text(L"pdf.view.1f2723e36a6b"));
     options.kind = SoftNoticeKind::Warning;
     options.buttons = SilentDialogButtons::YesNo;
-    options.yesLabel = IsEnglishUi() ? L"Enter Password" : L"パスワード入力";
-    options.noLabel = IsEnglishUi() ? L"Cancel" : L"キャンセル";
+    options.yesLabel = localization::Text(L"pdf.view.7eb7a2cc15ed");
+    options.noLabel = localization::Text(L"pdf.view.3672b0b92134");
     options.defaultResult = SilentDialogResult::Yes;
     options.escapeResult = SilentDialogResult::No;
     if (ShowPdfDialog(owner, options) != SilentDialogResult::Yes) {
@@ -309,14 +314,14 @@ bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
     std::wstring password;
     SecureWideStringScope passwordScope(&password);
     const std::wstring promptMessage =
-        IsEnglishUi()
-            ? L"Enter the PDF password.\nIt is kept only in memory for the current session and is not written to disk."
-            : L"PDFのパスワードを入力してください。\nパスワードは現在のセッション中だけメモリに保持し、ディスクには保存しません。";
+        localization::Text(L"pdf.view.ee6127d8900a");
     if (!PromptPasswordText(PdfDialogOwner(owner), title, promptMessage, password)) {
         return false;
     }
 
-    QueuePdfOpenPasswordForNextLoad(WideToUTF8(password));
+    std::string passwordUtf8 = WideToUTF8(password);
+    SecureStringScope passwordUtf8Scope(&passwordUtf8);
+    QueuePdfOpenPasswordForNextLoad(passwordUtf8);
     if (!OpenPdfWithAnnotations(owner, pdfPath)) {
         return false;
     }
@@ -3605,6 +3610,9 @@ void SetModeButtons() {
     if (g_hChkTextAutoWrap)
         SendMessageW(g_hChkTextAutoWrap, BM_SETCHECK,
                      g_textBoxAutoWrap ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_hChkPanMouseWheelZoom)
+        SendMessageW(g_hChkPanMouseWheelZoom, BM_SETCHECK,
+                     g_config.panMouseWheelZoom ? BST_CHECKED : BST_UNCHECKED, 0);
 
     const BOOL previewAllowsAnnot = previewReadOnly ? FALSE : TRUE;
     if (g_hBtnModeMarker) EnableWindow(g_hBtnModeMarker, previewAllowsAnnot);
@@ -3621,6 +3629,7 @@ void SetModeButtons() {
     if (g_hRadioTextReadableBackgroundNormal) EnableWindow(g_hRadioTextReadableBackgroundNormal, previewAllowsAnnot);
     if (g_hRadioTextReadableBackgroundInverted) EnableWindow(g_hRadioTextReadableBackgroundInverted, previewAllowsAnnot);
     if (g_hChkTextAutoWrap) EnableWindow(g_hChkTextAutoWrap, previewAllowsAnnot);
+    if (g_hChkPanMouseWheelZoom) EnableWindow(g_hChkPanMouseWheelZoom, previewAllowsAnnot);
     if (g_hComboWidth) EnableWindow(g_hComboWidth, previewAllowsAnnot);
     if (g_hComboMarkerAlpha) EnableWindow(g_hComboMarkerAlpha, previewAllowsAnnot);
     if (g_hComboAnnotMethod) EnableWindow(g_hComboAnnotMethod, previewAllowsAnnot);

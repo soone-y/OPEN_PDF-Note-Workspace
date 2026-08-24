@@ -2,6 +2,7 @@
 
 #include "bottom_math_panel.h"
 #include "note_view_internal.h"
+#include "core/localization.h"
 #include "ui/noop_nav_guard.h"
 
 #include "note/note_math.h"
@@ -81,9 +82,7 @@ static void SetBottomMathHint(const std::wstring& text) {
 }
 
 static std::wstring DefaultBottomMathHint() {
-    return IsEnglishUi()
-        ? L"Type a MathBox body here. Ctrl+Enter adds it as LaTeX to the current PDF view center."
-        : L"ここに MathBox の本文を入力します。Ctrl+Enter で LaTeX として現在表示中 PDF の中央へ追加します。";
+    return localization::Text(L"note.bottom_math.7b943e9a63f7").c_str();
 }
 
 static bool BottomMathAnalysisHasError(const note::MathInputAnalysis& analysis) {
@@ -107,31 +106,20 @@ static std::wstring BottomMathValidationMessage(const note::MathInputAnalysis& a
         return DefaultBottomMathHint();
     }
 
-    const bool english = IsEnglishUi();
     if (firstError->code == L"NOTE-E-MATHBOX-UNCLOSED-LEGACY-MATH") {
-        return english
-            ? L"Close the <math> ... </> wrapper before adding the MathBox."
-            : L"<math> ... </> を閉じてから MathBox を追加してください。";
+        return localization::Text(L"note.bottom_math.validation.unclosed_legacy_math");
     }
     if (firstError->code == L"NOTE-E-MATHBOX-UNCLOSED-DOUBLE-DOLLAR") {
-        return english
-            ? L"Close $$...$$ before adding the MathBox."
-            : L"$$...$$ を閉じてから MathBox を追加してください。";
+        return localization::Text(L"note.bottom_math.validation.unclosed_double_dollar");
     }
     if (firstError->code == L"NOTE-E-MATHBOX-UNCLOSED-BRACKET") {
-        return english
-            ? L"Close \\[...\\] before adding the MathBox."
-            : L"\\[...\\] を閉じてから MathBox を追加してください。";
+        return localization::Text(L"note.bottom_math.validation.unclosed_bracket");
     }
     if (firstError->code == L"NOTE-E-MATHBOX-UNCLOSED-PAREN") {
-        return english
-            ? L"Close \\(...\\) before adding the MathBox."
-            : L"\\(...\\) を閉じてから MathBox を追加してください。";
+        return localization::Text(L"note.bottom_math.validation.unclosed_paren");
     }
     if (firstError->code == L"NOTE-E-MATHBOX-UNCLOSED-DOLLAR") {
-        return english
-            ? L"Close $...$ before adding the MathBox."
-            : L"$...$ を閉じてから MathBox を追加してください。";
+        return localization::Text(L"note.bottom_math.validation.unclosed_dollar");
     }
     return firstError->message;
 }
@@ -184,8 +172,7 @@ static LRESULT CALLBACK BottomMathPreviewProc(HWND hWnd, UINT msg, WPARAM wParam
             g_bottomMathPreviewDragStart.x = GET_X_LPARAM(lParam);
             g_bottomMathPreviewDragStart.y = GET_Y_LPARAM(lParam);
             SetCapture(hWnd);
-            SetBottomMathHint(IsEnglishUi() ? L"Drag the preview onto the PDF to place a MathBox."
-                                            : L"プレビューを PDF へドラッグして MathBox を配置します。");
+            SetBottomMathHint(localization::Text(L"note.bottom_math.cd0b8bee50af").c_str());
             return 0;
         }
         return 0;
@@ -211,10 +198,8 @@ static LRESULT CALLBACK BottomMathPreviewProc(HWND hWnd, UINT msg, WPARAM wParam
                 }
                 SetCursor(LoadCursorW(nullptr, overPdf ? IDC_CROSS : IDC_NO));
                 SetBottomMathHint(overPdf
-                                      ? (IsEnglishUi() ? L"Release to place the MathBox on the PDF."
-                                                       : L"離すと PDF 上に MathBox を配置します。")
-                                      : (IsEnglishUi() ? L"Drag onto a PDF page, then release."
-                                                       : L"PDF ページ上までドラッグして離してください。"));
+                                      ? (localization::Text(L"note.bottom_math.5ed9a1b9f5e4").c_str())
+                                      : (localization::Text(L"note.bottom_math.c27a6f8e74ef").c_str()));
             }
             return 0;
         }
@@ -237,7 +222,7 @@ static LRESULT CALLBACK BottomMathPreviewProc(HWND hWnd, UINT msg, WPARAM wParam
             MathDisplay display;
             MathKind kind = MathKind::Latex;
             if (!BuildBottomMathPreviewDisplay(rawText, &display, &kind)) {
-                SetBottomMathHint(IsEnglishUi() ? L"MathBox text is empty." : L"MathBox の文字列が空です。");
+                SetBottomMathHint(localization::Text(L"note.bottom_math.415e30bc7826").c_str());
                 return 0;
             }
             std::wstring validationMessage;
@@ -246,20 +231,16 @@ static LRESULT CALLBACK BottomMathPreviewProc(HWND hWnd, UINT msg, WPARAM wParam
                 return 0;
             }
             if (!g_hPdfView || !CurrentLogicalPdfDocument()) {
-                SetBottomMathHint(IsEnglishUi() ? L"Open a PDF before dragging a MathBox."
-                                                : L"MathBox をドラッグ配置する前に PDF を開いてください。");
+                SetBottomMathHint(localization::Text(L"note.bottom_math.02dc8eebc462").c_str());
                 return 0;
             }
             if (!AddMathAnnotationFromTextAtPoint(g_hPdfView, rawText, kind, screenPt)) {
-                SetBottomMathHint(IsEnglishUi() ? L"Drop on a visible PDF page to place the MathBox."
-                                                : L"表示中の PDF ページ上で離すと MathBox を配置できます。");
+                SetBottomMathHint(localization::Text(L"note.bottom_math.1db5eb8bf89c").c_str());
                 return 0;
             }
             SetBottomMathHint((kind == MathKind::Markup)
-                                  ? (IsEnglishUi() ? L"Placed a Markup MathBox on the PDF."
-                                                   : L"Markup の MathBox を PDF に配置しました。")
-                                  : (IsEnglishUi() ? L"Placed a LaTeX MathBox on the PDF."
-                                                   : L"LaTeX の MathBox を PDF に配置しました。"));
+                                  ? (localization::Text(L"note.bottom_math.eecde4b27e9b").c_str())
+                                  : (localization::Text(L"note.bottom_math.25823f95b75b").c_str()));
             return 0;
         }
         break;
@@ -295,7 +276,7 @@ static LRESULT CALLBACK BottomMathPreviewProc(HWND hWnd, UINT msg, WPARAM wParam
             static_cast<LONG>(margin + tm.tmHeight)
         };
         SetTextColor(hdc, AdjustColorBrightness(g_theme.panelText, -35));
-        DrawTextW(hdc, IsEnglishUi() ? L"Preview" : L"プレビュー", -1, &titleRc,
+        DrawTextW(hdc, localization::Text(L"note.bottom_math.17ad9a8e4975").c_str(), -1, &titleRc,
                   DT_LEFT | DT_TOP | DT_NOPREFIX | DT_SINGLELINE);
 
         MathDisplay display;
@@ -310,13 +291,12 @@ static LRESULT CALLBACK BottomMathPreviewProc(HWND hWnd, UINT msg, WPARAM wParam
         if (!BuildBottomMathPreviewDisplay(rawText, &display, &kind)) {
             SetTextColor(hdc, AdjustColorBrightness(g_theme.panelText, -55));
             DrawTextW(hdc,
-                      IsEnglishUi() ? L"Type a formula to preview it here."
-                                    : L"数式を入力するとここにプレビューします。",
+                      localization::Text(L"note.bottom_math.bc3e4c2b405a").c_str(),
                       -1, &bodyRc, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
         } else {
             std::wstring badge = (kind == MathKind::Markup)
-                                     ? (IsEnglishUi() ? L"Markup" : L"Markup")
-                                     : (IsEnglishUi() ? L"LaTeX" : L"LaTeX");
+                                     ? (localization::Text(L"note.bottom_math.5f944ef08ac7").c_str())
+                                     : (localization::Text(L"note.bottom_math.c7bec3279ce2").c_str());
             RECT badgeRc = titleRc;
             SetTextColor(hdc, AdjustColorBrightness(g_theme.panelText, -15));
             DrawTextW(hdc, badge.c_str(), -1, &badgeRc, DT_RIGHT | DT_TOP | DT_NOPREFIX | DT_SINGLELINE);
@@ -339,7 +319,7 @@ static LRESULT CALLBACK BottomMathPreviewProc(HWND hWnd, UINT msg, WPARAM wParam
 static bool SubmitBottomMathInput(HWND hWnd, MathKind kind) {
     const std::wstring rawText = TrimWhitespace(ReadBottomMathInputText());
     if (rawText.empty()) {
-        SetBottomMathHint(IsEnglishUi() ? L"MathBox text is empty." : L"MathBox の文字列が空です。");
+        SetBottomMathHint(localization::Text(L"note.bottom_math.415e30bc7826").c_str());
         if (g_hBottomMathInput) SetFocus(g_hBottomMathInput);
         return false;
     }
@@ -350,19 +330,17 @@ static bool SubmitBottomMathInput(HWND hWnd, MathKind kind) {
         return false;
     }
     if (!g_hPdfView || !CurrentLogicalPdfDocument()) {
-        SetBottomMathHint(IsEnglishUi() ? L"Open a PDF before adding a MathBox." : L"MathBox を追加する前に PDF を開いてください。");
+        SetBottomMathHint(localization::Text(L"note.bottom_math.23c4b67247c0").c_str());
         return false;
     }
     if (!AddMathAnnotationFromText(g_hPdfView, rawText, kind)) {
-        SetBottomMathHint(IsEnglishUi() ? L"Failed to add MathBox to the current PDF view." : L"現在の PDF 表示へ MathBox を追加できませんでした。");
+        SetBottomMathHint(localization::Text(L"note.bottom_math.1bdedb2d5aa6").c_str());
         return false;
     }
     SetBottomMathHint(
         (kind == MathKind::Markup)
-            ? (IsEnglishUi() ? L"Added a Markup MathBox at the current view center."
-                             : L"Markup の MathBox を現在表示の中央へ追加しました。")
-            : (IsEnglishUi() ? L"Added a LaTeX MathBox at the current view center."
-                             : L"LaTeX の MathBox を現在表示の中央へ追加しました。"));
+            ? (localization::Text(L"note.bottom_math.e99f5ca1feec").c_str())
+            : (localization::Text(L"note.bottom_math.c9d6e030f613").c_str()));
     if (g_hBottomMathInput) {
         SetFocus(g_hBottomMathInput);
         SendMessageW(g_hBottomMathInput, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
@@ -428,11 +406,11 @@ LRESULT CALLBACK BottomMathProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             WS_CHILD | WS_VISIBLE,
             0, 0, 100, 100, hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kBottomMathPreviewId)), g_hInst, nullptr);
         g_hBottomMathAddLatex = CreateWindowExW(
-            0, L"BUTTON", IsEnglishUi() ? L"Add LaTeX MathBox" : L"LaTeX で追加",
+            0, L"BUTTON", localization::Text(L"note.bottom_math.ea273021ec2f").c_str(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0, 0, 100, 28, hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kBottomMathAddLatexId)), g_hInst, nullptr);
         g_hBottomMathAddMarkup = CreateWindowExW(
-            0, L"BUTTON", IsEnglishUi() ? L"Add Markup MathBox" : L"Markup で追加",
+            0, L"BUTTON", localization::Text(L"note.bottom_math.ef4b5de8c337").c_str(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0, 0, 100, 28, hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kBottomMathAddMarkupId)), g_hInst, nullptr);
         g_hBottomMathHint = CreateWindowExW(

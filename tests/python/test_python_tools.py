@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -36,6 +38,7 @@ analyze_build_logs = load_module("analyze_build_logs", "tools/metrics/analyze_bu
 analyze_document_language = load_module("analyze_document_language", "tools/metrics/analyze_document_language.py")
 analyze_repo = load_module("analyze_repo", "tools/metrics/code_metrics/analyze_repo.py")
 code_metrics_gui = load_module("code_metrics_gui", "tools/metrics/code_metrics/gui.py")
+text_integrity_gate = load_module("text_integrity_gate", "tools/release_checks/text_integrity_gate.py")
 libreoffice_reduce = load_module("libreoffice_reduce", "tools/libreoffice/libreoffice_reduce.py")
 libreoffice_smoke_test = load_module("libreoffice_smoke_test", "tools/libreoffice/libreoffice_smoke_test.py")
 libreoffice_conversion_quality_test = load_module(
@@ -49,6 +52,12 @@ validate_introduction_site = load_module(
 )
 release_license_gate = load_module("release_license_gate", "tools/release_checks/release_license_gate.py")
 release_text_gate = load_module("release_text_gate", "tools/release_checks/release_text_gate.py")
+release_locale_content_gate = load_module(
+    "release_locale_content_gate", "tools/release_checks/release_locale_content_gate.py"
+)
+validate_locale_usage = load_module(
+    "validate_locale_usage", "tools/localization/validate_locale_usage.py"
+)
 public_snapshot_content_gate = load_module(
     "public_snapshot_content_gate", "tools/release_checks/public_snapshot_content_gate.py"
 )
@@ -184,10 +193,29 @@ class AnnotationToolPolicyTests(unittest.TestCase):
         ):
             self.assertIn(f"{key} = RGB(255, 140, 0)", config)
 
+    def test_magnifier_options_are_persistent_and_dpi_aware(self) -> None:
+        config = (REPO_ROOT / "src/core/workspace_config.h").read_text(encoding="utf-8")
+        core = (REPO_ROOT / "src/core/app_core.cpp").read_text(encoding="utf-8")
+        overlay = (REPO_ROOT / "src/pdf_view/interaction_overlay.cppinc").read_text(encoding="utf-8")
+        settings = (REPO_ROOT / "src/settings/settings_annot.cppinc").read_text(encoding="utf-8")
+        catalog = json.loads((REPO_ROOT / "locales/ja.json").read_text(encoding="utf-8"))
+        self.assertIn("Horizontal", config + core + overlay + settings)
+        self.assertIn("magnifierZoom", config)
+        self.assertIn("magnifierSizeDip", config)
+        self.assertIn('ParseJsonDoubleField(json, "magnifierZoom")', core)
+        self.assertIn('ParseJsonIntField(json, "magnifierSizeDip")', core)
+        self.assertIn("GetDeviceCaps(hdc, LOGPIXELSX)", overlay)
+        self.assertIn("cursorGap", overlay)
+        self.assertIn("magnifier_shape.horizontal", settings)
+        self.assertIn("settings.annot.magnifier_zoom", catalog)
+        self.assertIn("settings.annot.magnifier_size", catalog)
+
     def test_annotation_input_warns_when_annotations_are_hidden(self) -> None:
         source = (REPO_ROOT / "src/pdf_view/input.cppinc").read_text(encoding="utf-8")
+        catalog = json.loads((REPO_ROOT / "locales/ja.json").read_text(encoding="utf-8"))
         self.assertIn("NotifyAnnotationInputWhileHidden", source)
-        self.assertIn("注釈表示がOFFです。入力した注釈は保存されますが", source)
+        self.assertIn('localization::Text(L"pdf.annotation_input_hidden")', source)
+        self.assertIn("注釈表示がOFFです。入力した注釈は保存されますが", catalog["pdf.annotation_input_hidden"])
         self.assertIn("if (g_showAnnots) return;", source)
 
 
@@ -427,6 +455,88 @@ class AnalyzeRepoTests(unittest.TestCase):
 
             self.assertIn("Approx Unused", rendered)
             self.assertIn("Summary", rendered)
+
+    def test_render_json_report_is_ascii_safe_for_windows_shell_redirection(self) -> None:
+        data = {"path": "tests/fixtures/日本語\\記号を含む.pptx"}
+
+        rendered = analyze_repo.render_json_report(data)
+
+        self.assertTrue(rendered.isascii())
+        self.assertEqual(json.loads(rendered), data)
+
+
+class TextIntegrityGateTests(unittest.TestCase):
+    def test_git_visible_paths_includes_nonignored_untracked_files(self) -> None:
+        with repo_tempdir() as root:
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+            (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", ".gitignore", "tracked.txt"], check=True)
+            (root / "untracked.json").write_text('{"pending":true}', encoding="utf-8")
+            (root / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+
+            paths = {path.as_posix() for path in text_integrity_gate.git_visible_paths(root)}
+
+            self.assertIn("tracked.txt", paths)
+            self.assertIn("untracked.json", paths)
+            self.assertNotIn("ignored.txt", paths)
+
+    def test_audit_rejects_utf16_invalid_utf8_and_invalid_json(self) -> None:
+        with repo_tempdir() as root:
+            (root / "valid.json").write_text('{"name":"日本語"}', encoding="utf-8")
+            (root / "invalid.json").write_bytes(b'{"value":"\\q"}')
+            (root / "utf16.cpp").write_bytes(b"\xff\xfei\x00n\x00t\x00")
+            (root / "invalid.txt").write_bytes(b"\x80")
+
+            report = text_integrity_gate.audit_paths(
+                root,
+                [Path("valid.json"), Path("invalid.json"), Path("utf16.cpp"), Path("invalid.txt")],
+            )
+
+            kinds = {entry["kind"] for entry in report["errors"]}
+            self.assertEqual(report["summary"]["text_files_checked"], 4)
+            self.assertIn("invalid-json", kinds)
+            self.assertIn("non-utf8-bom", kinds)
+            self.assertIn("invalid-utf8", kinds)
+
+    def test_audit_allows_only_the_pinned_legacy_exception(self) -> None:
+        with repo_tempdir() as root:
+            path = root / "third_party/pdfium/licenses/freetype.txt"
+            path.parent.mkdir(parents=True)
+            data = b"\x93FreeType\x94"
+            path.write_bytes(data)
+            original = text_integrity_gate.LEGACY_TEXT_EXCEPTIONS[
+                "third_party/pdfium/licenses/freetype.txt"
+            ]
+            text_integrity_gate.LEGACY_TEXT_EXCEPTIONS["third_party/pdfium/licenses/freetype.txt"] = {
+                **original,
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+            try:
+                report = text_integrity_gate.audit_paths(root, [path.relative_to(root)])
+            finally:
+                text_integrity_gate.LEGACY_TEXT_EXCEPTIONS["third_party/pdfium/licenses/freetype.txt"] = original
+
+            self.assertEqual(report["summary"]["errors"], 0)
+            self.assertEqual(report["summary"]["legacy_exceptions"], 1)
+
+    def test_text_report_escapes_non_ascii_paths_for_console_safety(self) -> None:
+        report = {
+            "summary": {
+                "text_files_checked": 1,
+                "structured_files_checked": 0,
+                "legacy_exceptions": 0,
+                "errors": 1,
+                "warnings": 0,
+            },
+            "errors": [{"path": "docs/日本語.json", "kind": "invalid-json", "detail": "test"}],
+            "warnings": [],
+        }
+
+        rendered = text_integrity_gate.render_text(report)
+
+        self.assertTrue(rendered.isascii())
+        self.assertIn(r"docs/\u65e5\u672c\u8a9e.json", rendered)
 
 
 class AnalyzeBuildLogsTests(unittest.TestCase):
@@ -2063,7 +2173,11 @@ class RenderHumanDocsTests(unittest.TestCase):
             doc_dir = site_dir / "docs" / "public"
             doc_dir.mkdir(parents=True)
             use_doc = doc_dir / "How_to_Use.md"
-            use_doc.write_text("# How to Use\n\nUsage steps.", encoding="utf-8")
+            use_doc.write_text(
+                "# How to Use\n\n## Section One\n\nUsage steps.\n\n"
+                "```mermaid\nflowchart LR\nA[Download] --> B[Extract]\nB --> C[Start]\n```\n\n## Section One",
+                encoding="utf-8",
+            )
 
             introduction = site_dir / "introduction" / "index.md"
             introduction.parent.mkdir()
@@ -2077,11 +2191,24 @@ class RenderHumanDocsTests(unittest.TestCase):
             self.assertTrue((site_dir / "docs" / "public" / "How_to_Use.html").exists())
             human_html = (site_dir / "docs" / "public" / "How_to_Use.html").read_text(encoding="utf-8")
             self.assertIn('class="site-menu"', human_html)
+            self.assertIn('class="contrast-toggle"', human_html)
+            self.assertIn('pdf-note-workspace-high-contrast', human_html)
             self.assertIn('GitHub リポジトリ', human_html)
-            self.assertIn('現在: 使い方・セットアップ', human_html)
-            self.assertIn('現在地', human_html)
             self.assertIn('導入・操作・保存・トラブル対処', human_html)
             self.assertIn('aria-current="page"', human_html)
+            self.assertIn('<h1 id="how-to-use">How to Use</h1>', human_html)
+            self.assertIn('<h2 id="section-one">Section One</h2>', human_html)
+            self.assertIn('<h2 id="section-one-1">Section One</h2>', human_html)
+            self.assertIn('class="flowchart-diagram"', human_html)
+            self.assertIn('>Download</span>', human_html)
+            self.assertIn('>Extract</span>', human_html)
+            self.assertNotIn('>B</span>', human_html)
+            self.assertNotIn('flowchart LR', human_html)
+            self.assertIn('@media (max-width: 560px)', human_html)
+            self.assertIn('class="menu-outside"', human_html)
+            self.assertIn('content: "↗"', human_html)
+            self.assertIn('目的別の入口へ戻る', human_html)
+            self.assertLess(human_html.index('プロジェクトの概要'), human_html.index('使い方・セットアップ'))
             self.assertNotIn('☰', human_html)
             # 生の .md も残っていること
             self.assertTrue(readme.exists())
@@ -2092,18 +2219,37 @@ class RenderHumanDocsTests(unittest.TestCase):
             introduction_html = (site_dir / "introduction" / "index.html").read_text(encoding="utf-8")
             self.assertIn('class="site-menu"', introduction_html)
             self.assertIn('Raw Markdown', introduction_html)
-            self.assertIn('現在: プロジェクトと文書案内', introduction_html)
+            self.assertNotIn('現在:', introduction_html)
+            self.assertIn('背景・設計・確認資料', introduction_html)
+            self.assertIn('<h1 id="introduction">Introduction</h1>', introduction_html)
             self.assertNotIn('📄', introduction_html)
 
 
-class AiDocumentationStructureTests(unittest.TestCase):
+class PublicDocumentationStructureTests(unittest.TestCase):
     def test_introduction_tree_is_in_the_public_snapshot_allowlist(self) -> None:
         allowlist = (
-            REPO_ROOT / "docs/internal/operations/public_repo_release_allowlist_2026-07-28.txt"
+            REPO_ROOT / "docs/internal/operations/public_repo_release_allowlist_2026-08-24.txt"
         ).read_text(encoding="utf-8-sig")
 
         self.assertIn("\nintroduction/\n", f"\n{allowlist}")
         self.assertNotIn("\nllms.txt\n", f"\n{allowlist}")
+
+    def test_locale_build_inputs_are_in_the_public_snapshot_allowlist(self) -> None:
+        allowlist = (
+            REPO_ROOT / "docs/internal/operations/public_repo_release_allowlist_2026-08-24.txt"
+        ).read_text(encoding="utf-8-sig")
+
+        for required in ("locales/", "tools/localization/", "docs/ja/", "docs/en/"):
+            self.assertIn(f"\n{required}\n", f"\n{allowlist}")
+
+    def test_introduction_index_links_every_human_readable_detail(self) -> None:
+        index = (REPO_ROOT / "introduction" / "index.md").read_text(encoding="utf-8-sig")
+        details = [REPO_ROOT / "introduction" / "project_overview.md"]
+        details.extend(sorted((REPO_ROOT / "introduction" / "core").glob("*.md")))
+
+        for document in details:
+            relative = document.relative_to(REPO_ROOT / "introduction").as_posix()
+            self.assertIn(f"]({relative})", index, document.name)
 
 
 class PublicSnapshotContentGateTests(unittest.TestCase):
@@ -2155,6 +2301,26 @@ class PublicSnapshotContentGateTests(unittest.TestCase):
 
 
 class PublicSiteValidationTests(unittest.TestCase):
+    def test_documentation_portal_source_orders_primary_entries(self) -> None:
+        portal = (REPO_ROOT / "site/github/index.html").read_text(encoding="utf-8-sig")
+        labels = (
+            "プロジェクトの概要",
+            "使い方・セットアップ",
+            "背景・設計・確認資料",
+            "ライセンスと第三者通知",
+        )
+        positions = [portal.index(label) for label in labels]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn('id="site-map-title">公開ページの関係', portal)
+        self.assertIn("GitHub Releases", portal)
+
+    def test_public_site_sources_include_persistent_high_contrast_controls(self) -> None:
+        github_portal = (REPO_ROOT / "site/github/index.html").read_text(encoding="utf-8-sig")
+        cloudflare_intro = (REPO_ROOT / "site/cloudflare/public/index.html").read_text(encoding="utf-8-sig")
+        for source in (github_portal, cloudflare_intro):
+            self.assertIn('class="contrast-toggle"', source)
+            self.assertIn("pdf-note-workspace-high-contrast", source)
+
     @staticmethod
     def write_minimal_site(root: Path) -> None:
         for relative, text in {
@@ -2272,8 +2438,8 @@ class IntroductionSiteValidationTests(unittest.TestCase):
 
 class ReleaseLicenseGateTests(unittest.TestCase):
     @staticmethod
-    def write_release(release_dir: Path) -> None:
-        for relative_path in release_license_gate.REQUIRED_LICENSE_FILES:
+    def write_release(release_dir: Path, locale: str = "ja") -> None:
+        for relative_path in release_license_gate.required_license_files(locale):
             target = release_dir / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(f"License material: {relative_path}\n", encoding="utf-8")
@@ -2308,6 +2474,15 @@ class ReleaseLicenseGateTests(unittest.TestCase):
 
             self.assertTrue(any("differs from unpacked release" in error for error in errors))
 
+    def test_requires_only_the_selected_locale_top_level_license_material(self) -> None:
+        with repo_tempdir() as root:
+            release_dir = root / "release_1.0.0"
+            self.write_release(release_dir, "en")
+
+            self.assertEqual(release_license_gate.validate_release_directory(release_dir, "en"), [])
+            self.assertFalse((release_dir / "LICENSE.ja.md").exists())
+            self.assertFalse((release_dir / "THIRD_PARTY_NOTICES.ja.md").exists())
+
 
 class ReleaseTextGateTests(unittest.TestCase):
     def test_rejects_invalid_utf8_and_replacement_character(self) -> None:
@@ -2331,6 +2506,179 @@ class ReleaseTextGateTests(unittest.TestCase):
             errors = release_text_gate.validate_release_directory(root)
 
             self.assertTrue(any("likely Windows-1252/UTF-8 mojibake" in error for error in errors))
+
+
+class LocaleUsageValidationTests(unittest.TestCase):
+    def test_accepts_catalog_backed_references_and_english_text(self) -> None:
+        with repo_tempdir() as root:
+            source = root / "src"
+            source.mkdir()
+            (source / "screen.cpp").write_text(
+                'auto text = localization::Text(L"screen.title");\n', encoding="utf-8"
+            )
+            ja = root / "ja.json"
+            en = root / "en.json"
+            ja.write_text(json.dumps({"screen.title": "画面"}), encoding="utf-8")
+            en.write_text(json.dumps({"screen.title": "Screen"}), encoding="utf-8")
+
+            self.assertEqual(validate_locale_usage.validate(source, ja, en), [])
+
+    def test_rejects_unknown_id_and_japanese_in_english_catalog(self) -> None:
+        with repo_tempdir() as root:
+            source = root / "src"
+            source.mkdir()
+            (source / "screen.cpp").write_text(
+                'auto text = localization::Format(L"screen.missing", {});\n', encoding="utf-8"
+            )
+            ja = root / "ja.json"
+            en = root / "en.json"
+            ja.write_text(json.dumps({"screen.title": "画面"}), encoding="utf-8")
+            en.write_text(json.dumps({"screen.title": "画面"}), encoding="utf-8")
+
+            errors = validate_locale_usage.validate(source, ja, en)
+
+            self.assertTrue(any("absent from Japanese catalog: screen.missing" in error for error in errors))
+            self.assertTrue(any("English catalog contains Japanese text: screen.title" in error for error in errors))
+
+
+class OfficeLocalizationTests(unittest.TestCase):
+    def test_docx_conversion_errors_are_catalog_backed(self) -> None:
+        source = (REPO_ROOT / "src/office/docx_space_protection.cpp").read_text(encoding="utf-8")
+        ja = json.loads((REPO_ROOT / "locales/ja.json").read_text(encoding="utf-8"))
+        en = json.loads((REPO_ROOT / "locales/en.json").read_text(encoding="utf-8"))
+        ids = set(re.findall(r'OfficeErr\(L"(office\.docx\.[a-z0-9_]+)"\)', source))
+
+        self.assertGreaterEqual(len(ids), 20)
+        self.assertFalse(re.search(r'L"[^"\\\r\n]*[\u3040-\u30ff\u3400-\u9fff]', source))
+        self.assertTrue(ids <= set(ja))
+        self.assertTrue(ids <= set(en))
+
+
+class ReleaseLocaleContentGateTests(unittest.TestCase):
+    @staticmethod
+    def write_release(directory: Path, locale: str, readme: str = "Release documentation\n", edition: str = "full") -> None:
+        (directory / "docs" / "legal").mkdir(parents=True)
+        (directory / "sample_workspace").mkdir()
+        documents = {
+            "docs/README.md": readme,
+            "docs/Getting_Started.md": "Getting started\n",
+            "docs/Help_Reference.md": "Help reference\n",
+            "docs/legal/LICENSE.md": "License\n",
+            "docs/legal/THIRD_PARTY_NOTICES.md": "Third-party notices\n",
+            "sample_workspace/README.txt": "Sample workspace\n",
+            "sample_workspace/Getting_Started.md": "Getting started\n",
+        }
+        for relative, content in documents.items():
+            (directory / relative).write_text(content, encoding="utf-8")
+        for name, source_relative, rewrite_legal_links in release_locale_content_gate.TOP_LEVEL_DOCUMENTS[locale]:
+            content = documents[source_relative]
+            if rewrite_legal_links:
+                content = content.replace("](" + "legal/", "](" + "docs/legal/")
+            (directory / name).write_text(content, encoding="utf-8")
+        (directory / "sample_workspace/workspace.json").write_text(
+            json.dumps({"language": locale}), encoding="utf-8"
+        )
+        for relative in release_locale_content_gate.REQUIRED_LECTURE_SAMPLE_FILES[locale]:
+            path = directory / "sample_workspace" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"sample")
+        starter_relative, expected_pdf, expected_note = release_locale_content_gate.STARTER_SESSION[locale]
+        starter = directory / "sample_workspace" / starter_relative
+        starter.mkdir(parents=True, exist_ok=True)
+        (starter / expected_pdf).write_bytes(b"sample")
+        (starter / expected_note).write_bytes(b"sample")
+        if edition == "full":
+            for relative in release_locale_content_gate.REQUIRED_FULL_CONVERSION_SAMPLE_FILES[locale]:
+                path = directory / "sample_workspace" / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"sample")
+
+    def test_accepts_complete_english_content(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "en")
+
+            self.assertEqual(release_locale_content_gate.validate_release_directory(root, "en"), [])
+
+    def test_accepts_complete_japanese_lecture_content(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "ja")
+
+            self.assertEqual(release_locale_content_gate.validate_release_directory(root, "ja"), [])
+
+    def test_accepts_lite_without_conversion_session_and_rejects_it_when_present(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "en", edition="lite")
+
+            self.assertEqual(release_locale_content_gate.validate_release_directory(root, "en", "lite"), [])
+            conversion_pdf = root / "sample_workspace/01_Lecture_Samples/Session_03_Office_Conversion/presentation_conversion_result.pdf"
+            conversion_pdf.parent.mkdir(parents=True)
+            conversion_pdf.write_bytes(b"sample")
+            errors = release_locale_content_gate.validate_release_directory(root, "en", "lite")
+
+            self.assertTrue(any("Lite release contains conversion sample session" in error for error in errors))
+            self.assertTrue(any("Lite release contains conversion-result PDF sample" in error for error in errors))
+
+    def test_rejects_starter_session_with_more_than_one_note(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "ja")
+            starter = root / "sample_workspace/01_講義サンプル/第01回_基本操作"
+            (starter / "extra.md").write_text("extra\n", encoding="utf-8")
+
+            errors = release_locale_content_gate.validate_release_directory(root, "ja")
+
+            self.assertTrue(any("starter session must contain exactly one PDF and one note" in error for error in errors))
+
+    def test_rejects_japanese_text_and_mismatched_sample_locale(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "ja")
+            (root / "sample_workspace/README.txt").write_text("日本語のサンプル\n", encoding="utf-8")
+
+            errors = release_locale_content_gate.validate_release_directory(root, "en")
+
+            self.assertTrue(any("language does not match" in error for error in errors))
+            self.assertTrue(any("contains Japanese locale text: sample_workspace/README.txt" in error for error in errors))
+
+    def test_rejects_broken_link_and_unselected_locale_directory(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "en")
+            (root / "docs/README.md").write_text("[Missing](missing.md)\n", encoding="utf-8")
+            (root / "docs/ja").mkdir()
+
+            errors = release_locale_content_gate.validate_release_directory(root, "en")
+
+            self.assertTrue(any("Markdown link target is missing: docs/README.md -> missing.md" in error for error in errors))
+            self.assertTrue(any("unselected locale or internal directory: docs/ja" in error for error in errors))
+
+    def test_rejects_japanese_filename_in_english_sample(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "en")
+            (root / "sample_workspace/日本語.txt").write_text("English text\n", encoding="utf-8")
+
+            errors = release_locale_content_gate.validate_release_directory(root, "en")
+
+            self.assertTrue(any("contains Japanese locale filename: sample_workspace/日本語.txt" in error for error in errors))
+
+    def test_rejects_top_level_document_for_the_other_locale(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "ja")
+            (root / "README.en.md").write_text("English release overview\n", encoding="utf-8")
+
+            errors = release_locale_content_gate.validate_release_directory(root, "ja")
+
+            self.assertTrue(any("unexpected top-level locale document: README.en.md" in error for error in errors))
+
+    def test_rejects_missing_unexpected_or_nontracking_top_level_documents(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "ja")
+            (root / "README.ja.md").write_text("changed\n", encoding="utf-8")
+            (root / "LICENSE.ja.md").unlink()
+            (root / "README.fr.md").write_text("French\n", encoding="utf-8")
+
+            errors = release_locale_content_gate.validate_release_directory(root, "ja")
+
+            self.assertTrue(any("does not follow its docs primary: README.ja.md" in error for error in errors))
+            self.assertTrue(any("is missing: LICENSE.ja.md" in error for error in errors))
+            self.assertTrue(any("unexpected top-level locale document: README.fr.md" in error for error in errors))
 
 
 class ReleaseSetIntegrityGateTests(unittest.TestCase):
@@ -2358,6 +2706,7 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
                 "format\tpdf-note-build-info-v1\n"
                 "version\t1.0.0\n"
                 f"edition\t{edition}\n"
+                "locale\tja\n"
                 f"artifact\tpdf_note_workspace.exe\t{release_set_integrity_gate.sha256_file(executable)}\n",
                 encoding="utf-8",
             )
@@ -2368,6 +2717,7 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
         self.write_zip(lite, lite_zip)
         (release_set / "release_set_manifest.json").write_text(json.dumps({
             "app_version": "1.0.0",
+            "locale": "ja",
             "components": {
                 "release": full.name,
                 "release_lite": lite.name,
@@ -2427,6 +2777,17 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
 
             self.assertTrue(any("unexpected files" in error for error in errors))
 
+    def test_explains_how_to_recover_when_release_directory_changes_after_zipping(self) -> None:
+        with repo_tempdir() as root:
+            release_set, _, _ = self.make_release_set(root)
+            (release_set / "release_full" / "docs" / "README.md").write_text(
+                "changed after ZIP creation\n", encoding="utf-8"
+            )
+
+            errors = release_set_integrity_gate.validate_release_set(release_set)
+
+            self.assertTrue(any("do not run or edit the unpacked release" in error for error in errors))
+
     def test_rejects_lite_runtime_or_wrong_build_version(self) -> None:
         with repo_tempdir() as root:
             release_set, _, _ = self.make_release_set(root)
@@ -2453,6 +2814,13 @@ class ReleaseStartupSmokeGateTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 release_startup_smoke_gate.safe_extract(archive, root / "extract", release_dir)
+
+    def test_rejects_previously_started_release_copy(self) -> None:
+        with repo_tempdir() as root:
+            (root / "workspace" / "__resource__").mkdir(parents=True)
+
+            with self.assertRaisesRegex(RuntimeError, "配布ZIPに、初回起動で生成される不要なデータ.*workspace"):
+                release_startup_smoke_gate.assert_not_previously_started(root)
 
 
 class RepositoryScriptAndTextGateTests(unittest.TestCase):
@@ -2635,6 +3003,9 @@ class SyncPublicationInputsTests(unittest.TestCase):
             (destination / "tools/dev/sync_publication_inputs.py").write_text("old", encoding="utf-8")
             (destination / "src/app").mkdir(parents=True)
             (destination / "src/app/main.cpp").write_text("public source", encoding="utf-8")
+            private_test = destination / "tests/python/test_python_tools.py"
+            private_test.parent.mkdir(parents=True)
+            private_test.write_text("DEV_PDF-Note-Workspace", encoding="utf-8")
 
             sync_publication_inputs.sync_publication_inputs(source, destination)
 
@@ -2654,6 +3025,7 @@ class SyncPublicationInputsTests(unittest.TestCase):
             self.assertFalse((destination / "tools").exists())
             self.assertFalse((destination / "index.html").exists())
             self.assertEqual((destination / "src/app/main.cpp").read_text(encoding="utf-8"), "public source")
+            self.assertEqual(private_test.read_text(encoding="utf-8"), "DEV_PDF-Note-Workspace")
 
     def test_rejects_private_development_reference(self) -> None:
         with repo_tempdir() as root:

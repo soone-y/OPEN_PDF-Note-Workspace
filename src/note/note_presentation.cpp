@@ -20,6 +20,14 @@ NotePresentationFrameAction ResolveNotePresentationFrameAction(
     return NotePresentationFrameAction::RawFallback;
 }
 
+size_t RichEditWindowTextLengthForIndexedText(std::wstring_view indexed_text) {
+    size_t line_breaks = 0;
+    for (const wchar_t ch : indexed_text) {
+        if (ch == L'\n') ++line_breaks;
+    }
+    return indexed_text.size() + line_breaks;
+}
+
 NoteDerivedRefreshPlan ResolveNoteDerivedRefreshPlan(
     const NoteDerivedRefreshRequest& request) {
     NoteDerivedRefreshPlan plan;

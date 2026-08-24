@@ -1,6 +1,8 @@
 // file: note_view/note_view_input_helpers.cppinc
 // Included by note_view_input.cppinc; contains input helpers, visual assist, and save guards.
 
+#include "core/localization.h"
+
 // Note edit input, focus, IME-aware navigation, and token actions.
 // Included by note_view.cpp to keep a single translation unit while narrowing edit scope.
 
@@ -1038,14 +1040,14 @@ static bool CurrentNoteSelectionOrWord(HWND hWnd, std::wstring* out) {
 static bool BeginNoteSearchFromInsertMode(HWND hWnd, bool backward) {
     if (!hWnd || !IsWindow(hWnd) || !g_hBottomNote || !IsWindow(g_hBottomNote)) {
         ShowSoftNotice(GetParent(hWnd),
-                       IsEnglishUi() ? L"Search bar is not available." : L"検索欄を開けませんでした。",
+                       localization::Text(L"note.search_bar_unavailable"),
                        SoftNoticeKind::Warning);
         return false;
     }
     EnsureNoteCmdlineEdit(g_hBottomNote);
     if (!g_hNoteCmdlineEdit || !IsWindow(g_hNoteCmdlineEdit)) {
         ShowSoftNotice(GetParent(hWnd),
-                       IsEnglishUi() ? L"Search bar is not available." : L"検索欄を開けませんでした。",
+                       localization::Text(L"note.search_bar_unavailable"),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -1069,7 +1071,7 @@ static bool ReplaceCurrentNoteSearchHit(HWND hWnd) {
     if (!hWnd || !g_noteSearchHitActive || g_noteSearchHitEnd <= g_noteSearchHitStart) return false;
     std::wstring replacement;
     if (!PromptSimpleText(GetParent(hWnd),
-                          IsEnglishUi() ? L"Replace current search hit" : L"現在の検索結果を置換",
+                          localization::Text(L"note.replace_current_search_hit").c_str(),
                           L"", replacement)) {
         return true;
     }

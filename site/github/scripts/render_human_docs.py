@@ -676,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     count = 0
-    for relative_dir in (Path("."), Path("docs/public"), Path("introduction")):
+    for relative_dir in (Path("."), Path("docs/public"), Path("docs/ja"), Path("docs/en"), Path("introduction")):
         directory = site_dir / relative_dir
         if not directory.exists() or not directory.is_dir():
             continue

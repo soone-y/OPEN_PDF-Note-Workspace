@@ -13,27 +13,19 @@ struct ScheduleTimeUiStrings {
 };
 
 static ScheduleTimeUiStrings GetScheduleTimeUiStrings() {
-    if (IsEnglishUi()) {
-        return {
-            L"Class Start Times",
-            L"Day",
-            L"Copy to all days",
-            L"Format: HH:MM (24h)",
-            L"Enter times in HH:MM format (e.g., 09:30).",
-            L"OK",
-            L"Cancel",
-            { L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat", L"Sun" }
-        };
-    }
     return {
-        g_config.studentMode ? L"授業開始時刻" : L"開始時刻",
-        L"曜日",
-        L"全曜日にコピー",
-        L"形式: HH:MM (24h)",
-        L"時刻の形式は HH:MM です。(例: 09:30)",
-        L"OK",
-        L"キャンセル",
-        { L"月", L"火", L"水", L"木", L"金", L"土", L"日" }
+        localization::Text(g_config.studentMode ? L"settings.schedule.time.title.student"
+                                                 : L"settings.schedule.time.title.parent"),
+        localization::Text(L"settings.schedule.time.day"),
+        localization::Text(L"settings.schedule.time.copy_all"),
+        localization::Text(L"settings.schedule.time.format_hint"),
+        localization::Text(L"settings.schedule.time.invalid"),
+        localization::Text(L"settings.schedule.time.ok"),
+        localization::Text(L"settings.schedule.time.cancel"),
+        { localization::Text(L"settings.schedule.day.mon"), localization::Text(L"settings.schedule.day.tue"),
+          localization::Text(L"settings.schedule.day.wed"), localization::Text(L"settings.schedule.day.thu"),
+          localization::Text(L"settings.schedule.day.fri"), localization::Text(L"settings.schedule.day.sat"),
+          localization::Text(L"settings.schedule.day.sun") }
     };
 }
 
@@ -200,7 +192,8 @@ static LRESULT CALLBACK ScheduleTimeProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         ctx->labels.resize(static_cast<size_t>(ctx->periods));
         ctx->edits.resize(static_cast<size_t>(ctx->periods));
         for (int p = 0; p < ctx->periods; ++p) {
-            std::wstring label = IsEnglishUi() ? (L"P" + std::to_wstring(p + 1)) : (std::to_wstring(p + 1) + L"限");
+            std::wstring label = localization::Format(L"settings.schedule.period",
+                                                      {{L"COUNT", std::to_wstring(p + 1)}});
             ctx->labels[static_cast<size_t>(p)] = CreateWindowExW(0, L"STATIC", label.c_str(),
                                                                   WS_CHILD | WS_VISIBLE,
                                                                   xLabel, y + labelPadY, labelW, rowH,
@@ -325,11 +318,9 @@ static LRESULT CALLBACK ScheduleTimeProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                 std::wstring msg = ui.errInvalid;
                 if (badDay >= 0 && badDay < static_cast<int>(ui.dayLabels.size()) && badPeriod >= 0) {
                     msg += L"\n";
-                    if (IsEnglishUi()) {
-                        msg += ui.dayLabels[static_cast<size_t>(badDay)] + L" P" + std::to_wstring(badPeriod + 1);
-                    } else {
-                        msg += ui.dayLabels[static_cast<size_t>(badDay)] + L" " + std::to_wstring(badPeriod + 1) + L"限";
-                    }
+                    msg += ui.dayLabels[static_cast<size_t>(badDay)] + L" " +
+                           localization::Format(L"settings.schedule.period",
+                                                {{L"COUNT", std::to_wstring(badPeriod + 1)}});
                 }
                 ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
                 if (badDay >= 0 && badDay < kScheduleDayCount) {
@@ -396,13 +387,14 @@ static void ShowScheduleTimeDialog(HWND owner) {
     int hPx = MulDiv(kScheduleTimeDlgHeight, dpiRef, 96);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, L"ScheduleTimeDlgClass",
                              ui.title.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, wPx, hPx,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) {
         if (owner) EnableWindow(owner, TRUE);
         return;
     }
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     MSG msg;

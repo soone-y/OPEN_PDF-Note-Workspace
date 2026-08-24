@@ -3,6 +3,7 @@
 // single translation unit while physically splitting responsibilities.
 
 #include "core/preview_trace.h"
+#include "core/localization.h"
 
 static DWORD g_pdfRecentLinkPlacementDblClickSuppressUntil = 0;
 static POINT g_pdfRecentLinkPlacementDblClickSuppressPt = { -1, -1 };
@@ -11,9 +12,7 @@ static ULONGLONG g_pdfIgnoreNextLeftKeyUntilTick = 0;
 static void NotifyAnnotationInputWhileHidden(HWND hwnd) {
     if (g_showAnnots) return;
     ShowSoftNotice(hwnd,
-                   IsEnglishUi()
-                       ? L"Annotations are hidden. New annotations will be saved but not shown until display is turned on."
-                       : L"注釈表示がOFFです。入力した注釈は保存されますが、表示をONにするまで見えません。",
+                   localization::Text(L"pdf.annotation_input_hidden"),
                    SoftNoticeKind::Warning);
 }
 

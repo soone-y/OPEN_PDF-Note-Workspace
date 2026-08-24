@@ -1,0 +1,19 @@
+# Basic Operation Sample Note
+
+Use this note to try headings, lists, checklist items, and text decoration.
+
+## Items to edit
+
+- [x] Open the note
+- [ ] Edit this line
+- [ ] Save the changes
+
+**bold**, *italic*, ~~strikethrough~~, and `code-style text`
+
+<u>underlined text</>
+
+<char=#1a73e8>blue text</>
+
+<back=#fff2cc>text with a background color</>
+
+This first session intentionally contains exactly one PDF and this one note, so both open together on a first launch. Additional format examples are kept in `reference_material`.

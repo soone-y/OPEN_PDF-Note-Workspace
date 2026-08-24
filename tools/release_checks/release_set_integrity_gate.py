@@ -234,6 +234,11 @@ def validate_release_zip(release_dir: Path, zip_path: Path) -> list[str]:
             errors.append(f"release ZIP has unexpected files: {', '.join(sorted(unexpected)[:5])}")
         if changed:
             errors.append(f"release ZIP has changed files: {', '.join(sorted(changed)[:5])}")
+        errors.append(
+            "release directory differs from its frozen ZIP; do not run or edit the "
+            "unpacked release inside a release set. Test only a separately extracted "
+            "ZIP copy, then create a new release set."
+        )
     return errors
 
 
@@ -251,10 +256,13 @@ def validate_release_metadata(release_set: Path, components: dict[str, object]) 
     try:
         release_manifest = json.loads((release_set / "release_set_manifest.json").read_text(encoding="utf-8-sig"))
         version = release_manifest["app_version"]
+        locale = release_manifest["locale"]
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
         return [f"unable to read release-set version: {error}"]
     if not isinstance(version, str) or not version:
         return ["release-set app_version is empty"]
+    if locale not in ("ja", "en"):
+        return ["release-set locale must be ja or en"]
     for label, directory_key, expected_edition in (("full", "release", "full"), ("Lite", "release_lite", "lite")):
         try:
             release_dir = child_path(release_set, components.get(directory_key), label=f"{label} directory")
@@ -274,6 +282,8 @@ def validate_release_metadata(release_set: Path, components: dict[str, object]) 
             errors.append(f"{label}: application build-info version does not match release-set app_version")
         if fields.get("edition") != expected_edition:
             errors.append(f"{label}: application build-info edition is not {expected_edition}")
+        if fields.get("locale") != locale:
+            errors.append(f"{label}: application build-info locale does not match release-set locale")
         executable = release_dir / "pdf_note_workspace.exe"
         if not executable.is_file() or fields.get("artifact:pdf_note_workspace.exe") != sha256_file(executable):
             errors.append(f"{label}: application executable does not match its build-info hash")

@@ -12,9 +12,8 @@ from pathlib import Path, PurePosixPath
 
 
 REQUIRED_LICENSE_FILES = (
-    "docs/LICENSE.md",
-    "docs/LICENSES_INDEX.md",
-    "docs/THIRD_PARTY_NOTICES.md",
+    "docs/legal/LICENSE.md",
+    "docs/legal/THIRD_PARTY_NOTICES.md",
     "licenses/README.txt",
     "licenses/pdfium/LICENSE",
     "licenses/md4c/LICENSE.md",
@@ -28,16 +27,26 @@ REQUIRED_LICENSE_FILES = (
 )
 
 
+def required_license_files(locale: str) -> tuple[str, ...]:
+    if locale not in {"ja", "en"}:
+        raise ValueError(f"release locale must be ja or en, not {locale!r}")
+    suffix = locale
+    return REQUIRED_LICENSE_FILES + (
+        f"LICENSE.{suffix}.md",
+        f"THIRD_PARTY_NOTICES.{suffix}.md",
+    )
+
+
 def sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def validate_release_directory(release_dir: Path) -> list[str]:
+def validate_release_directory(release_dir: Path, locale: str = "ja") -> list[str]:
     """Check the license contract of one unpacked distribution folder."""
     errors: list[str] = []
     if not release_dir.is_dir():
         return [f"release directory does not exist: {release_dir}"]
-    for relative_path in REQUIRED_LICENSE_FILES:
+    for relative_path in required_license_files(locale):
         path = release_dir / relative_path
         if not path.is_file():
             errors.append(f"required license file is missing: {relative_path}")
@@ -55,7 +64,7 @@ def zip_entry_for_release_file(zip_file: zipfile.ZipFile, release_dir: Path, rel
     return None
 
 
-def validate_release_zip(release_dir: Path, zip_path: Path) -> list[str]:
+def validate_release_zip(release_dir: Path, zip_path: Path, locale: str = "ja") -> list[str]:
     """Require each ZIP to contain byte-identical required license files."""
     errors: list[str] = []
     if not zip_path.is_file() or zip_path.stat().st_size == 0:
@@ -68,7 +77,7 @@ def validate_release_zip(release_dir: Path, zip_path: Path) -> list[str]:
             ]
             for name in bad_entries:
                 errors.append(f"release ZIP contains an unsafe entry: {name}")
-            for relative_path in REQUIRED_LICENSE_FILES:
+            for relative_path in required_license_files(locale):
                 directory_path = release_dir / relative_path
                 if not directory_path.is_file():
                     continue
@@ -99,9 +108,12 @@ def validate_release_set(release_set: Path) -> list[str]:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         components = manifest["components"]
+        locale = manifest["locale"]
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
         return [f"invalid release-set manifest: {manifest_path} ({error})"]
 
+    if locale not in {"ja", "en"}:
+        return ["release-set locale must be ja or en"]
     errors: list[str] = []
     for label, directory_key, zip_key in (
         ("full", "release", "release_zip"),
@@ -113,8 +125,8 @@ def validate_release_set(release_set: Path) -> list[str]:
         except ValueError as error:
             errors.append(str(error))
             continue
-        errors.extend(f"{label}: {error}" for error in validate_release_directory(release_dir))
-        errors.extend(f"{label}: {error}" for error in validate_release_zip(release_dir, zip_path))
+        errors.extend(f"{label}: {error}" for error in validate_release_directory(release_dir, locale))
+        errors.extend(f"{label}: {error}" for error in validate_release_zip(release_dir, zip_path, locale))
     return errors
 
 

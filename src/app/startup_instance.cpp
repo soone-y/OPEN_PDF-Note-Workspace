@@ -7,6 +7,7 @@
 #include <cwctype>
 #include <filesystem>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include <utility>
 #include <vector>
 
@@ -120,6 +121,50 @@ std::wstring PackageInstanceSuffix() {
     return L"_" + std::wstring(hash);
 }
 
+std::wstring PackageInstanceSuffixForExecutablePath(const std::wstring& executable) {
+    const std::wstring key = CanonicalPackageKeyForExecutablePath(executable);
+    if (key.empty()) return {};
+    wchar_t hash[17]{};
+    swprintf_s(hash, L"%016llx", static_cast<unsigned long long>(PackageKeyHash(key)));
+    return L"_" + std::wstring(hash);
+}
+
+bool ProcessHasTopLevelWindow(DWORD processId) {
+    struct Search { DWORD processId; bool found; } search{processId, false};
+    EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
+        auto* search = reinterpret_cast<Search*>(parameter);
+        DWORD windowProcessId = 0;
+        GetWindowThreadProcessId(window, &windowProcessId);
+        if (windowProcessId == search->processId) {
+            search->found = true;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&search));
+    return search.found;
+}
+
+bool IsOtherPackageHeadlessMainProcess(DWORD processId, std::wstring* outExecutablePath) {
+    if (processId == 0 || processId == GetCurrentProcessId() || ProcessHasTopLevelWindow(processId)) return false;
+    const std::wstring executable = ExecutablePathForProcess(processId);
+    const std::wstring currentExecutable = CurrentExecutablePath();
+    if (executable.empty() || currentExecutable.empty() ||
+        _wcsicmp(std::filesystem::path(executable).filename().c_str(),
+                 std::filesystem::path(currentExecutable).filename().c_str()) != 0) return false;
+    const std::wstring suffix = PackageInstanceSuffixForExecutablePath(executable);
+    if (suffix.empty() || suffix == PackageInstanceSuffix()) return false;
+    const std::wstring mutexName = kSingleInstanceMutexNameBase + suffix;
+    HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, mutexName.c_str());
+    if (!mutex) return false;
+    CloseHandle(mutex);
+    const std::wstring eventName = kSingleInstanceShutdownRequestEventNameBase + suffix;
+    HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, eventName.c_str());
+    if (!event) return false;
+    CloseHandle(event);
+    if (outExecutablePath) *outExecutablePath = executable;
+    return true;
+}
+
 std::wstring ReadOptionalInstanceSuffix() {
     std::wstring suffix;
     if (!ReadMainEnvVar(L"PDF_NOTE_SMALL_INSTANCE_SUFFIX", &suffix)) {
@@ -198,6 +243,37 @@ bool SignalSingleInstanceShutdownRequest() {
     const bool ok = SetEvent(event) != FALSE;
     CloseHandle(event);
     return ok;
+}
+
+std::vector<OtherPackageHeadlessMainProcess> FindOtherPackageHeadlessMainProcesses() {
+    std::vector<OtherPackageHeadlessMainProcess> result;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return result;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            std::wstring executable;
+            if (IsOtherPackageHeadlessMainProcess(entry.th32ProcessID, &executable)) {
+                result.push_back({entry.th32ProcessID, std::filesystem::path(executable).parent_path().wstring()});
+            }
+            entry.dwSize = sizeof(entry);
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return result;
+}
+
+bool RequestOtherPackageHeadlessMainProcessShutdown(DWORD processId) {
+    std::wstring executable;
+    if (!IsOtherPackageHeadlessMainProcess(processId, &executable)) return false;
+    const std::wstring suffix = PackageInstanceSuffixForExecutablePath(executable);
+    HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE,
+                              (std::wstring(kSingleInstanceShutdownRequestEventNameBase) + suffix).c_str());
+    if (!event) return false;
+    const bool requested = SetEvent(event) != FALSE;
+    CloseHandle(event);
+    return requested;
 }
 
 void CaptureStartupDocumentPathFromCommandLine() {

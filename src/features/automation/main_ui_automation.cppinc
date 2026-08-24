@@ -2509,6 +2509,190 @@ void AppendUiAutomationTrace(const std::wstring& line) {
     os.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
 }
 
+enum class MainWindowLossEvent {
+    None,
+    Hidden,
+    Destroyed,
+    Minimized,
+};
+
+constexpr UINT_PTR kOwnedDialogPresenceAutomationTimerId = 0;
+constexpr UINT kOwnedDialogPresenceAutomationCloseDelayMs = 20;
+
+struct MainWindowPresenceAutomationState {
+    HWND owner = nullptr;
+    HWINEVENTHOOK hideHook = nullptr;
+    HWINEVENTHOOK destroyHook = nullptr;
+    HWINEVENTHOOK minimizeHook = nullptr;
+    MainWindowLossEvent firstLossEvent = MainWindowLossEvent::None;
+};
+
+struct OwnedDialogCloseAutomationState {
+    HWND owner = nullptr;
+    UINT_PTR closeTimerId = 0;
+    const wchar_t* expectedClass = nullptr;
+    bool dialogWasOpened = false;
+    bool closeWasPosted = false;
+};
+
+static MainWindowPresenceAutomationState g_mainWindowPresenceAutomation;
+static OwnedDialogCloseAutomationState g_ownedDialogCloseAutomation;
+
+static void CALLBACK RecordMainWindowPresenceEvent(HWINEVENTHOOK, DWORD event, HWND hwnd,
+                                                    LONG objectId, LONG childId, DWORD, DWORD) {
+    if (hwnd != g_mainWindowPresenceAutomation.owner ||
+        g_mainWindowPresenceAutomation.firstLossEvent != MainWindowLossEvent::None) {
+        return;
+    }
+    if (event == EVENT_OBJECT_HIDE && objectId == OBJID_WINDOW && childId == CHILDID_SELF) {
+        g_mainWindowPresenceAutomation.firstLossEvent = MainWindowLossEvent::Hidden;
+    } else if (event == EVENT_OBJECT_DESTROY && objectId == OBJID_WINDOW && childId == CHILDID_SELF) {
+        g_mainWindowPresenceAutomation.firstLossEvent = MainWindowLossEvent::Destroyed;
+    } else if (event == EVENT_SYSTEM_MINIMIZESTART) {
+        g_mainWindowPresenceAutomation.firstLossEvent = MainWindowLossEvent::Minimized;
+    }
+}
+
+static void StopMainWindowPresenceMonitor() {
+    if (g_mainWindowPresenceAutomation.hideHook) {
+        UnhookWinEvent(g_mainWindowPresenceAutomation.hideHook);
+    }
+    if (g_mainWindowPresenceAutomation.destroyHook) {
+        UnhookWinEvent(g_mainWindowPresenceAutomation.destroyHook);
+    }
+    if (g_mainWindowPresenceAutomation.minimizeHook) {
+        UnhookWinEvent(g_mainWindowPresenceAutomation.minimizeHook);
+    }
+    g_mainWindowPresenceAutomation.hideHook = nullptr;
+    g_mainWindowPresenceAutomation.destroyHook = nullptr;
+    g_mainWindowPresenceAutomation.minimizeHook = nullptr;
+}
+
+static bool StartMainWindowPresenceMonitor(HWND owner, std::wstring* outError) {
+    if (!owner || !IsWindow(owner) || !IsWindowVisible(owner) || IsIconic(owner) || !IsWindowEnabled(owner)) {
+        if (outError) *outError = L"Dialog visibility automation requires a visible, restored, enabled main window.";
+        return false;
+    }
+    g_mainWindowPresenceAutomation = {};
+    g_mainWindowPresenceAutomation.owner = owner;
+    const DWORD processId = GetCurrentProcessId();
+    const DWORD threadId = GetCurrentThreadId();
+    g_mainWindowPresenceAutomation.hideHook = SetWinEventHook(
+        EVENT_OBJECT_HIDE, EVENT_OBJECT_HIDE, nullptr, RecordMainWindowPresenceEvent,
+        processId, threadId, WINEVENT_OUTOFCONTEXT);
+    g_mainWindowPresenceAutomation.destroyHook = SetWinEventHook(
+        EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY, nullptr, RecordMainWindowPresenceEvent,
+        processId, threadId, WINEVENT_OUTOFCONTEXT);
+    g_mainWindowPresenceAutomation.minimizeHook = SetWinEventHook(
+        EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZESTART, nullptr, RecordMainWindowPresenceEvent,
+        processId, threadId, WINEVENT_OUTOFCONTEXT);
+    if (g_mainWindowPresenceAutomation.hideHook && g_mainWindowPresenceAutomation.destroyHook &&
+        g_mainWindowPresenceAutomation.minimizeHook) {
+        return true;
+    }
+    StopMainWindowPresenceMonitor();
+    g_mainWindowPresenceAutomation = {};
+    if (outError) *outError = L"Could not install the main window presence monitor.";
+    return false;
+}
+
+static const wchar_t* MainWindowLossEventName(MainWindowLossEvent event) {
+    switch (event) {
+    case MainWindowLossEvent::Hidden: return L"EVENT_OBJECT_HIDE";
+    case MainWindowLossEvent::Destroyed: return L"EVENT_OBJECT_DESTROY";
+    case MainWindowLossEvent::Minimized: return L"EVENT_SYSTEM_MINIMIZESTART";
+    default: return L"unknown";
+    }
+}
+
+static void CALLBACK CloseOwnedDialogForPresenceAutomation(HWND, UINT, UINT_PTR timerId, DWORD) {
+    HWND owner = g_ownedDialogCloseAutomation.owner;
+    if (!owner || !IsWindow(owner) || g_ownedDialogCloseAutomation.closeWasPosted) return;
+    HWND dialog = GetWindow(owner, GW_ENABLEDPOPUP);
+    if (!dialog || !IsWindow(dialog)) return;
+    wchar_t className[64]{};
+    if (GetClassNameW(dialog, className, static_cast<int>(std::size(className))) == 0 ||
+        !g_ownedDialogCloseAutomation.expectedClass ||
+        wcscmp(className, g_ownedDialogCloseAutomation.expectedClass) != 0) {
+        return;
+    }
+    g_ownedDialogCloseAutomation.dialogWasOpened = true;
+    g_ownedDialogCloseAutomation.closeWasPosted = PostMessageW(dialog, WM_CLOSE, 0, 0) != FALSE;
+    if (g_ownedDialogCloseAutomation.closeWasPosted) {
+        KillTimer(nullptr, timerId);
+        g_ownedDialogCloseAutomation.closeTimerId = 0;
+    }
+}
+
+static bool BeginOwnedDialogPresenceAutomation(HWND owner, const wchar_t* expectedClass, std::wstring* outError) {
+    if (!StartMainWindowPresenceMonitor(owner, outError)) return false;
+    g_ownedDialogCloseAutomation = {};
+    g_ownedDialogCloseAutomation.owner = owner;
+    g_ownedDialogCloseAutomation.expectedClass = expectedClass;
+    g_ownedDialogCloseAutomation.closeTimerId =
+        SetTimer(nullptr, kOwnedDialogPresenceAutomationTimerId,
+                 kOwnedDialogPresenceAutomationCloseDelayMs, CloseOwnedDialogForPresenceAutomation);
+    if (g_ownedDialogCloseAutomation.closeTimerId != 0) return true;
+    StopMainWindowPresenceMonitor();
+    g_mainWindowPresenceAutomation = {};
+    g_ownedDialogCloseAutomation = {};
+    if (outError) *outError = L"Could not schedule the dialog close automation.";
+    return false;
+}
+
+static bool EndOwnedDialogPresenceAutomation(HWND owner, const wchar_t* scenario, std::wstring* outError) {
+    if (g_ownedDialogCloseAutomation.closeTimerId != 0) {
+        KillTimer(nullptr, g_ownedDialogCloseAutomation.closeTimerId);
+    }
+    const OwnedDialogCloseAutomationState dialogResult = g_ownedDialogCloseAutomation;
+    g_ownedDialogCloseAutomation = {};
+    StopMainWindowPresenceMonitor();
+    const MainWindowPresenceAutomationState monitorResult = g_mainWindowPresenceAutomation;
+    g_mainWindowPresenceAutomation = {};
+
+    if (!dialogResult.dialogWasOpened || !dialogResult.closeWasPosted) {
+        if (outError) *outError = std::wstring(L"Dialog visibility automation did not open and close ") + scenario + L".";
+        return false;
+    }
+    if (monitorResult.firstLossEvent != MainWindowLossEvent::None) {
+        AppendUiAutomationTrace(std::wstring(L"automation:main_window_lost:") +
+                              MainWindowLossEventName(monitorResult.firstLossEvent));
+        if (outError) *outError = std::wstring(L"Main window was lost while ") + scenario + L": " +
+                                  MainWindowLossEventName(monitorResult.firstLossEvent) + L".";
+        return false;
+    }
+    if (!IsWindow(owner) || !IsWindowVisible(owner) || IsIconic(owner) || !IsWindowEnabled(owner)) {
+        if (outError) *outError = std::wstring(L"Main window was not visible, restored, and enabled after ") + scenario + L".";
+        return false;
+    }
+    return true;
+}
+
+static bool RunUiAutomationHelpVisibilityScenario(HWND owner, std::wstring* outError) {
+    if (!BeginOwnedDialogPresenceAutomation(owner, L"HelpDialogClass", outError)) return false;
+    ShowHelpDialog(owner);
+    return EndOwnedDialogPresenceAutomation(owner, L"closing help", outError);
+}
+
+static bool RunUiAutomationDialogOwnerVisibilityScenario(HWND owner, std::wstring* outError) {
+    if (!BeginOwnedDialogPresenceAutomation(owner, L"SilentDialogClass", outError)) return false;
+    SilentDialogOptions options;
+    options.title = L"UI automation dialog-owner visibility";
+    options.message = L"This dialog is automatically closed by UI automation.";
+    options.kind = SoftNoticeKind::Info;
+    options.buttons = SilentDialogButtons::Ok;
+    options.defaultResult = SilentDialogResult::Ok;
+    options.escapeResult = SilentDialogResult::Ok;
+    const SilentDialogResult result = ShowSilentDialog(owner, options);
+    if (result != SilentDialogResult::Ok) {
+        std::wstring ignoredError;
+        (void)EndOwnedDialogPresenceAutomation(owner, L"closing the silent dialog", &ignoredError);
+        if (outError) *outError = L"Dialog visibility automation received an unexpected silent dialog result.";
+        return false;
+    }
+    return EndOwnedDialogPresenceAutomation(owner, L"closing the silent dialog", outError);
+}
+
 static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
     if (!owner || g_workspaceRoot.empty()) {
         if (outError) *outError = L"Palette automation requires a loaded workspace.";
@@ -3083,8 +3267,16 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
     std::wstring settingsBundleOnlyValue;
     const bool settingsBundleOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY", &settingsBundleOnlyValue) &&
                                     (settingsBundleOnlyValue == L"1" || settingsBundleOnlyValue == L"true");
+    std::wstring helpVisibilityOnlyValue;
+    const bool helpVisibilityOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_HELP_VISIBILITY_ONLY", &helpVisibilityOnlyValue) &&
+                                    (helpVisibilityOnlyValue == L"1" || helpVisibilityOnlyValue == L"true");
+    std::wstring dialogOwnerVisibilityOnlyValue;
+    const bool dialogOwnerVisibilityOnly = ReadMainEnvVar(
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_DIALOG_OWNER_VISIBILITY_ONLY", &dialogOwnerVisibilityOnlyValue) &&
+        (dialogOwnerVisibilityOnlyValue == L"1" || dialogOwnerVisibilityOnlyValue == L"true");
     if ((configOnly ? 1 : 0) + (logContractOnly ? 1 : 0) + (configRecoveryOnly ? 1 : 0) +
-        (configUnknownFieldOnly ? 1 : 0) + (settingsBundleOnly ? 1 : 0) > 1) {
+        (configUnknownFieldOnly ? 1 : 0) + (settingsBundleOnly ? 1 : 0) +
+        (helpVisibilityOnly ? 1 : 0) + (dialogOwnerVisibilityOnly ? 1 : 0) > 1) {
         if (outError) *outError = L"Only one focused UI automation mode may be selected.";
         return false;
     }
@@ -3128,6 +3320,32 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
         AppendUiAutomationTrace(L"automation:settings_bundle_ok");
         return true;
     }
+    if (helpVisibilityOnly) {
+        if (!RunUiAutomationHelpVisibilityScenario(owner, outError)) {
+            AppendUiAutomationTrace(L"automation:help_visibility_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:help_visibility_ok");
+        return true;
+    }
+    if (dialogOwnerVisibilityOnly) {
+        if (!RunUiAutomationDialogOwnerVisibilityScenario(owner, outError)) {
+            AppendUiAutomationTrace(L"automation:dialog_owner_visibility_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:dialog_owner_visibility_ok");
+        return true;
+    }
+    if (!RunUiAutomationHelpVisibilityScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:help_visibility_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:help_visibility_ok");
+    if (!RunUiAutomationDialogOwnerVisibilityScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:dialog_owner_visibility_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:dialog_owner_visibility_ok");
     if (!EnsureUiAutomationTargetSession(owner, outError)) {
         AppendUiAutomationTrace(L"automation:ensure_target_failed");
         return false;

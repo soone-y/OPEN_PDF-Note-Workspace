@@ -6,6 +6,8 @@ param (
     [string[]]$Files,
     [ValidateSet("Full", "Lite")]
     [string]$Edition = "Full",
+    [ValidateSet("ja", "en")]
+    [string]$Locale = "ja",
     [string]$ArtifactName = "pdf_note_workspace",
     [int]$FailureTailLines = 80
 )
@@ -103,7 +105,10 @@ if ($env:PDF_NOTE_ASCII_BUILD_ROOT_ACTIVE -ne "1" -and (Test-ContainsNonAscii -V
 }
 
 $outRoot = Join-Path $repoRoot "out"
-$binDirectoryName = if ($Edition -eq "Lite") { "bin_lite" } else { "bin" }
+$binDirectoryName = if ($Locale -eq "en") {
+    if ($Edition -eq "Lite") { "bin_lite_en" } else { "bin_en" }
+}
+elseif ($Edition -eq "Lite") { "bin_lite" } else { "bin" }
 $binDir = Join-Path $outRoot $binDirectoryName
 $logDir = Join-Path $outRoot "logs"
 $endTimeLogPath = Join-Path $logDir "build_end_time.log"
@@ -301,6 +306,7 @@ function Write-BuildInfoManifest {
         [Parameter(Mandatory)][string]$OutputExePath,
         [Parameter(Mandatory)][string]$Version,
         [Parameter(Mandatory)][string]$Edition,
+        [Parameter(Mandatory)][string]$Locale,
         [string[]]$ArtifactPaths = @()
     )
 
@@ -313,6 +319,7 @@ function Write-BuildInfoManifest {
         "format`tpdf-note-build-info-v1",
         ("version`t{0}" -f $Version),
         ("edition`t{0}" -f $Edition.ToLowerInvariant()),
+        ("locale`t{0}" -f $Locale),
         ("build_timestamp`t{0}" -f $buildTimestamp)
     )
 
@@ -454,17 +461,18 @@ try {
     $outputExe = Join-Path $binDir $outputExeName
     $buildInfoManifestPath = Join-Path $binDir ($outputExeName + ".buildinfo.txt")
     $appVersion = Get-AppVersion -Path $versionFilePath
+    $localeObjectSuffix = if ($Locale -eq "ja") { "" } else { "_" + $Locale }
     $objDir = if ($artifactAliasSpecified -and $Edition -eq "Lite") {
-        Join-Path $outRoot ("obj_lite_{0}" -f $ArtifactName)
+        Join-Path $outRoot ("obj_lite_{0}{1}" -f $ArtifactName, $localeObjectSuffix)
     }
     elseif ($artifactAliasSpecified) {
-        Join-Path $outRoot ("obj_{0}" -f $ArtifactName)
+        Join-Path $outRoot ("obj_{0}{1}" -f $ArtifactName, $localeObjectSuffix)
     }
     elseif ($Edition -eq "Lite") {
-        Join-Path $outRoot "obj_lite"
+        Join-Path $outRoot ("obj_lite" + $localeObjectSuffix)
     }
     else {
-        Join-Path $outRoot "obj"
+        Join-Path $outRoot ("obj" + $localeObjectSuffix)
     }
     $resourceSource = "src/resources/app.rc"
     $resourceHeader = "src/resources/app_resource.h"
@@ -494,6 +502,28 @@ try {
         exit 1
     }
 
+    $localeTool = Join-Path $repoRoot "tools\localization\generate_locale_catalog.py"
+    $localeUsageTool = Join-Path $repoRoot "tools\localization\validate_locale_usage.py"
+    $jaCatalog = Join-Path $repoRoot "locales\ja.json"
+    $selectedCatalog = Join-Path $repoRoot ("locales\{0}.json" -f $Locale)
+    $generatedLocaleDir = Join-Path $outRoot ("generated_locale\{0}" -f $Locale)
+    $generatedLocaleHeader = Join-Path $generatedLocaleDir "locale_catalog.generated.h"
+    $localeReportPath = Join-Path $generatedLocaleDir "fallback_report.json"
+    foreach ($localeInput in @($localeTool, $localeUsageTool, $jaCatalog, $selectedCatalog)) {
+        if (-not (Test-Path -LiteralPath $localeInput -PathType Leaf)) {
+            throw "Missing localization build input: $localeInput"
+        }
+    }
+    & python $localeUsageTool --source (Join-Path $repoRoot "src") --ja $jaCatalog --en (Join-Path $repoRoot "locales\en.json")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Locale usage validation failed."
+    }
+    New-Item -ItemType Directory -Force -Path $generatedLocaleDir | Out-Null
+    & python $localeTool --locale $Locale --ja $jaCatalog --localized $selectedCatalog --output $generatedLocaleHeader --report $localeReportPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $generatedLocaleHeader -PathType Leaf)) {
+        throw "Localization catalog generation failed for locale '$Locale'."
+    }
+
     $resourceInputs = @($resourceSource, $resourceHeader, $iconSource, $readOnlyViewerIconSource)
     $missingResourceInputs = @($resourceInputs | Where-Object { -not (Test-Path -LiteralPath $_) })
     if ($missingResourceInputs.Count -gt 0) {
@@ -508,7 +538,8 @@ try {
         "-Ithird_party/pdfium/include",
         "-Ithird_party/md4c/src",
         "-Ithird_party/zlib/include",
-        "-Isrc"
+        "-Isrc",
+        ("-I{0}" -f $generatedLocaleDir)
     )
 
     $libs = @(
@@ -556,10 +587,12 @@ try {
         $baseFlags + @("-O0", "-g3")
     }
     $flags += if ($Edition -eq "Lite") { "-DPDF_NOTE_LITE_EDITION=1" } else { "-DPDF_NOTE_LITE_EDITION=0" }
+    $flags += if ($Locale -eq "en") { "-DPDF_NOTE_LOCALE_EN=1" } else { "-DPDF_NOTE_LOCALE_EN=0" }
 
     Write-Host "Building PDF Note Workspace..." -ForegroundColor Cyan
     Write-Host ("Configuration: {0}" -f $configuration) -ForegroundColor Cyan
     Write-Host ("Edition: {0}" -f $Edition) -ForegroundColor Cyan
+    Write-Host ("Locale: {0}" -f $Locale) -ForegroundColor Cyan
     Write-Host ("Artifact: {0}" -f $outputExeName) -ForegroundColor Cyan
     Write-Verbose ("Compiler flags: {0}" -f ($flags -join " "))
 
@@ -608,6 +641,7 @@ try {
     Append-BuildDetailLog ("cwd: {0}" -f (Get-Location).Path)
     Append-BuildDetailLog ("configuration: {0}" -f $configuration)
     Append-BuildDetailLog ("edition: {0}" -f $Edition)
+    Append-BuildDetailLog ("locale: {0}" -f $Locale)
     Append-BuildDetailLog ""
     Write-Host ("Build detail log: {0}" -f $buildDetailLogPath) -ForegroundColor DarkCyan
 
@@ -617,6 +651,7 @@ try {
         ResourceCompiler      = $resourceCompiler
         Configuration         = $configuration
         Edition               = $Edition
+        Locale                = $Locale
         Includes              = $includes
         Libs                  = $libs
         Flags                 = $flags
@@ -959,7 +994,7 @@ try {
     }
 
     $buildInfoArtifactPaths = Sync-AppRuntimeArtifacts -OutputExePath $outputExe -BinDir $binDir -Compiler $compiler
-    Write-BuildInfoManifest -ManifestPath $buildInfoManifestPath -OutputExePath $outputExe -Version $appVersion -Edition $Edition -ArtifactPaths $buildInfoArtifactPaths
+    Write-BuildInfoManifest -ManifestPath $buildInfoManifestPath -OutputExePath $outputExe -Version $appVersion -Edition $Edition -Locale $Locale -ArtifactPaths $buildInfoArtifactPaths
 
     Set-ContentWithRetry -Path $signatureJsonPath -Value $signatureJson -Encoding UTF8
     Set-ContentWithRetry -Path $signatureHashPath -Value $signatureHash -Encoding ASCII -NoNewline

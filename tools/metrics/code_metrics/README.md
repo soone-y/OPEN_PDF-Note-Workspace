@@ -134,6 +134,8 @@ python tools/metrics/code_metrics/analyze_repo.py --scope all
 python tools/metrics/code_metrics/analyze_repo.py --format json > tools/metrics/code_metrics/out/own_metrics.json
 ```
 
+CLIのJSON出力は、従来のWindows PowerShellでのリダイレクト時にも文字コード変換で壊れないよう、非ASCII文字をJSONの`\uXXXX`エスケープとして出力する。JSONパーサで読み戻すと元のUnicode文字列に復元される。GUI上の表示と保存はUTF-8のまま扱う。
+
 ```powershell
 python tools/metrics/code_metrics/analyze_repo.py --scope all --top-files 20 --top-dirs 15 --max-tree-depth 4
 ```

@@ -1,6 +1,7 @@
 #include "ui/dialogs/export_dialog.h"
 #include "ui/dialogs/dialogs.h"
 #include "ui/noop_nav_guard.h"
+#include "core/localization.h"
 #include "workspace/workspace_config_io.h"
 
 static std::wstring ExperimentalExportDialogTitle(const std::wstring& base) {
@@ -8,7 +9,7 @@ static std::wstring ExperimentalExportDialogTitle(const std::wstring& base) {
         base.find(L"Experimental") != std::wstring::npos) {
         return base;
     }
-    return IsEnglishUi() ? (base + L" (Experimental)") : (base + L"（試験的）");
+    return base + localization::Text(L"dialog.export.experimental_suffix");
 }
 
 static bool ParsePositiveInt(const std::wstring& text, int& out) {
@@ -39,6 +40,28 @@ static bool s_lastNoteIncludeComments = true;
 static int s_lastNoteMarkupFormat = 0; // 0=md, 1=html
 static bool s_lastNoteMarkupMathPlaceholder = false;
 static std::wstring s_lastNoteMarkupMathPlaceholderText = L"[math]";
+
+class ScopedExportDialogOwner {
+public:
+    explicit ScopedExportDialogOwner(HWND owner) : owner_(owner) {
+        wasEnabled_ = owner_ && IsWindow(owner_) && IsWindowEnabled(owner_);
+        if (wasEnabled_) EnableWindow(owner_, FALSE);
+    }
+
+    ~ScopedExportDialogOwner() {
+        if (wasEnabled_ && owner_ && IsWindow(owner_)) {
+            EnableWindow(owner_, TRUE);
+            SetActiveWindow(owner_);
+        }
+    }
+
+    ScopedExportDialogOwner(const ScopedExportDialogOwner&) = delete;
+    ScopedExportDialogOwner& operator=(const ScopedExportDialogOwner&) = delete;
+
+private:
+    HWND owner_{};
+    bool wasEnabled_ = false;
+};
 
 namespace {
 
@@ -85,8 +108,7 @@ static bool IsPdfOutputPath(const std::wstring& path) {
 
 static void ShowExportResultLaunchFailure(HWND owner, const std::wstring& path) {
     ShowSoftNotice(owner,
-                   IsEnglishUi() ? L"Could not open the exported file:\n" + path
-                                 : L"出力ファイルを開けませんでした:\n" + path,
+                   localization::Format(L"dialog.export.launch_failed", {{L"PATH", path}}),
                    SoftNoticeKind::Warning);
 }
 
@@ -123,8 +145,8 @@ static void UpdateExportResultButtons(ExportResultsDialogState* ctx) {
     if (open) {
         const bool pdf = valid && IsPdfOutputPath((*ctx->paths)[static_cast<size_t>(selected)]);
         SetWindowTextW(open, pdf
-            ? (IsEnglishUi() ? L"Open in Read-Only Viewer" : L"閲覧専用で開く")
-            : (IsEnglishUi() ? L"Open with Default App" : L"既定のアプリで開く"));
+            ? (localization::Text(L"dialog.export.154cf8fead5d").c_str())
+            : (localization::Text(L"dialog.export.7494b10f0fa9").c_str()));
     }
 }
 
@@ -137,7 +159,7 @@ static LRESULT CALLBACK ExportResultsDialogProc(HWND hWnd, UINT msg, WPARAM wPar
         SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
         ctx->hwnd = hWnd;
         const int margin = 12;
-        CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"Exported files" : L"出力したファイル",
+        CreateWindowExW(0, L"STATIC", localization::Text(L"dialog.export.57a695564262").c_str(),
                         WS_CHILD | WS_VISIBLE, margin, margin, 580, 22, hWnd, nullptr, cs->hInstance, nullptr);
         ctx->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT,
@@ -150,10 +172,10 @@ static LRESULT CALLBACK ExportResultsDialogProc(HWND hWnd, UINT msg, WPARAM wPar
         if (ctx->list) SendMessageW(ctx->list, LB_SETCURSEL, 0, 0);
         CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                         margin, 262, 190, 28, hWnd, reinterpret_cast<HMENU>(kExportResultsOpenId), cs->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Open Location" : L"場所を開く",
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"dialog.export.50541c9a3e31").c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                         212, 262, 140, 28, hWnd, reinterpret_cast<HMENU>(kExportResultsFolderId), cs->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Close" : L"閉じる",
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"dialog.export.603bc62f3f34").c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                         448, 262, 144, 28, hWnd, reinterpret_cast<HMENU>(kExportResultsCloseId), cs->hInstance, nullptr);
         for (int id : { kExportResultsListId, kExportResultsOpenId, kExportResultsFolderId, kExportResultsCloseId }) {
@@ -220,10 +242,11 @@ static void ShowExportResultsDialog(HWND owner, const std::vector<std::wstring>&
     wc.lpszClassName = L"ExportResultsDialog";
     RegisterClassW(&wc);
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, wc.lpszClassName,
-                                  IsEnglishUi() ? L"Export complete" : L"出力が完了しました",
-                                  WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                                  localization::Text(L"dialog.export.dbb10e979b7d").c_str(),
+                                  WS_CAPTION | WS_POPUPWINDOW,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 620, 340, owner, nullptr, g_hInst, &ctx);
     if (!dialog) return;
+    PlaceOwnedPopupAtAppTopLeft(dialog, owner);
     // The result window only reports a completed export; it has no decision
     // that must block the main window.  Keep the owner interactive so, after
     // the grace period, an outside click can dismiss this transient window.
@@ -1013,10 +1036,10 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
     ClearExportDialogInlineError(ctx);
     ExportDialogKind kind = GetExportDialogKind(ctx);
     if (IsPdfExportKind(kind) && !ctx->hasPdf) {
-        return RejectExportDialogInput(ctx, L"PDFが開かれていません。");
+        return RejectExportDialogInput(ctx, localization::Text(L"export.pdf_not_open"));
     }
     if (IsNoteExportKind(kind) && !ctx->hasNote) {
-        return RejectExportDialogInput(ctx, L"ノートが開かれていません。");
+        return RejectExportDialogInput(ctx, localization::Text(L"export.note_not_open"));
     }
 
     ExportDialogResult result{};
@@ -1030,7 +1053,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
         int refPage = ReferencePageIndexForSizePreview(ctx, kind);
         double baseWPt = 0.0, baseHPt = 0.0;
         if (!TryGetPageSizePt(refPage, baseWPt, baseHPt)) {
-            return RejectExportDialogInput(ctx, L"出力サイズの計算に失敗しました。");
+            return RejectExportDialogInput(ctx, localization::Text(L"export.output_size_calculation_failed"));
         }
         ExportSizeMode mode = GetExportSizeMode(ctx);
         s_lastExportSizeMode = mode;
@@ -1041,7 +1064,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
             double inWPt = ReadPositiveDoubleFromEdit(ctx->editOutSizeW).value_or(0.0);
             double inHPt = ReadPositiveDoubleFromEdit(ctx->editOutSizeH).value_or(0.0);
             if (inWPt <= 0.0 && inHPt <= 0.0) {
-                return RejectExportDialogInput(ctx, L"出力サイズ(pt)を入力してください。", ctx->editOutSizeW, true);
+                return RejectExportDialogInput(ctx, localization::Text(L"export.output_size_pt_required"), ctx->editOutSizeW, true);
             }
             if (s_lastExportCustomAxis == 0) {
                 if (inWPt <= 0.0) inWPt = baseWPt * (inHPt / std::max(0.01, baseHPt));
@@ -1052,7 +1075,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
             }
         }
         if (!std::isfinite(scale) || scale < 0.125 || scale > 8.0) {
-            return RejectExportDialogInput(ctx, L"出力サイズが範囲外です。", ctx->editOutSizeW, true);
+            return RejectExportDialogInput(ctx, localization::Text(L"export.output_size_out_of_range"), ctx->editOutSizeW, true);
         }
         result.pdfScale = scale;
     } else if (kind == ExportDialogKind::PdfPng) {
@@ -1060,7 +1083,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
         int refPage = ReferencePageIndexForSizePreview(ctx, kind);
         double wPt = 0.0, hPt = 0.0;
         if (!TryGetPageSizePt(refPage, wPt, hPt)) {
-            return RejectExportDialogInput(ctx, L"出力サイズの計算に失敗しました。");
+            return RejectExportDialogInput(ctx, localization::Text(L"export.output_size_calculation_failed"));
         }
         int baseW = std::max(1, static_cast<int>(std::lround(wPt * kBaseDpi / 72.0)));
         int baseH = std::max(1, static_cast<int>(std::lround(hPt * kBaseDpi / 72.0)));
@@ -1080,7 +1103,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
             int wPx = ReadPositiveIntFromEdit(ctx->editOutSizeW).value_or(0);
             int hPx = ReadPositiveIntFromEdit(ctx->editOutSizeH).value_or(0);
             if (wPx <= 0 && hPx <= 0) {
-                return RejectExportDialogInput(ctx, L"出力サイズ(px)を入力してください。", ctx->editOutSizeW, true);
+                return RejectExportDialogInput(ctx, localization::Text(L"export.output_size_px_required"), ctx->editOutSizeW, true);
             }
             if (s_lastExportCustomAxis == 0) {
                 if (wPx <= 0) wPx = std::max(1, static_cast<int>(std::lround(baseW * (static_cast<double>(hPx) / baseH))));
@@ -1098,7 +1121,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
         }
 
         if (!std::isfinite(scale) || scale < 0.125 || scale > 8.0) {
-            return RejectExportDialogInput(ctx, L"出力サイズが範囲外です。", ctx->editOutSizeW, true);
+            return RejectExportDialogInput(ctx, localization::Text(L"export.output_size_out_of_range"), ctx->editOutSizeW, true);
         }
 
         uint64_t total = static_cast<uint64_t>(outW) * static_cast<uint64_t>(outH);
@@ -1106,7 +1129,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
             outW > file_output::kPdfPngMaxDimensionPx ||
             outH > file_output::kPdfPngMaxDimensionPx ||
             total == 0 || total > file_output::kPdfPngMaxPixels) {
-            return RejectExportDialogInput(ctx, L"指定サイズが大きすぎます（PNG出力）。", ctx->editOutSizeW, true);
+            return RejectExportDialogInput(ctx, localization::Text(L"export.png_size_too_large"), ctx->editOutSizeW, true);
         }
         result.pngWidthPx = outW;
         result.pngHeightPx = outH;
@@ -1118,13 +1141,13 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
     if (kind == ExportDialogKind::PdfPages) {
         std::wstring spec = TrimWhitespace(ReadDialogText(ctx->editPageSpec));
         if (spec.empty()) {
-            return RejectExportDialogInput(ctx, L"ページ指定が空です。", ctx->editPageSpec, true);
+            return RejectExportDialogInput(ctx, localization::Text(L"export.page_spec_empty"), ctx->editPageSpec, true);
         }
         bool defaultAnnot = IsExportDlgChecked(ctx->radioAnnotYes);
         std::wstring err;
         auto pages = file_output::ParsePdfPageSpec(spec, defaultAnnot, &err);
         if (pages.empty()) {
-            std::wstring msg = err.empty() ? L"ページ指定が不正です。" : err;
+            std::wstring msg = err.empty() ? localization::Text(L"export.page_spec_invalid") : err;
             return RejectExportDialogInput(ctx, msg, ctx->editPageSpec, true);
         }
         result.pages = std::move(pages);
@@ -1132,7 +1155,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
         std::wstring input = ReadDialogText(ctx->editPageNumber);
         int pageNo = 0;
         if (!ParsePositiveInt(input, pageNo)) {
-            return RejectExportDialogInput(ctx, L"ページ番号が不正です。", ctx->editPageNumber, true);
+            return RejectExportDialogInput(ctx, localization::Text(L"export.page_number_invalid"), ctx->editPageNumber, true);
         }
         if (g_pdf.doc) {
             int count = 0;
@@ -1141,7 +1164,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
                 count = FPDF_GetPageCount(g_pdf.doc);
             }
             if (pageNo > count) {
-                return RejectExportDialogInput(ctx, L"ページ番号が範囲外です。", ctx->editPageNumber, true);
+                return RejectExportDialogInput(ctx, localization::Text(L"export.page_number_out_of_range"), ctx->editPageNumber, true);
             }
         }
         result.pageIndex = pageNo - 1;
@@ -1247,20 +1270,20 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
                                       margin, row1Y, 80, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdTopPdf),
                                       cs->hInstance, nullptr);
-        ctx->topNote = CreateWindowExW(0, L"BUTTON", L"ノート",
+        ctx->topNote = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.note").c_str(),
                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
                                        margin + 90, row1Y, 80, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdTopNote),
                                        cs->hInstance, nullptr);
 
-        ctx->pdfAll = CreateWindowExW(0, L"BUTTON", L"注釈PDF",
+        ctx->pdfAll = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.annotated_pdf").c_str(),
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
                                       margin, row2Y, 150, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPdfAll),
                                       cs->hInstance, nullptr);
-        ctx->pdfPages = CreateWindowExW(0, L"BUTTON", L"ページ指定",
+        ctx->pdfPages = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.page_selection").c_str(),
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
                                         margin + 160, row2Y, 150, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPdfPages),
                                         cs->hInstance, nullptr);
-        ctx->pdfPng = CreateWindowExW(0, L"BUTTON", L"単ページPNG",
+        ctx->pdfPng = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.single_page_png").c_str(),
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
                                       margin + 320, row2Y, 150, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPdfPng),
                                       cs->hInstance, nullptr);
@@ -1269,7 +1292,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
                                         margin, row2Y, 100, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdNoteText),
                                         cs->hInstance, nullptr);
-        ctx->noteMarkup = CreateWindowExW(0, L"BUTTON", L"マークアップ",
+        ctx->noteMarkup = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.markup").c_str(),
                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
                                           margin + 110, row2Y, 150, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdNoteMarkup),
                                           cs->hInstance, nullptr);
@@ -1279,7 +1302,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                 margin, fileY, 460, 20, hWnd, nullptr,
                                                 cs->hInstance, nullptr);
 
-        ctx->labelPageSpec = CreateWindowExW(0, L"STATIC", L"ページ指定:",
+        ctx->labelPageSpec = CreateWindowExW(0, L"STATIC", localization::Text(L"export.page_spec_label").c_str(),
                                              WS_CHILD | WS_VISIBLE,
                                              margin, optY, 80, 20, hWnd, nullptr,
                                              cs->hInstance, nullptr);
@@ -1288,7 +1311,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                             margin + 90, optY - 2, 220, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPageSpec),
                                             cs->hInstance, nullptr);
 
-        ctx->labelPageNumber = CreateWindowExW(0, L"STATIC", L"ページ番号:",
+        ctx->labelPageNumber = CreateWindowExW(0, L"STATIC", localization::Text(L"export.page_number_label").c_str(),
                                                WS_CHILD | WS_VISIBLE,
                                                margin, optY, 80, 20, hWnd, nullptr,
                                                cs->hInstance, nullptr);
@@ -1302,55 +1325,55 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                 margin + 90, optY + 24, 360, 20, hWnd, nullptr,
                                                 cs->hInstance, nullptr);
 
-        ctx->labelAnnot = CreateWindowExW(0, L"STATIC", L"注釈:",
+        ctx->labelAnnot = CreateWindowExW(0, L"STATIC", localization::Text(L"export.annotation_label").c_str(),
                                           WS_CHILD | WS_VISIBLE,
                                           margin, optY + 52, 80, 20, hWnd, nullptr,
                                           cs->hInstance, nullptr);
-        ctx->radioAnnotYes = CreateWindowExW(0, L"BUTTON", L"含める",
+        ctx->radioAnnotYes = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.include").c_str(),
                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
                                              margin + 90, optY + 50, 100, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdAnnotYes),
                                              cs->hInstance, nullptr);
-        ctx->radioAnnotNo = CreateWindowExW(0, L"BUTTON", L"含めない",
+        ctx->radioAnnotNo = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.exclude").c_str(),
                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                             margin + 200, optY + 50, 110, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdAnnotNo),
                                             cs->hInstance, nullptr);
 
         int styleY = pngStyleY;
-        ctx->labelPngStyle = CreateWindowExW(0, L"STATIC", L"画像スタイル:",
+        ctx->labelPngStyle = CreateWindowExW(0, L"STATIC", localization::Text(L"export.image_style_label").c_str(),
                                              WS_CHILD | WS_VISIBLE,
                                              margin, styleY, 100, 20, hWnd, nullptr,
                                              cs->hInstance, nullptr);
-        ctx->radioPngStylePdf = CreateWindowExW(0, L"BUTTON", L"標準PDF風",
+        ctx->radioPngStylePdf = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.image_style_pdf").c_str(),
                                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
                                                  margin + 90, styleY, 100, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPngStylePdf),
                                                  cs->hInstance, nullptr);
-        ctx->radioPngStyleViewer = CreateWindowExW(0, L"BUTTON", L"エディタの表示風",
+        ctx->radioPngStyleViewer = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.image_style_viewer").c_str(),
                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                                     margin + 200, styleY, 100, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPngStyleViewer),
                                                     cs->hInstance, nullptr);
 
-        ctx->labelOutSize = CreateWindowExW(0, L"STATIC", L"出力サイズ:",
+        ctx->labelOutSize = CreateWindowExW(0, L"STATIC", localization::Text(L"export.output_size_label").c_str(),
                                             WS_CHILD | WS_VISIBLE,
                                             margin, outSizeY, 100, 20, hWnd, nullptr,
                                             cs->hInstance, nullptr);
-        ctx->radioOutSizeHalf = CreateWindowExW(0, L"BUTTON", L"半分",
+        ctx->radioOutSizeHalf = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.half").c_str(),
                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
                                                 margin + 90, outSizeY, 70, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdOutSizeHalf),
                                                 cs->hInstance, nullptr);
-        ctx->radioOutSizeOne = CreateWindowExW(0, L"BUTTON", L"そのまま（推奨）",
+        ctx->radioOutSizeOne = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.original_recommended").c_str(),
                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                                margin + 170, outSizeY, 130, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdOutSizeOne),
                                                cs->hInstance, nullptr);
-        ctx->radioOutSizeTwo = CreateWindowExW(0, L"BUTTON", L"倍",
+        ctx->radioOutSizeTwo = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.double").c_str(),
                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                                margin + 310, outSizeY, 50, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdOutSizeTwo),
                                                cs->hInstance, nullptr);
-        ctx->radioOutSizeCustom = CreateWindowExW(0, L"BUTTON", L"指定",
+        ctx->radioOutSizeCustom = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.custom").c_str(),
                                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                                   margin + 370, outSizeY, 60, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdOutSizeCustom),
                                                   cs->hInstance, nullptr);
 
-        ctx->labelOutSizeW = CreateWindowExW(0, L"STATIC", L"横:",
+        ctx->labelOutSizeW = CreateWindowExW(0, L"STATIC", localization::Text(L"export.width_label").c_str(),
                                              WS_CHILD | WS_VISIBLE,
                                              margin, outSizeY + 28, 60, 20, hWnd, nullptr,
                                              cs->hInstance, nullptr);
@@ -1358,7 +1381,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                             margin + 65, outSizeY + 26, 90, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdOutSizeW),
                                             cs->hInstance, nullptr);
-        ctx->labelOutSizeH = CreateWindowExW(0, L"STATIC", L"縦:",
+        ctx->labelOutSizeH = CreateWindowExW(0, L"STATIC", localization::Text(L"export.height_label").c_str(),
                                              WS_CHILD | WS_VISIBLE,
                                              margin + 170, outSizeY + 28, 60, 20, hWnd, nullptr,
                                              cs->hInstance, nullptr);
@@ -1372,7 +1395,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                               margin, outSizeMmY, 460, 18, hWnd, nullptr,
                                               cs->hInstance, nullptr);
 
-        ctx->labelPaper = CreateWindowExW(0, L"STATIC", L"用紙:",
+        ctx->labelPaper = CreateWindowExW(0, L"STATIC", localization::Text(L"export.paper_label").c_str(),
                                           WS_CHILD | WS_VISIBLE,
                                           margin, paperY, 50, 20, hWnd, nullptr,
                                           cs->hInstance, nullptr);
@@ -1381,30 +1404,30 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                           margin + 55, paperY - 2, 150, 200, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPaperCombo),
                                           cs->hInstance, nullptr);
 
-        ctx->checkStandardText = CreateWindowExW(0, L"BUTTON", L"テキスト注釈を標準で保存（見えない場合は画像にフォールバック）",
+        ctx->checkStandardText = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.standard_text_annotation").c_str(),
                                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                                  margin, stdTextY, 460, 22, hWnd,
                                                  reinterpret_cast<HMENU>(kExportDlgIdStandardText),
                                                  cs->hInstance, nullptr);
-        ctx->checkMatchPdfPaneTextLayout = CreateWindowExW(0, L"BUTTON", L"TextBoxの改行をPDF欄の表示に合わせる（推奨）",
+        ctx->checkMatchPdfPaneTextLayout = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.match_pdf_text_layout").c_str(),
                                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                                             margin, stdTextY + 24, 460, 22, hWnd,
                                                             reinterpret_cast<HMENU>(kExportDlgIdMatchPdfPaneTextLayout),
                                                             cs->hInstance, nullptr);
 
-        ctx->labelMath = CreateWindowExW(0, L"STATIC", L"数式:",
+        ctx->labelMath = CreateWindowExW(0, L"STATIC", localization::Text(L"export.math_label").c_str(),
                                          WS_CHILD | WS_VISIBLE,
                                          margin, optY, 80, 20, hWnd, nullptr,
                                          cs->hInstance, nullptr);
-        ctx->radioMathKeep = CreateWindowExW(0, L"BUTTON", L"そのまま",
+        ctx->radioMathKeep = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.keep").c_str(),
                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
                                              margin + 90, optY - 2, 100, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdMathKeep),
                                              cs->hInstance, nullptr);
-        ctx->radioMathReplace = CreateWindowExW(0, L"BUTTON", L"置き換える",
+        ctx->radioMathReplace = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.replace").c_str(),
                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                                 margin + 200, optY - 2, 120, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdMathReplace),
                                                 cs->hInstance, nullptr);
-        ctx->labelMathPlaceholder = CreateWindowExW(0, L"STATIC", L"置き換え文字列:",
+        ctx->labelMathPlaceholder = CreateWindowExW(0, L"STATIC", localization::Text(L"export.replacement_label").c_str(),
                                                     WS_CHILD | WS_VISIBLE,
                                                     margin, optY + 28, 100, 20, hWnd, nullptr,
                                                     cs->hInstance, nullptr);
@@ -1413,19 +1436,19 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                    margin + 110, optY + 26, 200, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdMathPlaceholder),
                                                    cs->hInstance, nullptr);
 
-        ctx->checkIncludeComments = CreateWindowExW(0, L"BUTTON", L"コメント行も出力",
+        ctx->checkIncludeComments = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.include_comments").c_str(),
                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                                     margin, optY + 52, 220, 22, hWnd,
                                                     reinterpret_cast<HMENU>(kExportDlgIdIncludeComments),
                                                     cs->hInstance, nullptr);
 
-        ctx->checkStripMarkup = CreateWindowExW(0, L"BUTTON", L"マークアップ除去 (txt)",
+        ctx->checkStripMarkup = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.strip_markup").c_str(),
                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                                 margin, optY + 78, 260, 22, hWnd,
                                                 reinterpret_cast<HMENU>(kExportDlgIdStripMarkup),
                                                 cs->hInstance, nullptr);
 
-        ctx->labelMarkupFormat = CreateWindowExW(0, L"STATIC", L"形式:",
+        ctx->labelMarkupFormat = CreateWindowExW(0, L"STATIC", localization::Text(L"export.format_label").c_str(),
                                                  WS_CHILD | WS_VISIBLE,
                                                  margin, optY + 78, 80, 20, hWnd, nullptr,
                                                  cs->hInstance, nullptr);
@@ -1440,12 +1463,12 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                reinterpret_cast<HMENU>(kExportDlgIdMarkupHtml),
                                                cs->hInstance, nullptr);
 
-        ctx->checkTitleHeading = CreateWindowExW(0, L"BUTTON", L"ノート名を先頭見出しにする",
+        ctx->checkTitleHeading = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.note_title_heading").c_str(),
                                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                                  margin, optY + 104, 320, 22, hWnd,
                                                  reinterpret_cast<HMENU>(kExportDlgIdTitleHeading),
                                                  cs->hInstance, nullptr);
-        ctx->checkShiftHeadings = CreateWindowExW(0, L"BUTTON", L"既存見出しを1段下げる",
+        ctx->checkShiftHeadings = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.shift_headings").c_str(),
                                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                                   margin, optY + 132, 260, 22, hWnd,
                                                   reinterpret_cast<HMENU>(kExportDlgIdShiftHeadings),
@@ -1464,7 +1487,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         HWND cancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                          390, buttonsY, 80, 26, hWnd, reinterpret_cast<HMENU>(IDCANCEL),
                                          cs->hInstance, nullptr);
-        ctx->labelReservationTitle = CreateWindowExW(0, L"STATIC", L"予約一覧（このウィンドウを閉じると破棄）",
+        ctx->labelReservationTitle = CreateWindowExW(0, L"STATIC", localization::Text(L"export.reservation_list_title").c_str(),
                                                      WS_CHILD | WS_VISIBLE,
                                                      margin, reservationTitleY, 460, 20, hWnd, nullptr,
                                                      cs->hInstance, nullptr);
@@ -1735,11 +1758,13 @@ bool ShowUnifiedExportDialog(HWND owner, ExportDialogKind preset, std::vector<Ex
     wc.lpszClassName = L"UnifiedExportDialog";
     RegisterClassW(&wc);
     const std::wstring dialogTitle = ExperimentalExportDialogTitle(GetUiText().menuExport);
+    ScopedExportDialogOwner modalOwner(owner);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, dialogTitle.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, 520, 548,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return false;
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     MSG msg;
@@ -1764,7 +1789,12 @@ void ExecuteUnifiedExport(HWND hWnd, const ExportDialogResult& result) {
 
 void ExecuteUnifiedExports(HWND hWnd, const std::vector<ExportDialogResult>& results) {
     if (results.empty()) return;
-    if (!s_pendingExportsAfterSave.empty()) return;
+    if (!s_pendingExportsAfterSave.empty()) {
+        ShowSoftNotice(hWnd,
+                       localization::Text(L"dialog.export.641e268761e7").c_str(),
+                       SoftNoticeKind::Info);
+        return;
+    }
 
     const file_output::SaveTransactionStartResult start =
         file_output::StartBackgroundSaveAndIntegrateTransaction(hWnd);
@@ -1772,8 +1802,7 @@ void ExecuteUnifiedExports(HWND hWnd, const std::vector<ExportDialogResult>& res
     if (start == file_output::SaveTransactionStartResult::Started) {
         s_pendingExportsAfterSave = results;
         ShowSoftNotice(hWnd,
-                       IsEnglishUi() ? L"Export will start after saving is complete."
-                                     : L"統合保存が完了したら出力を開始します。",
+                       localization::Text(L"dialog.export.c74d6b71c5de").c_str(),
                        SoftNoticeKind::Info);
         return;
     }
@@ -1790,6 +1819,9 @@ void CompleteUnifiedExportsAfterSave(HWND hWnd, bool saveSucceeded, bool saveRes
     if (s_pendingExportsAfterSave.empty()) return;
     if (!saveSucceeded) {
         s_pendingExportsAfterSave.clear();
+        ShowSoftNotice(hWnd,
+                       localization::Text(L"dialog.export.e434d92fc856").c_str(),
+                       SoftNoticeKind::Warning);
         return;
     }
     // A newer edit arrived while saving; wait for the restarted transaction so the

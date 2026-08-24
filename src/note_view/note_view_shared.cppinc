@@ -24,6 +24,7 @@
 #include "file_output/file_output.h"
 #include "file_output/note_snapshot.h"
 #include "core/atomic_write.h"
+#include "core/localization.h"
 #include "core/path_safety.h"
 #include "core/ui_notify.h"
 
@@ -69,6 +70,7 @@ std::wstring& Access_renderTextCache();
 std::vector<std::wstring>& Access_renderLines();
 std::vector<NoteRenderLineInfo>& Access_renderLineInfos();
 size_t& Access_lastParsedMarkupLength();
+size_t& Access_lastParsedMarkupWindowTextLength();
 int& Access_lastParsedMarkupBaseFontHeightPx();
 std::unordered_map<std::wstring, std::shared_ptr<mathrender::Node>>& Access_noteMathNodeCache();
 std::unordered_map<std::wstring, mathrender::Layout>& Access_noteMathLayoutCache();
@@ -96,6 +98,7 @@ std::vector<MathDisplayCache>& Access_mathDisplayCache();
 #define g_renderLines Access_renderLines()
 #define g_renderLineInfos Access_renderLineInfos()
 #define g_lastParsedMarkupLength Access_lastParsedMarkupLength()
+#define g_lastParsedMarkupWindowTextLength Access_lastParsedMarkupWindowTextLength()
 #define g_lastParsedMarkupBaseFontHeightPx Access_lastParsedMarkupBaseFontHeightPx()
 #define g_noteMathNodeCache Access_noteMathNodeCache()
 #define g_noteMathLayoutCache Access_noteMathLayoutCache()
@@ -229,7 +232,7 @@ static bool SaveCurrentNoteEditorCopy(HWND owner, std::wstring* outPath) {
 
     std::wstring input;
     if (!PromptSimpleText(owner ? owner : g_hMainWnd,
-                          IsEnglishUi() ? L"Save current note copy" : L"現在の編集を退避",
+                          localization::Text(L"note.copy_save.title"),
                           DefaultExternalChangeCopyPath(),
                           input)) {
         return false;
@@ -252,9 +255,7 @@ static bool SaveCurrentNoteEditorCopy(HWND owner, std::wstring* outPath) {
     if (IsUncPath(out) ||
         NormalizePathKey(out.wstring()) == NormalizePathKey(g_currentNotePath)) {
         ShowSoftNotice(owner ? owner : g_hMainWnd,
-                       IsEnglishUi()
-                           ? L"Choose a local copy path different from the open note."
-                           : L"開いているノートとは別のローカル退避先を指定してください。",
+                       localization::Text(L"note.copy_save.different_path"),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -262,9 +263,7 @@ static bool SaveCurrentNoteEditorCopy(HWND owner, std::wstring* outPath) {
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(out.parent_path(), isReparse) && isReparse) {
         ShowSoftNotice(owner ? owner : g_hMainWnd,
-                       IsEnglishUi()
-                           ? L"Reparse point output folders are not supported."
-                           : L"ジャンクション/シンボリックリンク等の出力先フォルダは使用できません。",
+                       localization::Text(L"note.copy_save.reparse_path"),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -272,16 +271,13 @@ static bool SaveCurrentNoteEditorCopy(HWND owner, std::wstring* outPath) {
     std::error_code ec;
     if (std::filesystem::exists(out, ec) && !ec) {
         ShowSoftNotice(owner ? owner : g_hMainWnd,
-                       IsEnglishUi()
-                           ? L"Existing files are not overwritten. Choose a new copy path."
-                           : L"既存ファイルは上書きしません。新しい退避先を指定してください。",
+                       localization::Text(L"note.copy_save.exists"),
                        SoftNoticeKind::Warning);
         return false;
     }
     if (ec) {
         ShowSoftNotice(owner ? owner : g_hMainWnd,
-                       IsEnglishUi() ? L"Could not inspect the copy path."
-                                     : L"退避先パスを確認できません。",
+                       localization::Text(L"note.copy_save.inspect_failed"),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -289,8 +285,7 @@ static bool SaveCurrentNoteEditorCopy(HWND owner, std::wstring* outPath) {
     std::filesystem::create_directories(out.parent_path(), ec);
     if (ec) {
         ShowSoftNotice(owner ? owner : g_hMainWnd,
-                       IsEnglishUi() ? L"Could not create the copy folder."
-                                     : L"退避先フォルダを作成できません。",
+                       localization::Text(L"note.copy_save.create_folder_failed"),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -300,8 +295,7 @@ static bool SaveCurrentNoteEditorCopy(HWND owner, std::wstring* outPath) {
     if (!atomic_write::AtomicWriteUtf8(out, WideToUTF8(text), out.parent_path(), &err)) {
         ShowSoftNotice(owner ? owner : g_hMainWnd,
                        err.empty()
-                           ? (IsEnglishUi() ? L"Could not save the current note copy."
-                                            : L"現在の編集を退避できませんでした。")
+                           ? localization::Text(L"note.copy_save.write_failed")
                            : err,
                        SoftNoticeKind::Warning);
         return false;
@@ -315,34 +309,28 @@ static void OfferCurrentNoteExternalChangeActions(HWND owner, bool missingOnDisk
     HWND target = owner ? owner : g_hMainWnd;
     const bool dirty = g_noteDirty || (g_hNoteEdit && SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0);
     SilentDialogOptions options;
-    options.title = IsEnglishUi() ? L"Note file changed" : L"ノート外部変更";
+    options.title = localization::Text(L"note.external_change.title");
     options.kind = SoftNoticeKind::Warning;
     options.preferredWidthPx = 560;
     options.buttons = dirty ? SilentDialogButtons::OkYesNoCancel
                             : SilentDialogButtons::OkCancel;
     options.okLabel = dirty
-        ? (IsEnglishUi() ? L"Save Copy + Reload" : L"退避して再読込")
-        : (IsEnglishUi() ? L"Reload" : L"再読み込み");
-    options.yesLabel = IsEnglishUi() ? L"Reload Without Copy" : L"退避せず再読込";
-    options.noLabel = IsEnglishUi() ? L"Keep Editing" : L"編集を維持";
-    options.cancelLabel = IsEnglishUi() ? L"Not Now" : L"今はしない";
+        ? localization::Text(L"note.external_change.save_copy_reload")
+        : localization::Text(L"note.external_change.reload");
+    options.yesLabel = localization::Text(L"note.external_change.reload_without_copy");
+    options.noLabel = localization::Text(L"note.external_change.keep_editing");
+    options.cancelLabel = localization::Text(L"note.external_change.not_now");
     options.defaultResult = SilentDialogResult::Cancel;
     options.escapeResult = SilentDialogResult::Cancel;
 
     if (missingOnDisk) {
-        options.message = IsEnglishUi()
-            ? L"The current note file is missing or inaccessible.\n\nSave the current editor text as a separate local copy, or keep editing without changing files."
-            : L"現在のノートファイルを確認できません。\n\n現在の編集を別ファイルへ退避するか、ファイルを変更せず編集を維持してください。";
+        options.message = localization::Text(L"note.external_change.missing_message");
         options.buttons = SilentDialogButtons::OkCancel;
-        options.okLabel = IsEnglishUi() ? L"Save Copy" : L"退避する";
+        options.okLabel = localization::Text(L"note.external_change.save_copy");
     } else if (dirty) {
-        options.message = IsEnglishUi()
-            ? L"The current note file changed outside the app while this editor also has unsaved edits.\n\nRecommended: save the current editor text as a separate copy, then reload the disk file."
-            : L"ノートファイルが外部で変更されています。この編集欄にも未保存の編集があります。\n\n推奨: 現在の編集を別ファイルへ退避してから、ディスク上のノートを再読み込みします。";
+        options.message = localization::Text(L"note.external_change.dirty_message");
     } else {
-        options.message = IsEnglishUi()
-            ? L"The current note file changed outside the app.\n\nReload the disk file, or keep the current view for now."
-            : L"ノートファイルが外部で変更されています。\n\nディスク上のノートを再読み込みするか、今は現在の表示を維持します。";
+        options.message = localization::Text(L"note.external_change.clean_message");
     }
 
     const SilentDialogResult result = ShowSilentDialog(target, options);
@@ -352,8 +340,7 @@ static void OfferCurrentNoteExternalChangeActions(HWND owner, bool missingOnDisk
             if (SaveCurrentNoteEditorCopy(target, &copyPath)) {
                 RefreshCurrentNoteFileSnapshot();
                 ShowSoftNotice(target,
-                               IsEnglishUi() ? L"Saved a copy of the current note edits."
-                                             : L"現在の編集を退避しました。",
+                               localization::Text(L"note.external_change.copy_saved"),
                                SoftNoticeKind::Info);
             }
         }
@@ -475,10 +462,9 @@ static void MaybeShowNoteOpenNotice(HWND owner) {
     const ULONGLONG now = GetTickCount64();
     if (now - g_noteNoOpenNoticeTick < 1200) return;
     g_noteNoOpenNoticeTick = now;
-    const wchar_t* msg = IsEnglishUi()
-        ? L"Open a session before editing notes."
-        : (g_config.studentMode ? L"ノート入力には回次を開いてください。"
-                                : L"ノート入力には下位項目を開いてください。");
+    const std::wstring msg = g_config.studentMode
+        ? localization::Text(L"note.edit_requires_session.student")
+        : localization::Text(L"note.edit_requires_session.generic");
     ShowSoftNotice(owner ? owner : g_hMainWnd, msg, SoftNoticeKind::Warning);
 }
 
@@ -759,7 +745,7 @@ static bool HandleLinkIdJump(const std::wstring& linkId,
     if (JumpToNoteLinkId(linkId, L"", false, sourceNotePath, sourcePos)) return true;
 
     if (hWnd) {
-        ShowSoftNotice(hWnd, IsEnglishUi() ? L"Link target not found." : L"リンク先が見つかりませんでした。");
+        ShowSoftNotice(hWnd, localization::Text(L"note.link_target_not_found"));
     }
     return false;
 }
@@ -846,16 +832,16 @@ static bool IsRichEditControl(HWND hWnd) {
     return _wcsnicmp(cls, L"RICHEDIT", 8) == 0;
 }
 
-static const wchar_t* NoteMenuLabelCut() { return IsEnglishUi() ? L"Cut" : L"切り取り"; }
-static const wchar_t* NoteMenuLabelCopy() { return IsEnglishUi() ? L"Copy" : L"コピー"; }
-static const wchar_t* NoteMenuLabelCopyWithTags() { return IsEnglishUi() ? L"Copy With Tags" : L"タグもコピー"; }
-static const wchar_t* NoteMenuLabelPaste() { return IsEnglishUi() ? L"Paste" : L"貼り付け"; }
-static const wchar_t* NoteMenuLabelSelectAll() { return IsEnglishUi() ? L"Select All" : L"全選択"; }
-static const wchar_t* NoteMenuLabelSelectNone() { return IsEnglishUi() ? L"Deselect" : L"選択解除"; }
+static const wchar_t* NoteMenuLabelCut() { return localization::Text(L"note.menu.cut").data(); }
+static const wchar_t* NoteMenuLabelCopy() { return localization::Text(L"note.menu.copy").data(); }
+static const wchar_t* NoteMenuLabelCopyWithTags() { return localization::Text(L"note.menu.copy_with_tags").data(); }
+static const wchar_t* NoteMenuLabelPaste() { return localization::Text(L"note.menu.paste").data(); }
+static const wchar_t* NoteMenuLabelSelectAll() { return localization::Text(L"note.menu.select_all").data(); }
+static const wchar_t* NoteMenuLabelSelectNone() { return localization::Text(L"note.menu.select_none").data(); }
 
 static void ShowNoteCopySuccessNotice(HWND owner) {
     ShowSoftNotice(owner ? owner : g_hMainWnd,
-                   IsEnglishUi() ? L"Copied text." : L"テキストをコピーしました。",
+                   localization::Text(L"note.copy_success"),
                    SoftNoticeKind::Info);
 }
 
@@ -1970,9 +1956,7 @@ static void ToggleNoteRenderSetting() {
     if (!CurrentNoteSupportsRenderOverlay()) {
         HWND owner = g_hMainWnd ? g_hMainWnd : (g_hNoteEdit ? GetParent(g_hNoteEdit) : nullptr);
         ShowSoftNotice(owner,
-                       IsEnglishUi()
-                           ? L"Render overlay is only available for Markdown and custom note routes."
-                           : L"レンダリング表示は Markdown / 独自記法ノートでのみ利用できます。",
+                       localization::Text(L"note.render_overlay_unavailable"),
                        SoftNoticeKind::Info);
         return;
     }
@@ -2208,7 +2192,6 @@ static void ShowNoteAssistNoteBackgroundMenu(HWND hWnd) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
 
-    const bool isEn = IsEnglishUi();
     std::wstring bgSource = ToLowerAscii(g_config.noteBgSource);
     bool themeCurrent = (bgSource == L"theme" || bgSource == L"theme_current");
     bool themeNamed = (bgSource == L"theme_named");
@@ -2222,13 +2205,14 @@ static void ShowNoteAssistNoteBackgroundMenu(HWND hWnd) {
     UINT flagsThemeCurrent = MF_STRING;
     if (themeCurrent) flagsThemeCurrent |= MF_CHECKED;
     if (g_themeCatalog.empty()) flagsThemeCurrent |= MF_GRAYED;
-    AppendMenuW(menu, flagsThemeCurrent, kMenuThemeCurrent, isEn ? L"Theme-follow (current)" : L"テーマ準拠");
+    const std::wstring themeCurrentLabel = localization::Text(L"note.background.theme_current");
+    AppendMenuW(menu, flagsThemeCurrent, kMenuThemeCurrent, themeCurrentLabel.c_str());
 
     if (!g_themeCatalog.empty()) {
         for (UINT i = 0; i < static_cast<UINT>(g_themeCatalog.size()); ++i) {
             const auto& t = g_themeCatalog[i];
-            std::wstring name = (t.nameJp.empty() ? t.name : t.nameJp);
-            if (name.empty()) name = L"(unnamed)";
+            std::wstring name = localization::IsEnglishBuild() || t.nameJp.empty() ? t.name : t.nameJp;
+            if (name.empty()) name = localization::Text(L"note.background.unnamed_theme");
             std::wstring label = name + L" " + ColorToHexW(t.noteBg);
             UINT flags = MF_STRING;
             if (themeNamed && t.name == g_config.noteBgThemeName) flags |= MF_CHECKED;
@@ -2238,26 +2222,24 @@ static void ShowNoteAssistNoteBackgroundMenu(HWND hWnd) {
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
-    struct Preset {
-        COLORREF color;
-        const wchar_t* en;
-        const wchar_t* ja;
-    };
+    struct Preset { COLORREF color; const wchar_t* textId; };
     const Preset presets[] = {
-        { RGB(255, 255, 255), L"White", L"白" },
-        { RGB(255, 250, 235), L"Cream", L"クリーム" },
-        { RGB(245, 245, 245), L"Light gray", L"薄グレー" },
-        { RGB(255, 255, 230), L"Soft yellow", L"薄イエロー" },
+        { RGB(255, 255, 255), L"note.background.white" },
+        { RGB(255, 250, 235), L"note.background.cream" },
+        { RGB(245, 245, 245), L"note.background.light_gray" },
+        { RGB(255, 255, 230), L"note.background.soft_yellow" },
     };
     constexpr UINT kPresetCount = static_cast<UINT>(sizeof(presets) / sizeof(presets[0]));
     for (UINT i = 0; i < kPresetCount; ++i) {
         const auto& p = presets[i];
         UINT flags = MF_STRING;
         if (explicitColor && p.color == g_noteBgColor) flags |= MF_CHECKED;
-        AppendMenuW(menu, flags, kMenuPresetBase + i, isEn ? p.en : p.ja);
+        const std::wstring label = localization::Text(p.textId);
+        AppendMenuW(menu, flags, kMenuPresetBase + i, label.c_str());
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kMenuCustom, isEn ? L"Custom..." : L"カスタム...");
+    const std::wstring customLabel = localization::Text(L"note.background.custom");
+    AppendMenuW(menu, MF_STRING, kMenuCustom, customLabel.c_str());
 
     POINT pt{};
     GetCursorPos(&pt);
@@ -3207,6 +3189,7 @@ struct LocalNoteViewContext {
     std::vector<std::wstring> renderLines;
     std::vector<NoteRenderLineInfo> renderLineInfos;
     size_t lastParsedMarkupLength = 0;
+    size_t lastParsedMarkupWindowTextLength = 0;
     int lastParsedMarkupBaseFontHeightPx = 0;
     std::unordered_map<std::wstring, std::shared_ptr<mathrender::Node>> mathNodeCache;
     std::unordered_map<std::wstring, mathrender::Layout> mathLayoutCache;
@@ -3237,6 +3220,7 @@ struct LocalNoteViewContext {
         renderLines.clear();
         renderLineInfos.clear();
         lastParsedMarkupLength = 0;
+        lastParsedMarkupWindowTextLength = 0;
         lastParsedMarkupBaseFontHeightPx = 0;
         mathNodeCache.clear();
         mathLayoutCache.clear();
@@ -3309,6 +3293,7 @@ inline std::wstring& Access_renderTextCache() { return GetViewContext(nullptr).r
 inline std::vector<std::wstring>& Access_renderLines() { return GetViewContext(nullptr).renderLines; }
 inline std::vector<NoteRenderLineInfo>& Access_renderLineInfos() { return GetViewContext(nullptr).renderLineInfos; }
 inline size_t& Access_lastParsedMarkupLength() { return GetViewContext(nullptr).lastParsedMarkupLength; }
+inline size_t& Access_lastParsedMarkupWindowTextLength() { return GetViewContext(nullptr).lastParsedMarkupWindowTextLength; }
 inline int& Access_lastParsedMarkupBaseFontHeightPx() { return GetViewContext(nullptr).lastParsedMarkupBaseFontHeightPx; }
 inline std::unordered_map<std::wstring, std::shared_ptr<mathrender::Node>>& Access_noteMathNodeCache() { return GetViewContext(nullptr).mathNodeCache; }
 inline std::unordered_map<std::wstring, mathrender::Layout>& Access_noteMathLayoutCache() { return GetViewContext(nullptr).mathLayoutCache; }
@@ -3991,6 +3976,15 @@ static bool IsNoteLineRawHelper(HWND hWnd, int line) {
 
 static void BeginNoteOpeningFocusVisualHold() {
     g_noteOpeningFocusVisualHold = true;
+    preview_trace::Append(
+        L"NoteOpeningVisualHold",
+        L"begin focus=" + preview_trace::Window(GetFocus()) +
+        L" renderActive=" + preview_trace::Bool(IsNoteRenderActive()) +
+        L" rawOnly=" + preview_trace::Bool(g_noteRawOnly));
+}
+
+void PreserveRenderedNoteOpeningView() {
+    BeginNoteOpeningFocusVisualHold();
 }
 
 static bool IsNoteOpeningFocusVisualHoldActive() {
@@ -4001,6 +3995,58 @@ static void EndNoteOpeningFocusVisualHold(HWND hWnd) {
     if (!g_noteOpeningFocusVisualHold) return;
     g_noteOpeningFocusVisualHold = false;
     if (hWnd) InvalidateRect(hWnd, nullptr, FALSE);
+    preview_trace::Append(
+        L"NoteOpeningVisualHold",
+        L"end target=" + preview_trace::Window(hWnd) +
+        L" focus=" + preview_trace::Window(GetFocus()));
+}
+
+void TraceCurrentNoteFocusState(const wchar_t* origin) {
+    if (!preview_trace::IsEnabled()) return;
+
+    HWND hWnd = g_hNoteEdit;
+    DWORD selStart = 0;
+    DWORD selEnd = 0;
+    if (hWnd && IsWindow(hWnd)) {
+        SendMessageW(hWnd, EM_GETSEL,
+                     reinterpret_cast<WPARAM>(&selStart),
+                     reinterpret_cast<LPARAM>(&selEnd));
+    }
+    const DWORD rangeStart = std::min(selStart, selEnd);
+    const DWORD rangeEnd = std::max(selStart, selEnd);
+    int caretLine = -1;
+    bool caretLineRaw = false;
+    if (hWnd && IsWindow(hWnd)) {
+        if (IsNoteRenderActive()) {
+            const size_t rawCaret = RichEditIndexToRawTextIndex(
+                CurrentNoteSyntaxSource().raw, static_cast<size_t>(rangeEnd));
+            caretLine = FindLineForRaw(rawCaret);
+        } else {
+            caretLine = static_cast<int>(
+                SendMessageW(hWnd, EM_LINEFROMCHAR, static_cast<WPARAM>(rangeEnd), 0));
+        }
+        if (caretLine >= 0) caretLineRaw = IsNoteLineRawHelper(hWnd, caretLine);
+    }
+
+    preview_trace::Append(
+        L"NoteFocusState",
+        L"origin=" + std::wstring(origin ? origin : L"unknown") +
+        L" focus=" + preview_trace::Window(GetFocus()) +
+        L" noteEdit=" + preview_trace::Window(hWnd) +
+        L" renderActive=" + preview_trace::Bool(IsNoteRenderActive()) +
+        L" rawOnly=" + preview_trace::Bool(g_noteRawOnly) +
+        L" openingHold=" + preview_trace::Bool(g_noteOpeningFocusVisualHold) +
+        L" noteHasFocus=" + preview_trace::Bool(g_noteHasFocus) +
+        L" vimEnabled=" + preview_trace::Bool(g_noteVimModeEnabled) +
+        L" vimNormal=" + preview_trace::Bool(g_noteNormalMode) +
+        L" saveRunning=" + preview_trace::Bool(IsSaveTransactionRunning()) +
+        L" renderSwitch=" + preview_trace::Bool(IsNoteRenderSwitchInProgress()) +
+        L" linkGraceMs=" + std::to_wstring(NoteLinkRenderGraceRemainingMs()) +
+        L" ctrlSelecting=" + preview_trace::Bool(g_ctrlRenderSelecting) +
+        L" ctrlSelected=" + preview_trace::Bool(g_ctrlRenderSelected) +
+        L" selection=" + std::to_wstring(rangeStart) + L":" + std::to_wstring(rangeEnd) +
+        L" caretLine=" + std::to_wstring(caretLine) +
+        L" caretLineRaw=" + preview_trace::Bool(caretLineRaw));
 }
 
 
@@ -4054,6 +4100,7 @@ static void ClearLegacyRenderCache() {
     g_renderLines.clear();
     g_renderLineInfos.clear();
     g_lastParsedMarkupLength = 0;
+    g_lastParsedMarkupWindowTextLength = 0;
     g_lastParsedMarkupBaseFontHeightPx = 0;
     g_noteMathNodeCache.clear();
     g_noteMathLayoutCache.clear();
@@ -5669,7 +5716,7 @@ static bool ExecuteNoteCmdlineSearch(HWND owner) {
                             SyncNoteNormalSelectionToEdit();
                             InvalidateNoteNormalStateViews();
                         } else {
-                            SetNoteCmdlineFlash(IsEnglishUi() ? L"Pattern not found." : L"見つかりませんでした。");
+                            SetNoteCmdlineFlash(localization::Text(L"note.search_pattern_not_found"));
                             CancelNoteCmdline();
                             return false;
                         }
@@ -5684,7 +5731,7 @@ static bool ExecuteNoteCmdlineSearch(HWND owner) {
     const bool typedNewPattern = !TrimWhitespace(pat).empty();
     if (!typedNewPattern) pat = g_noteLastSearchPattern;
     if (pat.empty()) {
-        SetNoteCmdlineFlash(IsEnglishUi() ? L"Enter a search term." : L"検索語を入力してください。");
+        SetNoteCmdlineFlash(localization::Text(L"note.search_enter_term"));
         CancelNoteCmdline();
         return false;
     }
@@ -5696,7 +5743,7 @@ static bool ExecuteNoteCmdlineSearch(HWND owner) {
     bool isY = g_noteNormalPendingY;
 
     if (!JumpToNoteSearchResult(owner ? owner : g_hMainWnd, pat, forward, typedNewPattern, true)) {
-        SetNoteCmdlineFlash(IsEnglishUi() ? L"Pattern not found." : L"見つかりませんでした。");
+        SetNoteCmdlineFlash(localization::Text(L"note.search_pattern_not_found"));
         CancelNoteCmdline();
         return false;
     }
@@ -5979,7 +6026,7 @@ bool HandleNoteNormalModeChar(HWND owner, wchar_t chRaw) {
     case L'N': {
         const int repeat = consumeCount();
         if (g_noteLastSearchPattern.empty()) {
-            SetNoteCmdlineFlash(IsEnglishUi() ? L"No search history." : L"検索履歴がありません。");
+            SetNoteCmdlineFlash(localization::Text(L"note.search_no_history"));
             return true;
         }
         bool found = true;
@@ -5992,7 +6039,7 @@ bool HandleNoteNormalModeChar(HWND owner, wchar_t chRaw) {
             }
         }
         if (!found) {
-            SetNoteCmdlineFlash(IsEnglishUi() ? L"Pattern not found." : L"見つかりませんでした。");
+            SetNoteCmdlineFlash(localization::Text(L"note.search_pattern_not_found"));
         }
         return true;
     }
@@ -7775,6 +7822,8 @@ static void ResetMarkdownRenderDerivedState(const std::wstring& text,
                                             int baseFontHeightPx,
                                             bool invalidateHorizontalExtent = false) {
     g_lastParsedMarkupLength = text.size();
+    g_lastParsedMarkupWindowTextLength =
+        note::RichEditWindowTextLengthForIndexedText(text);
     g_lastParsedMarkupBaseFontHeightPx = baseFontHeightPx;
     // Math nodes are keyed only by the stripped formula body. Keep them across
     // normal render-cache refreshes so unrelated edits do not reparse every

@@ -669,16 +669,31 @@ static void DrawMagnifierLens(HDC hdc, const RECT& client) {
         center.y < client.top || center.y > client.bottom) {
         return;
     }
-    constexpr int kLensRadius = 60;
-    constexpr double kLensZoom = 2.0;
-    int lensW = kLensRadius * 2;
-    int lensH = kLensRadius * 2;
-    int srcW = std::max(1, static_cast<int>(std::lround(lensW / kLensZoom)));
-    int srcH = std::max(1, static_cast<int>(std::lround(lensH / kLensZoom)));
+    const int clientW = client.right - client.left;
+    const int clientH = client.bottom - client.top;
+    if (clientW <= 0 || clientH <= 0) return;
+
+    const int dpi = std::max(96, GetDeviceCaps(hdc, LOGPIXELSX));
+    const int sizePx = std::max(1, MulDiv(std::clamp(g_magnifierSizeDip, 80, 240), dpi, 96));
+    const bool useCircle = (g_magnifierShape == MagnifierShape::Circle);
+    const bool useHorizontal = (g_magnifierShape == MagnifierShape::Horizontal);
+    int lensW = std::min(sizePx, clientW);
+    int lensH = useHorizontal
+        ? std::min(std::max(1, static_cast<int>(std::lround(static_cast<double>(sizePx) / 1.6))), clientH)
+        : std::min(sizePx, clientH);
+    const double zoom = std::clamp(g_magnifierZoom, 1.25, 4.0);
+    int srcW = std::max(1, static_cast<int>(std::lround(lensW / zoom)));
+    int srcH = std::max(1, static_cast<int>(std::lround(lensH / zoom)));
     int srcX = center.x - srcW / 2;
     int srcY = center.y - srcH / 2;
-    RECT lens{ center.x - kLensRadius, center.y - kLensRadius,
-               center.x + kLensRadius, center.y + kLensRadius };
+    const int cursorGap = std::max(8, MulDiv(16, dpi, 96));
+    int lensLeft = center.x + cursorGap;
+    int lensTop = center.y + cursorGap;
+    if (lensLeft + lensW > client.right) lensLeft = center.x - lensW - cursorGap;
+    if (lensTop + lensH > client.bottom) lensTop = center.y - lensH - cursorGap;
+    lensLeft = std::clamp(lensLeft, static_cast<int>(client.left), static_cast<int>(client.right) - lensW);
+    lensTop = std::clamp(lensTop, static_cast<int>(client.top), static_cast<int>(client.bottom) - lensH);
+    RECT lens{ lensLeft, lensTop, lensLeft + lensW, lensTop + lensH };
 
     HDC srcDC = CreateCompatibleDC(hdc);
     HBITMAP srcBmp = CreateCompatibleBitmap(hdc, srcW, srcH);
@@ -686,7 +701,6 @@ static void DrawMagnifierLens(HDC hdc, const RECT& client) {
     BitBlt(srcDC, 0, 0, srcW, srcH, hdc, srcX, srcY, SRCCOPY);
 
     int saved = SaveDC(hdc);
-    bool useCircle = (g_magnifierShape == MagnifierShape::Circle);
     HRGN clip = useCircle
         ? CreateEllipticRgn(lens.left, lens.top, lens.right, lens.bottom)
         : CreateRectRgn(lens.left, lens.top, lens.right, lens.bottom);
@@ -703,6 +717,13 @@ static void DrawMagnifierLens(HDC hdc, const RECT& client) {
     } else {
         Rectangle(hdc, lens.left, lens.top, lens.right, lens.bottom);
     }
+    const int crossHalf = std::max(3, MulDiv(6, dpi, 96));
+    const int crossX = lens.left + lensW / 2;
+    const int crossY = lens.top + lensH / 2;
+    MoveToEx(hdc, crossX - crossHalf, crossY, nullptr);
+    LineTo(hdc, crossX + crossHalf + 1, crossY);
+    MoveToEx(hdc, crossX, crossY - crossHalf, nullptr);
+    LineTo(hdc, crossX, crossY + crossHalf + 1);
     SelectObject(hdc, oldBrush);
     SelectObject(hdc, oldPen);
     DeleteObject(pen);
@@ -1075,7 +1096,7 @@ static bool TryJumpToLinkMarkerAtPoint(const POINT& pt) {
             HWND owner = g_hPdfView ? GetParent(g_hPdfView) : nullptr;
             if (!owner) owner = g_hMainWnd;
             if (owner) {
-                ShowSoftNotice(owner, IsEnglishUi() ? L"Link target not found." : L"リンク先が見つかりませんでした。");
+                ShowSoftNotice(owner, localization::Text(L"pdf.interaction.335f285672d3"));
             }
         }
     }
@@ -1596,36 +1617,22 @@ static std::optional<std::wstring> GetProtectedPdfCopyBlockMessage(FPDF_DOCUMENT
     const unsigned long userPerms = FPDF_GetDocUserPermissions(doc);
     const bool canCopy = userPerms == 0xfffffffful || (userPerms & kPdfPermissionCopyContent) != 0;
 
-    if (IsEnglishUi()) {
-        std::wstring message =
-            L"This PDF has author/publisher protection settings.\n"
-            L"To follow the original rights holder's instructions and usage conditions, "
-            L"this app does not copy text from protected source PDFs.";
-        if (!canCopy) {
-            message += L"\n\nThe source PDF also disallows content copying.";
-        }
-        message += L"\n\nIf copying is necessary, confirm the rights holder's permission and use a PDF without protection.";
-        return message;
-    }
-
-    std::wstring message =
-        L"このPDFには著作者・配布元が設定した保護があります。\n"
-        L"元の権利者の指示と利用条件に従うため、このアプリでは保護付きPDFからのテキストコピーを行いません。";
+    std::wstring message = localization::Text(L"pdf.protected_copy.base");
     if (!canCopy) {
-        message += L"\n\n元のPDFでは内容のコピーも禁止されています。";
+        message += localization::Text(L"pdf.protected_copy.source_disallows");
     }
-    message += L"\n\nコピーが必要な場合は、権利者の許諾と元PDFの利用条件を確認し、保護のないPDFで作業してください。";
+    message += localization::Text(L"pdf.protected_copy.guidance");
     return message;
 }
 
 static bool CanCopySelectedPdfText(HWND owner) {
     if (auto blockedMessage = GetProtectedPdfCopyBlockMessage(g_pdf.doc)) {
         if (PromptPasswordAndReopenCurrentPdf(owner ? owner : g_hMainWnd,
-                                              IsEnglishUi() ? L"Copy" : L"コピー",
+                                              localization::Text(L"pdf.interaction.f9d8ec40980e"),
                                               *blockedMessage)) {
             if (auto reblockedMessage = GetProtectedPdfCopyBlockMessage(g_pdf.doc)) {
                 ShowSilentMessageDialog(owner ? owner : g_hMainWnd,
-                                        IsEnglishUi() ? L"Copy" : L"コピー",
+                                        localization::Text(L"pdf.interaction.f9d8ec40980e"),
                                         *reblockedMessage,
                                         SoftNoticeKind::Warning);
                 return false;
@@ -1888,14 +1895,14 @@ void ClearPdfAnnotationSelection() {
     ClearAnnotationSelection();
 }
 
-static const wchar_t* ContextMenuLabelCut() { return IsEnglishUi() ? L"Cut" : L"切り取り"; }
-static const wchar_t* ContextMenuLabelCopy() { return IsEnglishUi() ? L"Copy" : L"コピー"; }
-static const wchar_t* ContextMenuLabelPaste() { return IsEnglishUi() ? L"Paste" : L"貼り付け"; }
-static const wchar_t* ContextMenuLabelSelectAll() { return IsEnglishUi() ? L"Select All" : L"全選択"; }
-static const wchar_t* ContextMenuLabelSelectNone() { return IsEnglishUi() ? L"Deselect" : L"選択解除"; }
-static const wchar_t* ContextMenuLabelTextColor() { return IsEnglishUi() ? L"Text color" : L"文字色"; }
-static const wchar_t* ContextMenuLabelClearTextColor() { return IsEnglishUi() ? L"Restore text color" : L"文字色を元に戻す"; }
-static const wchar_t* ContextMenuLabelAnnotTool() { return IsEnglishUi() ? L"Annotation tool" : L"注釈ツール"; }
+static std::wstring ContextMenuLabelCut() { return localization::Text(L"pdf.interaction.1ba06b787aeb"); }
+static std::wstring ContextMenuLabelCopy() { return localization::Text(L"pdf.interaction.f9d8ec40980e"); }
+static std::wstring ContextMenuLabelPaste() { return localization::Text(L"pdf.interaction.f2a160f47657"); }
+static std::wstring ContextMenuLabelSelectAll() { return localization::Text(L"pdf.interaction.89627108d27d"); }
+static std::wstring ContextMenuLabelSelectNone() { return localization::Text(L"pdf.interaction.41295add2251"); }
+static std::wstring ContextMenuLabelTextColor() { return localization::Text(L"pdf.interaction.1b5629273abc"); }
+static std::wstring ContextMenuLabelClearTextColor() { return localization::Text(L"pdf.interaction.81c470d23126"); }
+static std::wstring ContextMenuLabelAnnotTool() { return localization::Text(L"pdf.interaction.605cdcef5664"); }
 
 static std::wstring HexColorLabel(COLORREF color) {
     wchar_t hex[16]{};
@@ -1906,29 +1913,28 @@ static std::wstring HexColorLabel(COLORREF color) {
 static std::wstring TextColorMenuLabel(COLORREF color, size_t paletteIndex) {
     struct ColorName {
         COLORREF color;
-        const wchar_t* en;
-        const wchar_t* ja;
+        const wchar_t* id;
     };
     static constexpr ColorName kNames[] = {
-        { RGB(0, 0, 0), L"Black", L"黒" },
-        { RGB(255, 255, 0), L"Yellow", L"黄" },
-        { RGB(255, 0, 0), L"Red", L"赤" },
-        { RGB(0, 160, 255), L"Blue", L"青" },
-        { RGB(0, 200, 0), L"Green", L"緑" },
-        { RGB(255, 140, 0), L"Orange", L"オレンジ" },
-        { RGB(200, 80, 200), L"Purple", L"紫" },
-        { RGB(128, 128, 128), L"Gray", L"グレー" },
+        { RGB(0, 0, 0), L"pdf.text_color.black" },
+        { RGB(255, 255, 0), L"pdf.text_color.yellow" },
+        { RGB(255, 0, 0), L"pdf.text_color.red" },
+        { RGB(0, 160, 255), L"pdf.text_color.blue" },
+        { RGB(0, 200, 0), L"pdf.text_color.green" },
+        { RGB(255, 140, 0), L"pdf.text_color.orange" },
+        { RGB(200, 80, 200), L"pdf.text_color.purple" },
+        { RGB(128, 128, 128), L"pdf.text_color.gray" },
     };
 
     const std::wstring hex = HexColorLabel(color);
     for (const auto& name : kNames) {
         if (name.color == color) {
-            return std::wstring(IsEnglishUi() ? name.en : name.ja) + L" (" + hex + L")";
+            return localization::Text(name.id) + L" (" + hex + L")";
         }
     }
 
     if (paletteIndex == g_palette.size() - 1) {
-        return std::wstring(IsEnglishUi() ? L"Custom" : L"カスタム") + L" (" + hex + L")";
+        return std::wstring(localization::Text(L"pdf.interaction.10d8bccd0ef4")) + L" (" + hex + L")";
     }
     return hex;
 }
@@ -2232,18 +2238,18 @@ static void ShowPdfContextMenu(HWND hwnd, POINT screenPt) {
         const bool hasEditSelection = HasEditSelection();
         const bool canPaste = IsClipboardFormatAvailable(CF_UNICODETEXT) != 0;
         const bool hasText = !g_pdf.editText.empty();
-        AppendMenuW(menu, MF_STRING | (hasEditSelection ? 0 : MF_GRAYED), ID_CTX_CUT, ContextMenuLabelCut());
-        AppendMenuW(menu, MF_STRING | (hasEditSelection ? 0 : MF_GRAYED), ID_CTX_COPY, ContextMenuLabelCopy());
-        AppendMenuW(menu, MF_STRING | (canPaste ? 0 : MF_GRAYED), ID_CTX_PASTE, ContextMenuLabelPaste());
+        AppendMenuW(menu, MF_STRING | (hasEditSelection ? 0 : MF_GRAYED), ID_CTX_CUT, ContextMenuLabelCut().c_str());
+        AppendMenuW(menu, MF_STRING | (hasEditSelection ? 0 : MF_GRAYED), ID_CTX_COPY, ContextMenuLabelCopy().c_str());
+        AppendMenuW(menu, MF_STRING | (canPaste ? 0 : MF_GRAYED), ID_CTX_PASTE, ContextMenuLabelPaste().c_str());
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING | (hasText ? 0 : MF_GRAYED), ID_CTX_SELECT_ALL, ContextMenuLabelSelectAll());
-        AppendMenuW(menu, MF_STRING | (hasEditSelection ? 0 : MF_GRAYED), ID_CTX_SELECT_NONE, ContextMenuLabelSelectNone());
+        AppendMenuW(menu, MF_STRING | (hasText ? 0 : MF_GRAYED), ID_CTX_SELECT_ALL, ContextMenuLabelSelectAll().c_str());
+        AppendMenuW(menu, MF_STRING | (hasEditSelection ? 0 : MF_GRAYED), ID_CTX_SELECT_NONE, ContextMenuLabelSelectNone().c_str());
     } else if (hasPdfSelection) {
         const int pageIndex = resolvePageIndex();
-        AppendMenuW(menu, MF_STRING | (hasPdfSelection ? 0 : MF_GRAYED), ID_CTX_COPY, ContextMenuLabelCopy());
+        AppendMenuW(menu, MF_STRING | (hasPdfSelection ? 0 : MF_GRAYED), ID_CTX_COPY, ContextMenuLabelCopy().c_str());
         HMENU textColorMenu = CreatePopupMenu();
         if (textColorMenu) {
-            AppendMenuW(textColorMenu, MF_STRING, ID_CTX_TEXT_COLOR_CLEAR, ContextMenuLabelClearTextColor());
+            AppendMenuW(textColorMenu, MF_STRING, ID_CTX_TEXT_COLOR_CLEAR, ContextMenuLabelClearTextColor().c_str());
             AppendMenuW(textColorMenu, MF_SEPARATOR, 0, nullptr);
             for (size_t i = 0; i < g_palette.size(); ++i) {
                 const std::wstring label = TextColorMenuLabel(g_palette[i], i);
@@ -2251,16 +2257,16 @@ static void ShowPdfContextMenu(HWND hwnd, POINT screenPt) {
                             ID_CTX_TEXT_COLOR_BASE + static_cast<UINT>(i), label.c_str());
             }
             AppendMenuW(menu, MF_POPUP | (hasPdfSelection ? 0 : MF_GRAYED),
-                        reinterpret_cast<UINT_PTR>(textColorMenu), ContextMenuLabelTextColor());
+                        reinterpret_cast<UINT_PTR>(textColorMenu), ContextMenuLabelTextColor().c_str());
         }
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING | (pageIndex >= 0 ? 0 : MF_GRAYED), ID_CTX_SELECT_ALL, ContextMenuLabelSelectAll());
-        AppendMenuW(menu, MF_STRING | (hasPdfSelection ? 0 : MF_GRAYED), ID_CTX_SELECT_NONE, ContextMenuLabelSelectNone());
+        AppendMenuW(menu, MF_STRING | (pageIndex >= 0 ? 0 : MF_GRAYED), ID_CTX_SELECT_ALL, ContextMenuLabelSelectAll().c_str());
+        AppendMenuW(menu, MF_STRING | (hasPdfSelection ? 0 : MF_GRAYED), ID_CTX_SELECT_NONE, ContextMenuLabelSelectNone().c_str());
         HMENU annotToolMenu = CreatePopupMenu();
         if (annotToolMenu) {
             if (appendAnnotTools(annotToolMenu)) {
                 AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-                AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(annotToolMenu), ContextMenuLabelAnnotTool());
+                AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(annotToolMenu), ContextMenuLabelAnnotTool().c_str());
             } else {
                 DestroyMenu(annotToolMenu);
             }

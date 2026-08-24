@@ -1,8 +1,13 @@
 #include "ui/dialogs/dialogs.h"
 #include "ui/core/main_window_api.h"
+#include "core/localization.h"
+#include "core/preview_trace.h"
+#include "core/secure_memory.h"
 #include "ui/noop_nav_guard.h"
 
 #include <algorithm>
+#include <cstring>
+#include <vector>
 
 namespace {
 static constexpr ULONGLONG kSilentMessageDialogRepeatSuppressMs = 10000;
@@ -123,7 +128,7 @@ static LRESULT CALLBACK NewLectureDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             std::wstring name(buf, buf + len);
             name = TrimWhitespace(name);
             if (name.empty()) {
-                ShowSoftNotice(hWnd, IsEnglishUi() ? L"Enter a name." : L"名前を入力してください。",
+                ShowSoftNotice(hWnd, localization::Text(L"dialog.input.enter_name"),
                                SoftNoticeKind::Warning);
                 return 0;
             }
@@ -181,10 +186,11 @@ bool PromptNewLectureName(HWND owner, std::wstring& outName) {
     wc.lpszClassName = L"NewLectureDlgClass";
     RegisterClassW(&wc);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, ui.dlgNewLectureTitle.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, 300, 170,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return false;
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     RunDialogMessageLoop(w, &ctx.done);
@@ -207,10 +213,11 @@ bool PromptNewSessionName(HWND owner, std::wstring& outName) {
     wc.lpszClassName = L"NewSessionDlgClass";
     RegisterClassW(&wc);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, ui.dlgNewSessionTitle.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, 300, 170,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return false;
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     RunDialogMessageLoop(w, &ctx.done);
@@ -318,10 +325,11 @@ bool PromptSimpleText(HWND owner, const std::wstring& title,
     wc.lpszClassName = L"SimpleInputDlg";
     RegisterClassW(&wc);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, 360, 130,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return false;
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     RunDialogMessageLoop(w, &ctx.done);
@@ -352,24 +360,29 @@ static LRESULT CALLBACK SavePathDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
         auto cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
         ctx = reinterpret_cast<SavePathDialog*>(cs->lpCreateParams);
         SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
-        CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"Save to folder:" : L"保存先フォルダ:",
+        const std::wstring folderLabel = localization::Text(L"dialog.save_path.folder_label");
+        CreateWindowExW(0, L"STATIC", folderLabel.c_str(),
                         WS_CHILD | WS_VISIBLE, 12, 12, 150, 20, hWnd, nullptr, cs->hInstance, nullptr);
         ctx->folder = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", ctx->directory.c_str(),
                                       WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                       12, 34, 716, 24, hWnd, nullptr, cs->hInstance, nullptr);
-        CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"File name:" : L"ファイル名:",
+        const std::wstring fileNameLabel = localization::Text(L"dialog.save_path.file_name_label");
+        CreateWindowExW(0, L"STATIC", fileNameLabel.c_str(),
                         WS_CHILD | WS_VISIBLE, 12, 70, 150, 20, hWnd, nullptr, cs->hInstance, nullptr);
         ctx->fileName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", ctx->defaultName.c_str(),
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                         12, 92, 716, 24, hWnd, reinterpret_cast<HMENU>(101),
                                         cs->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Open system dialog..." : L"OS標準で開く...",
+        const std::wstring systemDialogLabel = localization::Text(L"dialog.save_path.system_dialog");
+        CreateWindowExW(0, L"BUTTON", systemDialogLabel.c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP, 12, 132, 170, 28, hWnd,
                         reinterpret_cast<HMENU>(kSavePathDialogOpenSystemId), cs->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Save" : L"保存",
+        const std::wstring saveLabel = localization::Text(L"dialog.save_path.save");
+        CreateWindowExW(0, L"BUTTON", saveLabel.c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP, 512, 132, 100, 28, hWnd,
                         reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Cancel" : L"キャンセル",
+        const std::wstring cancelLabel = localization::Text(L"dialog.save_path.cancel");
+        CreateWindowExW(0, L"BUTTON", cancelLabel.c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP, 628, 132, 100, 28, hWnd,
                         reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
         if (ctx->folder) SendMessageW(ctx->folder, EM_SETSEL, 0, 0);
@@ -416,7 +429,7 @@ static LRESULT CALLBACK SavePathDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
             }
             name = TrimWhitespace(name);
             if (name.empty()) {
-                ShowSoftNotice(hWnd, IsEnglishUi() ? L"Enter a file name." : L"ファイル名を入力してください。",
+                ShowSoftNotice(hWnd, localization::Text(L"dialog.input.enter_file_name"),
                                SoftNoticeKind::Warning);
                 return 0;
             }
@@ -461,10 +474,11 @@ SavePathPromptResult PromptSavePath(HWND owner, const std::wstring& title,
     wc.lpszClassName = L"SavePathDialog";
     RegisterClassW(&wc);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, 756, 210,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return SavePathPromptResult::Cancel;
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     RunDialogMessageLoop(w, &ctx.done);
@@ -537,15 +551,18 @@ static LRESULT CALLBACK CreateNameDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             ++shown;
         }
         const int buttonY = shown > 0 ? y + 42 : 76;
-        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Create" : L"作成",
+        const std::wstring createLabel = localization::Text(L"dialog.create_name.create");
+        CreateWindowExW(0, L"BUTTON", createLabel.c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         92, buttonY, 80, 28, hWnd, reinterpret_cast<HMENU>(IDOK),
                         cs->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Save dialog..." : L"保存ダイアログで作成...",
+        const std::wstring saveDialogLabel = localization::Text(L"dialog.create_name.save_dialog");
+        CreateWindowExW(0, L"BUTTON", saveDialogLabel.c_str(),
                         WS_CHILD | (ctx->showExplorerButton ? WS_VISIBLE : 0) | WS_TABSTOP,
                         182, buttonY, 150, 28, hWnd, reinterpret_cast<HMENU>(kExplorerId),
                         cs->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"Cancel" : L"キャンセル",
+        const std::wstring cancelLabel = localization::Text(L"dialog.save_path.cancel");
+        CreateWindowExW(0, L"BUTTON", cancelLabel.c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         ctx->showExplorerButton ? 342 : 232, buttonY, 90, 28,
                         hWnd, reinterpret_cast<HMENU>(IDCANCEL),
@@ -593,7 +610,7 @@ static LRESULT CALLBACK CreateNameDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             std::wstring name(buf, buf + len);
             name = TrimWhitespace(name);
             if (name.empty()) {
-                ShowSoftNotice(hWnd, IsEnglishUi() ? L"Enter a name." : L"名前を入力してください。",
+                ShowSoftNotice(hWnd, localization::Text(L"dialog.input.enter_name"),
                                SoftNoticeKind::Warning);
                 return 0;
             }
@@ -648,10 +665,11 @@ PromptCreateNameResult PromptCreateName(HWND owner,
     wc.lpszClassName = L"CreateNameDlg";
     RegisterClassW(&wc);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, 470, suggestions.empty() ? 150 : 210,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return PromptCreateNameResult::Cancel;
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     RunDialogMessageLoop(w, &ctx.done);
@@ -661,101 +679,515 @@ PromptCreateNameResult PromptCreateName(HWND owner,
     return ctx.action;
 }
 
-struct PasswordInputDialog {
+struct PasswordOverlayDisabledControl {
     HWND hwnd{};
+    BOOL wasEnabled = FALSE;
+};
+
+struct PasswordInputDialog {
+    HWND anchor{};
+    HWND panel{};
     HWND label{};
     HWND edit{};
+    HWND okButton{};
+    HWND cancelButton{};
+    RECT panelRect{};
     std::wstring title;
     std::wstring message;
     std::wstring result;
+    DWORD createdMessageTime = 0;
+    ULONGLONG createdTick = 0;
+    std::vector<PasswordOverlayDisabledControl> disabledAnnotationControls;
     bool ok = false;
     bool done = false;
 };
 
-static LRESULT CALLBACK PasswordInputDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    PasswordInputDialog* ctx = reinterpret_cast<PasswordInputDialog*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
-    switch (msg) {
-    case WM_CREATE: {
-        auto cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        ctx = reinterpret_cast<PasswordInputDialog*>(cs->lpCreateParams);
-        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
-        ctx->hwnd = hWnd;
-        ctx->label = CreateWindowExW(0, L"STATIC", ctx->message.c_str(),
-                                     WS_CHILD | WS_VISIBLE,
-                                     10, 10, 360, 48, hWnd, nullptr, cs->hInstance, nullptr);
-        ctx->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                                    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
-                                    10, 64, 360, 24, hWnd, reinterpret_cast<HMENU>(101),
-                                    cs->hInstance, nullptr);
-        SendMessageW(ctx->edit, EM_SETPASSWORDCHAR, static_cast<WPARAM>(L'*'), 0);
-        CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                        100, 100, 80, 26, hWnd, reinterpret_cast<HMENU>(IDOK),
-                        cs->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                        200, 100, 80, 26, hWnd, reinterpret_cast<HMENU>(IDCANCEL),
-                        cs->hInstance, nullptr);
-        SetFocus(ctx->edit);
-        ApplyThemeToDialog(hWnd);
-        return 0;
+static int PasswordOverlayScale(HWND hwnd, int pxAt96Dpi) {
+    HDC hdc = hwnd ? GetDC(hwnd) : nullptr;
+    const int dpi = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc && hwnd) ReleaseDC(hwnd, hdc);
+    return MulDiv(pxAt96Dpi, dpi > 0 ? dpi : 96, 96);
+}
+
+static bool IsWindowAndAncestorsEnabled(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return false;
+    for (HWND current = hwnd; current; current = GetParent(current)) {
+        if (!IsWindowEnabled(current)) return false;
     }
-    case WM_THEMECHANGED:
-        ApplyThemeToDialog(hWnd);
-        return 0;
+    return true;
+}
+
+static HWND PasswordOverlayAnchor(HWND owner) {
+    HWND candidates[] = {
+        ResolveAppDialogAnchor(owner),
+        g_hMainWnd,
+        owner,
+        (g_hPdfView && IsWindow(g_hPdfView) && IsWindowVisible(g_hPdfView)) ? g_hPdfView : nullptr,
+    };
+    for (HWND candidate : candidates) {
+        if (IsWindowAndAncestorsEnabled(candidate)) return candidate;
+    }
+    for (HWND candidate : candidates) {
+        if (candidate && IsWindow(candidate)) return candidate;
+    }
+    return nullptr;
+}
+
+static void TracePasswordOverlay(const PasswordInputDialog* ctx,
+                                 const wchar_t* event,
+                                 const std::wstring& detail = L"") {
+    if (!preview_trace::IsEnabled()) return;
+    std::wstring line = L"event=" + std::wstring(event ? event : L"(null)") +
+        L" anchor=" + preview_trace::Window(ctx ? ctx->anchor : nullptr) +
+        L" panel=" + preview_trace::Window(ctx ? ctx->panel : nullptr) +
+        L" edit=" + preview_trace::Window(ctx ? ctx->edit : nullptr) +
+        L" focus=" + preview_trace::Window(GetFocus()) +
+        L" mainVisible=" + preview_trace::Bool(g_hMainWnd && IsWindowVisible(g_hMainWnd)) +
+        L" mainIconic=" + preview_trace::Bool(g_hMainWnd && IsIconic(g_hMainWnd));
+    if (!detail.empty()) line += L" " + detail;
+    preview_trace::Append(L"PasswordOverlay", line);
+}
+
+static RECT PasswordOverlayTargetScreenRect(HWND anchor) {
+    RECT target{};
+    if (g_hPdfView && IsWindow(g_hPdfView) && IsWindowVisible(g_hPdfView) &&
+        GetWindowRect(g_hPdfView, &target)) {
+        return target;
+    }
+    if (anchor && IsWindow(anchor) && GetWindowRect(anchor, &target)) {
+        return target;
+    }
+    return {};
+}
+
+static bool AcceptPasswordOverlay(PasswordInputDialog* ctx);
+
+static void CancelPasswordOverlay(PasswordInputDialog* ctx, const wchar_t* reason = L"cancel") {
+    if (!ctx) return;
+    TracePasswordOverlay(ctx, L"cancel", L"reason=" + std::wstring(reason ? reason : L"(null)"));
+    ctx->ok = false;
+    ctx->done = true;
+}
+
+static LRESULT CALLBACK PasswordOverlayPanelProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    PasswordInputDialog* ctx = reinterpret_cast<PasswordInputDialog*>(
+        GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_COMMAND: {
+        const WORD id = LOWORD(wParam);
+        if (id == IDOK) {
+            AcceptPasswordOverlay(ctx);
+            return 0;
+        }
+        if (id == IDCANCEL) {
+            CancelPasswordOverlay(ctx);
+            return 0;
+        }
+        break;
+    }
+    case WM_SETFOCUS:
+        if (ctx && ctx->edit && IsWindow(ctx->edit)) {
+            SetFocus(ctx->edit);
+            return 0;
+        }
+        break;
     case WM_ERASEBKGND: {
         HDC hdc = reinterpret_cast<HDC>(wParam);
         RECT rc{};
         GetClientRect(hWnd, &rc);
-        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-        FillRect(hdc, &rc, bg);
+        FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
         return 1;
     }
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLOREDIT:
-    case WM_CTLCOLORLISTBOX:
-    case WM_CTLCOLORBTN: {
-        HDC hdc = reinterpret_cast<HDC>(wParam);
-        HWND ctl = reinterpret_cast<HWND>(lParam);
-        return ThemeCtlColorPanel(ctl, hdc);
-    }
-    case WM_DRAWITEM: {
-        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
-        if (DrawThemeButton(dis)) return TRUE;
-        break;
-    }
-    case WM_COMMAND:
-        if (!ctx) break;
-        if (LOWORD(wParam) == IDOK) {
-            wchar_t buf[512]{};
-            int len = GetWindowTextW(ctx->edit, buf, 511);
-            std::wstring value(buf, buf + len);
-            value = TrimWhitespace(value);
-            if (value.empty()) {
-                ShowSoftNotice(hWnd,
-                               IsEnglishUi() ? L"Enter a password." : L"パスワードを入力してください。",
-                               SoftNoticeKind::Warning);
-                return 0;
-            }
-            ctx->result = std::move(value);
-            ctx->ok = true;
-            ctx->done = true;
-            DestroyWindow(hWnd);
-            return 0;
-        } else if (LOWORD(wParam) == IDCANCEL) {
-            ctx->ok = false;
-            ctx->done = true;
-            DestroyWindow(hWnd);
-            return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+        HBRUSH border = CreateSolidBrush(RGB(210, 214, 220));
+        if (border) {
+            FrameRect(hdc, &rc, border);
+            DeleteObject(border);
         }
-        break;
-    case WM_CLOSE:
-        if (ctx) {
-            ctx->ok = false;
-            ctx->done = true;
-        }
-        DestroyWindow(hWnd);
+        EndPaint(hWnd, &ps);
         return 0;
     }
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(hdc, RGB(32, 32, 32));
+        SetBkColor(hdc, RGB(255, 255, 255));
+        return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
+    }
+    }
     return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static void EnsurePasswordOverlayPanelClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = PasswordOverlayPanelProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
+    wc.lpszClassName = L"PasswordOverlayPanel";
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+static void LayoutPasswordOverlay(PasswordInputDialog* ctx) {
+    if (!ctx || !ctx->anchor || !IsWindow(ctx->anchor)) return;
+    RECT host = PasswordOverlayTargetScreenRect(ctx->anchor);
+    const int clientW = static_cast<int>(host.right - host.left);
+    const int clientH = static_cast<int>(host.bottom - host.top);
+    if (clientW <= 0 || clientH <= 0) return;
+    const int margin = PasswordOverlayScale(ctx->anchor, 10);
+    const int panelW = std::min(PasswordOverlayScale(ctx->anchor, 392),
+                                std::max(PasswordOverlayScale(ctx->anchor, 260),
+                                         clientW - margin * 2));
+    const int panelH = PasswordOverlayScale(ctx->anchor, 170);
+    const int x = static_cast<int>(host.left) + (clientW - panelW) / 2;
+    const int y = static_cast<int>(host.top) + (clientH - panelH) / 2;
+    ctx->panelRect = { x, y, x + panelW, y + panelH };
+
+    const int pad = PasswordOverlayScale(ctx->anchor, 10);
+    const int editH = PasswordOverlayScale(ctx->anchor, 24);
+    const int buttonW = PasswordOverlayScale(ctx->anchor, 80);
+    const int buttonH = PasswordOverlayScale(ctx->anchor, 26);
+    const int buttonGap = PasswordOverlayScale(ctx->anchor, 20);
+    const int contentW = panelW - pad * 2;
+    const int buttonY = PasswordOverlayScale(ctx->anchor, 100);
+    const int buttonsW = buttonW * 2 + buttonGap;
+    const int buttonX = (panelW - buttonsW) / 2;
+
+    if (ctx->panel) {
+        SetWindowPos(ctx->panel, HWND_TOP, x, y, panelW, panelH,
+                     SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+    if (ctx->label) {
+        SetWindowPos(ctx->label, HWND_TOP, pad, pad, contentW,
+                     PasswordOverlayScale(ctx->anchor, 48), SWP_NOACTIVATE);
+    }
+    if (ctx->edit) {
+        SetWindowPos(ctx->edit, HWND_TOP, pad, PasswordOverlayScale(ctx->anchor, 64),
+                     contentW, editH, SWP_NOACTIVATE);
+    }
+    if (ctx->okButton) {
+        SetWindowPos(ctx->okButton, HWND_TOP, buttonX, buttonY, buttonW, buttonH, SWP_NOACTIVATE);
+    }
+    if (ctx->cancelButton) {
+        SetWindowPos(ctx->cancelButton, HWND_TOP, buttonX + buttonW + buttonGap, buttonY,
+                     buttonW, buttonH, SWP_NOACTIVATE);
+    }
+}
+
+static bool IsMouseDownMessage(UINT message) {
+    switch (message) {
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+    case WM_XBUTTONDOWN:
+    case WM_NCLBUTTONDOWN:
+    case WM_NCRBUTTONDOWN:
+    case WM_NCMBUTTONDOWN:
+    case WM_NCXBUTTONDOWN:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool IsInitialPasswordOverlayMouseMessage(const PasswordInputDialog* ctx,
+                                                 const MSG& msg) {
+    if (!ctx || !IsMouseDownMessage(msg.message)) return false;
+    if (ctx->createdMessageTime != 0 && msg.time <= ctx->createdMessageTime) {
+        return true;
+    }
+    return ctx->createdTick != 0 && (GetTickCount64() - ctx->createdTick) < 150;
+}
+
+static bool IsBlockedPasswordOverlayBackgroundInput(const MSG& msg) {
+    switch (msg.message) {
+    case WM_COMMAND:
+    case WM_SYSCOMMAND:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+    case WM_CHAR:
+    case WM_SYSCHAR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void ClearPasswordOverlayEdit(PasswordInputDialog* ctx) {
+    if (!ctx || !ctx->edit || !IsWindow(ctx->edit)) return;
+    SendMessageW(ctx->edit, EM_SETSEL, 0, -1);
+    SendMessageW(ctx->edit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    SetWindowTextW(ctx->edit, L"");
+}
+
+static void DestroyPasswordOverlay(PasswordInputDialog* ctx) {
+    if (!ctx) return;
+    ClearPasswordOverlayEdit(ctx);
+    for (auto it = ctx->disabledAnnotationControls.rbegin();
+         it != ctx->disabledAnnotationControls.rend(); ++it) {
+        if (it->hwnd && IsWindow(it->hwnd)) {
+            EnableWindow(it->hwnd, it->wasEnabled);
+            InvalidateRect(it->hwnd, nullptr, FALSE);
+        }
+    }
+    ctx->disabledAnnotationControls.clear();
+    HWND controls[] = { ctx->cancelButton, ctx->okButton, ctx->edit, ctx->label, ctx->panel };
+    for (HWND control : controls) {
+        if (control && IsWindow(control)) DestroyWindow(control);
+    }
+    ctx->panel = nullptr;
+    ctx->label = nullptr;
+    ctx->edit = nullptr;
+    ctx->okButton = nullptr;
+    ctx->cancelButton = nullptr;
+    if (ctx->anchor && IsWindow(ctx->anchor)) {
+        InvalidateRect(ctx->anchor, nullptr, FALSE);
+    }
+    if (g_hPdfView && g_hPdfView != ctx->anchor && IsWindow(g_hPdfView)) {
+        InvalidateRect(g_hPdfView, nullptr, FALSE);
+    }
+    TracePasswordOverlay(ctx, L"destroyed");
+}
+
+static bool IsPasswordOverlayControl(const PasswordInputDialog* ctx, HWND hwnd) {
+    return ctx && hwnd && (hwnd == ctx->panel || IsChild(ctx->panel, hwnd) ||
+                           hwnd == ctx->label ||
+                           hwnd == ctx->edit || hwnd == ctx->okButton ||
+                           hwnd == ctx->cancelButton);
+}
+
+static bool IsPasswordOverlayFocusableControl(const PasswordInputDialog* ctx, HWND hwnd) {
+    return ctx && hwnd && (hwnd == ctx->panel || hwnd == ctx->edit ||
+                           hwnd == ctx->okButton || hwnd == ctx->cancelButton ||
+                           IsChild(ctx->panel, hwnd));
+}
+
+static bool IsPasswordOverlayPoint(const PasswordInputDialog* ctx, POINT screenPt) {
+    if (!ctx) return false;
+    return PtInRect(&ctx->panelRect, screenPt) != FALSE;
+}
+
+static bool AcceptPasswordOverlay(PasswordInputDialog* ctx) {
+    if (!ctx || !ctx->edit) return false;
+    const int textLength = GetWindowTextLengthW(ctx->edit);
+    std::wstring value;
+    if (textLength > 0) {
+        value.resize(static_cast<size_t>(textLength) + 1);
+        const int copied = GetWindowTextW(ctx->edit, value.data(), textLength + 1);
+        value.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
+    }
+    SecureWideStringScope valueScope(&value);
+    if (value.empty()) {
+        ShowSoftNotice(ctx->anchor,
+                       localization::Text(L"dialog.input.enter_password"),
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+    SecureClearString(ctx->result);
+    ctx->result = std::move(value);
+    ClearPasswordOverlayEdit(ctx);
+    ctx->ok = true;
+    ctx->done = true;
+    TracePasswordOverlay(ctx, L"accept");
+    return true;
+}
+
+static void DisablePasswordOverlayAnnotationControls(PasswordInputDialog* ctx) {
+    if (!ctx) return;
+    HWND controls[] = {
+        g_hAnnotShow,
+        g_hBtnModeSelect,
+        g_hBtnModePan,
+        g_hBtnModeMagnifier,
+        g_hBtnModeMarker,
+        g_hBtnModeMarkerFree,
+        g_hBtnModeMarkerLine,
+        g_hBtnModeMarkerArrow,
+        g_hBtnModeMarkerWave,
+        g_hBtnModeText,
+        g_hBtnModeLine,
+        g_hBtnModeArrow,
+        g_hBtnModeWave,
+        g_hBtnModeFreehand,
+        g_hBtnModeShape,
+        g_hBtnModeEraser,
+        g_hComboFont,
+        g_hComboFontSize,
+        g_hComboFontSizeAlt,
+        g_hRadioFontSizeSlotA,
+        g_hRadioFontSizeSlotB,
+        g_hChkTextReadableBackground,
+        g_hRadioTextReadableBackgroundNormal,
+        g_hRadioTextReadableBackgroundInverted,
+        g_hComboWidth,
+        g_hComboMarkerAlpha,
+        g_hComboAnnotMethod,
+        g_hComboFreehandCorrection,
+        g_hComboMarkerTextStyle,
+        g_hComboLineDashStyle,
+        g_hComboShapeKind,
+        g_hComboShapeGeometry,
+        g_hComboShapeDrawMode,
+        g_hComboMagnifierShape,
+        g_hAnnotSettings,
+        g_hAnnotClear,
+        g_hAnnotList,
+        g_hAnnotSummary,
+    };
+    for (HWND hwnd : controls) {
+        if (!hwnd || !IsWindow(hwnd)) continue;
+        ctx->disabledAnnotationControls.push_back({ hwnd, IsWindowEnabled(hwnd) });
+        EnableWindow(hwnd, FALSE);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+}
+
+static bool CreatePasswordOverlay(PasswordInputDialog* ctx, HWND owner) {
+    if (!ctx) return false;
+    ctx->createdMessageTime = GetMessageTime();
+    ctx->createdTick = GetTickCount64();
+    ctx->anchor = PasswordOverlayAnchor(owner);
+    if (!ctx->anchor) return false;
+    TracePasswordOverlay(ctx, L"create_start", L"owner=" + preview_trace::Window(owner));
+    EnsurePasswordOverlayPanelClass();
+
+    ctx->panel = CreateWindowExW(WS_EX_TOOLWINDOW, L"PasswordOverlayPanel", L"",
+                                 WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
+                                 0, 0, 1, 1, ctx->anchor, nullptr, g_hInst, nullptr);
+    if (!ctx->panel) return false;
+    SetWindowLongPtrW(ctx->panel, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+    ctx->label = CreateWindowExW(0, L"STATIC", ctx->message.c_str(),
+                                 WS_CHILD | WS_VISIBLE,
+                                 0, 0, 1, 1, ctx->panel, nullptr, g_hInst, nullptr);
+    ctx->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
+                                0, 0, 1, 1, ctx->panel, reinterpret_cast<HMENU>(101),
+                                g_hInst, nullptr);
+    ctx->okButton = CreateWindowExW(0, L"BUTTON", L"OK",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                    0, 0, 1, 1, ctx->panel, reinterpret_cast<HMENU>(IDOK),
+                                    g_hInst, nullptr);
+    ctx->cancelButton = CreateWindowExW(0, L"BUTTON", L"Cancel",
+                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                        0, 0, 1, 1, ctx->panel, reinterpret_cast<HMENU>(IDCANCEL),
+                                        g_hInst, nullptr);
+    if (!ctx->label || !ctx->edit || !ctx->okButton || !ctx->cancelButton) {
+        DestroyPasswordOverlay(ctx);
+        return false;
+    }
+
+    HWND fontControls[] = { ctx->label, ctx->edit, ctx->okButton, ctx->cancelButton };
+    for (HWND control : fontControls) {
+        if (g_hUIFont) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g_hUIFont), TRUE);
+    }
+    SendMessageW(ctx->edit, EM_SETPASSWORDCHAR, static_cast<WPARAM>(L'*'), 0);
+    DisablePasswordOverlayAnnotationControls(ctx);
+    LayoutPasswordOverlay(ctx);
+    SetFocus(ctx->edit);
+    TracePasswordOverlay(ctx, L"create_end");
+    return true;
+}
+
+static POINT CurrentMessageScreenPoint() {
+    DWORD pos = GetMessagePos();
+    return POINT{ GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
+}
+
+static void RunPasswordOverlayMessageLoop(PasswordInputDialog* ctx) {
+    if (!ctx || !ctx->anchor) return;
+    MSG msg{};
+    while (!ctx->done) {
+        const BOOL gotMessage = GetMessageW(&msg, nullptr, 0, 0);
+        if (gotMessage == -1) return;
+        if (gotMessage == 0) {
+            PostQuitMessage(static_cast<int>(msg.wParam));
+            return;
+        }
+        if (ShouldSkipImeMessageInLoop(msg)) continue;
+        if (msg.hwnd == ctx->anchor && msg.message == WM_SIZE) {
+            LayoutPasswordOverlay(ctx);
+        }
+        if (msg.message == WM_ACTIVATEAPP && msg.wParam == FALSE) {
+            CancelPasswordOverlay(ctx, L"activate_app_false");
+            continue;
+        }
+        if (msg.message == WM_KILLFOCUS && IsPasswordOverlayFocusableControl(ctx, msg.hwnd)) {
+            HWND nextFocus = reinterpret_cast<HWND>(msg.wParam);
+            if (!IsPasswordOverlayFocusableControl(ctx, nextFocus)) {
+                CancelPasswordOverlay(ctx, L"focus_left_form");
+                continue;
+            }
+        }
+        if (msg.message == WM_COMMAND) {
+            HWND commandHwnd = reinterpret_cast<HWND>(msg.lParam);
+            if (commandHwnd == ctx->okButton) {
+                AcceptPasswordOverlay(ctx);
+                continue;
+            }
+            if (commandHwnd == ctx->cancelButton) {
+                CancelPasswordOverlay(ctx, L"cancel_button");
+                continue;
+            }
+        }
+        if (msg.message == WM_KEYDOWN) {
+            if (msg.wParam == VK_RETURN && msg.hwnd == ctx->edit) {
+                AcceptPasswordOverlay(ctx);
+                continue;
+            }
+            if (msg.wParam == VK_ESCAPE &&
+                (msg.hwnd == ctx->anchor || IsPasswordOverlayControl(ctx, msg.hwnd))) {
+                CancelPasswordOverlay(ctx, L"escape");
+                continue;
+            }
+            if (msg.wParam == VK_TAB && IsPasswordOverlayControl(ctx, msg.hwnd)) {
+                const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                HWND order[] = { ctx->edit, ctx->okButton, ctx->cancelButton };
+                int index = 0;
+                for (int i = 0; i < 3; ++i) {
+                    if (msg.hwnd == order[i]) {
+                        index = i;
+                        break;
+                    }
+                }
+                index = shift ? (index + 2) % 3 : (index + 1) % 3;
+                SetFocus(order[index]);
+                continue;
+            }
+        }
+        if (IsMouseDownMessage(msg.message) &&
+            !IsPasswordOverlayControl(ctx, msg.hwnd) &&
+            IsPasswordOverlayPoint(ctx, CurrentMessageScreenPoint())) {
+            continue;
+        }
+        if (IsMouseDownMessage(msg.message) &&
+            !IsPasswordOverlayControl(ctx, msg.hwnd) &&
+            !IsPasswordOverlayPoint(ctx, CurrentMessageScreenPoint())) {
+            if (IsInitialPasswordOverlayMouseMessage(ctx, msg)) {
+                TracePasswordOverlay(ctx, L"ignore_initial_mouse");
+                continue;
+            }
+            // Outside clicks mean cancel.  Consume the click so it cannot also
+            // trigger a file-open command behind the password form.
+            CancelPasswordOverlay(ctx, L"outside_mouse");
+            continue;
+        }
+        if (!IsPasswordOverlayControl(ctx, msg.hwnd) &&
+            msg.hwnd != ctx->anchor &&
+            IsBlockedPasswordOverlayBackgroundInput(msg)) {
+            continue;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
 }
 
 bool PromptPasswordText(HWND owner, const std::wstring& title,
@@ -763,24 +1195,20 @@ bool PromptPasswordText(HWND owner, const std::wstring& title,
     PasswordInputDialog ctx;
     ctx.title = title;
     ctx.message = message;
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = PasswordInputDlgProc;
-    wc.hInstance = g_hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"PasswordInputDlg";
-    RegisterClassW(&wc);
-    HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 392, 170,
-                             owner, nullptr, g_hInst, &ctx);
-    if (!w) return false;
-    ShowWindow(w, SW_SHOW);
-    UpdateWindow(w);
-    RunDialogMessageLoop(w, &ctx.done);
+    HWND previousFocus = GetFocus();
+    if (!CreatePasswordOverlay(&ctx, owner)) return false;
+    RunPasswordOverlayMessageLoop(&ctx);
+    DestroyPasswordOverlay(&ctx);
+    if (previousFocus && IsWindow(previousFocus)) {
+        SetFocus(previousFocus);
+    }
     if (ctx.ok) {
+        SecureClearString(out);
         out = ctx.result;
+        SecureClearString(ctx.result);
         return true;
     }
+    SecureClearString(ctx.result);
     return false;
 }
 
@@ -802,7 +1230,7 @@ static bool AcceptSelectPathDialogSelection(SelectPathDialog* ctx, HWND hWnd) {
     int sel = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
     if (sel < 0 || sel >= static_cast<int>(ctx->paths.size())) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi() ? L"Select a path to remove." : L"削除するパスを選択してください。",
+                       localization::Text(L"dialog.select_path.remove_required"),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -934,10 +1362,11 @@ bool PromptSelectPath(HWND owner, const std::wstring& title,
     wc.lpszClassName = L"SelectPathDlg";
     RegisterClassW(&wc);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, 620, 320,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return false;
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     RunDialogMessageLoop(w, &ctx.done);
@@ -1003,9 +1432,7 @@ static LRESULT CALLBACK RestoreBackupDlgProc(HWND hWnd, UINT msg, WPARAM wParam,
         const int listY = margin + labelH + 8;
         const int listH = 220;
 
-        std::wstring msgText = IsEnglishUi()
-            ? L"Select a backup to restore.\nThese backups are automatically created during conflicts or app crashes."
-            : L"復元するバックアップを選択してください。\n（競合時や異常発生時に自動退避されたファイルの一覧です）";
+        std::wstring msgText = localization::Text(L"dialog.common.eecad8e36e0c");
 
         ctx->label = CreateWindowExW(0, L"STATIC", msgText.c_str(),
                                      WS_CHILD | WS_VISIBLE,
@@ -1057,9 +1484,9 @@ static LRESULT CALLBACK RestoreBackupDlgProc(HWND hWnd, UINT msg, WPARAM wParam,
             SetFocus(ctx->list);
         }
 
-        std::wstring openFolderTxt = IsEnglishUi() ? L"Open Folder" : L"フォルダを開く";
-        std::wstring restoreTxt = IsEnglishUi() ? L"Restore" : L"復元する";
-        std::wstring cancelTxt = IsEnglishUi() ? L"Cancel" : L"キャンセル";
+        std::wstring openFolderTxt = localization::Text(L"dialog.common.78f2c08a8845");
+        std::wstring restoreTxt = localization::Text(L"dialog.common.575a7e91c663");
+        std::wstring cancelTxt = localization::Text(L"dialog.common.3672b0b92134");
 
         CreateWindowExW(0, L"BUTTON", openFolderTxt.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         margin, btnY, 150, btnH, hWnd, reinterpret_cast<HMENU>(102), cs->hInstance, nullptr);
@@ -1134,7 +1561,7 @@ bool PromptRestoreBackupList(HWND owner, const std::filesystem::path& backupRoot
     RestoreBackupDialogCtx ctx;
     ctx.backupRoot = backupRoot;
 
-    std::wstring title = IsEnglishUi() ? L"Restore Backup" : L"バックアップから復元";
+    std::wstring title = localization::Text(L"dialog.common.95d9abd66237");
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = RestoreBackupDlgProc;
@@ -1144,10 +1571,11 @@ bool PromptRestoreBackupList(HWND owner, const std::filesystem::path& backupRoot
     RegisterClassW(&wc);
 
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, 640, 400,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return false;
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     RunDialogMessageLoop(w, &ctx.done);
@@ -1164,6 +1592,9 @@ constexpr int kSilentDialogIdButton1 = 5102;
 constexpr int kSilentDialogIdButton2 = 5103;
 constexpr int kSilentDialogIdButton3 = 5104;
 constexpr int kSilentDialogIdButton4 = 5105;
+constexpr int kSilentDialogIdPathBase = 5200;
+constexpr int kSilentDialogIdCopyPathBase = 5300;
+constexpr size_t kSilentDialogMaxPaths = 3;
 
 struct SilentDialogButtonSpec {
     int id = 0;
@@ -1181,6 +1612,14 @@ struct SilentDialogState {
     HWND button2{};
     HWND button3{};
     HWND button4{};
+    std::vector<HWND> pathLabels;
+    std::vector<HWND> pathButtons;
+    std::vector<HWND> copyPathButtons;
+    std::vector<bool> expandedPaths;
+    std::wstring defaultOkLabel;
+    std::wstring defaultCancelLabel;
+    std::wstring defaultYesLabel;
+    std::wstring defaultNoLabel;
     SilentDialogButtonSpec buttonSpecs[4]{};
     int buttonCount = 0;
     SilentDialogResult result = SilentDialogResult::None;
@@ -1220,6 +1659,58 @@ static std::wstring NormalizeNewlinesForDrawText(const std::wstring& text) {
     return out;
 }
 
+static std::wstring CompactDiagnosticPath(const std::wstring& path) {
+    constexpr size_t kMaxVisibleChars = 72;
+    constexpr size_t kPrefixChars = 20;
+    constexpr size_t kSuffixChars = 48;
+    if (path.size() <= kMaxVisibleChars) return path;
+    return path.substr(0, kPrefixChars) + L"…" + path.substr(path.size() - kSuffixChars);
+}
+
+static bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
+    if (text.empty()) return false;
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) return false;
+    void* destination = GlobalLock(memory);
+    if (!destination) {
+        GlobalFree(memory);
+        return false;
+    }
+    memcpy(destination, text.c_str(), bytes);
+    GlobalUnlock(memory);
+    if (!OpenClipboard(owner)) {
+        GlobalFree(memory);
+        return false;
+    }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+        CloseClipboard();
+        GlobalFree(memory);
+        return false;
+    }
+    CloseClipboard();
+    return true;
+}
+
+static void AddPathToolTip(HWND dialog, HWND control, const std::wstring& path) {
+    if (!dialog || !control || path.empty()) return;
+    HWND tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                   WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                                   dialog, nullptr, g_hInst, nullptr);
+    if (!tooltip) return;
+    TOOLINFOW tool{};
+    tool.cbSize = sizeof(tool);
+    tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    tool.hwnd = dialog;
+    tool.uId = reinterpret_cast<UINT_PTR>(control);
+    tool.lpszText = const_cast<wchar_t*>(path.c_str());
+    if (!SendMessageW(tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool))) {
+        DestroyWindow(tooltip);
+    }
+}
+
 static int DialogScale(HWND hWnd, int pxAt96Dpi) {
     HDC dc = GetDC(hWnd);
     int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
@@ -1249,18 +1740,18 @@ static COLORREF SilentDialogAccentColor(SoftNoticeKind kind) {
     }
 }
 
-static const wchar_t* SilentDialogKindLabel(const SilentDialogOptions& options) {
+static std::wstring SilentDialogKindLabel(const SilentDialogOptions& options) {
     if (options.buttons != SilentDialogButtons::Ok) {
-        return IsEnglishUi() ? L"Confirmation" : L"確認";
+        return localization::Text(L"dialog.kind.confirmation");
     }
     switch (options.kind) {
     case SoftNoticeKind::Warning:
-        return IsEnglishUi() ? L"Warning" : L"警告";
+        return localization::Text(L"dialog.kind.warning");
     case SoftNoticeKind::Error:
-        return IsEnglishUi() ? L"Error" : L"エラー";
+        return localization::Text(L"dialog.kind.error");
     case SoftNoticeKind::Info:
     default:
-        return IsEnglishUi() ? L"Information" : L"情報";
+        return localization::Text(L"dialog.kind.information");
     }
 }
 
@@ -1305,18 +1796,14 @@ static int SilentDialogButtonIdForResult(const SilentDialogState* ctx, SilentDia
 
 static void ResolveSilentDialogButtons(SilentDialogState* ctx) {
     if (!ctx) return;
-    const wchar_t* ok = ctx->options.okLabel.empty()
-        ? (IsEnglishUi() ? L"OK" : L"OK")
-        : ctx->options.okLabel.c_str();
-    const wchar_t* cancel = ctx->options.cancelLabel.empty()
-        ? (IsEnglishUi() ? L"Cancel" : L"キャンセル")
-        : ctx->options.cancelLabel.c_str();
-    const wchar_t* yes = ctx->options.yesLabel.empty()
-        ? (IsEnglishUi() ? L"Yes" : L"はい")
-        : ctx->options.yesLabel.c_str();
-    const wchar_t* no = ctx->options.noLabel.empty()
-        ? (IsEnglishUi() ? L"No" : L"いいえ")
-        : ctx->options.noLabel.c_str();
+    ctx->defaultOkLabel = localization::Text(L"dialog.button.ok");
+    ctx->defaultCancelLabel = localization::Text(L"dialog.button.cancel");
+    ctx->defaultYesLabel = localization::Text(L"dialog.button.yes");
+    ctx->defaultNoLabel = localization::Text(L"dialog.button.no");
+    const wchar_t* ok = ctx->options.okLabel.empty() ? ctx->defaultOkLabel.c_str() : ctx->options.okLabel.c_str();
+    const wchar_t* cancel = ctx->options.cancelLabel.empty() ? ctx->defaultCancelLabel.c_str() : ctx->options.cancelLabel.c_str();
+    const wchar_t* yes = ctx->options.yesLabel.empty() ? ctx->defaultYesLabel.c_str() : ctx->options.yesLabel.c_str();
+    const wchar_t* no = ctx->options.noLabel.empty() ? ctx->defaultNoLabel.c_str() : ctx->options.noLabel.c_str();
     switch (ctx->options.buttons) {
     case SilentDialogButtons::Ok:
         ctx->buttonSpecs[0] = { kSilentDialogIdButton1, SilentDialogResult::Ok, ok };
@@ -1459,6 +1946,20 @@ static LRESULT CALLBACK SilentDialogEditProc(HWND hWnd, UINT msg, WPARAM wParam,
     return DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
+static LRESULT CALLBACK SilentDialogPathProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                             UINT_PTR idSubclass, DWORD_PTR refData) {
+    auto* ctx = reinterpret_cast<SilentDialogState*>(refData);
+    if (!ctx || !ctx->hwnd) return DefSubclassProc(hWnd, msg, wParam, lParam);
+    const int pathId = kSilentDialogIdPathBase + static_cast<int>(idSubclass);
+    if (msg == WM_LBUTTONUP ||
+        (msg == WM_KEYDOWN && (wParam == VK_RETURN || wParam == VK_SPACE))) {
+        SendMessageW(ctx->hwnd, WM_COMMAND, MAKEWPARAM(pathId, BN_CLICKED),
+                     reinterpret_cast<LPARAM>(hWnd));
+        return 0;
+    }
+    return DefSubclassProc(hWnd, msg, wParam, lParam);
+}
+
 static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     SilentDialogState* ctx = reinterpret_cast<SilentDialogState*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
     switch (msg) {
@@ -1474,6 +1975,10 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         const int buttonW = DialogScale(hWnd, ctx->buttonCount >= 4 ? 112 : 160);
         const int buttonH = DialogScale(hWnd, 28);
         const int buttonGap = DialogScale(hWnd, 10);
+        const int pathLabelH = DialogScale(hWnd, 18);
+        const int pathControlH = DialogScale(hWnd, 24);
+        const int pathRowH = pathLabelH + pathControlH + DialogScale(hWnd, 8);
+        const size_t pathCount = std::min(ctx->options.paths.size(), kSilentDialogMaxPaths);
 
         RECT client{};
         GetClientRect(hWnd, &client);
@@ -1481,9 +1986,12 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         int clientH = client.bottom - client.top;
         int buttonsY = clientH - margin - buttonH;
         int messageTop = margin + labelH + DialogScale(hWnd, 8);
-        int messageH = std::max(DialogScale(hWnd, 96), buttonsY - messageTop - DialogScale(hWnd, 10));
+        int pathAreaH = static_cast<int>(pathCount) * pathRowH;
+        int messageH = std::max(DialogScale(hWnd, 96),
+                                buttonsY - messageTop - pathAreaH - DialogScale(hWnd, 10));
 
-        ctx->labelKind = CreateWindowExW(0, L"STATIC", SilentDialogKindLabel(ctx->options),
+        const std::wstring kindLabel = SilentDialogKindLabel(ctx->options);
+        ctx->labelKind = CreateWindowExW(0, L"STATIC", kindLabel.c_str(),
                                          WS_CHILD | WS_VISIBLE,
                                          margin, margin, clientW - margin * 2, labelH,
                                          hWnd, nullptr, cs->hInstance, nullptr);
@@ -1496,6 +2004,44 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         if (ctx->editMessage) {
             SetWindowSubclass(ctx->editMessage, SilentDialogEditProc, 1, reinterpret_cast<DWORD_PTR>(ctx));
             SendMessageW(ctx->editMessage, EM_SETSEL, 0, 0);
+        }
+
+        ctx->pathLabels.reserve(pathCount);
+        ctx->pathButtons.reserve(pathCount);
+        ctx->copyPathButtons.reserve(pathCount);
+        ctx->expandedPaths.assign(pathCount, false);
+        const int pathTop = messageTop + messageH + DialogScale(hWnd, 8);
+        const int copyButtonW = DialogScale(hWnd, 76);
+        const int pathButtonW = std::max(DialogScale(hWnd, 140),
+                                         clientW - margin * 2 - copyButtonW - DialogScale(hWnd, 8));
+        for (size_t i = 0; i < pathCount; ++i) {
+            const auto& path = ctx->options.paths[i];
+            const int rowTop = pathTop + static_cast<int>(i) * pathRowH;
+            const std::wstring label = path.label.empty()
+                ? localization::Text(L"dialog.path.label")
+                : path.label;
+            HWND pathLabel = CreateWindowExW(0, L"STATIC", label.c_str(), WS_CHILD | WS_VISIBLE,
+                                              margin, rowTop, clientW - margin * 2, pathLabelH,
+                                              hWnd, nullptr, cs->hInstance, nullptr);
+            HWND pathButton = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", CompactDiagnosticPath(path.value).c_str(),
+                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY,
+                                               margin, rowTop + pathLabelH, pathButtonW, pathControlH,
+                                               hWnd, reinterpret_cast<HMENU>(kSilentDialogIdPathBase + i),
+                                               cs->hInstance, nullptr);
+            HWND copyButton = CreateWindowExW(0, L"BUTTON", localization::Text(L"dialog.path.copy").c_str(),
+                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                               margin + pathButtonW + DialogScale(hWnd, 8),
+                                               rowTop + pathLabelH, copyButtonW, pathControlH,
+                                               hWnd, reinterpret_cast<HMENU>(kSilentDialogIdCopyPathBase + i),
+                                               cs->hInstance, nullptr);
+            ctx->pathLabels.push_back(pathLabel);
+            ctx->pathButtons.push_back(pathButton);
+            ctx->copyPathButtons.push_back(copyButton);
+            if (pathButton) {
+                SetWindowSubclass(pathButton, SilentDialogPathProc, static_cast<UINT_PTR>(i),
+                                  reinterpret_cast<DWORD_PTR>(ctx));
+            }
+            AddPathToolTip(hWnd, pathButton, path.value);
         }
 
         int totalButtonsW = (buttonW * ctx->buttonCount) + (buttonGap * std::max(0, ctx->buttonCount - 1));
@@ -1521,6 +2067,9 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         applyFont(ctx->button2);
         applyFont(ctx->button3);
         applyFont(ctx->button4);
+        for (HWND control : ctx->pathLabels) applyFont(control);
+        for (HWND control : ctx->pathButtons) applyFont(control);
+        for (HWND control : ctx->copyPathButtons) applyFont(control);
 
         HWND focus = GetDlgItem(hWnd, defaultId);
         if (focus) SetFocus(focus);
@@ -1560,6 +2109,25 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
     case WM_COMMAND: {
         int id = LOWORD(wParam);
         if (!ctx) break;
+        if (id >= kSilentDialogIdPathBase &&
+            id < kSilentDialogIdPathBase + static_cast<int>(ctx->pathButtons.size())) {
+            const size_t index = static_cast<size_t>(id - kSilentDialogIdPathBase);
+            ctx->expandedPaths[index] = !ctx->expandedPaths[index];
+            const std::wstring& path = ctx->options.paths[index].value;
+            SetWindowTextW(ctx->pathButtons[index],
+                           (ctx->expandedPaths[index] ? path : CompactDiagnosticPath(path)).c_str());
+            return 0;
+        }
+        if (id >= kSilentDialogIdCopyPathBase &&
+            id < kSilentDialogIdCopyPathBase + static_cast<int>(ctx->copyPathButtons.size())) {
+            const size_t index = static_cast<size_t>(id - kSilentDialogIdCopyPathBase);
+            if (CopyTextToClipboard(hWnd, ctx->options.paths[index].value)) {
+                ShowSoftNotice(hWnd, localization::Text(L"dialog.path.copied"), SoftNoticeKind::Info);
+            } else {
+                ShowSoftNotice(hWnd, localization::Text(L"dialog.path.copy_failed"), SoftNoticeKind::Warning);
+            }
+            return 0;
+        }
         if (id == IDCANCEL) {
             CloseSilentDialog(ctx, SilentDialogEscapeResult(ctx->options));
             return 0;
@@ -1594,9 +2162,13 @@ SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& optio
     ctx.options = options;
     ctx.owner = ResolveSilentDialogOwner(owner);
     if (ctx.options.title.empty()) {
-        ctx.options.title = IsEnglishUi() ? L"Notice" : L"通知";
+        ctx.options.title = localization::Text(L"dialog.title.notice");
     }
     ctx.options.message = NormalizeNewlinesForEditControl(ctx.options.message);
+    ctx.options.paths.erase(
+        std::remove_if(ctx.options.paths.begin(), ctx.options.paths.end(),
+                       [](const SilentDialogPath& path) { return path.value.empty(); }),
+        ctx.options.paths.end());
 
     const HWND anchor = ctx.owner ? ctx.owner : GetDesktopWindow();
     const int baseWidth = (ctx.options.preferredWidthPx > 0) ? ctx.options.preferredWidthPx : 560;
@@ -1605,12 +2177,19 @@ SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& optio
     const int labelH = DialogScale(anchor, 20);
     const int buttonH = DialogScale(anchor, 28);
     const int buttonBandH = buttonH + DialogScale(anchor, 18);
+    const int pathRowH = DialogScale(anchor, 50);
+    const int pathAreaH = static_cast<int>(std::min(ctx.options.paths.size(), kSilentDialogMaxPaths)) * pathRowH;
     const int textWidth = std::max(DialogScale(anchor, 220), width - margin * 2 - DialogScale(anchor, 8));
     const SIZE measured = MeasureSilentDialogMessage(anchor, ctx.options.message, textWidth);
     const int messageH = std::clamp(static_cast<int>(measured.cy) + DialogScale(anchor, 20),
                                     DialogScale(anchor, 96),
                                     DialogScale(anchor, 280));
-    const int height = margin + labelH + DialogScale(anchor, 8) + messageH + buttonBandH + margin;
+    // CreateWindowExW receives an outer-window height.  Reserve the non-client
+    // area so the minimum message area and path rows do not overlap the buttons.
+    const int nonClientHeight = std::max(0, GetSystemMetrics(SM_CYCAPTION)) +
+                                std::max(0, GetSystemMetrics(SM_CYDLGFRAME)) * 2;
+    const int height = margin + labelH + DialogScale(anchor, 8) + messageH +
+                       DialogScale(anchor, 8) + pathAreaH + buttonBandH + margin + nonClientHeight;
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = SilentDialogProc;
@@ -1621,7 +2200,7 @@ SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& optio
 
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
                              wc.lpszClassName, ctx.options.title.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, width, height,
                              ctx.owner, nullptr, g_hInst, &ctx);
     if (!w) return SilentDialogResult::None;
@@ -1646,7 +2225,7 @@ SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& optio
 }
 
 void ShowSilentMessageDialog(HWND owner, const std::wstring& title, const std::wstring& message,
-                             SoftNoticeKind kind) {
+                             SoftNoticeKind kind, const std::vector<SilentDialogPath>& paths) {
     if (ShouldSuppressRepeatedUiMessage(g_silentMessageDialogRepeatState, title, message, kind,
                                         kSilentMessageDialogRepeatSuppressMs)) {
         return;
@@ -1656,12 +2235,13 @@ void ShowSilentMessageDialog(HWND owner, const std::wstring& title, const std::w
     options.title = title;
     options.message = message;
     options.kind = kind;
+    options.paths = paths;
     options.buttons = offerAbnormalExit ? SilentDialogButtons::OkCancel : SilentDialogButtons::Ok;
     options.okLabel = offerAbnormalExit
-        ? (IsEnglishUi() ? L"Close" : L"閉じる")
+        ? (localization::Text(L"dialog.common.603bc62f3f34"))
         : std::wstring();
     options.cancelLabel = offerAbnormalExit
-        ? (IsEnglishUi() ? L"Force Exit (Non-destructive)" : L"非破壊・強制終了")
+        ? (localization::Text(L"dialog.common.fea723590aa2"))
         : std::wstring();
     options.defaultResult = SilentDialogResult::Ok;
     options.escapeResult = SilentDialogResult::Ok;

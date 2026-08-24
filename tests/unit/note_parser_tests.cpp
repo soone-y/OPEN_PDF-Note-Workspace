@@ -481,6 +481,13 @@ int main() {
                    Action::RawFallback,
                "presentation policy refuses reuse without a committed cache");
 
+        const std::wstring indexedMultiline = L"# title\nbody";
+        Expect(note::RichEditWindowTextLengthForIndexedText(indexedMultiline) ==
+                   indexedMultiline.size() + 1,
+               "presentation length keeps RichEdit CRLF distinct from indexed line breaks");
+        Expect(note::RichEditWindowTextLengthForIndexedText(L"single line") == 11,
+               "presentation length leaves a single indexed line unchanged");
+
         const note::NoteDerivedRefreshPlan lightweight =
             note::ResolveNoteDerivedRefreshPlan({false, false, false});
         const note::NoteDerivedRefreshPlan headings =
@@ -1574,6 +1581,18 @@ int main() {
         Expect(rule != nullptr && ruleStart != std::wstring::npos &&
                    rule->span.start.value == ruleStart && rule->span.end.value == ruleStart + 4,
                "dash thematic break after text remains a horizontal-rule block");
+    }
+
+    {
+        const note::NoteDocument doc = ParseMd4c(
+            L"Text before a pending item\n"
+            L"- \n");
+        const note::BlockNode* heading = FindBlock(doc, note::BlockKind::Heading);
+        const note::BlockNode* paragraph = FindBlock(doc, note::BlockKind::Paragraph);
+        Expect(heading == nullptr,
+               "empty unordered-list marker does not promote the preceding text to a heading");
+        Expect(paragraph != nullptr,
+               "empty unordered-list marker keeps the preceding text as a paragraph");
     }
 
     {

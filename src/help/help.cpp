@@ -2,6 +2,7 @@
 #include "help/help.h"
 
 #include "core/app_core.h"
+#include "core/localization.h"
 #include "core/path_safety.h"
 #include "clrop/bridge.h"
 #include "ui/noop_nav_guard.h"
@@ -37,6 +38,7 @@ struct HelpDialogCtx {
     int currentSection = 0;
     size_t nextSearchOffset = 0;
     int nextGlobalSearchSection = 0;
+    bool ownerRestored = false;
     bool done = false;
 };
 
@@ -83,7 +85,19 @@ static std::wstring RenderHelpMarkdownForDisplay(const std::wstring& markdown) {
                 continue;
             }
             if (source[i] == L'`') {
-                ++i;
+                const size_t close = source.find(L'`', i + 1);
+                if (close != std::wstring::npos) {
+                    // Inline code in Help_Reference.md names visible buttons,
+                    // menu paths, keys, files, and folders.  Give it a compact
+                    // control-like shape rather than exposing Markdown syntax.
+                    out += L"［";
+                    out.append(source, i + 1, close - i - 1);
+                    out += L"］";
+                    i = close + 1;
+                    continue;
+                }
+                // Keep malformed input visible and guarantee forward progress.
+                out.push_back(source[i++]);
                 continue;
             }
             out.push_back(source[i++]);
@@ -104,7 +118,8 @@ static std::wstring RenderHelpMarkdownForDisplay(const std::wstring& markdown) {
             out += content == line.size() ? L"" : L"■ ";
             out += renderInline(line.substr(content));
         } else if (line.size() >= 2 && line[0] == L'-' && line[1] == L' ') {
-            out += L"• ";
+            // Older bundled documents used Markdown list lines.  Keep them
+            // readable without adding a second visual marker to explanations.
             out += renderInline(line.substr(2));
         } else {
             out += renderInline(line);
@@ -151,9 +166,10 @@ static bool IsSafeBundledHelpPath(const std::filesystem::path& path, bool direct
 }
 
 static std::optional<std::filesystem::path> FindBundledHelpDocsDir(const std::filesystem::path& exeDir) {
+    const wchar_t* const locale = IsEnglishUi() ? L"en" : L"ja";
     const std::filesystem::path candidates[] = {
         exeDir / L"docs",                  // release: <release>/docs
-        exeDir.parent_path().parent_path() / L"docs" / L"public", // development: <repo>/out/bin
+        exeDir.parent_path().parent_path() / L"docs" / locale, // development: <repo>/out/bin
     };
     for (const auto& candidate : candidates) {
         if (IsSafeBundledHelpPath(candidate, true)) return candidate;
@@ -161,13 +177,26 @@ static std::optional<std::filesystem::path> FindBundledHelpDocsDir(const std::fi
     return std::nullopt;
 }
 
+static std::optional<std::filesystem::path> FindBundledHelpReferenceDocument(
+    const std::filesystem::path& exeDir) {
+    const auto docsDir = FindBundledHelpDocsDir(exeDir);
+    if (!docsDir) return std::nullopt;
+    const std::filesystem::path reference = *docsDir / L"Help_Reference.md";
+    if (!IsSafeBundledHelpPath(reference, false)) return std::nullopt;
+    return reference;
+}
+
 static bool LaunchBundledHelpGuide(HWND owner) {
     const std::filesystem::path exeDir = GetExeDir();
     const std::filesystem::path viewerPath = exeDir / L"readonly_viewer.exe";
-    const auto docsDir = FindBundledHelpDocsDir(exeDir);
-    if (!IsSafeBundledHelpPath(viewerPath, false) || !docsDir) return false;
+    if (!IsSafeBundledHelpPath(viewerPath, false)) return false;
 
-    const std::wstring parameters = L"--folder \"" + docsDir->wstring() + L"\"";
+    // Open the actual reference document.  Passing only --folder populated the
+    // Viewer tree but deliberately left every document unopened.
+    std::wstring parameters;
+    if (const auto reference = FindBundledHelpReferenceDocument(exeDir)) {
+        parameters = L"--open \"" + reference->wstring() + L"\"";
+    }
     const HINSTANCE result = ShellExecuteW(owner, L"open", viewerPath.c_str(), parameters.c_str(),
                                             exeDir.c_str(), SW_SHOWNORMAL);
     return reinterpret_cast<INT_PTR>(result) > 32;
@@ -502,15 +531,19 @@ enum HelpSectionId : int {
     kHelpSectionCount,
 };
 
-static const wchar_t* HelpSectionLabel(int section, bool english) {
-    static constexpr const wchar_t* kJa[kHelpSectionCount] = {
-        L"はじめに", L"ソフトの役割", L"ファイルとワークスペース", L"メニュー操作", L"保存・復元", L"出力", L"表示とページ移動", L"ノート形式・独自拡張子 (.clro)", L"ノート記法", L"注釈ツールと色", L"設定", L"キーボード操作", L"困ったとき", L"詳細な案内",
+static const wchar_t* HelpSectionLabelId(int section) {
+    static constexpr const wchar_t* kIds[kHelpSectionCount] = {
+        L"help.section.start", L"help.section.software", L"help.section.files",
+        L"help.section.menus", L"help.section.saving", L"help.section.output",
+        L"help.section.view", L"help.section.extensions", L"help.section.notes",
+        L"help.section.annotations", L"help.section.settings", L"help.section.shortcuts",
+        L"help.section.troubleshooting", L"help.section.full_guide",
     };
-    static constexpr const wchar_t* kEn[kHelpSectionCount] = {
-        L"Getting started", L"Application roles", L"Files & workspace", L"Menu operations", L"Saving & recovery", L"Export", L"View & navigation", L"Note formats & .clro", L"Note syntax", L"Annotation tools & colors", L"Settings", L"Keyboard", L"Troubleshooting", L"Detailed guide",
-    };
-    if (section < 0 || section >= kHelpSectionCount) return L"";
-    return (english ? kEn : kJa)[section];
+    return (section < 0 || section >= kHelpSectionCount) ? L"" : kIds[section];
+}
+
+static std::wstring HelpSectionLabel(int section) {
+    return localization::Text(HelpSectionLabelId(section));
 }
 
 static std::wstring CurrentNoteContextHelpText(bool english) {
@@ -528,78 +561,61 @@ static std::wstring CurrentNoteContextHelpText(bool english) {
            (ext.empty() ? (english ? L"(none)" : L"（なし）") : ext) + L" / " + route;
 }
 
-static std::wstring HelpSectionTitle(int section, bool english) {
-    if (section == kHelpSectionStart) return english ? L"Help center" : L"ヘルプセンター";
-    return HelpSectionLabel(section, english);
+static std::wstring HelpSectionTitle(int section) {
+    if (section == kHelpSectionStart) return localization::Text(L"help.title");
+    return HelpSectionLabel(section);
 }
 
-static std::wstring HelpSectionSubtitle(int section, bool english) {
+static std::wstring HelpSectionSubtitle(int section) {
     switch (section) {
     case kHelpSectionStart:
-        return english ? L"Choose a topic on the left. All help stays on this device."
-                       : L"左の項目から必要な案内を選べます。ヘルプはすべてこの端末内で表示します。";
+        return localization::Text(L"help.subtitle.start");
     case kHelpSectionSoftware:
-        return english ? L"Choose the main app for editing and the read-only viewer for bundled documents."
-                       : L"編集はメインソフト、同梱文書の閲覧は読み取り専用Viewerを使います。";
+        return localization::Text(L"help.subtitle.software");
     case kHelpSectionFiles:
-        return english ? L"Open, import, organize, rename, and move files without silently changing originals."
-                       : L"ワークスペース、PDF、ノートを開く・取り込む・整理する方法です。原本は黙って変更しません。";
+        return localization::Text(L"help.subtitle.files");
     case kHelpSectionMenus:
-        return english ? L"A reference for File, Edit, Operations, View, Save, Export, Settings, and Help menus."
-                       : L"ファイル、編集、操作、表示、保存、出力、設定、ヘルプの各メニューを説明します。";
+        return localization::Text(L"help.subtitle.menus");
     case kHelpSectionExtensions:
-        return english ? L"Choose an extension according to how you create and use the note."
-                       : L"ノートの作成方法と使い方に合わせて拡張子を選んでください。";
+        return localization::Text(L"help.subtitle.extensions");
     case kHelpSectionSaving:
-        return english ? L"Edits are staged first, then integrated only when you choose to save."
-                       : L"編集内容はまず stage に保護され、保存時にだけ原本へ統合されます。";
+        return localization::Text(L"help.subtitle.saving");
     case kHelpSectionOutput:
-        return english ? L"Exports create separate output files; they do not overwrite the original PDF or note."
-                       : L"出力は別ファイルを作ります。開いている原本PDFやノートを上書きしません。";
+        return localization::Text(L"help.subtitle.output");
     case kHelpSectionView:
-        return english ? L"Control zoom, page navigation, layout, readable text, and scrolling direction."
-                       : L"拡大率、ページ移動、カラム、可読化、スクロール方向など表示の設定です。";
+        return localization::Text(L"help.subtitle.view");
     case kHelpSectionNotes:
-        return english ? L"Markdown, supported custom markup, and math notation for notes."
-                       : L"Markdown、対応する独自 markup、数式記法について説明します。";
+        return localization::Text(L"help.subtitle.notes");
     case kHelpSectionAnnotations:
-        return english ? L"Choose annotation tools, widths, styles, colors, and the shared color palette."
-                       : L"注釈ツールの使い分け、線幅・線種・色・カラーパレットを説明します。";
+        return localization::Text(L"help.subtitle.annotations");
     case kHelpSectionSettings:
-        return english ? L"Settings control display, notes, saving, schedules, layout, annotations, markup, and palettes."
-                       : L"設定は表示、ノート、保存、スケジュール、画面構成、注釈、markup、パレットに分かれます。";
+        return localization::Text(L"help.subtitle.settings");
     case kHelpSectionShortcuts:
-        return english ? L"Keyboard input takes priority while editing text or using IME."
-                       : L"ノート入力・テキスト編集中・IME変換中は文字入力を優先します。";
+        return localization::Text(L"help.subtitle.shortcuts");
     case kHelpSectionTroubleshooting:
-        return english ? L"Find the next safe action when opening, saving, restoring, displaying, or converting fails."
-                       : L"開けない、保存できない、復元したい、表示や変換で困ったときの確認先です。";
+        return localization::Text(L"help.subtitle.troubleshooting");
     default:
-        return english ? L"The complete local help text." : L"従来の詳細なローカルヘルプです。";
+        return localization::Text(L"help.subtitle.full_guide");
     }
 }
 
-static std::optional<std::wstring> LoadHelpReferenceSection(int section, bool english) {
-    if (english) return std::nullopt;
+static std::optional<std::wstring> LoadHelpReferenceSection(int section) {
     const auto docsDir = FindBundledHelpDocsDir(GetExeDir());
     if (!docsDir) return std::nullopt;
     const auto document = ReadUtf8TextFile(*docsDir / L"Help_Reference.md");
     if (!document) return std::nullopt;
-
-    const std::wstring heading = L"## " + std::wstring(HelpSectionLabel(section, false));
-    const size_t start = document->find(heading);
-    if (start == std::wstring::npos) return std::nullopt;
-    const size_t bodyStart = start + heading.size();
-    const size_t next = document->find(L"\n## ", bodyStart);
-    return RenderHelpMarkdownForDisplay(document->substr(bodyStart, next == std::wstring::npos
-                                                                 ? std::wstring::npos
-                                                                 : next - bodyStart));
+    // The concise distributed reference has six headings while this dialog
+    // has fourteen task-oriented categories.  The detailed-guide category is
+    // therefore the exact document view; short categories below remain safe
+    // fallbacks instead of trying to match unrelated headings.
+    if (section != kHelpSectionFullGuide) return std::nullopt;
+    return RenderHelpMarkdownForDisplay(*document);
 }
 
 static std::wstring HelpSectionBody(int section, bool english) {
     // Help_Reference.md is the Japanese help-content source of truth. The
     // in-code text below is a distribution-damage fallback only.
-    if (const auto documented = LoadHelpReferenceSection(section, english)) return *documented;
+    if (const auto documented = LoadHelpReferenceSection(section)) return *documented;
     switch (section) {
     case kHelpSectionStart:
         if (english) {
@@ -683,13 +699,17 @@ static void UpdateHelpDialogContent(HelpDialogCtx* ctx) {
     ctx->bodyText = HelpSectionBody(ctx->currentSection, english);
     ctx->nextSearchOffset = 0;
     ctx->nextGlobalSearchSection = ctx->currentSection;
-    if (ctx->title) SetWindowTextW(ctx->title, HelpSectionTitle(ctx->currentSection, english).c_str());
-    if (ctx->subtitle) SetWindowTextW(ctx->subtitle, HelpSectionSubtitle(ctx->currentSection, english).c_str());
+    if (ctx->title) SetWindowTextW(ctx->title, HelpSectionTitle(ctx->currentSection).c_str());
+    if (ctx->subtitle) SetWindowTextW(ctx->subtitle, HelpSectionSubtitle(ctx->currentSection).c_str());
     if (ctx->edit) {
         SetWindowTextW(ctx->edit, ctx->bodyText.c_str());
         SendMessageW(ctx->edit, EM_SETSEL, 0, 0);
     }
     if (ctx->btnOpenDocuments) {
+        const bool hasReference = static_cast<bool>(FindBundledHelpReferenceDocument(GetExeDir()));
+        SetWindowTextW(ctx->btnOpenDocuments,
+                       localization::Text(hasReference ? L"help.open_document"
+                                                       : L"help.open_viewer").c_str());
         ShowWindow(ctx->btnOpenDocuments,
                    ctx->currentSection == kHelpSectionFullGuide ? SW_SHOW : SW_HIDE);
     }
@@ -705,22 +725,15 @@ enum class HelpSearchStatus {
 
 static void ShowHelpSearchStatus(HelpDialogCtx* ctx, HelpSearchStatus status, bool allHelp = false) {
     if (!ctx || !ctx->subtitle) return;
-    const bool english = IsEnglishUi();
-    std::wstring text = HelpSectionSubtitle(ctx->currentSection, english);
+    std::wstring text = HelpSectionSubtitle(ctx->currentSection);
     if (status == HelpSearchStatus::EmptyQuery) {
-        text += allHelp ? (english ? L"  |  Enter text to search all help."
-                                   : L"  |  ヘルプ全体を検索する文字を入力してください。")
-                        : (english ? L"  |  Enter text to search this category."
-                                   : L"  |  このカテゴリ内を検索する文字を入力してください。");
+        text += localization::Text(allHelp ? L"help.search.enter_all" : L"help.search.enter_section");
     } else if (status == HelpSearchStatus::NoMatch) {
-        text += english ? L"  |  No matches in this category."
-                        : L"  |  このカテゴリ内には見つかりません。";
+        text += localization::Text(L"help.search.no_match_section");
     } else if (status == HelpSearchStatus::FoundInAll) {
-        text += english ? L"  |  Found in all help."
-                        : L"  |  ヘルプ全体から見つけました。";
+        text += localization::Text(L"help.search.found_all");
     } else if (status == HelpSearchStatus::NoMatchInAll) {
-        text += english ? L"  |  No matches in all help."
-                        : L"  |  ヘルプ全体には見つかりません。";
+        text += localization::Text(L"help.search.no_match_all");
     }
     SetWindowTextW(ctx->subtitle, text.c_str());
 }
@@ -849,6 +862,21 @@ static void LayoutHelpDialog(HWND hWnd, HelpDialogCtx* ctx) {
     if (ctx->btnClose) MoveWindow(ctx->btnClose, rc.right - pad - btnW, btnY, btnW, btnH, TRUE);
 }
 
+// Restore the disabled owner while the help window still covers it.  Doing it
+// only after DestroyWindow leaves a composition frame where neither window is
+// ready to paint, which can briefly reveal the desktop.
+static void RestoreHelpOwner(HelpDialogCtx* ctx) {
+    if (!ctx || ctx->ownerRestored) return;
+    ctx->ownerRestored = true;
+    HWND owner = ctx->owner;
+    if (!owner || !IsWindow(owner)) return;
+    EnableWindow(owner, TRUE);
+    if (IsWindowVisible(owner)) {
+        RedrawWindow(owner, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
+}
+
 static LRESULT CALLBACK HelpDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* ctx = reinterpret_cast<HelpDialogCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
     switch (msg) {
@@ -857,8 +885,7 @@ static LRESULT CALLBACK HelpDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
         ctx = reinterpret_cast<HelpDialogCtx*>(cs->lpCreateParams);
         SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
         ctx->currentSection = std::clamp(ctx->initialSection, 0, kHelpSectionCount - 1);
-        const bool english = IsEnglishUi();
-        ctx->navLabel = CreateWindowExW(0, L"STATIC", english ? L"Topics" : L"項目",
+        ctx->navLabel = CreateWindowExW(0, L"STATIC", localization::Text(L"help.topics").c_str(),
                                         WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, hWnd,
                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(1000)), g_hInst, nullptr);
         ctx->nav = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
@@ -867,7 +894,7 @@ static LRESULT CALLBACK HelpDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kHelpNavId)), g_hInst, nullptr);
         for (int section = 0; section < kHelpSectionCount; ++section) {
             SendMessageW(ctx->nav, LB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(HelpSectionLabel(section, english)));
+                         reinterpret_cast<LPARAM>(HelpSectionLabel(section).c_str()));
         }
         SendMessageW(ctx->nav, LB_SETCURSEL, ctx->currentSection, 0);
         ctx->title = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -880,11 +907,11 @@ static LRESULT CALLBACK HelpDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                       0, 0, 0, 0, hWnd,
                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kHelpSearchId)), g_hInst, nullptr);
-        ctx->btnFind = CreateWindowExW(0, L"BUTTON", english ? L"Find next" : L"次を検索",
+        ctx->btnFind = CreateWindowExW(0, L"BUTTON", localization::Text(L"help.find_next").c_str(),
                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                                        0, 0, 0, 0, hWnd,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kHelpFindId)), g_hInst, nullptr);
-        ctx->btnFindAll = CreateWindowExW(0, L"BUTTON", english ? L"Search all" : L"全体を検索",
+        ctx->btnFindAll = CreateWindowExW(0, L"BUTTON", localization::Text(L"help.search_all").c_str(),
                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                           0, 0, 0, 0, hWnd,
                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(kHelpFindAllId)),
@@ -895,12 +922,12 @@ static LRESULT CALLBACK HelpDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
                                     0, 0, 0, 0, hWnd,
                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(1003)), g_hInst, nullptr);
         ctx->btnOpenDocuments = CreateWindowExW(0, L"BUTTON",
-                                                english ? L"Open detailed documents" : L"詳細な文書を開く",
+                                                localization::Text(L"help.open_document").c_str(),
                                                 WS_CHILD | WS_TABSTOP,
                                                 0, 0, 0, 0, hWnd,
                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kHelpOpenDocumentsId)),
                                                 g_hInst, nullptr);
-        ctx->btnClose = CreateWindowExW(0, L"BUTTON", english ? L"Close" : L"閉じる",
+        ctx->btnClose = CreateWindowExW(0, L"BUTTON", localization::Text(L"common.close").c_str(),
                                         WS_CHILD | WS_VISIBLE,
                                         0, 0, 0, 0, hWnd,
                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
@@ -969,13 +996,19 @@ static LRESULT CALLBACK HelpDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
             ShowHelpSearchStatus(ctx, HelpSearchStatus::Ready);
             return 0;
         }
-        if (id == IDOK || id == IDCANCEL) { DestroyWindow(hWnd); return 0; }
+        if (id == IDOK || id == IDCANCEL) {
+            RestoreHelpOwner(ctx);
+            DestroyWindow(hWnd);
+            return 0;
+        }
         break;
     }
     case WM_CLOSE:
+        RestoreHelpOwner(ctx);
         DestroyWindow(hWnd);
         return 0;
     case WM_DESTROY:
+        RestoreHelpOwner(ctx);
         if (ctx) ctx->done = true;
         return 0;
     default:
@@ -1242,14 +1275,14 @@ static LRESULT CALLBACK PdfInfoDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(1101)),
                                     g_hInst, nullptr);
 
-        const wchar_t* copyLabel = IsEnglishUi() ? L"Copy" : L"コピー";
-        const wchar_t* closeLabel = IsEnglishUi() ? L"Close" : L"閉じる";
-        ctx->btnClose = CreateWindowExW(0, L"BUTTON", closeLabel,
+        const std::wstring copyLabel = localization::Text(L"help.f9d8ec40980e");
+        const std::wstring closeLabel = localization::Text(L"help.603bc62f3f34");
+        ctx->btnClose = CreateWindowExW(0, L"BUTTON", closeLabel.c_str(),
                                         WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                         rc.right - pad - btnW, btnY, btnW, btnH, hWnd,
                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)),
                                         g_hInst, nullptr);
-        ctx->btnCopy = CreateWindowExW(0, L"BUTTON", copyLabel,
+        ctx->btnCopy = CreateWindowExW(0, L"BUTTON", copyLabel.c_str(),
                                        WS_CHILD | WS_VISIBLE,
                                        rc.right - pad - btnW * 2 - 8, btnY, btnW, btnH, hWnd,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(1102)),
@@ -1356,18 +1389,19 @@ static void ShowHelpCenterDialog(HWND owner, int initialSection) {
 
     HelpDialogCtx ctx{};
     ctx.owner = owner;
-    ctx.windowTitle = IsEnglishUi() ? L"Help" : L"ヘルプ";
+    ctx.windowTitle = localization::Text(L"help.cf15f78613ee");
     ctx.initialSection = initialSection;
 
     if (owner) EnableWindow(owner, FALSE);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass, ctx.windowTitle.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE | WS_SIZEBOX,
+                             WS_CAPTION | WS_POPUPWINDOW | WS_SIZEBOX,
                              CW_USEDEFAULT, CW_USEDEFAULT, 840, 580,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) {
-        if (owner) EnableWindow(owner, TRUE);
+        RestoreHelpOwner(&ctx);
         return;
     }
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
 
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
@@ -1384,10 +1418,7 @@ static void ShowHelpCenterDialog(HWND owner, int initialSection) {
             DispatchMessageW(&msg);
         }
     }
-    if (owner) {
-        EnableWindow(owner, TRUE);
-        SetActiveWindow(owner);
-    }
+    RestoreHelpOwner(&ctx);
 }
 
 void ShowHelpDialog(HWND owner) {
@@ -1395,15 +1426,16 @@ void ShowHelpDialog(HWND owner) {
 }
 
 void OpenBundledHelpGuide(HWND owner) {
+    const bool hasReference = static_cast<bool>(FindBundledHelpReferenceDocument(GetExeDir()));
     if (LaunchBundledHelpGuide(owner)) {
         ShowSoftNotice(owner, IsEnglishUi()
-                                  ? L"Opening the bundled help in the read-only viewer."
-                                  : L"読み取り専用ビューアで同梱ヘルプを開きます。");
+                                  ? (hasReference ? L"Opening the bundled help document in the read-only viewer."
+                                                  : L"Opening the read-only viewer.")
+                                  : (hasReference ? L"読み取り専用Viewerで同梱ヘルプ文書を開きます。"
+                                                  : L"読み取り専用Viewerを開きます。"));
         return;
     }
-    ShowSoftNotice(owner, IsEnglishUi()
-                              ? L"The bundled help or read-only viewer could not be opened. Restore the complete application folder."
-                              : L"同梱ヘルプまたは読み取り専用ビューアを開けませんでした。配布フォルダ一式を復元してください。",
+    ShowSoftNotice(owner, localization::Text(L"help.e73e13526067"),
                    SoftNoticeKind::Warning);
 }
 
@@ -1426,15 +1458,16 @@ void ShowPdfInfoDialog(HWND owner) {
     ctx.owner = owner;
 
     if (owner) EnableWindow(owner, FALSE);
-    const wchar_t* title = IsEnglishUi() ? L"PDF Info" : L"PDF情報";
-    HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass, title,
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE | WS_SIZEBOX,
+    const std::wstring title = localization::Text(L"help.d42eb6858982");
+    HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass, title.c_str(),
+                             WS_CAPTION | WS_POPUPWINDOW | WS_SIZEBOX,
                              CW_USEDEFAULT, CW_USEDEFAULT, 720, 560,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) {
         if (owner) EnableWindow(owner, TRUE);
         return;
     }
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
 
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);

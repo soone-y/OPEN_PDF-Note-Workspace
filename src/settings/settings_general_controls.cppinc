@@ -8,13 +8,12 @@ static const wchar_t* kSelectionStyleValues[] = {
 };
 
 static std::wstring SelectionStyleLabel(const std::wstring& value) {
-    const bool english = IsEnglishUi();
     std::wstring v = value;
     std::transform(v.begin(), v.end(), v.begin(), ::towlower);
     if (v == L"theme" || v == L"themed" || v == L"tone") {
-        return english ? L"Theme-based" : L"テーマ寄り";
+        return localization::Text(L"settings.general.selection_style.theme");
     }
-    return english ? L"Windows style" : L"Windows風";
+    return localization::Text(L"settings.general.selection_style.windows");
 }
 
 static std::wstring NormalizeToneVariantValue(const std::wstring& value) {
@@ -29,13 +28,12 @@ static std::wstring NormalizeToneVariantValue(const std::wstring& value) {
 }
 
 static std::wstring ToneVariantLabel(const std::wstring& value) {
-    const bool english = IsEnglishUi();
     std::wstring v = NormalizeToneVariantValue(value);
-    if (v == L"guard") return english ? L"Tone guard" : L"トーンガード";
-    if (v == L"emphasis") return english ? L"Tone emphasis" : L"トーン強調";
-    if (v == L"white") return english ? L"White correction" : L"白へ補正";
-    if (v == L"black") return english ? L"Black correction" : L"黒へ補正";
-    return english ? L"Pure" : L"純";
+    if (v == L"guard") return localization::Text(L"settings.general.tone_variant.guard");
+    if (v == L"emphasis") return localization::Text(L"settings.general.tone_variant.emphasis");
+    if (v == L"white") return localization::Text(L"settings.general.tone_variant.white");
+    if (v == L"black") return localization::Text(L"settings.general.tone_variant.black");
+    return localization::Text(L"settings.general.tone_variant.pure");
 }
 
 static std::wstring GenHexColorW(COLORREF c) {
@@ -50,7 +48,7 @@ static std::wstring GenColorLabelW(COLORREF c) {
 
 static std::wstring FormatThemeLabel(const ThemeColors& theme) {
     if (theme.name == L"default") {
-        return IsEnglishUi() ? L"Default" : L"デフォルト";
+        return localization::Text(L"settings.general_controls.779a3b9d4381");
     }
 
     std::wstring hex6;
@@ -145,7 +143,8 @@ static COLORREF ConfigColorToRef(int rgb) {
 static void FillHighlightColorCombo(HWND cb, COLORREF defaultColor) {
     if (!cb) return;
     SendMessageW(cb, CB_RESETCONTENT, 0, 0);
-    std::wstring label = L"初期: " + GenHexColorW(defaultColor);
+    std::wstring label = localization::Format(
+        L"settings.general.default_color", {{L"COLOR", GenHexColorW(defaultColor)}});
     int idx = static_cast<int>(SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
     if (idx >= 0) SendMessageW(cb, CB_SETITEMDATA, idx, kColorDefaultData);
     const COLORREF palette[] = {
@@ -301,14 +300,19 @@ static void UpdateFontCustomizationVisibility(GeneralSettingsCtx* ctx) {
     if (ctx->cbNoteFontDigitTarget) ShowWindow(ctx->cbNoteFontDigitTarget, advancedVisible ? SW_SHOW : SW_HIDE);
 
     if (ctx->lblNoteRenderLatin) {
-        SetWindowTextW(ctx->lblNoteRenderLatin, (mode == 1) ? L"統一フォント" : L"別フォント(英字・記号)");
+        const std::wstring label = localization::Text(
+            (mode == 1) ? L"settings.general.font_customization_unified"
+                        : L"settings.general.font_customization_separate_latin");
+        SetWindowTextW(ctx->lblNoteRenderLatin, label.c_str());
     }
 }
 
 static std::wstring LayoutDefaultsLabelText(int left, int right, int top, int width, int height) {
-    return L"初期: 左" + std::to_wstring(left) + L" / 右" +
-           std::to_wstring(right) + L" / 上" + std::to_wstring(top) +
-           L" / 幅" + std::to_wstring(width) + L" / 高さ" + std::to_wstring(height);
+    return localization::Format(
+        L"settings.general.layout_defaults_summary",
+        {{L"LEFT", std::to_wstring(left)}, {L"RIGHT", std::to_wstring(right)},
+         {L"TOP", std::to_wstring(top)}, {L"WIDTH", std::to_wstring(width)},
+         {L"HEIGHT", std::to_wstring(height)}});
 }
 
 static std::wstring LayoutDefaultsLabelText() {
@@ -320,21 +324,21 @@ static std::wstring LayoutDefaultsLabelText() {
     return LayoutDefaultsLabelText(left, right, top, width, height);
 }
 
-static const wchar_t* DownKeyLastLineLabel(const std::wstring& action) {
+static std::wstring DownKeyLastLineLabel(const std::wstring& action) {
     std::wstring normalized = DownKeyLastLineActionToString(ParseDownKeyLastLineAction(action));
     for (const auto& opt : kDownKeyLastLineOptions) {
-        if (normalized == opt.value) return opt.label;
+        if (normalized == opt.value) return localization::Text(opt.label);
     }
-    return kDownKeyLastLineOptions[0].label;
+    return localization::Text(kDownKeyLastLineOptions[0].label);
 }
 
-static const wchar_t* LeftRightLineMoveLabel(const std::wstring& action) {
+static std::wstring LeftRightLineMoveLabel(const std::wstring& action) {
     std::wstring normalized = LeftRightLineMoveActionToString(
         ParseLeftRightLineMoveAction(action));
     for (const auto& opt : kLeftRightLineMoveOptions) {
-        if (normalized == opt.value) return opt.label;
+        if (normalized == opt.value) return localization::Text(opt.label);
     }
-    return kLeftRightLineMoveOptions[0].label;
+    return localization::Text(kLeftRightLineMoveOptions[0].label);
 }
 
 static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
@@ -506,10 +510,6 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
             ApplyPdfDisplayMode(g_hPdfView);
             UpdatePdfSinglePageModeMenuCheck();
         }
-    }
-    if (ctx->chkPanMouseWheelZoom) {
-        g_config.panMouseWheelZoom =
-            (SendMessageW(ctx->chkPanMouseWheelZoom, BM_GETCHECK, 0, 0) == BST_CHECKED);
     }
     if (ctx->chkWheelInvertVertical) {
         g_config.mouseWheelInvertVertical =
@@ -698,7 +698,7 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         std::wstring rule(buf, buf + std::max(0, len));
         rule = TrimWhitespace(rule);
         if (rule.empty()) {
-            rule = kDefaultNameRule;
+            rule = DefaultNameRule();
         }
         g_config.clroNamePattern = rule;
     }

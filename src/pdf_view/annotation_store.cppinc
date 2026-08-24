@@ -1030,9 +1030,9 @@ static bool RewriteClropPdfIdForCurrentPdf(HWND owner,
     std::wstring err;
     if (!clrop_bridge::SaveAnnotations(clropPath, g_pdf.path, annots, err)) {
         std::wstring msg = L"clrop の pdf_id 更新に失敗しました。\n";
-        msg += L"対象:\n" + clropPath;
         if (!err.empty()) msg += L"\n\n" + err;
-        ShowPdfMessageDialog(owner, L"clrop", msg, SoftNoticeKind::Error);
+        ShowPdfMessageDialog(owner, L"clrop", msg, SoftNoticeKind::Error,
+                             {{L"", clropPath}, {L"", g_pdf.path}});
         return false;
     }
 
@@ -1119,9 +1119,11 @@ static bool TryRecoverStagedAnnotationsForCurrentPdf(HWND owner,
     std::wstring err;
     std::vector<Annotation> stagedLoaded;
     if (!file_output::LoadResolvedStagedAnnotations(g_pdf.path, stage, &stagedLoaded, &err)) {
-        std::wstring msg = L"未統合の注釈差分の読み込みに失敗しました。\nstage checkpoint:\n" + stage.wstring();
+        std::wstring msg = L"未統合の注釈差分の読み込みに失敗しました。";
         if (!err.empty()) msg += L"\n\n" + err;
-        ShowPdfMessageDialog(owner, L"clrop recovery", msg, SoftNoticeKind::Error);
+        ShowPdfMessageDialog(owner, L"clrop recovery", msg, SoftNoticeKind::Error,
+                             {{L"", g_pdf.path},
+                              {localization::Text(L"dialog.path.stage"), stage.wstring()}});
         return false;
     }
 
@@ -1273,7 +1275,8 @@ bool LoadAnnotationsForCurrentPdf(HWND owner) {
         }
         std::wstring msg = L"注釈の読み込みに失敗しました。\n";
         if (!err.empty()) msg += err;
-        ShowPdfMessageDialog(owner, L"clrop", msg, SoftNoticeKind::Error);
+        ShowPdfMessageDialog(owner, L"clrop", msg, SoftNoticeKind::Error,
+                             {{L"", g_pdf.path}, {L"", clropPath}});
         RefreshAnnotPanel();
         preview_trace::Append(
             L"LoadAnnotationsForCurrentPdf",
@@ -1378,9 +1381,11 @@ bool MergeStagedAnnotationsIntoCurrentPdf(HWND owner, const std::filesystem::pat
     std::wstring err;
     std::vector<Annotation> loaded;
     if (!file_output::LoadResolvedStagedAnnotations(g_pdf.path, stagePath, &loaded, &err)) {
-        std::wstring msg = L"注釈差分の読み込みに失敗しました。\nstage checkpoint:\n" + stagePath.wstring();
+        std::wstring msg = L"注釈差分の読み込みに失敗しました。";
         if (!err.empty()) msg += L"\n\n" + err;
-        ShowPdfMessageDialog(owner, L"clrop merge", msg, SoftNoticeKind::Error);
+        ShowPdfMessageDialog(owner, L"clrop merge", msg, SoftNoticeKind::Error,
+                             {{L"", g_pdf.path},
+                              {localization::Text(L"dialog.path.stage"), stagePath.wstring()}});
         return false;
     }
 
@@ -1401,7 +1406,7 @@ bool MergeStagedAnnotationsIntoCurrentPdf(HWND owner, const std::filesystem::pat
     }
     if (added == 0) {
         ShowSoftNotice(owner ? owner : g_hMainWnd,
-                       IsEnglishUi() ? L"No new annotations were added." : L"追加される注釈はありませんでした。");
+                       localization::Text(L"pdf.annotation_store.237a7cf61796"));
         return true;
     }
 
@@ -1435,7 +1440,7 @@ bool MergeStagedAnnotationsIntoCurrentPdf(HWND owner, const std::filesystem::pat
         file_output::DiscardStagedDiff(stagePath);
     }
     ShowSoftNotice(owner ? owner : g_hMainWnd,
-                   IsEnglishUi() ? L"Merged annotations into the current PDF." : L"注釈差分を現在のPDFへ統合しました。");
+                   localization::Text(L"pdf.annotation_store.6f64f17d4c0f"));
     return true;
 }
 
@@ -1458,12 +1463,13 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
         std::wstring documentLockError;
         DocumentOpenLockCandidate documentLock(std::filesystem::path(path), &documentLockError);
         if (!documentLock.acquired()) {
-            const std::wstring message = IsEnglishUi()
-                ? L"This file is already open in another PDF Note Workspace window."
-                : L"このファイルは別の PDF Note Workspace ウィンドウで開かれています。";
-            ShowPdfMessageDialog(owner ? owner : g_hMainWnd, L"PDF",
-                                 documentLockError.empty() ? message : message + L"\n\n" + documentLockError,
-                                 SoftNoticeKind::Warning);
+            if (ShouldNotifyDocumentOpenLockFailure()) {
+                const std::wstring message = localization::Text(L"pdf.annotation_store.0c5127c1ce3c");
+                ShowPdfMessageDialog(owner ? owner : g_hMainWnd, L"PDF",
+                                     documentLockError.empty() ? message : message + L"\n\n" + documentLockError,
+                                     SoftNoticeKind::Warning,
+                                     {{L"", path}});
+            }
             return false;
         }
         if (!SaveAnnotationsIfDirty(owner)) {
@@ -1625,8 +1631,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
         }
         ShowPdfMessageDialog(owner ? owner : g_hMainWnd,
                              L"PDF",
-                             IsEnglishUi() ? L"Opening the PDF was canceled due to an unexpected internal error."
-                                           : L"予期しない内部エラーのため、PDFを開く処理を中止しました。",
+                             localization::Text(L"pdf.annotation_store.2057b2f40352"),
                              SoftNoticeKind::Error);
         return false;
     } catch (...) {
@@ -1637,8 +1642,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
         }
         ShowPdfMessageDialog(owner ? owner : g_hMainWnd,
                              L"PDF",
-                             IsEnglishUi() ? L"Opening the PDF was canceled due to an unexpected internal error."
-                                           : L"予期しない内部エラーのため、PDFを開く処理を中止しました。",
+                             localization::Text(L"pdf.annotation_store.2057b2f40352"),
                              SoftNoticeKind::Error);
         return false;
     }

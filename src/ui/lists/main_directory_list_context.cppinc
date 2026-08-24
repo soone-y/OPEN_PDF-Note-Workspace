@@ -31,21 +31,20 @@ static bool ShowDirectoryHierarchyItemContextMenu(HWND list, LPARAM lParam) {
                                   item.kind == DirectoryHierarchyItemKind::Folder ||
                                   item.kind == DirectoryHierarchyItemKind::Note ||
                                   item.kind == DirectoryHierarchyItemKind::Clrop;
+    const std::wstring readOnlyLabel = localization::Text(
+        item.kind == DirectoryHierarchyItemKind::Folder ? L"ui.directory_list.open_readonly.folder"
+        : item.kind == DirectoryHierarchyItemKind::Clrop ? L"ui.directory_list.open_readonly.clrop"
+                                                        : L"ui.directory_list.open_readonly.default");
     ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenInApp, IsEnglishUi() ? L"Open in this app" : L"このソフトで開く", appOpenable},
+        {kCmdOpenInApp, localization::Text(L"ui.directory_list.de691a7bc023").c_str(), appOpenable},
         {kCmdOpenReadOnly,
-         IsEnglishUi() ? (item.kind == DirectoryHierarchyItemKind::Folder ? L"Open folder in read-only app"
-                       : item.kind == DirectoryHierarchyItemKind::Clrop ? L"Inspect annotation data in read-only app"
-                                                                         : L"Open in read-only app")
-                       : (item.kind == DirectoryHierarchyItemKind::Folder ? L"読み取り専用ビューアでフォルダを開く"
-                       : item.kind == DirectoryHierarchyItemKind::Clrop ? L"読み取り専用ビューアで注釈データを確認"
-                                                                         : L"読み取り専用ビューアで開く"),
+         readOnlyLabel.c_str(),
          readOnlyOpenable},
     });
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenExplorer, IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示"},
-        {kCmdCopyPath, IsEnglishUi() ? L"Copy path" : L"パスをコピー"},
+        {kCmdOpenExplorer, localization::Text(L"ui.directory_list.9208055ca154").c_str()},
+        {kCmdCopyPath, localization::Text(L"ui.directory_list.9806c16958b1").c_str()},
     });
     SetForegroundWindow(popup);
     s_directoryHierarchyContextMenuActive = true;
@@ -287,7 +286,7 @@ static bool ShowDirectoryHierarchyPopup(HWND owner,
     EnsureDirectoryHierarchyPopupClass();
 
     auto* data = new DirectoryHierarchyPopupData();
-    data->title = (IsEnglishUi() ? L"Folder hierarchy: " : L"フォルダ階層: ") + label;
+    data->title = (localization::Text(L"ui.directory_list.314dd7223127").c_str()) + label;
     data->items = BuildDirectoryHierarchyItems(root);
 
     const int itemH = std::max(18, CalcListItemHeight());
@@ -373,7 +372,7 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     const bool canCloseSession = !isLectureList && IsCurrentSessionTargetPath(root);
     const std::wstring deleteLabel = isTempExternalLecture
         ? GetUiText().menuRemoveTempExternalLecture
-        : (IsEnglishUi() ? L"Delete" : L"削除");
+        : (localization::Text(L"ui.directory_list.8deafb711f09").c_str());
 
     ui::context_menu::PopupMenu menu;
     if (!menu) return false;
@@ -400,11 +399,11 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     // Keep the core commands in the same order as the file lists.  A command
     // that has no meaningful target in this pane remains visible but disabled.
     AppendMenuW(menu.get(), MF_STRING, kCmdNewLecture,
-                IsEnglishUi() ? L"Create lecture..." : L"授業を作成...");
+                localization::Text(L"ui.directory_list.23af32fea7bb").c_str());
     AppendMenuW(menu.get(),
                 canCreateSession ? MF_STRING : (MF_STRING | MF_GRAYED),
                 kCmdNewSession,
-                IsEnglishUi() ? L"Create session..." : L"回次を作成...");
+                localization::Text(L"ui.directory_list.5e4fd1449672").c_str());
     HMENU noteMenu = CreatePopupMenu();
     if (noteMenu) {
         AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteClro, L".clro");
@@ -415,43 +414,43 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
         AppendMenuW(menu.get(),
                     canCreateNote ? MF_POPUP : (MF_POPUP | MF_GRAYED),
                     reinterpret_cast<UINT_PTR>(noteMenu),
-                    IsEnglishUi() ? L"Create note" : L"ノートを作成");
+                    localization::Text(L"ui.directory_list.5d611a60297c").c_str());
     }
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu.get(), MF_STRING, kCmdReload,
-                IsEnglishUi() ? L"Reload" : L"再読み込み");
+                localization::Text(L"ui.directory_list.018a2719c366").c_str());
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenInApp, IsEnglishUi() ? L"Open in this app" : L"このソフトで開く"},
-        {kCmdOpenReadOnly, IsEnglishUi() ? L"Open in read-only viewer" : L"読み取り専用ビューアで開く"},
+        {kCmdOpenInApp, localization::Text(L"ui.directory_list.de691a7bc023").c_str()},
+        {kCmdOpenReadOnly, localization::Text(L"ui.directory_list.154ade32c630").c_str()},
     });
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenExplorer, IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示"},
-        {kCmdShowHierarchy, IsEnglishUi() ? L"Show directory hierarchy" : L"フォルダ階層を確認"},
-        {kCmdShowPath, IsEnglishUi() ? L"Show work path" : L"作業パスを表示"},
-        {kCmdCopyPath, IsEnglishUi() ? L"Copy path" : L"パスをコピー"},
+        {kCmdOpenExplorer, localization::Text(L"ui.directory_list.9208055ca154").c_str()},
+        {kCmdShowHierarchy, localization::Text(L"ui.directory_list.752b401aff9a").c_str()},
+        {kCmdShowPath, localization::Text(L"ui.directory_list.14a4b0c697e4").c_str()},
+        {kCmdCopyPath, localization::Text(L"ui.directory_list.9806c16958b1").c_str()},
     });
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     if (!kIsLiteEdition) {
         AppendMenuW(menu.get(),
                     MF_STRING,
                     kCmdConvertOffice,
-                    IsEnglishUi() ? L"Convert Office files to PDF" : L"OfficeファイルをPDFに変換");
+                    localization::Text(L"ui.directory_list.f1b464c0e53e").c_str());
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     }
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu.get(), canCloseLecture ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdCloseLecture, IsEnglishUi() ? L"Close lecture display" : L"授業の表示を閉じる");
+                kCmdCloseLecture, localization::Text(L"ui.directory_list.8bd547f6bad9").c_str());
     AppendMenuW(menu.get(), canCloseSession ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdCloseSession, IsEnglishUi() ? L"Close session display" : L"回次の表示を閉じる");
+                kCmdCloseSession, localization::Text(L"ui.directory_list.8b37e122658e").c_str());
     AppendMenuW(menu.get(), MF_STRING | MF_GRAYED, kCmdCloseFile,
-                IsEnglishUi() ? L"Close file display" : L"ファイルの表示を閉じる");
+                localization::Text(L"ui.directory_list.ce4e384de3db").c_str());
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu.get(),
                 canRename ? MF_STRING : (MF_STRING | MF_GRAYED),
                 kCmdRename,
-                IsEnglishUi() ? L"Rename" : L"名前の変更");
+                localization::Text(L"ui.directory_list.b351979601ed").c_str());
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu.get(),
                 canDelete ? MF_STRING : (MF_STRING | MF_GRAYED),
@@ -520,7 +519,7 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
             ReloadSessionsAndSelect(g_currentLecturePath, root.filename().wstring(), reopenFiles);
         }
         RefreshMainWindowUiState(owner);
-        ShowSoftNotice(owner, IsEnglishUi() ? L"List reloaded." : L"一覧を再読み込みしました。",
+        ShowSoftNotice(owner, localization::Text(L"ui.directory_list.21c906348eb0").c_str(),
                        SoftNoticeKind::Info);
         return true;
     }

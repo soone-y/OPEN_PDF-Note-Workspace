@@ -12,6 +12,7 @@ param(
     [switch]$SkipClropFileSafetyTests,
     [switch]$SkipDocxSpaceProtectionTests,
     [switch]$SkipTextEncodingTests,
+    [switch]$SkipTextIntegrityGate,
     [switch]$SkipRuntimeDependencyTests,
     [switch]$SkipDependencySecurityGate,
     [switch]$SkipThemeSwitchingTests,
@@ -54,6 +55,7 @@ $inputFuzzRegressionScript = Join-Path $PSScriptRoot "run_input_fuzz_regression_
 $clropFileSafetyScript = Join-Path $PSScriptRoot "run_clrop_file_safety_tests.ps1"
 $docxSpaceProtectionScript = Join-Path $PSScriptRoot "run_docx_space_protection_tests.ps1"
 $textEncodingScript = Join-Path $PSScriptRoot "run_text_encoding_tests.ps1"
+$textIntegrityGateScript = Join-Path $repoRoot "tools\release_checks\text_integrity_gate.py"
 $runtimeDependencyScript = Join-Path $PSScriptRoot "run_runtime_dependency_tests.ps1"
 $dependencySecurityGateScript = Join-Path $repoRoot "tools\release_checks\dependency_security_gate.py"
 $themeSwitchingScript = Join-Path $PSScriptRoot "run_theme_switching_tests.ps1"
@@ -76,17 +78,6 @@ $libreOfficeRuntimeGateScript = Join-Path $repoRoot "tools\release_checks\libreo
 $binaryOutputDir = Join-Path $repoRoot "out/bin"
 $liteBinaryOutputDir = Join-Path $repoRoot "out/bin_lite"
 $repoVersionPath = Join-Path $repoRoot "REPO_VERSION.txt"
-$versionTrackedDocumentationPaths = @(
-    (Join-Path $repoRoot "README.md"),
-    (Join-Path $repoRoot "docs/public/Index.md"),
-    (Join-Path $repoRoot "docs/public/How_to_Build.md"),
-    (Join-Path $repoRoot "docs/public/What_is_File_Formats.md"),
-    (Join-Path $repoRoot "docs/public/How_to_Save_and_Recovery.md"),
-    (Join-Path $repoRoot "docs/public/How_to_Setup.md"),
-    (Join-Path $repoRoot "docs/public/How_to_Troubleshoot.md"),
-    (Join-Path $repoRoot "docs/public/How_to_Use.md"),
-    (Join-Path $repoRoot "docs/public/Help_Reference.md")
-)
 $appBuildInfoManifestPath = Join-Path $binaryOutputDir "pdf_note_workspace.exe.buildinfo.txt"
 $liteAppBuildInfoManifestPath = Join-Path $liteBinaryOutputDir "pdf_note_workspace.exe.buildinfo.txt"
 $readOnlyViewerBuildInfoManifestPath = Join-Path $binaryOutputDir "readonly_viewer.exe.buildinfo.txt"
@@ -306,21 +297,6 @@ function Get-RepoVersionForVerification {
     return $version
 }
 
-function Assert-VersionTrackedDocumentation {
-    param([Parameter(Mandatory)][string]$ExpectedVersion)
-
-    foreach ($path in $versionTrackedDocumentationPaths) {
-        if (-not (Test-Path -LiteralPath $path)) {
-            throw "Version-tracked documentation file not found: $path"
-        }
-        $text = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $path).Path, [System.Text.Encoding]::UTF8)
-        $markerPattern = '(?m)^.*?: \(ZIP.*\)\r?$'
-        if ($text -notmatch $markerPattern) {
-            throw "Version-tracked documentation is missing the ZIP placeholder marker: $path"
-        }
-    }
-}
-
 function Invoke-ChildPowerShellScript {
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
@@ -538,7 +514,7 @@ function Invoke-SafetyScans {
         [pscustomobject]@{
             Label = "Python network API scan"
             IncludeGlobs = @("*.py")
-            Pattern = '^\s*(?:from|import)\s+(?:urllib|urllib3|requests|httpx|aiohttp|http\.client|socket|websocket|webbrowser|ftplib|smtplib|imaplib|poplib|telnetlib|xmlrpc\.client)\b|^\s*from\s+http\s+import\s+client\b|\b(?:urllib\.request|urllib3\.|requests\.(?:get|post|put|patch|delete|request)|httpx\.|aiohttp\.|http\.client|socket\.(?:socket|create_connection)|asyncio\.(?:open_connection|start_server)|websocket\.|webbrowser\.|ftplib\.|smtplib\.|imaplib\.|poplib\.|telnetlib\.|xmlrpc\.client)'
+            Pattern = '^\s*(?:from\s+(?:urllib\.request|urllib3|requests|httpx|aiohttp|http\.client|socket|websocket|webbrowser|ftplib|smtplib|imaplib|poplib|telnetlib|xmlrpc\.client)\s+import\b|from\s+urllib\s+import\s+[^#\r\n]*\brequest\b|import\s+(?:urllib\.request|urllib3|requests|httpx|aiohttp|http\.client|socket|websocket|webbrowser|ftplib|smtplib|imaplib|poplib|telnetlib|xmlrpc\.client)\b|from\s+http\s+import\s+client\b)|\b(?:urllib\.request|urllib3\.|requests\.(?:get|post|put|patch|delete|request)|httpx\.|aiohttp\.|http\.client|socket\.(?:socket|create_connection)|asyncio\.(?:open_connection|start_server)|websocket\.|webbrowser\.|ftplib\.|smtplib\.|imaplib\.|poplib\.|telnetlib\.|xmlrpc\.client)'
             AllowLinePatterns = @()
         }
     )
@@ -654,7 +630,6 @@ try {
 
     Invoke-Step -Name "Version Consistency" -Action {
         $expectedVersion = Get-RepoVersionForVerification
-        Assert-VersionTrackedDocumentation -ExpectedVersion $expectedVersion
         Assert-BuildInfoManifest -Path $appBuildInfoManifestPath -ExeName "pdf_note_workspace.exe" -ExpectedVersion $expectedVersion -ExpectedEdition "full"
         Assert-BuildInfoManifest -Path $liteAppBuildInfoManifestPath -ExeName "pdf_note_workspace.exe" -ExpectedVersion $expectedVersion -ExpectedEdition "lite"
         if (-not $SkipReadOnlyViewerBuild) {
@@ -724,6 +699,12 @@ try {
     if (-not $SkipTextEncodingTests) {
         Invoke-Step -Name "Text Encoding Tests" -Action {
             Invoke-ChildPowerShellScript -ScriptPath $textEncodingScript
+        }
+    }
+
+    if (-not $SkipTextIntegrityGate) {
+        Invoke-Step -Name "Text Integrity Gate" -Action {
+            Invoke-PythonScript -ScriptPath $textIntegrityGateScript
         }
     }
 

@@ -12,7 +12,9 @@ param(
     [string]$LibreOfficeRuntimePath = "",
     [switch]$SkipFreshnessCheck,
     [switch]$DryRun,
-    [switch]$Lite
+    [switch]$Lite,
+    [ValidateSet("ja", "en")]
+    [string]$Locale = "ja"
 )
 
 Set-StrictMode -Version Latest
@@ -34,6 +36,22 @@ if (-not $repoRoot) {
 
 function Write-Info([string]$Message) { Write-Host $Message -ForegroundColor Cyan }
 function Write-Warn([string]$Message) { Write-Host $Message -ForegroundColor Yellow }
+
+function Get-Sha256([string]$Path) {
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+        }
+        finally {
+            $sha.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
 
 function Get-InputItems([string[]]$Paths, [string[]]$ExcludePaths = @()) {
     $excludeRoots = @(
@@ -87,6 +105,14 @@ function Assert-BuildInfoEdition([string]$BuildInfoPath, [string]$ExpectedEditio
     $expectedLine = "edition`t" + $ExpectedEdition.ToLowerInvariant()
     if ($content -notmatch ("(?m)^" + [regex]::Escape($expectedLine) + "\r?$")) {
         throw "Build info manifest edition does not match '$ExpectedEdition': $BuildInfoPath"
+    }
+}
+
+function Assert-BuildInfoLocale([string]$BuildInfoPath, [string]$ExpectedLocale) {
+    $content = Get-Content -LiteralPath $BuildInfoPath -Raw
+    $expectedLine = "locale`t" + $ExpectedLocale
+    if ($content -notmatch ("(?m)^" + [regex]::Escape($expectedLine) + "\r?$")) {
+        throw "Build info manifest locale does not match '$ExpectedLocale': $BuildInfoPath"
     }
 }
 
@@ -162,10 +188,45 @@ function Apply-RepoVersionMarkers([string]$DocsDir, [string]$RepoVersion) {
     foreach ($document in $documents) {
         $content = [System.IO.File]::ReadAllText($document.FullName, [System.Text.Encoding]::UTF8)
         $markerCount = ([regex]::Matches($content, [regex]::Escape($marker))).Count
+        if ($markerCount -eq 0) {
+            continue
+        }
         if ($markerCount -ne 1) {
-            throw "User-facing release document must contain exactly one $marker marker: $($document.FullName)"
+            throw "A release-version marker may appear at most once in a document: $($document.FullName)"
         }
         [System.IO.File]::WriteAllText($document.FullName, $content.Replace($marker, $RepoVersion), $utf8)
+    }
+}
+
+function Copy-ReleaseTopDocuments([string]$ReleaseRoot, [string]$RepositoryRoot, [ValidateSet("ja", "en")][string]$Locale) {
+    # A distributable contains only its selected locale's top-level copies.
+    # Japanese legal material itself retains the English legal original and its
+    # Japanese reference translation; it does not require a second English
+    # release README or notice at the package root.
+    $sources = if ($Locale -eq "ja") {
+        @(
+            @{ Source = "docs\ja\README.md"; Destination = "README.ja.md" },
+            @{ Source = "docs\ja\legal\LICENSE.md"; Destination = "LICENSE.ja.md" },
+            @{ Source = "docs\ja\legal\THIRD_PARTY_NOTICES.md"; Destination = "THIRD_PARTY_NOTICES.ja.md" }
+        )
+    }
+    else {
+        @(
+            @{ Source = "docs\en\README.md"; Destination = "README.en.md" },
+            @{ Source = "docs\en\legal\LICENSE.md"; Destination = "LICENSE.en.md" },
+            @{ Source = "docs\en\legal\THIRD_PARTY_NOTICES.md"; Destination = "THIRD_PARTY_NOTICES.en.md" }
+        )
+    }
+    foreach ($entry in $sources) {
+        $destination = Join-Path $ReleaseRoot $entry.Destination
+        Copy-File -Source (Join-Path $RepositoryRoot $entry.Source) -Dest $destination
+        if ($entry.Destination -notlike "README.*" -or $DryRun) {
+            continue
+        }
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        $content = [System.IO.File]::ReadAllText($destination, [System.Text.Encoding]::UTF8)
+        $content = $content.Replace("](legal/", "](docs/legal/")
+        [System.IO.File]::WriteAllText($destination, $content, $utf8)
     }
 }
 
@@ -311,13 +372,31 @@ function Copy-LibreOfficeRuntimeLicenseArtifacts([string]$ReleaseRoot, [string]$
     }
 }
 
-function Copy-ReleaseSampleWorkspace([string]$SampleDest) {
-    $sampleSource = Join-Path $repoRoot "release_assets\sample_workspace"
+function Copy-ReleaseSampleWorkspace([string]$SampleDest, [string]$Locale, [switch]$Lite) {
+    $sampleSource = Join-Path $repoRoot ("release_assets\sample_workspace\" + $Locale)
     if (-not (Test-Path -LiteralPath $sampleSource)) {
         throw "Release sample workspace template not found: $sampleSource"
     }
 
-    Copy-DirectoryContents -SourceDir $sampleSource -DestDir $sampleDest
+    # Keep the course container in the package. Flattening its sessions into
+    # sample_workspace hid the course -> session structure from users.
+    $conversionSession = if ($Locale -eq "ja") {
+        Join-Path $sampleSource "01_講義サンプル\第03回_Office変換"
+    }
+    else {
+        Join-Path $sampleSource "01_Lecture_Samples\Session_03_Office_Conversion"
+    }
+
+    Ensure-Directory $SampleDest
+    Get-ChildItem -LiteralPath $sampleSource -Recurse -File -Force | ForEach-Object {
+        $sourceFile = $_.FullName
+        if ($Lite -and ($sourceFile.Equals($conversionSession, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $sourceFile.StartsWith($conversionSession.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase))) {
+            return
+        }
+        $relativePath = $sourceFile.Substring($sampleSource.TrimEnd('\').Length).TrimStart('\')
+        Copy-File -Source $sourceFile -Dest (Join-Path $SampleDest $relativePath)
+    }
 }
 
 function New-ReleaseFolderName([string]$Prefix) {
@@ -328,8 +407,9 @@ function New-ReleaseFolderName([string]$Prefix) {
 Push-Location -LiteralPath $repoRoot
 try {
     $repoVersion = Get-RepoVersion
-    $binDir = Join-Path $repoRoot "out\bin"
-    $appBinDir = if ($Lite) { Join-Path $repoRoot "out\bin_lite" } else { $binDir }
+    $binSuffix = if ($Locale -eq "en") { "_en" } else { "" }
+    $binDir = Join-Path $repoRoot ("out\bin" + $binSuffix)
+    $appBinDir = if ($Lite) { Join-Path $repoRoot ("out\bin_lite" + $binSuffix) } else { $binDir }
     $exeName = "pdf_note_workspace.exe"
     $exePath = Join-Path $appBinDir $exeName
     $exeBuildInfoName = $exeName + ".buildinfo.txt"
@@ -352,11 +432,14 @@ try {
         throw "Read-only viewer build info manifest not found: $readOnlyViewerBuildInfoPath"
     }
     Assert-BuildInfoEdition -BuildInfoPath $exeBuildInfoPath -ExpectedEdition $(if ($Lite) { "Lite" } else { "Full" })
+    Assert-BuildInfoLocale -BuildInfoPath $exeBuildInfoPath -ExpectedLocale $Locale
+    Assert-BuildInfoLocale -BuildInfoPath $readOnlyViewerBuildInfoPath -ExpectedLocale $Locale
     if (-not $SkipFreshnessCheck) {
         Assert-ArtifactFresh -ArtifactPath $exePath -InputPaths @(
             (Join-Path $repoRoot "src"),
             (Join-Path $repoRoot "scripts\build\build_workspace.ps1"),
-            (Join-Path $repoRoot "scripts\build\build_sources.json")
+            (Join-Path $repoRoot "scripts\build\build_sources.json"),
+            (Join-Path $repoRoot "locales")
         ) -ExcludePaths @(
             (Join-Path $repoRoot "src\readonly_viewer")
         )
@@ -446,12 +529,10 @@ try {
         Sanitize-LibreOfficeRuntimeForRelease -ImageDir $releaseLoRuntime
     }
 
-    $documentSource = Join-Path $repoRoot "docs\public"
-    if (Test-Path -LiteralPath $documentSource) {
-        Copy-DirectoryContents -SourceDir $documentSource -DestDir $docsDir
-    }
+    $documentSource = Join-Path $repoRoot ("docs\" + $Locale)
+    Copy-DirectoryContents -SourceDir $documentSource -DestDir $docsDir
 
-    $releaseReadme = Join-Path $documentSource "Index.md"
+    $releaseReadme = Join-Path $documentSource "README.md"
     if (Test-Path -LiteralPath $releaseReadme) {
         Copy-File -Source $releaseReadme -Dest (Join-Path $docsDir "README.md")
     }
@@ -462,20 +543,14 @@ try {
         }
     }
     Apply-RepoVersionMarkers -DocsDir $docsDir -RepoVersion $repoVersion
-    foreach ($docName in @("LICENSE.md", "LICENSES_INDEX.md", "THIRD_PARTY_NOTICES.md")) {
-        $docPath = Join-Path $repoRoot $docName
-        if (Test-Path -LiteralPath $docPath) {
-            Copy-File -Source $docPath -Dest (Join-Path $docsDir $docName)
-        }
-    }
+    Copy-ReleaseTopDocuments -ReleaseRoot $outDir -RepositoryRoot $repoRoot -Locale $Locale
     $docsContents = @(
         "Release documentation contents",
         "",
-        "- README.md / Index.md: documentation index.",
-        "- How_to_*.md: task-oriented user and developer guides.",
-        "- LICENSE.md: license for this project itself.",
-        "- LICENSES_INDEX.md: license checklist and release license mapping.",
-        "- THIRD_PARTY_NOTICES.md: third-party summary and redistribution notes."
+        "- README.md: canonical documentation for this release language.",
+        "- legal/LICENSE.md: legal text for this release language.",
+        "- legal/THIRD_PARTY_NOTICES.md: third-party notice for this release language.",
+        "- Top-level README.* and LICENSE.* files are copies of their canonical documents."
     ) -join "`r`n"
     Write-TextFile -DestPath (Join-Path $docsDir "CONTENTS.txt") -Value $docsContents -Encoding UTF8
 
@@ -569,7 +644,7 @@ try {
     }
 
     if (-not $NoSampleWorkspace) {
-        Copy-ReleaseSampleWorkspace -SampleDest (Join-Path $outDir "sample_workspace")
+        Copy-ReleaseSampleWorkspace -SampleDest (Join-Path $outDir "sample_workspace") -Locale $Locale -Lite:$Lite
     }
 
     if (-not $NoSetupJson) {
@@ -605,7 +680,7 @@ try {
         "  If this release includes the Office conversion runtime, these files are copied from that bundled runtime.",
         "  custom_build/ records the LibreOffice build options, reduction manifest, and patches when a runtime is bundled.",
         "",
-        "Read docs/THIRD_PARTY_NOTICES.md first for the summary."
+        "Read docs/legal/THIRD_PARTY_NOTICES.md first for the summary."
     ) -join "`r`n"
     Write-TextFile -DestPath (Join-Path $licensesDir "README.txt") -Value $licensesReadme -Encoding UTF8
 
@@ -629,7 +704,7 @@ try {
             $lines = @()
             foreach ($f in $files) {
                 $rel = $f.FullName.Substring($outDir.Length).TrimStart('\', '/')
-                $hash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                $hash = Get-Sha256 -Path $f.FullName
                 $entries += [PSCustomObject]@{
                     path = $rel
                     sha256 = $hash
@@ -641,6 +716,7 @@ try {
             $manifest = [PSCustomObject]@{
                 created_at = (Get-Date).ToString("o")
                 name = $folderName
+                locale = $Locale
                 files = $entries
             }
 

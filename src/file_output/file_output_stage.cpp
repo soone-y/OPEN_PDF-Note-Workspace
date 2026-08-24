@@ -5,6 +5,7 @@
 #include "clrop/hash.h"
 #include "core/annot_commands.h"
 #include "core/atomic_write.h"
+#include "core/localization.h"
 #include "core/preview_trace.h"
 #include "core/ui_notify.h"
 #include "note/note_identity.h"
@@ -491,7 +492,7 @@ std::wstring DefaultDeferredNoteBaseName() {
   }
 
   return SanitizeNoteFileNamePart(lectureName + L"_" + sessionName +
-                                  L"_ノート");
+                                  localization::Text(L"file_output.default_note_suffix"));
 }
 
 std::filesystem::path
@@ -502,11 +503,9 @@ ResolveDeferredCurrentNotePath(std::wstring *outErr = nullptr) {
     return std::filesystem::path(g_currentNotePath);
   if (g_currentSessionPath.empty()) {
     if (outErr) {
-      *outErr = IsEnglishUi()
-                    ? L"Open a session before saving notes."
-                    : (g_config.studentMode
-                           ? L"ノート保存には回次を開いてください。"
-                           : L"ノート保存には下位項目を開いてください。");
+      *outErr = localization::Text(g_config.studentMode
+          ? L"file_output.note.open_session_before_save.student"
+          : L"file_output.note.open_session_before_save.parent");
     }
     return {};
   }
@@ -515,7 +514,7 @@ ResolveDeferredCurrentNotePath(std::wstring *outErr = nullptr) {
   const std::filesystem::path noteDir = sessionRoot / L"note";
   if (!EnsureDir(noteDir)) {
     if (outErr)
-      *outErr = L"ノートフォルダを作成できません。";
+      *outErr = localization::Text(L"file_output.stage.note_folder_create_failed");
     return {};
   }
 
@@ -552,7 +551,7 @@ ResolveDeferredCurrentNotePath(std::wstring *outErr = nullptr) {
     }
   }
   if (outErr)
-    *outErr = L"ノート保存先ファイル名を決定できません。";
+    *outErr = localization::Text(L"file_output.stage.note_filename_unavailable");
   return {};
 }
 
@@ -562,8 +561,7 @@ bool EnsureCurrentNotePathForStageImpl(HWND owner) {
   if (!path.empty())
     return true;
   if (err.empty()) {
-    err = IsEnglishUi() ? L"Could not decide the note save path."
-                        : L"ノート保存先を決定できません。";
+    err = localization::Text(L"file_output.stage.87a50c572985");
   }
   ShowStageSoftNotice(owner, err, SoftNoticeKind::Warning);
   return false;
@@ -706,13 +704,8 @@ bool IsAnnotationSaveBlockedByIme() { return g_pdf.imeComposing; }
 void ShowImeBlockedSaveNotice(HWND owner, bool noteTarget) {
   const std::wstring text =
       noteTarget
-          ? (IsEnglishUi()
-                 ? L"Finish IME composition in the note before saving."
-                 : L"ノートの IME 変換を確定してから保存してください。")
-          : (IsEnglishUi()
-                 ? L"Finish IME composition in the annotation text before "
-                   L"saving."
-                 : L"注釈テキストの IME 変換を確定してから保存してください。");
+          ? (localization::Text(L"file_output.stage.68bfa971af08"))
+          : localization::Text(L"file_output.annotation.ime_finish");
   ShowStageSoftNotice(owner, text, SoftNoticeKind::Warning);
 }
 
@@ -724,50 +717,33 @@ bool EnsureFastLoadedAnnotationsStrongValidatedBeforeSave(
     return true;
 
   auto fail = [&](const std::wstring &reason) {
-    std::wstring msg =
-        IsEnglishUi()
-            ? L"Annotation save was stopped because the loaded .clrop has not "
-              L"been strongly verified against the current PDF."
-            : L"読み込んだ .clrop と現在の PDF "
-              L"の強照合が完了していないため、注釈保存を中止しました。";
+    std::wstring msg = localization::Text(L"file_output.annotation.strong_validation_blocked");
     if (!reason.empty())
       msg += L"\n" + reason;
-    msg += IsEnglishUi() ? L"\n\nReopen the PDF and resolve the .clrop "
-                           L"mismatch before saving annotations."
-                         : L"\n\nPDF を開き直し、.clrop "
-                           L"の不一致を確認してから注釈を保存してください。";
+    msg += localization::Text(L"file_output.annotation.strong_validation_guidance");
     if (outErr)
       *outErr = msg;
     ShowStageMessageDialog(
-        owner, IsEnglishUi() ? L"Stage annotations" : L"注釈 stage 保存", msg);
+        owner, localization::Text(L"file_output.stage.98d4f8e406e9"), msg);
     TraceSaveFailure(L"StageSave", L"annot_strong_validation_required", pdfPath,
                      {}, {}, msg);
     return false;
   };
 
   if (pdfPath.empty()) {
-    return fail(IsEnglishUi() ? L"Current PDF path is empty."
-                              : L"現在の PDF パスが空です。");
+    return fail(localization::Text(L"file_output.stage.01d56c2c0a29"));
   }
   if (!g_annotsLoadedPdfIdValid) {
-    return fail(IsEnglishUi() ? L"The loaded .clrop identity is unavailable."
-                              : L"読み込んだ .clrop の識別情報がありません。");
+    return fail(localization::Text(L"file_output.stage.223d87827537"));
   }
 
   const clrop::PdfId currentId = clrop::ComputePdfId(pdfPath);
   if (currentId.sha256.empty()) {
-    return fail(
-        IsEnglishUi()
-            ? L"Could not compute the current PDF SHA-256 for strong "
-              L"validation."
-            : L"現在の PDF の SHA-256 を計算できず、強照合できません。");
+    return fail(localization::Text(L"file_output.annotation.current_pdf_hash_failed"));
   }
   if (!clrop::PdfIdStrongMatches(g_annotsLoadedPdfId, currentId)) {
     return fail(
-        IsEnglishUi()
-            ? L"The current PDF bytes differ from the .clrop that was loaded."
-            : L"現在の PDF の内容が、読み込んだ .clrop の対象 PDF "
-              L"と一致しません。");
+        localization::Text(L"file_output.stage.bec1c99445fa"));
   }
 
   g_annotsLoadedPdfId = currentId;
@@ -824,9 +800,7 @@ PrepareAnnotStageSnapshotFromCurrentState(std::wstring *outErr = nullptr) {
   if (!TryBuildCurrentAnnotationSaveSnapshot(&snapshot.annotations)) {
     if (outErr)
       *outErr =
-          IsEnglishUi()
-              ? L"Finish IME composition in the annotation text before saving."
-              : L"注釈テキストの IME 変換を確定してから保存してください。";
+          localization::Text(L"file_output.stage.51079ba38818");
     return std::nullopt;
   }
   snapshot.revision = CurrentEditRevision();
@@ -1112,14 +1086,14 @@ bool LoadNoteStageState(const std::filesystem::path &stagePath,
   auto bytes = ReadFileBytes(statePath);
   if (!bytes.has_value()) {
     if (outErr)
-      *outErr = L"note state の読み込みに失敗しました。";
+      *outErr = localization::Text(L"file_output.stage.note_state_read_failed");
     return false;
   }
   static const std::string kMarker = "\n--DATA--\n";
   const size_t markerPos = bytes->find(kMarker);
   if (markerPos == std::string::npos) {
     if (outErr)
-      *outErr = L"note state の形式が不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_state_format_invalid");
     return false;
   }
 
@@ -1138,7 +1112,7 @@ bool LoadNoteStageState(const std::filesystem::path &stagePath,
       auto parsed = ParseUint64(UTF8ToWide(value));
       if (!parsed.has_value()) {
         if (outErr)
-          *outErr = L"note state の applied_rev が不正です。";
+          *outErr = localization::Text(L"file_output.stage.note_state_applied_revision_invalid");
         return false;
       }
       state.appliedJournalRevision = *parsed;
@@ -1146,7 +1120,7 @@ bool LoadNoteStageState(const std::filesystem::path &stagePath,
       auto parsed = ParseUint64(UTF8ToWide(value));
       if (!parsed.has_value()) {
         if (outErr)
-          *outErr = L"note state の applied_edit_rev が不正です。";
+          *outErr = localization::Text(L"file_output.stage.note_state_applied_edit_revision_invalid");
         return false;
       }
       state.appliedEditJournalRevision = *parsed;
@@ -1154,7 +1128,7 @@ bool LoadNoteStageState(const std::filesystem::path &stagePath,
       auto parsed = ParseUint64(UTF8ToWide(value));
       if (!parsed.has_value()) {
         if (outErr)
-          *outErr = L"note state の blank_tail が不正です。";
+          *outErr = localization::Text(L"file_output.stage.note_state_blank_tail_invalid");
         return false;
       }
       state.blankTailCount = *parsed;
@@ -1172,7 +1146,7 @@ bool SaveNoteStageState(const std::filesystem::path &stagePath,
   const auto statePath = NoteStatePath(stagePath);
   if (statePath.empty()) {
     if (outErr)
-      *outErr = L"note state path が不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_state_path_invalid");
     return false;
   }
   const bool stateEmpty = state.appliedJournalRevision == 0 &&
@@ -1186,7 +1160,7 @@ bool SaveNoteStageState(const std::filesystem::path &stagePath,
   }
   if (!EnsureDir(statePath.parent_path())) {
     if (outErr)
-      *outErr = L"note state フォルダを作成できません。";
+      *outErr = localization::Text(L"file_output.stage.note_state_folder_create_failed");
     return false;
   }
   std::string bytes;
@@ -1213,18 +1187,18 @@ bool WriteNoteJournalSegment(const std::filesystem::path &stagePath,
                              std::wstring *outErr = nullptr) {
   if (stagePath.empty()) {
     if (outErr)
-      *outErr = L"note journal stage path が不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_journal_stage_path_invalid");
     return false;
   }
   if (bytes.empty()) {
     if (outErr)
-      *outErr = L"note journal の内容がありません。";
+      *outErr = localization::Text(L"file_output.stage.note_journal_empty");
     return false;
   }
   const auto dir = NoteJournalDir();
   if (!EnsureDir(dir)) {
     if (outErr)
-      *outErr = L"note journal フォルダを作成できません。";
+      *outErr = localization::Text(L"file_output.stage.note_journal_folder_create_failed");
     return false;
   }
   const auto path = BuildNoteJournalPath(stagePath, revision);
@@ -1328,7 +1302,7 @@ bool CaptureStageDestinationObservation(const std::filesystem::path &path,
     outErr->clear();
   if (path.empty()) {
     if (outErr)
-      *outErr = L"統合先が不正です。";
+      *outErr = localization::Text(L"file_output.stage.destination_invalid");
     return false;
   }
 
@@ -1339,20 +1313,20 @@ bool CaptureStageDestinationObservation(const std::filesystem::path &path,
       return true;
     }
     if (outErr)
-      *outErr = L"統合先を確認できません。";
+      *outErr = localization::Text(L"file_output.stage.destination_inspect_failed");
     return false;
   }
   if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
       (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
     if (outErr)
-      *outErr = L"統合先が通常ファイルではありません。";
+      *outErr = localization::Text(L"file_output.stage.destination_not_regular_file");
     return false;
   }
 
   auto bytes = ReadFileBytes(path);
   if (!bytes.has_value()) {
     if (outErr)
-      *outErr = L"統合先の内容を読み取れません。";
+      *outErr = localization::Text(L"file_output.stage.destination_read_failed");
     return false;
   }
   if (outExisted)
@@ -1367,7 +1341,7 @@ bool DestinationStillMatchesStageObservation(const StageMeta &meta,
   if (!meta.destinationExistedAtStage.has_value() ||
       !meta.destinationFingerprintAtStage.has_value()) {
     if (outErr) {
-      *outErr = L"この stage には統合先の世代情報がありません。原本を保護するため統合しません。";
+      *outErr = localization::Text(L"file_output.stage.destination_observation_missing");
     }
     return false;
   }
@@ -1381,7 +1355,7 @@ bool DestinationStillMatchesStageObservation(const StageMeta &meta,
   if (existsNow != *meta.destinationExistedAtStage ||
       fingerprintNow != *meta.destinationFingerprintAtStage) {
     if (outErr) {
-      *outErr = L"stage 作成後に統合先が外部変更されたため、原本を保護して統合を中止しました。";
+      *outErr = localization::Text(L"file_output.stage.destination_changed_after_stage");
     }
     return false;
   }
@@ -1552,7 +1526,7 @@ bool UpdateStageMetaContentIdentity(const StageMeta &source,
   }
   if (identity.content_fingerprint != note::FingerprintSnapshotBytes(bytes)) {
     if (outErr)
-      *outErr = L"note stage のTextCore identityが本文と一致しません。";
+      *outErr = localization::Text(L"file_output.stage.note_text_identity_mismatch");
     return false;
   }
   StageMeta updated = source;
@@ -1564,7 +1538,7 @@ bool UpdateStageMetaContentIdentity(const StageMeta &source,
     if (source.basePersistenceRevision.has_value() ||
         source.persistenceRevision.has_value() || sourceRecord.has_value()) {
       if (outErr)
-        *outErr = L"note stage の永続IDが対象ノートと一致しません。";
+        *outErr = localization::Text(L"file_output.stage.note_identity_target_mismatch");
       return false;
     }
   }
@@ -1819,7 +1793,7 @@ bool DeleteBackupMetaFiles(const std::filesystem::path &backupMetaPath,
   BackupMetaInfo meta;
   if (!LoadBackupMetaFile(backupMetaPath, &meta)) {
     if (outErr)
-      *outErr = L"バックアップ metadata の読み込みに失敗しました。";
+      *outErr = localization::Text(L"file_output.stage.backup_metadata_read_failed");
     return false;
   }
 
@@ -1830,7 +1804,7 @@ bool DeleteBackupMetaFiles(const std::filesystem::path &backupMetaPath,
     ec.clear();
     if (!std::filesystem::remove(meta.backupPath, ec) && ec) {
       if (outErr)
-        *outErr = L"バックアップ本体の削除に失敗しました。";
+        *outErr = localization::Text(L"file_output.stage.backup_file_delete_failed");
       return false;
     }
   }
@@ -1840,7 +1814,7 @@ bool DeleteBackupMetaFiles(const std::filesystem::path &backupMetaPath,
     ec.clear();
     if (!std::filesystem::remove(meta.metaPath, ec) && ec) {
       if (outErr)
-        *outErr = L"バックアップ metadata の削除に失敗しました。";
+        *outErr = localization::Text(L"file_output.stage.backup_metadata_delete_failed");
       return false;
     }
   }
@@ -1989,7 +1963,7 @@ bool DeleteResolvedEmptyClropDestination(const StageMeta &meta,
                   DestinationPathFor(file_output::StagedDiffKind::Clrop,
                                      meta.targetPath))) {
     if (outErr)
-      *outErr = L"空の注釈データの削除先が不正です。";
+      *outErr = localization::Text(L"file_output.stage.empty_annotation_destination_invalid");
     return false;
   }
 
@@ -1999,25 +1973,25 @@ bool DeleteResolvedEmptyClropDestination(const StageMeta &meta,
     if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
       return true;
     if (outErr)
-      *outErr = L"空の .clrop ファイルを確認できません。";
+      *outErr = localization::Text(L"file_output.stage.empty_annotation_inspect_failed");
     return false;
   }
   if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
       (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
     if (outErr)
-      *outErr = L"空の .clrop ファイルの削除先が通常ファイルではありません。";
+      *outErr = localization::Text(L"file_output.stage.empty_annotation_destination_not_regular_file");
     return false;
   }
 
   std::error_code ec;
   if (!std::filesystem::is_regular_file(meta.destPath, ec) || ec) {
     if (outErr)
-      *outErr = L"空の .clrop ファイルの削除先が通常ファイルではありません。";
+      *outErr = localization::Text(L"file_output.stage.empty_annotation_destination_not_regular_file");
     return false;
   }
   if (!std::filesystem::remove(meta.destPath, ec) || ec) {
     if (outErr)
-      *outErr = L"空の .clrop ファイルを削除できません。";
+      *outErr = localization::Text(L"file_output.stage.empty_annotation_delete_failed");
     return false;
   }
   return true;
@@ -2153,7 +2127,7 @@ bool LoadResolvedStageAnnotationsForMeta(
     return false;
   if (meta.stagePath.empty() || meta.targetPath.empty()) {
     if (outErr)
-      *outErr = L"注釈 stage 情報が不正です。";
+      *outErr = localization::Text(L"file_output.stage.annotation_stage_metadata_invalid");
     return false;
   }
 
@@ -2165,7 +2139,7 @@ bool LoadResolvedStageAnnotationsForMeta(
           &loadedId, err, clrop_bridge::LoadAnnotationsValidation::Strong)) {
     if (outErr) {
       *outErr = err.empty()
-                    ? L"注釈 stage checkpoint の読み込みに失敗しました。"
+                    ? localization::Text(L"file_output.stage.annotation_checkpoint_read_failed")
                     : err;
       *outErr += L"\ncheckpoint path: " + meta.stagePath.wstring();
     }
@@ -2174,7 +2148,7 @@ bool LoadResolvedStageAnnotationsForMeta(
   if (mismatch) {
     if (outErr) {
       *outErr =
-          L"注釈 stage checkpoint の pdf_id が現在の PDF と一致しません。";
+          localization::Text(L"file_output.stage.annotation_checkpoint_pdf_mismatch");
       *outErr += L"\ncheckpoint path: " + meta.stagePath.wstring();
     }
     return false;
@@ -2209,9 +2183,9 @@ bool LoadResolvedStageAnnotationsForMeta(
     if (!loadedCommands) {
       if (outErr) {
         *outErr = readFailed
-                      ? L"注釈 stage journal の読み込みに失敗しました。"
+                      ? localization::Text(L"file_output.stage.annotation_journal_read_failed")
                       : (parseErr.empty()
-                             ? L"注釈 stage journal の解析に失敗しました。"
+                             ? localization::Text(L"file_output.stage.annotation_journal_parse_failed")
                              : parseErr);
         *outErr += L"\njournal path: " + seg.path.wstring();
         *outErr += L"\nbytes: " + std::to_wstring(lastByteCount);
@@ -2298,13 +2272,13 @@ bool LoadResolvedStageNoteDataForMeta(const StageMeta &meta,
   if (meta.kind != file_output::StagedDiffKind::Note ||
       meta.stagePath.empty()) {
     if (outErr)
-      *outErr = L"note stage 情報が不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_stage_metadata_invalid");
     return false;
   }
   auto snapshotBytes = ReadFileBytes(meta.stagePath);
   if (!snapshotBytes.has_value()) {
     if (outErr)
-      *outErr = L"note stage checkpoint の読み込みに失敗しました。";
+      *outErr = localization::Text(L"file_output.stage.note_checkpoint_read_failed");
     return false;
   }
 
@@ -2322,7 +2296,7 @@ bool LoadResolvedStageNoteDataForMeta(const StageMeta &meta,
     auto segBytes = ReadFileBytes(seg.path);
     if (!segBytes.has_value()) {
       if (outErr)
-        *outErr = L"note journal の読み込みに失敗しました。";
+        *outErr = localization::Text(L"file_output.stage.note_journal_read_failed");
       return false;
     }
     data.committedBytes += *segBytes;
@@ -2338,7 +2312,7 @@ bool LoadResolvedStageNoteDataForMeta(const StageMeta &meta,
     auto segBytes = ReadFileBytes(seg.path);
     if (!segBytes.has_value()) {
       if (outErr)
-        *outErr = L"note edit journal の読み込みに失敗しました。";
+        *outErr = localization::Text(L"file_output.stage.note_edit_journal_read_failed");
       return false;
     }
     auto edit = ParseNoteByteEdit(*segBytes, outErr);
@@ -2530,13 +2504,13 @@ bool ApplyNoteByteEdit(std::string *bytes, const NoteByteEdit &edit,
   if (edit.start > bytes->size() ||
       edit.deletedBytes.size() > bytes->size() - edit.start) {
     if (outErr)
-      *outErr = L"note edit journal の範囲が不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_edit_journal_range_invalid");
     return false;
   }
   if (bytes->compare(edit.start, edit.deletedBytes.size(), edit.deletedBytes) !=
       0) {
     if (outErr)
-      *outErr = L"note edit journal の削除対象が一致しません。";
+      *outErr = localization::Text(L"file_output.stage.note_edit_journal_delete_mismatch");
     return false;
   }
   bytes->replace(edit.start, edit.deletedBytes.size(), edit.insertedBytes);
@@ -2561,7 +2535,7 @@ std::optional<NoteByteEdit> ParseNoteByteEdit(std::string_view bytes,
   const size_t markerPos = bytes.find(kMarker);
   if (markerPos == std::string_view::npos) {
     if (outErr)
-      *outErr = L"note edit journal の形式が不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_edit_journal_format_invalid");
     return std::nullopt;
   }
   std::istringstream iss(std::string(bytes.substr(0, markerPos + 1)));
@@ -2574,7 +2548,7 @@ std::optional<NoteByteEdit> ParseNoteByteEdit(std::string_view bytes,
   bool hasInsertLen = false;
   if (!std::getline(iss, line) || line != "NEDJ1") {
     if (outErr)
-      *outErr = L"note edit journal のヘッダが不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_edit_journal_header_invalid");
     return std::nullopt;
   }
   while (std::getline(iss, line)) {
@@ -2588,7 +2562,7 @@ std::optional<NoteByteEdit> ParseNoteByteEdit(std::string_view bytes,
     auto parsed = ParseUint64(UTF8ToWide(value));
     if (!parsed.has_value()) {
       if (outErr)
-        *outErr = L"note edit journal の数値が不正です。";
+        *outErr = localization::Text(L"file_output.stage.note_edit_journal_number_invalid");
       return std::nullopt;
     }
     if (key == "start") {
@@ -2607,7 +2581,7 @@ std::optional<NoteByteEdit> ParseNoteByteEdit(std::string_view bytes,
       deleteLen > bytes.size() - dataStart ||
       insertLen > bytes.size() - dataStart - deleteLen) {
     if (outErr)
-      *outErr = L"note edit journal のサイズが不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_edit_journal_size_invalid");
     return std::nullopt;
   }
   NoteByteEdit edit;
@@ -2622,13 +2596,13 @@ bool WriteNoteEditJournalSegment(const std::filesystem::path &stagePath,
                                  std::wstring *outErr = nullptr) {
   if (stagePath.empty()) {
     if (outErr)
-      *outErr = L"note edit journal stage path が不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_edit_journal_stage_path_invalid");
     return false;
   }
   const auto dir = NoteJournalDir();
   if (!EnsureDir(dir)) {
     if (outErr)
-      *outErr = L"note edit journal フォルダを作成できません。";
+      *outErr = localization::Text(L"file_output.stage.note_edit_journal_folder_create_failed");
     return false;
   }
   const std::string bytes = SerializeNoteByteEdit(edit);
@@ -2766,13 +2740,13 @@ std::optional<StageMeta> StageNoteSnapshotWithBytes(
     std::wstring *outErr = nullptr) {
   if (notePath.empty()) {
     if (outErr)
-      *outErr = L"ノートが開かれていません。";
+      *outErr = localization::Text(L"file_output.stage.note_not_open");
     return std::nullopt;
   }
   const auto dir = StageDir(file_output::StagedDiffKind::Note);
   if (!EnsureDir(dir)) {
     if (outErr)
-      *outErr = L"ノート stage フォルダを作成できません。";
+      *outErr = localization::Text(L"file_output.stage.note_stage_folder_create_failed");
     return std::nullopt;
   }
 
@@ -2806,7 +2780,7 @@ std::optional<StageMeta> StageNoteSnapshotWithBytes(
       note::ResolveRuntimeNoteIdentityPath(notePath, &identityErr);
   if (!identity.note_id.valid()) {
     if (outErr)
-      *outErr = identityErr.empty() ? L"ノートの永続IDを確定できません。"
+      *outErr = identityErr.empty() ? localization::Text(L"file_output.stage.note_identity_unavailable")
                                     : identityErr;
     return std::nullopt;
   }
@@ -2842,7 +2816,7 @@ std::optional<StageMeta> StageNoteSnapshotWithBytes(
     }
     if (basePersistenceRevision == UINT64_MAX) {
       if (outErr)
-        *outErr = L"ノートの永続化リビジョンが上限に達しました。";
+        *outErr = localization::Text(L"file_output.stage.note_revision_limit");
       return std::nullopt;
     }
     meta.basePersistenceRevision = basePersistenceRevision;
@@ -2920,7 +2894,7 @@ bool ApplyNoteStageAppendPlan(const NoteStageAppendPlan &plan,
                               std::wstring *outErr = nullptr) {
   if (plan.meta.stagePath.empty()) {
     if (outErr)
-      *outErr = L"note stage path が不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_stage_path_invalid");
     return false;
   }
   if (!plan.journalAddBytes.empty()) {
@@ -2962,7 +2936,7 @@ bool ApplyNoteStageEditPlan(const NoteStageEditPlan &plan,
                             std::wstring *outErr = nullptr) {
   if (plan.meta.stagePath.empty()) {
     if (outErr)
-      *outErr = L"note stage path が不正です。";
+      *outErr = localization::Text(L"file_output.stage.note_stage_path_invalid");
     return false;
   }
   if (!WriteNoteEditJournalSegment(plan.meta.stagePath,
@@ -2979,13 +2953,13 @@ StageAnnotationCheckpointWithData(const std::wstring &pdfPath,
                                   std::wstring *outErr = nullptr) {
   if (pdfPath.empty()) {
     if (outErr)
-      *outErr = L"PDF が開かれていません。";
+      *outErr = localization::Text(L"file_output.stage.pdf_not_open");
     return std::nullopt;
   }
   const auto dir = StageDir(file_output::StagedDiffKind::Clrop);
   if (!EnsureDir(dir)) {
     if (outErr)
-      *outErr = L"注釈 stage フォルダを作成できません。";
+      *outErr = localization::Text(L"file_output.stage.annotation_stage_folder_create_failed");
     return std::nullopt;
   }
   StageMeta meta;
@@ -3026,19 +3000,19 @@ bool WriteAnnotJournalSegment(const std::wstring &pdfPath,
                               std::wstring *outErr = nullptr) {
   if (pdfPath.empty() || commands.empty()) {
     if (outErr)
-      *outErr = L"注釈 journal の内容がありません。";
+      *outErr = localization::Text(L"file_output.stage.annotation_journal_empty");
     return false;
   }
   const auto dir = AnnotJournalDir();
   if (!EnsureDir(dir)) {
     if (outErr)
-      *outErr = L"注釈 journal フォルダを作成できません。";
+      *outErr = localization::Text(L"file_output.stage.annotation_journal_folder_create_failed");
     return false;
   }
   std::string json;
   if (!SerializeAnnotCommandsJson(commands, &json)) {
     if (outErr)
-      *outErr = L"注釈 journal のシリアライズに失敗しました。";
+      *outErr = localization::Text(L"file_output.stage.annotation_journal_serialize_failed");
     return false;
   }
   const uint64_t revision =
@@ -3089,7 +3063,7 @@ bool PrepareNotePersistenceCommit(const StageMeta &meta,
       note::ResolveRuntimeNoteIdentityPath(meta.targetPath, &identityErr);
   if (!identity.note_id.valid()) {
     if (outErr)
-      *outErr = identityErr.empty() ? L"ノートの永続IDを確定できません。"
+      *outErr = identityErr.empty() ? localization::Text(L"file_output.stage.note_identity_unavailable")
                                     : identityErr;
     return false;
   }
@@ -3103,7 +3077,7 @@ bool PrepareNotePersistenceCommit(const StageMeta &meta,
   if (destinationExists) {
     if (!ReadFileBytesWin32(meta.destPath, diskBytes)) {
       if (outErr)
-        *outErr = L"統合前のノート原本を読み込めません。";
+        *outErr = localization::Text(L"file_output.stage.note_destination_read_failed");
       return false;
     }
     currentFingerprint = note::FingerprintSnapshotBytes(diskBytes);
@@ -3118,7 +3092,7 @@ bool PrepareNotePersistenceCommit(const StageMeta &meta,
       if (meta.basePersistenceRevision.has_value() ||
           meta.persistenceRevision.has_value() || stageRecord.has_value()) {
         if (outErr)
-          *outErr = L"note stage の永続IDが統合先と一致しません。";
+          *outErr = localization::Text(L"file_output.stage.note_identity_destination_mismatch");
         return false;
       }
     }
@@ -3137,7 +3111,7 @@ bool PrepareNotePersistenceCommit(const StageMeta &meta,
     if (meta.basePersistenceRevision.has_value() ||
         meta.persistenceRevision.has_value() || stageRecord.has_value()) {
       if (outErr)
-        *outErr = L"note stage の永続IDが統合先と一致しません。";
+        *outErr = localization::Text(L"file_output.stage.note_identity_destination_mismatch");
       return false;
     }
   }
@@ -3177,16 +3151,16 @@ bool PrepareNotePersistenceCommit(const StageMeta &meta,
   if (decision == note::NotePersistenceCommitDecision::InvalidInput) {
     if (outErr) {
       if (intent.expected_base_revision == UINT64_MAX) {
-        *outErr = L"ノートの永続化リビジョンが上限に達しました。";
+        *outErr = localization::Text(L"file_output.stage.note_revision_limit");
       } else {
-        *outErr = L"note stage の永続化意図または原本観測が不正です。";
+        *outErr = localization::Text(L"file_output.stage.note_commit_observation_invalid");
       }
     }
     return false;
   }
   if (decision == note::NotePersistenceCommitDecision::Conflict) {
     if (outErr)
-      *outErr = L"stage 作成後にノート原本が変更されたため統合を中止しました。";
+      *outErr = localization::Text(L"file_output.stage.note_changed_after_stage");
     return false;
   }
 
@@ -3212,14 +3186,14 @@ bool IntegrateStageMetaToDestination(HWND owner, const StageMeta &meta,
   PumpSaveScrollMessages(owner);
   if (meta.destPath.empty()) {
     if (outErr)
-      *outErr = L"統合先が不正です。";
+      *outErr = localization::Text(L"file_output.stage.destination_invalid");
     TraceSaveFailure(L"IntegrateStage", L"dest_empty", meta.targetPath,
                      meta.stagePath, meta.destPath, outErr ? *outErr : L"");
     return false;
   }
   if (IsUnsupportedPath(meta.destPath)) {
     if (outErr)
-      *outErr = L"UNC/デバイスパスには統合できません。";
+      *outErr = localization::Text(L"file_output.stage.destination_unsupported_path");
     TraceSaveFailure(L"IntegrateStage", L"unsupported_path", meta.targetPath,
                      meta.stagePath, meta.destPath, outErr ? *outErr : L"");
     return false;
@@ -3268,7 +3242,7 @@ bool IntegrateStageMetaToDestination(HWND owner, const StageMeta &meta,
     auto stageBytes = ReadFileBytes(meta.stagePath);
     if (!stageBytes.has_value()) {
       if (outErr)
-        *outErr = L"stage の読み込みに失敗しました。";
+        *outErr = localization::Text(L"file_output.stage.stage_read_failed");
       TraceSaveFailure(L"IntegrateStage", L"read_stage_failed", meta.targetPath,
                        meta.stagePath, meta.destPath, outErr ? *outErr : L"");
       return false;
@@ -3412,14 +3386,14 @@ bool WriteStageMetaToDestinationOnWorker(const StageMeta &meta,
                                          std::wstring *outErr = nullptr) {
   if (meta.destPath.empty()) {
     if (outErr)
-      *outErr = L"統合先が不正です。";
+      *outErr = localization::Text(L"file_output.stage.destination_invalid");
     TraceSaveFailure(L"BackgroundSave", L"dest_empty", meta.targetPath,
                      meta.stagePath, meta.destPath, outErr ? *outErr : L"");
     return false;
   }
   if (IsUnsupportedPath(meta.destPath)) {
     if (outErr)
-      *outErr = L"UNC/デバイスパスには統合できません。";
+      *outErr = localization::Text(L"file_output.stage.destination_unsupported_path");
     TraceSaveFailure(L"BackgroundSave", L"unsupported_path", meta.targetPath,
                      meta.stagePath, meta.destPath, outErr ? *outErr : L"");
     return false;
@@ -3461,7 +3435,7 @@ bool WriteStageMetaToDestinationOnWorker(const StageMeta &meta,
     auto stageBytes = ReadFileBytes(meta.stagePath);
     if (!stageBytes.has_value()) {
       if (outErr)
-        *outErr = L"stage の読み込みに失敗しました。";
+        *outErr = localization::Text(L"file_output.stage.stage_read_failed");
       TraceSaveFailure(L"BackgroundSave", L"read_stage_failed", meta.targetPath,
                        meta.stagePath, meta.destPath, outErr ? *outErr : L"");
       return false;
@@ -3594,7 +3568,7 @@ bool StageDeferredCurrentNoteForExplicitSave(HWND owner) {
                          g_currentNotePath, latest->stagePath, latest->destPath,
                          err);
         ShowStageMessageDialog(
-            owner, IsEnglishUi() ? L"Stage note" : L"ノート stage 保存", err);
+            owner, localization::Text(L"file_output.stage.ae847b4a0d43"), err);
         return false;
       }
     }
@@ -3615,7 +3589,7 @@ bool StageDeferredCurrentNoteForExplicitSave(HWND owner) {
     TraceSaveFailure(L"StageSave", L"deferred_note_explicit_checkpoint_failed",
                      g_currentNotePath, {}, {}, err);
     ShowStageMessageDialog(
-        owner, IsEnglishUi() ? L"Stage note" : L"ノート stage 保存", err);
+        owner, localization::Text(L"file_output.stage.ae847b4a0d43"), err);
     return false;
   }
   file_output::DiscardOtherStagedNoteFilesFor(g_currentNotePath,
@@ -3644,8 +3618,7 @@ bool SaveNoteFile(HWND owner) {
   ScopedBatchSaveUiRefresh batchUi(owner);
   if (g_currentNotePath.empty()) {
     ShowStageSoftNotice(owner,
-                        IsEnglishUi() ? L"No note is open."
-                                      : L"ノートが開かれていません。",
+                        localization::Text(L"file_output.stage.eb5c57ff8257"),
                         SoftNoticeKind::Warning);
     return false;
   }
@@ -3674,7 +3647,7 @@ bool SaveNoteFile(HWND owner) {
   std::wstring err;
   if (!IntegrateStageMetaToDestination(owner, *latestStage,
                                        /*discardOtherIfLatest=*/true, &err)) {
-    ShowStageMessageDialog(owner, IsEnglishUi() ? L"Save note" : L"ノート保存",
+    ShowStageMessageDialog(owner, localization::Text(L"file_output.stage.650ae0a61de3"),
                            err);
     return false;
   }
@@ -3739,7 +3712,7 @@ bool SaveNoteIfDirty(HWND owner) {
     TraceSaveFailure(L"StageSave", L"prepare_note_snapshot_failed",
                      g_currentNotePath);
     if (!g_lastNoteTextEncodingError.empty()) {
-      ShowStageMessageDialog(owner, IsEnglishUi() ? L"Save note" : L"ノート保存",
+      ShowStageMessageDialog(owner, localization::Text(L"file_output.stage.650ae0a61de3"),
                              g_lastNoteTextEncodingError, SoftNoticeKind::Warning);
     }
     return false;
@@ -3764,7 +3737,7 @@ bool SaveNoteIfDirty(HWND owner) {
                          prepared->targetPath, latest->stagePath,
                          latest->destPath, err);
         ShowStageMessageDialog(
-            owner, IsEnglishUi() ? L"Stage note" : L"ノート stage 保存", err);
+            owner, localization::Text(L"file_output.stage.ae847b4a0d43"), err);
         return false;
       }
     }
@@ -3804,7 +3777,7 @@ bool SaveNoteIfDirty(HWND owner) {
                          prepared->targetPath, latestStage->stagePath,
                          latestStage->destPath, err);
         ShowStageMessageDialog(
-            owner, IsEnglishUi() ? L"Stage note" : L"ノート stage 保存", err);
+            owner, localization::Text(L"file_output.stage.ae847b4a0d43"), err);
         return false;
       }
       g_noteDirty = false;
@@ -3822,7 +3795,7 @@ bool SaveNoteIfDirty(HWND owner) {
                        prepared->targetPath, latestStage->stagePath,
                        latestStage->destPath, err);
       ShowStageMessageDialog(
-          owner, IsEnglishUi() ? L"Stage note" : L"ノート stage 保存", err);
+          owner, localization::Text(L"file_output.stage.ae847b4a0d43"), err);
       return false;
     }
 
@@ -3835,7 +3808,7 @@ bool SaveNoteIfDirty(HWND owner) {
                          prepared->targetPath, latestStage->stagePath,
                          latestStage->destPath, err);
         ShowStageMessageDialog(
-            owner, IsEnglishUi() ? L"Stage note" : L"ノート stage 保存", err);
+            owner, localization::Text(L"file_output.stage.ae847b4a0d43"), err);
         return false;
       }
       g_noteDirty = false;
@@ -3853,7 +3826,7 @@ bool SaveNoteIfDirty(HWND owner) {
                        prepared->targetPath, latestStage->stagePath,
                        latestStage->destPath, err);
       ShowStageMessageDialog(
-          owner, IsEnglishUi() ? L"Stage note" : L"ノート stage 保存", err);
+          owner, localization::Text(L"file_output.stage.ae847b4a0d43"), err);
       return false;
     }
   }
@@ -3864,7 +3837,7 @@ bool SaveNoteIfDirty(HWND owner) {
     TraceSaveFailure(L"StageSave", L"note_checkpoint_failed",
                      prepared->targetPath, {}, {}, err);
     ShowStageMessageDialog(
-        owner, IsEnglishUi() ? L"Stage note" : L"ノート stage 保存", err);
+        owner, localization::Text(L"file_output.stage.ae847b4a0d43"), err);
     return false;
   }
   DiscardOtherStagedNoteFilesFor(prepared->targetPath, meta->stagePath);
@@ -3942,7 +3915,7 @@ bool SaveAnnotationsIfDirty(HWND owner) {
     TraceSaveFailure(L"StageSave", L"annot_journal_append_failed", pdfPath, {},
                      {}, err);
     ShowStageMessageDialog(
-        owner, IsEnglishUi() ? L"Stage annotations" : L"注釈 stage 保存", err);
+        owner, localization::Text(L"file_output.stage.98d4f8e406e9"), err);
     return false;
   }
 
@@ -3963,7 +3936,7 @@ bool SaveAnnotationsIfDirty(HWND owner) {
       TraceSaveFailure(L"StageSave", L"prepare_annot_snapshot_failed", pdfPath,
                        {}, {}, err);
       ShowStageMessageDialog(
-          owner, IsEnglishUi() ? L"Stage annotations" : L"注釈 stage 保存",
+          owner, localization::Text(L"file_output.stage.98d4f8e406e9"),
           err);
       return false;
     }
@@ -4019,7 +3992,7 @@ bool SaveAnnotationsIfDirty(HWND owner) {
     TraceSaveFailure(L"StageSave", L"annot_checkpoint_failed",
                      prepared->targetPath, {}, {}, err);
     ShowStageMessageDialog(
-        owner, IsEnglishUi() ? L"Stage annotations" : L"注釈 stage 保存", err);
+        owner, localization::Text(L"file_output.stage.98d4f8e406e9"), err);
     return false;
   }
   stepStartTick = preview_trace::TickNow();
@@ -4251,7 +4224,7 @@ void HandleDeferredAutoStageSaveTimer(HWND owner) {
         TraceSaveFailure(L"AutoStage", L"deferred_annot_checkpoint_failed",
                          g_preparedAnnotStageSnapshot->targetPath, {}, {}, err);
         ShowStageMessageDialog(
-            target, IsEnglishUi() ? L"Stage annotations" : L"注釈 stage 保存",
+            target, localization::Text(L"file_output.stage.98d4f8e406e9"),
             err);
         ok = false;
       } else {
@@ -4427,18 +4400,14 @@ bool RunSaveAndIntegrateTransaction(HWND owner) {
   WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
   if (!workspaceLock.acquired()) {
     ShowStageSoftNotice(owner,
-                        IsEnglishUi()
-                            ? L"Another shared workspace operation is in progress. Your staged changes were kept."
-                            : L"別の共有ワークスペース操作が進行中です。stage の変更は保持しました。",
+                        localization::Text(L"file_output.stage.3eadb65a6c46"),
                         SoftNoticeKind::Warning);
     return false;
   }
   uint64_t snapshotRevision = 0;
   if (!TryBeginSaveTransaction(&snapshotRevision)) {
     ShowStageSoftNotice(owner,
-                        IsEnglishUi()
-                            ? L"Another save transaction is already running."
-                            : L"別の保存トランザクションが進行中です。",
+                        localization::Text(L"file_output.stage.08543c01da1c"),
                         SoftNoticeKind::Warning);
     return false;
   }
@@ -4497,8 +4466,7 @@ StartBackgroundSaveAndIntegrateTransaction(HWND owner) {
     RequestQueuedSaveTransaction();
     ShowStageSoftNotice(
         owner,
-        IsEnglishUi() ? L"Save is already running. The request was queued."
-                      : L"保存処理が進行中です。保存要求を予約しました。",
+        localization::Text(L"file_output.stage.55cb5f0aad2a"),
         SoftNoticeKind::Info);
     return SaveTransactionStartResult::Failed;
   }
@@ -4575,8 +4543,7 @@ StartBackgroundSaveAndIntegrateTransaction(HWND owner) {
             result->ok = false;
             result->error =
                 err.empty()
-                    ? (IsEnglishUi() ? L"Background save failed."
-                                     : L"バックグラウンド保存に失敗しました。")
+                    ? (localization::Text(L"file_output.stage.09fe64f5550a"))
                     : err;
             break;
           }
@@ -4589,9 +4556,7 @@ StartBackgroundSaveAndIntegrateTransaction(HWND owner) {
       } catch (...) {
         result->ok = false;
         result->error =
-            IsEnglishUi()
-                ? L"Unknown background save error."
-                : L"バックグラウンド保存中に不明なエラーが発生しました。";
+            localization::Text(L"file_output.stage.9f7f7c9438b0");
         preview_trace::Append(L"BackgroundSave", L"worker_exception=unknown");
       }
 
@@ -4627,9 +4592,7 @@ CompleteBackgroundSaveAndIntegrateTransaction(HWND owner, void *rawResult) {
   std::unique_ptr<BackgroundSaveWorkerResult> result(
       static_cast<BackgroundSaveWorkerResult *>(rawResult));
   if (!result) {
-    completion.error = IsEnglishUi()
-                           ? L"Background save completion was invalid."
-                           : L"バックグラウンド保存の完了情報が不正です。";
+    completion.error = localization::Text(L"file_output.stage.c9ebbfd632f7");
     EndSaveTransaction();
     LeaveSaveOperation();
     RefreshSaveTransactionUi(owner);
@@ -4673,9 +4636,7 @@ CompleteBackgroundSaveAndIntegrateTransaction(HWND owner, void *rawResult) {
     if (restart == SaveTransactionStartResult::Failed) {
       completion.ok = false;
       if (completion.error.empty()) {
-        completion.error = IsEnglishUi()
-                               ? L"Queued save could not be started."
-                               : L"予約された保存を開始できませんでした。";
+        completion.error = localization::Text(L"file_output.stage.4f542c0796ef");
       }
     }
   }
@@ -4701,45 +4662,36 @@ std::wstring FormatStagedDiffLocationSummary(size_t maxEntries) {
     }
   }
 
-  std::wstring text;
-  if (IsEnglishUi()) {
-    text = L"Affected staged diffs: notes " + std::to_wstring(noteCount) +
-           L", annotations " + std::to_wstring(clropCount) + L"\n";
-  } else {
-    text = L"影響する未統合差分: ノート " + std::to_wstring(noteCount) +
-           L"件、注釈 " + std::to_wstring(clropCount) + L"件\n";
-  }
+  std::wstring text = localization::Format(L"file_output.stage.summary",
+      {{L"NOTES", std::to_wstring(noteCount)}, {L"ANNOTATIONS", std::to_wstring(clropCount)}});
 
   const size_t limit = std::min(maxEntries, entries.size());
   for (size_t i = 0; i < limit; ++i) {
     const auto &entry = entries[i];
     text += L" - ";
     text += (entry.kind == StagedDiffKind::Note)
-                ? (IsEnglishUi() ? L"Note" : L"ノート")
-                : (IsEnglishUi() ? L"Annotations" : L"注釈");
+                ? (localization::Text(L"file_output.stage.2a24383f6ef0"))
+                : (localization::Text(L"file_output.stage.22de7cf76020"));
     if (!entry.isLatest) {
-      text += IsEnglishUi() ? L" (old)" : L" (旧)";
+      text += localization::Text(L"file_output.stage.e17aa4bbf6fc");
     }
     if (entry.revision.has_value()) {
       text += L" rev=" + std::to_wstring(*entry.revision);
     }
-    text += IsEnglishUi() ? L"\n   Target: " : L"\n   対象: ";
+    text += localization::Text(L"file_output.stage.adf2e7abc906");
     text += entry.targetPath.empty() ? L"(unknown)" : entry.targetPath;
-    text += IsEnglishUi() ? L"\n   Stage: " : L"\n   差分ファイル: ";
+    text += localization::Text(L"file_output.stage.7bb8982158fc");
     text += entry.stagePath.empty() ? L"(unknown)" : entry.stagePath.wstring();
     if (!entry.destPath.empty() &&
         entry.destPath.wstring() != entry.targetPath) {
-      text += IsEnglishUi() ? L"\n   Destination: " : L"\n   統合先: ";
+      text += localization::Text(L"file_output.stage.3a9a7aaa1fb2");
       text += entry.destPath.wstring();
     }
     text += L"\n";
   }
   if (entries.size() > limit) {
-    text += IsEnglishUi()
-                ? L" - ... and " + std::to_wstring(entries.size() - limit) +
-                      L" more\n"
-                : L" - ... ほか " + std::to_wstring(entries.size() - limit) +
-                      L" 件\n";
+    text += localization::Format(L"file_output.stage.summary_more",
+                                 {{L"COUNT", std::to_wstring(entries.size() - limit)}});
   }
   return text;
 }
@@ -4891,9 +4843,8 @@ bool IntegrateStagedDiff(HWND owner, const std::filesystem::path &stagePath, boo
   if (!LoadStageMetaFile(StageMetaPath(stagePath), &meta)) {
     TraceSaveFailure(L"IntegrateStage", L"load_meta_failed", {}, stagePath);
     ShowStageMessageDialog(
-        owner, IsEnglishUi() ? L"Integrate stage" : L"stage 統合",
-        IsEnglishUi() ? L"Failed to read stage metadata."
-                      : L"stage metadata の読み込みに失敗しました。");
+        owner, localization::Text(L"file_output.stage.0affa81c15a4"),
+        localization::Text(L"file_output.stage.fd82b89c811d"));
     return false;
   }
   meta.stagePath = stagePath;
@@ -4902,14 +4853,8 @@ bool IntegrateStagedDiff(HWND owner, const std::filesystem::path &stagePath, boo
   
   auto doSkipBackup = [&]() -> bool {
     SilentDialogOptions confirm;
-    confirm.title = IsEnglishUi() ? L"Confirmation" : L"確認";
-    confirm.message = IsEnglishUi()
-                          ? L"Save will be attempted without creating a "
-                            L"backup.\nIf the file gets corrupted, you might "
-                            L"not be able to restore it.\nAre you sure?"
-                          : L"バックアップを作成せずに保存します。\n万が一保"
-                            L"存中にファイルが破損した場合、復元できなくなる"
-                            L"可能性があります。\nよろしいですか？";
+    confirm.title = localization::Text(L"file_output.stage.fb7328ca4c1c");
+    confirm.message = localization::Text(L"file_output.stage.skip_backup_confirm");
     confirm.kind = SoftNoticeKind::Warning;
     confirm.buttons = SilentDialogButtons::YesNo;
     confirm.defaultResult = SilentDialogResult::No;
@@ -4919,9 +4864,8 @@ bool IntegrateStagedDiff(HWND owner, const std::filesystem::path &stagePath, boo
       if (!IntegrateStageMetaToDestination(owner, meta,
                                            /*discardOtherIfLatest=*/true,
                                            &err, /*skipBackup=*/true)) {
-        ShowSilentMessageDialog(owner, IsEnglishUi() ? L"Integrate stage" : L"stage 統合",
-                                (IsEnglishUi() ? L"Retry also failed:\n"
-                                               : L"再試行も失敗しました:\n") +
+        ShowSilentMessageDialog(owner, localization::Text(L"file_output.stage.0affa81c15a4"),
+                                (localization::Text(L"file_output.stage.12b4c3118ba7")) +
                                     err,
                                 SoftNoticeKind::Error);
         return false;
@@ -4938,13 +4882,12 @@ bool IntegrateStagedDiff(HWND owner, const std::filesystem::path &stagePath, boo
   if (!IntegrateStageMetaToDestination(owner, meta,
                                        /*discardOtherIfLatest=*/true, &err)) {
     SilentDialogOptions options;
-    options.title = IsEnglishUi() ? L"Integrate stage" : L"stage 統合";
+    options.title = localization::Text(L"file_output.stage.0affa81c15a4");
     options.message = err;
     options.kind = SoftNoticeKind::Error;
     options.buttons = SilentDialogButtons::YesNo;
-    options.yesLabel = IsEnglishUi() ? L"Close" : L"閉じる";
-    options.noLabel = IsEnglishUi() ? L"Try saving without backup"
-                                    : L"バックアップ無しで保存を試みる";
+    options.yesLabel = localization::Text(L"file_output.stage.603bc62f3f34");
+    options.noLabel = localization::Text(L"file_output.stage.0300eea175d3");
     options.defaultResult = SilentDialogResult::Yes;
     options.escapeResult = SilentDialogResult::Yes;
 
@@ -5037,7 +4980,7 @@ bool LoadResolvedStagedNoteBytes(const std::wstring &notePath,
   if (!stagePath.empty()) {
     if (!LoadStageMetaFile(StageMetaPath(stagePath), &meta)) {
       if (outErr)
-        *outErr = L"stage metadata の読み込みに失敗しました。";
+      *outErr = localization::Text(L"file_output.stage.metadata_read_failed");
       return false;
     }
     meta.stagePath = stagePath;
@@ -5046,7 +4989,7 @@ bool LoadResolvedStagedNoteBytes(const std::wstring &notePath,
     auto latest = FindLatestStageMeta(StagedDiffKind::Note, notePath);
     if (!latest.has_value()) {
       if (outErr)
-        *outErr = L"note stage が見つかりません。";
+      *outErr = localization::Text(L"file_output.stage.note_stage_not_found");
       return false;
     }
     meta = *latest;
@@ -5070,7 +5013,7 @@ bool LoadResolvedStagedAnnotations(const std::wstring &pdfPath,
   if (!stagePath.empty()) {
     if (!LoadStageMetaFile(StageMetaPath(stagePath), &meta)) {
       if (outErr)
-        *outErr = L"stage metadata の読み込みに失敗しました。";
+      *outErr = localization::Text(L"file_output.stage.metadata_read_failed");
       return false;
     }
     meta.stagePath = stagePath;
@@ -5079,7 +5022,7 @@ bool LoadResolvedStagedAnnotations(const std::wstring &pdfPath,
     auto latest = FindLatestStageMeta(StagedDiffKind::Clrop, pdfPath);
     if (!latest.has_value()) {
       if (outErr)
-        *outErr = L"注釈 stage が見つかりません。";
+      *outErr = localization::Text(L"file_output.stage.annotation_stage_not_found");
       return false;
     }
     meta = *latest;
@@ -5178,28 +5121,26 @@ bool RestoreFromBackupMeta(HWND owner,
   BackupMetaInfo meta;
   if (!LoadBackupMetaFile(backupMetaPath, &meta)) {
     ShowStageMessageDialog(
-        owner, IsEnglishUi() ? L"Restore backup" : L"バックアップ復元",
-        IsEnglishUi() ? L"Failed to read backup metadata."
-                      : L"バックアップ metadata の読み込みに失敗しました。");
+        owner, localization::Text(L"file_output.stage.5c4b18ff1f3d"),
+        localization::Text(L"file_output.stage.792b99e266d0"));
     return false;
   }
   auto backupBytes = ReadFileBytes(meta.backupPath);
   if (!backupBytes.has_value()) {
     ShowStageMessageDialog(
-        owner, IsEnglishUi() ? L"Restore backup" : L"バックアップ復元",
-        IsEnglishUi() ? L"Failed to read backup data."
-                      : L"バックアップ本体の読み込みに失敗しました。");
+        owner, localization::Text(L"file_output.stage.5c4b18ff1f3d"),
+        localization::Text(L"file_output.stage.631e5fb971b2"));
     return false;
   }
   std::wstring err;
   if (!CreateBackupIfNeeded(meta.kind, meta.destPath, nullptr, nullptr, &err)) {
     ShowStageMessageDialog(
-        owner, IsEnglishUi() ? L"Restore backup" : L"バックアップ復元", err);
+        owner, localization::Text(L"file_output.stage.5c4b18ff1f3d"), err);
     return false;
   }
   if (!AtomicWriteVerified(meta.destPath, *backupBytes, &err)) {
     ShowStageMessageDialog(
-        owner, IsEnglishUi() ? L"Restore backup" : L"バックアップ復元", err);
+        owner, localization::Text(L"file_output.stage.5c4b18ff1f3d"), err);
     return false;
   }
   if (outDest)

@@ -349,7 +349,7 @@ inline bool IsPenGroupMode(ToolMode mode) {
 inline bool IsShapeGroupMode(ToolMode mode) {
     return AnnotToolGeometryForMode(mode) != AnnotToolGeometry::None;
 }
-enum class MagnifierShape { Circle, Square };
+enum class MagnifierShape { Circle, Square, Horizontal };
 enum class BottomPanePin { Note, Math };
 enum class BottomNoteMode { Legacy, Headings, Assist };
 enum class NotePlacement { Bottom, Top };
@@ -359,12 +359,14 @@ enum class LeftRightLineMoveAction { Allow, Stay };
 inline MagnifierShape ParseMagnifierShape(const std::wstring& s) {
     std::wstring t = s;
     std::transform(t.begin(), t.end(), t.begin(), ::towlower);
+    if (t == L"horizontal" || t == L"landscape" || t == L"wide") return MagnifierShape::Horizontal;
     if (t == L"square" || t == L"rect" || t == L"rectangle") return MagnifierShape::Square;
     return MagnifierShape::Circle;
 }
 
 inline std::wstring MagnifierShapeToString(MagnifierShape s) {
     switch (s) {
+    case MagnifierShape::Horizontal: return L"horizontal";
     case MagnifierShape::Square: return L"square";
     case MagnifierShape::Circle:
     default:
@@ -475,6 +477,24 @@ extern HWND g_hNoteList;
 extern HWND g_hMainWnd;
 extern HWND g_hPdfView;
 extern HWND g_hPdfToolbar;
+
+inline HWND ResolveAppDialogAnchor(HWND owner) {
+    HWND anchor = owner && IsWindow(owner) ? owner : g_hMainWnd;
+    if (!anchor || !IsWindow(anchor)) return nullptr;
+    HWND rootOwner = GetAncestor(anchor, GA_ROOTOWNER);
+    return (rootOwner && IsWindow(rootOwner)) ? rootOwner : anchor;
+}
+
+inline void PlaceOwnedPopupAtAppTopLeft(HWND popup, HWND owner) {
+    if (!popup || !IsWindow(popup)) return;
+    HWND anchor = ResolveAppDialogAnchor(owner);
+    if (!anchor) return;
+    RECT anchorRect{};
+    if (!GetWindowRect(anchor, &anchorRect)) return;
+    SetWindowPos(popup, HWND_TOP, anchorRect.left, anchorRect.top, 0, 0,
+                 SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
 extern HWND g_hBtnClearAnn;
 extern HWND g_hBtnToggleAnn;
 extern HWND g_hBtnNewLecture;
@@ -644,6 +664,8 @@ extern bool g_readableTextOverlay;
 extern bool g_showMathList;
 extern ToolMode g_toolMode;
 extern MagnifierShape g_magnifierShape;
+extern double g_magnifierZoom;
+extern int g_magnifierSizeDip;
 extern ShapeKind g_shapeKind;
 extern ShapeDrawMode g_shapeDrawMode;
 extern ShapeDetail g_shapeDetail;
@@ -668,6 +690,7 @@ extern bool g_textBoxReadableBackground;
 extern bool g_textBoxReadableBackgroundInverted;
 extern bool g_textBoxAutoWrap;
 extern HWND g_hChkTextAutoWrap;
+extern HWND g_hChkPanMouseWheelZoom;
 
 struct SavedToolbarState {
     bool valid = false;

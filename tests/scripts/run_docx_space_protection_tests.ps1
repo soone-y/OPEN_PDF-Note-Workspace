@@ -12,6 +12,11 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $outDir = Join-Path $repoRoot "out\tests"
 $src = Join-Path $repoRoot "tests\unit\docx_space_protection_tests.cpp"
 $exe = Join-Path $outDir "docx_space_protection_tests.exe"
+$localeTool = Join-Path $repoRoot "tools\localization\generate_locale_catalog.py"
+$jaCatalog = Join-Path $repoRoot "locales\ja.json"
+$generatedLocaleDir = Join-Path $outDir "generated_locale\ja"
+$generatedLocaleHeader = Join-Path $generatedLocaleDir "locale_catalog.generated.h"
+$localeReport = Join-Path $generatedLocaleDir "fallback_report.json"
 $fixtureDir = Join-Path $repoRoot "tests\fixtures\office_conversion"
 $fixture = (Get-ChildItem -LiteralPath $fixtureDir -Filter "*.docx" -File | Select-Object -First 1).FullName
 if (-not $fixture) {
@@ -32,6 +37,15 @@ $conversionInputDir = Join-Path $outDir "docx_space_protection_conversion_input"
 $compiler = Get-Command g++ -ErrorAction SilentlyContinue
 if (-not $compiler) {
     throw "g++ not found in PATH."
+}
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $python) {
+    throw "python not found in PATH; it is required to generate the test locale catalog."
+}
+foreach ($localeInput in @($localeTool, $jaCatalog)) {
+    if (-not (Test-Path -LiteralPath $localeInput -PathType Leaf)) {
+        throw "Localization test input was not found: $localeInput"
+    }
 }
 $compilerDir = Split-Path -Parent $compiler.Source
 
@@ -65,6 +79,11 @@ function New-DocxFixture {
 }
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+New-Item -ItemType Directory -Force -Path $generatedLocaleDir | Out-Null
+& $python.Source $localeTool --locale ja --ja $jaCatalog --localized $jaCatalog --output $generatedLocaleHeader --report $localeReport
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $generatedLocaleHeader -PathType Leaf)) {
+    throw "Failed to generate the Japanese locale catalog required by DOCX space protection tests."
+}
 Remove-Item -LiteralPath $asciiFixture -Force -ErrorAction SilentlyContinue
 New-DocxFixture -Path $asciiFixture -CompressionLevel Optimal
 Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
@@ -86,8 +105,10 @@ $args = @(
     "-pedantic",
     "-municode",
     "-Isrc",
+    ("-I{0}" -f $generatedLocaleDir),
     $src,
     "src/office/docx_space_protection.cpp",
+    "src/core/localization.cpp",
     "-lgdi32",
     "-luser32",
     "-lz",

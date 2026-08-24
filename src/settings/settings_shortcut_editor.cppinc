@@ -1,6 +1,8 @@
 // file: settings/settings_shortcut_editor.cppinc
 // Editor for annotation category/detail shortcuts.
 
+#include "core/localization.h"
+
 namespace {
 
 constexpr int kShortcutEditorList = 5201;
@@ -22,44 +24,40 @@ struct AnnotShortcutEditorCtx {
 
 static std::wstring ShortcutEditorTargetLabel(AnnotToolShortcutTargetKind kind,
                                               AnnotToolFamily family, ToolMode mode) {
-    const bool en = IsEnglishUi();
     if (kind == AnnotToolShortcutTargetKind::Category) {
         switch (family) {
-        case AnnotToolFamily::Select: return en ? L"Category: Select" : L"カテゴリ: 選択";
-        case AnnotToolFamily::Pan: return en ? L"Category: Pan" : L"カテゴリ: パン";
-        case AnnotToolFamily::Magnifier: return en ? L"Category: Magnifier" : L"カテゴリ: 拡大鏡";
-        case AnnotToolFamily::Text: return en ? L"Category: Text" : L"カテゴリ: テキスト";
-        case AnnotToolFamily::Marker: return en ? L"Category: Marker" : L"カテゴリ: マーカー";
-        case AnnotToolFamily::Pen: return en ? L"Category: Pen" : L"カテゴリ: ペン";
-        case AnnotToolFamily::Shape: return en ? L"Category: Shape" : L"カテゴリ: 図形";
-        case AnnotToolFamily::Eraser: return en ? L"Category: Eraser" : L"カテゴリ: 消しゴム";
-        default: return en ? L"Category" : L"カテゴリ";
+        case AnnotToolFamily::Select: return localization::Text(L"settings.shortcut.target.category_select");
+        case AnnotToolFamily::Pan: return localization::Text(L"settings.shortcut.target.category_pan");
+        case AnnotToolFamily::Magnifier: return localization::Text(L"settings.shortcut.target.category_magnifier");
+        case AnnotToolFamily::Text: return localization::Text(L"settings.shortcut.target.category_text");
+        case AnnotToolFamily::Marker: return localization::Text(L"settings.shortcut.target.category_marker");
+        case AnnotToolFamily::Pen: return localization::Text(L"settings.shortcut.target.category_pen");
+        case AnnotToolFamily::Shape: return localization::Text(L"settings.shortcut.target.category_shape");
+        case AnnotToolFamily::Eraser: return localization::Text(L"settings.shortcut.target.category_eraser");
+        default: return localization::Text(L"settings.shortcut.target.category");
         }
     }
     if (family == AnnotToolFamily::Shape) {
         if (AnnotToolUsesGeometry(mode, AnnotToolGeometry::Shape)) {
-            return en ? L"Detail: Shape (outline / fill)" : L"詳細: 図形（枠線／強調）";
+            return localization::Text(L"settings.shortcut.target.detail_shape");
         }
         const bool emphasis = IsEmphasisAnnotToolMode(mode, g_shapeDrawMode);
-        const std::wstring branch = emphasis
-            ? (en ? L"Detail: Emphasis / " : L"詳細: 強調 / ")
-            : (en ? L"Detail: Stroke / " : L"詳細: 線 / ");
-        if (IsArrowAnnotToolMode(mode)) return branch + (en ? L"Arrow" : L"矢印");
-        if (IsWaveAnnotToolMode(mode)) return branch + (en ? L"Wave" : L"波線");
-        return branch + (en ? L"Line" : L"直線");
+        if (IsArrowAnnotToolMode(mode)) return localization::Text(emphasis ? L"settings.shortcut.target.emphasis_arrow" : L"settings.shortcut.target.stroke_arrow");
+        if (IsWaveAnnotToolMode(mode)) return localization::Text(emphasis ? L"settings.shortcut.target.emphasis_wave" : L"settings.shortcut.target.stroke_wave");
+        return localization::Text(emphasis ? L"settings.shortcut.target.emphasis_line" : L"settings.shortcut.target.stroke_line");
     }
     switch (mode) {
-    case ToolMode::MarkerText: return en ? L"Detail: Marker" : L"詳細: マーカー";
-    case ToolMode::MarkerTextUnderline: return en ? L"Detail: Marker underline" : L"詳細: マーカー下線";
-    case ToolMode::MarkerTextColor: return en ? L"Detail: Marker text color" : L"詳細: マーカー文字色";
-    case ToolMode::MarkerFree: return en ? L"Detail: Free marker" : L"詳細: フリーマーカー";
-    case ToolMode::TextBox: return en ? L"Detail: Text" : L"詳細: テキスト";
-    case ToolMode::Freehand: return en ? L"Detail: Pen" : L"詳細: ペン";
-    case ToolMode::Select: return en ? L"Detail: Select" : L"詳細: 選択";
-    case ToolMode::Pan: return en ? L"Detail: Pan" : L"詳細: パン";
-    case ToolMode::Magnifier: return en ? L"Detail: Magnifier" : L"詳細: 拡大鏡";
-    case ToolMode::Eraser: return en ? L"Detail: Eraser" : L"詳細: 消しゴム";
-    default: return en ? L"Detail" : L"詳細";
+    case ToolMode::MarkerText: return localization::Text(L"settings.shortcut.target.detail_marker");
+    case ToolMode::MarkerTextUnderline: return localization::Text(L"settings.shortcut.target.detail_marker_underline");
+    case ToolMode::MarkerTextColor: return localization::Text(L"settings.shortcut.target.detail_marker_text_color");
+    case ToolMode::MarkerFree: return localization::Text(L"settings.shortcut.target.detail_free_marker");
+    case ToolMode::TextBox: return localization::Text(L"settings.shortcut.target.detail_text");
+    case ToolMode::Freehand: return localization::Text(L"settings.shortcut.target.detail_pen");
+    case ToolMode::Select: return localization::Text(L"settings.shortcut.target.detail_select");
+    case ToolMode::Pan: return localization::Text(L"settings.shortcut.target.detail_pan");
+    case ToolMode::Magnifier: return localization::Text(L"settings.shortcut.target.detail_magnifier");
+    case ToolMode::Eraser: return localization::Text(L"settings.shortcut.target.detail_eraser");
+    default: return localization::Text(L"settings.shortcut.target.detail");
     }
 }
 
@@ -291,13 +289,14 @@ static void ShowAnnotToolShortcutEditor(HWND owner) {
     AnnotShortcutEditorCtx ctx;
     ctx.owner = owner;
     ctx.bindings = AnnotToolShortcutBindings();
-    const std::wstring title = IsEnglishUi() ? L"Annotation shortcuts" : L"注釈ツールショートカット";
+    const std::wstring title = localization::Text(L"settings.annotation_shortcuts_title");
     if (owner) EnableWindow(owner, FALSE);
     int dpi = GetDpiY(owner);
     HWND hWnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"AnnotShortcutEditorDlgClass", title.c_str(),
-                                WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
+                                WS_CAPTION | WS_POPUPWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                 MulDiv(570, dpi, 96), MulDiv(390, dpi, 96), owner, nullptr, g_hInst, &ctx);
     if (!hWnd) { if (owner) EnableWindow(owner, TRUE); return; }
+    PlaceOwnedPopupAtAppTopLeft(hWnd, owner);
     ShowWindow(hWnd, SW_SHOW);
     UpdateWindow(hWnd);
     MSG msg;

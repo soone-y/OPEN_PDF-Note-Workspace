@@ -44,7 +44,7 @@ python tests/python/validate_codebase.py
 python -m unittest tests/python/test_python_tools.py
 ```
 
-`run_repo_checks.ps1` は、`REPO_VERSION.txt` と最新ビルドの Full / Lite / 閲覧専用ビューアの `.buildinfo.txt` を比較し、版番号の不一致を検出します。文書に版番号マーカーがあることも確認します。`-SkipBuild` を付けた場合も、既存のビルド成果物についてこの確認を行います。release作成時には、このマーカーが `REPO_VERSION.txt` の値へ置換されます。
+`run_repo_checks.ps1` は、`REPO_VERSION.txt` と最新ビルドの Full / Lite / 閲覧専用ビューアの `.buildinfo.txt` を比較し、版番号の不一致を検出します。`-SkipBuild` を付けた場合も、既存のビルド成果物についてこの確認を行います。配布版番号はrelease setのmanifest、ZIP、チェックサム、locale別タグとRelease Notesで固定・照合されます。利用者文書には、置換前提の版番号マーカーを置きません。
 
 保存処理を変更した場合は、保存系テストも実行してください。
 
@@ -57,9 +57,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_atomic_wri
 ```powershell
 ./release.ps1
 # 実機テストのサイクルを早めるため、Lite版のみを短時間で試作・パックする場合:
-./release.ps1 -Lite
+./build.ps1 -Lite
 ```
 
-配布時は `out/` を直接渡さず、release set 内に作られる通常版と Lite版のフォルダまたは ZIP を使います。`./release.ps1` は通常版・Lite版・閲覧専用ビューアを再ビルドしてから、配布物、ZIP、チェックサム、公開スナップショットを作ります（実機テスト等で高速にLite版のみを作成したい場合は `-Lite` オプションが便利です）。通常版には検証済み LibreOffice conversion runtime を必ず同梱し、Lite版には同梱しません。通常版からruntimeだけを除いた配布物は作れません。通常利用者には、二つの版を混ぜず、用途に応じてどちらか一方を配布してください。
+配布時は `out/` を直接渡さず、release set 内に作られる通常版と Lite版のフォルダまたは ZIP を使います。`./release.ps1` は通常版・Lite版・閲覧専用ビューアをビルドしてから、配布物、ZIP、チェックサム、公開スナップショットを作ります。Lite版だけを開発用にビルド・実機確認したい場合は `./build.ps1 -Lite` を使います。通常版には検証済み LibreOffice conversion runtime を必ず同梱し、Lite版には同梱しません。通常版からruntimeだけを除いた配布物は作れません。通常利用者には、二つの版を混ぜず、用途に応じてどちらか一方を配布してください。
 
 配布名、出力先、同梱物などを個別に調整する場合だけ、`scripts/release/make_release_set.ps1` または `scripts/release/pack_release.ps1` を使います。

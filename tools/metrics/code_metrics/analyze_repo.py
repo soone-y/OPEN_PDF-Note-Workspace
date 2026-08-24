@@ -1110,6 +1110,11 @@ def analyze_repository(
     return data
 
 
+def render_json_report(data: Dict[str, object], *, ensure_ascii: bool = True) -> str:
+    """Render JSON safely for command-shell redirection on legacy Windows consoles."""
+    return json.dumps(data, ensure_ascii=ensure_ascii, indent=2)
+
+
 def main() -> int:
     args = parse_args()
     root = Path(args.root).resolve()
@@ -1125,7 +1130,7 @@ def main() -> int:
     )
 
     if args.format == "json":
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+        print(render_json_report(data))
         return 0
 
     print(render_text_report(data, args.top_files, args.top_dirs, args.max_tree_depth))

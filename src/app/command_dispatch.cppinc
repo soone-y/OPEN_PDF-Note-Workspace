@@ -95,8 +95,7 @@ static bool HandleNoteAssistCommand(HWND hWnd, int id) {
     case ID_NOTE_ASSIST_PAGE_REF: {
         if (g_pdf.kind == DocKind::None || CurrentLogicalPdfPath().empty() || g_pdf.pageCount <= 0) {
             ShowSoftNotice(hWnd,
-                           IsEnglishUi() ? L"Open a PDF before inserting a page reference."
-                                         : L"ページ参照を挿入する前に PDF を開いてください。",
+                           localization::Text(L"app.command.c8de086bcdd3"),
                            SoftNoticeKind::Warning);
             return true;
         }
@@ -104,10 +103,9 @@ static bool HandleNoteAssistCommand(HWND hWnd, int id) {
         if (page < 0) page = 0;
         page = std::min(page, std::max(0, g_pdf.pageCount - 1));
         std::wstring name = std::filesystem::path(CurrentLogicalPdfPath()).filename().wstring();
-        if (name.empty()) name = IsEnglishUi() ? L"PDF" : L"PDF";
-        std::wstring snippet = IsEnglishUi()
-            ? (L"PDF p." + std::to_wstring(page + 1) + L": " + name)
-            : (L"PDF p." + std::to_wstring(page + 1) + L": " + name);
+        if (name.empty()) name = localization::Text(L"app.command.beb82eae76ec");
+        std::wstring snippet = localization::Format(L"app.command.note_assist_pdf_ref",
+                                                     {{L"PAGE", std::to_wstring(page + 1)}, {L"NAME", name}});
         InsertNoteAssistSnippet(selection, snippet);
         return true;
     }
@@ -196,7 +194,7 @@ static bool HandleNoteShortcutCommand(HWND hWnd, int id, UINT code) {
                 linkPointAdded = true;
             } else if (insideOpeningTagToken) {
                 if (hWnd) {
-                    ShowSoftNotice(hWnd, IsEnglishUi() ? L"Cannot insert link inside a tag." : L"タグ内ではリンク挿入できません。");
+                    ShowSoftNotice(hWnd, localization::Text(L"app.command.7c86604079c6"));
                 }
                 FinalizePendingLinkModeIfReady(hWnd);
                 return true;
@@ -211,7 +209,7 @@ static bool HandleNoteShortcutCommand(HWND hWnd, int id, UINT code) {
                         insertPos = std::min(text.size(), token->open);
                     } else {
                         if (hWnd) {
-                            ShowSoftNotice(hWnd, IsEnglishUi() ? L"Cannot insert link inside a tag." : L"タグ内ではリンク挿入できません。");
+                            ShowSoftNotice(hWnd, localization::Text(L"app.command.7c86604079c6"));
                         }
                         FinalizePendingLinkModeIfReady(hWnd);
                         return true;
@@ -226,7 +224,7 @@ static bool HandleNoteShortcutCommand(HWND hWnd, int id, UINT code) {
 
             if (IsInsertPosInsideMarkupTagToken(text, insertPos)) {
                 if (hWnd) {
-                    ShowSoftNotice(hWnd, IsEnglishUi() ? L"Insert canceled (unsafe position)." : L"安全のため挿入を中止しました。");
+                    ShowSoftNotice(hWnd, localization::Text(L"app.command.0bf909f19d78"));
                 }
                 FinalizePendingLinkModeIfReady(hWnd);
                 return true;
@@ -706,9 +704,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         if (!IsMenuCommandAllowedDuringSave(id)) {
             ShowMainSoftNotice(
                 hWnd,
-                IsEnglishUi()
-                    ? L"Save is running. Editing and file operations are disabled until it finishes."
-                    : L"統合保存中です。完了まで編集とファイル操作は無効です。",
+                localization::Text(L"app.command.400d78fa601c"),
                 SoftNoticeKind::Info);
             return;
         }
@@ -810,31 +806,18 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         if (!pickedTarget) break;
         const std::wstring target = *pickedTarget;
         if (file_output::HasPendingOrStagedDiffsUnderPath(std::filesystem::path(target))) {
-            std::wstring msg = IsEnglishUi()
-                ? L"There are unsaved or staged changes under this temporary external lecture.\n\n"
-                  L"Save them before removing the temporary external lecture path?\n\n"
-                  L"[Yes] Save and remove\n"
-                  L"[No] Keep the temporary external lecture path"
-                : (std::wstring(g_config.studentMode
-                                     ? L"この一時外部授業の配下に、未保存または未統合の stage 差分があります。\n\n"
-                                     : L"この一時外部上位項目の配下に、未保存または未統合の stage 差分があります。\n\n") +
-                   (g_config.studentMode
-                        ? L"保存してから一時外部授業パスを削除しますか？\n\n"
-                        : L"保存してから一時外部上位項目パスを削除しますか？\n\n") +
-                   L"[はい] 保存して削除\n" +
-                   (g_config.studentMode ? L"[いいえ] 一時外部授業パスを残す"
-                                         : L"[いいえ] 一時外部上位項目パスを残す"));
+            std::wstring msg = localization::Text(g_config.studentMode
+                ? L"app.command.temp_external.remove_confirm.student"
+                : L"app.command.temp_external.remove_confirm.parent");
             if (!ConfirmMainYesNo(hWnd, GetUiText().menuFile, msg, SoftNoticeKind::Warning,
                                   SilentDialogResult::No, SilentDialogResult::No)) {
                 break;
             }
             if (!file_output::RunSaveAndIntegrateTransaction(hWnd) ||
                 file_output::HasPendingOrStagedDiffsUnderPath(std::filesystem::path(target))) {
-                const wchar_t* msg = IsEnglishUi()
-                    ? L"Some unsaved or staged changes still remain under this temporary external lecture. The path was not removed."
-                    : (g_config.studentMode
-                           ? L"この一時外部授業の配下に未保存または未統合の差分がまだ残っているため、パスは削除しませんでした。"
-                           : L"この一時外部上位項目の配下に未保存または未統合の差分がまだ残っているため、パスは削除しませんでした。");
+                const std::wstring msg = localization::Text(g_config.studentMode
+                    ? L"app.command.temp_external.remaining_changes.student"
+                    : L"app.command.temp_external.remaining_changes.parent");
                 ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
                 break;
             }
@@ -848,10 +831,10 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
             if (!SaveNoteIfDirty(hWnd)) {
                 PromptStayOrOpenDiffManager(
                     hWnd,
-                    IsEnglishUi() ? L"Removing the temporary lecture path"
-                                  : (g_config.studentMode ? L"一時外部授業パスの削除" : L"一時外部上位項目パスの削除"),
-                    IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                  : L"「差分管理」で未統合差分を整理してから、もう一度実行してください。");
+                    localization::Text(g_config.studentMode
+                        ? L"app.command.temp_external.removing.student"
+                        : L"app.command.temp_external.removing.parent"),
+                    localization::Text(L"app.command.5ec6b17ea986"));
                 break;
             }
             ClearPdfAndNoteSelection();
@@ -1029,34 +1012,26 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_FILE_OPEN_WORKSPACE_DIR: {
         const auto& ui = GetUiText();
         if (g_workspaceRoot.empty()) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"No workspace is open."
-                : L"ワークスペースが開かれていません。";
+            const std::wstring msg = localization::Text(L"app.command.55c168692754");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
 
         std::filesystem::path target(g_workspaceRoot);
         if (target.wstring().rfind(L"\\\\", 0) == 0) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"UNC/device paths are not supported."
-                : L"UNC/デバイスパスは使用できません。";
+            const std::wstring msg = localization::Text(L"app.command.fdb3da0b190c");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
         bool isReparse = false;
         if (TryIsReparsePointNoFollow(target, isReparse) && isReparse) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"Reparse point folders (junction/symlink) are not supported."
-                : L"ジャンクション/シンボリックリンク等（reparse point）のフォルダは使用できません。";
+            const std::wstring msg = localization::Text(L"app.command.feeb29c6c55e");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
         std::wstring openErr;
         if (!TryOpenDirForList(target, &openErr)) {
-            std::wstring msg = IsEnglishUi()
-                ? L"Root folder is not accessible:\n\n"
-                : L"ルートフォルダにアクセスできません:\n\n";
+            std::wstring msg = localization::Text(L"app.command.aae672eba9b2");
             msg += target.wstring();
             if (!openErr.empty()) msg += L"\n\n" + openErr;
             ShowMainMessageDialog(hWnd, ui.menuOpenWorkspaceDir, msg, SoftNoticeKind::Warning);
@@ -1069,37 +1044,63 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_FILE_OPEN_LECTURE_DIR: {
         const auto& ui = GetUiText();
         if (g_currentLecturePath.empty()) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"No lecture is selected."
-                : (g_config.studentMode ? L"授業が選択されていません。" : L"上位項目が選択されていません。");
+            const std::wstring msg = localization::Text(g_config.studentMode
+                ? L"app.command.lecture.none_selected.student" : L"app.command.lecture.none_selected.parent");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
 
         std::filesystem::path target(g_currentLecturePath);
         if (target.wstring().rfind(L"\\\\", 0) == 0) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"UNC/device paths are not supported."
-                : L"UNC/デバイスパスは使用できません。";
+            const std::wstring msg = localization::Text(L"app.command.fdb3da0b190c");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
         bool isReparse = false;
         if (TryIsReparsePointNoFollow(target, isReparse) && isReparse) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"Reparse point folders (junction/symlink) are not supported."
-                : L"ジャンクション/シンボリックリンク等（reparse point）のフォルダは使用できません。";
+            const std::wstring msg = localization::Text(L"app.command.feeb29c6c55e");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
         std::wstring openErr;
         if (!TryOpenDirForList(target, &openErr)) {
-            std::wstring msg = IsEnglishUi()
-                ? L"Lecture folder is not accessible:\n\n"
-                : (g_config.studentMode ? L"授業フォルダにアクセスできません:\n\n" : L"上位項目フォルダにアクセスできません:\n\n");
-            msg += target.wstring();
-            if (!openErr.empty()) msg += L"\n\n" + openErr;
+            std::wstring msg = localization::Format(g_config.studentMode
+                ? L"app.command.lecture.inaccessible.student" : L"app.command.lecture.inaccessible.parent",
+                {{L"PATH", target.wstring()}, {L"DETAIL", openErr.empty() ? L"" : L"\n\n" + openErr}});
             ShowMainMessageDialog(hWnd, ui.menuOpenLectureDir, msg, SoftNoticeKind::Warning);
+            break;
+        }
+
+        ShowPathInExplorer(hWnd, target.wstring());
+        break;
+    }
+    case ID_FILE_OPEN_SESSION_DIR: {
+        const auto& ui = GetUiText();
+        if (g_currentSessionPath.empty()) {
+            const std::wstring msg = localization::Text(g_config.studentMode
+                ? L"app.command.session.none_selected.student" : L"app.command.session.none_selected.parent");
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+
+        std::filesystem::path target(g_currentSessionPath);
+        if (target.wstring().rfind(L"\\\\", 0) == 0) {
+            const std::wstring msg = localization::Text(L"app.command.fdb3da0b190c");
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        bool isReparse = false;
+        if (TryIsReparsePointNoFollow(target, isReparse) && isReparse) {
+            const std::wstring msg = localization::Text(L"app.command.feeb29c6c55e");
+            ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
+            break;
+        }
+        std::wstring openErr;
+        if (!TryOpenDirForList(target, &openErr)) {
+            std::wstring msg = localization::Format(g_config.studentMode
+                ? L"app.command.session.inaccessible.student" : L"app.command.session.inaccessible.parent",
+                {{L"PATH", target.wstring()}, {L"DETAIL", openErr.empty() ? L"" : L"\n\n" + openErr}});
+            ShowMainMessageDialog(hWnd, ui.menuOpenSessionDir, msg, SoftNoticeKind::Warning);
             break;
         }
 
@@ -1218,9 +1219,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_TEMP_RESET_PDF_POSITION: {
         const auto& ui = GetUiText();
         if (g_workspaceRoot.empty()) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"No workspace is open."
-                : L"ワークスペースが開かれていません。";
+            const std::wstring msg = localization::Text(L"app.command.55c168692754");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
@@ -1237,9 +1236,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         }
         std::filesystem::path backup;
         if (!BackupTempFileToEscape(src, &backup)) {
-            const wchar_t* err = IsEnglishUi()
-                ? L"Failed to reset saved PDF positions."
-                : L"PDF位置情報のリセットに失敗しました。";
+            const std::wstring err = localization::Text(L"app.command.7b19be4ba989");
             ShowMainMessageDialog(hWnd, ui.menuResetPdfPosition, err, SoftNoticeKind::Warning);
             break;
         }
@@ -1253,17 +1250,13 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_TEMP_RESET_LECTURE_LAST_OPEN: {
         const auto& ui = GetUiText();
         if (g_workspaceRoot.empty()) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"No workspace is open."
-                : L"ワークスペースが開かれていません。";
+            const std::wstring msg = localization::Text(L"app.command.55c168692754");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
-        const wchar_t* confirm = IsEnglishUi()
-            ? L"Reset the saved last-open times for lectures?\n\nA backup will be moved to \"__resource__/__escape__\"."
-            : (g_config.studentMode
-                   ? L"授業の「最終オープン時刻」をリセットしますか？\n\n現在のファイルは \"__resource__/__escape__\" に退避します。"
-                   : L"上位項目の「最終オープン時刻」をリセットしますか？\n\n現在のファイルは \"__resource__/__escape__\" に退避します。");
+        const std::wstring confirm = localization::Text(g_config.studentMode
+            ? L"app.command.history.reset_lecture_confirm.student"
+            : L"app.command.history.reset_lecture_confirm.parent");
         if (!ConfirmMainYesNo(hWnd, ui.menuResetLectureLastOpen, confirm, SoftNoticeKind::Warning,
                               SilentDialogResult::No, SilentDialogResult::No)) {
             break;
@@ -1281,9 +1274,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         }
         std::filesystem::path backup;
         if (!ResetLectureLastOpenTimes(&backup)) {
-            const wchar_t* err = IsEnglishUi()
-                ? L"Failed to reset last-open times."
-                : L"最終オープン時刻のリセットに失敗しました。";
+            const std::wstring err = localization::Text(L"app.command.f75bfad0e1e7");
             ShowMainMessageDialog(hWnd, ui.menuResetLectureLastOpen, err, SoftNoticeKind::Warning);
             break;
         }
@@ -1295,9 +1286,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         s_ignoreLectureSelChange = false;
         RefreshStatusDisplay(hWnd);
         UpdateWindowTitle(hWnd);
-        const wchar_t* done = IsEnglishUi()
-            ? L"Reset last-open times."
-            : L"最終オープン時刻をリセットしました。";
+        const std::wstring done = localization::Text(L"app.command.42f7324e0ed8");
         ShowSoftNotice(hWnd, done);
         RefreshMainMenuBar(hWnd);
         break;
@@ -1305,17 +1294,13 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_TEMP_RESET_SESSION_LAST_OPEN: {
         const auto& ui = GetUiText();
         if (g_workspaceRoot.empty()) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"No workspace is open."
-                : L"ワークスペースが開かれていません。";
+            const std::wstring msg = localization::Text(L"app.command.55c168692754");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
-        const wchar_t* confirm = IsEnglishUi()
-            ? L"Reset the saved last-open PDF/Note pairs per session?\n\nA backup will be moved to \"__resource__/__escape__\"."
-            : (g_config.studentMode
-                   ? L"回次ごとの「最終オープンPDF/ノート」履歴をリセットしますか？\n\n現在のファイルは \"__resource__/__escape__\" に退避します。"
-                   : L"下位項目ごとの「最終オープンPDF/ノート」履歴をリセットしますか？\n\n現在のファイルは \"__resource__/__escape__\" に退避します。");
+        const std::wstring confirm = localization::Text(g_config.studentMode
+            ? L"app.command.history.reset_session_confirm.student"
+            : L"app.command.history.reset_session_confirm.parent");
         if (!ConfirmMainYesNo(hWnd, ui.menuResetSessionLastOpen, confirm, SoftNoticeKind::Warning,
                               SilentDialogResult::No, SilentDialogResult::No)) {
             break;
@@ -1333,20 +1318,18 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         }
         std::filesystem::path backup;
         if (!ResetSessionLastOpenTimes(&backup)) {
-            const wchar_t* err = IsEnglishUi()
-                ? L"Failed to reset session last-open history."
-                : (g_config.studentMode ? L"回次の最終オープン履歴のリセットに失敗しました。"
-                                        : L"下位項目の最終オープン履歴のリセットに失敗しました。");
+            const std::wstring err = localization::Text(g_config.studentMode
+                ? L"app.command.history.reset_session_failed.student"
+                : L"app.command.history.reset_session_failed.parent");
             ShowMainMessageDialog(hWnd, ui.menuResetSessionLastOpen, err, SoftNoticeKind::Warning);
             break;
         }
         if (deleteOld && !oldBackups.empty()) {
             DeleteBackupFiles(oldBackups, backup);
         }
-        const wchar_t* done = IsEnglishUi()
-            ? L"Reset session last-open history."
-            : (g_config.studentMode ? L"回次の最終オープン履歴をリセットしました。"
-                                    : L"下位項目の最終オープン履歴をリセットしました。");
+        const std::wstring done = localization::Text(g_config.studentMode
+            ? L"app.command.history.reset_session_done.student"
+            : L"app.command.history.reset_session_done.parent");
         ShowSoftNotice(hWnd, done);
         RefreshMainMenuBar(hWnd);
         break;
@@ -1354,9 +1337,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_TEMP_RESTORE_LECTURE_LAST_OPEN: {
         const auto& ui = GetUiText();
         if (g_workspaceRoot.empty()) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"No workspace is open."
-                : L"ワークスペースが開かれていません。";
+            const std::wstring msg = localization::Text(L"app.command.55c168692754");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
@@ -1374,9 +1355,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         s_ignoreLectureSelChange = false;
         RefreshStatusDisplay(hWnd);
         UpdateWindowTitle(hWnd);
-        const wchar_t* done = IsEnglishUi()
-            ? L"Restored last-open times."
-            : L"最終オープン時刻を復元しました。";
+        const std::wstring done = localization::Text(L"app.command.dc6092f2d5ba");
         ShowSoftNotice(hWnd, done);
         RefreshMainMenuBar(hWnd);
         break;
@@ -1384,9 +1363,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_TEMP_RESTORE_PDF_POSITION: {
         const auto& ui = GetUiText();
         if (g_workspaceRoot.empty()) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"No workspace is open."
-                : L"ワークスペースが開かれていません。";
+            const std::wstring msg = localization::Text(L"app.command.55c168692754");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
@@ -1399,9 +1376,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
             }
             break;
         }
-        const wchar_t* done = IsEnglishUi()
-            ? L"Restored saved PDF positions."
-            : L"PDF位置情報を復元しました。";
+        const std::wstring done = localization::Text(L"app.command.4aa1e984db61");
         ShowSoftNotice(hWnd, done);
         RefreshMainMenuBar(hWnd);
         break;
@@ -1409,9 +1384,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_TEMP_RESTORE_SESSION_LAST_OPEN: {
         const auto& ui = GetUiText();
         if (g_workspaceRoot.empty()) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"No workspace is open."
-                : L"ワークスペースが開かれていません。";
+            const std::wstring msg = localization::Text(L"app.command.55c168692754");
             ShowMainSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
             break;
         }
@@ -1425,10 +1398,9 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
             break;
         }
         LoadSessionLastOpenMap();
-        const wchar_t* done = IsEnglishUi()
-            ? L"Restored session last-open history."
-            : (g_config.studentMode ? L"回次の最終オープン履歴を復元しました。"
-                                    : L"下位項目の最終オープン履歴を復元しました。");
+        const std::wstring done = localization::Text(g_config.studentMode
+            ? L"app.command.history.restore_session_done.student"
+            : L"app.command.history.restore_session_done.parent");
         ShowSoftNotice(hWnd, done);
         RefreshMainMenuBar(hWnd);
         break;
@@ -1461,15 +1433,11 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         std::error_code rmEc;
         std::filesystem::remove(selected, rmEc);
         if (rmEc) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"Failed to delete backup file."
-                : L"バックアップファイルの削除に失敗しました。";
+            const std::wstring msg = localization::Text(L"app.command.9631772b0346");
             ShowMainMessageDialog(hWnd, title, msg, SoftNoticeKind::Warning);
             break;
         }
-        const wchar_t* done = IsEnglishUi()
-            ? L"Deleted backup file."
-            : L"バックアップファイルを削除しました。";
+        const std::wstring done = localization::Text(L"app.command.ce5163cf23fd");
         ShowSoftNotice(hWnd, done);
         RefreshMainMenuBar(hWnd);
         break;
@@ -1560,7 +1528,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         ShowPdfInfoDialog(hWnd);
         break;
     case ID_HELP_SHOW_LOG_PATH: {
-        std::wstring label = IsEnglishUi() ? L"Log Directory Path" : L"ログフォルダのパス";
+        std::wstring label = localization::Text(L"app.command.4ad6a4c90048");
         std::filesystem::path logDir = AppLogPath(AppLogKind::Crash).parent_path();
         ShowSelectedPathDialog(hWnd, label, logDir.wstring());
         break;
@@ -1738,6 +1706,11 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         } else if (id == ID_TOOL_TEXT_AUTO_WRAP && code == BN_CLICKED) {
             g_textBoxAutoWrap =
                 SendMessageW(g_hChkTextAutoWrap, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            PersistConfig();
+            if (g_hPdfView) SetFocus(g_hPdfView);
+        } else if (id == ID_TOOL_PAN_MOUSE_WHEEL_ZOOM && code == BN_CLICKED) {
+            g_config.panMouseWheelZoom =
+                SendMessageW(g_hChkPanMouseWheelZoom, BM_GETCHECK, 0, 0) == BST_CHECKED;
             PersistConfig();
             if (g_hPdfView) SetFocus(g_hPdfView);
         } else if (id == ID_TOOL_WIDTH && code == CBN_SELCHANGE) {

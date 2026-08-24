@@ -3,6 +3,7 @@
 // single translation unit while physically splitting responsibilities.
 
 #include "core/preview_trace.h"
+#include "core/localization.h"
 
 static std::wstring ToExtendedPathIfAbsolute(const std::wstring& path) {
     if (path.rfind(L"\\\\?\\", 0) == 0) return path;
@@ -53,25 +54,23 @@ static std::wstring GetPdfJavaScriptNoticeText(FPDF_DOCUMENT doc, const std::wst
     if (n <= 0) return L"";
 
     std::wstring msg;
-    msg += IsEnglishUi()
-               ? L"This PDF contains embedded JavaScript. It will NOT be executed.\n"
-               : L"このPDFには埋め込みJavaScript（スクリプト）が含まれています。実行しません。\n";
+    msg += localization::Text(L"pdf.javascript_notice.intro");
 
-    msg += IsEnglishUi() ? L"Location: document-level JavaScript actions.\n" : L"場所: ドキュメントレベル（文書全体）のJavaScriptアクション。\n";
+    msg += localization::Text(L"pdf.javascript_notice.location");
 
     try {
         std::filesystem::path p(pdfPath);
-        msg += IsEnglishUi() ? L"PDF: " : L"PDF: ";
+        msg += localization::Text(L"pdf.javascript_notice.pdf_label");
         msg += p.filename().empty() ? pdfPath : p.filename().wstring();
         msg += L"\n";
     } catch (...) {
-        msg += IsEnglishUi() ? L"PDF: " : L"PDF: ";
+        msg += localization::Text(L"pdf.javascript_notice.pdf_label");
         msg += pdfPath;
         msg += L"\n";
     }
 
     const int showMax = 3;
-    msg += IsEnglishUi() ? L"Actions:\n" : L"アクション:\n";
+    msg += localization::Text(L"pdf.javascript_notice.actions_label");
     for (int i = 0; i < n && i < showMax; ++i) {
         FPDF_JAVASCRIPT_ACTION js = FPDFDoc_GetJavaScriptAction(doc, i);
         std::wstring name;
@@ -93,27 +92,21 @@ static std::wstring GetPdfJavaScriptNoticeText(FPDF_DOCUMENT doc, const std::wst
             }
             FPDFDoc_CloseJavaScriptAction(js);
         }
-        if (name.empty()) name = IsEnglishUi() ? L"(no name)" : L"(名前なし)";
+        if (name.empty()) name = localization::Text(L"pdf.javascript_notice.no_name");
         msg += L"  [" + std::to_wstring(i + 1) + L"] " + TrimForNotice(name, 48);
         if (!script.empty()) {
-            msg += IsEnglishUi() ? L"  script: " : L"  スクリプト: ";
+            msg += localization::Text(L"pdf.javascript_notice.script_label");
             msg += TrimForNotice(script, 64);
         }
         msg += L"\n";
     }
     if (n > showMax) {
-        msg += IsEnglishUi()
-                   ? L"  ... (more actions omitted)\n"
-                   : L"  ...（他のアクションは省略）\n";
+        msg += localization::Text(L"pdf.javascript_notice.more_omitted");
     }
 
     msg += L"\n";
-    msg += IsEnglishUi()
-               ? L"Alternative: open this PDF in another viewer (e.g. a browser or Adobe Reader) if you need those features.\n"
-               : L"代替手段: これらの機能が必要なら、別のPDFビューア（例: ブラウザ/Adobe Reader等）で開いてください。\n";
-    msg += IsEnglishUi()
-               ? L"(Note: other viewers may execute scripts; use caution.)"
-               : L"（注意: 他ビューアではスクリプトが実行される可能性があります。注意してください。）";
+    msg += localization::Text(L"pdf.javascript_notice.alternative");
+    msg += localization::Text(L"pdf.javascript_notice.other_viewer_caution");
     return msg;
 }
 
@@ -126,30 +119,23 @@ static bool PromptPasswordForPdfOpen(HWND pdfWnd,
     const std::wstring fileName = filePath.filename().empty() ? path : filePath.filename().wstring();
     std::wstring message;
     if (previousPasswordFailed) {
-        message =
-            IsEnglishUi()
-                ? L"The password was incorrect.\nEnter the PDF password again.\nFile: " + fileName +
-                      L"\n\nThe password is kept only in memory for the current session."
-                : L"パスワードが正しくありませんでした。\nPDFのパスワードを再入力してください。\nファイル: " + fileName +
-                      L"\n\nパスワードは現在のセッション中だけメモリに保持します。";
+        message = localization::Format(L"pdf.password.retry_message", {{L"FILE", fileName}});
     } else {
-        message =
-            IsEnglishUi()
-                ? L"This PDF requires a password to open.\nFile: " + fileName +
-                      L"\n\nThe password is kept only in memory for the current session."
-                : L"このPDFを開くにはパスワードが必要です。\nファイル: " + fileName +
-                      L"\n\nパスワードは現在のセッション中だけメモリに保持します。";
+        message = localization::Format(L"pdf.password.required_message", {{L"FILE", fileName}});
     }
 
     std::wstring password;
     SecureWideStringScope passwordScope(&password);
     if (!PromptPasswordText(PdfDialogOwner(pdfWnd),
-                            IsEnglishUi() ? L"PDF Password" : L"PDFパスワード",
+                            localization::Text(L"pdf.password.title"),
                             message,
                             password)) {
         return false;
     }
-    *outPasswordUtf8 = WideToUTF8(password);
+    std::string passwordUtf8 = WideToUTF8(password);
+    SecureStringScope passwordUtf8Scope(&passwordUtf8);
+    SecureClearString(*outPasswordUtf8);
+    *outPasswordUtf8 = std::move(passwordUtf8);
     return true;
 }
 
@@ -163,9 +149,7 @@ static bool LoadImageDocument(HWND pdfWnd, const std::wstring& path) {
                                g_pdf.imageStride, g_pdf.imageDpiX, g_pdf.imageDpiY, &err)) {
             break;
         }
-        std::wstring msg = IsEnglishUi()
-            ? L"Failed to open image. Check path and permissions."
-            : L"画像を開けません。パスと権限を確認してください。";
+        std::wstring msg = localization::Text(L"pdf.open.image_failed");
         if (!err.empty()) msg += L"\n" + err;
         ClearPdfState();
         if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"Image", msg)) {
@@ -207,9 +191,7 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
             preview_trace::Append(
                 L"LoadPdfDocument",
                 L"open_failed path=" + path + L" error=" + std::to_wstring(e));
-            std::wstring msg = IsEnglishUi()
-                ? L"Failed to open PDF. Check path and permissions."
-                : L"PDFを開けません。パスと権限を確認してください。";
+            std::wstring msg = localization::Text(L"pdf.open.path_or_permission_failed");
             std::wstring detail = L"(" + std::to_wstring(e) + L") " + atomic_write::Win32ErrorMessage(e);
             if (!detail.empty()) msg += L"\n" + detail;
             if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
@@ -223,9 +205,7 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
             size.QuadPart > static_cast<LONGLONG>(std::numeric_limits<unsigned long>::max())) {
             CloseHandle(hFile);
             preview_trace::Append(L"LoadPdfDocument", L"size_invalid path=" + path);
-            std::wstring msg = IsEnglishUi()
-                ? L"Failed to open PDF. File is empty or too large."
-                : L"PDFを開けません（ファイルが空か大きすぎます）。";
+            std::wstring msg = localization::Text(L"pdf.open.size_invalid");
             if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
                 continue;
             }
@@ -257,58 +237,59 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
             preview_trace::Append(
                 L"LoadPdfDocument",
                 L"pdfium_load_failed path=" + path + L" error=" + std::to_wstring(err));
-            if (err == FPDF_ERR_PASSWORD && passwordPromptCount < 3) {
-                std::string promptedPasswordUtf8;
-                SecureStringScope promptedPasswordScope(&promptedPasswordUtf8);
-                if (PromptPasswordForPdfOpen(pdfWnd,
-                                             path,
-                                             openPasswordUtf8.has_value(),
-                                             &promptedPasswordUtf8)) {
-                    openPasswordUtf8 = std::move(promptedPasswordUtf8);
-                    ++passwordPromptCount;
-                    continue;
+            if (err == FPDF_ERR_PASSWORD) {
+                if (passwordPromptCount < 3) {
+                    std::string promptedPasswordUtf8;
+                    SecureStringScope promptedPasswordScope(&promptedPasswordUtf8);
+                    if (PromptPasswordForPdfOpen(pdfWnd,
+                                                 path,
+                                                 openPasswordUtf8.has_value(),
+                                                 &promptedPasswordUtf8)) {
+                        openPasswordUtf8 = std::move(promptedPasswordUtf8);
+                        ++passwordPromptCount;
+                        continue;
+                    }
+                    preview_trace::Append(
+                        L"LoadPdfDocument",
+                        L"password_prompt_canceled path=" + path +
+                        L" attempts=" + std::to_wstring(passwordPromptCount));
+                    return false;
                 }
-                preview_trace::Append(
-                    L"LoadPdfDocument",
-                    L"password_prompt_canceled path=" + path +
-                    L" attempts=" + std::to_wstring(passwordPromptCount));
+
+                // A reload cannot change an exhausted password attempt.  Do not
+                // route this through the generic reload prompt, which used to
+                // show up to three more confirmations without another chance to
+                // enter a password.
+                const std::wstring message = localization::Text(L"pdf.open.password_attempts_exhausted");
+                ShowPdfMessageDialog(pdfWnd,
+                                     localization::Text(L"pdf.password.title"),
+                                     message,
+                                     SoftNoticeKind::Warning);
                 return false;
             }
 
             std::wstring detail;
             switch (err) {
             case FPDF_ERR_FILE:
-                detail = IsEnglishUi()
-                    ? L"File not found or not accessible."
-                    : L"ファイルが見つからないか読み込めません。";
+                detail = localization::Text(L"pdf.open.error.file");
                 break;
             case FPDF_ERR_FORMAT:
-                detail = IsEnglishUi()
-                    ? L"The PDF is corrupt or invalid. Loading was skipped for safety."
-                    : L"PDFが破損しているか不正な形式のため、安全のため読み込みを中止しました。";
+                detail = localization::Text(L"pdf.open.error.format");
                 break;
             case FPDF_ERR_PASSWORD:
-                detail = IsEnglishUi()
-                    ? L"Failed to unlock the PDF with the provided password."
-                    : L"入力したパスワードではPDFを開けませんでした。";
+                detail = localization::Text(L"pdf.open.error.password");
                 break;
             case FPDF_ERR_SECURITY:
-                detail = IsEnglishUi()
-                    ? L"Unsupported security settings in the PDF."
-                    : L"PDFのセキュリティ設定により開けません。";
+                detail = localization::Text(L"pdf.open.error.security");
                 break;
             case FPDF_ERR_PAGE:
-                detail = IsEnglishUi()
-                    ? L"Failed to load pages from the PDF."
-                    : L"PDFのページ読み込みに失敗しました。";
+                detail = localization::Text(L"pdf.open.error.page");
                 break;
             default:
-                detail = IsEnglishUi()
-                    ? L"The PDF may be corrupt or unsafe to open."
-                    : L"PDFが破損している可能性があるため開けません。";
+                detail = localization::Text(L"pdf.open.error.unknown");
                 break;
             }
-            std::wstring msg = IsEnglishUi() ? L"Failed to open PDF." : L"PDFを開けません。";
+            std::wstring msg = localization::Text(L"pdf.open.failed");
             if (!detail.empty()) msg += L"\n" + detail;
             if (reloadPromptCount++ < 3 && PromptPdfOpenFailureReload(pdfWnd, L"PDF", msg)) {
                 continue;

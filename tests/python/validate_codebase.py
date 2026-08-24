@@ -851,7 +851,8 @@ def find_annotation_layer_regressions() -> list[str]:
             "case Annotation::Type::MarkerText:": "export raster path must handle MarkerText annotations explicitly",
             "FillRectAlphaMaskedByText(hdc, rc, col": "PNG MarkerText export must preserve text-masked alpha fill",
             "AppendDashedPdfSegment": "PDF export for line/arrow annotations must preserve dash segments",
-            "PDF export with text-color annotations is not supported yet": "PDF export must fail quietly rather than writing incorrect TextColor output",
+            'localization::Text(L"file_output.text_color_export_unsupported")': "PDF export must use the localized TextColor rejection notice",
+            "static bool RejectUnsupportedTextColorPdfExport": "PDF export must centralize its unsupported TextColor preflight",
         },
         "src/pdf_view/annotation_store.cppinc": {
             "case Annotation::Type::MarkerText: return \"marker_text\";": "MarkerText must remain serializable to .clrop",
@@ -878,11 +879,12 @@ def find_annotation_layer_regressions() -> list[str]:
 
     file_output = (REPO_ROOT / "src/file_output/file_output.cpp").read_text(encoding="utf-8", errors="ignore")
     export_impl_pos = file_output.find("static bool ExportPdfPagesImpl")
-    contains_pos = file_output.find("const bool containsTextColor", export_impl_pos)
-    warning_pos = file_output.find("PDF export with text-color annotations is not supported yet", contains_pos)
+    reject_pos = file_output.find("if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;", export_impl_pos)
     write_pos = file_output.find("ExportPdfDocumentWithSpecs(doc", export_impl_pos)
-    if export_impl_pos < 0 or contains_pos < 0 or warning_pos < 0 or write_pos < 0 or not (contains_pos < warning_pos < write_pos):
+    if export_impl_pos < 0 or reject_pos < 0 or write_pos < 0 or not (reject_pos < write_pos):
         errors.append("src/file_output/file_output.cpp: TextColor PDF export must be rejected before destination PDF writing starts")
+    if file_output.count("if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;") < 3:
+        errors.append("src/file_output/file_output.cpp: TextColor PDF export must be rejected before selecting a destination and in the write path")
     return errors
 
 def find_pdf_textbox_visibility_regressions() -> list[str]:
@@ -1462,6 +1464,18 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
                 )
 
     publish_text = (REPO_ROOT / "publish.ps1").read_text(encoding="utf-8", errors="ignore")
+    repo_checks_text = (REPO_ROOT / "tests/scripts/run_repo_checks.ps1").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    if "ZIP placeholder marker" in repo_checks_text or "Assert-VersionTrackedDocumentation" in repo_checks_text:
+        errors.append(
+            "run_repo_checks.ps1: obsolete ZIP placeholder markers must not gate language-specific release confirmation"
+        )
+    expected_urllib_request_pattern = "urllib" + "\\.request"
+    if 'from|import)\\s+(?:urllib|' in repo_checks_text or expected_urllib_request_pattern not in repo_checks_text:
+        errors.append(
+            "run_repo_checks.ps1: Python network scan must target request APIs without rejecting local URL decoding"
+        )
     verify_read_only_contract = (
         'if ($Mode -eq "Verify") {',
         'Verify mode is read-only; no checklist was created or updated.',
@@ -1474,6 +1488,36 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
     submit_checklist_contract = 'No publish checklist exists for this release set.'
     if submit_checklist_contract not in publish_text:
         errors.append("publish.ps1: Submit and Resubmit must require an existing checklist")
+    locale_pair_contract = (
+        'function Get-ReleaseSetPair',
+        'function Get-RequestedReleaseSetPair',
+        'function Get-LatestReleaseSetPair',
+        'Specify exactly two release sets: one ja set and one en set.',
+        'if ($ReleaseSetPath.Count -eq 0 -and $Mode -eq "Confirm") {',
+        'return Get-LatestReleaseSetPair',
+        'Invoke-CreateReleaseSetPair',
+        'foreach ($item in $items)',
+    )
+    for needle in locale_pair_contract:
+        if needle not in publish_text:
+            errors.append("publish.ps1: normal publish must require and process the ja/en release-set pair")
+            break
+    locale_release_notes_contract = (
+        'if ($locale -eq "en") {',
+        '"### Downloads",',
+        '"### Before use",',
+        'elseif ($locale -eq "ja") {',
+        '"### ダウンロードするファイル",',
+        '"Unsupported release-set locale for release notes: $locale"',
+    )
+    for needle in locale_release_notes_contract:
+        if needle not in publish_text:
+            errors.append("publish.ps1: generated Release Notes must use the selected locale")
+            break
+    if "function Get-LatestReleaseSet {" in publish_text:
+        errors.append("publish.ps1: obsolete single-locale latest-release selection must not remain")
+    if "function Get-LatestChecklistReleaseSet" in publish_text:
+        errors.append("publish.ps1: obsolete single-locale latest-checklist selection must not remain")
     integrity_contract = ('release_set_integrity_gate.py', 'SnapshotTreeHash', 'SnapshotAllowlistHash')
     for needle in integrity_contract:
         if needle not in publish_text:
@@ -1505,6 +1549,15 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         if needle not in exporter_text:
             errors.append("tools/dev/export_public_snapshot.py: public snapshots must reject unreviewed Git-untracked files")
             break
+    public_allowlist_text = (
+        REPO_ROOT / "docs/internal/operations/public_repo_release_allowlist_2026-08-24.txt"
+    ).read_text(encoding="utf-8-sig", errors="ignore")
+    for required in ("locales/", "tools/localization/", "docs/ja/", "docs/en/"):
+        if required not in public_allowlist_text:
+            errors.append(
+                "public release allowlist: language build inputs and both locale document trees must be published together"
+            )
+            break
     creation_validation_contract = (
         '"-DeferPostCreationValidation"',
         'standalone release.ps1 keeps its self-validation by default',
@@ -1519,6 +1572,18 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
     )
     if 'if ($DeferPostCreationValidation) { $releaseSetArgs += "-DeferPostCreationValidation" }' not in release_text:
         errors.append("release.ps1: deferred validation must be passed explicitly to release-set creation")
+    build_text = (REPO_ROOT / "build.ps1").read_text(encoding="utf-8", errors="ignore")
+    release_entrypoint_contract = (
+        'release.ps1 は通常版と Lite版を一組で作成するため、-Lite は指定できません。',
+        'release set は作成せず、ビルド成果物だけを削除します',
+        'Invoke-RequiredScript -ScriptPath $buildScript -Arguments $buildArgs -Description "ビルド成果物の削除"',
+    )
+    for needle in release_entrypoint_contract:
+        if needle not in release_text:
+            errors.append("release.ps1: Lite-only release sets must be rejected and -Clean must not create a release set")
+            break
+    if 'if ($Clean -and $Rebuild) {' not in build_text:
+        errors.append("build.ps1: mutually exclusive -Clean and -Rebuild must be rejected before invoking a build")
     deferred_gate_contract = (
         'if (-not $DeferPostCreationValidation)',
         'if ($DeferPostCreationValidation) { $integrityArgs += "--skip-validation-after-write" }',
@@ -1529,6 +1594,8 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         if needle not in make_release_text:
             errors.append("make_release_set.ps1: deferred gates and the exact created path must remain explicit")
             break
+    if 'release set は通常版と Lite版を一組で作成するため、-Lite は指定できません。' not in make_release_text:
+        errors.append("make_release_set.ps1: Lite-only release sets must be rejected")
     return errors
 
 
@@ -1794,14 +1861,22 @@ def find_multi_instance_launch_regressions() -> list[str]:
             'DocumentOpenLockCandidate::DocumentOpenLockCandidate': "opened files must acquire a process-wide document lock",
             'Local\\\\PdfNoteDocumentOpenLock_': "opened files must use a distinct named mutex",
             'ReleaseAllDocumentOpenLocks': "all document locks must be released during shutdown",
+            'ShouldNotifyDocumentOpenLockFailure': "startup-driven opens must be able to suppress only their conflict notice",
+            'g_suppressedDocumentOpenLockConflictSequence': "startup restore must identify a suppressed document conflict",
         },
         "src/pdf_view/annotation_store.cppinc": {
             'DocumentOpenLockCandidate documentLock': "PDF and image opens must acquire the document lock",
             'documentLock.CommitReplacing': "a successful PDF/image switch must release only the previous document lock",
+            'ShouldNotifyDocumentOpenLockFailure()': "PDF conflict notices must honor startup-only suppression",
         },
         "src/note_view/note_view_note_ops.cppinc": {
             'DocumentOpenLockCandidate documentLock': "note opens must acquire the document lock",
             'documentLock.CommitReplacing': "a successful note switch must release only the previous document lock",
+            'ShouldNotifyDocumentOpenLockFailure()': "note conflict notices must honor startup-only suppression",
+        },
+        "src/main.cpp": {
+            'ScopedDocumentOpenLockNoticeSuppression suppressDocumentOpenLockNotice;': "startup document opens must suppress only their conflict notice",
+            '!suppressDocumentOpenLockNotice.sawSuppressedConflict()': "startup restore must not replace a suppressed conflict with a partial-restore notice",
         },
         "src/pdf_view/navigation.cppinc": {
             'ReleaseDocumentOpenLock(std::filesystem::path(g_pdf.path))': "closing a PDF/image must release its document lock",

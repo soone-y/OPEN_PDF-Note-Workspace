@@ -2132,12 +2132,13 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
     std::wstring documentLockError;
     DocumentOpenLockCandidate documentLock(std::filesystem::path(path), &documentLockError);
     if (!documentLock.acquired()) {
-        const std::wstring message = IsEnglishUi()
-            ? L"This file is already open in another PDF Note Workspace window."
-            : L"このファイルは別の PDF Note Workspace ウィンドウで開かれています。";
-        ShowSilentMessageDialog(hWnd, L"Note",
-                                documentLockError.empty() ? message : message + L"\n\n" + documentLockError,
-                                SoftNoticeKind::Warning);
+        if (ShouldNotifyDocumentOpenLockFailure()) {
+            const std::wstring message = localization::Text(L"note.operations.0c5127c1ce3c");
+            ShowSilentMessageDialog(hWnd, L"Note",
+                                    documentLockError.empty() ? message : message + L"\n\n" + documentLockError,
+                                    SoftNoticeKind::Warning,
+                                    {{L"", path}});
+        }
         return;
     }
     const bool hasCachedEditForTarget = FindCachedNoteEditWindow(path) != nullptr;
@@ -2177,7 +2178,6 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
             } else {
                 std::wstring msg =
                     L"未統合の差分が見つかりました。\n\n"
-                    L"差分ファイル:\n" + storageSnapshot.stagePath.wstring() + L"\n\n"
                     L"[はい] 差分を復元 (編集欄に適用)\n"
                     L"[いいえ] いまは復元しない（差分は保持）";
                 SilentDialogOptions options;
@@ -2187,6 +2187,7 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
                 options.buttons = SilentDialogButtons::YesNo;
                 options.defaultResult = SilentDialogResult::No;
                 options.escapeResult = SilentDialogResult::No;
+                options.paths = {{L"", storageSnapshot.stagePath.wstring()}};
                 if (ShowSilentDialog(hWnd, options) == SilentDialogResult::Yes) {
                     buffer.swap(staged);
                     selectedStageSnapshot = true;
@@ -2211,7 +2212,8 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
         preview_trace::Append(
             L"LoadNoteFile",
             L"abort=disk_open_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-        ShowSilentMessageDialog(hWnd, L"Note", GetUiText().errNoteOpen, SoftNoticeKind::Error);
+        ShowSilentMessageDialog(hWnd, L"Note", GetUiText().errNoteOpen, SoftNoticeKind::Error,
+                                {{L"", path}});
         return;
     }
 
@@ -2219,7 +2221,8 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
     std::wstring decodeError;
     if (!DecodeNoteTextForLoad(path, buffer, &decoded, &decodeError)) {
         preview_trace::Append(L"LoadNoteFile", L"abort=decode_failed path=" + path + L" err=" + decodeError);
-        ShowSilentMessageDialog(hWnd, L"Note", decodeError, SoftNoticeKind::Error);
+        ShowSilentMessageDialog(hWnd, L"Note", decodeError, SoftNoticeKind::Error,
+                                {{L"", path}});
         return;
     }
     std::wstring text = std::move(decoded.text);
@@ -2708,7 +2711,7 @@ bool JumpToNoteLinkId(const std::wstring& linkId,
     }
 
     if (showNotFoundNotice && owner) {
-        ShowSoftNotice(owner, IsEnglishUi() ? L"Link target not found." : L"リンク先が見つかりませんでした。");
+        ShowSoftNotice(owner, localization::Text(L"note.operations.335f285672d3"));
     }
     return false;
 }
@@ -2717,10 +2720,11 @@ bool CommitNoteRenderStateBeforePaintIfNeeded(HWND hWnd) {
     if (!hWnd || !g_noteRenderEnabled || g_noteRawOnly) return false;
     if (IsNoteImeComposing() || IsImeComposingOnEditWindow(hWnd)) return false;
     
-    int currentLen = GetWindowTextLengthW(hWnd);
     bool isStale = IsNoteTyping();
-    if (!isStale && currentLen >= 0) {
-        isStale = (static_cast<size_t>(currentLen) != g_lastParsedMarkupLength);
+    if (!isStale) {
+        const int currentWindowTextLength = GetWindowTextLengthW(hWnd);
+        isStale = currentWindowTextLength < 0 ||
+            static_cast<size_t>(currentWindowTextLength) != g_lastParsedMarkupWindowTextLength;
     }
     
     bool staleLineCountChanged = false;
@@ -2756,10 +2760,11 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
     // While delayed reparse is pending, avoid drawing stale rendered markup over the raw edit text.
     // Length mismatches catch inserts/deletes, while the typing flag also covers same-length edits
     // (e.g. replacing one character with another) that would otherwise keep the old overlay visible.
-    int currentLen = GetWindowTextLengthW(hWnd);
     bool isStale = IsNoteTyping();
-    if (!isStale && currentLen >= 0) {
-        isStale = (static_cast<size_t>(currentLen) != g_lastParsedMarkupLength);
+    if (!isStale) {
+        const int currentWindowTextLength = GetWindowTextLengthW(hWnd);
+        isStale = currentWindowTextLength < 0 ||
+            static_cast<size_t>(currentWindowTextLength) != g_lastParsedMarkupWindowTextLength;
     }
 
     // Compare against logical lines in the current text, not EM_GETLINECOUNT.
@@ -3070,6 +3075,9 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
     };
     auto isStaleEditingLine = [&](int line) -> bool {
         if (noteNormalModeActive) return false;
+        // Opening/focus display is read-only presentation.  A stale fallback
+        // must not bypass the normal raw-line guard and reveal the caret line.
+        if (g_noteOpeningFocusVisualHold || !g_noteHasFocus) return false;
         if (!isStale) return false;
         if (staleLineCountChanged) return true;
         if (renderActive) {
@@ -5476,7 +5484,7 @@ static HeadingsPaneProjection BuildHeadingsPaneProjection(
     projection.sourceIdentity = note::NoteDerivedSnapshotIdentity{
         CurrentNoteTextCoreOwner(), CurrentNoteTextCoreModel().revision};
     if (!CanReadStableSemanticIndex()) {
-        projection.text = IsEnglishUi() ? L"(updating headings)" : L"(見出しを更新中)";
+        projection.text = localization::Text(L"note.operations.e271405b01ca");
         return projection;
     }
 

@@ -4,6 +4,8 @@ param(
     [switch]$Clean,
     [switch]$VerboseOutput,
     [string[]]$Files,
+    [ValidateSet("ja", "en")]
+    [string]$Locale = "ja",
     [int]$FailureTailLines = 80
 )
 
@@ -93,7 +95,7 @@ if ($env:PDF_NOTE_ASCII_BUILD_ROOT_ACTIVE -ne "1" -and (Test-ContainsNonAscii -V
 }
 
 $outRoot = Join-Path $repoRoot "out"
-$binDir = Join-Path $outRoot "bin"
+$binDir = Join-Path $outRoot $(if ($Locale -eq "en") { "bin_en" } else { "bin" })
 $logDir = Join-Path $outRoot "logs"
 $endTimeLogPath = Join-Path $logDir "build_readonly_viewer_end_time.log"
 $buildDetailLogPath = Join-Path $logDir ("build_readonly_viewer_detail_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
@@ -281,6 +283,7 @@ function Write-BuildInfoManifest {
         [Parameter(Mandatory)][string]$ManifestPath,
         [Parameter(Mandatory)][string]$OutputExePath,
         [Parameter(Mandatory)][string]$Version,
+        [Parameter(Mandatory)][string]$Locale,
         [string[]]$ArtifactPaths = @()
     )
 
@@ -292,6 +295,7 @@ function Write-BuildInfoManifest {
     $lines = @(
         "format`tpdf-note-build-info-v1",
         ("version`t{0}" -f $Version),
+        ("locale`t{0}" -f $Locale),
         ("build_timestamp`t{0}" -f $buildTimestamp)
     )
 
@@ -403,7 +407,7 @@ try {
     $outputExe = Join-Path $binDir $outputExeName
     $buildInfoManifestPath = Join-Path $binDir ($outputExeName + ".buildinfo.txt")
     $appVersion = Get-AppVersion -Path $versionFilePath
-    $objDir = Join-Path $outRoot "obj_readonly_viewer"
+    $objDir = Join-Path $outRoot $(if ($Locale -eq "en") { "obj_readonly_viewer_en" } else { "obj_readonly_viewer" })
     $resourceSource = "src/resources/app.rc"
     $resourceHeader = "src/resources/app_resource.h"
     $readOnlyViewerIconSource = "src/resources/icons/readonly_viewer_icon.ico"
@@ -424,6 +428,28 @@ try {
         exit 1
     }
 
+    $localeTool = Join-Path $repoRoot "tools\localization\generate_locale_catalog.py"
+    $localeUsageTool = Join-Path $repoRoot "tools\localization\validate_locale_usage.py"
+    $jaCatalog = Join-Path $repoRoot "locales\ja.json"
+    $selectedCatalog = Join-Path $repoRoot ("locales\{0}.json" -f $Locale)
+    $generatedLocaleDir = Join-Path $outRoot ("generated_locale\{0}" -f $Locale)
+    $generatedLocaleHeader = Join-Path $generatedLocaleDir "locale_catalog.generated.h"
+    $localeReportPath = Join-Path $generatedLocaleDir "fallback_report.json"
+    foreach ($localeInput in @($localeTool, $localeUsageTool, $jaCatalog, $selectedCatalog)) {
+        if (-not (Test-Path -LiteralPath $localeInput -PathType Leaf)) {
+            throw "Missing localization build input: $localeInput"
+        }
+    }
+    & python $localeUsageTool --source (Join-Path $repoRoot "src") --ja $jaCatalog --en (Join-Path $repoRoot "locales\en.json")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Locale usage validation failed."
+    }
+    New-Item -ItemType Directory -Force -Path $generatedLocaleDir | Out-Null
+    & python $localeTool --locale $Locale --ja $jaCatalog --localized $selectedCatalog --output $generatedLocaleHeader --report $localeReportPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $generatedLocaleHeader -PathType Leaf)) {
+        throw "Localization catalog generation failed for locale '$Locale'."
+    }
+
     $resourceInputs = @($resourceSource, $resourceHeader, $readOnlyViewerIconSource)
     $missingResourceInputs = @($resourceInputs | Where-Object { -not (Test-Path -LiteralPath $_) })
     if ($missingResourceInputs.Count -gt 0) {
@@ -437,7 +463,8 @@ try {
     $includes = @(
         "-Ithird_party/pdfium/include",
         "-Ithird_party/md4c/src",
-        "-Isrc"
+        "-Isrc",
+        ("-I{0}" -f $generatedLocaleDir)
     )
 
     $libs = @(
@@ -471,9 +498,11 @@ try {
 
     $configuration = "Release"
     $flags = $baseFlags + @("-O2", "-DNDEBUG")
+    $flags += if ($Locale -eq "en") { "-DPDF_NOTE_LOCALE_EN=1" } else { "-DPDF_NOTE_LOCALE_EN=0" }
 
     Write-Host "Building PDF Read-Only Viewer..." -ForegroundColor Cyan
     Write-Host ("Configuration: {0}" -f $configuration) -ForegroundColor Cyan
+    Write-Host ("Locale: {0}" -f $Locale) -ForegroundColor Cyan
     Write-Verbose ("Compiler flags: {0}" -f ($flags -join " "))
 
     function Remove-BuildArtifacts {
@@ -524,6 +553,7 @@ try {
         Compiler         = $compiler
         ResourceCompiler = $resourceCompiler
         Configuration    = $configuration
+        Locale           = $Locale
         Includes         = $includes
         Libs             = $libs
         Flags            = $flags
@@ -815,7 +845,7 @@ try {
     Write-BuildOutputSummary -ExePath $outputExe -BinDir $binDir -LogDir $logDir
 
     $buildInfoArtifactPaths = Sync-ReadOnlyViewerRuntimeArtifacts -OutputExePath $outputExe -BinDir $binDir -Compiler $compiler
-    Write-BuildInfoManifest -ManifestPath $buildInfoManifestPath -OutputExePath $outputExe -Version $appVersion -ArtifactPaths $buildInfoArtifactPaths
+    Write-BuildInfoManifest -ManifestPath $buildInfoManifestPath -OutputExePath $outputExe -Version $appVersion -Locale $Locale -ArtifactPaths $buildInfoArtifactPaths
 
     Set-ContentWithRetry -Path $signatureJsonPath -Value $signatureJson -Encoding UTF8
     Set-ContentWithRetry -Path $signatureHashPath -Value $signatureHash -Encoding ASCII -NoNewline

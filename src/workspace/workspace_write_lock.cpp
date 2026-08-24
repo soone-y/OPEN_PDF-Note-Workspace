@@ -11,6 +11,8 @@ namespace {
 std::wstring g_workspaceWriteLockKey;
 std::unordered_map<std::wstring, HANDLE> g_documentOpenLocks;
 int g_documentOpenLockTransitionDepth = 0;
+thread_local int g_documentOpenLockNoticeSuppressionDepth = 0;
+thread_local unsigned long long g_suppressedDocumentOpenLockConflictSequence = 0;
 
 std::wstring NormalizeWorkspaceWriteLockKey(const std::filesystem::path& root) {
     if (root.empty()) return {};
@@ -139,6 +141,9 @@ DocumentOpenLockCandidate::DocumentOpenLockCandidate(const std::filesystem::path
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(candidate);
+        if (g_documentOpenLockNoticeSuppressionDepth > 0) {
+            ++g_suppressedDocumentOpenLockConflictSequence;
+        }
         if (outError) *outError = L"このファイルは別の PDF Note Workspace ウィンドウで開かれています。";
         --g_documentOpenLockTransitionDepth;
         return;
@@ -161,6 +166,25 @@ void DocumentOpenLockCandidate::CommitReplacing(const std::filesystem::path& pre
         ReleaseDocumentOpenLockByKey(previousKey);
     }
     newlyAcquired_ = false;
+}
+
+ScopedDocumentOpenLockNoticeSuppression::ScopedDocumentOpenLockNoticeSuppression() {
+    conflictSequenceAtEntry_ = g_suppressedDocumentOpenLockConflictSequence;
+    ++g_documentOpenLockNoticeSuppressionDepth;
+}
+
+ScopedDocumentOpenLockNoticeSuppression::~ScopedDocumentOpenLockNoticeSuppression() {
+    if (g_documentOpenLockNoticeSuppressionDepth > 0) {
+        --g_documentOpenLockNoticeSuppressionDepth;
+    }
+}
+
+bool ScopedDocumentOpenLockNoticeSuppression::sawSuppressedConflict() const {
+    return g_suppressedDocumentOpenLockConflictSequence != conflictSequenceAtEntry_;
+}
+
+bool ShouldNotifyDocumentOpenLockFailure() {
+    return g_documentOpenLockNoticeSuppressionDepth == 0;
 }
 
 bool IsDocumentOpenLockTransitionActive() {

@@ -68,6 +68,7 @@ void UpdateToolbarUI(HWND hWnd) {
     bool showFont = ToolbarHasFontOptions(g_toolMode);
     bool showFontSize = showFont;
     bool showTextBoxOptions = g_toolMode == ToolMode::TextBox;
+    bool showPanOptions = g_toolMode == ToolMode::Pan;
     bool showWidth = ToolbarHasWidthOptions(g_toolMode);
     bool showMarkerAlpha = ToolbarHasMarkerAlphaOptions(g_toolMode);
     bool showAnnotMethod = ToolbarHasAnnotMethodOptions(g_toolMode);
@@ -128,6 +129,7 @@ void UpdateToolbarUI(HWND hWnd) {
     if (g_hRadioTextReadableBackgroundNormal) EnableWindow(g_hRadioTextReadableBackgroundNormal, showTextBoxOptions && !saveBusy);
     if (g_hRadioTextReadableBackgroundInverted) EnableWindow(g_hRadioTextReadableBackgroundInverted, showTextBoxOptions && !saveBusy);
     if (g_hChkTextAutoWrap) EnableWindow(g_hChkTextAutoWrap, showTextBoxOptions && !saveBusy);
+    if (g_hChkPanMouseWheelZoom) EnableWindow(g_hChkPanMouseWheelZoom, showPanOptions && !saveBusy);
     if (g_hComboWidth) EnableWindow(g_hComboWidth, showWidth && !saveBusy);
     if (g_hComboMarkerAlpha) EnableWindow(g_hComboMarkerAlpha, showMarkerAlpha && !saveBusy);
     if (g_hComboAnnotMethod) EnableWindow(g_hComboAnnotMethod, showAnnotMethod && !saveBusy);
@@ -152,6 +154,7 @@ void UpdateToolbarUI(HWND hWnd) {
     setVisibleIfChanged(g_hRadioTextReadableBackgroundNormal, showTextBoxOptions);
     setVisibleIfChanged(g_hRadioTextReadableBackgroundInverted, showTextBoxOptions);
     setVisibleIfChanged(g_hChkTextAutoWrap, showTextBoxOptions);
+    setVisibleIfChanged(g_hChkPanMouseWheelZoom, showPanOptions);
     setVisibleIfChanged(g_hComboWidth, showWidth);
     setVisibleIfChanged(g_hComboMarkerAlpha, showMarkerAlpha);
     setVisibleIfChanged(g_hComboAnnotMethod, showAnnotMethod);

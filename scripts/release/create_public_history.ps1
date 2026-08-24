@@ -605,7 +605,7 @@ function Invoke-PublicHistoryScans([string]$WorkingDirectory) {
 
 $sourceRepoPath = if ([string]::IsNullOrWhiteSpace($SourceRepo)) { $repoRoot } else { Resolve-AbsolutePath -Path $SourceRepo -BasePath $repoRoot }
 $allowlistPath = if ([string]::IsNullOrWhiteSpace($Allowlist)) {
-    Resolve-OperationFile -Pattern "public_repo_release_allowlist_2026-07-28.txt"
+    Resolve-OperationFile -Pattern "public_repo_release_allowlist_2026-08-24.txt"
 }
 else {
     Resolve-AbsolutePath -Path $Allowlist -BasePath $repoRoot

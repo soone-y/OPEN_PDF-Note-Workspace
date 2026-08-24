@@ -4,12 +4,14 @@ param(
     [switch]$LogContractOnly,
     [switch]$ConfigRecoveryOnly,
     [switch]$ConfigUnknownFieldOnly,
-    [switch]$SettingsBundleOnly
+    [switch]$SettingsBundleOnly,
+    [switch]$HelpVisibilityOnly,
+    [switch]$DialogOwnerVisibilityOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-if (@(@($ConfigOnly, $LogContractOnly, $ConfigRecoveryOnly, $ConfigUnknownFieldOnly, $SettingsBundleOnly) | Where-Object { $_ }).Count -gt 1) {
+if (@(@($ConfigOnly, $LogContractOnly, $ConfigRecoveryOnly, $ConfigUnknownFieldOnly, $SettingsBundleOnly, $HelpVisibilityOnly, $DialogOwnerVisibilityOnly) | Where-Object { $_ }).Count -gt 1) {
     throw "Only one focused UI automation mode may be used at once."
 }
 
@@ -29,7 +31,7 @@ $timeoutSec = 120
 if (-not (Test-Path -LiteralPath $exePath)) {
     throw "Executable not found: $exePath"
 }
-if (-not ($ConfigOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly) -and -not (Test-Path -LiteralPath $fixtureSessionSource)) {
+if (-not ($ConfigOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly) -and -not (Test-Path -LiteralPath $fixtureSessionSource)) {
     throw "Fixture session not found: $fixtureSessionSource"
 }
 
@@ -69,7 +71,7 @@ $expectedCorruptWorkspaceJson = if ($ConfigRecoveryOnly) {
 } else {
     ""
 }
-if (-not ($ConfigOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly)) {
+if (-not ($ConfigOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly)) {
     $fixtureDestination = Join-Path $workspaceRoot "lecture1\session1"
     Get-ChildItem -LiteralPath $fixtureSessionSource -Force | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $fixtureDestination -Recurse -Force
@@ -102,6 +104,8 @@ $savedEnv = @{
     "PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_RECOVERY_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_RECOVERY_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_UNKNOWN_FIELD_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_UNKNOWN_FIELD_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_HELP_VISIBILITY_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_HELP_VISIBILITY_ONLY", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_DIALOG_OWNER_VISIBILITY_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_DIALOG_OWNER_VISIBILITY_ONLY", "Process")
 }
 
 function Restore-Env {
@@ -121,6 +125,8 @@ try {
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_RECOVERY_ONLY", $(if ($ConfigRecoveryOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_UNKNOWN_FIELD_ONLY", $(if ($ConfigUnknownFieldOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY", $(if ($SettingsBundleOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_HELP_VISIBILITY_ONLY", $(if ($HelpVisibilityOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_DIALOG_OWNER_VISIBILITY_ONLY", $(if ($DialogOwnerVisibilityOnly) { "1" } else { $null }), "Process")
 
     $proc = Start-Process -FilePath $exePath -WorkingDirectory $binDir -PassThru
     $deadline = (Get-Date).AddSeconds($timeoutSec)
@@ -147,12 +153,12 @@ try {
     if (-not $result.StartsWith("OK")) {
         throw ("UI automation reported failure:`n{0}" -f $result.Trim())
     }
-    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly) -and
+    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly) -and
         (-not (Test-Path -LiteralPath $noteStageDir) -or
          -not (Get-ChildItem -LiteralPath $noteStageDir -File -ErrorAction SilentlyContinue))) {
         throw "UI automation did not preserve the staged-exit note diff."
     }
-    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly)) {
+    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly)) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:output_export_ok$") {
             throw "UI automation did not complete the output export scenario."
@@ -201,7 +207,7 @@ try {
         }
     }
     }
-    if (-not ($LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly) -and $result -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
+    if (-not ($LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly) -and $result -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
             throw "UI automation did not complete the workspace configuration round-trip scenario."
@@ -265,6 +271,26 @@ try {
             Where-Object { $_.Name -like "settings_import_*" -and (Test-Path -LiteralPath (Join-Path $_.FullName "manifest.txt")) }
         if (-not $bundleBackups) {
             throw "Settings bundle import did not leave a recovery backup."
+        }
+    }
+    $expectsHelpVisibility = $HelpVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $DialogOwnerVisibilityOnly)
+    if ($expectsHelpVisibility) {
+        $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
+        if ($traceText -notmatch "(?m)^automation:help_visibility_ok$") {
+            if ($traceText -notmatch "(?m)^automation:help_visibility_(ok|failed)$") {
+                throw "The executable does not contain the help-visibility automation. Rebuild out\\bin\\pdf_note_workspace.exe, then run this test again."
+            }
+            throw "UI automation did not keep the main window visible while closing help."
+        }
+    }
+    $expectsDialogOwnerVisibility = $DialogOwnerVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly)
+    if ($expectsDialogOwnerVisibility) {
+        $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
+        if ($traceText -notmatch "(?m)^automation:dialog_owner_visibility_ok$") {
+            if ($traceText -notmatch "(?m)^automation:dialog_owner_visibility_(ok|failed)$") {
+                throw "The executable does not contain the dialog-owner visibility automation. Rebuild out\\bin\\pdf_note_workspace.exe, then run this test again."
+            }
+            throw "UI automation detected that the main window disappeared, was destroyed, or was minimized while a dialog was open."
         }
     }
 

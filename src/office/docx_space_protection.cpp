@@ -1,6 +1,7 @@
 #include "office/docx_space_protection.h"
 
 #include "core/atomic_write.h"
+#include "core/localization.h"
 
 #include <zlib.h>
 
@@ -79,9 +80,8 @@ static void AppendLe32(std::vector<uint8_t>& out, uint32_t value) {
     out.push_back(static_cast<uint8_t>((value >> 24) & 0xFFu));
 }
 
-static std::wstring OfficeErr(const wchar_t* en, const wchar_t* ja) {
-    (void)en;
-    return ja;
+static std::wstring OfficeErr(std::wstring_view id) {
+    return localization::Text(id);
 }
 
 static bool ReadFileBytes(const std::filesystem::path& path,
@@ -91,14 +91,12 @@ static bool ReadFileBytes(const std::filesystem::path& path,
     std::error_code ec;
     const auto size = std::filesystem::file_size(path, ec);
     if (ec || size > kMaxDocxBytes) {
-        if (outErr) *outErr = OfficeErr(L"Failed to read DOCX staging source.",
-                                        L"DOCX変換用コピーの読み込みに失敗しました。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.read_staging_source");
         return false;
     }
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs) {
-        if (outErr) *outErr = OfficeErr(L"Failed to open DOCX staging source.",
-                                        L"DOCX変換用コピーを開けません。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.open_staging_source");
         return false;
     }
     out->resize(static_cast<size_t>(size));
@@ -106,8 +104,7 @@ static bool ReadFileBytes(const std::filesystem::path& path,
         ifs.read(reinterpret_cast<char*>(out->data()), static_cast<std::streamsize>(out->size()));
     }
     if (!ifs && static_cast<size_t>(ifs.gcount()) != out->size()) {
-        if (outErr) *outErr = OfficeErr(L"Failed while reading DOCX staging source.",
-                                        L"DOCX変換用コピーの読み込み中に失敗しました。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.read_staging_source_interrupted");
         return false;
     }
     return true;
@@ -119,8 +116,7 @@ static bool WriteFileBytesAtomically(const std::filesystem::path& dest,
     std::error_code ec;
     std::filesystem::create_directories(dest.parent_path(), ec);
     if (ec) {
-        if (outErr) *outErr = OfficeErr(L"Failed to create DOCX staging folder.",
-                                        L"DOCX変換用フォルダを作成できません。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.create_staging_folder");
         return false;
     }
 
@@ -146,16 +142,14 @@ static bool WriteFileBytesAtomically(const std::filesystem::path& dest,
         DWORD got = 0;
         if (!WriteFile(tmpHandle, data.data() + written, chunk, &got, nullptr) || got != chunk) {
             cleanup();
-            if (outErr) *outErr = OfficeErr(L"Failed to write DOCX staging copy.",
-                                            L"DOCX変換用コピーを書き込めません。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.write_staging_copy");
             return false;
         }
         written += got;
     }
     if (!FlushFileBuffers(tmpHandle)) {
         cleanup();
-        if (outErr) *outErr = OfficeErr(L"Failed to flush DOCX staging copy.",
-                                        L"DOCX変換用コピーを確定できません。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.flush_staging_copy");
         return false;
     }
     CloseHandle(tmpHandle);
@@ -189,13 +183,11 @@ static bool ParseZipEntries(const std::vector<uint8_t>& data,
     if (eocdComment) eocdComment->clear();
     const auto eocdOff = FindEndOfCentralDirectory(data);
     if (!eocdOff) {
-        if (outErr) *outErr = OfficeErr(L"DOCX ZIP directory was not found.",
-                                        L"DOCX ZIPディレクトリが見つかりません。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.zip_directory_missing");
         return false;
     }
     if (ReadLe16(data, *eocdOff + 4) != 0 || ReadLe16(data, *eocdOff + 6) != 0) {
-        if (outErr) *outErr = OfficeErr(L"Multi-disk DOCX ZIP is not supported.",
-                                        L"分割DOCX ZIPには対応していません。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.zip_multidisk_unsupported");
         return false;
     }
     const uint16_t diskEntries = ReadLe16(data, *eocdOff + 8);
@@ -209,16 +201,14 @@ static bool ParseZipEntries(const std::vector<uint8_t>& data,
         centralOffset == 0xFFFFFFFFu ||
         static_cast<uint64_t>(centralOffset) + centralSize > data.size() ||
         *eocdOff + 22u + commentLen > data.size()) {
-        if (outErr) *outErr = OfficeErr(L"Unsupported DOCX ZIP layout.",
-                                        L"未対応のDOCX ZIP構造です。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.zip_layout_unsupported");
         return false;
     }
 
     size_t off = centralOffset;
     for (uint16_t i = 0; i < totalEntries; ++i) {
         if (off + 46u > data.size() || ReadLe32(data, off) != kZipCentralDirectoryHeaderSig) {
-            if (outErr) *outErr = OfficeErr(L"Invalid DOCX ZIP central directory.",
-                                            L"DOCX ZIP中央ディレクトリが不正です。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.zip_central_directory_invalid");
             return false;
         }
 
@@ -247,8 +237,7 @@ static bool ParseZipEntries(const std::vector<uint8_t>& data,
             entry.uncompressedSize == 0xFFFFFFFFu ||
             entry.diskStart != 0 ||
             (entry.flags & kZipFlagEncrypted) != 0) {
-            if (outErr) *outErr = OfficeErr(L"Unsupported DOCX ZIP entry.",
-                                            L"未対応のDOCX ZIP項目です。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.zip_entry_unsupported");
             return false;
         }
         entry.name.assign(reinterpret_cast<const char*>(data.data() + variableOff), nameLen);
@@ -259,8 +248,7 @@ static bool ParseZipEntries(const std::vector<uint8_t>& data,
 
         const size_t localOff = entry.localHeaderOffset;
         if (localOff + 30u > data.size() || ReadLe32(data, localOff) != kZipLocalFileHeaderSig) {
-            if (outErr) *outErr = OfficeErr(L"Invalid DOCX ZIP local header.",
-                                            L"DOCX ZIPローカルヘッダーが不正です。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.zip_local_header_invalid");
             return false;
         }
         const uint16_t localNameLen = ReadLe16(data, localOff + 26);
@@ -268,8 +256,7 @@ static bool ParseZipEntries(const std::vector<uint8_t>& data,
         const size_t dataOff = localOff + 30u + localNameLen + localExtraLen;
         const size_t dataEnd = dataOff + entry.compressedSize;
         if (dataEnd > data.size()) {
-            if (outErr) *outErr = OfficeErr(L"Invalid DOCX ZIP entry size.",
-                                            L"DOCX ZIP項目サイズが不正です。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.zip_entry_size_invalid");
             return false;
         }
         entry.localExtra.assign(data.begin() + static_cast<std::ptrdiff_t>(localOff + 30u + localNameLen),
@@ -293,8 +280,7 @@ static bool InflateRawDeflate(const std::vector<uint8_t>& compressed,
     z_stream stream{};
     int zret = inflateInit2(&stream, -MAX_WBITS);
     if (zret != Z_OK) {
-        if (outErr) *outErr = OfficeErr(L"Failed to initialize DOCX inflater.",
-                                        L"DOCX展開処理を初期化できません。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.inflater_initialize_failed");
         return false;
     }
     stream.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(compressed.data()));
@@ -304,8 +290,7 @@ static bool InflateRawDeflate(const std::vector<uint8_t>& compressed,
     zret = inflate(&stream, Z_FINISH);
     inflateEnd(&stream);
     if (zret != Z_STREAM_END || stream.total_out != expectedSize) {
-        if (outErr) *outErr = OfficeErr(L"Failed to inflate DOCX document XML.",
-                                        L"DOCX本文XMLを展開できません。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.document_xml_inflate_failed");
         return false;
     }
     return true;
@@ -317,8 +302,7 @@ static bool DecodeEntryData(const ZipEntry& entry,
     if (entry.method == kZipMethodStored) {
         *out = entry.compressedData;
         if (out->size() != entry.uncompressedSize) {
-            if (outErr) *outErr = OfficeErr(L"Invalid stored DOCX XML size.",
-                                            L"DOCX本文XMLの格納サイズが不正です。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.document_xml_size_invalid");
             return false;
         }
         return true;
@@ -326,8 +310,7 @@ static bool DecodeEntryData(const ZipEntry& entry,
     if (entry.method == kZipMethodDeflated) {
         return InflateRawDeflate(entry.compressedData, entry.uncompressedSize, out, outErr);
     }
-    if (outErr) *outErr = OfficeErr(L"Unsupported DOCX document XML compression.",
-                                    L"DOCX本文XMLの圧縮方式に対応していません。");
+    if (outErr) *outErr = OfficeErr(L"office.docx.document_xml_compression_unsupported");
     return false;
 }
 
@@ -455,17 +438,13 @@ static bool ValidateOfficePackageBytesForOfflineConversion(
         if (lowerName.find("vbaproject.bin") != std::string::npos ||
             lowerName.find("/activex/") != std::string::npos ||
             lowerName.rfind("activex/", 0) == 0) {
-            if (outErr) *outErr = OfficeErr(
-                L"The Office package contains active macro or ActiveX content.",
-                L"OfficeファイルにマクロまたはActiveXの実行可能コンテンツが含まれています。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.active_content_blocked");
             return false;
         }
         if (!EndsWith(lowerName, ".rels")) continue;
         if (entry.uncompressedSize > kMaxRelationshipPartBytes ||
             totalRelationshipBytes > kMaxTotalRelationshipBytes - entry.uncompressedSize) {
-            if (outErr) *outErr = OfficeErr(
-                L"Office relationship metadata exceeds the safe size limit.",
-                L"Officeファイルの参照関係メタデータが安全なサイズ上限を超えています。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.relationship_metadata_too_large");
             return false;
         }
         totalRelationshipBytes += entry.uncompressedSize;
@@ -474,9 +453,7 @@ static bool ValidateOfficePackageBytesForOfflineConversion(
         const std::string_view relationshipXml(
             reinterpret_cast<const char*>(relationshipBytes.data()), relationshipBytes.size());
         if (HasExternalRelationshipTarget(relationshipXml)) {
-            if (outErr) *outErr = OfficeErr(
-                L"The Office package contains an external relationship and was not opened.",
-                L"Officeファイルに外部参照が含まれるため、ファイルを開きませんでした。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.external_relationship_blocked");
             return false;
         }
     }
@@ -803,9 +780,7 @@ static bool RewriteDocxWithConversionXmlTransforms(const std::vector<ZipEntry>& 
         if (!IsDocxWordXmlEntry(entry.name)) continue;
         if (entry.uncompressedSize > kMaxWordXmlEntryBytes ||
             totalWordXmlBytes > kMaxTotalWordXmlBytes - entry.uncompressedSize) {
-            if (outErr) *outErr = OfficeErr(
-                L"DOCX Word XML exceeds the safe expansion limit.",
-                L"DOCX内のWord XMLが安全な展開サイズ上限を超えています。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.word_xml_too_large");
             return false;
         }
         totalWordXmlBytes += entry.uncompressedSize;
@@ -818,8 +793,7 @@ static bool RewriteDocxWithConversionXmlTransforms(const std::vector<ZipEntry>& 
         }
     }
     if (!foundDocumentXml) {
-        if (outErr) *outErr = OfficeErr(L"DOCX document XML was not found.",
-                                        L"DOCX本文XMLが見つかりません。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.document_xml_missing");
         return false;
     }
 
@@ -828,8 +802,7 @@ static bool RewriteDocxWithConversionXmlTransforms(const std::vector<ZipEntry>& 
     out->clear();
     for (const auto& entry : entries) {
         if (out->size() > 0xFFFFFFFFull) {
-            if (outErr) *outErr = OfficeErr(L"DOCX ZIP64 output is not supported.",
-                                            L"DOCX ZIP64出力には対応していません。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.zip64_output_unsupported");
             return false;
         }
         offsets.push_back(static_cast<uint32_t>(out->size()));
@@ -839,8 +812,7 @@ static bool RewriteDocxWithConversionXmlTransforms(const std::vector<ZipEntry>& 
     }
 
     if (out->size() > 0xFFFFFFFFull) {
-        if (outErr) *outErr = OfficeErr(L"DOCX ZIP64 output is not supported.",
-                                        L"DOCX ZIP64出力には対応していません。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.zip64_output_unsupported");
         return false;
     }
     const uint32_t centralOffset = static_cast<uint32_t>(out->size());
@@ -849,8 +821,7 @@ static bool RewriteDocxWithConversionXmlTransforms(const std::vector<ZipEntry>& 
         std::vector<uint8_t> central = BuildCentralHeader(entries[i], offsets[i]);
         centralSize += central.size();
         if (centralSize > 0xFFFFFFFFull) {
-            if (outErr) *outErr = OfficeErr(L"DOCX ZIP64 output is not supported.",
-                                            L"DOCX ZIP64出力には対応していません。");
+            if (outErr) *outErr = OfficeErr(L"office.docx.zip64_output_unsupported");
             return false;
         }
         out->insert(out->end(), central.begin(), central.end());
@@ -872,14 +843,10 @@ bool ValidateOfficePackageForOfflineConversion(const std::filesystem::path& sour
         if (!ReadFileBytes(source, &sourceBytes, outErr)) return false;
         return ValidateOfficePackageBytesForOfflineConversion(sourceBytes, outErr);
     } catch (const std::bad_alloc&) {
-        if (outErr) *outErr = OfficeErr(
-            L"Not enough memory to validate the Office package.",
-            L"Officeファイルを検証するためのメモリが不足しています。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.validation_memory_insufficient");
         return false;
     } catch (const std::length_error&) {
-        if (outErr) *outErr = OfficeErr(
-            L"Office package metadata exceeds the supported size.",
-            L"Officeファイルのメタデータが対応可能なサイズを超えています。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.metadata_too_large");
         return false;
     }
 }
@@ -902,14 +869,10 @@ bool TransformDocxForSpaceProtection(const std::filesystem::path& source,
 
         return WriteFileBytesAtomically(dest, outputBytes, outErr);
     } catch (const std::bad_alloc&) {
-        if (outErr) *outErr = OfficeErr(
-            L"Not enough memory to prepare the DOCX conversion copy.",
-            L"DOCX変換用コピーを準備するためのメモリが不足しています。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.staging_memory_insufficient");
         return false;
     } catch (const std::length_error&) {
-        if (outErr) *outErr = OfficeErr(
-            L"DOCX conversion data exceeds the supported size.",
-            L"DOCX変換データが対応可能なサイズを超えています。");
+        if (outErr) *outErr = OfficeErr(L"office.docx.conversion_data_too_large");
         return false;
     }
 }

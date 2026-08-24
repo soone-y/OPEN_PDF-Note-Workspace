@@ -1,0 +1,2 @@
+This is a plain-text example.
+You can edit it as simple UTF-8 text without formatting.

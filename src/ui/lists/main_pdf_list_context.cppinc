@@ -200,11 +200,11 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdCloseFile = 27;
     constexpr UINT kCmdReload = 28;
     AppendMenuW(menu.get(), MF_STRING, kCmdNewLecture,
-                IsEnglishUi() ? L"Create lecture..." : L"授業を作成...");
+                localization::Text(L"ui.pdf_list.23af32fea7bb").c_str());
     AppendMenuW(menu.get(),
                 canCreateSession ? MF_STRING : (MF_STRING | MF_GRAYED),
                 kCmdNewSession,
-                IsEnglishUi() ? L"Create session..." : L"回次を作成...");
+                localization::Text(L"ui.pdf_list.5e4fd1449672").c_str());
     HMENU noteMenu = CreatePopupMenu();
     HMENU selectedSessionNoteMenu = CreatePopupMenu();
     HMENU currentSessionNoteMenu = CreatePopupMenu();
@@ -221,13 +221,13 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         AppendMenuW(noteMenu,
                     canCreateNoteInSelectedFileSession ? MF_POPUP : (MF_POPUP | MF_GRAYED),
                     reinterpret_cast<UINT_PTR>(selectedSessionNoteMenu),
-                    IsEnglishUi() ? L"In selected file's session" : L"選択ファイルの回次に作成");
+                    localization::Text(L"ui.pdf_list.1b4bcad2d222").c_str());
         AppendMenuW(noteMenu,
                     canCreateNote ? MF_POPUP : (MF_POPUP | MF_GRAYED),
                     reinterpret_cast<UINT_PTR>(currentSessionNoteMenu),
-                    IsEnglishUi() ? L"In current session" : L"現在の回次に作成");
+                    localization::Text(L"ui.pdf_list.a2ac54b74f06").c_str());
         AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(noteMenu),
-                    IsEnglishUi() ? L"Create note" : L"ノートを作成");
+                    localization::Text(L"ui.pdf_list.5d611a60297c").c_str());
     } else {
         if (selectedSessionNoteMenu) DestroyMenu(selectedSessionNoteMenu);
         if (currentSessionNoteMenu) DestroyMenu(currentSessionNoteMenu);
@@ -235,58 +235,58 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     }
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu.get(), MF_STRING, kCmdReload,
-                IsEnglishUi() ? L"Reload" : L"再読み込み");
+                localization::Text(L"ui.pdf_list.018a2719c366").c_str());
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     ui::context_menu::AppendPathContextMenuItems(menu.get(), {
         {kCmdOpenInApp,
          officeFile
-             ? (IsEnglishUi() ? L"Convert to PDF" : L"PDFに変換")
-             : (IsEnglishUi() ? L"Open in this app" : L"このソフトで開く")},
+             ? (localization::Text(L"ui.pdf_list.7470105ed551").c_str())
+             : (localization::Text(L"ui.pdf_list.de691a7bc023").c_str())},
     });
     ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenReadOnly, IsEnglishUi() ? L"Open in read-only viewer" : L"読み取り専用ビューアで開く",
+        {kCmdOpenReadOnly, localization::Text(L"ui.pdf_list.154ade32c630").c_str(),
          !isNoteList && file.isPdf},
     });
     const bool imageFile = !isNoteList && IsImageFile(selectedPath);
     if (imageFile) {
         AppendMenuW(menu.get(), MF_STRING, kCmdConvertImageToPdf,
-                    IsEnglishUi() ? L"Convert image to PDF..." : L"画像をPDFに変換...");
+                    localization::Text(L"ui.pdf_list.4d1ad08173d8").c_str());
     }
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenExplorer, IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示"},
-        {kCmdShowHierarchy, IsEnglishUi() ? L"Show directory hierarchy" : L"フォルダ階層を確認", canShowHierarchy},
-        {kCmdShowPath, IsEnglishUi() ? L"Show work path" : L"作業パスを表示"},
-        {kCmdCopyPath, IsEnglishUi() ? L"Copy path" : L"パスをコピー"},
+        {kCmdOpenExplorer, localization::Text(L"ui.pdf_list.9208055ca154").c_str()},
+        {kCmdShowHierarchy, localization::Text(L"ui.pdf_list.752b401aff9a").c_str(), canShowHierarchy},
+        {kCmdShowPath, localization::Text(L"ui.pdf_list.14a4b0c697e4").c_str()},
+        {kCmdCopyPath, localization::Text(L"ui.pdf_list.9806c16958b1").c_str()},
     });
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu.get(),
                 MF_STRING,
                 isPinnedTemporaryPath ? kCmdUnpinTemporaryPath : kCmdPinTemporaryPath,
                 isPinnedTemporaryPath
-                    ? (IsEnglishUi() ? L"Remove temporary path" : L"一時パスから外す")
-                    : (IsEnglishUi() ? L"Always keep open (temporary path)" : L"常に開ける（一時パスに追加）"));
+                    ? (localization::Text(L"ui.pdf_list.8ba171ca98b1").c_str())
+                    : (localization::Text(L"ui.pdf_list.664d20d41490").c_str()));
     AppendMenuW(menu.get(),
                 isTemporaryPath ? MF_STRING : (MF_STRING | MF_GRAYED),
                 kCmdRemoveTemporaryPath,
-                IsEnglishUi() ? L"Remove from temporary list" : L"一時リストから消す");
+                localization::Text(L"ui.pdf_list.a56d092851ca").c_str());
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu.get(), canCloseLecture ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdCloseLecture, IsEnglishUi() ? L"Close lecture display" : L"授業の表示を閉じる");
+                kCmdCloseLecture, localization::Text(L"ui.pdf_list.8bd547f6bad9").c_str());
     AppendMenuW(menu.get(), canCloseSession ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdCloseSession, IsEnglishUi() ? L"Close session display" : L"回次の表示を閉じる");
+                kCmdCloseSession, localization::Text(L"ui.pdf_list.8b37e122658e").c_str());
     AppendMenuW(menu.get(), canCloseFile ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdCloseFile, IsEnglishUi() ? L"Close file display" : L"ファイルの表示を閉じる");
+                kCmdCloseFile, localization::Text(L"ui.pdf_list.ce4e384de3db").c_str());
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu.get(),
                 canRename ? MF_STRING : (MF_STRING | MF_GRAYED),
                 kCmdRename,
-                IsEnglishUi() ? L"Rename" : L"名前の変更");
+                localization::Text(L"ui.pdf_list.b351979601ed").c_str());
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu.get(),
                 canDeleteEmptyClro ? MF_STRING : (MF_STRING | MF_GRAYED),
                 kCmdDeleteEmptyClro,
-                IsEnglishUi() ? L"Delete empty .clro file" : L"空の .clro ファイルを削除");
+                localization::Text(L"ui.pdf_list.985ebbf796f6").c_str());
     SetForegroundWindow(owner);
     const UINT cmd = menu.TrackCommand(owner, screenPt,
                                        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
@@ -340,14 +340,13 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     if (cmd == kCmdReload) {
         if (!RefreshCurrentSessionFiles()) {
             ShowSoftNotice(owner,
-                           IsEnglishUi() ? L"There is no session to reload."
-                                         : L"再読み込みできる回次が開かれていません。",
+                           localization::Text(L"ui.pdf_list.d918d5126836").c_str(),
                            SoftNoticeKind::Warning);
             return true;
         }
         SyncLeftPaneSelection();
         RefreshMainWindowUiState(owner);
-        ShowSoftNotice(owner, IsEnglishUi() ? L"File list reloaded." : L"ファイル一覧を再読み込みしました。",
+        ShowSoftNotice(owner, localization::Text(L"ui.pdf_list.c5a835a713a3").c_str(),
                        SoftNoticeKind::Info);
         return true;
     }
@@ -379,14 +378,12 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     if (cmd == kCmdPinTemporaryPath) {
         if (!PinTemporaryFilePath(file.path, isNoteList)) {
             ShowSoftNotice(owner,
-                           IsEnglishUi() ? L"This file could not be added as a temporary path."
-                                         : L"このファイルを一時パスに追加できませんでした。",
+                           localization::Text(L"ui.pdf_list.2a136ebea8df").c_str(),
                            SoftNoticeKind::Warning);
         } else {
             RefreshTemporaryFileListDisplay(isNoteList);
             ShowSoftNotice(owner,
-                           IsEnglishUi() ? L"Added as a temporary path. It will remain available while changing directories."
-                                         : L"一時パスに追加しました。ディレクトリを変えても開いたままにできます。",
+                           localization::Text(L"ui.pdf_list.c7ede3b77174").c_str(),
                            SoftNoticeKind::Info);
         }
         return true;
@@ -395,16 +392,14 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         UnpinTemporaryFilePath(file.path, isNoteList);
         RefreshTemporaryFileListDisplay(isNoteList);
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Removed the temporary path."
-                                     : L"一時パスから外しました。",
+                       localization::Text(L"ui.pdf_list.173bbb92c60b").c_str(),
                        SoftNoticeKind::Info);
         return true;
     }
     if (cmd == kCmdRemoveTemporaryPath) {
         if (RemoveTemporaryFilePathFromCurrentList(file.path, isNoteList)) {
             ShowSoftNotice(owner,
-                           IsEnglishUi() ? L"Removed from the temporary list."
-                                         : L"一時リストから消しました。",
+                           localization::Text(L"ui.pdf_list.79941b38bec1").c_str(),
                            SoftNoticeKind::Info);
         }
         return true;
@@ -424,12 +419,8 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         const EmptyClroDeleteResult result = DeleteEmptyClroNoteFile(selectedPath, &deleteError);
         if (result != EmptyClroDeleteResult::Deleted) {
             const std::wstring message = result == EmptyClroDeleteResult::NotEligible
-                ? (IsEnglishUi()
-                    ? L"The .clro file was not deleted because it is no longer empty or has pending changes."
-                    : L".clro ファイルは空でなくなったか、未処理の変更があるため削除しませんでした。")
-                : (IsEnglishUi()
-                    ? L"Failed to delete the empty .clro file."
-                    : L"空の .clro ファイルを削除できませんでした。");
+                ? (localization::Text(L"ui.pdf_list.f4913f151e35").c_str())
+                : (localization::Text(L"ui.pdf_list.a03da752aa1e").c_str());
             ShowSoftNotice(owner, message, SoftNoticeKind::Warning);
             return true;
         }
@@ -439,8 +430,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         }
         RefreshCurrentSessionFiles();
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Deleted the empty .clro file."
-                                     : L"空の .clro ファイルを削除しました。",
+                       localization::Text(L"ui.pdf_list.8c6a6b99b060").c_str(),
                        SoftNoticeKind::Info);
         return true;
     }

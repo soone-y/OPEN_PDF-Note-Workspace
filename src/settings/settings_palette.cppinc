@@ -132,24 +132,16 @@ static void UpdatePaletteSelectedInfo(PaletteSettingsCtx* ctx) {
     std::wstring hex = PaletteHexColorW(c);
     std::wstring roleText;
     if (idx < 7) {
-        roleText = IsEnglishUi() ? L" (Fixed Preset)" : L" (固定プリセット)";
+        roleText = localization::Text(L"settings.palette.be911f831213");
     } else if (idx == 7) {
-        roleText = IsEnglishUi() ? L" (Dynamic Custom Slot)" : L" (選択更新枠)";
+        roleText = localization::Text(L"settings.palette.eaf09477bc2b");
     }
-    std::wstring text;
-    if (IsEnglishUi()) {
-        text = L"Selected: Slot " + std::to_wstring(idx + 1) + roleText + L"  " + hex +
-               L"\r\nRGB: R=" + std::to_wstring(GetRValue(c)) +
-               L"  G=" + std::to_wstring(GetGValue(c)) +
-               L"  B=" + std::to_wstring(GetBValue(c));
-    } else {
-        text = L"選択中: スロット " + std::to_wstring(idx + 1) + roleText + L"  " + hex +
-               L"\r\nRGB: R=" + std::to_wstring(GetRValue(c)) +
-               L"  G=" + std::to_wstring(GetGValue(c)) +
-               L"  B=" + std::to_wstring(GetBValue(c));
-    }
+    std::wstring text = localization::Format(L"settings.palette.selected_info",
+        {{L"SLOT", std::to_wstring(idx + 1)}, {L"ROLE", roleText}, {L"HEX", hex},
+         {L"R", std::to_wstring(GetRValue(c))}, {L"G", std::to_wstring(GetGValue(c))},
+         {L"B", std::to_wstring(GetBValue(c))}});
     if (ctx->changedSlot == idx) {
-        text += IsEnglishUi() ? L"\r\nUpdated" : L"\r\n更新済み";
+        text += localization::Text(L"settings.palette.8c31962ed379");
     }
     SetWindowTextW(ctx->selectedInfo, text.c_str());
 }
@@ -176,9 +168,7 @@ static void EnsurePaletteSettingsClass() {
             const int rowH = std::max(ScaleY(hWnd, 28), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
             const int columns = 8;
             const int titleH = std::max(rowH, ScaleY(hWnd, 30));
-            std::wstring subtitle = IsEnglishUi()
-                ? L"Select a slot, then use Change Color to update it."
-                : L"スロットを選び、「色を変更」でその色を更新します。";
+            std::wstring subtitle = localization::Text(L"settings.palette.3fec070b879c");
             int subtitleH = ctx->embedded ? 0
                                           : std::max(FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 4),
                                                      MeasureTextHeight(hWnd, subtitle, ScaleY(hWnd, 360), g_hUIFont));
@@ -222,17 +212,17 @@ static void EnsurePaletteSettingsClass() {
             int xCancel = pad + totalW - cancelW;
             int xOk = ctx->embedded ? (pad + totalW - okW) : (xCancel - btnGap - okW);
 
-            ctx->btnOpen = CreateWindowExW(0, L"BUTTON",
-                                           ctx->embedded
-                                               ? (IsEnglishUi() ? L"Change Color..." : L"色を変更...")
-                                               : (IsEnglishUi() ? L"Open Color Palette" : L"カラーパレットを開く"),
+            const std::wstring openLabel = ctx->embedded
+                ? localization::Text(L"settings.palette.023caed2a143")
+                : localization::Text(L"settings.palette.0e945dc66d38");
+            ctx->btnOpen = CreateWindowExW(0, L"BUTTON", openLabel.c_str(),
                                            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                            xOk, y, okW, btnH, hWnd,
                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
             SetUIFont(ctx->btnOpen);
             if (!ctx->embedded) {
                 ctx->btnClose = CreateWindowExW(0, L"BUTTON",
-                                                UiCloseLabel(),
+                                                UiCloseLabel().c_str(),
                                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                                 xCancel, y, cancelW, btnH, hWnd,
                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);

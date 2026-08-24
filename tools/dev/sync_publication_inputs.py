@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 
 
@@ -43,13 +44,14 @@ def load_allowlist(source_root: Path) -> dict:
     return payload
 
 
-def copy_file(source_root: Path, destination_root: Path, entry: dict) -> None:
+def copy_file(source_root: Path, destination_root: Path, entry: dict) -> Path:
     source = child_path(source_root, entry.get("source", ""), label="allowlist source")
     destination = child_path(destination_root, entry.get("destination", ""), label="allowlist destination")
     if not source.is_file():
         raise FileNotFoundError(f"Required publication input is missing: {source}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
+    return destination
 
 
 def clear_destination(destination: Path) -> None:
@@ -59,7 +61,7 @@ def clear_destination(destination: Path) -> None:
         destination.unlink()
 
 
-def copy_tree(source_root: Path, destination_root: Path, entry: dict) -> None:
+def copy_tree(source_root: Path, destination_root: Path, entry: dict) -> Path:
     source = child_path(source_root, entry.get("source", ""), label="allowlist tree source")
     destination = child_path(destination_root, entry.get("destination", ""), label="allowlist tree destination")
     if not source.is_dir():
@@ -77,9 +79,10 @@ def copy_tree(source_root: Path, destination_root: Path, entry: dict) -> None:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_file, target)
+    return destination
 
 
-def copy_document_markdown(source_root: Path, destination_root: Path, rule: dict) -> None:
+def copy_document_markdown(source_root: Path, destination_root: Path, rule: dict) -> Path:
     source = child_path(source_root, rule.get("source", ""), label="document source")
     destination = child_path(destination_root, rule.get("destination", ""), label="document destination")
     if not source.is_dir():
@@ -92,6 +95,7 @@ def copy_document_markdown(source_root: Path, destination_root: Path, rule: dict
     for markdown_file in source.glob("*.md"):
         if markdown_file.name not in excluded:
             shutil.copy2(markdown_file, destination / markdown_file.name)
+    return destination
 
 
 def remove_retired_paths(destination_root: Path, retired_paths: object) -> None:
@@ -102,9 +106,17 @@ def remove_retired_paths(destination_root: Path, retired_paths: object) -> None:
         clear_destination(target)
 
 
-def validate_publication_inputs(destination_root: Path) -> None:
-    """Reject private development-repository references before the public commit."""
-    for path in destination_root.rglob("*"):
+def validate_publication_inputs(destination_root: Path, paths: Iterable[Path] | None = None) -> None:
+    """Reject private development-repository references in managed Pages inputs."""
+    roots = [destination_root] if paths is None else list(paths)
+    candidates: set[Path] = set()
+    for root in roots:
+        if root.is_file():
+            candidates.add(root)
+        elif root.is_dir():
+            candidates.update(path for path in root.rglob("*") if path.is_file())
+
+    for path in candidates:
         if not path.is_file() or ".git" in path.relative_to(destination_root).parts:
             continue
         if path.suffix.lower() not in TEXT_EXTENSIONS:
@@ -131,17 +143,18 @@ def sync_publication_inputs(source_root: Path, destination_root: Path) -> None:
     allowlist = load_allowlist(source_root)
     portal = allowlist["documentation_portal"]
     submission = allowlist["pages_submission"]
+    managed_paths: list[Path] = []
     for entry in portal.get("files", []):
-        copy_file(source_root, destination_root, entry)
+        managed_paths.append(copy_file(source_root, destination_root, entry))
     for entry in portal.get("trees", []):
-        copy_tree(source_root, destination_root, entry)
+        managed_paths.append(copy_tree(source_root, destination_root, entry))
     document_rule = portal.get("document_markdown")
     if document_rule is not None:
-        copy_document_markdown(source_root, destination_root, document_rule)
+        managed_paths.append(copy_document_markdown(source_root, destination_root, document_rule))
     for entry in submission.get("files", []):
-        copy_file(source_root, destination_root, entry)
+        managed_paths.append(copy_file(source_root, destination_root, entry))
     for entry in submission.get("trees", []):
-        copy_tree(source_root, destination_root, entry)
+        managed_paths.append(copy_tree(source_root, destination_root, entry))
     retired_paths = submission.get("retired_paths")
     if not isinstance(retired_paths, list):
         raise ValueError("pages_submission.retired_paths must be an array")
@@ -150,7 +163,7 @@ def sync_publication_inputs(source_root: Path, destination_root: Path) -> None:
     # deleting every file absent from this smaller Pages allowlist would erase
     # published source code.  Retired Pages paths remain explicit and scoped.
     remove_retired_paths(destination_root, retired_paths)
-    validate_publication_inputs(destination_root)
+    validate_publication_inputs(destination_root, managed_paths)
 
 
 def main(argv: list[str] | None = None) -> int:

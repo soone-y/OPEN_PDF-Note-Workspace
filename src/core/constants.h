@@ -185,6 +185,7 @@ inline constexpr wchar_t kDefaultCacheDir[]        = L"__resource__/__tmp__";
 //   WM_APP+210 kMsgRunUiAutomation (defined in main/main_window_proc.cppinc)
 //   WM_APP+211 kMsgOpenStartupDocument (defined in main.cpp)
 //   WM_APP+212 kMsgBackgroundSaveComplete
+//   WM_APP+213 kMsgOtherPackageHeadlessProcessDiagnostics
 //
 // PdfViewProc:
 //   WM_APP+4   kMsgTextBoxFontUpdate

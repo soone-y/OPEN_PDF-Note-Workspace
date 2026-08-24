@@ -7,6 +7,7 @@
 #include "workspace/workspace_write_lock.h"
 #include "ui/dialogs/dialogs.h"
 #include "core/app_core.h"
+#include "core/localization.h"
 #include "core/atomic_write.h"
 #include "clrop/bridge.h"
 #include "file_output/file_output.h"

@@ -84,7 +84,7 @@ python tools/metrics/analyze_build_logs.py --format json --top 20 > out/reports/
 
 ## 公開スナップショット作成ツール (`export_public_snapshot.py`)
 
-実装本体は `tools/dev/export_public_snapshot.py` にあります。`release.ps1` はこのツールを `public_repo_release_allowlist_2026-07-28.txt` とともに呼び出し、公開用 source snapshot を作ります。allowlist配下でもGit未追跡ファイルがあれば停止し、Git追跡済みの入力だけをコピーします。例外は、専用artifact manifestにパスとSHA-256を固定したGit管理外vendor artifactだけです。単体実行では、対象に応じた専用allowlistと、必要な場合は`--artifact-manifest`を明示指定します。
+実装本体は `tools/dev/export_public_snapshot.py` にあります。`release.ps1` はこのツールを `public_repo_release_allowlist_2026-08-24.txt` とともに呼び出し、公開用 source snapshot を作ります。allowlist配下でもGit未追跡ファイルがあれば停止し、Git追跡済みの入力だけをコピーします。例外は、専用artifact manifestにパスとSHA-256を固定したGit管理外vendor artifactだけです。単体実行では、対象に応じた専用allowlistと、必要な場合は`--artifact-manifest`を明示指定します。
 
 ### 特徴
 - コピー元の開発リポジトリは変更しません。

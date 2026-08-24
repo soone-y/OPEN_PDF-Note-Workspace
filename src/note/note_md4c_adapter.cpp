@@ -180,6 +180,21 @@ bool IsThematicBreakLine(std::wstring_view line) {
     return count >= 3;
 }
 
+// MD4C resolves "text\\n- <EOL>" as a Setext level-2 heading, although the
+// editor has just inserted an empty unordered-list marker. Keep the ambiguity
+// narrow: a bare '-' remains available as an intentional Setext underline.
+bool IsEmptyUnorderedListMarkerLine(std::wstring_view line) {
+    size_t pos = 0;
+    while (pos < line.size() && (line[pos] == L' ' || line[pos] == L'\t')) ++pos;
+    if (pos >= line.size() || line[pos++] != L'-') return false;
+    if (pos >= line.size()) return false;
+    while (pos < line.size()) {
+        if (line[pos] != L' ' && line[pos] != L'\t') return false;
+        ++pos;
+    }
+    return true;
+}
+
 Span FindThematicBreakSpan(ParseContext* ctx) {
     if (!ctx || !ctx->model) return {};
     const std::wstring& raw = ctx->model->raw;
@@ -559,11 +574,10 @@ void DebugLog(const char* msg, void* userdata) {
                    DiagnosticSeverity::Warning);
 }
 
-// This editor treats a dash thematic-break line as a horizontal rule even
-// directly after paragraph text. MD4C otherwise gives "text\n---" Setext
-// heading semantics, which makes a user-entered horizontal rule restyle the
-// preceding line as a heading. Keep the paragraph and insert the rule at its
-// source position instead.
+// This editor resolves two dash-line ambiguities in favor of direct editing:
+// a thematic-break line remains a horizontal rule and an empty "- " marker
+// remains a pending unordered-list item. MD4C otherwise gives both forms
+// Setext-heading semantics when they directly follow paragraph text.
 void NormalizeDashThematicBreaks(NoteDocument* out, const NoteTextModel& model) {
     if (!out) return;
     const std::wstring& raw = model.raw;
@@ -577,10 +591,18 @@ void NormalizeDashThematicBreaks(NoteDocument* out, const NoteTextModel& model) 
         const std::wstring_view ruleLine(raw.data() + ruleStart, ruleEnd - ruleStart);
         size_t first = 0;
         while (first < ruleLine.size() && (ruleLine[first] == L' ' || ruleLine[first] == L'\t')) ++first;
-        if (first >= ruleLine.size() || ruleLine[first] != L'-' || !IsThematicBreakLine(ruleLine)) continue;
+        const bool isDashThematicBreak =
+            first < ruleLine.size() && ruleLine[first] == L'-' && IsThematicBreakLine(ruleLine);
+        const bool isEmptyListMarker = IsEmptyUnorderedListMarkerLine(ruleLine);
+        if (!isDashThematicBreak && !isEmptyListMarker) continue;
 
         heading.kind = BlockKind::Paragraph;
         heading.level = 0;
+
+        // The source remains intact and will become an ordinary List/ListItem
+        // as soon as the user enters content. There is no item content to
+        // represent while the editor is between the marker and that keystroke.
+        if (isEmptyListMarker) continue;
 
         const size_t insertAt = index + 1;
         for (auto& block : out->blocks) {

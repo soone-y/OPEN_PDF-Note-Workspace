@@ -486,8 +486,8 @@ void ReloadSessionsAndSelect(const std::wstring& lecturePath,
     if (g_hLectureList) owner = GetParent(g_hLectureList);
     if (!VerifyWorkspaceWritableForEditing(owner) ||
         !VerifyDirReadableWritableForEditing(owner, std::filesystem::path(lecturePath),
-                                             g_config.studentMode ? L"授業フォルダ" : L"上位項目フォルダ",
-                                             g_config.studentMode ? L"Lecture folder" : L"Parent item folder")) {
+                                             g_config.studentMode ? L"workspace.directory.lecture.student"
+                                                                  : L"workspace.directory.lecture.parent")) {
         return;
     }
     g_currentLecturePath = lecturePath;
@@ -504,8 +504,8 @@ void ReloadSessionsAndSelect(const std::wstring& lecturePath,
         SendMessageW(g_hSessionList, LB_SETCURSEL, idx, 0);
         if (reopenFiles) {
             if (!VerifyDirReadableWritableForEditing(owner, std::filesystem::path(g_sessions[static_cast<size_t>(idx)].path),
-                                                     g_config.studentMode ? L"セッションフォルダ" : L"下位項目フォルダ",
-                                                     g_config.studentMode ? L"Session folder" : L"Child item folder")) {
+                                                     g_config.studentMode ? L"workspace.directory.session.student"
+                                                                          : L"workspace.directory.session.parent")) {
                 return;
             }
             std::wstring pdf, note;

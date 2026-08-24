@@ -14,6 +14,7 @@
 #include "fpdf_transformpage.h"
 #include "core/atomic_write.h"
 #include "core/fault_injection.h"
+#include "core/localization.h"
 #include "core/preview_trace.h"
 #include "core/ui_notify.h"
 #include "core/ui_prompts.h"
@@ -68,7 +69,7 @@ static std::wstring ExperimentalExportDialogTitle(const std::wstring& base) {
         base.find(L"Experimental") != std::wstring::npos) {
         return base;
     }
-    return IsEnglishUi() ? (base + L" (Experimental)") : (base + L"（試験的）");
+    return base + localization::Text(L"file_output.experimental_suffix");
 }
 
 static void WarnExportOverwriteOriginal(HWND owner, bool isPdf) {
@@ -88,26 +89,11 @@ static std::optional<std::wstring> GetProtectedPdfExportBlockMessage(FPDF_DOCUME
     const unsigned long userPerms = FPDF_GetDocUserPermissions(doc);
     const bool canCopy = userPerms == 0xfffffffful || (userPerms & kPdfPermissionCopyContent) != 0;
 
-    if (IsEnglishUi()) {
-        std::wstring message =
-            L"This PDF has author/publisher protection settings.\n"
-            L"To follow the original rights holder's instructions and usage conditions, "
-            L"this app does not export copied PDFs from protected source PDFs, including annotated copies.";
-        if (!canCopy) {
-            message += L"\n\nThe source PDF also disallows content copying.";
-        }
-        message += L"\n\nIf export is necessary, confirm the rights holder's permission and use a PDF without protection.";
-        return message;
-    }
-
-    std::wstring message =
-        L"このPDFには著作者・配布元が設定した保護があります。\n"
-        L"元の権利者の指示と利用条件に従うため、このアプリでは保護付きPDFからのPDF出力"
-        L"（注釈を含むコピーを含む）を行いません。";
+    std::wstring message = localization::Text(L"file_output.protected_pdf.export_blocked");
     if (!canCopy) {
-        message += L"\n\n元のPDFでは内容のコピーも禁止されています。";
+        message += localization::Text(L"file_output.protected_pdf.copy_disallowed");
     }
-    message += L"\n\n出力が必要な場合は、権利者の許諾と元PDFの利用条件を確認し、保護のないPDFで作業してください。";
+    message += localization::Text(L"file_output.protected_pdf.permission_notice");
     return message;
 }
 
@@ -120,25 +106,11 @@ static std::optional<std::wstring> GetProtectedPdfPngExportBlockMessage(FPDF_DOC
     const unsigned long userPerms = FPDF_GetDocUserPermissions(doc);
     const bool canCopy = userPerms == 0xfffffffful || (userPerms & kPdfPermissionCopyContent) != 0;
 
-    if (IsEnglishUi()) {
-        std::wstring message =
-            L"This PDF has author/publisher protection settings.\n"
-            L"To follow the original rights holder's instructions and usage conditions, "
-            L"this app does not export page images from protected source PDFs.";
-        if (!canCopy) {
-            message += L"\n\nThe source PDF also disallows content copying.";
-        }
-        message += L"\n\nIf export is necessary, confirm the rights holder's permission and use a PDF without protection.";
-        return message;
-    }
-
-    std::wstring message =
-        L"このPDFには著作者・配布元が設定した保護があります。\n"
-        L"元の権利者の指示と利用条件に従うため、このアプリでは保護付きPDFからのページ画像出力を行いません。";
+    std::wstring message = localization::Text(L"file_output.protected_pdf.png_blocked");
     if (!canCopy) {
-        message += L"\n\n元のPDFでは内容のコピーも禁止されています。";
+        message += localization::Text(L"file_output.protected_pdf.copy_disallowed");
     }
-    message += L"\n\n出力が必要な場合は、権利者の許諾と元PDFの利用条件を確認し、保護のないPDFで作業してください。";
+    message += localization::Text(L"file_output.protected_pdf.permission_notice");
     return message;
 }
 
@@ -323,16 +295,14 @@ static std::wstring InitialDirForPath(const std::wstring& path) {
 static std::optional<std::wstring> ValidatePickedSavePath(HWND owner, std::filesystem::path path) {
     if (IsUncPath(path)) {
         ShowFileOutputSoftNotice(owner,
-                                 IsEnglishUi() ? L"UNC/device output paths are not supported."
-                                               : L"UNC/デバイスの出力先パスは使用できません。",
+                                 localization::Text(L"file_output.path.unc_unsupported"),
                                  SoftNoticeKind::Warning);
         return std::nullopt;
     }
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(path.parent_path(), isReparse) && isReparse) {
         ShowFileOutputSoftNotice(owner,
-                                 IsEnglishUi() ? L"Reparse point output folders are not supported."
-                                               : L"ジャンクション/シンボリックリンク等の出力先フォルダは使用できません。",
+                                 localization::Text(L"file_output.path.reparse_unsupported"),
                                  SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -340,16 +310,13 @@ static std::optional<std::wstring> ValidatePickedSavePath(HWND owner, std::files
     if (std::filesystem::exists(path, ec) && !ec) {
         ShowFileOutputSoftNotice(
             owner,
-            IsEnglishUi()
-                ? L"An existing file will not be overwritten. Enter a new output file name."
-                : L"既存ファイルは上書きしません。新しい出力ファイル名を入力してください。",
+            localization::Text(L"file_output.path.existing_file"),
             SoftNoticeKind::Warning);
         return std::nullopt;
     }
     if (ec) {
         ShowFileOutputSoftNotice(owner,
-                                 IsEnglishUi() ? L"Could not inspect the output path."
-                                               : L"出力先パスを確認できません。",
+                                 localization::Text(L"file_output.path.inspect_failed"),
                                  SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -369,8 +336,7 @@ static std::optional<std::wstring> PickSavePathWithSystemDialog(HWND owner,
                                              IID_PPV_ARGS(&dialog));
     if (FAILED(created) || !dialog) {
         ShowFileOutputSoftNotice(owner,
-                                 IsEnglishUi() ? L"Could not open the system save dialog."
-                                               : L"OS標準の保存ダイアログを開けませんでした。",
+                                 localization::Text(L"file_output.path.dialog_open_failed"),
                                  SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -399,8 +365,7 @@ static std::optional<std::wstring> PickSavePathWithSystemDialog(HWND owner,
     if (FAILED(shown)) {
         dialog->Release();
         ShowFileOutputSoftNotice(owner,
-                                 IsEnglishUi() ? L"The system save dialog failed."
-                                               : L"OS標準の保存ダイアログでエラーが発生しました。",
+                                 localization::Text(L"file_output.path.dialog_failed"),
                                  SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -438,8 +403,7 @@ static std::optional<std::wstring> PickSavePath(HWND owner,
     std::filesystem::path path(fileName);
     if (path.has_parent_path() || path.is_absolute()) {
         ShowFileOutputSoftNotice(owner,
-                                 IsEnglishUi() ? L"Enter only a file name, or use the system dialog to change folders."
-                                               : L"ファイル名のみを入力してください。フォルダを変える場合はOS標準で開くを使います。",
+                                 localization::Text(L"file_output.path.file_name_only"),
                                  SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -3370,8 +3334,7 @@ static bool ConvertImageToPdfFile(const std::wstring& sourcePath,
     const double heightPt = image.height * 72.0 / image.dpiY;
     if (!std::isfinite(widthPt) || !std::isfinite(heightPt) || widthPt <= 0.0 || heightPt <= 0.0 ||
         widthPt > 14400.0 || heightPt > 14400.0) {
-        if (err) *err = IsEnglishUi() ? L"Image page size is not supported by PDF."
-                                      : L"画像のページサイズはPDFで扱えません。";
+        if (err) *err = localization::Text(L"file_output.image_pdf.page_size_unsupported");
         return false;
     }
     FPDF_DOCUMENT doc = nullptr;
@@ -3403,8 +3366,7 @@ static bool ConvertImageToPdfFile(const std::wstring& sourcePath,
             std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
             FPDF_CloseDocument(doc);
         }
-        if (err) *err = IsEnglishUi() ? L"Failed to create the image PDF."
-                                      : L"画像PDFを作成できませんでした。";
+        if (err) *err = localization::Text(L"file_output.image_pdf.create_failed");
         return false;
     }
     const bool saved = SavePdfDocument(doc, destinationPath, err);
@@ -3513,7 +3475,7 @@ bool ConvertImageToPdf(HWND owner, const std::wstring& imagePath, std::wstring* 
     const std::filesystem::path source(imagePath);
     if (!IsImageFile(source)) return false;
     const std::wstring defaultName = DefaultNameFromPath(imagePath, L".pdf", L"image.pdf");
-    const std::wstring title = IsEnglishUi() ? L"Convert Image to PDF" : L"画像をPDFに変換";
+    const std::wstring title = localization::Text(L"file_output.image_pdf.title");
     COMDLG_FILTERSPEC filters[] = {
         { L"PDF (*.pdf)", L"*.pdf" },
         { L"All Files (*.*)", L"*.*" },
@@ -3524,16 +3486,14 @@ bool ConvertImageToPdf(HWND owner, const std::wstring& imagePath, std::wstring* 
     std::wstring err;
     if (!ConvertImageToPdfFile(imagePath, *target, &err)) {
         ShowFileOutputMessageDialog(owner, title,
-                                    err.empty() ? (IsEnglishUi() ? L"Image-to-PDF conversion failed."
-                                                                 : L"画像からPDFへの変換に失敗しました。")
+                                    err.empty() ? localization::Text(L"file_output.image_pdf.conversion_failed")
                                                 : err,
                                     SoftNoticeKind::Error);
         return false;
     }
     if (outPath) *outPath = *target;
     ShowFileOutputSoftNotice(owner,
-                             IsEnglishUi() ? L"Image PDF created without modifying the source image."
-                                           : L"元画像を変更せずにPDFを作成しました。",
+                             localization::Text(L"file_output.image_pdf.created"),
                              SoftNoticeKind::Info);
     return true;
 }
@@ -3608,6 +3568,28 @@ static std::vector<PdfPageSpec> BuildAllPdfPageSpecs(bool includeAnnotations) {
     return pages;
 }
 
+static bool HasTextColorAnnotationForPdfExport(const std::vector<PdfPageSpec>& pages,
+                                                const std::vector<Annotation>* annots) {
+    if (!annots) return false;
+    return std::any_of(pages.begin(), pages.end(), [&](const PdfPageSpec& spec) {
+        return spec.withAnnotations &&
+            std::any_of(annots->begin(), annots->end(), [&](const Annotation& ann) {
+                return ann.pageIndex == spec.pageIndex && ann.type == Annotation::Type::TextColor;
+            });
+    });
+}
+
+static bool RejectUnsupportedTextColorPdfExport(HWND owner, const std::vector<PdfPageSpec>& pages) {
+    if (!HasTextColorAnnotationForPdfExport(pages, CurrentLogicalPdfAnnotations())) return false;
+    // PDF export must not approximate TextColor as an opaque overlay. Until it
+    // can change the original PDF glyph colors faithfully, reject before an
+    // output path is selected or any destination write is started.
+    ShowSoftNotice(owner,
+                   localization::Text(L"file_output.text_color_export_unsupported"),
+                   SoftNoticeKind::Warning);
+    return true;
+}
+
 static bool ExportPdfPagesImpl(HWND owner,
                                const std::vector<PdfPageSpec>& pages,
                                const std::wstring& outPath,
@@ -3618,23 +3600,10 @@ static bool ExportPdfPagesImpl(HWND owner,
     const auto* annots = CurrentLogicalPdfAnnotations();
     if (!doc || CurrentLogicalPdfPath().empty()) return false;
     if (pages.empty()) return false;
+    if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;
     std::vector<Annotation> finalAnnots;
     if (annots) {
         finalAnnots = *annots;
-        const bool containsTextColor = std::any_of(
-            pages.begin(), pages.end(), [&](const PdfPageSpec& spec) {
-                return spec.withAnnotations &&
-                    std::any_of(finalAnnots.begin(), finalAnnots.end(), [&](const Annotation& ann) {
-                        return ann.pageIndex == spec.pageIndex && ann.type == Annotation::Type::TextColor;
-                    });
-            });
-        if (containsTextColor) {
-            const std::wstring msg = IsEnglishUi()
-                ? L"PDF export with text-color annotations is not supported yet. No file was written."
-                : L"文字色変更注釈を含むPDF書き出しには未対応です。ファイルは書き込みませんでした。";
-            ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
-            return false;
-        }
     }
     if (auto blockedMessage = GetProtectedPdfExportBlockMessage(doc)) {
         return ConfirmProtectedPdfExportAllowed(owner,
@@ -3683,6 +3652,8 @@ bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standard
                               bool matchPdfPaneTextLayout, std::wstring* outSavedPath) {
     if (outSavedPath) outSavedPath->clear();
     if (!CurrentLogicalPdfDocument() || CurrentLogicalPdfPath().empty()) return false;
+    const std::vector<PdfPageSpec> pages = BuildAllPdfPageSpecs(includeAnnotations);
+    if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;
     std::wstring defName = DefaultNameFromPath(CurrentLogicalPdfPath(), L"_annotated.pdf", L"document_annotated.pdf");
     std::wstring initialDir = InitialDirForPath(CurrentLogicalPdfPath());
     const std::wstring dialogTitle = ExperimentalExportDialogTitle(GetUiText().menuExportPdf);
@@ -3694,7 +3665,7 @@ bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standard
     auto target = PickSavePath(owner, dialogTitle.c_str(),
                                defName, initialDir, filters, 2, L"pdf");
     if (!target) return false;
-    const bool ok = ExportPdfPagesImpl(owner, BuildAllPdfPageSpecs(includeAnnotations), *target,
+    const bool ok = ExportPdfPagesImpl(owner, pages, *target,
                                        standardTextAnnots, exportScale, matchPdfPaneTextLayout);
     if (ok && outSavedPath) *outSavedPath = *target;
     return ok;
@@ -3726,6 +3697,7 @@ bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool stan
                     double exportScale, bool matchPdfPaneTextLayout, std::wstring* outSavedPath) {
     if (outSavedPath) outSavedPath->clear();
     if (!CurrentLogicalPdfDocument() || CurrentLogicalPdfPath().empty()) return false;
+    if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;
     std::wstring defName = DefaultNameFromPath(CurrentLogicalPdfPath(), L"_pages.pdf", L"document_pages.pdf");
     std::wstring initialDir = InitialDirForPath(CurrentLogicalPdfPath());
     const std::wstring dialogTitle = ExperimentalExportDialogTitle(GetUiText().menuExportPdfPages);
@@ -3944,9 +3916,7 @@ bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, Pd
         pixelCount > file_output::kPdfPngMaxPixels) {
         ShowFileOutputMessageDialog(
             owner, ExperimentalExportDialogTitle(GetUiText().menuExportPngPage),
-            IsEnglishUi()
-                ? L"The requested PNG is too large. Choose a smaller image size."
-                : L"指定したPNG画像は大きすぎます。出力サイズを小さくしてください。",
+            localization::Text(L"file_output.png_too_large"),
             SoftNoticeKind::Warning);
         return false;
     }

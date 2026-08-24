@@ -1,5 +1,7 @@
 // file: main/main_temp_external.cppinc
 
+#include "core/localization.h"
+
 static void LoadTempExternalLecturesFromSetup() {
     g_tempExternalLectures.clear();
     auto dirs = LoadSetupTempExternalLectureDirs();
@@ -69,10 +71,9 @@ static std::wstring PreferredTempExternalLecturePathForRemoval() {
 static std::optional<std::wstring> PromptTempExternalLecturePathToRemove(HWND owner) {
     if (g_tempExternalLectures.empty()) {
         ShowMainSoftNotice(owner,
-                            IsEnglishUi() ? L"There is no temporary external lecture path to remove."
-                                          : (g_config.studentMode
-                                                 ? L"削除できる一時外部授業パスがありません。"
-                                                 : L"削除できる一時外部上位項目パスがありません。"),
+                            localization::Text(g_config.studentMode
+                                ? L"external.temp_remove_none.student"
+                                : L"external.temp_remove_none.generic"),
                             SoftNoticeKind::Info);
         return std::nullopt;
     }
@@ -87,10 +88,9 @@ static std::optional<std::wstring> PromptTempExternalLecturePathToRemove(HWND ow
     std::wstring selected;
     if (!PromptSelectPath(owner,
                            GetUiText().menuRemoveTempExternalLecture,
-                           IsEnglishUi() ? L"Select the temporary external lecture path to remove."
-                                         : (g_config.studentMode
-                                                ? L"削除する一時外部授業パスを選択してください。"
-                                                : L"削除する一時外部上位項目パスを選択してください。"),
+                           localization::Text(g_config.studentMode
+                               ? L"external.temp_remove_select.student"
+                               : L"external.temp_remove_select.generic"),
                            paths, PreferredTempExternalLecturePathForRemoval(), selected)) {
         return std::nullopt;
     }
@@ -100,5 +100,5 @@ static std::optional<std::wstring> PromptTempExternalLecturePathToRemove(HWND ow
 static std::wstring TempExternalLectureLabel(const std::wstring& lecturePath) {
     std::wstring name = std::filesystem::path(lecturePath).filename().wstring();
     if (name.empty()) name = lecturePath;
-    return (IsEnglishUi() ? L"[External] " : L"外部: ") + name;
+    return localization::Format(L"external.temp_label", {{L"NAME", name}});
 }

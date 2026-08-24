@@ -1,5 +1,6 @@
 // file: main.cpp
 #include "core/app_core.h"
+#include "core/localization.h"
 #include "core/fault_injection.h"
 #include "core/preview_trace.h"
 #include "core/font_list.h"
@@ -143,6 +144,7 @@ static void OnLectureSelChange(HWND hWnd);
 static void OnSessionSelChange(HWND hWnd);
 static void OnPdfSelChange(HWND hWnd);
 static void OnNoteSelChange(HWND hWnd);
+static bool FocusAutoOpenedSoleNoteForEditing();
 void ReloadSessionsAndSelect(const std::wstring& lecturePath,
                                     const std::wstring& desiredName,
                                     bool reopenFiles);
@@ -164,6 +166,7 @@ bool SaveStartupLastOpenTarget();
 static bool SaveSessionLastOpenMap();
 void LoadSessionLastOpenMap();
 static bool RestoreStartupLastOpenSelection(HWND hWnd);
+void ShowOtherPackageHeadlessProcessDiagnostics(HWND hWnd);
 std::optional<std::wstring> PickFileUnder(HWND owner,
                                                  const std::filesystem::path& initial,
                                                  const std::wstring& title);
@@ -234,23 +237,16 @@ static bool PromptStayOrOpenDiffManager(HWND hWnd,
         // A save/stage preparation error can occur before a diff exists.  Do
         // not direct the user to Diff Manager in that case: it cannot resolve
         // the problem and made an IME-state failure look like a missing diff.
-        msg += IsEnglishUi()
-            ? L"\n\nThere are no staged diffs. The switch was stopped because the current edit could not be prepared safely."
-            : L"\n\n未統合差分はありません。現在の編集を安全に保存準備できなかったため、切替を中止しました。";
+        msg += localization::Text(L"main.ui.455309e62a34").c_str();
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
         return false;
     }
 
     SilentDialogOptions dialog;
-    dialog.title = IsEnglishUi() ? L"Switch canceled" : L"切替を中止しました";
-    dialog.message = blockedAction +
-        (IsEnglishUi()
-             ? L" was canceled because saving or integrating staged changes did not complete.\n"
-               L"The current file stays open.\n\n"
-               L"You can resolve staged diffs safely in Diff Manager."
-             : L" の前に、保存または未統合差分の処理を完了できなかったため中止しました。\n"
-               L"現在のファイルはそのままです。\n\n"
-               L"未統合差分は「操作」→「差分管理」から安全に整理できます。");
+    dialog.title = localization::Text(L"main.ui.ea6a7d5bcb5c").c_str();
+    dialog.message = localization::Format(L"main.staged_diff.operation_blocked", {
+        { L"ACTION", blockedAction }
+    });
     if (!failureDetail.empty()) {
         dialog.message += L"\n\n";
         dialog.message += failureDetail;
@@ -264,8 +260,8 @@ static bool PromptStayOrOpenDiffManager(HWND hWnd,
     dialog.buttons = SilentDialogButtons::YesNo;
     dialog.defaultResult = SilentDialogResult::Yes;
     dialog.escapeResult = SilentDialogResult::No;
-    dialog.yesLabel = IsEnglishUi() ? L"Open Diff Manager" : L"差分管理を開く";
-    dialog.noLabel = IsEnglishUi() ? L"Stay Here" : L"ここに留まる";
+    dialog.yesLabel = localization::Text(L"main.ui.9b59f5e7e12f").c_str();
+    dialog.noLabel = localization::Text(L"main.ui.0684d9a0cd66").c_str();
     if (ShowSilentDialog(hWnd, dialog) == SilentDialogResult::Yes) {
         ShowStageManagerDialog(hWnd);
     }
@@ -344,8 +340,6 @@ static bool CanStartExportCommand(HWND hWnd, UINT id);
 HWND MainDialogOwner(HWND owner);
 static void ShowMainSoftNotice(HWND owner, const std::wstring& text,
                                SoftNoticeKind kind = SoftNoticeKind::Info);
-void ShowMainMessageDialog(HWND owner, const std::wstring& title,
-                                  const std::wstring& message, SoftNoticeKind kind);
 void AppendMainOperationExceptionLog(const char* area, const char* detail);
 void ReportMainOperationException(HWND owner, const wchar_t* operation);
 void AppendUiAutomationTrace(const std::wstring& line);
@@ -715,18 +709,9 @@ static bool ConfirmRecommendedPdfExportBeforeRemovingTempLecture(HWND owner,
                                                                  const std::filesystem::path& lectureRoot) {
     if (!HasClropFilesUnderPath(lectureRoot)) return true;
 
-    std::wstring msg = IsEnglishUi()
-        ? (std::wstring(
-            L"This temporary external lecture contains .clrop annotation files.\n\n"
-            L"Removing the path will keep those files on disk, but the annotations will not be embedded into the PDF itself.\n"
-            L"It is recommended to export annotated PDFs before removing this path.\n\n"
-            L"Continue removing the path now?"))
-        : (std::wstring(g_config.studentMode
-                            ? L"この一時外部授業には .clrop 注釈ファイルがあります。\n\n"
-                            : L"この一時外部上位項目には .clrop 注釈ファイルがあります。\n\n") +
-           L"パスを削除しても .clrop 自体は残りますが、注釈は PDF 本体へ統合されません。\n"
-           L"削除前に、注釈入り PDF を別名で書き出しておくことをおすすめします。\n\n"
-           L"このままパスの削除を続けますか？");
+    std::wstring msg = localization::Text(g_config.studentMode
+        ? L"main.temp_external.clrop_warning_lecture"
+        : L"main.temp_external.clrop_warning_parent");
     return ConfirmMainYesNo(owner, GetUiText().menuRemoveTempExternalLecture, msg,
                             SoftNoticeKind::Info, SilentDialogResult::No,
                             SilentDialogResult::No);
@@ -750,7 +735,7 @@ static std::wstring RelativeOrPathForDisplay(const std::filesystem::path& path,
 }
 
 std::wstring DirectFilesSessionLabel() {
-    return IsEnglishUi() ? L"(Direct files)" : L"直下ファイル";
+    return localization::Text(L"main.ui.edaca69ae4a6").c_str();
 }
 
 static bool IsDirectFilesSessionPath(const std::wstring& sessionPath,
@@ -1437,30 +1422,18 @@ static bool OpenStartupDocumentPath(HWND hWnd, const std::wstring& rawPath) {
     std::filesystem::path path(AbsoluteOrOriginalPath(rawPath));
     std::error_code ec;
     if (!std::filesystem::exists(path, ec) || ec) {
-        ShowSoftNotice(hWnd,
-                       IsEnglishUi() ? L"The startup document was not found:\n" + path.wstring()
-                                     : L"起動指定されたファイルが見つかりません:\n" + path.wstring(),
+        ShowSoftNotice(hWnd, localization::Format(L"main.startup_document.not_found", {{L"PATH", path.wstring()}}),
                        SoftNoticeKind::Warning);
         return false;
     }
     if (!IsPdfFile(path) && !IsImageFile(path)) {
-        ShowSoftNotice(hWnd,
-                       IsEnglishUi() ? L"Only PDF/image files can be opened by the main software:\n" + path.wstring()
-                                     : L"メインソフトで開けるのはPDF/画像ファイルです:\n" + path.wstring(),
+        ShowSoftNotice(hWnd, localization::Format(L"main.startup_document.unsupported", {{L"PATH", path.wstring()}}),
                        SoftNoticeKind::Warning);
         return false;
     }
 
     if (!IsPathUnderRoot(path, g_workspaceRoot)) {
-        ShowSoftNotice(hWnd,
-                       IsEnglishUi()
-                           ? L"Only files inside the workspace can be opened by 'Open with' in the main software.\n"
-                             L"Files within the workspace can be opened directly.\n\n"
-                             L"To view external files outside the workspace, please use the Read-Only Viewer."
-                           : L"メインソフトで「プログラムから開く」が利用できるのはワークスペース内のファイルです。\n"
-                             L"ワークスペース内のファイルであれば直接開くことができます。\n\n"
-                             L"ワークスペース外のファイルを単体で閲覧する場合は、読み取り専用ソフト（Read-Only Viewer）をご利用ください。",
-                       SoftNoticeKind::Warning);
+        ShowSoftNotice(hWnd, localization::Text(L"main.startup_document.outside_workspace"), SoftNoticeKind::Warning);
         return false;
     }
 
@@ -1509,7 +1482,42 @@ static bool OpenStartupDocumentPath(HWND hWnd, const std::wstring& rawPath) {
 static bool OpenPendingStartupDocument(HWND hWnd) {
     std::wstring path = ConsumePendingStartupOpenDocumentPath();
     if (path.empty()) return false;
+    ScopedDocumentOpenLockNoticeSuppression suppressDocumentOpenLockNotice;
     return OpenStartupDocumentPath(hWnd, path);
+}
+
+void ShowOtherPackageHeadlessProcessDiagnostics(HWND hWnd) {
+    const auto processes = FindOtherPackageHeadlessMainProcesses();
+    for (const auto& process : processes) {
+        SilentDialogOptions dialog;
+        dialog.title = L"起動時点検";
+        dialog.message =
+            L"別の場所から起動された PDF Note Workspace が、メイン画面を表示せずに実行中です。\n\n"
+            L"場所:\n" + process.packageDirectory +
+            L"\n\n自動では終了しません。保存中でないことを確認してから、通常終了を要求できます。";
+        dialog.kind = SoftNoticeKind::Warning;
+        dialog.buttons = SilentDialogButtons::YesNo;
+        dialog.defaultResult = SilentDialogResult::No;
+        dialog.escapeResult = SilentDialogResult::No;
+        dialog.yesLabel = L"終了を試みる";
+        dialog.noLabel = L"今回は何もしない";
+        dialog.preferredWidthPx = 700;
+        if (ShowSilentDialog(hWnd, dialog) != SilentDialogResult::Yes) continue;
+
+        SilentDialogOptions confirm = dialog;
+        confirm.message = L"別の場所から起動されたメインソフトへ通常終了を要求します。\n\n"
+                          L"保存中の場合は終了処理が完了するまで待ちます。強制終了はしません。\n\n場所:\n" +
+                          process.packageDirectory;
+        confirm.yesLabel = L"終了要求を送る";
+        if (ShowSilentDialog(hWnd, confirm) != SilentDialogResult::Yes) continue;
+        if (RequestOtherPackageHeadlessMainProcessShutdown(process.processId)) {
+            ShowSoftNotice(hWnd, L"別の場所から起動されたメインソフトへ通常終了を要求しました。",
+                           SoftNoticeKind::Info);
+        } else {
+            ShowSoftNotice(hWnd, L"終了要求の送信前に対象の状態が変化したため、何も行いませんでした。",
+                           SoftNoticeKind::Warning);
+        }
+    }
 }
 
 static std::vector<std::filesystem::path> ListEscapeBackupsByPrefix(const std::wstring& expectedNamePrefix) {
@@ -1570,18 +1578,17 @@ static bool PickEscapeBackupFile(HWND owner,
     if (outErr) outErr->clear();
     if (outCanceled) *outCanceled = false;
     if (g_workspaceRoot.empty()) {
-        if (outErr) *outErr = IsEnglishUi() ? L"No workspace is open." : L"ワークスペースが開かれていません。";
+        if (outErr) *outErr = localization::Text(L"main.ui.55c168692754").c_str();
         return false;
     }
     if (!EnsureWorkspaceResourceDirs(nullptr)) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Failed to prepare workspace resource directories."
-                                            : L"ワークスペースのリソースフォルダ準備に失敗しました。";
+        if (outErr) *outErr = localization::Text(L"main.ui.ed98441f5586").c_str();
         return false;
     }
     std::filesystem::path escapeRoot = EscapeRootPath();
     std::error_code ec;
     if (!std::filesystem::exists(escapeRoot, ec) || ec || !std::filesystem::is_directory(escapeRoot, ec)) {
-        if (outErr) *outErr = IsEnglishUi() ? L"No backup directory found." : L"バックアップフォルダがありません。";
+        if (outErr) *outErr = localization::Text(L"main.ui.cc57d833f286").c_str();
         return false;
     }
 
@@ -1592,16 +1599,15 @@ static bool PickEscapeBackupFile(HWND owner,
     }
     std::filesystem::path src(*picked);
     if (!IsPathUnderRoot(src, escapeRoot)) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Select a file under __resource__/__escape__."
-                                            : L"__resource__/__escape__ 配下のファイルを選択してください。";
+        if (outErr) *outErr = localization::Text(L"main.ui.5c119b894fc3").c_str();
         return false;
     }
     std::wstring fileName = src.filename().wstring();
     if (fileName.rfind(expectedNamePrefix, 0) != 0) {
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? (L"Select a backup file whose name starts with: " + expectedNamePrefix)
-                : (L"次で始まるバックアップファイルを選択してください: " + expectedNamePrefix);
+            *outErr = localization::Format(L"main.backup.select_prefix", {
+                { L"PREFIX", expectedNamePrefix }
+            });
         }
         return false;
     }
@@ -1622,7 +1628,7 @@ static bool RestoreTempDataFromEscape(HWND owner,
 
     std::ifstream ifs(src, std::ios::binary);
     if (!ifs) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Failed to read backup file." : L"バックアップファイルの読み込みに失敗しました。";
+        if (outErr) *outErr = localization::Text(L"main.ui.a7f764be475b").c_str();
         return false;
     }
     std::string data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
@@ -1635,7 +1641,7 @@ static bool RestoreTempDataFromEscape(HWND owner,
     std::wstring writeErr;
     if (!atomic_write::AtomicWriteUtf8(targetPath, data, preferredTmp, quarantineDir, &writeErr)) {
         if (outErr) {
-            *outErr = IsEnglishUi() ? L"Failed to restore backup file." : L"バックアップファイルの復元に失敗しました。";
+            *outErr = localization::Text(L"main.ui.e373c44ecb75").c_str();
             if (!writeErr.empty()) *outErr += L"\n" + writeErr;
         }
         return false;
@@ -1676,9 +1682,9 @@ static bool AskDeleteOlderBackups(HWND owner,
                                   bool* outDeleteOld) {
     if (outDeleteOld) *outDeleteOld = false;
     if (!outDeleteOld) return false;
-    std::wstring msg = IsEnglishUi()
-        ? (L"Older backups for \"" + backupKindLabel + L"\" already exist.\n\nDelete older backups and keep only the newest one?")
-        : (L"\"" + backupKindLabel + L"\" の既存バックアップがあります。\n\n古いバックアップを削除して最新1件だけ残しますか？");
+    std::wstring msg = localization::Format(L"main.backup.delete_older", {
+        { L"KIND", backupKindLabel }
+    });
     *outDeleteOld = ConfirmMainYesNo(owner, menuTitle, msg, SoftNoticeKind::Warning,
                                      SilentDialogResult::No, SilentDialogResult::No);
     return true;
@@ -1839,6 +1845,16 @@ std::filesystem::path DialogWorkspaceInitialFolder() {
     return ExistingDialogDirectoryOrEmpty(DialogExeDirectory());
 }
 
+std::filesystem::path DialogWorkspaceSelectionInitialFolder() {
+    const std::filesystem::path workspace(g_workspaceRoot);
+    if (!workspace.empty()) {
+        if (auto parent = ExistingDialogDirectoryOrEmpty(workspace.parent_path()); !parent.empty()) {
+            return parent;
+        }
+    }
+    return DialogWorkspaceInitialFolder();
+}
+
 static std::filesystem::path DialogKnownFolderInitialFolder(REFKNOWNFOLDERID folderId) {
     PWSTR rawPath = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(folderId, KF_FLAG_DEFAULT, nullptr, &rawPath)) && rawPath) {
@@ -1935,15 +1951,13 @@ static void CloseAllReadOnlyViewerWindows(HWND owner) {
     const int count = RequestCloseAllReadOnlyViewerWindows();
     if (count <= 0) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"No read-only viewer windows are open."
-                                     : L"開いている閲覧専用ビューアはありません。",
+                       localization::Text(L"main.ui.b9dd5145c6ff").c_str(),
                        SoftNoticeKind::Info);
         return;
     }
-    ShowSoftNotice(owner,
-                   IsEnglishUi() ? L"Closing read-only viewer windows: " + std::to_wstring(count)
-                                 : L"閲覧専用ビューアを閉じます: " + std::to_wstring(count),
-                   SoftNoticeKind::Info);
+    ShowSoftNotice(owner, localization::Format(L"main.read_only.close_windows", {
+        { L"COUNT", std::to_wstring(count) }
+    }), SoftNoticeKind::Info);
 }
 
 static std::filesystem::path CurrentMainExecutableDir() {
@@ -2039,8 +2053,7 @@ static bool LaunchReadOnlyViewerWithParams(HWND owner, const std::wstring& param
     const std::filesystem::path viewerDir = viewer.parent_path();
     if (viewer.empty() || viewerDir.empty()) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Read-only viewer executable was not found."
-                                     : L"閲覧専用ビューアの実行ファイルが見つかりません。",
+                       localization::Text(L"main.ui.235ee0cf5b9e").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2067,8 +2080,7 @@ static bool LaunchReadOnlyViewerWithParams(HWND owner, const std::wstring& param
                         &si,
                         &pi)) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Failed to launch the read-only viewer."
-                                     : L"閲覧専用ビューアを起動できませんでした。",
+                       localization::Text(L"main.ui.b31dd323b81d").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2095,23 +2107,20 @@ bool LaunchReadOnlyViewerForPdfAt(HWND owner,
                                   bool hasY) {
     if (pdfPath.empty()) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"No PDF is selected." : L"PDFが選択されていません。",
+                       localization::Text(L"main.ui.7c387df4ecdb").c_str(),
                        SoftNoticeKind::Info);
         return false;
     }
     std::filesystem::path path(pdfPath);
     std::error_code ec;
     if (!std::filesystem::exists(path, ec) || ec || !std::filesystem::is_regular_file(path, ec) || ec) {
-        ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"PDF file was not found:\n" + pdfPath
-                                     : L"PDFファイルが見つかりません:\n" + pdfPath,
+        ShowSoftNotice(owner, localization::Format(L"main.pdf.not_found", {{L"PATH", pdfPath}}),
                        SoftNoticeKind::Warning);
         return false;
     }
     if (!IsPdfFile(path)) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"The read-only viewer currently accepts PDF files only."
-                                     : L"閲覧専用ビューアへ渡せるのはPDFファイルのみです。",
+                       localization::Text(L"main.ui.8fecbc9016f4").c_str(),
                        SoftNoticeKind::Info);
         return false;
     }
@@ -2147,8 +2156,7 @@ static bool LaunchReadOnlyViewerForFolder(HWND owner, const std::wstring& folder
     if (folder.empty() || !std::filesystem::is_directory(folder, ec) || ec ||
         folder.wstring().rfind(L"\\\\", 0) == 0) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"The selected folder cannot be opened in the read-only viewer."
-                                     : L"選択したフォルダを読み取り専用ビューアで開けません。",
+                       localization::Text(L"main.ui.6537951f6941").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2170,14 +2178,12 @@ static bool LaunchReadOnlyViewerForNote(HWND owner, const std::wstring& notePath
     if (path.empty() || !std::filesystem::is_regular_file(path, ec) || ec) return false;
     if (IsClropFilePath(path)) {
         SilentDialogOptions dialog;
-        dialog.title = IsEnglishUi() ? L"Open annotation data" : L"注釈データを開く";
-        dialog.message = IsEnglishUi()
-            ? L"This CLROP file can contain annotation data and references to a PDF.\n\nIt will be opened for read-only inspection only; this operation does not modify the file.\n\nOpen it?"
-            : L"この CLROP ファイルには、注釈データや PDF への参照が含まれる場合があります。\n\n読み取り専用で内容を確認するだけで、ファイルは変更しません。\n\n開きますか？";
+        dialog.title = localization::Text(L"main.ui.13c4241e46e2").c_str();
+        dialog.message = localization::Text(L"main.ui.136fea9879a5").c_str();
         dialog.kind = SoftNoticeKind::Info;
         dialog.buttons = SilentDialogButtons::YesNo;
-        dialog.yesLabel = IsEnglishUi() ? L"Open read-only" : L"読み取り専用で開く";
-        dialog.noLabel = IsEnglishUi() ? L"Cancel" : L"キャンセル";
+        dialog.yesLabel = localization::Text(L"main.ui.c2220f9e1483").c_str();
+        dialog.noLabel = localization::Text(L"main.ui.3672b0b92134").c_str();
         dialog.defaultResult = SilentDialogResult::No;
         dialog.escapeResult = SilentDialogResult::No;
         if (ShowSilentDialog(owner, dialog) != SilentDialogResult::Yes) return false;
@@ -2222,12 +2228,12 @@ static bool CopyPathToClipboard(HWND owner, const std::wstring& path) {
     if (path.empty()) return false;
     if (!SetMainClipboardUnicodeText(owner, path)) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Failed to copy the path." : L"パスをコピーできませんでした。",
+                       localization::Text(L"main.ui.ed39c29a1bfa").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
     ShowSoftNotice(owner,
-                   IsEnglishUi() ? L"Copied path." : L"パスをコピーしました。",
+                   localization::Text(L"main.ui.350e40bdd203").c_str(),
                    SoftNoticeKind::Info);
     return true;
 }
@@ -2238,8 +2244,7 @@ static bool ShowPathInExplorer(HWND owner, const std::wstring& pathText) {
     std::filesystem::path target(pathText);
     if (IsUncPath(target)) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Explorer opening is limited to local paths."
-                                     : L"エクスプローラーで開けるのはローカルパスだけです。",
+                       localization::Text(L"main.ui.e3b3bc9ab218").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2247,18 +2252,16 @@ static bool ShowPathInExplorer(HWND owner, const std::wstring& pathText) {
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(target, isReparse) && isReparse) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Reparse-point paths are not opened in Explorer."
-                                     : L"リパースポイントのパスはエクスプローラーで開きません。",
+                       localization::Text(L"main.ui.9160a4ea3405").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
 
     std::error_code ec;
     if (!std::filesystem::exists(target, ec) || ec) {
-        ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"The path was not found:\n" + pathText
-                                     : L"パスが見つかりません:\n" + pathText,
-                       SoftNoticeKind::Warning);
+        ShowSoftNotice(owner, localization::Format(L"main.path.not_found", {
+            { L"PATH", pathText }
+        }), SoftNoticeKind::Warning);
         return false;
     }
 
@@ -2267,8 +2270,7 @@ static bool ShowPathInExplorer(HWND owner, const std::wstring& pathText) {
     const bool isFile = std::filesystem::is_regular_file(target, ec) && !ec;
     if (!isDir && !isFile) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Only files and folders can be opened in Explorer."
-                                     : L"エクスプローラーで開けるのはファイルまたはフォルダだけです。",
+                       localization::Text(L"main.ui.3fbe32e3a3af").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2278,8 +2280,7 @@ static bool ShowPathInExplorer(HWND owner, const std::wstring& pathText) {
     HINSTANCE result = ShellExecuteW(owner, L"open", L"explorer.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Failed to open Explorer."
-                                     : L"エクスプローラーを開けませんでした。",
+                       localization::Text(L"main.ui.0c031c0de1dc").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2302,14 +2303,34 @@ static std::wstring FirstOpenablePdfListPath() {
     return L"";
 }
 
+static void TracePdfSelectionRoute(const wchar_t* step, HWND owner, int selectedIndex = -2) {
+    if (!preview_trace::IsEnabled()) return;
+    const int listSelection = g_hPdfList
+        ? static_cast<int>(SendMessageW(g_hPdfList, LB_GETCURSEL, 0, 0))
+        : -1;
+    preview_trace::Append(
+        L"PdfSelectionRoute",
+        L"step=" + std::wstring(step ? step : L"(null)") +
+        L" owner=" + preview_trace::Window(owner) +
+        L" focus=" + preview_trace::Window(GetFocus()) +
+        L" listSel=" + std::to_wstring(listSelection) +
+        L" selectedIndex=" + std::to_wstring(selectedIndex) +
+        L" currentPdfIndex=" + std::to_wstring(CurrentPdfIndex()) +
+        L" currentPdfOpen=" + preview_trace::Bool(!CurrentLogicalPdfPath().empty()) +
+        L" mainVisible=" + preview_trace::Bool(g_hMainWnd && IsWindowVisible(g_hMainWnd)) +
+        L" mainIconic=" + preview_trace::Bool(g_hMainWnd && IsIconic(g_hMainWnd)));
+}
+
 static void RestorePdfListSelectionToCurrent() {
     if (!g_hPdfList) return;
+    TracePdfSelectionRoute(L"restore_pdf_selection_before", g_hMainWnd);
     const int index = CurrentPdfIndex();
     SendMessageW(g_hPdfList,
                  LB_SETCURSEL,
                  index >= 0 ? static_cast<WPARAM>(index) : static_cast<WPARAM>(-1),
                  0);
     InvalidateRect(g_hPdfList, nullptr, FALSE);
+    TracePdfSelectionRoute(L"restore_pdf_selection_after", g_hMainWnd, index);
 }
 
 static bool PromptOfficeFileListAction(HWND owner, const std::wstring& officePath) {
@@ -2317,20 +2338,18 @@ static bool PromptOfficeFileListAction(HWND owner, const std::wstring& officePat
     std::filesystem::path path(officePath);
 
     SilentDialogOptions dialog;
-    dialog.title = IsEnglishUi() ? L"Office file in PDF list (Experimental conversion)"
-                                 : L"PDF欄のOfficeファイル（試験的変換）";
-    dialog.message = IsEnglishUi()
-        ? (L"This Office file is listed in the PDF area.\nPDF conversion is experimental.\nChoose whether to convert it to PDF or show it in Explorer.\n\nFile:\n" +
-           path.filename().wstring())
-        : (L"このOfficeファイルはPDF欄に表示されています。\nPDF変換は試験的です。\nPDFに変換するか、エクスプローラーで表示するかを選んでください。\n\n対象:\n" +
-           path.filename().wstring());
+    dialog.title = localization::Text(L"main.ui.c48599e41c8b").c_str();
+    dialog.message = localization::Format(L"main.office_file.action_prompt", {
+        { L"FILE", path.filename().wstring() }
+    });
     dialog.kind = SoftNoticeKind::Info;
     dialog.buttons = SilentDialogButtons::YesNoCancel;
-    dialog.yesLabel = IsEnglishUi() ? L"Convert to PDF" : L"PDFに変換";
-    dialog.noLabel = IsEnglishUi() ? L"Show in Explorer" : L"エクスプローラーで表示";
-    dialog.cancelLabel = IsEnglishUi() ? L"Cancel" : L"キャンセル";
+    dialog.yesLabel = localization::Text(L"main.ui.7470105ed551").c_str();
+    dialog.noLabel = localization::Text(L"main.ui.9208055ca154").c_str();
+    dialog.cancelLabel = localization::Text(L"main.ui.3672b0b92134").c_str();
     dialog.defaultResult = SilentDialogResult::Yes;
     dialog.escapeResult = SilentDialogResult::Cancel;
+    dialog.paths = {{L"", officePath}};
 
     const SilentDialogResult result = ShowSilentDialog(owner, dialog);
     if (result == SilentDialogResult::Yes) {
@@ -2347,18 +2366,19 @@ static void ShowSelectedPathDialog(HWND owner,
                                    const std::wstring& pathText) {
     if (!owner || pathText.empty()) return;
     const std::wstring title = label.empty()
-        ? (IsEnglishUi() ? L"Work path" : L"作業パス")
+        ? (localization::Text(L"main.ui.eb7a77e31d46").c_str())
         : label;
     SilentDialogOptions dialog;
     dialog.title = title;
-    dialog.message = (IsEnglishUi() ? L"Path:\n\n" : L"パス:\n\n") + pathText;
+    dialog.message = localization::Text(L"main.ui.d012849c040a");
     dialog.kind = SoftNoticeKind::Info;
     dialog.buttons = SilentDialogButtons::YesNoCancel;
-    dialog.yesLabel = IsEnglishUi() ? L"Open in Explorer" : L"エクスプローラーで開く";
-    dialog.noLabel = IsEnglishUi() ? L"Copy path" : L"パスをコピー";
-    dialog.cancelLabel = IsEnglishUi() ? L"Close" : L"閉じる";
+    dialog.yesLabel = localization::Text(L"main.ui.eabc3b94d0f6").c_str();
+    dialog.noLabel = localization::Text(L"main.ui.9806c16958b1").c_str();
+    dialog.cancelLabel = localization::Text(L"main.ui.603bc62f3f34").c_str();
     dialog.defaultResult = SilentDialogResult::Yes;
     dialog.escapeResult = SilentDialogResult::Cancel;
+    dialog.paths = {{L"", pathText}};
     const SilentDialogResult result = ShowSilentDialog(owner, dialog);
     if (result == SilentDialogResult::Yes) {
         ShowPathInExplorer(owner, pathText);
@@ -2418,25 +2438,21 @@ static bool EnsureDirectoryMutationReady(HWND owner,
             PromptStayOrOpenDiffManager(
                 owner,
                 blockedAction,
-                IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                              : L"「差分管理」で未統合差分を整理してから、もう一度実行してください。");
+                localization::Text(L"main.ui.5ec6b17ea986").c_str());
             return false;
         }
         if (!file_output::PrepareStagedDiffsForSwitch(owner)) {
             PromptStayOrOpenDiffManager(
                 owner,
                 blockedAction,
-                IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                              : L"「差分管理」で未統合差分を整理してから、もう一度実行してください。");
+                localization::Text(L"main.ui.5ec6b17ea986").c_str());
             return false;
         }
     }
 
     if (!file_output::HasPendingOrStagedDiffsUnderPath(target)) return true;
 
-    std::wstring msg = IsEnglishUi()
-        ? L"There are unsaved or staged changes under this directory.\n\nSave them before continuing?\n\n[Yes] Save and continue\n[No] Cancel"
-        : L"このフォルダ配下に、未保存または未統合の stage 差分があります。\n\n保存してから続行しますか？\n\n[はい] 保存して続行\n[いいえ] 中止";
+    std::wstring msg = localization::Text(L"main.ui.a1e3568ea4cd").c_str();
     if (!ConfirmMainYesNo(owner, blockedAction, msg, SoftNoticeKind::Warning,
                           SilentDialogResult::No, SilentDialogResult::No)) {
         return false;
@@ -2452,8 +2468,7 @@ static bool EnsureDirectoryMutationReady(HWND owner,
     }
     if (!saved || file_output::HasPendingOrStagedDiffsUnderPath(target)) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Some unsaved or staged changes still remain under this directory. The operation was canceled."
-                                     : L"このフォルダ配下に未保存または未統合の差分がまだ残っているため、操作を中止しました。",
+                       localization::Text(L"main.ui.5c35e0b9aae0").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2470,8 +2485,7 @@ static bool MoveDirectoryToDeletedItemsEscape(const std::filesystem::path& sourc
 
     std::filesystem::path escapeRoot = EscapeRootPath();
     if (escapeRoot.empty()) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Delete backup folder is not available."
-                                            : L"削除退避フォルダを利用できません。";
+        if (outErr) *outErr = localization::Text(L"main.ui.71e7f9a08fe1").c_str();
         return false;
     }
 
@@ -2480,8 +2494,7 @@ static bool MoveDirectoryToDeletedItemsEscape(const std::filesystem::path& sourc
     std::filesystem::create_directories(deletedRoot, ec);
     if (ec) {
         if (outErr) {
-            *outErr = (IsEnglishUi() ? L"Failed to create the delete backup folder:\n"
-                                     : L"削除退避フォルダを作成できませんでした:\n") +
+            *outErr = (localization::Text(L"main.ui.06d3c8d54a48").c_str()) +
                       deletedRoot.wstring() + L"\n" + UTF8ToWide(ec.message());
         }
         return false;
@@ -2494,8 +2507,7 @@ static bool MoveDirectoryToDeletedItemsEscape(const std::filesystem::path& sourc
     std::filesystem::rename(source, dest, ec);
     if (ec) {
         if (outErr) {
-            *outErr = (IsEnglishUi() ? L"Failed to move the directory into the delete backup folder:\n"
-                                     : L"フォルダを削除退避フォルダへ移動できませんでした:\n") +
+            *outErr = (localization::Text(L"main.ui.8c61872a9e0c").c_str()) +
                       source.wstring() + L"\n\n" + UTF8ToWide(ec.message());
         }
         return false;
@@ -2504,32 +2516,23 @@ static bool MoveDirectoryToDeletedItemsEscape(const std::filesystem::path& sourc
     return true;
 }
 
+static std::wstring LectureUiText(const wchar_t* lectureId, const wchar_t* parentId) {
+    return localization::Text(g_config.studentMode ? lectureId : parentId);
+}
+
 static bool RemoveTempExternalLectureFromContext(HWND owner, const std::wstring& lecturePath) {
     if (lecturePath.empty()) return false;
     if (file_output::HasPendingOrStagedDiffsUnderPath(std::filesystem::path(lecturePath))) {
-        std::wstring msg = IsEnglishUi()
-            ? L"There are unsaved or staged changes under this temporary external lecture.\n\nSave them before removing the temporary external lecture path?\n\n[Yes] Save and remove\n[No] Keep the temporary external lecture path"
-            : (std::wstring(g_config.studentMode
-                                 ? L"この一時外部授業の配下に、未保存または未統合の stage 差分があります。\n\n"
-                                 : L"この一時外部上位項目の配下に、未保存または未統合の stage 差分があります。\n\n") +
-               (g_config.studentMode
-                    ? L"保存してから一時外部授業パスを削除しますか？\n\n"
-                    : L"保存してから一時外部上位項目パスを削除しますか？\n\n") +
-               L"[はい] 保存して削除\n" +
-               (g_config.studentMode ? L"[いいえ] 一時外部授業パスを残す"
-                                     : L"[いいえ] 一時外部上位項目パスを残す"));
+        std::wstring msg = LectureUiText(L"main.temp_external.pending_changes_lecture",
+                                         L"main.temp_external.pending_changes_parent");
         if (!ConfirmMainYesNo(owner, GetUiText().menuRemoveTempExternalLecture, msg, SoftNoticeKind::Warning,
                               SilentDialogResult::No, SilentDialogResult::No)) {
             return false;
         }
         if (!file_output::RunSaveAndIntegrateTransaction(owner) ||
             file_output::HasPendingOrStagedDiffsUnderPath(std::filesystem::path(lecturePath))) {
-            ShowSoftNotice(owner,
-                           IsEnglishUi() ? L"Some unsaved or staged changes still remain under this temporary external lecture. The path was not removed."
-                                         : (g_config.studentMode
-                                                ? L"この一時外部授業の配下に未保存または未統合の差分がまだ残っているため、パスは削除しませんでした。"
-                                                : L"この一時外部上位項目の配下に未保存または未統合の差分がまだ残っているため、パスは削除しませんでした。"),
-                           SoftNoticeKind::Warning);
+            ShowSoftNotice(owner, LectureUiText(L"main.temp_external.pending_remain_lecture",
+                                                 L"main.temp_external.pending_remain_parent"), SoftNoticeKind::Warning);
             return false;
         }
     }
@@ -2542,10 +2545,8 @@ static bool RemoveTempExternalLectureFromContext(HWND owner, const std::wstring&
         if (!SaveNoteIfDirty(owner)) {
             PromptStayOrOpenDiffManager(
                 owner,
-                IsEnglishUi() ? L"Removing the temporary lecture path"
-                              : (g_config.studentMode ? L"一時外部授業パスの削除" : L"一時外部上位項目パスの削除"),
-                IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                              : L"「差分管理」で未統合差分を整理してから、もう一度実行してください。");
+                LectureUiText(L"main.temp_external.removing_lecture", L"main.temp_external.removing_parent"),
+                localization::Text(L"main.ui.5ec6b17ea986").c_str());
             return false;
         }
         ClearPdfAndNoteSelection();
@@ -2566,14 +2567,13 @@ static bool RenameLectureDirectoryFromContext(HWND owner,
                                              const std::wstring& label) {
     if (!IsWorkspaceManagedDirectoryTarget(lecturePath)) return false;
     if (!EnsureDirectoryMutationReady(owner, lecturePath,
-                                      IsEnglishUi() ? L"Renaming lecture"
-                                                    : (g_config.studentMode ? L"授業名変更" : L"上位項目名変更"))) {
+                                      LectureUiText(L"main.lecture.rename_action", L"main.parent.rename_action"))) {
         return false;
     }
 
     std::wstring newName;
     if (!PromptSimpleText(owner,
-                          IsEnglishUi() ? L"Rename Lecture" : (g_config.studentMode ? L"授業名変更" : L"上位項目名変更"),
+                          LectureUiText(L"main.lecture.rename", L"main.parent.rename"),
                           lecturePath.filename().wstring(),
                           newName)) {
         return false;
@@ -2581,14 +2581,12 @@ static bool RenameLectureDirectoryFromContext(HWND owner,
     newName = TrimWhitespace(newName);
     if (newName.empty()) return false;
     if (!ValidateCreateFileSystemName(owner, newName,
-                                      IsEnglishUi() ? L"Rename Lecture"
-                                                    : (g_config.studentMode ? L"授業名変更" : L"上位項目名変更"))) {
+                                      LectureUiText(L"main.lecture.rename", L"main.parent.rename"))) {
         return false;
     }
     if (IsWorkspaceReservedImportDirectoryName(std::filesystem::path(newName))) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Directories named __resource__ are reserved by this app."
-                                     : L"__resource__ という名前のフォルダはアプリ予約領域のため使えません。",
+                       localization::Text(L"main.ui.058073b6ff28").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2598,8 +2596,7 @@ static bool RenameLectureDirectoryFromContext(HWND owner,
     std::error_code ec;
     if (std::filesystem::exists(dest, ec) && !ec) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"A directory with the same name already exists."
-                                     : L"同名のフォルダが既にあります。",
+                       localization::Text(L"main.ui.047517fb7ee4").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2612,11 +2609,12 @@ static bool RenameLectureDirectoryFromContext(HWND owner,
     std::filesystem::rename(lecturePath, dest, ec);
     if (ec) {
         ShowMainMessageDialog(owner,
-                              IsEnglishUi() ? L"Rename Lecture" : (g_config.studentMode ? L"授業名変更" : L"上位項目名変更"),
-                              (IsEnglishUi() ? L"Failed to rename the directory.\n\n"
-                                             : L"フォルダ名の変更に失敗しました。\n\n") +
-                                  lecturePath.wstring() + L"\n->\n" + dest.wstring() + L"\n\n" + UTF8ToWide(ec.message()),
-                              SoftNoticeKind::Warning);
+                              LectureUiText(L"main.lecture.rename", L"main.parent.rename"),
+                              (localization::Text(L"main.ui.4e9bbd360427").c_str()) +
+                                  UTF8ToWide(ec.message()),
+                              SoftNoticeKind::Warning,
+                              {{localization::Text(L"dialog.path.source"), lecturePath.wstring()},
+                               {localization::Text(L"dialog.path.destination"), dest.wstring()}});
         return false;
     }
 
@@ -2645,7 +2643,7 @@ static bool RenameLectureDirectoryFromContext(HWND owner,
         RefreshMainWindowUiState(owner);
     }
     ShowSoftNotice(owner,
-                   (IsEnglishUi() ? L"Renamed: " : L"名前を変更しました: ") + label,
+                   (localization::Text(L"main.ui.07a636c539f8").c_str()) + label,
                    SoftNoticeKind::Info);
     return true;
 }
@@ -2657,19 +2655,18 @@ static bool RenameSessionDirectoryFromContext(HWND owner,
     if (!IsWorkspaceManagedDirectoryTarget(sessionPath)) return false;
     if (IsDirectFilesSessionPath(sessionPath.wstring(), lecturePath)) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Rename the lecture item instead for direct-file folders."
-                                     : L"直下ファイルの項目は、授業/上位項目の側で名前変更してください。",
+                       localization::Text(L"main.ui.f723b89b8aca").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
     if (!EnsureDirectoryMutationReady(owner, sessionPath,
-                                      IsEnglishUi() ? L"Renaming session" : L"セッション名変更")) {
+                                      localization::Text(L"main.ui.eea7b176bb54").c_str())) {
         return false;
     }
 
     std::wstring newName;
     if (!PromptSimpleText(owner,
-                          IsEnglishUi() ? L"Rename Session" : L"セッション名変更",
+                          localization::Text(L"main.ui.1e4cced51092").c_str(),
                           sessionPath.filename().wstring(),
                           newName)) {
         return false;
@@ -2677,13 +2674,12 @@ static bool RenameSessionDirectoryFromContext(HWND owner,
     newName = TrimWhitespace(newName);
     if (newName.empty()) return false;
     if (!ValidateCreateFileSystemName(owner, newName,
-                                      IsEnglishUi() ? L"Rename Session" : L"セッション名変更")) {
+                                      localization::Text(L"main.ui.1e4cced51092").c_str())) {
         return false;
     }
     if (IsWorkspaceReservedImportDirectoryName(std::filesystem::path(newName))) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Directories named __resource__ are reserved by this app."
-                                     : L"__resource__ という名前のフォルダはアプリ予約領域のため使えません。",
+                       localization::Text(L"main.ui.058073b6ff28").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2693,8 +2689,7 @@ static bool RenameSessionDirectoryFromContext(HWND owner,
     std::error_code ec;
     if (std::filesystem::exists(dest, ec) && !ec) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"A directory with the same name already exists."
-                                     : L"同名のフォルダが既にあります。",
+                       localization::Text(L"main.ui.047517fb7ee4").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -2706,11 +2701,12 @@ static bool RenameSessionDirectoryFromContext(HWND owner,
     std::filesystem::rename(sessionPath, dest, ec);
     if (ec) {
         ShowMainMessageDialog(owner,
-                              IsEnglishUi() ? L"Rename Session" : L"セッション名変更",
-                              (IsEnglishUi() ? L"Failed to rename the directory.\n\n"
-                                             : L"フォルダ名の変更に失敗しました。\n\n") +
-                                  sessionPath.wstring() + L"\n->\n" + dest.wstring() + L"\n\n" + UTF8ToWide(ec.message()),
-                              SoftNoticeKind::Warning);
+                              localization::Text(L"main.ui.1e4cced51092").c_str(),
+                              (localization::Text(L"main.ui.4e9bbd360427").c_str()) +
+                                  UTF8ToWide(ec.message()),
+                              SoftNoticeKind::Warning,
+                              {{localization::Text(L"dialog.path.source"), sessionPath.wstring()},
+                               {localization::Text(L"dialog.path.destination"), dest.wstring()}});
         return false;
     }
 
@@ -2729,7 +2725,7 @@ static bool RenameSessionDirectoryFromContext(HWND owner,
         RefreshMainWindowUiState(owner);
     }
     ShowSoftNotice(owner,
-                   (IsEnglishUi() ? L"Renamed: " : L"名前を変更しました: ") + label,
+                   (localization::Text(L"main.ui.07a636c539f8").c_str()) + label,
                    SoftNoticeKind::Info);
     return true;
 }
@@ -2743,18 +2739,16 @@ static bool DeleteLectureDirectoryFromContext(HWND owner,
     }
     if (!IsWorkspaceManagedDirectoryTarget(lecturePath)) return false;
     if (!EnsureDirectoryMutationReady(owner, lecturePath,
-                                      IsEnglishUi() ? L"Deleting lecture"
-                                                    : (g_config.studentMode ? L"授業削除" : L"上位項目削除"),
+                                      LectureUiText(L"main.lecture.delete_action", L"main.parent.delete_action"),
                                       /*requireIntegratedSave=*/true)) {
         return false;
     }
 
-    std::wstring confirm = IsEnglishUi()
-        ? (L"Move this lecture directory into \"__resource__/__escape__/deleted_items\"?\n\n" + lecturePath.wstring())
-        : (std::wstring(g_config.studentMode ? L"この授業フォルダを " : L"この上位項目フォルダを ") +
-           L"\"__resource__/__escape__/deleted_items\" に退避移動しますか？\n\n" + lecturePath.wstring());
+    std::wstring confirm = localization::Format(LectureUiText(L"main.lecture.delete_confirm", L"main.parent.delete_confirm"), {
+        { L"PATH", lecturePath.wstring() }
+    });
     if (!ConfirmMainYesNo(owner,
-                          IsEnglishUi() ? L"Delete Lecture" : (g_config.studentMode ? L"授業削除" : L"上位項目削除"),
+                          LectureUiText(L"main.lecture.delete", L"main.parent.delete"),
                           confirm, SoftNoticeKind::Warning,
                           SilentDialogResult::No, SilentDialogResult::No)) {
         return false;
@@ -2764,8 +2758,9 @@ static bool DeleteLectureDirectoryFromContext(HWND owner,
     std::wstring err;
     if (!MoveDirectoryToDeletedItemsEscape(lecturePath, L"lecture_", &movedPath, &err)) {
         ShowMainMessageDialog(owner,
-                              IsEnglishUi() ? L"Delete Lecture" : (g_config.studentMode ? L"授業削除" : L"上位項目削除"),
-                              err, SoftNoticeKind::Warning);
+                              LectureUiText(L"main.lecture.delete", L"main.parent.delete"),
+                              err, SoftNoticeKind::Warning,
+                              {{L"", lecturePath.wstring()}});
         return false;
     }
 
@@ -2792,8 +2787,7 @@ static bool DeleteLectureDirectoryFromContext(HWND owner,
         RefreshMainWindowUiState(owner);
     }
     ShowSoftNotice(owner,
-                   IsEnglishUi() ? L"Moved the deleted lecture into the emergency backup folder."
-                                 : L"削除したフォルダを緊急退避フォルダへ移動しました。",
+                   localization::Text(L"main.ui.527a998eb84c").c_str(),
                    SoftNoticeKind::Info);
     return true;
 }
@@ -2805,22 +2799,20 @@ static bool DeleteSessionDirectoryFromContext(HWND owner,
     if (!IsWorkspaceManagedDirectoryTarget(sessionPath)) return false;
     if (IsDirectFilesSessionPath(sessionPath.wstring(), lecturePath)) {
         ShowSoftNotice(owner,
-                       IsEnglishUi() ? L"Delete the lecture item instead for direct-file folders."
-                                     : L"直下ファイルの項目は、授業/上位項目の側で削除してください。",
+                       localization::Text(L"main.ui.04908cdc926d").c_str(),
                        SoftNoticeKind::Warning);
         return false;
     }
     if (!EnsureDirectoryMutationReady(owner, sessionPath,
-                                      IsEnglishUi() ? L"Deleting session" : L"セッション削除",
+                                      localization::Text(L"main.ui.96c859575e3b").c_str(),
                                       /*requireIntegratedSave=*/true)) {
         return false;
     }
 
-    std::wstring confirm = IsEnglishUi()
-        ? (L"Move this session directory into \"__resource__/__escape__/deleted_items\"?\n\n" + sessionPath.wstring())
-        : (L"このセッションフォルダを \"__resource__/__escape__/deleted_items\" に退避移動しますか？\n\n" +
-           sessionPath.wstring());
-    if (!ConfirmMainYesNo(owner, IsEnglishUi() ? L"Delete Session" : L"セッション削除",
+    std::wstring confirm = localization::Format(L"main.session.delete_confirm", {
+        { L"PATH", sessionPath.wstring() }
+    });
+    if (!ConfirmMainYesNo(owner, localization::Text(L"main.ui.f46725ce2c3c").c_str(),
                           confirm, SoftNoticeKind::Warning,
                           SilentDialogResult::No, SilentDialogResult::No)) {
         return false;
@@ -2829,8 +2821,9 @@ static bool DeleteSessionDirectoryFromContext(HWND owner,
     std::filesystem::path movedPath;
     std::wstring err;
     if (!MoveDirectoryToDeletedItemsEscape(sessionPath, L"session_", &movedPath, &err)) {
-        ShowMainMessageDialog(owner, IsEnglishUi() ? L"Delete Session" : L"セッション削除",
-                              err, SoftNoticeKind::Warning);
+        ShowMainMessageDialog(owner, localization::Text(L"main.ui.f46725ce2c3c").c_str(),
+                              err, SoftNoticeKind::Warning,
+                              {{L"", sessionPath.wstring()}});
         return false;
     }
 
@@ -2854,8 +2847,7 @@ static bool DeleteSessionDirectoryFromContext(HWND owner,
         RefreshMainWindowUiState(owner);
     }
     ShowSoftNotice(owner,
-                   IsEnglishUi() ? L"Moved the deleted session into the emergency backup folder."
-                                 : L"削除したフォルダを緊急退避フォルダへ移動しました。",
+                   localization::Text(L"main.ui.932dcc315e37").c_str(),
                    SoftNoticeKind::Info);
     return true;
 }
@@ -2949,21 +2941,42 @@ static void ScrollNoteToFileStart() {
     }
 }
 
-static void FocusNoteFromListAtFileStart(HWND owner) {
+static void TraceNoteListActivation(const wchar_t* origin,
+                                    int selectedIndex,
+                                    bool sameOpenNote,
+                                    bool preserveRenderedOpeningView) {
+    preview_trace::Append(
+        L"NoteListActivation",
+        L"origin=" + std::wstring(origin ? origin : L"unknown") +
+        L" selectedIndex=" + std::to_wstring(selectedIndex) +
+        L" currentIndex=" + std::to_wstring(CurrentNoteIndex()) +
+        L" sameOpenNote=" + preview_trace::Bool(sameOpenNote) +
+        L" preserveRenderedOpeningView=" + preview_trace::Bool(preserveRenderedOpeningView) +
+        L" focus=" + preview_trace::Window(GetFocus()) +
+        L" vimEnabled=" + preview_trace::Bool(g_noteVimModeEnabled) +
+        L" vimNormal=" + preview_trace::Bool(g_noteNormalMode));
+}
+
+static void FocusNoteFromListAtFileStart() {
     if (!g_hNoteEdit) return;
+    // This also covers returning to the already open note.  Loading a
+    // different note starts the hold itself, but the same-note route does
+    // not, which would otherwise expose the first line as raw on focus.
+    PreserveRenderedNoteOpeningView();
+    TraceNoteListActivation(L"focus_file_start_before", CurrentNoteIndex(), true, true);
     SendMessageW(g_hNoteEdit, EM_SETSEL, 0, 0);
     g_noteNormalCaret = 0;
     ScrollNoteToFileStart();
-    if (g_noteVimModeEnabled && owner) {
-        EnterNoteNormalMode(owner);
-        return;
-    }
+    // Entering a note from the list is a display/focus operation.  It must
+    // not implicitly enter Vim normal mode; that transition is reserved for
+    // an explicit note command.
+    g_noteNormalMode = false;
+    OnExitNoteNormalMode();
     SetFocus(g_hNoteEdit);
     SendMessageW(g_hNoteEdit, EM_SETSEL, 0, 0);
     SendMessageW(g_hNoteEdit, EM_SCROLLCARET, 0, 0);
-    g_noteNormalMode = false;
-    OnExitNoteNormalMode();
     if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
+    TraceCurrentNoteFocusState(L"focus_file_start_after");
 }
 
 static bool OpenOrFocusSelectedNoteAtFileStart(HWND owner) {
@@ -2973,10 +2986,12 @@ static bool OpenOrFocusSelectedNoteAtFileStart(HWND owner) {
     if (sel < 0 || sel >= static_cast<int>(g_noteFiles.size())) return false;
     const std::wstring selPath = g_noteFiles[static_cast<size_t>(sel)].path;
     if (selPath.empty()) return false;
-    if (changed || NormalizePathKey(selPath) != NormalizePathKey(g_currentNotePath)) {
+    const bool requiresOpen = changed || NormalizePathKey(selPath) != NormalizePathKey(g_currentNotePath);
+    TraceNoteListActivation(L"open_or_focus", sel, !requiresOpen, false);
+    if (requiresOpen) {
         if (!OpenNoteIfDifferent(owner, selPath)) return false;
     }
-    FocusNoteFromListAtFileStart(owner);
+    FocusNoteFromListAtFileStart();
     return true;
 }
 
@@ -2994,11 +3009,11 @@ static void FocusNoteEditAtNormalCaret() {
     int len = GetWindowTextLengthW(g_hNoteEdit);
     if (len < 0) len = 0;
     DWORD caret = std::min<DWORD>(g_noteNormalCaret, static_cast<DWORD>(len));
+    g_noteNormalMode = false;
+    OnExitNoteNormalMode();
     SetFocus(g_hNoteEdit);
     SendMessageW(g_hNoteEdit, EM_SETSEL, caret, caret);
     SendMessageW(g_hNoteEdit, EM_SCROLLCARET, 0, 0);
-    g_noteNormalMode = false;
-    OnExitNoteNormalMode();
     if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
 }
 
@@ -3141,7 +3156,10 @@ void FocusMainWindowForNoteNormalMode() {
     if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
 }
 
-static void ActivateOrScrollSelection(HWND owner, ListClickKind kind, int sel) {
+static void ActivateOrScrollSelection(HWND owner,
+                                      ListClickKind kind,
+                                      int sel,
+                                      bool preserveRenderedOpeningView = false) {
     if (sel < 0) return;
     if (kind == ListClickKind::Pdf) {
         if (sel >= static_cast<int>(g_pdfFiles.size())) return;
@@ -3166,15 +3184,23 @@ static void ActivateOrScrollSelection(HWND owner, ListClickKind kind, int sel) {
     std::wstring openKey = NormalizePathKey(g_currentNotePath);
     std::wstring selKey = NormalizePathKey(selPath);
     if (!openKey.empty() && openKey == selKey) {
+        TraceNoteListActivation(L"activate_existing", sel, true, preserveRenderedOpeningView);
         HWND focused = GetFocus();
         bool focusInNoteEdit =
             (focused == g_hNoteEdit) || (focused && g_hNoteEdit && IsChild(g_hNoteEdit, focused));
         if (!focusInNoteEdit) {
+            // Re-selecting the already open note with the mouse is an open/focus
+            // action, not an edit. Keep the first caret line rendered just as a
+            // freshly loaded note does. Keyboard activation intentionally keeps
+            // its existing raw-caret behavior.
+            if (preserveRenderedOpeningView) PreserveRenderedNoteOpeningView();
             FocusNoteEditAtNormalCaret();
+            TraceCurrentNoteFocusState(L"activate_existing_after_focus");
         } else {
             ScrollNoteToFileStart();
         }
     } else {
+        TraceNoteListActivation(L"activate_open", sel, false, preserveRenderedOpeningView);
         OpenNoteIfDifferent(owner, selPath);
     }
 }
@@ -3256,9 +3282,7 @@ static void TraceStartupLastOpenRestore(const std::wstring& step,
 
 static void ShowStartupLastOpenPartialNotice(HWND hWnd, const std::vector<std::wstring>& missing) {
     if (missing.empty()) return;
-    std::wstring msg = IsEnglishUi()
-        ? L"Restored the available last-open items. Not restored: "
-        : L"lastopen の復元可能な範囲だけ復元しました。未復元: ";
+    std::wstring msg = localization::Text(L"main.ui.7d96d036fd4c").c_str();
     for (size_t i = 0; i < missing.size(); ++i) {
         if (i > 0) msg += L", ";
         msg += missing[i];
@@ -3267,6 +3291,7 @@ static void ShowStartupLastOpenPartialNotice(HWND hWnd, const std::vector<std::w
 }
 
 static bool RestoreStartupLastOpenSelection(HWND hWnd) {
+    ScopedDocumentOpenLockNoticeSuppression suppressDocumentOpenLockNotice;
     const ULONGLONG startTick = preview_trace::TickNow();
     StartupLastOpenTarget target;
     std::vector<std::wstring> missing;
@@ -3278,7 +3303,8 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
     auto finish = [&](const std::wstring& step) -> bool {
         TraceStartupLastOpenRestore(step, startTick, target,
                                     lectureRestored, sessionRestored, pdfRestored, noteRestored);
-        if (lectureRestored && !missing.empty()) {
+        if (lectureRestored && !missing.empty() &&
+            !suppressDocumentOpenLockNotice.sawSuppressedConflict()) {
             ShowStartupLastOpenPartialNotice(hWnd, missing);
         }
         return lectureRestored || sessionRestored || pdfRestored || noteRestored;
@@ -3291,13 +3317,13 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
     std::filesystem::path lecturePath(target.lecturePath);
     if (!std::filesystem::exists(lecturePath, ec) || ec ||
         !std::filesystem::is_directory(lecturePath, ec) || ec) {
-        missing.push_back(IsEnglishUi() ? L"lecture" : L"上位項目");
+        missing.push_back(localization::Text(L"main.ui.543315c60276").c_str());
         return finish(L"missing=lecture");
     }
 
     int lectureIdx = FindLectureIndexByPath(target.lecturePath);
     if (lectureIdx < 0) {
-        missing.push_back(IsEnglishUi() ? L"lecture list item" : L"上位項目リスト項目");
+        missing.push_back(localization::Text(L"main.ui.62f3135b063c").c_str());
         return finish(L"missing=lecture_index");
     }
 
@@ -3309,7 +3335,7 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
     lectureRestored =
         NormalizePathKeyForList(g_currentLecturePath) == NormalizePathKeyForList(target.lecturePath);
     if (!lectureRestored) {
-        missing.push_back(IsEnglishUi() ? L"lecture selection" : L"上位項目選択");
+        missing.push_back(localization::Text(L"main.ui.aade6aefdb51").c_str());
         return finish(L"failed=lecture_select");
     }
 
@@ -3321,19 +3347,19 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
     ec.clear();
     if (!std::filesystem::exists(sessionPath, ec) || ec ||
         !std::filesystem::is_directory(sessionPath, ec) || ec) {
-        missing.push_back(IsEnglishUi() ? L"session" : L"下位項目");
+        missing.push_back(localization::Text(L"main.ui.e697706531f2").c_str());
         return finish(L"missing=session_path");
     }
 
     if (g_sessions.empty()) {
         sessionRestored = SessionKeyFromPath(g_currentSessionPath) == SessionKeyFromPath(target.sessionPath);
-        if (!sessionRestored) missing.push_back(IsEnglishUi() ? L"session list" : L"下位項目リスト");
+        if (!sessionRestored) missing.push_back(localization::Text(L"main.ui.6fff0bdf3f78").c_str());
         return finish(sessionRestored ? L"end=direct_session" : L"missing=session_list");
     }
 
     int sessionIdx = FindSessionIndexByPath(target.sessionPath);
     if (sessionIdx < 0) {
-        missing.push_back(IsEnglishUi() ? L"session list item" : L"下位項目リスト項目");
+        missing.push_back(localization::Text(L"main.ui.ca5fb960f714").c_str());
         return finish(L"missing=session_index");
     }
 
@@ -3344,7 +3370,7 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
     }
     sessionRestored = SessionKeyFromPath(g_currentSessionPath) == SessionKeyFromPath(target.sessionPath);
     if (!sessionRestored) {
-        missing.push_back(IsEnglishUi() ? L"session selection" : L"下位項目選択");
+        missing.push_back(localization::Text(L"main.ui.3f14862af168").c_str());
         return finish(L"failed=session_select");
     }
 
@@ -3371,7 +3397,7 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
         noteRestored = hasPreferredNote &&
             IsStartupLastOpenFileInList(g_noteFiles, preferredNote);
         if (hasPreferredPdf && !selectedPdf) missing.push_back(L"PDF");
-        if (hasPreferredNote && !selectedNote) missing.push_back(IsEnglishUi() ? L"note" : L"ノート");
+        if (hasPreferredNote && !selectedNote) missing.push_back(localization::Text(L"main.ui.6e2cda623cf3").c_str());
         RefreshMainWindowUiState(hWnd);
         return finish(L"end=selected_files_only");
     }
@@ -3388,7 +3414,7 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
     }
     if (hasPreferredNote) {
         noteRestored = OpenNoteIfDifferent(hWnd, preferredNote);
-        if (!noteRestored) missing.push_back(IsEnglishUi() ? L"note" : L"ノート");
+        if (!noteRestored) missing.push_back(localization::Text(L"main.ui.6e2cda623cf3").c_str());
     }
     SyncLeftPaneSelection();
     RefreshMainWindowUiState(hWnd);
@@ -3607,6 +3633,9 @@ static bool OpenSelectionForList(HWND list) {
     }
     if (list == g_hSessionList) {
         const bool opened = OpenSelectedSession(owner);
+        // A session switch can auto-open its sole note.  Keep that note ready
+        // for keyboard editing instead of moving the focus back to the PDF list.
+        if (opened && FocusAutoOpenedSoleNoteForEditing()) return true;
         if (opened && g_hPdfList) {
             SetFocus(g_hPdfList);
             EnsureListboxSelection(g_hPdfList);
@@ -3654,12 +3683,13 @@ static bool FocusPdfPaneForPaneNav(HWND owner) {
 }
 
 static bool FocusNotePaneForPaneNav(HWND owner) {
+    (void)owner;
     if (!g_hNoteEdit || !IsWindow(g_hNoteEdit)) return false;
-    HWND resolvedOwner = owner ? owner : (g_hMainWnd ? g_hMainWnd : GetParent(g_hNoteEdit));
-    if (g_noteVimModeEnabled && resolvedOwner) {
-        EnterNoteNormalMode(resolvedOwner);
-        return true;
-    }
+    // Pane navigation is an initial display operation.  Do not enter Vim
+    // normal mode or expose a raw caret line until the user starts editing.
+    PreserveRenderedNoteOpeningView();
+    g_noteNormalMode = false;
+    OnExitNoteNormalMode();
     SetFocus(g_hNoteEdit);
     return true;
 }
@@ -3669,9 +3699,7 @@ bool HandlePaneDirectionalNavigation(HWND owner, PaneNavContext context, HWND so
     case PaneNavContext::LeftPaneList:
         switch (vkey) {
         case 'J':
-            if (source == g_hNoteList && owner) {
-                (void)OpenOrFocusSelectedNoteAtFileStart(owner);
-            }
+            if (source == g_hNoteList) return OpenOrFocusSelectedNoteAtFileStart(owner);
             return FocusNotePaneForPaneNav(owner);
         case 'K':
             if (source == g_hPdfList && owner) {
@@ -3680,10 +3708,7 @@ bool HandlePaneDirectionalNavigation(HWND owner, PaneNavContext context, HWND so
             return FocusPdfPaneForPaneNav(owner);
         case 'L':
             if (source == g_hNoteList) {
-                if (owner) {
-                    (void)OpenOrFocusSelectedNoteAtFileStart(owner);
-                }
-                return FocusNotePaneForPaneNav(owner);
+                return OpenOrFocusSelectedNoteAtFileStart(owner);
             }
             if (source == g_hPdfList && owner) {
                 (void)OpenSelectedPdf(owner);
@@ -3724,18 +3749,14 @@ static bool PrepareContextDisplayClose(HWND owner, const wchar_t* operationJa,
     if (!SaveNoteIfDirty(owner)) {
         SyncLeftPaneSelection();
         PromptStayOrOpenDiffManager(owner, IsEnglishUi() ? operationEn : operationJa,
-                                    IsEnglishUi()
-                                        ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                        : L"「差分管理」で未統合差分を整理してから、もう一度実行してください。");
+                                    localization::Text(L"main.ui.5ec6b17ea986").c_str());
         return false;
     }
     PreparePendingLinkForPdfSwitch(owner);
     if (!file_output::PrepareStagedDiffsForSwitch(owner)) {
         SyncLeftPaneSelection();
         PromptStayOrOpenDiffManager(owner, IsEnglishUi() ? operationEn : operationJa,
-                                    IsEnglishUi()
-                                        ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                        : L"「差分管理」で未統合差分を整理してから、もう一度実行してください。");
+                                    localization::Text(L"main.ui.5ec6b17ea986").c_str());
         return false;
     }
     return true;
@@ -3763,7 +3784,7 @@ static bool CloseFileDisplayFromContext(HWND owner, bool isNote, const std::wstr
         if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
     }
     FinishContextDisplayClose(owner);
-    ShowSoftNotice(owner, IsEnglishUi() ? L"Closed the file display." : L"ファイルの表示を閉じました。",
+    ShowSoftNotice(owner, localization::Text(L"main.ui.ec3b7ea7321a").c_str(),
                    SoftNoticeKind::Info);
     return true;
 }
@@ -3786,7 +3807,7 @@ static bool CloseSessionDisplayFromContext(HWND owner, const std::wstring& path)
         InvalidateRect(g_hNoteList, nullptr, TRUE);
     }
     FinishContextDisplayClose(owner);
-    ShowSoftNotice(owner, IsEnglishUi() ? L"Closed the session display." : L"回次の表示を閉じました。",
+    ShowSoftNotice(owner, localization::Text(L"main.ui.b601f9401e0b").c_str(),
                    SoftNoticeKind::Info);
     return true;
 }
@@ -3800,7 +3821,7 @@ static bool CloseLectureDisplayFromContext(HWND owner, const std::wstring& path)
     g_currentLecturePath.clear();
     if (g_hLectureList) SendMessageW(g_hLectureList, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
     FinishContextDisplayClose(owner);
-    ShowSoftNotice(owner, IsEnglishUi() ? L"Closed the lecture display." : L"授業の表示を閉じました。",
+    ShowSoftNotice(owner, localization::Text(L"main.ui.94c143be5a7e").c_str(),
                    SoftNoticeKind::Info);
     return true;
 }
@@ -3837,6 +3858,15 @@ static LRESULT CALLBACK PdfNoteListProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
             state->preSel = static_cast<int>(SendMessageW(hWnd, LB_GETCURSEL, 0, 0));
             state->hitIndex = outside ? -1 : idx;
             state->tracking = !outside;
+            if (state->kind == ListClickKind::Note) {
+                preview_trace::Append(
+                    L"NoteListActivation",
+                    L"origin=note_list_mouse_down hitIndex=" + std::to_wstring(state->hitIndex) +
+                    L" previousIndex=" + std::to_wstring(state->preSel) +
+                    L" sameOpenNote=" + preview_trace::Bool(
+                        !state->openPath.empty() &&
+                        state->openPath == g_currentNotePath));
+            }
             // Re-select detection must not fire on double-click. Delay action until the
             // double-click time elapses, and cancel if a WM_LBUTTONDBLCLK arrives.
             KillTimer(hWnd, kListReselectTimerId);
@@ -3876,7 +3906,7 @@ static LRESULT CALLBACK PdfNoteListProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
             if (!state) return 0;
             int curSel = static_cast<int>(SendMessageW(hWnd, LB_GETCURSEL, 0, 0));
             if (!state->suppressNextScroll && state->pendingSel >= 0 && curSel == state->pendingSel) {
-                ActivateOrScrollSelection(GetParent(hWnd), state->kind, state->pendingSel);
+                ActivateOrScrollSelection(GetParent(hWnd), state->kind, state->pendingSel, true);
             }
             state->pendingSel = -1;
             state->suppressNextScroll = false;
@@ -3892,13 +3922,21 @@ static LRESULT CALLBACK PdfNoteListProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
             return 0;
         }
         if (state->pendingSel >= 0) {
-            ActivateOrScrollSelection(GetParent(hWnd), state->kind, state->pendingSel);
+            ActivateOrScrollSelection(GetParent(hWnd), state->kind, state->pendingSel, true);
             state->pendingSel = -1;
         }
         return 0;
     }
     case WM_KEYDOWN: {
         if (!state) break;
+        if (state->kind == ListClickKind::Note &&
+            (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_RETURN || wParam == VK_SPACE ||
+             wParam == 'H' || wParam == 'J' || wParam == 'K' || wParam == 'L')) {
+            TraceNoteListActivation(L"note_list_key", static_cast<int>(SendMessageW(hWnd, LB_GETCURSEL, 0, 0)),
+                                    false, false);
+            preview_trace::Append(L"NoteListActivation",
+                                  L"keyCode=" + std::to_wstring(static_cast<unsigned long long>(wParam)));
+        }
         if (wParam == VK_TAB) {
             if (g_hPdfView) SetFocus(g_hPdfView);
             return 0;
@@ -4062,7 +4100,7 @@ static void AddDirectoryHierarchyTruncatedLine(std::vector<DirectoryHierarchyIte
                                                const std::vector<bool>& ancestorLast) {
     if (!items.empty() && items.back().text.find(L"...") != std::wstring::npos) return;
     AddDirectoryHierarchyInfo(
-        items, ancestorLast, IsEnglishUi() ? L"... (more entries omitted)" : L"... (以降の項目は省略)");
+        items, ancestorLast, localization::Text(L"main.ui.162cdb94e6ed").c_str());
 }
 
 static void AppendDirectoryHierarchyChildren(const std::filesystem::path& dir,
@@ -4152,18 +4190,14 @@ static std::vector<DirectoryHierarchyItem> BuildDirectoryHierarchyItems(const st
 
     if (IsPotentialNetworkPath(root)) {
         std::vector<bool> ancestors;
-        AddDirectoryHierarchyInfo(items, ancestors, IsEnglishUi()
-                                                ? L"(network paths are not enumerated)"
-                                                : L"(ネットワークパスは列挙しません)");
+        AddDirectoryHierarchyInfo(items, ancestors, localization::Text(L"main.ui.cc503d9b3300").c_str());
         return items;
     }
 
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(root, isReparse) && isReparse) {
         std::vector<bool> ancestors;
-        AddDirectoryHierarchyInfo(items, ancestors, IsEnglishUi()
-                                                ? L"(reparse-point folders are not enumerated)"
-                                                : L"(リパースポイントのフォルダは列挙しません)");
+        AddDirectoryHierarchyInfo(items, ancestors, localization::Text(L"main.ui.c3c1cd6bdc51").c_str());
         return items;
     }
 
@@ -4171,9 +4205,7 @@ static std::vector<DirectoryHierarchyItem> BuildDirectoryHierarchyItems(const st
     std::vector<bool> ancestors;
     AppendDirectoryHierarchyChildren(root, 1, ancestors, items);
     if (items.size() == before) {
-        AddDirectoryHierarchyInfo(items, ancestors, IsEnglishUi()
-                                                ? L"(no folders, PDFs, or notes)"
-                                                : L"(フォルダ/PDF/ノートなし)");
+        AddDirectoryHierarchyInfo(items, ancestors, localization::Text(L"main.ui.508876dcd97e").c_str());
     }
     return items;
 }
@@ -4632,18 +4664,16 @@ static bool ShouldShowFixedToolbarTextFontChoices(int pageIndex) {
 static std::wstring BuildAdaptiveToolbarTextFontLabel(int pt10) {
     double ratio = static_cast<double>(pt10) / (kToolbarTextFontRatioBasePt * 10.0);
     double pt = static_cast<double>(pt10) / 10.0;
-    if (IsEnglishUi()) {
-        return L"x" + FormatSig2(ratio) + L" A4 size ratio (" + FormatSig2(pt) + L"pt)";
-    }
-    return L"x" + FormatSig2(ratio) + L" A4基準サイズ比 (" + FormatSig2(pt) + L"pt)";
+    return localization::Format(L"main.toolbar.font_ratio", {
+        { L"RATIO", FormatSig2(ratio) }, { L"PT", FormatSig2(pt) }
+    });
 }
 
 static std::wstring BuildFixedToolbarTextFontLabel(int pt10) {
     double pt = static_cast<double>(pt10) / 10.0;
-    if (IsEnglishUi()) {
-        return L"Fixed " + FormatSig2(pt) + L"pt";
-    }
-    return L"固定 " + FormatSig2(pt) + L"pt";
+    return localization::Format(L"main.toolbar.font_fixed", {
+        { L"PT", FormatSig2(pt) }
+    });
 }
 
 static void SelectToolbarTextFontComboChoice(HWND combo, DWORD_PTR wantData) {
@@ -4936,6 +4966,7 @@ static void RemoveOwnerDrawButtonsOnly(HWND hWnd) {
     RestoreButtonType(g_hRadioTextReadableBackgroundNormal, BS_AUTORADIOBUTTON);
     RestoreButtonType(g_hRadioTextReadableBackgroundInverted, BS_AUTORADIOBUTTON);
     RestoreButtonType(g_hChkTextAutoWrap, BS_AUTOCHECKBOX);
+    RestoreButtonType(g_hChkPanMouseWheelZoom, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hAnnotSettings, BS_PUSHBUTTON);
     RestoreButtonType(g_hAnnotClear, BS_PUSHBUTTON);
     RestoreButtonType(g_hChkShortcutHeading1, BS_AUTOCHECKBOX);
@@ -5077,15 +5108,14 @@ static void OnLectureSelChange(HWND hWnd) {
         SyncLeftPaneSelection();
         PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching lectures"
                                                         : (g_config.studentMode ? L"授業切替" : L"上位項目切替"),
-                                    IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                  : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+                                    localization::Text(L"main.ui.4628424dc46e").c_str());
         return;
     }
     timing.Mark(L"SaveNoteIfDirty");
     if (!VerifyWorkspaceWritableForEditing(hWnd) ||
         !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(nextLecture),
-                                             g_config.studentMode ? L"授業フォルダ" : L"上位項目フォルダ",
-                                             g_config.studentMode ? L"Lecture folder" : L"Parent item folder")) {
+                                             g_config.studentMode ? L"workspace.directory.lecture.student"
+                                                                  : L"workspace.directory.lecture.parent")) {
         timing.SetOutcome(L"cancelled_verify_dir");
         SyncLeftPaneSelection();
         return;
@@ -5099,8 +5129,7 @@ static void OnLectureSelChange(HWND hWnd) {
         SyncLeftPaneSelection();
         PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching lectures"
                                                         : (g_config.studentMode ? L"授業切替" : L"上位項目切替"),
-                                    IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                  : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+                                    localization::Text(L"main.ui.4628424dc46e").c_str());
         return;
     }
     timing.Mark(L"PrepareStagedDiffsForSwitch");
@@ -5210,7 +5239,7 @@ static void OnSessionSelChange(HWND hWnd) {
     timing.Mark(L"SaveNoteIfDirty");
     if (!VerifyWorkspaceWritableForEditing(hWnd) ||
         !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(target.path),
-                                             L"セッションフォルダ", L"Session folder")) {
+                                             L"workspace.directory.session.student")) {
         timing.SetOutcome(L"cancelled_verify_dir");
         SyncLeftPaneSelection();
         return;
@@ -5222,9 +5251,8 @@ static void OnSessionSelChange(HWND hWnd) {
     if (!file_output::PrepareStagedDiffsForSwitch(hWnd)) {
         timing.SetOutcome(L"cancelled_stage_before_switch");
         SyncLeftPaneSelection();
-        PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching sessions" : L"セッション切替",
-                                    IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                  : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+        PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.649c6170d512").c_str(),
+                                    localization::Text(L"main.ui.4628424dc46e").c_str());
         return;
     }
     timing.Mark(L"PrepareStagedDiffsForSwitch");
@@ -5268,12 +5296,12 @@ static void OnSessionSelChange(HWND hWnd) {
         AppendMainOperationExceptionLog("OnSessionSelChange", ex.what());
         RestoreLectureSessionStateAfterException(hWnd, previousLecturePath, previousSessionPath,
                                                 previousPdfPath, previousNotePath);
-        ReportMainOperationException(hWnd, IsEnglishUi() ? L"Switching sessions" : L"セッション切替");
+        ReportMainOperationException(hWnd, localization::Text(L"main.ui.649c6170d512").c_str());
     } catch (...) {
         AppendMainOperationExceptionLog("OnSessionSelChange", nullptr);
         RestoreLectureSessionStateAfterException(hWnd, previousLecturePath, previousSessionPath,
                                                 previousPdfPath, previousNotePath);
-        ReportMainOperationException(hWnd, IsEnglishUi() ? L"Switching sessions" : L"セッション切替");
+        ReportMainOperationException(hWnd, localization::Text(L"main.ui.649c6170d512").c_str());
     }
 }
 
@@ -5297,21 +5325,19 @@ static bool OpenNoteIfDifferent(HWND hWnd, const std::wstring& path) {
     ScopedDeferredMainWindowUiRefresh deferredUi(hWnd);
     if (!SaveNoteIfDirty(hWnd)) {
         SyncLeftPaneSelection();
-        return PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching notes" : L"ノート切替",
-                                           IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                         : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+        return PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.a68e8bfa5e55").c_str(),
+                                           localization::Text(L"main.ui.4628424dc46e").c_str());
     }
     if (!VerifyWorkspaceWritableForEditing(hWnd) ||
         !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(path).parent_path(),
-                                             L"ノート保存先フォルダ", L"Note folder")) {
+                                             L"workspace.directory.note")) {
         SyncLeftPaneSelection();
         return false;
     }
     if (!file_output::PrepareStagedDiffsForSwitch(hWnd)) {
         SyncLeftPaneSelection();
-        return PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching notes" : L"ノート切替",
-                                           IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                         : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+        return PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.a68e8bfa5e55").c_str(),
+                                           localization::Text(L"main.ui.4628424dc46e").c_str());
     }
     LoadNoteFile(hWnd, path);
     SyncBottomPaneAfterNoteLoad(hWnd);
@@ -5322,12 +5348,12 @@ static bool OpenNoteIfDifferent(HWND hWnd, const std::wstring& path) {
     } catch (const std::exception& ex) {
         AppendMainOperationExceptionLog("OpenNoteIfDifferent", ex.what());
         RestorePreviousNoteAfterException(hWnd, previousNotePath);
-        ReportMainOperationException(hWnd, IsEnglishUi() ? L"Switching notes" : L"ノート切替");
+        ReportMainOperationException(hWnd, localization::Text(L"main.ui.a68e8bfa5e55").c_str());
         return false;
     } catch (...) {
         AppendMainOperationExceptionLog("OpenNoteIfDifferent", nullptr);
         RestorePreviousNoteAfterException(hWnd, previousNotePath);
-        ReportMainOperationException(hWnd, IsEnglishUi() ? L"Switching notes" : L"ノート切替");
+        ReportMainOperationException(hWnd, localization::Text(L"main.ui.a68e8bfa5e55").c_str());
         return false;
     }
 }
@@ -5371,16 +5397,37 @@ void AutoOpenSingleSessionFiles(HWND hWnd) {
         return;
     }
     const std::wstring autoOpenPdfPath = FirstOpenablePdfListPath();
+    if (g_noteFiles.size() == 1 && !g_noteFiles.front().path.empty()) {
+        LoadNoteFile(hWnd, g_noteFiles.front().path);
+        SyncBottomPaneAfterNoteLoad(hWnd);
+    }
     if (g_pdfFiles.size() == 1 && !autoOpenPdfPath.empty()) {
         if (g_pdfPreviewActive) {
             DisableIntegratedPdfPreview(hWnd, true);
         }
         OpenPdfWithAnnotations(hWnd, autoOpenPdfPath);
     }
-    if (g_noteFiles.size() == 1 && !g_noteFiles.front().path.empty()) {
-        LoadNoteFile(hWnd, g_noteFiles.front().path);
-        SyncBottomPaneAfterNoteLoad(hWnd);
+    (void)FocusAutoOpenedSoleNoteForEditing();
+}
+
+static bool FocusAutoOpenedSoleNoteForEditing() {
+    if (ParseSessionAutoOpenMode(g_config.sessionAutoOpenMode) == SessionAutoOpenMode::Off ||
+        !g_hNoteEdit || !IsWindow(g_hNoteEdit) || g_noteFiles.size() != 1) {
+        return false;
     }
+    const std::wstring& soleNotePath = g_noteFiles.front().path;
+    if (soleNotePath.empty() || g_currentNotePath.empty() ||
+        NormalizePathKey(soleNotePath) != NormalizePathKey(g_currentNotePath)) {
+        return false;
+    }
+
+    // Focus acquisition is presentation-only.  Preserve the opening hold so
+    // the rendered note remains intact until an actual keyboard input starts
+    // editing it; never enter Vim normal mode here.
+    PreserveRenderedNoteOpeningView();
+    SetFocus(g_hNoteEdit);
+    TraceCurrentNoteFocusState(L"session_auto_open_note_focus");
+    return true;
 }
 
 bool OpenPdfIfDifferent(HWND hWnd, const std::wstring& path) {
@@ -5395,21 +5442,19 @@ bool OpenPdfIfDifferent(HWND hWnd, const std::wstring& path) {
     ScopedDeferredMainWindowUiRefresh deferredUi(hWnd);
     if (!SaveNoteIfDirty(hWnd)) {
         SyncLeftPaneSelection();
-        return PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching PDFs" : L"PDF切替",
-                                           IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                         : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+        return PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.325089e3c2a9").c_str(),
+                                           localization::Text(L"main.ui.4628424dc46e").c_str());
     }
     if (!VerifyWorkspaceWritableForEditing(hWnd) ||
         !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(path).parent_path(),
-                                             L"PDF保存先フォルダ", L"PDF folder")) {
+                                             L"workspace.directory.pdf")) {
         SyncLeftPaneSelection();
         return false;
     }
     if (!file_output::PrepareStagedDiffsForSwitch(hWnd)) {
         SyncLeftPaneSelection();
-        return PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching PDFs" : L"PDF切替",
-                                           IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                         : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+        return PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.325089e3c2a9").c_str(),
+                                           localization::Text(L"main.ui.4628424dc46e").c_str());
     }
     if (g_pdfPreviewActive) {
         DisableIntegratedPdfPreview(hWnd, true);
@@ -5426,16 +5471,17 @@ bool OpenPdfIfDifferent(HWND hWnd, const std::wstring& path) {
         return true;
     }
     SyncLeftPaneSelection();
+    RestorePdfListSelectionToCurrent();
     return false;
     } catch (const std::exception& ex) {
         AppendMainOperationExceptionLog("OpenPdfIfDifferent", ex.what());
         RestorePreviousPdfAfterException(hWnd, previousPdfPath);
-        ReportMainOperationException(hWnd, IsEnglishUi() ? L"Switching PDFs" : L"PDF切替");
+        ReportMainOperationException(hWnd, localization::Text(L"main.ui.325089e3c2a9").c_str());
         return false;
     } catch (...) {
         AppendMainOperationExceptionLog("OpenPdfIfDifferent", nullptr);
         RestorePreviousPdfAfterException(hWnd, previousPdfPath);
-        ReportMainOperationException(hWnd, IsEnglishUi() ? L"Switching PDFs" : L"PDF切替");
+        ReportMainOperationException(hWnd, localization::Text(L"main.ui.325089e3c2a9").c_str());
         return false;
     }
 }
@@ -5448,21 +5494,23 @@ static void OnNoteSelChange(HWND hWnd) {
     if (sel < 0 || sel >= static_cast<int>(g_noteFiles.size())) return;
     const auto& f = g_noteFiles[static_cast<size_t>(sel)];
     if (f.path.empty()) return;
+    TraceNoteListActivation(L"selection_change", sel,
+                            !g_currentNotePath.empty() && f.path == g_currentNotePath,
+                            false);
     if (!g_currentNotePath.empty() && f.path == g_currentNotePath) return;
     SwitchTimingScope timing(L"note_switch", f.path);
     timing.Mark(L"selected");
     if (!SaveNoteIfDirty(hWnd)) {
         timing.SetOutcome(L"cancelled_save_note");
         SyncLeftPaneSelection();
-        PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching notes" : L"ノート切替",
-                                    IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                  : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+        PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.a68e8bfa5e55").c_str(),
+                                    localization::Text(L"main.ui.4628424dc46e").c_str());
         return;
     }
     timing.Mark(L"SaveNoteIfDirty");
     if (!VerifyWorkspaceWritableForEditing(hWnd) ||
         !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(f.path).parent_path(),
-                                             L"ノート保存先フォルダ", L"Note folder")) {
+                                             L"workspace.directory.note")) {
         timing.SetOutcome(L"cancelled_verify_dir");
         SyncLeftPaneSelection();
         return;
@@ -5471,9 +5519,8 @@ static void OnNoteSelChange(HWND hWnd) {
     if (!file_output::PrepareStagedDiffsForSwitch(hWnd)) {
         timing.SetOutcome(L"cancelled_stage_before_switch");
         SyncLeftPaneSelection();
-        PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching notes" : L"ノート切替",
-                                    IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                  : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+        PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.a68e8bfa5e55").c_str(),
+                                    localization::Text(L"main.ui.4628424dc46e").c_str());
         return;
     }
     timing.Mark(L"PrepareStagedDiffsForSwitch");
@@ -5499,11 +5546,11 @@ static void OnNoteSelChange(HWND hWnd) {
     } catch (const std::exception& ex) {
         AppendMainOperationExceptionLog("OnNoteSelChange", ex.what());
         RestorePreviousNoteAfterException(hWnd, previousNotePath);
-        ReportMainOperationException(hWnd, IsEnglishUi() ? L"Switching notes" : L"ノート切替");
+        ReportMainOperationException(hWnd, localization::Text(L"main.ui.a68e8bfa5e55").c_str());
     } catch (...) {
         AppendMainOperationExceptionLog("OnNoteSelChange", nullptr);
         RestorePreviousNoteAfterException(hWnd, previousNotePath);
-        ReportMainOperationException(hWnd, IsEnglishUi() ? L"Switching notes" : L"ノート切替");
+        ReportMainOperationException(hWnd, localization::Text(L"main.ui.a68e8bfa5e55").c_str());
     }
 }
 
@@ -5512,17 +5559,21 @@ static void OnPdfSelChange(HWND hWnd) {
     try {
     fault_injection::MaybeThrow(L"OnPdfSelChange:start");
     int sel = static_cast<int>(SendMessageW(g_hPdfList, LB_GETCURSEL, 0, 0));
+    TracePdfSelectionRoute(L"on_pdf_sel_change_start", hWnd, sel);
     if (sel < 0 || sel >= static_cast<int>(g_pdfFiles.size())) return;
     const auto& f = g_pdfFiles[static_cast<size_t>(sel)];
     if (f.path.empty()) return;
     if (IsOfficeFileListPath(f.path)) {
+        TracePdfSelectionRoute(L"office_path_prompt_before", hWnd, sel);
         PromptOfficeFileListAction(hWnd, f.path);
         RestorePdfListSelectionToCurrent();
         SyncLeftPaneSelection();
+        TracePdfSelectionRoute(L"office_path_prompt_after", hWnd, sel);
         return;
     }
     if (!CurrentLogicalPdfPath().empty() && f.path == CurrentLogicalPdfPath()) {
         SyncLeftPaneSelection();
+        TracePdfSelectionRoute(L"same_pdf_selection", hWnd, sel);
         return;
     }
     SwitchTimingScope timing(L"pdf_switch", f.path);
@@ -5530,15 +5581,14 @@ static void OnPdfSelChange(HWND hWnd) {
     if (!SaveNoteIfDirty(hWnd)) {
         timing.SetOutcome(L"cancelled_save_note");
         SyncLeftPaneSelection();
-        PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching PDFs" : L"PDF切替",
-                                    IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                  : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+        PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.325089e3c2a9").c_str(),
+                                    localization::Text(L"main.ui.4628424dc46e").c_str());
         return;
     }
     timing.Mark(L"SaveNoteIfDirty");
     if (!VerifyWorkspaceWritableForEditing(hWnd) ||
         !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(f.path).parent_path(),
-                                             L"PDF保存先フォルダ", L"PDF folder")) {
+                                             L"workspace.directory.pdf")) {
         timing.SetOutcome(L"cancelled_verify_dir");
         SyncLeftPaneSelection();
         return;
@@ -5547,9 +5597,8 @@ static void OnPdfSelChange(HWND hWnd) {
     if (!file_output::PrepareStagedDiffsForSwitch(hWnd)) {
         timing.SetOutcome(L"cancelled_stage_before_switch");
         SyncLeftPaneSelection();
-        PromptStayOrOpenDiffManager(hWnd, IsEnglishUi() ? L"Switching PDFs" : L"PDF切替",
-                                    IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                                                  : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+        PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.325089e3c2a9").c_str(),
+                                    localization::Text(L"main.ui.4628424dc46e").c_str());
         return;
     }
     timing.Mark(L"PrepareStagedDiffsForSwitch");
@@ -5566,8 +5615,10 @@ static void OnPdfSelChange(HWND hWnd) {
         }
         PreparePendingLinkForPdfSwitch(hWnd);
         timing.Mark(L"PreparePendingLinkForPdfSwitch");
+        TracePdfSelectionRoute(L"open_pdf_before", hWnd, sel);
         if (OpenPdfWithAnnotations(hWnd, f.path)) {
             openedPdf = true;
+            TracePdfSelectionRoute(L"open_pdf_success", hWnd, sel);
             timing.Mark(L"OpenPdfWithAnnotations");
             SyncLeftPaneSelection();
             FlushDeferredLeftPaneSelection();
@@ -5576,6 +5627,7 @@ static void OnPdfSelChange(HWND hWnd) {
             file_output::ScheduleIntegrateAfterSwitch(hWnd);
             timing.Mark(L"ScheduleIntegrateAfterSwitch");
         } else {
+            TracePdfSelectionRoute(L"open_pdf_failed", hWnd, sel);
             timing.SetOutcome(L"failed_open_pdf");
             SyncLeftPaneSelection();
             FlushDeferredLeftPaneSelection();
@@ -5584,15 +5636,18 @@ static void OnPdfSelChange(HWND hWnd) {
     if (openedPdf) {
         timing.Mark(L"FlushDeferredMainWindowUiRefresh");
         timing.SetOutcome(L"ok");
+    } else {
+        RestorePdfListSelectionToCurrent();
+        TracePdfSelectionRoute(L"open_pdf_failed_restored_selection", hWnd, sel);
     }
     } catch (const std::exception& ex) {
         AppendMainOperationExceptionLog("OnPdfSelChange", ex.what());
         RestorePreviousPdfAfterException(hWnd, previousPdfPath);
-        ReportMainOperationException(hWnd, IsEnglishUi() ? L"Switching PDFs" : L"PDF切替");
+        ReportMainOperationException(hWnd, localization::Text(L"main.ui.325089e3c2a9").c_str());
     } catch (...) {
         AppendMainOperationExceptionLog("OnPdfSelChange", nullptr);
         RestorePreviousPdfAfterException(hWnd, previousPdfPath);
-        ReportMainOperationException(hWnd, IsEnglishUi() ? L"Switching PDFs" : L"PDF切替");
+        ReportMainOperationException(hWnd, localization::Text(L"main.ui.325089e3c2a9").c_str());
     }
 }
 
@@ -5914,31 +5969,31 @@ static bool SyncShapeKindCombo(ShapeKind kind) {
 
 static std::wstring AnnotMethodLabel(ToolMode mode) {
     switch (mode) {
-    case ToolMode::MarkerText: return IsEnglishUi() ? L"Text" : L"テキスト";
-    case ToolMode::MarkerTextUnderline: return IsEnglishUi() ? L"Underline" : L"下線";
-    case ToolMode::MarkerTextColor: return IsEnglishUi() ? L"Text color" : L"文字色";
-    case ToolMode::MarkerFree: return IsEnglishUi() ? L"Freehand" : L"フリーハンド";
-    case ToolMode::MarkerLine: return IsEnglishUi() ? L"Marker line" : L"マーカー直線";
-    case ToolMode::MarkerArrow: return IsEnglishUi() ? L"Marker arrow" : L"マーカー矢印";
-    case ToolMode::MarkerWave: return IsEnglishUi() ? L"Marker wave" : L"マーカー波線";
-    case ToolMode::Line: return IsEnglishUi() ? L"Line" : L"直線";
-    case ToolMode::Arrow: return IsEnglishUi() ? L"Arrow" : L"矢印";
-    case ToolMode::Wave: return IsEnglishUi() ? L"Wave" : L"波線";
-    case ToolMode::Freehand: return IsEnglishUi() ? L"Freehand" : L"フリーハンド";
-    case ToolMode::Shape: return IsEnglishUi() ? L"Shape" : L"図形";
-    default: return IsEnglishUi() ? L"Method" : L"描画方法";
+    case ToolMode::MarkerText: return localization::Text(L"main.ui.a197a17b5eec").c_str();
+    case ToolMode::MarkerTextUnderline: return localization::Text(L"main.ui.2ebec217715f").c_str();
+    case ToolMode::MarkerTextColor: return localization::Text(L"main.ui.1b5629273abc").c_str();
+    case ToolMode::MarkerFree: return localization::Text(L"main.ui.1dbd7c3c1815").c_str();
+    case ToolMode::MarkerLine: return localization::Text(L"main.ui.14b07299ccfa").c_str();
+    case ToolMode::MarkerArrow: return localization::Text(L"main.ui.79be0fb1524e").c_str();
+    case ToolMode::MarkerWave: return localization::Text(L"main.ui.db3af2005413").c_str();
+    case ToolMode::Line: return localization::Text(L"main.ui.692c81aaf8cd").c_str();
+    case ToolMode::Arrow: return localization::Text(L"main.ui.e12659168d5a").c_str();
+    case ToolMode::Wave: return localization::Text(L"main.ui.a13294942cb8").c_str();
+    case ToolMode::Freehand: return localization::Text(L"main.ui.1dbd7c3c1815").c_str();
+    case ToolMode::Shape: return localization::Text(L"main.ui.92cdd57cf054").c_str();
+    default: return localization::Text(L"main.ui.9830ee83e680").c_str();
     }
 }
 
 static std::wstring CorrectionPenLabel() {
-    return IsEnglishUi() ? L"Line correction" : L"線補正";
+    return localization::Text(L"main.ui.633976798904").c_str();
 }
 
 static std::wstring FreehandCorrectionModeLabel(const std::wstring& correction) {
     std::wstring mode = NormalizeCorrectionPenMode(correction);
-    if (mode == L"auto") return IsEnglishUi() ? L"Auto" : L"自動";
-    if (mode == L"hold") return IsEnglishUi() ? L"Pause" : L"静止";
-    return IsEnglishUi() ? L"Smooth" : L"ならす";
+    if (mode == L"auto") return localization::Text(L"main.ui.9957a2dbbd88").c_str();
+    if (mode == L"hold") return localization::Text(L"main.ui.278244fc5bc0").c_str();
+    return localization::Text(L"main.ui.f037f17e4024").c_str();
 }
 
 static void AddAnnotMethodComboItem(HWND combo, const std::wstring& label, int data,
@@ -5953,14 +6008,14 @@ static void AddAnnotMethodComboItem(HWND combo, const std::wstring& label, int d
 
 static std::wstring ShapeDetailLabel(ShapeDetail detail) {
     switch (detail) {
-    case ShapeDetail::Line: return IsEnglishUi() ? L"Line" : L"直線";
-    case ShapeDetail::Arrow: return IsEnglishUi() ? L"Arrow" : L"矢印";
-    case ShapeDetail::Wave: return IsEnglishUi() ? L"Wave" : L"波線";
-    case ShapeDetail::Rectangle: return IsEnglishUi() ? L"Rectangle" : L"長方形";
-    case ShapeDetail::Ellipse: return IsEnglishUi() ? L"Ellipse" : L"円／楕円";
-    case ShapeDetail::Triangle: return IsEnglishUi() ? L"Triangle" : L"三角形";
-    case ShapeDetail::Diamond: return IsEnglishUi() ? L"Diamond" : L"菱形";
-    default: return IsEnglishUi() ? L"Line" : L"直線";
+    case ShapeDetail::Line: return localization::Text(L"main.ui.692c81aaf8cd").c_str();
+    case ShapeDetail::Arrow: return localization::Text(L"main.ui.e12659168d5a").c_str();
+    case ShapeDetail::Wave: return localization::Text(L"main.ui.a13294942cb8").c_str();
+    case ShapeDetail::Rectangle: return localization::Text(L"main.ui.9117e6d6ff5f").c_str();
+    case ShapeDetail::Ellipse: return localization::Text(L"main.ui.59239acb2316").c_str();
+    case ShapeDetail::Triangle: return localization::Text(L"main.ui.b6ccd52bc893").c_str();
+    case ShapeDetail::Diamond: return localization::Text(L"main.ui.55914cda2140").c_str();
+    default: return localization::Text(L"main.ui.692c81aaf8cd").c_str();
     }
 }
 
@@ -6941,9 +6996,7 @@ static bool DiscardPendingLinkMarkersFromPdfPath(HWND owner,
     if (!loaded) {
         if (owner) {
             ShowSoftNotice(owner,
-                           IsEnglishUi()
-                               ? L"Could not remove an unfinished PDF link marker."
-                               : L"未完成のPDFリンクマーカーを削除できませんでした。",
+                           localization::Text(L"main.ui.5f020e75bbef").c_str(),
                            SoftNoticeKind::Warning);
         }
         return false;
@@ -6959,9 +7012,7 @@ static bool DiscardPendingLinkMarkersFromPdfPath(HWND owner,
     if (!clrop_bridge::SaveAnnotations(savePath.wstring(), pdfPath, annots, err)) {
         if (owner) {
             ShowSoftNotice(owner,
-                           IsEnglishUi()
-                               ? L"Could not save removal of an unfinished PDF link marker."
-                               : L"未完成のPDFリンクマーカー削除を保存できませんでした。",
+                           localization::Text(L"main.ui.9b94b4d8de16").c_str(),
                            SoftNoticeKind::Warning);
         }
         return false;
@@ -6997,9 +7048,7 @@ static bool UpdatePendingLinkMarkerNotePathInPdfPath(HWND owner,
     if (!loaded) {
         if (owner) {
             ShowSoftNotice(owner,
-                           IsEnglishUi()
-                               ? L"Could not update a cross-PDF link marker."
-                               : L"PDFをまたぐリンクマーカーを更新できませんでした。",
+                           localization::Text(L"main.ui.ad3dfa40cd3b").c_str(),
                            SoftNoticeKind::Warning);
         }
         return false;
@@ -7017,9 +7066,7 @@ static bool UpdatePendingLinkMarkerNotePathInPdfPath(HWND owner,
     if (!clrop_bridge::SaveAnnotations(savePath.wstring(), pdfPath, annots, err)) {
         if (owner) {
             ShowSoftNotice(owner,
-                           IsEnglishUi()
-                               ? L"Could not save a cross-PDF link marker update."
-                               : L"PDFをまたぐリンクマーカー更新を保存できませんでした。",
+                           localization::Text(L"main.ui.f196127adb29").c_str(),
                            SoftNoticeKind::Warning);
         }
         return false;
@@ -7230,11 +7277,11 @@ std::wstring FileDisplayLabelForPath(const std::wstring& filePath,
           s_pinnedTempNoteKeys.find(pathKey) != s_pinnedTempNoteKeys.end()));
     std::wstring prefix;
     if (pinnedTemp) {
-        prefix = IsEnglishUi() ? L"[Always] " : L"[常] ";
+        prefix = localization::Text(L"main.ui.5581ff31a58e").c_str();
     } else if (searchTemp) {
-        prefix = IsEnglishUi() ? L"[Search] " : L"[検索] ";
+        prefix = localization::Text(L"main.ui.709793f5ff93").c_str();
     } else if (hierarchyTemp) {
-        prefix = IsEnglishUi() ? L"[Temp] " : L"[一時] ";
+        prefix = localization::Text(L"main.ui.441dd4e29aa1").c_str();
     }
     std::wstring base = FilenameOrPath(path);
     size_t duplicates = 0;
@@ -7328,7 +7375,7 @@ void RefreshMainMenuBar(HWND hWnd) {
 
 std::wstring BuildStatusDisplayText() {
     if (s_statusDisplayUseCompactText) {
-        return std::wstring(IsEnglishUi() ? L"… | " : L"… | ") + BuildSaveStateStatusText();
+        return std::wstring(localization::Text(L"main.ui.eb3a8d5b7e71").c_str()) + BuildSaveStateStatusText();
     }
     std::wstring lecture = g_currentLecturePath.empty()
         ? L"-"
@@ -7360,9 +7407,12 @@ std::wstring BuildStatusDisplayText() {
     if (logicalPdfPath.empty()) pdf = L"-";
     std::wstring note = FileDisplayLabelForPath(g_currentNotePath, g_noteFiles, sessionRoot);
     if (g_currentNotePath.empty()) note = L"-";
-    std::wstring text = (g_config.studentMode ? L"講義: " : L"上位: ") + lecture +
-                        (g_config.studentMode ? L" | 回次: " : L" | 下位: ") + session +
-                        L" | PDF: " + pdf + L" | Note: " + note;
+    const std::wstring textId = g_config.studentMode
+        ? L"main.status.current_items.student"
+        : L"main.status.current_items.parent";
+    std::wstring text = localization::Format(textId, {
+        {L"LECTURE", lecture}, {L"SESSION", session}, {L"PDF", pdf}, {L"NOTE", note},
+    });
     std::wstring officeProgress = BuildOfficeConversionProgressStatusText();
     if (!officeProgress.empty()) {
         text += L" | " + officeProgress;
@@ -7522,8 +7572,9 @@ static void ShowMainSoftNotice(HWND owner, const std::wstring& text, SoftNoticeK
 }
 
 void ShowMainMessageDialog(HWND owner, const std::wstring& title,
-                                   const std::wstring& message, SoftNoticeKind kind) {
-    ShowSilentMessageDialog(MainDialogOwner(owner), title, message, kind);
+                           const std::wstring& message, SoftNoticeKind kind,
+                           const std::vector<SilentDialogPath>& paths) {
+    ShowSilentMessageDialog(MainDialogOwner(owner), title, message, kind, paths);
 }
 
 static HWND ResolveManagedAbnormalExitOwner(HWND owner) {
@@ -7547,8 +7598,8 @@ static std::wstring ManagedAbnormalExitLabel(bool ok, bool hadDirtyState,
         return IsEnglishUi() ? cleanEn : cleanJa;
     }
     return ok
-        ? (IsEnglishUi() ? L"saved to stage" : L"stage へ退避しました")
-        : (IsEnglishUi() ? L"failed to save to stage" : L"stage へ退避できませんでした");
+        ? (localization::Text(L"main.ui.b3d16374d4ce").c_str())
+        : (localization::Text(L"main.ui.e5309a032455").c_str());
 }
 
 static bool ManagedAbnormalExitTextContains(const std::wstring& text, const wchar_t* token) {
@@ -7574,9 +7625,7 @@ static void AppendManagedAbnormalExitPathBlock(std::wstringstream& ss,
 static void AppendManagedAbnormalExitStagePaths(std::wstringstream& ss) {
     const auto entries = file_output::ListStagedDiffEntries();
     if (entries.empty()) {
-        ss << (IsEnglishUi()
-                   ? L"Stage diff files:\n  (none)\n"
-                   : L"stage 差分ファイル:\n  (なし)\n");
+        ss << (localization::Text(L"main.ui.febb29819077").c_str());
         return;
     }
 
@@ -7758,7 +7807,7 @@ void ShowManagedAbnormalExitReportIfPending() {
     s_managedAbnormalExit.reportPending = false;
     if (s_managedAbnormalExit.reportText.empty()) return;
     SilentDialogOptions options;
-    options.title = IsEnglishUi() ? L"Abnormal exit report" : L"異常終了レポート";
+    options.title = localization::Text(L"main.ui.4b7d8c987f44").c_str();
     options.message = s_managedAbnormalExit.reportText;
     options.kind = SoftNoticeKind::Error;
     options.buttons = SilentDialogButtons::Ok;
@@ -7778,15 +7827,13 @@ void AppendMainOperationExceptionLog(const char* area, const char* detail) {
 
 void ReportMainOperationException(HWND owner, const wchar_t* operation) {
     std::wstring msg = operation ? operation : L"この操作";
-    msg += IsEnglishUi()
-        ? L" failed due to an unexpected internal error. The operation was canceled."
-        : L" で予期しない内部エラーが発生したため、この操作を中止しました。";
+    msg += localization::Text(L"main.ui.e4b225206f54").c_str();
     if (IsUiAutomationEnabled()) {
         ShowMainSoftNotice(owner, msg, SoftNoticeKind::Error);
         return;
     }
     ShowMainMessageDialog(owner,
-                          IsEnglishUi() ? L"Operation canceled" : L"操作を中止しました",
+                          localization::Text(L"main.ui.15eea7df3a3d").c_str(),
                           msg,
                           SoftNoticeKind::Error);
 }
@@ -7933,7 +7980,7 @@ static void ArchiveWorkspaceLogFiles(HWND owner) {
     }
     if (logFiles.empty()) {
         ShowMainSoftNotice(owner,
-                           IsEnglishUi() ? L"No log files were found." : L"ログファイルがありません。",
+                           localization::Text(L"main.ui.c24eceb143b4").c_str(),
                            SoftNoticeKind::Info);
         return;
     }
@@ -7941,7 +7988,7 @@ static void ArchiveWorkspaceLogFiles(HWND owner) {
     const std::filesystem::path logDir = WorkspaceLogDirectory();
     if (logDir.empty()) {
         ShowMainSoftNotice(owner,
-                           IsEnglishUi() ? L"No workspace is open." : L"ワークスペースが開かれていません。",
+                           localization::Text(L"main.ui.55c168692754").c_str(),
                            SoftNoticeKind::Warning);
         return;
     }
@@ -7951,17 +7998,15 @@ static void ArchiveWorkspaceLogFiles(HWND owner) {
     SaveOperationGuard guard;
     std::wstring err;
     if (!WriteWorkspaceLogZipArchive(logFiles, archivePath, &err)) {
-        std::wstring msg = IsEnglishUi()
-            ? L"Failed to create the ZIP archive."
-            : L"ZIPアーカイブの作成に失敗しました。";
+        std::wstring msg = localization::Text(L"main.ui.868fb5d67c29").c_str();
         if (!err.empty()) msg += L"\n\n" + err;
         ShowMainMessageDialog(owner, DebugMenuLabel(), msg, SoftNoticeKind::Error);
         return;
     }
 
-    std::wstring msg = IsEnglishUi()
-        ? (L"Archived " + std::to_wstring(logFiles.size()) + L" log file(s): " + archivePath.filename().wstring())
-        : (std::to_wstring(logFiles.size()) + L" 件のログを ZIP 保存しました: " + archivePath.filename().wstring());
+    std::wstring msg = localization::Format(L"main.logs.archived", {
+        { L"COUNT", std::to_wstring(logFiles.size()) }, { L"FILE", archivePath.filename().wstring() }
+    });
     ShowMainSoftNotice(owner, msg, SoftNoticeKind::Info);
 }
 
@@ -7974,7 +8019,7 @@ static void DeleteWorkspaceLogFiles(HWND owner) {
     }
     if (logFiles.empty()) {
         ShowMainSoftNotice(owner,
-                           IsEnglishUi() ? L"No log files were found." : L"ログファイルがありません。",
+                           localization::Text(L"main.ui.c24eceb143b4").c_str(),
                            SoftNoticeKind::Info);
         RefreshMainMenuBar(owner);
         return;
@@ -7986,17 +8031,12 @@ static void DeleteWorkspaceLogFiles(HWND owner) {
     dialog.buttons = SilentDialogButtons::YesNo;
     dialog.defaultResult = SilentDialogResult::No;
     dialog.escapeResult = SilentDialogResult::No;
-    dialog.yesLabel = IsEnglishUi() ? L"Delete" : L"削除";
-    dialog.noLabel = IsEnglishUi() ? L"Cancel" : L"キャンセル";
-    dialog.message = IsEnglishUi()
-        ? (L"Delete " + std::to_wstring(logFiles.size()) + L" managed log file(s) under:\n\n" +
-           WorkspaceLogDirectory().wstring() +
-           BuildWorkspaceLogDisplayList(logFiles) +
-           L"\n\nOnly app-managed local log files are removed. ZIP archives are kept.")
-        : (std::to_wstring(logFiles.size()) + L" 件の管理ログを削除します。\n\n" +
-           WorkspaceLogDirectory().wstring() +
-           BuildWorkspaceLogDisplayList(logFiles) +
-           L"\n\n削除対象はアプリ管理のローカルログのみで、ZIP アーカイブは残します。");
+    dialog.yesLabel = localization::Text(L"main.ui.8deafb711f09").c_str();
+    dialog.noLabel = localization::Text(L"main.ui.3672b0b92134").c_str();
+    dialog.message = localization::Format(L"main.logs.delete_confirm", {
+        { L"COUNT", std::to_wstring(logFiles.size()) }, { L"PATH", WorkspaceLogDirectory().wstring() },
+        { L"FILES", BuildWorkspaceLogDisplayList(logFiles) }
+    });
     if (ShowSilentDialog(owner, dialog) != SilentDialogResult::Yes) {
         return;
     }
@@ -8013,23 +8053,23 @@ static void DeleteWorkspaceLogFiles(HWND owner) {
         }
         std::wstring line = logFile.displayName + L": ";
         line += err.empty()
-            ? (IsEnglishUi() ? L"not deleted." : L"削除できませんでした。")
+            ? (localization::Text(L"main.ui.69df7e8dc916").c_str())
             : err;
         failures.push_back(std::move(line));
     }
 
     RefreshMainMenuBar(owner);
     if (failures.empty()) {
-        std::wstring msg = IsEnglishUi()
-            ? (L"Deleted " + std::to_wstring(deleted) + L" log file(s). Active logs will be recreated on the next write.")
-            : (std::to_wstring(deleted) + L" 件のログを削除しました。有効なログは次回出力時に再作成されます。");
+        std::wstring msg = localization::Format(L"main.logs.deleted", {
+            { L"COUNT", std::to_wstring(deleted) }
+        });
         ShowMainSoftNotice(owner, msg, SoftNoticeKind::Info);
         return;
     }
 
-    std::wstring msg = IsEnglishUi()
-        ? (L"Deleted " + std::to_wstring(deleted) + L" log file(s), but some files could not be removed.")
-        : (std::to_wstring(deleted) + L" 件のログを削除しましたが、一部は削除できませんでした。");
+    std::wstring msg = localization::Format(L"main.logs.deleted_partial", {
+        { L"COUNT", std::to_wstring(deleted) }
+    });
     for (const auto& line : failures) {
         msg += L"\n- " + line;
     }
@@ -8043,7 +8083,7 @@ static bool AreAllDebugLogsEnabled(const AppDebugLogConfig& cfg) {
 static void ToggleAllDebugLogs(HWND owner) {
     if (g_workspaceRoot.empty()) {
         ShowMainSoftNotice(owner,
-                           IsEnglishUi() ? L"No workspace is open." : L"ワークスペースが開かれていません。",
+                           localization::Text(L"main.ui.55c168692754").c_str(),
                            SoftNoticeKind::Warning);
         return;
     }
@@ -8058,9 +8098,7 @@ static void ToggleAllDebugLogs(HWND owner) {
     const std::filesystem::path configPath = std::filesystem::path(g_workspaceRoot) / L"workspace.json";
     if (!SaveWorkspaceConfigToFile(configPath, next)) {
         ShowMainMessageDialog(owner, DebugMenuLabel(),
-                              IsEnglishUi()
-                                  ? L"Failed to save the debug log setting."
-                                  : L"デバッグログ設定を保存できませんでした。",
+                              localization::Text(L"main.ui.897babaee233").c_str(),
                               SoftNoticeKind::Warning);
         return;
     }
@@ -8069,12 +8107,8 @@ static void ToggleAllDebugLogs(HWND owner) {
     RefreshMainMenuBar(owner);
     ShowMainSoftNotice(owner,
                        enable
-                           ? (IsEnglishUi()
-                                  ? L"Debug logs will be ON after the next restart."
-                                  : L"デバッグログは次回起動時に ON になります。")
-                           : (IsEnglishUi()
-                                  ? L"Debug logs will be OFF after the next restart."
-                                  : L"デバッグログは次回起動時に OFF になります。"),
+                           ? (localization::Text(L"main.ui.57f107510879").c_str())
+                           : (localization::Text(L"main.ui.9bb2d5b0119e").c_str()),
                        SoftNoticeKind::Info);
 }
 
@@ -8083,15 +8117,15 @@ static std::wstring BuildSaveStateStatusText() {
     // Internal/background stage writes also use SaveOperationGuard, but showing
     // them here can leave the status text stuck until another manual refresh.
     if (IsSaveTransactionRunning()) {
-        return IsEnglishUi() ? L"Save: background" : L"保存: バックグラウンド中";
+        return localization::Text(L"main.ui.b72711042efd").c_str();
     }
 
     std::vector<std::wstring> parts;
     if (g_noteDirty) {
-        parts.push_back(IsEnglishUi() ? L"note unsaved" : L"ノート未保存");
+        parts.push_back(localization::Text(L"main.ui.bfe820b2434c").c_str());
     }
     if (g_annotsDirty) {
-        parts.push_back(IsEnglishUi() ? L"annotations unsaved" : L"注釈未保存");
+        parts.push_back(localization::Text(L"main.ui.5853d49b9f69").c_str());
     }
 
     size_t noteStageCount = 0;
@@ -8105,21 +8139,21 @@ static std::wstring BuildSaveStateStatusText() {
     }
 
     if (noteStageCount > 0) {
-        parts.push_back((IsEnglishUi() ? L"note staged " : L"未統合ノート ") +
+        parts.push_back((localization::Text(L"main.ui.c86028732c1b").c_str()) +
                         std::to_wstring(noteStageCount));
     }
     if (clropStageCount > 0) {
-        parts.push_back((IsEnglishUi() ? L"annotations staged " : L"未統合注釈 ") +
+        parts.push_back((localization::Text(L"main.ui.9df1818ba9b1").c_str()) +
                         std::to_wstring(clropStageCount));
     }
 
     if (parts.empty()) {
-        return IsEnglishUi() ? L"Save: clean" : L"保存: クリーン";
+        return localization::Text(L"main.ui.21c807f4d25c").c_str();
     }
 
-    std::wstring text = IsEnglishUi() ? L"Save: " : L"保存: ";
+    std::wstring text = localization::Text(L"main.ui.0c694fa8b2e3").c_str();
     for (size_t i = 0; i < parts.size(); ++i) {
-        if (i > 0) text += IsEnglishUi() ? L" / " : L" / ";
+        if (i > 0) text += localization::Text(L"main.ui.5ae737320c0d").c_str();
         text += parts[i];
     }
     return text;
@@ -8134,8 +8168,8 @@ static std::wstring BuildOfficeConversionProgressStatusText() {
 
     const bool finishing = s_officeConversionProgress.finishingProcessTree;
     std::wstring text = finishing
-        ? (IsEnglishUi() ? L"Finishing: " : L"終了待ち: ")
-        : (IsEnglishUi() ? L"Converting: " : L"変換中: ");
+        ? (localization::Text(L"main.ui.1dbc3c466305").c_str())
+        : (localization::Text(L"main.ui.abea31ab6b6f").c_str());
     size_t current = s_officeConversionProgress.current;
     size_t total = s_officeConversionProgress.total;
     if (total > 0) {
@@ -8155,14 +8189,12 @@ static std::wstring BuildOfficeConversionProgressStatusText() {
     }
     text += L" ";
     text += std::to_wstring(elapsedSec);
-    text += IsEnglishUi() ? L"s" : L"秒";
+    text += localization::Text(L"main.ui.ca7fc6a1fcc2").c_str();
     if (finishing) {
-        text += IsEnglishUi()
-            ? L" / waiting for LibreOffice exit"
-            : L" / LibreOffice終了待ち";
+        text += localization::Text(L"main.ui.9734090a5c25").c_str();
         if (s_officeConversionProgress.activeProcessCount > 0) {
             text += L" (" + std::to_wstring(s_officeConversionProgress.activeProcessCount) +
-                    (IsEnglishUi() ? L" proc)" : L" プロセス)");
+                    (localization::Text(L"main.ui.146f796dfc46").c_str());
         }
     }
     return text;
@@ -8171,9 +8203,7 @@ static std::wstring BuildOfficeConversionProgressStatusText() {
 static void RefreshOfficeConversionProgressWindowText() {
     if (!s_officeConversionProgress.label) return;
     std::wstring text = BuildOfficeConversionProgressStatusText();
-    text += IsEnglishUi()
-        ? L"\nThe source file is unchanged. You can safely cancel the conversion."
-        : L"\n変換元ファイルは変更しません。安全に中止できます。";
+    text += localization::Text(L"main.ui.418b815fd3bc").c_str();
     SetWindowTextW(s_officeConversionProgress.label, text.c_str());
 }
 
@@ -8185,13 +8215,11 @@ void RequestOfficeConversionCancel(bool closeOwnerAfterEnd) {
     if (s_officeConversionProgress.cancelButton) {
         EnableWindow(s_officeConversionProgress.cancelButton, FALSE);
         SetWindowTextW(s_officeConversionProgress.cancelButton,
-                       IsEnglishUi() ? L"Stopping..." : L"中止処理中...");
+                       localization::Text(L"main.ui.eccfe8f6b569").c_str());
     }
     if (s_officeConversionProgress.label) {
         SetWindowTextW(s_officeConversionProgress.label,
-                       IsEnglishUi()
-                           ? L"Stopping LibreOffice..."
-                           : L"LibreOfficeを停止しています...");
+                       localization::Text(L"main.ui.561271a5877f").c_str());
     }
 }
 
@@ -8211,7 +8239,7 @@ static LRESULT CALLBACK OfficeConversionProgressProc(HWND hWnd, UINT msg,
             0, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE | PBS_MARQUEE,
             18, 72, 474, 18, hWnd, nullptr, g_hInst, nullptr);
         s_officeConversionProgress.cancelButton = CreateWindowExW(
-            0, L"BUTTON", IsEnglishUi() ? L"Cancel" : L"中止",
+            0, L"BUTTON", localization::Text(L"main.ui.469c960d152d").c_str(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
             392, 104, 100, 30, hWnd, reinterpret_cast<HMENU>(IDCANCEL), g_hInst, nullptr);
         SetUIFont(s_officeConversionProgress.label);
@@ -8283,7 +8311,7 @@ static bool ShowOfficeConversionProgressWindow(HWND owner) {
     HWND window = CreateWindowExW(
         WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
         wc.lpszClassName,
-        IsEnglishUi() ? L"Office to PDF conversion (Experimental)" : L"Office PDF変換（試験的）",
+        localization::Text(L"main.ui.ea91551e7c9f").c_str(),
         WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
         x, y, width, height, dialogOwner, nullptr, g_hInst, nullptr);
     if (!window) {

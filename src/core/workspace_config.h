@@ -87,11 +87,14 @@ struct WorkspaceConfig {
     std::wstring sessionNumberingMode = L"count"; // "count" | "max_number"
     std::wstring sessionAutoOpenMode = L"edit"; // auto-open the sole PDF and note in a session
     bool sessionAutoOpenPairLinked = false;
+    // Opt-in only. Sample workspaces use this to select the first session on a
+    // first launch with no restorable last-open target.
+    bool startupSelectFirstSession = false;
     bool noteRenderEnabled = true;
     bool noteRawOnly = false;
     bool noteRenderMath = false;
     bool noteWrapEnabled = true;
-    bool noteVimModeEnabled = true;
+    bool noteVimModeEnabled = false;
     bool noteVimCaretLineRawTextVisible = false;
     bool noteVimClickEntersInsertMode = true;
     // Delay after the latest edit before refreshing the rendered note overlay.
@@ -174,7 +177,9 @@ struct WorkspaceConfig {
     COLORREF markerFreeColor = RGB(255, 140, 0);
     COLORREF markerTextColor = RGB(255, 140, 0);
     COLORREF paletteCustomColor = RGB(128, 128, 128);
-    std::wstring magnifierShape = L"circle"; // "circle" | "square"
+    std::wstring magnifierShape = L"circle"; // "circle" | "square" | "horizontal"
+    double magnifierZoom = 2.0;
+    int magnifierSizeDip = 120;
     COLORREF shapeColor = RGB(255, 140, 0);
     std::wstring shapeDetail = L"line";
     std::wstring shapeKind = L"rectangle";

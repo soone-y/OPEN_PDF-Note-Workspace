@@ -1,6 +1,7 @@
 #include "ui/dialogs/annot_math_panel.h"
 
 #include "core/app_core.h"
+#include "core/localization.h"
 #include "core/font_list.h"
 #include "pdf_view/pdf_view.h"
 #include "bridge/view_bridge.h"
@@ -111,7 +112,7 @@ std::wstring AnnotTypeLabel(const Annotation& ann) {
     const auto& ui = GetUiText();
     switch (ann.type) {
     case Annotation::Type::MarkerText: return ui.btnModeMarker;
-    case Annotation::Type::TextColor: return IsEnglishUi() ? L"Text color" : L"文字色";
+    case Annotation::Type::TextColor: return localization::Text(L"ui.annot_math.1b5629273abc").c_str();
     case Annotation::Type::MarkerFree: return ui.btnModeMarkerFree;
     case Annotation::Type::TextBox: return ui.btnModeText;
     case Annotation::Type::Line: return ui.btnModeLine;
@@ -119,10 +120,10 @@ std::wstring AnnotTypeLabel(const Annotation& ann) {
     case Annotation::Type::Wave: return ui.btnModeWave;
     case Annotation::Type::Freehand: return ui.btnModeFreehand;
     case Annotation::Type::Shape: return ui.btnModeShape;
-    case Annotation::Type::LinkMarker: return IsEnglishUi() ? L"Link" : L"リンク";
-    case Annotation::Type::MathBox: return IsEnglishUi() ? L"Math" : L"数式";
+    case Annotation::Type::LinkMarker: return localization::Text(L"ui.annot_math.bddbdc2ea3b0").c_str();
+    case Annotation::Type::MathBox: return localization::Text(L"ui.annot_math.13f90b190e75").c_str();
     default:
-        return IsEnglishUi() ? L"Annotation" : L"注釈";
+        return localization::Text(L"ui.annot_math.9aee0c26e8be").c_str();
     }
 }
 
@@ -149,20 +150,20 @@ std::wstring AnnotListLabel(const Annotation& ann) {
     } else if (ann.type == Annotation::Type::Shape) {
         std::wstring shapeLabel;
         switch (ann.shapeKind) {
-        case ShapeKind::Square: shapeLabel = IsEnglishUi() ? L"Square" : L"正方形"; break;
-        case ShapeKind::Rectangle: shapeLabel = IsEnglishUi() ? L"Rectangle" : L"長方形"; break;
-        case ShapeKind::Diamond: shapeLabel = IsEnglishUi() ? L"Diamond" : L"菱形"; break;
-        case ShapeKind::EquilateralTriangle: shapeLabel = IsEnglishUi() ? L"Equilateral" : L"正三角形"; break;
-        case ShapeKind::Triangle: shapeLabel = IsEnglishUi() ? L"Triangle" : L"三角形"; break;
-        case ShapeKind::Ellipse: shapeLabel = IsEnglishUi() ? L"Ellipse" : L"円"; break;
-        case ShapeKind::Circle: shapeLabel = IsEnglishUi() ? L"Circle" : L"正円"; break;
-        case ShapeKind::RotatedEllipse: shapeLabel = IsEnglishUi() ? L"Rotated ellipse" : L"斜め円"; break;
+        case ShapeKind::Square: shapeLabel = localization::Text(L"ui.annot_math.06b65b92aa7f").c_str(); break;
+        case ShapeKind::Rectangle: shapeLabel = localization::Text(L"ui.annot_math.9117e6d6ff5f").c_str(); break;
+        case ShapeKind::Diamond: shapeLabel = localization::Text(L"ui.annot_math.55914cda2140").c_str(); break;
+        case ShapeKind::EquilateralTriangle: shapeLabel = localization::Text(L"ui.annot_math.d826b2725d8a").c_str(); break;
+        case ShapeKind::Triangle: shapeLabel = localization::Text(L"ui.annot_math.b6ccd52bc893").c_str(); break;
+        case ShapeKind::Ellipse: shapeLabel = localization::Text(L"ui.annot_math.3526a0625382").c_str(); break;
+        case ShapeKind::Circle: shapeLabel = localization::Text(L"ui.annot_math.60bceaee61a7").c_str(); break;
+        case ShapeKind::RotatedEllipse: shapeLabel = localization::Text(L"ui.annot_math.e3f9e9d7366f").c_str(); break;
         default: break;
         }
         if (!shapeLabel.empty()) {
             label += L": " + shapeLabel;
             if (ann.shapeDrawMode == ShapeDrawMode::Outline) {
-                label += IsEnglishUi() ? L" / Outline" : L" / 枠線";
+                label += localization::Text(L"ui.annot_math.fa5e9ce1acaa").c_str();
             }
         }
     } else if (ann.type == Annotation::Type::LinkMarker) {
@@ -1024,7 +1025,7 @@ void ShowAnnotationInspector(HWND owner, int annotationIndex, bool editMode) {
     x = std::clamp(x, workLeft, std::max(workLeft, workRight - kDialogWidth));
     y = std::clamp(y, workTop, std::max(workTop, workBottom - kDialogHeight));
     HWND dialog = CreateWindowExW(WS_EX_TOOLWINDOW, L"PdfNoteAnnotInspector",
-                                  IsEnglishUi() ? L"Annotation properties" : L"注釈プロパティ",
+                                  localization::Text(L"ui.annot_math.6e745bc1653d").c_str(),
                                   WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                                   x, y, kDialogWidth, kDialogHeight, ctx->owner, nullptr, g_hInst, ctx);
     if (!dialog) delete ctx;
@@ -1066,26 +1067,26 @@ bool ShowAnnotPanelContextMenu(HWND owner, POINT screenPt) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return false;
     AppendMenuW(menu, MF_STRING, kAnnotPanelContextProperties,
-                IsEnglishUi() ? L"Properties" : L"プロパティ");
+                localization::Text(L"ui.annot_math.735d8de5a085").c_str());
     AppendMenuW(menu, MF_STRING | (writable ? 0 : MF_GRAYED), kAnnotPanelContextEdit,
-                IsEnglishUi() ? L"Edit" : L"編集");
+                localization::Text(L"ui.annot_math.a594f14542df").c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kAnnotPanelContextMove,
-                IsEnglishUi() ? L"Go to annotation" : L"この注釈へ移動");
+                localization::Text(L"ui.annot_math.ddcd1b04d392").c_str());
     AppendMenuW(menu, MF_STRING | (canOpenLink ? 0 : MF_GRAYED), kAnnotPanelContextOpenLink,
-                IsEnglishUi() ? L"Open linked note" : L"リンクを開く");
+                localization::Text(L"ui.annot_math.0a4fac6c5b28").c_str());
     AppendMenuW(menu, MF_STRING | (canCopy ? 0 : MF_GRAYED), kAnnotPanelContextCopy,
-                IsEnglishUi() ? L"Copy text" : L"コピー");
+                localization::Text(L"ui.annot_math.e2bd713f3599").c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (writable ? 0 : MF_GRAYED), kAnnotPanelContextDuplicate,
-                IsEnglishUi() ? L"Duplicate" : L"複製");
+                localization::Text(L"ui.annot_math.304aba35dc7a").c_str());
     AppendMenuW(menu, MF_STRING | (writable && canBringFront ? 0 : MF_GRAYED),
-                kAnnotPanelContextBringFront, IsEnglishUi() ? L"Bring to front" : L"最前面へ");
+                kAnnotPanelContextBringFront, localization::Text(L"ui.annot_math.5ff7425b7b1b").c_str());
     AppendMenuW(menu, MF_STRING | (writable && canSendBack ? 0 : MF_GRAYED),
-                kAnnotPanelContextSendBack, IsEnglishUi() ? L"Send to back" : L"最背面へ");
+                kAnnotPanelContextSendBack, localization::Text(L"ui.annot_math.42df70c5dc7d").c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (writable ? 0 : MF_GRAYED), kAnnotPanelContextDelete,
-                IsEnglishUi() ? L"Delete" : L"削除");
+                localization::Text(L"ui.annot_math.8deafb711f09").c_str());
     const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                                         screenPt.x, screenPt.y, 0, owner, nullptr);
     DestroyMenu(menu);

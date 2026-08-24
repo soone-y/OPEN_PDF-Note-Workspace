@@ -1,8 +1,10 @@
 // file: schedule.cpp
 #include "schedule/schedule.h"
+#include "core/localization.h"
 
 #include "core/app_core.h"
 #include "core/atomic_write.h"
+#include "core/localization.h"
 #include "ui/combobox_guard.h"
 
 #include <algorithm>
@@ -249,9 +251,14 @@ static std::vector<int> BuildEnabledDayIndices(int mask) {
 
 static std::vector<std::wstring> BuildDayLabels(const std::vector<int>& dayIndices) {
     std::vector<std::wstring> labels;
-    const std::vector<std::wstring> ja = { L"月", L"火", L"水", L"木", L"金", L"土", L"日" };
-    const std::vector<std::wstring> en = { L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat", L"Sun" };
-    const auto& base = IsEnglishUi() ? en : ja;
+    const std::vector<std::wstring> base = {
+        localization::Text(L"settings.schedule.day.mon"),
+        localization::Text(L"settings.schedule.day.tue"),
+        localization::Text(L"settings.schedule.day.wed"),
+        localization::Text(L"settings.schedule.day.thu"),
+        localization::Text(L"settings.schedule.day.fri"),
+        localization::Text(L"settings.schedule.day.sat"),
+        localization::Text(L"settings.schedule.day.sun")};
     for (int idx : dayIndices) {
         if (idx >= 0 && idx < static_cast<int>(base.size())) {
             labels.push_back(base[static_cast<size_t>(idx)]);
@@ -262,10 +269,7 @@ static std::vector<std::wstring> BuildDayLabels(const std::vector<int>& dayIndic
 
 static std::wstring BuildPeriodLabel(int index) {
     int n = index + 1;
-    if (IsEnglishUi()) {
-        return L"P" + std::to_wstring(n);
-    }
-    return std::to_wstring(n) + L"限";
+    return localization::Format(L"settings.schedule.period", {{L"COUNT", std::to_wstring(n)}});
 }
 
 static std::vector<std::wstring> CollectLectureNames() {
@@ -542,10 +546,11 @@ void ShowScheduleWindow(HWND parent) {
         WS_EX_DLGMODALFRAME,
         wc.lpszClassName,
         GetUiText().menuLectureSchedule.c_str(),
-        WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+        WS_CAPTION | WS_POPUPWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, width, height,
         parent, nullptr, g_hInst, nullptr);
     if (g_hScheduleWnd) {
+        PlaceOwnedPopupAtAppTopLeft(g_hScheduleWnd, parent);
         ShowWindow(g_hScheduleWnd, SW_SHOW);
         UpdateWindow(g_hScheduleWnd);
     }
@@ -565,9 +570,14 @@ void ShowGlobalMemoWindow(HWND parent) {
     wc.lpszClassName = L"PdfNoteGlobalMemoWnd";
     RegisterClassW(&wc);
     g_hGlobalMemoWnd = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName,
-        IsEnglishUi() ? L"Global deadlines and memos" : L"全体メモ・締切管理",
-        WS_CAPTION | WS_SYSMENU | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 780, 530,
+        localization::Text(L"schedule.global_memo_title").c_str(),
+        WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 780, 530,
         parent, nullptr, g_hInst, nullptr);
+    if (g_hGlobalMemoWnd) {
+        PlaceOwnedPopupAtAppTopLeft(g_hGlobalMemoWnd, parent);
+        ShowWindow(g_hGlobalMemoWnd, SW_SHOW);
+        UpdateWindow(g_hGlobalMemoWnd);
+    }
 }
 
 

@@ -1,4 +1,5 @@
 #include "workspace/workspace_config_io.h"
+#include "core/localization.h"
 #include "core/app_core.h"
 #include "ui/core/main_window_api.h"
 #include "ui/dialogs/dialogs.h"
@@ -152,6 +153,8 @@ void ApplyConfigToUI(HWND hWnd) {
     SyncUserPaletteToRuntime();
     SyncUserToolShortcutsToRuntime();
     g_magnifierShape = ParseMagnifierShape(g_config.magnifierShape);
+    g_magnifierZoom = std::clamp(g_config.magnifierZoom, 1.25, 4.0);
+    g_magnifierSizeDip = std::clamp(g_config.magnifierSizeDip, 80, 240);
     g_shapeKind = ParseShapeKind(g_config.shapeKind);
     g_shapeDrawMode = ParseShapeDrawMode(g_config.shapeDrawMode);
     const auto firstAvailableMode = [](ToolMode fallback, auto predicate) {
@@ -267,6 +270,10 @@ void ApplyConfigToUI(HWND hWnd) {
     if (g_hChkTextAutoWrap) {
         SendMessageW(g_hChkTextAutoWrap, BM_SETCHECK,
                      g_textBoxAutoWrap ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    if (g_hChkPanMouseWheelZoom) {
+        SendMessageW(g_hChkPanMouseWheelZoom, BM_SETCHECK,
+                     g_config.panMouseWheelZoom ? BST_CHECKED : BST_UNCHECKED, 0);
     }
     selectComboByData(g_hComboMarkerAlpha, static_cast<DWORD_PTR>(std::llround(ToolAlphaForMode(g_toolMode) * 1000.0)));
     selectComboByData(g_hComboMarkerTextStyle, static_cast<DWORD_PTR>(g_markerTextUnderline ? 1 : 0));
@@ -434,16 +441,12 @@ void ShowTempExternalLectureAccessWarning(HWND owner,
     if (!key.empty() && s_tempExternalAccessWarned.find(key) != s_tempExternalAccessWarned.end()) return;
     if (!key.empty()) s_tempExternalAccessWarned.insert(key);
 
-    std::wstring msg = IsEnglishUi()
-        ? L"Temporary external lecture path cannot be used because access failed.\n\npath:\n" + dir.wstring()
-        : std::wstring(g_config.studentMode
-                           ? L"一時外部授業パスにアクセスできないため、このパスは今回使用しません。\n\npath:\n"
-                           : L"一時外部上位項目パスにアクセスできないため、このパスは今回使用しません。\n\npath:\n") + dir.wstring();
-    msg += IsEnglishUi()
-        ? L"\n\nThe registration is not removed automatically. Check folder permissions, removable drive state, or security policy. If this path is no longer needed, remove it from the temporary external lecture list."
-        : (g_config.studentMode
-               ? L"\n\n登録は自動削除しません。フォルダ権限、外部ドライブの接続状態、セキュリティ制御を確認してください。不要な場合は一時外部授業リストから削除してください。"
-               : L"\n\n登録は自動削除しません。フォルダ権限、外部ドライブの接続状態、セキュリティ制御を確認してください。不要な場合は一時外部上位項目リストから削除してください。");
+    std::wstring msg = localization::Format(g_config.studentMode
+        ? L"workspace.config.temp_external.access_failed.student"
+        : L"workspace.config.temp_external.access_failed.parent", {{L"PATH", dir.wstring()}});
+    msg += localization::Text(g_config.studentMode
+        ? L"workspace.config.temp_external.access_guidance.student"
+        : L"workspace.config.temp_external.access_guidance.parent");
     if (!detail.empty()) msg += L"\n\n" + detail;
     ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
 }
@@ -579,33 +582,26 @@ bool EnsureWorkspaceResourceDirs(std::filesystem::path* settingsDir) {
 bool VerifyWorkspaceWritableForEditing(HWND owner) {
     std::wstring err;
     if (EnsureWorkspaceResourceDirsWithErr(g_workspaceRoot, nullptr, &err)) return true;
-    std::wstring msg = IsEnglishUi()
-        ? L"Workspace is not writable.\nThis operation is canceled and no edit/open action is performed.\n\nroot:\n" + g_workspaceRoot
-        : L"ワークスペースに書き込みできません。\nこの操作は中断され、編集/オープン処理は行いません。\n\nroot:\n" + g_workspaceRoot;
-    msg += IsEnglishUi()
-        ? L"\n\nCheck access control / security policy for this folder."
-        : L"\n\nこのフォルダのアクセス権・セキュリティ制御を確認してください。";
+    std::wstring msg = localization::Format(L"workspace.config.not_writable", {{L"ROOT", g_workspaceRoot}});
+    msg += localization::Text(L"workspace.config_io.f9e597c9cfc2").c_str();
     if (!err.empty()) msg += L"\n\n" + err;
     ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
     return false;
 }
 
-bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path& dir, const wchar_t* labelJa, const wchar_t* labelEn) {
+bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path& dir, const wchar_t* labelId) {
+    const std::wstring label = localization::Text(labelId ? labelId : L"workspace.directory.folder");
     std::wstring readErr;
     if (!TryOpenDirForList(dir, &readErr)) {
         ForgetWritableProbe(dir);
-        std::wstring msg = IsEnglishUi()
-            ? std::wstring(labelEn ? labelEn : L"Folder") + L" is not readable.\nThis operation is canceled and no edit/open action is performed.\n\npath:\n" + dir.wstring()
-            : std::wstring(labelJa ? labelJa : L"フォルダ") + L"を読み込めません。\nこの操作は中断され、編集/オープン処理は行いません。\n\npath:\n" + dir.wstring();
-        msg += IsEnglishUi()
-            ? L"\n\nCheck access control / security policy for this folder."
-            : L"\n\nこのフォルダのアクセス権・セキュリティ制御を確認してください。";
+        std::wstring msg = localization::Format(L"workspace.config.directory.not_readable",
+                                                {{L"LABEL", label}, {L"PATH", dir.wstring()}});
+        msg += localization::Text(L"workspace.config_io.f9e597c9cfc2").c_str();
         if (!readErr.empty()) msg += L"\n\n" + readErr;
         if (IsTempExternalLecturePath(dir.wstring())) {
-            msg += IsEnglishUi()
-                ? L"\n\nThis temporary external lecture registration is not removed automatically."
-                : (g_config.studentMode ? L"\n\nこの一時外部授業の登録は自動削除しません。"
-                                        : L"\n\nこの一時外部上位項目の登録は自動削除しません。");
+            msg += localization::Text(g_config.studentMode
+                ? L"workspace.config.temp_external.registration_kept.student"
+                : L"workspace.config.temp_external.registration_kept.parent");
         }
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
@@ -613,18 +609,14 @@ bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path
     std::wstring writeErr;
     if (!IsWritableProbeCached(dir) && !TryWriteTempDeleteOnCloseFile(dir, &writeErr)) {
         ForgetWritableProbe(dir);
-        std::wstring msg = IsEnglishUi()
-            ? std::wstring(labelEn ? labelEn : L"Folder") + L" is not writable.\nThis operation is canceled and no edit/open action is performed.\n\npath:\n" + dir.wstring()
-            : std::wstring(labelJa ? labelJa : L"フォルダ") + L"に書き込みできません。\nこの操作は中断され、編集/オープン処理は行いません。\n\npath:\n" + dir.wstring();
-        msg += IsEnglishUi()
-            ? L"\n\nCheck access control / security policy for this folder."
-            : L"\n\nこのフォルダのアクセス権・セキュリティ制御を確認してください。";
+        std::wstring msg = localization::Format(L"workspace.config.directory.not_writable",
+                                                {{L"LABEL", label}, {L"PATH", dir.wstring()}});
+        msg += localization::Text(L"workspace.config_io.f9e597c9cfc2").c_str();
         if (!writeErr.empty()) msg += L"\n\n" + writeErr;
         if (IsTempExternalLecturePath(dir.wstring())) {
-            msg += IsEnglishUi()
-                ? L"\n\nThis temporary external lecture registration is not removed automatically."
-                : (g_config.studentMode ? L"\n\nこの一時外部授業の登録は自動削除しません。"
-                                        : L"\n\nこの一時外部上位項目の登録は自動削除しません。");
+            msg += localization::Text(g_config.studentMode
+                ? L"workspace.config.temp_external.registration_kept.student"
+                : L"workspace.config.temp_external.registration_kept.parent");
         }
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
@@ -723,7 +715,7 @@ void SaveSettingsPreset(HWND hWnd) {
     std::filesystem::path presetPath = settingsDir / fileName;
     std::error_code existsEc;
     if (std::filesystem::exists(presetPath, existsEc) && !existsEc) {
-        std::wstring msg = L"既に存在します。上書きしますか？\n\n" + presetPath.wstring();
+        std::wstring msg = L"既に存在します。上書きしますか？";
         SilentDialogOptions options;
         options.title = ui.menuSettings;
         options.message = msg;
@@ -731,6 +723,7 @@ void SaveSettingsPreset(HWND hWnd) {
         options.buttons = SilentDialogButtons::YesNo;
         options.defaultResult = SilentDialogResult::No;
         options.escapeResult = SilentDialogResult::No;
+        options.paths = {{L"", presetPath.wstring()}};
         if (ShowSilentDialog(hWnd, options) != SilentDialogResult::Yes) {
             return;
         }
@@ -767,9 +760,10 @@ void LoadSettingsPreset(HWND hWnd) {
     std::wstring err;
     auto loaded = LoadWorkspaceConfigFromFile(std::filesystem::path(*picked), &err);
     if (!loaded) {
-        std::wstring msg = L"設定プリセットの読み込みに失敗しました。\n\n" + std::filesystem::path(*picked).wstring();
+        std::wstring msg = L"設定プリセットの読み込みに失敗しました。";
         if (!err.empty()) msg += L"\n\n理由:\n" + err;
-        ShowSilentMessageDialog(hWnd, ui.menuSettings, msg, SoftNoticeKind::Warning);
+        ShowSilentMessageDialog(hWnd, ui.menuSettings, msg, SoftNoticeKind::Warning,
+                                {{L"", std::filesystem::path(*picked).wstring()}});
         return;
     }
     WorkspaceConfig preset = *loaded;
@@ -1077,12 +1071,13 @@ static bool PickSettingsBundleSavePath(HWND owner, std::filesystem::path* outPat
     IFileSaveDialog* dialog = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
     if (FAILED(hr) || !dialog) return false;
-    dialog->SetTitle(IsEnglishUi()
-        ? L"Export user settings for version migration"
-        : L"バージョン更新用にユーザー設定を書き出し");
+    const std::wstring title = localization::Text(L"workspace.config_io.cb4ee15d2058").c_str();
+    const std::wstring settingsFilter = localization::Text(L"workspace.config_io.a22471ca2933").c_str();
+    const std::wstring allFilesFilter = localization::Text(L"workspace.config_io.4de7ee3c7424").c_str();
+    dialog->SetTitle(title.c_str());
     COMDLG_FILTERSPEC filters[] = {
-        {IsEnglishUi() ? L"PDF Note settings transfer bundle (*.pnssettings)" : L"PDF Note 設定引き継ぎファイル (*.pnssettings)", L"*.pnssettings"},
-        {IsEnglishUi() ? L"All files (*.*)" : L"すべてのファイル (*.*)", L"*.*"}
+        {settingsFilter.c_str(), L"*.pnssettings"},
+        {allFilesFilter.c_str(), L"*.*"}
     };
     dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
     dialog->SetDefaultExtension(L"pnssettings");
@@ -1122,12 +1117,13 @@ static bool PickSettingsBundleOpenPath(HWND owner, std::filesystem::path* outPat
     IFileOpenDialog* dialog = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
     if (FAILED(hr) || !dialog) return false;
-    dialog->SetTitle(IsEnglishUi()
-        ? L"Import user settings from a previous version"
-        : L"以前のバージョンのユーザー設定を読み込み");
+    const std::wstring title = localization::Text(L"workspace.config_io.84ddc690eb58").c_str();
+    const std::wstring settingsFilter = localization::Text(L"workspace.config_io.a22471ca2933").c_str();
+    const std::wstring allFilesFilter = localization::Text(L"workspace.config_io.4de7ee3c7424").c_str();
+    dialog->SetTitle(title.c_str());
     COMDLG_FILTERSPEC filters[] = {
-        {IsEnglishUi() ? L"PDF Note settings transfer bundle (*.pnssettings)" : L"PDF Note 設定引き継ぎファイル (*.pnssettings)", L"*.pnssettings"},
-        {IsEnglishUi() ? L"All files (*.*)" : L"すべてのファイル (*.*)", L"*.*"}
+        {settingsFilter.c_str(), L"*.pnssettings"},
+        {allFilesFilter.c_str(), L"*.*"}
     };
     dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
     FILEOPENDIALOGOPTIONS options{};
@@ -1391,7 +1387,7 @@ bool ImportAllUserSettingsFromFile(const std::filesystem::path& inputPath, std::
 
 void ExportAllUserSettings(HWND hWnd) {
     if (g_workspaceRoot.empty()) {
-        ShowSoftNotice(hWnd, IsEnglishUi() ? L"No workspace is open." : L"ワークスペースが開かれていません。",
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.config_io.55c168692754").c_str(),
                        SoftNoticeKind::Warning);
         return;
     }
@@ -1399,23 +1395,19 @@ void ExportAllUserSettings(HWND hWnd) {
     if (!PickSettingsBundleSavePath(hWnd, &outputPath)) return;
     std::wstring err;
     if (!ExportAllUserSettingsToFile(outputPath, &err)) {
-        std::wstring msg = IsEnglishUi()
-            ? L"Could not export the user settings transfer file."
-            : L"設定引き継ぎファイルを書き出せませんでした。";
+        std::wstring msg = localization::Text(L"workspace.config_io.59f0b7d1f221").c_str();
         if (!err.empty()) msg += L"\n\n" + err;
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
         return;
     }
     ShowSoftNotice(hWnd,
-                   (IsEnglishUi()
-                        ? L"Exported a settings transfer file for version updates:\n"
-                        : L"バージョン更新時に引き継げる設定ファイルを書き出しました:\n") +
+                   (localization::Text(L"workspace.config_io.d573cf2c8ffb").c_str()) +
                    outputPath.wstring());
 }
 
 void ImportAllUserSettings(HWND hWnd) {
     if (g_workspaceRoot.empty()) {
-        ShowSoftNotice(hWnd, IsEnglishUi() ? L"No workspace is open." : L"ワークスペースが開かれていません。",
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.config_io.55c168692754").c_str(),
                        SoftNoticeKind::Warning);
         return;
     }
@@ -1423,17 +1415,13 @@ void ImportAllUserSettings(HWND hWnd) {
     if (!PickSettingsBundleOpenPath(hWnd, &inputPath)) return;
     std::wstring err;
     if (!ImportAllUserSettingsFromFile(inputPath, &err)) {
-        std::wstring msg = IsEnglishUi()
-            ? L"Could not import the user settings transfer file. Existing settings were kept or restored from backup."
-            : L"設定引き継ぎファイルを読み込めませんでした。既存設定は保持またはバックアップから復旧されています。";
+        std::wstring msg = localization::Text(L"workspace.config_io.fc3104c42d86").c_str();
         if (!err.empty()) msg += L"\n\n" + err;
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
         return;
     }
     ShowSoftNotice(hWnd,
-                   IsEnglishUi()
-                       ? L"Imported user settings from the transfer file."
-                       : L"引き継ぎファイルからユーザー設定を読み込みました。");
+                   localization::Text(L"workspace.config_io.bb59d199ea60").c_str());
 }
 
 void SaveAllManual(HWND hWnd) {
@@ -1490,7 +1478,7 @@ void SaveCurrentNoteManual(HWND hWnd) {
     try {
     if (g_currentNotePath.empty()) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi() ? L"No note is open." : L"ノートが開かれていません。",
+                       localization::Text(L"workspace.config_io.eb5c57ff8257").c_str(),
                        SoftNoticeKind::Warning);
         return;
     }
@@ -1502,13 +1490,9 @@ void SaveCurrentNoteManual(HWND hWnd) {
     }
     FinalizeManualSaveUi(hWnd, /*updateWindowTitleAfterSave=*/true);
 
-    std::wstring msg = IsEnglishUi()
-        ? L"Saved the current note directly to its original file."
-        : L"現在のノートを原本ファイルへ直接保存しました。";
+    std::wstring msg = localization::Text(L"workspace.config_io.6c9e238c789c").c_str();
     if (g_annotsDirty || g_annotsNeedsIntegrate) {
-        msg += IsEnglishUi()
-            ? L"\nAnnotation staged diffs were not integrated."
-            : L"\n注釈の未統合差分はそのままです。";
+        msg += localization::Text(L"workspace.config_io.e270e475dd85").c_str();
     }
     ShowSoftNotice(hWnd, msg);
     } catch (const std::exception& ex) {
@@ -1523,34 +1507,14 @@ void SaveCurrentNoteManual(HWND hWnd) {
 void ShowRecoveryDialog(HWND hWnd) {
     const auto& ui = GetUiText();
     if (g_workspaceRoot.empty()) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"No workspace is open."
-            : L"ワークスペースが開かれていません。";
+        const std::wstring msg = localization::Text(L"workspace.config_io.55c168692754").c_str();
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
         return;
     }
     std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
     std::filesystem::path backupRoot = resource / L"__escape__" / L"backup";
 
-    std::wstring msg = IsEnglishUi()
-        ? (std::wstring(
-            L"Recovery / Backups\n\n"
-            L"[Yes] Restore from backup\n"
-            L"  - Select a .meta.txt under __resource__/__escape__/backup\n"
-            L"  - Destination is taken from meta (dest=...)\n\n"
-            L"[No] Integrate staged diffs now (stage -> original)\n"
-            L"  - Integrates the currently adopted staged diffs\n"
-            L"  - Same as Ctrl+S integrate\n\n"
-            L"[Cancel] Do nothing"))
-        : (std::wstring(
-            L"復元/バックアップ\n\n"
-            L"[はい] バックアップから復元する\n"
-            L"  - __resource__/__escape__/backup の .meta.txt を選択\n"
-            L"  - 復元先は meta の dest に従います\n\n"
-            L"[いいえ] 未統合の差分をいま統合する（ステージ→原本）\n"
-            L"  - 現在採用されている stage を原本へ反映します\n"
-            L"  - Ctrl+S と同じ統合処理です\n\n"
-            L"[キャンセル] 何もしない"));
+    std::wstring msg = localization::Text(L"workspace.recovery.action_prompt");
 
     SilentDialogOptions dialog;
     dialog.title = ui.menuRecovery;
@@ -1570,9 +1534,7 @@ void ShowRecoveryDialog(HWND hWnd) {
 
     // Backup restore path
     if (g_noteDirty || g_annotsDirty || g_noteNeedsIntegrate || g_annotsNeedsIntegrate) {
-        const wchar_t* warn = IsEnglishUi()
-            ? L"There are unintegrated staged changes.\n\nRestoring a backup may revert to an older version.\nContinue?"
-            : L"未統合の差分があります。\n\nバックアップから復元すると、現在の編集内容より古い版へ戻る可能性があります。\n続行しますか？";
+        const std::wstring warn = localization::Text(L"workspace.config_io.6df3218d1994").c_str();
         SilentDialogOptions confirm;
         confirm.title = ui.menuRecovery;
         confirm.message = warn;
@@ -1584,7 +1546,7 @@ void ShowRecoveryDialog(HWND hWnd) {
     }
 
     auto pickedMeta = PickFileUnderLocked(hWnd, backupRoot,
-        IsEnglishUi() ? L"Select backup .meta.txt" : L"バックアップ(meta.txt)を選択");
+        localization::Text(L"workspace.config_io.77e6fe1774c0").c_str());
     if (!pickedMeta) return;
 
     std::filesystem::path restoredDest;
@@ -1609,23 +1571,21 @@ void ShowRecoveryDialog(HWND hWnd) {
         }
     }
     RefreshStatusDisplay(hWnd);
-    ShowSoftNotice(hWnd, IsEnglishUi() ? L"Restored." : L"復元しました。");
+    ShowSoftNotice(hWnd, localization::Text(L"workspace.config_io.6d9231d0b1c3").c_str());
 }
 
 void ShowRestoreBackupListDialogAndExecute(HWND hWnd) {
     if (g_workspaceRoot.empty()) {
         ShowSoftNotice(hWnd,
-                       IsEnglishUi() ? L"No workspace is open." : L"ワークスペースが開かれていません。",
+                       localization::Text(L"workspace.config_io.55c168692754").c_str(),
                        SoftNoticeKind::Warning);
         return;
     }
     
     if (g_noteDirty || g_annotsDirty || g_noteNeedsIntegrate || g_annotsNeedsIntegrate) {
-        const wchar_t* warn = IsEnglishUi()
-            ? L"There are unintegrated staged changes.\n\nRestoring a backup may revert to an older version.\nContinue?"
-            : L"未統合の差分があります。\n\nバックアップから復元すると、現在の編集内容より古い版へ戻る可能性があります。\n続行しますか？";
+        const std::wstring warn = localization::Text(L"workspace.config_io.6df3218d1994").c_str();
         SilentDialogOptions confirm;
-        confirm.title = IsEnglishUi() ? L"Restore Backup" : L"バックアップ復元";
+        confirm.title = localization::Text(L"workspace.config_io.98d1854bd23d").c_str();
         confirm.message = warn;
         confirm.kind = SoftNoticeKind::Warning;
         confirm.buttons = SilentDialogButtons::YesNo;
@@ -1660,23 +1620,21 @@ void ShowRestoreBackupListDialogAndExecute(HWND hWnd) {
             }
         }
         RefreshStatusDisplay(hWnd);
-        ShowSoftNotice(hWnd, IsEnglishUi() ? L"Restored." : L"復元しました。");
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.config_io.6d9231d0b1c3").c_str());
     }
 }
 
 void ShowDeleteSavedBackupDialog(HWND hWnd) {
     const auto& ui = GetUiText();
     if (g_workspaceRoot.empty()) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"No workspace is open."
-            : L"ワークスペースが開かれていません。";
+        const std::wstring msg = localization::Text(L"workspace.config_io.55c168692754").c_str();
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
         return;
     }
 
     std::filesystem::path backupRoot = std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__" / L"backup";
     auto pickedMeta = PickFileUnderLocked(hWnd, backupRoot,
-        IsEnglishUi() ? L"Select backup .meta.txt to delete" : L"削除するバックアップ(meta.txt)を選択");
+        localization::Text(L"workspace.config_io.8e84626c6132").c_str());
     if (!pickedMeta) return;
 
     std::filesystem::path selected(*pickedMeta);
@@ -1685,16 +1643,12 @@ void ShowDeleteSavedBackupDialog(HWND hWnd) {
         ShowMainMessageDialog(
             hWnd,
             ui.menuDeleteBackup,
-            IsEnglishUi()
-                ? L"Select a backup .meta.txt file."
-                : L"バックアップの .meta.txt ファイルを選択してください。",
+            localization::Text(L"workspace.config_io.76a39734f407").c_str(),
             SoftNoticeKind::Warning);
         return;
     }
 
-    const wchar_t* confirm = IsEnglishUi()
-        ? L"Delete the selected backup and its metadata?"
-        : L"選択したバックアップ本体と metadata を削除しますか？";
+    const std::wstring confirm = localization::Text(L"workspace.config_io.bdd6d772f9d4").c_str();
     if (!ConfirmMainYesNo(hWnd, ui.menuDeleteBackup, confirm, SoftNoticeKind::Warning,
                           SilentDialogResult::No, SilentDialogResult::No)) {
         return;
@@ -1703,15 +1657,13 @@ void ShowDeleteSavedBackupDialog(HWND hWnd) {
     std::wstring err;
     if (!file_output::DeleteBackupMeta(selected, &err)) {
         if (err.empty()) {
-            err = IsEnglishUi()
-                ? L"Failed to delete backup."
-                : L"バックアップの削除に失敗しました。";
+            err = localization::Text(L"workspace.config_io.cb5f4466e22d").c_str();
         }
         ShowMainMessageDialog(hWnd, ui.menuDeleteBackup, err, SoftNoticeKind::Warning);
         return;
     }
 
     ShowSoftNotice(hWnd,
-                   IsEnglishUi() ? L"Deleted backup." : L"バックアップを削除しました。");
+                   localization::Text(L"workspace.config_io.ad8507f8d221").c_str());
     RefreshMainMenuBar(hWnd);
 }

@@ -241,9 +241,9 @@ static void CreateChildren(HWND hWnd) {
                                             0, 0, 100, 24, g_hPdfToolbar,
                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_MARKER_FREE)),
                                             g_hInst, nullptr);
-    std::wstring markerLineLabel = IsEnglishUi() ? L"Marker Line" : L"マーカー直線";
-    std::wstring markerArrowLabel = IsEnglishUi() ? L"Marker Arrow" : L"マーカー矢印";
-    std::wstring markerWaveLabel = IsEnglishUi() ? L"Marker Wave" : L"マーカー波線";
+    std::wstring markerLineLabel = localization::Text(L"ui.layout.ca6e1a7074ef").c_str();
+    std::wstring markerArrowLabel = localization::Text(L"ui.layout.e336ab068e7d").c_str();
+    std::wstring markerWaveLabel = localization::Text(L"ui.layout.dffcba2038c7").c_str();
     g_hBtnModeMarkerLine = CreateWindowExW(0, L"BUTTON", markerLineLabel.c_str(),
                                             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
                                             0, 0, 110, 24, g_hPdfToolbar,
@@ -279,7 +279,7 @@ static void CreateChildren(HWND hWnd) {
                                       0, 0, 80, 24, g_hPdfToolbar,
                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_MODE_WAVE)),
                                       g_hInst, nullptr);
-    const std::wstring penButtonLabel = IsEnglishUi() ? L"Pen" : L"ペン";
+    const std::wstring penButtonLabel = localization::Text(L"ui.layout.7fa1a0161a12").c_str();
     g_hBtnModeFreehand = CreateWindowExW(0, L"BUTTON", penButtonLabel.c_str(),
                                           WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
                                           0, 0, 90, 24, g_hPdfToolbar,
@@ -370,7 +370,7 @@ static void CreateChildren(HWND hWnd) {
                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_FONT_SIZE_SLOT_B)),
                                             g_hInst, nullptr);
     g_hChkTextReadableBackground = CreateWindowExW(0, L"BUTTON",
-                                                   IsEnglishUi() ? L"Readable bg" : L"背景補助",
+                                                   localization::Text(L"ui.layout.0f521d6fbb33").c_str(),
                                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                                    0, 0, 120, 24, g_hPdfToolbar,
                                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TEXT_READABLE_BACKGROUND)),
@@ -378,13 +378,13 @@ static void CreateChildren(HWND hWnd) {
     SendMessageW(g_hChkTextReadableBackground, BM_SETCHECK,
                  g_textBoxReadableBackground ? BST_CHECKED : BST_UNCHECKED, 0);
     g_hRadioTextReadableBackgroundNormal = CreateWindowExW(0, L"BUTTON",
-                                                           IsEnglishUi() ? L"Normal" : L"通常",
+                                                           localization::Text(L"ui.layout.c794e87477e3").c_str(),
                                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
                                                            0, 0, 64, 24, g_hPdfToolbar,
                                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TEXT_READABLE_BACKGROUND_NORMAL)),
                                                            g_hInst, nullptr);
     g_hRadioTextReadableBackgroundInverted = CreateWindowExW(0, L"BUTTON",
-                                                             IsEnglishUi() ? L"Invert" : L"反転",
+                                                             localization::Text(L"ui.layout.9e92bd921717").c_str(),
                                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                                              0, 0, 64, 24, g_hPdfToolbar,
                                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TEXT_READABLE_BACKGROUND_INVERTED)),
@@ -394,13 +394,21 @@ static void CreateChildren(HWND hWnd) {
     SendMessageW(g_hRadioTextReadableBackgroundInverted, BM_SETCHECK,
                  g_textBoxReadableBackgroundInverted ? BST_CHECKED : BST_UNCHECKED, 0);
     g_hChkTextAutoWrap = CreateWindowExW(0, L"BUTTON",
-                                         IsEnglishUi() ? L"Wrap at page edge" : L"右端で折り返す",
+                                         localization::Text(L"ui.layout.d06972780232").c_str(),
                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                          0, 0, 160, 24, g_hPdfToolbar,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TEXT_AUTO_WRAP)),
                                          g_hInst, nullptr);
     SendMessageW(g_hChkTextAutoWrap, BM_SETCHECK,
                  g_textBoxAutoWrap ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_hChkPanMouseWheelZoom = CreateWindowExW(
+        0, L"BUTTON", localization::Text(L"ui.layout.11b6aabeb3b1").c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        0, 0, 220, 24, g_hPdfToolbar,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_PAN_MOUSE_WHEEL_ZOOM)),
+        g_hInst, nullptr);
+    SendMessageW(g_hChkPanMouseWheelZoom, BM_SETCHECK,
+                 g_config.panMouseWheelZoom ? BST_CHECKED : BST_UNCHECKED, 0);
     SyncToolbarFontSizeCombo();
 
     // Single "width" option; values are tool-specific, but the UI control is shared.
@@ -418,9 +426,9 @@ static void CreateChildren(HWND hWnd) {
             if (idx >= 0) SendMessageW(g_hComboWidth, CB_SETITEMDATA, idx, static_cast<LPARAM>(pt10));
         };
         // Default set (line/freehand). Marker-free will swap options when selected.
-        add(L"細", 15);
-        add(L"中", 25);
-        add(L"太", 40);
+        add(localization::Text(L"ui.layout.pen_width_thin").c_str(), 15);
+        add(localization::Text(L"ui.layout.pen_width_medium").c_str(), 25);
+        add(localization::Text(L"ui.layout.pen_width_thick").c_str(), 40);
         SendMessageW(g_hComboWidth, CB_SETCURSEL, 1, 0);
     }
 
@@ -438,10 +446,13 @@ static void CreateChildren(HWND hWnd) {
             int idx = static_cast<int>(SendMessageW(g_hComboMarkerAlpha, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s.c_str())));
             if (idx >= 0) SendMessageW(g_hComboMarkerAlpha, CB_SETITEMDATA, idx, static_cast<LPARAM>(permille));
         };
-        const wchar_t* labels[] = { L"薄", L"標準", L"濃", L"最大" };
+        const std::array<std::wstring, 4> labels = {
+            localization::Text(L"ui.layout.opacity_light"), localization::Text(L"ui.layout.opacity_normal"),
+            localization::Text(L"ui.layout.opacity_dark"), localization::Text(L"ui.layout.opacity_maximum")
+        };
         const int count = ToolAlphaOptionCountForMode(ToolMode::MarkerText);
         for (int i = 0; i < count; ++i) {
-            add(labels[std::min(i, 3)], ToolAlphaOptionValueForMode(ToolMode::MarkerText, i));
+            add(labels[std::min(i, 3)].c_str(), ToolAlphaOptionValueForMode(ToolMode::MarkerText, i));
         }
         SendMessageW(g_hComboMarkerAlpha, CB_SETCURSEL, 1, 0);
     }
@@ -481,8 +492,8 @@ static void CreateChildren(HWND hWnd) {
                 SendMessageW(g_hComboMarkerTextStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(value));
             }
         };
-        add(IsEnglishUi() ? L"Text marker" : L"通常", 0);
-        add(IsEnglishUi() ? L"Underline style" : L"下線風", 1);
+        add(localization::Text(L"ui.layout.016c62381789").c_str(), 0);
+        add(localization::Text(L"ui.layout.e01dcc32ec8c").c_str(), 1);
         SendMessageW(g_hComboMarkerTextStyle, CB_SETCURSEL, g_markerTextUnderline ? 1 : 0, 0);
     }
 
@@ -500,8 +511,8 @@ static void CreateChildren(HWND hWnd) {
                 SendMessageW(g_hComboLineDashStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(value));
             }
         };
-        add(IsEnglishUi() ? L"Solid" : L"実線", 0);
-        add(IsEnglishUi() ? L"Dashed" : L"破線", 1);
+        add(localization::Text(L"ui.layout.93c21b87d6e3").c_str(), 0);
+        add(localization::Text(L"ui.layout.c93df0074dab").c_str(), 1);
         SendMessageW(g_hComboLineDashStyle, CB_SETCURSEL, g_lineDashStyle == L"dash" ? 1 : 0, 0);
     }
 
@@ -519,14 +530,14 @@ static void CreateChildren(HWND hWnd) {
                 SendMessageW(g_hComboShapeKind, CB_SETITEMDATA, idx, static_cast<LPARAM>(kind));
             }
         };
-        add(IsEnglishUi() ? L"Circle" : L"正円", ShapeKind::Circle);
-        add(IsEnglishUi() ? L"Ellipse" : L"円", ShapeKind::Ellipse);
-        add(IsEnglishUi() ? L"Rotated ellipse" : L"斜め円", ShapeKind::RotatedEllipse);
-        add(IsEnglishUi() ? L"Square" : L"正方形", ShapeKind::Square);
-        add(IsEnglishUi() ? L"Rectangle" : L"長方形", ShapeKind::Rectangle);
-        add(IsEnglishUi() ? L"Diamond" : L"菱形", ShapeKind::Diamond);
-        add(IsEnglishUi() ? L"Triangle" : L"三角形", ShapeKind::Triangle);
-        add(IsEnglishUi() ? L"Equilateral triangle" : L"正三角形", ShapeKind::EquilateralTriangle);
+        add(localization::Text(L"ui.layout.60bceaee61a7").c_str(), ShapeKind::Circle);
+        add(localization::Text(L"ui.layout.3526a0625382").c_str(), ShapeKind::Ellipse);
+        add(localization::Text(L"ui.layout.e3f9e9d7366f").c_str(), ShapeKind::RotatedEllipse);
+        add(localization::Text(L"ui.layout.06b65b92aa7f").c_str(), ShapeKind::Square);
+        add(localization::Text(L"ui.layout.9117e6d6ff5f").c_str(), ShapeKind::Rectangle);
+        add(localization::Text(L"ui.layout.55914cda2140").c_str(), ShapeKind::Diamond);
+        add(localization::Text(L"ui.layout.b6ccd52bc893").c_str(), ShapeKind::Triangle);
+        add(localization::Text(L"ui.layout.99317e85b5db").c_str(), ShapeKind::EquilateralTriangle);
         int want = static_cast<int>(g_shapeKind);
         int count = static_cast<int>(SendMessageW(g_hComboShapeKind, CB_GETCOUNT, 0, 0));
         for (int i = 0; i < count; ++i) {
@@ -552,8 +563,8 @@ static void CreateChildren(HWND hWnd) {
                 SendMessageW(g_hComboShapeDrawMode, CB_SETITEMDATA, idx, static_cast<LPARAM>(mode));
             }
         };
-        add(IsEnglishUi() ? L"Filled" : L"塗りつぶし", ShapeDrawMode::Fill);
-        add(IsEnglishUi() ? L"Outline only" : L"枠線のみ", ShapeDrawMode::Outline);
+        add(localization::Text(L"ui.layout.9d960f334669").c_str(), ShapeDrawMode::Fill);
+        add(localization::Text(L"ui.layout.645bb2dffd79").c_str(), ShapeDrawMode::Outline);
         int want = static_cast<int>(g_shapeDrawMode);
         int count = static_cast<int>(SendMessageW(g_hComboShapeDrawMode, CB_GETCOUNT, 0, 0));
         for (int i = 0; i < count; ++i) {
@@ -572,13 +583,20 @@ static void CreateChildren(HWND hWnd) {
                                              g_hInst, nullptr);
     ui::GuardComboAgainstAccidentalChange(g_hComboMagnifierShape, g_hPdfView);
     if (g_hComboMagnifierShape) {
-        int idx = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"正円")));
+        const std::wstring circle = localization::Text(L"ui.layout.60bceaee61a7");
+        int idx = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(circle.c_str())));
         if (idx >= 0) {
             SendMessageW(g_hComboMagnifierShape, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierShape::Circle));
         }
-        idx = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"正方形")));
+        const std::wstring square = localization::Text(L"ui.layout.06b65b92aa7f");
+        idx = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(square.c_str())));
         if (idx >= 0) {
             SendMessageW(g_hComboMagnifierShape, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierShape::Square));
+        }
+        const std::wstring horizontal = localization::Text(L"settings.annot.magnifier_shape.horizontal");
+        idx = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(horizontal.c_str())));
+        if (idx >= 0) {
+            SendMessageW(g_hComboMagnifierShape, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierShape::Horizontal));
         }
         int want = static_cast<int>(g_magnifierShape);
         int count = static_cast<int>(SendMessageW(g_hComboMagnifierShape, CB_GETCOUNT, 0, 0));
@@ -606,7 +624,7 @@ static void CreateChildren(HWND hWnd) {
     InstallAnnotOptionCycleCombo(g_hComboMagnifierShape);
 
     g_hChkShortcutHeading1 = CreateWindowExW(0, L"BUTTON",
-                                             IsEnglishUi() ? L"Heading" : L"見出し",
+                                             localization::Text(L"ui.layout.d75e3e23e49d").c_str(),
                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                              0, 0, 80, 24, hWnd,
                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_HEADING1)),
@@ -644,8 +662,8 @@ static void CreateChildren(HWND hWnd) {
                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                               0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
     {
-        const wchar_t* label = IsEnglishUi() ? L"Link decor" : L"ﾘﾝｸ装飾";
-        g_hChkShortcutLinkDecor = CreateWindowExW(0, L"BUTTON", label,
+        const std::wstring label = localization::Text(L"ui.layout.de2c999771ea").c_str();
+        g_hChkShortcutLinkDecor = CreateWindowExW(0, L"BUTTON", label.c_str(),
                                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                                   0, 0, 80, 24, hWnd, nullptr, g_hInst, nullptr);
         if (g_hChkShortcutLinkDecor) {
@@ -672,65 +690,64 @@ static void CreateChildren(HWND hWnd) {
                                                  0, 0, 32, 24, hWnd,
                                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_CHAR_PICKER)),
                                                  g_hInst, nullptr);
-    g_hShortcutIndentLabel = CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"d=" : L"d=",
+    g_hShortcutIndentLabel = CreateWindowExW(0, L"STATIC", localization::Text(L"ui.layout.d7555ac93b73").c_str(),
                                              WS_CHILD | WS_VISIBLE | SS_LEFT,
                                              0, 0, 30, 24, hWnd, nullptr, g_hInst, nullptr);
     g_hShortcutIndentEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER,
                                               0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
     if (g_hShortcutIndentEdit) {
-        const wchar_t* cue = IsEnglishUi() ? L"number" : L"数値";
-        SendMessageW(g_hShortcutIndentEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue));
+        const std::wstring cue = localization::Text(L"ui.layout.f34c91a92daf").c_str();
+        SendMessageW(g_hShortcutIndentEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue.c_str()));
     }
-    g_hShortcutMarginLabel = CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"m=" : L"m=",
+    g_hShortcutMarginLabel = CreateWindowExW(0, L"STATIC", localization::Text(L"ui.layout.3b77684645ca").c_str(),
                                              WS_CHILD | WS_VISIBLE | SS_LEFT,
                                              0, 0, 30, 24, hWnd, nullptr, g_hInst, nullptr);
     g_hShortcutMarginEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_CENTER,
                                             0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
     if (g_hShortcutMarginEdit) {
-        const wchar_t* cue = IsEnglishUi() ? L"margin units" : L"マージン単位";
-        SendMessageW(g_hShortcutMarginEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue));
+        const std::wstring cue = localization::Text(L"ui.layout.57399b8fbb3a").c_str();
+        SendMessageW(g_hShortcutMarginEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue.c_str()));
     }
-    g_hShortcutFontSizeLabel = CreateWindowExW(0, L"STATIC", IsEnglishUi() ? L"s=" : L"s=",
+    g_hShortcutFontSizeLabel = CreateWindowExW(0, L"STATIC", localization::Text(L"ui.layout.010acbca7c8a").c_str(),
                                                WS_CHILD | WS_VISIBLE | SS_LEFT,
                                                0, 0, 30, 24, hWnd, nullptr, g_hInst, nullptr);
     g_hShortcutFontSizeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER,
                                               0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
     if (g_hShortcutFontSizeEdit) {
-        const wchar_t* cue = IsEnglishUi() ? L"px" : L"px";
-        SendMessageW(g_hShortcutFontSizeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue));
+        const std::wstring cue = localization::Text(L"ui.layout.08e3a2cd01fd").c_str();
+        SendMessageW(g_hShortcutFontSizeEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue.c_str()));
     }
     g_hShortcutTagEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                            0, 0, 120, 24, hWnd, nullptr, g_hInst, nullptr);
     if (g_hShortcutTagEdit) {
-        const wchar_t* cue = IsEnglishUi() ? L"Body text (no spaces)"
-                                           : L"本文テキスト（空白不可）";
-        SendMessageW(g_hShortcutTagEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue));
+        const std::wstring cue = localization::Text(L"ui.layout.ebc7e0973ac6").c_str();
+        SendMessageW(g_hShortcutTagEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue.c_str()));
     }
-    g_hBtnShortcutInput = CreateWindowExW(0, L"BUTTON", L"入力",
+    g_hBtnShortcutInput = CreateWindowExW(0, L"BUTTON", localization::Text(L"ui.layout.shortcut_input").c_str(),
                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                            0, 0, 90, 26, hWnd,
                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_INPUT)),
                                            g_hInst, nullptr);
-    g_hBtnShortcutPdfLink = CreateWindowExW(0, L"BUTTON", L"リンク",
+    g_hBtnShortcutPdfLink = CreateWindowExW(0, L"BUTTON", localization::Text(L"ui.layout.shortcut_pdf_link").c_str(),
                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                             0, 0, 90, 26, hWnd,
                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_PDF_LINK)),
                                             g_hInst, nullptr);
-    g_hBtnNoteAssistBullet = CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"- List" : L"- 箇条",
+    g_hBtnNoteAssistBullet = CreateWindowExW(0, L"BUTTON", localization::Text(L"ui.layout.fb696da9fda6").c_str(),
                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                              0, 0, 70, 26, hWnd,
                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_ASSIST_BULLET)),
                                              g_hInst, nullptr);
-    g_hBtnNoteAssistQuote = CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"> Quote" : L"> 引用",
+    g_hBtnNoteAssistQuote = CreateWindowExW(0, L"BUTTON", localization::Text(L"ui.layout.f9d1ad286381").c_str(),
                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                             0, 0, 70, 26, hWnd,
                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_ASSIST_QUOTE)),
                                             g_hInst, nullptr);
-    g_hBtnNoteAssistPageRef = CreateWindowExW(0, L"BUTTON", IsEnglishUi() ? L"P Ref" : L"P 参照",
+    g_hBtnNoteAssistPageRef = CreateWindowExW(0, L"BUTTON", localization::Text(L"ui.layout.93919450645b").c_str(),
                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                               0, 0, 70, 26, hWnd,
                                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_ASSIST_PAGE_REF)),
@@ -767,6 +784,7 @@ static void CreateChildren(HWND hWnd) {
     SetUIFont(g_hRadioTextReadableBackgroundNormal);
     SetUIFont(g_hRadioTextReadableBackgroundInverted);
     SetUIFont(g_hChkTextAutoWrap);
+    SetUIFont(g_hChkPanMouseWheelZoom);
     SetUIFont(g_hComboWidth);
     SetUIFont(g_hComboMarkerAlpha);
     SetUIFont(g_hComboAnnotMethod);
@@ -951,7 +969,7 @@ static void OrganizeCurrentSessionFiles(HWND hWnd) {
         }
     }
     if (candidates <= 0) {
-        std::wstring msg = IsEnglishUi() ? L"No files to organize." : L"整理するファイルはありません。";
+        std::wstring msg = localization::Text(L"ui.layout.1bf8d874725d").c_str();
         ShowSoftNotice(hWnd, msg);
         return;
     }
@@ -995,11 +1013,11 @@ static void OrganizeCurrentSessionFiles(HWND hWnd) {
 
     std::wstring msg;
     if (organizeStats.failed > 0) {
-        msg = IsEnglishUi() ? L"Organize finished with warnings." : L"整理処理を完了しました（一部警告あり）。";
-        msg += (IsEnglishUi() ? L"\nMoved: " : L"\n移動: ") + std::to_wstring(organizeStats.moved);
-        msg += (IsEnglishUi() ? L"\nFailed: " : L"\n失敗: ") + std::to_wstring(organizeStats.failed);
+        msg = localization::Text(L"ui.layout.ad9f8eba5585").c_str();
+        msg += (localization::Text(L"ui.layout.001d564b15a4").c_str()) + std::to_wstring(organizeStats.moved);
+        msg += (localization::Text(L"ui.layout.69aba8f7920b").c_str()) + std::to_wstring(organizeStats.failed);
         if (!organizeStats.failures.empty()) {
-            msg += IsEnglishUi() ? L"\n\nDetails:\n" : L"\n\n詳細:\n";
+            msg += localization::Text(L"ui.layout.09edf61e698c").c_str();
             const size_t limit = std::min<size_t>(organizeStats.failures.size(), 6);
             for (size_t i = 0; i < limit; ++i) {
                 msg += L" - " + organizeStats.failures[i] + L"\n";
@@ -1009,13 +1027,11 @@ static void OrganizeCurrentSessionFiles(HWND hWnd) {
             }
         }
     } else if (organizeStats.candidates <= 0) {
-        msg = IsEnglishUi() ? L"No files to organize." : L"整理するファイルはありません。";
+        msg = localization::Text(L"ui.layout.1bf8d874725d").c_str();
     } else {
-        msg = IsEnglishUi() ? L"Organized files into \"pdf\" / \"note\" folders." : L"\"pdf\" / \"note\" フォルダに整理しました。";
+        msg = localization::Text(L"ui.layout.3b1d1c31a5eb").c_str();
         if (organizeStats.renamedOnConflict > 0) {
-            msg += IsEnglishUi()
-                ? L"\nName conflicts were kept safely by renaming destination files."
-                : L"\n同名衝突は上書きせず、別名で安全に保存しました。";
+            msg += localization::Text(L"ui.layout.bf239e8b9a66").c_str();
         }
     }
 
@@ -1036,28 +1052,14 @@ static void OrganizeCurrentSessionFiles(HWND hWnd) {
 }
 
 static int PromptCompleteOffStageActionOnExit(HWND hWnd) {
-    std::wstring msg = IsEnglishUi()
-        ? L"There are unintegrated staged changes. Choose how to exit.\n\n"
-          L"Yes:\n"
-          L"Save to the original now, then exit.\n\n"
-          L"No:\n"
-          L"Exit without saving to the original and keep staged changes.\n\n"
-          L"Cancel:\n"
-          L"Return to the app without exiting."
-        : L"未統合の stage 差分があります。終了方法を選んでください。\n\n"
-          L"はい:\n"
-          L"いま原本へ保存してから終了します。\n\n"
-          L"いいえ:\n"
-          L"原本へ保存せず、stage 差分を残したまま終了します。\n\n"
-          L"キャンセル:\n"
-          L"終了せずアプリに戻ります。";
+    std::wstring msg = localization::Text(L"ui.layout.exit_with_staged_changes");
     const std::wstring stagedLocations = file_output::FormatStagedDiffLocationSummary();
     if (!stagedLocations.empty()) {
-        msg += IsEnglishUi() ? L"\n\nStaged diff details:\n\n" : L"\n\n未統合差分の詳細:\n\n";
+        msg += localization::Text(L"ui.layout.b5f076b437eb").c_str();
         msg += stagedLocations;
     }
     SilentDialogOptions dialog;
-    dialog.title = IsEnglishUi() ? L"Exit confirmation" : L"終了確認";
+    dialog.title = localization::Text(L"ui.layout.4ee6e941fd06").c_str();
     dialog.message = msg;
     dialog.kind = SoftNoticeKind::Warning;
     dialog.buttons = SilentDialogButtons::YesNoCancel;
@@ -1126,10 +1128,8 @@ static bool HandleManagedAbnormalExit(HWND hWnd) {
         ClearManagedAbnormalExitRequest();
         ShowMainMessageDialog(
             hWnd,
-            IsEnglishUi() ? L"Abnormal exit canceled" : L"異常終了を中止しました",
-            IsEnglishUi()
-                ? L"Unsaved edits could not be preserved to stage, so the abnormal exit was canceled."
-                : L"未保存の編集を stage に保護できなかったため、異常終了を中止しました。",
+            localization::Text(L"ui.layout.a9b14301c63b").c_str(),
+            localization::Text(L"ui.layout.fcef8369e044").c_str(),
             SoftNoticeKind::Error);
         preview_trace::Append(
             L"ManagedAbnormalExit",
@@ -1182,9 +1182,8 @@ static bool HandleAppExit(HWND hWnd) {
             L"abort=save_note_if_dirty_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
         return PromptStayOrOpenDiffManager(
             hWnd,
-            IsEnglishUi() ? L"Exiting the app" : L"アプリ終了",
-            IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try exiting again."
-                          : L"「差分管理」で未統合差分を整理してから、もう一度終了してください。");
+            localization::Text(L"ui.layout.d7f54787589f").c_str(),
+            localization::Text(L"ui.layout.f2484c529c40").c_str());
     }
     if (!SaveAnnotationsIfDirty(hWnd)) {
         preview_trace::Append(
@@ -1192,9 +1191,8 @@ static bool HandleAppExit(HWND hWnd) {
             L"abort=save_annotations_if_dirty_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
         return PromptStayOrOpenDiffManager(
             hWnd,
-            IsEnglishUi() ? L"Exiting the app" : L"アプリ終了",
-            IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try exiting again."
-                          : L"「差分管理」で未統合差分を整理してから、もう一度終了してください。");
+            localization::Text(L"ui.layout.d7f54787589f").c_str(),
+            localization::Text(L"ui.layout.f2484c529c40").c_str());
     }
     const bool hasStagedDiffs = file_output::HasAnyStagedDiffs();
     preview_trace::Append(
@@ -1239,16 +1237,14 @@ static bool PrepareWorkspaceRestart(HWND hWnd) {
     if (!SaveNoteIfDirty(hWnd)) {
         return PromptStayOrOpenDiffManager(
             hWnd,
-            IsEnglishUi() ? L"Switching workspaces" : L"ワークスペース切替",
-            IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                          : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+            localization::Text(L"ui.layout.e2cceab67405").c_str(),
+            localization::Text(L"ui.layout.4628424dc46e").c_str());
     }
     if (!SaveAnnotationsIfDirty(hWnd)) {
         return PromptStayOrOpenDiffManager(
             hWnd,
-            IsEnglishUi() ? L"Switching workspaces" : L"ワークスペース切替",
-            IsEnglishUi() ? L"Please resolve the pending diff from Diff Manager, then try again."
-                          : L"「差分管理」で未統合差分を整理してから、もう一度切り替えてください。");
+            localization::Text(L"ui.layout.e2cceab67405").c_str(),
+            localization::Text(L"ui.layout.4628424dc46e").c_str());
     }
     SaveLastPdfViewInfo();
     ClearPdfAndNoteSelection();
@@ -1265,9 +1261,7 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
     if (root.empty()) return;
     // No-network requirement: block UNC/device-prefix workspace roots (\\server\share, \\?\UNC\..., etc).
     if (root.rfind(L"\\\\", 0) == 0) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"UNC/device paths are not supported as a workspace root."
-            : L"UNC/デバイスパスはワークスペースのルートとして使用できません。";
+        const std::wstring msg = localization::Text(L"ui.layout.7f0f004af1ba").c_str();
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
         preview_trace::Append(
             L"ReloadWorkspaceFromRoot",
@@ -1276,9 +1270,7 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
     }
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(std::filesystem::path(root), isReparse) && isReparse) {
-        const wchar_t* msg = IsEnglishUi()
-            ? L"Reparse point folders (junction/symlink) are not supported as a workspace root."
-            : L"ジャンクション/シンボリックリンク等（reparse point）のフォルダはワークスペースとして使用できません。";
+        const std::wstring msg = localization::Text(L"ui.layout.11b5e404c360").c_str();
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
         preview_trace::Append(
             L"ReloadWorkspaceFromRoot",
@@ -1288,9 +1280,7 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
     std::error_code ec;
     if (!std::filesystem::exists(std::filesystem::path(root), ec) || ec ||
         !std::filesystem::is_directory(std::filesystem::path(root), ec) || ec) {
-        std::wstring msg = IsEnglishUi()
-            ? L"Workspace folder not found:\n" + root
-            : L"ワークスペースフォルダが見つかりません:\n" + root;
+        std::wstring msg = localization::Format(L"ui.layout.workspace_not_found", {{L"ROOT", root}});
         ShowSilentMessageDialog(hWnd, GetUiText().menuFile, msg, SoftNoticeKind::Warning);
         preview_trace::Append(
             L"ReloadWorkspaceFromRoot",
@@ -1302,12 +1292,9 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
     {
         std::wstring err;
         if (!EnsureWorkspaceResourceDirsWithErr(root, nullptr, &err)) {
-            std::wstring msg = IsEnglishUi()
-                ? L"Workspace switch was canceled because the target workspace is not writable.\n\nroot:\n" + root
-                : L"切り替え先ワークスペースに書き込みできないため、ワークスペース切り替えを中断しました。\n\nroot:\n" + root;
-            msg += IsEnglishUi()
-                ? L"\n\nCheck access control / security policy for this folder."
-                : L"\n\nこのフォルダのアクセス権・セキュリティ制御を確認してください。";
+            std::wstring msg = localization::Format(L"ui.layout.workspace_switch_not_writable",
+                                                    {{L"ROOT", root}});
+            msg += localization::Text(L"ui.layout.f9e597c9cfc2").c_str();
             if (!err.empty()) msg += L"\n\n" + err;
             ShowSoftNotice(hWnd, msg);
             preview_trace::Append(
@@ -1318,9 +1305,7 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
     }
     std::wstring workspaceLockError;
     if (!AcquireWorkspaceWriteLock(std::filesystem::path(root), &workspaceLockError)) {
-        std::wstring msg = IsEnglishUi()
-            ? L"Workspace switch was canceled because the target workspace path could not be prepared."
-            : L"切り替え先ワークスペースのパスを準備できないため、切り替えを中断しました。";
+        std::wstring msg = localization::Text(L"ui.layout.888f6f981299").c_str();
         if (!workspaceLockError.empty()) msg += L"\n\n" + workspaceLockError;
         ShowSilentMessageDialog(hWnd, GetUiText().menuFile, msg, SoftNoticeKind::Warning);
         preview_trace::Append(
@@ -1338,9 +1323,7 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
         std::wstring identityErr;
         if (!note::ConfigureRuntimeNoteIdentityStore(
                 std::filesystem::path(g_workspaceRoot), &identityErr)) {
-            std::wstring message = IsEnglishUi()
-                ? L"Persistent note identities could not be loaded. Notes remain available, but identity persistence is disabled for this workspace."
-                : L"ノートの永続identityを読み込めませんでした。ノートは利用できますが、このワークスペースではidentityの永続化を無効にします。";
+            std::wstring message = localization::Text(L"ui.layout.a1495b07a2ac").c_str();
             if (!identityErr.empty()) message += L"\n\n" + identityErr;
             ShowSoftNotice(hWnd, message, SoftNoticeKind::Warning);
         }

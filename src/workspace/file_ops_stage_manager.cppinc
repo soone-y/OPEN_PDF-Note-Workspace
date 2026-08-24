@@ -46,20 +46,20 @@ static bool StageDiffCanActivate(const file_output::StagedDiffEntry& entry) {
 
 static std::wstring StageDiffKindDisplayName(file_output::StagedDiffKind kind) {
     if (kind == file_output::StagedDiffKind::Note) {
-        return IsEnglishUi() ? L"Note" : L"ノート";
+        return localization::Text(L"workspace.stage_manager.2a24383f6ef0");
     }
-    return IsEnglishUi() ? L"Annotations" : L"注釈";
+    return localization::Text(L"workspace.stage_manager.22de7cf76020");
 }
 
 static std::wstring StageDiffStatusDisplayName(const file_output::StagedDiffEntry& entry) {
     if (entry.kind == file_output::StagedDiffKind::Clrop) {
         return entry.isLatest
-            ? (IsEnglishUi() ? L"latest checkpoint" : L"最新checkpoint")
-            : (IsEnglishUi() ? L"old checkpoint" : L"旧checkpoint");
+            ? (localization::Text(L"workspace.stage_manager.8ff65962f49c"))
+            : (localization::Text(L"workspace.stage_manager.e5357eeba9a6"));
     }
     return entry.isLatest
-        ? (IsEnglishUi() ? L"latest" : L"最新")
-        : (IsEnglishUi() ? L"old" : L"旧");
+        ? (localization::Text(L"workspace.stage_manager.73438282d69e"))
+        : (localization::Text(L"workspace.stage_manager.e100d078ee31"));
 }
 
 static std::wstring StageDiffEntryLabel(const file_output::StagedDiffEntry& entry) {
@@ -85,91 +85,68 @@ static std::wstring StageDiffSummaryText(const std::vector<file_output::StagedDi
         }
     }
     if (entries.empty()) {
-        return IsEnglishUi()
-            ? L"No staged diffs."
-            : L"【未統合の差分はありません】";
+        return localization::Text(L"workspace.stage_manager.369135583807");
     }
-    if (IsEnglishUi()) {
-        return L"[Staged Diffs Summary] Notes: " + std::to_wstring(noteCount) +
-               L", Annotations: " + std::to_wstring(clropCount) +
-               L"\n* Normal save will integrate only the latest diff for each target.";
-    }
-    return L"【未統合差分の状況】 ノート: " + std::to_wstring(noteCount) +
-           L" 件 / 注釈: " + std::to_wstring(clropCount) +
-           L" 件\n※通常保存では、各対象の「最新差分」のみが原本へ自動で統合されます。";
+    return localization::Format(L"workspace.stage_manager.summary",
+                                {{L"NOTES", std::to_wstring(noteCount)},
+                                 {L"ANNOTATIONS", std::to_wstring(clropCount)}});
 }
 
 static std::wstring StageDiffDefaultHandlingText(const file_output::StagedDiffEntry& entry) {
     if (entry.isLatest) {
-        return IsEnglishUi()
-            ? L"[Normal Save Handling]\nThis diff is LATEST and will be integrated into the original file.\n\n"
-            : L"【通常保存時の扱い】\n最新差分として扱われ、原本へ統合（反映）されます。\n\n";
+        return localization::Text(L"workspace.stage_manager.ff89694bfdb4");
     }
-    return IsEnglishUi()
-        ? L"[Normal Save Handling]\nThis diff is OLD and will NOT be integrated. Use actions below to manage it.\n\n"
-        : L"【通常保存時の扱い】\n無視されます（旧差分）。明示的な復旧や統合・破棄が必要な場合のみ操作してください。\n\n";
+    return localization::Text(L"workspace.stage_manager.f3e78a7ae7ec");
 }
 
 static std::wstring StageDiffEntryDetail(const file_output::StagedDiffEntry& entry) {
     std::wstring text = StageDiffDefaultHandlingText(entry);
-    text += IsEnglishUi() ? L"Kind: " : L"種類: ";
+    text += localization::Text(L"workspace.stage_manager.29852094cc21");
     text += StageDiffKindDisplayName(entry.kind) + L"\n";
-    text += IsEnglishUi() ? L"Status: " : L"状態: ";
+    text += localization::Text(L"workspace.stage_manager.6ac91c5c4687");
     text += StageDiffStatusDisplayName(entry) + L"\n";
     if (entry.revision.has_value()) {
-        text += IsEnglishUi() ? L"Revision: " : L"リビジョン: ";
+        text += localization::Text(L"workspace.stage_manager.61ea34ffe7bf");
         text += std::to_wstring(*entry.revision) + L"\n";
     }
-    text += IsEnglishUi() ? L"Target: " : L"対象: ";
+    text += localization::Text(L"workspace.stage_manager.6080a559dbc4");
     text += entry.targetPath + L"\n";
-    text += IsEnglishUi() ? L"Stage: " : L"stage: ";
+    text += localization::Text(L"workspace.stage_manager.c26040aa9ac6");
     text += entry.stagePath.wstring() + L"\n";
     if (!entry.destPath.empty()) {
-        text += IsEnglishUi() ? L"Destination: " : L"統合先: ";
+        text += localization::Text(L"workspace.stage_manager.0488697e7464");
         text += entry.destPath.wstring() + L"\n";
     }
     if (entry.kind == file_output::StagedDiffKind::Note &&
         entry.noteRestoreView.has_value()) {
         const auto& restore = *entry.noteRestoreView;
-        text += IsEnglishUi() ? L"Restore position:\n" : L"復元位置:\n";
-        text += IsEnglishUi() ? L"- Content revision: " : L"- 本文revision: ";
+        text += localization::Text(L"workspace.stage_manager.10b25f12ff32");
+        text += localization::Text(L"workspace.stage_manager.6a0e6f923857");
         text += std::to_wstring(restore.contentRevision) + L"\n";
-        text += IsEnglishUi() ? L"- Selection: " : L"- 選択範囲: ";
+        text += localization::Text(L"workspace.stage_manager.9f79651f79f6");
         text += std::to_wstring(restore.selectionStart) + L"-" +
                 std::to_wstring(restore.selectionEnd) + L"\n";
-        text += IsEnglishUi() ? L"- First visible line: " : L"- 先頭表示行: ";
+        text += localization::Text(L"workspace.stage_manager.046da1fc6c08");
         text += std::to_wstring(restore.firstVisibleLine) + L"\n";
-        text += IsEnglishUi() ? L"- Scroll: " : L"- スクロール: ";
+        text += localization::Text(L"workspace.stage_manager.2a4e887663e2");
         text += L"x=" + std::to_wstring(restore.scrollX) +
                 L", y=" + std::to_wstring(restore.scrollY) + L"\n";
     }
     if (StageDiffTargetsCurrentFile(entry)) {
-        text += IsEnglishUi()
-            ? L"\nThis target is open now."
-            : L"\nこの対象は現在開いています。";
+        text += localization::Text(L"workspace.stage_manager.3953e52f96f9");
     }
     if (StageDiffCanMergeIntoCurrentPdf(entry)) {
-        text += IsEnglishUi()
-            ? L"\n\"Merge into current\" adds only annotations that are not exactly identical."
-            : L"\n「現在へ追加」は完全一致しない注釈だけを追記します。";
+        text += localization::Text(L"workspace.stage_manager.e905cae76a8a");
     }
     if (entry.kind == file_output::StagedDiffKind::Clrop) {
         if (!entry.isLatest) {
-            text += IsEnglishUi()
-                ? L"\n\nThis checkpoint is not the current annotation base. It remains only for explicit recovery/discard work while the old snapshot-first design is being retired."
-                : L"\n\n※この checkpoint は現行の注釈基底ではありません。明示的な復旧または破棄のためだけに残っています。";
+            text += localization::Text(L"workspace.stage_manager.f6f19037bf14");
         }
-        text += IsEnglishUi()
-            ? L"\n\nAnnotation stage activation is disabled. Use integrate, merge, or discard."
-            : L"\n\n※注釈 stage の「最新にする」は無効です。統合・追加・破棄のいずれかを選んでください。";
-        text += IsEnglishUi()
-            ? L"\n\n[Actions]\n- Integrate to original: reconstructs the latest state, verifies, and writes to original file (with backup).\n- Integrate without backup: bypasses backup creation (use if backup fails due to permissions).\n- Add to current PDF: appends only annotations not already present in the view.\n- Discard: removes this diff only. Original file remains unchanged."
-            : L"\n\n【操作の案内】\n・原本へ統合: 差分から最新状態を復元し、バックアップと検証を経て原本へ反映します。\n・バックアップなしで直接統合: 権限エラー等でバックアップが作れない場合に強制保存を試みます。\n・現在PDFへ注釈追加: 現在の表示にない注釈だけを抽出して追記します。\n・破棄: この差分データのみを削除します。原本は変わりません。";
+        text += localization::Text(L"workspace.stage_manager.528039f1408b");
+        text += localization::Text(L"workspace.stage_manager.009e567e041b");
         return text;
     }
-    text += IsEnglishUi()
-        ? L"\n\n[Actions]\n- Make latest: marks this stage as the latest one without writing to original.\n- Integrate to original: verifies and writes to original file (with backup).\n- Integrate without backup: bypasses backup creation (use if backup fails).\n- Discard: removes this diff only. Original file remains unchanged."
-        : L"\n\n【操作の案内】\n・最新にする: 原本は変更せず、この差分を「最新の編集状態」として扱います。\n・原本へ統合: バックアップと検証を経て、この差分を原本へ反映します。\n・バックアップなしで直接統合: バックアップを行わずに原本への強制保存を試みます。\n・破棄: この差分データのみを削除します。原本は変わりません。";
+    text += localization::Text(L"workspace.stage_manager.b85525eaa4bc");
     return text;
 }
 
@@ -186,7 +163,7 @@ static void StageManagerApplySelection(StageManagerDialogState* ctx, int selecte
         canActivate = StageDiffCanActivate(entry);
         canMerge = StageDiffCanMergeIntoCurrentPdf(entry);
     } else {
-        detail = IsEnglishUi() ? L"No staged diffs." : L"未統合の差分はありません。";
+        detail = localization::Text(L"workspace.stage_manager.355c556c369f");
     }
     if (ctx->detail) SetWindowTextW(ctx->detail, detail.c_str());
     EnableWindow(ctx->btnActivate, canActivate);
@@ -235,9 +212,7 @@ static void StageManagerHandleAction(StageManagerDialogState* ctx, int actionId)
             ? g_noteNeedsIntegrate
             : g_annotsNeedsIntegrate;
         if (inUse) {
-            const wchar_t* msg = IsEnglishUi()
-                ? L"This staged diff is currently applied in the editor/viewer. Integrate it or switch away before discarding."
-                : L"この差分は現在の編集欄/表示に適用中です。破棄する前に統合するか、別の状態へ切り替えてください。";
+            const std::wstring msg = localization::Text(L"workspace.stage_manager.c441a5f875f1");
             ShowSoftNotice(ctx->hwnd, msg, SoftNoticeKind::Warning);
             return;
         }
@@ -247,18 +222,14 @@ static void StageManagerHandleAction(StageManagerDialogState* ctx, int actionId)
     case kStageMgrActivate:
         if (!StageDiffCanActivate(entry)) {
             ShowSoftNotice(ctx->hwnd,
-                           IsEnglishUi()
-                               ? L"Activate is unavailable for annotation staged diffs."
-                               : L"注釈の stage 差分では「採用」は使えません。",
+                           localization::Text(L"workspace.stage_manager.d04fe8ca5e26"),
                            SoftNoticeKind::Warning);
             return;
         }
         ok = file_output::PromoteStagedDiff(entry.stagePath);
         if (ok && StageDiffTargetsCurrentFile(entry)) {
             ShowSoftNotice(ctx->hwnd,
-                           IsEnglishUi()
-                               ? L"The selected stage is now active. Reopen the current file if you want to reload it immediately."
-                               : L"選択した stage を最新扱いにしました。すぐ反映したい場合は現在のファイルを開き直してください。");
+                           localization::Text(L"workspace.stage_manager.32636a22f4bb"));
         }
         break;
     case kStageMgrIntegrate:
@@ -266,9 +237,8 @@ static void StageManagerHandleAction(StageManagerDialogState* ctx, int actionId)
         break;
     case kStageMgrIntegrateNoBackup: {
         SilentDialogOptions options;
-        options.title = IsEnglishUi() ? L"Warning" : L"警告";
-        options.message = IsEnglishUi() ? L"If you bypass the backup and the save fails, you might lose the file. Are you sure?"
-                                        : L"万が一ファイルへの書き込み中に破損した場合、復元できなくなる可能性があります。本当によろしいですか？";
+        options.title = localization::Text(L"workspace.stage_manager.a9b2c42773c9");
+        options.message = localization::Text(L"workspace.stage_manager.7c8768ca1c0d");
         options.kind = SoftNoticeKind::Warning;
         options.buttons = SilentDialogButtons::YesNo;
         options.defaultResult = SilentDialogResult::No;
@@ -288,12 +258,10 @@ static void StageManagerHandleAction(StageManagerDialogState* ctx, int actionId)
     }
 
     if (!ok) {
-        std::wstring msg = IsEnglishUi()
-            ? L"Operation failed."
-            : L"操作に失敗しました。";
-        msg += IsEnglishUi() ? L"\n\nTarget: " : L"\n\n対象: ";
+        std::wstring msg = localization::Text(L"workspace.stage_manager.dc860e2bde35");
+        msg += localization::Text(L"workspace.stage_manager.5dcbcd08c52b");
         msg += entry.targetPath.empty() ? L"(unknown)" : entry.targetPath;
-        msg += IsEnglishUi() ? L"\nStage: " : L"\n差分ファイル: ";
+        msg += localization::Text(L"workspace.stage_manager.79bd42025fbb");
         msg += entry.stagePath.empty() ? L"(unknown)" : entry.stagePath.wstring();
         ShowSoftNotice(ctx->hwnd, msg, SoftNoticeKind::Warning);
     }
@@ -323,34 +291,34 @@ static LRESULT CALLBACK StageManagerDialogProc(HWND hWnd, UINT msg, WPARAM wPara
                                           ES_AUTOVSCROLL | ES_READONLY,
                                       384, 64, 400, 300, hWnd, nullptr, g_hInst, nullptr);
 
-        const wchar_t* activateLabel = IsEnglishUi() ? L"Make latest" : L"最新にする";
-        const wchar_t* integrateLabel = IsEnglishUi() ? L"Integrate to original" : L"原本へ統合";
-        const wchar_t* mergeLabel = IsEnglishUi() ? L"Add to current PDF" : L"現在PDFへ注釈追加";
-        const wchar_t* discardLabel = IsEnglishUi() ? L"Discard" : L"破棄";
-        const wchar_t* noBackupLabel = IsEnglishUi() ? L"Integrate without backup" : L"バックアップなしで直接統合";
-        const wchar_t* closeLabel = IsEnglishUi() ? L"Close" : L"閉じる";
+        const std::wstring activateLabel = localization::Text(L"workspace.stage_manager.ab2785e44160");
+        const std::wstring integrateLabel = localization::Text(L"workspace.stage_manager.c166aa153cdf");
+        const std::wstring mergeLabel = localization::Text(L"workspace.stage_manager.277797d3d598");
+        const std::wstring discardLabel = localization::Text(L"workspace.stage_manager.bd94165e161d");
+        const std::wstring noBackupLabel = localization::Text(L"workspace.stage_manager.2d660f3156ba");
+        const std::wstring closeLabel = localization::Text(L"workspace.stage_manager.603bc62f3f34");
 
-        ctx->btnActivate = CreateWindowExW(0, L"BUTTON", activateLabel,
+        ctx->btnActivate = CreateWindowExW(0, L"BUTTON", activateLabel.c_str(),
                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                            12, 376, 120, 28, hWnd, reinterpret_cast<HMENU>(kStageMgrActivate),
                                            g_hInst, nullptr);
-        ctx->btnIntegrate = CreateWindowExW(0, L"BUTTON", integrateLabel,
+        ctx->btnIntegrate = CreateWindowExW(0, L"BUTTON", integrateLabel.c_str(),
                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                             142, 376, 140, 28, hWnd, reinterpret_cast<HMENU>(kStageMgrIntegrate),
                                             g_hInst, nullptr);
-        ctx->btnMerge = CreateWindowExW(0, L"BUTTON", mergeLabel,
+        ctx->btnMerge = CreateWindowExW(0, L"BUTTON", mergeLabel.c_str(),
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                         292, 376, 180, 28, hWnd, reinterpret_cast<HMENU>(kStageMgrMerge),
                                         g_hInst, nullptr);
-        CreateWindowExW(0, L"BUTTON", noBackupLabel,
+        CreateWindowExW(0, L"BUTTON", noBackupLabel.c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         482, 376, 180, 28, hWnd, reinterpret_cast<HMENU>(kStageMgrIntegrateNoBackup),
                         g_hInst, nullptr);
-        ctx->btnDiscard = CreateWindowExW(0, L"BUTTON", discardLabel,
+        ctx->btnDiscard = CreateWindowExW(0, L"BUTTON", discardLabel.c_str(),
                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                           672, 376, 80, 28, hWnd, reinterpret_cast<HMENU>(kStageMgrDiscard),
                                           g_hInst, nullptr);
-        CreateWindowExW(0, L"BUTTON", closeLabel,
+        CreateWindowExW(0, L"BUTTON", closeLabel.c_str(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         762, 376, 80, 28, hWnd, reinterpret_cast<HMENU>(IDOK),
                         g_hInst, nullptr);
@@ -420,10 +388,11 @@ void ShowStageManagerDialog(HWND owner) {
     RegisterClassW(&wc);
 
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, GetUiText().menuDiffManager.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
+                             WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, 870, 455,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return;
+    PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);
     MSG msg;

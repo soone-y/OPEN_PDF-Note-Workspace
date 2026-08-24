@@ -71,6 +71,7 @@ struct UiText {
     std::wstring menuNewClro;
     std::wstring menuOpenWorkspaceDir;
     std::wstring menuOpenLectureDir;
+    std::wstring menuOpenSessionDir;
     std::wstring menuExit;
     std::wstring menuResetZoom;
     std::wstring menuSetZoom;

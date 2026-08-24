@@ -5,6 +5,7 @@
 
 #include "resources/app_resource.h"
 #include "core/app_core.h"
+#include "core/localization.h"
 #include "core/fault_injection.h"
 #include "clrop/bridge.h"
 #include "file_output/file_output.h"
@@ -114,116 +115,28 @@ struct SearchUiStrings {
 };
 
 static SearchUiStrings GetSearchUiStrings() {
-    if (IsEnglishUi()) {
-        SearchUiStrings s{
-            L"Search",
-            L"Query",
-            L"Spaces=AND, OR/|=OR, quotes=phrase. Width variants and separators (space, ,、・) are ignored.",
-            L"term OR term, term | term, \"exact phrase\", A,B",
-            L"Search",
-            L"Cancel",
-            L"Range (choose one)",
-            L"Target (choose any)",
-            L"Options",
-            L"Normalize width/kana and separators",
-            L"Ignore case",
-            L"Translucent window",
-            L"Results",
-            L"Enter/double-click=open, colored=opened, right-click=more, Delete=hide",
-            L"Hide from results",
-            L"Open in read-only viewer",
-            L"Status",
-            L"Summary",
-            L"Ready.",
-            L"Searching",
-            L"Done.",
-            L"Canceled.",
-            L"Hits: ",
-            L"Files: ",
-            L"Pages: ",
-            { L"Open parent item", L"Open child item", L"Whole workspace" },
-            L"Also include temporarily added external parent items",
-            { L"Note", L"PDF", L"Annotations" },
-            L"Enter a search term.",
-            L"Select a range.",
-            L"Select at least one target.",
-            L"No note is open.",
-            L"No PDF is open.",
-            L"No session is open.",
-            L"No lecture is open.",
-            L"No searchable files were found.",
-            L"No matches.",
-            L"Note",
-            L"PDF",
-            L"Annot",
-            L"Path",
-            L"Line",
-            L"Page",
-            L"hits",
-            L"Current"
-        };
-        if (g_config.studentMode) {
-            s.ranges = { L"Open lecture", L"Open session", L"Whole workspace" };
-            s.includeTempExternalLabel = L"Also include temporarily added external lectures";
-        } else {
-            s.msgNoSession = L"No child item is open.";
-            s.msgNoLecture = L"No parent item is open.";
-        }
-        return s;
-    }
+    const auto text = [](const wchar_t* id) { return localization::Text(id); };
     SearchUiStrings s{
-        L"検索",
-        L"検索語",
-        L"空白=AND、OR/|=OR、\"...\"=フレーズ。半角/全角と区切り（空白,、・）は同一視",
-        L"語 OR 語、語 | 語、\"フレーズ\"、A,B",
-        L"検索",
-        L"中止",
-        L"検索範囲（1つ選択）",
-        L"検索対象（複数選択可）",
-        L"オプション",
-        L"全角/半角・カナ・区切りを同一視",
-        L"大文字/小文字を同一視",
-        L"検索ウィンドウを半透明",
-        L"結果",
-        L"Enter/ダブルクリック=開く、色付き=移動済み、右クリック=操作、Delete=下げる",
-        L"検索結果から下げる",
-        L"読み取り専用ビューアで開く",
-        L"状態",
-        L"内訳",
-        L"待機中",
-        L"検索中",
-        L"完了",
-        L"中断",
-        L"一致: ",
-        L"ファイル: ",
-        L"ページ: ",
-        { L"開いている上位項目", L"開いている下位項目", L"ワークスペース全体" },
-        L"一時的に追加した外部の上位項目も含める",
-        { L"ノート", L"PDF", L"注釈" },
-        L"検索語を入力してください。",
-        L"検索範囲を選択してください。",
-        L"検索対象を1つ以上選択してください。",
-        L"ノートが開かれていません。",
-        L"PDFが開かれていません。",
-        L"セッションが開かれていません。",
-        L"授業が開かれていません。",
-        L"検索できるファイルが見つかりません。",
-        L"該当なし",
-        L"ノート",
-        L"PDF",
-        L"注釈",
-        L"パス",
-        L"行",
-        L"ページ",
-        L"件",
-        L"現在"
+        text(L"search.ui.title"), text(L"search.ui.query_label"), text(L"search.ui.query_hint"), text(L"search.ui.query_cue"),
+        text(L"search.ui.run"), text(L"search.ui.cancel"), text(L"search.ui.range_label"), text(L"search.ui.target_label"),
+        text(L"search.ui.options"), text(L"search.ui.normalize"), text(L"search.ui.ignore_case"), text(L"search.ui.translucent"),
+        text(L"search.ui.results"), text(L"search.ui.result_hint"), text(L"search.ui.hide_result"), text(L"search.ui.open_readonly"),
+        text(L"search.ui.status"), text(L"search.ui.summary"), text(L"search.ui.ready"), text(L"search.ui.searching"),
+        text(L"search.ui.done"), text(L"search.ui.canceled"), text(L"search.ui.hits"), text(L"search.ui.files"), text(L"search.ui.pages"),
+        { text(L"search.ui.range_parent"), text(L"search.ui.range_child"), text(L"search.ui.range_workspace") },
+        text(L"search.ui.include_external_parent"),
+        { text(L"search.ui.target_note"), text(L"search.ui.target_pdf"), text(L"search.ui.target_annotations") },
+        text(L"search.ui.need_query"), text(L"search.ui.need_range"), text(L"search.ui.need_target"), text(L"search.ui.no_note"),
+        text(L"search.ui.no_pdf"), text(L"search.ui.no_session"), text(L"search.ui.no_lecture"), text(L"search.ui.no_searchable_files"),
+        text(L"search.ui.no_results"), text(L"search.ui.tag_note"), text(L"search.ui.tag_pdf"), text(L"search.ui.tag_annot"),
+        text(L"search.ui.tag_path"), text(L"search.ui.meta_line"), text(L"search.ui.meta_page"), text(L"search.ui.meta_hits"), text(L"search.ui.meta_current")
     };
     if (g_config.studentMode) {
-        s.ranges = { L"開いている授業", L"開いている回次", L"ワークスペース全体" };
-        s.includeTempExternalLabel = L"一時的に追加した外部の授業も含める";
+        s.ranges = { text(L"search.ui.range_lecture"), text(L"search.ui.range_session"), text(L"search.ui.range_workspace") };
+        s.includeTempExternalLabel = text(L"search.ui.include_external_lecture");
     } else {
-        s.msgNoSession = L"下位項目が開かれていません。";
-        s.msgNoLecture = L"上位項目が開かれていません。";
+        s.msgNoSession = text(L"search.ui.no_child");
+        s.msgNoLecture = text(L"search.ui.no_parent");
     }
     return s;
 }
@@ -925,10 +838,9 @@ static std::wstring JoinMetaParts(const std::vector<std::wstring>& parts) {
 
 static std::wstring FormatResultHitText(const SearchUiStrings& ui, int hits) {
     if (hits <= 0) return L"";
-    if (IsEnglishUi()) {
-        return std::to_wstring(hits) + L" " + ui.metaHits;
-    }
-    return std::to_wstring(hits) + ui.metaHits;
+    return localization::Format(L"search.ui.result_hits", {
+        { L"HITS", std::to_wstring(hits) }, { L"UNIT", ui.metaHits }
+    });
 }
 
 static std::wstring GetSearchResultBadge(const SearchUiStrings& ui, SearchResultKind kind) {
@@ -3044,6 +2956,7 @@ void ShowSearchWindow(HWND parent) {
                                    CW_USEDEFAULT, CW_USEDEFAULT, 760, 620,
                                    nullptr, nullptr, g_hInst, parent);
     if (g_hSearchWnd) {
+        PlaceOwnedPopupAtAppTopLeft(g_hSearchWnd, parent);
         ShowWindow(g_hSearchWnd, SW_SHOWNORMAL);
         UpdateWindow(g_hSearchWnd);
         FocusSearchWindowQuery(g_hSearchWnd);
@@ -3051,12 +2964,12 @@ void ShowSearchWindow(HWND parent) {
     } catch (const std::exception& ex) {
         AppendCrashLogLine("ShowSearchWindow", ex.what());
         ShowSoftNotice(parent ? parent : g_hMainWnd,
-                       IsEnglishUi() ? L"Search window could not be opened." : L"検索ウィンドウを開けませんでした。",
+                       localization::Text(L"search.b20bb7de8ca7"),
                        SoftNoticeKind::Error);
     } catch (...) {
         AppendCrashLogLine("ShowSearchWindow", nullptr);
         ShowSoftNotice(parent ? parent : g_hMainWnd,
-                       IsEnglishUi() ? L"Search window could not be opened." : L"検索ウィンドウを開けませんでした。",
+                       localization::Text(L"search.b20bb7de8ca7"),
                        SoftNoticeKind::Error);
     }
 }
@@ -3118,12 +3031,12 @@ void ShowSearchWindowWithPreset(HWND parent, int rangeIndex, unsigned targetMask
     } catch (const std::exception& ex) {
         AppendCrashLogLine("ShowSearchWindowWithPreset", ex.what());
         ShowSoftNotice(parent ? parent : g_hMainWnd,
-                       IsEnglishUi() ? L"Preset search could not be opened." : L"検索プリセットを開けませんでした。",
+                       localization::Text(L"search.0f60feba3db8"),
                        SoftNoticeKind::Error);
     } catch (...) {
         AppendCrashLogLine("ShowSearchWindowWithPreset", nullptr);
         ShowSoftNotice(parent ? parent : g_hMainWnd,
-                       IsEnglishUi() ? L"Preset search could not be opened." : L"検索プリセットを開けませんでした。",
+                       localization::Text(L"search.0f60feba3db8"),
                        SoftNoticeKind::Error);
     }
 }

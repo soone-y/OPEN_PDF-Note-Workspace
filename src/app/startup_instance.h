@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <string>
+#include <vector>
 
 inline constexpr UINT kMsgOpenStartupDocument = WM_APP + 211;
 inline constexpr ULONG_PTR kCopyDataOpenDocumentPath = 0x50445731; // "PDW1"
@@ -20,6 +21,13 @@ std::wstring SingleInstanceShutdownRequestEventName();
 // True only when processId belongs to an executable packaged with this executable's setup file.
 bool IsProcessInCurrentMainPackage(DWORD processId);
 bool SignalSingleInstanceShutdownRequest();
+
+struct OtherPackageHeadlessMainProcess {
+    DWORD processId = 0;
+    std::wstring packageDirectory;
+};
+[[nodiscard]] std::vector<OtherPackageHeadlessMainProcess> FindOtherPackageHeadlessMainProcesses();
+[[nodiscard]] bool RequestOtherPackageHeadlessMainProcessShutdown(DWORD processId);
 
 void CaptureStartupDocumentPathFromCommandLine();
 bool HasPendingStartupOpenDocumentPath();

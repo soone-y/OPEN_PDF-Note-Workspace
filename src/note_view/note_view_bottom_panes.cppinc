@@ -1,6 +1,8 @@
 // Bottom note pane UI and interaction.
 // MathBox input lives under src/note_view/bottom_math_panel.cpp.
 
+#include "core/localization.h"
+
 static int g_bottomPaneScrollY = 0;
 static int g_bottomPaneMaxScrollY = 0;
 
@@ -348,13 +350,12 @@ LRESULT CALLBACK BottomNoteProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 flash = g_noteCmdlineFlash;
             }
 
-            std::wstring left = IsEnglishUi()
-                ? (L"Ln " + std::to_wstring(lineOneBased) + L", Col " + std::to_wstring(colOneBased) +
-                   L"  " + std::to_wstring(static_cast<unsigned long long>(caret)) + L"/" +
-                   std::to_wstring(static_cast<unsigned long long>(textLen)))
-                : (L"行 " + std::to_wstring(lineOneBased) + L"、桁 " + std::to_wstring(colOneBased) +
-                   L"  " + std::to_wstring(static_cast<unsigned long long>(caret)) + L"/" +
-                   std::to_wstring(static_cast<unsigned long long>(textLen)));
+            std::wstring left = localization::Format(L"note.status.cursor", {
+                {L"LINE", std::to_wstring(lineOneBased)},
+                {L"COLUMN", std::to_wstring(colOneBased)},
+                {L"CARET", std::to_wstring(static_cast<unsigned long long>(caret))},
+                {L"LENGTH", std::to_wstring(static_cast<unsigned long long>(textLen))},
+            });
 
             std::wstring right;
             if (!flash.empty()) {

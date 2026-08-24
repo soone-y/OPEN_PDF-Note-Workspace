@@ -3,6 +3,7 @@
 
 #include "core/app_core.h"
 #include "core/font_list.h"
+#include "core/localization.h"
 #include "pdf_view/pdf_view.h"
 #include "note_view/note_view.h"
 #include "file_output/file_output.h"

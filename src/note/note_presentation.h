@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstddef>
+#include <string_view>
+
 namespace note {
 
 enum class NotePresentationFrameAction {
@@ -20,6 +23,10 @@ struct NotePresentationFrameState {
 
 NotePresentationFrameAction ResolveNotePresentationFrameAction(
     const NotePresentationFrameState& state);
+
+// GetWindowTextW exposes RichEdit hard line breaks as CRLF, while edit
+// positions and the renderer use one indexed character per hard line break.
+size_t RichEditWindowTextLengthForIndexedText(std::wstring_view indexed_text);
 
 struct NoteDerivedRefreshRequest {
     bool render_active = false;

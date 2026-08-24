@@ -1,6 +1,7 @@
 #include <richedit.h>
 // file: core/app_core.cpp
 #include "core/app_core.h"
+#include "core/localization.h"
 #include "workspace/workspace_write_lock.h"
 #include "core/text_encoding.h"
 #include "app/startup_instance.h"
@@ -10,6 +11,7 @@
 #include "core/preview_trace.h"
 #include "core/ui_notify.h"
 #include "core/setup_json_policy.h"
+#include "core/localization.h"
 #include "clrop/hash.h"
 #include "theme/built_in_theme.h"
 #include "workspace/workspace_actions.h"
@@ -245,6 +247,7 @@ HWND g_hChkTextReadableBackground = nullptr;
 HWND g_hRadioTextReadableBackgroundNormal = nullptr;
 HWND g_hRadioTextReadableBackgroundInverted = nullptr;
 HWND g_hChkTextAutoWrap = nullptr;
+HWND g_hChkPanMouseWheelZoom = nullptr;
 HWND g_hComboWidth = nullptr;
 HWND g_hComboMarkerAlpha = nullptr;
 HWND g_hComboAnnotMethod = nullptr;
@@ -309,7 +312,7 @@ std::wstring g_currentNotePath;
 std::wstring g_currentSessionPath;
 bool g_noteNormalMode = false;
 DWORD g_noteNormalCaret = 0;
-bool g_noteVimModeEnabled = true;
+bool g_noteVimModeEnabled = false;
 bool g_noteVimCaretLineRawTextVisible = false;
 bool g_noteVimClickEntersInsertMode = true;
 bool g_noteDirty = false;
@@ -352,146 +355,8 @@ std::vector<FileEntry> g_noteFiles;
 WorkspaceConfig g_config;
 static bool g_workspaceConfigAutoPersistBlocked = false;
 static std::wstring g_workspaceConfigAutoPersistBlockedRootKey;
-static UiText g_uiJa{
-    L"PDF Note Workspace",
-    L"メニュー", L"表示", L"保存", L"出力", L"検索", L"操作", L"一時", L"ヘルプ",
-    L"ワークスペースを開く...", L"ワークスペース再読み込み", L"ファイルを取り込む...", L"フォルダを授業として取り込む...", L"フォルダを回次として取り込む...", L"PDF/ノートをフォルダに整理...", L"ノートと注釈を原本へ保存・統合 (Ctrl+S)", L"現在のノートだけ原本へ保存", L"復元/バックアップ...", L"保存バックアップを削除...", L"PDFを書き出し...", L"PDFをページ指定で書き出し...", L"PDFをPNGで書き出し...", L"ノートをtxt出力...", L"ノートをマークアップ/Markdown出力...", L"ノートをHTML出力...", L"授業を作成...", L"授業を作成", L"回次作成", L"ノート作成", L"ノートの作成", L"ルートフォルダをエクスプローラーで開く", L"授業フォルダをエクスプローラーで開く", L"終了",
-    L"ズームをリセット", L"ズーム指定...", L"最初のページ", L"前のページ", L"次のページ", L"最後のページ", L"ページ指定ジャンプ...", L"PDF位置の記憶をリセット",
-    L"右下の表示", L"ノートテキストの延長", L"見出し一覧", L"MathBox入力", L"ノートアシスト", L"ノート折り返し(生表示)",
-    L"ヘルプを表示", L"PDF情報...", L"バージョン情報", L"クラッシュ（テスト）",
-    L"選択クリア", L"全消し", L"注釈表示切替",
-    L"選択", L"パン", L"拡大鏡", L"マーカー", L"フリーハンドマーカー", L"テキスト", L"ライン", L"矢印", L"波線", L"フリーハンド", L"図形", L"消しゴム",
-    L"予約スペース",
-    L"バージョン情報", L"ソフト情報\n"
-    L"ソフト名: PDF Note Workspace\n"
-    L"リポジトリバージョン: {REPO_VERSION}\n"
-    L"ビルド日時: {BUILD_TIMESTAMP}\n"
-    L"ビルド成果物 (SHA-256):\n"
-    L"{BUILD_ARTIFACTS}\n"
-    L"開発者: Soone-Y\n"
-    L"アプリライセンス: zlib License (LICENSE.md 参照)\n"
-    L"利用ライブラリ一覧:\n"
-    L"  - PDFium\n"
-    L"  - MinGW-w64 runtime (libstdc++ / libgcc / winpthreads)\n"
-    L"各ライブラリのライセンス:\n"
-    L"  - PDFium: パッケージ LICENSE / 同梱 notices (THIRD_PARTY_NOTICES.md 参照)\n"
-    L"  - MinGW-w64 runtime: GPLv3 + GCC Runtime Library Exception / MIT + BSD (THIRD_PARTY_NOTICES.md 参照)\n"
-    L"\n"
-    L"安全性ポリシー:\n"
-    L"  - 保存時に原本PDFファイルを直接上書きしません。\n"
-    L"外部通信ポリシー:\n"
-    L"  - 本ソフトは外部通信機能を持ちません。",
-    L"ページ", L"ズーム",
-    L"PDFを開けません。パスと権限を確認してください。", L"ノートを開けませんでした。", L"ノートを保存できませんでした。", L"ファイルを取り込めませんでした。", L"同名ファイルがあります。上書きしますか？",
-    L"セッションが開かれていません。講義→回次を選択してください。",
-    L"ノートを作成できませんでした。書き込み権限とパスを確認してください。",
-    L"ノートを作成しました。",
-    L"授業を作成", L"授業名", L"授業フォルダを作成できませんでした。", L"同名が存在するため番号を付けました。",
-    L"回次ファイルを作成", L"回次名", L"回次フォルダを作成できませんでした。", L"同名の回次が存在します。", L"講義を選択してください。",
-    L"設定", L"基本設定...", L"ノート設定...", L"マークアップ設定...", L"注釈設定",
-    L"設定プリセットを保存...", L"設定プリセットを読み込み...",
-    L"授業スケジュール",
-    L"一時外部授業パス追加",
-    L"一時外部授業パス削除",
-    L"操作",
-    L"復元",
-    L"削除",
-    L"最終オープン時刻をリセット",
-    L"セッション最終オープン履歴をリセット",
-    L"PDF位置を復元",
-    L"最終オープン時刻を復元",
-    L"セッション最終オープン履歴を復元",
-    L"PDF位置バックアップを削除",
-    L"最終オープン時刻バックアップを削除",
-    L"セッション最終オープン履歴バックアップを削除",
-    L"PDF名を変更...",
-    L"ノート名を変更...",
-    L"PDF位置を変更...",
-    L"ノート位置を変更...",
-    L"未統合の差分を確認...",
-    L"閲覧専用ビューアで開く",
-    L"閲覧専用ビューアを起動",
-    L"すべての閲覧専用ビューアを閉じる",
-    L"LibreOfficeでDOCX/PPTXをPDFに変換（試験的）...",
-    L"白紙PDFを作成...",
-    L"スクロール方向",
-    L"縦（上→下）",
-    L"縦（下→上）",
-    L"横（右→左）",
-    L"横（左→右）",
-    L"1枚送り",
-    L"カラーパレット..."
-};
-static UiText g_uiEn{
-    L"PDF Note Workspace",
-    L"Menu", L"View", L"Save", L"Export", L"Search", L"Operations", L"Temp", L"Help",
-    L"Open Workspace...", L"Reload Workspace", L"Import File...", L"Import Directory as Lecture...", L"Import Directory as Session...", L"Organize PDF/notes into folders...", L"Save note + annotations to original files (Ctrl+S)", L"Save only the current note to its original file", L"Recovery / Backups...", L"Delete Saved File Backup...", L"Export PDF with annotations...", L"Export PDF pages...", L"Export PDF page as PNG...", L"Export note as text...", L"Export note as markup/Markdown...", L"Export note as HTML...", L"New Lecture...", L"New Lecture", L"New Session", L"New Note", L"Create Note", L"Open Root Folder", L"Open Lecture Folder", L"Exit",
-    L"Reset Zoom", L"Set Zoom...", L"First Page", L"Previous Page", L"Next Page", L"Last Page", L"Jump to Page...", L"Reset Saved PDF Position",
-    L"Bottom-right display", L"Extend note text", L"Heading list", L"MathBox input", L"Note assist", L"Note Wrap (raw mode)",
-    L"Help...", L"PDF Info...", L"About", L"Crash (test)",
-    L"Clear Select", L"Clear Annots", L"Toggle Annots",
-    L"Select", L"Pan", L"Magnifier", L"Marker (text)", L"Marker (free)", L"Text", L"Line", L"Arrow", L"Wave", L"Freehand", L"Shape", L"Eraser",
-    L"Reserved pane",
-    L"About", L"Software Information\n"
-    L"Software Name: PDF Note Workspace\n"
-    L"Repository Version: {REPO_VERSION}\n"
-    L"Build Date/Time: {BUILD_TIMESTAMP}\n"
-    L"Build Artifacts (SHA-256):\n"
-    L"{BUILD_ARTIFACTS}\n"
-    L"Developer: Soone-Y\n"
-    L"App License: zlib License (see LICENSE.md)\n"
-    L"Third-Party Libraries:\n"
-    L"  - PDFium\n"
-    L"  - MinGW-w64 runtime (libstdc++ / libgcc / winpthreads)\n"
-    L"License for Each Library:\n"
-    L"  - PDFium: package LICENSE / bundled notices (see THIRD_PARTY_NOTICES.md)\n"
-    L"  - MinGW-w64 runtime: GPLv3 + GCC Runtime Library Exception / MIT + BSD (see THIRD_PARTY_NOTICES.md)\n"
-    L"\n"
-    L"Safety Policy:\n"
-    L"  - The original PDF file is never overwritten directly when saving.\n"
-    L"External Communication Policy:\n"
-    L"  - This software has no external communication features.",
-    L"Page", L"Zoom",
-    L"Failed to open PDF. Check path and permissions.", L"Failed to open note file.", L"Failed to save note file.", L"Failed to import file.", L"A file with the same name exists. Overwrite?",
-    L"No session is open. Select a lecture/session first.",
-    L"Failed to create note. Check write permission and path.",
-    L"Note created.",
-    L"Create Lecture", L"Lecture name", L"Failed to create lecture directory.", L"Name existed; appended a number.",
-    L"Create Session", L"Session name", L"Failed to create session directory.", L"Session already exists.", L"Select a lecture first.",
-    L"Settings", L"Preferences...", L"Note Settings...", L"Markup...", L"Annotation Settings...",
-    L"Save Settings Preset...", L"Load Settings Preset...",
-    L"Lecture Schedule",
-    L"Add Temporary External Lecture...",
-    L"Remove Temporary External Lecture",
-    L"Operations",
-    L"Restore",
-    L"Delete",
-    L"Reset Last Open Times",
-    L"Reset Session Last-Open History",
-    L"Restore Saved PDF Position",
-    L"Restore Last Open Times",
-    L"Restore Session Last-Open History",
-    L"Delete Saved PDF Position Backup",
-    L"Delete Last Open Times Backup",
-    L"Delete Session Last-Open History Backup",
-    L"Rename PDF...",
-    L"Rename Note...",
-    L"Move PDF...",
-    L"Move Note...",
-    L"Review Unintegrated Diffs...",
-    L"Open in Read-Only Viewer",
-    L"Launch Read-Only Viewer (No File)",
-    L"Close All Read-Only Viewers",
-    L"Convert DOCX/PPTX to PDF with LibreOffice (Experimental)...",
-    L"Create Blank PDF...",
-    L"Scroll direction",
-    L"Vertical (top to bottom)",
-    L"Vertical (bottom to top)",
-    L"Horizontal (right to left)",
-    L"Horizontal (left to right)",
-    L"Single-page mode",
-    L"Color Palette..."
-};
+// All shared UI text comes from the build-selected ID catalog.
+// The catalog is immutable after generation; mode-specific overrides are copied below.
 
 int g_leftWidth  = kDefaultLeftPane;
 int g_rightWidth = kDefaultRightPane;
@@ -516,6 +381,8 @@ bool g_readableTextOverlay = false;
 bool g_showMathList = true;
 ToolMode g_toolMode = ToolMode::Select;
 MagnifierShape g_magnifierShape = MagnifierShape::Circle;
+double g_magnifierZoom = 2.0;
+int g_magnifierSizeDip = 120;
 ShapeKind g_shapeKind = ShapeKind::Rectangle;
 // The first visible Shape-family entry is Stroke > Line. Keep the runtime
 // default aligned with that order until a workspace selection is restored.
@@ -762,7 +629,7 @@ static std::wstring DefaultThemeFileId() {
 MAYBE_UNUSED static ThemeColors MakeSystemDefaultTone() {
     ThemeColors t;
     t.name = L"default";
-    t.nameJp = IsEnglishUi() ? L"Default" : L"デフォルト";
+    t.nameJp = localization::Text(L"core.app.779a3b9d4381");
 
     t.windowBg = GetSysColor(COLOR_WINDOW);
     t.windowText = GetSysColor(COLOR_WINDOWTEXT);
@@ -1308,13 +1175,13 @@ static bool ReadThemeFile(const std::filesystem::path& path,
     if (outReason) outReason->clear();
     std::wstring fileToneId;
     if (!TryParseThemeIdHexFromFileId(path.filename().wstring(), &fileToneId)) {
-        if (outReason) *outReason = L"ファイル名が theme_XXXXXX.json 形式ではありません。";
+        if (outReason) *outReason = localization::Text(L"theme.file_name_invalid");
         return false;
     }
     std::wstring readErr;
     std::string json;
     if (!ReadTextFileUtf8Limited(path, kMaxThemeFileBytes, &json, &readErr)) {
-        if (outReason) *outReason = L"テーマファイルの読み込みに失敗しました。(" + readErr + L")";
+        if (outReason) *outReason = localization::Format(L"theme.file_read_failed", {{L"ERROR", readErr}});
         return false;
     }
 
@@ -1322,45 +1189,45 @@ static bool ReadThemeFile(const std::filesystem::path& path,
     auto fmt = ParseJsonStringField(json, "format");
     if (!fmt) {
         if (kThemeRequireFormatTag) {
-            if (outReason) *outReason = L"format が無いため、このソフトのテーマとして扱いません。";
+            if (outReason) *outReason = localization::Text(L"theme.format_missing");
             return false;
         }
     } else if (*fmt != "pdf_note_theme_v1") {
-        if (outReason) *outReason = L"format がこのソフトのテーマ形式ではありません。";
+        if (outReason) *outReason = localization::Text(L"theme.format_invalid");
         return false;
     }
 
     auto tone = ParseJsonStringField(json, "tone_id");
     if (!tone) {
-        if (outReason) *outReason = L"tone_id が無いため、このソフトのテーマとして扱いません。";
+        if (outReason) *outReason = localization::Text(L"theme.tone_id_missing");
         return false;
     }
     std::wstring toneW = UTF8ToWide(*tone);
     if (!toneW.empty() && toneW[0] == L'#') toneW.erase(0, 1);
     if (toneW.size() != 6 || !IsSixHexString(toneW)) {
-        if (outReason) *outReason = L"tone_id が不正です。";
+        if (outReason) *outReason = localization::Text(L"theme.tone_id_invalid");
         return false;
     }
     for (auto& ch : toneW) {
         if (ch >= L'a' && ch <= L'f') ch = static_cast<wchar_t>(ch - L'a' + L'A');
     }
     if (toneW != fileToneId) {
-        if (outReason) *outReason = L"ファイル名の基調ID(XXXXXX)と tone_id が一致しません。";
+        if (outReason) *outReason = localization::Text(L"theme.tone_id_filename_mismatch");
         return false;
     }
 
     ThemeColors t = fallbackCatalog.empty() ? ThemeColors{} : fallbackCatalog.front();
     if (!ParseThemeBlock(json, t)) {
-        if (outReason) *outReason = L"テーマJSONの解析に失敗しました。";
+        if (outReason) *outReason = localization::Text(L"theme.json_parse_failed");
         return false;
     }
 
     if (t.name.empty()) {
-        if (outReason) *outReason = L"name が空です。";
+        if (outReason) *outReason = localization::Text(L"theme.name_empty");
         return false;
     }
     if (t.name.size() > 200 || t.nameJp.size() > 200) {
-        if (outReason) *outReason = L"name/name_jp が長すぎます。";
+        if (outReason) *outReason = localization::Text(L"theme.name_too_long");
         return false;
     }
     out = std::move(t);
@@ -1998,16 +1865,13 @@ std::wstring TrimWhitespace(const std::wstring& s) {
 }
 
 bool IsEnglishUi() {
-    std::wstring lang = g_config.language;
-    std::transform(lang.begin(), lang.end(), lang.begin(), ::towlower);
-    return !lang.empty() && lang.rfind(L"en", 0) == 0;
+    return localization::IsEnglishBuild();
 }
 
 void UpdateLinkModeButtonState(bool active) {
-    const wchar_t* label = IsEnglishUi() ? (active ? L"Linking" : L"Link")
-                                          : (active ? L"リンク中" : L"リンク");
+    const std::wstring label = localization::Text(active ? L"link.active" : L"link.idle");
     if (g_hBtnShortcutPdfLink) {
-        SetWindowTextW(g_hBtnShortcutPdfLink, label);
+        SetWindowTextW(g_hBtnShortcutPdfLink, label.c_str());
     }
 }
 
@@ -2608,7 +2472,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.noteRawOnly = false;
     cfg.noteRenderMath = false;
     cfg.noteWrapEnabled = true;
-    cfg.noteVimModeEnabled = true;
+    cfg.noteVimModeEnabled = false;
     cfg.noteVimCaretLineRawTextVisible = false;
     cfg.noteVimClickEntersInsertMode = true;
     cfg.noteOverlayRefreshDelayMs = 400;
@@ -2639,7 +2503,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.autoSaveSeconds = kDefaultAutoSaveSeconds;
     cfg.autoIntegrateSeconds = kAutoIntegrateModeOffSwitchExit;
     cfg.autoIntegrateCustomMinutes = kAutoIntegrateCustomMinutesDefault;
-    cfg.clroNamePattern = L"回数_授業名_ノート1(連番).clro";
+    cfg.clroNamePattern = localization::Text(L"workspace.default_note_pattern");
     cfg.textFontName = g_textFontName.empty() ? L"Meiryo" : g_textFontName;
     cfg.textFontPt = (g_textFontPt > 1.0) ? g_textFontPt : 14.0;
     cfg.textFontUseA4Scale = g_textFontUseA4Scale;
@@ -2678,6 +2542,8 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.shapeColor = g_shapeColor;
     cfg.paletteCustomColor = g_paletteCustomColor;
     cfg.magnifierShape = MagnifierShapeToString(MagnifierShape::Circle);
+    cfg.magnifierZoom = 2.0;
+    cfg.magnifierSizeDip = 120;
     cfg.shapeDetail = UTF8ToWide(ShapeDetailKey(g_shapeDetail));
     cfg.shapeKind = ShapeKindToString(g_shapeKind);
     cfg.shapeDrawMode = ShapeDrawModeToString(g_shapeDrawMode);
@@ -2774,7 +2640,7 @@ static bool LooksLikeWorkspaceJson(const std::string& rawJson) {
     if (json.front() != '{' || json.back() != '}') return false;
     if (!IsSyntacticallyValidJsonLite(json)) return false;
     // NOTE: shortcuts are no longer persisted in workspace.json.
-    static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfBitmapBudgetMiB|pdfSinglePageMode|panMouseWheelZoom|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|sessionSortMode|sessionNumberingMode|sessionAutoOpenMode|sessionAutoOpenPairLinked|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
+    static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfBitmapBudgetMiB|pdfSinglePageMode|panMouseWheelZoom|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|sessionSortMode|sessionNumberingMode|sessionAutoOpenMode|sessionAutoOpenPairLinked|startupSelectFirstSession|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
     return std::regex_search(json, keyRe);
 }
 
@@ -2880,7 +2746,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "language", "markFontPx", "headingFontPx", "markColor", "headingColor",
         "headingBold", "headingUnderline", "headingLeftBar", "bottomPanePin", "bottomNoteMode", "notePlacement",
         "colorTone", "toneVariant", "quickAnnotPopupPlacement",
-        "lectureSortMode", "sessionSortMode", "sessionNumberingMode", "sessionAutoOpenMode", "sessionAutoOpenPairLinked", "selectionStyle", "pointerOffsetX", "pointerOffsetY",
+        "lectureSortMode", "sessionSortMode", "sessionNumberingMode", "sessionAutoOpenMode", "sessionAutoOpenPairLinked", "startupSelectFirstSession", "selectionStyle", "pointerOffsetX", "pointerOffsetY",
         "showMathList", "downKeyLastLineAction", "downKeyLastLineInsertNewline",
         "leftRightLineMoveAction", "autoPairBrackets", "fullWidthParenCaretInside", "fullWidthParenCancelNextLeft",
         "noteFontName", "noteFontPt", "noteRenderFontName", "noteRenderJpFontName",
@@ -2901,7 +2767,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "markerFreeWidthPt", "markerTextWidthPt", "markerTextUnderline", "eraserWidthPt",
         "markerAlpha", "lineAlpha", "arrowAlpha", "waveAlpha", "freehandAlpha", "shapeAlpha",
         "textColor", "lineColor", "arrowColor", "waveColor", "freehandColor", "markerFreeColor",
-        "markerTextColor", "shapeColor", "paletteCustomColor", "magnifierShape", "shapeDetail", "shapeKind",
+        "markerTextColor", "shapeColor", "paletteCustomColor", "magnifierShape", "magnifierZoom", "magnifierSizeDip", "shapeDetail", "shapeKind",
         "shapeDrawMode", "annotLastMarkerDetail", "annotLastPenDetail",
         "annotLastShapePresentation", "annotLastShapeGeometry", "annotLastShapeDetail",
         // Accepted only for one-time migration from the earlier numeric representation.
@@ -3139,14 +3005,15 @@ static std::wstring SetupJsonAutoUpdateBlockedReason(
     case setup_json_policy::AutoUpdateDecision::Allow:
         return L"";
     case setup_json_policy::AutoUpdateDecision::BlockReadFailure:
-        return readErr.empty() ? L"setup.json を読み込めません。"
-                               : L"setup.json を読み込めません: " + readErr;
+        return readErr.empty()
+                   ? localization::Text(L"setup.auto_update.read_failed")
+                   : localization::Format(L"setup.auto_update.read_failed_detail", {{L"ERROR", readErr}});
     case setup_json_policy::AutoUpdateDecision::BlockInvalidJson:
-        return L"setup.json がJSONとして壊れているため、自動更新しません。";
+        return localization::Text(L"setup.auto_update.invalid_json");
     case setup_json_policy::AutoUpdateDecision::BlockMissingWorkspaceRoot:
-        return L"setup.json に workspaceRoot が無いため、自動更新しません。";
+        return localization::Text(L"setup.auto_update.workspace_root_missing");
     case setup_json_policy::AutoUpdateDecision::BlockUnknownTopLevelField: {
-        std::wstring reason = L"setup.json にこのバージョンでは解釈できない項目があるため、自動更新しません。";
+        std::wstring reason = localization::Text(L"setup.auto_update.unknown_fields");
         const size_t limit = std::min<size_t>(unknownFields.size(), 8);
         for (size_t i = 0; i < limit; ++i) {
             reason += L"\n- " + UTF8ToWide(unknownFields[i]);
@@ -3155,7 +3022,7 @@ static std::wstring SetupJsonAutoUpdateBlockedReason(
         return reason;
     }
     }
-    return L"setup.json を安全に自動更新できません。";
+    return localization::Text(L"setup.auto_update.blocked");
 }
 
 static setup_json_policy::AutoUpdateDecision ResolveSetupJsonAutoUpdateDecision(
@@ -4258,10 +4125,10 @@ static bool ApplyThemeByNameImpl(const std::wstring& name, HWND owner, bool pers
                 }
                 if (!s_warnedFiles.count(name)) {
                     s_warnedFiles.insert(name);
-                    std::wstring msg = IsEnglishUi() ? L"Theme file is invalid and was ignored:\n" : L"テーマファイルが不正のため無視しました:\n";
+                    std::wstring msg = localization::Text(L"core.app.e6bfff5e1ba3");
                     msg += path.wstring();
                     if (!reason.empty()) msg += L"\n\n" + reason;
-                    ShowAppCoreMessageDialog(nullptr, IsEnglishUi() ? L"Themes" : L"テーマ",
+                    ShowAppCoreMessageDialog(nullptr, localization::Text(L"core.app.da55a5e33423"),
                                              msg, SoftNoticeKind::Warning);
                 }
 
@@ -4403,12 +4270,12 @@ bool CreateThemeFromCurrent(HWND owner,
     if (err) err->clear();
 
     if (g_workspaceRoot.empty()) {
-        if (err) *err = IsEnglishUi() ? L"No workspace is open." : L"ワークスペースが開かれていません。";
+        if (err) *err = localization::Text(L"core.app.55c168692754");
         return false;
     }
     std::wstring label = TrimWhitespace(displayName);
     if (label.empty()) {
-        if (err) *err = IsEnglishUi() ? L"Theme name is empty." : L"テーマ名が空です。";
+        if (err) *err = localization::Text(L"core.app.1f9532faff88");
         return false;
     }
 
@@ -4422,7 +4289,7 @@ bool CreateThemeFromCurrent(HWND owner,
         if (cand.size() > 40) cand.resize(40);
         cand += L"_" + std::to_wstring(idx++);
         if (idx > 9999) {
-            if (err) *err = IsEnglishUi() ? L"Failed to allocate a unique theme id." : L"テーマIDの採番に失敗しました。";
+            if (err) *err = localization::Text(L"core.app.1827139f4f17");
             return false;
         }
     }
@@ -4434,11 +4301,11 @@ bool CreateThemeFromCurrent(HWND owner,
     std::wstring fileId;
     if (kThemeUseThemeFiles && !g_workspaceRoot.empty()) {
         if (!WriteThemeFile(g_workspaceRoot, t, &fileId) || fileId.empty()) {
-            if (err) *err = IsEnglishUi() ? L"Failed to write theme file." : L"テーマファイルの保存に失敗しました。";
+            if (err) *err = localization::Text(L"core.app.900e2c9b810f");
             return false;
         }
     } else {
-        if (err) *err = IsEnglishUi() ? L"Theme files are disabled." : L"テーマファイル機能が無効です。";
+        if (err) *err = localization::Text(L"core.app.74797603cd0e");
         return false;
     }
 
@@ -4458,7 +4325,7 @@ bool CreateThemeFromCurrent(HWND owner,
     }
 
     if (!ApplyThemeByName(fileId, owner, /*persist=*/true)) {
-        if (err) *err = IsEnglishUi() ? L"Failed to apply theme." : L"テーマの適用に失敗しました。";
+        if (err) *err = localization::Text(L"core.app.c1d4688a7531");
         return false;
     }
     if (outThemeId) *outThemeId = fileId;
@@ -4720,6 +4587,7 @@ static bool ButtonIsKnownCheckbox(HWND hWnd) {
     return hWnd == g_hAnnotShow ||
            hWnd == g_hChkTextReadableBackground ||
            hWnd == g_hChkTextAutoWrap ||
+           hWnd == g_hChkPanMouseWheelZoom ||
            hWnd == g_hChkShortcutHeading1 ||
            hWnd == g_hChkShortcutBack ||
            hWnd == g_hChkShortcutChar ||
@@ -4967,10 +4835,10 @@ std::wstring AnnotToolFamilyLabel(AnnotToolFamily family) {
     case AnnotToolFamily::Magnifier: return ui.btnModeMagnifier;
     case AnnotToolFamily::Text:      return ui.btnModeText;
     case AnnotToolFamily::Marker:    return ui.btnModeMarker;
-    case AnnotToolFamily::Pen:       return IsEnglishUi() ? L"Pen" : L"ペン";
+    case AnnotToolFamily::Pen:       return localization::Text(L"core.app.7fa1a0161a12");
     case AnnotToolFamily::Shape:     return ui.btnModeShape;
     case AnnotToolFamily::Eraser:    return ui.btnModeEraser;
-    default:                         return IsEnglishUi() ? L"Tool" : L"ツール";
+    default:                         return localization::Text(L"core.app.5d62153345b8");
     }
 }
 
@@ -5169,7 +5037,7 @@ static void AddQuickAnnotContextOptions(std::vector<QuickAnnotPopupItem>& items)
         for (int i = 0; i < static_cast<int>(std::size(kFontPt10)); ++i) {
             const double pt = static_cast<double>(kFontPt10[i]) / 10.0;
             addItem(ID_ANNOT_CONTEXT_FONT_SIZE_BASE + i,
-                    std::wstring(IsEnglishUi() ? L"Size " : L"文字サイズ ") + QuickAnnotFormatPt(pt) + L"pt",
+                    std::wstring(localization::Text(L"core.app.403156da627f")) + QuickAnnotFormatPt(pt) + L"pt",
                     std::abs(currentPt10 - kFontPt10[i]) <= 1);
         }
     }
@@ -5194,26 +5062,30 @@ static void AddQuickAnnotContextOptions(std::vector<QuickAnnotPopupItem>& items)
             widthPt10[1] = 40;
             widthPt10[2] = 80;
         }
-        const wchar_t* labelsJa[] = { L"太さ 細", L"太さ 中", L"太さ 太", L"太さ 極太" };
-        const wchar_t* labelsEn[] = { L"Width Thin", L"Width Medium", L"Width Thick", L"Width Extra thick" };
+        static constexpr const wchar_t* labelIds[] = {
+            L"core.annotation.width.thin", L"core.annotation.width.medium",
+            L"core.annotation.width.thick", L"core.annotation.width.extra_thick" };
         const int currentPt10 = static_cast<int>(std::llround(ToolWidthPtForMode(g_toolMode) * 10.0));
         for (int i = 0; i < widthCount; ++i) {
             const double pt = static_cast<double>(widthPt10[i]) / 10.0;
+            const std::wstring label = localization::Text(labelIds[i]);
             addItem(ID_ANNOT_CONTEXT_WIDTH_BASE + i,
-                    QuickAnnotPtLabel(IsEnglishUi() ? labelsEn[i] : labelsJa[i], pt),
+                    QuickAnnotPtLabel(label.c_str(), pt),
                     std::abs(currentPt10 - widthPt10[i]) <= 1);
         }
     }
 
     if (ToolbarHasMarkerAlphaOptions(g_toolMode)) {
-        const wchar_t* labelsJa[] = { L"濃さ 薄", L"濃さ 標準", L"濃さ 濃", L"濃さ 最大" };
-        const wchar_t* labelsEn[] = { L"Opacity Light", L"Opacity Standard", L"Opacity Dark", L"Opacity Maximum" };
+        static constexpr const wchar_t* labelIds[] = {
+            L"core.annotation.opacity.light", L"core.annotation.opacity.standard",
+            L"core.annotation.opacity.dark", L"core.annotation.opacity.maximum" };
         const double current = ToolAlphaForMode(g_toolMode);
         const int count = ToolAlphaOptionCountForMode(g_toolMode);
         for (int i = 0; i < count; ++i) {
             const double alpha = ToolAlphaOptionValueForMode(g_toolMode, i);
+            const std::wstring label = localization::Text(labelIds[i]);
             addItem(ID_ANNOT_CONTEXT_ALPHA_BASE + i,
-                    QuickAnnotAlphaLabel(IsEnglishUi() ? labelsEn[i] : labelsJa[i], alpha),
+                    QuickAnnotAlphaLabel(label.c_str(), alpha),
                     std::abs(current - alpha) < 0.01);
         }
     }
@@ -6154,6 +6026,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     if (auto b = ParseJsonBoolField(json, "sessionAutoOpenPairLinked")) {
         cfg.sessionAutoOpenPairLinked = *b;
     }
+    if (auto b = ParseJsonBoolField(json, "startupSelectFirstSession")) {
+        cfg.startupSelectFirstSession = *b;
+    }
     if (auto s = ParseJsonStringField(json, "selectionStyle")) {
         cfg.selectionStyle = NormalizeSelectionStyle(UTF8ToWide(*s));
     }
@@ -6417,6 +6292,12 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     if (auto c = ParseJsonColorField(json, "paletteCustomColor")) cfg.paletteCustomColor = *c;
     if (auto s = ParseJsonStringField(json, "magnifierShape")) {
         cfg.magnifierShape = MagnifierShapeToString(ParseMagnifierShape(UTF8ToWide(*s)));
+    }
+    if (auto v = ParseJsonDoubleField(json, "magnifierZoom")) {
+        cfg.magnifierZoom = std::clamp(*v, 1.25, 4.0);
+    }
+    if (auto v = ParseJsonIntField(json, "magnifierSizeDip")) {
+        cfg.magnifierSizeDip = std::clamp(*v, 80, 240);
     }
     const bool hasShapeDetail = ParseJsonStringField(json, "shapeDetail").has_value();
     if (auto s = ParseJsonStringField(json, "shapeDetail")) {
@@ -6876,25 +6757,24 @@ WorkspaceConfig LoadWorkspaceConfig(const std::wstring& root) {
         BlockWorkspaceConfigAutoPersistForRoot(rootPath);
         LoadScheduleStartTimes(rootPath, cfg);
         EnsureScheduleStartTimesSize(cfg);
-        std::wstring msg = L"workspace.json を読み込めないため、既存設定を初期化せず、この起動では設定ファイルの自動保存を停止しました。\n";
+        std::wstring msg = localization::Text(L"workspace.config.read_failed");
         if (!readOk && !readErr.empty()) {
-            msg += L"\n読み込みエラー: " + readErr + L"\n";
+            msg += localization::Format(L"workspace.config.read_error", {{L"ERROR", readErr}});
         }
         if (!quarantined.empty()) {
-            msg += L"\n読めない設定ファイルを退避しました:\n" + quarantined.wstring();
+            msg += localization::Format(L"workspace.config.quarantined", {{L"PATH", quarantined.wstring()}});
         } else {
-            msg += L"\n読めない設定ファイルの退避に失敗しました。元の workspace.json は上書きしません。";
+            msg += localization::Text(L"workspace.config.quarantine_failed");
         }
-        msg += L"\n\n退避ファイルまたは元ファイルを確認し、手動で復旧するまで workspace.json は作り直しません。";
-        ShowAppCoreMessageDialog(nullptr, L"設定", msg, SoftNoticeKind::Warning);
+        msg += localization::Text(L"workspace.config.manual_recovery_required");
+        ShowAppCoreMessageDialog(nullptr, localization::Text(L"app_core.settings_title"), msg, SoftNoticeKind::Warning);
         return cfg;
     }
     const std::filesystem::path rootPath(root);
     std::vector<std::string> unknownFields;
     if (WorkspaceJsonHasUnknownTopLevelFields(json, &unknownFields)) {
         BlockWorkspaceConfigAutoPersistForRoot(rootPath);
-        std::wstring msg = L"workspace.json にこのバージョンでは解釈できない項目があるため、この起動では設定ファイルの自動保存を停止しました。\n";
-        msg += L"既存設定を既定値で上書きしないための保護です。必要なら workspace.json を手動で確認してください。\n\n未対応項目:";
+        std::wstring msg = localization::Text(L"workspace.config.unknown_fields");
         const size_t limit = std::min<size_t>(unknownFields.size(), 8);
         for (size_t i = 0; i < limit; ++i) {
             msg += L"\n- " + UTF8ToWide(unknownFields[i]);
@@ -6902,7 +6782,7 @@ WorkspaceConfig LoadWorkspaceConfig(const std::wstring& root) {
         if (unknownFields.size() > limit) {
             msg += L"\n- ...";
         }
-        ShowAppCoreMessageDialog(nullptr, L"設定", msg, SoftNoticeKind::Warning);
+        ShowAppCoreMessageDialog(nullptr, localization::Text(L"app_core.settings_title"), msg, SoftNoticeKind::Warning);
     }
     ApplyJsonToWorkspaceConfig(json, cfg);
     LoadScheduleStartTimes(rootPath, cfg);
@@ -7015,6 +6895,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"sessionNumberingMode\": \"" << WideToUTF8(NormalizeSessionNumberingMode(cfg.sessionNumberingMode)) << "\",\n";
     ofs << "  \"sessionAutoOpenMode\": \"" << WideToUTF8(NormalizeSessionAutoOpenMode(cfg.sessionAutoOpenMode)) << "\",\n";
     ofs << "  \"sessionAutoOpenPairLinked\": " << (cfg.sessionAutoOpenPairLinked ? "true" : "false") << ",\n";
+    ofs << "  \"startupSelectFirstSession\": " << (cfg.startupSelectFirstSession ? "true" : "false") << ",\n";
     ofs << "  \"selectionStyle\": \"" << WideToUTF8(NormalizeSelectionStyle(cfg.selectionStyle)) << "\",\n";
     ofs << "  \"pointerOffsetX\": " << std::clamp(cfg.pointerOffsetX, -20, 20) << ",\n";
     ofs << "  \"pointerOffsetY\": " << std::clamp(cfg.pointerOffsetY, -20, 20) << ",\n";
@@ -7111,6 +6992,8 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"shapeColor\": \"" << ColorToHex(cfg.shapeColor) << "\",\n";
     ofs << "  \"paletteCustomColor\": \"" << ColorToHex(cfg.paletteCustomColor) << "\",\n";
     ofs << "  \"magnifierShape\": \"" << WideToUTF8(MagnifierShapeToString(ParseMagnifierShape(cfg.magnifierShape))) << "\",\n";
+    ofs << "  \"magnifierZoom\": " << std::clamp(cfg.magnifierZoom, 1.25, 4.0) << ",\n";
+    ofs << "  \"magnifierSizeDip\": " << std::clamp(cfg.magnifierSizeDip, 80, 240) << ",\n";
     ofs << "  \"shapeDetail\": \"" << WideToUTF8(cfg.shapeDetail) << "\",\n";
     ofs << "  \"shapeKind\": \"" << WideToUTF8(ShapeKindToString(ParseShapeKind(cfg.shapeKind))) << "\",\n";
     ofs << "  \"shapeDrawMode\": \"" << WideToUTF8(ShapeDrawModeToString(ParseShapeDrawMode(cfg.shapeDrawMode))) << "\",\n";
@@ -7218,6 +7101,8 @@ void PersistConfig() {
         g_config.shapeColor = g_shapeColor;
         g_config.paletteCustomColor = g_paletteCustomColor;
         g_config.magnifierShape = MagnifierShapeToString(g_magnifierShape);
+        g_config.magnifierZoom = std::clamp(g_magnifierZoom, 1.25, 4.0);
+        g_config.magnifierSizeDip = std::clamp(g_magnifierSizeDip, 80, 240);
         SyncLegacyShapeStateFromDetail();
         g_config.shapeDetail = UTF8ToWide(ShapeDetailKey(g_shapeDetail));
         g_config.shapeKind = ShapeKindToString(g_shapeKind);
@@ -7240,9 +7125,8 @@ void PersistConfig() {
             if (key != s_lastPersistConfigErrorPath || (now - s_lastPersistConfigErrorTick) >= 10000) {
                 s_lastPersistConfigErrorPath = key;
                 s_lastPersistConfigErrorTick = now;
-                std::wstring msg = IsEnglishUi()
-                    ? L"Failed to save workspace settings.\n\nPath:\n" + key
-                    : L"ワークスペース設定を保存できませんでした。\n\n保存先:\n" + key;
+                std::wstring msg = localization::Format(L"core.workspace_settings.save_failed",
+                                                        {{L"PATH", key}});
                 ShowAppCoreSoftNotice(g_hMainWnd, msg, SoftNoticeKind::Warning);
             }
         }
@@ -7264,71 +7148,72 @@ std::filesystem::path WorkspaceCachePath(const std::wstring& root, const Workspa
 }
 
 const UiText& GetUiText() {
-    std::wstring lang = g_config.language;
-    std::transform(lang.begin(), lang.end(), lang.begin(), ::towlower);
-    if (!lang.empty() && lang.rfind(L"en", 0) == 0) {
+    const UiText& catalogText = localization::UserInterfaceText();
+    if (IsEnglishUi()) {
         if (!g_config.studentMode) {
             static UiText genericEn;
-            genericEn = g_uiEn;
-            genericEn.menuImportDirAsLecture = L"Import Directory as Parent Item...";
-            genericEn.menuImportDirAsSession = L"Import Directory as Child Item...";
-            genericEn.menuOrganizeSessionFiles = L"Organize PDF/notes into folders...";
-            genericEn.menuNewLecture = L"New Parent Item...";
-            genericEn.btnNewLecture = L"New Parent Item";
-            genericEn.btnNewSession = L"New Child Item";
-            genericEn.menuOpenLectureDir = L"Open Parent Item Folder";
-            genericEn.errNewClroNoSession = L"No child item is open. Select a parent/child item first.";
-            genericEn.dlgNewLectureTitle = L"Create Parent Item";
-            genericEn.dlgNewLectureLabel = L"Parent item name";
-            genericEn.errLectureCreate = L"Failed to create parent item directory.";
-            genericEn.dlgNewSessionTitle = L"Create Child Item";
-            genericEn.dlgNewSessionLabel = L"Child item name";
-            genericEn.errSessionCreate = L"Failed to create child item directory.";
-            genericEn.errSessionExists = L"Child item already exists.";
-            genericEn.errSessionNoLecture = L"Select a parent item first.";
-            genericEn.menuLectureSchedule = L"Parent Item Schedule";
-            genericEn.menuAddTempExternalLecture = L"Add Temporary External Parent Item...";
-            genericEn.menuRemoveTempExternalLecture = L"Remove Temporary External Parent Item";
-            genericEn.menuResetLectureLastOpen = L"Reset Parent Item Last-Open Times";
-            genericEn.menuResetSessionLastOpen = L"Reset Child Item Last-Open History";
-            genericEn.menuRestoreLectureLastOpen = L"Restore Parent Item Last-Open Times";
-            genericEn.menuRestoreSessionLastOpen = L"Restore Child Item Last-Open History";
-            genericEn.menuDeleteLectureLastOpenBackup = L"Delete Parent Item Last-Open Backup";
-            genericEn.menuDeleteSessionLastOpenBackup = L"Delete Child Item Last-Open History Backup";
+            genericEn = catalogText;
+            genericEn.menuImportDirAsLecture = localization::Text(L"ui.generic.menu_import_dir_as_lecture");
+            genericEn.menuImportDirAsSession = localization::Text(L"ui.generic.menu_import_dir_as_session");
+            genericEn.menuOrganizeSessionFiles = localization::Text(L"ui.generic.menu_organize_session_files");
+            genericEn.menuNewLecture = localization::Text(L"ui.generic.menu_new_lecture");
+            genericEn.btnNewLecture = localization::Text(L"ui.generic.btn_new_lecture");
+            genericEn.btnNewSession = localization::Text(L"ui.generic.btn_new_session");
+            genericEn.menuOpenLectureDir = localization::Text(L"ui.generic.menu_open_lecture_dir");
+            genericEn.menuOpenSessionDir = localization::Text(L"ui.generic.menu_open_session_dir");
+            genericEn.errNewClroNoSession = localization::Text(L"ui.generic.err_new_clro_no_session");
+            genericEn.dlgNewLectureTitle = localization::Text(L"ui.generic.dlg_new_lecture_title");
+            genericEn.dlgNewLectureLabel = localization::Text(L"ui.generic.dlg_new_lecture_label");
+            genericEn.errLectureCreate = localization::Text(L"ui.generic.err_lecture_create");
+            genericEn.dlgNewSessionTitle = localization::Text(L"ui.generic.dlg_new_session_title");
+            genericEn.dlgNewSessionLabel = localization::Text(L"ui.generic.dlg_new_session_label");
+            genericEn.errSessionCreate = localization::Text(L"ui.generic.err_session_create");
+            genericEn.errSessionExists = localization::Text(L"ui.generic.err_session_exists");
+            genericEn.errSessionNoLecture = localization::Text(L"ui.generic.err_session_no_lecture");
+            genericEn.menuLectureSchedule = localization::Text(L"ui.generic.menu_lecture_schedule");
+            genericEn.menuAddTempExternalLecture = localization::Text(L"ui.generic.menu_add_temp_external_lecture");
+            genericEn.menuRemoveTempExternalLecture = localization::Text(L"ui.generic.menu_remove_temp_external_lecture");
+            genericEn.menuResetLectureLastOpen = localization::Text(L"ui.generic.menu_reset_lecture_last_open");
+            genericEn.menuResetSessionLastOpen = localization::Text(L"ui.generic.menu_reset_session_last_open");
+            genericEn.menuRestoreLectureLastOpen = localization::Text(L"ui.generic.menu_restore_lecture_last_open");
+            genericEn.menuRestoreSessionLastOpen = localization::Text(L"ui.generic.menu_restore_session_last_open");
+            genericEn.menuDeleteLectureLastOpenBackup = localization::Text(L"ui.generic.menu_delete_lecture_last_open_backup");
+            genericEn.menuDeleteSessionLastOpenBackup = localization::Text(L"ui.generic.menu_delete_session_last_open_backup");
             return genericEn;
         }
-        return g_uiEn;
+        return catalogText;
     }
     if (!g_config.studentMode) {
         static UiText genericJa;
-        genericJa = g_uiJa;
-        genericJa.menuImportDirAsLecture = L"フォルダを上位項目として取り込む...";
-        genericJa.menuImportDirAsSession = L"フォルダを下位項目として取り込む...";
-        genericJa.menuNewLecture = L"上位項目を作成...";
-        genericJa.btnNewLecture = L"上位項目を作成";
-        genericJa.btnNewSession = L"下位項目作成";
-        genericJa.menuOpenLectureDir = L"上位項目フォルダをエクスプローラーで開く";
-        genericJa.errNewClroNoSession = L"下位項目が開かれていません。上位項目→下位項目を選択してください。";
-        genericJa.dlgNewLectureTitle = L"上位項目を作成";
-        genericJa.dlgNewLectureLabel = L"上位項目名";
-        genericJa.errLectureCreate = L"上位項目フォルダを作成できませんでした。";
-        genericJa.dlgNewSessionTitle = L"下位項目ファイルを作成";
-        genericJa.dlgNewSessionLabel = L"下位項目名";
-        genericJa.errSessionCreate = L"下位項目フォルダを作成できませんでした。";
-        genericJa.errSessionExists = L"同名の下位項目が存在します。";
-        genericJa.errSessionNoLecture = L"上位項目を選択してください。";
-        genericJa.menuLectureSchedule = L"上位項目スケジュール";
-        genericJa.menuAddTempExternalLecture = L"一時外部上位項目パス追加";
-        genericJa.menuRemoveTempExternalLecture = L"一時外部上位項目パス削除";
-        genericJa.menuResetLectureLastOpen = L"上位項目の最終オープン時刻をリセット";
-        genericJa.menuResetSessionLastOpen = L"下位項目最終オープン履歴をリセット";
-        genericJa.menuRestoreLectureLastOpen = L"上位項目の最終オープン時刻を復元";
-        genericJa.menuRestoreSessionLastOpen = L"下位項目最終オープン履歴を復元";
-        genericJa.menuDeleteLectureLastOpenBackup = L"上位項目最終オープン時刻バックアップを削除";
-        genericJa.menuDeleteSessionLastOpenBackup = L"下位項目最終オープン履歴バックアップを削除";
+        genericJa = catalogText;
+        genericJa.menuImportDirAsLecture = localization::Text(L"ui.generic.menu_import_dir_as_lecture");
+        genericJa.menuImportDirAsSession = localization::Text(L"ui.generic.menu_import_dir_as_session");
+        genericJa.menuNewLecture = localization::Text(L"ui.generic.menu_new_lecture");
+        genericJa.btnNewLecture = localization::Text(L"ui.generic.btn_new_lecture");
+        genericJa.btnNewSession = localization::Text(L"ui.generic.btn_new_session");
+        genericJa.menuOpenLectureDir = localization::Text(L"ui.generic.menu_open_lecture_dir");
+        genericJa.menuOpenSessionDir = localization::Text(L"ui.generic.menu_open_session_dir");
+        genericJa.errNewClroNoSession = localization::Text(L"ui.generic.err_new_clro_no_session");
+        genericJa.dlgNewLectureTitle = localization::Text(L"ui.generic.dlg_new_lecture_title");
+        genericJa.dlgNewLectureLabel = localization::Text(L"ui.generic.dlg_new_lecture_label");
+        genericJa.errLectureCreate = localization::Text(L"ui.generic.err_lecture_create");
+        genericJa.dlgNewSessionTitle = localization::Text(L"ui.generic.dlg_new_session_title");
+        genericJa.dlgNewSessionLabel = localization::Text(L"ui.generic.dlg_new_session_label");
+        genericJa.errSessionCreate = localization::Text(L"ui.generic.err_session_create");
+        genericJa.errSessionExists = localization::Text(L"ui.generic.err_session_exists");
+        genericJa.errSessionNoLecture = localization::Text(L"ui.generic.err_session_no_lecture");
+        genericJa.menuLectureSchedule = localization::Text(L"ui.generic.menu_lecture_schedule");
+        genericJa.menuAddTempExternalLecture = localization::Text(L"ui.generic.menu_add_temp_external_lecture");
+        genericJa.menuRemoveTempExternalLecture = localization::Text(L"ui.generic.menu_remove_temp_external_lecture");
+        genericJa.menuResetLectureLastOpen = localization::Text(L"ui.generic.menu_reset_lecture_last_open");
+        genericJa.menuResetSessionLastOpen = localization::Text(L"ui.generic.menu_reset_session_last_open");
+        genericJa.menuRestoreLectureLastOpen = localization::Text(L"ui.generic.menu_restore_lecture_last_open");
+        genericJa.menuRestoreSessionLastOpen = localization::Text(L"ui.generic.menu_restore_session_last_open");
+        genericJa.menuDeleteLectureLastOpenBackup = localization::Text(L"ui.generic.menu_delete_lecture_last_open_backup");
+        genericJa.menuDeleteSessionLastOpenBackup = localization::Text(L"ui.generic.menu_delete_session_last_open_backup");
         return genericJa;
     }
-    return g_uiJa;
+    return catalogText;
 }
 
 std::wstring BuildAboutDialogText() {

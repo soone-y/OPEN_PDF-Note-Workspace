@@ -1,6 +1,8 @@
 // file: pdf_view/annotation_edit.cppinc
 // NOTE: Included by `src/pdf_view/navigation.cppinc` to keep annotation editing/history in the same translation unit.
 
+#include "core/localization.h"
+
 static std::vector<AnnotCommand> g_annotUndo;
 static std::vector<AnnotCommand> g_annotRedo;
 static std::vector<AnnotCommand> g_pendingAnnotStageCommands;
@@ -774,9 +776,7 @@ void ClearAllAnnotationsWithUndo(HWND owner) {
     if (g_pdf.kind != DocKind::Pdf) return;
     if (g_annots.empty()) return;
     const auto& ui = GetUiText();
-    const std::wstring firstMsg = IsEnglishUi()
-        ? L"Clear all annotations?"
-        : L"注釈をすべて削除します。よろしいですか？";
+    const std::wstring firstMsg = localization::Text(L"pdf.clear_all_annotations_confirm");
     if (!ConfirmPdfYesNo(owner, ui.appTitle, firstMsg, SoftNoticeKind::Warning,
                          SilentDialogResult::No, SilentDialogResult::No)) {
         return;
@@ -784,13 +784,11 @@ void ClearAllAnnotationsWithUndo(HWND owner) {
 
     SilentDialogOptions second;
     second.title = ui.appTitle;
-    second.message = IsEnglishUi()
-        ? L"Final confirmation.\n\nThis clears every annotation in the current PDF view."
-        : L"最終確認です。\n\n現在のPDF表示内の注釈をすべて削除します。";
+    second.message = localization::Text(L"pdf.clear_all_annotations_final_confirm");
     second.kind = SoftNoticeKind::Warning;
     second.buttons = SilentDialogButtons::YesNo;
-    second.yesLabel = IsEnglishUi() ? L"Clear All" : L"全削除";
-    second.noLabel = IsEnglishUi() ? L"Cancel" : L"キャンセル";
+    second.yesLabel = localization::Text(L"common.clear_all");
+    second.noLabel = localization::Text(L"common.cancel");
     second.defaultResult = SilentDialogResult::No;
     second.escapeResult = SilentDialogResult::No;
     second.placement = SilentDialogPlacement::OwnerLowerLeft;

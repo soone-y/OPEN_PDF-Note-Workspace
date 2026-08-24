@@ -1,5 +1,7 @@
 // file: main/main_workspace_logs.cppinc
 
+#include "core/localization.h"
+
 static std::filesystem::path WorkspaceLogDirectory() {
     if (g_workspaceRoot.empty()) return {};
     return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__log__";
@@ -51,7 +53,7 @@ static bool ReadWorkspaceLogFileIdentity(const std::filesystem::path& path,
                                          std::wstring* outErr) {
     if (outErr) outErr->clear();
     if (!outIdentity) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Internal error." : L"内部エラーです。";
+        if (outErr) *outErr = localization::Text(L"workspace.logs.internal_error");
         return false;
     }
 
@@ -65,7 +67,7 @@ static bool ReadWorkspaceLogFileIdentity(const std::filesystem::path& path,
     if (handle == INVALID_HANDLE_VALUE) {
         if (outErr) {
             const DWORD e = GetLastError();
-            *outErr = (IsEnglishUi() ? L"Failed to inspect log file:\n" : L"ログファイルの確認に失敗しました:\n") +
+            *outErr = localization::Text(L"workspace.logs.inspect_file_failed") +
                       path.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
         }
         return false;
@@ -76,7 +78,7 @@ static bool ReadWorkspaceLogFileIdentity(const std::filesystem::path& path,
         const DWORD e = GetLastError();
         CloseHandle(handle);
         if (outErr) {
-            *outErr = (IsEnglishUi() ? L"Failed to inspect log file:\n" : L"ログファイルの確認に失敗しました:\n") +
+            *outErr = localization::Text(L"workspace.logs.inspect_file_failed") +
                       path.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
         }
         return false;
@@ -117,17 +119,13 @@ static bool ValidateWorkspaceLogCandidate(const std::filesystem::path& path,
     const std::filesystem::path logDir = WorkspaceLogDirectory();
     if (logDir.empty()) {
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"No workspace log folder is available."
-                : L"ワークスペースのログフォルダが見つかりません。";
+            *outErr = localization::Text(L"workspace.logs.folder_missing");
         }
         return false;
     }
     if (NormalizePathKey(path.parent_path().wstring()) != NormalizePathKey(logDir.wstring())) {
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"Refusing to operate on a log outside the workspace log folder:\n" + path.wstring()
-                : L"ワークスペースのログフォルダ外にあるため操作を拒否しました:\n" + path.wstring();
+            *outErr = localization::Text(L"workspace.logs.outside_folder_refused") + path.wstring();
         }
         return false;
     }
@@ -135,9 +133,7 @@ static bool ValidateWorkspaceLogCandidate(const std::filesystem::path& path,
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) {
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"Reparse-point log files are not supported:\n" + path.wstring()
-                : L"reparse point のログファイルは使用できません:\n" + path.wstring();
+            *outErr = localization::Text(L"workspace.logs.reparse_file_unsupported") + path.wstring();
         }
         return false;
     }
@@ -145,12 +141,8 @@ static bool ValidateWorkspaceLogCandidate(const std::filesystem::path& path,
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path, ec)) {
         if (outErr) {
-            *outErr = ec
-                ? ((IsEnglishUi() ? L"Failed to inspect log file:\n" : L"ログファイルの確認に失敗しました:\n") +
-                   path.wstring())
-                : ((IsEnglishUi() ? L"Refusing to operate on a non-file log path:\n"
-                                  : L"ファイルではないログパスのため操作を拒否しました:\n") +
-                   path.wstring());
+            *outErr = localization::Text(ec ? L"workspace.logs.inspect_file_failed"
+                                             : L"workspace.logs.non_file_path_refused") + path.wstring();
         }
         return false;
     }
@@ -161,10 +153,7 @@ static bool ValidateWorkspaceLogCandidate(const std::filesystem::path& path,
     }
     if (identity.linkCount != 1) {
         if (outErr) {
-            *outErr = (IsEnglishUi()
-                ? L"Refusing to operate on a log file with multiple hard links:\n"
-                : L"hard link を持つログファイルのため操作を拒否しました:\n") +
-                path.wstring();
+            *outErr = localization::Text(L"workspace.logs.multiple_hard_links_refused") + path.wstring();
         }
         return false;
     }
@@ -193,9 +182,7 @@ static std::vector<WorkspaceLogFileInfo> EnumerateWorkspaceLogFiles(std::wstring
     if (logDir.empty()) return out;
     if (IsUncPath(logDir)) {
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"UNC log paths are not supported:\n" + logDir.wstring()
-                : L"UNC のログパスは使用できません:\n" + logDir.wstring();
+            *outErr = localization::Text(L"workspace.logs.unc_path_unsupported") + logDir.wstring();
         }
         return out;
     }
@@ -203,9 +190,7 @@ static std::vector<WorkspaceLogFileInfo> EnumerateWorkspaceLogFiles(std::wstring
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(logDir, isReparse) && isReparse) {
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"Reparse-point log folders are not supported:\n" + logDir.wstring()
-                : L"reparse point のログフォルダは使用できません:\n" + logDir.wstring();
+            *outErr = localization::Text(L"workspace.logs.reparse_folder_unsupported") + logDir.wstring();
         }
         return out;
     }
@@ -213,17 +198,13 @@ static std::vector<WorkspaceLogFileInfo> EnumerateWorkspaceLogFiles(std::wstring
     std::error_code ec;
     if (!std::filesystem::exists(logDir, ec)) {
         if (ec && outErr) {
-            *outErr = IsEnglishUi()
-                ? L"Failed to inspect the log folder:\n" + logDir.wstring()
-                : L"ログフォルダの確認に失敗しました:\n" + logDir.wstring();
+            *outErr = localization::Text(L"workspace.logs.inspect_folder_failed") + logDir.wstring();
         }
         return out;
     }
     if (!std::filesystem::is_directory(logDir, ec)) {
         if (ec && outErr) {
-            *outErr = IsEnglishUi()
-                ? L"The log path is not a directory:\n" + logDir.wstring()
-                : L"ログパスがフォルダではありません:\n" + logDir.wstring();
+            *outErr = localization::Text(L"workspace.logs.path_not_directory") + logDir.wstring();
         }
         return out;
     }
@@ -234,9 +215,7 @@ static std::vector<WorkspaceLogFileInfo> EnumerateWorkspaceLogFiles(std::wstring
         const bool exists = std::filesystem::exists(path, ec);
         if (ec) {
             if (outErr) {
-                *outErr = IsEnglishUi()
-                    ? L"Failed to inspect the log file:\n" + path.wstring()
-                    : L"ログファイルの確認に失敗しました:\n" + path.wstring();
+                *outErr = localization::Text(L"workspace.logs.inspect_file_failed") + path.wstring();
             }
             out.clear();
             return out;
@@ -325,7 +304,7 @@ static bool WriteAllToHandle(HANDLE handle,
                              std::wstring* outErr) {
     if (outErr) outErr->clear();
     if (handle == INVALID_HANDLE_VALUE) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Invalid file handle." : L"ファイルハンドルが無効です。";
+        if (outErr) *outErr = localization::Text(L"workspace.logs.invalid_file_handle");
         return false;
     }
     const uint8_t* ptr = reinterpret_cast<const uint8_t*>(data);
@@ -336,7 +315,7 @@ static bool WriteAllToHandle(HANDLE handle,
         if (!WriteFile(handle, ptr, chunk, &written, nullptr) || written != chunk) {
             if (outErr) {
                 DWORD e = GetLastError();
-                *outErr = (IsEnglishUi() ? L"Failed to write archive:\n" : L"アーカイブの書き込みに失敗しました:\n") +
+                *outErr = localization::Text(L"workspace.logs.write_archive_failed") +
                           pathForErr.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
             }
             return false;
@@ -364,9 +343,7 @@ static void CleanupFailedArchiveTempFile(HANDLE* handle,
         return;
     }
     if (err && !moved.empty()) {
-        *err += IsEnglishUi()
-            ? L"\n\nTemporary archive was quarantined here:\n" + moved.wstring()
-            : L"\n\n一時アーカイブを退避しました:\n" + moved.wstring();
+        *err += localization::Text(L"workspace.logs.temp_archive_quarantined") + moved.wstring();
     }
 }
 
@@ -417,9 +394,7 @@ static bool DeleteWorkspaceLogFile(const WorkspaceLogFileInfo& logFile, std::wst
     if (!SameWorkspaceLogIdentity(currentIdentity, logFile.identity)) {
         CloseHandle(handle);
         if (outErr) {
-            *outErr = IsEnglishUi()
-                ? L"The log file changed before deletion."
-                : L"削除前にログファイルが変化しました。";
+            *outErr = localization::Text(L"workspace.logs.changed_before_delete");
         }
         return false;
     }
@@ -450,7 +425,7 @@ static bool BuildWorkspaceLogArchiveEntries(const std::vector<WorkspaceLogFileIn
                                             std::wstring* outErr) {
     if (outErr) outErr->clear();
     if (!outEntries) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Internal error." : L"内部エラーです。";
+        if (outErr) *outErr = localization::Text(L"workspace.logs.internal_error");
         return false;
     }
     outEntries->clear();
@@ -470,9 +445,7 @@ static bool BuildWorkspaceLogArchiveEntries(const std::vector<WorkspaceLogFileIn
         }
         if (!SameWorkspaceLogIdentity(currentIdentity, logFile.identity)) {
             if (outErr) {
-                *outErr = (IsEnglishUi()
-                    ? L"Refusing to archive a log file that changed during the operation:\n"
-                    : L"処理中に変化したログファイルのため ZIP 保存を拒否しました:\n") +
+                *outErr = localization::Text(L"workspace.logs.changed_during_archive_refused") +
                     logFile.path.wstring();
             }
             return false;
@@ -481,7 +454,7 @@ static bool BuildWorkspaceLogArchiveEntries(const std::vector<WorkspaceLogFileIn
         std::ifstream file(logFile.path, std::ios::binary);
         if (!file) {
             if (outErr) {
-                *outErr = (IsEnglishUi() ? L"Failed to read log file:\n" : L"ログファイルを読み取れませんでした:\n") +
+                *outErr = localization::Text(L"workspace.logs.read_file_failed") +
                           logFile.path.wstring();
             }
             return false;
@@ -504,8 +477,7 @@ static bool BuildWorkspaceLogArchiveEntries(const std::vector<WorkspaceLogFileIn
             totalRead += static_cast<uint64_t>(got);
             if (totalRead > 0xFFFFFFFFull) {
                 if (outErr) {
-                    *outErr = (IsEnglishUi() ? L"ZIP64 is not supported for log archives:\n"
-                                             : L"ログアーカイブでは ZIP64 を未対応としています:\n") +
+                    *outErr = localization::Text(L"workspace.logs.zip64_archive_unsupported") +
                               logFile.path.wstring();
                 }
                 return false;
@@ -514,7 +486,7 @@ static bool BuildWorkspaceLogArchiveEntries(const std::vector<WorkspaceLogFileIn
         }
         if (file.bad()) {
             if (outErr) {
-                *outErr = (IsEnglishUi() ? L"Failed while reading log file:\n" : L"ログファイルの読み取り中に失敗しました:\n") +
+                *outErr = localization::Text(L"workspace.logs.read_file_during_operation_failed") +
                           logFile.path.wstring();
             }
             return false;
@@ -596,9 +568,7 @@ static bool CopyWorkspaceLogFileBytes(HANDLE handle,
     }
     if (!SameWorkspaceLogIdentity(currentIdentity, entry.sourceIdentity)) {
         if (outErr) {
-            *outErr = (IsEnglishUi()
-                ? L"Refusing to archive a log file that changed during the operation:\n"
-                : L"処理中に変化したログファイルのため ZIP 保存を拒否しました:\n") +
+            *outErr = localization::Text(L"workspace.logs.changed_during_archive_refused") +
                 entry.sourcePath.wstring();
         }
         return false;
@@ -607,7 +577,7 @@ static bool CopyWorkspaceLogFileBytes(HANDLE handle,
     std::ifstream file(entry.sourcePath, std::ios::binary);
     if (!file) {
         if (outErr) {
-            *outErr = (IsEnglishUi() ? L"Failed to reopen log file:\n" : L"ログファイルを再オープンできませんでした:\n") +
+            *outErr = localization::Text(L"workspace.logs.reopen_file_failed") +
                       entry.sourcePath.wstring();
         }
         return false;
@@ -624,7 +594,7 @@ static bool CopyWorkspaceLogFileBytes(HANDLE handle,
     }
     if (file.bad()) {
         if (outErr) {
-            *outErr = (IsEnglishUi() ? L"Failed while copying log file:\n" : L"ログファイルのコピー中に失敗しました:\n") +
+            *outErr = localization::Text(L"workspace.logs.copy_file_failed") +
                       entry.sourcePath.wstring();
         }
         return false;
@@ -637,11 +607,11 @@ static bool WriteWorkspaceLogZipArchive(const std::vector<WorkspaceLogFileInfo>&
                                         std::wstring* outErr) {
     if (outErr) outErr->clear();
     if (logFiles.empty()) {
-        if (outErr) *outErr = IsEnglishUi() ? L"No log files to archive." : L"ZIP保存するログがありません。";
+        if (outErr) *outErr = localization::Text(L"workspace.logs.no_files_to_archive");
         return false;
     }
     if (logFiles.size() > 0xFFFFu) {
-        if (outErr) *outErr = IsEnglishUi() ? L"Too many log files for ZIP." : L"ZIPに入れるログ数が多すぎます。";
+        if (outErr) *outErr = localization::Text(L"workspace.logs.too_many_files");
         return false;
     }
 
@@ -660,7 +630,7 @@ static bool WriteWorkspaceLogZipArchive(const std::vector<WorkspaceLogFileInfo>&
     uint64_t centralSize64 = 0;
     for (auto& entry : entries) {
         if (bytesWritten > 0xFFFFFFFFull) {
-            if (outErr) *outErr = IsEnglishUi() ? L"ZIP64 is not supported." : L"ZIP64 は未対応です。";
+            if (outErr) *outErr = localization::Text(L"workspace.logs.zip64_unsupported");
             CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
             return false;
         }
@@ -681,7 +651,7 @@ static bool WriteWorkspaceLogZipArchive(const std::vector<WorkspaceLogFileInfo>&
     }
 
     if (bytesWritten > 0xFFFFFFFFull) {
-        if (outErr) *outErr = IsEnglishUi() ? L"ZIP64 is not supported." : L"ZIP64 は未対応です。";
+        if (outErr) *outErr = localization::Text(L"workspace.logs.zip64_unsupported");
         CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
         return false;
     }
@@ -691,7 +661,7 @@ static bool WriteWorkspaceLogZipArchive(const std::vector<WorkspaceLogFileInfo>&
         std::vector<uint8_t> centralHeader = BuildZipCentralHeader(entry);
         centralSize64 += centralHeader.size();
         if (centralSize64 > 0xFFFFFFFFull) {
-            if (outErr) *outErr = IsEnglishUi() ? L"ZIP64 is not supported." : L"ZIP64 は未対応です。";
+            if (outErr) *outErr = localization::Text(L"workspace.logs.zip64_unsupported");
             CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
             return false;
         }
@@ -714,7 +684,7 @@ static bool WriteWorkspaceLogZipArchive(const std::vector<WorkspaceLogFileInfo>&
     if (!FlushFileBuffers(tmpHandle)) {
         if (outErr) {
             DWORD e = GetLastError();
-            *outErr = (IsEnglishUi() ? L"Failed to flush archive:\n" : L"アーカイブのフラッシュに失敗しました:\n") +
+            *outErr = localization::Text(L"workspace.logs.flush_archive_failed") +
                       tmp.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
         }
         CleanupFailedArchiveTempFile(&tmpHandle, tmp, dest.parent_path(), outErr);
@@ -724,7 +694,7 @@ static bool WriteWorkspaceLogZipArchive(const std::vector<WorkspaceLogFileInfo>&
         tmpHandle = INVALID_HANDLE_VALUE;
         if (outErr) {
             DWORD e = GetLastError();
-            *outErr = (IsEnglishUi() ? L"Failed to close archive temp file:\n" : L"アーカイブ一時ファイルを閉じられませんでした:\n") +
+            *outErr = localization::Text(L"workspace.logs.close_temp_archive_failed") +
                       tmp.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(e);
         }
         CleanupFailedArchiveTempFile(nullptr, tmp, dest.parent_path(), outErr);

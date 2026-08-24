@@ -1,6 +1,7 @@
 #include "ui/menus/menu_build.h"
 
 #include "core/app_core.h"
+#include "core/localization.h"
 #include "core/path_safety.h"
 #include "file_output/file_output.h"
 #include "ui/menus/main_debug_menu.h"
@@ -69,15 +70,19 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, ID_FILE_OPEN_WORKSPACE_DIR, ui.menuOpenWorkspaceDir.c_str());
     AppendMenuW(file, MF_STRING, ID_FILE_OPEN_LECTURE_DIR, ui.menuOpenLectureDir.c_str());
+    // Keep this available like "Open Lecture Folder"; the command reports a
+    // quiet visual warning when no session is selected.
+    AppendMenuW(file, MF_STRING, ID_FILE_OPEN_SESSION_DIR, ui.menuOpenSessionDir.c_str());
     AppendMenuW(file, MF_STRING, ID_FILE_EXIT, ui.menuExit.c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), ui.menuFile.c_str());
 
     HMENU edit = CreatePopupMenu();
     AppendMenuW(edit, MenuStringState(menuState.canUndo), ID_EDIT_UNDO,
-                IsEnglishUi() ? L"Undo\tCtrl+Z" : L"元に戻す\tCtrl+Z");
+                localization::Text(L"menu.edit.undo").c_str());
     AppendMenuW(edit, MenuStringState(menuState.canRedo), ID_EDIT_REDO,
-                IsEnglishUi() ? L"Redo\tCtrl+Y" : L"やり直す\tCtrl+Y");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), IsEnglishUi() ? L"Edit" : L"編集");
+                localization::Text(L"menu.edit.redo").c_str());
+    const std::wstring editLabel = localization::Text(L"menu.edit.title");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), editLabel.c_str());
 
     HMENU op = CreatePopupMenu();
     UINT renamePdfFlags = !CurrentLogicalPdfPath().empty() ? MF_STRING : (MF_STRING | MF_GRAYED);
@@ -94,7 +99,7 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
         AppendMenuW(op, MF_STRING, ID_OP_CONVERT_OFFICE_TO_PDF, ui.menuConvertOfficeToPdf.c_str());
     }
     AppendMenuW(op, MenuStringState(menuState.hasCurrentImage), ID_OP_CONVERT_IMAGE_TO_PDF,
-                IsEnglishUi() ? L"Convert image to PDF..." : L"画像をPDFに変換...");
+                localization::Text(L"menu.operation.convert_image_to_pdf").c_str());
     AppendMenuW(op, MenuStringState(!g_currentSessionPath.empty()),
                 ID_OP_CREATE_BLANK_PDF, ui.menuCreateBlankPdf.c_str());
     AppendMenuW(op, MF_SEPARATOR, 0, nullptr);
@@ -113,14 +118,14 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(view, pdfViewFlags, ID_VIEW_RESET_ZOOM, ui.menuResetZoom.c_str());
     AppendMenuW(view, pdfViewFlags, ID_VIEW_SET_ZOOM, ui.menuSetZoom.c_str());
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
-    std::wstring leftPaneLabel = IsEnglishUi() ? L"Left column" : L"左カラム";
+    std::wstring leftPaneLabel = localization::Text(L"menu.view.left_column");
     UINT leftPaneFlags = MF_STRING;
     if (!g_leftPaneCollapsed) leftPaneFlags |= MF_CHECKED;
     AppendMenuW(view, leftPaneFlags, ID_VIEW_LEFT_PANE_TOGGLE, leftPaneLabel.c_str());
     UINT readableTextFlags = MF_STRING;
     if (g_readableTextOverlay) readableTextFlags |= MF_CHECKED;
     AppendMenuW(view, readableTextFlags, ID_VIEW_READABLE_TEXT_OVERLAY,
-                IsEnglishUi() ? L"Readable low-contrast text" : L"低コントラスト文字を可読化");
+                localization::Text(L"menu.view.readable_low_contrast").c_str());
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
 
     HMENU scrollDir = CreatePopupMenu();
@@ -186,36 +191,36 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(save, saveDiffManagerFlags, ID_OP_STAGE_MANAGE, ui.menuDiffManager.c_str());
     AppendMenuW(save, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(save, MF_STRING, ID_FILE_RECOVERY, ui.menuRecovery.c_str());
-    AppendMenuW(save, MF_STRING, ID_FILE_RESTORE_BACKUP, IsEnglishUi() ? L"Restore Backup..." : L"バックアップから復元...");
+    AppendMenuW(save, MF_STRING, ID_FILE_RESTORE_BACKUP, localization::Text(L"menu.save.restore_backup").c_str());
     AppendMenuW(save, deleteBackupFlags, ID_FILE_DELETE_BACKUP, ui.menuDeleteBackup.c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(save), ui.menuSave.c_str());
 
     const UINT exportCombinedFlags = MenuStringState(g_pdf.doc != nullptr || !g_currentNotePath.empty());
     AppendMenuW(exportMenu, exportPdfFlags, ID_FILE_EXPORT_PDF_QUICK,
-                IsEnglishUi() ? L"Quick: Export PDF with annotations..." : L"簡単: 注釈を統合してPDF出力...");
+                localization::Text(L"menu.export.quick_pdf").c_str());
     AppendMenuW(exportMenu, exportNoteFlags, ID_FILE_EXPORT_NOTE_TEXT_QUICK,
-                IsEnglishUi() ? L"Quick: Export note as text..." : L"簡単: ノートをtxt出力...");
+                localization::Text(L"menu.export.quick_note_text").c_str());
     AppendMenuW(exportMenu, exportNoteFlags, ID_FILE_EXPORT_NOTE_MARKDOWN_QUICK,
-                IsEnglishUi() ? L"Quick: Export note as Markdown..." : L"簡単: ノートをmd出力...");
+                localization::Text(L"menu.export.quick_note_markdown").c_str());
     AppendMenuW(exportMenu, exportNoteFlags, ID_FILE_EXPORT_NOTE_HTML_QUICK,
-                IsEnglishUi() ? L"Quick: Export note as HTML..." : L"簡単: ノートをHTML出力...");
+                localization::Text(L"menu.export.quick_note_html").c_str());
     AppendMenuW(exportMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(exportMenu, exportCombinedFlags, ID_FILE_EXPORT_COMBINED,
-                IsEnglishUi() ? L"Export PDF + note together..." : L"PDFとノートをまとめて出力...");
+                localization::Text(L"menu.export.combined").c_str());
     AppendMenuW(exportMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(exportMenu, exportPdfFlags, ID_FILE_EXPORT_PDF,
-                IsEnglishUi() ? L"Export the open PDF..." : L"開いているPDFを出力...");
+                localization::Text(L"menu.export.open_pdf").c_str());
     AppendMenuW(exportMenu, exportPdfFlags, ID_FILE_EXPORT_PDF_PAGES, ui.menuExportPdfPages.c_str());
     AppendMenuW(exportMenu, exportPdfFlags, ID_FILE_EXPORT_PNG_PAGE, ui.menuExportPngPage.c_str());
     AppendMenuW(exportMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(exportMenu, exportNoteFlags, ID_FILE_EXPORT_NOTE_TEXT,
-                IsEnglishUi() ? L"Export the open note..." : L"開いているノートを出力...");
+                localization::Text(L"menu.export.open_note").c_str());
     AppendMenuW(exportMenu, exportNoteFlags, ID_FILE_EXPORT_NOTE_MARKUP, ui.menuExportNoteMarkup.c_str());
     AppendMenuW(exportMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(exportMenu, MF_STRING, ID_SETTINGS_BUNDLE_EXPORT,
-                IsEnglishUi() ? L"Export settings for version migration..." : L"バージョン更新用に設定を書き出し...");
+                localization::Text(L"menu.settings.export_migration").c_str());
     AppendMenuW(exportMenu, MF_STRING, ID_SETTINGS_BUNDLE_IMPORT,
-                IsEnglishUi() ? L"Import settings from previous version..." : L"以前のバージョンの設定を読み込み...");
+                localization::Text(L"menu.settings.import_migration").c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(exportMenu), ui.menuExport.c_str());
 
     AppendMenuW(bar, MF_STRING, ID_SEARCH, ui.menuSearch.c_str());
@@ -223,7 +228,7 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     HMENU help = CreatePopupMenu();
     AppendMenuW(help, MF_STRING, ID_HELP_GUIDE, ui.menuHelpGuide.c_str());
     AppendMenuW(help, MF_STRING, ID_HELP_PDF_INFO, ui.menuPdfInfo.c_str());
-    AppendMenuW(help, MF_STRING, ID_HELP_SHOW_LOG_PATH, IsEnglishUi() ? L"Show Log Path" : L"ログのパスを表示");
+    AppendMenuW(help, MF_STRING, ID_HELP_SHOW_LOG_PATH, localization::Text(L"menu.help.show_log_path").c_str());
     if (menuState.developerMode) {
         AppendMenuW(help, MF_SEPARATOR, 0, nullptr);
         HMENU debug = CreatePopupMenu();
@@ -260,15 +265,15 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_MARKUP, ui.menuMarkupSettings.c_str());
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_PALETTE, ui.menuPaletteSettings.c_str());
     AppendMenuW(settings, MF_STRING, ID_GLOBAL_MEMOS,
-                IsEnglishUi() ? L"Global deadlines and memos..." : L"全体メモ・締切管理...");
+                localization::Text(L"menu.settings.global_memos").c_str());
     AppendMenuW(settings, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_PRESET_SAVE, ui.menuSettingsPresetSave.c_str());
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_PRESET_LOAD, ui.menuSettingsPresetLoad.c_str());
     AppendMenuW(settings, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_BUNDLE_EXPORT,
-                IsEnglishUi() ? L"Export settings for version migration..." : L"バージョン更新用に設定を書き出し...");
+                localization::Text(L"menu.settings.export_migration").c_str());
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_BUNDLE_IMPORT,
-                IsEnglishUi() ? L"Import settings from previous version..." : L"以前のバージョンの設定を読み込み...");
+                localization::Text(L"menu.settings.import_migration").c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), ui.menuSettings.c_str());
 
     const std::wstring initialStatusText = BuildStatusDisplayText();

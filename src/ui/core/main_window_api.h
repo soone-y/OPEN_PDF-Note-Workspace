@@ -7,7 +7,9 @@
 #include <optional>
 #include <filesystem>
 #include "core/ui_notify.h" // For SoftNoticeKind
-void ShowMainMessageDialog(HWND owner, const std::wstring& title, const std::wstring& message, SoftNoticeKind kind);
+void ShowMainMessageDialog(HWND owner, const std::wstring& title, const std::wstring& message,
+                           SoftNoticeKind kind,
+                           const std::vector<SilentDialogPath>& paths = {});
 bool ConfirmMainYesNo(HWND owner, const std::wstring& title, const std::wstring& message, SoftNoticeKind kind, SilentDialogResult defaultResult, SilentDialogResult escapeResult);
 void AppendMainOperationExceptionLog(const char* label, const char* what);
 void ReportMainOperationException(HWND hWnd, const wchar_t* titleJa);
@@ -45,10 +47,12 @@ struct TempExternalLecture {
 extern bool s_ignoreLectureSelChange;
 extern std::vector<TempExternalLecture> g_tempExternalLectures;
 std::filesystem::path DialogWorkspaceInitialFolder();
+std::filesystem::path DialogWorkspaceSelectionInitialFolder();
 std::filesystem::path DialogDownloadsInitialFolder();
 std::filesystem::path DialogDocumentsInitialFolder();
 bool PersistTempExternalLecturesToSetup();
-std::optional<std::wstring> PromptExistingLocalPath(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool requireDirectory);
+std::optional<std::wstring> PromptExistingLocalPath(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool requireDirectory,
+                                                     const std::filesystem::path& highlightPath = {});
 std::optional<std::wstring> PromptExistingLocalPathAppFirst(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool requireDirectory);
 
 

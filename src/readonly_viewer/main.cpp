@@ -2,6 +2,7 @@
 #include "clrop/json.h"
 #include "core/text_encoding.h"
 #include "core/atomic_write.h"
+#include "core/localization.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -114,6 +115,8 @@ HWND g_hwndEditControl = NULL;
 HWND g_hwndMain = NULL;
 HWND g_hwndPdfPanel = NULL;
 HWND g_hwndDetachedDiagram = NULL;
+HWND g_hwndToggleLeftPaneButton = NULL;
+HWND g_hwndOpenFolderButton = NULL;
 WNDPROC g_originalEditProc = nullptr;
 int g_splitX = 250;
 bool g_isDraggingSplitter = false;
@@ -198,6 +201,7 @@ struct ByteRange {
 };
 
 std::vector<std::wstring> g_filePaths;
+std::vector<std::wstring> g_directoryPaths;
 
 struct FileSnapshot {
     uintmax_t size = 0;
@@ -264,29 +268,29 @@ void BuildViewerMenu(HWND hwnd) {
     HMENU paths = CreatePopupMenu();
     HMENU settings = CreatePopupMenu();
     if (!bar || !file || !view || !paths || !settings) return;
-    AppendMenuW(file, MF_STRING, kOpenFileButtonId, L"ファイルを開く\tCtrl+O");
-    AppendMenuW(file, MF_STRING, kOpenFolderButtonId, L"フォルダーを開く");
+    AppendMenuW(file, MF_STRING, kOpenFileButtonId, localization::Text(L"readonly.menu.open_file").c_str());
+    AppendMenuW(file, MF_STRING, kOpenFolderButtonId, localization::Text(L"readonly.menu.open_folder").c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING, kTabMenuCloseAll, L"すべてのタブを閉じる");
+    AppendMenuW(file, MF_STRING, kTabMenuCloseAll, localization::Text(L"readonly.menu.close_all_tabs").c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING, SC_CLOSE, L"終了");
-    AppendMenuW(view, MF_STRING, kToggleLeftPaneButtonId, L"一覧ペインを表示/非表示");
+    AppendMenuW(file, MF_STRING, SC_CLOSE, localization::Text(L"readonly.menu.exit").c_str());
+    AppendMenuW(view, MF_STRING, kToggleLeftPaneButtonId, localization::Text(L"readonly.menu.toggle_list_pane").c_str());
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(view, MF_STRING, kDecoratedButtonId, L"本文表示\tCtrl+1");
+    AppendMenuW(view, MF_STRING, kDecoratedButtonId, localization::Text(L"readonly.menu.decorated_view").c_str());
     AppendMenuW(view, MF_STRING, kRawButtonId, L"Raw\tCtrl+2");
     AppendMenuW(view, MF_STRING, kHexButtonId, L"Hex\tCtrl+3");
-    AppendMenuW(view, MF_STRING, kDiagramButtonId, L"図一覧\tCtrl+4");
-    AppendMenuW(view, MF_STRING, kPdfRangeButtonId, L"PDFページ範囲...");
-    AppendMenuW(paths, MF_STRING, kPathMarkTabPersistentMenuId, L"現在のタブを永続化");
-    AppendMenuW(paths, MF_STRING, kPathMarkTabTemporaryMenuId, L"現在のタブを一時扱い");
+    AppendMenuW(view, MF_STRING, kDiagramButtonId, localization::Text(L"readonly.menu.diagram_list").c_str());
+    AppendMenuW(view, MF_STRING, kPdfRangeButtonId, localization::Text(L"readonly.menu.pdf_page_range").c_str());
+    AppendMenuW(paths, MF_STRING, kPathMarkTabPersistentMenuId, localization::Text(L"readonly.menu.persist_current_tab").c_str());
+    AppendMenuW(paths, MF_STRING, kPathMarkTabTemporaryMenuId, localization::Text(L"readonly.menu.mark_current_tab_temporary").c_str());
     AppendMenuW(paths, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(paths, MF_STRING, kPathMarkFolderPersistentMenuId, L"現在のフォルダーを永続化");
-    AppendMenuW(paths, MF_STRING, kPathMarkFolderTemporaryMenuId, L"現在のフォルダーを一時扱い");
-    AppendMenuW(settings, MF_STRING, kPersistSessionMenuId, L"前回の閲覧状態を復元");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"ファイル");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"表示");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(paths), L"パス管理");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), L"設定");
+    AppendMenuW(paths, MF_STRING, kPathMarkFolderPersistentMenuId, localization::Text(L"readonly.menu.persist_current_folder").c_str());
+    AppendMenuW(paths, MF_STRING, kPathMarkFolderTemporaryMenuId, localization::Text(L"readonly.menu.mark_current_folder_temporary").c_str());
+    AppendMenuW(settings, MF_STRING, kPersistSessionMenuId, localization::Text(L"readonly.menu.restore_previous_session").c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), localization::Text(L"readonly.menu.file").c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), localization::Text(L"readonly.menu.view").c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(paths), localization::Text(L"readonly.menu.path_management").c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), localization::Text(L"readonly.menu.settings").c_str());
     SetMenu(hwnd, bar);
 }
 
@@ -376,39 +380,39 @@ LRESULT CALLBACK TabProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             SendMessageW(GetParent(hWnd), kTabContextMenuMessage, kTabMenuSelect, index);
             HMENU menu = CreatePopupMenu();
             if (!menu) return 0;
-            AppendMenuW(menu, MF_STRING, kTabMenuClose, L"このタブを閉じる");
-            AppendMenuW(menu, MF_STRING, kTabMenuCloseOthers, L"他のタブを閉じる");
-            AppendMenuW(menu, MF_STRING, kTabMenuCloseToRight, L"右側のタブを閉じる");
-            if (g_tabs[index].isPartialText) AppendMenuW(menu, MF_STRING, kTabMenuChangeRange, L"表示範囲を変更...");
+            AppendMenuW(menu, MF_STRING, kTabMenuClose, localization::Text(L"readonly.tab.close").c_str());
+            AppendMenuW(menu, MF_STRING, kTabMenuCloseOthers, localization::Text(L"readonly.tab.close_others").c_str());
+            AppendMenuW(menu, MF_STRING, kTabMenuCloseToRight, localization::Text(L"readonly.tab.close_to_right").c_str());
+            if (g_tabs[index].isPartialText) AppendMenuW(menu, MF_STRING, kTabMenuChangeRange, localization::Text(L"readonly.tab.change_range").c_str());
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, index > 0 ? MF_STRING : MF_STRING | MF_GRAYED,
-                        kTabMenuMoveLeft, L"左へ移動");
+                        kTabMenuMoveLeft, localization::Text(L"readonly.tab.move_left").c_str());
             AppendMenuW(menu, index + 1 < static_cast<int>(g_tabs.size()) ? MF_STRING : MF_STRING | MF_GRAYED,
-                        kTabMenuMoveRight, L"右へ移動");
+                        kTabMenuMoveRight, localization::Text(L"readonly.tab.move_right").c_str());
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(menu, MF_STRING, kTabMenuMoveToNewWindow, L"新しいウィンドウへ移す");
+            AppendMenuW(menu, MF_STRING, kTabMenuMoveToNewWindow, localization::Text(L"readonly.tab.move_to_new_window").c_str());
             CollectOtherViewerWindows(GetParent(hWnd));
             HMENU transferMenu = CreatePopupMenu();
             for (size_t targetIndex = 0; targetIndex < g_tabTransferTargets.size(); ++targetIndex) {
                 wchar_t title[160]{};
                 GetWindowTextW(g_tabTransferTargets[targetIndex], title,
                                static_cast<int>(sizeof(title) / sizeof(title[0])));
-                std::wstring label = title[0] ? title : L"閲覧専用ウィンドウ";
-                label += L" （別ウィンドウ）";
+                std::wstring label = title[0] ? title : localization::Text(L"readonly.tab.viewer_window");
+                label += localization::Text(L"readonly.tab.other_window_suffix");
                 AppendMenuW(transferMenu, MF_STRING,
                             kTabMenuMoveToWindowBase + static_cast<UINT>(targetIndex), label.c_str());
             }
             AppendMenuW(menu, MF_POPUP | (g_tabTransferTargets.empty() ? MF_GRAYED : 0),
-                        reinterpret_cast<UINT_PTR>(transferMenu), L"他のウィンドウへ移す");
+                        reinterpret_cast<UINT_PTR>(transferMenu), localization::Text(L"readonly.tab.move_to_other_window").c_str());
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(menu, MF_STRING, kTabMenuCloseAll, L"すべてのタブを閉じる");
-            if (!g_closedTabs.empty()) AppendMenuW(menu, MF_STRING, kTabMenuReopenClosed, L"閉じたタブを再度開く");
+            AppendMenuW(menu, MF_STRING, kTabMenuCloseAll, localization::Text(L"readonly.menu.close_all_tabs").c_str());
+            if (!g_closedTabs.empty()) AppendMenuW(menu, MF_STRING, kTabMenuReopenClosed, localization::Text(L"readonly.tab.reopen_closed").c_str());
             HMENU tabList = CreatePopupMenu();
             for (size_t tabIndex = 0; tabIndex < g_tabs.size() && tabIndex < 200; ++tabIndex) {
                 AppendMenuW(tabList, MF_STRING | (tabIndex == static_cast<size_t>(index) ? MF_CHECKED : 0),
                             kTabMenuListBase + static_cast<UINT>(tabIndex), g_tabs[tabIndex].title.c_str());
             }
-            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tabList), L"タブ一覧");
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tabList), localization::Text(L"readonly.tab.list").c_str());
 
             POINT screen_point = client_point;
             ClientToScreen(hWnd, &screen_point);
@@ -646,7 +650,7 @@ LoadFileResult LoadTextFile(const std::wstring& path, const std::optional<ByteRa
         if (g_loadCancelRequested) {
             result.bytes.clear();
             result.cancelled = true;
-            result.text = L"読み込みを中止しました。";
+            result.text = localization::Text(L"readonly.status.load_canceled");
             return result;
         }
         const size_t chunk = std::min<size_t>(result.bytes.size() - total_read, 1024 * 1024);
@@ -706,19 +710,17 @@ void UpdateRangeDialog(HWND hwnd, RangeDialogState& state) {
     }
     range_bar += L"]  100%";
     SetWindowTextW(GetDlgItem(hwnd, kRangeVisualBarId), range_bar.c_str());
-    std::wstring summary = L"選択範囲: " + std::to_wstring(state.start / 10) + L"% ～ " +
-        std::to_wstring(state.end / 10) + L"%\r\n推定表示量: " + std::to_wstring(megabytes) +
-        L" MB / 約 " + std::to_wstring(estimated_characters) + L" 文字";
+    std::wstring summary = localization::Format(L"readonly.range.summary", {{L"START", std::to_wstring(state.start / 10)}, {L"END", std::to_wstring(state.end / 10)}, {L"MB", std::to_wstring(megabytes)}, {L"CHARS", std::to_wstring(estimated_characters)}});
     SetWindowTextW(GetDlgItem(hwnd, kRangeSummaryId), summary.c_str());
     std::wstring warning;
-    if (bytes > kMaximumRangeLoadBytes) warning = L"この範囲は256MBを超えるため開けません。範囲を狭めてください。";
+    if (bytes > kMaximumRangeLoadBytes) warning = localization::Text(L"readonly.range.too_large");
     else if (available_memory > 0 && estimated_working_set > available_memory / 2)
-        warning = L"強い警告: 現在利用できるメモリに対して表示量が大きすぎます。範囲を狭めてください。";
+        warning = localization::Text(L"readonly.range.memory_critical");
     else if (available_memory > 0 && estimated_working_set > available_memory / 4)
-        warning = L"注意: 現在の空きメモリでは表示が遅くなる可能性があります。";
-    else if (bytes > 128ull * 1024ull * 1024ull) warning = L"強い警告: 大量のメモリを使用し、表示が遅くなる可能性があります。";
-    else if (bytes > 32ull * 1024ull * 1024ull) warning = L"注意: 環境によっては表示に時間がかかります。";
-    else warning = L"負荷: 軽い";
+        warning = localization::Text(L"readonly.range.memory_low");
+    else if (bytes > 128ull * 1024ull * 1024ull) warning = localization::Text(L"readonly.range.memory_heavy");
+    else if (bytes > 32ull * 1024ull * 1024ull) warning = localization::Text(L"readonly.range.memory_slow");
+    else warning = localization::Text(L"readonly.range.memory_light");
     SetWindowTextW(GetDlgItem(hwnd, kRangeWarningId), warning.c_str());
     EnableWindow(GetDlgItem(hwnd, kRangeConfirmId), bytes <= kMaximumRangeLoadBytes &&
                  (available_memory == 0 || estimated_working_set <= available_memory / 2));
@@ -733,14 +735,14 @@ LRESULT CALLBACK LargeTextRangeDialogProc(HWND hwnd, UINT message, WPARAM wParam
     if (!state) return DefWindowProcW(hwnd, message, wParam, lParam);
     if (message == WM_CREATE) {
         const HINSTANCE instance = GetModuleHandleW(nullptr);
-        CreateWindowExW(0, L"STATIC", L"大きなテキストです。数直線で開く連続範囲を指定してください。",
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.range.large_text_help").c_str(),
                         WS_CHILD | WS_VISIBLE, 16, 16, 500, 22, hwnd, nullptr, instance, nullptr);
-        CreateWindowExW(0, L"STATIC", L"選択範囲（■ の部分を開きます）", WS_CHILD | WS_VISIBLE, 16, 44, 500, 20, hwnd, nullptr, instance, nullptr);
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.range.selection_label").c_str(), WS_CHILD | WS_VISIBLE, 16, 44, 500, 20, hwnd, nullptr, instance, nullptr);
         CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 64, 500, 22, hwnd, reinterpret_cast<HMENU>(kRangeVisualBarId), instance, nullptr);
-        CreateWindowExW(0, L"STATIC", L"開始つまみ", WS_CHILD | WS_VISIBLE, 16, 92, 90, 20, hwnd, nullptr, instance, nullptr);
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.range.start_handle").c_str(), WS_CHILD | WS_VISIBLE, 16, 92, 90, 20, hwnd, nullptr, instance, nullptr);
         HWND start = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
                                      110, 86, 400, 32, hwnd, reinterpret_cast<HMENU>(kRangeStartSliderId), instance, nullptr);
-        CreateWindowExW(0, L"STATIC", L"終了つまみ", WS_CHILD | WS_VISIBLE, 16, 132, 90, 20, hwnd, nullptr, instance, nullptr);
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.range.end_handle").c_str(), WS_CHILD | WS_VISIBLE, 16, 132, 90, 20, hwnd, nullptr, instance, nullptr);
         HWND end = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
                                    110, 126, 400, 32, hwnd, reinterpret_cast<HMENU>(kRangeEndSliderId), instance, nullptr);
         for (HWND slider : {start, end}) { SendMessageW(slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 1000)); SendMessageW(slider, TBM_SETTICFREQ, 100, 0); }
@@ -748,9 +750,9 @@ LRESULT CALLBACK LargeTextRangeDialogProc(HWND hwnd, UINT message, WPARAM wParam
         SendMessageW(end, TBM_SETPOS, TRUE, state->end);
         CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 170, 500, 42, hwnd, reinterpret_cast<HMENU>(kRangeSummaryId), instance, nullptr);
         CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 218, 500, 36, hwnd, reinterpret_cast<HMENU>(kRangeWarningId), instance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"この範囲を開く", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.range.open").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                         284, 264, 130, 28, hwnd, reinterpret_cast<HMENU>(kRangeConfirmId), instance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"キャンセル", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         424, 264, 90, 28, hwnd, reinterpret_cast<HMENU>(kRangeCancelId), instance, nullptr);
         UpdateRangeDialog(hwnd, *state);
         return 0;
@@ -794,7 +796,7 @@ std::optional<ByteRange> ChooseLargeTextRange(HWND owner, uintmax_t file_size, c
     state.start = current ? static_cast<int>(current->start * 1000 / file_size) : 0;
     state.end = current ? static_cast<int>(current->end * 1000 / file_size) :
         std::max(1, std::min(1000, static_cast<int>((16ull * 1024ull * 1024ull * 1000ull) / file_size)));
-    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, kRangeDialogClass, L"表示範囲を指定",
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, kRangeDialogClass, localization::Text(L"readonly.range.title").c_str(),
                                   WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 540, 340,
                                   owner, nullptr, GetModuleHandleW(nullptr), &state);
     if (!dialog) return std::nullopt;
@@ -824,13 +826,13 @@ LRESULT CALLBACK FileChangeDialogProc(HWND hwnd, UINT message, WPARAM wParam, LP
     if (!state) return DefWindowProcW(hwnd, message, wParam, lParam);
     if (message == WM_CREATE) {
         const HINSTANCE instance = GetModuleHandleW(nullptr);
-        CreateWindowExW(0, L"STATIC", L"開いているファイルが外部で更新された可能性があります。",
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.file_change.detected").c_str(),
                         WS_CHILD | WS_VISIBLE, 18, 18, 470, 22, hwnd, nullptr, instance, nullptr);
-        CreateWindowExW(0, L"STATIC", L"再読み込みすると、現在の表示をファイルの最新内容に置き換えます。",
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.file_change.reload_explanation").c_str(),
                         WS_CHILD | WS_VISIBLE, 18, 48, 470, 40, hwnd, nullptr, instance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"今回はそのまま", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.file_change.keep_current").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                         222, 118, 125, 30, hwnd, reinterpret_cast<HMENU>(kFileChangeKeepButtonId), instance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"再読み込み", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.file_change.reload").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         357, 118, 115, 30, hwnd, reinterpret_cast<HMENU>(kFileChangeReloadButtonId), instance, nullptr);
         return 0;
     }
@@ -859,7 +861,7 @@ bool ConfirmReloadChangedFile(HWND owner) {
     }
     if (!atom) return false;
     FileChangeDialogState state{};
-    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, kFileChangeDialogClass, L"ファイルの更新を確認",
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, kFileChangeDialogClass, localization::Text(L"readonly.file_change.title").c_str(),
                                   WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 510, 195, owner, nullptr,
                                   GetModuleHandleW(nullptr), &state);
@@ -954,7 +956,7 @@ void RenderInlineMarkdown(
             if (labelEnd != std::wstring_view::npos && labelEnd + 1 < end && source[labelEnd + 1] == L'(') {
                 const size_t targetEnd = source.find(L')', labelEnd + 2);
                 if (targetEnd != std::wstring_view::npos && targetEnd < end) {
-                    if (image) AppendStyledText(document, L"画像: ", style, headingLevel);
+                    if (image) AppendStyledText(document, localization::Text(L"readonly.render.image_prefix"), style, headingLevel);
                     RenderInlineMarkdown(source, labelStart, labelEnd, document, style | TextStyleLink, headingLevel);
                     pos = targetEnd + 1;
                     continue;
@@ -1093,7 +1095,7 @@ RenderedDocument RenderMarkdown(const std::wstring& source, std::vector<InlineDi
                 if (result.can_render() && inline_diagrams) {
                     ++diagram_number;
                     const size_t text_offset = document.text.size();
-                    AppendStyledText(document, L"図 " + std::to_wstring(diagram_number) + L"  （右クリックで図表一覧）\n", TextStyleItalic, 0);
+                    AppendStyledText(document, localization::Format(L"readonly.render.diagram_label", {{L"NUMBER", std::to_wstring(diagram_number)}}) + L"\n", TextStyleItalic, 0);
                     // Reserve vertical space in the RichEdit document for the child preview.
                     for (int blank_line = 0; blank_line < 15; ++blank_line) document.text.push_back(L'\n');
                     inline_diagrams->push_back({text_offset, result.model});
@@ -1250,11 +1252,11 @@ LRESULT CALLBACK DetachedDiagramWndProc(HWND hWnd, UINT message, WPARAM wParam, 
     switch (message) {
         case WM_CREATE: {
             const HINSTANCE instance = reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance;
-            CreateWindowExW(0, L"BUTTON", L"拡大", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.diagram.zoom_in").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             8, 6, 64, 24, hWnd, reinterpret_cast<HMENU>(kDetachedDiagramZoomInButtonId), instance, nullptr);
-            CreateWindowExW(0, L"BUTTON", L"縮小", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.diagram.zoom_out").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             78, 6, 64, 24, hWnd, reinterpret_cast<HMENU>(kDetachedDiagramZoomOutButtonId), instance, nullptr);
-            CreateWindowExW(0, L"BUTTON", L"等倍", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.diagram.zoom_reset").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                             148, 6, 64, 24, hWnd, reinterpret_cast<HMENU>(kDetachedDiagramResetButtonId), instance, nullptr);
             if (!g_detachedMermaidPreview.Create(hWnd, instance, 204)) return -1;
             return 0;
@@ -1301,7 +1303,7 @@ void OpenDetachedDiagramWindow() {
         window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         window_class.lpszClassName = kDetachedDiagramWindowClass;
         RegisterClassW(&window_class);
-        g_hwndDetachedDiagram = CreateWindowExW(WS_EX_TOOLWINDOW, kDetachedDiagramWindowClass, L"Mermaid 図表",
+        g_hwndDetachedDiagram = CreateWindowExW(WS_EX_TOOLWINDOW, kDetachedDiagramWindowClass, localization::Text(L"readonly.diagram.title").c_str(),
                                                  WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 900, 700,
                                                  g_hwndMain, nullptr, GetModuleHandleW(nullptr), nullptr);
         if (!g_hwndDetachedDiagram) return;
@@ -1329,19 +1331,19 @@ void AppendDecoratedLine(RenderedDocument& document,
 
 std::wstring ClropItemKindLabel(clrop::Item::Kind kind) {
     switch (kind) {
-        case clrop::Item::Kind::Text: return L"テキスト";
-        case clrop::Item::Kind::Math: return L"数式";
-        case clrop::Item::Kind::MarkerText: return L"テキストマーカー";
-        case clrop::Item::Kind::TextColor: return L"文字色";
-        case clrop::Item::Kind::MarkerFree: return L"フリーマーカー";
-        case clrop::Item::Kind::Line: return L"線";
-        case clrop::Item::Kind::Arrow: return L"矢印";
-        case clrop::Item::Kind::Wave: return L"波線";
-        case clrop::Item::Kind::Freehand: return L"手書き";
-        case clrop::Item::Kind::LinkMarker: return L"リンクマーカー";
-        case clrop::Item::Kind::Shape: return L"図形";
+        case clrop::Item::Kind::Text: return localization::Text(L"readonly.clrop.kind.text");
+        case clrop::Item::Kind::Math: return localization::Text(L"readonly.clrop.kind.math");
+        case clrop::Item::Kind::MarkerText: return localization::Text(L"readonly.clrop.kind.text_marker");
+        case clrop::Item::Kind::TextColor: return localization::Text(L"readonly.clrop.kind.text_color");
+        case clrop::Item::Kind::MarkerFree: return localization::Text(L"readonly.clrop.kind.free_marker");
+        case clrop::Item::Kind::Line: return localization::Text(L"readonly.clrop.kind.line");
+        case clrop::Item::Kind::Arrow: return localization::Text(L"readonly.clrop.kind.arrow");
+        case clrop::Item::Kind::Wave: return localization::Text(L"readonly.clrop.kind.wave");
+        case clrop::Item::Kind::Freehand: return localization::Text(L"readonly.clrop.kind.freehand");
+        case clrop::Item::Kind::LinkMarker: return localization::Text(L"readonly.clrop.kind.link_marker");
+        case clrop::Item::Kind::Shape: return localization::Text(L"readonly.clrop.kind.shape");
     }
-    return L"注釈";
+    return localization::Text(L"readonly.clrop.kind.annotation");
 }
 
 std::wstring ClropItemPreview(const clrop::Item& item) {
@@ -1366,8 +1368,8 @@ std::wstring ClropItemPreview(const clrop::Item& item) {
 RenderedDocument RenderClropDocument(const OpenTab& tab) {
     RenderedDocument document;
     if (tab.bytes.empty()) {
-        AppendDecoratedLine(document, L"CLRO を読み取れません", TextStyleBold, 1);
-        AppendDecoratedLine(document, L"Raw表示で内容を確認してください。");
+        AppendDecoratedLine(document, localization::Text(L"readonly.clrop.read_failed"), TextStyleBold, 1);
+        AppendDecoratedLine(document, localization::Text(L"readonly.clrop.use_raw_view"));
         return document;
     }
 
@@ -1375,8 +1377,8 @@ RenderedDocument RenderClropDocument(const OpenTab& tab) {
     clrop::Document clropDocument;
     std::wstring error;
     if (!clrop::ParseClropFromJson(json, clropDocument, error)) {
-        AppendDecoratedLine(document, L"CLRO を解析できません", TextStyleBold, 1);
-        AppendDecoratedLine(document, L"Raw表示で内容を確認してください。");
+        AppendDecoratedLine(document, localization::Text(L"readonly.clrop.parse_failed"), TextStyleBold, 1);
+        AppendDecoratedLine(document, localization::Text(L"readonly.clrop.use_raw_view"));
         if (!error.empty()) AppendDecoratedLine(document, error, TextStyleCode);
         return document;
     }
@@ -1388,28 +1390,27 @@ RenderedDocument RenderClropDocument(const OpenTab& tab) {
         for (const clrop::Item& item : page.items) ++kindCounts[ClropItemKindLabel(item.kind)];
     }
 
-    AppendDecoratedLine(document, L"CLRO 注釈ファイル", TextStyleBold, 1);
-    AppendDecoratedLine(document, L"形式バージョン: " + std::to_wstring(clropDocument.version));
+    AppendDecoratedLine(document, localization::Text(L"readonly.clrop.title"), TextStyleBold, 1);
+    AppendDecoratedLine(document, localization::Text(L"readonly.clrop.format_version") + std::to_wstring(clropDocument.version));
     if (!clropDocument.pdfId.path.empty()) {
-        AppendDecoratedLine(document, L"対象PDF: " + clropDocument.pdfId.path);
+        AppendDecoratedLine(document, localization::Text(L"readonly.clrop.target_pdf") + clropDocument.pdfId.path);
     }
     if (clropDocument.pdfId.pageCount > 0) {
-        AppendDecoratedLine(document, L"PDFページ数: " + std::to_wstring(clropDocument.pdfId.pageCount));
+        AppendDecoratedLine(document, localization::Text(L"readonly.clrop.pdf_page_count") + std::to_wstring(clropDocument.pdfId.pageCount));
     }
-    AppendDecoratedLine(document, L"注釈ページ: " + std::to_wstring(clropDocument.pages.size()) +
-        L"　注釈数: " + std::to_wstring(itemCount));
+    AppendDecoratedLine(document, localization::Format(L"readonly.clrop.page_and_annotation_count", {{L"PAGES", std::to_wstring(clropDocument.pages.size())}, {L"ITEMS", std::to_wstring(itemCount)}}));
 
     if (!kindCounts.empty()) {
-        AppendDecoratedLine(document, L"注釈の種類", TextStyleBold, 2);
+    AppendDecoratedLine(document, localization::Text(L"readonly.clrop.annotation_types"), TextStyleBold, 2);
         for (const auto& [kind, count] : kindCounts) {
             AppendDecoratedLine(document, L"• " + kind + L": " + std::to_wstring(count));
         }
     }
 
-    AppendDecoratedLine(document, L"ページ別の注釈", TextStyleBold, 2);
+    AppendDecoratedLine(document, localization::Text(L"readonly.clrop.annotations_by_page"), TextStyleBold, 2);
     for (const clrop::Page& page : clropDocument.pages) {
         AppendDecoratedLine(document,
-            L"ページ " + std::to_wstring(page.page + 1) + L"（" + std::to_wstring(page.items.size()) + L"件）",
+            localization::Format(L"readonly.clrop.page_item_count", {{L"PAGE", std::to_wstring(page.page + 1)}, {L"COUNT", std::to_wstring(page.items.size())}}),
             TextStyleBold,
             3);
         for (const clrop::Item& item : page.items) {
@@ -1757,7 +1758,7 @@ void ChangePartialTextRange(HWND owner, int index) {
     if (!tab.isPartialText || tab.sourceSize == 0) return;
     const std::optional<ByteRange> range = ChooseLargeTextRange(owner, tab.sourceSize, tab.textRange);
     if (!range) return;
-    BeginCancellableLoad(owner, L"読み込み中…");
+    BeginCancellableLoad(owner, localization::Text(L"readonly.status.loading"));
     LoadFileResult loaded = LoadTextFile(tab.path, range);
     EndCancellableLoad();
     if (loaded.hasError || loaded.cancelled) { SetViewerStatus(owner, loaded.text); return; }
@@ -1772,9 +1773,9 @@ void ChangePartialTextRange(HWND owner, int index) {
 }
 
 void SetViewerStatus(HWND owner, const std::wstring& message) {
-    std::wstring title = L"閲覧専用";
+    std::wstring title = localization::Text(L"readonly.window.title");
     if (!g_tabs.empty()) {
-        title += L"（" + std::to_wstring(g_tabs.size()) + L" タブ）";
+        title += localization::Format(L"readonly.window.tab_count", {{L"COUNT", std::to_wstring(g_tabs.size())}});
     }
     if (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size())) {
         title += L" - " + g_tabs[static_cast<size_t>(g_currentTab)].title;
@@ -1949,7 +1950,7 @@ bool ReadReadonlySessionFile(const std::filesystem::path& path, StoredReadonlySe
 
 [[nodiscard]] bool SaveReadonlySession(std::wstring* error) {
     const std::filesystem::path dir = ViewerExeDirectory();
-    if (dir.empty()) { if (error) *error = L"設定の保存先を決定できませんでした。"; return false; }
+    if (dir.empty()) { if (error) *error = localization::Text(L"readonly.settings.path_unavailable"); return false; }
     std::ostringstream json;
     json << "{\n  \"format\": \"readonly_viewer_session_v1\",\n  \"persistenceEnabled\": "
          << (g_persistSessionEnabled ? "true" : "false") << ",\n  \"folder\": {\"path\": \"";
@@ -2028,7 +2029,7 @@ std::vector<std::wstring> PromptForLocalPaths(HWND owner, bool pickFolder) {
         options |= pickFolder ? FOS_PICKFOLDERS : (FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT);
         dialog->SetOptions(options);
     }
-    dialog->SetTitle(pickFolder ? L"閲覧するフォルダーを開く" : L"閲覧するファイルを開く");
+    dialog->SetTitle(localization::Text(pickFolder ? L"readonly.picker.open_folder" : L"readonly.picker.open_file").c_str());
     if (!pickFolder) {
         COMDLG_FILTERSPEC filters[] = {
             {L"PDF, Text and Markdown", L"*.pdf;*.txt;*.md;*.markdown;*.json;*.clro;*.sha256"},
@@ -2119,21 +2120,21 @@ bool ReloadOpenTab(HWND owner, int index) {
 
     std::optional<ByteRange> selectedRange;
     if (previous.isPartialText) selectedRange = previous.textRange;
-    BeginCancellableLoad(owner, L"更新したファイルを読み込み中…");
+    BeginCancellableLoad(owner, localization::Text(L"readonly.status.loading_updated_file"));
     LoadFileResult loaded = LoadTextFile(previous.path, selectedRange);
     EndCancellableLoad();
     if (loaded.cancelled || loaded.hasError) {
-        SetViewerStatus(owner, loaded.text.empty() ? L"ファイルを再読み込みできませんでした。" : loaded.text);
+        SetViewerStatus(owner, loaded.text.empty() ? localization::Text(L"readonly.status.reload_failed") : loaded.text);
         return false;
     }
     if (loaded.requires_range_selection) {
         selectedRange = ChooseLargeTextRange(owner, loaded.source_size);
         if (!selectedRange) { SetViewerStatus(owner, L""); return false; }
-        BeginCancellableLoad(owner, L"選択範囲を読み込み中…");
+        BeginCancellableLoad(owner, localization::Text(L"readonly.status.loading_selected_range"));
         loaded = LoadTextFile(previous.path, selectedRange);
         EndCancellableLoad();
         if (loaded.cancelled || loaded.hasError) {
-            SetViewerStatus(owner, loaded.text.empty() ? L"ファイルを再読み込みできませんでした。" : loaded.text);
+            SetViewerStatus(owner, loaded.text.empty() ? localization::Text(L"readonly.status.reload_failed") : loaded.text);
             return false;
         }
     }
@@ -2149,7 +2150,7 @@ bool ReloadOpenTab(HWND owner, int index) {
     refreshed.sourceSize = loaded.source_size;
     refreshed.sourceSnapshot = CaptureFileSnapshot(refreshed.path);
     refreshed.title = std::filesystem::path(refreshed.path).filename().wstring();
-    if (refreshed.isPartialText) refreshed.title += L" （一部）";
+    if (refreshed.isPartialText) refreshed.title += localization::Text(L"readonly.tab.partial_suffix");
     ParseJapaneseLines(refreshed);
     g_tabs[static_cast<size_t>(index)] = std::move(refreshed);
     TCITEMW item{};
@@ -2169,7 +2170,7 @@ bool ConfirmAndReloadChangedTab(HWND owner, int index) {
         return false;
     }
     if (!ConfirmReloadChangedFile(owner)) {
-        SetViewerStatus(owner, L"外部更新された可能性があるため、現在の表示を維持しています。");
+        SetViewerStatus(owner, localization::Text(L"readonly.status.external_change_kept"));
         return false;
     }
     return ReloadOpenTab(owner, index);
@@ -2197,7 +2198,7 @@ bool OpenPathInTab(HWND owner, const std::wstring& path) {
         }
     }
 
-    BeginCancellableLoad(owner, L"読み込み中…");
+    BeginCancellableLoad(owner, localization::Text(L"readonly.status.loading"));
     LoadFileResult loaded = LoadTextFile(path);
     EndCancellableLoad();
     if (loaded.cancelled) {
@@ -2211,7 +2212,7 @@ bool OpenPathInTab(HWND owner, const std::wstring& path) {
             SetViewerStatus(owner, L"");
             return false;
         }
-        BeginCancellableLoad(owner, L"選択範囲を読み込み中…");
+        BeginCancellableLoad(owner, localization::Text(L"readonly.status.loading_selected_range"));
         loaded = LoadTextFile(path, selected_range);
         EndCancellableLoad();
         if (loaded.cancelled) {
@@ -2221,7 +2222,7 @@ bool OpenPathInTab(HWND owner, const std::wstring& path) {
     }
     OpenTab tab;
     tab.title = std::filesystem::path(path).filename().wstring();
-    if (selected_range) tab.title += L" （一部）";
+    if (selected_range) tab.title += localization::Text(L"readonly.tab.partial_suffix");
     tab.path = path;
     tab.rawText = std::move(loaded.text);
     tab.bytes = std::move(loaded.bytes);
@@ -2409,6 +2410,7 @@ void PopulateFileTree(const std::wstring& directoryPath) {
     if (!g_persistSessionEnabled) g_sessionFolderPersistent = false;
     TreeView_DeleteAllItems(g_hwndFileTree);
     g_filePaths.clear();
+    g_directoryPaths.clear();
     
     TVINSERTSTRUCTW tvis = {0};
     tvis.hParent = TVI_ROOT;
@@ -2418,21 +2420,44 @@ void PopulateFileTree(const std::wstring& directoryPath) {
     tvis.item.lParam = -1;
     HTREEITEM hRoot = TreeView_InsertItem(g_hwndFileTree, &tvis);
 
-    try {
-        for (const auto& entry : std::filesystem::directory_iterator(directoryPath)) {
-            if (entry.is_regular_file()) {
-                g_filePaths.push_back(entry.path().wstring());
-                size_t index = g_filePaths.size() - 1;
-                
-                std::wstring filename = entry.path().filename().wstring();
-                tvis.hParent = hRoot;
-                tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
-                tvis.item.pszText = (LPWSTR)filename.c_str();
-                tvis.item.lParam = (LPARAM)index;
-                TreeView_InsertItem(g_hwndFileTree, &tvis);
-            }
-        }
-    } catch (...) {}
+    const auto addDirectory = [&](const std::wstring& path, const std::wstring& label) {
+        g_directoryPaths.push_back(path);
+        tvis.hParent = hRoot;
+        tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
+        tvis.item.pszText = const_cast<LPWSTR>(label.c_str());
+        tvis.item.lParam = -static_cast<LPARAM>(g_directoryPaths.size()) - 1;
+        TreeView_InsertItem(g_hwndFileTree, &tvis);
+    };
+
+    std::error_code ec;
+    const std::filesystem::path current(directoryPath);
+    const std::filesystem::path parent = current.parent_path();
+    if (!parent.empty() && parent != current && IsSupportedLocalPath(parent.wstring())) {
+        addDirectory(parent.wstring(), localization::Text(L"readonly.tree.parent_folder"));
+    }
+    std::vector<std::filesystem::path> directories;
+    std::vector<std::filesystem::path> files;
+    for (std::filesystem::directory_iterator it(current, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        std::error_code entryEc;
+        if (it->is_directory(entryEc) && !entryEc && IsSupportedLocalPath(it->path().wstring())) directories.push_back(it->path());
+        else if (it->is_regular_file(entryEc) && !entryEc) files.push_back(it->path());
+    }
+    const auto byName = [](const std::filesystem::path& left, const std::filesystem::path& right) {
+        return _wcsicmp(left.filename().c_str(), right.filename().c_str()) < 0;
+    };
+    std::sort(directories.begin(), directories.end(), byName);
+    std::sort(files.begin(), files.end(), byName);
+    for (const auto& directory : directories) addDirectory(directory.wstring(), localization::Text(L"readonly.tree.folder_prefix") + directory.filename().wstring());
+    for (const auto& file : files) {
+        g_filePaths.push_back(file.wstring());
+        tvis.hParent = hRoot;
+        tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
+        std::wstring filename = file.filename().wstring();
+        tvis.item.pszText = const_cast<LPWSTR>(filename.c_str());
+        tvis.item.lParam = static_cast<LPARAM>(g_filePaths.size() - 1);
+        TreeView_InsertItem(g_hwndFileTree, &tvis);
+    }
     TreeView_Expand(g_hwndFileTree, hRoot, TVE_EXPAND);
 }
 
@@ -2478,16 +2503,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             BuildViewerMenu(hWnd);
             g_hwndPdfPanel = readonly_viewer::CreatePdfPreviewPanel(hWnd, hInst, 1002);
             if (g_hwndPdfPanel) ShowWindow(g_hwndPdfPanel, SW_HIDE);
+            g_hwndToggleLeftPaneButton = CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.pane.close_list").c_str(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                0, 0, 0, 0, hWnd, (HMENU)kToggleLeftPaneButtonId, hInst, NULL);
+            g_hwndOpenFolderButton = CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.menu.open_folder").c_str(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                0, 0, 0, 0, hWnd, (HMENU)kOpenFolderButtonId, hInst, NULL);
             g_hwndFileTree = CreateWindowExW(0, WC_TREEVIEWW, L"",
                 WS_CHILD | WS_VISIBLE | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS,
                 0, 0, 0, 0, hWnd, (HMENU)101, hInst, NULL);
             g_hwndTocTree = CreateWindowExW(0, WC_TREEVIEWW, L"",
                 WS_CHILD | WS_VISIBLE | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS,
                 0, 0, 0, 0, hWnd, (HMENU)102, hInst, NULL);
-            g_hwndFileTreeLabel = CreateWindowExW(0, L"STATIC", L"ファイル",
+            g_hwndFileTreeLabel = CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.pane.files").c_str(),
                 WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
                 0, 0, 0, 0, hWnd, nullptr, hInst, nullptr);
-            g_hwndTocTreeLabel = CreateWindowExW(0, L"STATIC", L"目次",
+            g_hwndTocTreeLabel = CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.pane.table_of_contents").c_str(),
                 WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
                 0, 0, 0, 0, hWnd, nullptr, hInst, nullptr);
             g_hwndTabControl = CreateWindowExW(0, WC_TABCONTROLW, L"",
@@ -2514,7 +2545,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 WS_CHILD | WS_VISIBLE,
                 0, 0, 0, 0, hWnd, (HMENU)105, hInst, NULL);
             if (!g_mermaidPreview.Create(hWnd, hInst, 112)) {
-                SetViewerStatus(hWnd, L"図表プレビューを初期化できませんでした。");
+                SetViewerStatus(hWnd, localization::Text(L"readonly.status.diagram_preview_failed"));
             }
             g_mermaidPreview.SetDetachedWindowTarget(hWnd);
             UpdateModeButtons(ViewMode::Raw);
@@ -2522,7 +2553,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         case WM_SIZE: {
-            constexpr int commandBarHeight = 0;
+            constexpr int paneToggleHeight = 28;
+            constexpr int openFolderButtonHeight = 28;
+            constexpr int paneHeaderHeight = paneToggleHeight + openFolderButtonHeight;
             constexpr int paneLabelHeight = 24;
             int width = LOWORD(lParam);
             int height = HIWORD(lParam);
@@ -2532,27 +2565,38 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 if (splitX < 50) splitX = 50;
             }
 
-            int leftPaneHeight = std::max(0, height - commandBarHeight);
-            int rightPaneWidth = g_leftPaneVisible ? width - splitX - 5 : width;
+            const int hiddenPaneButtonWidth = 90;
+            int leftPaneHeight = std::max(0, height - paneHeaderHeight);
+            int rightPaneWidth = g_leftPaneVisible ? width - splitX - 5 : width - hiddenPaneButtonWidth;
 
             int availableTreeHeight = std::max(0, leftPaneHeight - paneLabelHeight * 2);
             int fileTreeHeight = availableTreeHeight / 2;
             int tocTreeHeight = availableTreeHeight - fileTreeHeight;
 
+            if (g_hwndToggleLeftPaneButton) {
+                SetWindowTextW(g_hwndToggleLeftPaneButton, localization::Text(g_leftPaneVisible ? L"readonly.pane.close_list" : L"readonly.pane.show_list").c_str());
+                MoveWindow(g_hwndToggleLeftPaneButton, 0, 0,
+                           g_leftPaneVisible ? splitX : hiddenPaneButtonWidth, paneToggleHeight, TRUE);
+                ShowWindow(g_hwndToggleLeftPaneButton, SW_SHOW);
+            }
+            if (g_hwndOpenFolderButton) {
+                ShowWindow(g_hwndOpenFolderButton, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
+                if (g_leftPaneVisible) MoveWindow(g_hwndOpenFolderButton, 0, paneToggleHeight, splitX, openFolderButtonHeight, TRUE);
+            }
             if (g_hwndFileTree) ShowWindow(g_hwndFileTree, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
             if (g_hwndTocTree) ShowWindow(g_hwndTocTree, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
             if (g_hwndFileTreeLabel) ShowWindow(g_hwndFileTreeLabel, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
             if (g_hwndTocTreeLabel) ShowWindow(g_hwndTocTreeLabel, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
             if (g_leftPaneVisible) {
-                if (g_hwndFileTreeLabel) MoveWindow(g_hwndFileTreeLabel, 8, commandBarHeight, splitX - 8, paneLabelHeight, TRUE);
-                if (g_hwndFileTree) MoveWindow(g_hwndFileTree, 0, commandBarHeight + paneLabelHeight, splitX, fileTreeHeight, TRUE);
-                if (g_hwndTocTreeLabel) MoveWindow(g_hwndTocTreeLabel, 8, commandBarHeight + paneLabelHeight + fileTreeHeight,
+                if (g_hwndFileTreeLabel) MoveWindow(g_hwndFileTreeLabel, 8, paneHeaderHeight, splitX - 8, paneLabelHeight, TRUE);
+                if (g_hwndFileTree) MoveWindow(g_hwndFileTree, 0, paneHeaderHeight + paneLabelHeight, splitX, fileTreeHeight, TRUE);
+                if (g_hwndTocTreeLabel) MoveWindow(g_hwndTocTreeLabel, 8, paneHeaderHeight + paneLabelHeight + fileTreeHeight,
                                                     splitX - 8, paneLabelHeight, TRUE);
-                if (g_hwndTocTree) MoveWindow(g_hwndTocTree, 0, commandBarHeight + paneLabelHeight * 2 + fileTreeHeight,
+                if (g_hwndTocTree) MoveWindow(g_hwndTocTree, 0, paneHeaderHeight + paneLabelHeight * 2 + fileTreeHeight,
                                                splitX, tocTreeHeight, TRUE);
             }
 
-            LayoutToolbarControls(hWnd, g_leftPaneVisible ? splitX : -5, rightPaneWidth, height);
+            LayoutToolbarControls(hWnd, g_leftPaneVisible ? splitX : hiddenPaneButtonWidth - 5, rightPaneWidth, height);
             return 0;
         }
         case WM_COMMAND: {
@@ -2576,33 +2620,33 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         g_sessionFolderPersistent = false;
                         for (OpenTab& tab : g_tabs) tab.persistent = false;
                         std::wstring error;
-                        if (!SaveReadonlySession(&error)) SetViewerStatus(hWnd, L"閲覧状態を無効化しましたが、設定を保存できませんでした。");
+                        if (!SaveReadonlySession(&error)) SetViewerStatus(hWnd, localization::Text(L"readonly.status.session_disable_save_failed"));
                     }
                     DrawMenuBar(hWnd);
-                    SetViewerStatus(hWnd, g_persistSessionEnabled ? L"閲覧状態の復元を有効にしました。パス管理から復元対象を選択してください。" : L"閲覧状態の復元を無効にしました。");
+                    SetViewerStatus(hWnd, localization::Text(g_persistSessionEnabled ? L"readonly.status.session_restore_enabled" : L"readonly.status.session_restore_disabled"));
                     return 0;
                 }
                 case kPathMarkTabPersistentMenuId:
                     if (!g_persistSessionEnabled || g_currentTab < 0 || g_currentTab >= static_cast<int>(g_tabs.size())) {
-                        SetViewerStatus(hWnd, L"先に設定で閲覧状態の復元を有効にしてください。"); return 0;
+                        SetViewerStatus(hWnd, localization::Text(L"readonly.status.enable_session_restore_first")); return 0;
                     }
                     g_tabs[g_currentTab].persistent = true;
-                    SetViewerStatus(hWnd, L"現在のタブを永続化対象にしました。");
+                    SetViewerStatus(hWnd, localization::Text(L"readonly.status.current_tab_persisted"));
                     return 0;
                 case kPathMarkTabTemporaryMenuId:
                     if (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size())) g_tabs[g_currentTab].persistent = false;
-                    SetViewerStatus(hWnd, L"現在のタブを一時扱いにしました。");
+                    SetViewerStatus(hWnd, localization::Text(L"readonly.status.current_tab_temporary"));
                     return 0;
                 case kPathMarkFolderPersistentMenuId:
                     if (!g_persistSessionEnabled || g_sessionFolder.empty()) {
-                        SetViewerStatus(hWnd, L"先に設定で閲覧状態の復元を有効にし、ローカルフォルダーを開いてください。"); return 0;
+                        SetViewerStatus(hWnd, localization::Text(L"readonly.status.enable_restore_and_open_folder")); return 0;
                     }
                     g_sessionFolderPersistent = true;
-                    SetViewerStatus(hWnd, L"現在のフォルダーを永続化対象にしました。");
+                    SetViewerStatus(hWnd, localization::Text(L"readonly.status.current_folder_persisted"));
                     return 0;
                 case kPathMarkFolderTemporaryMenuId:
                     g_sessionFolderPersistent = false;
-                    SetViewerStatus(hWnd, L"現在のフォルダーを一時扱いにしました。");
+                    SetViewerStatus(hWnd, localization::Text(L"readonly.status.current_folder_temporary"));
                     return 0;
                 case kOpenFileButtonId: {
                     const std::vector<std::wstring> paths = PromptForLocalPaths(hWnd, false);
@@ -2716,9 +2760,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             LPNMHDR lpnmhdr = (LPNMHDR)lParam;
             if (lpnmhdr->hwndFrom == g_hwndFileTree && lpnmhdr->code == TVN_SELCHANGEDW) {
                 LPNMTREEVIEWW lpnmtv = (LPNMTREEVIEWW)lParam;
-                if (lpnmtv->itemNew.hItem && lpnmtv->itemNew.lParam >= 0 && lpnmtv->itemNew.lParam < (LPARAM)g_filePaths.size()) {
-                    std::wstring path = g_filePaths[lpnmtv->itemNew.lParam];
-                    OpenPathInTab(hWnd, path);
+                if (lpnmtv->itemNew.hItem) {
+                    const LPARAM itemPath = lpnmtv->itemNew.lParam;
+                    if (itemPath >= 0 && itemPath < static_cast<LPARAM>(g_filePaths.size())) {
+                        OpenPathInTab(hWnd, g_filePaths[static_cast<size_t>(itemPath)]);
+                    } else if (itemPath <= -2) {
+                        const size_t directoryIndex = static_cast<size_t>(-itemPath - 2);
+                        if (directoryIndex < g_directoryPaths.size()) {
+                            PopulateFileTree(g_directoryPaths[directoryIndex]);
+                            SetViewerStatus(hWnd, L"");
+                        }
+                    }
                 }
             } else if (lpnmhdr->hwndFrom == g_hwndTabControl && lpnmhdr->code == TCN_SELCHANGE) {
                 int idx = TabCtrl_GetCurSel(g_hwndTabControl);

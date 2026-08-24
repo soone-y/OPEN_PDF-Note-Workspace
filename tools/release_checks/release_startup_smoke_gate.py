@@ -17,6 +17,19 @@ from pathlib import Path, PurePosixPath
 STARTUP_WAIT_SECONDS = 4
 
 
+def assert_not_previously_started(extracted_release_dir: Path) -> None:
+    """Reject a smoke-test copy that already has first-startup runtime data."""
+    runtime_roots = ("workspace", "__resource__")
+    found = [name for name in runtime_roots if (extracted_release_dir / name).exists()]
+    if found:
+        raise RuntimeError(
+            "起動スモーク検査を中断しました。配布ZIPに、初回起動で生成される不要なデータが含まれています: "
+            + ", ".join(found)
+            + "\nリリースZIPは未起動の配布物である必要があります。release set配下を編集せず、"
+            + "新しいrelease setを作り直してから検査をやり直してください。"
+        )
+
+
 def child_path(root: Path, value: object, *, label: str) -> Path:
     if not isinstance(value, str) or not value:
         raise ValueError(f"release-set manifest is missing {label}")
@@ -134,6 +147,7 @@ def validate_release_set(release_set: Path) -> list[str]:
                 executable = destination / directory_name / "pdf_note_workspace.exe"
                 if not executable.is_file():
                     raise ValueError(f"extracted application is missing: {executable}")
+                assert_not_previously_started(destination / directory_name)
                 smoke_start(executable)
             except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as error:
                 errors.append(f"{label}: {error}")
