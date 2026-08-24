@@ -32,6 +32,8 @@ FORBIDDEN_SUFFIXES = {
     ".obj",
     ".orig",
     ".pch",
+    ".pyc",
+    ".pyo",
     ".rej",
     ".tar",
     ".tgz",

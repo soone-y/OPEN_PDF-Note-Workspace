@@ -2299,6 +2299,21 @@ class PublicSnapshotContentGateTests(unittest.TestCase):
 
             self.assertEqual(public_snapshot_content_gate.collect_violations(root), [])
 
+    def test_rejects_python_runtime_cache(self) -> None:
+        with repo_tempdir() as root:
+            cache = root / "site" / "github" / "scripts" / "__pycache__"
+            cache.mkdir(parents=True)
+            (cache / "render_human_docs.cpython-312.pyc").write_bytes(b"cache")
+
+            violations = public_snapshot_content_gate.collect_violations(root)
+            self.assertIn(
+                public_snapshot_content_gate.Violation(
+                    "forbidden-file-type",
+                    "site/github/scripts/__pycache__/render_human_docs.cpython-312.pyc",
+                ),
+                violations,
+            )
+
 
 class PublicSiteValidationTests(unittest.TestCase):
     def test_documentation_portal_source_orders_primary_entries(self) -> None:

@@ -334,11 +334,14 @@ try {
         foreach ($requiredPath in @($snapshotReadme, $pagesBuildScript, $pagesValidationScript)) {
             if (-not (Test-Path -LiteralPath $requiredPath)) { throw "Missing release snapshot preparation input: $requiredPath" }
         }
-        & python $pagesBuildScript --replace --documentation-portal
+        # The snapshot exporter excludes Python caches.  Keep that invariant while
+        # generating frozen Pages output inside the snapshot: bytecode is a local
+        # runtime artifact and can otherwise differ between the ja/en creations.
+        & python -B $pagesBuildScript --replace --documentation-portal
         if ($LASTEXITCODE -ne 0) { throw "GitHub Pages snapshot build failed." }
         if (-not $DeferPostCreationValidation) {
             $pagesOutput = Join-Path $publicSnapshotDir "site\github\output\public"
-            & python $pagesValidationScript --site $pagesOutput
+            & python -B $pagesValidationScript --site $pagesOutput
             if ($LASTEXITCODE -ne 0) { throw "GitHub Pages snapshot validation failed." }
         }
         $snapshotContentGateScript = Join-Path $repoRoot "tools\release_checks\public_snapshot_content_gate.py"

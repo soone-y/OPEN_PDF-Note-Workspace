@@ -1493,7 +1493,7 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         'function Get-RequestedReleaseSetPair',
         'function Get-LatestReleaseSetPair',
         'Specify exactly two release sets: one ja set and one en set.',
-        'if ($ReleaseSetPath.Count -eq 0 -and $Mode -eq "Confirm") {',
+        'if ($ReleaseSetPath.Count -eq 0 -and $Mode -in @("Confirm", "Submit")) {',
         'return Get-LatestReleaseSetPair',
         'Invoke-CreateReleaseSetPair',
         'foreach ($item in $items)',
@@ -1502,17 +1502,20 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         if needle not in publish_text:
             errors.append("publish.ps1: normal publish must require and process the ja/en release-set pair")
             break
-    locale_release_notes_contract = (
-        'if ($locale -eq "en") {',
-        '"### Downloads",',
-        '"### Before use",',
-        'elseif ($locale -eq "ja") {',
-        '"### ダウンロードするファイル",',
-        '"Unsupported release-set locale for release notes: $locale"',
+    unified_release_notes_contract = (
+        'function New-ReleaseNotesText',
+        '"## Downloads / ダウンロードするファイル",',
+        '"### 日本語",',
+        '"### English",',
+        'Get-ReleaseChecksumAssetName -Locale "ja"',
+        'Get-ReleaseChecksumAssetName -Locale "en"',
+        'function Invoke-UnifiedPublicSubmission',
+        'function Invoke-UnifiedReleaseResubmission',
+        '"v$($Manifest.app_version)"',
     )
-    for needle in locale_release_notes_contract:
+    for needle in unified_release_notes_contract:
         if needle not in publish_text:
-            errors.append("publish.ps1: generated Release Notes must use the selected locale")
+            errors.append("publish.ps1: a unified release must provide bilingual notes, four named checksums, and one version tag")
             break
     if "function Get-LatestReleaseSet {" in publish_text:
         errors.append("publish.ps1: obsolete single-locale latest-release selection must not remain")
