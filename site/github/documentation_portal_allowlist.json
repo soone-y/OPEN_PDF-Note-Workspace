@@ -4,20 +4,17 @@
   "version_source": "REPO_VERSION.txt",
   "documentation_portal": {
     "files": [
+      { "source": "site/github/index.html", "destination": "index.html" },
       { "source": "REPO_VERSION.txt", "destination": "REPO_VERSION.txt" },
       { "source": "README.md", "destination": "README.md" },
+      { "source": "DOCUMENTATION.md", "destination": "DOCUMENTATION.md" },
       { "source": "LICENSE.md", "destination": "LICENSE.md" },
       { "source": "LICENSES_INDEX.md", "destination": "LICENSES_INDEX.md" },
       { "source": "THIRD_PARTY_NOTICES.md", "destination": "THIRD_PARTY_NOTICES.md" },
       { "source": ".github/SECURITY.md", "destination": ".github/SECURITY.md" },
-      { "source": "docs/public/How_to_Save_and_Recovery.md", "destination": "docs/public/How_to_Save_and_Recovery.md" },
-      { "source": "docs/public/How_to_Setup.md", "destination": "docs/public/How_to_Setup.md" },
-      { "source": "docs/public/How_to_Troubleshoot.md", "destination": "docs/public/How_to_Troubleshoot.md" },
-      { "source": "docs/public/How_to_Use.md", "destination": "docs/public/How_to_Use.md" },
-      { "source": "docs/public/Help_Reference.md", "destination": "docs/public/Help_Reference.md" },
-      { "source": "docs/public/Index.md", "destination": "docs/public/Index.md" },
-      { "source": "docs/public/What_is_File_Formats.md", "destination": "docs/public/What_is_File_Formats.md" },
-      { "source": "docs/images/app_overview.png", "destination": "docs/images/app_overview.png" }
+      { "source": "docs/案内ドキュメントの構成.md", "destination": "docs/案内ドキュメントの構成.md" },
+      { "source": "docs/images/app_overview.png", "destination": "docs/images/app_overview.png" },
+      { "source": "site/github/en/index.html", "destination": "en/index.html" }
     ],
     "trees": [
       { "source": "introduction", "destination": "introduction" },
@@ -36,6 +33,10 @@
       {
         "source": "site/github/index.html",
         "destination": "site/github/index.html"
+      },
+      {
+        "source": "site/github/en/index.html",
+        "destination": "site/github/en/index.html"
       },
       {
         "source": "site/github/documentation_portal_allowlist.json",

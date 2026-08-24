@@ -186,8 +186,8 @@ SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?P<char>=+|-+)[ \t]*$")
 
 FENCE_START_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 
-HTML_COMMENT_START_RE = re.compile(r"<!--")
-HTML_COMMENT_END_RE = re.compile(r"-->")
+HTML_COMMENT_START = "<!--"
+HTML_COMMENT_END_MARKERS = ("-->", "--!>")
 
 
 # -----------------------------
@@ -208,6 +208,11 @@ def read_text_safely(path: Path) -> str:
         except UnicodeDecodeError:
             continue
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def contains_html_comment_end(line: str) -> bool:
+    """Return whether a line ends an HTML comment under browser parsing rules."""
+    return any(marker in line for marker in HTML_COMMENT_END_MARKERS)
 
 
 def file_sha256(path: Path) -> str:
@@ -377,15 +382,16 @@ def extract_headings_from_text(text: str, skip_front_matter: bool = True) -> lis
         if fm_start <= idx < fm_end:
             continue
 
-        # HTML comment block. Markdown見出し検出の邪魔になるケースを簡易的に抑える。
+        # HTML comment block. Keep comments out of heading detection, including
+        # the HTML parser's permissive --!> end marker.
         if in_html_comment:
-            if HTML_COMMENT_END_RE.search(line):
+            if contains_html_comment_end(line):
                 in_html_comment = False
             prev_line = None
             prev_line_no = None
             continue
-        if HTML_COMMENT_START_RE.search(line) and not HTML_COMMENT_END_RE.search(line):
-            in_html_comment = True
+        if HTML_COMMENT_START in line:
+            in_html_comment = not contains_html_comment_end(line)
             prev_line = None
             prev_line_no = None
             continue

@@ -17,7 +17,8 @@ from typing import Iterable, Optional, Sequence
 
 DEFAULT_GROUPS = (
     "internal=docs/internal",
-    "public=docs/public",
+    "ja=docs/ja",
+    "en=docs/en",
     "introduction=introduction",
 )
 DEFAULT_EXTENSIONS = (".md", ".txt")

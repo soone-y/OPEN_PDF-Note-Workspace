@@ -741,6 +741,13 @@ class ValidateCodebaseTests(unittest.TestCase):
 
 
 class MdStructureScannerTests(unittest.TestCase):
+    def test_extract_headings_ignores_html_comments_closed_with_end_bang(self) -> None:
+        text = "# Before\n<!--\n# Hidden\n--!>\n# After\n"
+
+        headings = md_structure_scanner.extract_headings_from_text(text)
+
+        self.assertEqual([(h.level, h.text) for h in headings], [(1, "Before"), (1, "After")])
+
     def test_extract_headings_ignores_front_matter_and_fenced_code(self) -> None:
         text = (
             "---\n"
@@ -2165,12 +2172,21 @@ class LibreOfficeConversionQualityToolTests(unittest.TestCase):
 
 
 class RenderHumanDocsTests(unittest.TestCase):
-    def test_generates_html_for_public_docs_including_introduction(self) -> None:
+    def test_mermaid_labels_only_allow_exact_line_break_tags(self) -> None:
+        rendered = render_human_docs.render_mermaid_flowchart(
+            ["flowchart LR", "A[One<BR />Two] --> B[<br onclick=alert(1)>]"]
+        )
+
+        self.assertIsNotNone(rendered)
+        self.assertIn("One<br>Two", rendered)
+        self.assertIn("&lt;br onclick=alert(1)&gt;", rendered)
+
+    def test_generates_html_for_language_docs_including_introduction(self) -> None:
         with repo_tempdir() as site_dir:
             readme = site_dir / "README.md"
             readme.write_text("# Project README\n\nSome text.", encoding="utf-8")
 
-            doc_dir = site_dir / "docs" / "public"
+            doc_dir = site_dir / "docs" / "ja"
             doc_dir.mkdir(parents=True)
             use_doc = doc_dir / "How_to_Use.md"
             use_doc.write_text(
@@ -2178,6 +2194,9 @@ class RenderHumanDocsTests(unittest.TestCase):
                 "```mermaid\nflowchart LR\nA[Download] --> B[Extract]\nB --> C[Start]\n```\n\n## Section One",
                 encoding="utf-8",
             )
+            english_doc = site_dir / "docs" / "en" / "How_to_Use.md"
+            english_doc.parent.mkdir(parents=True)
+            english_doc.write_text("# How to Use\n\nUsage steps.", encoding="utf-8")
 
             introduction = site_dir / "introduction" / "index.md"
             introduction.parent.mkdir()
@@ -2188,8 +2207,8 @@ class RenderHumanDocsTests(unittest.TestCase):
 
             # 人間用ドキュメントの .html が作られていること
             self.assertTrue((site_dir / "README.html").exists())
-            self.assertTrue((site_dir / "docs" / "public" / "How_to_Use.html").exists())
-            human_html = (site_dir / "docs" / "public" / "How_to_Use.html").read_text(encoding="utf-8")
+            self.assertTrue((site_dir / "docs" / "ja" / "How_to_Use.html").exists())
+            human_html = (site_dir / "docs" / "ja" / "How_to_Use.html").read_text(encoding="utf-8")
             self.assertIn('class="site-menu"', human_html)
             self.assertIn('class="contrast-toggle"', human_html)
             self.assertIn('pdf-note-workspace-high-contrast', human_html)
@@ -2208,11 +2227,15 @@ class RenderHumanDocsTests(unittest.TestCase):
             self.assertIn('class="menu-outside"', human_html)
             self.assertIn('content: "↗"', human_html)
             self.assertIn('目的別の入口へ戻る', human_html)
-            self.assertLess(human_html.index('プロジェクトの概要'), human_html.index('使い方・セットアップ'))
+            self.assertLess(human_html.index('プロジェクトの概要'), human_html.index('日本語の文書'))
+            self.assertIn('class="language-switch" href="../../docs/en/How_to_Use.html"', human_html)
+            self.assertIn('>English</a>', human_html)
+            self.assertNotIn('日本語</span><span aria-hidden="true">/</span>', human_html)
             self.assertNotIn('☰', human_html)
             # 生の .md も残っていること
             self.assertTrue(readme.exists())
             self.assertTrue(use_doc.exists())
+            self.assertTrue(english_doc.exists())
             # 追加の説明資料もブラウザ用HTMLを生成し、生の .md は残すこと
             self.assertTrue((site_dir / "introduction" / "index.html").exists())
             self.assertTrue(introduction.exists())
@@ -2320,7 +2343,7 @@ class PublicSiteValidationTests(unittest.TestCase):
         portal = (REPO_ROOT / "site/github/index.html").read_text(encoding="utf-8-sig")
         labels = (
             "プロジェクトの概要",
-            "使い方・セットアップ",
+            "日本語の文書",
             "背景・設計・確認資料",
             "ライセンスと第三者通知",
         )
@@ -2328,6 +2351,10 @@ class PublicSiteValidationTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn('id="site-map-title">公開ページの関係', portal)
         self.assertIn("GitHub Releases", portal)
+        self.assertIn('href="en/index.html"', portal)
+        english_portal = (REPO_ROOT / "site/github/en/index.html").read_text(encoding="utf-8-sig")
+        self.assertIn('href="../index.html" lang="ja">日本語</a>', english_portal)
+        self.assertIn("User documentation", english_portal)
 
     def test_public_site_sources_include_persistent_high_contrast_controls(self) -> None:
         github_portal = (REPO_ROOT / "site/github/index.html").read_text(encoding="utf-8-sig")
@@ -2410,6 +2437,60 @@ class PublicSiteValidationTests(unittest.TestCase):
 
             self.assertTrue(any("must visibly link to common entry document" in error for error in errors))
 
+    def test_allowlist_coverage_rejects_missing_and_unallowlisted_output(self) -> None:
+        with repo_tempdir() as root:
+            source = root / "source"
+            site = root / "site"
+            (source / "docs" / "ja").mkdir(parents=True)
+            (source / "README.md").write_text("# README", encoding="utf-8")
+            (source / "docs" / "ja" / "Guide.md").write_text("# Guide", encoding="utf-8")
+            allowlist = source / "allowlist.json"
+            allowlist.write_text(json.dumps({
+                "schema_version": 1,
+                "documentation_portal": {
+                    "files": [{"source": "README.md", "destination": "README.md"}],
+                    "trees": [{"source": "docs/ja", "destination": "docs/ja"}],
+                },
+            }), encoding="utf-8")
+            for relative in ("README.md", "README.html", "docs/ja/Guide.md", "unexpected.txt"):
+                target = site / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("content", encoding="utf-8")
+
+            errors: list[str] = []
+            validate_public_site.validate_allowlist_coverage(site, source, allowlist, errors)
+
+            self.assertIn("allowlisted portal file is missing from generated site: docs/ja/Guide.html", errors)
+            self.assertIn("generated site contains file outside documentation portal allowlist: unexpected.txt", errors)
+
+    def test_documentation_map_rejects_missing_and_unallowlisted_documents(self) -> None:
+        with repo_tempdir() as root:
+            (root / "docs" / "ja").mkdir(parents=True)
+            (root / "README.md").write_text("# README", encoding="utf-8")
+            (root / "docs" / "ja" / "Guide.md").write_text("# Guide", encoding="utf-8")
+            (root / "private.md").write_text("# Private", encoding="utf-8")
+            (root / "DOCUMENTATION.md").write_text(
+                "[README](README.md)\n[Private](private.md)\n", encoding="utf-8"
+            )
+            allowlist = root / "allowlist.json"
+            allowlist.write_text(json.dumps({
+                "schema_version": 1,
+                "documentation_portal": {
+                    "files": [
+                        {"source": "README.md", "destination": "README.md"},
+                        {"source": "DOCUMENTATION.md", "destination": "DOCUMENTATION.md"},
+                    ],
+                    "trees": [{"source": "docs/ja", "destination": "docs/ja"}],
+                },
+            }), encoding="utf-8")
+
+            errors: list[str] = []
+            validate_public_site.validate_documentation_map(root, allowlist, errors)
+
+            self.assertIn("DOCUMENTATION.md does not list allowlisted Markdown document: docs/ja/Guide.md", errors)
+            self.assertIn("DOCUMENTATION.md does not list allowlisted Markdown document: DOCUMENTATION.md", errors)
+            self.assertIn("DOCUMENTATION.md lists Markdown document outside documentation portal allowlist: private.md", errors)
+
 class IntroductionSiteValidationTests(unittest.TestCase):
     @staticmethod
     def write_minimal_site(root: Path) -> None:
@@ -2489,14 +2570,15 @@ class ReleaseLicenseGateTests(unittest.TestCase):
 
             self.assertTrue(any("differs from unpacked release" in error for error in errors))
 
-    def test_requires_only_the_selected_locale_top_level_license_material(self) -> None:
+    def test_requires_the_common_top_level_license_material(self) -> None:
         with repo_tempdir() as root:
             release_dir = root / "release_1.0.0"
             self.write_release(release_dir, "en")
 
             self.assertEqual(release_license_gate.validate_release_directory(release_dir, "en"), [])
+            self.assertTrue((release_dir / "LICENSE.md").exists())
+            self.assertFalse((release_dir / "LICENSE.en.md").exists())
             self.assertFalse((release_dir / "LICENSE.ja.md").exists())
-            self.assertFalse((release_dir / "THIRD_PARTY_NOTICES.ja.md").exists())
 
 
 class ReleaseTextGateTests(unittest.TestCase):
@@ -2585,10 +2667,12 @@ class ReleaseLocaleContentGateTests(unittest.TestCase):
         }
         for relative, content in documents.items():
             (directory / relative).write_text(content, encoding="utf-8")
-        for name, source_relative, rewrite_legal_links in release_locale_content_gate.TOP_LEVEL_DOCUMENTS[locale]:
-            content = documents[source_relative]
-            if rewrite_legal_links:
-                content = content.replace("](" + "legal/", "](" + "docs/legal/")
+        top_documents = {
+            "README.md": "[Guide](docs/README.md)\n",
+            "LICENSE.md": "[Notices](docs/legal/THIRD_PARTY_NOTICES.md)\n",
+            "SECURITY.md": "Security policy\n",
+        }
+        for name, content in top_documents.items():
             (directory / name).write_text(content, encoding="utf-8")
         (directory / "sample_workspace/workspace.json").write_text(
             json.dumps({"language": locale}), encoding="utf-8"
@@ -2673,7 +2757,7 @@ class ReleaseLocaleContentGateTests(unittest.TestCase):
 
             self.assertTrue(any("contains Japanese locale filename: sample_workspace/日本語.txt" in error for error in errors))
 
-    def test_rejects_top_level_document_for_the_other_locale(self) -> None:
+    def test_rejects_top_level_locale_document(self) -> None:
         with repo_tempdir() as root:
             self.write_release(root, "ja")
             (root / "README.en.md").write_text("English release overview\n", encoding="utf-8")
@@ -2682,17 +2766,15 @@ class ReleaseLocaleContentGateTests(unittest.TestCase):
 
             self.assertTrue(any("unexpected top-level locale document: README.en.md" in error for error in errors))
 
-    def test_rejects_missing_unexpected_or_nontracking_top_level_documents(self) -> None:
+    def test_rejects_missing_or_unexpected_top_level_documents(self) -> None:
         with repo_tempdir() as root:
             self.write_release(root, "ja")
-            (root / "README.ja.md").write_text("changed\n", encoding="utf-8")
-            (root / "LICENSE.ja.md").unlink()
+            (root / "README.md").unlink()
             (root / "README.fr.md").write_text("French\n", encoding="utf-8")
 
             errors = release_locale_content_gate.validate_release_directory(root, "ja")
 
-            self.assertTrue(any("does not follow its docs primary: README.ja.md" in error for error in errors))
-            self.assertTrue(any("is missing: LICENSE.ja.md" in error for error in errors))
+            self.assertTrue(any("is missing: README.md" in error for error in errors))
             self.assertTrue(any("unexpected top-level locale document: README.fr.md" in error for error in errors))
 
 
@@ -2892,6 +2974,8 @@ class BuildPublicSiteTests(unittest.TestCase):
                     "version_source": "REPO_VERSION.txt",
                     "documentation_portal": {
                         "files": [
+                            {"source": "site/github/index.html", "destination": "index.html"},
+                        ] + [
                             {"source": name, "destination": name}
                             for name in (
                                 "PORTAL_NOTE.md", "README.md", "LICENSE.md",
@@ -2929,8 +3013,8 @@ class BuildPublicSiteTests(unittest.TestCase):
             self.assertTrue((site / "docs" / "public" / "How_to_Use.md").exists())
             self.assertFalse((site / "docs" / "public" / "How_to_Build.md").exists())
             self.assertEqual((site / "docs" / "public" / "How_to_Use.md").read_text(encoding="utf-8"), "# Use 1.2.3")
-            self.assertNotIn("How_to_Build.md](", (site / "README.md").read_text(encoding="utf-8"))
-            self.assertNotIn("How_to_Build.md](", (site / "docs" / "public" / "Index.md").read_text(encoding="utf-8"))
+            self.assertIn("How_to_Build.md](", (site / "README.md").read_text(encoding="utf-8"))
+            self.assertIn("How_to_Build.md](", (site / "docs" / "public" / "Index.md").read_text(encoding="utf-8"))
 
 
 class SyncPublicationInputsTests(unittest.TestCase):

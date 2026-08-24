@@ -9,16 +9,16 @@
 SCENARIO: 大学の講義PDF閲覧、手書き/テキスト注釈記入、並行ノート作成
 ADVANTAGE: 原本PDF未変更のまま保存、注釈とノートを個別再利用可能
 EVIDENCE:
-  - docs/public/How_to_Use.md
+  - docs/ja/Using_the_App.md
 
 [USE_CASE: PAPER_READING_AND_RESEARCH]
 SCENARIO: PDF論文の精読、ハイライト、注釈、思考ログのテキストノート記録
 ADVANTAGE: 読解文脈（資料・注釈・思考ログ）をワークスペース単位で保持し再開可能
-EVIDENCE: docs/public/How_to_Use.md
+EVIDENCE: docs/ja/Using_the_App.md
 
 [USE_CASE: DOCUMENT_REVIEW]
 SCENARIO: PDF資料への修正指示・メモ書き込み、テキストノートでの改修案整理
-EVIDENCE: docs/public/How_to_Use.md
+EVIDENCE: docs/ja/Using_the_App.md
 ```
 
 ---
@@ -39,6 +39,6 @@ EVIDENCE: docs/public/How_to_Use.md
   <layer id="workspace_layer" status="implemented">
     <fact>PDF・注釈・ノートを作業単位で束ね再開可能にする層。</fact>
   </layer>
-  <evidence_path>docs/public/How_to_Use.md</evidence_path>
+  <evidence_path>docs/ja/Using_the_App.md</evidence_path>
 </layer_model_index>
 ```

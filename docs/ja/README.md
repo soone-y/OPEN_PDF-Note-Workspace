@@ -1,22 +1,51 @@
-# PDF Note Workspace（日本語版）
+# PDF Note Workspace 文書案内
 
-このフォルダは日本語版配布物の文書正本です。
+同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)
 
-- 起動: `pdf_note_workspace.exe`
-- 簡易閲覧: `readonly_viewer.exe`
-- 文書とライセンス: この `docs/` と配布物の `licenses/`
+このフォルダは、利用者と開発者が目的別に読める文書の入口です。初めての方は、上から順に必要な文書だけ読めば使い始められます。
 
-[はじめに](Getting_Started.md) には、起動、ワークスペース、通常版・Lite版、作業データの保護をまとめています。
+初めて使う場合は、まず [Getting_Started.md](Getting_Started.md) を読んで ZIP を展開し、その後 [Using_the_App.md](Using_the_App.md) を読んでください。
 
-- [ヘルプ早見表](Help_Reference.md)
-- [保存と復元](Save_and_Recovery.md)
-- [ファイル形式](File_Formats.md)
-- [基本操作](Using_the_App.md)
-- [問題が起きたとき](Troubleshooting.md)
+配布フォルダ内の EXE、DLL、`pdf_workspace_setup.json` は一緒に置いたまま使い、起動場所を変えたい場合はショートカットを作成してください。
 
-アプリは外部通信を行いません。PDF・ノートの保存では原本を直接上書きせず、復元可能な保存処理を使用します。
+## 通常版と Lite版の選び方
+
+配布物には、Office ファイルを PDF に変換できる通常版と、変換 runtime を含めない Lite版があります。PDF 閲覧、注釈、ノート、保存・復元はどちらも同じです。
+
+| 選ぶ版 | 向いている用途 | Office ファイルの扱い |
+| --- | --- | --- |
+| 通常版 | `.docx` / `.pptx` をアプリ内で PDF にして使いたい | 同梱 LibreOffice でローカル変換する。変換は試験的なため、結果を確認する |
+| Lite版 | PDF を既に用意している、または配布サイズを小さくしたい | Office-to-PDF 変換は行わない。PDF を用意してから取り込む |
+
+Lite版はウィンドウ名に `Lite` と表示されます。Lite版へ DOCX/PPTX をドロップしても変換・取込みはせず、Lite版では使えないことを表示します。Microsoft Office やオンライン変換サービスは、どちらの版でも使用しません。
+
+## ファイル名が英語である理由
+
+`Using_the_App.md` のような英語のファイル名は、Windows のフォルダ、ZIP 配布、開発用ツールでも同じ名前で確実に扱えるようにするための識別名です。読むために英語を理解する必要はありません。文書の見出しと本文は日本語です。
+
+## 利用者向け詳細一覧
+
+この一覧が第2段階の案内です。目的に合う文書を選んでください。
+
+| 文書 | 読む場面 |
+| --- | --- |
+| [Getting_Started.md](Getting_Started.md) | ZIP の展開、ショートカット、関連付け、更新、削除を行いたい |
+| [Using_the_App.md](Using_the_App.md) | 起動、ワークスペース、ノート作成、基本保存を知りたい |
+| [Help_Reference.md](Help_Reference.md) | アプリ内ヘルプの全項目、メニュー、設定、出力を詳しく調べたい |
+| [File_Formats.md](File_Formats.md) | `.clro`、`.md`、`.txt`、`.clrop` の違いを知りたい |
+| [Save_and_Recovery.md](Save_and_Recovery.md) | 保存、stage、バックアップ、復元を理解したい |
+| [Troubleshooting.md](Troubleshooting.md) | 困ったときの一次対応と、解決のための知識を得たい |
+
+アプリ内では「ヘルプ」から同じ主題をカテゴリ別に確認できます。ヘルプは外部サイトへ接続しません。
+
+## 開発者向け
+
+| 文書 | 読む場面 |
+| --- | --- |
+| [How_to_Build.md](How_to_Build.md) | ソースからビルド、テスト、release 作成を行いたい |
+
 
 ## ライセンス
 
-- [ライセンス](legal/LICENSE.md) には英語原文と日本語参考訳を収録しています。英語原文が法的な正本です。
-- 第三者コンポーネントは [第三者通知](legal/THIRD_PARTY_NOTICES.md) と `licenses/` を参照してください。
+- リポジトリでは、ルートの `LICENSE.md`、`LICENSES_INDEX.md`、`THIRD_PARTY_NOTICES.md` を参照してください。
+- 配布物では、同じファイルを `docs/` フォルダに同梱しています。

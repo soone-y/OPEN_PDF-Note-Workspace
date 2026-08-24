@@ -12,6 +12,8 @@ from pathlib import Path
 from urllib.parse import unquote
 
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+ALLOWLIST_PATH = Path(__file__).resolve().parents[1] / "documentation_portal_allowlist.json"
 TEXT_EXTENSIONS = {".html", ".json", ".md", ".txt", ".xml"}
 FORBIDDEN_PUBLIC_REFERENCES = (
     "DEV" + "_PDF-Note-Workspace",
@@ -170,29 +172,159 @@ def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
             errors.append(f"index.html must visibly link to common entry document: {target}")
 
 
-def validate_site(site: Path) -> list[str]:
+def resolve_child(root: Path, relative: object, *, label: str) -> Path:
+    if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
+        raise ValueError(f"{label} must be a non-empty relative path")
+    candidate = (root / relative).resolve()
+    if candidate != root.resolve() and root.resolve() not in candidate.parents:
+        raise ValueError(f"{label} escapes its root: {relative}")
+    return candidate
+
+
+def allowlisted_portal_paths(source_root: Path, allowlist_path: Path) -> tuple[set[Path], set[Path]]:
+    """Return portal output paths and the Markdown source documents they derive from."""
+    try:
+        payload = json.loads(allowlist_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid documentation portal allowlist: {error}") from error
+    if payload.get("schema_version") != 1:
+        raise ValueError("unsupported documentation portal allowlist schema_version")
+    rules = payload.get("documentation_portal")
+    if not isinstance(rules, dict):
+        raise ValueError("documentation_portal allowlist profile must be an object")
+
+    expected: set[Path] = set()
+    markdown_sources: set[Path] = set()
+
+    def add_expected(source: Path, destination: Path) -> None:
+        if destination in expected:
+            raise ValueError(f"documentation portal allowlist has duplicate destination: {destination.as_posix()}")
+        expected.add(destination)
+        if source.suffix.lower() == ".md":
+            markdown_sources.add(source.relative_to(source_root))
+
+    for kind in ("files", "trees"):
+        entries = rules.get(kind, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"documentation portal allowlist {kind} must be an array")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"documentation portal allowlist {kind} entries must be objects")
+            source = resolve_child(source_root, entry.get("source"), label=f"allowlist {kind} source")
+            destination_value = entry.get("destination")
+            if not isinstance(destination_value, str) or not destination_value:
+                raise ValueError("allowlist destination must be a non-empty relative path")
+            destination = Path(destination_value)
+            if destination.is_absolute() or ".." in destination.parts:
+                raise ValueError(f"allowlist destination escapes the site: {destination_value}")
+            if kind == "files":
+                if not source.is_file():
+                    raise ValueError(f"allowlist file source is missing: {entry['source']}")
+                add_expected(source, destination)
+                continue
+            if not source.is_dir():
+                raise ValueError(f"allowlist tree source is missing: {entry['source']}")
+            excluded = tuple(entry.get("exclude_prefixes", []))
+            if not all(isinstance(prefix, str) and prefix for prefix in excluded):
+                raise ValueError("allowlist tree exclude_prefixes must contain non-empty strings")
+            for source_file in source.rglob("*"):
+                if source_file.is_file():
+                    relative_source = source_file.relative_to(source)
+                    if not any(relative_source.as_posix().startswith(prefix) for prefix in excluded):
+                        add_expected(source_file, destination / relative_source)
+
+    return expected, markdown_sources
+
+
+def expected_allowlisted_paths(source_root: Path, allowlist_path: Path) -> set[Path]:
+    """Return the copied portal files and every HTML page derived from Markdown."""
+    expected, _ = allowlisted_portal_paths(source_root, allowlist_path)
+
+    # The renderer must create one browser page for every allowlisted Markdown
+    # source. This catches a newly allowlisted document omitted from rendering.
+    return expected | {path.with_suffix(".html") for path in expected if path.suffix.lower() == ".md"}
+
+
+def validate_allowlist_coverage(site: Path, source_root: Path, allowlist_path: Path, errors: list[str]) -> None:
+    try:
+        expected = expected_allowlisted_paths(source_root.resolve(), allowlist_path.resolve())
+    except ValueError as error:
+        errors.append(f"documentation portal allowlist is invalid: {error}")
+        return
+    actual = {path.relative_to(site) for path in site.rglob("*") if path.is_file()}
+    for path in sorted(expected - actual, key=lambda item: item.as_posix()):
+        errors.append(f"allowlisted portal file is missing from generated site: {path.as_posix()}")
+    for path in sorted(actual - expected, key=lambda item: item.as_posix()):
+        errors.append(f"generated site contains file outside documentation portal allowlist: {path.as_posix()}")
+
+
+def validate_documentation_map(source_root: Path, allowlist_path: Path, errors: list[str]) -> None:
+    """Require DOCUMENTATION.md to link every allowlisted Markdown document exactly as a public index."""
+    try:
+        _, expected_documents = allowlisted_portal_paths(source_root.resolve(), allowlist_path.resolve())
+    except ValueError as error:
+        errors.append(f"documentation portal allowlist is invalid: {error}")
+        return
+    map_path = source_root / "DOCUMENTATION.md"
+    if not map_path.is_file():
+        errors.append("DOCUMENTATION.md is missing")
+        return
+    try:
+        text = map_path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as error:
+        errors.append(f"DOCUMENTATION.md is not valid UTF-8: {error}")
+        return
+    linked_documents: set[Path] = set()
+    for match in MARKDOWN_LINK.finditer(text):
+        target = local_target(match.group(1))
+        if not target or not target.lower().endswith(".md"):
+            continue
+        try:
+            target_path = resolve_child(source_root, target, label="DOCUMENTATION.md link")
+        except ValueError as error:
+            errors.append(f"DOCUMENTATION.md has invalid document link: {error}")
+            continue
+        if target_path.is_file():
+            linked_documents.add(target_path.relative_to(source_root))
+    for path in sorted(expected_documents - linked_documents, key=lambda item: item.as_posix()):
+        errors.append(f"DOCUMENTATION.md does not list allowlisted Markdown document: {path.as_posix()}")
+    for path in sorted(linked_documents - expected_documents, key=lambda item: item.as_posix()):
+        errors.append(f"DOCUMENTATION.md lists Markdown document outside documentation portal allowlist: {path.as_posix()}")
+
+
+def validate_site(
+    site: Path, *, source_root: Path | None = None, allowlist_path: Path | None = None
+) -> list[str]:
     errors: list[str] = []
     if not site.is_dir():
         return [f"site directory does not exist: {site}"]
     for relative_path in DOCUMENTATION_PORTAL_REQUIRED_FILES:
         if not (site / relative_path).is_file():
             errors.append(f"required public file is missing: {relative_path}")
-    if (site / "docs" / "public" / "How_to_Build.md").exists():
-        errors.append("developer-only docs/public/How_to_Build.md must not be public")
+    if (site / "docs" / "public").exists():
+        errors.append("retired docs/public directory must not be published")
     validate_text_encoding(site, errors)
     validate_structured_files(site, errors)
     validate_local_links(site, errors)
     validate_portal_entrypoint(site, errors)
     validate_rendered_human_docs(site, errors)
     validate_rendered_fragments(site, errors)
+    if source_root is not None or allowlist_path is not None:
+        if source_root is None or allowlist_path is None:
+            errors.append("allowlist validation requires both source_root and allowlist_path")
+        else:
+            validate_allowlist_coverage(site, source_root, allowlist_path, errors)
+            validate_documentation_map(source_root, allowlist_path, errors)
     return errors
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--site", type=Path, required=True)
+    parser.add_argument("--source-root", type=Path, default=REPO_ROOT)
+    parser.add_argument("--allowlist", type=Path, default=ALLOWLIST_PATH)
     args = parser.parse_args(argv)
-    errors = validate_site(args.site)
+    errors = validate_site(args.site, source_root=args.source_root, allowlist_path=args.allowlist)
     if errors:
         print("Public-site validation failed:", file=sys.stderr)
         for error in errors:

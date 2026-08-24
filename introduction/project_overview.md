@@ -35,15 +35,15 @@ GitHub Pagesは公開文書ポータルであり、ここで読める `introduct
 
 ## 5. 次に読む資料
 
-1. 操作・導入は [使い方・セットアップ](../docs/public/Index.md) を読む。
-2. 保存や復元は [保存と復元](../docs/public/How_to_Save_and_Recovery.md) を読む。
+1. 操作・導入は [使い方・セットアップ](../docs/ja/README.md) を読む。
+2. 保存や復元は [保存と復元](../docs/ja/Save_and_Recovery.md) を読む。
 3. 配布物と基本方針は [プロジェクト概要](../README.md) を読む。
 4. ライセンスは [ライセンスと第三者通知](../LICENSES_INDEX.md) を読む。
 
 EVIDENCE:
 
 - `README.md`
-- `docs/public/How_to_Use.md`
-- `docs/public/How_to_Save_and_Recovery.md`
-- `docs/public/How_to_Setup.md`
-- `docs/public/How_to_Troubleshoot.md`
+- `docs/ja/Using_the_App.md`
+- `docs/ja/Save_and_Recovery.md`
+- `docs/ja/Getting_Started.md`
+- `docs/ja/Troubleshooting.md`

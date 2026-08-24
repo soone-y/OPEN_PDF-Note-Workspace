@@ -24,18 +24,7 @@ REQUIRED_SAMPLE_FILES = (
     "sample_workspace/Getting_Started.md",
     "sample_workspace/workspace.json",
 )
-TOP_LEVEL_DOCUMENTS = {
-    "ja": (
-        ("README.ja.md", "docs/README.md", True),
-        ("LICENSE.ja.md", "docs/legal/LICENSE.md", False),
-        ("THIRD_PARTY_NOTICES.ja.md", "docs/legal/THIRD_PARTY_NOTICES.md", False),
-    ),
-    "en": (
-        ("README.en.md", "docs/README.md", True),
-        ("LICENSE.en.md", "docs/legal/LICENSE.md", False),
-        ("THIRD_PARTY_NOTICES.en.md", "docs/legal/THIRD_PARTY_NOTICES.md", False),
-    ),
-}
+TOP_LEVEL_DOCUMENTS = ("README.md", "LICENSE.md", "SECURITY.md")
 REQUIRED_LECTURE_SAMPLE_FILES = {
     "ja": (
         "01_講義サンプル/COURSE_GUIDE.html",
@@ -98,36 +87,19 @@ def validate_markdown_links(root: Path, release_dir: Path) -> list[str]:
 
 
 def validate_top_level_documents(release_dir: Path, locale: str) -> list[str]:
-    """Require exactly the selected locale's generated top-level document copies."""
+    """Require bilingual common entry documents and reject locale copies."""
     errors: list[str] = []
-    selected = TOP_LEVEL_DOCUMENTS[locale]
-    selected_names = {name for name, _, _ in selected}
-    for name, source_relative, rewrite_legal_links in selected:
-        destination = release_dir / name
-        source = release_dir / source_relative
-        if not destination.is_file():
-            errors.append(f"required top-level locale document is missing: {name}")
+    for name in TOP_LEVEL_DOCUMENTS:
+        path = release_dir / name
+        if not path.is_file():
+            errors.append(f"required top-level common document is missing: {name}")
             continue
-        if destination.stat().st_size == 0:
-            errors.append(f"required top-level locale document is empty: {name}")
-            continue
-        if not source.is_file():
-            continue
-        try:
-            expected = source.read_text(encoding="utf-8-sig")
-            actual = destination.read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeDecodeError) as error:
-            errors.append(f"top-level locale document is unreadable: {name} ({error})")
-            continue
-        if rewrite_legal_links:
-            expected = expected.replace("](" + "legal/", "](" + "docs/legal/")
-        if actual != expected:
-            errors.append(f"top-level locale document does not follow its docs primary: {name}")
+        if path.stat().st_size == 0:
+            errors.append(f"required top-level common document is empty: {name}")
 
     for prefix in ("README", "LICENSE", "THIRD_PARTY_NOTICES"):
         for candidate in release_dir.glob(f"{prefix}.*.md"):
-            if candidate.name not in selected_names:
-                errors.append(f"release contains an unexpected top-level locale document: {candidate.name}")
+            errors.append(f"release contains an unexpected top-level locale document: {candidate.name}")
     return errors
 
 
@@ -192,9 +164,7 @@ def validate_release_directory(release_dir: Path, locale: str, edition: str = "f
             errors.append(f"release contains an unselected locale or internal directory: {forbidden}")
     errors.extend(validate_top_level_documents(release_dir, locale))
 
-    for root in (release_dir / "docs", release_dir / "sample_workspace"):
-        if root.is_dir():
-            errors.extend(validate_markdown_links(root, release_dir))
+    errors.extend(validate_markdown_links(release_dir, release_dir))
 
     if locale == "en":
         for root in (release_dir / "docs", release_dir / "sample_workspace"):

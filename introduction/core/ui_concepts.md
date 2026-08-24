@@ -7,19 +7,19 @@
 ```yaml
 [UI_ELEMENT: WORKSPACE]
 CONCEPT: PDF、注釈データ、ノート、設定を保持する作業用フォルダ構造
-EVIDENCE: docs/public/How_to_Use.md
+EVIDENCE: docs/ja/Using_the_App.md
 
 [UI_ELEMENT: STAGE_AREA]
 CONCEPT: PDF本体の表示、注釈描画、閲覧を行うメイン画面領域
-EVIDENCE: docs/public/How_to_Use.md
+EVIDENCE: docs/ja/Using_the_App.md
 
 [UI_ELEMENT: SIDE_PANEL]
 CONCEPT: テキスト/Markdownノートの作成・編集を行う画面隣接領域
-EVIDENCE: docs/public/How_to_Use.md
+EVIDENCE: docs/ja/Using_the_App.md
 
 [UI_ELEMENT: ANNOTATION_TOOLBAR]
 CONCEPT: ペン、ハイライト、テキスト入力、図形描画のモード切り替え部
-EVIDENCE: docs/public/How_to_Use.md
+EVIDENCE: docs/ja/Using_the_App.md
 ```
 
 ### 画面レイアウト階層構造 (UI Layout Structure)
@@ -55,6 +55,6 @@ graph LR
   <action type="file_management">メニューバー / サイドパネル操作部</action>
   <action type="annotation_tool_selection">ステージ上部 / 専用ツールバー</action>
   <action type="save_and_recovery">アプリヘッダー / ファイルメニュー</action>
-  <evidence_path>docs/public/How_to_Use.md</evidence_path>
+  <evidence_path>docs/ja/Using_the_App.md</evidence_path>
 </operation_mapping>
 ```

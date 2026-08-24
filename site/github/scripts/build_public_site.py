@@ -118,27 +118,6 @@ def replace_version_tokens(site_dir: Path, version: str) -> None:
         markdown_file.write_text(text.replace(VERSION_TOKEN, version), encoding="utf-8")
 
 
-def replace_developer_only_references(site_dir: Path) -> None:
-    """Remove developer-only build-guide links from the public documentation portal."""
-    readme_path = site_dir / "README.md"
-    if readme_path.is_file():
-        text = readme_path.read_text(encoding="utf-8-sig")
-        text = text.replace(
-            "[docs/public/How_to_Build.md](docs/public/How_to_Build.md)",
-            "開発用のビルド手順は公開していません",
-        )
-        readme_path.write_text(text, encoding="utf-8")
-
-    index_path = site_dir / "docs" / "public" / "Index.md"
-    if index_path.is_file():
-        text = index_path.read_text(encoding="utf-8-sig")
-        developer_section = "## 開発者向け\n\n| 文書 | 読む場面 |\n| --- | --- |\n| [How_to_Build.md](How_to_Build.md) | ソースからビルド、テスト、release 作成を行いたい |\n\n"
-        if developer_section not in text:
-            raise ValueError("Public document index has an unexpected developer section")
-        text = text.replace(developer_section, "", 1)
-        index_path.write_text(text, encoding="utf-8")
-
-
 def build_site(*, replace: bool = False, documentation_portal: bool = False) -> int:
     if OUTPUT_DIR.exists():
         if not replace:
@@ -158,14 +137,12 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
 
         allowlist = load_allowlist()
         copy_allowlisted_content(staging_dir, allowlist)
-        copy_file(GITHUB_SITE_ROOT / "index.html", staging_dir / "index.html")
 
         version_source = resolve_repo_relative_path(allowlist.get("version_source", ""), label="allowlist version source")
         version = version_source.read_text(encoding="utf-8").strip()
         if not version:
             raise ValueError("REPO_VERSION.txt must contain a version")
         replace_version_tokens(staging_dir, version)
-        replace_developer_only_references(staging_dir)
 
         # Keep human-readable HTML local and leave raw Markdown unchanged for AI clients.
         tool_directory = Path(__file__).resolve().parent

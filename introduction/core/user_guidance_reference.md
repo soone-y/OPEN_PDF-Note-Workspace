@@ -2,7 +2,7 @@
 
 ## 1. 導入と更新
 
-利用者向けの正本は `docs/public/How_to_Setup.md` である。導入を案内するときは、次の順序を基本とする。
+利用者向けの正本は `docs/ja/Getting_Started.md` である。導入を案内するときは、次の順序を基本とする。
 
 1. GitHub Releases の Assets から、通常版または Lite版の ZIP を一つ選ぶ。ソースコード ZIP はアプリ配布物ではない。
 2. ZIP を書き込み可能なローカルフォルダへ展開する。ZIP 内を直接実行しない。
@@ -14,8 +14,8 @@
 
 EVIDENCE:
 
-- `docs/public/How_to_Setup.md`
-- `docs/public/Index.md`
+- `docs/ja/Getting_Started.md`
+- `docs/ja/README.md`
 - `README.md`
 
 ## 2. 利用者が変更できる範囲
@@ -34,8 +34,8 @@ EVIDENCE:
 
 EVIDENCE:
 
-- `docs/public/How_to_Setup.md`
-- `docs/public/How_to_Troubleshoot.md`
+- `docs/ja/Getting_Started.md`
+- `docs/ja/Troubleshooting.md`
 
 ## 3. 保存・復元の段階
 
@@ -61,9 +61,9 @@ note recovery: __resource__/__escape__/note_recovery/
 
 EVIDENCE:
 
-- `docs/public/How_to_Save_and_Recovery.md`
-- `docs/public/How_to_Use.md`
-- `docs/public/How_to_Troubleshoot.md`
+- `docs/ja/Save_and_Recovery.md`
+- `docs/ja/Using_the_App.md`
+- `docs/ja/Troubleshooting.md`
 
 ## 4. 支援依頼と開発者への連絡
 
@@ -80,6 +80,6 @@ GitHubリポジトリの Issues や Discussions を案内する場合は、案�
 
 EVIDENCE:
 
-- `docs/public/How_to_Troubleshoot.md`
+- `docs/ja/Troubleshooting.md`
 - `.github/SECURITY.md`
 - `https://github.com/soone-y/OPEN_PDF-Note-Workspace`

@@ -832,12 +832,14 @@ static bool IsRichEditControl(HWND hWnd) {
     return _wcsnicmp(cls, L"RICHEDIT", 8) == 0;
 }
 
-static const wchar_t* NoteMenuLabelCut() { return localization::Text(L"note.menu.cut").data(); }
-static const wchar_t* NoteMenuLabelCopy() { return localization::Text(L"note.menu.copy").data(); }
-static const wchar_t* NoteMenuLabelCopyWithTags() { return localization::Text(L"note.menu.copy_with_tags").data(); }
-static const wchar_t* NoteMenuLabelPaste() { return localization::Text(L"note.menu.paste").data(); }
-static const wchar_t* NoteMenuLabelSelectAll() { return localization::Text(L"note.menu.select_all").data(); }
-static const wchar_t* NoteMenuLabelSelectNone() { return localization::Text(L"note.menu.select_none").data(); }
+// Keep the localized string alive through the AppendMenuW call below. Returning
+// a pointer into Text()'s temporary result would leave a dangling pointer.
+static std::wstring NoteMenuLabelCut() { return localization::Text(L"note.menu.cut"); }
+static std::wstring NoteMenuLabelCopy() { return localization::Text(L"note.menu.copy"); }
+static std::wstring NoteMenuLabelCopyWithTags() { return localization::Text(L"note.menu.copy_with_tags"); }
+static std::wstring NoteMenuLabelPaste() { return localization::Text(L"note.menu.paste"); }
+static std::wstring NoteMenuLabelSelectAll() { return localization::Text(L"note.menu.select_all"); }
+static std::wstring NoteMenuLabelSelectNone() { return localization::Text(L"note.menu.select_none"); }
 
 static void ShowNoteCopySuccessNotice(HWND owner) {
     ShowSoftNotice(owner ? owner : g_hMainWnd,
@@ -889,15 +891,15 @@ static void ShowNoteContextMenu(HWND hWnd, POINT screenPt) {
     if (!menu) return;
     const bool normalVisual = (g_noteVimModeEnabled && g_noteNormalMode && IsNoteNormalVisualActive());
     if (normalVisual) {
-        AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_CTX_COPY, NoteMenuLabelCopy());
-        AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_CTX_COPY_WITH_TAGS, NoteMenuLabelCopyWithTags());
+        AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_CTX_COPY, NoteMenuLabelCopy().c_str());
+        AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_CTX_COPY_WITH_TAGS, NoteMenuLabelCopyWithTags().c_str());
     } else {
-    AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_CTX_CUT, NoteMenuLabelCut());
-    AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_CTX_COPY, NoteMenuLabelCopy());
-    AppendMenuW(menu, MF_STRING | (canPaste ? 0 : MF_GRAYED), ID_CTX_PASTE, NoteMenuLabelPaste());
+    AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_CTX_CUT, NoteMenuLabelCut().c_str());
+    AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_CTX_COPY, NoteMenuLabelCopy().c_str());
+    AppendMenuW(menu, MF_STRING | (canPaste ? 0 : MF_GRAYED), ID_CTX_PASTE, NoteMenuLabelPaste().c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (hasText ? 0 : MF_GRAYED), ID_CTX_SELECT_ALL, NoteMenuLabelSelectAll());
-    AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_CTX_SELECT_NONE, NoteMenuLabelSelectNone());
+    AppendMenuW(menu, MF_STRING | (hasText ? 0 : MF_GRAYED), ID_CTX_SELECT_ALL, NoteMenuLabelSelectAll().c_str());
+    AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_CTX_SELECT_NONE, NoteMenuLabelSelectNone().c_str());
     }
 
     UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPt.x, screenPt.y, 0, hWnd, nullptr);

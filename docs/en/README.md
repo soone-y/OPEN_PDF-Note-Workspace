@@ -13,6 +13,7 @@ This directory is the canonical documentation for the English release.
 - [File Formats](File_Formats.md)
 - [Using the Application](Using_the_App.md)
 - [Troubleshooting](Troubleshooting.md)
+- [Build and Verification](How_to_Build.md)
 
 The application has no external communication features. Saving uses recoverable operations and never overwrites an original PDF directly.
 

@@ -428,26 +428,23 @@ try {
         exit 1
     }
 
-    $localeTool = Join-Path $repoRoot "tools\localization\generate_locale_catalog.py"
-    $localeUsageTool = Join-Path $repoRoot "tools\localization\validate_locale_usage.py"
+    $localePreparationTool = Join-Path $repoRoot "tools\localization\prepare_locale_catalog.py"
     $jaCatalog = Join-Path $repoRoot "locales\ja.json"
     $selectedCatalog = Join-Path $repoRoot ("locales\{0}.json" -f $Locale)
     $generatedLocaleDir = Join-Path $outRoot ("generated_locale\{0}" -f $Locale)
     $generatedLocaleHeader = Join-Path $generatedLocaleDir "locale_catalog.generated.h"
     $localeReportPath = Join-Path $generatedLocaleDir "fallback_report.json"
-    foreach ($localeInput in @($localeTool, $localeUsageTool, $jaCatalog, $selectedCatalog)) {
+    $localeUsageStamp = Join-Path $outRoot "generated_locale\usage_validation.stamp.json"
+    $localeCatalogStamp = Join-Path $generatedLocaleDir "catalog.stamp.json"
+    foreach ($localeInput in @($localePreparationTool, $jaCatalog, $selectedCatalog, (Join-Path $repoRoot "locales\en.json"))) {
         if (-not (Test-Path -LiteralPath $localeInput -PathType Leaf)) {
             throw "Missing localization build input: $localeInput"
         }
     }
-    & python $localeUsageTool --source (Join-Path $repoRoot "src") --ja $jaCatalog --en (Join-Path $repoRoot "locales\en.json")
-    if ($LASTEXITCODE -ne 0) {
-        throw "Locale usage validation failed."
-    }
     New-Item -ItemType Directory -Force -Path $generatedLocaleDir | Out-Null
-    & python $localeTool --locale $Locale --ja $jaCatalog --localized $selectedCatalog --output $generatedLocaleHeader --report $localeReportPath
+    & python $localePreparationTool --source (Join-Path $repoRoot "src") --ja $jaCatalog --en (Join-Path $repoRoot "locales\en.json") --locale $Locale --localized $selectedCatalog --output $generatedLocaleHeader --report $localeReportPath --usage-stamp $localeUsageStamp --catalog-stamp $localeCatalogStamp
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $generatedLocaleHeader -PathType Leaf)) {
-        throw "Localization catalog generation failed for locale '$Locale'."
+        throw "Localization catalog preparation failed for locale '$Locale'."
     }
 
     $resourceInputs = @($resourceSource, $resourceHeader, $readOnlyViewerIconSource)

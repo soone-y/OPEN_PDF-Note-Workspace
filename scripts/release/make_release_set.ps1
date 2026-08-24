@@ -1,7 +1,8 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$OutBaseDir = "..\\PDF-Note-ReleaseSet",
     [string]$NamePrefix = "pdf_note_workspace_release_set",
+    [string]$ReleaseSetName = "",
     [switch]$Zip = $true,
     [switch]$Checksums = $true,
     [switch]$IncludeWorkspace,
@@ -13,6 +14,7 @@ param(
     [string]$ReleaseNotesPath = "",
     [string]$PublicAllowlist = "",
     [string]$PublicGitignoreTemplate = "",
+    [string]$PublicSnapshotSource = "",
     [switch]$SnapshotOnly,
     [switch]$DryRun,
     [switch]$Lite,
@@ -61,6 +63,27 @@ function Copy-FileStrict([string]$Source, [string]$Destination) {
         return
     }
     Copy-Item -Force -LiteralPath $Source -Destination $Destination
+}
+
+function Copy-DirectoryStrict([string]$Source, [string]$Destination) {
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        throw "Public snapshot source directory is missing: $Source"
+    }
+    $sourceFull = (Resolve-Path -LiteralPath $Source -ErrorAction Stop).Path.TrimEnd('\')
+    $destinationFull = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\')
+    if ($sourceFull.Equals($destinationFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Public snapshot source and destination must differ: $sourceFull"
+    }
+    if (Test-Path -LiteralPath $Destination) {
+        throw "Public snapshot destination already exists: $Destination"
+    }
+    if ($DryRun) {
+        Write-Info "[dry-run] copy public snapshot: $sourceFull -> $destinationFull"
+        return
+    }
+    $destinationParent = Split-Path -Parent $destinationFull
+    Ensure-Directory $destinationParent
+    Copy-Item -LiteralPath $sourceFull -Destination $destinationFull -Recurse -Force -ErrorAction Stop
 }
 
 function Write-JsonFile([string]$Destination, [object]$Value) {
@@ -125,6 +148,13 @@ function New-ReleaseSetFolderName([string]$Prefix, [string]$Locale) {
     return "${Prefix}_${version}_${Locale}_${stamp}"
 }
 
+function Get-DistributionZipName([string]$Version, [ValidateSet("ja", "en")][string]$Locale, [ValidateSet("full", "lite")][string]$Edition) {
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        throw "配布 ZIP 名に必要な版番号を取得できません。REPO_VERSION.txt を確認してください。"
+    }
+    return "pdf_note_workspace_${Version}_${Locale}_${Edition}.zip"
+}
+
 function Move-ItemStrict([string]$Source, [string]$Destination) {
     if (-not (Test-Path -LiteralPath $Source)) {
         throw "Missing path to move: $Source"
@@ -177,7 +207,15 @@ function Assert-ReleaseSetManifestComponents([string]$SetRoot, [object]$Componen
 
 Push-Location -LiteralPath $repoRoot
 try {
-    $folderName = New-ReleaseSetFolderName -Prefix $NamePrefix -Locale $Locale
+    $folderName = if ([string]::IsNullOrWhiteSpace($ReleaseSetName)) {
+        New-ReleaseSetFolderName -Prefix $NamePrefix -Locale $Locale
+    }
+    else {
+        Convert-ToSafeLabel -Value $ReleaseSetName
+    }
+    if ([string]::IsNullOrWhiteSpace($folderName)) {
+        throw "Release set directory name is empty or invalid."
+    }
     $outBasePath = Resolve-OutputBasePath -Path $OutBaseDir
     $setRoot = [System.IO.Path]::GetFullPath((Join-Path $outBasePath $folderName))
     Assert-OutsideRepoRoot -Path $setRoot
@@ -276,25 +314,29 @@ try {
 
             if ($Zip) {
                 $stagedZips = @(Get-ChildItem -LiteralPath $stagingBaseDir -File -Force | Where-Object { $_.Extension -ieq ".zip" })
+                $stagedZipNames = @()
+                $destinationZipNames = @()
                 if ($Lite) {
-                    $expectedZipNames = @(($releaseLiteComponentName + ".zip"))
+                    $stagedZipNames = @(($releaseLiteComponentName + ".zip"))
                     $releaseZipComponentName = $null
-                    $releaseLiteZipComponentName = $expectedZipNames[0]
+                    $releaseLiteZipComponentName = Get-DistributionZipName -Version (Get-RepoVersionLabel) -Locale $Locale -Edition "lite"
+                    $destinationZipNames = @($releaseLiteZipComponentName)
                 } else {
-                    $expectedZipNames = @(
+                    $stagedZipNames = @(
                         ($releaseComponentName + ".zip"),
                         ($releaseLiteComponentName + ".zip")
                     )
-                    $releaseZipComponentName = $expectedZipNames[0]
-                    $releaseLiteZipComponentName = $expectedZipNames[1]
+                    $releaseZipComponentName = Get-DistributionZipName -Version (Get-RepoVersionLabel) -Locale $Locale -Edition "full"
+                    $releaseLiteZipComponentName = Get-DistributionZipName -Version (Get-RepoVersionLabel) -Locale $Locale -Edition "lite"
+                    $destinationZipNames = @($releaseZipComponentName, $releaseLiteZipComponentName)
                 }
-                $unexpectedZips = @($stagedZips | Where-Object { $_.Name -notin $expectedZipNames })
-                if ($stagedZips.Count -ne $expectedZipNames.Count -or $unexpectedZips.Count -ne 0) {
+                $unexpectedZips = @($stagedZips | Where-Object { $_.Name -notin $stagedZipNames })
+                if ($stagedZips.Count -ne $stagedZipNames.Count -or $unexpectedZips.Count -ne 0) {
                     throw "Expected ZIP files for staged releases under $stagingBaseDir."
                 }
-                foreach ($zipName in $expectedZipNames) {
-                    $stagedZipPath = Join-Path $stagingBaseDir $zipName
-                    Move-ItemStrict -Source $stagedZipPath -Destination (Join-Path $setRoot $zipName)
+                for ($index = 0; $index -lt $stagedZipNames.Count; $index++) {
+                    $stagedZipPath = Join-Path $stagingBaseDir $stagedZipNames[$index]
+                    Move-ItemStrict -Source $stagedZipPath -Destination (Join-Path $setRoot $destinationZipNames[$index])
                 }
             }
             Remove-DirectoryIfEmpty -Path $stagingBaseDir
@@ -320,9 +362,15 @@ try {
     }
     $snapshotArgs += @("--artifact-manifest", $releaseArtifactManifest)
     if (-not [string]::IsNullOrWhiteSpace($PublicGitignoreTemplate)) { $snapshotArgs += @("--gitignore-template", $PublicGitignoreTemplate) }
-    if ($DryRun) { $snapshotArgs += "--dry-run" }
-    & $snapshotScript @snapshotArgs
-    if (-not $?) { throw "export_public_snapshot.ps1 failed with exit code $LASTEXITCODE" }
+    if ([string]::IsNullOrWhiteSpace($PublicSnapshotSource)) {
+        if ($DryRun) { $snapshotArgs += "--dry-run" }
+        & $snapshotScript @snapshotArgs
+        if (-not $?) { throw "export_public_snapshot.ps1 failed with exit code $LASTEXITCODE" }
+    }
+    else {
+        Write-Info "Reusing the frozen public snapshot: $PublicSnapshotSource"
+        Copy-DirectoryStrict -Source $PublicSnapshotSource -Destination $publicSnapshotDir
+    }
 
     if (-not $DryRun) {
         # Release invariant: every public file submitted by publish.ps1 must be
@@ -337,8 +385,13 @@ try {
         # The snapshot exporter excludes Python caches.  Keep that invariant while
         # generating frozen Pages output inside the snapshot: bytecode is a local
         # runtime artifact and can otherwise differ between the ja/en creations.
-        & python -B $pagesBuildScript --replace --documentation-portal
-        if ($LASTEXITCODE -ne 0) { throw "GitHub Pages snapshot build failed." }
+        # A JA/EN pair reuses the already frozen JA snapshot verbatim. Rebuilding
+        # Pages after that copy would duplicate work and could make the two sets
+        # differ; validate the copied output instead.
+        if ([string]::IsNullOrWhiteSpace($PublicSnapshotSource)) {
+            & python -B $pagesBuildScript --replace --documentation-portal
+            if ($LASTEXITCODE -ne 0) { throw "GitHub Pages snapshot build failed." }
+        }
         if (-not $DeferPostCreationValidation) {
             $pagesOutput = Join-Path $publicSnapshotDir "site\github\output\public"
             & python -B $pagesValidationScript --site $pagesOutput

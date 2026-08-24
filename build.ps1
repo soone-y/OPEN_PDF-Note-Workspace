@@ -4,6 +4,7 @@ param(
     [switch]$Clean,
     [switch]$VerboseOutput,
     [switch]$Lite,
+    [switch]$AllLocales,
     [ValidateSet("ja", "en")]
     [string]$Locale = "ja"
 )
@@ -65,6 +66,23 @@ function Test-BuildConfigurationIsNewer {
         }
     }
     return $false
+}
+
+if ($AllLocales) {
+    if ($PSBoundParameters.ContainsKey("Locale")) {
+        throw "-AllLocales と -Locale は同時に指定できません。両言語なら -AllLocales、単一言語なら -Locale ja または -Locale en を使用してください。"
+    }
+    $powerShellExe = (Get-Process -Id $PID -ErrorAction Stop).Path
+    foreach ($targetLocale in @("ja", "en")) {
+        $arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath, "-Locale", $targetLocale)
+        if ($Rebuild) { $arguments += "-Rebuild" }
+        if ($Clean) { $arguments += "-Clean" }
+        if ($VerboseOutput) { $arguments += "-VerboseOutput" }
+        if ($Lite) { $arguments += "-Lite" }
+        & $powerShellExe @arguments
+        if ($LASTEXITCODE -ne 0) { throw "両言語ビルドに失敗しました（言語: $targetLocale、終了コード: $LASTEXITCODE）。" }
+    }
+    exit 0
 }
 
 $workspaceBuildScript = Join-Path $PSScriptRoot "scripts/build/build_workspace.ps1"

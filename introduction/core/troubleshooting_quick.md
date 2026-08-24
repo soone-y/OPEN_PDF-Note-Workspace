@@ -7,7 +7,7 @@
 ```yaml
 [ISSUE: PDF_CANNOT_OPEN]
 POSSIBLE_CAUSES: ファイル破損, 暗号化/権限不足, メモリ不足
-EVIDENCE: docs/public/How_to_Troubleshoot.md
+EVIDENCE: docs/ja/Troubleshooting.md
 
 [ISSUE: OFFICE_CONVERSION_FAILED]
 POSSIBLE_CAUSES:
@@ -16,20 +16,20 @@ POSSIBLE_CAUSES:
 ANSWER_STANCE: Lite版は変換非対応を説明。通常版でも試験的機能であることを提示
 EVIDENCE:
   - README.md
-  - docs/public/How_to_Troubleshoot.md
+  - docs/ja/Troubleshooting.md
 
 [ISSUE: SAVE_FAILED]
 POSSIBLE_CAUSES: フォルダアクセス権限不足, ディスク容量不足, stageデータ非整合
 EVIDENCE:
-  - docs/public/How_to_Save_and_Recovery.md
-  - docs/public/How_to_Troubleshoot.md
+  - docs/ja/Save_and_Recovery.md
+  - docs/ja/Troubleshooting.md
 
 [ISSUE: WARNING_SOUND_EMITTED]
 FACT: アプリ側からの音再生機能なし
 UNRESOLVED_ISSUE: 特定のWindows操作経路で「一般の警告音」が発生する既知問題あり
 ANSWER_STANCE: 「完全無音」と断定せず、Windows一般警告音の未解消既知問題を回答
 EVIDENCE:
-  - docs/public/How_to_Troubleshoot.md
+  - docs/ja/Troubleshooting.md
 ```
 
 ### 診断プロトコルと回答フロー (Diagnosis Protocol)
@@ -38,7 +38,7 @@ EVIDENCE:
   <node id="pdf_cannot_open" type="issue">
     <symptom>PDFが開けない / 読み込めない</symptom>
     <causes>ファイル破損, 権限不足, 非対応暗号化</causes>
-    <primary_evidence>docs/public/How_to_Troubleshoot.md</primary_evidence>
+    <primary_evidence>docs/ja/Troubleshooting.md</primary_evidence>
   </node>
   <node id="office_conversion_failed" type="issue">
     <symptom>DOCX/PPTX から PDF へ変換できない</symptom>
@@ -48,11 +48,11 @@ EVIDENCE:
     <branch condition="is_standard_edition">
       <stance>通常版のOffice変換は試験的 (Experimental) 機能であり、レイアウト差が生じる旨を提示</stance>
     </branch>
-    <primary_evidence>README.md, docs/public/How_to_Troubleshoot.md</primary_evidence>
+    <primary_evidence>README.md, docs/ja/Troubleshooting.md</primary_evidence>
   </node>
   <node id="warning_sound_emitted" type="issue">
     <symptom>操作時にWindowsの警告音が鳴る</symptom>
     <stance>アプリ内に音再生APIは無実装だが、特定操作で一般警告音が鳴る未解消の既知問題として事実を回答する</stance>
-    <primary_evidence>docs/public/How_to_Troubleshoot.md</primary_evidence>
+    <primary_evidence>docs/ja/Troubleshooting.md</primary_evidence>
   </node>
 </troubleshooting_flow_tree>

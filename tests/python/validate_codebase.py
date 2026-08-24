@@ -1485,7 +1485,7 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         if needle not in publish_text:
             errors.append("publish.ps1: Verify mode must validate without creating or updating a checklist")
             break
-    submit_checklist_contract = 'No publish checklist exists for this release set.'
+    submit_checklist_contract = 'JA/EN pair の公開確認文書がありません。'
     if submit_checklist_contract not in publish_text:
         errors.append("publish.ps1: Submit and Resubmit must require an existing checklist")
     locale_pair_contract = (
@@ -1493,9 +1493,10 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         'function Get-RequestedReleaseSetPair',
         'function Get-LatestReleaseSetPair',
         'Specify exactly two release sets: one ja set and one en set.',
-        'if ($ReleaseSetPath.Count -eq 0 -and $Mode -in @("Confirm", "Submit")) {',
+        'if ($ReleaseSetPath.Count -eq 0 -and $Mode -in @("ReleaseNotes", "Confirm", "Submit")) {',
         'return Get-LatestReleaseSetPair',
-        'Invoke-CreateReleaseSetPair',
+        'function Invoke-CreateReleaseSetPair',
+        'exactly two created ja/en release set paths',
         'foreach ($item in $items)',
     )
     for needle in locale_pair_contract:
@@ -1503,10 +1504,14 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
             errors.append("publish.ps1: normal publish must require and process the ja/en release-set pair")
             break
     unified_release_notes_contract = (
+        'function Get-PairChecklistPath',
+        'function New-PairChecklist',
+        'function Get-PairConfirmationWord',
         'function New-ReleaseNotesText',
-        '"## Downloads / ダウンロードするファイル",',
-        '"### 日本語",',
-        '"### English",',
+        '"## English",',
+        '"## 日本語",',
+        '"### System requirements",',
+        '"### 動作環境",',
         'Get-ReleaseChecksumAssetName -Locale "ja"',
         'Get-ReleaseChecksumAssetName -Locale "en"',
         'function Invoke-UnifiedPublicSubmission',
@@ -1517,6 +1522,43 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         if needle not in publish_text:
             errors.append("publish.ps1: a unified release must provide bilingual notes, four named checksums, and one version tag")
             break
+    if publish_text.index('"## 日本語",') > publish_text.index('"## English",'):
+        errors.append("publish.ps1: unified release notes must place the Japanese block before the English block")
+    release_set_text = (REPO_ROOT / "scripts/release/make_release_set.ps1").read_text(encoding="utf-8", errors="ignore")
+    distribution_name_contract = (
+        'function Get-DistributionZipName',
+        'pdf_note_workspace_${Version}_${Locale}_${Edition}.zip',
+        '-Locale $Locale -Edition "full"',
+        '-Locale $Locale -Edition "lite"',
+    )
+    if any(needle not in release_set_text for needle in distribution_name_contract):
+        errors.append("make_release_set.ps1: distributable ZIP names must include product, version, locale, and edition")
+    release_entry_text = (REPO_ROOT / "release.ps1").read_text(encoding="utf-8", errors="ignore")
+    release_pair_layout_contract = (
+        'function Get-ReleasePairDirectory',
+        'pdf_note_workspace_release_${safeVersion}_${stamp}',
+        'if ($AllLocales) { @("ja", "en") } else { @($Locale) }',
+        '"-ReleaseSetName", $targetLocale',
+        'RELEASE_PAIR_PATH=$pairDirectory',
+    )
+    if any(needle not in release_entry_text for needle in release_pair_layout_contract):
+        errors.append("release.ps1: -AllLocales must place ja/en sets in one named parent directory")
+    release_snapshot_reuse_contract = (
+        '$frozenPublicSnapshot = ""',
+        '"-PublicSnapshotSource", $frozenPublicSnapshot',
+        '"public_snapshot"',
+    )
+    if any(needle not in release_entry_text for needle in release_snapshot_reuse_contract):
+        errors.append("release.ps1: -AllLocales must reuse the first frozen public snapshot for the paired locale")
+    snapshot_reuse_gate_contract = (
+        '[string]$PublicSnapshotSource = ""',
+        'function Copy-DirectoryStrict',
+        'Copy-DirectoryStrict -Source $PublicSnapshotSource -Destination $publicSnapshotDir',
+        'if ([string]::IsNullOrWhiteSpace($PublicSnapshotSource)) {',
+        'if (-not $DeferPostCreationValidation) {',
+    )
+    if any(needle not in release_set_text for needle in snapshot_reuse_gate_contract):
+        errors.append("make_release_set.ps1: reused snapshots must be copied safely and still pass the release gates")
     if "function Get-LatestReleaseSet {" in publish_text:
         errors.append("publish.ps1: obsolete single-locale latest-release selection must not remain")
     if "function Get-LatestChecklistReleaseSet" in publish_text:

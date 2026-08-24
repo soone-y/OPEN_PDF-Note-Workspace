@@ -26,9 +26,9 @@
         "core/ui_concepts.md",
         "core/troubleshooting_quick.md",
         "../README.md",
-        "../docs/public/Index.md",
-        "../docs/public/How_to_Use.md",
-        "../docs/public/How_to_Troubleshoot.md"
+        "../docs/ja/README.md",
+        "../docs/ja/Using_the_App.md",
+        "../docs/ja/Troubleshooting.md"
       ]
     },
     {
@@ -37,8 +37,8 @@
       "read": [
         "core/user_guidance_reference.md",
         "../README.md",
-        "../docs/public/Index.md",
-        "../docs/public/How_to_Setup.md"
+        "../docs/ja/README.md",
+        "../docs/ja/Getting_Started.md"
       ]
     },
     {
@@ -47,7 +47,7 @@
       "read": [
         "core/user_guidance_reference.md",
         "core/ui_concepts.md",
-        "../docs/public/How_to_Setup.md"
+        "../docs/ja/Getting_Started.md"
       ]
     },
     {
@@ -56,8 +56,8 @@
       "read": [
         "core/user_guidance_reference.md",
         "core/file_formats.md",
-        "../docs/public/How_to_Save_and_Recovery.md",
-        "../docs/public/How_to_Troubleshoot.md"
+        "../docs/ja/Save_and_Recovery.md",
+        "../docs/ja/Troubleshooting.md"
       ]
     },
     {
@@ -66,7 +66,7 @@
       "read": [
         "core/user_guidance_reference.md",
         "core/troubleshooting_quick.md",
-        "../docs/public/How_to_Troubleshoot.md",
+        "../docs/ja/Troubleshooting.md",
         "../.github/SECURITY.md"
       ],
       "do_not_assume_contact_channel_availability": true
@@ -89,8 +89,8 @@
         "core/use_cases.md",
         "core/ui_concepts.md",
         "../README.md",
-        "../docs/public/How_to_Use.md",
-        "../docs/public/What_is_File_Formats.md"
+        "../docs/ja/Using_the_App.md",
+        "../docs/ja/File_Formats.md"
       ],
       "distinguish_design_principles_from_current_implementation": true
     },
@@ -109,9 +109,9 @@
         "../README.md",
         "../LICENSES_INDEX.md",
         "../THIRD_PARTY_NOTICES.md",
-        "../docs/public/How_to_Setup.md",
-        "../docs/public/How_to_Save_and_Recovery.md",
-        "../docs/public/How_to_Troubleshoot.md"
+        "../docs/ja/Getting_Started.md",
+        "../docs/ja/Save_and_Recovery.md",
+        "../docs/ja/Troubleshooting.md"
       ],
       "github_pages_boundary": "GitHub Pagesでは公開文書だけを確認できる。ソース、テスト、設定、配布バイナリの実体を確認していない場合は、実装済み事実として断定しない。"
     },
@@ -127,9 +127,9 @@
         "core/features_faq.md",
         "core/user_guidance_reference.md",
         "../README.md",
-        "../docs/public/How_to_Setup.md",
-        "../docs/public/How_to_Save_and_Recovery.md",
-        "../docs/public/How_to_Troubleshoot.md"
+        "../docs/ja/Getting_Started.md",
+        "../docs/ja/Save_and_Recovery.md",
+        "../docs/ja/Troubleshooting.md"
       ],
       "distinguish_policy_from_verified_implementation": true,
       "github_pages_boundary": "GitHub Pagesだけを確認した場合は、公開文書で確認できる説明と、公開リポジトリまたは配布物の実体を確認しなければ判断できない実装状況を分ける。"
@@ -140,7 +140,7 @@
       "read": [
         "core/features_faq.md",
         "core/troubleshooting_quick.md",
-        "../docs/public/How_to_Troubleshoot.md"
+        "../docs/ja/Troubleshooting.md"
       ],
       "treat_reported_general_warning_sound_as_unresolved_issue": true
     },
@@ -149,8 +149,8 @@
       "when": "PDF、.clrop、.clro、Markdown、TeX、テキスト、CSVの扱いについて質問された場合",
       "read": [
         "core/file_formats.md",
-        "../docs/public/What_is_File_Formats.md",
-        "../docs/public/How_to_Save_and_Recovery.md"
+        "../docs/ja/File_Formats.md",
+        "../docs/ja/Save_and_Recovery.md"
       ]
     }
   ],

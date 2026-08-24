@@ -2333,6 +2333,24 @@ static void RestorePdfListSelectionToCurrent() {
     TracePdfSelectionRoute(L"restore_pdf_selection_after", g_hMainWnd, index);
 }
 
+static bool HighlightPdfListPathForPendingOpen(HWND owner, const std::wstring& path) {
+    if (!g_hPdfList || path.empty()) return false;
+    TracePdfSelectionRoute(L"highlight_pending_open_before", owner);
+    const std::wstring targetKey = NormalizePathKey(std::filesystem::path(path));
+    for (size_t i = 0; i < g_pdfFiles.size(); ++i) {
+        if (NormalizePathKey(std::filesystem::path(g_pdfFiles[i].path)) != targetKey) continue;
+        // Password prompts are part of opening this PDF. Reflect that pending
+        // open in the list without sending a selection-change notification;
+        // cancel/failure paths restore the selection to the currently open PDF.
+        SendMessageW(g_hPdfList, LB_SETCURSEL, static_cast<WPARAM>(i), 0);
+        InvalidateRect(g_hPdfList, nullptr, FALSE);
+        TracePdfSelectionRoute(L"highlight_pending_open_after", owner, static_cast<int>(i));
+        return true;
+    }
+    TracePdfSelectionRoute(L"highlight_pending_open_not_found", owner);
+    return false;
+}
+
 static bool PromptOfficeFileListAction(HWND owner, const std::wstring& officePath) {
     if (!owner || officePath.empty()) return false;
     std::filesystem::path path(officePath);
@@ -5405,7 +5423,10 @@ void AutoOpenSingleSessionFiles(HWND hWnd) {
         if (g_pdfPreviewActive) {
             DisableIntegratedPdfPreview(hWnd, true);
         }
-        OpenPdfWithAnnotations(hWnd, autoOpenPdfPath);
+        HighlightPdfListPathForPendingOpen(hWnd, autoOpenPdfPath);
+        if (!OpenPdfWithAnnotations(hWnd, autoOpenPdfPath)) {
+            RestorePdfListSelectionToCurrent();
+        }
     }
     (void)FocusAutoOpenedSoleNoteForEditing();
 }
@@ -5464,6 +5485,7 @@ bool OpenPdfIfDifferent(HWND hWnd, const std::wstring& path) {
         }
     }
     PreparePendingLinkForPdfSwitch(hWnd);
+    HighlightPdfListPathForPendingOpen(hWnd, path);
     if (OpenPdfWithAnnotations(hWnd, path)) {
         SyncLeftPaneSelection();
         RefreshMainWindowUiState(hWnd);

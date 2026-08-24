@@ -199,33 +199,26 @@ function Apply-RepoVersionMarkers([string]$DocsDir, [string]$RepoVersion) {
 }
 
 function Copy-ReleaseTopDocuments([string]$ReleaseRoot, [string]$RepositoryRoot, [ValidateSet("ja", "en")][string]$Locale) {
-    # A distributable contains only its selected locale's top-level copies.
-    # Japanese legal material itself retains the English legal original and its
-    # Japanese reference translation; it does not require a second English
-    # release README or notice at the package root.
-    $sources = if ($Locale -eq "ja") {
-        @(
-            @{ Source = "docs\ja\README.md"; Destination = "README.ja.md" },
-            @{ Source = "docs\ja\legal\LICENSE.md"; Destination = "LICENSE.ja.md" },
-            @{ Source = "docs\ja\legal\THIRD_PARTY_NOTICES.md"; Destination = "THIRD_PARTY_NOTICES.ja.md" }
-        )
-    }
-    else {
-        @(
-            @{ Source = "docs\en\README.md"; Destination = "README.en.md" },
-            @{ Source = "docs\en\legal\LICENSE.md"; Destination = "LICENSE.en.md" },
-            @{ Source = "docs\en\legal\THIRD_PARTY_NOTICES.md"; Destination = "THIRD_PARTY_NOTICES.en.md" }
-        )
-    }
+    # Every distributable has the same bilingual top-level entry documents.
+    # Locale-specific user documents are copied under docs/ before this runs.
+    $sources = @(
+        @{ Source = "README.md"; Destination = "README.md" },
+        @{ Source = "LICENSE.md"; Destination = "LICENSE.md" },
+        @{ Source = ".github\SECURITY.md"; Destination = "SECURITY.md" }
+    )
     foreach ($entry in $sources) {
         $destination = Join-Path $ReleaseRoot $entry.Destination
         Copy-File -Source (Join-Path $RepositoryRoot $entry.Source) -Dest $destination
-        if ($entry.Destination -notlike "README.*" -or $DryRun) {
+        if ($DryRun) {
             continue
         }
         $utf8 = New-Object System.Text.UTF8Encoding($false)
         $content = [System.IO.File]::ReadAllText($destination, [System.Text.Encoding]::UTF8)
-        $content = $content.Replace("](legal/", "](docs/legal/")
+        # A package contains one selected docs tree as docs/. The common root
+        # README links to both source trees, so both targets resolve to it.
+        $content = $content.Replace("](docs/ja/README.md)", "](docs/README.md)")
+        $content = $content.Replace("](docs/en/README.md)", "](docs/README.md)")
+        $content = $content.Replace("](THIRD_PARTY_NOTICES.md)", "](docs/legal/THIRD_PARTY_NOTICES.md)")
         [System.IO.File]::WriteAllText($destination, $content, $utf8)
     }
 }
@@ -550,7 +543,7 @@ try {
         "- README.md: canonical documentation for this release language.",
         "- legal/LICENSE.md: legal text for this release language.",
         "- legal/THIRD_PARTY_NOTICES.md: third-party notice for this release language.",
-        "- Top-level README.* and LICENSE.* files are copies of their canonical documents."
+        "- Top-level README.md, LICENSE.md, and SECURITY.md are bilingual common documents."
     ) -join "`r`n"
     Write-TextFile -DestPath (Join-Path $docsDir "CONTENTS.txt") -Value $docsContents -Encoding UTF8
 

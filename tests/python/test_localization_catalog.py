@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +13,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPO_ROOT / "tools" / "localization" / "generate_locale_catalog.py"
+PREPARER_PATH = REPO_ROOT / "tools" / "localization" / "prepare_locale_catalog.py"
 SPEC = importlib.util.spec_from_file_location("generate_locale_catalog", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 catalog_generator = importlib.util.module_from_spec(SPEC)
@@ -78,6 +81,42 @@ class LocalizationCatalogTests(unittest.TestCase):
             generated = output.read_text(encoding="utf-8")
             self.assertIn('Text(L"ui.app_title")', generated)
             self.assertNotIn('ui.app_\\\\1itle', generated)
+
+    def test_preparer_revalidates_changed_source_and_repairs_changed_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "src"
+            source.mkdir()
+            source_file = source / "main.cpp"
+            source_file.write_text('localization::Text(L"menu.open");\n', encoding="utf-8")
+            ja = self.write_catalog(directory, "ja.json", {"menu.open": "開く"})
+            en = self.write_catalog(directory, "en.json", {"menu.open": "Open"})
+            output = directory / "generated" / "locale_catalog.generated.h"
+            report = directory / "generated" / "fallback_report.json"
+            usage_stamp = directory / "generated" / "usage.stamp.json"
+            catalog_stamp = directory / "generated" / "catalog.stamp.json"
+            command = [
+                sys.executable, str(PREPARER_PATH), "--source", str(source), "--ja", str(ja), "--en", str(en),
+                "--locale", "en", "--localized", str(en), "--output", str(output), "--report", str(report),
+                "--usage-stamp", str(usage_stamp), "--catalog-stamp", str(catalog_stamp),
+            ]
+
+            first = subprocess.run(command, check=False, capture_output=True, text=True)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            second = subprocess.run(command, check=False, capture_output=True, text=True)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("Locale usage validation cache hit.", second.stdout)
+            self.assertIn("Locale catalog cache hit: en", second.stdout)
+
+            output.write_text("damaged\n", encoding="utf-8")
+            repaired = subprocess.run(command, check=False, capture_output=True, text=True)
+            self.assertEqual(repaired.returncode, 0, repaired.stderr)
+            self.assertIn('id == L"menu.open") return L"Open"', output.read_text(encoding="utf-8"))
+
+            source_file.write_text('localization::Text(L"menu.missing");\n', encoding="utf-8")
+            invalid = subprocess.run(command, check=False, capture_output=True, text=True)
+            self.assertEqual(invalid.returncode, 1)
+            self.assertIn("source references ID absent from Japanese catalog: menu.missing", invalid.stderr)
 
 
 if __name__ == "__main__":

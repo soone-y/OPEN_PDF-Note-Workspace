@@ -2,7 +2,7 @@
 """
 render_human_docs.py
 
-公開サイト成果物 (site/github/output/public/) 内の人間用ドキュメント (README.md, docs/public/*.md) から、
+公開サイト成果物 (site/github/output/public/) 内の人間用ドキュメント (README.md, docs/ja/*.md, docs/en/*.md) から、
 ブラウザで直接閲覧できる美しいセルフコンテインド HTML ページ (.html) を自動生成します。
 
 - 人間がアクセスした場合: 美しくデザインされた HTML ドキュメントとして表示。
@@ -17,7 +17,7 @@ from pathlib import Path
 
 # HTML テンプレート（外部通信ゼロ・落ち着いたライト/ダーク対応デザイン）
 HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="ja">
+<html lang="{language_code}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -191,6 +191,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }}
 
     .header-tools {{ display: inline-flex; align-items: center; gap: 12px; }}
+    .language-switch {{ color: var(--link); font-size: 0.82em; font-weight: 600; }}
     .contrast-toggle {{ display: inline-flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 0.82em; font-weight: 600; cursor: pointer; }}
     .contrast-toggle input {{ inline-size: 15px; block-size: 15px; accent-color: var(--accent); }}
 
@@ -359,7 +360,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="doc-header">
 {navigation_html}
     <div class="header-tools">
-      <label class="contrast-toggle"><input id="contrast-toggle" type="checkbox"><span>高コントラスト</span></label>
+{language_switch_html}
+      <label class="contrast-toggle"><input id="contrast-toggle" type="checkbox"><span>{contrast_label}</span></label>
 {raw_markdown_html}
     </div>
   </div>
@@ -537,9 +539,25 @@ def render_mermaid_flowchart(lines: list[str]) -> str | None:
         return None
 
     def node_html(label: str) -> str:
-        safe = html.escape(label)
-        safe = re.sub(r"&lt;br\s*/?&gt;", "<br>", safe, flags=re.IGNORECASE)
-        return f'<span class="flowchart-node">{safe}</span>'
+        # Only these exact line-break spellings are admitted as HTML. Escape
+        # every other label character before it reaches the generated page.
+        parts: list[str] = []
+        cursor = 0
+        while cursor < len(label):
+            tag_start = label.find("<", cursor)
+            if tag_start < 0:
+                parts.append(html.escape(label[cursor:]))
+                break
+            parts.append(html.escape(label[cursor:tag_start]))
+            lower_tail = label[tag_start:].lower()
+            matched_tag = next((tag for tag in ("<br>", "<br/>", "<br />") if lower_tail.startswith(tag)), None)
+            if matched_tag is None:
+                parts.append("&lt;")
+                cursor = tag_start + 1
+            else:
+                parts.append("<br>")
+                cursor = tag_start + len(matched_tag)
+        return f'<span class="flowchart-node">{"".join(parts)}</span>'
 
     edge_html = []
     for source, target, branch_label in edges:
@@ -585,11 +603,29 @@ def format_inline(text: str, root_rel: str) -> str:
     text = re.sub(r'`(.*?)`', lambda m: f'<code>{html.escape(m.group(1))}</code>', text)
     return text
 
+def language_switch_html(*, root_rel: str, rel_path: Path, site_dir: Path) -> str:
+    """Return a same-document language switch for language-specific docs."""
+    if rel_path.parts[:2] not in (("docs", "ja"), ("docs", "en")):
+        return ""
+    current_locale = rel_path.parts[1]
+    other_locale = "en" if current_locale == "ja" else "ja"
+    counterpart = Path("docs") / other_locale / Path(*rel_path.parts[2:])
+    if not (site_dir / counterpart).is_file():
+        return ""
+    counterpart_html = counterpart.with_suffix(".html").as_posix()
+    label = "English" if current_locale == "ja" else "日本語"
+    aria_label = "Switch to English" if current_locale == "ja" else "日本語版へ切り替える"
+    return f'      <a class="language-switch" href="{root_rel}{counterpart_html}" aria-label="{aria_label}">{label}</a>'
+
+
 def navigation_html(*, root_rel: str, rel_path: Path) -> str:
-    """現在の項目をハイライトし、リンクの目的を示すポータル用メニューを生成する。"""
+    """Render a one-language navigation menu and highlight the current section."""
+    locale = rel_path.parts[1] if rel_path.parts[:2] in (("docs", "ja"), ("docs", "en")) else "ja"
     if rel_path.parts[0] == "introduction":
         current_section = "背景・設計・確認資料"
-    elif rel_path.parts[:2] == ("docs", "public"):
+    elif rel_path.parts[:2] == ("docs", "en"):
+        current_section = "User documentation"
+    elif rel_path.parts[:2] == ("docs", "ja"):
         current_section = "使い方・セットアップ"
     elif rel_path.name == "README.md":
         current_section = "プロジェクトの概要"
@@ -598,18 +634,36 @@ def navigation_html(*, root_rel: str, rel_path: Path) -> str:
     else:
         current_section = "公開文書"
 
-    portal_entries = (
-        ("プロジェクトの概要", "配布物、通常版・Lite版、基本方針", f"{root_rel}README.html", "プロジェクトの概要"),
-        ("使い方・セットアップ", "導入・操作・保存・トラブル対処", f"{root_rel}docs/public/Index.html", "使い方・セットアップ"),
-        ("背景・設計・確認資料", "設計の考え方、利用判断、根拠と確認範囲", f"{root_rel}introduction/index.html", "背景・設計・確認資料"),
-        ("ライセンスと第三者通知", "利用条件と第三者コンポーネント", f"{root_rel}LICENSES_INDEX.html", "ライセンスと第三者通知"),
-    )
-    outside_entries = (
-        ("文書ポータルのトップ", "目的別の入口へ戻る", f"{root_rel}index.html"),
-        ("紹介サイト", "ソフトの概要と配布先を見る", "https://pdf-note-workspace.soone-y.com/"),
-        ("配布物を入手する", "GitHub Releases を開く", "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases", None),
-        ("GitHub リポジトリ", "ソース、Issue、公開履歴を見る", "https://github.com/soone-y/OPEN_PDF-Note-Workspace", None),
-    )
+    if locale == "en":
+        portal_entries = (
+            ("Project overview", "Packages, Standard and Lite editions, and core policies", f"{root_rel}README.html", "Project overview"),
+            ("User documentation", "Setup, use, saving and recovery, file formats, and troubleshooting", f"{root_rel}docs/en/README.html", "User documentation"),
+            ("Background, design, and verification (Japanese)", "Design rationale, evaluation, evidence, and verification scope", f"{root_rel}introduction/index.html", "Background, design, and verification"),
+            ("Licenses and third-party notices", "Terms and third-party components", f"{root_rel}LICENSES_INDEX.html", "Licenses and third-party notices"),
+        )
+        outside_entries = (
+            ("English documentation portal", "Return to the English-language entry point", f"{root_rel}en/index.html"),
+            ("Product site", "Read an overview and find downloads", "https://pdf-note-workspace.soone-y.com/"),
+            ("Get the release", "Open GitHub Releases", "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases", None),
+            ("GitHub repository", "Browse source, issues, and public history", "https://github.com/soone-y/OPEN_PDF-Note-Workspace", None),
+        )
+        menu_label = "Documentation menu"
+        menu_aria_label = "Open documentation menu"
+    else:
+        portal_entries = (
+            ("プロジェクトの概要", "配布物、通常版・Lite版、基本方針", f"{root_rel}README.html", "プロジェクトの概要"),
+            ("日本語の文書", "導入・操作・保存・トラブル対処", f"{root_rel}docs/ja/README.html", "使い方・セットアップ"),
+            ("背景・設計・確認資料", "設計の考え方、利用判断、根拠と確認範囲", f"{root_rel}introduction/index.html", "背景・設計・確認資料"),
+            ("ライセンスと第三者通知", "利用条件と第三者コンポーネント", f"{root_rel}LICENSES_INDEX.html", "ライセンスと第三者通知"),
+        )
+        outside_entries = (
+            ("文書ポータルのトップ", "目的別の入口へ戻る", f"{root_rel}index.html"),
+            ("紹介サイト", "ソフトの概要と配布先を見る", "https://pdf-note-workspace.soone-y.com/"),
+            ("配布物を入手する", "GitHub Releases を開く", "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases", None),
+            ("GitHub リポジトリ", "ソース、Issue、公開履歴を見る", "https://github.com/soone-y/OPEN_PDF-Note-Workspace", None),
+        )
+        menu_label = "文書メニュー"
+        menu_aria_label = "文書メニューを開く"
     portal_entry_html = "\n".join(
         f'''        <a href="{href}"{' aria-current="page"' if section == current_section else ''}>
           <span class="menu-link-title">{html.escape(label)}</span>
@@ -625,8 +679,8 @@ def navigation_html(*, root_rel: str, rel_path: Path) -> str:
         for label, detail, href, *_ in outside_entries
     )
     return f"""    <details class=\"site-menu\">
-      <summary aria-label=\"文書メニューを開く\"><span class=\"menu-icon\" aria-hidden=\"true\"></span>文書メニュー</summary>
-      <nav aria-label=\"文書メニュー\">
+      <summary aria-label=\"{menu_aria_label}\"><span class=\"menu-icon\" aria-hidden=\"true\"></span>{menu_label}</summary>
+      <nav aria-label=\"{menu_label}\">
         <div class=\"menu-links\">
 {portal_entry_html}
         </div>
@@ -652,11 +706,15 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
     title = title_match.group(1).strip() if title_match else md_path.stem
 
     body_html = simple_markdown_to_html(content, root_rel)
+    language_code = rel_path.parts[1] if rel_path.parts[:2] in (("docs", "ja"), ("docs", "en")) else "ja"
     full_html = HTML_TEMPLATE.format(
         title=html.escape(title),
+        language_code=language_code,
+        contrast_label="High contrast" if language_code == "en" else "高コントラスト",
         root_rel=root_rel,
         raw_markdown_html=raw_markdown_html,
         navigation_html=navigation_html(root_rel=root_rel, rel_path=rel_path),
+        language_switch_html=language_switch_html(root_rel=root_rel, rel_path=rel_path, site_dir=site_dir),
         content_html=body_html
     )
 
@@ -676,7 +734,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     count = 0
-    for relative_dir in (Path("."), Path("docs/public"), Path("docs/ja"), Path("docs/en"), Path("introduction")):
+    rendered: set[Path] = set()
+    for relative_dir in (Path("."), Path("docs/ja"), Path("docs/en"), Path("introduction")):
         directory = site_dir / relative_dir
         if not directory.exists() or not directory.is_dir():
             continue
@@ -688,7 +747,18 @@ def main(argv: list[str] | None = None) -> int:
         for markdown_file in markdown_files:
             if markdown_file.is_file():
                 convert_md_file_to_html(markdown_file, site_dir)
+                rendered.add(markdown_file.resolve())
                 count += 1
+
+    # These common documents live outside the language trees but are linked
+    # from DOCUMENTATION.md, so their Markdown links must have HTML targets.
+    for markdown_file in (
+        site_dir / ".github" / "SECURITY.md",
+        site_dir / "docs" / "案内ドキュメントの構成.md",
+    ):
+        if markdown_file.is_file() and markdown_file.resolve() not in rendered:
+            convert_md_file_to_html(markdown_file, site_dir)
+            count += 1
 
     print(f"Successfully generated {count} HTML documentation pages in {site_dir}")
     return 0

@@ -1,6 +1,8 @@
-# セキュリティポリシー
+# セキュリティポリシー / Security Policy
 
 PDF Note Workspace の安全性向上にご協力いただきありがとうございます。
+
+This document contains the security policy in Japanese and English.
 
 ## サポート対象のバージョン
 
@@ -38,3 +40,42 @@ PDF Note Workspace の安全性向上にご協力いただきありがとうご�
 ## 対象範囲
 
 このポリシーは、公式 GitHub Releases の PDF Note Workspace 本体および同梱ファイルを対象とします。アプリは外部通信を行わない方針のため、オンラインサービスやアカウント機能は提供していません。
+
+## English
+
+### Supported versions
+
+Security fixes are provided only for the latest version published through GitHub Releases. Older releases, development snapshots, and independently modified or redistributed builds are not supported.
+
+| Version | Security updates |
+| --- | --- |
+| Latest GitHub Release | Supported |
+| All other versions | Not supported |
+
+Before reporting an issue, please check whether it can be reproduced with the latest release when possible. If it occurs only with an older version, include whether updating resolves it.
+
+### Reporting a vulnerability
+
+Do not publish vulnerability details or reproduction steps in public Issues, Discussions, or social media. Use **Report a vulnerability** in the repository's **Security** tab to submit a private report.
+
+Include, where known:
+
+- Application version, edition (Full or Lite), and Windows version
+- Exact reproduction steps, expected result, and actual result
+- Expected impact, such as disclosure or modification of information, arbitrary code execution, or denial of service
+- A minimal safe reproduction file or safe alternative steps, if needed
+- A proposed fix, proof of concept, and relevant logs or screen text
+
+Do not send personal information, confidential information, real PDFs or notes, or credentials. Use the smallest possible reproduction data with its contents replaced.
+
+If private reporting is unavailable for the repository, do not disclose vulnerability details publicly. Wait until the repository maintainer enables a private reporting channel.
+
+### Handling and disclosure
+
+After receiving a report, we assess the latest release and, when needed, fix, verify, and release an update. We cannot guarantee a response time or that a fix will be provided.
+
+When a fix is needed, details are normally shared after a fixed release is available so that users can update safely. Please avoid public disclosure until the fix and user guidance are ready, even if you wish to disclose the report.
+
+### Scope
+
+This policy covers the official GitHub Releases of PDF Note Workspace and their bundled files. The application is designed not to make external network connections and does not provide online services or account features.

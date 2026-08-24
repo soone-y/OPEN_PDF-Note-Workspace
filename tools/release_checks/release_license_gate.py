@@ -30,11 +30,7 @@ REQUIRED_LICENSE_FILES = (
 def required_license_files(locale: str) -> tuple[str, ...]:
     if locale not in {"ja", "en"}:
         raise ValueError(f"release locale must be ja or en, not {locale!r}")
-    suffix = locale
-    return REQUIRED_LICENSE_FILES + (
-        f"LICENSE.{suffix}.md",
-        f"THIRD_PARTY_NOTICES.{suffix}.md",
-    )
+    return REQUIRED_LICENSE_FILES + ("LICENSE.md",)
 
 
 def sha256_bytes(content: bytes) -> str:

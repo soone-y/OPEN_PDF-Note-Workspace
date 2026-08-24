@@ -8,28 +8,28 @@
 [EXT_SPEC: .pdf]
 ROLE: 閲覧対象PDFドキュメント本体
 MUTABILITY: 原則不可変 (アプリによる上書き禁止)
-EVIDENCE: docs/public/What_is_File_Formats.md
+EVIDENCE: docs/ja/File_Formats.md
 
 [EXT_SPEC: .clrop]
 ROLE: PDFに対応する注釈データ (JSON)
 MUTABILITY: アプリが書き込み管理。ノートではないため直接テキスト手動編集不可
 PAIRING_RULE: PDFと同名・同階層に配置 (例: doc.pdf -> doc.clrop)
-EVIDENCE: docs/public/What_is_File_Formats.md
+EVIDENCE: docs/ja/File_Formats.md
 
 [EXT_SPEC: .clro]
 ROLE: 本ソフト標準ノート形式 (UTF-8 Markdownテキスト)
 MUTABILITY: アプリおよび外部エディタで編集可能
-EVIDENCE: docs/public/What_is_File_Formats.md
+EVIDENCE: docs/ja/File_Formats.md
 
 [EXT_SPEC: .md / .markdown / .tex / .txt / .csv]
 ROLE: 互換Markdown、TeX、書式なしテキストノート
 MUTABILITY: 編集可能。勝手に .clro へ自動改名されない
-EVIDENCE: docs/public/What_is_File_Formats.md
+EVIDENCE: docs/ja/File_Formats.md
 
 [EXT_SPEC: .png / .jpg / .jpeg]
 ROLE: 取込み用画像ファイル
 CONVERSION: 原本非破壊で 1 ページの PDF へローカル変換してワークスペースへ取り込み可能
-EVIDENCE: docs/public/How_to_Use.md
+EVIDENCE: docs/ja/Using_the_App.md
 ```
 
 ---
@@ -53,6 +53,6 @@ EVIDENCE: docs/public/How_to_Use.md
   <step id="consolidated_save" type="explicit_write">
     <description>Ctrl+S または保存メニュー選択による正規ファイル統合</description>
   </step>
-  <evidence_path>docs/public/How_to_Save_and_Recovery.md</evidence_path>
+  <evidence_path>docs/ja/Save_and_Recovery.md</evidence_path>
 </persistence_model>
 ```

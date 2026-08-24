@@ -1,4 +1,8 @@
-# ライセンス情報
+# ライセンス / License
+
+この文書は日本語と英語を併記する公開トップ用のライセンス文書です。法的な正本は下記の英語原文です。
+
+This is the bilingual license document for the repository root. The English license text below is legally controlling.
 
 本リポジトリ `PDF Note Workspace` の本体コードおよび別ライセンス表記のない同梱素材は、zlib License で提供します。
 `third_party/` 配下の外部依存物、利用者の環境にあるフォント、ローカルのツールチェーンから取得するランタイム DLL は、このライセンスの対象外です。これらは `THIRD_PARTY_NOTICES.md` を参照してください。
@@ -102,3 +106,28 @@ Copyright (c) 2026 Soone-Y
 - いかなる団体また個人も、本プロジェクトのライセンスに則って特段の許可を得ること無く利用できます。
 - ライセンス表記に同意できない場合は利用できません。
 - ライセンスの許す限りの資源、例えばライセンス表記自体などを教育目的に利用することもできます。
+
+## English
+
+### Project license
+
+`PDF Note Workspace` code and bundled materials without a separate license notice are provided under the zlib License. The English zlib License text in section 1 is the legally controlling text.
+
+- Copyright: `Copyright (c) 2026 Soone-Y`
+- Covered: project code and documentation in `src/`, `scripts/`, `tests/`, and `docs/`, plus repository-bundled materials without a separate license notice.
+- Not covered: third-party dependencies and their license documents under `third_party/`, fonts belonging to the user's Windows, toolchain, or local environment, and runtime DLLs supplied by the local toolchain.
+
+### Fonts and bundled materials
+
+- Normal display and drawing select fonts installed in the running environment by face name. Some European and symbol fonts bundled with LibreOffice are retained in `third_party/libreoffice/image/Fonts/` and loaded as private fonts for this process. Their licenses are governed by LibreOffice's terms.
+- PDF export with standard text annotations can obtain font data from the exporting machine through the Windows registry/GDI and pass it to PDFium for embedding. If that fails, it falls back to bitmap drawing. Licenses for fonts embedded in an exported PDF therefore come from the fonts installed on the exporting machine or the bundled LibreOffice fonts, not from this repository.
+- Repository-bundled materials without a separate license notice are distributed under the same zlib License as the project. When adding externally sourced material, record its origin and license in `THIRD_PARTY_NOTICES.md` or a separate notice.
+
+### Third-party components
+
+- In a release package, consult `docs/THIRD_PARTY_NOTICES.md` and the license texts in `licenses/pdfium/`, `licenses/mingw-w64/`, `licenses/md4c/`, `licenses/zlib/`, and `licenses/libreoffice/`.
+- In this repository, their corresponding source locations include `third_party/pdfium/`, `third_party/mingw_runtime_licenses/mingw-w64/`, `third_party/md4c/LICENSE.md`, and the LibreOffice license files under `third_party/libreoffice/image/`.
+
+### Use by individuals, educational institutions, and other organizations
+
+Any person or organization may use this project without separate permission, subject to the zlib License. If you cannot accept its terms, do not use the software. Materials permitted by the license, including the license notice itself, may also be used for educational purposes.

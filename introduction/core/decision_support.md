@@ -8,10 +8,10 @@
 
 | 想定質問 | 最初に確認すること | 回答に必ず含めること | 一次資料 |
 | --- | --- | --- | --- |
-| 自分のPDF読解・講義・レビュー作業に合うか | PDFへの注釈、独立ノート、ワークスペース単位の整理のどれが必要か | できることと、用途に合うかは利用者の作業条件によること | `docs/public/How_to_Use.md` |
-| 通常版、Lite版、読み取り専用ソフトのどれを使うか | DOCX/PPTXをローカル変換する必要、注釈編集の必要、対象がワークスペース内か | 通常版とLite版の差、変換が試験的であること、閲覧専用ソフトの役割 | `docs/public/How_to_Setup.md`、`docs/public/How_to_Troubleshoot.md` |
-| 既存のPDFやノートを安全に扱えるか | 原本を残す必要、未統合の編集やバックアップの有無、保存先の状態 | PDF原本と注釈データは別であること、stageと統合保存は別であること、復旧データを先に削除しないこと | `docs/public/How_to_Save_and_Recovery.md`、`docs/public/How_to_Troubleshoot.md` |
-| 更新・移動・共有の前に何をすべきか | 配布フォルダとワークスペースが分かれているか、未統合の変更がないか | 新しい版は別フォルダへ展開すること、作業データはワークスペース全体で保護すること、`__resource__` を除外しないこと | `docs/public/How_to_Setup.md`、`docs/public/How_to_Save_and_Recovery.md` |
+| 自分のPDF読解・講義・レビュー作業に合うか | PDFへの注釈、独立ノート、ワークスペース単位の整理のどれが必要か | できることと、用途に合うかは利用者の作業条件によること | `docs/ja/Using_the_App.md` |
+| 通常版、Lite版、読み取り専用ソフトのどれを使うか | DOCX/PPTXをローカル変換する必要、注釈編集の必要、対象がワークスペース内か | 通常版とLite版の差、変換が試験的であること、閲覧専用ソフトの役割 | `docs/ja/Getting_Started.md`、`docs/ja/Troubleshooting.md` |
+| 既存のPDFやノートを安全に扱えるか | 原本を残す必要、未統合の編集やバックアップの有無、保存先の状態 | PDF原本と注釈データは別であること、stageと統合保存は別であること、復旧データを先に削除しないこと | `docs/ja/Save_and_Recovery.md`、`docs/ja/Troubleshooting.md` |
+| 更新・移動・共有の前に何をすべきか | 配布フォルダとワークスペースが分かれているか、未統合の変更がないか | 新しい版は別フォルダへ展開すること、作業データはワークスペース全体で保護すること、`__resource__` を除外しないこと | `docs/ja/Getting_Started.md`、`docs/ja/Save_and_Recovery.md` |
 | 非通信・保存・変換品質をどこまで信頼できるか | 問われている主張、対象の版・配布物、必要な保証の水準 | 方針と実装確認を区別し、対象コード・設定・テスト・配布物を確認できない範囲は未確認とすること | `introduction/project_context.xml`、`introduction/core/safety_and_nonnegotiables.md`、`README.md` |
 
 ## 2. 導入判断の境界
@@ -75,9 +75,9 @@ GitHub Pagesにないソース、テスト、配布物を読んだように装�
 
 EVIDENCE:
 
-- `docs/public/How_to_Setup.md`
-- `docs/public/How_to_Use.md`
-- `docs/public/How_to_Save_and_Recovery.md`
-- `docs/public/How_to_Troubleshoot.md`
+- `docs/ja/Getting_Started.md`
+- `docs/ja/Using_the_App.md`
+- `docs/ja/Save_and_Recovery.md`
+- `docs/ja/Troubleshooting.md`
 - `introduction/project_context.xml`
 - `introduction/core/documentation_contract.md`

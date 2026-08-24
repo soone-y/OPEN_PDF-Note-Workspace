@@ -2,7 +2,7 @@
 
 ## 文書言語・語彙観測ツール (`analyze_document_language.py`)
 
-`tools/metrics/analyze_document_language.py` は、文書群を混ぜずに unigram / bigram / trigram の頻度と出現ファイルをローカル集計する読み取り専用 CLI です。外部通信は行いません。既定では `docs/internal/`、`docs/public/`、`introduction/` を別グループとして、Markdown とテキスト文書だけを読みます。
+`tools/metrics/analyze_document_language.py` は、文書群を混ぜずに unigram / bigram / trigram の頻度と出現ファイルをローカル集計する読み取り専用 CLI です。外部通信は行いません。既定では `docs/internal/`、`docs/ja/`、`docs/en/`、`introduction/` を別グループとして、Markdown とテキスト文書だけを読みます。
 
 テーマ候補は、既定で 2-gram 以上かつ 2文書群・2文書以上に出現する語句だけを対象にします。文書数、見出しでの出現、文書群の広がりで優先度を付け、重複した語順の候補はまとめます。各候補には確認用のファイル名と行番号を添えます。また、各文書群に固有な語句を、他群との文書出現率の差として別表示します。
 
@@ -13,7 +13,7 @@ python tools/metrics/analyze_document_language.py --format md
 利用者向けヘルプだけを個別に見る場合は、対象を明示します。
 
 ```powershell
-python tools/metrics/analyze_document_language.py --group help=docs/public --format json
+python tools/metrics/analyze_document_language.py --group help=docs/ja --format json
 ```
 
 レポートは既存ファイルを上書きしません。実行条件（対象、拡張子、除外、stop word、正規化・分かち書き方式）は JSON 出力に、主要条件は Markdown 出力に含まれます。

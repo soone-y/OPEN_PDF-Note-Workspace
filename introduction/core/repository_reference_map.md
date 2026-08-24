@@ -4,14 +4,14 @@
 
 1. `introduction/index.md` から目的に合う資料を選ぶ。必要な場合だけ `introduction/manifest.json` を補助的に参照する。
 2. `introduction/core/` の背景・設計・確認資料を読む。`introduction/project_context.xml` は機械的な補助情報として必要な場合だけ参照する。
-3. 利用者向けの挙動は `README.md` と `docs/public/` で補う。
+3. 利用者向けの挙動は `README.md`、`docs/ja/`、`docs/en/` で補う。
 4. 実装保証、安全性、保存、配布物について強い客観的主張をする場合は、公開リポジトリの `src/`、設定、`tests/`、検査結果を追加確認する。
 
 | 質問・変更の領域 | まず読む資料 | 一次資料・確認範囲 |
 | --- | --- | --- |
-| 導入、更新、Lite版 | `core/user_guidance_reference.md` | `README.md`、`docs/public/How_to_Setup.md` |
-| カスタマイズ、操作、画面 | `core/user_guidance_reference.md`、`core/ui_concepts.md` | `docs/public/How_to_Use.md`、`src/help/`、設定の読込・保存コード |
-| 保存、stage、復元、データ形式 | `core/file_formats.md`、`core/data_schemas.md` | `docs/public/How_to_Save_and_Recovery.md`、`src/file_output/`、`src/clrop/`、関連テスト |
+| 導入、更新、Lite版 | `core/user_guidance_reference.md` | `README.md`、`docs/ja/Getting_Started.md` |
+| カスタマイズ、操作、画面 | `core/user_guidance_reference.md`、`core/ui_concepts.md` | `docs/ja/Using_the_App.md`、`src/help/`、設定の読込・保存コード |
+| 保存、stage、復元、データ形式 | `core/file_formats.md`、`core/data_schemas.md` | `docs/ja/Save_and_Recovery.md`、`src/file_output/`、`src/clrop/`、関連テスト |
 | 安全性、外部通信、無音 | `core/safety_and_nonnegotiables.md`、`core/troubleshooting_quick.md` | 対象ソース、設定、検査結果。一般警告音は未解消の既知問題として扱う |
 | コード構造・変更 | `core/architecture_layers.md`、`core/code_symbol_index.md`、`core/ai_guardrails.md` | `src/`、呼び出し元、`tests/` |
 | 公開・ライセンス・配布 | `core/documentation_contract.md` | `LICENSE.md`、`LICENSES_INDEX.md`、`THIRD_PARTY_NOTICES.md`、公開用設定 |
@@ -45,7 +45,7 @@ EVIDENCE:
 - `introduction/manifest.json`
 - `introduction/core/documentation_contract.md`
 - `introduction/core/user_guidance_reference.md`
-- `docs/public/`
+- `docs/ja/` と `docs/en/`
 - `site/README.md`
 - `site/github/documentation_portal_allowlist.json`
 - Cloudflare Pagesの紹介ページ
