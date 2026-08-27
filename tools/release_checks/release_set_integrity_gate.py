@@ -292,10 +292,12 @@ def validate_release_metadata(release_set: Path, components: dict[str, object]) 
         lite_dir = child_path(release_set, components.get("release_lite"), label="Lite directory")
     except ValueError as error:
         return errors + [str(error)]
-    if not (full_dir / "libreoffice" / "custom_runtime" / "instdir").is_dir():
-        errors.append("full: LibreOffice custom runtime is missing")
-    if (lite_dir / "libreoffice" / "custom_runtime").exists():
-        errors.append("Lite: LibreOffice custom runtime must not be included")
+    short_runtime_dir = full_dir / "lo"
+    legacy_runtime_dir = full_dir / "libreoffice" / "custom_runtime" / "instdir"
+    if not short_runtime_dir.is_dir() and not legacy_runtime_dir.is_dir():
+        errors.append("full: LibreOffice runtime directory is missing (expected lo for new releases)")
+    if (lite_dir / "lo").exists() or (lite_dir / "libreoffice" / "custom_runtime").exists():
+        errors.append("Lite: LibreOffice runtime directory (lo) must not be included")
     return errors
 
 

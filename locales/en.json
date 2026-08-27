@@ -1710,5 +1710,7 @@
   "export.single_page_png": "Single-page PNG", "export.output_size_label": "Output size:", "export.half": "Half", "export.original_recommended": "Original (recommended)", "export.double": "Double", "export.custom": "Custom", "export.width_label": "Width:", "export.height_label": "Height:", "export.paper_label": "Paper:",
   "export.standard_text_annotation": "Save text annotations as text (fall back to images when they are not visible)", "export.match_pdf_text_layout": "Match TextBox line breaks to the PDF pane (recommended)", "export.math_label": "Math:", "export.keep": "Keep", "export.replace": "Replace", "export.replacement_label": "Replacement text:", "export.include_comments": "Include comment lines", "export.strip_markup": "Remove markup (txt)", "export.format_label": "Format:", "export.note_title_heading": "Use the note name as the first heading", "export.shift_headings": "Shift existing headings down one level", "export.reservation_list_title": "Reservations (discarded when this window closes)",
   "main.status.current_items.student": "Lecture: {LECTURE} | Session: {SESSION} | PDF: {PDF} | Note: {NOTE}",
-  "main.status.current_items.parent": "Parent: {LECTURE} | Child: {SESSION} | PDF: {PDF} | Note: {NOTE}"
+  "main.status.current_items.parent": "Parent: {LECTURE} | Child: {SESSION} | PDF: {PDF} | Note: {NOTE}",
+  "main.status.current_items.endpoints.student": "Lecture: {LECTURE} | … | Note: {NOTE}",
+  "main.status.current_items.endpoints.parent": "Parent: {LECTURE} | … | Note: {NOTE}"
 }

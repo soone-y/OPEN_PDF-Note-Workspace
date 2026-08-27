@@ -6,13 +6,21 @@ param(
     [switch]$ConfigUnknownFieldOnly,
     [switch]$SettingsBundleOnly,
     [switch]$HelpVisibilityOnly,
-    [switch]$DialogOwnerVisibilityOnly
+    [switch]$DialogOwnerVisibilityOnly,
+    [switch]$OutputExportOnly,
+    [switch]$TargetSessionOnly,
+    [switch]$PdfOnly,
+    [switch]$PdfiumRawOnly,
+    [switch]$SkipPngExport
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-if (@(@($ConfigOnly, $LogContractOnly, $ConfigRecoveryOnly, $ConfigUnknownFieldOnly, $SettingsBundleOnly, $HelpVisibilityOnly, $DialogOwnerVisibilityOnly) | Where-Object { $_ }).Count -gt 1) {
+if (@(@($ConfigOnly, $LogContractOnly, $ConfigRecoveryOnly, $ConfigUnknownFieldOnly, $SettingsBundleOnly, $HelpVisibilityOnly, $DialogOwnerVisibilityOnly, $OutputExportOnly, $TargetSessionOnly, $PdfOnly, $PdfiumRawOnly) | Where-Object { $_ }).Count -gt 1) {
     throw "Only one focused UI automation mode may be used at once."
+}
+if ($SkipPngExport -and -not $OutputExportOnly) {
+    throw "-SkipPngExport may only be used together with -OutputExportOnly."
 }
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -106,6 +114,11 @@ $savedEnv = @{
     "PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_HELP_VISIBILITY_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_HELP_VISIBILITY_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_DIALOG_OWNER_VISIBILITY_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_DIALOG_OWNER_VISIBILITY_ONLY", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_OUTPUT_EXPORT_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_OUTPUT_EXPORT_ONLY", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_SKIP_PNG_EXPORT" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_SKIP_PNG_EXPORT", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY", "Process")
 }
 
 function Restore-Env {
@@ -127,6 +140,11 @@ try {
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY", $(if ($SettingsBundleOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_HELP_VISIBILITY_ONLY", $(if ($HelpVisibilityOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_DIALOG_OWNER_VISIBILITY_ONLY", $(if ($DialogOwnerVisibilityOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_OUTPUT_EXPORT_ONLY", $(if ($OutputExportOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_SKIP_PNG_EXPORT", $(if ($SkipPngExport) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY", $(if ($TargetSessionOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY", $(if ($PdfOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY", $(if ($PdfiumRawOnly) { "1" } else { $null }), "Process")
 
     $proc = Start-Process -FilePath $exePath -WorkingDirectory $binDir -PassThru
     $deadline = (Get-Date).AddSeconds($timeoutSec)
@@ -153,22 +171,26 @@ try {
     if (-not $result.StartsWith("OK")) {
         throw ("UI automation reported failure:`n{0}" -f $result.Trim())
     }
-    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly) -and
+    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly) -and
         (-not (Test-Path -LiteralPath $noteStageDir) -or
          -not (Get-ChildItem -LiteralPath $noteStageDir -File -ErrorAction SilentlyContinue))) {
         throw "UI automation did not preserve the staged-exit note diff."
     }
-    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly)) {
+    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly)) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:output_export_ok$") {
             throw "UI automation did not complete the output export scenario."
         }
         $pdfExport = Join-Path $outputExportDir "export.pdf"
         $pngExport = Join-Path $outputExportDir "page.png"
-        foreach ($path in @($pdfExport, $pngExport,
+        $expectedExports = @($pdfExport,
                             (Join-Path $outputExportDir "note.txt"),
                             (Join-Path $outputExportDir "note.md"),
-                            (Join-Path $outputExportDir "note.html"))) {
+                            (Join-Path $outputExportDir "note.html"))
+        if (-not $SkipPngExport) {
+            $expectedExports += $pngExport
+        }
+        foreach ($path in $expectedExports) {
             if (-not (Test-Path -LiteralPath $path) -or (Get-Item -LiteralPath $path).Length -le 0) {
                 throw "UI automation export artifact is missing or empty: $path"
             }
@@ -177,14 +199,16 @@ try {
         if ($pdfBytes.Length -lt 5 -or [System.Text.Encoding]::ASCII.GetString($pdfBytes, 0, 5) -ne "%PDF-") {
             throw "UI automation PDF export does not have a PDF signature."
         }
-        $pngBytes = [System.IO.File]::ReadAllBytes($pngExport)
-        $pngSignature = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
-        $pngSignatureMatches = $pngBytes.Length -ge $pngSignature.Length
-        for ($i = 0; $i -lt $pngSignature.Length -and $pngSignatureMatches; ++$i) {
-            $pngSignatureMatches = $pngBytes[$i] -eq $pngSignature[$i]
-        }
-        if (-not $pngSignatureMatches) {
-            throw "UI automation PNG export does not have a PNG signature."
+        if (-not $SkipPngExport) {
+            $pngBytes = [System.IO.File]::ReadAllBytes($pngExport)
+            $pngSignature = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+            $pngSignatureMatches = $pngBytes.Length -ge $pngSignature.Length
+            for ($i = 0; $i -lt $pngSignature.Length -and $pngSignatureMatches; ++$i) {
+                $pngSignatureMatches = $pngBytes[$i] -eq $pngSignature[$i]
+            }
+            if (-not $pngSignatureMatches) {
+                throw "UI automation PNG export does not have a PNG signature."
+            }
         }
     }
     if (-not $ConfigRecoveryOnly -and -not (Test-Path -LiteralPath $workspaceConfigPath)) {
@@ -207,7 +231,7 @@ try {
         }
     }
     }
-    if (-not ($LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly) -and $result -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
+    if (-not ($LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly) -and $result -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
             throw "UI automation did not complete the workspace configuration round-trip scenario."
@@ -273,7 +297,7 @@ try {
             throw "Settings bundle import did not leave a recovery backup."
         }
     }
-    $expectsHelpVisibility = $HelpVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $DialogOwnerVisibilityOnly)
+    $expectsHelpVisibility = $HelpVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly)
     if ($expectsHelpVisibility) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:help_visibility_ok$") {
@@ -283,7 +307,7 @@ try {
             throw "UI automation did not keep the main window visible while closing help."
         }
     }
-    $expectsDialogOwnerVisibility = $DialogOwnerVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly)
+    $expectsDialogOwnerVisibility = $DialogOwnerVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly)
     if ($expectsDialogOwnerVisibility) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:dialog_owner_visibility_ok$") {

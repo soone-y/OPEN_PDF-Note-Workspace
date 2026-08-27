@@ -2819,7 +2819,7 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
                 f"artifact\tpdf_note_workspace.exe\t{release_set_integrity_gate.sha256_file(executable)}\n",
                 encoding="utf-8",
             )
-        (full / "libreoffice" / "custom_runtime" / "instdir").mkdir(parents=True)
+        (full / "lo").mkdir(parents=True)
         full_zip = release_set / "release_full.zip"
         lite_zip = release_set / "release_lite.zip"
         self.write_zip(full, full_zip)
@@ -2845,6 +2845,15 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
     def test_accepts_recorded_snapshot_and_exact_zip_contents(self) -> None:
         with repo_tempdir() as root:
             release_set, _, _ = self.make_release_set(root)
+
+            self.assertEqual(release_set_integrity_gate.validate_release_set(release_set), [])
+
+    def test_accepts_legacy_full_runtime_layout(self) -> None:
+        with repo_tempdir() as root:
+            release_set, _, _ = self.make_release_set(root)
+            full = release_set / "release_full"
+            (full / "lo").rmdir()
+            (full / "libreoffice" / "custom_runtime" / "instdir").mkdir(parents=True)
 
             self.assertEqual(release_set_integrity_gate.validate_release_set(release_set), [])
 
@@ -2901,13 +2910,13 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
         with repo_tempdir() as root:
             release_set, _, _ = self.make_release_set(root)
             lite = release_set / "release_lite"
-            (lite / "libreoffice" / "custom_runtime").mkdir(parents=True)
+            (lite / "lo").mkdir(parents=True)
             build_info = lite / "pdf_note_workspace.exe.buildinfo.txt"
             build_info.write_text(build_info.read_text(encoding="utf-8").replace("version\t1.0.0", "version\t9.9.9"), encoding="utf-8")
 
             errors = release_set_integrity_gate.validate_release_set(release_set)
 
-            self.assertTrue(any("Lite: LibreOffice custom runtime" in error for error in errors))
+            self.assertTrue(any("Lite: LibreOffice runtime directory (lo)" in error for error in errors))
             self.assertTrue(any("Lite: application build-info version" in error for error in errors))
 
 

@@ -1710,5 +1710,7 @@
   "export.single_page_png": "単ページPNG", "export.output_size_label": "出力サイズ:", "export.half": "半分", "export.original_recommended": "そのまま（推奨）", "export.double": "倍", "export.custom": "指定", "export.width_label": "横:", "export.height_label": "縦:", "export.paper_label": "用紙:",
   "export.standard_text_annotation": "テキスト注釈を標準で保存（見えない場合は画像にフォールバック）", "export.match_pdf_text_layout": "TextBoxの改行をPDF欄の表示に合わせる（推奨）", "export.math_label": "数式:", "export.keep": "そのまま", "export.replace": "置き換える", "export.replacement_label": "置き換え文字列:", "export.include_comments": "コメント行も出力", "export.strip_markup": "マークアップ除去 (txt)", "export.format_label": "形式:", "export.note_title_heading": "ノート名を先頭見出しにする", "export.shift_headings": "既存見出しを1段下げる", "export.reservation_list_title": "予約一覧（このウィンドウを閉じると破棄）",
   "main.status.current_items.student": "講義: {LECTURE} | 回次: {SESSION} | PDF: {PDF} | Note: {NOTE}",
-  "main.status.current_items.parent": "上位: {LECTURE} | 下位: {SESSION} | PDF: {PDF} | Note: {NOTE}"
+  "main.status.current_items.parent": "上位: {LECTURE} | 下位: {SESSION} | PDF: {PDF} | Note: {NOTE}",
+  "main.status.current_items.endpoints.student": "講義: {LECTURE} | … | Note: {NOTE}",
+  "main.status.current_items.endpoints.parent": "上位: {LECTURE} | … | Note: {NOTE}"
 }

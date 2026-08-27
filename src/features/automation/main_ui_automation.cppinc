@@ -170,7 +170,8 @@ static bool RestoreUiAutomationNoteSelection(HWND owner,
     return true;
 }
 
-static bool EnsureUiAutomationTargetSession(HWND owner, std::wstring* outError) {
+static bool EnsureUiAutomationTargetSession(HWND owner, std::wstring* outError,
+                                            bool openNote = true) {
     AppendUiAutomationTrace(L"ensure_target:begin");
     if (!owner) {
         if (outError) *outError = L"Main window is not ready.";
@@ -233,6 +234,19 @@ static bool EnsureUiAutomationTargetSession(HWND owner, std::wstring* outError) 
                 return false;
             }
             AppendUiAutomationTrace(L"ensure_target:fixture_pdf_opened");
+            if (!openNote) {
+                SyncLeftPaneSelection();
+                if (CurrentPdfIndex() >= 0) {
+                    SendMessageW(g_hPdfList, LB_SETCURSEL, CurrentPdfIndex(), 0);
+                }
+                if (static_cast<int>(g_pdfFiles.size()) >= 2 && CurrentPdfIndex() >= 0 &&
+                    !CurrentLogicalPdfPath().empty()) {
+                    AppendUiAutomationTrace(L"ensure_target:fixture_pdf_only_success");
+                    return true;
+                }
+                AppendUiAutomationTrace(L"ensure_target:fixture_pdf_only_incomplete");
+                return false;
+            }
             LoadNoteFile(owner, preferredNote);
             SyncBottomPaneAfterNoteLoad(owner);
             AppendUiAutomationTrace(L"ensure_target:fixture_note_opened");
@@ -279,7 +293,7 @@ static bool EnsureUiAutomationTargetSession(HWND owner, std::wstring* outError) 
                 OpenPdfWithAnnotations(owner, autoOpenPdfPath);
                 AppendUiAutomationTrace(L"ensure_target:open_pdf_end");
             }
-            if (!g_noteFiles.empty()) {
+            if (openNote && !g_noteFiles.empty()) {
                 AppendUiAutomationTrace(L"ensure_target:open_note_begin");
                 LoadNoteFile(owner, g_noteFiles.front().path);
                 SyncBottomPaneAfterNoteLoad(owner);
@@ -288,11 +302,9 @@ static bool EnsureUiAutomationTargetSession(HWND owner, std::wstring* outError) 
             SyncLeftPaneSelection();
             AppendUiAutomationTrace(L"ensure_target:sync_done");
             if (static_cast<int>(g_pdfFiles.size()) >= 2 &&
-                static_cast<int>(g_noteFiles.size()) >= 2 &&
-                CurrentPdfIndex() >= 0 &&
-                CurrentNoteIndex() >= 0 &&
-                !CurrentLogicalPdfPath().empty() &&
-                !g_currentNotePath.empty()) {
+                (!openNote || static_cast<int>(g_noteFiles.size()) >= 2) &&
+                CurrentPdfIndex() >= 0 && (!openNote || CurrentNoteIndex() >= 0) &&
+                !CurrentLogicalPdfPath().empty() && (!openNote || !g_currentNotePath.empty())) {
                 AppendUiAutomationTrace(L"ensure_target:success");
                 return true;
             }
@@ -367,6 +379,35 @@ static bool HasPngFileSignature(const std::string& bytes) {
         static_cast<char>(0x89), 'P', 'N', 'G', '\r', '\n', static_cast<char>(0x1a), '\n'};
     return bytes.size() >= sizeof(kSignature) &&
            std::equal(std::begin(kSignature), std::end(kSignature), bytes.begin());
+}
+
+static bool RunUiAutomationPdfiumRawOpenScenario(std::wstring* outError) {
+    std::wstring automationRoot;
+    if (!TryGetUiAutomationWorkspaceRoot(&automationRoot)) {
+        if (outError) *outError = L"PDFium raw-open automation requires an automation workspace.";
+        return false;
+    }
+    const std::filesystem::path pdfPath = std::filesystem::path(automationRoot) /
+        L"lecture1" / L"session1" / L"sample.pdf";
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(pdfPath, ec) || ec) {
+        if (outError) *outError = L"PDFium raw-open automation fixture PDF is missing.";
+        return false;
+    }
+    const std::string utf8Path = WideToUTF8(pdfPath.wstring());
+    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    FPDF_DOCUMENT document = FPDF_LoadDocument(utf8Path.c_str(), nullptr);
+    if (!document) {
+        if (outError) *outError = L"PDFium raw-open automation could not load the fixture PDF.";
+        return false;
+    }
+    const int pageCount = FPDF_GetPageCount(document);
+    FPDF_CloseDocument(document);
+    if (pageCount <= 0) {
+        if (outError) *outError = L"PDFium raw-open automation fixture PDF had no pages.";
+        return false;
+    }
+    return true;
 }
 
 static bool ReadPngDimensions(const std::string& bytes, int* outWidth, int* outHeight) {
@@ -487,6 +528,10 @@ static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outErr
     const std::filesystem::path textOut = outputDir / L"note.txt";
     const std::filesystem::path markdownOut = outputDir / L"note.md";
     const std::filesystem::path htmlOut = outputDir / L"note.html";
+    std::wstring skipPngExportValue;
+    const bool skipPngExport = ReadMainEnvVar(
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_SKIP_PNG_EXPORT", &skipPngExportValue) &&
+        (skipPngExportValue == L"1" || skipPngExportValue == L"true");
 
     const std::vector<file_output::PdfPageSpec> firstPage{{0, false}};
     if (!file_output::ExportPdfPages(owner, firstPage, pdfOut.wstring(),
@@ -497,12 +542,14 @@ static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outErr
     }
     constexpr int kExportPngWidth = 1200;
     constexpr int kExportPngHeight = 900;
-    if (!file_output::ExportPdfPagePng(owner, 0, pngOut.wstring(),
-                                        file_output::PdfPngStyle::PdfLike,
-                                        /*includeAnnotations=*/false,
-                                        kExportPngWidth, kExportPngHeight)) {
-        if (outError) *outError = L"PNG export failed during output export automation.";
-        return false;
+    if (!skipPngExport) {
+        if (!file_output::ExportPdfPagePng(owner, 0, pngOut.wstring(),
+                                            file_output::PdfPngStyle::PdfLike,
+                                            /*includeAnnotations=*/false,
+                                            kExportPngWidth, kExportPngHeight)) {
+            if (outError) *outError = L"PNG export failed during output export automation.";
+            return false;
+        }
     }
     file_output::TextExportOptions textOptions{};
     file_output::NoteMarkupExportOptions markupOptions{};
@@ -524,12 +571,13 @@ static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outErr
     bool exportedPngHasVisibleContent = false;
     if (!ReadUiAutomationFileBytes(pdfOut, &exportedPdf) || exportedPdf.size() < 5 ||
         exportedPdf.compare(0, 5, "%PDF-") != 0 ||
-        !ReadUiAutomationFileBytes(pngOut, &exportedPng) || !HasPngFileSignature(exportedPng) ||
-        !ReadPngDimensions(exportedPng, &exportedPngWidth, &exportedPngHeight) ||
-        exportedPngWidth != kExportPngWidth || exportedPngHeight != kExportPngHeight ||
-        !InspectPngRasterWithWic(pngOut, kExportPngWidth, kExportPngHeight,
-                                 &exportedPngHasVisibleContent) ||
-        !exportedPngHasVisibleContent ||
+        (!skipPngExport &&
+         (!ReadUiAutomationFileBytes(pngOut, &exportedPng) || !HasPngFileSignature(exportedPng) ||
+          !ReadPngDimensions(exportedPng, &exportedPngWidth, &exportedPngHeight) ||
+          exportedPngWidth != kExportPngWidth || exportedPngHeight != kExportPngHeight ||
+          !InspectPngRasterWithWic(pngOut, kExportPngWidth, kExportPngHeight,
+                                   &exportedPngHasVisibleContent) ||
+          !exportedPngHasVisibleContent)) ||
         !ReadUiAutomationFileBytes(textOut, &exportedText) || exportedText.empty() ||
         !ReadUiAutomationFileBytes(markdownOut, &exportedMarkdown) || exportedMarkdown.empty() ||
         !ReadUiAutomationFileBytes(htmlOut, &exportedHtml) || exportedHtml.empty()) {
@@ -3274,9 +3322,26 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
     const bool dialogOwnerVisibilityOnly = ReadMainEnvVar(
         L"PDF_NOTE_SMALL_UI_AUTOMATION_DIALOG_OWNER_VISIBILITY_ONLY", &dialogOwnerVisibilityOnlyValue) &&
         (dialogOwnerVisibilityOnlyValue == L"1" || dialogOwnerVisibilityOnlyValue == L"true");
+    std::wstring outputExportOnlyValue;
+    const bool outputExportOnly = ReadMainEnvVar(
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_OUTPUT_EXPORT_ONLY", &outputExportOnlyValue) &&
+        (outputExportOnlyValue == L"1" || outputExportOnlyValue == L"true");
+    std::wstring targetSessionOnlyValue;
+    const bool targetSessionOnly = ReadMainEnvVar(
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY", &targetSessionOnlyValue) &&
+        (targetSessionOnlyValue == L"1" || targetSessionOnlyValue == L"true");
+    std::wstring pdfOnlyValue;
+    const bool pdfOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY", &pdfOnlyValue) &&
+                         (pdfOnlyValue == L"1" || pdfOnlyValue == L"true");
+    std::wstring pdfiumRawOnlyValue;
+    const bool pdfiumRawOnly = ReadMainEnvVar(
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY", &pdfiumRawOnlyValue) &&
+        (pdfiumRawOnlyValue == L"1" || pdfiumRawOnlyValue == L"true");
     if ((configOnly ? 1 : 0) + (logContractOnly ? 1 : 0) + (configRecoveryOnly ? 1 : 0) +
         (configUnknownFieldOnly ? 1 : 0) + (settingsBundleOnly ? 1 : 0) +
-        (helpVisibilityOnly ? 1 : 0) + (dialogOwnerVisibilityOnly ? 1 : 0) > 1) {
+        (helpVisibilityOnly ? 1 : 0) + (dialogOwnerVisibilityOnly ? 1 : 0) +
+        (outputExportOnly ? 1 : 0) + (targetSessionOnly ? 1 : 0) + (pdfOnly ? 1 : 0) +
+        (pdfiumRawOnly ? 1 : 0) > 1) {
         if (outError) *outError = L"Only one focused UI automation mode may be selected.";
         return false;
     }
@@ -3334,6 +3399,43 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
             return false;
         }
         AppendUiAutomationTrace(L"automation:dialog_owner_visibility_ok");
+        return true;
+    }
+    if (outputExportOnly) {
+        if (!EnsureUiAutomationTargetSession(owner, outError)) {
+            AppendUiAutomationTrace(L"automation:ensure_target_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:ensure_target_ok");
+        if (!RunUiAutomationOutputExportScenario(owner, outError)) {
+            AppendUiAutomationTrace(L"automation:output_export_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:output_export_ok");
+        return true;
+    }
+    if (targetSessionOnly) {
+        if (!EnsureUiAutomationTargetSession(owner, outError)) {
+            AppendUiAutomationTrace(L"automation:ensure_target_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:ensure_target_ok");
+        return true;
+    }
+    if (pdfOnly) {
+        if (!EnsureUiAutomationTargetSession(owner, outError, /*openNote=*/false)) {
+            AppendUiAutomationTrace(L"automation:ensure_pdf_only_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:ensure_pdf_only_ok");
+        return true;
+    }
+    if (pdfiumRawOnly) {
+        if (!RunUiAutomationPdfiumRawOpenScenario(outError)) {
+            AppendUiAutomationTrace(L"automation:pdfium_raw_open_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:pdfium_raw_open_ok");
         return true;
     }
     if (!RunUiAutomationHelpVisibilityScenario(owner, outError)) {

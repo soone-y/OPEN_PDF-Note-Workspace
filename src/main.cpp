@@ -308,9 +308,17 @@ struct StatusDisplayStateSnapshot {
 
 static std::optional<MainMenuStateSnapshot> s_lastMainMenuStateSnapshot;
 static std::optional<StatusDisplayStateSnapshot> s_lastStatusDisplayStateSnapshot;
-// Once the top-level menu has actually wrapped, keep the compact status for
-// the remainder of this run so the menu bar does not oscillate between rows.
-static bool s_statusDisplayUseCompactText = false;
+enum class StatusDisplayDensity {
+    Full,
+    Endpoints,
+    Ellipsis,
+};
+
+// Once the top-level menu has actually wrapped, only reduce the status detail
+// for the remainder of this run so the menu bar does not oscillate between rows.
+// Keep the outer hierarchy entries first; only fall back to the old all-ellipsis
+// form when even those two entries cannot share the menu row.
+static StatusDisplayDensity s_statusDisplayDensity = StatusDisplayDensity::Full;
 static int s_deferredMainWindowUiRefreshDepth = 0;
 static bool s_deferredMainWindowUiRefreshPending = false;
 static HWND s_deferredMainWindowUiRefreshOwner = nullptr;
@@ -7396,9 +7404,6 @@ void RefreshMainMenuBar(HWND hWnd) {
 }
 
 std::wstring BuildStatusDisplayText() {
-    if (s_statusDisplayUseCompactText) {
-        return std::wstring(localization::Text(L"main.ui.eb3a8d5b7e71").c_str()) + BuildSaveStateStatusText();
-    }
     std::wstring lecture = g_currentLecturePath.empty()
         ? L"-"
         : LectureDisplayLabelForPath(g_currentLecturePath, g_lectures);
@@ -7429,17 +7434,32 @@ std::wstring BuildStatusDisplayText() {
     if (logicalPdfPath.empty()) pdf = L"-";
     std::wstring note = FileDisplayLabelForPath(g_currentNotePath, g_noteFiles, sessionRoot);
     if (g_currentNotePath.empty()) note = L"-";
-    const std::wstring textId = g_config.studentMode
-        ? L"main.status.current_items.student"
-        : L"main.status.current_items.parent";
-    std::wstring text = localization::Format(textId, {
-        {L"LECTURE", lecture}, {L"SESSION", session}, {L"PDF", pdf}, {L"NOTE", note},
-    });
-    std::wstring officeProgress = BuildOfficeConversionProgressStatusText();
-    if (!officeProgress.empty()) {
-        text += L" | " + officeProgress;
+
+    std::wstring text;
+    if (s_statusDisplayDensity == StatusDisplayDensity::Ellipsis) {
+        text = localization::Text(L"main.ui.eb3a8d5b7e71").c_str();
+    } else if (s_statusDisplayDensity == StatusDisplayDensity::Endpoints) {
+        const std::wstring textId = g_config.studentMode
+            ? L"main.status.current_items.endpoints.student"
+            : L"main.status.current_items.endpoints.parent";
+        text = localization::Format(textId, {
+            {L"LECTURE", lecture}, {L"NOTE", note},
+        });
+        text += L" | ";
+    } else {
+        const std::wstring textId = g_config.studentMode
+            ? L"main.status.current_items.student"
+            : L"main.status.current_items.parent";
+        text = localization::Format(textId, {
+            {L"LECTURE", lecture}, {L"SESSION", session}, {L"PDF", pdf}, {L"NOTE", note},
+        });
+        std::wstring officeProgress = BuildOfficeConversionProgressStatusText();
+        if (!officeProgress.empty()) {
+            text += L" | " + officeProgress;
+        }
+        text += L" | ";
     }
-    text += L" | " + BuildSaveStateStatusText();
+    text += BuildSaveStateStatusText();
     return text;
 }
 
@@ -8430,8 +8450,11 @@ void RefreshStatusDisplay(HWND hWnd) {
         L"RefreshStatusDisplay",
         L"after_modify_menu elapsed_ms=" + preview_trace::ElapsedMs(startTick));
     DrawMenuBar(hWnd);
-    if (!s_statusDisplayUseCompactText && IsStatusDisplayOnSecondMenuRow(hWnd, menu)) {
-        s_statusDisplayUseCompactText = true;
+    while (s_statusDisplayDensity != StatusDisplayDensity::Ellipsis &&
+           IsStatusDisplayOnSecondMenuRow(hWnd, menu)) {
+        s_statusDisplayDensity = s_statusDisplayDensity == StatusDisplayDensity::Full
+            ? StatusDisplayDensity::Endpoints
+            : StatusDisplayDensity::Ellipsis;
         text = BuildStatusDisplayText();
         if (g_config.ownerDrawUi) {
             UpdateMenuItemText(menu, ID_STATUS_DISPLAY, text);
@@ -8442,7 +8465,10 @@ void RefreshStatusDisplay(HWND hWnd) {
         }
         s_lastStatusDisplayStateSnapshot = StatusDisplayStateSnapshot{std::move(text)};
         DrawMenuBar(hWnd);
-        preview_trace::Append(L"RefreshStatusDisplay", L"switched_to_compact_after_menu_wrap");
+        preview_trace::Append(
+            L"RefreshStatusDisplay",
+            L"reduced_status_after_menu_wrap density=" +
+            std::to_wstring(static_cast<int>(s_statusDisplayDensity)));
     }
     preview_trace::Append(
         L"RefreshStatusDisplay",

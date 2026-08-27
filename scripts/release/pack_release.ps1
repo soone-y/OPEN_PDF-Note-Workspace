@@ -519,7 +519,10 @@ try {
             throw "LibreOffice runtime is missing program\soffice.com: $loRuntime"
         }
         Write-Info "Including gated LibreOffice conversion runtime."
-        $releaseLoRuntime = Join-Path $outDir "libreoffice\custom_runtime\instdir"
+        # Keep the distributable layout shallow.  LibreOffice has long registry
+        # component names, and the former nested runtime root could exceed the
+        # legacy Windows extraction path limit under ordinary user folders.
+        $releaseLoRuntime = Join-Path $outDir "lo"
         Copy-DirectoryContents -SourceDir $loRuntime -DestDir $releaseLoRuntime
         Sanitize-LibreOfficeRuntimeForRelease -ImageDir $releaseLoRuntime
     }

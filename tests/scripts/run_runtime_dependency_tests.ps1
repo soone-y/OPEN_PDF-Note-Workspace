@@ -159,9 +159,9 @@ if (Test-Path -LiteralPath (Join-Path $defaultRuntime "program\soffice.com")) {
     if ($LASTEXITCODE -ne 0) {
         throw "default pack_release LibreOffice runtime dry-run failed"
     }
-    $loRuntimeDryRunHits = @($loDryRun | Select-String -SimpleMatch "libreoffice\custom_runtime\instdir")
+    $loRuntimeDryRunHits = @($loDryRun | Select-String -Pattern 'copy-dir: .*libreoffice\\custom_runtime\\instdir -> .*\\lo$')
     if ($loRuntimeDryRunHits.Count -eq 0) {
-        throw "default pack_release dry-run did not include LibreOffice custom runtime"
+        throw "default pack_release dry-run did not place the LibreOffice runtime in the short lo directory"
     }
     $loRuntimeSanitizeDryRunHits = @($loDryRun | Select-String -SimpleMatch "sanitize LibreOffice release runtime")
     if ($loRuntimeSanitizeDryRunHits.Count -eq 0) {

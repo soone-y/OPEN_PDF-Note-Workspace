@@ -14,6 +14,8 @@ The application does not overwrite original PDFs, notes, or annotations directly
 
 The Full edition includes local Office-to-PDF conversion through the bundled LibreOffice runtime. The Lite edition omits that runtime, but PDF viewing, annotations, notes, saving, and recovery work the same way.
 
+We recommend extracting either ZIP into a new writable folder directly under your user profile or Documents. If Windows reports that a target path is too long, you can instead try a short drive-root folder such as `C:\PDFNote`. Avoid deeply nested folders or very long folder names, which can prevent Windows from extracting the Office conversion runtime.
+
 ## If something goes wrong
 
 Check `docs/README.md`, `docs/legal/`, and `licenses/` in the distribution. If personal work data is stored inside the distribution folder, copy the entire workspace elsewhere before updating or deleting the distribution.

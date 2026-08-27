@@ -1502,6 +1502,8 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         'function Get-RequestedReleaseSetPair',
         'function Get-LatestReleaseSetPair',
         'function Get-AllowlistDiffLines',
+        'Allowlist diff placeholder was repaired in the existing unconfirmed checklist:',
+        '$(foreach ($line in $allowlistDiffSection) { $line })',
         '公開snapshot allowlist 差分（コメント・空行を除いた有効エントリ）:',
         '--- ALLOWLIST DIFF BEGIN ---',
         'Confirmed checklist has no allowlist diff section; it is retained unchanged:',
@@ -1522,6 +1524,8 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
             break
     unified_release_notes_contract = (
         'function Get-PairChecklistPath',
+        '$pairName = Split-Path -Leaf (Split-Path -Parent $item.SetRoot)',
+        '$setName = "${pairName}_${locale}"',
         '$names = @($byLocale["ja"]; $byLocale["en"])',
         'function New-PairChecklist',
         'function Get-PairConfirmationWord',

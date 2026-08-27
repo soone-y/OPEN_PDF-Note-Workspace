@@ -28,6 +28,7 @@ param(
     [switch]$SkipSafetyScan,
     [switch]$SkipLibreOfficeRuntimeGate,
     [switch]$SkipBinaryArtifactScan,
+    [switch]$IncludeMemoryDiagnostics,
     [switch]$IncludeOfficeConversionTests,
     [string]$OfficeSoffice = "",
     [switch]$KeepOfficeConversionOutputs,
@@ -63,8 +64,10 @@ $workspaceConfigTestScript = Join-Path $PSScriptRoot "run_workspace_config_tests
 $workspaceConfigRecoveryTestScript = Join-Path $PSScriptRoot "run_workspace_config_recovery_tests.ps1"
 $workspaceConfigUnknownFieldTestScript = Join-Path $PSScriptRoot "run_workspace_config_unknown_field_tests.ps1"
 $appLogContractTestScript = Join-Path $PSScriptRoot "run_app_log_contract_tests.ps1"
+$publishVersionHistoryTestScript = Join-Path $PSScriptRoot "run_publish_version_history_tests.ps1"
 $officeConversionFixtureScript = Join-Path $PSScriptRoot "run_office_conversion_fixture_tests.ps1"
 $uiAutomationScript = Join-Path $PSScriptRoot "run_ui_automation_fault_tests.ps1"
+$memoryDiagnosticsScript = Join-Path $PSScriptRoot "run_memory_diagnostics.ps1"
 $pythonToolTestScript = Join-Path $repoRoot "tests\python\test_python_tools.py"
 $dependencySecurityTestScript = Join-Path $repoRoot "tests\python\test_dependency_security_gate.py"
 $cloudflareSiteValidationScript = Join-Path $repoRoot "site\cloudflare\scripts\validate_introduction_site.py"
@@ -584,6 +587,7 @@ try {
     Assert-ScriptExists -Path $workspaceConfigRecoveryTestScript
     Assert-ScriptExists -Path $workspaceConfigUnknownFieldTestScript
     Assert-ScriptExists -Path $appLogContractTestScript
+    Assert-ScriptExists -Path $publishVersionHistoryTestScript
     Assert-ScriptExists -Path $officeConversionFixtureScript
     Assert-ScriptExists -Path $uiAutomationScript
     Assert-ScriptExists -Path $pythonToolTestScript
@@ -635,6 +639,10 @@ try {
         if (-not $SkipReadOnlyViewerBuild) {
             Assert-BuildInfoManifest -Path $readOnlyViewerBuildInfoManifestPath -ExeName "readonly_viewer.exe" -ExpectedVersion $expectedVersion
         }
+    }
+
+    Invoke-Step -Name "Publish Version History Tests" -Action {
+        Invoke-ChildPowerShellScript -ScriptPath $publishVersionHistoryTestScript
     }
 
     if (-not $SkipAtomicWrite) {
@@ -753,6 +761,12 @@ try {
     if (-not $SkipUiAutomation) {
         Invoke-Step -Name "UI Automation Rollback Tests" -Action {
             Invoke-ChildPowerShellScript -ScriptPath $uiAutomationScript
+        }
+    }
+
+    if ($IncludeMemoryDiagnostics) {
+        Invoke-Step -Name "Application Verifier Memory Diagnostics" -Action {
+            Invoke-ChildPowerShellScript -ScriptPath $memoryDiagnosticsScript -Arguments @("-Iterations", "3")
         }
     }
 

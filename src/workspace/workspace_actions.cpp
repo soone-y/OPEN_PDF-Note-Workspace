@@ -2172,6 +2172,10 @@ void AddLibreOfficeImageCandidate(std::vector<std::filesystem::path>& candidates
 void AddCustomLibreOfficeRuntimeCandidates(std::vector<std::filesystem::path>& candidates,
                                                   const std::filesystem::path& base) {
     if (base.empty()) return;
+    // New distributables use the short lo/ root so that LibreOffice's own deep
+    // registry paths remain extractable on systems using legacy path limits.
+    AddLibreOfficeImageCandidate(candidates, base / L"lo");
+    // Keep these legacy candidates for previously created release sets.
     AddLibreOfficeImageCandidate(candidates, base / L"third_party" / L"libreoffice" / L"custom_runtime" / L"instdir");
     AddLibreOfficeImageCandidate(candidates, base / L"libreoffice" / L"custom_runtime" / L"instdir");
 }
