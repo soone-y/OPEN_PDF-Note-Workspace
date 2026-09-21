@@ -120,7 +120,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       position: absolute;
       left: 0;
       right: 0;
-      top: 3px;
+      top: 4px;
       border-top: 2px solid currentColor;
     }}
     .site-menu summary:hover {{
