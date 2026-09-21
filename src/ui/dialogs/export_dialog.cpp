@@ -3,6 +3,7 @@
 #include "ui/noop_nav_guard.h"
 #include "core/localization.h"
 #include "workspace/workspace_config_io.h"
+#include "workspace/workspace_actions.h"
 
 static std::wstring ExperimentalExportDialogTitle(const std::wstring& base) {
     if (base.find(L"試験的") != std::wstring::npos ||
@@ -70,6 +71,7 @@ constexpr int kExportResultsOpenId = 4902;
 constexpr int kExportResultsFolderId = 4903;
 constexpr int kExportResultsCloseId = 4904;
 constexpr ULONGLONG kExportResultsOutsideDismissDelayMs = 1800;
+constexpr int kQuickExportSettingsCloseId = 4911;
 
 struct ExportResultsDialogState {
     HWND hwnd{};
@@ -106,6 +108,16 @@ static bool IsPdfOutputPath(const std::wstring& path) {
     return extension == L".pdf";
 }
 
+static bool IsMarkdownOutputPath(const std::wstring& path) {
+    std::wstring extension = std::filesystem::path(path).extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
+    return extension == L".md" || extension == L".markdown";
+}
+
+static bool IsReadOnlyViewerOutputPath(const std::wstring& path) {
+    return IsPdfOutputPath(path) || IsMarkdownOutputPath(path);
+}
+
 static void ShowExportResultLaunchFailure(HWND owner, const std::wstring& path) {
     ShowSoftNotice(owner,
                    localization::Format(L"dialog.export.launch_failed", {{L"PATH", path}}),
@@ -116,6 +128,10 @@ static void OpenExportResultFile(HWND owner, const std::wstring& path) {
     if (path.empty()) return;
     if (IsPdfOutputPath(path)) {
         (void)LaunchReadOnlyViewerForPdfAt(owner, path, -1, 0.0, false);
+        return;
+    }
+    if (IsMarkdownOutputPath(path)) {
+        (void)LaunchReadOnlyViewerForFile(owner, path);
         return;
     }
     const HINSTANCE result = ShellExecuteW(owner, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -143,8 +159,8 @@ static void UpdateExportResultButtons(ExportResultsDialogState* ctx) {
     EnableWindow(open, valid);
     EnableWindow(folder, valid);
     if (open) {
-        const bool pdf = valid && IsPdfOutputPath((*ctx->paths)[static_cast<size_t>(selected)]);
-        SetWindowTextW(open, pdf
+        const bool viewer = valid && IsReadOnlyViewerOutputPath((*ctx->paths)[static_cast<size_t>(selected)]);
+        SetWindowTextW(open, viewer
             ? (localization::Text(L"dialog.export.154cf8fead5d").c_str())
             : (localization::Text(L"dialog.export.7494b10f0fa9").c_str()));
     }
@@ -274,30 +290,181 @@ static void ShowExportResultsDialog(HWND owner, const std::vector<std::wstring>&
     }
 }
 
+struct QuickExportSettingsDialogState {
+    HWND hwnd{};
+    std::wstring summary;
+    bool done = false;
+};
+
+static std::wstring QuickExportEnabledLabel(bool value) {
+    return localization::Text(value ? L"export.quick_settings.enabled" : L"export.quick_settings.disabled");
+}
+
+static std::wstring BuildQuickExportSettingsSummary() {
+    const int percent = std::clamp(g_config.quickPdfScalePercent, 13, 800);
+    std::wstring summary = localization::Text(L"export.quick_settings_pdf_heading");
+    summary += L"\r\n" + localization::Format(L"export.quick_settings_pdf_scale", {{L"PERCENT", std::to_wstring(percent)}});
+    summary += L"\r\n" + localization::Format(L"export.quick_settings_pdf_standard_text",
+                                                   {{L"VALUE", QuickExportEnabledLabel(g_config.quickPdfStandardTextAnnots)}});
+    summary += L"\r\n" + localization::Format(L"export.quick_settings_pdf_match_layout",
+                                                   {{L"VALUE", QuickExportEnabledLabel(g_config.quickPdfMatchPdfPaneTextLayout)}});
+    summary += L"\r\n\r\n" + localization::Text(L"export.quick_settings_note_heading");
+    summary += L"\r\n" + localization::Text(L"export.quick_settings_note_format");
+    summary += L"\r\n" + localization::Format(L"export.quick_settings_note_strip_markup",
+                                                   {{L"VALUE", QuickExportEnabledLabel(g_config.quickNoteStripMarkup)}});
+    summary += L"\r\n" + localization::Format(L"export.quick_settings_note_comments",
+                                                   {{L"VALUE", QuickExportEnabledLabel(g_config.quickNoteIncludeComments)}});
+    if (g_config.quickNoteMathPlaceholder) {
+        std::wstring placeholder = TrimWhitespace(g_config.quickNoteMathPlaceholderText);
+        if (placeholder.empty()) placeholder = L"[math]";
+        summary += L"\r\n" + localization::Format(L"export.quick_settings_note_math_placeholder",
+                                                       {{L"VALUE", placeholder}});
+    } else {
+        summary += L"\r\n" + localization::Text(L"export.quick_settings_note_math_keep");
+    }
+    return summary;
+}
+
+static LRESULT CALLBACK QuickExportSettingsDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<QuickExportSettingsDialogState*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = reinterpret_cast<QuickExportSettingsDialogState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        ctx->hwnd = hWnd;
+        HWND summary = CreateWindowExW(0, L"STATIC", ctx->summary.c_str(), WS_CHILD | WS_VISIBLE,
+                                       12, 12, 430, 198, hWnd, nullptr, cs->hInstance, nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", localization::Text(L"common.close").c_str(),
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                     350, 220, 92, 26, hWnd,
+                                     reinterpret_cast<HMENU>(kQuickExportSettingsCloseId), cs->hInstance, nullptr);
+        if (g_hUIFont) {
+            SendMessageW(summary, WM_SETFONT, reinterpret_cast<WPARAM>(g_hUIFont), TRUE);
+            SendMessageW(close, WM_SETFONT, reinterpret_cast<WPARAM>(g_hUIFont), TRUE);
+        }
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    }
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
+    case WM_DRAWITEM:
+        if (DrawThemeButton(reinterpret_cast<LPDRAWITEMSTRUCT>(lParam))) return TRUE;
+        break;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == kQuickExportSettingsCloseId || LOWORD(wParam) == IDCANCEL) {
+            if (ctx) ctx->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) {
+            if (ctx) ctx->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        if (ctx) ctx->done = true;
+        DestroyWindow(hWnd);
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static void ShowQuickExportSettingsDialog(HWND owner) {
+    QuickExportSettingsDialogState ctx{};
+    ctx.summary = BuildQuickExportSettingsSummary();
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = QuickExportSettingsDialogProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemePanelBrush ? g_hThemePanelBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"QuickExportSettingsDialog";
+    RegisterClassW(&wc);
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, wc.lpszClassName,
+                                  localization::Text(L"export.quick_settings_title").c_str(),
+                                  WS_CAPTION | WS_POPUPWINDOW,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 465, 290, owner, nullptr, g_hInst, &ctx);
+    if (!dialog) return;
+    PlaceOwnedPopupAtAppTopLeft(dialog, owner);
+    ShowWindow(dialog, SW_SHOW);
+    UpdateWindow(dialog);
+    MSG msg{};
+    while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (ShouldSkipImeMessageInLoop(msg)) continue;
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    if (owner && IsWindow(owner)) SetActiveWindow(owner);
+}
+
 static std::optional<std::wstring> ExecuteUnifiedExportAndGetPath(HWND hWnd, const ExportDialogResult& result) {
+    const bool hasChosenOutputPath = !result.outputPath.empty();
+
+    std::error_code existsError;
+    if (hasChosenOutputPath && std::filesystem::exists(std::filesystem::path(result.outputPath), existsError) && !existsError) {
+        SilentDialogOptions overwrite;
+        overwrite.title = localization::Text(L"export.overwrite_title");
+        overwrite.message = localization::Text(L"export.overwrite_message");
+        overwrite.kind = SoftNoticeKind::Warning;
+        overwrite.buttons = SilentDialogButtons::YesNo;
+        overwrite.yesLabel = localization::Text(L"export.overwrite_yes");
+        overwrite.noLabel = localization::Text(L"export.overwrite_no");
+        overwrite.defaultResult = SilentDialogResult::No;
+        overwrite.escapeResult = SilentDialogResult::No;
+        overwrite.paths = {{localization::Text(L"export.overwrite_path_label"), result.outputPath}};
+        if (ShowSilentDialog(hWnd, overwrite) != SilentDialogResult::Yes) return std::nullopt;
+    }
+
     std::wstring path;
     bool ok = false;
     switch (result.kind) {
     case ExportDialogKind::PdfAll:
-        ok = file_output::ExportPdfWithAnnotations(hWnd, true, result.standardTextAnnots, result.pdfScale,
-                                                    result.matchPdfPaneTextLayout, &path);
+        ok = hasChosenOutputPath
+                 ? file_output::ExportPdfWithAnnotations(hWnd, true, result.outputPath,
+                                                         result.standardTextAnnots, result.pdfScale,
+                                                         result.matchPdfPaneTextLayout)
+                 : file_output::ExportPdfWithAnnotations(hWnd, true, result.standardTextAnnots, result.pdfScale,
+                                                         result.matchPdfPaneTextLayout, &path);
         break;
     case ExportDialogKind::PdfPages:
-        ok = file_output::ExportPdfPages(hWnd, result.pages, result.standardTextAnnots, result.pdfScale,
-                                          result.matchPdfPaneTextLayout, &path);
+        ok = hasChosenOutputPath
+                 ? file_output::ExportPdfPages(hWnd, result.pages, result.outputPath,
+                                               result.standardTextAnnots, result.pdfScale,
+                                               result.matchPdfPaneTextLayout)
+                 : file_output::ExportPdfPages(hWnd, result.pages, result.standardTextAnnots, result.pdfScale,
+                                               result.matchPdfPaneTextLayout, &path);
         break;
     case ExportDialogKind::PdfPng:
-        ok = file_output::ExportPdfPagePng(hWnd, result.pageIndex, result.pngStyle, result.includeAnnots,
-                                            result.pngWidthPx, result.pngHeightPx, &path);
+        ok = hasChosenOutputPath
+                 ? file_output::ExportPdfPagePng(hWnd, result.pageIndex, result.outputPath,
+                                                 result.pngStyle, result.includeAnnots,
+                                                 result.pngWidthPx, result.pngHeightPx)
+                 : file_output::ExportPdfPagePng(hWnd, result.pageIndex, result.pngStyle, result.includeAnnots,
+                                                 result.pngWidthPx, result.pngHeightPx, &path);
         break;
     case ExportDialogKind::NoteText:
-        ok = file_output::ExportNotePlainText(hWnd, result.textOptions, &path);
+        ok = hasChosenOutputPath
+                 ? file_output::ExportNotePlainText(g_currentNotePath, result.outputPath, result.textOptions)
+                 : file_output::ExportNotePlainText(hWnd, result.textOptions, &path);
         break;
     case ExportDialogKind::NoteMarkup:
-        ok = file_output::ExportNoteMarkup(hWnd, result.noteMarkupOptions, &path);
+        ok = hasChosenOutputPath
+                 ? file_output::ExportNoteMarkup(g_currentNotePath, result.outputPath, result.noteMarkupOptions)
+                 : file_output::ExportNoteMarkup(hWnd, result.noteMarkupOptions, &path);
         break;
     }
-    return ok && !path.empty() ? std::optional<std::wstring>(std::move(path)) : std::nullopt;
+    if (!ok) return std::nullopt;
+    return hasChosenOutputPath ? std::optional<std::wstring>(result.outputPath)
+                               : (path.empty() ? std::nullopt : std::optional<std::wstring>(std::move(path)));
 }
 
 } // namespace
@@ -309,9 +476,11 @@ struct ExportDialogState {
     bool hasPdf = false;
     bool hasNote = false;
     bool updatingSize = false;
+    bool outputTargetInitialized = false;
     ExportDialogKind preset = ExportDialogKind::PdfAll;
-    std::optional<ExportDialogResult> reservedPdf;
-    std::optional<ExportDialogResult> reservedNote;
+    ExportDialogKind outputTargetKind = ExportDialogKind::PdfAll;
+    std::wstring suggestedOutputName;
+    std::vector<ExportDialogResult> reservedResults;
     std::vector<ExportDialogResult> committedResults;
 
     HWND topPdf{};
@@ -322,6 +491,11 @@ struct ExportDialogState {
     HWND noteText{};
     HWND noteMarkup{};
     HWND labelFileExample{};
+    HWND labelOutputFolder{};
+    HWND editOutputFolder{};
+    HWND btnBrowseOutputFolder{};
+    HWND labelOutputName{};
+    HWND editOutputName{};
     HWND labelPageSpec{};
     HWND editPageSpec{};
     HWND labelPageExample{};
@@ -360,6 +534,15 @@ struct ExportDialogState {
     HWND checkTitleHeading{};
     HWND checkShiftHeadings{};
     HWND btnSet{};
+    HWND btnUpdateReservation{};
+    HWND btnSaveQuickPdf{};
+    HWND btnSaveQuickNote{};
+    HWND btnShowQuickSettings{};
+    HWND btnClearReservations{};
+    HWND btnExecuteReservation{};
+    HWND btnMoveReservationUp{};
+    HWND btnMoveReservationDown{};
+    HWND btnRemoveReservation{};
     HWND labelInlineError{};
     HWND labelReservationTitle{};
     HWND labelReservationList{};
@@ -398,7 +581,20 @@ constexpr int kExportDlgIdOutSizeCustom = 4084;
 constexpr int kExportDlgIdOutSizeW = 4091;
 constexpr int kExportDlgIdOutSizeH = 4092;
 constexpr int kExportDlgIdPaperCombo = 4101;
+constexpr int kExportDlgIdOutputFolder = 4111;
+constexpr int kExportDlgIdBrowseOutputFolder = 4112;
+constexpr int kExportDlgIdOutputName = 4113;
 constexpr int kExportDlgIdSet = 4201;
+constexpr int kExportDlgIdSaveQuickPdf = 4202;
+constexpr int kExportDlgIdSaveQuickNote = 4203;
+constexpr int kExportDlgIdClearReservations = 4204;
+constexpr int kExportDlgIdMoveReservationUp = 4205;
+constexpr int kExportDlgIdMoveReservationDown = 4206;
+constexpr int kExportDlgIdRemoveReservation = 4207;
+constexpr int kExportDlgIdUpdateReservation = 4208;
+constexpr int kExportDlgIdExecuteReservation = 4209;
+constexpr int kExportDlgIdReservationList = 4210;
+constexpr int kExportDlgIdShowQuickSettings = 4211;
 
 static bool IsExportDlgChecked(HWND hWnd) {
     return hWnd && SendMessageW(hWnd, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -418,6 +614,7 @@ static std::wstring ReadDialogText(HWND hWnd) {
 static ExportDialogKind GetExportDialogKind(ExportDialogState* ctx);
 static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& outResult);
 static void UpdateReservationSummaryUi(ExportDialogState* ctx);
+static void UpdateReservationButtonsUi(ExportDialogState* ctx);
 
 static COLORREF BlendExportDialogColor(COLORREF a, COLORREF b, double t) {
     int ar = GetRValue(a), ag = GetGValue(a), ab = GetBValue(a);
@@ -468,12 +665,8 @@ static bool RejectExportDialogInput(ExportDialogState* ctx,
 }
 
 static int ExportDialogEnterCommand(const ExportDialogState* ctx) {
-    if (!ctx) return IDOK;
-    // When a reservation already exists, Enter should update/store the current side
-    // rather than closing the dialog and exporting only the stored items.
-    if (ctx->reservedPdf.has_value() || ctx->reservedNote.has_value()) {
-        return kExportDlgIdSet;
-    }
+    // Enter is the same as the explicit final action: start output.  Adding a
+    // reservation is intentionally available only through its labelled button.
     return IDOK;
 }
 
@@ -887,36 +1080,191 @@ static bool IsNoteExportKind(ExportDialogKind kind) {
 }
 
 static std::wstring ReservationLabelForResult(const ExportDialogResult& result) {
+    std::wstring label;
     switch (result.kind) {
     case ExportDialogKind::PdfAll:
-        return L"注釈PDF";
+        label = localization::Text(L"export.reservation_kind.pdf_all");
+        break;
     case ExportDialogKind::PdfPages:
-        return L"ページ指定PDF";
+        label = localization::Text(L"export.reservation_kind.pdf_pages");
+        break;
     case ExportDialogKind::PdfPng:
-        return L"単ページPNG";
+        label = localization::Text(L"export.reservation_kind.png");
+        break;
     case ExportDialogKind::NoteText:
-        return (result.textOptions.markupMode == file_output::MarkupMode::Simplified) ? L"txt (マークアップ除去)" : L"txt";
+        label = localization::Text(result.textOptions.markupMode == file_output::MarkupMode::Simplified
+                                       ? L"export.reservation_kind.note_text_simplified"
+                                       : L"export.reservation_kind.note_text");
+        break;
     case ExportDialogKind::NoteMarkup:
-        return (result.noteMarkupOptions.format == file_output::NoteMarkupExportOptions::Format::Html)
-                   ? L"マークアップ (html)"
-                   : L"マークアップ (md)";
+        label = localization::Text(result.noteMarkupOptions.format == file_output::NoteMarkupExportOptions::Format::Html
+                                       ? L"export.reservation_kind.markup_html"
+                                       : L"export.reservation_kind.markup_md");
+        break;
     default:
-        return L"(不明)";
+        label = localization::Text(L"export.reservation_kind.unknown");
+        break;
     }
+    if (!result.outputPath.empty()) {
+        label += L" \u2192 " + std::filesystem::path(result.outputPath).filename().wstring();
+    }
+    return label;
 }
 
 static void UpdateReservationSummaryUi(ExportDialogState* ctx) {
     if (!ctx || !ctx->labelReservationList) return;
-    std::wstring pdf = L"PDF: 未設定";
-    std::wstring note = L"ノート: 未設定";
-    if (ctx->reservedPdf.has_value()) {
-        pdf = L"PDF: " + ReservationLabelForResult(*ctx->reservedPdf);
+    int selected = static_cast<int>(SendMessageW(ctx->labelReservationList, LB_GETCURSEL, 0, 0));
+    SendMessageW(ctx->labelReservationList, LB_RESETCONTENT, 0, 0);
+    if (ctx->reservedResults.empty()) {
+        SendMessageW(ctx->labelReservationList, LB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(localization::Text(L"export.reservation_empty").c_str()));
+        EnableWindow(ctx->labelReservationList, FALSE);
+        UpdateReservationButtonsUi(ctx);
+        return;
     }
-    if (ctx->reservedNote.has_value()) {
-        note = L"ノート: " + ReservationLabelForResult(*ctx->reservedNote);
+    EnableWindow(ctx->labelReservationList, TRUE);
+    for (size_t i = 0; i < ctx->reservedResults.size(); ++i) {
+        const std::wstring text = std::to_wstring(i + 1) + L". " + ReservationLabelForResult(ctx->reservedResults[i]);
+        SendMessageW(ctx->labelReservationList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
     }
-    std::wstring text = pdf + L"\r\n" + note;
-    SetWindowTextW(ctx->labelReservationList, text.c_str());
+    if (selected < 0) selected = 0;
+    selected = std::min(selected, static_cast<int>(ctx->reservedResults.size()) - 1);
+    SendMessageW(ctx->labelReservationList, LB_SETCURSEL, selected, 0);
+    UpdateReservationButtonsUi(ctx);
+}
+
+static std::wstring OutputExtensionForKind(const ExportDialogState* ctx, ExportDialogKind kind) {
+    switch (kind) {
+    case ExportDialogKind::PdfAll:
+    case ExportDialogKind::PdfPages:
+        return L".pdf";
+    case ExportDialogKind::PdfPng:
+        return L".png";
+    case ExportDialogKind::NoteText:
+        return L".txt";
+    case ExportDialogKind::NoteMarkup:
+        return IsExportDlgChecked(ctx ? ctx->radioMarkupHtml : nullptr) ? L".html" : L".md";
+    }
+    return L"";
+}
+
+static std::wstring OutputExtensionForResult(const ExportDialogState* ctx, const ExportDialogResult& result) {
+    if (result.kind == ExportDialogKind::NoteMarkup) {
+        return result.noteMarkupOptions.format == file_output::NoteMarkupExportOptions::Format::Html
+                   ? L".html"
+                   : L".md";
+    }
+    return OutputExtensionForKind(ctx, result.kind);
+}
+
+static std::filesystem::path OutputSourcePathForKind(ExportDialogKind kind) {
+    return IsPdfExportKind(kind) ? std::filesystem::path(CurrentLogicalPdfPath())
+                                 : std::filesystem::path(g_currentNotePath);
+}
+
+static std::wstring DefaultOutputNameForKind(const ExportDialogState* ctx, ExportDialogKind kind) {
+    const std::filesystem::path source = OutputSourcePathForKind(kind);
+    std::wstring stem = source.stem().wstring();
+    if (stem.empty()) stem = IsPdfExportKind(kind) ? L"document" : L"note";
+    switch (kind) {
+    case ExportDialogKind::PdfAll: return stem + L"_annotated.pdf";
+    case ExportDialogKind::PdfPages: return stem + L"_pages.pdf";
+    case ExportDialogKind::PdfPng: return stem + L"_page_1.png";
+    case ExportDialogKind::NoteText: return stem + L".txt";
+    case ExportDialogKind::NoteMarkup: return stem + OutputExtensionForKind(ctx, kind);
+    }
+    return stem;
+}
+
+static std::wstring DefaultOutputFolderForKind(ExportDialogKind kind) {
+    const std::filesystem::path source = OutputSourcePathForKind(kind);
+    if (!source.parent_path().empty()) return source.parent_path().wstring();
+    return g_workspaceRoot;
+}
+
+static void ResetSuggestedOutputTarget(ExportDialogState* ctx, ExportDialogKind kind) {
+    if (!ctx || !ctx->editOutputFolder || !ctx->editOutputName) return;
+    const std::wstring folder = DefaultOutputFolderForKind(kind);
+    const std::wstring name = DefaultOutputNameForKind(ctx, kind);
+    SetWindowTextW(ctx->editOutputFolder, folder.c_str());
+    SetWindowTextW(ctx->editOutputName, name.c_str());
+    ctx->outputTargetInitialized = true;
+    ctx->outputTargetKind = kind;
+    ctx->suggestedOutputName = name;
+}
+
+static bool BuildExportOutputTarget(ExportDialogState* ctx, ExportDialogResult& result) {
+    if (!ctx || !ctx->editOutputFolder || !ctx->editOutputName) return false;
+    const std::wstring folderText = TrimWhitespace(ReadDialogText(ctx->editOutputFolder));
+    std::wstring name = TrimWhitespace(ReadDialogText(ctx->editOutputName));
+    if (folderText.empty()) {
+        return RejectExportDialogInput(ctx, localization::Text(L"export.output_folder_required"),
+                                       ctx->editOutputFolder, true);
+    }
+    if (name.empty()) {
+        return RejectExportDialogInput(ctx, localization::Text(L"export.output_name_required"),
+                                       ctx->editOutputName, true);
+    }
+    const std::filesystem::path folder(folderText);
+    std::error_code ec;
+    if (!folder.is_absolute() || !std::filesystem::is_directory(folder, ec) || ec) {
+        return RejectExportDialogInput(ctx, localization::Text(L"export.output_folder_invalid"),
+                                       ctx->editOutputFolder, true);
+    }
+    const std::filesystem::path fileName(name);
+    if (fileName.has_parent_path() || fileName.has_root_name() || fileName.has_root_directory() ||
+        fileName.filename() != fileName || name == L"." || name == L"..") {
+        return RejectExportDialogInput(ctx, localization::Text(L"export.output_name_invalid"),
+                                       ctx->editOutputName, true);
+    }
+    const std::wstring expectedExtension = OutputExtensionForResult(ctx, result);
+    std::wstring extension = fileName.extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
+    if (extension.empty()) {
+        name += expectedExtension;
+        SetWindowTextW(ctx->editOutputName, name.c_str());
+    } else if (extension != expectedExtension) {
+        return RejectExportDialogInput(ctx,
+                                       localization::Format(L"export.output_extension_invalid",
+                                                            {{L"EXT", expectedExtension}}),
+                                       ctx->editOutputName, true);
+    }
+    result.outputPath = (folder / name).lexically_normal().wstring();
+    const std::filesystem::path source = OutputSourcePathForKind(result.kind);
+    if (!source.empty()) {
+        const auto normalizedSource = source.lexically_normal().wstring();
+        if (CompareStringOrdinal(result.outputPath.c_str(), -1, normalizedSource.c_str(), -1, TRUE) == CSTR_EQUAL) {
+            return RejectExportDialogInput(ctx, localization::Text(L"export.output_original_forbidden"),
+                                           ctx->editOutputName, true);
+        }
+    }
+    return !result.outputPath.empty();
+}
+
+static void UpdateReservationButtonsUi(ExportDialogState* ctx) {
+    if (!ctx) return;
+    const int selected = ctx->labelReservationList
+                             ? static_cast<int>(SendMessageW(ctx->labelReservationList, LB_GETCURSEL, 0, 0))
+                             : LB_ERR;
+    const int count = static_cast<int>(ctx->reservedResults.size());
+    EnableWindow(ctx->btnMoveReservationUp, selected > 0 && selected < count);
+    EnableWindow(ctx->btnMoveReservationDown, selected >= 0 && selected + 1 < count);
+    EnableWindow(ctx->btnRemoveReservation, selected >= 0 && selected < count);
+    EnableWindow(ctx->btnUpdateReservation, selected >= 0 && selected < count);
+    EnableWindow(ctx->btnExecuteReservation, selected >= 0 && selected < count);
+    EnableWindow(ctx->btnClearReservations, count > 0);
+}
+
+static void LoadSelectedReservationOutputTarget(ExportDialogState* ctx) {
+    if (!ctx || !ctx->labelReservationList || !ctx->editOutputFolder || !ctx->editOutputName) return;
+    const int selected = static_cast<int>(SendMessageW(ctx->labelReservationList, LB_GETCURSEL, 0, 0));
+    if (selected < 0 || selected >= static_cast<int>(ctx->reservedResults.size())) return;
+    const std::filesystem::path output(ctx->reservedResults[static_cast<size_t>(selected)].outputPath);
+    SetWindowTextW(ctx->editOutputFolder, output.parent_path().wstring().c_str());
+    SetWindowTextW(ctx->editOutputName, output.filename().wstring().c_str());
+    ctx->outputTargetInitialized = true;
+    ctx->outputTargetKind = ctx->reservedResults[static_cast<size_t>(selected)].kind;
+    ctx->suggestedOutputName.clear();
 }
 
 static void UpdateExportDialogUi(ExportDialogState* ctx) {
@@ -955,6 +1303,14 @@ static void UpdateExportDialogUi(ExportDialogState* ctx) {
     }
 
     ExportDialogKind kind = GetExportDialogKind(ctx);
+    const std::wstring suggestedName = DefaultOutputNameForKind(ctx, kind);
+    if (!ctx->outputTargetInitialized || ctx->outputTargetKind != kind) {
+        ResetSuggestedOutputTarget(ctx, kind);
+    } else if (ReadDialogText(ctx->editOutputName) == ctx->suggestedOutputName &&
+               suggestedName != ctx->suggestedOutputName) {
+        SetWindowTextW(ctx->editOutputName, suggestedName.c_str());
+        ctx->suggestedOutputName = suggestedName;
+    }
     bool showPageSpec = (kind == ExportDialogKind::PdfPages);
     bool showPageNumber = (kind == ExportDialogKind::PdfPng);
     bool showAnnots = (kind == ExportDialogKind::PdfPages || kind == ExportDialogKind::PdfPng);
@@ -1219,27 +1575,82 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
     return true;
 }
 
-static void StoreReservation(ExportDialogState* ctx, const ExportDialogResult& result) {
-    if (!ctx) return;
-    if (IsPdfExportKind(result.kind)) {
-        ctx->reservedPdf = result;
-    } else if (IsNoteExportKind(result.kind)) {
-        ctx->reservedNote = result;
+static bool SaveQuickPdfSettings(ExportDialogState* ctx) {
+    ExportDialogResult result{};
+    if (!BuildExportDialogResult(ctx, result)) return false;
+    if (result.kind != ExportDialogKind::PdfAll) {
+        return RejectExportDialogInput(ctx, localization::Text(L"export.quick_pdf_requires"));
     }
+    g_config.quickPdfScalePercent = std::clamp(static_cast<int>(std::lround(result.pdfScale * 100.0)), 13, 800);
+    g_config.quickPdfStandardTextAnnots = result.standardTextAnnots;
+    g_config.quickPdfMatchPdfPaneTextLayout = result.matchPdfPaneTextLayout;
+    if (!g_workspaceRoot.empty()) SaveWorkspaceConfig(g_workspaceRoot, g_config);
+    ShowSoftNotice(ctx->hwnd, localization::Text(L"export.quick_settings_saved"), SoftNoticeKind::Info);
+    return true;
+}
+
+static bool SaveQuickNoteSettings(ExportDialogState* ctx) {
+    ExportDialogResult result{};
+    if (!BuildExportDialogResult(ctx, result)) return false;
+    if (result.kind != ExportDialogKind::NoteText) {
+        return RejectExportDialogInput(ctx, localization::Text(L"export.quick_note_requires"));
+    }
+    g_config.quickNoteStripMarkup = result.textOptions.markupMode == file_output::MarkupMode::Simplified;
+    g_config.quickNoteIncludeComments = result.textOptions.includeCommentLines;
+    g_config.quickNoteMathPlaceholder = result.textOptions.mathMode == file_output::MathMode::Placeholder;
+    if (g_config.quickNoteMathPlaceholder) {
+        std::wstring placeholder = TrimWhitespace(UTF8ToWide(result.textOptions.mathPlaceholder));
+        if (placeholder.empty()) placeholder = L"[math]";
+        if (placeholder.size() > 512) placeholder.resize(512);
+        g_config.quickNoteMathPlaceholderText = std::move(placeholder);
+    }
+    if (!g_workspaceRoot.empty()) SaveWorkspaceConfig(g_workspaceRoot, g_config);
+    ShowSoftNotice(ctx->hwnd, localization::Text(L"export.quick_settings_saved"), SoftNoticeKind::Info);
+    return true;
+}
+
+static bool SameOutputPath(const std::wstring& lhs, const std::wstring& rhs) {
+    if (lhs.empty() || rhs.empty()) return false;
+    const std::wstring normalizedLhs = std::filesystem::path(lhs).lexically_normal().wstring();
+    const std::wstring normalizedRhs = std::filesystem::path(rhs).lexically_normal().wstring();
+    return CompareStringOrdinal(normalizedLhs.c_str(), -1, normalizedRhs.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+
+static bool ReservationTargetConflicts(const ExportDialogState* ctx,
+                                       const ExportDialogResult& result,
+                                       int ignoredIndex = -1) {
+    if (!ctx) return false;
+    for (int i = 0; i < static_cast<int>(ctx->reservedResults.size()); ++i) {
+        if (i == ignoredIndex) continue;
+        if (SameOutputPath(ctx->reservedResults[static_cast<size_t>(i)].outputPath, result.outputPath)) return true;
+    }
+    return false;
+}
+
+static bool StoreReservation(ExportDialogState* ctx, const ExportDialogResult& result) {
+    if (!ctx) return false;
+    if (ReservationTargetConflicts(ctx, result)) {
+        return RejectExportDialogInput(ctx, localization::Text(L"export.reservation_duplicate_destination"),
+                                       ctx->editOutputName, true);
+    }
+    ctx->reservedResults.push_back(result);
     UpdateReservationSummaryUi(ctx);
+    return true;
 }
 
 static void SwitchCategoryAfterSet(ExportDialogState* ctx, ExportDialogKind justStoredKind) {
     if (!ctx) return;
-    if (IsPdfExportKind(justStoredKind) && ctx->hasNote && !ctx->reservedNote.has_value()) {
+    if (IsPdfExportKind(justStoredKind) && ctx->hasNote) {
         CheckRadioButton(ctx->hwnd, kExportDlgIdTopPdf, kExportDlgIdTopNote, kExportDlgIdTopNote);
         UpdateExportDialogUi(ctx);
-        return;
-    }
-    if (IsNoteExportKind(justStoredKind) && ctx->hasPdf && !ctx->reservedPdf.has_value()) {
+    } else if (IsNoteExportKind(justStoredKind) && ctx->hasPdf) {
         CheckRadioButton(ctx->hwnd, kExportDlgIdTopPdf, kExportDlgIdTopNote, kExportDlgIdTopPdf);
         UpdateExportDialogUi(ctx);
     }
+    // The destination controls now describe the next output, not the last
+    // reservation. Require an explicit list selection before allowing update.
+    if (ctx->labelReservationList) SendMessageW(ctx->labelReservationList, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+    UpdateReservationButtonsUi(ctx);
 }
 
 static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1256,14 +1667,17 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         const int row2Y = 42;
         const int rowH = 26;
         const int fileY = 76;
-        const int optY = 104;
+        const int outputFolderY = 100;
+        const int outputNameY = 128;
+        const int optY = 164;
         const int outSizeY = optY + 84;
         const int outSizeMmY = outSizeY + 52;
         const int paperY = outSizeY + 74;
         const int pngStyleY = outSizeY + 102;
         const int stdTextY = outSizeY + 130;
         const int buttonsY = outSizeY + 192;
-        const int reservationTitleY = buttonsY + 36;
+        const int quickButtonsY = buttonsY + 36;
+        const int reservationTitleY = quickButtonsY + 34;
         const int reservationListY = reservationTitleY + 20;
 
         ctx->topPdf = CreateWindowExW(0, L"BUTTON", L"PDF",
@@ -1301,6 +1715,29 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                 WS_CHILD | WS_VISIBLE,
                                                 margin, fileY, 460, 20, hWnd, nullptr,
                                                 cs->hInstance, nullptr);
+        ctx->labelOutputFolder = CreateWindowExW(0, L"STATIC", localization::Text(L"export.output_folder_label").c_str(),
+                                                 WS_CHILD | WS_VISIBLE,
+                                                 margin, outputFolderY, 90, 20, hWnd, nullptr,
+                                                 cs->hInstance, nullptr);
+        ctx->editOutputFolder = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                                margin + 95, outputFolderY - 2, 290, 22, hWnd,
+                                                reinterpret_cast<HMENU>(kExportDlgIdOutputFolder),
+                                                cs->hInstance, nullptr);
+        ctx->btnBrowseOutputFolder = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.browse").c_str(),
+                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                     margin + 392, outputFolderY - 2, 76, 22, hWnd,
+                                                     reinterpret_cast<HMENU>(kExportDlgIdBrowseOutputFolder),
+                                                     cs->hInstance, nullptr);
+        ctx->labelOutputName = CreateWindowExW(0, L"STATIC", localization::Text(L"export.output_name_label").c_str(),
+                                               WS_CHILD | WS_VISIBLE,
+                                               margin, outputNameY, 90, 20, hWnd, nullptr,
+                                               cs->hInstance, nullptr);
+        ctx->editOutputName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                              margin + 95, outputNameY - 2, 373, 22, hWnd,
+                                              reinterpret_cast<HMENU>(kExportDlgIdOutputName),
+                                              cs->hInstance, nullptr);
 
         ctx->labelPageSpec = CreateWindowExW(0, L"STATIC", localization::Text(L"export.page_spec_label").c_str(),
                                              WS_CHILD | WS_VISIBLE,
@@ -1474,27 +1911,66 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                   reinterpret_cast<HMENU>(kExportDlgIdShiftHeadings),
                                                   cs->hInstance, nullptr);
 
-        ctx->btnSet = CreateWindowExW(0, L"BUTTON", L"Set", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                      210, buttonsY, 80, 26, hWnd, reinterpret_cast<HMENU>(kExportDlgIdSet),
+        ctx->btnSet = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.add_to_list").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                      170, buttonsY, 100, 26, hWnd, reinterpret_cast<HMENU>(kExportDlgIdSet),
                                       cs->hInstance, nullptr);
+        ctx->btnUpdateReservation = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.update_reservation").c_str(),
+                                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                    280, buttonsY, 100, 26, hWnd,
+                                                    reinterpret_cast<HMENU>(kExportDlgIdUpdateReservation),
+                                                    cs->hInstance, nullptr);
         ctx->labelInlineError = CreateWindowExW(0, L"STATIC", L"",
                                                 WS_CHILD,
-                                                margin, buttonsY - 6, 188, 40, hWnd, nullptr,
+                                                margin, buttonsY - 6, 148, 40, hWnd, nullptr,
                                                 cs->hInstance, nullptr);
-        HWND okBtn = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                     300, buttonsY, 80, 26, hWnd, reinterpret_cast<HMENU>(IDOK),
+        HWND okBtn = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.execute").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                     390, buttonsY, 80, 26, hWnd, reinterpret_cast<HMENU>(IDOK),
                                      cs->hInstance, nullptr);
-        HWND cancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                         390, buttonsY, 80, 26, hWnd, reinterpret_cast<HMENU>(IDCANCEL),
+        HWND cancelBtn = CreateWindowExW(0, L"BUTTON", localization::Text(L"common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                         480, buttonsY, 80, 26, hWnd, reinterpret_cast<HMENU>(IDCANCEL),
                                          cs->hInstance, nullptr);
+        ctx->btnSaveQuickPdf = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.save_quick_pdf").c_str(),
+                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                               margin, quickButtonsY, 145, 26, hWnd,
+                                               reinterpret_cast<HMENU>(kExportDlgIdSaveQuickPdf), cs->hInstance, nullptr);
+        ctx->btnSaveQuickNote = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.save_quick_note").c_str(),
+                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                margin + 155, quickButtonsY, 145, 26, hWnd,
+                                                reinterpret_cast<HMENU>(kExportDlgIdSaveQuickNote), cs->hInstance, nullptr);
+        ctx->btnShowQuickSettings = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.show_quick_settings").c_str(),
+                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                     margin + 310, quickButtonsY, 155, 26, hWnd,
+                                                     reinterpret_cast<HMENU>(kExportDlgIdShowQuickSettings), cs->hInstance, nullptr);
         ctx->labelReservationTitle = CreateWindowExW(0, L"STATIC", localization::Text(L"export.reservation_list_title").c_str(),
                                                      WS_CHILD | WS_VISIBLE,
-                                                     margin, reservationTitleY, 460, 20, hWnd, nullptr,
+                                                     margin, reservationTitleY, 540, 20, hWnd, nullptr,
                                                      cs->hInstance, nullptr);
-        ctx->labelReservationList = CreateWindowExW(0, L"STATIC", L"",
-                                                    WS_CHILD | WS_VISIBLE,
-                                                    margin, reservationListY, 460, 52, hWnd, nullptr,
+        ctx->labelReservationList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL,
+                                                    margin, reservationListY, 540, 66, hWnd,
+                                                    reinterpret_cast<HMENU>(kExportDlgIdReservationList),
                                                     cs->hInstance, nullptr);
+        const int reservationActionsY = reservationListY + 70;
+        ctx->btnExecuteReservation = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.execute_selected").c_str(),
+                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                     margin, reservationActionsY, 110, 24, hWnd,
+                                                     reinterpret_cast<HMENU>(kExportDlgIdExecuteReservation), cs->hInstance, nullptr);
+        ctx->btnMoveReservationUp = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.move_up").c_str(),
+                                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                    margin + 120, reservationActionsY, 70, 24, hWnd,
+                                                    reinterpret_cast<HMENU>(kExportDlgIdMoveReservationUp), cs->hInstance, nullptr);
+        ctx->btnMoveReservationDown = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.move_down").c_str(),
+                                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                      margin + 200, reservationActionsY, 70, 24, hWnd,
+                                                      reinterpret_cast<HMENU>(kExportDlgIdMoveReservationDown), cs->hInstance, nullptr);
+        ctx->btnRemoveReservation = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.remove_selected").c_str(),
+                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                     margin + 280, reservationActionsY, 110, 24, hWnd,
+                                                     reinterpret_cast<HMENU>(kExportDlgIdRemoveReservation), cs->hInstance, nullptr);
+        ctx->btnClearReservations = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.clear_list").c_str(),
+                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                     margin + 400, reservationActionsY, 120, 24, hWnd,
+                                                     reinterpret_cast<HMENU>(kExportDlgIdClearReservations), cs->hInstance, nullptr);
 
         auto applyFont = [&](HWND h) {
             if (h && g_hUIFont) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_hUIFont), TRUE);
@@ -1507,6 +1983,11 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         applyFont(ctx->noteText);
         applyFont(ctx->noteMarkup);
         applyFont(ctx->labelFileExample);
+        applyFont(ctx->labelOutputFolder);
+        applyFont(ctx->editOutputFolder);
+        applyFont(ctx->btnBrowseOutputFolder);
+        applyFont(ctx->labelOutputName);
+        applyFont(ctx->editOutputName);
         applyFont(ctx->labelPageSpec);
         applyFont(ctx->editPageSpec);
         applyFont(ctx->labelPageNumber);
@@ -1545,6 +2026,15 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         applyFont(ctx->checkTitleHeading);
         applyFont(ctx->checkShiftHeadings);
         applyFont(ctx->btnSet);
+        applyFont(ctx->btnUpdateReservation);
+        applyFont(ctx->btnSaveQuickPdf);
+        applyFont(ctx->btnSaveQuickNote);
+        applyFont(ctx->btnShowQuickSettings);
+        applyFont(ctx->btnClearReservations);
+        applyFont(ctx->btnExecuteReservation);
+        applyFont(ctx->btnMoveReservationUp);
+        applyFont(ctx->btnMoveReservationDown);
+        applyFont(ctx->btnRemoveReservation);
         applyFont(ctx->labelInlineError);
         applyFont(okBtn);
         applyFont(cancelBtn);
@@ -1556,6 +2046,8 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         };
         attachSilentEdit(ctx->editPageSpec);
         attachSilentEdit(ctx->editPageNumber);
+        attachSilentEdit(ctx->editOutputFolder);
+        attachSilentEdit(ctx->editOutputName);
         attachSilentEdit(ctx->editOutSizeW);
         attachSilentEdit(ctx->editOutSizeH);
         attachSilentEdit(ctx->editMathPlaceholder);
@@ -1661,16 +2153,15 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
     case WM_COMMAND: {
         int id = LOWORD(wParam);
         if (id == IDOK) {
-            if (ctx && (ctx->reservedPdf.has_value() || ctx->reservedNote.has_value())) {
-                ctx->committedResults.clear();
-                if (ctx->reservedNote.has_value()) ctx->committedResults.push_back(*ctx->reservedNote);
-                if (ctx->reservedPdf.has_value()) ctx->committedResults.push_back(*ctx->reservedPdf);
+            if (ctx && !ctx->reservedResults.empty()) {
+                ctx->committedResults = ctx->reservedResults;
                 ctx->ok = !ctx->committedResults.empty();
                 ctx->done = true;
                 DestroyWindow(hWnd);
             } else {
                 ExportDialogResult current{};
                 if (!BuildExportDialogResult(ctx, current)) return 0;
+                if (!BuildExportOutputTarget(ctx, current)) return 0;
                 ctx->committedResults.clear();
                 ctx->committedResults.push_back(std::move(current));
                 ctx->ok = true;
@@ -1682,8 +2173,86 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         if (id == kExportDlgIdSet) {
             ExportDialogResult current{};
             if (!BuildExportDialogResult(ctx, current)) return 0;
-            StoreReservation(ctx, current);
+            if (!BuildExportOutputTarget(ctx, current)) return 0;
+            if (!StoreReservation(ctx, current)) return 0;
             SwitchCategoryAfterSet(ctx, current.kind);
+            return 0;
+        }
+        if (id == kExportDlgIdExecuteReservation) {
+            if (!ctx || !ctx->labelReservationList) return 0;
+            const int selected = static_cast<int>(SendMessageW(ctx->labelReservationList, LB_GETCURSEL, 0, 0));
+            if (selected < 0 || selected >= static_cast<int>(ctx->reservedResults.size())) return 0;
+            ctx->committedResults.clear();
+            ctx->committedResults.push_back(ctx->reservedResults[static_cast<size_t>(selected)]);
+            ctx->ok = true;
+            ctx->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (id == kExportDlgIdUpdateReservation) {
+            if (!ctx || !ctx->labelReservationList) return 0;
+            const int selected = static_cast<int>(SendMessageW(ctx->labelReservationList, LB_GETCURSEL, 0, 0));
+            if (selected < 0 || selected >= static_cast<int>(ctx->reservedResults.size())) return 0;
+            ExportDialogResult updated = ctx->reservedResults[static_cast<size_t>(selected)];
+            if (!BuildExportOutputTarget(ctx, updated)) return 0;
+            if (ReservationTargetConflicts(ctx, updated, selected)) {
+                RejectExportDialogInput(ctx, localization::Text(L"export.reservation_duplicate_destination"),
+                                        ctx->editOutputName, true);
+                return 0;
+            }
+            ctx->reservedResults[static_cast<size_t>(selected)].outputPath = std::move(updated.outputPath);
+            UpdateReservationSummaryUi(ctx);
+            SendMessageW(ctx->labelReservationList, LB_SETCURSEL, selected, 0);
+            UpdateReservationButtonsUi(ctx);
+            return 0;
+        }
+        if (id == kExportDlgIdBrowseOutputFolder) {
+            if (!ctx) return 0;
+            std::filesystem::path initial(TrimWhitespace(ReadDialogText(ctx->editOutputFolder)));
+            if (initial.empty()) initial = std::filesystem::path(DefaultOutputFolderForKind(GetExportDialogKind(ctx)));
+            auto picked = PickFolderWithInitial(hWnd, initial, localization::Text(L"export.select_output_folder"));
+            if (picked) SetWindowTextW(ctx->editOutputFolder, picked->c_str());
+            return 0;
+        }
+        if (id == kExportDlgIdSaveQuickPdf) {
+            (void)SaveQuickPdfSettings(ctx);
+            return 0;
+        }
+        if (id == kExportDlgIdSaveQuickNote) {
+            (void)SaveQuickNoteSettings(ctx);
+            return 0;
+        }
+        if (id == kExportDlgIdShowQuickSettings) {
+            ShowQuickExportSettingsDialog(hWnd);
+            return 0;
+        }
+        if (id == kExportDlgIdClearReservations) {
+            if (!ctx) return 0;
+            ctx->reservedResults.clear();
+            UpdateReservationSummaryUi(ctx);
+            return 0;
+        }
+        if (id == kExportDlgIdMoveReservationUp || id == kExportDlgIdMoveReservationDown ||
+            id == kExportDlgIdRemoveReservation) {
+            if (!ctx) return 0;
+            const int selected = static_cast<int>(SendMessageW(ctx->labelReservationList, LB_GETCURSEL, 0, 0));
+            const int count = static_cast<int>(ctx->reservedResults.size());
+            if (selected < 0 || selected >= count) return 0;
+            if (id == kExportDlgIdMoveReservationUp && selected > 0) {
+                std::swap(ctx->reservedResults[static_cast<size_t>(selected)],
+                          ctx->reservedResults[static_cast<size_t>(selected - 1)]);
+                UpdateReservationSummaryUi(ctx);
+                SendMessageW(ctx->labelReservationList, LB_SETCURSEL, selected - 1, 0);
+            } else if (id == kExportDlgIdMoveReservationDown && selected + 1 < count) {
+                std::swap(ctx->reservedResults[static_cast<size_t>(selected)],
+                          ctx->reservedResults[static_cast<size_t>(selected + 1)]);
+                UpdateReservationSummaryUi(ctx);
+                SendMessageW(ctx->labelReservationList, LB_SETCURSEL, selected + 1, 0);
+            } else if (id == kExportDlgIdRemoveReservation) {
+                ctx->reservedResults.erase(ctx->reservedResults.begin() + selected);
+                UpdateReservationSummaryUi(ctx);
+            }
+            UpdateReservationButtonsUi(ctx);
             return 0;
         }
         if (id == IDCANCEL) {
@@ -1712,8 +2281,24 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                 return 0;
             }
         }
+        if (id == kExportDlgIdReservationList && HIWORD(wParam) == LBN_SELCHANGE) {
+            LoadSelectedReservationOutputTarget(ctx);
+            UpdateReservationButtonsUi(ctx);
+            return 0;
+        }
         if (HIWORD(wParam) == BN_CLICKED) {
             ClearExportDialogInlineError(ctx);
+            const bool changesOutputKind = id == kExportDlgIdTopPdf || id == kExportDlgIdTopNote ||
+                                           id == kExportDlgIdPdfAll || id == kExportDlgIdPdfPages ||
+                                           id == kExportDlgIdPdfPng || id == kExportDlgIdNoteText ||
+                                           id == kExportDlgIdNoteMarkup;
+            if (changesOutputKind && ctx && ctx->labelReservationList) {
+                // The fields become a new output's defaults after a format
+                // change, so they must not still be presented as an edit of
+                // the previously selected reservation.
+                SendMessageW(ctx->labelReservationList, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+                UpdateReservationButtonsUi(ctx);
+            }
             UpdateExportDialogUi(ctx);
             UpdateExportDialogSizeUi(ctx, id);
         } else if (HIWORD(wParam) == EN_CHANGE) {
@@ -1740,6 +2325,9 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         ctx->done = true;
         DestroyWindow(hWnd);
         return 0;
+    case WM_DESTROY:
+        UnregisterAppExitDialog(hWnd);
+        return 0;
     }
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
@@ -1761,9 +2349,10 @@ bool ShowUnifiedExportDialog(HWND owner, ExportDialogKind preset, std::vector<Ex
     ScopedExportDialogOwner modalOwner(owner);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, dialogTitle.c_str(),
                              WS_CAPTION | WS_POPUPWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 520, 548,
+                             CW_USEDEFAULT, CW_USEDEFAULT, 580, 670,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return false;
+    RegisterAppExitBlockingDialog(w);
     PlaceOwnedPopupAtAppTopLeft(w, owner);
     ShowWindow(w, SW_SHOW);
     UpdateWindow(w);

@@ -52,6 +52,10 @@ bool ConfigureRuntimeNoteIdentityStore(const std::filesystem::path& workspaceRoo
                                        std::wstring* outError = nullptr);
 NoteIdentity ResolveRuntimeNoteIdentityPath(const std::wstring& absolutePath,
                                             std::wstring* outError = nullptr);
+// Read-only lookup used by workspace transaction recovery. Unlike Resolve,
+// this never allocates an identity or writes the catalog.
+std::optional<NoteId> FindRuntimeNoteIdentityPath(const std::wstring& absolutePath,
+                                                  std::wstring* outError = nullptr);
 bool RebindRuntimeNoteIdentityPath(NoteId noteId,
                                    const std::wstring& oldAbsolutePath,
                                    const std::wstring& newAbsolutePath,

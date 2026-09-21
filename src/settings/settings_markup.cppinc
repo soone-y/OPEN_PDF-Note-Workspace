@@ -85,7 +85,7 @@ static void UpdateMarkupSectionNavUi(MarkupSettingsCtx* ctx, int sectionIndex) {
     if (!ctx) return;
     int clamped = std::clamp(sectionIndex, 0, std::max(0, ctx->sectionCount - 1));
     if (ctx->navList) {
-        SendMessageW(ctx->navList, LB_SETCURSEL, clamped, 0);
+        SendMessageW(ctx->navList, CB_SETCURSEL, clamped, 0);
     }
 }
 
@@ -152,6 +152,8 @@ static void ScrollMarkupSettingsTo(HWND hWnd, MarkupSettingsCtx* ctx, int newPos
     si.fMask = SIF_POS;
     si.nPos = clamped;
     SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+    UpdateMarkupSectionNavUi(ctx, SettingsSectionForScrollPosition(
+        ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
 }
 
 static void JumpMarkupSettingsToSection(HWND hWnd, MarkupSettingsCtx* ctx, int sectionIndex) {
@@ -164,8 +166,8 @@ static void LayoutMarkupSettingsChrome(HWND hWnd, MarkupSettingsCtx* ctx) {
     if (!hWnd || !ctx) return;
     const int pad = ScaleY(hWnd, 12);
     const int rowH = std::max(ScaleY(hWnd, 24), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
-    const int navW = ScaleY(hWnd, ctx->embedded ? 170 : 200);
-    const int columnGap = ScaleY(hWnd, 18);
+    const int sectionNavH = rowH;
+    const int sectionNavGap = ScaleY(hWnd, 8);
     const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
     const int titleH = std::max(rowH, ScaleY(hWnd, 30));
     RECT rc{};
@@ -187,8 +189,10 @@ static void LayoutMarkupSettingsChrome(HWND hWnd, MarkupSettingsCtx* ctx) {
     int panelTop = pad + headerH;
     int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
     int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
-    int contentPaneX = pad + navW + columnGap;
-    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - contentPaneX - pad);
+    int contentPaneX = pad;
+    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - pad * 2);
+    int contentPanelTop = panelTop + sectionNavH + sectionNavGap;
+    int contentPanelH = std::max(ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
     if (!ctx->embedded && ctx->headerTitle) {
         SetWindowPos(ctx->headerTitle, nullptr, pad, pad, clientW - pad * 2, titleH,
                      SWP_NOZORDER | SWP_NOACTIVATE);
@@ -201,11 +205,12 @@ static void LayoutMarkupSettingsChrome(HWND hWnd, MarkupSettingsCtx* ctx) {
         LayoutHeaderSectionButtons(hWnd, ctx->categoryButtons, pad, sectionButtonTop, clientW - pad * 2, sectionButtonH);
     }
     if (ctx->navList) {
-        SetWindowPos(ctx->navList, nullptr, pad, panelTop, navW, panelH,
+        int sectionNavW = std::min(contentPaneW, ScaleY(hWnd, ctx->embedded ? 360 : 400));
+        SetWindowPos(ctx->navList, nullptr, contentPaneX, panelTop, sectionNavW, sectionNavH,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (ctx->scrollPanel) {
-        SetWindowPos(ctx->scrollPanel, nullptr, contentPaneX, panelTop, contentPaneW, panelH,
+        SetWindowPos(ctx->scrollPanel, nullptr, contentPaneX, contentPanelTop, contentPaneW, contentPanelH,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (!ctx->embedded) {
@@ -318,8 +323,8 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         GetClientRect(hWnd, &rc);
         int clientW = std::max(0, static_cast<int>(rc.right - rc.left));
         int clientH = std::max(0, static_cast<int>(rc.bottom - rc.top));
-        const int navW = ScaleY(hWnd, ctx->embedded ? 170 : 200);
-        const int columnGap = ScaleY(hWnd, 18);
+        const int sectionNavH = rowH;
+        const int sectionNavGap = ScaleY(hWnd, 8);
         const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
         const int titleH = std::max(rowH, ScaleY(hWnd, 30));
         const std::wstring subtitle = localization::Text(L"settings.markup.subtitle");
@@ -331,8 +336,10 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         const int panelTop = pad + headerH;
         const int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
         const int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
-        const int contentPaneX = pad + navW + columnGap;
-        const int contentPaneW = std::max(ScaleY(hWnd, 340), clientW - contentPaneX - pad);
+        const int contentPaneX = pad;
+        const int contentPaneW = std::max(ScaleY(hWnd, 340), clientW - pad * 2);
+        const int contentPanelTop = panelTop + sectionNavH + sectionNavGap;
+        const int contentPanelH = std::max(ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
         int contentW = std::max(0, contentPaneW - pad * 2);
         int controlW = SettingsControlWidth(hWnd, contentW, ctx->embedded, 240, 420);
         int y = pad;
@@ -364,18 +371,19 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
             UpdateSettingsCategoryButtons(ctx->categoryButtons, kSettingsNavMarkup);
         }
 
-        ctx->navList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                                       pad, panelTop, navW, panelH,
+        int sectionNavW = std::min(contentPaneW, ScaleY(hWnd, ctx->embedded ? 360 : 400));
+        ctx->navList = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+                                       contentPaneX, panelTop, sectionNavW, ScaleY(hWnd, 240),
                                        hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MARKUP_SECTION_LIST)),
                                        g_hInst, nullptr);
         SetUIFont(ctx->navList);
         SetSettingsNavFont(ctx->navList);
-        SetWindowSubclass(ctx->navList, SettingsNavListSubclassProc, 1, 0);
+        ui::GuardComboAgainstAccidentalChange(ctx->navList);
 
         ctx->scrollPanel = CreateWindowExW(0, L"SettingsScrollPanelClass", L"",
                                            WS_CHILD | WS_VISIBLE,
-                                           contentPaneX, panelTop, contentPaneW, panelH,
+                                           contentPaneX, contentPanelTop, contentPaneW, contentPanelH,
                                            hWnd, nullptr, g_hInst, nullptr);
 
         WorkspaceConfig defaults;
@@ -544,7 +552,8 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         GetWindowRect(hWnd, &winRc);
         int winH = std::max(0, static_cast<int>(winRc.bottom - winRc.top));
         int frameH = std::max(0, winH - clientH);
-        int desiredClientH = headerH + std::max(ctx->contentHeight, ScaleY(hWnd, 360)) + panelBottomPad;
+        int desiredClientH = headerH + sectionNavH + sectionNavGap +
+                             std::max(ctx->contentHeight, ScaleY(hWnd, 360)) + panelBottomPad;
         int desiredHeight = std::max(ScaleY(hWnd, kMarkupDlgHeight), desiredClientH + frameH);
         int maxHeight = (workH > 0) ? std::max(0, workH - margin) : desiredHeight;
         if (maxHeight > 0) desiredHeight = std::min(desiredHeight, maxHeight);
@@ -557,6 +566,8 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         ctx->scrollPos = 0;
         UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
                            &ctx->scrollPos, &ctx->scrollMax);
+        UpdateMarkupSectionNavUi(ctx, SettingsSectionForScrollPosition(
+            ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
 
         auto fillFont = [&](HWND cb, std::initializer_list<int> pts, int current, const std::wstring& defaultLabel) {
             if (!cb) return;
@@ -618,10 +629,10 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         LoadActiveMarkupCustomTagPreset(ctx);
 
         if (ctx->navList) {
-            SendMessageW(ctx->navList, LB_RESETCONTENT, 0, 0);
-            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(L"settings.markup.section_heading").c_str()));
-            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(L"settings.markup.section_emphasis").c_str()));
-            SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(L"settings.markup.section_custom_tag").c_str()));
+            SendMessageW(ctx->navList, CB_RESETCONTENT, 0, 0);
+            SendMessageW(ctx->navList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(L"settings.markup.section_heading").c_str()));
+            SendMessageW(ctx->navList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(L"settings.markup.section_emphasis").c_str()));
+            SendMessageW(ctx->navList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(L"settings.markup.section_custom_tag").c_str()));
             UpdateMarkupSectionNavUi(ctx, 0);
         }
 
@@ -659,6 +670,8 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
             if (ctx->contentHeight > 0) {
                 UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
                                    &ctx->scrollPos, &ctx->scrollMax);
+                UpdateMarkupSectionNavUi(ctx, SettingsSectionForScrollPosition(
+                    ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
             }
         }
         break;
@@ -724,8 +737,8 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
         if (!ctx) break;
-        if (id == IDC_MARKUP_SECTION_LIST && code == LBN_SELCHANGE) {
-            int sel = static_cast<int>(SendMessageW(ctx->navList, LB_GETCURSEL, 0, 0));
+        if (id == IDC_MARKUP_SECTION_LIST && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(ctx->navList, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {
                 UpdateMarkupSectionNavUi(ctx, sel);
                 JumpMarkupSettingsToSection(hWnd, ctx, sel);

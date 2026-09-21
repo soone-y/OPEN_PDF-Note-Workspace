@@ -14,7 +14,6 @@
 #include "note/note_semantic_index.h"
 #include "note/note_identity_store.h"
 #include "note/note_workspace_service.h"
-#include "note_view/note_view.h"
 #include "pdf_view/pdf_view.h"
 
 #include <algorithm>
@@ -284,7 +283,7 @@ static void SetIdleStatus(SearchCtx* ctx, const std::wstring& text) {
 }
 
 static void ClearOpenedSearchResultMarkers() {
-    ClearNoteSearchResultMarker();
+    ClearCurrentNoteSearchMarker();
     ClearPdfSearchResultMarker();
 }
 
@@ -1162,10 +1161,10 @@ static bool IsCurrentOpenNotePath(const std::filesystem::path& path) {
 
 static note_snapshot::CurrentEditTextSnapshot CurrentEditSnapshotForNotePath(const std::filesystem::path& path) {
     note_snapshot::CurrentEditTextSnapshot snapshot;
-    if (!g_hNoteEdit || !IsCurrentOpenNotePath(path)) return snapshot;
+    if (!HasCurrentNoteEditorForPath(path.wstring()) || !IsCurrentOpenNotePath(path)) return snapshot;
     snapshot.available = true;
     snapshot.targetPath = path.wstring();
-    snapshot.bytes = WideToUTF8(GetWindowTextValue(g_hNoteEdit));
+    snapshot.bytes = WideToUTF8(ReadCurrentNoteEditorText());
     snapshot.identity = CaptureCurrentNoteSnapshotIdentity();
     return snapshot;
 }
@@ -1173,10 +1172,10 @@ static note_snapshot::CurrentEditTextSnapshot CurrentEditSnapshotForNotePath(con
 static bool CurrentOpenNoteMatchesSnapshot(
     const note::SnapshotIdentity& expectedIdentity) {
     if (!expectedIdentity.valid()) return true;
-    if (!g_hNoteEdit) return false;
+    if (!HasCurrentNoteEditorForPath(g_currentNotePath)) return false;
     note::SnapshotIdentity currentIdentity = CaptureCurrentNoteSnapshotIdentity();
     if (!currentIdentity.note_id.valid()) return false;
-    const std::string bytes = WideToUTF8(GetWindowTextValue(g_hNoteEdit));
+    const std::string bytes = WideToUTF8(ReadCurrentNoteEditorText());
     currentIdentity = note::BuildSnapshotIdentity(
         currentIdentity.note_id,
         currentIdentity.content_revision,
@@ -1205,7 +1204,9 @@ static void SearchNoteText(const std::wstring& text,
     std::wstring extension = ToLowerCopy(path.extension().wstring());
     const note::NoteContentKind contentKind = extension == L".txt"
         ? note::NoteContentKind::PlainText
-        : note::NoteContentKind::Markdown;
+        : extension == L".tex"
+            ? note::NoteContentKind::TeXSource
+            : note::NoteContentKind::Markdown;
     const auto index = note::RuntimeNoteWorkspaceService().ResolveIndex(
         snapshotIdentity, path.wstring(), std::move(metadata), text, contentKind);
     if (!index) return;
@@ -1597,14 +1598,7 @@ static bool ExtractLectureSessionFromVisibleLecturePath(const std::filesystem::p
 }
 
 static void JumpToNoteLine(int line) {
-    if (!g_hNoteEdit || line < 1) return;
-    int lineIndex = std::max(0, line - 1);
-    LRESULT start = SendMessageW(g_hNoteEdit, EM_LINEINDEX, static_cast<WPARAM>(lineIndex), 0);
-    if (start < 0) return;
-    LRESULT end = SendMessageW(g_hNoteEdit, EM_LINEINDEX, static_cast<WPARAM>(lineIndex + 1), 0);
-    if (end < 0) end = start;
-    SendMessageW(g_hNoteEdit, EM_SETSEL, static_cast<WPARAM>(start), static_cast<LPARAM>(end));
-    SendMessageW(g_hNoteEdit, EM_SCROLLCARET, 0, 0);
+    static_cast<void>(SelectCurrentNoteLine(line));
 }
 
 static std::wstring BuildSummaryText(const SearchJob& job, const SearchUiStrings& ui) {
@@ -2451,7 +2445,7 @@ static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex, bool navi
         if (!CurrentOpenNoteMatchesSnapshot(item.noteSnapshotIdentity)) return;
         if (item.lineNumber >= 1) JumpToNoteLine(item.lineNumber);
         if (item.textStart != std::wstring::npos && item.textEnd > item.textStart) {
-            SetNoteSearchResultMarker(item.textStart, item.textEnd);
+            SetCurrentNoteSearchMarker(item.textStart, item.textEnd);
         }
         MarkSearchResultOpened(ctx, listIndex);
         return;

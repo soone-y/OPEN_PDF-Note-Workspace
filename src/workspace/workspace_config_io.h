@@ -30,10 +30,9 @@ bool SaveNoteIfDirty(HWND hWnd);
 void FinalizeManualSaveUi(HWND hWnd, bool updateWindowTitleAfterSave);
 void SaveSettingsPreset(HWND hWnd);
 void LoadSettingsPreset(HWND hWnd);
-bool ExportAllUserSettingsToFile(const std::filesystem::path& outputPath, std::wstring* outErr = nullptr);
-bool ImportAllUserSettingsFromFile(const std::filesystem::path& inputPath, std::wstring* outErr = nullptr);
-void ExportAllUserSettings(HWND hWnd);
-void ImportAllUserSettings(HWND hWnd);
+bool ExportSettingsPresetToFile(const std::filesystem::path& outputPath, std::wstring* outErr = nullptr);
+bool ImportSettingsPresetFromFile(const std::filesystem::path& inputPath, std::wstring* outErr = nullptr,
+                                  std::filesystem::path* outRecoveryBackup = nullptr);
 void SaveAllManual(HWND hWnd);
 void SaveCurrentNoteManual(HWND hWnd);
 

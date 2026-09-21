@@ -4,6 +4,7 @@ param(
     [string]$NamePrefix = "pdf_note_workspace",
     [switch]$Zip,
     [switch]$Checksums = $true,
+    [switch]$NoChecksums,
     [switch]$IncludeWorkspace,
     [string]$WorkspacePath = "",
     [switch]$NoSetupJson,
@@ -12,6 +13,7 @@ param(
     [string]$LibreOfficeRuntimePath = "",
     [switch]$SkipFreshnessCheck,
     [switch]$DryRun,
+    [switch]$TestOnly,
     [switch]$Lite,
     [ValidateSet("ja", "en")]
     [string]$Locale = "ja"
@@ -21,6 +23,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 if ($NoLibreOfficeRuntime -and -not $Lite) {
     throw "A standard release must include the LibreOffice conversion runtime. Use -Lite for a conversion-free release."
+}
+if ($TestOnly -and $Zip) {
+    throw "-TestOnly は非ZIP確認出力専用です。-Zip は指定できません。"
+}
+if ($NoChecksums -and -not $TestOnly) {
+    throw "-NoChecksums は -TestOnly の内部確認出力だけで使用できます。"
+}
+if ($NoChecksums) {
+    $Checksums = $false
 }
 $includeLibreOfficeRuntime = -not $Lite
 
@@ -376,10 +387,10 @@ function Copy-ReleaseSampleWorkspace([string]$SampleDest, [string]$Locale, [swit
     # Keep the course container in the package. Flattening its sessions into
     # sample_workspace hid the course -> session structure from users.
     $conversionSession = if ($Locale -eq "ja") {
-        Join-Path $sampleSource "01_講義サンプル\第03回_Office変換"
+        Join-Path $sampleSource "01_講義サンプル\第04回_Office変換"
     }
     else {
-        Join-Path $sampleSource "01_Lecture_Samples\Session_03_Office_Conversion"
+        Join-Path $sampleSource "01_Lecture_Samples\Session_04_Office_Conversion"
     }
 
     Ensure-Directory $SampleDest
@@ -465,6 +476,16 @@ try {
     Ensure-Directory $outDir
     Ensure-Directory $docsDir
     Ensure-Directory $licensesDir
+
+    if ($TestOnly) {
+        $testOnlyNotice = (@(
+            "TEST ONLY - NOT A RELEASE SET OR DISTRIBUTABLE",
+            "This unpacked output was created by release.ps1 -Test for local verification.",
+            "Do not zip, publish, submit, or distribute this directory.",
+            "Create a normal release set with release.ps1 before any publication."
+        ) -join [Environment]::NewLine)
+        Write-TextFile -DestPath (Join-Path $outDir "TEST_ONLY_DO_NOT_PUBLISH.txt") -Value $testOnlyNotice
+    }
 
     Copy-File -Source $exePath -Dest (Join-Path $outDir $exeName)
     Copy-File -Source $readOnlyViewerExePath -Dest (Join-Path $outDir $readOnlyViewerExeName)

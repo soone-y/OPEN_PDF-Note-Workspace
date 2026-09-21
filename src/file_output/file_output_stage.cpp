@@ -11,11 +11,8 @@
 #include "note/note_identity.h"
 #include "note/note_identity_store.h"
 #include "note/note_persistence.h"
-#include "note_view/note_view.h"
+#include "workspace/workspace_actions.h"
 #include "workspace/workspace_write_lock.h"
-
-
-#include <richedit.h>
 
 #include <algorithm>
 #include <array>
@@ -47,6 +44,8 @@ constexpr UINT kNoteStageIdleBaseDelayMs = 20 * 1000;
 constexpr UINT kNoteStageIdleMinDelayMs = 6 * 1000;
 constexpr UINT kNoteStageIdleStepReduceMs = 2 * 1000;
 constexpr int kNoteStageIdleCharsPerStep = 10;
+// TODO(recovery-settings): make this retention policy configurable in the
+// advanced recovery settings, together with retention days and total-size cap.
 constexpr size_t kMaxBackupGenerationsPerFile = 3;
 
 ULONGLONG g_autoStageDirtySinceTick = 0;
@@ -129,45 +128,28 @@ bool UsesAutoStageTimerMode() {
 bool HasPendingAutoStageWork() { return g_annotsDirty; }
 
 int CurrentNoteEditorCharCount() {
-  if (!g_hNoteEdit)
-    return 0;
-  return std::max(0, GetWindowTextLengthW(g_hNoteEdit));
+  return CurrentNoteEditorCharacterCount();
 }
 
 std::optional<file_output::StagedNoteRestoreViewState>
 CaptureCurrentNoteRestoreViewState(const std::wstring &notePath,
                                    uint64_t contentRevision) {
-  if (!g_hNoteEdit || !IsWindow(g_hNoteEdit) || notePath.empty() ||
-      g_currentNotePath.empty()) {
-    return std::nullopt;
-  }
-  if (NormalizePathKey(std::filesystem::path(notePath)) !=
-      NormalizePathKey(std::filesystem::path(g_currentNotePath))) {
-    return std::nullopt;
-  }
-  const int textLen = std::max(0, GetWindowTextLengthW(g_hNoteEdit));
-  DWORD selStart = 0;
-  DWORD selEnd = 0;
-  SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&selStart),
-               reinterpret_cast<LPARAM>(&selEnd));
-  POINT scroll{};
-  SendMessageW(g_hNoteEdit, EM_GETSCROLLPOS, 0,
-               reinterpret_cast<LPARAM>(&scroll));
+  const auto editorState =
+      CaptureCurrentNoteEditorPersistenceState(notePath, contentRevision);
+  if (!editorState.has_value()) return std::nullopt;
   file_output::StagedNoteRestoreViewState state{};
-  state.contentRevision = contentRevision;
-  state.selectionStart = static_cast<uint64_t>(
-      std::min<DWORD>(selStart, static_cast<DWORD>(textLen)));
-  state.selectionEnd = static_cast<uint64_t>(
-      std::min<DWORD>(selEnd, static_cast<DWORD>(textLen)));
-  state.scrollX = scroll.x;
-  state.scrollY = scroll.y;
-  state.firstVisibleLine =
-      static_cast<int>(SendMessageW(g_hNoteEdit, EM_GETFIRSTVISIBLELINE, 0, 0));
+  state.contentRevision = editorState->contentRevision;
+  state.selectionStart = editorState->selectionStart;
+  state.selectionEnd = editorState->selectionEnd;
+  state.scrollX = editorState->scrollX;
+  state.scrollY = editorState->scrollY;
+  state.firstVisibleLine = editorState->firstVisibleLine;
   return state;
 }
 
 void RecordPersistedNoteEditorLength() {
-  if (g_currentNotePath.empty() || !g_hNoteEdit) {
+  if (g_currentNotePath.empty() ||
+      !HasCurrentNoteEditorForPath(g_currentNotePath)) {
     g_noteStagePersistedCharCount = 0;
     g_noteStagePersistedCharCountKnown = false;
     return;
@@ -299,14 +281,28 @@ UINT ComputeAutoStageDelayMs() {
 
 HWND NoticeOwner(HWND owner) { return owner ? owner : g_hMainWnd; }
 
+// WM_ENDSESSION is not a safe place for modal UI, retry timers, or integration
+// into originals. Keep this flag scoped to the emergency stage-only path.
+bool g_systemEndSessionStageSave = false;
+
+class ScopedSystemEndSessionStageSave {
+ public:
+  ScopedSystemEndSessionStageSave() { g_systemEndSessionStageSave = true; }
+  ~ScopedSystemEndSessionStageSave() { g_systemEndSessionStageSave = false; }
+  ScopedSystemEndSessionStageSave(const ScopedSystemEndSessionStageSave &) = delete;
+  ScopedSystemEndSessionStageSave &operator=(const ScopedSystemEndSessionStageSave &) = delete;
+};
+
 void ShowStageSoftNotice(HWND owner, const std::wstring &text,
                          SoftNoticeKind kind = SoftNoticeKind::Info) {
+  if (g_systemEndSessionStageSave) return;
   ShowSoftNotice(NoticeOwner(owner), text, kind);
 }
 
 void ShowStageMessageDialog(HWND owner, const std::wstring &title,
                             const std::wstring &message,
                             SoftNoticeKind kind = SoftNoticeKind::Error) {
+  if (g_systemEndSessionStageSave) return;
   ShowSilentMessageDialog(NoticeOwner(owner), title, message, kind);
 }
 
@@ -511,7 +507,7 @@ ResolveDeferredCurrentNotePath(std::wstring *outErr = nullptr) {
   }
 
   const std::filesystem::path sessionRoot(g_currentSessionPath);
-  const std::filesystem::path noteDir = sessionRoot / L"note";
+  const std::filesystem::path noteDir = CurrentNoteDirectory();
   if (!EnsureDir(noteDir)) {
     if (outErr)
       *outErr = localization::Text(L"file_output.stage.note_folder_create_failed");
@@ -686,17 +682,7 @@ std::optional<std::string> ReadFileBytes(const std::filesystem::path &path) {
 }
 
 std::wstring ReadCurrentNoteText() {
-  if (!g_hNoteEdit)
-    return {};
-  int len = GetWindowTextLengthW(g_hNoteEdit);
-  if (len <= 0)
-    return {};
-  std::wstring text(static_cast<size_t>(len), L'\0');
-  int copied = GetWindowTextW(g_hNoteEdit, text.data(), len + 1);
-  if (copied < 0)
-    copied = 0;
-  text.resize(static_cast<size_t>(copied));
-  return text;
+  return ReadCurrentNoteEditorText();
 }
 
 bool IsAnnotationSaveBlockedByIme() { return g_pdf.imeComposing; }
@@ -2005,6 +1991,7 @@ void RefreshDirtyUi(HWND owner) {
     return;
   }
   RefreshMainWindowUiState(owner);
+  UpdateAnnotPanelSummary();
 }
 
 std::vector<StageMeta> LoadAllStageMeta(file_output::StagedDiffKind kind) {
@@ -2195,7 +2182,14 @@ bool LoadResolvedStageAnnotationsForMeta(
       return false;
     }
     for (const auto &cmd : commands) {
-      ApplyAnnotCommandToList(outAnnotations, cmd);
+      if (!ApplyAnnotCommandToList(outAnnotations, cmd)) {
+        if (outErr) {
+          *outErr = localization::Text(
+              L"file_output.stage.annotation_journal_parse_failed");
+          *outErr += L"\njournal path: " + seg.path.wstring();
+        }
+        return false;
+      }
     }
   }
   return true;
@@ -2255,13 +2249,7 @@ enum class PersistedSnapshotMatch {
 };
 
 void ClearCurrentNoteEditorModifiedFlag(const std::wstring &notePath) {
-  if (!g_hNoteEdit || notePath.empty() || g_currentNotePath.empty())
-    return;
-  if (NormalizePathKey(std::filesystem::path(notePath)) !=
-      NormalizePathKey(std::filesystem::path(g_currentNotePath))) {
-    return;
-  }
-  SendMessageW(g_hNoteEdit, EM_SETMODIFY, FALSE, 0);
+  MarkCurrentNoteEditorPersisted(notePath);
 }
 
 bool LoadResolvedStageNoteDataForMeta(const StageMeta &meta,
@@ -4014,7 +4002,26 @@ bool SaveAnnotationsIfDirty(HWND owner) {
   return true;
 }
 
+bool PreserveUnsavedChangesForSystemEndSession(HWND owner) noexcept {
+  ScopedSystemEndSessionStageSave silentScope;
+  try {
+    // Do not call RunSaveAndIntegrateTransaction here: WM_ENDSESSION may be
+    // followed by termination immediately, so originals must remain untouched.
+    const bool noteOk = SaveNoteIfDirty(owner);
+    const bool annotOk = SaveAnnotationsIfDirty(owner);
+    preview_trace::Append(
+        L"SystemEndSessionStage",
+        L"note_ok=" + preview_trace::Bool(noteOk) +
+            L" annot_ok=" + preview_trace::Bool(annotOk));
+    return noteOk && annotOk;
+  } catch (...) {
+    preview_trace::Append(L"SystemEndSessionStage", L"exception");
+    return false;
+  }
+}
+
 void ConfigureNoteStageSaveScheduling(HWND owner) {
+  if (g_systemEndSessionStageSave) return;
   HWND target = NoticeOwner(owner);
   if (!target)
     return;
@@ -4035,6 +4042,7 @@ void ConfigureNoteStageSaveScheduling(HWND owner) {
 }
 
 void ConfigureAutoStageSaveScheduling(HWND owner) {
+  if (g_systemEndSessionStageSave) return;
   HWND target = NoticeOwner(owner);
   if (!target)
     return;
@@ -4063,7 +4071,8 @@ void NotifyNoteStageEdit(HWND owner) {
   if (g_currentNotePath.empty() && g_currentSessionPath.empty())
     return;
   g_noteStageLastEditTick = GetTickCount64();
-  if (!g_noteStagePersistedCharCountKnown && g_hNoteEdit) {
+  if (!g_noteStagePersistedCharCountKnown &&
+      HasCurrentNoteEditorForPath(g_currentNotePath)) {
     g_noteStagePersistedCharCount = CurrentNoteEditorCharCount();
     g_noteStagePersistedCharCountKnown = true;
   }
@@ -4260,6 +4269,9 @@ void HandleDeferredAutoStageSaveTimer(HWND owner) {
 bool ShouldAutoIntegrateOnSwitchOrExit() { return false; }
 
 bool PrepareStagedDiffsForSwitch(HWND owner) {
+  // Switching must remain responsive.  Persist only the small recoverable
+  // work checkpoint here; original-file integration is reserved for explicit
+  // Save Work, normal exit, and pre-output processing.
   return file_output::SaveNoteIfDirty(owner) &&
          file_output::SaveAnnotationsIfDirty(owner);
 }
@@ -4273,34 +4285,17 @@ bool MaybeAutoIntegrateOnSwitchOrExit(HWND owner) {
 }
 
 void ScheduleIntegrateAfterSwitch(HWND owner) {
-  ConfigureAutoIntegrateScheduling(owner);
-}
-
-static UINT AutoIntegrateDelayMs() {
-  int seconds = g_config.autoIntegrateSeconds;
-  if (seconds == kAutoIntegrateModeCustom) {
-    seconds = std::clamp(g_config.autoIntegrateCustomMinutes,
-                         kAutoIntegrateCustomMinutesMin,
-                         kAutoIntegrateCustomMinutesMax) *
-              60;
-  }
-  if (seconds <= 0)
-    return 0;
-  constexpr int kMaxDelaySeconds = static_cast<int>(UINT_MAX / 1000);
-  return static_cast<UINT>(std::min(seconds, kMaxDelaySeconds) * 1000);
+  // Kept as a call-site boundary during the transition from the former
+  // automatic-integration setting.  A switch never starts original writes.
+  if (HWND target = NoticeOwner(owner))
+    KillTimer(target, kAutoIntegrateTimerId);
 }
 
 void ConfigureAutoIntegrateScheduling(HWND owner) {
-  HWND target = NoticeOwner(owner);
-  if (!target)
-    return;
-  KillTimer(target, kAutoIntegrateTimerId);
-  const UINT delayMs = AutoIntegrateDelayMs();
-  if (delayMs == 0)
-    return;
-  if (!g_noteNeedsIntegrate && !g_annotsNeedsIntegrate)
-    return;
-  SetTimer(target, kAutoIntegrateTimerId, delayMs, nullptr);
+  // Never integrate originals on a timer.  Internal checkpoints are still
+  // automatic, while integration has deliberate user-visible boundaries.
+  if (HWND target = NoticeOwner(owner))
+    KillTimer(target, kAutoIntegrateTimerId);
 }
 
 void NotifyAutoIntegrateStageSaved(HWND owner) {
@@ -4308,22 +4303,8 @@ void NotifyAutoIntegrateStageSaved(HWND owner) {
 }
 
 void HandleAutoIntegrateTimer(HWND owner) {
-  HWND target = NoticeOwner(owner);
-  if (!target)
-    return;
-  KillTimer(target, kAutoIntegrateTimerId);
-  if (AutoIntegrateDelayMs() == 0)
-    return;
-  if (ShouldDeferBackgroundSaveForActiveInput()) {
-    ConfigureAutoIntegrateScheduling(target);
-    return;
-  }
-  if (!g_noteNeedsIntegrate && !g_annotsNeedsIntegrate && !HasAnyStagedDiffs())
-    return;
-  if (StartBackgroundSaveAndIntegrateTransaction(target) ==
-      SaveTransactionStartResult::Failed) {
-    ConfigureAutoIntegrateScheduling(target);
-  }
+  if (HWND target = NoticeOwner(owner))
+    KillTimer(target, kAutoIntegrateTimerId);
 }
 
 bool ShouldDeferBackgroundSaveForActiveInput() {

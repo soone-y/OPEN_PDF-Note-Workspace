@@ -17,6 +17,8 @@ This page is the common entry point to the public documentation for PDF Note Wor
 | 日本語：ヘルプ / Japanese: help reference | 日本語版：メニュー、設定、ショートカットの参照 / Japanese version: menus, settings, and shortcuts | `docs/ja/Help_Reference.md` | [開く / Open](docs/ja/Help_Reference.md) |
 | 日本語：保存と復元 / Japanese: saving and recovery | 日本語版：stage、統合保存、バックアップ、復元 / Japanese version: stage data, integration, backups, and recovery | `docs/ja/Save_and_Recovery.md` | [開く / Open](docs/ja/Save_and_Recovery.md) |
 | 日本語：ファイル形式 / Japanese: file formats | 日本語版：ノート、PDF注釈、対応形式 / Japanese version: notes, PDF annotations, and supported formats | `docs/ja/File_Formats.md` | [開く / Open](docs/ja/File_Formats.md) |
+| 日本語：`.clro` ノート形式 / Japanese: `.clro` note format | 日本語版：標準ノートの役割、記法、他ソフトとの扱い / Japanese version: standard-note role, notation, and use with other software | `docs/ja/CLRO_Note_Format.md` | [開く / Open](docs/ja/CLRO_Note_Format.md) |
+| 日本語：`.clrop` 注釈データ / Japanese: `.clrop` annotation data | 日本語版：PDFとの対応、JSONの役割、安全な扱い / Japanese version: PDF relationship, JSON role, and safe handling | `docs/ja/CLROP_Annotation_Format.md` | [開く / Open](docs/ja/CLROP_Annotation_Format.md) |
 | 日本語：問題解決 / Japanese: troubleshooting | 日本語版：安全な一次対応と報告に必要な情報 / Japanese version: safe first steps and useful report information | `docs/ja/Troubleshooting.md` | [開く / Open](docs/ja/Troubleshooting.md) |
 | 日本語：ビルドと検証 / Japanese: build and verification | 日本語版：ソースからのビルド、テスト、release set作成 / Japanese version: building, testing, and release sets | `docs/ja/How_to_Build.md` | [開く / Open](docs/ja/How_to_Build.md) |
 | 日本語：ライセンス / Japanese: license | 日本語版：英語原文と日本語参考訳 / Japanese version: English original and Japanese reference translation | `docs/ja/legal/LICENSE.md` | [開く / Open](docs/ja/legal/LICENSE.md) |
@@ -27,6 +29,8 @@ This page is the common entry point to the public documentation for PDF Note Wor
 | 英語：ヘルプ / English: help reference | 英語版：メニュー、設定、ショートカットの参照 / English version: menus, settings, and shortcuts | `docs/en/Help_Reference.md` | [Open](docs/en/Help_Reference.md) |
 | 英語：保存と復元 / English: saving and recovery | 英語版：stage、統合保存、バックアップ、復元 / English version: stage data, integration, backups, and recovery | `docs/en/Save_and_Recovery.md` | [Open](docs/en/Save_and_Recovery.md) |
 | 英語：ファイル形式 / English: file formats | 英語版：ノート、PDF注釈、対応形式 / English version: notes, PDF annotations, and supported formats | `docs/en/File_Formats.md` | [Open](docs/en/File_Formats.md) |
+| 英語：`.clro` ノート形式 / English: `.clro` note format | 英語版：標準ノートの役割、記法、他ソフトとの扱い / English version: standard-note role, notation, and use with other software | `docs/en/CLRO_Note_Format.md` | [Open](docs/en/CLRO_Note_Format.md) |
+| 英語：`.clrop` 注釈データ / English: `.clrop` annotation data | 英語版：PDFとの対応、JSONの役割、安全な扱い / English version: PDF relationship, JSON role, and safe handling | `docs/en/CLROP_Annotation_Format.md` | [Open](docs/en/CLROP_Annotation_Format.md) |
 | 英語：問題解決 / English: troubleshooting | 英語版：安全な一次対応と報告に必要な情報 / English version: safe first steps and useful report information | `docs/en/Troubleshooting.md` | [Open](docs/en/Troubleshooting.md) |
 | 英語：ビルドと検証 / English: build and verification | 英語版：ソースからのビルド、テスト、release set作成 / English version: building, testing, and release sets | `docs/en/How_to_Build.md` | [Open](docs/en/How_to_Build.md) |
 | 英語：ライセンス / English: license | 英語版：法的正本のzlib License / English version: legally controlling zlib License | `docs/en/legal/LICENSE.md` | [Open](docs/en/legal/LICENSE.md) |

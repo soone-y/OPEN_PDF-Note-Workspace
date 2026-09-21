@@ -1,13 +1,13 @@
 
 // file: file_output.cpp
 #include "file_output/file_output.h"
+#include "bridge/view_bridge.h"
 #include "core/font_list.h"
 #include "math/math_render.h"
 #include "clrop/bridge.h"
 #include "file_output/note_snapshot.h"
 #include "note/note_export.h"
 #include "note/note_workspace_service.h"
-#include "note_view/note_view.h"
 #include "fpdf_save.h"
 #include "fpdf_edit.h"
 #include "fpdf_ppo.h"
@@ -116,17 +116,12 @@ static std::optional<std::wstring> GetProtectedPdfPngExportBlockMessage(FPDF_DOC
 
 static bool ConfirmProtectedPdfExportAllowed(HWND owner,
                                              const std::wstring& title,
-                                             const std::wstring& blockedMessage,
-                                             std::optional<std::wstring> (*recheck)(FPDF_DOCUMENT)) {
-    if (!PromptPasswordAndReopenCurrentPdf(owner, title, blockedMessage)) {
-        return false;
-    }
-    FPDF_DOCUMENT currentDoc = CurrentLogicalPdfDocument();
-    if (!recheck || !recheck(currentDoc).has_value()) {
-        return true;
-    }
-    ShowFileOutputMessageDialog(owner, title, blockedMessage, SoftNoticeKind::Warning);
-    return false;
+                                             const std::wstring& blockedMessage) {
+    // A PDF password opens the source but cannot prove the user's legal rights.
+    // Export therefore also requires this explicit, per-output confirmation.
+    return PromptPasswordAndReopenCurrentPdf(
+        owner, title, blockedMessage,
+        localization::Text(L"file_output.protected_pdf.authorization_confirmation"));
 }
 
 static constexpr int kMarkerTextBrightMin = 250;
@@ -560,8 +555,7 @@ static bool IsSamePath(const std::filesystem::path& a, const std::filesystem::pa
 
 static note_snapshot::CurrentEditTextSnapshot CurrentEditSnapshotForNotePath(const std::wstring& notePath) {
     note_snapshot::CurrentEditTextSnapshot snapshot;
-    if (!g_currentNotePath.empty() && g_hNoteEdit &&
-        IsSamePath(std::filesystem::path(notePath), std::filesystem::path(g_currentNotePath))) {
+    if (HasCurrentNoteEditorForPath(notePath)) {
         snapshot.available = true;
         snapshot.targetPath = notePath;
         std::wstring encodeError;
@@ -582,6 +576,15 @@ static bool IsPlainTextNotePath(const std::wstring& notePath) {
         return static_cast<wchar_t>(towlower(ch));
     });
     return ext == L".txt" || ext == L".csv";
+}
+
+static bool IsTeXSourceNotePath(const std::wstring& notePath) {
+    if (notePath.empty()) return false;
+    std::wstring ext = std::filesystem::path(notePath).extension().wstring();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(towlower(ch));
+    });
+    return ext == L".tex";
 }
 
 static bool IsAppManagedUtf8NotePath(const std::wstring& notePath) {
@@ -654,7 +657,9 @@ static std::optional<ResolvedNoteExportSource> ResolveNoteExportSource(
     meta.title = note::DeriveTitleFromFileName(meta.file_name);
     const note::NoteContentKind contentKind = source.plain_text
         ? note::NoteContentKind::PlainText
-        : note::NoteContentKind::Markdown;
+        : IsTeXSourceNotePath(source.snapshot.targetPath)
+            ? note::NoteContentKind::TeXSource
+            : note::NoteContentKind::Markdown;
 
     note::NoteWorkspaceService& workspace = note::RuntimeNoteWorkspaceService();
     note::LocalNoteKernel* kernel = workspace.FindKernel(
@@ -3597,20 +3602,21 @@ static bool ExportPdfPagesImpl(HWND owner,
                                double exportScale,
                                bool matchPdfPaneTextLayout) {
     FPDF_DOCUMENT doc = CurrentLogicalPdfDocument();
-    const auto* annots = CurrentLogicalPdfAnnotations();
     if (!doc || CurrentLogicalPdfPath().empty()) return false;
     if (pages.empty()) return false;
     if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;
-    std::vector<Annotation> finalAnnots;
-    if (annots) {
-        finalAnnots = *annots;
-    }
     if (auto blockedMessage = GetProtectedPdfExportBlockMessage(doc)) {
-        return ConfirmProtectedPdfExportAllowed(owner,
-                                                ExperimentalExportDialogTitle(GetUiText().menuExportPdf),
-                                                *blockedMessage,
-                                                GetProtectedPdfExportBlockMessage);
+        if (!ConfirmProtectedPdfExportAllowed(owner,
+                                               ExperimentalExportDialogTitle(GetUiText().menuExportPdf),
+                                               *blockedMessage)) {
+            return false;
+        }
+        doc = CurrentLogicalPdfDocument();
+        if (!doc || CurrentLogicalPdfPath().empty()) return false;
     }
+    const auto* annots = CurrentLogicalPdfAnnotations();
+    std::vector<Annotation> finalAnnots;
+    if (annots) finalAnnots = *annots;
     if (IsSamePath(std::filesystem::path(outPath), std::filesystem::path(CurrentLogicalPdfPath()))) {
         WarnExportOverwriteOriginal(owner, /*isPdf=*/true);
         return false;
@@ -3669,6 +3675,15 @@ bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standard
                                        standardTextAnnots, exportScale, matchPdfPaneTextLayout);
     if (ok && outSavedPath) *outSavedPath = *target;
     return ok;
+}
+
+bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, const std::wstring& outPath,
+                              bool standardTextAnnots, double exportScale,
+                              bool matchPdfPaneTextLayout) {
+    if (!CurrentLogicalPdfDocument() || CurrentLogicalPdfPath().empty() || outPath.empty()) return false;
+    const std::vector<PdfPageSpec> pages = BuildAllPdfPageSpecs(includeAnnotations);
+    return ExportPdfPagesImpl(owner, pages, outPath, standardTextAnnots, exportScale,
+                              matchPdfPaneTextLayout);
 }
 
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages) {
@@ -3895,10 +3910,17 @@ bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, Pd
     }
     if (!doc || pageIndex < 0 || pageIndex >= pageCount) return false;
     if (auto blockedMessage = GetProtectedPdfPngExportBlockMessage(doc)) {
-        return ConfirmProtectedPdfExportAllowed(owner,
-                                                ExperimentalExportDialogTitle(GetUiText().menuExportPngPage),
-                                                *blockedMessage,
-                                                GetProtectedPdfPngExportBlockMessage);
+        if (!ConfirmProtectedPdfExportAllowed(owner,
+                                               ExperimentalExportDialogTitle(GetUiText().menuExportPngPage),
+                                               *blockedMessage)) {
+            return false;
+        }
+        doc = CurrentLogicalPdfDocument();
+        {
+            std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+            pageCount = doc ? FPDF_GetPageCount(doc) : 0;
+        }
+        if (!doc || pageIndex < 0 || pageIndex >= pageCount) return false;
     }
     double widthPt = 0.0;
     double heightPt = 0.0;

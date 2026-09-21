@@ -1256,6 +1256,12 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 g_annots.push_back(ann);
                 ArmRecentPdfLinkPlacementDblClickSuppress(pt);
                 EnsureAnnotationId(g_annots.back(), g_annots, static_cast<int>(g_annots.size()) - 1);
+                // A link endpoint is a real annotation from its first point:
+                // it must participate in undo/redo and the recoverable stage
+                // checkpoint before this view can be switched away.
+                RecordAnnotAdd(static_cast<int>(g_annots.size() - 1), g_annots.back());
+                MarkAnnotsDirty(GetParent(hwnd));
+                RememberPendingLinkPdfPath(CurrentLogicalPdfPath());
                 g_linkPending.havePdf = true;
                 ++g_linkPending.pdfPoints;
                 g_linkPending.pdfPage = hitPageIndex;
@@ -1265,12 +1271,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
                 if (g_linkPending.pdfPoints + g_linkPending.notePoints >= 2) {
                     HWND owner = GetParent(hwnd);
-                    FinalizePendingPdfLinkMarkers(owner, g_linkPending.id, g_linkPending.notePath);
-                    g_linkPending = {};
-                    UpdateLinkModeButtonState(false);
-                } else {
-                    RequestAnnotPanelRevealLatest();
-                    RefreshAnnotPanel();
+                    FinalizePendingLinkModeIfReady(owner);
                 }
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
@@ -1837,10 +1838,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                 g_annots[static_cast<size_t>(addedIndex)] = smoothed;
                                 RecordAnnotUpdate(addedIndex, addedIndex, raw, g_annots[static_cast<size_t>(addedIndex)]);
                             } else if (ShouldApplyFreehandShapeCorrection()) {
-                                FreehandCorrectionResult correction;
-                                if (TryBuildFreehandCorrection(raw, &correction) && correction.accepted) {
-                                    correction.corrected.id = raw.id;
-                                    g_annots[static_cast<size_t>(addedIndex)] = correction.corrected;
+                                Annotation correction;
+                                if (TryCorrectFreehandAnnotation(raw, &correction)) {
+                                    correction.id = raw.id;
+                                    g_annots[static_cast<size_t>(addedIndex)] = correction;
                                     RecordAnnotUpdate(addedIndex, addedIndex, raw, g_annots[static_cast<size_t>(addedIndex)]);
                                 }
                             }
@@ -2246,11 +2247,15 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         if (!g_pdf.editingText && ctrlDown) {
             if (wParam == 'Z' && !shiftDown) {
-                ExecutePdfUndoRedoFromFocus(GetParent(hwnd), true);
+                if (!ExecutePdfUndoRedoFromFocus(GetParent(hwnd), true) && !g_pdf.editingText) {
+                    ExecuteWorkspaceOperationUndoRedo(GetParent(hwnd), true);
+                }
                 return 0;
             }
             if (wParam == 'Y' || (wParam == 'Z' && shiftDown) || wParam == 'R') {
-                ExecutePdfUndoRedoFromFocus(GetParent(hwnd), false);
+                if (!ExecutePdfUndoRedoFromFocus(GetParent(hwnd), false) && !g_pdf.editingText) {
+                    ExecuteWorkspaceOperationUndoRedo(GetParent(hwnd), false);
+                }
                 return 0;
             }
             if (wParam == VK_OEM_PLUS || wParam == VK_ADD) {
@@ -2290,11 +2295,15 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (g_pdf.editingText) {
             if (ctrlDown) {
                 if (wParam == 'Z' && !shiftDown) {
-                    ExecutePdfUndoRedoFromFocus(GetParent(hwnd), true);
+                    if (!ExecutePdfUndoRedoFromFocus(GetParent(hwnd), true) && !g_pdf.editingText) {
+                        ExecuteWorkspaceOperationUndoRedo(GetParent(hwnd), true);
+                    }
                     return 0;
                 }
                 if (wParam == 'Y' || (wParam == 'Z' && shiftDown)) {
-                    ExecutePdfUndoRedoFromFocus(GetParent(hwnd), false);
+                    if (!ExecutePdfUndoRedoFromFocus(GetParent(hwnd), false) && !g_pdf.editingText) {
+                        ExecuteWorkspaceOperationUndoRedo(GetParent(hwnd), false);
+                    }
                     return 0;
                 }
                 if (wParam == VK_OEM_PLUS || wParam == VK_ADD) {
@@ -2348,7 +2357,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     g_pdf.suppressNextImeResultReturnChar = false;
                     g_pdf.imeResultMessageTime = 0;
                     g_pdf.editLayoutDirty = true;
-                    if (PasteClipboardToEdit(hwnd)) {
+                    if (PasteClipboardIntoActivePdfTextBox(hwnd)) {
                         RecalcEditingTextboxSize(true);
                         EnsureEditingTextBoxVisible(hwnd, L"paste_text");
                         UpdateImeWindowPosition(hwnd, true);

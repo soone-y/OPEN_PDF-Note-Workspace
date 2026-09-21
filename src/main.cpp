@@ -26,6 +26,7 @@
 #include "ui/dialogs/dialogs.h"
 #include "workspace/workspace_tree.h"
 #include "workspace/file_ops.h"
+#include "workspace/workspace_resource_identity.h"
 #include "workspace/workspace_write_lock.h"
 #include "app/main_close_policy.h"
 #include "ui/menus/main_debug_menu.h"
@@ -94,6 +95,7 @@ static DWORD WINAPI SingleInstanceShutdownRequestThread(LPVOID);
 static constexpr UINT_PTR kExitRetryTimerId = 0x5E11;
 static bool s_exitInProgress = false;
 static bool s_exitPending = false;
+static bool s_systemEndSessionObserved = false;
 static constexpr int kManagedAbnormalExitCode = 3;
 struct ManagedAbnormalExitState {
     bool requested = false;
@@ -181,7 +183,7 @@ std::filesystem::path DialogWorkspaceInitialFolder();
 namespace {
 }
 void LoadLectures();
-static void SetBottomPanePinMode(BottomPanePin pin, BottomNoteMode noteMode);
+static void SetBottomPaneRuntimeMode(BottomPanePin pin, BottomNoteMode noteMode);
 static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool promptClassdir, bool persistConfig);
 static void ScrollPdfToFileStart();
 static void ScrollNoteToFileStart();
@@ -199,7 +201,7 @@ bool IsWorkspaceReservedImportDirectoryName(const std::filesystem::path& path);
 void EnterNoteNormalMode(HWND hWnd);
 void CancelPendingLinkMode(HWND owner);
 static void PreparePendingLinkForPdfSwitch(HWND owner);
-static void FinalizePendingLinkModeIfReady(HWND owner);
+void FinalizePendingLinkModeIfReady(HWND owner);
 static bool EnsureListboxSelection(HWND list);
 static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam);
 static bool ShowDirectoryHierarchyPopup(HWND owner,
@@ -595,8 +597,6 @@ std::wstring ToLowerAscii(std::wstring s) {
     std::transform(s.begin(), s.end(), s.begin(), ::towlower);
     return s;
 }
-
-#include "workspace/main_workspace_logs.cppinc"
 
 static std::wstring NormalizeStemLower(const std::filesystem::path& p) {
     return ToLowerAscii(p.stem().wstring());
@@ -2157,6 +2157,27 @@ static bool LaunchReadOnlyViewerForPdf(HWND owner, const std::wstring& pdfPath) 
     return LaunchReadOnlyViewerForPdfAt(owner, pdfPath, -1, 0.0, false);
 }
 
+bool LaunchReadOnlyViewerForFile(HWND owner, const std::wstring& filePath);
+
+static bool OpenReadOnlyViewerCurrentOrPickFile(HWND owner) {
+    const std::wstring currentFile = CurrentLogicalPdfPath();
+    if (!currentFile.empty()) {
+        return IsPdfFile(std::filesystem::path(currentFile))
+                   ? LaunchReadOnlyViewerForPdf(owner, currentFile)
+                   : LaunchReadOnlyViewerForFile(owner, currentFile);
+    }
+
+    // The picker is only shown after an explicit menu action.  Its helper
+    // accepts existing local paths and rejects network locations before a
+    // viewer process is started.
+    const auto selected = PickFileUnder(owner, DialogContextInitialFolder(),
+                                        localization::Text(L"menu.viewer.open_file"));
+    if (!selected.has_value()) return false;
+    return IsPdfFile(std::filesystem::path(*selected))
+               ? LaunchReadOnlyViewerForPdf(owner, *selected)
+               : LaunchReadOnlyViewerForFile(owner, *selected);
+}
+
 static bool LaunchReadOnlyViewerForFolder(HWND owner, const std::wstring& folderPath) {
     if (folderPath.empty()) return false;
     std::error_code ec;
@@ -2180,8 +2201,8 @@ static bool IsClropFilePath(const std::filesystem::path& path) {
     return extension == L".clro" || extension == L".clrop";
 }
 
-static bool LaunchReadOnlyViewerForNote(HWND owner, const std::wstring& notePath) {
-    const std::filesystem::path path = CanonicalOrSelf(std::filesystem::path(notePath));
+bool LaunchReadOnlyViewerForFile(HWND owner, const std::wstring& filePath) {
+    const std::filesystem::path path = CanonicalOrSelf(std::filesystem::path(filePath));
     std::error_code ec;
     if (path.empty() || !std::filesystem::is_regular_file(path, ec) || ec) return false;
     if (IsClropFilePath(path)) {
@@ -5739,13 +5760,12 @@ void ApplyActiveColorForMode(HWND hWnd, ToolMode mode) {
 
 void ApplyPaletteCustomColor(HWND hWnd, COLORREF color) {
     const COLORREF prev = g_paletteCustomColor;
-    g_paletteCustomColor = color;  // Update last OK color (slot 9)
+    g_paletteCustomColor = color;
 
-    // Persist: index 7 = last OK color, index 8 = picker custom #1.
+    // Palette slot 8 is the single application-owned custom color.
     COLORREF custom[kToolPaletteCommandSlotCapacity]{};
     LoadUserPaletteColorsForSettings(custom, std::size(custom));
-    custom[static_cast<size_t>(kLastOkColorSlotIndex)]             = g_paletteCustomColor;
-    custom[static_cast<size_t>(kPickerCustomColorStartSlotIndex)] = g_paletteDialogCustomColor;
+    custom[static_cast<size_t>(kLastOkColorSlotIndex)] = g_paletteCustomColor;
     SaveUserPaletteColorsForSettings(custom, std::size(custom));
     // ^ rebuilds g_palette and calls PersistConfig()
 
@@ -6865,10 +6885,11 @@ static bool InsertSnippetIntoNoteAt(size_t pos, const std::wstring& snippet) {
 
 static void OnShortcutColorPick(HWND owner, COLORREF& target, HWND preview) {
     COLORREF picked = target;
-    if (PickColorDialog(owner, target, &picked, /*trackDialogCustom=*/true)) {
+    if (PickColorDialog(owner, target, &picked)) {
         if (picked != target) {
             target = picked;
-            ApplyPaletteCustomColor(owner, picked);
+            // Note shortcut colors are independent from the annotation palette.
+            PersistConfig();
         }
     } else {
         if (g_hPdfToolbar) {
@@ -6990,7 +7011,7 @@ static int PendingLinkPointCount() {
     return g_linkPending.notePoints + g_linkPending.pdfPoints;
 }
 
-static void RememberPendingLinkPdfPath(const std::wstring& pdfPath) {
+void RememberPendingLinkPdfPath(const std::wstring& pdfPath) {
     if (pdfPath.empty()) return;
     if (std::find(g_linkPending.pendingPdfPaths.begin(),
                   g_linkPending.pendingPdfPaths.end(),
@@ -7104,14 +7125,17 @@ static bool UpdatePendingLinkMarkerNotePathInPdfPath(HWND owner,
     return true;
 }
 
-static void FinalizePendingLinkModeIfReady(HWND owner) {
+void FinalizePendingLinkModeIfReady(HWND owner) {
     if (!g_linkPending.active) return;
     if (g_linkPending.id.empty()) return;
     if (PendingLinkPointCount() < 2) return;
     if (g_linkPending.pdfPoints > 0) {
-        if (FinalizePendingPdfLinkMarkers(owner, g_linkPending.id, g_linkPending.notePath)) {
-            RememberPendingLinkPdfPath(CurrentLogicalPdfPath());
-        }
+        // A PDF endpoint is already an ordinary dirty annotation.  Keep its
+        // path in the cross-view transaction even when it does not need the
+        // note-path update (the PDF-to-PDF case).
+        RememberPendingLinkPdfPath(CurrentLogicalPdfPath());
+        (void)FinalizePendingPdfLinkMarkers(owner, g_linkPending.id,
+                                             g_linkPending.notePath);
         if (!g_linkPending.notePath.empty()) {
             for (const auto& pdfPath : g_linkPending.pendingPdfPaths) {
                 UpdatePendingLinkMarkerNotePathInPdfPath(owner, pdfPath, g_linkPending.id, g_linkPending.notePath);
@@ -7142,9 +7166,11 @@ static void PreparePendingLinkForPdfSwitch(HWND owner) {
     if (!g_linkPending.active || g_linkPending.id.empty()) return;
     if (g_linkPending.pdfPoints <= 0 && !g_linkPending.havePdf) return;
 
-    if (FinalizePendingPdfLinkMarkers(owner, g_linkPending.id, g_linkPending.notePath)) {
-        RememberPendingLinkPdfPath(CurrentLogicalPdfPath());
-    }
+    // The switch has already checkpointed current dirty annotations.  Record
+    // this endpoint regardless of whether finalization changes note_path;
+    // PDF-to-PDF links intentionally have no note_path to update.
+    RememberPendingLinkPdfPath(CurrentLogicalPdfPath());
+    (void)FinalizePendingPdfLinkMarkers(owner, g_linkPending.id, g_linkPending.notePath);
     g_linkPending.pdfAnnotIndex = -1;
 
     if (owner) UpdateWindowTitle(owner);
@@ -7445,7 +7471,6 @@ std::wstring BuildStatusDisplayText() {
         text = localization::Format(textId, {
             {L"LECTURE", lecture}, {L"NOTE", note},
         });
-        text += L" | ";
     } else {
         const std::wstring textId = g_config.studentMode
             ? L"main.status.current_items.student"
@@ -7457,9 +7482,10 @@ std::wstring BuildStatusDisplayText() {
         if (!officeProgress.empty()) {
             text += L" | " + officeProgress;
         }
-        text += L" | ";
     }
-    text += BuildSaveStateStatusText();
+    if (std::wstring saveState = BuildSaveStateStatusText(); !saveState.empty()) {
+        text += L" | " + saveState;
+    }
     return text;
 }
 
@@ -7561,14 +7587,13 @@ void EndIntegratedPdfPreviewMode(HWND owner, bool restoreOriginalPdf) {
     DisableIntegratedPdfPreview(owner, restoreOriginalPdf);
 }
 
-static void SetBottomPanePinMode(BottomPanePin pin, BottomNoteMode noteMode) {
+// View-menu selection changes only the current runtime state.  The General
+// settings control is the sole owner of the persisted default.
+static void SetBottomPaneRuntimeMode(BottomPanePin pin, BottomNoteMode noteMode) {
     g_bottomPanePin = pin;
     g_bottomNoteMode = noteMode;
-    g_config.bottomPanePin = BottomPanePinToString(pin);
-    g_config.bottomNoteMode = BottomNoteModeToString(noteMode);
     UpdateBottomPaneMenuChecks();
     ApplyBottomPaneEdgeStyle();
-    PersistConfig();
     if (HWND owner = MainWindowHandle()) {
         LayoutChildren(owner);
     }
@@ -8014,52 +8039,37 @@ static bool CanStartExportCommand(HWND hWnd, UINT id) {
 }
 
 static void ArchiveWorkspaceLogFiles(HWND owner) {
-    std::wstring scanErr;
-    const std::vector<WorkspaceLogFileInfo> logFiles = EnumerateWorkspaceLogFiles(&scanErr);
-    if (!scanErr.empty()) {
-        ShowMainMessageDialog(owner, DebugMenuLabel(), scanErr, SoftNoticeKind::Warning);
+    SaveOperationGuard guard;
+    const WorkspaceLogArchiveResult result = ArchiveWorkspaceLogs();
+    if (result.inspectionFailed) {
+        ShowMainMessageDialog(owner, DebugMenuLabel(), result.error, SoftNoticeKind::Warning);
         return;
     }
-    if (logFiles.empty()) {
+    if (result.empty) {
         ShowMainSoftNotice(owner,
                            localization::Text(L"main.ui.c24eceb143b4").c_str(),
                            SoftNoticeKind::Info);
         return;
     }
-
-    const std::filesystem::path logDir = WorkspaceLogDirectory();
-    if (logDir.empty()) {
-        ShowMainSoftNotice(owner,
-                           localization::Text(L"main.ui.55c168692754").c_str(),
-                           SoftNoticeKind::Warning);
+    if (!result.ok) {
+        std::wstring message = localization::Text(L"main.ui.868fb5d67c29").c_str();
+        if (!result.error.empty()) message += L"\n\n" + result.error;
+        ShowMainMessageDialog(owner, DebugMenuLabel(), message, SoftNoticeKind::Error);
         return;
     }
-
-    const std::filesystem::path archivePath =
-        atomic_write::MakeUniqueDestInDir(logDir, WorkspaceLogArchiveBaseName());
-    SaveOperationGuard guard;
-    std::wstring err;
-    if (!WriteWorkspaceLogZipArchive(logFiles, archivePath, &err)) {
-        std::wstring msg = localization::Text(L"main.ui.868fb5d67c29").c_str();
-        if (!err.empty()) msg += L"\n\n" + err;
-        ShowMainMessageDialog(owner, DebugMenuLabel(), msg, SoftNoticeKind::Error);
-        return;
-    }
-
     std::wstring msg = localization::Format(L"main.logs.archived", {
-        { L"COUNT", std::to_wstring(logFiles.size()) }, { L"FILE", archivePath.filename().wstring() }
+        { L"COUNT", std::to_wstring(result.archivedCount) }, { L"FILE", result.archiveFileName }
     });
     ShowMainSoftNotice(owner, msg, SoftNoticeKind::Info);
 }
 
 static void DeleteWorkspaceLogFiles(HWND owner) {
-    std::wstring scanErr;
-    const std::vector<WorkspaceLogFileInfo> logFiles = EnumerateWorkspaceLogFiles(&scanErr);
-    if (!scanErr.empty()) {
-        ShowMainMessageDialog(owner, DebugMenuLabel(), scanErr, SoftNoticeKind::Warning);
+    const WorkspaceLogDeletePreview preview = PreviewWorkspaceLogDeletion();
+    if (preview.inspectionFailed) {
+        ShowMainMessageDialog(owner, DebugMenuLabel(), preview.error, SoftNoticeKind::Warning);
         return;
     }
-    if (logFiles.empty()) {
+    if (preview.empty) {
         ShowMainSoftNotice(owner,
                            localization::Text(L"main.ui.c24eceb143b4").c_str(),
                            SoftNoticeKind::Info);
@@ -8076,43 +8086,33 @@ static void DeleteWorkspaceLogFiles(HWND owner) {
     dialog.yesLabel = localization::Text(L"main.ui.8deafb711f09").c_str();
     dialog.noLabel = localization::Text(L"main.ui.3672b0b92134").c_str();
     dialog.message = localization::Format(L"main.logs.delete_confirm", {
-        { L"COUNT", std::to_wstring(logFiles.size()) }, { L"PATH", WorkspaceLogDirectory().wstring() },
-        { L"FILES", BuildWorkspaceLogDisplayList(logFiles) }
+        { L"COUNT", std::to_wstring(preview.count) }, { L"PATH", preview.directory },
+        { L"FILES", preview.displayList }
     });
     if (ShowSilentDialog(owner, dialog) != SilentDialogResult::Yes) {
         return;
     }
 
     SaveOperationGuard guard;
-    size_t deleted = 0;
-    std::vector<std::wstring> failures;
-    failures.reserve(logFiles.size());
-    for (const auto& logFile : logFiles) {
-        std::wstring err;
-        if (DeleteWorkspaceLogFile(logFile, &err)) {
-            ++deleted;
-            continue;
-        }
-        std::wstring line = logFile.displayName + L": ";
-        line += err.empty()
-            ? (localization::Text(L"main.ui.69df7e8dc916").c_str())
-            : err;
-        failures.push_back(std::move(line));
+    WorkspaceLogDeleteResult result = DeleteWorkspaceLogs();
+    if (result.inspectionFailed) {
+        ShowMainMessageDialog(owner, DebugMenuLabel(), result.error, SoftNoticeKind::Warning);
+        return;
     }
 
     RefreshMainMenuBar(owner);
-    if (failures.empty()) {
+    if (result.ok) {
         std::wstring msg = localization::Format(L"main.logs.deleted", {
-            { L"COUNT", std::to_wstring(deleted) }
+            { L"COUNT", std::to_wstring(result.deletedCount) }
         });
         ShowMainSoftNotice(owner, msg, SoftNoticeKind::Info);
         return;
     }
 
     std::wstring msg = localization::Format(L"main.logs.deleted_partial", {
-        { L"COUNT", std::to_wstring(deleted) }
+        { L"COUNT", std::to_wstring(result.deletedCount) }
     });
-    for (const auto& line : failures) {
+    for (const auto& line : result.failures) {
         msg += L"\n- " + line;
     }
     ShowMainMessageDialog(owner, DebugMenuLabel(), msg, SoftNoticeKind::Warning);
@@ -8155,50 +8155,10 @@ static void ToggleAllDebugLogs(HWND owner) {
 }
 
 static std::wstring BuildSaveStateStatusText() {
-    // Only expose "busy" for the explicit save transaction UI.
-    // Internal/background stage writes also use SaveOperationGuard, but showing
-    // them here can leave the status text stuck until another manual refresh.
-    if (IsSaveTransactionRunning()) {
-        return localization::Text(L"main.ui.b72711042efd").c_str();
-    }
-
-    std::vector<std::wstring> parts;
-    if (g_noteDirty) {
-        parts.push_back(localization::Text(L"main.ui.bfe820b2434c").c_str());
-    }
-    if (g_annotsDirty) {
-        parts.push_back(localization::Text(L"main.ui.5853d49b9f69").c_str());
-    }
-
-    size_t noteStageCount = 0;
-    size_t clropStageCount = 0;
-    for (const auto& entry : file_output::ListStagedDiffEntries()) {
-        if (entry.kind == file_output::StagedDiffKind::Note) {
-            ++noteStageCount;
-        } else if (entry.kind == file_output::StagedDiffKind::Clrop) {
-            ++clropStageCount;
-        }
-    }
-
-    if (noteStageCount > 0) {
-        parts.push_back((localization::Text(L"main.ui.c86028732c1b").c_str()) +
-                        std::to_wstring(noteStageCount));
-    }
-    if (clropStageCount > 0) {
-        parts.push_back((localization::Text(L"main.ui.9df1818ba9b1").c_str()) +
-                        std::to_wstring(clropStageCount));
-    }
-
-    if (parts.empty()) {
-        return localization::Text(L"main.ui.21c807f4d25c").c_str();
-    }
-
-    std::wstring text = localization::Text(L"main.ui.0c694fa8b2e3").c_str();
-    for (size_t i = 0; i < parts.size(); ++i) {
-        if (i > 0) text += localization::Text(L"main.ui.5ae737320c0d").c_str();
-        text += parts[i];
-    }
-    return text;
+    // Checkpoint state changes frequently while editing and is recoverable
+    // internal state, not a status users need to monitor.  Ctrl+S remains a
+    // quiet explicit save operation; errors still receive visual notices.
+    return L"";
 }
 
 static std::wstring BuildOfficeConversionProgressStatusText() {
@@ -8254,6 +8214,7 @@ void RequestOfficeConversionCancel(bool closeOwnerAfterEnd) {
     s_officeConversionProgress.cancelRequested = true;
     s_officeConversionProgress.closeOwnerAfterEnd =
         s_officeConversionProgress.closeOwnerAfterEnd || closeOwnerAfterEnd;
+    CancelOfficeConversionJobsForExit();
     if (s_officeConversionProgress.cancelButton) {
         EnableWindow(s_officeConversionProgress.cancelButton, FALSE);
         SetWindowTextW(s_officeConversionProgress.cancelButton,
@@ -8336,10 +8297,10 @@ static bool ShowOfficeConversionProgressWindow(HWND owner) {
 
     s_officeConversionProgress.owner = owner ? owner : g_hMainWnd;
     HWND dialogOwner = s_officeConversionProgress.owner;
-    if (dialogOwner) {
-        s_officeConversionProgress.ownerWasEnabled = IsWindowEnabled(dialogOwner) != FALSE;
-        if (s_officeConversionProgress.ownerWasEnabled) EnableWindow(dialogOwner, FALSE);
-    }
+    // This is deliberately a modeless progress window.  LibreOffice conversion
+    // runs in background workers, so editing and saving in the main window must
+    // remain available while a conversion is in flight.
+    s_officeConversionProgress.ownerWasEnabled = false;
 
     constexpr int width = 530;
     constexpr int height = 180;
@@ -8357,9 +8318,6 @@ static bool ShowOfficeConversionProgressWindow(HWND owner) {
         WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
         x, y, width, height, dialogOwner, nullptr, g_hInst, nullptr);
     if (!window) {
-        if (dialogOwner && s_officeConversionProgress.ownerWasEnabled) {
-            EnableWindow(dialogOwner, TRUE);
-        }
         s_officeConversionProgress.ownerWasEnabled = false;
         return false;
     }

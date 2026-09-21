@@ -4,6 +4,8 @@
 // ---------------------------------------------------------------------
 // Note handling and math extraction
 // ---------------------------------------------------------------------
+constexpr size_t kNoteTabDisplaySpaces = 4;
+
 static std::wstring GetEditText(HWND hEdit) {
     int len = GetWindowTextLengthW(hEdit);
     if (len <= 0) return L"";
@@ -36,6 +38,29 @@ static std::wstring GetEditTextForIndexing(HWND hEdit) {
     return normalized;
 }
 
+// Keep U+0009 in the document unchanged, but make the native raw editor use
+// a tab stop matching four displayed space glyphs.
+static void ConfigureNoteEditTabStops(HWND hEdit) {
+    if (!hEdit || !IsRichEditControl(hEdit)) return;
+    HDC hdc = GetDC(hEdit);
+    if (!hdc) return;
+    HFONT font = GetActiveNoteFont();
+    HFONT oldFont = font ? static_cast<HFONT>(SelectObject(hdc, font)) : nullptr;
+    SIZE spaceSize{};
+    TEXTMETRICW metrics{};
+    const bool measuredSpace = GetTextExtentPoint32W(hdc, L" ", 1, &spaceSize) != 0;
+    const bool measuredMetrics = GetTextMetricsW(hdc, &metrics) != 0;
+    if (oldFont) SelectObject(hdc, oldFont);
+    ReleaseDC(hEdit, hdc);
+
+    const int spaceWidth = measuredSpace ? std::max(1, static_cast<int>(spaceSize.cx)) : 1;
+    const int averageWidth = measuredMetrics ? std::max(1, static_cast<int>(metrics.tmAveCharWidth)) : spaceWidth;
+    const int targetPixels = static_cast<int>(kNoteTabDisplaySpaces) * spaceWidth;
+    const int tabStopDlu = std::max(1, (targetPixels * 4 + averageWidth / 2) / averageWidth);
+    const int tabStops[] = {tabStopDlu};
+    SendMessageW(hEdit, EM_SETTABSTOPS, 1, reinterpret_cast<LPARAM>(tabStops));
+}
+
 // Defined by note_view_input_helpers.cppinc, which is included later in the
 // same translation unit. Tab-stop Backspace uses this bounded range reader so
 // normal Backspace never needs to copy the entire note just to reject a
@@ -48,9 +73,13 @@ static std::wstring NormalizeTextForNoteIndexing(std::wstring text) {
     normalized.reserve(text.size());
     for (size_t i = 0; i < text.size(); ++i) {
         wchar_t ch = text[i];
-        normalized.push_back(ch);
-        if (ch == L'\r' && i + 1 < text.size() && text[i + 1] == L'\n') {
-            ++i;
+        if (ch == L'\r') {
+            normalized.push_back(L'\n');
+            if (i + 1 < text.size() && text[i + 1] == L'\n') {
+                ++i;
+            }
+        } else {
+            normalized.push_back(ch);
         }
     }
     return normalized;
@@ -112,11 +141,57 @@ void ForgetNoteUndoHistoryForWindow(HWND hEdit) {
     g_noteUndoHistoryByWindow.erase(hEdit);
 }
 
-void ApplyTextEditToSnapshot(std::wstring* text, const note::TextEdit& edit) {
-    if (!text) return;
-    const size_t start = std::min(edit.start.value, text->size());
-    const size_t deleteLen = std::min(edit.deleted_len, text->size() - start);
-    text->replace(start, deleteLen, edit.inserted_text);
+[[nodiscard]] bool ApplyTextEditToSnapshot(std::wstring* text, const note::TextEdit& edit) {
+    if (!text || edit.start.value > text->size() ||
+        edit.deleted_len > text->size() - edit.start.value) {
+        return false;
+    }
+    text->replace(edit.start.value, edit.deleted_len, edit.inserted_text);
+    return true;
+}
+
+static size_t SaturatingNoteTextOffsetAdd(size_t left, size_t right) {
+    const size_t max = std::numeric_limits<size_t>::max();
+    return right > max - left ? max : left + right;
+}
+
+// Selection is view state, not a historic document state.  Keep the current
+// selection stable across an Undo/Redo whenever it is outside the replaced
+// range; shift it by the replacement delta when it follows the range.  A
+// selection which intersects the changed text has no unambiguous identity, so
+// collapse it at the end of the replacement instead of reviving a selection
+// made by an earlier edit.
+static note::NoteTextSelection TransformNoteSelectionThroughTextEdit(
+    note::NoteTextSelection selection, const note::TextEdit& edit) {
+    const size_t start = edit.start.value;
+    const size_t sourceEnd = SaturatingNoteTextOffsetAdd(start, edit.deleted_len);
+    const size_t destinationEnd =
+        SaturatingNoteTextOffsetAdd(start, edit.inserted_text.size());
+    const size_t selectionStart = std::min(selection.anchor.value, selection.caret.value);
+    const size_t selectionEnd = std::max(selection.anchor.value, selection.caret.value);
+    if (selectionStart != selectionEnd && selectionStart < sourceEnd && selectionEnd > start) {
+        return {{destinationEnd}, {destinationEnd}};
+    }
+
+    const auto transformOffset = [&](size_t offset) {
+        if (offset >= sourceEnd) {
+            return SaturatingNoteTextOffsetAdd(offset - edit.deleted_len,
+                                                edit.inserted_text.size());
+        }
+        if (offset <= start) return offset;
+        return start;
+    };
+    return {{transformOffset(selection.anchor.value)},
+            {transformOffset(selection.caret.value)}};
+}
+
+static note::NoteTextSelection CaptureCurrentNoteSelection(HWND hEdit, size_t textLength) {
+    DWORD start = 0;
+    DWORD end = 0;
+    SendMessageW(hEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&start),
+                 reinterpret_cast<LPARAM>(&end));
+    return {{std::min(static_cast<size_t>(start), textLength)},
+            {std::min(static_cast<size_t>(end), textLength)}};
 }
 
 note::NoteHistoryOperationKind ClassifyNoteHistoryOperation(
@@ -153,6 +228,7 @@ void ResetNoteEditHistorySnapshot(HWND hEdit) {
     if (note::LocalNoteKernel* kernel = CurrentNoteKernel()) {
         kernel->DiscardPendingEditAndRequireFullRefresh();
     }
+    MarkCurrentNoteTextCoreAsEditorSynchronized(hEdit, g_noteUndoTextSnapshot);
 }
 
 static void RegisterExpectedNoteTextEdit(HWND hEdit,
@@ -253,6 +329,10 @@ bool SynchronizeActiveNoteEditorToKernel(HWND owner) {
         file_output::NotifyNoteStageEdit(owner);
     }
 
+    if (kernel && kernel->text_core().MatchesRaw(editorText)) {
+        MarkCurrentNoteTextCoreAsEditorSynchronized(g_hNoteEdit, editorText);
+    }
+
     return true;
 }
 
@@ -275,6 +355,7 @@ void RecordCurrentNoteTextEditForUndo(HWND hEdit) {
     if (g_expectedNoteTextEdit.active && g_expectedNoteTextEdit.hEdit == hEdit) {
         NoteUndoEntry entry = std::move(g_expectedNoteTextEdit.entry);
         g_expectedNoteTextEdit = {};
+        const std::wstring currentText = GetEditTextForIndexing(hEdit);
         if (!g_noteUndoSnapshotReady) {
             ResetNoteEditHistorySnapshot(hEdit);
             return;
@@ -284,15 +365,46 @@ void RecordCurrentNoteTextEditForUndo(HWND hEdit) {
             return;
         }
         if (entry.edit.deleted_len == 0 && entry.edit.inserted_text.empty()) {
+            MarkCurrentNoteTextCoreAsEditorSynchronized(hEdit, currentText);
             return;
         }
         const note::TextEdit edit = entry.edit;
-        ApplyTextEditToSnapshot(&g_noteUndoTextSnapshot, edit);
+        std::wstring expectedAfter = g_noteUndoTextSnapshot;
+        if (!ApplyTextEditToSnapshot(&expectedAfter, edit)) {
+            ResetNoteEditHistorySnapshot(hEdit);
+            return;
+        }
+        if (currentText != expectedAfter) {
+            // Never publish a pre-reserved operation merely because a native
+            // RichEdit command was attempted. If it produced a different
+            // result, derive the one observable operation from actual text.
+            const auto observedEdit = note::ComputeNoteTextEdit(
+                g_noteUndoTextSnapshot, currentText);
+            if (!observedEdit.has_value() ||
+                (observedEdit->deleted_len == 0 && observedEdit->inserted_text.empty())) {
+                return;
+            }
+            DWORD actualSelStart = 0;
+            DWORD actualSelEnd = 0;
+            SendMessageW(hEdit, EM_GETSEL,
+                         reinterpret_cast<WPARAM>(&actualSelStart),
+                         reinterpret_cast<LPARAM>(&actualSelEnd));
+            const note::NoteTextSelection before{{entry.beforeSelStart}, {entry.beforeSelEnd}};
+            const note::NoteTextSelection after{{actualSelStart}, {actualSelEnd}};
+            g_noteUndoTextSnapshot = currentText;
+            ApplyNoteDirtyGraphForUserTextEdit(
+                *observedEdit, before, after,
+                ClassifyNoteHistoryOperation(*observedEdit, before, after));
+            MarkCurrentNoteTextCoreAsEditorSynchronized(hEdit, currentText);
+            return;
+        }
+        g_noteUndoTextSnapshot = std::move(expectedAfter);
         const note::NoteTextSelection before{{entry.beforeSelStart}, {entry.beforeSelEnd}};
         const note::NoteTextSelection after{{entry.afterSelStart}, {entry.afterSelEnd}};
         ApplyNoteDirtyGraphForUserTextEdit(
             edit, before, after,
             ClassifyNoteHistoryOperation(edit, before, after));
+        MarkCurrentNoteTextCoreAsEditorSynchronized(hEdit, g_noteUndoTextSnapshot);
         return;
     }
 
@@ -300,6 +412,7 @@ void RecordCurrentNoteTextEditForUndo(HWND hEdit) {
     if (!g_noteUndoSnapshotReady) {
         g_noteUndoTextSnapshot = currentText;
         g_noteUndoSnapshotReady = true;
+        MarkCurrentNoteTextCoreAsEditorSynchronized(hEdit, currentText);
         return;
     }
     auto editOpt = note::ComputeNoteTextEdit(g_noteUndoTextSnapshot, currentText);
@@ -309,6 +422,7 @@ void RecordCurrentNoteTextEditForUndo(HWND hEdit) {
     }
     const note::TextEdit& edit = *editOpt;
     if (edit.deleted_len == 0 && edit.inserted_text.empty()) {
+        MarkCurrentNoteTextCoreAsEditorSynchronized(hEdit, currentText);
         return;
     }
 
@@ -333,6 +447,7 @@ void RecordCurrentNoteTextEditForUndo(HWND hEdit) {
     ApplyNoteDirtyGraphForUserTextEdit(
         edit, before, after,
         ClassifyNoteHistoryOperation(edit, before, after));
+    MarkCurrentNoteTextCoreAsEditorSynchronized(hEdit, g_noteUndoTextSnapshot);
 }
 
 static bool IsEditableNoteUndoRedoFocusOwner() {
@@ -352,6 +467,38 @@ bool CanExecuteNoteUndoRedoFromFocus(bool undo) {
     return kernel && (undo ? kernel->CanUndo() : kernel->CanRedo());
 }
 
+static bool TextContainsPendingLinkId(const std::wstring& text,
+                                      const std::wstring& linkId) {
+    if (text.empty() || linkId.empty()) return false;
+    return text.find(L"link:" + linkId) != std::wstring::npos ||
+           text.find(L"LINK:" + linkId) != std::wstring::npos ||
+           text.find(L"l=" + linkId) != std::wstring::npos ||
+           text.find(L"link=" + linkId) != std::wstring::npos;
+}
+
+static void SynchronizePendingNoteLinkPointAfterUndoRedo(const std::wstring& text) {
+    if (!g_linkPending.active || g_linkPending.id.empty()) return;
+    if (!g_linkPending.notePath.empty() &&
+        g_linkPending.notePath != g_currentNotePath) {
+        return;
+    }
+
+    if (TextContainsPendingLinkId(text, g_linkPending.id)) {
+        // A pending transaction has at most one note endpoint: its second
+        // endpoint completes it immediately.  Reconcile directly from the
+        // post-replay text rather than trusting the pre-replay counter.
+        g_linkPending.notePoints = 1;
+        g_linkPending.haveNote = true;
+        g_linkPending.notePath = g_currentNotePath;
+        return;
+    }
+
+    g_linkPending.notePoints = 0;
+    g_linkPending.haveNote = false;
+    g_linkPending.notePath.clear();
+    g_linkPending.notePos = 0;
+}
+
 bool ExecuteNoteUndoRedoFromFocus(HWND owner, bool undo) {
     (void)owner;
     note::LocalNoteKernel* kernel = CurrentNoteKernel();
@@ -361,11 +508,16 @@ bool ExecuteNoteUndoRedoFromFocus(HWND owner, bool undo) {
         // shared history. This preserves history instead of discarding it.
         RecordCurrentNoteTextEditForUndo(g_hNoteEdit);
     }
-    if (!kernel->text_core().MatchesRaw(GetEditTextForIndexing(g_hNoteEdit))) return false;
+    const std::wstring currentText = GetEditTextForIndexing(g_hNoteEdit);
+    if (!kernel->text_core().MatchesRaw(currentText)) return false;
     if (!(undo ? kernel->CanUndo() : kernel->CanRedo())) return false;
+    const note::NoteTextSelection selectionBeforeReplay =
+        CaptureCurrentNoteSelection(g_hNoteEdit, currentText.size());
     const auto replay = undo ? kernel->Undo(IsNoteRenderActive()) : kernel->Redo(IsNoteRenderActive());
     if (!replay.has_value() || !replay->applied()) return false;
     const note::TextEdit& edit = replay->apply_result.dirty_graph.edit;
+    const note::NoteTextSelection selectionAfterReplay =
+        TransformNoteSelectionThroughTextEdit(selectionBeforeReplay, edit);
     g_noteApplyingUndoRedo = true;
     ReleaseNoteChangeSuppressionForUserEdit();
     SendMessageW(g_hNoteEdit, EM_SETSEL,
@@ -374,12 +526,14 @@ bool ExecuteNoteUndoRedoFromFocus(HWND owner, bool undo) {
     SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE,
                  reinterpret_cast<LPARAM>(edit.inserted_text.c_str()));
     SendMessageW(g_hNoteEdit, EM_SETSEL,
-                 static_cast<WPARAM>(replay->selection.anchor.value),
-                 static_cast<LPARAM>(replay->selection.caret.value));
+                 static_cast<WPARAM>(selectionAfterReplay.anchor.value),
+                 static_cast<LPARAM>(selectionAfterReplay.caret.value));
     g_noteApplyingUndoRedo = false;
     g_noteUndoTextSnapshot = GetEditTextForIndexing(g_hNoteEdit);
     g_noteUndoSnapshotReady = true;
     ApplyNoteKernelHistoryResult(kernel, replay->apply_result);
+    MarkCurrentNoteTextCoreAsEditorSynchronized(g_hNoteEdit, g_noteUndoTextSnapshot);
+    SynchronizePendingNoteLinkPointAfterUndoRedo(g_noteUndoTextSnapshot);
     SendMessageW(g_hNoteEdit, EM_SCROLLCARET, 0, 0);
     return true;
 }
@@ -541,6 +695,7 @@ static HWND CreateAdditionalNoteEditWindow(HWND owner) {
     } else {
         SetUIFont(hEdit);
     }
+    ConfigureNoteEditTabStops(hEdit);
     SendMessageW(hEdit, EM_SETREADONLY, HasOpenNote() ? FALSE : TRUE, 0);
     UpdateNoteFormatRect(hEdit);
     return hEdit;
@@ -572,6 +727,7 @@ static void ActivateNoteEditWindow(HWND owner, HWND nextEdit) {
     if (activeNoteFont) {
         SendMessageW(g_hNoteEdit, WM_SETFONT, reinterpret_cast<WPARAM>(activeNoteFont), TRUE);
     }
+    ConfigureNoteEditTabStops(g_hNoteEdit);
     SendMessageW(g_hNoteEdit, EM_SETBKGNDCOLOR, 0, g_noteBgColor);
 
     if (haveRect) {
@@ -1377,6 +1533,18 @@ static bool BuildNoteSelectedLineRange(const std::wstring& text,
     return *outBlockStart <= *outBlockEnd;
 }
 
+static bool IsMarkdownListLine(const std::wstring& text, size_t lineStart, size_t lineEnd) {
+    size_t marker = lineStart;
+    while (marker < lineEnd && IsNoteBulletIndentChar(text[marker])) {
+        ++marker;
+    }
+    if (marker + 1 < lineEnd && IsMarkdownBulletMarker(text[marker]) &&
+        IsNoteBulletIndentChar(text[marker + 1])) {
+        return true;
+    }
+    return TryParseMarkdownOrderedListMarker(text, marker, lineEnd, nullptr, nullptr, nullptr);
+}
+
 static bool TryIndentSelectedMarkdownLines(HWND hWnd) {
     if (!hWnd) return false;
     if (CurrentNoteContentRoute() != NoteContentRoute::MarkdownMd4c) return false;
@@ -1398,9 +1566,11 @@ static bool TryIndentSelectedMarkdownLines(HWND hWnd) {
     replacement.reserve((blockEnd - blockStart) + 8);
     size_t scan = blockStart;
     while (scan <= blockEnd) {
-        replacement += L"    ";
         size_t lineEnd = FindNoteLineEnd(text, scan);
         lineEnd = std::min(lineEnd, blockEnd);
+        // A Markdown list item moves by one semantic level (two spaces),
+        // while non-list lines retain the existing four-space block indent.
+        replacement += IsMarkdownListLine(text, scan, lineEnd) ? L"  " : L"    ";
         replacement.append(text, scan, lineEnd - scan);
         if (lineEnd >= blockEnd) break;
         replacement.push_back(text[lineEnd]);
@@ -1410,8 +1580,76 @@ static bool TryIndentSelectedMarkdownLines(HWND hWnd) {
     return ReplaceNoteLineBlock(hWnd, blockStart, blockEnd, replacement, 0, replacement.size());
 }
 
+// Tab on a Markdown list marker is a structural editing command, not four
+// literal spaces in the item text. A just-typed unordered or ordered marker
+// becomes valid Markdown first; later Tab presses nest that item one level.
+// Keep this narrow: ordinary lines and markers with a selection still follow
+// the established generic indentation path.
+static bool TryHandleCurrentMarkdownListTab(HWND hWnd) {
+    if (!hWnd || CurrentNoteContentRoute() != NoteContentRoute::MarkdownMd4c) return false;
+
+    DWORD selStart = 0;
+    DWORD selEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selStart),
+                 reinterpret_cast<LPARAM>(&selEnd));
+    if (selStart != selEnd) return false;
+
+    const std::wstring text = GetEditTextForIndexing(hWnd);
+    const size_t caret = std::min<size_t>(selStart, text.size());
+    const size_t lineStart = FindNoteLineStart(text, caret);
+    const size_t lineEnd = FindNoteLineEnd(text, caret);
+    size_t marker = lineStart;
+    while (marker < lineEnd && IsNoteBulletIndentChar(text[marker])) {
+        ++marker;
+    }
+    if (marker >= lineEnd) return false;
+
+    size_t afterMarker = marker;
+    bool incompleteMarker = false;
+    if (IsMarkdownBulletMarker(text[marker])) {
+        afterMarker = marker + 1;
+        incompleteMarker = (afterMarker == lineEnd && caret == afterMarker);
+    } else if (IsMarkdownOrderedListDigit(text[marker])) {
+        while (afterMarker < lineEnd && IsMarkdownOrderedListDigit(text[afterMarker])) {
+            ++afterMarker;
+        }
+        if (afterMarker < lineEnd && (text[afterMarker] == L'.' || text[afterMarker] == L')')) {
+            ++afterMarker;
+            incompleteMarker = (afterMarker == lineEnd && caret == afterMarker);
+        }
+    }
+    if (incompleteMarker) {
+        // `-`, `*`, `+`, `1.`, and `1)` + Tab complete the separator without
+        // inserting a literal tab into the list item.
+        return ReplaceNoteSelectionAndSetSelection(hWnd, selStart, selEnd, L" ", 1, 1);
+    }
+    if (!IsMarkdownListLine(text, lineStart, lineEnd)) return false;
+
+    // Two spaces are one nesting level for a Markdown list item. Four leading spaces
+    // can instead become a code block in CommonMark, so do not reuse the
+    // generic block-indent width here.
+    constexpr std::wstring_view kNestedListIndent = L"  ";
+    std::wstring replacement(kNestedListIndent);
+    replacement.append(text, lineStart, lineEnd - lineStart);
+    const size_t caretInReplacement = (caret - lineStart) + kNestedListIndent.size();
+    return ReplaceNoteLineBlock(hWnd, lineStart, lineEnd, replacement,
+                                caretInReplacement, caretInReplacement);
+}
+
 static size_t CountMarkdownOutdentChars(const std::wstring& text, size_t lineStart, size_t lineEnd) {
     if (lineStart >= lineEnd) return 0;
+    if (IsMarkdownListLine(text, lineStart, lineEnd)) {
+        if (text[lineStart] == L'\t') return 1;
+        size_t leadingSpaces = 0;
+        while (lineStart + leadingSpaces < lineEnd &&
+               text[lineStart + leadingSpaces] == L' ') {
+            ++leadingSpaces;
+        }
+        // List Tab adds two spaces, therefore Shift+Tab removes only that
+        // one level even if an older pasted item has deeper indentation.
+        return std::min<size_t>(2, leadingSpaces);
+    }
     if (text[lineStart] == L'\t') return 1;
     size_t removed = 0;
     while (lineStart + removed < lineEnd && removed < 4 && text[lineStart + removed] == L' ') {
@@ -1900,8 +2138,7 @@ static void RefreshNoteRenderAndLayoutStage(
     //
     //   Unavailable - No kernel; syntax is unreliable; clear to avoid stale paint.
     //
-    if (needRenderPlan &&
-        CurrentNoteContentRoute() == NoteContentRoute::MarkdownMd4c) {
+    if (needRenderPlan && CurrentNoteSupportsRenderOverlay()) {
         if (syntax.kind == Kind::Unchanged && HasCurrentLineCache()) {
             // Fast path: the LineCache is already consistent with the current text
             // revision - nothing to rebuild. UpdateNoteLineSpacing + InvalidateRect
@@ -2301,6 +2538,8 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
                 L"after_reuse_cached_edit chars=" + std::to_wstring(text.size()) +
                 L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
         }
+        MarkCurrentNoteTextCoreAsEditorSynchronized(
+            g_hNoteEdit, GetEditTextForIndexing(g_hNoteEdit));
         SendMessageW(g_hNoteEdit, EM_SETMODIFY, FALSE, 0);
         g_noteDirty = false;
         // Richedit can emit EN_CHANGE asynchronously after SetWindowText/EM_SETMODIFY.
@@ -2495,9 +2734,7 @@ ResolveCurrentNoteWorkspaceIndex() {
         g_currentNotePath,
         CurrentNoteTextMetadata(),
         kernel->text_core().model().raw,
-        CurrentNoteContentRoute() == NoteContentRoute::PlainText
-            ? note::NoteContentKind::PlainText
-            : note::NoteContentKind::Markdown);
+        CurrentNoteContentKind());
 }
 
 static bool CurrentNoteHasLinkTargetExcluding(const std::wstring& linkId,
@@ -2722,89 +2959,213 @@ bool JumpToNoteLinkId(const std::wstring& linkId,
     return false;
 }
 
-bool CommitNoteRenderStateBeforePaintIfNeeded(HWND hWnd) {
-    if (!hWnd || !g_noteRenderEnabled || g_noteRawOnly) return false;
-    if (IsNoteImeComposing() || IsImeComposingOnEditWindow(hWnd)) return false;
-    
-    bool isStale = IsNoteTyping();
-    if (!isStale) {
+// This state is created once at the beginning of WM_PAINT and is shared by
+// the commit barrier and overlay. Keeping the text snapshot here prevents the
+// two stages from independently reading the entire RichEdit contents and from
+// resolving different raw/structured priorities in one frame.
+struct NoteRenderPresentationFrame {
+    note::NotePresentationPlan plan{};
+    note::NotePresentationFrameAction action = note::NotePresentationFrameAction::RawFallback;
+    bool stale = false;
+    bool staleLineCountChanged = false;
+    bool hasCurrentTextForStale = false;
+    std::wstring currentTextForStale;
+    std::vector<size_t> currentLogicalStartsForStale;
+};
+
+static bool CanReuseCommittedLayoutForImeComposition(HWND hWnd) {
+    if (!hWnd || g_noteImeCompositionRequiresWholeViewFallback ||
+        RequiresImmediateNoteDerivedFrameCommit() ||
+        !g_noteRenderStaleLines.valid ||
+        g_noteRenderStaleLines.first != g_noteRenderStaleLines.last ||
+        !IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd)) {
+        return false;
+    }
+
+    const note::NoteTextModel& currentText = CurrentNoteTextCoreModel();
+    if (currentText.line_starts.empty()) return false;
+
+    DWORD selectionStart = 0;
+    DWORD selectionEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selectionStart),
+                 reinterpret_cast<LPARAM>(&selectionEnd));
+    const size_t rawStart = std::min(static_cast<size_t>(selectionStart), currentText.raw.size());
+    const size_t rawEnd = std::min(static_cast<size_t>(selectionEnd), currentText.raw.size());
+    const int firstLine = FindLogicalLineForRaw(currentText.line_starts, rawStart);
+    const int caretLine = FindLogicalLineForRaw(currentText.line_starts, rawEnd);
+    if (firstLine != caretLine || caretLine < 0) return false;
+    return g_noteRenderStaleLines.first == static_cast<size_t>(caretLine);
+}
+
+static NoteRenderPresentationFrame BuildNoteRenderPresentationFrame(
+    HWND hWnd, bool captureStaleText = true) {
+    NoteRenderPresentationFrame frame;
+    if (!hWnd || !g_noteRenderEnabled || g_noteRawOnly) return frame;
+
+    const bool renderActive = IsNoteRenderActive();
+    if (!renderActive) return frame;
+    const bool textCoreEditorCurrent = IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd);
+    // A structured/hybrid frame may reuse the canonical line index only after
+    // the event adapter has bound this control mutation to the same document
+    // revision. Without that proof, retain one full native owner for the frame.
+    if (!textCoreEditorCurrent) {
+        frame.plan = note::ResolveNotePresentationPlan(
+            note::NotePresentationFrameState{renderActive, false, false, false, false, false,
+                                             false});
+        frame.action = note::ResolveNotePresentationFrameAction(frame.plan);
+        return frame;
+    }
+    const bool imeComposing = IsNoteImeComposing() || IsImeComposingOnEditWindow(hWnd);
+    const bool lineCacheCurrent = HasCurrentLineCache();
+    frame.stale = IsNoteTyping();
+    if (!frame.stale) {
         const int currentWindowTextLength = GetWindowTextLengthW(hWnd);
-        isStale = currentWindowTextLength < 0 ||
+        frame.stale = currentWindowTextLength < 0 ||
             static_cast<size_t>(currentWindowTextLength) != g_lastParsedMarkupWindowTextLength;
     }
-    
-    bool staleLineCountChanged = false;
-    if (isStale) {
-        std::wstring currentTextForStale = GetEditTextForIndexing(hWnd);
-        staleLineCountChanged = (SplitLines(currentTextForStale).size() != g_lineCache.size());
+
+    // IME never copies the whole editor text merely to decide this frame. A
+    // bounded proof admits the current composition line as NativeRaw while
+    // every other line retains its committed owner; any unproven or structural
+    // composition instead resolves to a whole-view native fallback below.
+    const bool imeCompositionCanReuseCommittedLayout =
+        imeComposing && !lineCacheCurrent && CanReuseCommittedLayoutForImeComposition(hWnd);
+    if (frame.stale && !imeComposing && !captureStaleText) {
+        // Caret/IME callers only need to decide whether committed geometry is
+        // safe. They must not copy the entire document outside WM_PAINT. A
+        // missing structural proof therefore falls back to native raw.
+        frame.action = note::NotePresentationFrameAction::RawFallback;
+        return frame;
     }
-    const bool derivedFrameCommitRequired = RequiresImmediateNoteDerivedFrameCommit();
-    
-    const bool lineCacheCurrent = HasCurrentLineCache();
-    const note::NotePresentationFrameAction frameAction =
-        note::ResolveNotePresentationFrameAction(note::NotePresentationFrameState{
-            IsNoteRenderActive(),
-            !g_lineCache.empty(),
-            lineCacheCurrent,
-            isStale,
-            staleLineCountChanged || derivedFrameCommitRequired,
-            IsNoteImeComposing() || IsImeComposingOnEditWindow(hWnd),
-        });
-        
-    if (frameAction == note::NotePresentationFrameAction::CommitBeforePaint) {
-        // Synchronous commit to prevent raw text flicker.
+    if (frame.stale && !imeComposing) {
+        frame.currentTextForStale = GetEditTextForIndexing(hWnd);
+        frame.hasCurrentTextForStale = true;
+        frame.staleLineCountChanged =
+            note::CountNoteLogicalLines(frame.currentTextForStale) != g_lineCache.size();
+    }
+
+    frame.plan = note::ResolveNotePresentationPlan(note::NotePresentationFrameState{
+        renderActive,
+        !g_lineCache.empty(),
+        lineCacheCurrent,
+        frame.stale,
+        frame.staleLineCountChanged || RequiresImmediateNoteDerivedFrameCommit(),
+        imeComposing,
+        textCoreEditorCurrent,
+        imeCompositionCanReuseCommittedLayout,
+    });
+    frame.action = note::ResolveNotePresentationFrameAction(frame.plan);
+    if (frame.action == note::NotePresentationFrameAction::ReuseCommittedLayout &&
+        frame.hasCurrentTextForStale) {
+        // ReuseCommittedLayout still needs the current raw line mapping, but
+        // must not acquire the RichEdit text a second time inside the overlay.
+        frame.currentLogicalStartsForStale =
+            BuildLogicalLineStartsFromIndexingText(frame.currentTextForStale);
+        if (frame.currentLogicalStartsForStale.size() != g_lineCache.size()) {
+            frame.action = note::NotePresentationFrameAction::RawFallback;
+        }
+    }
+    return frame;
+}
+
+static void RefreshNoteRenderPresentationFrameAfterCommit(
+    NoteRenderPresentationFrame* frame) {
+    if (!frame) return;
+
+    frame->currentTextForStale.clear();
+    frame->currentLogicalStartsForStale.clear();
+    frame->hasCurrentTextForStale = false;
+    frame->stale = false;
+    frame->staleLineCountChanged = false;
+    // The synchronous commit has established the only acceptable structured
+    // snapshot for this frame. If it did not, show native raw rather than
+    // attempting a stale-layout reuse without a current raw text snapshot.
+    const HWND hWnd = CurrentNoteViewContextWindow();
+    frame->plan = note::ResolveNotePresentationPlan(note::NotePresentationFrameState{
+        IsNoteRenderActive(),
+        !g_lineCache.empty(),
+        HasCurrentLineCache(),
+        false,
+        false,
+        false,
+        IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd),
+    });
+    frame->action = note::ResolveNotePresentationFrameAction(frame->plan);
+}
+
+static bool CommitNoteRenderStateBeforePaintIfNeeded(
+    HWND hWnd, NoteRenderPresentationFrame* presentationFrame) {
+    if (!hWnd || !presentationFrame) return false;
+    if (presentationFrame->action == note::NotePresentationFrameAction::CommitBeforePaint) {
+        // A structural edit can move every following logical line.  Recompute
+        // updates RichEdit's paragraph geometry, but the pre-existing update
+        // region may cover only the edited line.  Widen it before BeginPaint
+        // so this frame erases both the former and the new positions of a tall
+        // rendered line; otherwise a clipped fragment can survive for one
+        // paint while the following lines move.
         RecomputeMathFromNote();
+        InvalidateRect(hWnd, nullptr, FALSE);
+        RefreshNoteRenderPresentationFrameAfterCommit(presentationFrame);
         return true;
     }
     return false;
 }
 
-static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
-    if (!hdc || !hWnd) return;
-    if (!g_noteRenderEnabled || g_noteRawOnly) return;
-    
-    // While delayed reparse is pending, avoid drawing stale rendered markup over the raw edit text.
-    // Length mismatches catch inserts/deletes, while the typing flag also covers same-length edits
-    // (e.g. replacing one character with another) that would otherwise keep the old overlay visible.
-    bool isStale = IsNoteTyping();
-    if (!isStale) {
-        const int currentWindowTextLength = GetWindowTextLengthW(hWnd);
-        isStale = currentWindowTextLength < 0 ||
-            static_cast<size_t>(currentWindowTextLength) != g_lastParsedMarkupWindowTextLength;
-    }
+bool CommitNoteRenderStateBeforePaintIfNeeded(HWND hWnd) {
+    NoteRenderPresentationFrame presentationFrame = BuildNoteRenderPresentationFrame(hWnd);
+    return CommitNoteRenderStateBeforePaintIfNeeded(hWnd, &presentationFrame);
+}
 
-    // Compare against logical lines in the current text, not EM_GETLINECOUNT.
-    // RichEdit's line count includes soft wraps, while g_lineCache tracks hard lines only.
-    // Using display-line count here can incorrectly drop overlay rendering on unrelated lines.
-    std::wstring currentTextForStale;
-    bool haveCurrentTextForStale = false;
-    bool staleLineCountChanged = false;
-    if (isStale) {
-        currentTextForStale = GetEditTextForIndexing(hWnd);
-        haveCurrentTextForStale = true;
-        staleLineCountChanged = (SplitLines(currentTextForStale).size() != g_lineCache.size());
+// WM_PRINTCLIENT is the native text owner only for NativeRaw lines.  Keeping
+// this in the same presentation path as the overlay prevents invisible native
+// text from being rendered and then covered by a structured line in the same
+// frame.  A null region deliberately preserves the complete native fallback.
+static void PaintNativeNoteClient(HWND hWnd, HDC hdc, HRGN clipRegion) {
+    if (!hWnd || !hdc) return;
+    const int savedDc = SaveDC(hdc);
+    if (clipRegion) {
+        SelectClipRgn(hdc, clipRegion);
     }
-    const bool derivedFrameCommitRequired = RequiresImmediateNoteDerivedFrameCommit();
-    const bool lineCacheCurrent = HasCurrentLineCache();
-    const note::NotePresentationFrameAction frameAction =
-        note::ResolveNotePresentationFrameAction(note::NotePresentationFrameState{
-            IsNoteRenderActive(),
-            !g_lineCache.empty(),
-            lineCacheCurrent,
-            isStale,
-            staleLineCountChanged || derivedFrameCommitRequired,
-            IsNoteImeComposing() || IsImeComposingOnEditWindow(hWnd),
-        });
-    if (frameAction == note::NotePresentationFrameAction::RawFallback ||
-        frameAction == note::NotePresentationFrameAction::CommitBeforePaint) {
+    SendMessageW(hWnd, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(hdc), PRF_CLIENT);
+    if (savedDc != 0) {
+        RestoreDC(hdc, savedDc);
+    }
+}
+
+static void DrawHighlightOverlay(HWND hWnd, HDC hdc,
+                                 const NoteRenderPresentationFrame& presentationFrame) {
+    if (!hdc || !hWnd) return;
+    if (!g_noteRenderEnabled || g_noteRawOnly) {
+        PaintNativeNoteClient(hWnd, hdc);
+        return;
+    }
+    const bool isStale = presentationFrame.stale;
+    const bool staleLineCountChanged = presentationFrame.staleLineCountChanged;
+    const bool haveCurrentTextForStale = presentationFrame.hasCurrentTextForStale;
+    const std::wstring& currentTextForStale = presentationFrame.currentTextForStale;
+    const note::NotePresentationFrameAction frameAction = presentationFrame.action;
+    if (note::ResolveNoteNativePaintScope(frameAction) == note::NoteNativePaintScope::AllLines) {
+        PaintNativeNoteClient(hWnd, hdc);
+        return;
+    }
+    if (!IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd)) {
+        PaintNativeNoteClient(hWnd, hdc);
         return;
     }
 
     RECT rc{};
     GetClientRect(hWnd, &rc);
     const NoteLayoutFrame layoutFrame = BuildNoteLayoutFrame(hWnd);
-    bool requireExactRevision = (frameAction != note::NotePresentationFrameAction::ReuseCommittedLayout);
-    if (!NoteLayoutFrameMatchesRenderSnapshot(layoutFrame, requireExactRevision)) return;
+    // A raw editing line may coexist with the committed snapshot only when
+    // the presentation resolver selected ReuseCommittedLayout.  All geometry
+    // consumers still derive its line band from the same layout frame.
+    const bool requireExactRevision =
+        (frameAction != note::NotePresentationFrameAction::ReuseCommittedLayout);
+    if (!NoteLayoutFrameMatchesRenderSnapshot(layoutFrame, requireExactRevision)) {
+        PaintNativeNoteClient(hWnd, hdc);
+        return;
+    }
     rc = layoutFrame.client;
     int clientH = layoutFrame.clientHeightPx;
     int clientW = layoutFrame.clientWidthPx;
@@ -2812,7 +3173,10 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
 
     MarkupFontProvider fonts;
     fonts.Initialize(hdc, GetActiveNoteFont());
-    if (!fonts.baseFont) return;
+    if (!fonts.baseFont) {
+        PaintNativeNoteClient(hWnd, hdc);
+        return;
+    }
 
     int baseLineHeight = fonts.baseMetrics.tmHeight;
     if (baseLineHeight <= 0) baseLineHeight = 1;
@@ -2822,6 +3186,10 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
     int spaceW = fonts.spaceWidth;
     if (spaceW <= 0) spaceW = fonts.baseMetrics.tmAveCharWidth;
     if (spaceW <= 0) spaceW = 1;
+    if (!EnsureTableRenderLayouts(hWnd, hdc, fonts, layoutFrame.dpi)) {
+        PaintNativeNoteClient(hWnd, hdc);
+        return;
+    }
 
     int oldBkMode = SetBkMode(hdc, TRANSPARENT);
 
@@ -2864,16 +3232,31 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
             }
         }
     }
-    std::wstring indexingText;
-    std::vector<size_t> logicalStarts;
+    const note::NoteTextModel& currentTextCore = CurrentNoteTextCoreModel();
+    std::wstring_view indexingText;
+    const std::vector<size_t>* logicalStartsPtr = nullptr;
     const bool renderActive = layoutFrame.renderActive;
     if (renderActive) {
-        logicalStarts = GetNoteLogicalLineStarts(hWnd, &indexingText);
+        if (frameAction == note::NotePresentationFrameAction::ReuseCommittedLayout &&
+            haveCurrentTextForStale && !presentationFrame.currentLogicalStartsForStale.empty()) {
+            indexingText = currentTextForStale;
+            logicalStartsPtr = &presentationFrame.currentLogicalStartsForStale;
+        } else {
+            indexingText = currentTextCore.raw;
+            logicalStartsPtr = &currentTextCore.line_starts;
+        }
     }
     int lineCount = renderActive
-        ? std::max<int>(1, static_cast<int>(logicalStarts.size()))
+        ? std::max<int>(1, logicalStartsPtr ? static_cast<int>(logicalStartsPtr->size()) : 0)
         : NoteLineCount();
     if (lineCount <= 0) {
+        PaintNativeNoteClient(hWnd, hdc);
+        return;
+    }
+    const std::vector<size_t> emptyLogicalStarts;
+    const std::vector<size_t>& logicalStarts = logicalStartsPtr ? *logicalStartsPtr : emptyLogicalStarts;
+    if (renderActive && logicalStarts.empty()) {
+        PaintNativeNoteClient(hWnd, hdc);
         return;
     }
     const bool showVimCaretLineRawInNote =
@@ -3022,9 +3405,6 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
     }
     int maxLine = std::min<int>(static_cast<int>(g_lineCache.size()) - 1, lineCount - 1);
 
-    auto isRawLine = [&](int line) -> bool {
-        return IsNoteLineRawHelper(hWnd, line);
-    };
     auto fillSolidRect = [&](const RECT& r, COLORREF col) {
         HBRUSH br = CreateSolidBrush(col);
         FillRect(hdc, &r, br);
@@ -3171,7 +3551,74 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
             suppressRawLineOverlay = NoteLinkRenderGraceRemainingMs() > 0;
         }
     }
+    // Resolve one text owner per logical line once for this paint. Only the
+    // visible lines (plus the native-raw clip overscan) can reach this paint,
+    // so do not allocate or visit every logical line in a long note.
+    const int surfaceFirstLine = std::max(0, firstVisible - 2);
+    const int surfaceLastLine = std::min(lineCount - 1, lastVisible + 2);
+    const NoteRawLineSurfaceResolver rawLineSurfaceResolver =
+        BuildNoteRawLineSurfaceResolver(hWnd);
+    std::vector<note::NotePresentationLineSurface> lineSurfaces(
+        static_cast<size_t>(surfaceLastLine - surfaceFirstLine + 1),
+        note::NotePresentationLineSurface::Structured);
+    for (int line = surfaceFirstLine; line <= surfaceLastLine; ++line) {
+        lineSurfaces[static_cast<size_t>(line - surfaceFirstLine)] =
+            note::ResolveNotePresentationLineSurface(
+                rawLineSurfaceResolver.RequestsNativeRaw(line),
+                suppressRawLineOverlay,
+                isStaleEditingLine(line));
+    }
+    auto lineSurface = [&](int line) -> note::NotePresentationLineSurface {
+        if (line < surfaceFirstLine || line > surfaceLastLine) {
+            return note::NotePresentationLineSurface::Structured;
+        }
+        return lineSurfaces[static_cast<size_t>(line - surfaceFirstLine)];
+    };
+    auto isNativeRawLine = [&](int line) -> bool {
+        return lineSurface(line) == note::NotePresentationLineSurface::NativeRaw;
+    };
     if (renderActive) {
+        // The surface resolver above is the sole owner decision.  Let
+        // RichEdit draw only the NativeRaw bands; Structured and OverlayRaw
+        // lines are drawn below by this overlay and must never receive an
+        // invisible native text pass first.
+        HRGN nativeRawRegion = CreateRectRgn(0, 0, 0, 0);
+        bool nativeRawRegionComplete = nativeRawRegion != nullptr;
+        bool hasNativeRawLine = false;
+        for (int rawL = surfaceFirstLine; rawL <= surfaceLastLine; ++rawL) {
+            if (!isNativeRawLine(rawL)) continue;
+            int rawTop = 0;
+            int rawBottom = 0;
+            if (!QueryLogicalLineBandFromStarts(hWnd, indexingText, logicalStarts, rawL,
+                                                baseLineHeight, &rawTop, &rawBottom,
+                                                nullptr, nullptr, nullptr, nullptr)) {
+                nativeRawRegionComplete = false;
+                break;
+            }
+            if (rawL == static_cast<int>(logicalStarts.size() - 1)) {
+                rawBottom = std::max(rawBottom, static_cast<int>(rc.bottom));
+            }
+            HRGN lineRegion = CreateRectRgn(rc.left, rawTop, rc.right, rawBottom);
+            if (!lineRegion || !nativeRawRegion ||
+                CombineRgn(nativeRawRegion, nativeRawRegion, lineRegion, RGN_OR) == ERROR) {
+                nativeRawRegionComplete = false;
+            } else {
+                hasNativeRawLine = true;
+            }
+            if (lineRegion) DeleteObject(lineRegion);
+            if (!nativeRawRegionComplete) break;
+        }
+        if (nativeRawRegionComplete) {
+            if (hasNativeRawLine) {
+                PaintNativeNoteClient(hWnd, hdc, nativeRawRegion);
+            }
+        } else {
+            // A clip construction failure must preserve input visibility.  It
+            // is safe to pay the legacy native paint cost for this one frame.
+            PaintNativeNoteClient(hWnd, hdc);
+        }
+        if (nativeRawRegion) DeleteObject(nativeRawRegion);
+
         // [REASON FOR CHANGE]
         // 以前は、IME入力中のみクリッピングを除外していました：
         // if (IsNoteImeComposing() && caretLine >= 0 && caretLine < lineCount) {
@@ -3184,8 +3631,8 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
         // キャレットがある行（生テキスト表示すべき行）が常に正しく折り返されるようにするため、
         // IME入力中に限らず「生テキストであるべき時」は常にこのネイティブテキストへの
         // フォールバック（透過）処理を適用するように変更しています。
-        for (int rawL = std::max(0, firstVisible - 2); rawL <= std::min(lineCount - 1, lastVisible + 2); ++rawL) {
-            if (IsNoteLineRawHelper(hWnd, rawL) && !suppressRawLineOverlay) {
+        for (int rawL = surfaceFirstLine; rawL <= surfaceLastLine; ++rawL) {
+            if (isNativeRawLine(rawL)) {
             int imeY = 0;
             int imeBottom = 0;
             if (QueryLogicalLineBandFromStarts(hWnd, indexingText, logicalStarts, rawL, baseLineHeight,
@@ -3202,9 +3649,8 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
 
     for (int line = firstVisible; line <= lastVisible && line < lineCount; ++line) {
         if (line < 0) continue;
-        bool staleEditing = isStaleEditingLine(line);
-        const bool rawLine = isRawLine(line) && !suppressRawLineOverlay;
-        if (!staleEditing && !rawLine) {
+        const note::NotePresentationLineSurface surface = lineSurface(line);
+        if (surface == note::NotePresentationLineSurface::Structured) {
             if (line > maxLine) break;
             if (line >= static_cast<int>(g_lineCache.size())) break;
         }
@@ -3246,14 +3692,14 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
         }
         RECT lineRc{ rc.left, lineY, rc.right, lineBottom };
         fillSolidRect(lineRc, baseBack);
-        if (staleEditing || rawLine) {
+        if (surface != note::NotePresentationLineSurface::Structured) {
             // [REASON FOR CHANGE]
             // 以前は、IME入力中のみ独自描画をスキップしていました：
             // if (renderActive && IsNoteImeComposing() && line == caretLine) { continue; }
             //
             // 折り返されない drawStaleRawLine による描画を防ぎ、背面のRichEditの
             // 折り返しテキストを表示させるため、キャレット行の生テキスト表示時は常にスキップします。
-            if (renderActive && rawLine) {
+            if (surface == note::NotePresentationLineSurface::NativeRaw) {
                 continue;
             }
             int lineX = NoteLayoutFrameLineBaseXForRenderState(layoutFrame, linePos.x);
@@ -3262,6 +3708,13 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
         }
     }
 
+    // A structured selection needs source/display boundaries, but only for
+    // the visible lines currently selected. Reuse one buffer across those
+    // lines so a multi-line selection does not allocate once per line during
+    // WM_PAINT.
+    std::vector<RenderBoundary> selectionBoundaryScratch;
+    std::vector<RenderedSegmentPlacement> selectionPlacementScratch;
+    std::vector<RenderBoundary> selectionSegmentBoundaryScratch;
     for (int line = firstVisible; line <= lastVisible && line <= maxLine; ++line) {
         if (line < 0) continue;
         if (line >= static_cast<int>(g_lineCache.size())) break;
@@ -3269,7 +3722,8 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
         // If cache is stale (typing), skip rendering the overlay for the line(s) being edited.
         // This prevents drawing old/wrong text over the new raw text.
         // Other lines remain highlighted.
-        if (isStaleEditingLine(line)) continue;
+        const note::NotePresentationLineSurface surface = lineSurface(line);
+        if (surface == note::NotePresentationLineSurface::OverlayRaw) continue;
         size_t lineStart = 0;
         size_t lineEnd = 0;
         POINT linePos{};
@@ -3319,6 +3773,21 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
             fillBottom = std::max<int>(fillBottom, static_cast<int>(rc.bottom));
         }
         const LineCache& cache = g_lineCache[static_cast<size_t>(line)];
+        TableRenderRowGeometry tableRowGeometry;
+        const bool hasTableSegment = std::any_of(
+            cache.segments.begin(), cache.segments.end(), [](const Segment& segment) {
+                return segment.tableColumn >= 0;
+            });
+        if ((cache.table.active() || hasTableSegment) &&
+            (!cache.table.active() ||
+             !BuildTableRenderRowGeometry(hdc, fonts, cache, baseLineHeight, &tableRowGeometry))) {
+            // A table line is an atomic presentation surface.  Drawing only
+            // its grid after a geometry failure would hide source content and
+            // violate the one-owner rule, so repaint the whole client natively.
+            SetBkMode(hdc, oldBkMode);
+            PaintNativeNoteClient(hWnd, hdc);
+            return;
+        }
         const NoteListMarkerInfo listMarker = cache.isCodeBlockLine ? NoteListMarkerInfo{} : DetectNoteListMarkerInfo(cache);
         int linePermille = ResolveLineHeightPermille(cache);
         int topPercent = std::clamp(g_config.noteMathMarginTopPercent, 5, 95);
@@ -3334,9 +3803,19 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
         int baselineY = lineY + baseAscent;
         GetLineRenderMetrics(line, lineY, linePaintHeight, baseLineHeight, baseAscent, linePermille,
                              topPercent, &renderLineY, &renderHeight, &baselineY);
+        // Selection must use the same source/display boundary sequence as the
+        // rendered caret and structured hit test.  The vectors own transient
+        // storage for this visible line; EditorLineLayout views never own or
+        // allocate that storage.
+        selectionBoundaryScratch.clear();
+        const bool hasSelectionLineGeometry =
+            showNormalVisualSelection &&
+            surface == note::NotePresentationLineSurface::Structured &&
+            BuildRenderedBoundariesForLineWithScratch(hWnd, hdc, line, &selectionBoundaryScratch,
+                                                      &selectionPlacementScratch) &&
+            !selectionBoundaryScratch.empty();
         lineBottom = fillBottom;
-        if (isRawLine(line)) {
-            if (!suppressRawLineOverlay) {
+        if (surface == note::NotePresentationLineSurface::NativeRaw) {
                 if (caretMath && caretMath->end > lineStart && caretMath->start < lineEnd) {
                     size_t hlStart = std::max(caretMath->start, lineStart);
                     size_t hlEnd = std::min(caretMath->end, lineEnd);
@@ -3354,8 +3833,7 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
                         }
                     }
                 }
-                continue;
-            }
+            continue;
         }
 
         int indentPx = spaceW * ResolveLineIndent(cache);
@@ -3391,7 +3869,11 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
                 rc.right - containerInsetX / 2,
                 std::max(containerTop + 1, containerBottom)
             };
-            COLORREF containerBack = BlendColor(baseBack, g_theme.accent, (Luma(baseBack) >= 128) ? 0.045 : 0.10);
+            // A container identifies a block-level scope.  Keep that tint
+            // deliberately lighter and more accent-led than inline code,
+            // whose neutral chip marks a literal token inside prose.
+            COLORREF containerBack = BlendColor(baseBack, g_theme.accent,
+                                                (Luma(baseBack) >= 128) ? 0.028 : 0.075);
             COLORREF containerBorder = BlendColor(g_theme.accent, baseText, 0.52);
             COLORREF containerBar = BlendColor(g_theme.accent, baseBack, 0.28);
             fillSolidRect(containerRc, containerBack);
@@ -3447,6 +3929,95 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
             };
             fillSolidRect(codeBarRc, cache.isCodeFenceLine ? BlendColor(codeBar, baseBack, 0.18) : codeBar);
         }
+        if (cache.table.active()) {
+            const TableRenderLayoutEntry* table = FindTableRenderLayout(cache.table.sourceStart);
+            if (!table || !table->layout.valid) {
+                continue;
+            }
+            const int tableLeft = lineX + indentPx;
+            const int tableRight = tableLeft + table->layout.total_width_px;
+            const int tableTop = renderLineY;
+            const int tableBottom = renderLineY + renderHeight;
+            if (tableRight > tableLeft && tableBottom > tableTop) {
+                // Outer vertical borders own the corner pixels. Horizontal
+                // rules occupy only the interior span, so the compact
+                // one-pixel delimiter cannot appear to protrude leftward.
+                const int ruleLeft = std::min(tableRight - 1, tableLeft + 1);
+                const int ruleRight = std::max(ruleLeft, tableRight - 1);
+                const bool brightBack = (Luma(baseBack) >= 128);
+                const bool isHeader = cache.table.role == TableRenderLineRole::Header;
+                const bool isDivider = cache.table.role == TableRenderLineRole::Divider;
+                const COLORREF tableBack = isHeader
+                    ? BlendColor(baseBack, g_theme.accent, brightBack ? 0.08 : 0.17)
+                    : baseBack;
+                const COLORREF tableBorder = BlendColor(
+                    g_theme.accent, baseText, brightBack ? 0.52 : 0.40);
+                const COLORREF dividerBorder = BlendColor(
+                    g_theme.accent, baseText, brightBack ? 0.34 : 0.22);
+                if (isHeader) {
+                    fillSolidRect(RECT{tableLeft, tableTop, tableRight, tableBottom}, tableBack);
+                }
+                const bool previousIsSameTable =
+                    line > 0 && static_cast<size_t>(line - 1) < g_lineCache.size() &&
+                    g_lineCache[static_cast<size_t>(line - 1)].table.active() &&
+                    g_lineCache[static_cast<size_t>(line - 1)].table.sourceStart == cache.table.sourceStart;
+                const bool nextIsSameTableDivider =
+                    line + 1 < static_cast<int>(g_lineCache.size()) &&
+                    g_lineCache[static_cast<size_t>(line + 1)].table.active() &&
+                    g_lineCache[static_cast<size_t>(line + 1)].table.sourceStart == cache.table.sourceStart &&
+                    g_lineCache[static_cast<size_t>(line + 1)].table.role == TableRenderLineRole::Divider;
+                if (!previousIsSameTable) {
+                    fillSolidRect(RECT{ruleLeft, tableTop, ruleRight, tableTop + 1}, tableBorder);
+                }
+                // The following delimiter paints the one shared header/body
+                // rule.  Do not leave a second adjacent rule below the header.
+                if (!nextIsSameTableDivider) {
+                    const COLORREF bottomBorder = isDivider ? dividerBorder : tableBorder;
+                    fillSolidRect(RECT{ruleLeft, std::max(tableTop, tableBottom - 1), ruleRight, tableBottom},
+                                  bottomBorder);
+                }
+                for (const note::NoteTableColumnLayout& column : table->layout.columns) {
+                    const int borderX = tableLeft + column.left_border_x_px;
+                    if (borderX >= tableLeft && borderX < tableRight) {
+                        fillSolidRect(RECT{borderX, tableTop, borderX + 1, tableBottom}, tableBorder);
+                    }
+                }
+                fillSolidRect(RECT{tableRight - 1, tableTop, tableRight, tableBottom}, tableBorder);
+            }
+        }
+
+        auto selectionSegmentRangeRect = [&](size_t segStart,
+                                             size_t segEnd,
+                                             int segmentX,
+                                             int segmentWidth,
+                                             size_t partStart,
+                                             size_t partEnd) -> std::optional<note::EditorLineRect> {
+            if (!hasSelectionLineGeometry || segEnd < segStart || partEnd <= partStart) {
+                return std::nullopt;
+            }
+            // One source offset can sit between differently anchored runs.
+            // Build a per-run view so the range starts at the run that is
+            // actually being painted, rather than at a preceding run's X.
+            selectionSegmentBoundaryScratch.clear();
+            selectionSegmentBoundaryScratch.push_back({segStart, segmentX});
+            auto boundary = std::upper_bound(
+                selectionBoundaryScratch.begin(), selectionBoundaryScratch.end(), segStart,
+                [](size_t raw, const RenderBoundary& value) { return raw < value.raw; });
+            while (boundary != selectionBoundaryScratch.end() && boundary->raw <= segEnd) {
+                selectionSegmentBoundaryScratch.push_back(*boundary);
+                ++boundary;
+            }
+            if (selectionSegmentBoundaryScratch.back().raw != segEnd) {
+                selectionSegmentBoundaryScratch.push_back(
+                    {segEnd, segmentX + std::max(0, segmentWidth)});
+            }
+            const note::EditorLineLayout segmentLayout(
+                note::EditorLineRect{rc.left, renderLineY, rc.right, renderLineY + renderHeight},
+                selectionSegmentBoundaryScratch.data(), selectionSegmentBoundaryScratch.size());
+            return segmentLayout.valid()
+                ? segmentLayout.TextRangeRect(partStart, partEnd)
+                : std::nullopt;
+        };
 
         for (size_t segIndex = 0; segIndex < cache.segments.size(); ++segIndex) {
             const auto& seg = cache.segments[segIndex];
@@ -3463,7 +4034,9 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
 
             std::vector<int> segPrefixWidths;
             bool segPrefixWidthsReady = false;
-            int segWidth = MeasureRenderedSegmentWidth(hdc, fonts, cache, seg, baseLineHeight, nullptr, nullptr);
+            const bool tableSegment = seg.tableColumn >= 0;
+            int segWidth = MeasureRenderedSegmentWidth(
+                hdc, fonts, cache, seg, baseLineHeight, nullptr, nullptr);
             SIZE segSize{};
             segSize.cx = segWidth;
             segSize.cy = tmSeg.tmHeight;
@@ -3487,8 +4060,16 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
                 }
             }
 
-            int drawX = lineX + indentPx + runX;
-            if (SegmentUsesAnchoredLayout(seg)) {
+            const int inlineChipPadX = InlineCodeChipHorizontalPaddingPx(cache, seg, baseLineHeight);
+            int drawX = lineX + indentPx + runX + inlineChipPadX;
+            if (tableSegment) {
+                if (!ResolveTableSegmentX(tableRowGeometry, cache, segIndex,
+                                          lineX + indentPx, &drawX)) {
+                    if (oldSeg) SelectObject(hdc, oldSeg);
+                    continue;
+                }
+                drawX += inlineChipPadX;
+            } else if (SegmentUsesAnchoredLayout(seg)) {
                 int anchoredRunWidth = MeasureAnchoredRunWidth(hdc, fonts, cache, segIndex, baseLineHeight);
                 drawX = ComputeAnchoredRunStartX(hWnd, clientW, layoutFrame.scrollX, seg.style.anchor,
                                                  seg.style.anchorOffsetChars * spaceW, anchoredRunWidth);
@@ -3496,10 +4077,14 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
                     const auto& prevSeg = cache.segments[prev - 1];
                     if (!SameAnchoredLayout(prevSeg, seg)) break;
                     if (prevSeg.text.empty()) continue;
-                    drawX += MeasureRenderedSegmentWidth(hdc, fonts, cache, prevSeg, baseLineHeight, nullptr, nullptr);
+                    const int previousContentWidth = MeasureRenderedSegmentWidth(
+                        hdc, fonts, cache, prevSeg, baseLineHeight, nullptr, nullptr);
+                    drawX += SegmentFlowAdvanceWidth(
+                        cache, prevSeg, baseLineHeight, previousContentWidth);
                 }
+                drawX += inlineChipPadX;
             }
-            if (!SegmentUsesAnchoredLayout(seg) && runX == 0) {
+            if (!tableSegment && !SegmentUsesAnchoredLayout(seg) && runX == 0 && inlineChipPadX == 0) {
                 drawX += FirstGlyphLeftBearingAlignmentPx(hdc, fonts, seg.text, effectiveBold,
                                                           seg.style.italic, extraPx, fontFaceOverride);
             }
@@ -3571,18 +4156,24 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
                 size_t partStart = std::max(normalSelStart, segStart);
                 size_t partEnd = std::min(normalSelEnd, segEnd);
                 if (partEnd > partStart) {
-                    std::wstring rawSeg = cache.rawLine.substr(seg.rawStart, SegmentRawLen(seg));
-                    const bool decodeEscapes = SegmentDecodesMarkdownBackslashEscapes(cache, seg);
-                    size_t relStart = VisibleCharsBeforeRawOffset(rawSeg, partStart - segStart, decodeEscapes);
-                    size_t relEnd = VisibleCharsBeforeRawOffset(rawSeg, partEnd - segStart, decodeEscapes);
-                    if (drawAsMath && !seg.text.empty()) {
-                        normalSelWStart = static_cast<int>(std::lround(static_cast<double>(visualW) * relStart /
-                                                                      static_cast<double>(seg.text.size())));
-                        normalSelWEnd = static_cast<int>(std::lround(static_cast<double>(visualW) * relEnd /
-                                                                    static_cast<double>(seg.text.size())));
+                    if (const auto selectionRect = selectionSegmentRangeRect(
+                            segStart, segEnd, drawX, visualW, partStart, partEnd)) {
+                        normalSelWStart = selectionRect->left - drawX;
+                        normalSelWEnd = selectionRect->right - drawX;
                     } else {
-                        normalSelWStart = prefixWidthAt(relStart);
-                        normalSelWEnd = prefixWidthAt(relEnd);
+                        std::wstring rawSeg = cache.rawLine.substr(seg.rawStart, SegmentRawLen(seg));
+                        const bool decodeEscapes = SegmentDecodesMarkdownBackslashEscapes(cache, seg);
+                        size_t relStart = VisibleCharsBeforeRawOffset(rawSeg, partStart - segStart, decodeEscapes);
+                        size_t relEnd = VisibleCharsBeforeRawOffset(rawSeg, partEnd - segStart, decodeEscapes);
+                        if (drawAsMath && !seg.text.empty()) {
+                            normalSelWStart = static_cast<int>(std::lround(static_cast<double>(visualW) * relStart /
+                                                                          static_cast<double>(seg.text.size())));
+                            normalSelWEnd = static_cast<int>(std::lround(static_cast<double>(visualW) * relEnd /
+                                                                        static_cast<double>(seg.text.size())));
+                        } else {
+                            normalSelWStart = prefixWidthAt(relStart);
+                            normalSelWEnd = prefixWidthAt(relEnd);
+                        }
                     }
                     hasNormalSegSelection = (normalSelWEnd > normalSelWStart);
                     fullSegSelected = (normalSelWStart <= 0 && normalSelWEnd >= segSize.cx);
@@ -3608,9 +4199,8 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
                     hasSearchSegSelection = (searchSelWEnd > searchSelWStart);
                 }
             }
-            const bool useInlineCodeChip = seg.isInlineCode && !cache.isCodeBlockLine && visualW > 0;
+            const bool useInlineCodeChip = inlineChipPadX > 0 && visualW > 0;
             const bool useDisplayMathCard = drawAsMath && seg.mathDisplay && visualW > 0;
-            const int inlineChipPadX = std::max(3, baseLineHeight / 4);
             const int inlineChipPadY = std::max(1, baseLineHeight / 9);
             const int blockCardPadX = std::max(spaceW, baseLineHeight / 2);
             const int blockCardPadY = std::max(4, baseLineHeight / 4);
@@ -3802,8 +4392,8 @@ static void DrawHighlightOverlay(HWND hWnd, HDC hdc) {
             }
 
             if (oldSeg) SelectObject(hdc, oldSeg);
-            if (!SegmentUsesAnchoredLayout(seg)) {
-                runX += visualW;
+            if (!tableSegment && !SegmentUsesAnchoredLayout(seg)) {
+                runX += SegmentFlowAdvanceWidth(cache, seg, baseLineHeight, visualW);
             }
         }
 
@@ -4001,6 +4591,16 @@ static void StoreSegmentMeasureCacheKey(SegmentMeasureCache* c,
     c->jpFace = MarkupFontProviderJpFace(fonts);
 }
 
+static std::wstring ExpandNoteTabsForDisplay(std::wstring_view text) {
+    std::wstring display;
+    display.reserve(text.size() + kNoteTabDisplaySpaces);
+    for (const wchar_t ch : text) {
+        if (ch == L'\t') display.append(kNoteTabDisplaySpaces, L' ');
+        else display.push_back(ch);
+    }
+    return display;
+}
+
 static int MeasureStyledSegmentTextWidth(HDC hdc,
                                          MarkupFontProvider& fonts,
                                          const std::wstring& text,
@@ -4026,34 +4626,44 @@ static int MeasureStyledSegmentTextWidth(HDC hdc,
         HFONT runFont = fonts.Acquire(hdc, bold, italic, extraPx, nullptr, jp, fontFaceOverride);
         HFONT oldFont = runFont ? static_cast<HFONT>(SelectObject(hdc, runFont)) : nullptr;
         const int runLen = static_cast<int>(runEnd - runStart);
+        const std::wstring_view sourceRun(text.data() + runStart, static_cast<size_t>(runLen));
+        const bool hasTab = sourceRun.find(L'\t') != std::wstring_view::npos;
+        std::wstring expandedRun;
+        const std::wstring_view displayRun = hasTab
+            ? std::wstring_view(expandedRun = ExpandNoteTabsForDisplay(sourceRun))
+            : sourceRun;
         int runWidth = 0;
         if (prefix) {
             SIZE runSize{};
-            std::vector<int> dx(static_cast<size_t>(runLen), 0);
+            std::vector<int> dx(displayRun.size(), 0);
             int fit = 0;
-            bool ok = GetTextExtentExPointW(hdc, text.c_str() + runStart, runLen, 0x7FFFFFFF,
+            bool ok = GetTextExtentExPointW(hdc, displayRun.data(), static_cast<int>(displayRun.size()), 0x7FFFFFFF,
                                             &fit, dx.data(), &runSize) != 0;
             if (!ok || fit <= 0) {
-                for (int i = 0; i < runLen; ++i) {
+                for (size_t i = 0; i < displayRun.size(); ++i) {
                     SIZE sz{};
-                    if (GetTextExtentPoint32W(hdc, text.c_str() + runStart, i + 1, &sz)) {
-                        dx[static_cast<size_t>(i)] = sz.cx;
+                    if (GetTextExtentPoint32W(hdc, displayRun.data(), static_cast<int>(i + 1), &sz)) {
+                        dx[i] = sz.cx;
                     } else if (i > 0) {
-                        dx[static_cast<size_t>(i)] = dx[static_cast<size_t>(i - 1)];
+                        dx[i] = dx[i - 1];
                     }
                 }
-            } else if (fit < runLen) {
-                for (int i = fit; i < runLen; ++i) {
-                    dx[static_cast<size_t>(i)] = runSize.cx;
+            } else if (fit < static_cast<int>(displayRun.size())) {
+                for (size_t i = static_cast<size_t>(fit); i < displayRun.size(); ++i) {
+                    dx[i] = runSize.cx;
                 }
             }
             runWidth = dx.empty() ? 0 : dx.back();
+            size_t displayEnd = 0;
             for (int i = 0; i < runLen; ++i) {
-                (*prefix)[runStart + static_cast<size_t>(i)] = total + dx[static_cast<size_t>(i)];
+                displayEnd += (text[runStart + static_cast<size_t>(i)] == L'\t')
+                    ? kNoteTabDisplaySpaces
+                    : 1;
+                (*prefix)[runStart + static_cast<size_t>(i)] = total + dx[displayEnd - 1];
             }
         } else {
             SIZE runSize{};
-            if (GetTextExtentPoint32W(hdc, text.c_str() + runStart, runLen, &runSize)) {
+            if (GetTextExtentPoint32W(hdc, displayRun.data(), static_cast<int>(displayRun.size()), &runSize)) {
                 runWidth = runSize.cx;
             }
         }
@@ -4083,11 +4693,17 @@ static void DrawStyledSegmentText(HDC hdc,
             ++runEnd;
         }
         const int runLen = static_cast<int>(runEnd - runStart);
+        const std::wstring_view sourceRun(text.data() + runStart, static_cast<size_t>(runLen));
+        const bool hasTab = sourceRun.find(L'\t') != std::wstring_view::npos;
+        std::wstring expandedRun;
+        const std::wstring_view displayRun = hasTab
+            ? std::wstring_view(expandedRun = ExpandNoteTabsForDisplay(sourceRun))
+            : sourceRun;
         HFONT runFont = fonts.Acquire(hdc, bold, italic, extraPx, nullptr, jp, fontFaceOverride);
         HFONT oldFont = runFont ? static_cast<HFONT>(SelectObject(hdc, runFont)) : nullptr;
-        TextOutW(hdc, x + runX, y, text.c_str() + runStart, runLen);
+        TextOutW(hdc, x + runX, y, displayRun.data(), static_cast<int>(displayRun.size()));
         SIZE runSize{};
-        if (GetTextExtentPoint32W(hdc, text.c_str() + runStart, runLen, &runSize)) {
+        if (GetTextExtentPoint32W(hdc, displayRun.data(), static_cast<int>(displayRun.size()), &runSize)) {
             runX += runSize.cx;
         }
         if (oldFont) SelectObject(hdc, oldFont);
@@ -4169,7 +4785,13 @@ static int MeasureRenderedLineVisualWidth(HDC hdc, MarkupFontProvider& fonts, co
     for (const auto& seg : cache.segments) {
         if (seg.text.empty()) continue;
         if (SegmentUsesAnchoredLayout(seg)) continue;
-        width += MeasureRenderedSegmentWidth(hdc, fonts, cache, seg, baseFontHeight, nullptr, nullptr);
+        const int contentWidth = MeasureRenderedSegmentWidth(
+            hdc, fonts, cache, seg, baseFontHeight, nullptr, nullptr);
+        const int flowWidth = SegmentFlowAdvanceWidth(cache, seg, baseFontHeight, contentWidth);
+        if (width > std::numeric_limits<int>::max() - flowWidth) {
+            return std::numeric_limits<int>::max();
+        }
+        width += flowWidth;
     }
     return width;
 }
@@ -4283,6 +4905,223 @@ static int MeasureRenderedSegmentWidth(HDC hdc,
     return segWidth;
 }
 
+static const TableRenderLayoutEntry* FindTableRenderLayout(size_t sourceStart) {
+    const auto found = g_tableRenderLayoutCache.entryIndices.find(sourceStart);
+    if (found == g_tableRenderLayoutCache.entryIndices.end() ||
+        found->second >= g_tableRenderLayoutCache.entries.size()) {
+        return nullptr;
+    }
+    return &g_tableRenderLayoutCache.entries[found->second];
+}
+
+static bool RebuildTableRenderLayouts(HWND hWnd,
+                                      HDC hdc,
+                                      MarkupFontProvider& fonts,
+                                      int dpi) {
+    if (!hWnd || !hdc || !fonts.baseFont || !CanReadStableRenderDerivedState()) return false;
+
+    const note::NoteDerivedSnapshotIdentity sourceIdentity = g_noteRenderSnapshot.sourceIdentity;
+    const int baseFontHeight = std::max(1, static_cast<int>(fonts.baseMetrics.tmHeight));
+    int spaceWidth = fonts.spaceWidth;
+    if (spaceWidth <= 0) spaceWidth = fonts.baseMetrics.tmAveCharWidth;
+    if (spaceWidth <= 0) spaceWidth = 1;
+    dpi = std::max(1, dpi);
+    if (g_tableRenderLayoutCache.Matches(sourceIdentity, fonts.baseFont, baseFontHeight,
+                                         spaceWidth, dpi)) {
+        return g_tableRenderLayoutCache.layoutsValid;
+    }
+
+    struct PendingTable {
+        size_t sourceStart = 0;
+        size_t columnCount = 0;
+        bool invalid = false;
+        std::vector<note::NoteTableColumnMeasure> cellMeasures;
+    };
+    std::vector<PendingTable> pending;
+    std::unordered_map<size_t, size_t> pendingIndices;
+    auto findOrCreate = [&pending, &pendingIndices](const TableRenderLineInfo& table) -> PendingTable* {
+        const auto found = pendingIndices.find(table.sourceStart);
+        if (found != pendingIndices.end()) {
+            if (found->second >= pending.size()) return nullptr;
+            PendingTable& candidate = pending[found->second];
+            if (candidate.columnCount != table.columnCount) candidate.invalid = true;
+            return &candidate;
+        }
+        const size_t nextIndex = pending.size();
+        pending.push_back(PendingTable{table.sourceStart, table.columnCount});
+        if (!pendingIndices.emplace(table.sourceStart, nextIndex).second) {
+            pending.back().invalid = true;
+        }
+        return &pending.back();
+    };
+
+    for (const LineCache& cache : g_lineCache) {
+        if (!cache.table.active()) continue;
+        PendingTable* table = findOrCreate(cache.table);
+        if (!table || table->columnCount == 0 || table->columnCount > 256) {
+            if (table) table->invalid = true;
+            continue;
+        }
+
+        std::vector<int64_t> cellWidths(table->columnCount, 0);
+        for (const Segment& seg : cache.segments) {
+            if (seg.tableColumn < 0) continue;
+            const size_t column = static_cast<size_t>(seg.tableColumn);
+            if (column >= table->columnCount) {
+                table->invalid = true;
+                break;
+            }
+            const int contentWidth = MeasureRenderedSegmentWidth(
+                hdc, fonts, cache, seg, baseFontHeight, nullptr, nullptr);
+            const int width = SegmentFlowAdvanceWidth(cache, seg, baseFontHeight, contentWidth);
+            if (width < 0 || cellWidths[column] > std::numeric_limits<int>::max() - width) {
+                table->invalid = true;
+                break;
+            }
+            cellWidths[column] += width;
+        }
+        if (table->invalid) continue;
+        for (size_t column = 0; column < cellWidths.size(); ++column) {
+            table->cellMeasures.push_back(note::NoteTableColumnMeasure{
+                column, static_cast<int>(cellWidths[column])});
+        }
+    }
+
+    TableRenderLayoutCache next;
+    next.sourceIdentity = sourceIdentity;
+    next.baseFont = fonts.baseFont;
+    next.baseFontHeight = baseFontHeight;
+    next.spaceWidth = spaceWidth;
+    next.dpi = dpi;
+    next.entries.reserve(pending.size());
+    next.entryIndices.reserve(pending.size());
+    const int cappedSpaceWidth = std::min(
+        std::numeric_limits<int>::max() / 4, std::max(1, spaceWidth));
+    const int minimumCellWidth = cappedSpaceWidth * 4;
+    const int cellPadding = std::clamp((spaceWidth + 1) / 2, 3, 24);
+    next.layoutsValid = true;
+    for (const PendingTable& table : pending) {
+        note::NoteTableLayout layout;
+        if (!table.invalid) {
+            note::NoteTableLayoutInput input;
+            input.column_count = table.columnCount;
+            input.minimum_content_width_px = minimumCellWidth;
+            input.cell_horizontal_padding_px = cellPadding;
+            input.border_width_px = 1;
+            input.cell_measures = table.cellMeasures;
+            layout = note::ResolveNoteTableLayout(input);
+        }
+        const size_t entryIndex = next.entries.size();
+        const bool inserted = next.entryIndices.emplace(table.sourceStart, entryIndex).second;
+        if (!inserted || !layout.valid) next.layoutsValid = false;
+        next.entries.push_back(TableRenderLayoutEntry{table.sourceStart, std::move(layout)});
+    }
+    if (!next.entries.empty() && next.layoutsValid) {
+        // Verify all entries once before publish. WM_PAINT only reads this
+        // cached result and never walks the table collection.
+        next.layoutsValid = std::all_of(next.entries.begin(), next.entries.end(),
+                                        [](const TableRenderLayoutEntry& entry) {
+                                            return entry.layout.valid;
+                                        });
+    }
+    g_tableRenderLayoutCache = std::move(next);
+    return g_tableRenderLayoutCache.layoutsValid;
+}
+
+static bool EnsureTableRenderLayouts(HWND hWnd,
+                                     HDC hdc,
+                                     MarkupFontProvider& fonts,
+                                     int dpi) {
+    if (!hWnd || !hdc || !fonts.baseFont || !CanReadStableRenderDerivedState()) return false;
+    int spaceWidth = fonts.spaceWidth;
+    if (spaceWidth <= 0) spaceWidth = fonts.baseMetrics.tmAveCharWidth;
+    if (spaceWidth <= 0) spaceWidth = 1;
+    return g_tableRenderLayoutCache.Matches(
+               g_noteRenderSnapshot.sourceIdentity,
+               fonts.baseFont,
+               std::max(1, static_cast<int>(fonts.baseMetrics.tmHeight)),
+               spaceWidth,
+               std::max(1, dpi)) &&
+        g_tableRenderLayoutCache.layoutsValid;
+}
+
+static note::NoteTableCellAlignment ResolveTableCellAlignment(
+    note::TableCellAlign alignment) noexcept {
+    switch (alignment) {
+    case note::TableCellAlign::Center:
+        return note::NoteTableCellAlignment::Center;
+    case note::TableCellAlign::Right:
+        return note::NoteTableCellAlignment::Right;
+    case note::TableCellAlign::Left:
+    case note::TableCellAlign::Default:
+    default:
+        return note::NoteTableCellAlignment::Left;
+    }
+}
+
+static bool BuildTableRenderRowGeometry(HDC hdc,
+                                        MarkupFontProvider& fonts,
+                                        const LineCache& cache,
+                                        int baseFontHeight,
+                                        TableRenderRowGeometry* out) {
+    if (!hdc || !out || !cache.table.active()) {
+        return false;
+    }
+    const TableRenderLayoutEntry* table = FindTableRenderLayout(cache.table.sourceStart);
+    if (!table || !table->layout.valid) return false;
+
+    TableRenderRowGeometry next;
+    next.table = table;
+    next.prior_content_widths_px.assign(cache.segments.size(), 0);
+    next.content_widths_px.assign(table->layout.columns.size(), 0);
+    for (size_t index = 0; index < cache.segments.size(); ++index) {
+        const Segment& candidate = cache.segments[index];
+        if (candidate.text.empty()) continue;
+        if (candidate.tableColumn < 0) return false;
+        const size_t columnIndex = static_cast<size_t>(candidate.tableColumn);
+        if (columnIndex >= next.content_widths_px.size()) return false;
+        const int contentWidth = MeasureRenderedSegmentWidth(
+            hdc, fonts, cache, candidate, baseFontHeight, nullptr, nullptr);
+        const int width = SegmentFlowAdvanceWidth(cache, candidate, baseFontHeight, contentWidth);
+        if (width < 0 ||
+            next.content_widths_px[columnIndex] > std::numeric_limits<int>::max() - width) {
+            return false;
+        }
+        next.prior_content_widths_px[index] = next.content_widths_px[columnIndex];
+        next.content_widths_px[columnIndex] += width;
+    }
+    *out = std::move(next);
+    return true;
+}
+
+static bool ResolveTableSegmentX(const TableRenderRowGeometry& geometry,
+                                 const LineCache& cache,
+                                 size_t segmentIndex,
+                                 int tableLeftX,
+                                 int* outX) {
+    if (!outX || !geometry.table || segmentIndex >= cache.segments.size() ||
+        segmentIndex >= geometry.prior_content_widths_px.size() ||
+        !cache.table.active()) {
+        return false;
+    }
+    const Segment& segment = cache.segments[segmentIndex];
+    if (segment.tableColumn < 0) return false;
+    const size_t columnIndex = static_cast<size_t>(segment.tableColumn);
+    if (!geometry.table->layout.valid || columnIndex >= geometry.table->layout.columns.size() ||
+        columnIndex >= geometry.content_widths_px.size()) {
+        return false;
+    }
+    const note::NoteTableColumnLayout& column = geometry.table->layout.columns[columnIndex];
+    const int contentOffset = note::ResolveNoteTableCellContentOffset(
+        column, geometry.content_widths_px[columnIndex],
+        ResolveTableCellAlignment(segment.tableCellAlign));
+    const int64_t x = static_cast<int64_t>(tableLeftX) + column.content_x_px +
+        contentOffset + geometry.prior_content_widths_px[segmentIndex];
+    if (x < std::numeric_limits<int>::min() || x > std::numeric_limits<int>::max()) return false;
+    *outX = static_cast<int>(x);
+    return true;
+}
+
 static int MeasureAnchoredRunWidth(HDC hdc,
                                    MarkupFontProvider& fonts,
                                    const LineCache& cache,
@@ -4295,7 +5134,13 @@ static int MeasureAnchoredRunWidth(HDC hdc,
     for (size_t i = startIndex; i < cache.segments.size(); ++i) {
         const Segment& seg = cache.segments[i];
         if (!SameAnchoredLayout(first, seg)) break;
-        width += MeasureRenderedSegmentWidth(hdc, fonts, cache, seg, baseFontHeight, nullptr, nullptr);
+        const int contentWidth = MeasureRenderedSegmentWidth(
+            hdc, fonts, cache, seg, baseFontHeight, nullptr, nullptr);
+        const int flowWidth = SegmentFlowAdvanceWidth(cache, seg, baseFontHeight, contentWidth);
+        if (width > std::numeric_limits<int>::max() - flowWidth) {
+            return std::numeric_limits<int>::max();
+        }
+        width += flowWidth;
     }
     return width;
 }
@@ -4310,6 +5155,10 @@ static int MeasureRenderedContentRightPx(HWND hWnd, HDC hdc) {
     MarkupFontProvider fonts;
     fonts.Initialize(hdc, GetActiveNoteFont());
     if (!fonts.baseFont) return 0;
+    // Table columns are measured while the committed canvas extent is being
+    // refreshed after an input/layout event.  WM_PAINT only verifies and uses
+    // this snapshot-local cache; it never scans all logical lines for tables.
+    if (!RebuildTableRenderLayouts(hWnd, hdc, fonts, layoutFrame.dpi)) return 0;
 
     int maxRight = 0;
     const int clientW = layoutFrame.clientWidthPx;
@@ -4318,21 +5167,47 @@ static int MeasureRenderedContentRightPx(HWND hWnd, HDC hdc) {
     int usable = renderActive
         ? static_cast<int>(g_lineCache.size())
         : std::min<int>(lineCount, static_cast<int>(g_lineCache.size()));
+    std::vector<RenderedSegmentPlacement> placementScratch;
     for (int line = 0; line < usable; ++line) {
+        const LineCache& cache = g_lineCache[static_cast<size_t>(line)];
+        // A structured render line shares exactly the same segment placement
+        // with the boundary builder used by caret, selection, and hit test.
+        // Extent calculation does not need character boundaries, so reuse the
+        // run-level form and keep the work proportional to rendered runs.
+        const bool rawLineVisible = renderActive && IsNoteLineRawHelper(hWnd, line);
+        if (renderActive && !rawLineVisible) {
+            RenderedLinePlacement linePlacement;
+            if (BuildRenderedSegmentPlacements(hWnd, hdc, line,
+                                               &linePlacement, &placementScratch, &fonts)) {
+                int lineRight = linePlacement.flow_end_x;
+                for (const RenderedSegmentPlacement& placement : placementScratch) {
+                    lineRight = std::max(lineRight,
+                                         placement.x + std::max(0, placement.width));
+                }
+                // Placement X is a client coordinate. Convert once to the
+                // canvas coordinate expected by g_noteRenderedContentRightPx.
+                maxRight = std::max(maxRight, layoutFrame.scrollX + lineRight);
+                continue;
+            }
+        }
+
         int lineBaseX = 0;
-        if (!renderActive) {
+        if (renderActive) {
+            // Raw RichEdit rows are positioned after the render margin too.
+            // Retaining that margin prevents a raw helper line from shrinking
+            // the committed canvas extent below its visible right edge.
+            lineBaseX = layoutFrame.contentLeftPx;
+        } else {
             LRESULT lineStartRes = SendMessageW(hWnd, EM_LINEINDEX, static_cast<WPARAM>(line), 0);
             if (lineStartRes < 0) continue;
             POINT linePos{};
             if (!GetCharPos(hWnd, static_cast<size_t>(lineStartRes), &linePos)) continue;
             lineBaseX = anchorScrollX + linePos.x;
         }
-        const LineCache& cache = g_lineCache[static_cast<size_t>(line)];
         // In render mode the active editing/selection line can switch to its raw
         // Markdown text. Its width can exceed the corresponding rendered line
         // (for example, due to markup tokens), so the canvas must use the width
         // of the representation that is actually on screen.
-        const bool rawLineVisible = renderActive && IsNoteLineRawHelper(hWnd, line);
         const int lineWidth = rawLineVisible
             ? MeasureStyledSegmentTextWidth(hdc, fonts, cache.rawLine, false, false, 0, nullptr, nullptr)
             // In render mode the cache is the source of truth for hard lines. Depending on when
@@ -4355,10 +5230,15 @@ static int MeasureRenderedContentRightPx(HWND hWnd, HDC hdc) {
                 const auto& prevSeg = cache.segments[prev - 1];
                 if (!SameAnchoredLayout(prevSeg, seg)) break;
                 if (prevSeg.text.empty()) continue;
-                prefix += MeasureRenderedSegmentWidth(hdc, fonts, cache, prevSeg, baseFontHeight, nullptr, nullptr);
+                const int previousContentWidth = MeasureRenderedSegmentWidth(
+                    hdc, fonts, cache, prevSeg, baseFontHeight, nullptr, nullptr);
+                prefix += SegmentFlowAdvanceWidth(
+                    cache, prevSeg, baseFontHeight, previousContentWidth);
             }
-            int segWidth = MeasureRenderedSegmentWidth(hdc, fonts, cache, seg, baseFontHeight, nullptr, nullptr);
-            int anchoredRight = anchorScrollX + segBaseX + prefix + segWidth;
+            const int contentWidth = MeasureRenderedSegmentWidth(
+                hdc, fonts, cache, seg, baseFontHeight, nullptr, nullptr);
+            const int flowWidth = SegmentFlowAdvanceWidth(cache, seg, baseFontHeight, contentWidth);
+            int anchoredRight = anchorScrollX + segBaseX + prefix + flowWidth;
             maxRight = std::max(maxRight, anchoredRight);
         }
     }
@@ -4370,8 +5250,11 @@ static int MeasureRenderedContentRightPx(HWND hWnd, HDC hdc) {
     return maxRight;
 }
 
+static std::wstring ExpandNoteTabsForDisplay(std::wstring_view text);
+
 void ExpandNoteRenderCanvasForPendingEdit(HWND hWnd) {
     if (!hWnd || !IsNoteRenderActive()) return;
+    if (!IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd)) return;
     const NoteLayoutFrame layoutFrame = BuildNoteLayoutFrame(hWnd);
 
     DWORD selStart = 0;
@@ -4379,21 +5262,32 @@ void ExpandNoteRenderCanvasForPendingEdit(HWND hWnd) {
     SendMessageW(hWnd, EM_GETSEL,
                  reinterpret_cast<WPARAM>(&selStart),
                  reinterpret_cast<LPARAM>(&selEnd));
-    DWORD caret = std::max(selStart, selEnd);
-
-    std::wstring indexingText = GetEditTextForIndexing(hWnd);
-    if (indexingText.empty()) return;
-    caret = static_cast<DWORD>(std::min<size_t>(caret, indexingText.size()));
-
-    std::vector<size_t> logicalStarts = BuildLogicalLineStartsFromIndexingText(indexingText);
-    if (logicalStarts.empty()) return;
-    int line = FindLogicalLineForRaw(logicalStarts, static_cast<size_t>(caret));
-
-    size_t lineStart = 0;
-    size_t lineEnd = 0;
-    if (!GetLogicalLineRangeFromStarts(indexingText, logicalStarts, line, &lineStart, &lineEnd, nullptr)) {
+    const note::NoteTextModel& currentText = CurrentNoteTextCoreModel();
+    const size_t lineBreakCount = currentText.line_starts.empty()
+        ? 0
+        : currentText.line_starts.size() - 1;
+    const int editorWindowTextLength = GetWindowTextLengthW(hWnd);
+    if (editorWindowTextLength < 0 || currentText.line_starts.empty() ||
+        currentText.raw.size() > std::numeric_limits<size_t>::max() - lineBreakCount ||
+        static_cast<size_t>(editorWindowTextLength) != currentText.raw.size() + lineBreakCount) {
+        // The TextCore is synchronized by RecordCurrentNoteTextEditForUndo
+        // before this helper is called.  If that invariant is unavailable,
+        // retain the last safe canvas rather than copying the full RichEdit
+        // document merely to estimate a provisional width.
         return;
     }
+
+    const size_t caret = std::min<size_t>(std::max(selStart, selEnd), currentText.raw.size());
+    const int line = FindLogicalLineForRaw(currentText.line_starts, caret);
+    if (line < 0 || line >= static_cast<int>(currentText.line_starts.size())) return;
+    const size_t lineStart = currentText.line_starts[static_cast<size_t>(line)];
+    size_t lineEnd = (static_cast<size_t>(line + 1) < currentText.line_starts.size())
+        ? currentText.line_starts[static_cast<size_t>(line + 1)]
+        : currentText.raw.size();
+    if (lineEnd > lineStart && currentText.raw[lineEnd - 1] == L'\n') {
+        --lineEnd;
+    }
+    if (lineStart > lineEnd || lineEnd > currentText.raw.size()) return;
 
     POINT linePos{};
     if (!GetCharPos(hWnd, lineStart, &linePos)) return;
@@ -4403,12 +5297,16 @@ void ExpandNoteRenderCanvasForPendingEdit(HWND hWnd) {
     HFONT font = GetActiveNoteFont();
     HFONT oldFont = font ? static_cast<HFONT>(SelectObject(hdc, font)) : nullptr;
     SIZE rawSize{};
-    const size_t len = (lineEnd > lineStart) ? (lineEnd - lineStart) : 0;
-    if (len > 0) {
-        GetTextExtentPoint32W(hdc,
-                              indexingText.c_str() + lineStart,
-                              static_cast<int>(std::min<size_t>(len, static_cast<size_t>(std::numeric_limits<int>::max()))),
-                              &rawSize);
+    const size_t len = lineEnd - lineStart;
+    if (len > 0 && len <= static_cast<size_t>(std::numeric_limits<int>::max())) {
+        const std::wstring_view rawLine(currentText.raw.data() + lineStart, len);
+        std::wstring expandedTabs;
+        std::wstring_view displayLine = rawLine;
+        if (rawLine.find(L'\t') != std::wstring_view::npos) {
+            expandedTabs = ExpandNoteTabsForDisplay(rawLine);
+            displayLine = expandedTabs;
+        }
+        GetTextExtentPoint32W(hdc, displayLine.data(), static_cast<int>(displayLine.size()), &rawSize);
     }
     TEXTMETRICW tm{};
     int safetyPad = 8;
@@ -4628,9 +5526,9 @@ static void GetLineRenderMetrics(int line,
 
 static bool TryGetRenderedCaretRect(HWND hWnd, HDC hdc, size_t caretIndex, RECT* outRect) {
     if (!hWnd || !hdc || !outRect) return false;
-    if (!CanReadStableRenderDerivedState(/*requireExactRevision=*/false)) return false;
+    if (!CanReadStableRenderDerivedState()) return false;
     const NoteLayoutFrame layoutFrame = BuildNoteLayoutFrame(hWnd);
-    if (!NoteLayoutFrameMatchesRenderSnapshot(layoutFrame, /*requireExactRevision=*/false)) return false;
+    if (!NoteLayoutFrameMatchesRenderSnapshot(layoutFrame)) return false;
     RECT rc = layoutFrame.client;
     MarkupFontProvider fonts;
     fonts.Initialize(hdc, GetActiveNoteFont());
@@ -4638,15 +5536,24 @@ static bool TryGetRenderedCaretRect(HWND hWnd, HDC hdc, size_t caretIndex, RECT*
 
     int baseLineHeight = fonts.baseMetrics.tmHeight;
     if (baseLineHeight <= 0) baseLineHeight = 1;
-    int textLen = GetWindowTextLengthW(hWnd);
-    if (textLen < 0) textLen = 0;
-    size_t clampedCaret = std::min<size_t>(caretIndex, static_cast<size_t>(textLen));
-    std::wstring indexingText;
-    std::vector<size_t> logicalStarts;
     const bool renderActive = layoutFrame.renderActive;
+    const note::NoteTextModel& currentTextCore = CurrentNoteTextCoreModel();
+    std::wstring_view indexingText;
+    const std::vector<size_t>* logicalStartsPtr = nullptr;
     if (renderActive) {
-        logicalStarts = GetNoteLogicalLineStarts(hWnd, &indexingText);
+        if (!IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd) ||
+            currentTextCore.line_starts.empty()) {
+            return false;
+        }
+        indexingText = currentTextCore.raw;
+        logicalStartsPtr = &currentTextCore.line_starts;
     }
+    const size_t maxCaret = renderActive
+        ? currentTextCore.raw.size()
+        : static_cast<size_t>(std::max(0, GetWindowTextLengthW(hWnd)));
+    const size_t clampedCaret = std::min(caretIndex, maxCaret);
+    const std::vector<size_t> emptyLogicalStarts;
+    const std::vector<size_t>& logicalStarts = logicalStartsPtr ? *logicalStartsPtr : emptyLogicalStarts;
     int lineCount = renderActive
         ? std::max<int>(1, static_cast<int>(logicalStarts.size()))
         : NoteLineCount();
@@ -4671,51 +5578,7 @@ static bool TryGetRenderedCaretRect(HWND hWnd, HDC hdc, size_t caretIndex, RECT*
         lineStart = static_cast<size_t>(lineStartRes);
     }
     size_t rel = (clampedCaret > lineStart) ? (clampedCaret - lineStart) : 0;
-    const LineCache* cachePtr = &g_lineCache[static_cast<size_t>(line)];
-
-    std::wstring newRawLine;
-    if (renderActive && !indexingText.empty() && lineStart <= indexingText.size()) {
-        size_t nextStart = (line + 1 < static_cast<int>(logicalStarts.size())) ? logicalStarts[line + 1] : indexingText.size();
-        if (nextStart > lineStart) {
-            newRawLine = indexingText.substr(lineStart, nextStart - lineStart);
-            while (!newRawLine.empty() && (newRawLine.back() == L'\n' || newRawLine.back() == L'\r')) {
-                newRawLine.pop_back();
-            }
-        }
-    } else {
-        // Raw fallback or no indexing text
-        int lineLen = static_cast<int>(SendMessageW(hWnd, EM_LINELENGTH, static_cast<WPARAM>(lineStart), 0));
-        if (lineLen > 0) {
-            newRawLine.resize(static_cast<size_t>(lineLen));
-            *reinterpret_cast<WORD*>(&newRawLine[0]) = static_cast<WORD>(lineLen);
-            SendMessageW(hWnd, EM_GETLINE, static_cast<WPARAM>(line), reinterpret_cast<LPARAM>(&newRawLine[0]));
-        }
-    }
-
-    if (renderActive && !newRawLine.empty() && newRawLine != cachePtr->rawLine &&
-        CurrentNoteContentRoute() == NoteContentRoute::MarkdownMd4c) {
-        RefreshMarkdownRenderCache(indexingText);
-        if (static_cast<size_t>(line) < g_lineCache.size()) {
-            cachePtr = &g_lineCache[static_cast<size_t>(line)];
-        }
-    }
-    const LineCache& cache = *cachePtr;
-
-    size_t newCaretRel = rel;
-    size_t diffStart = rel;
-    const bool cacheMatchesCurrentLine = !newRawLine.empty() && cache.rawLine == newRawLine;
-    if (!cacheMatchesCurrentLine) {
-        if (!newRawLine.empty()) {
-            diffStart = 0;
-            while (diffStart < rel && diffStart < cache.rawLine.size() && diffStart < newRawLine.size() &&
-                   newRawLine[diffStart] == cache.rawLine[diffStart]) {
-                diffStart++;
-            }
-        } else {
-            diffStart = std::min(rel, cache.rawLine.size());
-        }
-        rel = diffStart; // Use diffStart to calculate the base X from the stale layout
-    }
+    const LineCache& cache = g_lineCache[static_cast<size_t>(line)];
 
     POINT linePos{};
     if (!GetCharPos(hWnd, lineStart, &linePos)) return false;
@@ -4766,22 +5629,19 @@ static bool TryGetRenderedCaretRect(HWND hWnd, HDC hdc, size_t caretIndex, RECT*
     std::vector<RenderBoundary> boundaries;
     bool caretXResolvedFromBoundaries = false;
     if (BuildRenderedBoundariesForLine(hWnd, hdc, line, &boundaries) && !boundaries.empty()) {
-        size_t boundaryIndex = 0;
-        while (boundaryIndex + 1 < boundaries.size() &&
-               boundaries[boundaryIndex + 1].raw <= clampedCaret) {
-            ++boundaryIndex;
+        const note::EditorLineLayout editorLineLayout(
+            note::EditorLineRect{rc.left, renderLineY, rc.right, renderLineY + renderHeight},
+            boundaries.data(), boundaries.size());
+        if (const auto caret = editorLineLayout.CaretAt(clampedCaret)) {
+            caretX = caret->x;
+            caretXResolvedFromBoundaries = true;
         }
-        caretX = boundaries[boundaryIndex].x;
-        caretXResolvedFromBoundaries = true;
     }
 
     if (!caretXResolvedFromBoundaries) {
         int runX = 0;
         int clientW = layoutFrame.clientWidthPx;
         const int anchorScrollX = NoteLayoutFrameAnchorScrollX(layoutFrame, hWnd);
-        bool extraBold = false;
-        bool extraItalic = false;
-        int extraExtraPx = 0;
 
         for (size_t segIndex = 0; segIndex < cache.segments.size(); ++segIndex) {
             const auto& seg = cache.segments[segIndex];
@@ -4794,12 +5654,6 @@ static bool TryGetRenderedCaretRect(HWND hWnd, HDC hdc, size_t caretIndex, RECT*
             size_t segStart = seg.rawStart;
             size_t segEnd = segStart + SegmentRawLen(seg);
 
-            if (rel >= segStart && rel <= segEnd) {
-                extraBold = effectiveBold;
-                extraItalic = seg.style.italic;
-                extraExtraPx = extraPx;
-            }
-
             const std::wstring* fontFaceOverride = EffectiveSegmentFontFaceOverride(cache, seg);
             HFONT segFont = fonts.Acquire(hdc, effectiveBold, seg.style.italic, extraPx, &tmSeg,
                                           /*japanese=*/false, fontFaceOverride);
@@ -4810,7 +5664,9 @@ static bool TryGetRenderedCaretRect(HWND hWnd, HDC hdc, size_t caretIndex, RECT*
             bool measureAsMath = false;
             int segWidth = MeasureRenderedSegmentWidth(hdc, fonts, cache, seg, baseLineHeight,
                                                        &segPrefixWidths, &measureAsMath);
-            int segBaseX = baseLineX + indentPx + runX;
+            const int inlineChipPadX = InlineCodeChipHorizontalPaddingPx(cache, seg, baseLineHeight);
+            const int flowWidth = SegmentFlowAdvanceWidth(cache, seg, baseLineHeight, segWidth);
+            int segBaseX = baseLineX + indentPx + runX + inlineChipPadX;
             if (SegmentUsesAnchoredLayout(seg)) {
                 int anchoredRunWidth = MeasureAnchoredRunWidth(hdc, fonts, cache, segIndex, baseLineHeight);
                 segBaseX = ComputeAnchoredRunStartX(hWnd, clientW, anchorScrollX, seg.style.anchor,
@@ -4819,8 +5675,12 @@ static bool TryGetRenderedCaretRect(HWND hWnd, HDC hdc, size_t caretIndex, RECT*
                     const auto& prevSeg = cache.segments[prev - 1];
                     if (!SameAnchoredLayout(prevSeg, seg)) break;
                     if (prevSeg.text.empty()) continue;
-                    segBaseX += MeasureRenderedSegmentWidth(hdc, fonts, cache, prevSeg, baseLineHeight, nullptr, nullptr);
+                    const int previousContentWidth = MeasureRenderedSegmentWidth(
+                        hdc, fonts, cache, prevSeg, baseLineHeight, nullptr, nullptr);
+                    segBaseX += SegmentFlowAdvanceWidth(
+                        cache, prevSeg, baseLineHeight, previousContentWidth);
                 }
+                segBaseX += inlineChipPadX;
             }
 
             if (rel <= segStart) {
@@ -4829,7 +5689,7 @@ static bool TryGetRenderedCaretRect(HWND hWnd, HDC hdc, size_t caretIndex, RECT*
             }
             if (rel >= segEnd) {
                 if (!SegmentUsesAnchoredLayout(seg)) {
-                    runX += segWidth;
+                    runX += flowWidth;
                     caretX = baseLineX + indentPx + runX;
                 }
                 if (oldSeg) SelectObject(hdc, oldSeg);
@@ -4857,12 +5717,6 @@ static bool TryGetRenderedCaretRect(HWND hWnd, HDC hdc, size_t caretIndex, RECT*
             break;
         }
 
-        size_t extraChars = (!cacheMatchesCurrentLine && newCaretRel > diffStart) ? (newCaretRel - diffStart) : 0;
-        if (extraChars > 0 && !newRawLine.empty() && diffStart + extraChars <= newRawLine.size()) {
-            std::wstring extraText = newRawLine.substr(diffStart, extraChars);
-            caretX += MeasureStyledSegmentTextWidth(hdc, fonts, extraText,
-                                                    extraBold, extraItalic, extraExtraPx);
-        }
     }
 
     int caretTop = renderLineY + 1;
@@ -4895,16 +5749,24 @@ static bool TryGetRawCaretRect(HWND hWnd, HDC hdc, size_t caretIndex, RECT* outR
 
     int baseLineHeight = fonts.baseMetrics.tmHeight;
     if (baseLineHeight <= 0) baseLineHeight = 1;
-    int textLen = GetWindowTextLengthW(hWnd);
-    if (textLen < 0) textLen = 0;
-    size_t clampedCaret = std::min<size_t>(caretIndex, static_cast<size_t>(textLen));
-
-    std::wstring indexingText;
-    std::vector<size_t> logicalStarts;
     const bool renderActive = layoutFrame.renderActive;
+    const note::NoteTextModel& currentTextCore = CurrentNoteTextCoreModel();
+    std::wstring_view indexingText;
+    const std::vector<size_t>* logicalStartsPtr = nullptr;
     if (renderActive) {
-        logicalStarts = GetNoteLogicalLineStarts(hWnd, &indexingText);
+        if (!IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd) ||
+            currentTextCore.line_starts.empty()) {
+            return false;
+        }
+        indexingText = currentTextCore.raw;
+        logicalStartsPtr = &currentTextCore.line_starts;
     }
+    const size_t maxCaret = renderActive
+        ? currentTextCore.raw.size()
+        : static_cast<size_t>(std::max(0, GetWindowTextLengthW(hWnd)));
+    const size_t clampedCaret = std::min(caretIndex, maxCaret);
+    const std::vector<size_t> emptyLogicalStarts;
+    const std::vector<size_t>& logicalStarts = logicalStartsPtr ? *logicalStartsPtr : emptyLogicalStarts;
     int lineCount = renderActive
         ? std::max<int>(1, static_cast<int>(logicalStarts.size()))
         : NoteLineCount();
@@ -4994,11 +5856,15 @@ static std::optional<std::wstring> LinkIdAtCharIndex(HWND hWnd, size_t idx) {
     if (!NoteContentRouteSupportsLinkTargets(CurrentNoteContentRoute())) return std::nullopt;
     if (!hWnd) return std::nullopt;
     if (!CanReadStableRenderDerivedState()) return std::nullopt;
-    int line = FindLineForRaw(idx);
+    const bool renderActive = IsNoteRenderActive();
+    const note::NoteTextModel& currentTextCore = CurrentNoteTextCoreModel();
+    int line = renderActive
+        ? FindLogicalLineForRaw(currentTextCore.line_starts, idx)
+        : FindLineForRaw(idx);
     if (line < 0 || line >= static_cast<int>(g_lineCache.size())) return std::nullopt;
     size_t lineStart = 0;
-    if (IsNoteRenderActive()) {
-        if (!GetLogicalLineRangeFromStarts(GetEditTextForIndexing(hWnd), GetNoteLogicalLineStarts(hWnd), line,
+    if (renderActive) {
+        if (!GetLogicalLineRangeFromStarts(currentTextCore.raw, currentTextCore.line_starts, line,
                                            &lineStart, nullptr, nullptr)) {
             return std::nullopt;
         }
@@ -5022,8 +5888,32 @@ static std::optional<std::wstring> LinkIdAtCharIndex(HWND hWnd, size_t idx) {
     return std::nullopt;
 }
 
+static std::optional<size_t> HitTestNativeNoteRawPosition(HWND hWnd, int clientX, int clientY) {
+    if (!hWnd) return std::nullopt;
+    if (IsRichEditControl(hWnd)) {
+        POINTL point{clientX, clientY};
+        const LRESULT result = SendMessageW(
+            hWnd, EM_CHARFROMPOS, 0, reinterpret_cast<LPARAM>(&point));
+        return result >= 0
+            ? std::optional<size_t>(ClampNoteRawIndex(static_cast<size_t>(result)))
+            : std::nullopt;
+    }
+    const LRESULT result = SendMessageW(hWnd, EM_CHARFROMPOS, 0,
+                                        MAKELPARAM(clientX, clientY));
+    return result != -1
+        ? std::optional<size_t>(ClampNoteRawIndex(static_cast<size_t>(LOWORD(result))))
+        : std::nullopt;
+}
+
 static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int clientY) {
-    if (!hWnd || !CanReadStableRenderDerivedState(/*requireExactRevision=*/false)) return std::nullopt;
+    if (!hWnd) return std::nullopt;
+    const NoteRenderPresentationFrame presentationFrame =
+        BuildNoteRenderPresentationFrame(hWnd, /*captureStaleText=*/false);
+    if (presentationFrame.action == note::NotePresentationFrameAction::RawFallback ||
+        presentationFrame.action == note::NotePresentationFrameAction::CommitBeforePaint) {
+        return HitTestNativeNoteRawPosition(hWnd, clientX, clientY);
+    }
+    if (!CanReadStableRenderDerivedState(/*requireExactRevision=*/false)) return std::nullopt;
     const NoteLayoutFrame layoutFrame = BuildNoteLayoutFrame(hWnd);
     if (!NoteLayoutFrameMatchesRenderSnapshot(layoutFrame, /*requireExactRevision=*/false)) return std::nullopt;
     RECT rc = layoutFrame.client;
@@ -5033,19 +5923,6 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
         ReleaseDC(hWnd, hdc);
         return result;
     };
-    auto queryNativeHitRaw = [&]() -> std::optional<size_t> {
-        if (IsRichEditControl(hWnd)) {
-            POINTL pt{ clientX, clientY };
-            LRESULT res = SendMessageW(hWnd, EM_CHARFROMPOS, 0, reinterpret_cast<LPARAM>(&pt));
-            if (res >= 0) {
-                return ClampNoteRawIndex(static_cast<size_t>(res));
-            }
-            return std::nullopt;
-        }
-        LRESULT res = SendMessageW(hWnd, EM_CHARFROMPOS, 0, MAKELPARAM(clientX, clientY));
-        if (res == -1) return std::nullopt;
-        return ClampNoteRawIndex(static_cast<size_t>(LOWORD(res)));
-    };
     MarkupFontProvider fonts;
     fonts.Initialize(hdc, GetActiveNoteFont());
     if (!fonts.baseFont) return finish(std::nullopt);
@@ -5054,12 +5931,16 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
     int spaceW = fonts.spaceWidth;
     if (spaceW <= 0) spaceW = fonts.baseMetrics.tmAveCharWidth;
     if (spaceW <= 0) spaceW = 1;
-    std::wstring indexingText;
-    std::vector<size_t> logicalStarts;
+    const note::NoteTextModel& currentTextCore = CurrentNoteTextCoreModel();
+    std::wstring_view indexingText;
+    std::vector<size_t> emptyLogicalStarts;
+    const std::vector<size_t>* logicalStartsPtr = &emptyLogicalStarts;
     const bool renderActive = layoutFrame.renderActive;
     if (renderActive) {
-        logicalStarts = GetNoteLogicalLineStarts(hWnd, &indexingText);
+        indexingText = currentTextCore.raw;
+        logicalStartsPtr = &currentTextCore.line_starts;
     }
+    const std::vector<size_t>& logicalStarts = *logicalStartsPtr;
     int lineCount = renderActive
         ? std::max<int>(1, static_cast<int>(logicalStarts.size()))
         : NoteLineCount();
@@ -5069,7 +5950,8 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
     if (renderActive && logicalStarts.size() != g_lineCache.size()) {
         return finish(std::nullopt);
     }
-    const std::optional<size_t> nativeHitRaw = queryNativeHitRaw();
+    const std::optional<size_t> nativeHitRaw =
+        HitTestNativeNoteRawPosition(hWnd, clientX, clientY);
 
     auto tryResolveNativeRawHit = [&](int rawLine, size_t* outRaw) -> bool {
         if (!outRaw || !nativeHitRaw) return false;
@@ -5099,7 +5981,7 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
     };
     if (nativeHitRaw) {
         int nativeHitLine = renderActive
-            ? FindLineForRaw(*nativeHitRaw)
+            ? FindLogicalLineForRaw(logicalStarts, *nativeHitRaw)
             : static_cast<int>(SendMessageW(hWnd, EM_LINEFROMCHAR, static_cast<WPARAM>(*nativeHitRaw), 0));
         size_t rawHit = 0;
         if (tryResolveNativeRawHit(nativeHitLine, &rawHit)) {
@@ -5187,9 +6069,13 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
         break;
     }
 
+    int lineTop = 0;
+    int lineBottom = 0;
     size_t lineStart = 0;
     POINT linePos{};
-    if (!queryLineBand(candidate, nullptr, nullptr, &lineStart, &linePos)) return finish(std::nullopt);
+    if (!queryLineBand(candidate, &lineTop, &lineBottom, &lineStart, &linePos)) {
+        return finish(std::nullopt);
+    }
     const LineCache& cache = g_lineCache[static_cast<size_t>(candidate)];
     int hitX = clientX - linePos.x;
     if (hitX <= 0) {
@@ -5244,6 +6130,29 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
         return finish(lineStart + insertPos);
     }
 
+    // The structured line's visible source/display mapping is the one used
+    // for caret placement as well.  Reuse it here instead of measuring every
+    // segment a second, independently interpreted time.  Deliberately retain
+    // the legacy far-right rule below: it is the explicit way to place a raw
+    // caret after hidden trailing markup rather than before its closing tag.
+    std::vector<RenderBoundary> boundaries;
+    if (BuildRenderedBoundariesForLine(hWnd, hdc, candidate, &boundaries) &&
+        !boundaries.empty()) {
+        const note::EditorLineLayout editorLineLayout(
+            note::EditorLineRect{rc.left, lineTop, rc.right, lineBottom},
+            boundaries.data(), boundaries.size());
+        const int farRightThreshold = std::max(1, spaceW * 2);
+        if (clientX <= editorLineLayout.MaxInlineExtent() + farRightThreshold) {
+            if (const auto rawHit = editorLineLayout.HitTest(clientX, clientY)) {
+                size_t lineEnd = 0;
+                if (GetLogicalLineRangeFromStarts(indexingText, logicalStarts, candidate,
+                                                  nullptr, &lineEnd, nullptr)) {
+                    return finish(std::clamp(*rawHit, lineStart, lineEnd));
+                }
+            }
+        }
+    }
+
     int indentPx = spaceW * ResolveLineIndent(cache);
     int runX = 0;
     size_t lastRawEnd = 0;
@@ -5262,7 +6171,8 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
         HFONT oldSeg = nullptr;
         if (segFont) oldSeg = static_cast<HFONT>(SelectObject(hdc, segFont));
 
-        int segBaseX = indentPx + runX;
+        const int inlineChipPadX = InlineCodeChipHorizontalPaddingPx(cache, seg, lineHeight);
+        int segBaseX = indentPx + runX + inlineChipPadX;
         if (SegmentUsesAnchoredLayout(seg)) {
             int anchoredRunWidth = MeasureAnchoredRunWidth(hdc, fonts, cache, segIndex, lineHeight);
             segBaseX = ComputeAnchoredRunStartX(hWnd, clientW, anchorScrollX, seg.style.anchor,
@@ -5271,8 +6181,12 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
                 const auto& prevSeg = cache.segments[prev - 1];
                 if (!SameAnchoredLayout(prevSeg, seg)) break;
                 if (prevSeg.text.empty()) continue;
-                segBaseX += MeasureRenderedSegmentWidth(hdc, fonts, cache, prevSeg, lineHeight, nullptr, nullptr);
+                const int previousContentWidth = MeasureRenderedSegmentWidth(
+                    hdc, fonts, cache, prevSeg, lineHeight, nullptr, nullptr);
+                segBaseX += SegmentFlowAdvanceWidth(
+                    cache, prevSeg, lineHeight, previousContentWidth);
             }
+            segBaseX += inlineChipPadX;
             segBaseX -= linePos.x;
         }
 
@@ -5310,7 +6224,9 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
 
                     return finish(lineStart + seg.rawStart + insertPos);
                 }
-                if (!SegmentUsesAnchoredLayout(seg)) runX += segWidth;
+                if (!SegmentUsesAnchoredLayout(seg)) {
+                    runX += SegmentFlowAdvanceWidth(cache, seg, lineHeight, segWidth);
+                }
                 if (oldSeg) SelectObject(hdc, oldSeg);
                 lastRawEnd = seg.rawStart + SegmentRawLen(seg);
                 continue;
@@ -5325,6 +6241,7 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
             segWidth = MeasureRenderedSegmentWidth(hdc, fonts, cache, seg, lineHeight,
                                                    &dx, &ignoredMeasureAsMath);
         }
+        const int flowWidth = SegmentFlowAdvanceWidth(cache, seg, lineHeight, segWidth);
         if (!dx.empty()) {
             if (relX <= 0) {
                 if (oldSeg) SelectObject(hdc, oldSeg);
@@ -5349,9 +6266,9 @@ static std::optional<size_t> HitTestMarkupPosition(HWND hWnd, int clientX, int c
 
                 return finish(lineStart + seg.rawStart + rawInsertPos);
             }
-            if (!SegmentUsesAnchoredLayout(seg)) runX += segWidth;
+            if (!SegmentUsesAnchoredLayout(seg)) runX += flowWidth;
         } else {
-            if (!SegmentUsesAnchoredLayout(seg)) runX += segWidth;
+            if (!SegmentUsesAnchoredLayout(seg)) runX += flowWidth;
         }
         if (oldSeg) SelectObject(hdc, oldSeg);
         lastRawEnd = seg.rawStart + SegmentRawLen(seg);
@@ -5594,6 +6511,9 @@ bool ShouldShowBottomNotePane() {
 }
 enum class BottomPaneCommandKind {
     None,
+    OpenZoomDialog,
+    TogglePdfZoomOverlay,
+    ToggleAnnotations,
     ToggleRender,
     ToggleWrap,
     ToggleVimControls,
@@ -5630,7 +6550,13 @@ static BottomPaneCommand BuildBottomPaneCommandForLine(const BottomPaneProjectio
 
     if (projection.mode != BottomNoteMode::Assist) return command;
     const BottomAssistLineLayout& layout = projection.assistLayout;
-    if (lineIdx == 0) {
+    if (lineIdx == layout.pdfZoomIdx) {
+        command.kind = BottomPaneCommandKind::OpenZoomDialog;
+    } else if (lineIdx == layout.pdfZoomOverlayIdx) {
+        command.kind = BottomPaneCommandKind::TogglePdfZoomOverlay;
+    } else if (lineIdx == layout.annotVisibilityIdx) {
+        command.kind = BottomPaneCommandKind::ToggleAnnotations;
+    } else if (lineIdx == layout.noteDisplayIdx || lineIdx == layout.renderIdx) {
         command.kind = BottomPaneCommandKind::ToggleRender;
     } else if (layout.wrapIdx >= 0 && lineIdx == layout.wrapIdx) {
         command.kind = BottomPaneCommandKind::ToggleWrap;

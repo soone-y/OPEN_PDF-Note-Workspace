@@ -47,6 +47,9 @@ constexpr int kAnnotInspectorY2 = 118;
 constexpr int kAnnotInspectorColorHex = 119;
 constexpr int kAnnotInspectorFontName = 120;
 constexpr int kAnnotInspectorFontPt = 121;
+// This is the only timer owned by AnnotInspectorProc. Each inspector HWND
+// has its own timer namespace, so a fixed ID is safe for concurrent dialogs.
+constexpr UINT_PTR kAnnotInspectorApplyFeedbackTimer = 1;
 
 struct AnnotInspectorCtx {
     HWND owner = nullptr;
@@ -376,6 +379,7 @@ bool TryReadInspectorNumber(HWND hWnd, int id, double minimum, double maximum, d
 }
 
 void ShowInspectorValidation(HWND hWnd, int controlId, const wchar_t* message) {
+    KillTimer(hWnd, kAnnotInspectorApplyFeedbackTimer);
     SetWindowTextW(GetDlgItem(hWnd, kAnnotInspectorValidation), message);
     HWND control = GetDlgItem(hWnd, controlId);
     if (control) {
@@ -391,6 +395,18 @@ void ShowNoSoundPopup(HWND hWnd, int controlId, const wchar_t* title, const wcha
 
 void ClearInspectorValidation(HWND hWnd) {
     SetWindowTextW(GetDlgItem(hWnd, kAnnotInspectorValidation), L"");
+}
+
+void SetAnnotInspectorTitle(HWND hWnd, const Annotation& annotation) {
+    SetWindowTextW(hWnd, AnnotListLabel(annotation).c_str());
+    RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME);
+}
+
+void ShowAnnotInspectorApplied(HWND hWnd) {
+    SetWindowTextW(GetDlgItem(hWnd, kAnnotInspectorValidation),
+                   localization::Text(L"ui.annot_math.e96aa12267b4").c_str());
+    KillTimer(hWnd, kAnnotInspectorApplyFeedbackTimer);
+    (void)SetTimer(hWnd, kAnnotInspectorApplyFeedbackTimer, 1000, nullptr);
 }
 
 std::wstring InspectorEditableText(const Annotation& ann) {
@@ -530,6 +546,7 @@ bool ApplyAnnotInspectorAll(HWND hWnd, AnnotInspectorCtx* ctx, bool showValidati
 
     if (!UpdateAnnotationAtIndex(ctx->owner, ctx->index, after)) return false;
     (void)SyncTextBoxToolFontFromAnnotationIndex(ctx->index);
+    SetAnnotInspectorTitle(hWnd, g_annots[static_cast<size_t>(ctx->index)]);
     ClearInspectorValidation(hWnd);
     return true;
 }
@@ -555,9 +572,12 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                                   ann.type == Annotation::Type::Arrow ||
                                   ann.type == Annotation::Type::Line);
 
-        CreateWindowExW(0, L"BUTTON", L"プロパティ", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+        const std::wstring viewLabel = localization::Text(L"ui.annot_math.63c3859d7f0b");
+        const std::wstring editLabel = localization::Text(L"ui.annot_math.a594f14542df");
+        CreateWindowExW(0, L"BUTTON", viewLabel.c_str(),
+                        WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON,
                         16, 10, 90, 22, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorView), g_hInst, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"編集", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+        CreateWindowExW(0, L"BUTTON", editLabel.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
                         112, 10, 70, 22, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorEdit), g_hInst, nullptr);
 
         const int infoY = 36;
@@ -780,6 +800,7 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
         SetAnnotInspectorEditable(hWnd, ctx, ctx->editable);
         ApplyThemeToDialog(hWnd);
+        SetAnnotInspectorTitle(hWnd, ann);
         ctx->initializing = false;
         return 0;
     }
@@ -828,7 +849,7 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
         if (id == kAnnotInspectorApply && code == BN_CLICKED) {
-            ApplyAnnotInspectorAll(hWnd, ctx, true);
+            if (ApplyAnnotInspectorAll(hWnd, ctx, true)) ShowAnnotInspectorApplied(hWnd);
             return 0;
         }
         if (id == kAnnotInspectorClose && code == BN_CLICKED) {
@@ -837,6 +858,13 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         }
         break;
     }
+    case WM_TIMER:
+        if (wParam == kAnnotInspectorApplyFeedbackTimer) {
+            KillTimer(hWnd, kAnnotInspectorApplyFeedbackTimer);
+            ClearInspectorValidation(hWnd);
+            return 0;
+        }
+        break;
     case WM_ACTIVATE: {
         const WORD activation = LOWORD(wParam);
         HWND otherWnd = reinterpret_cast<HWND>(lParam);
@@ -855,6 +883,7 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         if (ApplyAnnotInspectorAll(hWnd, ctx, true)) DestroyWindow(hWnd);
         return 0;
     case WM_NCDESTROY:
+        KillTimer(hWnd, kAnnotInspectorApplyFeedbackTimer);
         delete ctx;
         SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
         return 0;
@@ -875,6 +904,33 @@ void EnsureAnnotInspectorClass() {
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassW(&wc);
     registered = true;
+}
+
+struct OpenAnnotInspectorLookup {
+    const std::wstring& annotationId;
+    HWND found = nullptr;
+};
+
+BOOL CALLBACK FindOpenAnnotInspectorProc(HWND hWnd, LPARAM lParam) {
+    auto* lookup = reinterpret_cast<OpenAnnotInspectorLookup*>(lParam);
+    wchar_t className[64]{};
+    if (!lookup || GetClassNameW(hWnd, className, static_cast<int>(std::size(className))) == 0 ||
+        wcscmp(className, L"PdfNoteAnnotInspector") != 0) {
+        return TRUE;
+    }
+    const auto* ctx = reinterpret_cast<const AnnotInspectorCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    if (ctx && ctx->annotationId == lookup->annotationId) {
+        lookup->found = hWnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+HWND FindOpenAnnotInspector(const std::wstring& annotationId) {
+    OpenAnnotInspectorLookup lookup{annotationId};
+    EnumThreadWindows(GetCurrentThreadId(), FindOpenAnnotInspectorProc,
+                      reinterpret_cast<LPARAM>(&lookup));
+    return lookup.found;
 }
 
 } // namespace
@@ -900,8 +956,17 @@ bool SyncTextBoxToolFontFromAnnotationIndex(int index) {
 }
 void UpdateAnnotPanelSummary() {
     if (!g_hAnnotSummary) return;
-    SetWindowTextW(g_hAnnotSummary, L"");
-    ShowWindow(g_hAnnotSummary, SW_HIDE);
+    const wchar_t* key = L"annotation.status.saved";
+    if (g_pdf.kind != DocKind::Pdf) {
+        key = L"annotation.status.no_pdf";
+    } else if (g_annotsDirty) {
+        key = L"annotation.status.unsaved";
+    } else if (g_annotsNeedsIntegrate) {
+        key = L"annotation.status.staged";
+    }
+    const std::wstring status = localization::Text(key);
+    SetWindowTextW(g_hAnnotSummary, status.c_str());
+    ShowWindow(g_hAnnotSummary, SW_SHOW);
 }
 
 static std::wstring s_selectedAnnotId;
@@ -1000,11 +1065,17 @@ void JumpToSelectedAnnot() {
 
 void ShowAnnotationInspector(HWND owner, int annotationIndex, bool editMode) {
     if (annotationIndex < 0 || annotationIndex >= static_cast<int>(g_annots.size())) return;
+    const Annotation& annotation = g_annots[static_cast<size_t>(annotationIndex)];
+    if (HWND existing = FindOpenAnnotInspector(annotation.id)) {
+        if (IsIconic(existing)) ShowWindow(existing, SW_RESTORE);
+        SetForegroundWindow(existing);
+        return;
+    }
     EnsureAnnotInspectorClass();
     auto* ctx = new AnnotInspectorCtx;
     ctx->owner = owner ? owner : g_hMainWnd;
     ctx->index = annotationIndex;
-    ctx->annotationId = g_annots[static_cast<size_t>(annotationIndex)].id;
+    ctx->annotationId = annotation.id;
     ctx->editable = editMode && !IsPdfPreviewReadOnlyActive();
     constexpr int kDialogWidth = 520;
     constexpr int kDialogHeight = 530;
@@ -1024,8 +1095,8 @@ void ShowAnnotationInspector(HWND owner, int annotationIndex, bool editMode) {
     const int workBottom = static_cast<int>(work.bottom);
     x = std::clamp(x, workLeft, std::max(workLeft, workRight - kDialogWidth));
     y = std::clamp(y, workTop, std::max(workTop, workBottom - kDialogHeight));
-    HWND dialog = CreateWindowExW(WS_EX_TOOLWINDOW, L"PdfNoteAnnotInspector",
-                                  localization::Text(L"ui.annot_math.6e745bc1653d").c_str(),
+    const std::wstring title = AnnotListLabel(annotation);
+    HWND dialog = CreateWindowExW(WS_EX_TOOLWINDOW, L"PdfNoteAnnotInspector", title.c_str(),
                                   WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                                   x, y, kDialogWidth, kDialogHeight, ctx->owner, nullptr, g_hInst, ctx);
     if (!dialog) delete ctx;

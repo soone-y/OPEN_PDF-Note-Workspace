@@ -111,8 +111,11 @@ static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintR
 
     const auto& ui = GetUiText();
     std::wstring status = ui.statusPageLabel + L" " + std::to_wstring(currentPage + 1) + L"/" +
-                          std::to_wstring(std::max(1, g_pdf.pageCount)) +
-                          L"  " + ui.statusZoomLabel + L" " + std::to_wstring(static_cast<int>(g_pdf.scale * 100)) + L"%";
+                          std::to_wstring(std::max(1, g_pdf.pageCount));
+    if (g_config.showPdfZoomOverlay) {
+        status += L"  " + ui.statusZoomLabel + L" " +
+                  std::to_wstring(static_cast<int>(g_pdf.scale * 100)) + L"%";
+    }
     SetBkMode(memDC, TRANSPARENT);
     SetTextColor(memDC, g_theme.panelText);
     TextOutW(memDC, 8, 8, status.c_str(), static_cast<int>(status.size()));

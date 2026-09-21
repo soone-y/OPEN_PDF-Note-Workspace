@@ -23,7 +23,10 @@ bool SerializeAnnotCommandsJson(const std::vector<AnnotCommand>& cmds, std::stri
 bool DeserializeAnnotCommandsJson(std::string_view json,
                                   std::vector<AnnotCommand>* outCmds,
                                   std::wstring* outErr = nullptr);
-void ApplyAnnotCommandToList(std::vector<Annotation>* annots, const AnnotCommand& cmd);
+// Applies only when the command's explicit precondition matches. The target
+// list remains unchanged on failure.
+[[nodiscard]] bool ApplyAnnotCommandToList(std::vector<Annotation>* annots,
+                                           const AnnotCommand& cmd);
 bool CollectPendingAnnotStageCommands(const std::wstring& pdfPath, std::vector<AnnotCommand>* outCmds);
 void ClearPendingAnnotStageCommands(const std::wstring& pdfPath);
 void InvalidatePendingAnnotStageCommands(const std::wstring& pdfPath);

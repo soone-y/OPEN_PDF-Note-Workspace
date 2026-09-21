@@ -53,6 +53,70 @@ static std::wstring GetNoteAutomationIndexingText() {
     return normalized;
 }
 
+static bool OpenUiAutomationClipboard(HWND owner) {
+    // Clipboard ownership is serialized across the desktop.  A fixed handful
+    // of 1 ms retries is not enough when a clipboard manager or the shell is
+    // completing a delayed-render transaction, so use a short bounded window.
+    // This path is available only to the local automation fixture; normal note
+    // editing never waits here.
+    constexpr ULONGLONG kRetryWindowMs = 500;
+    constexpr DWORD kRetryIntervalMs = 5;
+    const ULONGLONG deadline = GetTickCount64() + kRetryWindowMs;
+    do {
+        if (OpenClipboard(owner)) return true;
+        Sleep(kRetryIntervalMs);
+    } while (GetTickCount64() < deadline);
+    return false;
+}
+
+static bool SetUiAutomationClipboardText(HWND owner, const std::wstring& text) {
+    if (text.size() >= std::numeric_limits<size_t>::max() / sizeof(wchar_t)) return false;
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) return false;
+    void* destination = GlobalLock(memory);
+    if (!destination) {
+        GlobalFree(memory);
+        return false;
+    }
+    std::copy_n(text.c_str(), text.size() + 1, static_cast<wchar_t*>(destination));
+    GlobalUnlock(memory);
+    if (!OpenUiAutomationClipboard(owner)) {
+        GlobalFree(memory);
+        return false;
+    }
+    if (!EmptyClipboard()) {
+        CloseClipboard();
+        GlobalFree(memory);
+        return false;
+    }
+    if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+        CloseClipboard();
+        GlobalFree(memory);
+        return false;
+    }
+    CloseClipboard();
+    return true;
+}
+
+static std::optional<std::wstring> GetUiAutomationClipboardText(HWND owner) {
+    if (!IsClipboardFormatAvailable(CF_UNICODETEXT) || !OpenUiAutomationClipboard(owner)) return std::nullopt;
+    HANDLE memory = GetClipboardData(CF_UNICODETEXT);
+    if (!memory) {
+        CloseClipboard();
+        return std::nullopt;
+    }
+    const wchar_t* source = static_cast<const wchar_t*>(GlobalLock(memory));
+    if (!source) {
+        CloseClipboard();
+        return std::nullopt;
+    }
+    std::wstring text(source);
+    GlobalUnlock(memory);
+    CloseClipboard();
+    return text;
+}
+
 static int FindNoteTextSnippetStart(const std::wstring& needle) {
     if (!g_hNoteEdit || needle.empty()) return -1;
     const std::wstring text = GetNoteAutomationIndexingText();
@@ -859,11 +923,179 @@ static bool RunUiAutomationNoteInputUndoRedoScenario(HWND owner, std::wstring* o
         return false;
     }
 
+    // Clipboard commands are separate from plain replacement: the Cut
+    // deletion is permitted only after the clipboard write succeeds, and both
+    // the source edit and its inverse must travel through the same history.
+    const std::wstring clipboardToken = L"ui-automation-clipboard-token";
+    const size_t appendAt = GetNoteAutomationIndexingText().size();
+    if (!SetUiAutomationClipboardText(owner, clipboardToken)) {
+        if (outError) *outError = L"Could not prepare the clipboard Paste fixture.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_SETSEL, static_cast<WPARAM>(appendAt), static_cast<LPARAM>(appendAt));
+    SendMessageW(g_hNoteEdit, WM_PASTE, 0, 0);
+    if (FindNoteTextSnippetStart(clipboardToken) < 0) {
+        if (outError) *outError = L"WM_PASTE did not insert the clipboard fixture.";
+        return false;
+    }
+    if (!SendUiAutomationNoteUndoChangedText() ||
+        FindNoteTextSnippetStart(clipboardToken) >= 0 ||
+        !SendUiAutomationNoteRedoChangedText() ||
+        FindNoteTextSnippetStart(clipboardToken) < 0) {
+        if (outError) *outError = L"Undo/redo did not round-trip WM_PASTE.";
+        return false;
+    }
+    if (!SelectNoteTextSnippet(clipboardToken)) {
+        if (outError) *outError = L"Could not select the clipboard fixture for WM_CUT.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, WM_CUT, 0, 0);
+    const auto cutClipboard = GetUiAutomationClipboardText(owner);
+    if (FindNoteTextSnippetStart(clipboardToken) >= 0 ||
+        !cutClipboard.has_value() || *cutClipboard != clipboardToken) {
+        if (outError) *outError = L"WM_CUT did not atomically copy then remove the selected text.";
+        return false;
+    }
+    if (!SendUiAutomationNoteUndoChangedText() ||
+        !SelectNoteTextSnippet(clipboardToken) ||
+        !SetUiAutomationClipboardText(owner, L"")) {
+        if (outError) *outError = L"Could not restore the Cut selection and prepare an empty Paste payload.";
+        return false;
+    }
+    const std::wstring beforeEmptyPaste = GetNoteAutomationIndexingText();
+    SendMessageW(g_hNoteEdit, WM_PASTE, 0, 0);
+    if (GetNoteAutomationIndexingText() != beforeEmptyPaste) {
+        if (outError) *outError = L"An empty clipboard payload destructively changed the selection.";
+        return false;
+    }
+    if (!SendUiAutomationNoteRedoChangedText() ||
+        FindNoteTextSnippetStart(clipboardToken) >= 0) {
+        if (outError) *outError = L"Redo did not reapply WM_CUT after the empty Paste no-op.";
+        return false;
+    }
+
+    // Selection-replacing Paste must be a single Replace command. Undo/Redo
+    // retain a later, unrelated selection instead of jumping back to the
+    // selection that happened to create this command.
+    const std::wstring selectedPasteSource = L"ui-automation-selected-paste-source";
+    const std::wstring selectedPasteReplacement = L"ui-automation-selected-paste-replacement";
+    const size_t selectedPasteInsertAt = GetNoteAutomationIndexingText().size();
+    if (!SetUiAutomationClipboardText(owner, selectedPasteSource)) {
+        if (outError) *outError = L"Could not prepare the selection-Paste source fixture.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_SETSEL,
+                 static_cast<WPARAM>(selectedPasteInsertAt),
+                 static_cast<LPARAM>(selectedPasteInsertAt));
+    SendMessageW(g_hNoteEdit, WM_PASTE, 0, 0);
+    if (!SelectNoteTextSnippet(selectedPasteSource)) {
+        if (outError) *outError = L"Could not select the Paste replacement source.";
+        return false;
+    }
+    if (!SetUiAutomationClipboardText(owner, selectedPasteReplacement)) {
+        if (outError) *outError = L"Could not prepare the selection-Paste replacement fixture.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, WM_PASTE, 0, 0);
+    const bool sourceStillPresent = FindNoteTextSnippetStart(selectedPasteSource) >= 0;
+    const bool replacementPresent = FindNoteTextSnippetStart(selectedPasteReplacement) >= 0;
+    if (sourceStillPresent || !replacementPresent) {
+        if (outError) {
+            const std::optional<std::wstring> clipboardAfterPaste =
+                GetUiAutomationClipboardText(owner);
+            const bool replacementStillOnClipboard = clipboardAfterPaste.has_value() &&
+                *clipboardAfterPaste == selectedPasteReplacement;
+            *outError = L"WM_PASTE did not replace the selected source text: sourcePresent=" +
+                std::to_wstring(sourceStillPresent ? 1 : 0) +
+                L" replacementPresent=" + std::to_wstring(replacementPresent ? 1 : 0) +
+                L" replacementOnClipboard=" +
+                std::to_wstring(replacementStillOnClipboard ? 1 : 0) +
+                L" revision=" + std::to_wstring(CurrentEditRevision()) +
+                L" ime=" + std::to_wstring(IsNoteImeComposing() ? 1 : 0) +
+                L" normalMode=" + std::to_wstring(g_noteNormalMode ? 1 : 0);
+        }
+        return false;
+    }
+    const DWORD stableSelectionStart = static_cast<DWORD>(
+        selectedPasteInsertAt == 0 ? 0 : selectedPasteInsertAt - 1);
+    const DWORD stableSelectionEnd = static_cast<DWORD>(selectedPasteInsertAt);
+    SendMessageW(g_hNoteEdit, EM_SETSEL, static_cast<WPARAM>(stableSelectionStart),
+                 static_cast<LPARAM>(stableSelectionEnd));
+    if (!SendUiAutomationNoteUndoChangedText() ||
+        FindNoteTextSnippetStart(selectedPasteSource) < 0 ||
+        FindNoteTextSnippetStart(selectedPasteReplacement) >= 0) {
+        if (outError) *outError = L"Undo did not restore the selection-replacing Paste text.";
+        return false;
+    }
+    DWORD selectionAfterUndoStart = 0;
+    DWORD selectionAfterUndoEnd = 0;
+    SendMessageW(g_hNoteEdit, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selectionAfterUndoStart),
+                 reinterpret_cast<LPARAM>(&selectionAfterUndoEnd));
+    if (selectionAfterUndoStart != stableSelectionStart ||
+        selectionAfterUndoEnd != stableSelectionEnd) {
+        if (outError) *outError = L"Undo jumped an unrelated Note selection to historic edit state.";
+        return false;
+    }
+    if (!SendUiAutomationNoteRedoChangedText() ||
+        FindNoteTextSnippetStart(selectedPasteSource) >= 0 ||
+        FindNoteTextSnippetStart(selectedPasteReplacement) < 0) {
+        if (outError) *outError = L"Redo did not restore the selection-replacing Paste text.";
+        return false;
+    }
+    DWORD selectionAfterRedoStart = 0;
+    DWORD selectionAfterRedoEnd = 0;
+    SendMessageW(g_hNoteEdit, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selectionAfterRedoStart),
+                 reinterpret_cast<LPARAM>(&selectionAfterRedoEnd));
+    if (selectionAfterRedoStart != stableSelectionStart ||
+        selectionAfterRedoEnd != stableSelectionEnd) {
+        if (outError) *outError = L"Redo jumped an unrelated Note selection to historic edit state.";
+        return false;
+    }
+
+    // A selection that intersects the replacement has no stable text identity.
+    // It must collapse at the end of each resulting replacement, rather than
+    // being restored from the earlier Paste snapshot.
+    const DWORD pastedTextStart = static_cast<DWORD>(selectedPasteInsertAt);
+    const DWORD pastedTextEnd = static_cast<DWORD>(
+        selectedPasteInsertAt + selectedPasteReplacement.size());
+    const DWORD restoredTextEnd = static_cast<DWORD>(
+        selectedPasteInsertAt + selectedPasteSource.size());
+    SendMessageW(g_hNoteEdit, EM_SETSEL, static_cast<WPARAM>(pastedTextStart),
+                 static_cast<LPARAM>(pastedTextEnd));
+    if (!SendUiAutomationNoteUndoChangedText() ||
+        FindNoteTextSnippetStart(selectedPasteSource) < 0 ||
+        FindNoteTextSnippetStart(selectedPasteReplacement) >= 0) {
+        if (outError) *outError = L"Undo did not restore the intersecting Note Paste text.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selectionAfterUndoStart),
+                 reinterpret_cast<LPARAM>(&selectionAfterUndoEnd));
+    if (selectionAfterUndoStart != restoredTextEnd || selectionAfterUndoEnd != restoredTextEnd) {
+        if (outError) *outError = L"Undo did not collapse an intersecting Note selection deterministically.";
+        return false;
+    }
+    if (!SendUiAutomationNoteRedoChangedText() ||
+        FindNoteTextSnippetStart(selectedPasteSource) >= 0 ||
+        FindNoteTextSnippetStart(selectedPasteReplacement) < 0) {
+        if (outError) *outError = L"Redo did not restore the intersecting Note Paste text.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_GETSEL,
+                 reinterpret_cast<WPARAM>(&selectionAfterRedoStart),
+                 reinterpret_cast<LPARAM>(&selectionAfterRedoEnd));
+    if (selectionAfterRedoStart != pastedTextEnd || selectionAfterRedoEnd != pastedTextEnd) {
+        if (outError) *outError = L"Redo did not collapse an intersecting Note selection deterministically.";
+        return false;
+    }
+
     // Typing coalesces only compatible adjacent text units, so punctuation in
     // the token can legitimately create more than one history entry. Unwind
     // until the exact pre-test snapshot is restored, without touching storage.
     size_t cleanupUndoCount = 0;
-    const size_t maxCleanupUndoCount = typedToken.size() + 3;
+    const size_t maxCleanupUndoCount = typedToken.size() + 8;
     while (GetNoteAutomationIndexingText() != originalText &&
            cleanupUndoCount < maxCleanupUndoCount) {
         if (!SendUiAutomationNoteUndoChangedText()) break;
@@ -1589,6 +1821,157 @@ static bool RunUiAutomationPdfActiveEditSaveScenario(HWND owner, std::wstring* o
     return true;
 }
 
+static bool RunUiAutomationPdfTextboxUndoRedoScenario(HWND owner, std::wstring* outError) {
+    if (!owner || g_pdf.kind != DocKind::Pdf || !g_hPdfView || g_pdf.pages.empty()) {
+        if (outError) *outError = L"PDF textbox undo/redo automation requires an open PDF document.";
+        return false;
+    }
+
+    // Start from the same history boundary as a newly opened TextBox. The
+    // discard path clears any process-local text edit entry without creating
+    // an annotation or touching staged data.
+    g_pdf.editingText = true;
+    g_pdf.editPage = -1;
+    EndInlineTextEditing(g_hPdfView, false);
+
+    const auto& page = g_pdf.pages.front();
+    const std::wstring before = L"ui automation pdf textbox history";
+    const std::wstring after = before + L"X";
+    const std::wstring selectedPasteSource = L"history";
+    const std::wstring selectedPasteReplacement = L"paste";
+    const size_t selectedPasteStart = before.find(selectedPasteSource);
+    const size_t selectedPasteEnd = selectedPasteStart + selectedPasteSource.size();
+    const std::wstring afterPaste = before.substr(0, selectedPasteStart) +
+                                   selectedPasteReplacement + before.substr(selectedPasteEnd) + L"X";
+    const double left = std::clamp(24.0, 0.0, std::max(24.0, page.widthPt - 48.0));
+    const double right = std::min(page.widthPt, left + 180.0);
+    const double top = std::max(32.0, std::min(page.heightPt, 96.0));
+    const double bottom = std::max(0.0, top - 28.0);
+
+    g_pdf.editingText = true;
+    g_pdf.editPage = 0;
+    g_pdf.editX1 = left;
+    g_pdf.editX2 = right;
+    g_pdf.editY1 = top;
+    g_pdf.editY2 = bottom;
+    g_pdf.editText = before;
+    g_pdf.editCaret = before.size();
+    g_pdf.editSelStart = g_pdf.editCaret;
+    g_pdf.editSelEnd = g_pdf.editCaret;
+    g_pdf.editSelectingText = false;
+    g_pdf.editSelAnchor = g_pdf.editCaret;
+    g_pdf.editLayoutDirty = true;
+    g_pdf.editInnerLayoutW = 0;
+    g_pdf.editLayout.lines.clear();
+    g_pdf.editFontName = g_textFontName;
+    g_pdf.editFontPt = (g_textFontPt > 0.0) ? g_textFontPt : 12.0;
+    g_pdf.imeComp.clear();
+    g_pdf.imeComposing = false;
+
+    auto fail = [&](const wchar_t* message) {
+        EndInlineTextEditing(g_hPdfView, false);
+        if (outError) *outError = message;
+        return false;
+    };
+
+    SetFocus(g_hPdfView);
+    if (GetFocus() != g_hPdfView) {
+        return fail(L"Could not focus the PDF textbox for undo/redo automation.");
+    }
+    SendMessageW(g_hPdfView, WM_CHAR, L'X', 0);
+    if (g_pdf.editText != after || !CanExecutePdfUndoRedoFromFocus(true)) {
+        return fail(L"PDF textbox typing did not produce an undoable local edit.");
+    }
+    if (!ExecutePdfUndoRedoFromFocus(owner, true) ||
+        g_pdf.editText != before || g_pdf.editCaret != before.size() ||
+        g_pdf.editSelStart != before.size() || g_pdf.editSelEnd != before.size()) {
+        return fail(L"PDF textbox undo did not restore the expected snapshot.");
+    }
+    if (!CanExecutePdfUndoRedoFromFocus(false) ||
+        !ExecutePdfUndoRedoFromFocus(owner, false) ||
+        g_pdf.editText != after || g_pdf.editCaret != after.size() ||
+        g_pdf.editSelStart != after.size() || g_pdf.editSelEnd != after.size()) {
+        return fail(L"PDF textbox redo did not restore the expected snapshot.");
+    }
+
+    // Paste over an existing selection must be one TextEditCommand. The
+    // clipboard path below is the same one used by Ctrl+V and the context
+    // menu, rather than a direct edit of g_pdf.editText. A later selection
+    // outside the replacement must stay where the user moved it.
+    g_pdf.editCaret = selectedPasteEnd;
+    g_pdf.editSelStart = selectedPasteStart;
+    g_pdf.editSelEnd = selectedPasteEnd;
+    if (!SetUiAutomationClipboardText(owner, selectedPasteReplacement) ||
+        !PasteClipboardIntoActivePdfTextBox(g_hPdfView) ||
+        g_pdf.editText != afterPaste ||
+        g_pdf.editCaret != selectedPasteStart + selectedPasteReplacement.size() ||
+        g_pdf.editSelStart != g_pdf.editCaret || g_pdf.editSelEnd != g_pdf.editCaret) {
+        return fail(L"PDF textbox Paste did not replace the selected source text.");
+    }
+    // The trailing X is outside the replaced range. Its offset changes with
+    // the replacement, but the selection must keep pointing at that same X.
+    const size_t stableSelectionBeforeUndoStart =
+        selectedPasteStart + selectedPasteReplacement.size();
+    const size_t stableSelectionBeforeUndoEnd = stableSelectionBeforeUndoStart + 1;
+    const size_t stableSelectionAfterUndoStart = selectedPasteEnd;
+    const size_t stableSelectionAfterUndoEnd = stableSelectionAfterUndoStart + 1;
+    g_pdf.editCaret = stableSelectionBeforeUndoEnd;
+    g_pdf.editSelStart = stableSelectionBeforeUndoStart;
+    g_pdf.editSelEnd = stableSelectionBeforeUndoEnd;
+    if (!ExecutePdfUndoRedoFromFocus(owner, true) ||
+        g_pdf.editText != after || g_pdf.editCaret != stableSelectionAfterUndoEnd ||
+        g_pdf.editSelStart != stableSelectionAfterUndoStart ||
+        g_pdf.editSelEnd != stableSelectionAfterUndoEnd) {
+        return fail(L"PDF textbox undo jumped an unrelated selection to historic edit state.");
+    }
+    if (!ExecutePdfUndoRedoFromFocus(owner, false) ||
+        g_pdf.editText != afterPaste ||
+        g_pdf.editCaret != stableSelectionBeforeUndoEnd ||
+        g_pdf.editSelStart != stableSelectionBeforeUndoStart ||
+        g_pdf.editSelEnd != stableSelectionBeforeUndoEnd) {
+        return fail(L"PDF textbox redo jumped an unrelated selection to historic edit state.");
+    }
+
+    // Selection navigation is not a document mutation. It must not prevent
+    // Undo from applying the same text command. A selection that intersects
+    // the changed text collapses at the end of the resulting replacement.
+    g_pdf.editCaret = 0;
+    g_pdf.editSelStart = 0;
+    g_pdf.editSelEnd = afterPaste.size();
+    if (!ExecutePdfUndoRedoFromFocus(owner, true) ||
+        g_pdf.editText != after || g_pdf.editCaret != selectedPasteEnd ||
+        g_pdf.editSelStart != selectedPasteEnd || g_pdf.editSelEnd != selectedPasteEnd) {
+        return fail(L"PDF textbox undo was blocked by a later selection change.");
+    }
+    if (!ExecutePdfUndoRedoFromFocus(owner, false) ||
+        g_pdf.editText != afterPaste ||
+        g_pdf.editCaret != selectedPasteStart + selectedPasteReplacement.size() ||
+        g_pdf.editSelStart != g_pdf.editCaret || g_pdf.editSelEnd != g_pdf.editCaret) {
+        return fail(L"PDF textbox redo did not survive selection-navigation undo.");
+    }
+
+    // Simulate a state change which did not pass through this TextBox command
+    // path. Undo must reject it without consuming the entry; restoring the
+    // expected state must make that same entry undoable again.
+    g_pdf.editText.push_back(L'!');
+    const std::wstring mismatchedText = g_pdf.editText;
+    if (ExecutePdfUndoRedoFromFocus(owner, true) || g_pdf.editText != mismatchedText) {
+        return fail(L"PDF textbox undo consumed or partially restored a mismatched snapshot.");
+    }
+    g_pdf.editText = afterPaste;
+    g_pdf.editCaret = selectedPasteStart + selectedPasteReplacement.size();
+    g_pdf.editSelStart = g_pdf.editCaret;
+    g_pdf.editSelEnd = g_pdf.editCaret;
+    if (!ExecutePdfUndoRedoFromFocus(owner, true) || g_pdf.editText != after ||
+         g_pdf.editCaret != selectedPasteEnd ||
+         g_pdf.editSelStart != selectedPasteEnd || g_pdf.editSelEnd != selectedPasteEnd) {
+        return fail(L"PDF textbox undo entry was consumed after a snapshot mismatch.");
+    }
+
+    EndInlineTextEditing(g_hPdfView, false);
+    return true;
+}
+
 static bool RunUiAutomationPdfTextboxEscCommitScenario(HWND owner, std::wstring* outError) {
     if (!owner || g_pdf.kind != DocKind::Pdf || CurrentLogicalPdfPath().empty() ||
         !g_hPdfView || g_pdf.pages.empty()) {
@@ -1827,6 +2210,98 @@ static bool RunUiAutomationAnnotListLatestVisibleScenario(HWND owner, std::wstri
     restore();
     return true;
 }
+
+static bool RunUiAutomationFreehandAndAnnotationHistoryScenario(HWND owner, std::wstring* outError) {
+    if (!owner || !g_hPdfView || !g_hAnnotList || g_pdf.kind != DocKind::Pdf || g_pdf.pages.empty()) {
+        if (outError) *outError = L"Freehand/history automation requires an open PDF document.";
+        return false;
+    }
+
+    const auto originalAnnots = g_annots;
+    const bool originalAnnotsDirty = g_annotsDirty;
+    const bool originalAnnotsNeedsIntegrate = g_annotsNeedsIntegrate;
+    const std::wstring originalCorrection = g_config.freehandCorrection;
+    const ToolMode originalToolMode = g_toolMode;
+    const int originalSel = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETCURSEL, 0, 0));
+    auto restore = [&]() {
+        g_annots = originalAnnots;
+        g_annotsDirty = originalAnnotsDirty;
+        g_annotsNeedsIntegrate = originalAnnotsNeedsIntegrate;
+        g_config.freehandCorrection = originalCorrection;
+        g_toolMode = originalToolMode;
+        ClearPdfAnnotationHistory();
+        RefreshAnnotPanel();
+        if (originalSel >= 0 && originalSel < static_cast<int>(g_annots.size())) {
+            SendMessageW(g_hAnnotList, LB_SETCURSEL, static_cast<WPARAM>(originalSel), 0);
+        }
+        UpdateAnnotPanelSummary();
+        RefreshMainWindowUiState(owner);
+        if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    };
+    auto fail = [&](const wchar_t* message) {
+        restore();
+        if (outError) *outError = message;
+        return false;
+    };
+
+    ClearPdfAnnotationHistory();
+    g_config.freehandCorrection = L"auto";
+    Annotation raw;
+    raw.type = Annotation::Type::Freehand;
+    raw.pageIndex = 0;
+    raw.width = 2.0;
+    raw.color = RGB(255, 140, 0);
+    raw.path = {{ 36.0, 120.0 }, { 58.0, 120.6 }, { 80.0, 119.4 },
+                { 102.0, 120.3 }, { 124.0, 120.0 }};
+    raw.x1 = raw.path.front().x;
+    raw.y1 = raw.path.front().y;
+    raw.x2 = raw.path.back().x;
+    raw.y2 = raw.path.back().y;
+
+    Annotation corrected;
+    if (!TryCorrectFreehandAnnotation(raw, &corrected) || corrected.type != Annotation::Type::Line) {
+        return fail(L"Freehand correction automation did not recognize a stable line stroke.");
+    }
+    Annotation tooShort = raw;
+    tooShort.path = {{ 36.0, 120.0 }, { 38.0, 120.0 }};
+    if (TryCorrectFreehandAnnotation(tooShort, &corrected)) {
+        return fail(L"Freehand correction automation accepted a stroke below the minimum length.");
+    }
+
+    g_annots.clear();
+    InsertAnnotAt(corrected, 0);
+    if (g_annots.size() != 1 || g_annots.front().id.empty()) {
+        return fail(L"Annotation history automation could not prepare a corrected annotation.");
+    }
+    if (!DeleteAnnotationAtIndex(owner, 0) || !g_annots.empty()) {
+        return fail(L"Annotation history automation did not record deletion.");
+    }
+
+    SetFocus(g_hPdfView);
+    if (!ExecutePdfUndoRedoFromFocus(owner, true) || g_annots.size() != 1 ||
+        g_annots.front().type != Annotation::Type::Line) {
+        return fail(L"Annotation history automation could not undo deletion.");
+    }
+    if (!ExecutePdfUndoRedoFromFocus(owner, false) || !g_annots.empty()) {
+        return fail(L"Annotation history automation could not redo deletion.");
+    }
+    if (!ExecutePdfUndoRedoFromFocus(owner, true) || g_annots.size() != 1) {
+        return fail(L"Annotation history automation could not restore the annotation before add testing.");
+    }
+    if (!DuplicateAnnotationAtIndex(owner, 0) || g_annots.size() != 2) {
+        return fail(L"Annotation history automation did not record addition.");
+    }
+    if (!ExecutePdfUndoRedoFromFocus(owner, true) || g_annots.size() != 1) {
+        return fail(L"Annotation history automation could not undo addition.");
+    }
+    if (!ExecutePdfUndoRedoFromFocus(owner, false) || g_annots.size() != 2) {
+        return fail(L"Annotation history automation could not redo addition.");
+    }
+
+    restore();
+    return true;
+}
+
 static bool RunUiAutomationPdfTextboxTripleClickCopyFocusScenario(HWND owner, std::wstring* outError) {
     if (!owner || g_pdf.kind != DocKind::Pdf || !g_hPdfView || g_pdf.pages.empty()) {
         if (outError) *outError = L"PDF textbox triple-click automation requires an open PDF document.";
@@ -2321,6 +2796,8 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
     }
     const std::wstring previousNotePath = g_currentNotePath;
     const int previousNoteIndex = CurrentNoteIndex();
+    const bool previousRenderEnabled = g_noteRenderEnabled;
+    const bool previousRawOnly = g_noteRawOnly;
     const std::filesystem::path mathNotePath =
         std::filesystem::path(g_currentSessionPath) / L"note_math.md";
     std::error_code mathNoteEc;
@@ -2331,10 +2808,16 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
     }
 
     auto restorePrevious = [&]() {
+        g_noteRenderEnabled = previousRenderEnabled;
+        g_noteRawOnly = previousRawOnly;
         std::wstring ignored;
         RestoreUiAutomationNoteSelection(owner, previousNotePath, previousNoteIndex, &ignored);
+        RefreshBottomPaneView();
+        RefreshMainWindowUiState(owner);
     };
 
+    g_noteRenderEnabled = true;
+    g_noteRawOnly = false;
     LoadNoteFile(owner, mathNotePath.wstring());
     SyncBottomPaneAfterNoteLoad(owner);
     SyncLeftPaneSelection();
@@ -2428,6 +2911,50 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         return false;
     }
 
+    // While the normal debounce is pending, a long raw helper line must widen
+    // the render canvas immediately. This catches a regression where the
+    // expansion helper exists but is not connected to EN_CHANGE.
+    const std::wstring pendingWidthProbe(192, L'W');
+    const int pendingWidthAnchor = FindNoteTextSnippetStart(tailAnchor);
+    if (pendingWidthAnchor < 0) {
+        restorePrevious();
+        if (outError) *outError = L"Could not find the pending-width render anchor.";
+        return false;
+    }
+    const int pendingWidthInsertPos = pendingWidthAnchor + static_cast<int>(tailAnchor.size());
+    SetFocus(g_hNoteEdit);
+    SendMessageW(g_hNoteEdit, EM_SETSEL,
+                 static_cast<WPARAM>(pendingWidthInsertPos),
+                 static_cast<LPARAM>(pendingWidthInsertPos));
+    if (!SendUiAutomationNoteTextInput(pendingWidthProbe)) {
+        restorePrevious();
+        if (outError) *outError = L"Could not enter the pending-width render probe.";
+        return false;
+    }
+    SCROLLINFO pendingWidthScroll{};
+    pendingWidthScroll.cbSize = sizeof(pendingWidthScroll);
+    pendingWidthScroll.fMask = SIF_RANGE | SIF_PAGE;
+    const bool pendingWidthExpanded =
+        GetScrollInfo(g_hNoteEdit, SB_HORZ, &pendingWidthScroll) != 0 &&
+        pendingWidthScroll.nMax >= static_cast<int>(pendingWidthScroll.nPage);
+    if (!SelectNoteTextSnippet(pendingWidthProbe)) {
+        restorePrevious();
+        if (outError) *outError = L"Could not select the pending-width render probe for cleanup.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    RecomputeMathFromNote();
+    if (!SaveNoteIfDirty(owner)) {
+        restorePrevious();
+        if (outError) *outError = L"Could not reconcile the note after pending-width render testing.";
+        return false;
+    }
+    if (!pendingWidthExpanded) {
+        restorePrevious();
+        if (outError) *outError = L"Pending raw helper text did not expand the render horizontal extent.";
+        return false;
+    }
+
     if (!SelectNoteTextSnippet(L"$x$")) {
         restorePrevious();
         if (outError) *outError = L"Could not select inline dollar math in the fixture note.";
@@ -2466,7 +2993,13 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         return false;
     }
 
-    return RestoreUiAutomationNoteSelection(owner, previousNotePath, previousNoteIndex, outError);
+    g_noteRenderEnabled = previousRenderEnabled;
+    g_noteRawOnly = previousRawOnly;
+    const bool restored =
+        RestoreUiAutomationNoteSelection(owner, previousNotePath, previousNoteIndex, outError);
+    RefreshBottomPaneView();
+    RefreshMainWindowUiState(owner);
+    return restored;
 }
 
 static bool TestSelectionAndColorIsolationInvariants(HWND owner, std::wstring* outError) {
@@ -2581,10 +3114,16 @@ struct OwnedDialogCloseAutomationState {
     const wchar_t* expectedClass = nullptr;
     bool dialogWasOpened = false;
     bool closeWasPosted = false;
+    int helpSearchStep = 0;
+    bool helpSearchValidated = false;
+    std::wstring helpSearchFailure;
 };
 
 static MainWindowPresenceAutomationState g_mainWindowPresenceAutomation;
 static OwnedDialogCloseAutomationState g_ownedDialogCloseAutomation;
+static constexpr int kUiAutomationHelpSearchControlId = 1006;
+static constexpr int kUiAutomationHelpFindControlId = 1007;
+static constexpr int kUiAutomationHelpSubtitleControlId = 1002;
 
 static void CALLBACK RecordMainWindowPresenceEvent(HWINEVENTHOOK, DWORD event, HWND hwnd,
                                                     LONG objectId, LONG childId, DWORD, DWORD) {
@@ -2665,6 +3204,50 @@ static void CALLBACK CloseOwnedDialogForPresenceAutomation(HWND, UINT, UINT_PTR 
         return;
     }
     g_ownedDialogCloseAutomation.dialogWasOpened = true;
+    if (wcscmp(className, L"HelpDialogClass") == 0) {
+        HWND search = GetDlgItem(dialog, kUiAutomationHelpSearchControlId);
+        HWND find = GetDlgItem(dialog, kUiAutomationHelpFindControlId);
+        HWND subtitle = GetDlgItem(dialog, kUiAutomationHelpSubtitleControlId);
+        if (!search || !find || !subtitle) {
+            g_ownedDialogCloseAutomation.helpSearchFailure = L"Help search controls were not created.";
+        } else if (g_ownedDialogCloseAutomation.helpSearchStep == 0) {
+            SetWindowTextW(search, L"stage");
+            g_ownedDialogCloseAutomation.helpSearchStep = 1;
+            return;
+        } else if (g_ownedDialogCloseAutomation.helpSearchStep == 1) {
+            SendMessageW(find, BM_CLICK, 0, 0);
+            g_ownedDialogCloseAutomation.helpSearchStep = 2;
+            return;
+        } else if (g_ownedDialogCloseAutomation.helpSearchStep == 2) {
+            const int findLength = GetWindowTextLengthW(find);
+            const int subtitleLength = GetWindowTextLengthW(subtitle);
+            std::wstring findText(static_cast<size_t>(std::max(0, findLength)) + 1, L'\0');
+            std::wstring subtitleText(static_cast<size_t>(std::max(0, subtitleLength)) + 1, L'\0');
+            GetWindowTextW(find, findText.data(), findLength + 1);
+            GetWindowTextW(subtitle, subtitleText.data(), subtitleLength + 1);
+            findText.resize(static_cast<size_t>(std::max(0, findLength)));
+            subtitleText.resize(static_cast<size_t>(std::max(0, subtitleLength)));
+            if (findText != localization::Text(L"help.next") || subtitleText.find(L"1/") == std::wstring::npos) {
+                g_ownedDialogCloseAutomation.helpSearchFailure =
+                    L"Help search did not show the first match count and Next button.";
+            } else {
+                SetWindowTextW(search, L"stage ");
+                g_ownedDialogCloseAutomation.helpSearchStep = 3;
+                return;
+            }
+        } else if (g_ownedDialogCloseAutomation.helpSearchStep == 3) {
+            const int findLength = GetWindowTextLengthW(find);
+            std::wstring findText(static_cast<size_t>(std::max(0, findLength)) + 1, L'\0');
+            GetWindowTextW(find, findText.data(), findLength + 1);
+            findText.resize(static_cast<size_t>(std::max(0, findLength)));
+            if (findText != localization::Text(L"help.search")) {
+                g_ownedDialogCloseAutomation.helpSearchFailure =
+                    L"Help search button did not return to Search after the query changed.";
+            } else {
+                g_ownedDialogCloseAutomation.helpSearchValidated = true;
+            }
+        }
+    }
     g_ownedDialogCloseAutomation.closeWasPosted = PostMessageW(dialog, WM_CLOSE, 0, 0) != FALSE;
     if (g_ownedDialogCloseAutomation.closeWasPosted) {
         KillTimer(nullptr, timerId);
@@ -2701,6 +3284,16 @@ static bool EndOwnedDialogPresenceAutomation(HWND owner, const wchar_t* scenario
     if (!dialogResult.dialogWasOpened || !dialogResult.closeWasPosted) {
         if (outError) *outError = std::wstring(L"Dialog visibility automation did not open and close ") + scenario + L".";
         return false;
+    }
+    if (dialogResult.expectedClass && wcscmp(dialogResult.expectedClass, L"HelpDialogClass") == 0) {
+        if (!dialogResult.helpSearchFailure.empty()) {
+            if (outError) *outError = dialogResult.helpSearchFailure;
+            return false;
+        }
+        if (!dialogResult.helpSearchValidated) {
+            if (outError) *outError = L"Help search automation did not complete.";
+            return false;
+        }
     }
     if (monitorResult.firstLossEvent != MainWindowLossEvent::None) {
         AppendUiAutomationTrace(std::wstring(L"automation:main_window_lost:") +
@@ -2762,9 +3355,8 @@ static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
         g_activeColor = originalActive;
         if (originalPalette.size() == g_palette.size()) {
             g_palette = originalPalette;
-            // Restore dynamic globals from original palette data.
-            g_paletteCustomColor       = originalColors[static_cast<size_t>(kLastOkColorSlotIndex)];
-            g_paletteDialogCustomColor = originalColors[static_cast<size_t>(kPickerCustomColorStartSlotIndex)];
+            // Restore the application-owned custom palette color.
+            g_paletteCustomColor = originalColors[static_cast<size_t>(kLastOkColorSlotIndex)];
         }
         PersistConfig();
         UpdateToolbarUI(owner);
@@ -2921,6 +3513,14 @@ static bool RunUiAutomationSessionSortNumberingScenario(std::wstring* outError) 
     add(L"第2回");
     add(L"第1回");
 
+    if (ExtractNumericKey(L"第2回（3限）") != std::optional<int>{2} ||
+        ExtractNumericKey(L"2026年度 第2回") != std::optional<int>{2} ||
+        ExtractNumericKey(L"資料2_3") != std::optional<int>{2} ||
+        ExtractNumericKey(L"第１０回") != std::optional<int>{10}) {
+        if (outError) *outError = L"Session numeric key extraction failed.";
+        return false;
+    }
+
     auto asc = sessions;
     SortSessionsForDisplay(asc, SessionSortMode::NumericAsc);
     if (asc.size() != 4 || asc[0].displayName != L"第1回" || asc[1].displayName != L"第2回" ||
@@ -2964,6 +3564,7 @@ static bool RunUiAutomationWorkspaceConfigRoundTripScenario(std::wstring* outErr
     g_config.pdfBitmapBudgetMiB = kPdfBitmapBudgetMiBMin;
     g_config.pointerOffsetX = 17;
     g_config.pointerOffsetY = -13;
+    g_config.sessionFileLayout = L"session_root";
     g_config.noteOverlayRefreshDelayMs = 600;
     g_config.noteFullReparseDelayMs = 1200;
     g_config.debugLogs.previewTrace = true;
@@ -2981,6 +3582,7 @@ static bool RunUiAutomationWorkspaceConfigRoundTripScenario(std::wstring* outErr
         loaded->pdfBitmapBudgetMiB == kPdfBitmapBudgetMiBMin &&
         loaded->pointerOffsetX == 17 &&
         loaded->pointerOffsetY == -13 &&
+        loaded->sessionFileLayout == L"session_root" &&
         loaded->noteOverlayRefreshDelayMs == 600 &&
         loaded->noteFullReparseDelayMs == 1200 &&
         loaded->debugLogs.previewTrace &&
@@ -3143,7 +3745,7 @@ static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outE
     ApplyConfigToUI(owner);
 
     std::wstring err;
-    if (!ExportAllUserSettingsToFile(bundle, &err)) {
+    if (!ExportSettingsPresetToFile(bundle, &err)) {
         restoreConfig();
         if (outError) *outError = L"Settings bundle export failed: " + err;
         return false;
@@ -3167,7 +3769,7 @@ static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outE
         return false;
     }
 
-    if (!ImportAllUserSettingsFromFile(bundle, &err)) {
+    if (!ImportSettingsPresetFromFile(bundle, &err)) {
         restoreConfig();
         if (outError) *outError = L"Settings bundle import failed: " + err;
         return false;
@@ -3219,7 +3821,7 @@ static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outE
     for (const auto& bad : badInputs) {
         std::map<std::wstring, std::optional<std::string>> beforeBad;
         CaptureUiAutomationSettingsBytes(&beforeBad);
-        if (ImportAllUserSettingsFromFile(bad, &err)) {
+        if (ImportSettingsPresetFromFile(bad, &err)) {
             restoreConfig();
             if (outError) *outError = L"Invalid settings bundle was accepted: " + bad.filename().wstring();
             return false;
@@ -3236,7 +3838,7 @@ static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outE
     SetFaultInjectionPointForAutomation(L"settings_import_after_first_aux_write");
     std::map<std::wstring, std::optional<std::string>> beforeFault;
     CaptureUiAutomationSettingsBytes(&beforeFault);
-    const bool faultAccepted = ImportAllUserSettingsFromFile(bundle, &err);
+    const bool faultAccepted = ImportSettingsPresetFromFile(bundle, &err);
     ClearFaultInjectionPointForAutomation();
     std::map<std::wstring, std::optional<std::string>> afterFault;
     CaptureUiAutomationSettingsBytes(&afterFault);
@@ -3297,6 +3899,47 @@ static bool RunUiAutomationWorkspaceConfigRecoveryScenario(std::wstring* outErro
     return false;
 }
 
+struct ToolbarChildFontAutomationState {
+    HFONT expected = nullptr;
+    int checkedCount = 0;
+    bool hasMismatch = false;
+    int mismatchedControlId = 0;
+};
+
+static BOOL CALLBACK VerifyToolbarChildUIFontForAutomation(HWND child, LPARAM lParam) {
+    auto* state = reinterpret_cast<ToolbarChildFontAutomationState*>(lParam);
+    if (!state || !child) return FALSE;
+    ++state->checkedCount;
+    const HFONT actual = reinterpret_cast<HFONT>(SendMessageW(child, WM_GETFONT, 0, 0));
+    if (actual == state->expected) return TRUE;
+    state->hasMismatch = true;
+    state->mismatchedControlId = static_cast<int>(GetWindowLongPtrW(child, GWLP_ID));
+    return FALSE;
+}
+
+static bool RunUiAutomationToolbarChildFontScenario(std::wstring* outError) {
+    if (!g_hPdfToolbar || !IsWindow(g_hPdfToolbar) || !g_hUIFont) {
+        if (outError) *outError = L"Toolbar font automation requires an initialized toolbar and UI font.";
+        return false;
+    }
+    ToolbarChildFontAutomationState state{};
+    state.expected = g_hUIFont;
+    EnumChildWindows(g_hPdfToolbar, VerifyToolbarChildUIFontForAutomation,
+                     reinterpret_cast<LPARAM>(&state));
+    if (state.checkedCount <= 0) {
+        if (outError) *outError = L"Toolbar font automation found no toolbar controls.";
+        return false;
+    }
+    if (state.hasMismatch) {
+        if (outError) {
+            *outError = L"Toolbar control is missing the common UI font (control ID " +
+                        std::to_wstring(state.mismatchedControlId) + L").";
+        }
+        return false;
+    }
+    return true;
+}
+
 static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
     ClearFaultInjectionPointForAutomation();
     AppendUiAutomationTrace(L"automation:start");
@@ -3345,6 +3988,11 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
         if (outError) *outError = L"Only one focused UI automation mode may be selected.";
         return false;
     }
+    if (!RunUiAutomationToolbarChildFontScenario(outError)) {
+        AppendUiAutomationTrace(L"automation:toolbar_fonts_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:toolbar_fonts_ok");
     if (configOnly) {
         if (!RunUiAutomationWorkspaceConfigRoundTripScenario(outError)) {
             AppendUiAutomationTrace(L"automation:workspace_config_roundtrip_failed");
@@ -3528,6 +4176,11 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
         return false;
     }
     AppendUiAutomationTrace(L"automation:pdf_active_edit_save_ok");
+    if (!RunUiAutomationPdfTextboxUndoRedoScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:pdf_textbox_undo_redo_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:pdf_textbox_undo_redo_ok");
     if (!RunUiAutomationPdfTextboxEscCommitScenario(owner, outError)) {
         AppendUiAutomationTrace(L"automation:pdf_textbox_esc_commit_failed");
         return false;
@@ -3543,6 +4196,11 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
         return false;
     }
     AppendUiAutomationTrace(L"automation:annot_list_latest_visible_ok");
+    if (!RunUiAutomationFreehandAndAnnotationHistoryScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:freehand_annotation_history_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:freehand_annotation_history_ok");
     if (!RunUiAutomationPendingLinkCancelStageScenario(owner, outError)) {
         AppendUiAutomationTrace(L"automation:pending_link_cancel_stage_failed");
         return false;

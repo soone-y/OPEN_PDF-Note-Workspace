@@ -146,7 +146,7 @@ static void SetSettingsSectionFont(HWND hWnd) {
 // UnifiedSettingsProc-local WM_APP message. Keep value in the central registry
 // comment in core/app_core.h because WM_APP values are otherwise hard to audit.
 constexpr UINT kUnifiedSettingsNavigateMsg = WM_APP + 140;
-static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory);
+static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initialAnnotSection = -1);
 static void FillColorCombo(HWND cb);
 static void SelectComboByItemData(HWND cb, DWORD_PTR want);
 static void SelectComboClosestPt10(HWND cb, int wantPt10);
@@ -203,7 +203,7 @@ static int LayoutHeaderSectionButtons(HWND hWnd, const std::array<HWND, N>& butt
     return top + rowH;
 }
 
-constexpr int kSettingsCategoryButtonCount = 5;
+constexpr int kSettingsCategoryButtonCount = 6;
 enum SettingsCategoryNavTarget : int {
     kSettingsNavNone = -1,
     kSettingsNavGeneral = 0,
@@ -211,6 +211,7 @@ enum SettingsCategoryNavTarget : int {
     kSettingsNavMarkup = 2,
     kSettingsNavAnnot = 3,
     kSettingsNavPalette = 4,
+    kSettingsNavAssets = 5,
 };
 
 static std::wstring SettingsCategoryDialogTitle(int target) {
@@ -224,6 +225,8 @@ static std::wstring SettingsCategoryDialogTitle(int target) {
         return ui.menuAnnotSettings;
     case kSettingsNavPalette:
         return ui.menuPaletteSettings;
+    case kSettingsNavAssets:
+        return localization::Text(L"settings.assets.tab");
     case kSettingsNavGeneral:
     default:
         return ui.menuGeneralSettings;
@@ -240,6 +243,8 @@ static std::wstring SettingsCategoryHeaderLabel(int target) {
         return localization::Text(L"settings.common.9aee0c26e8be");
     case kSettingsNavPalette:
         return localization::Text(L"settings.common.0daa4cb8f68a");
+    case kSettingsNavAssets:
+        return localization::Text(L"settings.assets.tab");
     case kSettingsNavGeneral:
     default:
         return localization::Text(L"settings.common.c34e9119321f");
@@ -253,6 +258,7 @@ static std::array<std::wstring, kSettingsCategoryButtonCount> SettingsCategoryBu
         SettingsCategoryHeaderLabel(kSettingsNavMarkup),
         SettingsCategoryHeaderLabel(kSettingsNavAnnot),
         SettingsCategoryHeaderLabel(kSettingsNavPalette),
+        SettingsCategoryHeaderLabel(kSettingsNavAssets),
     };
 }
 
@@ -262,6 +268,16 @@ static void UpdateSettingsCategoryButtons(const std::array<HWND, kSettingsCatego
         if (!buttons[static_cast<size_t>(i)]) continue;
         EnableWindow(buttons[static_cast<size_t>(i)], i != activeIndex);
     }
+}
+
+static int SettingsSectionForScrollPosition(const int* sectionTops, int sectionCount, int scrollPos) {
+    if (!sectionTops || sectionCount <= 0) return 0;
+    int active = 0;
+    for (int i = 1; i < sectionCount; ++i) {
+        if (scrollPos < sectionTops[i]) break;
+        active = i;
+    }
+    return active;
 }
 
 static void UpdateDialogScroll(HWND hWnd, int contentH, int clientH, int* scrollPos, int* scrollMax) {

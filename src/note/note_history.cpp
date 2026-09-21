@@ -24,7 +24,53 @@ bool ContainsLineBreak(const TextEdit& edit) {
 constexpr uint64_t kMergeWindowMs = 1000;
 constexpr size_t kMaxHistoryEntries = 4096;
 
+struct TextState {
+    core_hash::Sha256Digest fingerprint{};
+    size_t length = 0;
+};
+
+void AppendCanonicalUtf16(core_hash::Sha256* hasher,
+                          size_t* length,
+                          std::wstring_view text) {
+    if (!hasher || !length) return;
+    for (wchar_t codeUnit : text) {
+        const std::uint16_t value = static_cast<std::uint16_t>(codeUnit);
+        const std::uint8_t bytes[] = {
+            static_cast<std::uint8_t>(value & 0xffu),
+            static_cast<std::uint8_t>((value >> 8) & 0xffu),
+        };
+        hasher->Update(bytes, sizeof(bytes));
+        ++*length;
+    }
+}
+
+TextState DescribeText(std::wstring_view text) {
+    core_hash::Sha256 hasher;
+    TextState state;
+    AppendCanonicalUtf16(&hasher, &state.length, text);
+    state.fingerprint = hasher.Finalize();
+    return state;
+}
+
+TextState DescribeAppliedEdit(std::wstring_view before, const TextEdit& edit) {
+    core_hash::Sha256 hasher;
+    TextState state;
+    AppendCanonicalUtf16(&hasher, &state.length, before.substr(0, edit.start.value));
+    AppendCanonicalUtf16(&hasher, &state.length, edit.inserted_text);
+    AppendCanonicalUtf16(&hasher, &state.length,
+                         before.substr(edit.start.value + edit.deleted_len));
+    state.fingerprint = hasher.Finalize();
+    return state;
+}
+
 } // namespace
+
+bool NoteHistoryReplayMatchesCurrentText(const NoteHistoryReplay& replay,
+                                         std::wstring_view currentText) {
+    const TextState state = DescribeText(currentText);
+    return state.length == replay.expected_content_length &&
+           state.fingerprint == replay.expected_content_fingerprint;
+}
 
 void NoteHistory::Clear() {
     undo_.clear();
@@ -52,6 +98,12 @@ bool NoteHistory::Record(std::wstring_view textBefore,
     next.selectionAfter = selectionAfter;
     next.kind = kind;
     next.tick = tick;
+    const TextState beforeState = DescribeText(textBefore);
+    const TextState afterState = DescribeAppliedEdit(textBefore, forward);
+    next.before_content_fingerprint = beforeState.fingerprint;
+    next.before_content_length = beforeState.length;
+    next.after_content_fingerprint = afterState.fingerprint;
+    next.after_content_length = afterState.length;
     const std::wstring_view affected = forward.inserted_text.empty()
         ? textBefore.substr(forward.start.value, forward.deleted_len)
         : std::wstring_view(forward.inserted_text);
@@ -78,13 +130,17 @@ bool NoteHistory::Record(std::wstring_view textBefore,
 std::optional<NoteHistoryReplay> NoteHistory::PeekUndo() const {
     if (undo_.empty()) return std::nullopt;
     const Entry& entry = undo_.back();
-    return NoteHistoryReplay{entry.inverse, entry.selectionBefore};
+    return NoteHistoryReplay{entry.inverse, entry.forward.inserted_text,
+                             entry.after_content_fingerprint,
+                             entry.after_content_length};
 }
 
 std::optional<NoteHistoryReplay> NoteHistory::PeekRedo() const {
     if (redo_.empty()) return std::nullopt;
     const Entry& entry = redo_.back();
-    return NoteHistoryReplay{entry.forward, entry.selectionAfter};
+    return NoteHistoryReplay{entry.forward, entry.inverse.inserted_text,
+                             entry.before_content_fingerprint,
+                             entry.before_content_length};
 }
 
 bool NoteHistory::CommitUndo() {
@@ -148,6 +204,8 @@ void NoteHistory::Merge(Entry* previous, Entry next) {
     }
     previous->selectionAfter = next.selectionAfter;
     previous->tick = next.tick;
+    previous->after_content_fingerprint = next.after_content_fingerprint;
+    previous->after_content_length = next.after_content_length;
 }
 
 } // namespace note

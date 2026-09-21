@@ -346,12 +346,14 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     std::wstring prevLectureSort = g_config.lectureSortMode;
     std::wstring prevSessionSort = g_config.sessionSortMode;
     std::wstring prevSessionNumbering = g_config.sessionNumberingMode;
+    std::wstring prevSessionFileLayout = g_config.sessionFileLayout;
     bool prevShowMathList = g_showMathList;
     std::wstring prevQuickAnnotPopupPlacement = g_config.quickAnnotPopupPlacement;
     std::wstring prevSelectionStyle = g_config.selectionStyle;
     int prevPointerOffsetX = std::clamp(g_config.pointerOffsetX, -20, 20);
     int prevPointerOffsetY = std::clamp(g_config.pointerOffsetY, -20, 20);
     std::wstring prevPdfFlowMode = NormalizePdfFlowModeValue(g_config.pdfFlowMode);
+    bool prevPdfZoomOverlay = g_config.showPdfZoomOverlay;
     std::wstring prevThemeName = g_themeName;
     std::wstring prevToneVariant = NormalizeToneVariantValue(g_config.toneVariant);
     const int prevNoteRenderMode = CurrentNoteRenderModeValue(g_noteRenderEnabled, g_noteRenderMath);
@@ -403,18 +405,25 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         if (paneSel < 0 || paneSel >= static_cast<int>(std::size(kBottomPaneOptions))) paneSel = 0;
         BottomPanePin wantPin = kBottomPaneOptions[paneSel].pin;
         BottomNoteMode wantNoteMode = kBottomPaneOptions[paneSel].noteMode;
-        pinChanged = (g_bottomPanePin != wantPin);
-        noteModeChanged = (g_bottomNoteMode != wantNoteMode);
-        g_bottomPanePin = wantPin;
-        g_bottomNoteMode = wantNoteMode;
-        g_config.bottomPanePin = BottomPanePinToString(wantPin);
-        g_config.bottomNoteMode = BottomNoteModeToString(wantNoteMode);
-        if (pinChanged) {
-            UpdateBottomPaneMenuChecks();
-            ApplyBottomPaneEdgeStyle();
-        }
-        if (noteModeChanged && g_hBottomNote) {
-            InvalidateRect(g_hBottomNote, nullptr, TRUE);
+        const BottomPanePin configuredPin = ParseBottomPanePin(g_config.bottomPanePin);
+        const BottomNoteMode configuredNoteMode = ParseBottomNoteMode(g_config.bottomNoteMode);
+        if (configuredPin != wantPin || configuredNoteMode != wantNoteMode) {
+            // An explicit General-settings change updates the persisted default
+            // and makes that choice active now.  Applying unrelated settings
+            // leaves a temporary View-menu selection untouched.
+            pinChanged = (g_bottomPanePin != wantPin);
+            noteModeChanged = (g_bottomNoteMode != wantNoteMode);
+            g_config.bottomPanePin = BottomPanePinToString(wantPin);
+            g_config.bottomNoteMode = BottomNoteModeToString(wantNoteMode);
+            g_bottomPanePin = wantPin;
+            g_bottomNoteMode = wantNoteMode;
+            if (pinChanged || noteModeChanged) {
+                UpdateBottomPaneMenuChecks();
+                ApplyBottomPaneEdgeStyle();
+            }
+            if ((pinChanged || noteModeChanged) && g_hBottomNote) {
+                InvalidateRect(g_hBottomNote, nullptr, TRUE);
+            }
         }
     }
 
@@ -450,6 +459,11 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         if (numberingSel < 0 || numberingSel >= static_cast<int>(std::size(kSessionNumberingOptions))) numberingSel = 0;
         g_config.sessionNumberingMode = kSessionNumberingOptions[numberingSel].value;
     }
+    if (ctx->cbSessionFileLayout) {
+        int layoutSel = static_cast<int>(SendMessageW(ctx->cbSessionFileLayout, CB_GETCURSEL, 0, 0));
+        if (layoutSel < 0 || layoutSel >= static_cast<int>(std::size(kSessionFileLayoutOptions))) layoutSel = 0;
+        g_config.sessionFileLayout = kSessionFileLayoutOptions[layoutSel].value;
+    }
     if (ctx->cbSessionAutoOpenMode) {
         int modeSel = static_cast<int>(SendMessageW(ctx->cbSessionAutoOpenMode, CB_GETCURSEL, 0, 0));
         if (modeSel < 0 || modeSel >= static_cast<int>(std::size(kSessionAutoOpenOptions))) modeSel = 0;
@@ -462,7 +476,9 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     bool lectureSortChanged = (g_config.lectureSortMode != prevLectureSort);
     bool sessionSortChanged = (g_config.sessionSortMode != prevSessionSort);
     bool sessionNumberingChanged = (g_config.sessionNumberingMode != prevSessionNumbering);
+    bool sessionFileLayoutChanged = (g_config.sessionFileLayout != prevSessionFileLayout);
     (void)sessionNumberingChanged;
+    (void)sessionFileLayoutChanged;
     std::wstring selectedPdfFlowMode = prevPdfFlowMode;
     if (ctx->cbPdfFlowMode) {
         int sel = static_cast<int>(SendMessageW(ctx->cbPdfFlowMode, CB_GETCURSEL, 0, 0));
@@ -511,6 +527,11 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
             UpdatePdfSinglePageModeMenuCheck();
         }
     }
+    if (ctx->chkPdfZoomOverlay) {
+        g_config.showPdfZoomOverlay =
+            (SendMessageW(ctx->chkPdfZoomOverlay, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    const bool pdfZoomOverlayChanged = (g_config.showPdfZoomOverlay != prevPdfZoomOverlay);
     if (ctx->chkWheelInvertVertical) {
         g_config.mouseWheelInvertVertical =
             (SendMessageW(ctx->chkWheelInvertVertical, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -776,10 +797,16 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
                      quickAnnotPopupPlacementChanged || showMathChanged;
     effects.updateMathListVisibility = showMathChanged;
     effects.refreshBottomPane = pinChanged || noteModeChanged;
+    if (pdfZoomOverlayChanged) {
+        effects.refreshBottomPane = true;
+    }
     effects.reloadLectureList = lectureSortChanged;
     effects.reloadSessionList = sessionSortChanged;
     effects.applyThemeUi = themeUiChanged;
     effects.invalidatePdfView = selectionStyleChanged || pdfFlowModeChanged || pointerOffsetChanged;
+    if (pdfZoomOverlayChanged) {
+        effects.invalidatePdfView = true;
+    }
     effects.invalidateNoteEdit = true;
     CommitSettingsApplyEffects(ctx->owner, effects);
 }

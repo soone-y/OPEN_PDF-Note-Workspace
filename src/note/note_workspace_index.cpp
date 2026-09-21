@@ -101,7 +101,7 @@ WorkspaceNoteIndexSnapshot BuildWorkspaceNoteIndexFromKernel(
         snapshotIdentity.note_id != kernel.text_core().note_id() ||
         (snapshotIdentity.content_revision != 0 &&
          snapshotIdentity.content_revision != kernel.text_core().content_revision()) ||
-        (kernel.content_kind() == NoteContentKind::Markdown &&
+        (kernel.content_kind() != NoteContentKind::PlainText &&
          (!kernel.CanReadSyntax() || !kernel.CanReadSemantic()))) {
         return index;
     }

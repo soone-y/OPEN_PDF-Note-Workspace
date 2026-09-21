@@ -3,8 +3,10 @@
 // Keep the include order stable because later fragments depend on earlier shared helpers/state.
 
 #include "core/ui_prompts.h"
+#include "bridge/view_bridge.h"
 #include "ui/noop_nav_guard.h"
 #include "workspace/workspace_write_lock.h"
+#include "workspace/file_ops.h"
 
 enum class PaneNavContext {
     LeftPaneList,

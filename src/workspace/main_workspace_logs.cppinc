@@ -32,6 +32,13 @@ struct WorkspaceLogFileInfo {
     WorkspaceLogFileIdentity identity;
 };
 
+static std::wstring WorkspaceLogLowerAscii(std::wstring value) {
+    for (wchar_t& ch : value) {
+        if (ch >= L'A' && ch <= L'Z') ch = static_cast<wchar_t>(ch - L'A' + L'a');
+    }
+    return value;
+}
+
 static const std::array<AppLogKind, 4>& WorkspaceManagedLogKinds() {
     static const std::array<AppLogKind, 4> kKinds = {
         AppLogKind::PreviewTrace,
@@ -230,13 +237,84 @@ static std::vector<WorkspaceLogFileInfo> EnumerateWorkspaceLogFiles(std::wstring
         out.push_back(std::move(info));
     }
     std::sort(out.begin(), out.end(), [](const WorkspaceLogFileInfo& a, const WorkspaceLogFileInfo& b) {
-        return ToLowerAscii(a.displayName) < ToLowerAscii(b.displayName);
+        return WorkspaceLogLowerAscii(a.displayName) < WorkspaceLogLowerAscii(b.displayName);
     });
     return out;
 }
 
+static bool WriteWorkspaceLogZipArchive(const std::vector<WorkspaceLogFileInfo>& logFiles,
+                                        const std::filesystem::path& dest,
+                                        std::wstring* outErr);
+static bool DeleteWorkspaceLogFile(const WorkspaceLogFileInfo& logFile, std::wstring* outErr);
+
 bool HasWorkspaceLogFiles() {
     return !EnumerateWorkspaceLogFiles(nullptr).empty();
+}
+
+WorkspaceLogArchiveResult ArchiveWorkspaceLogs() {
+    WorkspaceLogArchiveResult result;
+    const std::vector<WorkspaceLogFileInfo> logFiles = EnumerateWorkspaceLogFiles(&result.error);
+    if (!result.error.empty()) {
+        result.inspectionFailed = true;
+        return result;
+    }
+    if (logFiles.empty()) {
+        result.ok = true;
+        result.empty = true;
+        return result;
+    }
+    const std::filesystem::path logDir = WorkspaceLogDirectory();
+    if (logDir.empty()) {
+        result.error = localization::Text(L"workspace.logs.folder_missing");
+        return result;
+    }
+    const std::filesystem::path archivePath =
+        atomic_write::MakeUniqueDestInDir(logDir, WorkspaceLogArchiveBaseName());
+    if (!WriteWorkspaceLogZipArchive(logFiles, archivePath, &result.error)) return result;
+    result.ok = true;
+    result.archivedCount = logFiles.size();
+    result.archiveFileName = archivePath.filename().wstring();
+    return result;
+}
+
+WorkspaceLogDeleteResult DeleteWorkspaceLogs() {
+    WorkspaceLogDeleteResult result;
+    const std::vector<WorkspaceLogFileInfo> logFiles = EnumerateWorkspaceLogFiles(&result.error);
+    if (!result.error.empty()) {
+        result.inspectionFailed = true;
+        return result;
+    }
+    if (logFiles.empty()) {
+        result.ok = true;
+        result.empty = true;
+        return result;
+    }
+    result.failures.reserve(logFiles.size());
+    for (const auto& logFile : logFiles) {
+        std::wstring error;
+        if (DeleteWorkspaceLogFile(logFile, &error)) {
+            ++result.deletedCount;
+            continue;
+        }
+        result.failures.push_back(logFile.displayName + L": " + std::move(error));
+    }
+    result.ok = result.failures.empty();
+    return result;
+}
+
+WorkspaceLogDeletePreview PreviewWorkspaceLogDeletion() {
+    WorkspaceLogDeletePreview result;
+    const std::vector<WorkspaceLogFileInfo> logFiles = EnumerateWorkspaceLogFiles(&result.error);
+    if (!result.error.empty()) {
+        result.inspectionFailed = true;
+        return result;
+    }
+    result.ok = true;
+    result.empty = logFiles.empty();
+    result.count = logFiles.size();
+    result.directory = WorkspaceLogDirectory().wstring();
+    result.displayList = BuildWorkspaceLogDisplayList(logFiles);
+    return result;
 }
 
 static void DosDateTimeFromSystemTime(const SYSTEMTIME& st, WORD* outDate, WORD* outTime) {

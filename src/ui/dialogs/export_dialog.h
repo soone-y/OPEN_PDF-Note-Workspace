@@ -24,6 +24,9 @@ struct ExportDialogResult {
     file_output::PdfPngStyle pngStyle = file_output::PdfPngStyle::PdfLike;
     file_output::TextExportOptions textOptions{};
     file_output::NoteMarkupExportOptions noteMarkupOptions{};
+    // The unified export dialog validates this user-selected destination before
+    // any output begins.  An empty value is retained only for legacy callers.
+    std::wstring outputPath;
 };
 
 bool ShowUnifiedExportDialog(HWND owner, ExportDialogKind preset, std::vector<ExportDialogResult>& out);

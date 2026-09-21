@@ -17,7 +17,7 @@ FACT: ワークスペース内で独立ノートを編集可能
 SUPPORTED_EXT:
   - .clro (標準ノート: UTF-8 Markdown)
   - .md / .markdown (互換Markdown)
-  - .tex (TeX数式ノート)
+  - .tex (TeX原文)
   - .txt / .csv (書式なしテキスト)
 EVIDENCE:
   - docs/ja/File_Formats.md

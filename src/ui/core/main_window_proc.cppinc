@@ -672,11 +672,22 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (IsNoteChangeSuppressed()) {
                 // EN_CHANGE does not prove user intent. Only an input message or an explicit
                 // edit command may release the post-load transaction latch.
+                // RichEdit can emit a delayed EN_CHANGE after EM_SETMODIFY(FALSE)
+                // without a text mutation. Preserve a binding already
+                // established by the load boundary in that case.
+                if (textModified) {
+                    NoteEditorTextMutationObserved(g_hNoteEdit);
+                }
                 if (textModified && !IsNoteImeComposing()) {
                     PostMessageW(hWnd, kMsgNoteOverlayUpdate, 0, static_cast<LPARAM>(CurrentEditRevision()));
                 }
                 return 0;
             }
+            // Every unsuppressed control-side text notification first
+            // invalidates the zero-copy TextCore binding.
+            // RecordCurrentNoteTextEditForUndo republishes it only after the
+            // canonical document accepts the observed edit.
+            NoteEditorTextMutationObserved(g_hNoteEdit);
             if (g_currentNotePath.empty() && !g_currentSessionPath.empty() &&
                 !file_output::EnsureCurrentNotePathForStage(hWnd)) {
                 preview_trace::Append(L"NoteChange", L"note_deferred_path_failed_on_change");
@@ -692,6 +703,12 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SetNoteTyping(true);
             const bool commitDerivedFrameBeforePaint =
                 RequiresImmediateNoteDerivedFrameCommit() && !IsNoteImeComposing();
+            if (!commitDerivedFrameBeforePaint && !IsNoteImeComposing()) {
+                // Keep a growing raw helper line reachable while the debounced
+                // render refresh is pending.  This reads the synchronized
+                // TextCore's current line only; it never scans the note here.
+                ExpandNoteRenderCanvasForPendingEdit(g_hNoteEdit);
+            }
             if (commitDerivedFrameBeforePaint) {
                 ScheduleNoteOverlayRefresh(hWnd, true, CurrentEditRevision());
             }
@@ -704,6 +721,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             file_output::NotifyNoteStageEdit(hWnd);
             return 0;
         }
+    if (from == g_hAnnotSummary && code == STN_CLICKED) {
+        PostMessageW(hWnd, WM_COMMAND, MAKEWPARAM(ID_OP_STAGE_MANAGE, 0), 0);
+        return 0;
+    }
     if (from == g_hAnnotList && code == LBN_SELCHANGE) {
         int sel = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETCURSEL, 0, 0));
         SyncAnnotPanelSelectionFromList();
@@ -952,6 +973,13 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     case WM_CLOSE: {
+        // A normal close requests cancellation first.  Keep the window alive
+        // until every worker has posted its completion, so no detached worker
+        // can outlive the UI that owns its result and private temp directory.
+        if (HasActiveOfficeConversionJobs() && !s_exitInProgress) {
+            RequestOfficeConversionCancel(true);
+            return 0;
+        }
         const auto closeAction = main_close_policy::ResolveCloseRequestAction({
             s_exitInProgress,
             IsSaveOperationInProgress(),
@@ -990,15 +1018,40 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_QUERYENDSESSION:
+        // Windows requires an immediate answer here. The non-interactive,
+        // stage-only preservation work belongs to WM_ENDSESSION.
+        s_systemEndSessionObserved = true;
         return TRUE;
+    case kMsgOfficeConversionWorkerComplete:
+        HandleOfficeConversionWorkerCompletion(hWnd, lParam);
+        return 0;
     case WM_ENDSESSION:
         if (wParam == TRUE) {
             s_exitInProgress = true;
+            s_exitPending = false;
+            KillTimer(hWnd, kNoteStageSaveTimerId);
+            KillTimer(hWnd, kAutoSaveTimerId);
+            KillTimer(hWnd, kAutoSaveExecuteTimerId);
+            KillTimer(hWnd, kAutoIntegrateTimerId);
             KillTimer(hWnd, kExitRetryTimerId);
-            CommitActiveEditsForAppExit(hWnd);
-            (void)SaveNoteIfDirty(hWnd);
-            (void)SaveAnnotationsIfDirty(hWnd);
-            file_output::RunSaveAndIntegrateTransaction(hWnd);
+            // Do not leave soffice.bin or a delayed LibreOffice worker writing
+            // into our private conversion directory while Windows tears down
+            // the session.  The worker Job Objects are killed synchronously.
+            CancelOfficeConversionJobsForExit();
+            // Never show a prompt or overwrite originals while Windows is
+            // ending the session. A successful stage is recovered next start.
+            // SaveNoteIfDirty inside the preservation function commits an
+            // active note IME composition without presenting UI. PDF inline
+            // text needs its explicit boundary before its stage snapshot.
+            EndInlineTextEditing(g_hPdfView, true);
+            const bool staged =
+                file_output::PreserveUnsavedChangesForSystemEndSession(hWnd);
+            preview_trace::Append(
+                L"SystemEndSession",
+                L"query_seen=" + preview_trace::Bool(s_systemEndSessionObserved) +
+                    L" staged=" + preview_trace::Bool(staged));
+        } else {
+            s_systemEndSessionObserved = false;
         }
         return 0;
     case WM_DESTROY:

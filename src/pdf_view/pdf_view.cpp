@@ -1,7 +1,6 @@
 // file: pdf_view/pdf_view.cpp
 #include "pdf_view/pdf_view.h"
 #include "ui/core/main_window_api.h"
-#include "note_view/note_view.h"
 #include "bridge/view_bridge.h"
 #include "core/ui_notify.h"
 #include "core/localization.h"
@@ -19,6 +18,7 @@
 #include "core/preview_trace.h"
 #include "core/secure_memory.h"
 #include "workspace/workspace_write_lock.h"
+#include "workspace/file_ops.h"
 #include <algorithm>
 #include <array>
 #include <filesystem>
@@ -284,7 +284,8 @@ static bool ConfirmPdfYesNo(HWND owner, const std::wstring& title, const std::ws
 }
 
 bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
-                                       const std::wstring& blockedMessage) {
+                                       const std::wstring& blockedMessage,
+                                       const std::wstring& confirmation) {
     const std::wstring pdfPath = CurrentLogicalPdfPath();
     if (pdfPath.empty()) return false;
     const bool hadSelection = g_pdf.hasSelection;
@@ -315,7 +316,7 @@ bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
     SecureWideStringScope passwordScope(&password);
     const std::wstring promptMessage =
         localization::Text(L"pdf.view.ee6127d8900a");
-    if (!PromptPasswordText(PdfDialogOwner(owner), title, promptMessage, password)) {
+    if (!PromptPasswordText(PdfDialogOwner(owner), title, promptMessage, password, confirmation)) {
         return false;
     }
 
@@ -428,7 +429,7 @@ static bool HasEditSelection();
 static void SelectAllEditText();
 static bool DeleteEditSelection();
 static bool CopyEditSelectionToClipboard(HWND hwnd);
-static bool PasteClipboardToEdit(HWND hwnd);
+bool PasteClipboardIntoActivePdfTextBox(HWND hwnd);
 static bool InlineCaretClientPoint(POINT& out, int* outLineHeight = nullptr);
 static void RecalcEditingTextboxSize(bool includeComp);
 static void UpdateImeWindowPosition(HWND hwnd, bool updateCandidate);
@@ -1314,6 +1315,14 @@ static bool TryBuildFreehandCorrection(const Annotation& source, FreehandCorrect
     out->accepted = true;
     out->corrected = std::move(best);
     out->confidence = bestConfidence;
+    return true;
+}
+
+bool TryCorrectFreehandAnnotation(const Annotation& source, Annotation* corrected) {
+    if (!corrected) return false;
+    FreehandCorrectionResult result;
+    if (!TryBuildFreehandCorrection(source, &result) || !result.accepted) return false;
+    *corrected = std::move(result.corrected);
     return true;
 }
 
@@ -3254,22 +3263,25 @@ static bool CopyEditSelectionToClipboard(HWND hwnd) {
     if (end > g_pdf.editText.size()) end = g_pdf.editText.size();
     if (start >= end) return false;
     std::wstring text = g_pdf.editText.substr(start, end - start);
-    if (!OpenClipboard(hwnd)) return false;
-    EmptyClipboard();
     size_t bytes = (text.size() + 1) * sizeof(wchar_t);
     HGLOBAL hmem = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (!hmem) {
-        CloseClipboard();
-        return false;
-    }
+    if (!hmem) return false;
     void* dst = GlobalLock(hmem);
     if (!dst) {
         GlobalFree(hmem);
-        CloseClipboard();
         return false;
     }
     std::memcpy(dst, text.c_str(), bytes);
     GlobalUnlock(hmem);
+    if (!OpenClipboard(hwnd)) {
+        GlobalFree(hmem);
+        return false;
+    }
+    if (!EmptyClipboard()) {
+        CloseClipboard();
+        GlobalFree(hmem);
+        return false;
+    }
     if (!SetClipboardData(CF_UNICODETEXT, hmem)) {
         GlobalFree(hmem);
         CloseClipboard();
@@ -3280,7 +3292,8 @@ static bool CopyEditSelectionToClipboard(HWND hwnd) {
     return true;
 }
 
-static bool PasteClipboardToEdit(HWND hwnd) {
+bool PasteClipboardIntoActivePdfTextBox(HWND hwnd) {
+    if (!g_pdf.editingText) return false;
     if (!OpenClipboard(hwnd)) return false;
     HANDLE data = GetClipboardData(CF_UNICODETEXT);
     if (!data) {

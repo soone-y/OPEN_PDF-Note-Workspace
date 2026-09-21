@@ -302,13 +302,15 @@ std::vector<std::vector<size_t>> BuildChildBlockLists(const NoteDocument& doc) {
 
 std::vector<Segment> BuildVisibleSegments(const NoteTextModel& model,
                                           const NoteDocument& doc,
-                                          const BlockNode& block) {
+                                          const BlockNode& block,
+                                          size_t blockIndex) {
     (void)model;
     std::vector<Segment> base;
     for (size_t i = 0; i < block.inline_count; ++i) {
         const size_t inlineIndex = block.first_inline + i;
         if (inlineIndex >= doc.inlines.size()) break;
         const InlineNode& node = doc.inlines[inlineIndex];
+        if (node.parent_block != blockIndex) continue;
         if (node.kind == InlineKind::Text || node.kind == InlineKind::Code) {
             Segment seg;
             seg.kind = (node.kind == InlineKind::Code) ? Segment::Kind::Code : Segment::Kind::Text;
@@ -384,6 +386,20 @@ std::wstring RenderPlainSegment(const NoteTextModel& model,
     default:
         return SliceRenderedMarkdownText(model, segment.span);
     }
+}
+
+std::wstring RenderPlainBlockInlineContent(const NoteTextModel& model,
+                                           const NoteDocument& doc,
+                                           const BlockNode& block,
+                                           size_t blockIndex,
+                                           const TextExportConfig& config) {
+    std::wstring out;
+    const std::vector<Segment> segments = BuildVisibleSegments(model, doc, block, blockIndex);
+    for (const auto& segment : segments) {
+        out += RenderPlainSegment(model, segment, config);
+    }
+    if (!out.empty() && out.back() != L'\n') out.push_back(L'\n');
+    return out;
 }
 
 std::wstring BuildMarkdownHeadingPrefix(int level) {
@@ -466,23 +482,20 @@ std::wstring RenderPlainBlock(const NoteTextModel& model,
 
     switch (block.kind) {
     case BlockKind::HorizontalRule:
-        return L"-----\n";
+        return L"\n";
     case BlockKind::CodeBlock:
         out += SliceWithoutLegacyStyleTags(model, block.span);
         if (!out.empty() && out.back() != L'\n') out.push_back(L'\n');
         return out;
     case BlockKind::Paragraph:
-    case BlockKind::Heading: {
-        const std::vector<Segment> segments = BuildVisibleSegments(model, doc, block);
-        for (const auto& segment : segments) {
-            out += RenderPlainSegment(model, segment, config);
-        }
-        if (!out.empty() && out.back() != L'\n') out.push_back(L'\n');
-        return out;
-    }
+    case BlockKind::Heading:
+        return RenderPlainBlockInlineContent(model, doc, block, blockIndex, config);
     case BlockKind::List:
     case BlockKind::ListItem:
     case BlockKind::Quote: {
+        // MD4C may attach text directly to a list item or quote. Preserve it
+        // before walking child blocks so text export removes only syntax.
+        out += RenderPlainBlockInlineContent(model, doc, block, blockIndex, config);
         const size_t bucket = (blockIndex < children.size()) ? blockIndex : children.size() - 1;
         for (size_t child : children[bucket]) {
             out += RenderPlainBlock(model, doc, children, child, config);
@@ -495,6 +508,7 @@ std::wstring RenderPlainBlock(const NoteTextModel& model,
     case BlockKind::TableRow:
     case BlockKind::TableHeaderCell:
     case BlockKind::TableCell: {
+        out += RenderPlainBlockInlineContent(model, doc, block, blockIndex, config);
         const size_t bucket = (blockIndex < children.size()) ? blockIndex : children.size() - 1;
         for (size_t child : children[bucket]) {
             out += RenderPlainBlock(model, doc, children, child, config);
@@ -572,7 +586,7 @@ std::string RenderHtmlInlineRange(const NoteTextModel& model,
                                   const MarkupExportConfig& config) {
     if (blockIndex >= doc.blocks.size()) return {};
     const BlockNode& block = doc.blocks[blockIndex];
-    std::vector<Segment> segments = BuildVisibleSegments(model, doc, block);
+    std::vector<Segment> segments = BuildVisibleSegments(model, doc, block, blockIndex);
     std::vector<InlineNode> overlays;
     overlays.reserve(block.inline_count);
     for (size_t i = 0; i < block.inline_count; ++i) {
@@ -718,7 +732,7 @@ std::string RenderHtmlBlock(const NoteTextModel& model,
     case BlockKind::HorizontalRule:
         return "<hr>\n";
     case BlockKind::Paragraph: {
-        const std::vector<Segment> segments = BuildVisibleSegments(model, doc, block);
+        const std::vector<Segment> segments = BuildVisibleSegments(model, doc, block, blockIndex);
         if (segments.size() == 1 && segments[0].kind == Segment::Kind::Math &&
             segments[0].math && segments[0].math->kind == MathKind::Block) {
             if (config.mathMode == ExportMarkupMathMode::Placeholder) {

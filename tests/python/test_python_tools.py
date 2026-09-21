@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import csv
 import hashlib
 import json
 import re
@@ -119,6 +120,46 @@ def _validate_annotation_shortcuts(entries: list[dict]) -> None:
 
 
 class AnnotationToolPolicyTests(unittest.TestCase):
+    def test_annotation_panel_settings_open_the_active_tool_section(self) -> None:
+        unified = (REPO_ROOT / "src/settings/settings_unified.cppinc").read_text(encoding="utf-8")
+        annot = (REPO_ROOT / "src/settings/settings_annot.cppinc").read_text(encoding="utf-8")
+        dispatch = (REPO_ROOT / "src/app/command_dispatch.cppinc").read_text(encoding="utf-8")
+        self.assertIn("ShowAnnotationSettingsForTool", unified)
+        self.assertIn("AnnotSettingsSectionForTool", unified)
+        self.assertIn("case ToolMode::TextBox", unified)
+        self.assertIn("return kAnnotSectionStroke", unified)
+        self.assertIn("shell->annotCtx->initialSection = shell->initialAnnotSection", annot)
+        self.assertIn("JumpAnnotSettingsToSection(hWnd, ctx, initialSection)", annot)
+        self.assertIn("ShowAnnotationSettingsForTool(hWnd, g_toolMode)", dispatch)
+
+    def test_palette_uses_app_owned_editor_without_common_dialog_state(self) -> None:
+        palette = (REPO_ROOT / "src" / "settings" / "settings_palette.cppinc").read_text(encoding="utf-8")
+        dispatch = (REPO_ROOT / "src" / "app" / "command_dispatch.cppinc").read_text(encoding="utf-8")
+        core = (REPO_ROOT / "src" / "core" / "app_core.cpp").read_text(encoding="utf-8")
+        self.assertIn("ShowPaletteColorEditorDialog", palette)
+        self.assertNotIn("ChooseColorW", palette)
+        self.assertIn("IDC_PALETTE_EDITOR_HEX", palette)
+        self.assertIn("UpdatePaletteEditorFromHex", palette)
+        self.assertIn("IDC_PALETTE_EDITOR_CHOICE_BASE", palette)
+        self.assertIn("DrawPaletteSaturationValueCanvas", palette)
+        self.assertIn("DrawPaletteHueCanvas", palette)
+        self.assertIn("SamplePaletteColorAtCursor", palette)
+        self.assertIn("IDC_PALETTE_EDITOR_EYEDROPPER", palette)
+        self.assertIn("ShowPaletteColorEditorDialog(hWnd, picked, &picked)", dispatch)
+        self.assertNotIn("g_paletteDialogCustomColor", core)
+        self.assertIn("Legacy Windows picker slots remain in JSON only", core)
+
+    def test_annotation_automation_covers_freehand_correction_and_history(self) -> None:
+        automation = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(encoding="utf-8")
+        pdf_view = (REPO_ROOT / "src/pdf_view/pdf_view.cpp").read_text(encoding="utf-8")
+        self.assertIn("RunUiAutomationFreehandAndAnnotationHistoryScenario", automation)
+        self.assertIn("TryCorrectFreehandAnnotation(raw, &corrected)", automation)
+        self.assertIn("ExecutePdfUndoRedoFromFocus(owner, true)", automation)
+        self.assertIn("ExecutePdfUndoRedoFromFocus(owner, false)", automation)
+        self.assertIn("DuplicateAnnotationAtIndex(owner, 0)", automation)
+        self.assertIn("automation:freehand_annotation_history_ok", automation)
+        self.assertIn("bool TryCorrectFreehandAnnotation", pdf_view)
+
     def test_shortcut_schema_accepts_category_and_detail_targets(self) -> None:
         _validate_annotation_shortcuts([
             {"key": "Ctrl+Alt+5", "category": "marker"},
@@ -179,6 +220,32 @@ class AnnotationToolPolicyTests(unittest.TestCase):
         toolbar = (REPO_ROOT / "src/ui/menus/main_toolbar_ui.cppinc").read_text(encoding="utf-8")
         self.assertIn("SyncLegacyShapeStateFromDetail();", toolbar)
 
+    def test_toolbar_controls_receive_a_centralized_common_ui_font_fallback(self) -> None:
+        """New toolbar controls must receive the common font and be checked at runtime."""
+        layout = (REPO_ROOT / "src/ui/core/main_view_layout.cppinc").read_text(encoding="utf-8")
+        automation = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(encoding="utf-8")
+        self.assertIn("static BOOL CALLBACK ApplyToolbarChildUIFont", layout)
+        self.assertIn("EnumChildWindows(g_hPdfToolbar, ApplyToolbarChildUIFont, 0);", layout)
+        self.assertIn("ApplyToolbarChildUIFonts();", layout)
+        toolbar_control_creations = [
+            match.start()
+            for match in re.finditer(
+                r"CreateWindowExW\((?:(?!;).)*?\bg_hPdfToolbar,", layout, re.DOTALL
+            )
+        ]
+        self.assertTrue(toolbar_control_creations, "toolbar controls must be created in the main layout")
+        self.assertGreater(
+            layout.rindex("ApplyToolbarChildUIFonts();"),
+            max(toolbar_control_creations),
+            "the common-font fallback must run after every toolbar control is created",
+        )
+        self.assertIn("RunUiAutomationToolbarChildFontScenario", automation)
+        self.assertIn("VerifyToolbarChildUIFontForAutomation", automation)
+        self.assertIn("SendMessageW(child, WM_GETFONT, 0, 0)", automation)
+        self.assertIn("automation:toolbar_fonts_ok", automation)
+        ui_automation_script = (REPO_ROOT / "tests/scripts/run_ui_automation_fault_tests.ps1").read_text(encoding="utf-8")
+        self.assertIn("automation:toolbar_fonts_ok", ui_automation_script)
+
     def test_annotation_color_defaults_are_orange(self) -> None:
         core = (REPO_ROOT / "src/core/app_core.cpp").read_text(encoding="utf-8")
         config = (REPO_ROOT / "src/core/workspace_config.h").read_text(encoding="utf-8")
@@ -193,6 +260,209 @@ class AnnotationToolPolicyTests(unittest.TestCase):
         ):
             self.assertIn(f"{key} = RGB(255, 140, 0)", config)
 
+    def test_quick_output_settings_round_trip_and_presets_include_them(self) -> None:
+        """New quick-output controls must not silently disappear from workspace settings or presets."""
+        config = (REPO_ROOT / "src/core/workspace_config.h").read_text(encoding="utf-8")
+        core = (REPO_ROOT / "src/core/app_core.cpp").read_text(encoding="utf-8")
+        export_dialog = (REPO_ROOT / "src/ui/dialogs/export_dialog.cpp").read_text(encoding="utf-8")
+        presets = (REPO_ROOT / "src/workspace/workspace_config_io.cpp").read_text(encoding="utf-8")
+
+        fields = {
+            "quickPdfScalePercent": "ParseJsonIntField",
+            "quickPdfStandardTextAnnots": "ParseJsonBoolField",
+            "quickPdfMatchPdfPaneTextLayout": "ParseJsonBoolField",
+            "quickNoteStripMarkup": "ParseJsonBoolField",
+            "quickNoteIncludeComments": "ParseJsonBoolField",
+            "quickNoteMathPlaceholder": "ParseJsonBoolField",
+            "quickNoteMathPlaceholderText": "ParseJsonStringField",
+        }
+        for field, parser in fields.items():
+            self.assertIn(field, config)
+            self.assertIn(f'{parser}(json, "{field}")', core)
+            self.assertIn(f'"{field}"', core)
+            self.assertIn(f'\\"{field}\\"', core)
+            self.assertIn(field, export_dialog)
+
+        self.assertIn("ExportSettingsPresetToFile", presets)
+        self.assertIn('"workspace.json", root / L"workspace.json"', presets)
+        dispatch = (REPO_ROOT / "src/app/command_dispatch.cppinc").read_text(encoding="utf-8")
+        self.assertIn("g_config.quickNoteMathPlaceholderText", dispatch)
+        self.assertIn("EscapeJsonStringValue", core)
+
+    def test_main_menu_keeps_the_requested_action_routes(self) -> None:
+        """The public menu map is an action map, not a collection of disabled placeholders."""
+        menu = (REPO_ROOT / "src/ui/menus/menu_build.cpp").read_text(encoding="utf-8")
+        dispatch = (REPO_ROOT / "src/app/command_dispatch.cppinc").read_text(encoding="utf-8")
+        main = (REPO_ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        required_routes = {
+            "ID_FILE_NEW_CLRO": "menu.file.create_note",
+            "ID_FILE_NEW_SESSION": "menu.file.create_session",
+            "ID_FILE_NEW_LECTURE": "menu.file.create_lecture",
+            "ID_FILE_IMPORT_FILE": "menu.file.import_file",
+            "ID_FILE_IMPORT_DIR_AS_SESSION": "menu.file.import_session",
+            "ID_FILE_IMPORT_DIR_AS_LECTURE": "menu.file.import_lecture",
+            "ID_FILE_OPEN_WORKSPACE_DIR": "menu.file.open_root",
+            "ID_FILE_OPEN_LECTURE_DIR": "menu.file.open_lecture",
+            "ID_FILE_OPEN_SESSION_DIR": "menu.file.open_session",
+            "ID_FILE_ADD_TEMP_EXTERNAL_LECTURE": "menu.file.add_external_folder",
+            "ID_FILE_REMOVE_TEMP_EXTERNAL_LECTURE": "menu.common.delete",
+            "ID_OP_RENAME_PDF": "menu.common.pdf",
+            "ID_OP_RENAME_NOTE": "menu.common.note",
+            "ID_OP_MOVE_PDF": "menu.common.pdf",
+            "ID_OP_MOVE_NOTE": "menu.common.note",
+            "ID_VIEW_CLOSE_PDF": "menu.common.pdf",
+            "ID_VIEW_CLOSE_NOTE": "menu.common.note",
+            "ID_VIEW_PDF_SINGLE_PAGE_MODE": "menu.scroll.page_display",
+            "ID_FILE_SAVE_ALL": "menu.save.work",
+            "ID_OP_STAGE_MANAGE": "menu.save.review_diffs",
+            "ID_FILE_RESTORE_BACKUP": "menu.common.restore",
+            "ID_FILE_DELETE_BACKUP": "menu.common.delete",
+            "ID_FILE_EXPORT_PDF_QUICK": "menu.export.quick_pdf",
+            "ID_FILE_EXPORT_NOTE_TEXT_QUICK": "menu.export.quick_note",
+            "ID_FILE_EXPORT_COMBINED": "menu.export.dialog",
+            "ID_OP_OPEN_READONLY_VIEWER_FILE": "menu.viewer.open_file",
+            "ID_OP_OPEN_READONLY_VIEWER": "menu.tools.open_in_viewer",
+            "ID_SETTINGS_GENERAL": "menu.settings.dialog",
+            "ID_SETTINGS_PALETTE": "menu.settings.palette",
+            "ID_HELP_GUIDE": "menu.help.dialog",
+            "ID_HELP_NOTE_INFO": "menu.help.note_info",
+        }
+        for command, label in required_routes.items():
+            self.assertIn(command, menu)
+            self.assertIn(label, menu)
+            self.assertTrue(
+                f"case {command}" in dispatch or f"case {command}" in main,
+                f"{command} has a menu item but no command dispatch route",
+            )
+
+        self.assertNotIn("appendPending", menu)
+        self.assertNotIn("menu.pending.", menu)
+
+        self.assertIn("OpenReadOnlyViewerCurrentOrPickFile", main)
+        self.assertIn("LaunchReadOnlyViewerForFile(owner, *selected)", main)
+        self.assertIn("LaunchReadOnlyViewerForPdf(owner, *selected)", main)
+
+        menu_commands = set(re.findall(r"\bID_[A-Z0-9_]+\b", menu))
+        non_action_commands = {"ID_STATUS_DISPLAY"}
+        for command in menu_commands - non_action_commands:
+            self.assertTrue(
+                f"case {command}" in dispatch or f"case {command}" in main,
+                f"{command} is present in the menu but has no command dispatch route",
+            )
+
+    def test_exported_markdown_opens_in_the_bundled_readonly_viewer(self) -> None:
+        """Markdown results must not depend on a Windows file association."""
+        export_dialog = (REPO_ROOT / "src/ui/dialogs/export_dialog.cpp").read_text(encoding="utf-8")
+        app_core = (REPO_ROOT / "src/core/app_core.h").read_text(encoding="utf-8")
+        main = (REPO_ROOT / "src/main.cpp").read_text(encoding="utf-8")
+
+        self.assertIn('return extension == L".md" || extension == L".markdown";', export_dialog)
+        self.assertIn("IsReadOnlyViewerOutputPath", export_dialog)
+        self.assertIn("LaunchReadOnlyViewerForFile(owner, path)", export_dialog)
+        self.assertIn("bool LaunchReadOnlyViewerForFile(HWND owner, const std::wstring& filePath);", app_core)
+        self.assertIn("bool LaunchReadOnlyViewerForFile(HWND owner, const std::wstring& filePath) {", main)
+
+    def test_stage_manager_stages_current_work_before_listing_diffs(self) -> None:
+        """The review dialog must include edits made since the last auto-stage checkpoint."""
+        stage_manager = (REPO_ROOT / "src/workspace/file_ops_stage_manager.cppinc").read_text(encoding="utf-8")
+
+        show_dialog = stage_manager.index("void ShowStageManagerDialog(HWND owner)")
+        create_window = stage_manager.index("HWND w = CreateWindowExW", show_dialog)
+        review_setup = stage_manager[show_dialog:create_window]
+        self.assertIn("file_output::SaveNoteIfDirty(owner)", review_setup)
+        self.assertIn("file_output::SaveAnnotationsIfDirty(owner)", review_setup)
+        self.assertIn("never write the original note or .clrop", review_setup)
+
+    def test_settings_presets_are_the_single_settings_transfer_route(self) -> None:
+        """Preset save/load must use the full protected bundle; no parallel migration UI remains."""
+        menu = (REPO_ROOT / "src/ui/menus/menu_build.cpp").read_text(encoding="utf-8")
+        dispatch = (REPO_ROOT / "src/app/command_dispatch.cppinc").read_text(encoding="utf-8")
+        config_io = (REPO_ROOT / "src/workspace/workspace_config_io.cpp").read_text(encoding="utf-8")
+        assets = (REPO_ROOT / "src/settings/settings_assets.cppinc").read_text(encoding="utf-8")
+        ids = (REPO_ROOT / "src/core/command_ids.h").read_text(encoding="utf-8")
+
+        self.assertIn("ID_SETTINGS_PRESET_SAVE", menu)
+        self.assertIn("ID_SETTINGS_PRESET_LOAD", menu)
+        self.assertIn("case ID_SETTINGS_PRESET_SAVE", dispatch)
+        self.assertIn("case ID_SETTINGS_PRESET_LOAD", dispatch)
+        self.assertIn("PickSettingsPresetSavePath", config_io)
+        self.assertIn("PickSettingsPresetOpenPath", config_io)
+        self.assertIn("ExportSettingsPresetToFile", config_io)
+        self.assertIn("ImportSettingsPresetFromFile", config_io)
+        self.assertIn("workspace.config_io.0d32b1c7e154", config_io)
+        self.assertIn("IDC_SETTINGS_ASSETS_PRESET_SAVE", assets)
+        self.assertIn("IDC_SETTINGS_ASSETS_PRESET_LOAD", assets)
+
+        combined = menu + dispatch + config_io + assets + ids
+        for obsolete in (
+            "ID_SETTINGS_BUNDLE_",
+            "ExportAllUserSettings",
+            "ImportAllUserSettings",
+            "PickSettingsBundle",
+            "IDC_SETTINGS_ASSETS_EXPORT",
+            "IDC_SETTINGS_ASSETS_IMPORT",
+            "menu.settings.migration",
+        ):
+            self.assertNotIn(obsolete, combined)
+
+    def test_organize_notice_reports_updated_file_locations(self) -> None:
+        layout = (REPO_ROOT / "src/ui/core/main_view_layout.cppinc").read_text(encoding="utf-8")
+        ja = json.loads((REPO_ROOT / "locales/ja.json").read_text(encoding="utf-8"))
+        en = json.loads((REPO_ROOT / "locales/en.json").read_text(encoding="utf-8"))
+        key = "ui.layout.6212da2d3a1c"
+        self.assertIn(key, layout)
+        self.assertEqual(ja[key], "\nファイル位置を更新しました。")
+        self.assertEqual(en[key], "\nUpdated file locations.")
+        self.assertIn("ファイル位置を更新しました", ja["ui.layout.3b1d1c31a5eb"])
+
+    def test_annotation_inspector_acknowledges_apply_without_a_sound(self) -> None:
+        source = (REPO_ROOT / "src/ui/dialogs/annot_math_panel.cpp").read_text(encoding="utf-8")
+        ja = json.loads((REPO_ROOT / "locales/ja.json").read_text(encoding="utf-8"))
+        en = json.loads((REPO_ROOT / "locales/en.json").read_text(encoding="utf-8"))
+
+        self.assertIn("kAnnotInspectorApplyFeedbackTimer", source)
+        self.assertIn("ShowAnnotInspectorApplied", source)
+        self.assertIn("SetTimer(hWnd, kAnnotInspectorApplyFeedbackTimer, 1000", source)
+        self.assertIn("case WM_TIMER", source)
+        self.assertIn("KillTimer(hWnd, kAnnotInspectorApplyFeedbackTimer)", source)
+        self.assertIn('localization::Text(L"ui.annot_math.e96aa12267b4")', source)
+        self.assertIn("const std::wstring title = AnnotListLabel", source)
+        self.assertIn("SetAnnotInspectorTitle", source)
+        self.assertIn("RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME)", source)
+        self.assertIn('localization::Text(L"ui.annot_math.63c3859d7f0b")', source)
+        self.assertIn("FindOpenAnnotInspector(annotation.id)", source)
+        self.assertIn("EnumThreadWindows(GetCurrentThreadId(), FindOpenAnnotInspectorProc", source)
+        self.assertNotIn("ui.annot_math.6e745bc1653d", ja)
+        self.assertNotIn("ui.annot_math.6e745bc1653d", en)
+        self.assertEqual(ja["ui.annot_math.63c3859d7f0b"], "閲覧")
+        self.assertEqual(en["ui.annot_math.63c3859d7f0b"], "View")
+        self.assertEqual(ja["ui.annot_math.e96aa12267b4"], "適用しました")
+        self.assertEqual(en["ui.annot_math.e96aa12267b4"], "Applied")
+
+    def test_japanese_early_design_clrop_matches_its_paired_pdf(self) -> None:
+        session = REPO_ROOT / "release_assets/sample_workspace/ja/01_講義サンプル/第03回_最初期構想"
+        pdf = session / "PDF学習ワークスペース統合画面構成および基本仕様書.pdf"
+        clrop = session / "PDF学習ワークスペース統合画面構成および基本仕様書.clrop"
+        data = json.loads(clrop.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 1)
+        self.assertEqual(data["pdf_id"]["path"], pdf.name)
+        self.assertEqual(data["pdf_id"]["size"], pdf.stat().st_size)
+        self.assertEqual(data["pdf_id"]["sha256"], hashlib.sha256(pdf.read_bytes()).hexdigest())
+        text_item = next(item for item in data["pages"][0]["items"] if item["id"] == "sample-text")
+        self.assertEqual(text_item["font"], "Meiryo")
+        self.assertEqual(text_item["content"], "注釈は .clrop（JSON）で管理します。")
+        self.assertEqual(text_item["lines"], [text_item["content"]])
+        self.assertEqual(text_item["bbox"], [147.749896103, 605.333315878, 253.25, 33.375])
+        red_text = next(item for item in data["pages"][0]["items"] if item["id"] == "amrwvyqqz_ncg_8")
+        self.assertEqual(red_text["font"], "Yu Mincho")
+        wave = next(item for item in data["pages"][0]["items"] if item["type"] == "wave")
+        self.assertEqual(wave["id"], "amrwvvir3_ncg_4")
+        self.assertEqual(wave["color"], "#FF8C00")
+        self.assertEqual(wave["alpha"], 1)
+        self.assertEqual(wave["width"], 2)
+        self.assertEqual(wave["p1"], [149.087732612, 579.204292878])
+        self.assertEqual(wave["p2"], [394.249014612, 578.441943878])
+
     def test_magnifier_options_are_persistent_and_dpi_aware(self) -> None:
         config = (REPO_ROOT / "src/core/workspace_config.h").read_text(encoding="utf-8")
         core = (REPO_ROOT / "src/core/app_core.cpp").read_text(encoding="utf-8")
@@ -202,13 +472,16 @@ class AnnotationToolPolicyTests(unittest.TestCase):
         self.assertIn("Horizontal", config + core + overlay + settings)
         self.assertIn("magnifierZoom", config)
         self.assertIn("magnifierSizeDip", config)
+        self.assertIn("magnifierPosition", config)
         self.assertIn('ParseJsonDoubleField(json, "magnifierZoom")', core)
         self.assertIn('ParseJsonIntField(json, "magnifierSizeDip")', core)
+        self.assertIn('ParseJsonStringField(json, "magnifierPosition")', core)
         self.assertIn("GetDeviceCaps(hdc, LOGPIXELSX)", overlay)
         self.assertIn("cursorGap", overlay)
         self.assertIn("magnifier_shape.horizontal", settings)
         self.assertIn("settings.annot.magnifier_zoom", catalog)
         self.assertIn("settings.annot.magnifier_size", catalog)
+        self.assertIn("settings.annot.magnifier_position", catalog)
 
     def test_annotation_input_warns_when_annotations_are_hidden(self) -> None:
         source = (REPO_ROOT / "src/pdf_view/input.cppinc").read_text(encoding="utf-8")
@@ -702,6 +975,24 @@ class CodeMetricsGuiTests(unittest.TestCase):
 
 
 class ValidateCodebaseTests(unittest.TestCase):
+    def test_windows_powershell_requires_bom_for_non_ascii_source(self) -> None:
+        with repo_tempdir() as root:
+            script = root / "tests" / "scripts" / "sample.ps1"
+            script.parent.mkdir(parents=True)
+            script.write_text('Write-Host "日本語"\n', encoding="utf-8")
+
+            with mock.patch.object(validate_codebase, "REPO_ROOT", root):
+                problems = validate_codebase.find_windows_powershell_encoding_violations()
+
+            self.assertEqual(len(problems), 1)
+            self.assertIn("UTF-8 BOM", problems[0])
+
+            script.write_bytes(b"\xef\xbb\xbf" + script.read_bytes())
+            with mock.patch.object(validate_codebase, "REPO_ROOT", root):
+                problems = validate_codebase.find_windows_powershell_encoding_violations()
+
+            self.assertEqual(problems, [])
+
     def test_command_id_validation_rejects_palette_range_collision(self) -> None:
         with repo_tempdir() as root:
             header = root / "src" / "core" / "command_ids.h"
@@ -2248,7 +2539,7 @@ class RenderHumanDocsTests(unittest.TestCase):
             self.assertTrue(introduction.exists())
             introduction_html = (site_dir / "introduction" / "index.html").read_text(encoding="utf-8")
             self.assertIn('class="site-menu"', introduction_html)
-            self.assertIn('Raw Markdown', introduction_html)
+            self.assertNotIn('Raw Markdown', introduction_html)
             self.assertIn('class="menu-current-label">（現在の文書）</span>', introduction_html)
             self.assertIn('背景・設計・確認資料', introduction_html)
             self.assertIn('<h1 id="introduction">Introduction</h1>', introduction_html)
@@ -2346,27 +2637,40 @@ class PublicSnapshotContentGateTests(unittest.TestCase):
 
 
 class PublicSiteValidationTests(unittest.TestCase):
-    def test_documentation_portal_source_orders_primary_entries(self) -> None:
+    def test_documentation_portal_source_maps_user_guides(self) -> None:
         portal = (REPO_ROOT / "site/github/index.html").read_text(encoding="utf-8-sig")
-        labels = (
-            "プロジェクトの概要",
-            "日本語の文書",
-            "背景・設計・確認資料",
-            "ライセンスと第三者通知",
-        )
-        positions = [portal.index(label) for label in labels]
-        self.assertEqual(positions, sorted(positions))
-        self.assertIn('id="site-map-title">利用目的に応じた案内と確認先', portal)
+        self.assertIn("はじめて使う方へ", portal)
+        self.assertIn('id="site-map-title">文書の全体像', portal)
         self.assertIn("現在地：文書ポータルの案内ページ", portal)
-        self.assertIn("高度利用者・開発を検討する方", portal)
-        self.assertIn("ポータルだけでは確認できない事実の確認先", portal)
-        self.assertIn("GitHub Releases", portal)
+        for guide in (
+            "docs/ja/Getting_Started.html",
+            "docs/ja/Using_the_App.html",
+            "docs/ja/Save_and_Recovery.html",
+            "docs/ja/File_Formats.html",
+            "docs/ja/CLRO_Note_Format.html",
+            "docs/ja/CLROP_Annotation_Format.html",
+            "docs/ja/Troubleshooting.html",
+            "docs/ja/Help_Reference.html",
+            "DOCUMENTATION.html",
+        ):
+            self.assertIn(f'href="{guide}"', portal)
         self.assertIn('href="en/index.html"', portal)
         english_portal = (REPO_ROOT / "site/github/en/index.html").read_text(encoding="utf-8-sig")
         self.assertIn('href="../index.html" lang="ja">日本語</a>', english_portal)
-        self.assertIn("User documentation", english_portal)
-        self.assertIn("Guides by purpose and where to verify", english_portal)
-        self.assertIn("Current page: documentation portal guide", english_portal)
+        self.assertIn("Getting started", english_portal)
+        self.assertIn("Documentation at a glance", english_portal)
+        for guide in (
+            "../docs/en/Getting_Started.html",
+            "../docs/en/Using_the_App.html",
+            "../docs/en/Save_and_Recovery.html",
+            "../docs/en/File_Formats.html",
+            "../docs/en/CLRO_Note_Format.html",
+            "../docs/en/CLROP_Annotation_Format.html",
+            "../docs/en/Troubleshooting.html",
+            "../docs/en/Help_Reference.html",
+            "../DOCUMENTATION.html",
+        ):
+            self.assertIn(f'href="{guide}"', english_portal)
 
     def test_public_site_sources_include_persistent_high_contrast_controls(self) -> None:
         github_portal = (REPO_ROOT / "site/github/index.html").read_text(encoding="utf-8-sig")
@@ -2674,8 +2978,6 @@ class ReleaseLocaleContentGateTests(unittest.TestCase):
             "docs/Help_Reference.md": "Help reference\n",
             "docs/legal/LICENSE.md": "License\n",
             "docs/legal/THIRD_PARTY_NOTICES.md": "Third-party notices\n",
-            "sample_workspace/README.txt": "Sample workspace\n",
-            "sample_workspace/Getting_Started.md": "Getting started\n",
         }
         for relative, content in documents.items():
             (directory / relative).write_text(content, encoding="utf-8")
@@ -2693,6 +2995,22 @@ class ReleaseLocaleContentGateTests(unittest.TestCase):
             path = directory / "sample_workspace" / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"sample")
+        for relative in release_locale_content_gate.REQUIRED_COMPANION_SESSION_NOTES[locale]:
+            path = directory / "sample_workspace" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"sample")
+        for relative in release_locale_content_gate.REQUIRED_NOTE_FORMAT_SAMPLE_FILES[locale]:
+            path = directory / "sample_workspace" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"sample")
+        link_sample = release_locale_content_gate.NOTE_FORMAT_LINK_SAMPLE[locale]
+        source_session = (
+            REPO_ROOT / "release_assets" / "sample_workspace" / locale
+            / release_locale_content_gate.NOTE_FORMAT_SESSION_PATH[locale]
+        )
+        target_session = directory / "sample_workspace" / release_locale_content_gate.NOTE_FORMAT_SESSION_PATH[locale]
+        for key in ("note", "pdf", "clrop"):
+            shutil.copyfile(source_session / link_sample[key], target_session / link_sample[key])
         starter_relative, expected_pdf, expected_note = release_locale_content_gate.STARTER_SESSION[locale]
         starter = directory / "sample_workspace" / starter_relative
         starter.mkdir(parents=True, exist_ok=True)
@@ -2700,6 +3018,10 @@ class ReleaseLocaleContentGateTests(unittest.TestCase):
         (starter / expected_note).write_bytes(b"sample")
         if edition == "full":
             for relative in release_locale_content_gate.REQUIRED_FULL_CONVERSION_SAMPLE_FILES[locale]:
+                path = directory / "sample_workspace" / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"sample")
+            for relative in release_locale_content_gate.REQUIRED_FULL_COMPANION_SESSION_NOTES[locale]:
                 path = directory / "sample_workspace" / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"sample")
@@ -2721,7 +3043,7 @@ class ReleaseLocaleContentGateTests(unittest.TestCase):
             self.write_release(root, "en", edition="lite")
 
             self.assertEqual(release_locale_content_gate.validate_release_directory(root, "en", "lite"), [])
-            conversion_pdf = root / "sample_workspace/01_Lecture_Samples/Session_03_Office_Conversion/presentation_conversion_result.pdf"
+            conversion_pdf = root / "sample_workspace/01_Lecture_Samples/Session_04_Office_Conversion/feature_overview_and_charts_conversion_result.pdf"
             conversion_pdf.parent.mkdir(parents=True)
             conversion_pdf.write_bytes(b"sample")
             errors = release_locale_content_gate.validate_release_directory(root, "en", "lite")
@@ -2738,6 +3060,127 @@ class ReleaseLocaleContentGateTests(unittest.TestCase):
             errors = release_locale_content_gate.validate_release_directory(root, "ja")
 
             self.assertTrue(any("starter session must contain exactly one PDF and one note" in error for error in errors))
+
+    def test_rejects_missing_note_format_sample(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "en")
+            (root / "sample_workspace/01_Lecture_Samples/Session_02_Note_Formats/table_data.csv").unlink()
+
+            errors = release_locale_content_gate.validate_release_directory(root, "en")
+
+            self.assertTrue(any("required note-format sample is missing" in error for error in errors))
+
+    def test_rejects_missing_companion_session_note(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "ja")
+            (root / "sample_workspace/01_講義サンプル/第03回_最初期構想/ノート_最初期構想.clro").unlink()
+
+            errors = release_locale_content_gate.validate_release_directory(root, "ja")
+
+            self.assertTrue(any("required companion session note is missing" in error for error in errors))
+
+    def test_rejects_duplicate_note_format_extension(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "ja")
+            session = root / "sample_workspace/01_講義サンプル/第02回_ノート形式"
+            (session / "another_note.md").write_text("duplicate\n", encoding="utf-8")
+
+            errors = release_locale_content_gate.validate_release_directory(root, "ja")
+
+            self.assertTrue(any("exactly one file for each required extension" in error for error in errors))
+
+    def test_rejects_mismatched_note_format_pdf_link_pair(self) -> None:
+        with repo_tempdir() as root:
+            self.write_release(root, "en")
+            pdf = root / "sample_workspace/01_Lecture_Samples/Session_02_Note_Formats/pdf_link_practice.pdf"
+            pdf.write_bytes(b"different PDF")
+
+            errors = release_locale_content_gate.validate_release_directory(root, "en")
+
+            self.assertTrue(any("mismatched PDF size" in error for error in errors))
+            self.assertTrue(any("mismatched PDF hash" in error for error in errors))
+
+    def test_note_format_samples_demonstrate_their_extensions(self) -> None:
+        samples = {
+            "ja": {
+                "directory": REPO_ROOT / "release_assets/sample_workspace/ja/01_講義サンプル/第02回_ノート形式",
+                "clro": "基本操作.clro",
+                "markdown": "ノート_数式.md",
+                "tex": "ノート_TeX数式.tex",
+                "text": "ノート_プレーンテキスト.txt",
+                "csv": "ノート_表データ.csv",
+                "pdf": "PDFリンク練習.pdf",
+                "clrop": "PDFリンク練習.clrop",
+            },
+            "en": {
+                "directory": REPO_ROOT / "release_assets/sample_workspace/en/01_Lecture_Samples/Session_02_Note_Formats",
+                "clro": "basic_operation_note.clro",
+                "markdown": "math.md",
+                "tex": "tex_math_note.tex",
+                "text": "plain_text.txt",
+                "csv": "table_data.csv",
+                "pdf": "pdf_link_practice.pdf",
+                "clrop": "pdf_link_practice.clrop",
+            },
+        }
+        for sample in samples.values():
+            directory = sample["directory"]
+            clro = (directory / sample["clro"]).read_text(encoding="utf-8")
+            markdown = (directory / sample["markdown"]).read_text(encoding="utf-8")
+            tex = (directory / sample["tex"]).read_text(encoding="utf-8")
+            text = (directory / sample["text"]).read_text(encoding="utf-8")
+            pdf = directory / sample["pdf"]
+            clrop = json.loads((directory / sample["clrop"]).read_text(encoding="utf-8"))
+            with (directory / sample["csv"]).open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.reader(handle))
+
+            self.assertTrue(all(token in clro for token in ("<u>", "<char=", "<back=", "<link=")))
+            self.assertTrue(all(token in markdown for token in ("## ", "> ", ":::", "```", "|")))
+            self.assertTrue(all(token in tex for token in ("\\documentclass", "\\begin{align}", "\\begin{tabular}")))
+            self.assertIn("#", text)
+            self.assertEqual(len(rows), 6)
+            self.assertTrue(all(len(row) == 5 for row in rows))
+            self.assertIn("<link=session-02-pdf-note-link>", clro)
+            self.assertEqual(clrop["pdf_id"]["path"], pdf.name)
+            self.assertEqual(clrop["pdf_id"]["size"], pdf.stat().st_size)
+            self.assertEqual(clrop["pdf_id"]["sha256"], hashlib.sha256(pdf.read_bytes()).hexdigest())
+            markers = [
+                item
+                for page in clrop["pages"]
+                for item in page["items"]
+                if item.get("type") == "link-marker" and item.get("link_id") == "session-02-pdf-note-link"
+            ]
+            self.assertEqual(len(markers), 1)
+            self.assertEqual(len(markers[0]["p1"]), 2)
+            self.assertNotIn("note_path", markers[0])
+
+    def test_session_two_and_four_companion_notes_are_concise_clro_material(self) -> None:
+        samples = {
+            "ja": {
+                "01_講義サンプル/第03回_最初期構想/ノート_最初期構想.clro": ("# 第03回", "> ", "PDF学習ワークスペース統合画面構成および基本仕様書.pdf"),
+                "01_講義サンプル/第04回_Office変換/ノート_Office変換.clro": ("# 第04回", "> ", "PPTX_機能紹介とネイティブ図表_変換結果.pdf"),
+            },
+            "en": {
+                "01_Lecture_Samples/Session_03_Early_Design/early_design_notes.clro": ("# Session 03", "> ", "early_design_reference.pdf"),
+                "01_Lecture_Samples/Session_04_Office_Conversion/office_conversion_notes.clro": ("# Session 04", "> ", "feature_overview_and_charts_conversion_result.pdf"),
+            },
+        }
+        for locale, notes in samples.items():
+            root = REPO_ROOT / "release_assets/sample_workspace" / locale
+            for relative, tokens in notes.items():
+                note = root / relative
+                self.assertTrue(note.is_file())
+                self.assertTrue(all(token in note.read_text(encoding="utf-8") for token in tokens))
+
+    def test_full_conversion_session_has_one_native_chart_pdf_per_locale(self) -> None:
+        expected_pdf_names = {
+            "ja": "PPTX_機能紹介とネイティブ図表_変換結果.pdf",
+            "en": "feature_overview_and_charts_conversion_result.pdf",
+        }
+        for locale, required_files in release_locale_content_gate.REQUIRED_FULL_CONVERSION_SAMPLE_FILES.items():
+            conversion_pdfs = [path for path in required_files if path.endswith(".pdf")]
+            self.assertEqual(len(conversion_pdfs), 1, locale)
+            self.assertEqual(Path(conversion_pdfs[0]).name, expected_pdf_names[locale])
 
     def test_rejects_japanese_text_and_mismatched_sample_locale(self) -> None:
         with repo_tempdir() as root:
@@ -2959,6 +3402,30 @@ class RepositoryScriptAndTextGateTests(unittest.TestCase):
 
 
 class BuildPublicSiteTests(unittest.TestCase):
+    def test_preserves_prior_output_when_staged_install_fails(self) -> None:
+        with repo_tempdir() as root:
+            output = root / "site" / "github" / "output" / "public"
+            output.mkdir(parents=True)
+            (output / "existing.md").write_text("prior generation", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "new.md").write_text("staged generation", encoding="utf-8")
+
+            original_rename = Path.rename
+
+            def fail_staged_install(path: Path, target: Path) -> Path:
+                if path == staging:
+                    raise OSError("simulated staged install failure")
+                return original_rename(path, target)
+
+            with mock.patch.object(build_public_site, "OUTPUT_DIR", output), \
+                 mock.patch.object(Path, "rename", new=fail_staged_install):
+                with self.assertRaisesRegex(OSError, "simulated staged install failure"):
+                    build_public_site.replace_staged_site(staging)
+
+            self.assertEqual((output / "existing.md").read_text(encoding="utf-8"), "prior generation")
+            self.assertTrue((staging / "new.md").is_file())
+
     def test_builds_only_selected_files_and_keeps_machine_readable_index(self) -> None:
         with repo_tempdir() as root:
             (root / "introduction" / "core").mkdir(parents=True)

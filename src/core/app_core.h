@@ -350,6 +350,7 @@ inline bool IsShapeGroupMode(ToolMode mode) {
     return AnnotToolGeometryForMode(mode) != AnnotToolGeometry::None;
 }
 enum class MagnifierShape { Circle, Square, Horizontal };
+enum class MagnifierPosition { Center, UpperLeft };
 enum class BottomPanePin { Note, Math };
 enum class BottomNoteMode { Legacy, Headings, Assist };
 enum class NotePlacement { Bottom, Top };
@@ -485,6 +486,17 @@ inline HWND ResolveAppDialogAnchor(HWND owner) {
     return (rootOwner && IsWindow(rootOwner)) ? rootOwner : anchor;
 }
 
+inline MagnifierPosition ParseMagnifierPosition(const std::wstring& s) {
+    std::wstring t = s;
+    std::transform(t.begin(), t.end(), t.begin(), ::towlower);
+    if (t == L"upper_left" || t == L"upper-left" || t == L"left_top") return MagnifierPosition::UpperLeft;
+    return MagnifierPosition::Center;
+}
+
+inline std::wstring MagnifierPositionToString(MagnifierPosition p) {
+    return p == MagnifierPosition::UpperLeft ? L"upper_left" : L"center";
+}
+
 inline void PlaceOwnedPopupAtAppTopLeft(HWND popup, HWND owner) {
     if (!popup || !IsWindow(popup)) return;
     HWND anchor = ResolveAppDialogAnchor(owner);
@@ -618,7 +630,7 @@ extern int g_headingFontPx;
 
 void SetHighlightColors(COLORREF mark, COLORREF heading);
 
-// bottom-right note assist
+// bottom-right status assist
 extern std::wstring g_previewNote;
 extern bool g_pdfPreviewEnabled;
 extern bool g_pdfPreviewActive;
@@ -666,6 +678,7 @@ extern ToolMode g_toolMode;
 extern MagnifierShape g_magnifierShape;
 extern double g_magnifierZoom;
 extern int g_magnifierSizeDip;
+extern MagnifierPosition g_magnifierPosition;
 extern ShapeKind g_shapeKind;
 extern ShapeDrawMode g_shapeDrawMode;
 extern ShapeDetail g_shapeDetail;
@@ -674,8 +687,7 @@ extern ToolMode g_markerGroupMode;
 extern ToolMode g_penGroupMode;
 extern ToolMode g_shapeGroupMode;
 extern std::vector<COLORREF> g_palette;
-extern COLORREF g_paletteCustomColor;      // JSON index 7: last OK selected color (Dynamic Slot 9 candidate)
-extern COLORREF g_paletteDialogCustomColor; // JSON index 8: picker custom color #1 (Dynamic Slot 8 candidate)
+extern COLORREF g_paletteCustomColor; // JSON index 7: application-owned custom palette color
 extern COLORREF g_activeColor;
 extern WNDPROC g_oldNoteProc;
 extern std::wstring g_textFontName;
@@ -765,7 +777,7 @@ bool IsJapaneseRenderCharForNoteFont(wchar_t ch);
 std::wstring ResolveNoteRenderBaseFace();
 std::wstring ResolveNoteRenderJpFace();
 void SetPaletteCustomColor(COLORREF color);
-bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor, bool trackDialogCustom = false);
+bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor);
 void SyncUserPaletteToRuntime();
 void LoadUserPaletteColorsForSettings(COLORREF* custom, size_t count);
 void SaveUserPaletteColorsForSettings(const COLORREF* custom, size_t count);
@@ -852,6 +864,7 @@ bool LaunchReadOnlyViewerForPdfAt(HWND owner,
                                   int pageIndex,
                                   double yPt,
                                   bool hasY);
+bool LaunchReadOnlyViewerForFile(HWND owner, const std::wstring& filePath);
 void SyncLeftPaneSelection();
 void RefreshLeftPaneOpenState();
 void BeginDeferredLeftPaneSelection();

@@ -383,6 +383,7 @@ ToolMode g_toolMode = ToolMode::Select;
 MagnifierShape g_magnifierShape = MagnifierShape::Circle;
 double g_magnifierZoom = 2.0;
 int g_magnifierSizeDip = 120;
+MagnifierPosition g_magnifierPosition = MagnifierPosition::Center;
 ShapeKind g_shapeKind = ShapeKind::Rectangle;
 // The first visible Shape-family entry is Stroke > Line. Keep the runtime
 // default aligned with that order until a workspace selection is restored.
@@ -447,8 +448,7 @@ std::vector<COLORREF> g_palette = {
     RGB(200,  80, 200), // magenta-ish for variation
     RGB(128, 128, 128), // gray (7th fixed preset)
 };
-COLORREF g_paletteCustomColor = RGB(0, 0, 0);       // slot 9: last OK color (black default)
-COLORREF g_paletteDialogCustomColor = RGB(0, 0, 0); // slot 8: s_customColors[0] snapshot (black default)
+COLORREF g_paletteCustomColor = RGB(0, 0, 0); // slot 8: application-owned custom color
 COLORREF g_activeColor = g_palette.front();
 WNDPROC g_oldNoteProc = nullptr;
 std::wstring g_currentLecturePath;
@@ -489,7 +489,7 @@ double g_noteRenderFontPt = 10.0;
 NoteSystem g_noteSystem = NoteSystem::Legacy;
 bool g_noteRenderEnabled = true;
 bool g_noteRawOnly = false;
-bool g_noteRenderMath = false;
+bool g_noteRenderMath = true;
 bool g_noteWrapEnabled = true;
 bool g_noteGridEnabled = false;
 int g_noteGridPitch = 24;
@@ -1271,9 +1271,9 @@ static void FillDefaultUserPaletteColors(COLORREF* custom, size_t count) {
         RGB(  0, 200,   0), // [4] Green  (Preset 5)
         RGB(200,  80, 200), // [5] Magenta(Preset 6)
         RGB(128, 128, 128), // [6] Gray   (Preset 7)
-        RGB(  0,   0,   0), // [7] Last OK selected color (black default)
-        RGB(  0,   0,   0), // [8] Picker Custom #1 (Dynamic Slot 8 candidate, black default)
-        RGB(  0,   0,   0), // [9] Picker Custom #2 (black default)
+        RGB(  0,   0,   0), // [7] Application-owned custom color (black default)
+        RGB(  0,   0,   0), // [8] Legacy Picker Custom #1 (preserved)
+        RGB(  0,   0,   0), // [9] Legacy Picker Custom #2 (preserved)
         RGB(255, 255, 255), // [10] Picker Custom #3 (white)
         RGB(255, 255, 255), // [11] Picker Custom #4 (white)
         RGB(255, 255, 255), // [12] Picker Custom #5 (white)
@@ -1294,16 +1294,15 @@ static void FillDefaultUserPaletteColors(COLORREF* custom, size_t count) {
     }
 }
 
-// Build the runtime palette from fixed presets + two dynamic slots.
-// Dynamic slot 8: g_paletteDialogCustomColor (s_customColors[0] snapshot).
-// Dynamic slot 9: g_paletteCustomColor (last OK-returned color).
-// Either dynamic slot is omitted when it exactly duplicates any earlier entry.
+// Build the runtime palette from the seven presets plus one application-owned
+// custom color. Legacy Windows picker slots remain in JSON only so they can be
+// preserved without appearing as a second, confusing palette setting.
 static void BuildAndApplyRuntimePalette(const COLORREF* presets, size_t presetCount) {
     const std::vector<COLORREF> prevPalette = g_palette;
     const COLORREF prevActive = g_activeColor;
 
     std::vector<COLORREF> result;
-    result.reserve(presetCount + 2);
+    result.reserve(presetCount + 1);
 
     // Add presets without duplicates.
     for (size_t i = 0; i < presetCount; ++i) {
@@ -1312,15 +1311,9 @@ static void BuildAndApplyRuntimePalette(const COLORREF* presets, size_t presetCo
         if (!dup) result.push_back(presets[i]);
     }
 
-    // Slot 8: dialog custom color — append only if not already in presets.
-    bool dialogInPresets = false;
-    for (const COLORREF& c : result) { if (c == g_paletteDialogCustomColor) { dialogInPresets = true; break; } }
-    if (!dialogInPresets) result.push_back(g_paletteDialogCustomColor);
-
-    // Slot 9: last OK color — append only if distinct from all prior entries.
-    bool okInPrior = false;
-    for (const COLORREF& c : result) { if (c == g_paletteCustomColor) { okInPrior = true; break; } }
-    if (!okInPrior) result.push_back(g_paletteCustomColor);
+    bool customInPresets = false;
+    for (const COLORREF& c : result) { if (c == g_paletteCustomColor) { customInPresets = true; break; } }
+    if (!customInPresets) result.push_back(g_paletteCustomColor);
 
     g_palette = result;
 
@@ -1464,58 +1457,27 @@ static void WriteThemeConfig(const std::filesystem::path& path,
 
 void SetPaletteCustomColor(COLORREF color) {
     g_paletteCustomColor = color;
-    if (!g_palette.empty()) {
-        g_palette.back() = color;
-    }
 }
 
-bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor, bool trackDialogCustom) {
+bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor) {
     if (!outColor) return false;
     CHOOSECOLORW cc{};
     cc.lStructSize = sizeof(cc);
     cc.hwndOwner = owner;
     cc.rgbResult = initial;
 
-    // Load full 24-slot palette from JSON (or defaults).
-    // Indices 8..23 correspond 1-to-1 with s_customColors[0..15].
-    COLORREF custom[kToolPaletteCommandSlotCapacity]{};
-    LoadUserPaletteColors(custom, std::size(custom));
-
-    COLORREF s_customColors[16];
-    for (size_t i = 0; i < 16; ++i) {
-        s_customColors[i] = custom[kPickerCustomColorStartSlotIndex + i];
-    }
-
-    cc.lpCustColors = s_customColors;
     cc.Flags = CC_FULLOPEN | CC_RGBINIT;
-    bool ok = ChooseColorW(&cc);
-
-    // Save modified custom colors (s_customColors[0..15]) back to JSON indices 8..23
-    for (size_t i = 0; i < 16; ++i) {
-        custom[kPickerCustomColorStartSlotIndex + i] = s_customColors[i];
-    }
-    g_paletteDialogCustomColor = s_customColors[0]; // JSON index 8 / Picker #1
-
-    if (ok) {
-        *outColor = cc.rgbResult;
-        g_paletteCustomColor = cc.rgbResult;
-        custom[kLastOkColorSlotIndex] = cc.rgbResult; // JSON index 7 / Last OK
-    }
-
-    // Persist full 24 slots to JSON and rebuild runtime palette.
-    SaveUserPaletteColors(custom, std::size(custom));
-    BuildAndApplyRuntimePalette(custom, static_cast<size_t>(kPresetPaletteSlotCount));
-    PersistConfig();
-
-    return ok;
+    if (!ChooseColorW(&cc)) return false;
+    *outColor = cc.rgbResult;
+    return true;
 }
 
 void SyncUserPaletteToRuntime() {
     COLORREF custom[kToolPaletteCommandSlotCapacity]{};
-    LoadUserPaletteColors(custom, std::size(custom));
-    // Index 7 = Last OK color, Index 8 = Picker Custom #1
-    g_paletteCustomColor       = custom[static_cast<size_t>(kLastOkColorSlotIndex)];
-    g_paletteDialogCustomColor = custom[static_cast<size_t>(kPickerCustomColorStartSlotIndex)];
+    const bool loaded = LoadUserPaletteColors(custom, std::size(custom));
+    // A workspace written before the palette file existed still supplies the
+    // custom color through its config. Once a palette exists, it is canonical.
+    if (loaded) g_paletteCustomColor = custom[static_cast<size_t>(kLastOkColorSlotIndex)];
     BuildAndApplyRuntimePalette(custom, static_cast<size_t>(kPresetPaletteSlotCount));
 }
 
@@ -1530,10 +1492,6 @@ void SaveUserPaletteColorsForSettings(const COLORREF* custom, size_t count) {
     if (count > static_cast<size_t>(kLastOkColorSlotIndex)) {
         g_paletteCustomColor = custom[kLastOkColorSlotIndex];
     }
-    if (count > static_cast<size_t>(kPickerCustomColorStartSlotIndex)) {
-        g_paletteDialogCustomColor = custom[kPickerCustomColorStartSlotIndex];
-    }
-
     BuildAndApplyRuntimePalette(custom, static_cast<size_t>(kPresetPaletteSlotCount));
     PersistConfig();
 }
@@ -2134,18 +2092,45 @@ std::optional<int> ParseKanjiNumber(const std::wstring& s) {
 }
 
 std::optional<int> ExtractNumericKey(const std::wstring& name) {
-    std::wstring digits;
-    for (wchar_t ch : name) {
-        int fw = FullwidthDigit(ch);
-        if (fw >= 0) {
-            digits.push_back(static_cast<wchar_t>(L'0' + fw));
-        } else if (iswdigit(ch)) {
-            digits.push_back(ch);
+    auto digitAt = [&](size_t index) -> int {
+        if (index >= name.size()) return -1;
+        const int fullwidth = FullwidthDigit(name[index]);
+        if (fullwidth >= 0) return fullwidth;
+        return (name[index] >= L'0' && name[index] <= L'9')
+            ? static_cast<int>(name[index] - L'0')
+            : -1;
+    };
+    auto parseDigitRun = [&](size_t start) -> std::optional<int> {
+        std::wstring digits;
+        for (size_t index = start; index < name.size(); ++index) {
+            const int digit = digitAt(index);
+            if (digit < 0) break;
+            digits.push_back(static_cast<wchar_t>(L'0' + digit));
         }
+        if (digits.empty()) return std::nullopt;
+        try {
+            return std::stoi(digits);
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+
+    // Prefer the ordinal marker used by ordinary session names.  This avoids
+    // treating a year and a period number as one number (for example,
+    // "2026年度 第2回" is session 2, not 20262).
+    for (size_t index = 0; index < name.size(); ++index) {
+        if (name[index] != L'第') continue;
+        size_t digitStart = index + 1;
+        while (digitStart < name.size() && iswspace(name[digitStart])) ++digitStart;
+        if (auto value = parseDigitRun(digitStart)) return value;
     }
-    if (!digits.empty()) {
-        try { return std::stoi(digits); } catch (...) {}
+
+    // Without an ordinal marker, use only the first contiguous digit run.
+    // Separate numbers must not be concatenated: "資料2_3" sorts as 2.
+    for (size_t index = 0; index < name.size(); ++index) {
+        if (digitAt(index) >= 0) return parseDigitRun(index);
     }
+
     auto roman = ParseRomanNumber(name);
     if (roman) return roman;
     return ParseKanjiNumber(name);
@@ -2415,6 +2400,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.pdfFlowMode = L"v_ttb";
     cfg.pdfBitmapBudgetMiB = kPdfBitmapBudgetMiBDefault;
     cfg.pdfSinglePageMode = false;
+    cfg.showPdfZoomOverlay = true;
     cfg.panMouseWheelZoom = false;
     cfg.mouseWheelInvertVertical = false;
     cfg.mouseWheelInvertHorizontal = false;
@@ -2466,11 +2452,12 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.lectureSortMode = L"recent";
     cfg.sessionSortMode = L"numeric_asc";
     cfg.sessionNumberingMode = L"count";
+    cfg.sessionFileLayout = L"separate_directories";
     cfg.sessionAutoOpenMode = L"edit";
     cfg.sessionAutoOpenPairLinked = false;
     cfg.noteRenderEnabled = true;
     cfg.noteRawOnly = false;
-    cfg.noteRenderMath = false;
+    cfg.noteRenderMath = true;
     cfg.noteWrapEnabled = true;
     cfg.noteVimModeEnabled = false;
     cfg.noteVimCaretLineRawTextVisible = false;
@@ -2544,6 +2531,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.magnifierShape = MagnifierShapeToString(MagnifierShape::Circle);
     cfg.magnifierZoom = 2.0;
     cfg.magnifierSizeDip = 120;
+    cfg.magnifierPosition = MagnifierPositionToString(MagnifierPosition::Center);
     cfg.shapeDetail = UTF8ToWide(ShapeDetailKey(g_shapeDetail));
     cfg.shapeKind = ShapeKindToString(g_shapeKind);
     cfg.shapeDrawMode = ShapeDrawModeToString(g_shapeDrawMode);
@@ -2640,7 +2628,7 @@ static bool LooksLikeWorkspaceJson(const std::string& rawJson) {
     if (json.front() != '{' || json.back() != '}') return false;
     if (!IsSyntacticallyValidJsonLite(json)) return false;
     // NOTE: shortcuts are no longer persisted in workspace.json.
-    static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfBitmapBudgetMiB|pdfSinglePageMode|panMouseWheelZoom|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|sessionSortMode|sessionNumberingMode|sessionAutoOpenMode|sessionAutoOpenPairLinked|startupSelectFirstSession|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
+static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfBitmapBudgetMiB|pdfSinglePageMode|showPdfZoomOverlay|panMouseWheelZoom|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|quickPdfScalePercent|quickPdfStandardTextAnnots|quickPdfMatchPdfPaneTextLayout|quickNoteStripMarkup|quickNoteIncludeComments|quickNoteMathPlaceholder|quickNoteMathPlaceholderText|sessionSortMode|sessionNumberingMode|sessionFileLayout|sessionAutoOpenMode|sessionAutoOpenPairLinked|startupSelectFirstSession|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
     return std::regex_search(json, keyRe);
 }
 
@@ -2734,10 +2722,12 @@ static bool IsWorkspaceConfigAutoPersistBlockedForRoot(const std::filesystem::pa
 static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
     static const std::set<std::string> known{
         "classesDir", "cacheDir", "showAnnots", "pdfFlowMode", "pdfBitmapBudgetMiB",
-        "pdfSinglePageMode", "panMouseWheelZoom", "mouseWheelInvertVertical",
+        "pdfSinglePageMode", "showPdfZoomOverlay", "panMouseWheelZoom", "mouseWheelInvertVertical",
         "mouseWheelInvertHorizontal", "touchpadInvertVertical", "touchpadInvertHorizontal",
         "ownerDrawUi", "useNativeFileDialogs", "developerMode", "studentMode",
-        "exportStandardTextAnnots", "debugLogPreviewTrace", "debugLogSwitchTiming",
+        "exportStandardTextAnnots", "quickPdfScalePercent", "quickPdfStandardTextAnnots",
+        "quickPdfMatchPdfPaneTextLayout", "quickNoteStripMarkup", "quickNoteIncludeComments",
+        "quickNoteMathPlaceholder", "quickNoteMathPlaceholderText", "debugLogPreviewTrace", "debugLogSwitchTiming",
         "debugLogCrash", "debugLogStartupWatchdog", "debugLogOfficeConversion",
         "leftWidth", "rightWidth", "topHeight",
         "windowWidth", "windowHeight", "defaultWindowWidth", "defaultWindowHeight",
@@ -2746,7 +2736,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "language", "markFontPx", "headingFontPx", "markColor", "headingColor",
         "headingBold", "headingUnderline", "headingLeftBar", "bottomPanePin", "bottomNoteMode", "notePlacement",
         "colorTone", "toneVariant", "quickAnnotPopupPlacement",
-        "lectureSortMode", "sessionSortMode", "sessionNumberingMode", "sessionAutoOpenMode", "sessionAutoOpenPairLinked", "startupSelectFirstSession", "selectionStyle", "pointerOffsetX", "pointerOffsetY",
+        "lectureSortMode", "sessionSortMode", "sessionNumberingMode", "sessionFileLayout", "sessionAutoOpenMode", "sessionAutoOpenPairLinked", "startupSelectFirstSession", "selectionStyle", "pointerOffsetX", "pointerOffsetY",
         "showMathList", "downKeyLastLineAction", "downKeyLastLineInsertNewline",
         "leftRightLineMoveAction", "autoPairBrackets", "fullWidthParenCaretInside", "fullWidthParenCancelNextLeft",
         "noteFontName", "noteFontPt", "noteRenderFontName", "noteRenderJpFontName",
@@ -2767,7 +2757,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "markerFreeWidthPt", "markerTextWidthPt", "markerTextUnderline", "eraserWidthPt",
         "markerAlpha", "lineAlpha", "arrowAlpha", "waveAlpha", "freehandAlpha", "shapeAlpha",
         "textColor", "lineColor", "arrowColor", "waveColor", "freehandColor", "markerFreeColor",
-        "markerTextColor", "shapeColor", "paletteCustomColor", "magnifierShape", "magnifierZoom", "magnifierSizeDip", "shapeDetail", "shapeKind",
+        "markerTextColor", "shapeColor", "paletteCustomColor", "magnifierShape", "magnifierZoom", "magnifierSizeDip", "magnifierPosition", "shapeDetail", "shapeKind",
         "shapeDrawMode", "annotLastMarkerDetail", "annotLastPenDetail",
         "annotLastShapePresentation", "annotLastShapeGeometry", "annotLastShapeDetail",
         // Accepted only for one-time migration from the earlier numeric representation.
@@ -2812,7 +2802,15 @@ static bool ParseJsonStringToken(const std::string& json, size_t* pos, std::stri
             *pos += 4;
             out->push_back('?');
         } else {
-            out->push_back(esc);
+            switch (esc) {
+            case 'b': out->push_back('\b'); break;
+            case 'f': out->push_back('\f'); break;
+            case 'n': out->push_back('\n'); break;
+            case 'r': out->push_back('\r'); break;
+            case 't': out->push_back('\t'); break;
+            case '"': case '\\': case '/': out->push_back(esc); break;
+            default: return false;
+            }
         }
     }
     return false;
@@ -3067,12 +3065,40 @@ static bool ReadExistingSetupJsonForAutoUpdate(const std::filesystem::path& setu
 
 
 static std::optional<std::string> ParseJsonStringField(const std::string& json, const std::string& key) {
-    std::regex re("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
+    std::regex re("\"" + key + "\"\\s*:\\s*");
     std::smatch m;
-    if (std::regex_search(json, m, re)) {
-        return m[1].str();
+    if (!std::regex_search(json, m, re)) return std::nullopt;
+    size_t pos = static_cast<size_t>(m.position(0) + m.length(0));
+    std::string value;
+    if (!ParseJsonStringToken(json, &pos, &value)) return std::nullopt;
+    return value;
+}
+
+static std::string EscapeJsonStringValue(const std::string& value) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string escaped;
+    escaped.reserve(value.size() + 8);
+    for (unsigned char ch : value) {
+        switch (ch) {
+        case '"': escaped += "\\\""; break;
+        case '\\': escaped += "\\\\"; break;
+        case '\b': escaped += "\\b"; break;
+        case '\f': escaped += "\\f"; break;
+        case '\n': escaped += "\\n"; break;
+        case '\r': escaped += "\\r"; break;
+        case '\t': escaped += "\\t"; break;
+        default:
+            if (ch < 0x20) {
+                escaped += "\\u00";
+                escaped.push_back(kHex[(ch >> 4) & 0x0f]);
+                escaped.push_back(kHex[ch & 0x0f]);
+            } else {
+                escaped.push_back(static_cast<char>(ch));
+            }
+            break;
+        }
     }
-    return std::nullopt;
+    return escaped;
 }
 
 static std::vector<std::string> ParseJsonStringArrayField(const std::string& json, const std::string& key) {
@@ -5811,6 +5837,13 @@ static std::wstring NormalizeSessionNumberingMode(const std::wstring& mode) {
     return L"count";
 }
 
+static std::wstring NormalizeSessionFileLayout(const std::wstring& layout) {
+    std::wstring value = layout;
+    std::transform(value.begin(), value.end(), value.begin(), ::towlower);
+    if (value == L"session_root" || value == L"root" || value == L"flat") return L"session_root";
+    return L"separate_directories";
+}
+
 static std::wstring NormalizeSessionAutoOpenMode(const std::wstring& mode) {
     std::wstring m = mode;
     std::transform(m.begin(), m.end(), m.begin(), ::towlower);
@@ -5915,6 +5948,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     if (auto b = ParseJsonBoolField(json, "pdfSinglePageMode")) {
         cfg.pdfSinglePageMode = *b;
     }
+    if (auto b = ParseJsonBoolField(json, "showPdfZoomOverlay")) {
+        cfg.showPdfZoomOverlay = *b;
+    }
     if (auto b = ParseJsonBoolField(json, "panMouseWheelZoom")) {
         cfg.panMouseWheelZoom = *b;
     }
@@ -5944,6 +5980,29 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto b = ParseJsonBoolField(json, "exportStandardTextAnnots")) {
         cfg.exportStandardTextAnnots = *b;
+    }
+    if (auto v = ParseJsonIntField(json, "quickPdfScalePercent")) {
+        cfg.quickPdfScalePercent = std::clamp(*v, 13, 800);
+    }
+    if (auto b = ParseJsonBoolField(json, "quickPdfStandardTextAnnots")) {
+        cfg.quickPdfStandardTextAnnots = *b;
+    }
+    if (auto b = ParseJsonBoolField(json, "quickPdfMatchPdfPaneTextLayout")) {
+        cfg.quickPdfMatchPdfPaneTextLayout = *b;
+    }
+    if (auto b = ParseJsonBoolField(json, "quickNoteStripMarkup")) {
+        cfg.quickNoteStripMarkup = *b;
+    }
+    if (auto b = ParseJsonBoolField(json, "quickNoteIncludeComments")) {
+        cfg.quickNoteIncludeComments = *b;
+    }
+    if (auto b = ParseJsonBoolField(json, "quickNoteMathPlaceholder")) {
+        cfg.quickNoteMathPlaceholder = *b;
+    }
+    if (auto s = ParseJsonStringField(json, "quickNoteMathPlaceholderText")) {
+        std::wstring value = TrimWhitespace(UTF8ToWide(*s));
+        if (value.size() > 512) value.resize(512);
+        if (!value.empty()) cfg.quickNoteMathPlaceholderText = std::move(value);
     }
     if (auto b = ParseJsonBoolField(json, "debugLogPreviewTrace")) {
         cfg.debugLogs.previewTrace = *b;
@@ -6019,6 +6078,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto s = ParseJsonStringField(json, "sessionNumberingMode")) {
         cfg.sessionNumberingMode = NormalizeSessionNumberingMode(UTF8ToWide(*s));
+    }
+    if (auto s = ParseJsonStringField(json, "sessionFileLayout")) {
+        cfg.sessionFileLayout = NormalizeSessionFileLayout(UTF8ToWide(*s));
     }
     if (auto s = ParseJsonStringField(json, "sessionAutoOpenMode")) {
         cfg.sessionAutoOpenMode = NormalizeSessionAutoOpenMode(UTF8ToWide(*s));
@@ -6298,6 +6360,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto v = ParseJsonIntField(json, "magnifierSizeDip")) {
         cfg.magnifierSizeDip = std::clamp(*v, 80, 240);
+    }
+    if (auto s = ParseJsonStringField(json, "magnifierPosition")) {
+        cfg.magnifierPosition = MagnifierPositionToString(ParseMagnifierPosition(UTF8ToWide(*s)));
     }
     const bool hasShapeDetail = ParseJsonStringField(json, "shapeDetail").has_value();
     if (auto s = ParseJsonStringField(json, "shapeDetail")) {
@@ -6834,6 +6899,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"pdfFlowMode\": \"" << WideToUTF8(NormalizePdfFlowMode(cfg.pdfFlowMode)) << "\",\n";
     ofs << "  \"pdfBitmapBudgetMiB\": " << std::clamp(cfg.pdfBitmapBudgetMiB, kPdfBitmapBudgetMiBMin, kPdfBitmapBudgetMiBMax) << ",\n";
     ofs << "  \"pdfSinglePageMode\": " << (cfg.pdfSinglePageMode ? "true" : "false") << ",\n";
+    ofs << "  \"showPdfZoomOverlay\": " << (cfg.showPdfZoomOverlay ? "true" : "false") << ",\n";
     ofs << "  \"panMouseWheelZoom\": " << (cfg.panMouseWheelZoom ? "true" : "false") << ",\n";
     ofs << "  \"mouseWheelInvertVertical\": " << (cfg.mouseWheelInvertVertical ? "true" : "false") << ",\n";
     ofs << "  \"mouseWheelInvertHorizontal\": " << (cfg.mouseWheelInvertHorizontal ? "true" : "false") << ",\n";
@@ -6844,6 +6910,14 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"developerMode\": " << (cfg.developerMode ? "true" : "false") << ",\n";
     ofs << "  \"studentMode\": " << (cfg.studentMode ? "true" : "false") << ",\n";
     ofs << "  \"exportStandardTextAnnots\": " << (cfg.exportStandardTextAnnots ? "true" : "false") << ",\n";
+    ofs << "  \"quickPdfScalePercent\": " << std::clamp(cfg.quickPdfScalePercent, 13, 800) << ",\n";
+    ofs << "  \"quickPdfStandardTextAnnots\": " << (cfg.quickPdfStandardTextAnnots ? "true" : "false") << ",\n";
+    ofs << "  \"quickPdfMatchPdfPaneTextLayout\": " << (cfg.quickPdfMatchPdfPaneTextLayout ? "true" : "false") << ",\n";
+    ofs << "  \"quickNoteStripMarkup\": " << (cfg.quickNoteStripMarkup ? "true" : "false") << ",\n";
+    ofs << "  \"quickNoteIncludeComments\": " << (cfg.quickNoteIncludeComments ? "true" : "false") << ",\n";
+    ofs << "  \"quickNoteMathPlaceholder\": " << (cfg.quickNoteMathPlaceholder ? "true" : "false") << ",\n";
+    ofs << "  \"quickNoteMathPlaceholderText\": \""
+        << EscapeJsonStringValue(WideToUTF8(cfg.quickNoteMathPlaceholderText)) << "\",\n";
     ofs << "  \"debugLogPreviewTrace\": " << (cfg.debugLogs.previewTrace ? "true" : "false") << ",\n";
     ofs << "  \"debugLogSwitchTiming\": " << (cfg.debugLogs.switchTiming ? "true" : "false") << ",\n";
     ofs << "  \"debugLogCrash\": " << (cfg.debugLogs.crash ? "true" : "false") << ",\n";
@@ -6893,6 +6967,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"lectureSortMode\": \"" << WideToUTF8(NormalizeLectureSortMode(cfg.lectureSortMode)) << "\",\n";
     ofs << "  \"sessionSortMode\": \"" << WideToUTF8(NormalizeSessionSortMode(cfg.sessionSortMode)) << "\",\n";
     ofs << "  \"sessionNumberingMode\": \"" << WideToUTF8(NormalizeSessionNumberingMode(cfg.sessionNumberingMode)) << "\",\n";
+    ofs << "  \"sessionFileLayout\": \"" << WideToUTF8(NormalizeSessionFileLayout(cfg.sessionFileLayout)) << "\",\n";
     ofs << "  \"sessionAutoOpenMode\": \"" << WideToUTF8(NormalizeSessionAutoOpenMode(cfg.sessionAutoOpenMode)) << "\",\n";
     ofs << "  \"sessionAutoOpenPairLinked\": " << (cfg.sessionAutoOpenPairLinked ? "true" : "false") << ",\n";
     ofs << "  \"startupSelectFirstSession\": " << (cfg.startupSelectFirstSession ? "true" : "false") << ",\n";
@@ -6994,6 +7069,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"magnifierShape\": \"" << WideToUTF8(MagnifierShapeToString(ParseMagnifierShape(cfg.magnifierShape))) << "\",\n";
     ofs << "  \"magnifierZoom\": " << std::clamp(cfg.magnifierZoom, 1.25, 4.0) << ",\n";
     ofs << "  \"magnifierSizeDip\": " << std::clamp(cfg.magnifierSizeDip, 80, 240) << ",\n";
+    ofs << "  \"magnifierPosition\": \"" << WideToUTF8(MagnifierPositionToString(ParseMagnifierPosition(cfg.magnifierPosition))) << "\",\n";
     ofs << "  \"shapeDetail\": \"" << WideToUTF8(cfg.shapeDetail) << "\",\n";
     ofs << "  \"shapeKind\": \"" << WideToUTF8(ShapeKindToString(ParseShapeKind(cfg.shapeKind))) << "\",\n";
     ofs << "  \"shapeDrawMode\": \"" << WideToUTF8(ShapeDrawModeToString(ParseShapeDrawMode(cfg.shapeDrawMode))) << "\",\n";
@@ -7032,8 +7108,6 @@ void PersistConfig() {
         g_config.leftSplit2 = g_leftSplit2;
         g_config.leftPaneCollapsed = g_leftPaneCollapsed;
         g_config.showAnnots = g_showAnnots;
-        g_config.bottomPanePin = BottomPanePinToString(g_bottomPanePin);
-        g_config.bottomNoteMode = BottomNoteModeToString(g_bottomNoteMode);
         g_config.notePlacement = NotePlacementToString(g_notePlacement);
         g_config.textFontName = g_textFontName;
         if (std::clamp(g_textFontActiveSizeSlot, 0, 1) == 1) {
@@ -7103,6 +7177,7 @@ void PersistConfig() {
         g_config.magnifierShape = MagnifierShapeToString(g_magnifierShape);
         g_config.magnifierZoom = std::clamp(g_magnifierZoom, 1.25, 4.0);
         g_config.magnifierSizeDip = std::clamp(g_magnifierSizeDip, 80, 240);
+        g_config.magnifierPosition = MagnifierPositionToString(g_magnifierPosition);
         SyncLegacyShapeStateFromDetail();
         g_config.shapeDetail = UTF8ToWide(ShapeDetailKey(g_shapeDetail));
         g_config.shapeKind = ShapeKindToString(g_shapeKind);

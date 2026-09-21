@@ -12,10 +12,10 @@
 //   3050..(3050 + kToolPaletteCommandSlotCapacity - 1) ID_TOOL_COLOR_BASE
 // Keep static IDs outside those ranges. If a dynamic upper bound changes,
 // update this registry and the corresponding WM_COMMAND range checks.
-inline constexpr int kToolPaletteCommandSlotCapacity = 24; // Total JSON storage capacity (7 presets + 1 last OK + 16 picker custom)
+inline constexpr int kToolPaletteCommandSlotCapacity = 24; // 8 active palette slots + 16 preserved legacy picker slots
 inline constexpr int kPresetPaletteSlotCount = 7;          // Fixed preset slots (0..6)
-inline constexpr int kLastOkColorSlotIndex = 7;             // Last OK color slot in JSON
-inline constexpr int kPickerCustomColorStartSlotIndex = 8;  // Picker "作成した色" 16 slots (8..23)
+inline constexpr int kLastOkColorSlotIndex = 7;             // Application-owned custom color slot in JSON
+inline constexpr int kPickerCustomColorStartSlotIndex = 8;  // Legacy Windows picker slots, preserved but not used
 enum CommandId : int {
     ID_FILE_OPEN_WS = 1001,
     ID_FILE_RELOAD_WS,
@@ -79,14 +79,13 @@ enum CommandId : int {
     ID_SETTINGS_PRESET_LOAD = 1305,
     ID_SETTINGS_PALETTE = 1306,
     ID_SETTINGS_NOTE = 1307,
-    ID_SETTINGS_BUNDLE_EXPORT = 1308,
-    ID_SETTINGS_BUNDLE_IMPORT = 1309,
     ID_MATH_LIST = 1500,
     ID_HELP_ABOUT = 1201,
     ID_HELP_GUIDE,
     ID_HELP_CRASH,
     ID_HELP_PDF_INFO = 1204,
     ID_HELP_SHOW_LOG_PATH = 1205,
+    ID_HELP_NOTE_INFO = 1206,
     ID_STATUS_DISPLAY = 1250,
     ID_NOTE_SHORTCUT_INPUT = 1800,
     ID_NOTE_SHORTCUT_BACK_PICKER,
@@ -175,6 +174,9 @@ enum CommandId : int {
     ID_OP_CREATE_BLANK_PDF = 3322,
     ID_OP_LAUNCH_READONLY_VIEWER = 3323,
     ID_OP_CONVERT_IMAGE_TO_PDF = 3324,
+    ID_OP_OPEN_READONLY_VIEWER_FILE = 3325,
+    ID_VIEW_CLOSE_PDF = 3326,
+    ID_VIEW_CLOSE_NOTE = 3327,
     ID_DEBUG_LOG_ARCHIVE = 3401,
     ID_DEBUG_LOG_DELETE = 3402,
     ID_DEBUG_LOG_TOGGLE_ALL = 3403,

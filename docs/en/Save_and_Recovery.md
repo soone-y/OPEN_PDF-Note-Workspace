@@ -1,13 +1,13 @@
 # Saving and Recovery
 
-Edits are protected in stage data before they are written to an original file. When you integrate with `Ctrl+S` or the Save menu, the application creates a backup and updates the original only after the safe write succeeds.
+Edits are protected internally before they are written to an original file. Save Work, normal exit, and pre-output processing create a pre-save copy and update the original only after the safe write succeeds. Document/session switching keeps the protected work without starting original-file writes.
 
 ## Choose the right action
 
-- Continue editing: automatic stage protection keeps the in-progress state.
-- Commit a checkpoint: integrate with `Ctrl+S`.
-- Review unintegrated changes: open Diff Manager from Operations or Save.
-- Return to an earlier saved state: open `Save > Restore/Backup...`.
+- Continue editing: automatic work protection keeps the in-progress state.
+- Commit a checkpoint: use `Ctrl+S` or `Save > Save Work`.
+- Review work that could not be saved: open `Save > Review Save Status...`.
+- Restore a PDF position or last-open time: select the item from `Restore`. Use `Restore > Backups` to restore or individually delete a saved backup. Select an item and choose **Details...** to review and copy its full restore-destination and metadata paths first.
 
 ## Important notes
 

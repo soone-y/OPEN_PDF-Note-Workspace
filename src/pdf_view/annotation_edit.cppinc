@@ -12,8 +12,9 @@ static bool g_editingExistingAnnot = false;
 static int g_editingOriginalIndex = -1;
 static Annotation g_editingOriginal;
 static bool g_annotHistoryDirty = false;
-static bool g_annotHistorySaveWarned = false;
 static bool g_annotHistoryLoadWarned = false;
+
+static void MarkAnnotHistoryDirty();
 
 struct TextEditSnapshot {
     std::wstring text;
@@ -24,8 +25,14 @@ struct TextEditSnapshot {
     size_t selEnd = 0;
 };
 
-static std::vector<TextEditSnapshot> g_textEditUndo;
-static std::vector<TextEditSnapshot> g_textEditRedo;
+struct TextEditCommand {
+    TextEditSnapshot before;
+    TextEditSnapshot after;
+};
+
+static std::vector<TextEditCommand> g_textEditUndo;
+static std::vector<TextEditCommand> g_textEditRedo;
+static std::optional<TextEditSnapshot> g_pendingTextEditBefore;
 
 // ============================================================================
 // End of duplicates
@@ -110,52 +117,200 @@ static void ResetEditOriginal() {
 static TextEditSnapshot CaptureTextEditSnapshot() {
     return TextEditSnapshot{
         g_pdf.editText,
-        g_pdf.editFontName,
-        g_pdf.editFontPt,
-        g_pdf.editCaret,
-        g_pdf.editSelStart,
-        g_pdf.editSelEnd,
+        g_pdf.editFontName.empty() ? g_textFontName : g_pdf.editFontName,
+        (g_pdf.editFontPt > 0.0) ? g_pdf.editFontPt : g_textFontPt,
+        std::min(g_pdf.editCaret, g_pdf.editText.size()),
+        std::min(g_pdf.editSelStart, g_pdf.editText.size()),
+        std::min(g_pdf.editSelEnd, g_pdf.editText.size()),
     };
 }
 
-static void RestoreTextEditSnapshot(const TextEditSnapshot& snap) {
-    g_pdf.editText = snap.text;
-    g_pdf.editFontName = snap.fontName.empty() ? g_textFontName : snap.fontName;
-    g_pdf.editFontPt = (snap.fontPt > 0.0) ? snap.fontPt : g_textFontPt;
-    size_t maxPos = g_pdf.editText.size();
-    g_pdf.editCaret = std::min(snap.caret, maxPos);
-    g_pdf.editSelStart = std::min(snap.selStart, maxPos);
-    g_pdf.editSelEnd = std::min(snap.selEnd, maxPos);
+static bool TextEditDocumentStateMatches(const TextEditSnapshot& left,
+                                         const TextEditSnapshot& right) {
+    // Caret and selection are view state: moving either after an edit must
+    // not make its document command ineligible for Undo/Redo. Only canonical
+    // text and formatting are preconditions.
+    return left.text == right.text && left.fontName == right.fontName &&
+           left.fontPt == right.fontPt;
+}
+
+static size_t SaturatingTextEditOffsetAdd(size_t left, size_t right) {
+    const size_t max = std::numeric_limits<size_t>::max();
+    return right > max - left ? max : left + right;
+}
+
+struct TextEditReplacementRange {
+    size_t start = 0;
+    size_t deletedLen = 0;
+    size_t insertedLen = 0;
+};
+
+static TextEditReplacementRange FindTextEditReplacementRange(
+    std::wstring_view source, std::wstring_view destination) {
+    size_t prefix = 0;
+    const size_t prefixLimit = std::min(source.size(), destination.size());
+    while (prefix < prefixLimit && source[prefix] == destination[prefix]) {
+        ++prefix;
+    }
+    size_t suffix = 0;
+    while (suffix < source.size() - prefix && suffix < destination.size() - prefix &&
+           source[source.size() - 1 - suffix] == destination[destination.size() - 1 - suffix]) {
+        ++suffix;
+    }
+    return {prefix, source.size() - prefix - suffix, destination.size() - prefix - suffix};
+}
+
+static size_t TransformTextEditOffset(size_t offset,
+                                      const TextEditReplacementRange& replacement) {
+    const size_t sourceEnd =
+        SaturatingTextEditOffsetAdd(replacement.start, replacement.deletedLen);
+    if (offset >= sourceEnd) {
+        return SaturatingTextEditOffsetAdd(offset - replacement.deletedLen,
+                                            replacement.insertedLen);
+    }
+    if (offset <= replacement.start) return offset;
+    return replacement.start;
+}
+
+static TextEditSnapshot WithSelectionTransformedThroughTextEdit(
+    const TextEditSnapshot& current, const TextEditSnapshot& destination) {
+    TextEditSnapshot next = destination;
+    const TextEditReplacementRange replacement =
+        FindTextEditReplacementRange(current.text, destination.text);
+    const size_t sourceEnd =
+        SaturatingTextEditOffsetAdd(replacement.start, replacement.deletedLen);
+    const size_t destinationEnd =
+        SaturatingTextEditOffsetAdd(replacement.start, replacement.insertedLen);
+    const size_t currentSelStart = std::min(current.selStart, current.selEnd);
+    const size_t currentSelEnd = std::max(current.selStart, current.selEnd);
+    if (currentSelStart != currentSelEnd && currentSelStart < sourceEnd &&
+        currentSelEnd > replacement.start) {
+        next.caret = destinationEnd;
+        next.selStart = destinationEnd;
+        next.selEnd = destinationEnd;
+        return next;
+    }
+    next.caret = TransformTextEditOffset(current.caret, replacement);
+    next.selStart = TransformTextEditOffset(current.selStart, replacement);
+    next.selEnd = TransformTextEditOffset(current.selEnd, replacement);
+    return next;
+}
+
+static bool TryCaptureTextEditSnapshot(TextEditSnapshot* out) {
+    if (!out) return false;
+    try {
+        *out = CaptureTextEditSnapshot();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool RestoreTextEditSnapshot(const TextEditSnapshot& snap) {
+    // Allocate every fallible string before touching the live edit state.
+    // The swaps and scalar assignments below are non-throwing, so a failed
+    // restore leaves both the text and the history entry unchanged.
+    try {
+        std::wstring nextText = snap.text;
+        std::wstring nextFont = snap.fontName.empty() ? g_textFontName : snap.fontName;
+        const size_t maxPos = nextText.size();
+        const size_t nextCaret = std::min(snap.caret, maxPos);
+        const size_t nextSelStart = std::min(snap.selStart, maxPos);
+        const size_t nextSelEnd = std::min(snap.selEnd, maxPos);
+        g_pdf.editText.swap(nextText);
+        g_pdf.editFontName.swap(nextFont);
+        g_pdf.editFontPt = (snap.fontPt > 0.0) ? snap.fontPt : g_textFontPt;
+        g_pdf.editCaret = nextCaret;
+        g_pdf.editSelStart = nextSelStart;
+        g_pdf.editSelEnd = nextSelEnd;
+    } catch (...) {
+        return false;
+    }
     g_pdf.imeComp.clear();
     g_pdf.imeComposing = false;
     g_pdf.suppressNextImeResultReturnChar = false;
     g_pdf.imeResultMessageTime = 0;
     g_pdf.editLayoutDirty = true;
+    return true;
+}
+
+static bool FinalizePendingTextEditChange() {
+    if (!g_pendingTextEditBefore.has_value()) return true;
+    TextEditSnapshot after;
+    if (!TryCaptureTextEditSnapshot(&after)) return false;
+    // Caret/selection movement is not a document command. Recording it would
+    // make the first Undo merely jump to an old selection rather than undoing
+    // text or formatting.
+    if (TextEditDocumentStateMatches(*g_pendingTextEditBefore, after)) {
+        g_pendingTextEditBefore.reset();
+        return true;
+    }
+    try {
+        g_textEditUndo.reserve(g_textEditUndo.size() + 1);
+        g_textEditUndo.emplace_back(TextEditCommand{
+            *g_pendingTextEditBefore, std::move(after)});
+    } catch (...) {
+        return false;
+    }
+    g_textEditRedo.clear();
+    if (g_textEditUndo.size() > kTextEditHistoryLimit) {
+        const size_t drop = g_textEditUndo.size() - kTextEditHistoryLimit;
+        g_textEditUndo.erase(g_textEditUndo.begin(), g_textEditUndo.begin() + drop);
+    }
+    g_pendingTextEditBefore.reset();
+    return true;
+}
+
+static bool PendingTextEditChangeExists(bool* outChanged) {
+    if (outChanged) *outChanged = false;
+    if (!g_pendingTextEditBefore.has_value()) return true;
+    TextEditSnapshot current;
+    if (!TryCaptureTextEditSnapshot(&current)) return false;
+    if (outChanged) {
+        *outChanged = !TextEditDocumentStateMatches(*g_pendingTextEditBefore, current);
+    }
+    return true;
 }
 
 static void ClearTextEditHistory() {
     g_textEditUndo.clear();
     g_textEditRedo.clear();
+    g_pendingTextEditBefore.reset();
 }
 
 static void RecordTextEditChange() {
     if (!g_pdf.editingText) return;
-    g_textEditRedo.clear();
-    g_textEditUndo.push_back(CaptureTextEditSnapshot());
-    if (g_textEditUndo.size() > kTextEditHistoryLimit) {
-        size_t drop = g_textEditUndo.size() - kTextEditHistoryLimit;
-        g_textEditUndo.erase(g_textEditUndo.begin(), g_textEditUndo.begin() + drop);
-    }
+    if (!FinalizePendingTextEditChange()) return;
+    TextEditSnapshot before;
+    if (!TryCaptureTextEditSnapshot(&before)) return;
+    g_pendingTextEditBefore = std::move(before);
 }
 
 static bool UndoTextEdit(HWND hwnd) {
-    if (!g_pdf.editingText || g_textEditUndo.empty()) return false;
+    if (!g_pdf.editingText || !FinalizePendingTextEditChange() || g_textEditUndo.empty()) return false;
+    TextEditSnapshot current;
+    if (!TryCaptureTextEditSnapshot(&current)) return false;
+    const TextEditCommand& command = g_textEditUndo.back();
+    if (!TextEditDocumentStateMatches(current, command.after)) return false;
+    TextEditSnapshot destination;
+    try {
+        destination = WithSelectionTransformedThroughTextEdit(current, command.before);
+    } catch (...) {
+        return false;
+    }
     RECT before{};
-    bool hadBefore = GetEditingTextBoxClientRect(&before);
-    g_textEditRedo.push_back(CaptureTextEditSnapshot());
-    TextEditSnapshot snap = std::move(g_textEditUndo.back());
+    const bool hadBefore = GetEditingTextBoxClientRect(&before);
+    try {
+        g_textEditRedo.reserve(g_textEditRedo.size() + 1);
+        g_textEditRedo.push_back(command);
+    } catch (...) {
+        return false;
+    }
+    if (!RestoreTextEditSnapshot(destination)) {
+        g_textEditRedo.pop_back();
+        return false;
+    }
     g_textEditUndo.pop_back();
-    RestoreTextEditSnapshot(snap);
     RecalcEditingTextboxSize(true);
     EnsureEditingTextBoxVisible(hwnd, L"undo_text_edit");
     UpdateImeWindowPosition(hwnd, true);
@@ -164,17 +319,30 @@ static bool UndoTextEdit(HWND hwnd) {
 }
 
 static bool RedoTextEdit(HWND hwnd) {
-    if (!g_pdf.editingText || g_textEditRedo.empty()) return false;
-    RECT before{};
-    bool hadBefore = GetEditingTextBoxClientRect(&before);
-    g_textEditUndo.push_back(CaptureTextEditSnapshot());
-    if (g_textEditUndo.size() > kTextEditHistoryLimit) {
-        size_t drop = g_textEditUndo.size() - kTextEditHistoryLimit;
-        g_textEditUndo.erase(g_textEditUndo.begin(), g_textEditUndo.begin() + drop);
+    if (!g_pdf.editingText || !FinalizePendingTextEditChange() || g_textEditRedo.empty()) return false;
+    TextEditSnapshot current;
+    if (!TryCaptureTextEditSnapshot(&current)) return false;
+    const TextEditCommand& command = g_textEditRedo.back();
+    if (!TextEditDocumentStateMatches(current, command.before)) return false;
+    TextEditSnapshot destination;
+    try {
+        destination = WithSelectionTransformedThroughTextEdit(current, command.after);
+    } catch (...) {
+        return false;
     }
-    TextEditSnapshot snap = std::move(g_textEditRedo.back());
+    RECT before{};
+    const bool hadBefore = GetEditingTextBoxClientRect(&before);
+    try {
+        g_textEditUndo.reserve(g_textEditUndo.size() + 1);
+        g_textEditUndo.push_back(command);
+    } catch (...) {
+        return false;
+    }
+    if (!RestoreTextEditSnapshot(destination)) {
+        g_textEditUndo.pop_back();
+        return false;
+    }
     g_textEditRedo.pop_back();
-    RestoreTextEditSnapshot(snap);
     RecalcEditingTextboxSize(true);
     EnsureEditingTextBoxVisible(hwnd, L"redo_text_edit");
     UpdateImeWindowPosition(hwnd, true);
@@ -182,7 +350,7 @@ static bool RedoTextEdit(HWND hwnd) {
     return true;
 }
 
-static void ClearAnnotHistory() {
+void ClearPdfAnnotationHistory() {
     g_annotUndo.clear();
     g_annotRedo.clear();
     g_annotHistoryDirty = false;
@@ -212,12 +380,6 @@ void InsertAnnotAt(const Annotation& ann, int index) {
     }
     g_annots.insert(g_annots.begin() + index, ann);
     EnsureAnnotationId(g_annots[static_cast<size_t>(index)], g_annots, index);
-}
-
-static bool EraseAnnotAt(int index) {
-    if (index < 0 || index >= static_cast<int>(g_annots.size())) return false;
-    g_annots.erase(g_annots.begin() + index);
-    return true;
 }
 
 static bool AnnotationEquals(const Annotation& a, const Annotation& b) {
@@ -256,119 +418,137 @@ static int FindAnnotIndexByIdInList(const std::vector<Annotation>& annots, std::
     return -1;
 }
 
-static int FindAnnotIndexByIdOrFallbackInList(const std::vector<Annotation>& annots,
-                                              const std::wstring& id,
-                                              int fallbackIndex) {
-    int resolved = FindAnnotIndexByIdInList(annots, id);
-    if (resolved >= 0) return resolved;
-    if (fallbackIndex >= 0 && fallbackIndex < static_cast<int>(annots.size())) return fallbackIndex;
-    return -1;
+static bool AnnotationAtMatches(const std::vector<Annotation>& annots,
+                                int index,
+                                const Annotation& expected) {
+    return !expected.id.empty() && index >= 0 &&
+           index < static_cast<int>(annots.size()) &&
+           annots[static_cast<size_t>(index)].id == expected.id &&
+           AnnotationEquals(annots[static_cast<size_t>(index)], expected);
 }
 
-static void InsertAnnotAtInList(std::vector<Annotation>* annots, const Annotation& ann, int index) {
-    if (!annots) return;
-    if (index < 0 || index > static_cast<int>(annots->size())) {
-        annots->push_back(ann);
-        EnsureAnnotationId(annots->back(), *annots, static_cast<int>(annots->size()) - 1);
-        return;
+static bool AnnotationListsMatchExactly(const std::vector<Annotation>& left,
+                                        const std::vector<Annotation>& right) {
+    if (left.size() != right.size()) return false;
+    for (size_t i = 0; i < left.size(); ++i) {
+        if (left[i].id != right[i].id || !AnnotationEquals(left[i], right[i])) {
+            return false;
+        }
     }
-    annots->insert(annots->begin() + index, ann);
-    EnsureAnnotationId((*annots)[static_cast<size_t>(index)], *annots, index);
-}
-
-static bool EraseAnnotAtInList(std::vector<Annotation>* annots, int index) {
-    if (!annots || index < 0 || index >= static_cast<int>(annots->size())) return false;
-    annots->erase(annots->begin() + index);
     return true;
 }
 
-void ApplyAnnotCommandToList(std::vector<Annotation>* annots, const AnnotCommand& cmd) {
-    if (!annots) return;
+static bool TryApplyAnnotCommandForward(std::vector<Annotation>* annots,
+                                        const AnnotCommand& cmd) {
+    if (!annots) return false;
     switch (cmd.kind) {
     case AnnotCommandKind::Add:
-        {
-            const int existingIndex = FindAnnotIndexByIdInList(*annots, cmd.after.id);
-            if (existingIndex >= 0 && existingIndex < static_cast<int>(annots->size())) {
-                (*annots)[static_cast<size_t>(existingIndex)] = cmd.after;
-                EnsureAnnotationId((*annots)[static_cast<size_t>(existingIndex)], *annots, existingIndex);
-            } else {
-                InsertAnnotAtInList(annots, cmd.after, cmd.afterIndex);
-            }
+        if (cmd.after.id.empty() || cmd.afterIndex < 0 ||
+            cmd.afterIndex > static_cast<int>(annots->size()) ||
+            FindAnnotIndexByIdInList(*annots, cmd.after.id) >= 0) {
+            return false;
         }
-        break;
+        annots->insert(annots->begin() + cmd.afterIndex, cmd.after);
+        return true;
     case AnnotCommandKind::Remove:
-        EraseAnnotAtInList(annots, FindAnnotIndexByIdOrFallbackInList(*annots, cmd.before.id, cmd.beforeIndex));
-        break;
+        if (!AnnotationAtMatches(*annots, cmd.beforeIndex, cmd.before)) return false;
+        annots->erase(annots->begin() + cmd.beforeIndex);
+        return true;
     case AnnotCommandKind::Update:
-        {
-            const int resolvedBeforeIndex =
-                FindAnnotIndexByIdOrFallbackInList(*annots, cmd.before.id, cmd.beforeIndex);
-            if (cmd.beforeIndex == cmd.afterIndex &&
-                resolvedBeforeIndex >= 0 && resolvedBeforeIndex < static_cast<int>(annots->size())) {
-                (*annots)[static_cast<size_t>(resolvedBeforeIndex)] = cmd.after;
-                EnsureAnnotationId((*annots)[static_cast<size_t>(resolvedBeforeIndex)], *annots, resolvedBeforeIndex);
-            } else {
-                int insertIndex = cmd.afterIndex;
-                if (resolvedBeforeIndex >= 0 && insertIndex > resolvedBeforeIndex) {
-                    --insertIndex;
-                }
-                EraseAnnotAtInList(annots, resolvedBeforeIndex);
-                InsertAnnotAtInList(annots, cmd.after, insertIndex);
-            }
+        if (cmd.before.id.empty() || cmd.after.id.empty() ||
+            cmd.before.id != cmd.after.id ||
+            !AnnotationAtMatches(*annots, cmd.beforeIndex, cmd.before)) {
+            return false;
         }
-        break;
+        if (cmd.beforeIndex == cmd.afterIndex) {
+            (*annots)[static_cast<size_t>(cmd.beforeIndex)] = cmd.after;
+            return true;
+        }
+        annots->erase(annots->begin() + cmd.beforeIndex);
+        if (cmd.afterIndex < 0 || cmd.afterIndex > static_cast<int>(annots->size())) {
+            return false;
+        }
+        annots->insert(annots->begin() + cmd.afterIndex, cmd.after);
+        return true;
     case AnnotCommandKind::Reorder:
-        if (!cmd.afterSnapshot.empty()) {
-            *annots = cmd.afterSnapshot;
-            EnsureAnnotationIds(*annots);
-        }
-        break;
+        if (!AnnotationListsMatchExactly(*annots, cmd.snapshot)) return false;
+        *annots = cmd.afterSnapshot;
+        return true;
     case AnnotCommandKind::ClearAll:
+        if (!AnnotationListsMatchExactly(*annots, cmd.snapshot)) return false;
         annots->clear();
-        break;
+        return true;
     }
+    return false;
 }
 
-static void ApplyAnnotCommand(const AnnotCommand& cmd) {
-    ApplyAnnotCommandToList(&g_annots, cmd);
-}
-
-static void RevertAnnotCommand(const AnnotCommand& cmd) {
+static bool TryApplyAnnotCommandReverse(std::vector<Annotation>* annots,
+                                        const AnnotCommand& cmd) {
+    if (!annots) return false;
     switch (cmd.kind) {
     case AnnotCommandKind::Add:
-        EraseAnnotAt(FindAnnotIndexByIdOrFallback(cmd.after.id, cmd.afterIndex));
-        break;
+        if (!AnnotationAtMatches(*annots, cmd.afterIndex, cmd.after)) return false;
+        annots->erase(annots->begin() + cmd.afterIndex);
+        return true;
     case AnnotCommandKind::Remove:
-        InsertAnnotAt(cmd.before, cmd.beforeIndex);
-        break;
-    case AnnotCommandKind::Update:
-        {
-            const int resolvedAfterIndex = FindAnnotIndexByIdOrFallback(cmd.after.id, cmd.afterIndex);
-            if (cmd.beforeIndex == cmd.afterIndex &&
-                resolvedAfterIndex >= 0 && resolvedAfterIndex < static_cast<int>(g_annots.size())) {
-                g_annots[static_cast<size_t>(resolvedAfterIndex)] = cmd.before;
-                EnsureAnnotationId(g_annots[static_cast<size_t>(resolvedAfterIndex)],
-                                   g_annots,
-                                   resolvedAfterIndex);
-            } else {
-                int insertIndex = cmd.beforeIndex;
-                if (resolvedAfterIndex >= 0 && insertIndex > resolvedAfterIndex) {
-                    --insertIndex;
-                }
-                EraseAnnotAt(resolvedAfterIndex);
-                InsertAnnotAt(cmd.before, insertIndex);
-            }
+        if (cmd.before.id.empty() || cmd.beforeIndex < 0 ||
+            cmd.beforeIndex > static_cast<int>(annots->size()) ||
+            FindAnnotIndexByIdInList(*annots, cmd.before.id) >= 0) {
+            return false;
         }
-        break;
+        annots->insert(annots->begin() + cmd.beforeIndex, cmd.before);
+        return true;
+    case AnnotCommandKind::Update:
+        if (cmd.before.id.empty() || cmd.after.id.empty() ||
+            cmd.before.id != cmd.after.id ||
+            !AnnotationAtMatches(*annots, cmd.afterIndex, cmd.after)) {
+            return false;
+        }
+        if (cmd.beforeIndex == cmd.afterIndex) {
+            (*annots)[static_cast<size_t>(cmd.afterIndex)] = cmd.before;
+            return true;
+        }
+        annots->erase(annots->begin() + cmd.afterIndex);
+        if (cmd.beforeIndex < 0 || cmd.beforeIndex > static_cast<int>(annots->size())) {
+            return false;
+        }
+        annots->insert(annots->begin() + cmd.beforeIndex, cmd.before);
+        return true;
     case AnnotCommandKind::Reorder:
-        g_annots = cmd.snapshot;
-        EnsureAnnotationIds(g_annots);
-        break;
+        if (!AnnotationListsMatchExactly(*annots, cmd.afterSnapshot)) return false;
+        *annots = cmd.snapshot;
+        return true;
     case AnnotCommandKind::ClearAll:
-        g_annots = cmd.snapshot;
-        EnsureAnnotationIds(g_annots);
-        break;
+        if (!annots->empty()) return false;
+        *annots = cmd.snapshot;
+        return true;
     }
+    return false;
+}
+
+bool ApplyAnnotCommandToList(std::vector<Annotation>* annots, const AnnotCommand& cmd) {
+    if (!annots) return false;
+    std::vector<Annotation> next;
+    try {
+        next = *annots;
+    } catch (...) {
+        return false;
+    }
+    if (!TryApplyAnnotCommandForward(&next, cmd)) return false;
+    *annots = std::move(next);
+    return true;
+}
+
+static bool RevertAnnotCommand(const AnnotCommand& cmd) {
+    std::vector<Annotation> next;
+    try {
+        next = g_annots;
+    } catch (...) {
+        return false;
+    }
+    if (!TryApplyAnnotCommandReverse(&next, cmd)) return false;
+    g_annots = std::move(next);
+    return true;
 }
 
 static void RecordAnnotAdd(int index, const Annotation& ann, bool revealLatest = true) {
@@ -416,6 +596,78 @@ static void RecordAnnotUpdate(int beforeIndex, int afterIndex, const Annotation&
     cmd.before = std::move(beforeRecorded);
     cmd.after = std::move(afterRecorded);
     PushAnnotCommand(std::move(cmd));
+}
+
+static bool AnnotationIsPendingLinkMarker(const Annotation& ann,
+                                          const std::wstring& linkId) {
+    return ann.type == Annotation::Type::LinkMarker && ann.linkId == linkId;
+}
+
+static bool AnnotCommandReferencesPendingLink(const AnnotCommand& cmd,
+                                              const std::wstring& linkId) {
+    switch (cmd.kind) {
+    case AnnotCommandKind::Add:
+        return AnnotationIsPendingLinkMarker(cmd.after, linkId);
+    case AnnotCommandKind::Remove:
+        return AnnotationIsPendingLinkMarker(cmd.before, linkId);
+    case AnnotCommandKind::Update:
+        return AnnotationIsPendingLinkMarker(cmd.before, linkId) ||
+               AnnotationIsPendingLinkMarker(cmd.after, linkId);
+    case AnnotCommandKind::Reorder:
+    case AnnotCommandKind::ClearAll:
+        return false;
+    }
+    return false;
+}
+
+static void DiscardPendingLinkAnnotHistory(const std::wstring& linkId) {
+    if (linkId.empty()) return;
+    const auto erasePendingLink = [&](std::vector<AnnotCommand>& commands) {
+        const auto newEnd = std::remove_if(
+            commands.begin(), commands.end(), [&](const AnnotCommand& cmd) {
+                return AnnotCommandReferencesPendingLink(cmd, linkId);
+            });
+        const bool changed = newEnd != commands.end();
+        commands.erase(newEnd, commands.end());
+        return changed;
+    };
+    const bool undoChanged = erasePendingLink(g_annotUndo);
+    const bool redoChanged = erasePendingLink(g_annotRedo);
+    if (undoChanged || redoChanged) {
+        MarkAnnotHistoryDirty();
+    }
+}
+
+static void SynchronizePendingPdfLinkEndpointAfterHistoryReplay(
+    const AnnotCommand& cmd,
+    bool undo) {
+    if (!g_linkPending.active || g_linkPending.id.empty() ||
+        cmd.kind != AnnotCommandKind::Add ||
+        !AnnotationIsPendingLinkMarker(cmd.after, g_linkPending.id)) {
+        return;
+    }
+
+    if (undo) {
+        if (g_linkPending.pdfPoints > 0) {
+            --g_linkPending.pdfPoints;
+        }
+        g_linkPending.havePdf = (g_linkPending.pdfPoints > 0);
+        if (!g_linkPending.havePdf) {
+            g_linkPending.pdfPage = -1;
+            g_linkPending.pdfAnnotIndex = -1;
+            g_linkPending.pdfX = 0.0;
+            g_linkPending.pdfY = 0.0;
+        }
+        return;
+    }
+
+    ++g_linkPending.pdfPoints;
+    g_linkPending.havePdf = true;
+    g_linkPending.pdfPage = cmd.after.pageIndex;
+    g_linkPending.pdfX = cmd.after.x1;
+    g_linkPending.pdfY = cmd.after.y1;
+    g_linkPending.pdfAnnotIndex = FindAnnotIndexByIdInList(g_annots, cmd.after.id);
+    RememberPendingLinkPdfPath(CurrentLogicalPdfPath());
 }
 
 static void RecordAnnotClear(std::vector<Annotation>&& snapshot) {
@@ -680,10 +932,12 @@ bool FinalizePendingPdfLinkMarkers(HWND owner, const std::wstring& linkId, const
         auto& ann = g_annots[i];
         if (ann.type != Annotation::Type::LinkMarker) continue;
         if (ann.linkId != linkId) continue;
+        const Annotation before = ann;
         if (!notePath.empty()) {
             ann.linkNotePath = notePath;
         }
-        RecordAnnotAdd(static_cast<int>(i), ann);
+        if (AnnotationEquals(before, ann)) continue;
+        RecordAnnotUpdate(static_cast<int>(i), static_cast<int>(i), before, ann);
         found = true;
     }
     if (!found) return false;
@@ -703,6 +957,10 @@ bool DiscardPendingPdfLinkMarkers(const std::wstring& linkId) {
         removed = true;
     }
     if (removed) {
+        // The canceled transaction must not leave an Add command that can
+        // resurrect an endpoint, nor append stale commands into its stage.
+        DiscardPendingLinkAnnotHistory(linkId);
+        InvalidatePendingAnnotStageCommands(CurrentLogicalPdfPath());
         MarkAnnotsDirty(g_hPdfView ? GetParent(g_hPdfView) : nullptr);
         RefreshAnnotPanel();
         if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
@@ -713,15 +971,17 @@ bool DiscardPendingPdfLinkMarkers(const std::wstring& linkId) {
 static bool UndoAnnotCommand(HWND owner) {
     if (g_pdf.kind != DocKind::Pdf) return false;
     if (g_annotUndo.empty()) return false;
-    AnnotCommand cmd = std::move(g_annotUndo.back());
-    g_annotUndo.pop_back();
-    if (cmd.kind == AnnotCommandKind::ClearAll) {
-        // Avoid keeping two full copies (g_annots + cmd.snapshot). Redo will capture again if needed.
-        g_annots = std::move(cmd.snapshot);
-    } else {
-        RevertAnnotCommand(cmd);
+    AnnotCommand cmd;
+    try {
+        cmd = g_annotUndo.back();
+        g_annotRedo.reserve(g_annotRedo.size() + 1);
+    } catch (...) {
+        return false;
     }
+    if (!RevertAnnotCommand(cmd)) return false;
+    SynchronizePendingPdfLinkEndpointAfterHistoryReplay(cmd, /*undo=*/true);
     g_annotRedo.push_back(std::move(cmd));
+    g_annotUndo.pop_back();
     InvalidatePendingAnnotStageCommands(CurrentLogicalPdfPath());
     MarkAnnotHistoryDirty();
     MarkAnnotsDirty(owner);
@@ -732,14 +992,17 @@ static bool UndoAnnotCommand(HWND owner) {
 static bool RedoAnnotCommand(HWND owner) {
     if (g_pdf.kind != DocKind::Pdf) return false;
     if (g_annotRedo.empty()) return false;
-    AnnotCommand cmd = std::move(g_annotRedo.back());
-    g_annotRedo.pop_back();
-    if (cmd.kind == AnnotCommandKind::ClearAll && cmd.snapshot.empty()) {
-        // Re-capture the current annotations so undo after redo can restore them (even if snapshot was evicted).
-        cmd.snapshot = std::move(g_annots);
+    AnnotCommand cmd;
+    try {
+        cmd = g_annotRedo.back();
+        g_annotUndo.reserve(g_annotUndo.size() + 1);
+    } catch (...) {
+        return false;
     }
-    ApplyAnnotCommand(cmd);
+    if (!ApplyAnnotCommandToList(&g_annots, cmd)) return false;
+    SynchronizePendingPdfLinkEndpointAfterHistoryReplay(cmd, /*undo=*/false);
     g_annotUndo.push_back(std::move(cmd));
+    g_annotRedo.pop_back();
     TrimAnnotHistory();
     InvalidatePendingAnnotStageCommands(CurrentLogicalPdfPath());
     MarkAnnotHistoryDirty();
@@ -759,6 +1022,9 @@ bool CanExecutePdfUndoRedoFromFocus(bool undo) {
         return false;
     }
     if (g_pdf.editingText) {
+        bool pendingChange = false;
+        if (!PendingTextEditChangeExists(&pendingChange)) return false;
+        if (pendingChange) return undo;
         return undo ? !g_textEditUndo.empty() : !g_textEditRedo.empty();
     }
     return undo ? !g_annotUndo.empty() : !g_annotRedo.empty();

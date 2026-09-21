@@ -1,6 +1,11 @@
 ﻿// file: main/file_ops_move_rename.cppinc
 // NOTE: Included by operations.cppinc. This fragment owns safe rename/move flows
 // and any linked note-path rewrites needed to keep data consistent.
+#include "clrop/hash.h"
+
+#include <algorithm>
+#include <limits>
+
 static std::wstring OperationMenuTitle() {
     return GetUiText().menuOperation.empty() ? GetUiText().menuFile : GetUiText().menuOperation;
 }
@@ -114,19 +119,6 @@ static bool ReadOperationFileBytes(const std::filesystem::path& path,
     return true;
 }
 
-static bool RestoreOperationFileBytes(const std::filesystem::path& path,
-                                      const std::string& bytes,
-                                      std::wstring* outErr) {
-    if (outErr) outErr->clear();
-    const auto preferredTmp = OperationPreferredTmpDir();
-    const auto quarantineDir = OperationQuarantineDir();
-    if (!atomic_write::AtomicWriteBytes(path, bytes.data(), bytes.size(),
-                                        preferredTmp, quarantineDir, outErr)) {
-        return false;
-    }
-    return true;
-}
-
 static size_t ReplaceLinkedNotePathInAnnotations(std::vector<Annotation>& annots,
                                                  const std::filesystem::path& oldNotePath,
                                                  const std::filesystem::path& newNotePath) {
@@ -196,7 +188,6 @@ struct NoteLinkRewriteFile {
     std::filesystem::path filePath;
     std::wstring pdfPath;
     std::vector<Annotation> updatedAnnots;
-    std::string originalBytes;
 };
 
 struct NoteLinkRewritePlan {
@@ -220,22 +211,522 @@ struct OperationTransactionMove {
     std::filesystem::path src;
     std::filesystem::path dest;
     std::filesystem::path backup;
+    std::uint64_t originalSize = 0;
+    std::string originalSha256;
+    std::uint64_t backupSize = 0;
+    std::string backupSha256;
+    // Normally equal to original.  A link rewrite that targets this source
+    // replaces it with the rewrite's verified postcondition before moving.
+    std::uint64_t finalSize = 0;
+    std::string finalSha256;
+    // prepared -> source_changing -> postcondition_verified
+    std::string step = "prepared";
 };
 
 struct OperationTransactionRewrite {
     std::filesystem::path target;
     std::filesystem::path backup;
+    std::uint64_t originalSize = 0;
+    std::string originalSha256;
+    std::uint64_t backupSize = 0;
+    std::string backupSha256;
+    std::uint64_t rewrittenSize = 0;
+    std::string rewrittenSha256;
+    // prepared -> rewriting -> postcondition_verified
+    std::string step = "prepared";
 };
+
+// The note catalog is a persistent resource member, not merely process UI
+// state.  A file rename and the NoteId alias rebind therefore have distinct
+// durable steps.  This lets interrupted operations prove which side advanced
+// without guessing from a filename.
+struct OperationTransactionNoteAlias {
+    note::NoteId noteId{};
+    std::filesystem::path src;
+    std::filesystem::path dest;
+    // prepared -> rebinding -> postcondition_verified
+    std::string step = "prepared";
+};
+
+// PDF and annotation-sidecar (LinkSet) identities are persisted separately
+// from their files.  The matching file move contains the full postcondition
+// fingerprint; this alias records the catalog transition independently.
+struct OperationTransactionResourceAlias {
+    WorkspaceResourceId resourceId{};
+    WorkspaceResourceKind kind = WorkspaceResourceKind::Pdf;
+    std::filesystem::path src;
+    std::filesystem::path dest;
+    // prepared -> rebinding -> postcondition_verified
+    std::string step = "prepared";
+};
+
+static std::optional<WorkspaceResourceKind> OperationResourceKindForFile(
+    const std::filesystem::path& path) {
+    if (IsPdfFile(path)) return WorkspaceResourceKind::Pdf;
+    if (ToLowerAscii(path.extension().wstring()) == L".clrop") {
+        return WorkspaceResourceKind::LinkSet;
+    }
+    return std::nullopt;
+}
+
+static const char* OperationResourceKindName(WorkspaceResourceKind kind) {
+    switch (kind) {
+    case WorkspaceResourceKind::Pdf: return "pdf";
+    case WorkspaceResourceKind::LinkSet: return "link_set";
+    }
+    return "";
+}
+
+static std::optional<WorkspaceResourceKind> ParseOperationResourceKind(std::string_view value) {
+    if (value == "pdf") return WorkspaceResourceKind::Pdf;
+    if (value == "link_set") return WorkspaceResourceKind::LinkSet;
+    return std::nullopt;
+}
 
 struct OperationTransaction {
     std::filesystem::path dir;
     std::filesystem::path manifest;
+    std::filesystem::path sessionRoot;
+    std::wstring id;
+    int version = 6;
     std::vector<OperationTransactionMove> moves;
     std::vector<OperationTransactionRewrite> rewrites;
+    std::vector<OperationTransactionNoteAlias> noteAliases;
+    std::vector<OperationTransactionResourceAlias> resourceAliases;
 };
+
+// A failed recovery blocks only the session whose files are represented by
+// the manifest.  It is deliberately not a workspace-wide latch: another
+// session must not become unusable merely because this global evidence store
+// contains an unrelated incomplete operation.
+struct OperationRecoveryBlock {
+    std::wstring sessionKey;
+    std::filesystem::path manifest;
+    OperationTransaction transaction;
+    std::string state;
+    bool hasTransaction = false;
+    bool memberPathsVerified = false;
+};
+
+static OperationRecoveryBlock s_operationRecoveryBlock;
+
+// Workspace moves have a deliberately small, process-local history. The
+// manifest remains recovery evidence, not persistent undo state: a restart
+// starts with no enabled operation undo/redo entry. The opposite transaction
+// retains only the verified pre-rewrite backups needed to redo a link rewrite.
+struct WorkspaceOperationHistoryEntry {
+    OperationTransaction transaction;
+    std::optional<OperationTransaction> oppositeTransaction;
+};
+
+struct WorkspaceOperationHistory {
+    std::optional<WorkspaceOperationHistoryEntry> undo;
+    std::optional<WorkspaceOperationHistoryEntry> redo;
+};
+
+static WorkspaceOperationHistory s_workspaceOperationHistory;
 
 static std::filesystem::path OperationTransactionsRoot() {
     return OperationQuarantineDir() / L"operation_transactions";
+}
+
+static bool EnsureOperationResourceCatalogConfigured(std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (g_workspaceRoot.empty()) {
+        if (outErr) *outErr = L"workspace resource catalog requires an open workspace";
+        return false;
+    }
+    return ConfigureRuntimeWorkspaceResourceCatalog(std::filesystem::path(g_workspaceRoot), outErr);
+}
+
+static std::wstring OperationSessionKey(const std::filesystem::path& sessionRoot) {
+    return NormalizePathKey(sessionRoot);
+}
+
+static bool TransactionBelongsToOperationSession(
+    const OperationTransaction& tx,
+    const std::filesystem::path& sessionRoot) {
+    if (sessionRoot.empty()) return false;
+    if (tx.version == 4 || tx.version == 5 || tx.version == 6) {
+        return !tx.sessionRoot.empty() && AreSameLocalPath(tx.sessionRoot, sessionRoot);
+    }
+
+    // V1/V2 did not record the session root.  Do not assume that every legacy
+    // record in the workspace-wide evidence store belongs to the session that
+    // happens to be opening now.  A move is mandatory in every manifest, so
+    // its source/destination is the conservative ownership evidence.
+    for (const auto& move : tx.moves) {
+        if (IsPathUnderRoot(move.src, sessionRoot) ||
+            IsPathUnderRoot(move.dest, sessionRoot)) {
+            return true;
+        }
+    }
+    for (const auto& rewrite : tx.rewrites) {
+        if (IsPathUnderRoot(rewrite.target, sessionRoot)) return true;
+    }
+    return false;
+}
+
+static void ClearOperationRecoveryBlock(const std::filesystem::path& sessionRoot) {
+    const std::wstring sessionKey = OperationSessionKey(sessionRoot);
+    if (!sessionKey.empty() && sessionKey == s_operationRecoveryBlock.sessionKey) {
+        s_operationRecoveryBlock = {};
+    }
+}
+
+static void BlockOperationSessionForRecovery(
+    const std::filesystem::path& sessionRoot,
+    const std::filesystem::path& manifest,
+    const OperationTransaction* transaction = nullptr,
+    const std::string& state = {},
+    bool memberPathsVerified = false) {
+    const std::wstring sessionKey = OperationSessionKey(sessionRoot);
+    if (sessionKey.empty()) return;
+
+    // Keep the first record that caused the block. It is the one the user was
+    // shown at startup, and replacing it with a later record would obscure
+    // the original recovery evidence.
+    if (s_operationRecoveryBlock.sessionKey == sessionKey &&
+        !s_operationRecoveryBlock.manifest.empty()) {
+        return;
+    }
+    s_operationRecoveryBlock = {};
+    s_operationRecoveryBlock.sessionKey = sessionKey;
+    s_operationRecoveryBlock.manifest = manifest;
+    s_operationRecoveryBlock.state = state;
+    if (transaction) {
+        s_operationRecoveryBlock.transaction = *transaction;
+        s_operationRecoveryBlock.hasTransaction = true;
+        s_operationRecoveryBlock.memberPathsVerified = memberPathsVerified;
+    }
+}
+
+static bool IsSafeOperationRecoveryDirectory(const std::filesystem::path& path) {
+    if (path.empty() || !IsPathUnderRoot(path, OperationTransactionsRoot())) return false;
+    bool isReparse = false;
+    if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) return false;
+    std::error_code ec;
+    return std::filesystem::is_directory(path, ec) && !ec;
+}
+
+static bool IsSafeOperationTransactionId(std::wstring_view value) {
+    if (value.empty() || value.size() > 128) return false;
+    for (const wchar_t ch : value) {
+        const bool digit = ch >= L'0' && ch <= L'9';
+        const bool lower = ch >= L'a' && ch <= L'z';
+        const bool upper = ch >= L'A' && ch <= L'Z';
+        if (!digit && !lower && !upper && ch != L'_' && ch != L'-') return false;
+    }
+    return true;
+}
+
+static std::wstring OperationRecoveryStateLabel(const char* state) {
+    const std::string value = state ? state : "";
+    if (value == "prepared") return localization::Text(L"workspace.file_ops.recovery_state_prepared");
+    if (value == "applying") return localization::Text(L"workspace.file_ops.recovery_state_applying");
+    if (value == "applied") return localization::Text(L"workspace.file_ops.recovery_state_applied");
+    if (value == "committed") return localization::Text(L"workspace.file_ops.recovery_state_committed");
+    return localization::Text(L"workspace.file_ops.recovery_state_unknown");
+}
+
+static std::wstring OperationRecoveryPresenceLabel(const std::filesystem::path& path) {
+    std::error_code ec;
+    const bool present = !path.empty() && std::filesystem::exists(path, ec);
+    if (ec) return localization::Text(L"workspace.file_ops.recovery_member_unavailable");
+    return localization::Text(present ? L"workspace.file_ops.recovery_member_present"
+                                     : L"workspace.file_ops.recovery_member_missing");
+}
+
+static std::wstring OperationNoteAliasStepLabel(const std::string& step) {
+    if (step == "prepared") return localization::Text(L"workspace.file_ops.recovery_alias_prepared");
+    if (step == "rebinding") return localization::Text(L"workspace.file_ops.recovery_alias_rebinding");
+    if (step == "postcondition_verified") {
+        return localization::Text(L"workspace.file_ops.recovery_alias_postcondition_verified");
+    }
+    return localization::Text(L"workspace.file_ops.recovery_state_unknown");
+}
+
+static std::wstring OperationResourceAliasStepLabel(const std::string& step) {
+    if (step == "prepared") return localization::Text(L"workspace.file_ops.recovery_alias_prepared");
+    if (step == "rebinding") return localization::Text(L"workspace.file_ops.recovery_alias_rebinding");
+    if (step == "postcondition_verified") {
+        return localization::Text(L"workspace.file_ops.recovery_alias_postcondition_verified");
+    }
+    return localization::Text(L"workspace.file_ops.recovery_state_unknown");
+}
+
+static void ShowOperationRecoveryRequiredDialog(HWND owner,
+                                                const std::wstring& title,
+                                                const std::filesystem::path& manifest,
+                                                const OperationTransaction* transaction = nullptr,
+                                                const char* persistedState = nullptr,
+                                                const std::wstring& context = L"",
+                                                bool memberPathsVerified = false) {
+    const std::filesystem::path recoveryDir = manifest.parent_path();
+    const bool canOpenRecoveryDir = IsSafeOperationRecoveryDirectory(recoveryDir);
+    SilentDialogOptions dialog;
+    dialog.title = title.empty() ? OperationMenuTitle() : title;
+    dialog.message = context;
+    if (!dialog.message.empty()) dialog.message += L"\n\n";
+    dialog.message += localization::Text(L"workspace.file_ops.f1e1c2454b3f");
+    if (transaction) {
+        const std::wstring transactionId = transaction->id.empty()
+            ? recoveryDir.filename().wstring()
+            : transaction->id;
+        dialog.message += L"\n" + localization::Format(
+            L"workspace.file_ops.recovery_transaction",
+            {{L"ID", transactionId.empty() ? L"-" : transactionId}});
+        dialog.message += L"\n" + localization::Format(
+            L"workspace.file_ops.recovery_members",
+            {{L"COUNT", std::to_wstring(transaction->moves.size() +
+                                          transaction->rewrites.size() +
+                                          transaction->noteAliases.size() +
+                                          transaction->resourceAliases.size())}});
+        dialog.message += L"\n" + localization::Format(
+            L"workspace.file_ops.recovery_state",
+            {{L"STATE", OperationRecoveryStateLabel(persistedState)}});
+        if (memberPathsVerified) {
+            constexpr size_t kMaxVisibleMemberDetails = 12;
+            size_t shown = 0;
+            auto canShowAnother = [&]() {
+                if (shown >= kMaxVisibleMemberDetails) return false;
+                ++shown;
+                return true;
+            };
+            for (size_t index = 0; index < transaction->moves.size() && canShowAnother(); ++index) {
+                const auto& move = transaction->moves[index];
+                dialog.message += L"\n" + localization::Format(
+                    L"workspace.file_ops.recovery_move_detected",
+                    {{L"INDEX", std::to_wstring(index + 1)},
+                     {L"SOURCE", OperationRecoveryPresenceLabel(move.src)},
+                     {L"DESTINATION", OperationRecoveryPresenceLabel(move.dest)},
+                     {L"BACKUP", OperationRecoveryPresenceLabel(move.backup)}});
+            }
+            for (size_t index = 0; index < transaction->rewrites.size() && canShowAnother(); ++index) {
+                const auto& rewrite = transaction->rewrites[index];
+                dialog.message += L"\n" + localization::Format(
+                    L"workspace.file_ops.recovery_rewrite_detected",
+                    {{L"INDEX", std::to_wstring(index + 1)},
+                     {L"TARGET", OperationRecoveryPresenceLabel(rewrite.target)},
+                     {L"BACKUP", OperationRecoveryPresenceLabel(rewrite.backup)}});
+            }
+            for (size_t index = 0; index < transaction->noteAliases.size() && canShowAnother(); ++index) {
+                const auto& alias = transaction->noteAliases[index];
+                dialog.message += L"\n" + localization::Format(
+                    L"workspace.file_ops.recovery_note_alias_detected",
+                    {{L"INDEX", std::to_wstring(index + 1)},
+                     {L"STATE", OperationNoteAliasStepLabel(alias.step)},
+                     {L"SOURCE", OperationRecoveryPresenceLabel(alias.src)},
+                     {L"DESTINATION", OperationRecoveryPresenceLabel(alias.dest)}});
+            }
+            for (size_t index = 0; index < transaction->resourceAliases.size() && canShowAnother(); ++index) {
+                const auto& alias = transaction->resourceAliases[index];
+                dialog.message += L"\n" + localization::Format(
+                    L"workspace.file_ops.recovery_resource_alias_detected",
+                    {{L"INDEX", std::to_wstring(index + 1)},
+                     {L"STATE", OperationResourceAliasStepLabel(alias.step)},
+                     {L"SOURCE", OperationRecoveryPresenceLabel(alias.src)},
+                     {L"DESTINATION", OperationRecoveryPresenceLabel(alias.dest)}});
+            }
+            const size_t memberCount = transaction->moves.size() + transaction->rewrites.size() +
+                                       transaction->noteAliases.size() +
+                                       transaction->resourceAliases.size();
+            if (memberCount > shown) {
+                dialog.message += L"\n" + localization::Format(
+                    L"workspace.file_ops.recovery_more_members",
+                    {{L"COUNT", std::to_wstring(memberCount - shown)}});
+            }
+        }
+    }
+    dialog.kind = SoftNoticeKind::Error;
+    dialog.buttons = canOpenRecoveryDir ? SilentDialogButtons::YesNo
+                                        : SilentDialogButtons::Ok;
+    dialog.yesLabel = localization::Text(L"workspace.file_ops.recovery_open_folder");
+    dialog.noLabel = localization::Text(L"workspace.file_ops.recovery_no_action");
+    dialog.defaultResult = canOpenRecoveryDir ? SilentDialogResult::No
+                                              : SilentDialogResult::Ok;
+    dialog.escapeResult = canOpenRecoveryDir ? SilentDialogResult::No
+                                             : SilentDialogResult::Ok;
+    dialog.preferredWidthPx = 680;
+    dialog.paths.push_back({localization::Text(L"workspace.file_ops.recovery_manifest"),
+                            manifest.wstring()});
+    if (canOpenRecoveryDir) {
+        dialog.paths.push_back({localization::Text(L"workspace.file_ops.recovery_folder"),
+                                recoveryDir.wstring()});
+    }
+    if (transaction && memberPathsVerified) {
+        for (size_t index = 0; index < transaction->moves.size(); ++index) {
+            const std::wstring member = std::to_wstring(index + 1);
+            const auto& move = transaction->moves[index];
+            dialog.paths.push_back({localization::Format(
+                                        L"workspace.file_ops.recovery_move_source",
+                                        {{L"INDEX", member}}),
+                                    move.src.wstring()});
+            dialog.paths.push_back({localization::Format(
+                                        L"workspace.file_ops.recovery_move_destination",
+                                        {{L"INDEX", member}}),
+                                    move.dest.wstring()});
+            dialog.paths.push_back({localization::Format(
+                                        L"workspace.file_ops.recovery_move_backup",
+                                        {{L"INDEX", member}}),
+                                    move.backup.wstring()});
+        }
+        for (size_t index = 0; index < transaction->rewrites.size(); ++index) {
+            const std::wstring member = std::to_wstring(index + 1);
+            const auto& rewrite = transaction->rewrites[index];
+            dialog.paths.push_back({localization::Format(
+                                        L"workspace.file_ops.recovery_rewrite_target",
+                                        {{L"INDEX", member}}),
+                                    rewrite.target.wstring()});
+            dialog.paths.push_back({localization::Format(
+                                        L"workspace.file_ops.recovery_rewrite_backup",
+                                        {{L"INDEX", member}}),
+                                    rewrite.backup.wstring()});
+        }
+        for (size_t index = 0; index < transaction->noteAliases.size(); ++index) {
+            const std::wstring member = std::to_wstring(index + 1);
+            const auto& alias = transaction->noteAliases[index];
+            dialog.paths.push_back({localization::Format(
+                                        L"workspace.file_ops.recovery_note_alias_source",
+                                        {{L"INDEX", member}}),
+                                    alias.src.wstring()});
+            dialog.paths.push_back({localization::Format(
+                                        L"workspace.file_ops.recovery_note_alias_destination",
+                                        {{L"INDEX", member}}),
+                                    alias.dest.wstring()});
+        }
+        for (size_t index = 0; index < transaction->resourceAliases.size(); ++index) {
+            const std::wstring member = std::to_wstring(index + 1);
+            const auto& alias = transaction->resourceAliases[index];
+            dialog.paths.push_back({localization::Format(
+                                        L"workspace.file_ops.recovery_resource_alias_source",
+                                        {{L"INDEX", member}}),
+                                    alias.src.wstring()});
+            dialog.paths.push_back({localization::Format(
+                                        L"workspace.file_ops.recovery_resource_alias_destination",
+                                        {{L"INDEX", member}}),
+                                    alias.dest.wstring()});
+        }
+    }
+
+    const SilentDialogResult result = ShowSilentDialog(owner, dialog);
+    if (result != SilentDialogResult::Yes || !canOpenRecoveryDir) return;
+
+    // This is an explicit user request, and it opens only the verified local
+    // transaction directory.  It never executes recovery or changes a file.
+    const std::wstring params = L"\"" + recoveryDir.wstring() + L"\"";
+    const HINSTANCE opened = ShellExecuteW(owner, L"open", L"explorer.exe",
+                                           params.c_str(), nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(opened) <= 32) {
+        ShowSoftNotice(owner,
+                       localization::Text(L"workspace.file_ops.recovery_open_failed"),
+                       SoftNoticeKind::Warning);
+    }
+}
+
+static bool RequireOperationSessionRecoveryResolved(
+    HWND owner,
+    const std::wstring& title,
+    const std::filesystem::path& sessionRoot) {
+    const std::wstring sessionKey = OperationSessionKey(sessionRoot);
+    if (sessionKey.empty() || s_operationRecoveryBlock.sessionKey != sessionKey) {
+        return true;
+    }
+    const OperationTransaction* transaction =
+        s_operationRecoveryBlock.hasTransaction
+            ? &s_operationRecoveryBlock.transaction
+            : nullptr;
+    ShowOperationRecoveryRequiredDialog(owner, title,
+                                        s_operationRecoveryBlock.manifest,
+                                        transaction,
+                                        s_operationRecoveryBlock.state.empty()
+                                            ? nullptr
+                                            : s_operationRecoveryBlock.state.c_str(),
+                                        L"",
+                                        s_operationRecoveryBlock.memberPathsVerified);
+    return false;
+}
+
+struct OperationFileFingerprint {
+    std::uint64_t size = 0;
+    std::string sha256;
+};
+
+static bool IsOperationSha256(const std::string& value) {
+    if (value.size() != 64) return false;
+    for (const char ch : value) {
+        const bool digit = ch >= '0' && ch <= '9';
+        const bool lower = ch >= 'a' && ch <= 'f';
+        if (!digit && !lower) return false;
+    }
+    return true;
+}
+
+static bool CaptureOperationFileFingerprint(const std::filesystem::path& path,
+                                            OperationFileFingerprint* out,
+                                            std::wstring* outErr) {
+    if (out) *out = {};
+    if (outErr) outErr->clear();
+    if (path.empty()) return false;
+
+    bool isReparse = false;
+    if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) {
+        if (outErr) *outErr = L"Operation fingerprint rejected a reparse point:\n" + path.wstring();
+        return false;
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || ec) {
+        if (outErr) *outErr = L"Operation fingerprint requires a regular file:\n" + path.wstring();
+        return false;
+    }
+    const std::uintmax_t beforeSize = std::filesystem::file_size(path, ec);
+    if (ec || beforeSize > static_cast<std::uintmax_t>(std::numeric_limits<std::uint64_t>::max())) {
+        if (outErr) *outErr = L"Operation fingerprint could not read the file size:\n" + path.wstring();
+        return false;
+    }
+
+    OperationFileFingerprint fingerprint;
+    fingerprint.size = static_cast<std::uint64_t>(beforeSize);
+    if (!clrop::ComputeFileSha256(path, &fingerprint.sha256) ||
+        !IsOperationSha256(fingerprint.sha256)) {
+        if (outErr) *outErr = L"Operation fingerprint could not hash the file:\n" + path.wstring();
+        return false;
+    }
+    const std::uintmax_t afterSize = std::filesystem::file_size(path, ec);
+    if (ec || afterSize != beforeSize) {
+        if (outErr) *outErr = L"File changed while its operation fingerprint was captured:\n" + path.wstring();
+        return false;
+    }
+    if (out) *out = std::move(fingerprint);
+    return true;
+}
+
+static bool OperationFingerprintsMatch(const OperationFileFingerprint& a,
+                                       const OperationFileFingerprint& b) {
+    return a.size == b.size && IsOperationSha256(a.sha256) && a.sha256 == b.sha256;
+}
+
+static bool FileMatchesOperationFingerprint(const std::filesystem::path& path,
+                                            const OperationFileFingerprint& expected,
+                                            std::wstring* outErr) {
+    if (!IsOperationSha256(expected.sha256)) return false;
+    OperationFileFingerprint actual;
+    if (!CaptureOperationFileFingerprint(path, &actual, outErr)) return false;
+    return OperationFingerprintsMatch(actual, expected);
+}
+
+static bool ParseOperationUint64(const std::string& text, std::uint64_t* out) {
+    if (out) *out = 0;
+    if (text.empty()) return false;
+    std::uint64_t value = 0;
+    for (const char ch : text) {
+        if (ch < '0' || ch > '9') return false;
+        const std::uint64_t digit = static_cast<std::uint64_t>(ch - '0');
+        if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / 10u) return false;
+        value = value * 10u + digit;
+    }
+    if (out) *out = value;
+    return true;
 }
 
 static std::string EncodeOperationTransactionPath(const std::filesystem::path& path) {
@@ -278,16 +769,117 @@ static bool WriteOperationTransactionManifest(const OperationTransaction& tx,
                                               std::wstring* outErr) {
     if (outErr) outErr->clear();
     std::ostringstream oss;
-    oss << "PDF_NOTE_OPERATION_TRANSACTION_V1\n";
+    const bool legacyV1 = tx.version == 1;
+    const bool legacyV2 = tx.version == 2;
+    const bool legacyV3 = tx.version == 3;
+    const bool currentV4 = tx.version == 4;
+    const bool currentV5 = tx.version == 5;
+    const bool currentV6 = tx.version == 6;
+    if (!legacyV1 && !legacyV2 && !legacyV3 && !currentV4 && !currentV5 && !currentV6) return false;
+    oss << (legacyV1 ? "PDF_NOTE_OPERATION_TRANSACTION_V1\n"
+                     : (legacyV2 ? "PDF_NOTE_OPERATION_TRANSACTION_V2\n"
+                                 : (legacyV3 ? "PDF_NOTE_OPERATION_TRANSACTION_V3\n"
+                                             : (currentV4 ? "PDF_NOTE_OPERATION_TRANSACTION_V4\n"
+                                                          : (currentV5 ? "PDF_NOTE_OPERATION_TRANSACTION_V5\n"
+                                                                       : "PDF_NOTE_OPERATION_TRANSACTION_V6\n")))));
     oss << "state=" << (state ? state : "pending") << "\n";
+    if (!legacyV1 && !legacyV2) {
+        if (!IsSafeOperationTransactionId(tx.id)) {
+            if (outErr) *outErr = L"Operation transaction ID is invalid.";
+            return false;
+        }
+        oss << "id=" << WideToUTF8(tx.id) << "\n";
+        if (currentV4 || currentV5 || currentV6) {
+            if (tx.sessionRoot.empty() || !tx.sessionRoot.is_absolute() ||
+                g_workspaceRoot.empty() ||
+                !IsPathUnderRoot(tx.sessionRoot, std::filesystem::path(g_workspaceRoot))) {
+                if (outErr) *outErr = L"Operation transaction session root is invalid.";
+                return false;
+            }
+            oss << "session=" << EncodeOperationTransactionPath(tx.sessionRoot) << "\n";
+        }
+    }
     for (const auto& move : tx.moves) {
         oss << "move\t" << EncodeOperationTransactionPath(move.src)
             << "\t" << EncodeOperationTransactionPath(move.dest)
-            << "\t" << EncodeOperationTransactionPath(move.backup) << "\n";
+            << "\t" << EncodeOperationTransactionPath(move.backup);
+        if (!legacyV1) {
+            if (!IsOperationSha256(move.originalSha256) ||
+                !IsOperationSha256(move.backupSha256) ||
+                (!legacyV2 && !IsOperationSha256(move.finalSha256)) ||
+                (move.step != "prepared" && move.step != "source_changing" &&
+                 move.step != "postcondition_verified")) {
+                if (outErr) *outErr = L"Operation move manifest data is incomplete.";
+                return false;
+            }
+            oss << "\t" << move.originalSize
+                << "\t" << move.originalSha256
+                << "\t" << move.backupSize
+                << "\t" << move.backupSha256;
+            if (!legacyV2) {
+                oss << "\t" << move.finalSize
+                    << "\t" << move.finalSha256;
+            }
+            oss << "\t" << move.step;
+        }
+        oss << "\n";
     }
     for (const auto& rewrite : tx.rewrites) {
         oss << "rewrite\t" << EncodeOperationTransactionPath(rewrite.target)
-            << "\t" << EncodeOperationTransactionPath(rewrite.backup) << "\n";
+            << "\t" << EncodeOperationTransactionPath(rewrite.backup);
+        if (!legacyV1) {
+            const bool hasPostcondition = IsOperationSha256(rewrite.rewrittenSha256);
+            const bool stepAllowsNoPostcondition =
+                rewrite.step == "prepared" || rewrite.step == "rewriting";
+            if (!IsOperationSha256(rewrite.originalSha256) ||
+                !IsOperationSha256(rewrite.backupSha256) ||
+                (rewrite.step != "prepared" && rewrite.step != "rewriting" &&
+                 rewrite.step != "postcondition_verified") ||
+                (!hasPostcondition && !stepAllowsNoPostcondition) ||
+                (hasPostcondition && rewrite.step != "postcondition_verified")) {
+                if (outErr) *outErr = L"Operation rewrite manifest data is incomplete.";
+                return false;
+            }
+            oss << "\t" << rewrite.originalSize
+                << "\t" << rewrite.originalSha256
+                << "\t" << rewrite.backupSize
+                << "\t" << rewrite.backupSha256
+                << "\t" << rewrite.rewrittenSize
+                << "\t" << (hasPostcondition ? rewrite.rewrittenSha256 : "-")
+                << "\t" << rewrite.step;
+        }
+        oss << "\n";
+    }
+    if (currentV5 || currentV6) {
+        for (const auto& alias : tx.noteAliases) {
+            if (!alias.noteId.valid() || alias.src.empty() || alias.dest.empty() ||
+                (alias.step != "prepared" && alias.step != "rebinding" &&
+                 alias.step != "postcondition_verified")) {
+                if (outErr) *outErr = L"Operation note-alias manifest data is incomplete.";
+                return false;
+            }
+            oss << "note_alias\t" << alias.noteId.value
+                << "\t" << EncodeOperationTransactionPath(alias.src)
+                << "\t" << EncodeOperationTransactionPath(alias.dest)
+                << "\t" << alias.step << "\n";
+        }
+    }
+    if (currentV6) {
+        for (const auto& alias : tx.resourceAliases) {
+            const std::string resourceId = WorkspaceResourceIdToHex(alias.resourceId);
+            const char* kind = OperationResourceKindName(alias.kind);
+            if (resourceId.empty() || !kind || !*kind || alias.src.empty() || alias.dest.empty() ||
+                (alias.step != "prepared" && alias.step != "rebinding" &&
+                 alias.step != "postcondition_verified")) {
+                if (outErr) *outErr = L"Operation resource-alias manifest data is incomplete.";
+                return false;
+            }
+            oss << "resource_alias\t" << kind
+                << "\t" << resourceId
+                << "\t" << EncodeOperationTransactionPath(alias.src)
+                << "\t" << EncodeOperationTransactionPath(alias.dest)
+                << "\t" << alias.step << "\n";
+        }
     }
     return atomic_write::AtomicWriteUtf8(tx.manifest, oss.str(),
                                          OperationPreferredTmpDir(),
@@ -321,6 +913,7 @@ static bool CreateOperationTransactionDirectory(OperationTransaction* tx,
         if (std::filesystem::create_directory(candidate, ec)) {
             tx->dir = candidate;
             tx->manifest = candidate / L"manifest.tsv";
+            tx->id = candidate.filename().wstring();
             return true;
         }
         if (ec && ec != std::errc::file_exists) {
@@ -334,32 +927,179 @@ static bool CreateOperationTransactionDirectory(OperationTransaction* tx,
     return false;
 }
 
+static bool VerifyOperationBackupCapacity(
+    const std::vector<std::pair<std::filesystem::path, std::filesystem::path>>& moves,
+    const NoteLinkRewritePlan& rewritePlan,
+    const std::filesystem::path& transactionRoot,
+    std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (transactionRoot.empty()) return false;
+
+    std::uint64_t totalBytes = 0;
+    std::uint64_t largestFile = 0;
+    auto includeFile = [&](const std::filesystem::path& path) -> bool {
+        bool isReparse = false;
+        if (path.empty() ||
+            (TryIsReparsePointNoFollow(path, isReparse) && isReparse)) {
+            if (outErr) *outErr = L"Operation backup rejected an unsafe source:\n" + path.wstring();
+            return false;
+        }
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec) || ec) {
+            if (outErr) *outErr = L"Operation backup requires a regular source file:\n" + path.wstring();
+            return false;
+        }
+        const std::uintmax_t rawSize = std::filesystem::file_size(path, ec);
+        if (ec || rawSize > static_cast<std::uintmax_t>(std::numeric_limits<std::uint64_t>::max())) {
+            if (outErr) *outErr = L"Operation backup could not determine source size:\n" + path.wstring();
+            return false;
+        }
+        const std::uint64_t size = static_cast<std::uint64_t>(rawSize);
+        if (totalBytes > std::numeric_limits<std::uint64_t>::max() - size) {
+            if (outErr) *outErr = L"Operation backup size exceeds the supported limit.";
+            return false;
+        }
+        totalBytes += size;
+        largestFile = std::max(largestFile, size);
+        return true;
+    };
+    for (const auto& move : moves) {
+        if (!includeFile(move.first)) return false;
+    }
+    for (const auto& rewrite : rewritePlan.files) {
+        if (!includeFile(rewrite.filePath)) return false;
+    }
+    if (totalBytes > std::numeric_limits<std::uint64_t>::max() - largestFile) {
+        if (outErr) *outErr = L"Operation backup temporary-space requirement exceeds the supported limit.";
+        return false;
+    }
+
+    ULARGE_INTEGER available{};
+    if (!GetDiskFreeSpaceExW(ToExtendedWin32PathIfAbsoluteLocal(transactionRoot).c_str(),
+                             &available, nullptr, nullptr)) {
+        if (outErr) {
+            *outErr = L"Operation backup could not inspect free space:\n" + transactionRoot.wstring();
+        }
+        return false;
+    }
+    const std::uint64_t required = totalBytes + largestFile;
+    if (available.QuadPart < required) {
+        if (outErr) {
+            *outErr = L"Insufficient free space for verified operation backups:\n" +
+                      transactionRoot.wstring();
+        }
+        return false;
+    }
+    return true;
+}
+
 static bool PrepareOperationTransaction(
     const std::vector<std::pair<std::filesystem::path, std::filesystem::path>>& moves,
     const NoteLinkRewritePlan& rewritePlan,
+    const std::vector<OperationTransactionNoteAlias>& noteAliases,
+    const std::vector<OperationTransactionResourceAlias>& resourceAliases,
     OperationTransaction* outTx,
     std::wstring* outErr) {
     if (outTx) *outTx = {};
     if (outErr) outErr->clear();
     OperationTransaction tx;
+    tx.sessionRoot = std::filesystem::path(g_currentSessionPath);
+    if (tx.sessionRoot.empty() || !tx.sessionRoot.is_absolute() ||
+        g_workspaceRoot.empty() ||
+        !IsPathUnderRoot(tx.sessionRoot, std::filesystem::path(g_workspaceRoot))) {
+        if (outErr) *outErr = L"Operation transaction requires an open session.";
+        return false;
+    }
     if (!CreateOperationTransactionDirectory(&tx, outErr)) return false;
+    if (!VerifyOperationBackupCapacity(moves, rewritePlan, tx.dir, outErr)) return false;
 
     for (size_t index = 0; index < moves.size(); ++index) {
         OperationTransactionMove entry;
         entry.src = moves[index].first;
         entry.dest = moves[index].second;
         entry.backup = tx.dir / (L"move_" + std::to_wstring(index) + L".bak");
+        OperationFileFingerprint sourceFingerprint;
+        if (!CaptureOperationFileFingerprint(entry.src, &sourceFingerprint, outErr)) return false;
         if (!CopyFileForImportSafely(entry.src, entry.backup, outErr)) return false;
+        OperationFileFingerprint backupFingerprint;
+        if (!CaptureOperationFileFingerprint(entry.backup, &backupFingerprint, outErr) ||
+            !OperationFingerprintsMatch(sourceFingerprint, backupFingerprint)) {
+            if (outErr && outErr->empty()) {
+                *outErr = L"Operation move backup does not match its source:\n" + entry.src.wstring();
+            }
+            return false;
+        }
+        entry.originalSize = sourceFingerprint.size;
+        entry.originalSha256 = std::move(sourceFingerprint.sha256);
+        entry.backupSize = backupFingerprint.size;
+        entry.backupSha256 = std::move(backupFingerprint.sha256);
+        entry.finalSize = entry.originalSize;
+        entry.finalSha256 = entry.originalSha256;
         tx.moves.push_back(std::move(entry));
     }
     for (size_t index = 0; index < rewritePlan.files.size(); ++index) {
         OperationTransactionRewrite entry;
         entry.target = rewritePlan.files[index].filePath;
         entry.backup = tx.dir / (L"rewrite_" + std::to_wstring(index) + L".bak");
+        OperationFileFingerprint originalFingerprint;
+        if (!CaptureOperationFileFingerprint(entry.target, &originalFingerprint, outErr)) return false;
         if (!CopyFileForImportSafely(entry.target, entry.backup, outErr)) return false;
+        OperationFileFingerprint backupFingerprint;
+        if (!CaptureOperationFileFingerprint(entry.backup, &backupFingerprint, outErr) ||
+            !OperationFingerprintsMatch(originalFingerprint, backupFingerprint)) {
+            if (outErr && outErr->empty()) {
+                *outErr = L"Operation rewrite backup does not match its source:\n" + entry.target.wstring();
+            }
+            return false;
+        }
+        entry.originalSize = originalFingerprint.size;
+        entry.originalSha256 = std::move(originalFingerprint.sha256);
+        entry.backupSize = backupFingerprint.size;
+        entry.backupSha256 = std::move(backupFingerprint.sha256);
         tx.rewrites.push_back(std::move(entry));
     }
-    if (!WriteOperationTransactionManifest(tx, "pending", outErr)) return false;
+    for (const auto& alias : noteAliases) {
+        if (!alias.noteId.valid() || alias.src.empty() || alias.dest.empty() ||
+            alias.step != "prepared") {
+            if (outErr) *outErr = L"Operation note alias is invalid.";
+            return false;
+        }
+        bool hasMatchingMove = false;
+        for (const auto& move : tx.moves) {
+            if (AreSameLocalPath(move.src, alias.src) &&
+                AreSameLocalPath(move.dest, alias.dest)) {
+                hasMatchingMove = true;
+                break;
+            }
+        }
+        if (!hasMatchingMove) {
+            if (outErr) *outErr = L"Operation note alias does not match a file move.";
+            return false;
+        }
+        tx.noteAliases.push_back(alias);
+    }
+    for (const auto& alias : resourceAliases) {
+        const auto expectedKind = OperationResourceKindForFile(alias.src);
+        if (!alias.resourceId.valid() || !expectedKind.has_value() || alias.kind != *expectedKind ||
+            alias.src.empty() || alias.dest.empty() || alias.step != "prepared") {
+            if (outErr) *outErr = L"Operation resource alias is invalid.";
+            return false;
+        }
+        bool hasMatchingMove = false;
+        for (const auto& move : tx.moves) {
+            if (AreSameLocalPath(move.src, alias.src) &&
+                AreSameLocalPath(move.dest, alias.dest)) {
+                hasMatchingMove = true;
+                break;
+            }
+        }
+        if (!hasMatchingMove) {
+            if (outErr) *outErr = L"Operation resource alias does not match a file move.";
+            return false;
+        }
+        tx.resourceAliases.push_back(alias);
+    }
+    if (!WriteOperationTransactionManifest(tx, "prepared", outErr)) return false;
     if (outTx) *outTx = std::move(tx);
     return true;
 }
@@ -368,24 +1108,74 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
                                              OperationTransaction* outTx,
                                              std::string* outState) {
     if (!outTx || !outState) return false;
+    constexpr std::uintmax_t kManifestMaxBytes = 2u * 1024u * 1024u;
+    constexpr size_t kManifestMaxMembers = 128;
+    std::error_code sizeEc;
+    if (manifest.empty() ||
+        std::filesystem::file_size(manifest, sizeEc) > kManifestMaxBytes || sizeEc) {
+        return false;
+    }
+    bool isReparse = false;
+    if (TryIsReparsePointNoFollow(manifest, isReparse) && isReparse) return false;
     std::ifstream input(manifest, std::ios::binary);
     if (!input) return false;
     OperationTransaction tx;
     tx.manifest = manifest;
     tx.dir = manifest.parent_path();
     std::string line;
-    if (!std::getline(input, line) || line != "PDF_NOTE_OPERATION_TRANSACTION_V1") return false;
+    if (!std::getline(input, line)) return false;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line == "PDF_NOTE_OPERATION_TRANSACTION_V1") {
+        tx.version = 1;
+    } else if (line == "PDF_NOTE_OPERATION_TRANSACTION_V2") {
+        tx.version = 2;
+    } else if (line == "PDF_NOTE_OPERATION_TRANSACTION_V3") {
+        tx.version = 3;
+    } else if (line == "PDF_NOTE_OPERATION_TRANSACTION_V4") {
+        tx.version = 4;
+    } else if (line == "PDF_NOTE_OPERATION_TRANSACTION_V5") {
+        tx.version = 5;
+    } else if (line == "PDF_NOTE_OPERATION_TRANSACTION_V6") {
+        tx.version = 6;
+    } else {
+        return false;
+    }
     if (!std::getline(input, line) || line.rfind("state=", 0) != 0) return false;
     if (!line.empty() && line.back() == '\r') line.pop_back();
-    *outState = line.substr(6);
+    const std::string state = line.substr(6);
+    if (state.empty() || state.size() > 32) return false;
+    for (const char ch : state) {
+        if ((ch < 'a' || ch > 'z') && ch != '_') return false;
+    }
+    if (tx.version == 3 || tx.version == 4 || tx.version == 5 || tx.version == 6) {
+        if (!std::getline(input, line) || line.rfind("id=", 0) != 0) return false;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const std::string encodedId = line.substr(3);
+        tx.id = UTF8ToWide(encodedId);
+        if ((encodedId.empty() || tx.id.empty()) || !IsSafeOperationTransactionId(tx.id)) {
+            return false;
+        }
+        if (tx.version == 4 || tx.version == 5 || tx.version == 6) {
+            if (!std::getline(input, line) || line.rfind("session=", 0) != 0) return false;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const std::string encodedSession = line.substr(8);
+            if (encodedSession.empty() || encodedSession.size() > 64u * 1024u ||
+                !DecodeOperationTransactionPath(encodedSession, &tx.sessionRoot) ||
+                !tx.sessionRoot.is_absolute()) {
+                return false;
+            }
+        }
+    }
     while (std::getline(input, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty()) continue;
+        if (line.empty() || line.size() > 256u * 1024u) return false;
         std::vector<std::string> fields;
         std::istringstream record(line);
         std::string field;
         while (std::getline(record, field, '\t')) fields.push_back(field);
-        if (fields.size() == 4 && fields[0] == "move") {
+        if (tx.moves.size() + tx.rewrites.size() + tx.noteAliases.size() +
+                tx.resourceAliases.size() >= kManifestMaxMembers) return false;
+        if (tx.version == 1 && fields.size() == 4 && fields[0] == "move") {
             OperationTransactionMove move;
             if (!DecodeOperationTransactionPath(fields[1], &move.src) ||
                 !DecodeOperationTransactionPath(fields[2], &move.dest) ||
@@ -393,90 +1183,400 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
                 return false;
             }
             tx.moves.push_back(std::move(move));
-        } else if (fields.size() == 3 && fields[0] == "rewrite") {
+        } else if (tx.version == 1 && fields.size() == 3 && fields[0] == "rewrite") {
             OperationTransactionRewrite rewrite;
             if (!DecodeOperationTransactionPath(fields[1], &rewrite.target) ||
                 !DecodeOperationTransactionPath(fields[2], &rewrite.backup)) {
                 return false;
             }
             tx.rewrites.push_back(std::move(rewrite));
+        } else if (tx.version == 2 && fields.size() == 9 && fields[0] == "move") {
+            OperationTransactionMove move;
+            if (!DecodeOperationTransactionPath(fields[1], &move.src) ||
+                !DecodeOperationTransactionPath(fields[2], &move.dest) ||
+                !DecodeOperationTransactionPath(fields[3], &move.backup) ||
+                !ParseOperationUint64(fields[4], &move.originalSize) ||
+                !IsOperationSha256(fields[5]) ||
+                !ParseOperationUint64(fields[6], &move.backupSize) ||
+                !IsOperationSha256(fields[7]) ||
+                (fields[8] != "prepared" && fields[8] != "source_changing" &&
+                 fields[8] != "postcondition_verified")) {
+                return false;
+            }
+            move.originalSha256 = fields[5];
+            move.backupSha256 = fields[7];
+            move.step = fields[8];
+            tx.moves.push_back(std::move(move));
+        } else if ((tx.version == 3 || tx.version == 4 || tx.version == 5 || tx.version == 6) &&
+                   fields.size() == 11 && fields[0] == "move") {
+            OperationTransactionMove move;
+            if (!DecodeOperationTransactionPath(fields[1], &move.src) ||
+                !DecodeOperationTransactionPath(fields[2], &move.dest) ||
+                !DecodeOperationTransactionPath(fields[3], &move.backup) ||
+                !ParseOperationUint64(fields[4], &move.originalSize) ||
+                !IsOperationSha256(fields[5]) ||
+                !ParseOperationUint64(fields[6], &move.backupSize) ||
+                !IsOperationSha256(fields[7]) ||
+                !ParseOperationUint64(fields[8], &move.finalSize) ||
+                !IsOperationSha256(fields[9]) ||
+                (fields[10] != "prepared" && fields[10] != "source_changing" &&
+                 fields[10] != "postcondition_verified")) {
+                return false;
+            }
+            move.originalSha256 = fields[5];
+            move.backupSha256 = fields[7];
+            move.finalSha256 = fields[9];
+            move.step = fields[10];
+            tx.moves.push_back(std::move(move));
+        } else if ((tx.version == 2 || tx.version == 3 || tx.version == 4 || tx.version == 5 || tx.version == 6) &&
+                   fields.size() == 10 && fields[0] == "rewrite") {
+            OperationTransactionRewrite rewrite;
+            if (!DecodeOperationTransactionPath(fields[1], &rewrite.target) ||
+                !DecodeOperationTransactionPath(fields[2], &rewrite.backup) ||
+                !ParseOperationUint64(fields[3], &rewrite.originalSize) ||
+                !IsOperationSha256(fields[4]) ||
+                !ParseOperationUint64(fields[5], &rewrite.backupSize) ||
+                !IsOperationSha256(fields[6]) ||
+                !ParseOperationUint64(fields[7], &rewrite.rewrittenSize) ||
+                (fields[9] != "prepared" && fields[9] != "rewriting" &&
+                 fields[9] != "postcondition_verified")) {
+                return false;
+            }
+            const bool hasPostcondition = IsOperationSha256(fields[8]);
+            if ((fields[8] != "-" && !hasPostcondition) ||
+                (hasPostcondition && fields[9] != "postcondition_verified") ||
+                (!hasPostcondition && fields[9] == "postcondition_verified") ||
+                (!hasPostcondition && rewrite.rewrittenSize != 0)) {
+                return false;
+            }
+            rewrite.originalSha256 = fields[4];
+            rewrite.backupSha256 = fields[6];
+            if (hasPostcondition) rewrite.rewrittenSha256 = fields[8];
+            rewrite.step = fields[9];
+            tx.rewrites.push_back(std::move(rewrite));
+        } else if ((tx.version == 5 || tx.version == 6) && fields.size() == 5 && fields[0] == "note_alias") {
+            uint64_t noteId = 0;
+            OperationTransactionNoteAlias alias;
+            if (!ParseOperationUint64(fields[1], &noteId) || noteId == 0 ||
+                !DecodeOperationTransactionPath(fields[2], &alias.src) ||
+                !DecodeOperationTransactionPath(fields[3], &alias.dest) ||
+                (fields[4] != "prepared" && fields[4] != "rebinding" &&
+                 fields[4] != "postcondition_verified")) {
+                return false;
+            }
+            alias.noteId = note::NoteId{noteId};
+            alias.step = fields[4];
+            tx.noteAliases.push_back(std::move(alias));
+        } else if (tx.version == 6 && fields.size() == 6 && fields[0] == "resource_alias") {
+            const auto kind = ParseOperationResourceKind(fields[1]);
+            const auto resourceId = WorkspaceResourceIdFromHex(fields[2]);
+            OperationTransactionResourceAlias alias;
+            if (!kind.has_value() || !resourceId.has_value() ||
+                !DecodeOperationTransactionPath(fields[3], &alias.src) ||
+                !DecodeOperationTransactionPath(fields[4], &alias.dest) ||
+                (fields[5] != "prepared" && fields[5] != "rebinding" &&
+                 fields[5] != "postcondition_verified")) {
+                return false;
+            }
+            alias.resourceId = *resourceId;
+            alias.kind = *kind;
+            alias.step = fields[5];
+            tx.resourceAliases.push_back(std::move(alias));
         } else {
             return false;
         }
     }
     if (tx.moves.empty()) return false;
     *outTx = std::move(tx);
+    *outState = state;
     return true;
 }
 
 static bool ValidateOperationTransactionPaths(const OperationTransaction& tx,
                                               const std::filesystem::path& sessionRoot) {
     if (sessionRoot.empty() || g_workspaceRoot.empty() || tx.dir.empty()) return false;
+    if (tx.version != 1 && tx.version != 2 && tx.version != 3 && tx.version != 4 &&
+        tx.version != 5 && tx.version != 6) return false;
+    if ((tx.version == 3 || tx.version == 4 || tx.version == 5 || tx.version == 6) &&
+        (!IsSafeOperationTransactionId(tx.id) || tx.id != tx.dir.filename().wstring())) {
+        return false;
+    }
+    if ((tx.version == 4 || tx.version == 5 || tx.version == 6) &&
+        (tx.sessionRoot.empty() || !tx.sessionRoot.is_absolute() ||
+         !IsPathUnderRoot(tx.sessionRoot, std::filesystem::path(g_workspaceRoot)))) {
+        return false;
+    }
+    if (!IsPathUnderRoot(tx.dir, OperationTransactionsRoot()) ||
+        !AreSameLocalPath(tx.manifest, tx.dir / L"manifest.tsv")) {
+        return false;
+    }
+    bool transactionDirIsReparse = false;
+    if (TryIsReparsePointNoFollow(tx.dir, transactionDirIsReparse) && transactionDirIsReparse) {
+        return false;
+    }
+    const std::filesystem::path& recordedSessionRoot =
+        (tx.version == 4 || tx.version == 5 || tx.version == 6) ? tx.sessionRoot : sessionRoot;
     const std::filesystem::path stageRoot = OperationPreferredTmpDir();
     for (const auto& move : tx.moves) {
-        if (!IsPathUnderRoot(move.src, sessionRoot) ||
-            !IsPathUnderRoot(move.dest, sessionRoot) ||
+        if (!IsPathUnderRoot(move.src, recordedSessionRoot) ||
+            !IsPathUnderRoot(move.dest, recordedSessionRoot) ||
             !IsPathUnderRoot(move.backup, tx.dir)) {
             return false;
         }
     }
     for (const auto& rewrite : tx.rewrites) {
-        if ((!IsPathUnderRoot(rewrite.target, sessionRoot) &&
+        if ((!IsPathUnderRoot(rewrite.target, recordedSessionRoot) &&
              !IsPathUnderRoot(rewrite.target, stageRoot)) ||
             !IsPathUnderRoot(rewrite.backup, tx.dir)) {
             return false;
         }
     }
+    if (tx.version < 5 && (!tx.noteAliases.empty() || !tx.resourceAliases.empty())) return false;
+    if (tx.version < 6 && !tx.resourceAliases.empty()) return false;
+    std::unordered_set<uint64_t> noteIds;
+    std::unordered_set<std::wstring> aliasSourceKeys;
+    std::unordered_set<std::wstring> aliasDestinationKeys;
+    for (const auto& alias : tx.noteAliases) {
+        if (!alias.noteId.valid() || alias.src.empty() || alias.dest.empty() ||
+            (alias.step != "prepared" && alias.step != "rebinding" &&
+             alias.step != "postcondition_verified") ||
+            !IsPathUnderRoot(alias.src, recordedSessionRoot) ||
+            !IsPathUnderRoot(alias.dest, recordedSessionRoot) ||
+            !noteIds.insert(alias.noteId.value).second ||
+            !aliasSourceKeys.insert(NormalizePathKey(alias.src)).second ||
+            !aliasDestinationKeys.insert(NormalizePathKey(alias.dest)).second) {
+            return false;
+        }
+        bool hasMatchingMove = false;
+        for (const auto& move : tx.moves) {
+            if (AreSameLocalPath(move.src, alias.src) &&
+                AreSameLocalPath(move.dest, alias.dest)) {
+                hasMatchingMove = true;
+                break;
+            }
+        }
+        if (!hasMatchingMove) return false;
+    }
+    if (tx.version == 5 || tx.version == 6) {
+        for (const auto& move : tx.moves) {
+            if (!IsNoteFile(move.src) && !IsNoteFile(move.dest)) continue;
+            size_t matchingAliasCount = 0;
+            for (const auto& alias : tx.noteAliases) {
+                if (AreSameLocalPath(move.src, alias.src) &&
+                    AreSameLocalPath(move.dest, alias.dest)) {
+                    ++matchingAliasCount;
+                }
+            }
+            if (matchingAliasCount != 1) return false;
+        }
+    }
+    std::set<WorkspaceResourceId> resourceIds;
+    std::unordered_set<std::wstring> resourceAliasSourceKeys;
+    std::unordered_set<std::wstring> resourceAliasDestinationKeys;
+    for (const auto& alias : tx.resourceAliases) {
+        const auto expectedKind = OperationResourceKindForFile(alias.src);
+        if (!alias.resourceId.valid() || !expectedKind.has_value() || alias.kind != *expectedKind ||
+            alias.src.empty() || alias.dest.empty() ||
+            (alias.step != "prepared" && alias.step != "rebinding" &&
+             alias.step != "postcondition_verified") ||
+            !IsPathUnderRoot(alias.src, recordedSessionRoot) ||
+            !IsPathUnderRoot(alias.dest, recordedSessionRoot) ||
+            !resourceIds.insert(alias.resourceId).second ||
+            !resourceAliasSourceKeys.insert(NormalizePathKey(alias.src)).second ||
+            !resourceAliasDestinationKeys.insert(NormalizePathKey(alias.dest)).second) {
+            return false;
+        }
+        bool hasMatchingMove = false;
+        for (const auto& move : tx.moves) {
+            if (AreSameLocalPath(move.src, alias.src) &&
+                AreSameLocalPath(move.dest, alias.dest)) {
+                hasMatchingMove = true;
+                break;
+            }
+        }
+        if (!hasMatchingMove) return false;
+    }
+    if (tx.version == 6) {
+        for (const auto& move : tx.moves) {
+            const auto expectedKind = OperationResourceKindForFile(move.src);
+            if (!expectedKind.has_value()) continue;
+            size_t matchingAliasCount = 0;
+            for (const auto& alias : tx.resourceAliases) {
+                if (alias.kind == *expectedKind && AreSameLocalPath(move.src, alias.src) &&
+                    AreSameLocalPath(move.dest, alias.dest)) {
+                    ++matchingAliasCount;
+                }
+            }
+            if (matchingAliasCount != 1) return false;
+        }
+    }
     return true;
 }
 
-static bool PreserveRecoveryOverwriteTarget(const std::filesystem::path& target,
-                                            const std::filesystem::path& txDir,
-                                            size_t index,
-                                            std::wstring* outErr) {
-    std::error_code ec;
-    if (!std::filesystem::exists(target, ec) || ec) return !ec;
-    const std::filesystem::path observed =
-        txDir / (L"observed_" + std::to_wstring(index) + L"_" +
-                 std::to_wstring(static_cast<unsigned long long>(GetTickCount64())) + L".bak");
-    return CopyFileForImportSafely(target, observed, outErr);
+static OperationFileFingerprint BackupFingerprint(const OperationTransactionMove& move) {
+    return {move.backupSize, move.backupSha256};
 }
+
+static OperationFileFingerprint FinalFingerprint(const OperationTransactionMove& move) {
+    return {move.finalSize, move.finalSha256};
+}
+
+static OperationFileFingerprint OriginalFingerprint(const OperationTransactionRewrite& rewrite) {
+    return {rewrite.originalSize, rewrite.originalSha256};
+}
+
+static OperationFileFingerprint BackupFingerprint(const OperationTransactionRewrite& rewrite) {
+    return {rewrite.backupSize, rewrite.backupSha256};
+}
+
+static bool IsOperationPathPresent(const std::filesystem::path& path,
+                                   bool* outPresent,
+                                   std::wstring* outErr) {
+    if (outPresent) *outPresent = false;
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) {
+        if (outErr) *outErr = L"Could not inspect an operation path:\n" + path.wstring();
+        return false;
+    }
+    if (outPresent) *outPresent = exists;
+    return true;
+}
+
+static bool NoteAliasHasExpectedIdentity(const std::filesystem::path& path,
+                                         note::NoteId expected,
+                                         bool requirePresent,
+                                         std::wstring* outErr);
+static bool ResourceAliasHasExpectedIdentity(const std::filesystem::path& path,
+                                             WorkspaceResourceId expected,
+                                             WorkspaceResourceKind kind,
+                                             bool requirePresent,
+                                             std::wstring* outErr);
 
 static bool RecoverOperationTransactionToOriginalState(OperationTransaction* tx,
                                                        const std::filesystem::path& sessionRoot,
                                                        std::wstring* outErr) {
     if (outErr) outErr->clear();
-    if (!tx || !ValidateOperationTransactionPaths(*tx, sessionRoot)) {
+    if (!tx || !TransactionBelongsToOperationSession(*tx, sessionRoot) ||
+        !ValidateOperationTransactionPaths(*tx, sessionRoot)) {
         if (outErr) *outErr = localization::Text(L"workspace.file_ops.c9073a50f949");
         return false;
     }
-    for (auto it = tx->moves.rbegin(); it != tx->moves.rend(); ++it) {
-        std::error_code srcEc;
-        std::error_code destEc;
-        const bool hasSrc = std::filesystem::exists(it->src, srcEc);
-        const bool hasDest = std::filesystem::exists(it->dest, destEc);
-        if (srcEc || destEc || (hasSrc && hasDest)) {
-            if (outErr) {
+    // V1/V2 did not retain all content preconditions. Treating an arbitrary file at
+    // a recorded path as ours and copying a backup over it is data loss.
+    if (tx->version < 3) {
+        if (outErr) *outErr = localization::Text(L"workspace.file_ops.f1e1c2454b3f");
+        return false;
+    }
+
+    // Validate the complete recovery plan before changing even the first
+    // member.  Move reversal below never overwrites a source: it only renames
+    // a verified destination into an absent source.  Link rewrites require an
+    // overwrite, so safety-first recovery intentionally leaves them for an
+    // explicit future recovery action after presenting the preserved evidence.
+    std::vector<bool> moveNeedsReverse;
+    moveNeedsReverse.reserve(tx->moves.size());
+    bool hasNoteMove = false;
+    bool hasResourceMove = false;
+    for (const auto& move : tx->moves) {
+        hasNoteMove = hasNoteMove || IsNoteFile(move.src) || IsNoteFile(move.dest);
+        hasResourceMove = hasResourceMove || OperationResourceKindForFile(move.src).has_value();
+        if (!FileMatchesOperationFingerprint(move.backup, BackupFingerprint(move), outErr)) {
+            if (outErr && outErr->empty()) *outErr = L"Operation move backup changed:\n" + move.backup.wstring();
+            return false;
+        }
+        bool hasSrc = false;
+        bool hasDest = false;
+        if (!IsOperationPathPresent(move.src, &hasSrc, outErr) ||
+            !IsOperationPathPresent(move.dest, &hasDest, outErr) ||
+            hasSrc == hasDest) {
+            if (outErr && outErr->empty()) {
                 *outErr = localization::Text(L"workspace.file_ops.130971f0b58a");
             }
             return false;
         }
-        if (!hasSrc && hasDest) {
-            std::error_code moveEc;
-            std::filesystem::rename(it->dest, it->src, moveEc);
-            if (moveEc) {
-                if (outErr) *outErr = it->dest.wstring() + L"\n->\n" + it->src.wstring() +
-                                      L"\n\n" + atomic_write::Win32ErrorMessage(moveEc.value());
+        if (hasSrc) {
+            if (!FileMatchesOperationFingerprint(move.src, FinalFingerprint(move), outErr)) {
+                if (outErr && outErr->empty()) *outErr = L"Operation move source changed:\n" + move.src.wstring();
                 return false;
             }
-        } else if (!hasSrc && !hasDest) {
-            if (!CopyFileForImportSafely(it->backup, it->src, outErr)) return false;
+            moveNeedsReverse.push_back(false);
+        } else {
+            if (!FileMatchesOperationFingerprint(move.dest, FinalFingerprint(move), outErr)) {
+                if (outErr && outErr->empty()) *outErr = L"Operation move destination changed:\n" + move.dest.wstring();
+                return false;
+            }
+            moveNeedsReverse.push_back(true);
         }
     }
-    for (size_t index = 0; index < tx->rewrites.size(); ++index) {
-        const auto& rewrite = tx->rewrites[index];
-        if (!PreserveRecoveryOverwriteTarget(rewrite.target, tx->dir, index, outErr) ||
-            !CopyFileForImportSafely(rewrite.backup, rewrite.target, outErr)) {
+    if (hasNoteMove) {
+        // V5 records the catalog alias as its own member. Recovery may reverse
+        // a note move only while every alias is still provably at its original
+        // path; after rebinding begins, no automatic catalog overwrite or
+        // guess is permitted.
+        if (tx->version != 5 && tx->version != 6) {
+            if (outErr) *outErr = localization::Text(L"workspace.file_ops.f1e1c2454b3f");
+            return false;
+        }
+        for (const auto& alias : tx->noteAliases) {
+            if (alias.step != "prepared" ||
+                !NoteAliasHasExpectedIdentity(alias.src, alias.noteId,
+                                              /*requirePresent=*/true, outErr) ||
+                !NoteAliasHasExpectedIdentity(alias.dest, alias.noteId,
+                                              /*requirePresent=*/false, outErr)) {
+                if (outErr && outErr->empty()) {
+                    *outErr = localization::Text(L"workspace.file_ops.f1e1c2454b3f");
+                }
+                return false;
+            }
+        }
+    }
+    if (hasResourceMove) {
+        // V6 gives the PDF/LinkSet catalog alias the same independent durable
+        // step as NoteId.  Once a rebind begins, recovery will not overwrite
+        // the catalog or infer which alias a moved file should own.
+        if (tx->version != 6) {
+            if (outErr) *outErr = localization::Text(L"workspace.file_ops.f1e1c2454b3f");
+            return false;
+        }
+        for (const auto& alias : tx->resourceAliases) {
+            if (alias.step != "prepared" ||
+                !ResourceAliasHasExpectedIdentity(alias.src, alias.resourceId, alias.kind,
+                                                  /*requirePresent=*/true, outErr) ||
+                !ResourceAliasHasExpectedIdentity(alias.dest, alias.resourceId, alias.kind,
+                                                  /*requirePresent=*/false, outErr)) {
+                if (outErr && outErr->empty()) {
+                    *outErr = localization::Text(L"workspace.file_ops.f1e1c2454b3f");
+                }
+                return false;
+            }
+        }
+    }
+    for (const auto& rewrite : tx->rewrites) {
+        if (!FileMatchesOperationFingerprint(rewrite.backup, BackupFingerprint(rewrite), outErr)) {
+            if (outErr && outErr->empty()) *outErr = L"Operation rewrite backup changed:\n" + rewrite.backup.wstring();
+            return false;
+        }
+        if (FileMatchesOperationFingerprint(rewrite.target, OriginalFingerprint(rewrite), nullptr)) {
+            continue;
+        }
+        // A verified postcondition proves provenance, but does not make an
+        // automatic overwrite safe.  Preserve the manifest and both content
+        // fingerprints for a user-directed recovery command.
+        if (outErr) {
+            *outErr = localization::Text(L"workspace.file_ops.f1e1c2454b3f");
+            *outErr += tx->manifest.wstring();
+        }
+        return false;
+    }
+    for (size_t index = tx->moves.size(); index > 0; --index) {
+        if (!moveNeedsReverse[index - 1]) continue;
+        const auto& move = tx->moves[index - 1];
+        std::error_code moveEc;
+        std::filesystem::rename(move.dest, move.src, moveEc);
+        if (moveEc) {
+            if (outErr) *outErr = move.dest.wstring() + L"\n->\n" + move.src.wstring() +
+                                  L"\n\n" + atomic_write::Win32ErrorMessage(moveEc.value());
             return false;
         }
     }
@@ -485,9 +1585,18 @@ static bool RecoverOperationTransactionToOriginalState(OperationTransaction* tx,
 
 bool RecoverPendingFileOperationTransactionsForSession(
     HWND owner, const std::filesystem::path& sessionRoot) {
+    std::wstring catalogErr;
+    if (!EnsureOperationResourceCatalogConfigured(&catalogErr)) {
+        // A V6 alias cannot be safely interpreted without its catalog. Do
+        // not infer a replacement mapping from a path during startup.
+        return false;
+    }
     const std::filesystem::path root = OperationTransactionsRoot();
     std::error_code ec;
-    if (!std::filesystem::exists(root, ec) || ec) return true;
+    if (!std::filesystem::exists(root, ec) || ec) {
+        ClearOperationRecoveryBlock(sessionRoot);
+        return true;
+    }
     bool recoveredAny = false;
     bool allOk = true;
     std::filesystem::directory_iterator it(root, ec);
@@ -500,22 +1609,53 @@ bool RecoverPendingFileOperationTransactionsForSession(
         }
         std::error_code typeEc;
         if (!it->is_directory(typeEc) || typeEc) continue;
+        const std::filesystem::path manifest = it->path() / L"manifest.tsv";
         OperationTransaction tx;
         std::string state;
-        if (!ReadOperationTransactionManifest(it->path() / L"manifest.tsv", &tx, &state) ||
-            state != "pending" ||
-            !ValidateOperationTransactionPaths(tx, sessionRoot)) {
+        if (!ReadOperationTransactionManifest(manifest, &tx, &state)) {
+            // An unreadable record has no trustworthy session affinity. Keep
+            // it as evidence but never let it block an unrelated session.
             continue;
         }
-        std::wstring recoverErr;
-        if (!RecoverOperationTransactionToOriginalState(&tx, sessionRoot, &recoverErr)) {
+        if (!TransactionBelongsToOperationSession(tx, sessionRoot)) {
+            continue;
+        }
+        if (!ValidateOperationTransactionPaths(tx, sessionRoot)) {
             allOk = false;
-            std::wstring msg = localization::Text(L"workspace.file_ops.f1e1c2454b3f");
-            msg += recoverErr;
-            ShowSilentMessageDialog(owner, OperationMenuTitle(), msg, SoftNoticeKind::Error);
+            BlockOperationSessionForRecovery(sessionRoot, manifest, &tx, state);
+            ShowOperationRecoveryRequiredDialog(owner, OperationMenuTitle(), manifest, &tx, state.c_str());
             continue;
         }
-        recoveredAny = true;
+        if (state == "committed" || state == "recovered") continue;
+        if ((tx.version == 3 || tx.version == 4 || tx.version == 5 || tx.version == 6) &&
+            (state == "prepared" || state == "applying" || state == "applied")) {
+            std::wstring recoverErr;
+            if (!RecoverOperationTransactionToOriginalState(&tx, sessionRoot, &recoverErr)) {
+                allOk = false;
+                BlockOperationSessionForRecovery(sessionRoot, manifest, &tx, state, true);
+                ShowOperationRecoveryRequiredDialog(owner, OperationMenuTitle(), manifest, &tx,
+                                                    state.c_str(), L"", true);
+            } else {
+                recoveredAny = true;
+            }
+            continue;
+        }
+        // Old manifests lack per-member fingerprints and are intentionally
+        // retained as evidence.  Never infer that their destinations are ours.
+        if (tx.version != 1 || state != "pending") {
+            allOk = false;
+            BlockOperationSessionForRecovery(sessionRoot, manifest, &tx, state, true);
+            ShowOperationRecoveryRequiredDialog(owner, OperationMenuTitle(), manifest, &tx,
+                                                state.c_str(), L"", true);
+            continue;
+        }
+        allOk = false;
+        BlockOperationSessionForRecovery(sessionRoot, manifest, &tx, state, true);
+        ShowOperationRecoveryRequiredDialog(owner, OperationMenuTitle(), manifest, &tx,
+                                            state.c_str(), L"", true);
+    }
+    if (allOk) {
+        ClearOperationRecoveryBlock(sessionRoot);
     }
     if (recoveredAny) {
         ShowSoftNotice(owner,
@@ -671,16 +1811,7 @@ static bool PrepareNoteLinkRewritePlan(HWND owner,
             return false;
         }
 
-        std::string originalBytes;
-        std::wstring readErr;
-        if (!ReadOperationFileBytes(candidate.filePath, originalBytes, &readErr)) {
-            if (outErr) {
-                *outErr = readErr;
-            }
-            return false;
-        }
-
-        plan.files.push_back({candidate.filePath, candidate.pdfPath, std::move(loaded), std::move(originalBytes)});
+        plan.files.push_back({candidate.filePath, candidate.pdfPath, std::move(loaded)});
         const std::wstring pdfKey = NormalizePathKey(candidate.pdfPath);
         if (!pdfKey.empty() && affectedPdfKeys.insert(pdfKey).second) {
             plan.affectedPdfPaths.push_back(candidate.pdfPath);
@@ -705,23 +1836,71 @@ static bool PrepareNoteLinkRewritePlan(HWND owner,
     return true;
 }
 
+static bool BeginOperationTransactionRewrite(OperationTransaction* tx,
+                                             size_t index,
+                                             std::wstring* outErr) {
+    if (!tx || (tx->version != 5 && tx->version != 6) || index >= tx->rewrites.size()) return false;
+    OperationTransactionRewrite& rewrite = tx->rewrites[index];
+    if (rewrite.step != "prepared") return false;
+    if (!FileMatchesOperationFingerprint(rewrite.target, OriginalFingerprint(rewrite), outErr) ||
+        !FileMatchesOperationFingerprint(rewrite.backup, BackupFingerprint(rewrite), outErr)) {
+        if (outErr && outErr->empty()) {
+            *outErr = L"Operation rewrite precondition changed:\n" + rewrite.target.wstring();
+        }
+        return false;
+    }
+    rewrite.step = "rewriting";
+    if (WriteOperationTransactionManifest(*tx, "applying", outErr)) return true;
+    rewrite.step = "prepared";
+    return false;
+}
+
+static bool CompleteOperationTransactionRewrite(OperationTransaction* tx,
+                                                size_t index,
+                                                std::wstring* outErr) {
+    if (!tx || (tx->version != 5 && tx->version != 6) || index >= tx->rewrites.size()) return false;
+    OperationTransactionRewrite& rewrite = tx->rewrites[index];
+    if (rewrite.step != "rewriting") return false;
+    OperationFileFingerprint observed;
+    if (!CaptureOperationFileFingerprint(rewrite.target, &observed, outErr)) return false;
+    rewrite.rewrittenSize = observed.size;
+    rewrite.rewrittenSha256 = std::move(observed.sha256);
+    rewrite.step = "postcondition_verified";
+    std::vector<std::pair<size_t, OperationFileFingerprint>> replacedMovePostconditions;
+    for (size_t moveIndex = 0; moveIndex < tx->moves.size(); ++moveIndex) {
+        OperationTransactionMove& move = tx->moves[moveIndex];
+        if (!AreSameLocalPath(move.src, rewrite.target)) continue;
+        replacedMovePostconditions.push_back({moveIndex, FinalFingerprint(move)});
+        move.finalSize = rewrite.rewrittenSize;
+        move.finalSha256 = rewrite.rewrittenSha256;
+    }
+    if (WriteOperationTransactionManifest(*tx, "applying", outErr)) return true;
+    for (const auto& [moveIndex, previous] : replacedMovePostconditions) {
+        tx->moves[moveIndex].finalSize = previous.size;
+        tx->moves[moveIndex].finalSha256 = previous.sha256;
+    }
+    rewrite.rewrittenSize = 0;
+    rewrite.rewrittenSha256.clear();
+    rewrite.step = "rewriting";
+    return false;
+}
+
 static bool ApplyNoteLinkRewritePlan(NoteLinkRewritePlan* plan,
+                                     OperationTransaction* transaction,
                                      std::wstring* outErr) {
     if (outErr) outErr->clear();
     if (!plan || !plan->HasWork()) return true;
+    if (!transaction || (transaction->version != 5 && transaction->version != 6) ||
+        transaction->rewrites.size() != plan->files.size()) {
+        if (outErr) *outErr = L"Operation rewrite transaction does not match its plan.";
+        return false;
+    }
 
-    std::vector<size_t> written;
-    written.reserve(plan->files.size());
     for (size_t i = 0; i < plan->files.size(); ++i) {
+        if (!BeginOperationTransactionRewrite(transaction, i, outErr)) return false;
         std::wstring err;
         const auto& file = plan->files[i];
         if (!clrop_bridge::SaveAnnotations(file.filePath.wstring(), file.pdfPath, file.updatedAnnots, err)) {
-            for (auto it = written.rbegin(); it != written.rend(); ++it) {
-                std::wstring rollbackErr;
-                RestoreOperationFileBytes(plan->files[*it].filePath,
-                                          plan->files[*it].originalBytes,
-                                          &rollbackErr);
-            }
             if (outErr) {
                 *outErr = (localization::Text(L"workspace.file_ops.a5f1e19eaae3"));
                 *outErr += file.filePath.wstring();
@@ -729,7 +1908,7 @@ static bool ApplyNoteLinkRewritePlan(NoteLinkRewritePlan* plan,
             }
             return false;
         }
-        written.push_back(i);
+        if (!CompleteOperationTransactionRewrite(transaction, i, outErr)) return false;
     }
 
     if (plan->touchesCurrentPdf &&
@@ -897,33 +2076,188 @@ static bool BuildOperationMoveSet(const std::filesystem::path& src,
     return true;
 }
 
-static bool MovePathSetWithRollback(
-    const std::vector<std::pair<std::filesystem::path, std::filesystem::path>>& moves,
-    std::wstring* outErr) {
+static bool ApplyOperationTransactionMoves(OperationTransaction* transaction,
+                                           std::wstring* outErr) {
     if (outErr) outErr->clear();
-    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> completed;
-    for (const auto& move : moves) {
-        std::error_code ec;
-        std::filesystem::rename(move.first, move.second, ec);
-        if (!ec) {
-            completed.push_back(move);
-            continue;
+    if (!transaction || (transaction->version != 5 && transaction->version != 6)) return false;
+    for (auto& move : transaction->moves) {
+        if (move.step != "prepared") return false;
+        bool destinationExists = false;
+        if (!IsOperationPathPresent(move.dest, &destinationExists, outErr) || destinationExists ||
+            !FileMatchesOperationFingerprint(move.src, FinalFingerprint(move), outErr) ||
+            !FileMatchesOperationFingerprint(move.backup, BackupFingerprint(move), outErr)) {
+            if (outErr && outErr->empty()) {
+                *outErr = localization::Text(L"workspace.file_ops.aa70bb265fd8");
+                *outErr += move.src.wstring() + L"\n->\n" + move.dest.wstring();
+            }
+            return false;
         }
 
-        for (auto it = completed.rbegin(); it != completed.rend(); ++it) {
-            std::error_code rollbackEc;
-            std::filesystem::rename(it->second, it->first, rollbackEc);
-            if (rollbackEc && outErr && outErr->empty()) {
-                *outErr = (localization::Text(L"workspace.file_ops.10235d55a6fc"));
-                *outErr += it->second.wstring() + L"\n->\n" + it->first.wstring();
+        move.step = "source_changing";
+        if (!WriteOperationTransactionManifest(*transaction, "applying", outErr)) {
+            move.step = "prepared";
+            return false;
+        }
+        std::error_code ec;
+        std::filesystem::rename(move.src, move.dest, ec);
+        if (ec) {
+            if (outErr && outErr->empty()) {
+                *outErr = (localization::Text(L"workspace.file_ops.aa70bb265fd8"));
+                *outErr += move.src.wstring() + L"\n->\n" + move.dest.wstring();
+                *outErr += L"\n\n" + atomic_write::Win32ErrorMessage(ec.value());
             }
+            return false;
         }
-        if (outErr && outErr->empty()) {
-            *outErr = (localization::Text(L"workspace.file_ops.aa70bb265fd8"));
-            *outErr += move.first.wstring() + L"\n->\n" + move.second.wstring();
-            *outErr += L"\n\n" + atomic_write::Win32ErrorMessage(ec.value());
+        if (!FileMatchesOperationFingerprint(move.dest, FinalFingerprint(move), outErr)) {
+            if (outErr && outErr->empty()) {
+                *outErr = L"Operation move postcondition could not be verified:\n" + move.dest.wstring();
+            }
+            return false;
         }
+        move.step = "postcondition_verified";
+        if (!WriteOperationTransactionManifest(*transaction, "applying", outErr)) {
+            // The durable state remains source_changing.  Its verified backup
+            // and destination fingerprint let recovery classify it safely.
+            move.step = "source_changing";
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool NoteAliasHasExpectedIdentity(const std::filesystem::path& path,
+                                         note::NoteId expected,
+                                         bool requirePresent,
+                                         std::wstring* outErr) {
+    std::wstring lookupErr;
+    const auto observed = note::FindRuntimeNoteIdentityPath(path.wstring(), &lookupErr);
+    if (!lookupErr.empty()) {
+        if (outErr) *outErr = lookupErr;
         return false;
+    }
+    if (requirePresent) {
+        if (observed.has_value() && *observed == expected) return true;
+        if (outErr) *outErr = L"Operation note-alias precondition changed:\n" + path.wstring();
+        return false;
+    }
+    if (!observed.has_value()) return true;
+    if (outErr) *outErr = L"Operation note-alias destination is already bound:\n" + path.wstring();
+    return false;
+}
+
+static bool ApplyOperationTransactionNoteAliases(OperationTransaction* transaction,
+                                                 std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (!transaction || (transaction->version != 5 && transaction->version != 6)) return false;
+    for (auto& alias : transaction->noteAliases) {
+        if (alias.step != "prepared" ||
+            !NoteAliasHasExpectedIdentity(alias.src, alias.noteId, /*requirePresent=*/true, outErr) ||
+            !NoteAliasHasExpectedIdentity(alias.dest, alias.noteId, /*requirePresent=*/false, outErr)) {
+            return false;
+        }
+        alias.step = "rebinding";
+        if (!WriteOperationTransactionManifest(*transaction, "applying", outErr)) {
+            alias.step = "prepared";
+            return false;
+        }
+
+        std::wstring rebindErr;
+        if (!note::RebindRuntimeNoteIdentityPath(alias.noteId,
+                                                 alias.src.wstring(),
+                                                 alias.dest.wstring(),
+                                                 &rebindErr)) {
+            if (outErr && outErr->empty()) *outErr = std::move(rebindErr);
+            return false;
+        }
+        if (!NoteAliasHasExpectedIdentity(alias.dest, alias.noteId, /*requirePresent=*/true, outErr) ||
+            !NoteAliasHasExpectedIdentity(alias.src, alias.noteId, /*requirePresent=*/false, outErr)) {
+            return false;
+        }
+        alias.step = "postcondition_verified";
+        if (!WriteOperationTransactionManifest(*transaction, "applying", outErr)) {
+            // The catalog change is durable but its manifest step is not yet.
+            // Leave the preceding rebinding state as the only recovery claim.
+            alias.step = "rebinding";
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ResourceAliasHasExpectedIdentity(const std::filesystem::path& path,
+                                             WorkspaceResourceId expected,
+                                             WorkspaceResourceKind kind,
+                                             bool requirePresent,
+                                             std::wstring* outErr) {
+    std::wstring lookupErr;
+    const auto observed = FindRuntimeWorkspaceResourceIdentityPath(kind, path.wstring(), &lookupErr);
+    if (!lookupErr.empty()) {
+        if (outErr) *outErr = lookupErr;
+        return false;
+    }
+    if (requirePresent) {
+        if (observed.has_value() && observed->resource_id == expected) return true;
+        if (outErr) *outErr = L"Operation resource-alias precondition changed:\n" + path.wstring();
+        return false;
+    }
+    if (!observed.has_value()) return true;
+    if (outErr) *outErr = L"Operation resource-alias destination is already bound:\n" + path.wstring();
+    return false;
+}
+
+static std::optional<WorkspaceResourceFingerprint> ResourceAliasFinalFingerprint(
+    const OperationTransaction& transaction,
+    const OperationTransactionResourceAlias& alias) {
+    for (const auto& move : transaction.moves) {
+        if (AreSameLocalPath(move.src, alias.src) && AreSameLocalPath(move.dest, alias.dest)) {
+            WorkspaceResourceFingerprint fingerprint{move.finalSize, move.finalSha256};
+            return fingerprint.valid()
+                ? std::optional<WorkspaceResourceFingerprint>(std::move(fingerprint))
+                : std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+static bool ApplyOperationTransactionResourceAliases(OperationTransaction* transaction,
+                                                     std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (!transaction || transaction->version != 6) return false;
+    for (auto& alias : transaction->resourceAliases) {
+        const auto expectedFingerprint = ResourceAliasFinalFingerprint(*transaction, alias);
+        if (alias.step != "prepared" || !expectedFingerprint.has_value() ||
+            !ResourceAliasHasExpectedIdentity(alias.src, alias.resourceId, alias.kind,
+                                              /*requirePresent=*/true, outErr) ||
+            !ResourceAliasHasExpectedIdentity(alias.dest, alias.resourceId, alias.kind,
+                                              /*requirePresent=*/false, outErr)) {
+            return false;
+        }
+        alias.step = "rebinding";
+        if (!WriteOperationTransactionManifest(*transaction, "applying", outErr)) {
+            alias.step = "prepared";
+            return false;
+        }
+
+        std::wstring rebindErr;
+        if (!RebindRuntimeWorkspaceResourceIdentityPath(alias.resourceId, alias.kind,
+                                                        alias.src.wstring(), alias.dest.wstring(),
+                                                        *expectedFingerprint, &rebindErr)) {
+            if (outErr && outErr->empty()) *outErr = std::move(rebindErr);
+            return false;
+        }
+        if (!ResourceAliasHasExpectedIdentity(alias.dest, alias.resourceId, alias.kind,
+                                              /*requirePresent=*/true, outErr) ||
+            !ResourceAliasHasExpectedIdentity(alias.src, alias.resourceId, alias.kind,
+                                              /*requirePresent=*/false, outErr)) {
+            return false;
+        }
+        alias.step = "postcondition_verified";
+        if (!WriteOperationTransactionManifest(*transaction, "applying", outErr)) {
+            // The catalog step is already durable. Keeping rebinding in the
+            // manifest makes the conservative recovery boundary explicit.
+            alias.step = "rebinding";
+            return false;
+        }
     }
     return true;
 }
@@ -994,6 +2328,281 @@ static void AfterOperationReopenCurrentTarget(HWND owner,
     RememberCurrentSessionFiles();
 }
 
+static void RecordCommittedWorkspaceOperation(const OperationTransaction& transaction) {
+    s_workspaceOperationHistory = {};
+    if (transaction.version != 6 || transaction.moves.empty() || transaction.sessionRoot.empty()) {
+        return;
+    }
+    s_workspaceOperationHistory.undo = WorkspaceOperationHistoryEntry{transaction, std::nullopt};
+}
+
+static std::filesystem::path WorkspaceOperationRewriteTarget(
+    const OperationTransaction& operation,
+    const OperationTransactionRewrite& rewrite,
+    bool undo) {
+    if (!undo) return rewrite.target;
+    for (const auto& move : operation.moves) {
+        if (AreSameLocalPath(move.src, rewrite.target)) return move.dest;
+    }
+    return rewrite.target;
+}
+
+static OperationFileFingerprint WorkspaceOperationDirectionMoveFingerprint(
+    const OperationTransaction& operation,
+    const OperationTransactionMove& move,
+    bool undo) {
+    if (undo) return FinalFingerprint(move);
+    for (const auto& rewrite : operation.rewrites) {
+        if (AreSameLocalPath(rewrite.target, move.src)) return OriginalFingerprint(rewrite);
+    }
+    return FinalFingerprint(move);
+}
+
+static bool VerifyWorkspaceOperationDirection(const OperationTransaction& operation,
+                                              bool undo,
+                                              const std::filesystem::path& sessionRoot,
+                                              const OperationTransaction* rewriteSource,
+                                              std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (operation.version != 6 || operation.moves.empty() ||
+        !TransactionBelongsToOperationSession(operation, sessionRoot) ||
+        !ValidateOperationTransactionPaths(operation, sessionRoot)) {
+        return false;
+    }
+    if ((!undo && !operation.rewrites.empty() &&
+         (!rewriteSource || rewriteSource->rewrites.size() != operation.rewrites.size())) ||
+        (rewriteSource && rewriteSource->version != 6)) {
+        return false;
+    }
+    for (const auto& move : operation.moves) {
+        if (move.step != "postcondition_verified") return false;
+        const std::filesystem::path current = undo ? move.dest : move.src;
+        const std::filesystem::path absent = undo ? move.src : move.dest;
+        bool absentPresent = false;
+        if (!IsOperationPathPresent(absent, &absentPresent, outErr) || absentPresent ||
+            !FileMatchesOperationFingerprint(
+                current, WorkspaceOperationDirectionMoveFingerprint(operation, move, undo), outErr)) {
+            return false;
+        }
+    }
+    for (const auto& alias : operation.noteAliases) {
+        if (alias.step != "postcondition_verified" ||
+            !NoteAliasHasExpectedIdentity(undo ? alias.dest : alias.src, alias.noteId,
+                                          /*requirePresent=*/true, outErr) ||
+            !NoteAliasHasExpectedIdentity(undo ? alias.src : alias.dest, alias.noteId,
+                                          /*requirePresent=*/false, outErr)) {
+            return false;
+        }
+    }
+    for (const auto& alias : operation.resourceAliases) {
+        if (alias.step != "postcondition_verified" ||
+            !ResourceAliasHasExpectedIdentity(undo ? alias.dest : alias.src,
+                                              alias.resourceId, alias.kind,
+                                              /*requirePresent=*/true, outErr) ||
+            !ResourceAliasHasExpectedIdentity(undo ? alias.src : alias.dest,
+                                              alias.resourceId, alias.kind,
+                                              /*requirePresent=*/false, outErr)) {
+            return false;
+        }
+    }
+    for (size_t index = 0; index < operation.rewrites.size(); ++index) {
+        const auto& rewrite = operation.rewrites[index];
+        const std::filesystem::path currentTarget =
+            WorkspaceOperationRewriteTarget(operation, rewrite, undo);
+        const OperationFileFingerprint expected = undo
+            ? OperationFileFingerprint{rewrite.rewrittenSize, rewrite.rewrittenSha256}
+            : OriginalFingerprint(rewrite);
+        const OperationTransactionRewrite& sourceRewrite = undo
+            ? rewrite
+            : rewriteSource->rewrites[index];
+        if (rewrite.step != "postcondition_verified" ||
+            !FileMatchesOperationFingerprint(currentTarget, expected, outErr) ||
+            !FileMatchesOperationFingerprint(sourceRewrite.backup,
+                                             BackupFingerprint(sourceRewrite), outErr)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool RestoreWorkspaceOperationRewriteFromBackup(
+    const std::filesystem::path& backup,
+    const OperationFileFingerprint& expectedBackup,
+    const std::filesystem::path& target,
+    std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (!FileMatchesOperationFingerprint(backup, expectedBackup, outErr)) return false;
+    if (target.empty() || target.parent_path().empty()) return false;
+    const std::filesystem::path temporary = atomic_write::MakeUniqueDestInDir(
+        target.parent_path(), target.filename().wstring() + L".__workspace_undo__.tmp");
+    std::wstring copyErr;
+    if (!CopyFileForImportSafely(backup, temporary, &copyErr)) {
+        if (outErr) *outErr = copyErr;
+        return false;
+    }
+    if (!FileMatchesOperationFingerprint(temporary, expectedBackup, outErr)) return false;
+    if (!atomic_write::AtomicReplaceFile(target, temporary, OperationQuarantineDir(), outErr)) return false;
+    return FileMatchesOperationFingerprint(target, expectedBackup, outErr);
+}
+
+static bool ApplyWorkspaceOperationInverseRewrites(
+    const OperationTransaction& sourceOperation,
+    const OperationTransaction* rewriteSource,
+    bool undo,
+    OperationTransaction* inverse,
+    std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    if (!inverse || sourceOperation.rewrites.size() != inverse->rewrites.size() ||
+        (!undo && (!rewriteSource || rewriteSource->rewrites.size() != sourceOperation.rewrites.size()))) {
+        return false;
+    }
+    for (size_t index = 0; index < sourceOperation.rewrites.size(); ++index) {
+        const OperationTransactionRewrite& sourceRewrite = undo
+            ? sourceOperation.rewrites[index]
+            : rewriteSource->rewrites[index];
+        if (!BeginOperationTransactionRewrite(inverse, index, outErr) ||
+            !RestoreWorkspaceOperationRewriteFromBackup(sourceRewrite.backup,
+                                                        BackupFingerprint(sourceRewrite),
+                                                        inverse->rewrites[index].target, outErr) ||
+            !CompleteOperationTransactionRewrite(inverse, index, outErr)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ApplyWorkspaceOperationDirection(HWND owner,
+                                             const OperationTransaction& operation,
+                                             bool undo,
+                                             const OperationTransaction* rewriteSource,
+                                             OperationTransaction* outApplied,
+                                             std::wstring* outErr) {
+    if (outApplied) *outApplied = {};
+    if (outErr) outErr->clear();
+    if (g_currentSessionPath.empty()) return false;
+    const std::filesystem::path sessionRoot(g_currentSessionPath);
+    if (!EnsureOperationResourceCatalogConfigured(outErr) ||
+        !RequireOperationSessionRecoveryResolved(owner, OperationMenuTitle(), sessionRoot) ||
+        !VerifyWorkspaceOperationDirection(operation, undo, sessionRoot, rewriteSource, outErr)) {
+        return false;
+    }
+
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moves;
+    std::vector<OperationTransactionNoteAlias> noteAliases;
+    std::vector<OperationTransactionResourceAlias> resourceAliases;
+    moves.reserve(operation.moves.size());
+    noteAliases.reserve(operation.noteAliases.size());
+    resourceAliases.reserve(operation.resourceAliases.size());
+    for (const auto& move : operation.moves) {
+        moves.push_back({undo ? move.dest : move.src, undo ? move.src : move.dest});
+    }
+    for (const auto& alias : operation.noteAliases) {
+        noteAliases.push_back({alias.noteId, undo ? alias.dest : alias.src,
+                               undo ? alias.src : alias.dest, "prepared"});
+    }
+    for (const auto& alias : operation.resourceAliases) {
+        resourceAliases.push_back({alias.resourceId, alias.kind, undo ? alias.dest : alias.src,
+                                   undo ? alias.src : alias.dest, "prepared"});
+    }
+
+    NoteLinkRewritePlan inverseRewritePlan;
+    for (const auto& rewrite : operation.rewrites) {
+        NoteLinkRewriteFile file;
+        file.filePath = WorkspaceOperationRewriteTarget(operation, rewrite, undo);
+        inverseRewritePlan.files.push_back(std::move(file));
+    }
+    OperationTransaction inverse;
+    if (!PrepareOperationTransaction(moves, inverseRewritePlan, noteAliases, resourceAliases,
+                                     &inverse, outErr)) {
+        return false;
+    }
+    auto recoverOrBlock = [&](const char* state) {
+        std::wstring recoveryErr;
+        if (!RecoverOperationTransactionToOriginalState(&inverse, sessionRoot, &recoveryErr)) {
+            BlockOperationSessionForRecovery(sessionRoot, inverse.manifest, &inverse, state, true);
+            ShowOperationRecoveryRequiredDialog(owner, OperationMenuTitle(), inverse.manifest,
+                                                &inverse, state, L"", true);
+        }
+    };
+    if (!WriteOperationTransactionManifest(inverse, "applying", outErr) ||
+        !ApplyWorkspaceOperationInverseRewrites(operation, rewriteSource, undo, &inverse, outErr) ||
+        !ApplyOperationTransactionMoves(&inverse, outErr) ||
+        !ApplyOperationTransactionNoteAliases(&inverse, outErr) ||
+        !ApplyOperationTransactionResourceAliases(&inverse, outErr) ||
+        !WriteOperationTransactionManifest(inverse, "applied", outErr) ||
+        !WriteOperationTransactionManifest(inverse, "committed", outErr)) {
+        recoverOrBlock("applying");
+        return false;
+    }
+
+    const auto& mainMove = operation.moves.front();
+    const std::filesystem::path reopenedTarget = undo ? mainMove.src : mainMove.dest;
+    const std::filesystem::path previousTarget = undo ? mainMove.dest : mainMove.src;
+    const bool isPdf = IsPdfFile(reopenedTarget);
+    OperationNoteChange pairedNote;
+    if (isPdf) {
+        for (const auto& alias : operation.noteAliases) {
+            const std::filesystem::path currentNote = undo ? alias.dest : alias.src;
+            if (!g_currentNotePath.empty() &&
+                AreSameLocalPath(std::filesystem::path(g_currentNotePath), currentNote)) {
+                pairedNote.enabled = true;
+                pairedNote.src = currentNote;
+                pairedNote.dest = undo ? alias.src : alias.dest;
+                break;
+            }
+        }
+    }
+    if (owner) {
+        AfterOperationReopenCurrentTarget(owner, reopenedTarget, isPdf,
+                                          pairedNote.enabled ? &pairedNote : nullptr);
+        if (isPdf) MovePdfViewInfoPath(previousTarget.wstring(), reopenedTarget.wstring());
+    }
+    if (outApplied) *outApplied = std::move(inverse);
+    return true;
+}
+
+bool CanExecuteWorkspaceOperationUndoRedo(bool undo) {
+    if (g_currentSessionPath.empty()) return false;
+    const std::optional<WorkspaceOperationHistoryEntry>& entry = undo
+        ? s_workspaceOperationHistory.undo
+        : s_workspaceOperationHistory.redo;
+    if (!entry.has_value() || entry->transaction.version != 6 || entry->transaction.moves.empty() ||
+        (!undo && !entry->transaction.rewrites.empty() && !entry->oppositeTransaction.has_value())) {
+        return false;
+    }
+    return TransactionBelongsToOperationSession(
+        entry->transaction, std::filesystem::path(g_currentSessionPath));
+}
+
+bool ExecuteWorkspaceOperationUndoRedo(HWND owner, bool undo) {
+    if (!CanExecuteWorkspaceOperationUndoRedo(undo)) return false;
+    const WorkspaceOperationHistoryEntry entry = undo
+        ? *s_workspaceOperationHistory.undo
+        : *s_workspaceOperationHistory.redo;
+    const OperationTransaction& operation = entry.transaction;
+    const OperationTransaction* rewriteSource = undo ? nullptr
+        : (entry.oppositeTransaction.has_value() ? &*entry.oppositeTransaction : nullptr);
+    std::wstring err;
+    OperationTransaction applied;
+    if (!ApplyWorkspaceOperationDirection(owner, operation, undo, rewriteSource, &applied, &err)) {
+        if (!err.empty()) {
+            ShowSoftNotice(owner,
+                           localization::Text(L"workspace.file_ops.workspace_undo_unavailable"),
+                           SoftNoticeKind::Warning);
+        }
+        return false;
+    }
+    if (undo) {
+        s_workspaceOperationHistory.undo.reset();
+        s_workspaceOperationHistory.redo = WorkspaceOperationHistoryEntry{operation, std::move(applied)};
+    } else {
+        s_workspaceOperationHistory.redo.reset();
+        s_workspaceOperationHistory.undo = WorkspaceOperationHistoryEntry{operation, std::nullopt};
+    }
+    if (owner) RefreshMainMenuBar(owner);
+    return true;
+}
+
 bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly) {
     const auto& ui = GetUiText();
     const std::wstring title = renameOnly
@@ -1002,10 +2611,23 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
     const std::filesystem::path src = isPdf
         ? std::filesystem::path(CurrentLogicalPdfPath())
         : std::filesystem::path(g_currentNotePath);
+    std::wstring catalogErr;
+    if (!EnsureOperationResourceCatalogConfigured(&catalogErr)) {
+        ShowSilentMessageDialog(owner, title,
+                                catalogErr.empty()
+                                    ? localization::Text(L"workspace.file_ops.resource_identity_failed")
+                                    : catalogErr,
+                                SoftNoticeKind::Error);
+        return false;
+    }
     if (src.empty()) {
         const std::wstring msg = localization::Text(isPdf
             ? L"workspace.file_ops.no_pdf" : L"workspace.file_ops.no_note");
         ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        return false;
+    }
+    if (!RequireOperationSessionRecoveryResolved(
+            owner, title, std::filesystem::path(g_currentSessionPath))) {
         return false;
     }
     if (!EnsureOperationReadyForPath(owner, src, isPdf, title)) return false;
@@ -1096,29 +2718,41 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
         }
     }
 
-    struct NoteIdentityMove {
-        note::NoteId noteId{};
-        std::filesystem::path src;
-        std::filesystem::path dest;
-    };
-    std::vector<NoteIdentityMove> noteIdentityMoves;
+    std::vector<OperationTransactionNoteAlias> noteIdentityMoves;
+    std::vector<OperationTransactionResourceAlias> resourceIdentityMoves;
     for (const auto& move : moves) {
-        if (!IsNoteFile(move.first)) continue;
+        if (IsNoteFile(move.first)) {
+            std::wstring identityErr;
+            const note::NoteIdentity identity =
+                note::ResolveRuntimeNoteIdentityPath(move.first.wstring(), &identityErr);
+            if (!identity.valid() || !identityErr.empty()) {
+                if (identityErr.empty()) {
+                    identityErr = localization::Text(L"workspace.file_ops.55004c4b137f");
+                }
+                ShowSilentMessageDialog(owner, title, identityErr, SoftNoticeKind::Error);
+                return false;
+            }
+            noteIdentityMoves.push_back({identity.note_id, move.first, move.second, "prepared"});
+        }
+        const auto kind = OperationResourceKindForFile(move.first);
+        if (!kind.has_value()) continue;
         std::wstring identityErr;
-        const note::NoteIdentity identity =
-            note::ResolveRuntimeNoteIdentityPath(move.first.wstring(), &identityErr);
-        if (!identity.valid() || !identityErr.empty()) {
+        const auto identity = ResolveRuntimeWorkspaceResourceIdentityPath(
+            *kind, move.first.wstring(), &identityErr);
+        if (!identity.has_value() || !identityErr.empty()) {
             if (identityErr.empty()) {
-                identityErr = localization::Text(L"workspace.file_ops.55004c4b137f");
+                identityErr = localization::Text(L"workspace.file_ops.resource_identity_failed");
             }
             ShowSilentMessageDialog(owner, title, identityErr, SoftNoticeKind::Error);
             return false;
         }
-        noteIdentityMoves.push_back({identity.note_id, move.first, move.second});
+        resourceIdentityMoves.push_back(
+            {identity->resource_id, *kind, move.first, move.second, "prepared"});
     }
 
     OperationTransaction transaction;
-    if (!PrepareOperationTransaction(moves, noteRewritePlan, &transaction, &err)) {
+    if (!PrepareOperationTransaction(moves, noteRewritePlan, noteIdentityMoves,
+                                     resourceIdentityMoves, &transaction, &err)) {
         ShowSilentMessageDialog(
             owner, title,
             err.empty()
@@ -1128,16 +2762,41 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
         return false;
     }
 
-    if (noteRewritePlan.HasWork() && !ApplyNoteLinkRewritePlan(&noteRewritePlan, &err)) {
+    // Persist the transition before the first rewrite or rename. A later
+    // startup must treat this as RecoveryRequired unless a fingerprinted
+    // manifest can prove every member's postcondition.
+    if (!WriteOperationTransactionManifest(transaction, "applying", &err)) {
         std::wstring recoveryErr;
-        RecoverOperationTransactionToOriginalState(&transaction,
-                                                   std::filesystem::path(g_currentSessionPath),
-                                                   &recoveryErr);
-        if (!recoveryErr.empty()) {
-            if (!err.empty()) err += L"\n\n";
-            err += recoveryErr;
+        const bool recovered = RecoverOperationTransactionToOriginalState(
+            &transaction, std::filesystem::path(g_currentSessionPath), &recoveryErr);
+        if (!recovered) {
+            BlockOperationSessionForRecovery(std::filesystem::path(g_currentSessionPath),
+                                             transaction.manifest, &transaction, "prepared", true);
+            ShowOperationRecoveryRequiredDialog(owner, title, transaction.manifest, &transaction,
+                                                "prepared", L"", true);
+        } else {
+            ShowSilentMessageDialog(
+                owner, title,
+                err.empty()
+                    ? (localization::Text(L"workspace.file_ops.c4d23695b8a0"))
+                    : err,
+                SoftNoticeKind::Error);
         }
-        if (!err.empty()) {
+        return false;
+    }
+
+    if (noteRewritePlan.HasWork() &&
+        !ApplyNoteLinkRewritePlan(&noteRewritePlan, &transaction, &err)) {
+        std::wstring recoveryErr;
+        const bool recovered = RecoverOperationTransactionToOriginalState(
+            &transaction, std::filesystem::path(g_currentSessionPath), &recoveryErr);
+        if (recovered) RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
+        if (!recovered) {
+            BlockOperationSessionForRecovery(std::filesystem::path(g_currentSessionPath),
+                                             transaction.manifest, &transaction, "applying", true);
+            ShowOperationRecoveryRequiredDialog(owner, title, transaction.manifest, &transaction,
+                                                "applying", L"", true);
+        } else if (!err.empty()) {
             ShowSilentMessageDialog(owner, title, err, SoftNoticeKind::Error);
         }
         return false;
@@ -1145,61 +2804,62 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
     if (isPdf) {
         SaveLastPdfViewInfo();
     }
-    if (!MovePathSetWithRollback(moves, &err)) {
+    if (!ApplyOperationTransactionMoves(&transaction, &err)) {
         std::wstring recoveryErr;
-        if (!RecoverOperationTransactionToOriginalState(&transaction,
-                                                        std::filesystem::path(g_currentSessionPath),
-                                                        &recoveryErr) &&
-            !recoveryErr.empty()) {
-            if (!err.empty()) err += L"\n\n";
-            err += recoveryErr;
-        }
-        RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
-        if (!err.empty()) {
-            ShowSilentMessageDialog(owner, title, err, SoftNoticeKind::Error);
+        const bool recovered = RecoverOperationTransactionToOriginalState(
+            &transaction, std::filesystem::path(g_currentSessionPath), &recoveryErr);
+        if (recovered) {
+            RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
+            if (!err.empty()) {
+                ShowSilentMessageDialog(owner, title, err, SoftNoticeKind::Error);
+            }
+        } else {
+            BlockOperationSessionForRecovery(std::filesystem::path(g_currentSessionPath),
+                                             transaction.manifest, &transaction, "applying", true);
+            ShowOperationRecoveryRequiredDialog(owner, title, transaction.manifest, &transaction,
+                                                "applying", L"", true);
         }
         return false;
     }
 
-    size_t reboundIdentityCount = 0;
-    for (; reboundIdentityCount < noteIdentityMoves.size(); ++reboundIdentityCount) {
-        const NoteIdentityMove& identityMove = noteIdentityMoves[reboundIdentityCount];
-        std::wstring identityErr;
-        if (!note::RebindRuntimeNoteIdentityPath(identityMove.noteId,
-                                                 identityMove.src.wstring(),
-                                                 identityMove.dest.wstring(),
-                                                 &identityErr)) {
-            std::wstring recoveryErr;
-            const bool recovered = RecoverOperationTransactionToOriginalState(
-                &transaction, std::filesystem::path(g_currentSessionPath), &recoveryErr);
-            if (recovered) {
-                for (size_t i = reboundIdentityCount; i > 0; --i) {
-                    const NoteIdentityMove& completed = noteIdentityMoves[i - 1];
-                    std::wstring reverseErr;
-                    if (!note::RebindRuntimeNoteIdentityPath(completed.noteId,
-                                                             completed.dest.wstring(),
-                                                             completed.src.wstring(),
-                                                             &reverseErr) &&
-                        !reverseErr.empty()) {
-                        if (!recoveryErr.empty()) recoveryErr += L"\n";
-                        recoveryErr += reverseErr;
-                    }
-                }
-            }
+    if (!ApplyOperationTransactionNoteAliases(&transaction, &err)) {
+        std::wstring recoveryErr;
+        const bool recovered = RecoverOperationTransactionToOriginalState(
+            &transaction, std::filesystem::path(g_currentSessionPath), &recoveryErr);
+        if (recovered) {
             RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
-            err = identityErr.empty()
-                ? (localization::Text(L"workspace.file_ops.03f5d47ceb13"))
-                : identityErr;
-            if (!recoveryErr.empty()) err += L"\n\n" + recoveryErr;
-            ShowSilentMessageDialog(owner, title, err, SoftNoticeKind::Error);
-            return false;
+            ShowSilentMessageDialog(
+                owner, title,
+                err.empty() ? localization::Text(L"workspace.file_ops.03f5d47ceb13") : err,
+                SoftNoticeKind::Error);
+        } else {
+            BlockOperationSessionForRecovery(std::filesystem::path(g_currentSessionPath),
+                                             transaction.manifest, &transaction, "applying", true);
+            ShowOperationRecoveryRequiredDialog(owner, title, transaction.manifest, &transaction,
+                                                "applying", L"", true);
         }
+        return false;
     }
-    if (isPdf) {
-        MovePdfViewInfoPath(src.wstring(), dest.wstring());
+    if (!ApplyOperationTransactionResourceAliases(&transaction, &err)) {
+        std::wstring recoveryErr;
+        const bool recovered = RecoverOperationTransactionToOriginalState(
+            &transaction, std::filesystem::path(g_currentSessionPath), &recoveryErr);
+        if (recovered) {
+            RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
+            ShowSilentMessageDialog(
+                owner, title,
+                err.empty() ? localization::Text(L"workspace.file_ops.resource_identity_failed") : err,
+                SoftNoticeKind::Error);
+        } else {
+            BlockOperationSessionForRecovery(std::filesystem::path(g_currentSessionPath),
+                                             transaction.manifest, &transaction, "applying", true);
+            ShowOperationRecoveryRequiredDialog(owner, title, transaction.manifest, &transaction,
+                                                "applying", L"", true);
+        }
+        return false;
     }
-
-    if (!WriteOperationTransactionManifest(transaction, "committed", &err)) {
+    if (!WriteOperationTransactionManifest(transaction, "applied", &err) ||
+        !WriteOperationTransactionManifest(transaction, "committed", &err)) {
         std::wstring recoveryErr;
         bool recovered = RecoverOperationTransactionToOriginalState(&transaction,
                                                                     std::filesystem::path(g_currentSessionPath),
@@ -1208,33 +2868,23 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
             MovePdfViewInfoPath(dest.wstring(), src.wstring());
         }
         if (recovered) {
-            for (size_t i = noteIdentityMoves.size(); i > 0; --i) {
-                const NoteIdentityMove& completed = noteIdentityMoves[i - 1];
-                std::wstring identityErr;
-                if (!note::RebindRuntimeNoteIdentityPath(completed.noteId,
-                                                         completed.dest.wstring(),
-                                                         completed.src.wstring(),
-                                                         &identityErr) &&
-                    !identityErr.empty()) {
-                    if (!recoveryErr.empty()) recoveryErr += L"\n";
-                    recoveryErr += identityErr;
-                }
-            }
-        }
-        if (!recoveryErr.empty()) {
-            if (!err.empty()) err += L"\n\n";
-            err += recoveryErr;
-        }
-        RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
-        ShowSilentMessageDialog(
-            owner, title,
-            err.empty()
-                ? (localization::Text(L"workspace.file_ops.786bc09d44fd"))
+            RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
+            ShowSilentMessageDialog(
+                owner, title,
+                err.empty()
+                    ? (localization::Text(L"workspace.file_ops.786bc09d44fd"))
                 : err,
-            SoftNoticeKind::Error);
+                SoftNoticeKind::Error);
+        } else {
+            BlockOperationSessionForRecovery(std::filesystem::path(g_currentSessionPath),
+                                             transaction.manifest, &transaction, "applied", true);
+            ShowOperationRecoveryRequiredDialog(owner, title, transaction.manifest, &transaction,
+                                                "applied", L"", true);
+        }
         return false;
     }
 
+    RecordCommittedWorkspaceOperation(transaction);
     AfterOperationReopenCurrentTarget(owner, dest, isPdf, noteChange.enabled ? &noteChange : nullptr);
     if (isPdf) {
         MovePdfViewInfoPath(src.wstring(), dest.wstring());
@@ -1261,8 +2911,14 @@ bool RunUiAutomationOperationTransactionRecoveryScenario(std::wstring* outError)
         return false;
     }
     const std::filesystem::path sessionRoot(g_currentSessionPath);
-    const std::filesystem::path source = sessionRoot / L"__ui_operation_tx_source.clro";
-    const std::filesystem::path destination = sessionRoot / L"__ui_operation_tx_destination.clro";
+    std::wstring catalogConfigureErr;
+    if (!EnsureOperationResourceCatalogConfigured(&catalogConfigureErr)) {
+        if (outError) *outError = L"Operation recovery automation could not configure the resource catalog.\n" +
+                                  catalogConfigureErr;
+        return false;
+    }
+    const std::filesystem::path source = sessionRoot / L"__ui_operation_tx_source.bin";
+    const std::filesystem::path destination = sessionRoot / L"__ui_operation_tx_destination.bin";
     const std::filesystem::path rewriteTarget = sessionRoot / L"__ui_operation_tx_rewrite.clrop";
     const std::string sourceOriginal = "operation-source-original";
     const std::string rewriteOriginal = "operation-rewrite-original";
@@ -1282,10 +2938,72 @@ bool RunUiAutomationOperationTransactionRecoveryScenario(std::wstring* outError)
     rewritePlan.files.push_back(std::move(rewriteFile));
     std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moves{{source, destination}};
     OperationTransaction transaction;
-    if (!PrepareOperationTransaction(moves, rewritePlan, &transaction, &err)) {
+    if (!PrepareOperationTransaction(moves, rewritePlan, {}, {}, &transaction, &err)) {
         if (outError) *outError = L"Failed to prepare operation recovery transaction.\n" + err;
         return false;
     }
+    OperationTransaction persistedTransaction;
+    std::string persistedState;
+    if (!ReadOperationTransactionManifest(transaction.manifest, &persistedTransaction, &persistedState) ||
+        persistedTransaction.version != 6 || persistedState != "prepared" ||
+        persistedTransaction.id != transaction.id || persistedTransaction.id.empty() ||
+        !AreSameLocalPath(persistedTransaction.sessionRoot, sessionRoot) ||
+        !ValidateOperationTransactionPaths(persistedTransaction, sessionRoot)) {
+        if (outError) *outError = L"Operation recovery fixture did not persist a valid V6 manifest.";
+        return false;
+    }
+    OperationTransaction aliasFixture = persistedTransaction;
+    aliasFixture.noteAliases.push_back(
+        {note::NoteId{0x7a11ce5u}, source, destination, "prepared"});
+    if (!WriteOperationTransactionManifest(aliasFixture, "prepared", &err)) {
+        if (outError) *outError = L"Failed to write a V6 note-alias recovery fixture.";
+        return false;
+    }
+    OperationTransaction parsedAliasFixture;
+    std::string aliasFixtureState;
+    if (!ReadOperationTransactionManifest(transaction.manifest, &parsedAliasFixture, &aliasFixtureState) ||
+        parsedAliasFixture.version != 6 || aliasFixtureState != "prepared" ||
+        parsedAliasFixture.noteAliases.size() != 1 ||
+        parsedAliasFixture.noteAliases.front().noteId != note::NoteId{0x7a11ce5u} ||
+        !AreSameLocalPath(parsedAliasFixture.noteAliases.front().src, source) ||
+        !AreSameLocalPath(parsedAliasFixture.noteAliases.front().dest, destination) ||
+        !ValidateOperationTransactionPaths(parsedAliasFixture, sessionRoot) ||
+        !WriteOperationTransactionManifest(persistedTransaction, "prepared", &err)) {
+        if (outError) *outError = L"A V6 note-alias recovery fixture was not handled safely.";
+        return false;
+    }
+    // A V3 record predates the explicit session field. Its parsed members,
+    // rather than the global transaction directory, provide the only safe
+    // session-affinity evidence. Verify that it remains readable before the
+    // fixture resumes testing the current V4 format.
+    OperationTransaction legacyV3Transaction = persistedTransaction;
+    legacyV3Transaction.version = 3;
+    legacyV3Transaction.sessionRoot.clear();
+    if (!WriteOperationTransactionManifest(legacyV3Transaction, "prepared", &err)) {
+        if (outError) *outError = L"Failed to write a compatible V3 recovery fixture.";
+        return false;
+    }
+    OperationTransaction parsedLegacyV3Transaction;
+    std::string legacyV3State;
+    if (!ReadOperationTransactionManifest(transaction.manifest, &parsedLegacyV3Transaction, &legacyV3State) ||
+        parsedLegacyV3Transaction.version != 3 || !parsedLegacyV3Transaction.sessionRoot.empty() ||
+        legacyV3State != "prepared" ||
+        !TransactionBelongsToOperationSession(parsedLegacyV3Transaction, sessionRoot) ||
+        !ValidateOperationTransactionPaths(parsedLegacyV3Transaction, sessionRoot) ||
+        !WriteOperationTransactionManifest(persistedTransaction, "prepared", &err)) {
+        if (outError) *outError = L"A compatible V3 recovery fixture was not handled safely.";
+        return false;
+    }
+    OperationTransaction foreignSessionTransaction = persistedTransaction;
+    foreignSessionTransaction.sessionRoot = sessionRoot.parent_path() / L"__ui_other_session";
+    std::wstring foreignRecoveryErr;
+    if (TransactionBelongsToOperationSession(foreignSessionTransaction, sessionRoot) ||
+        RecoverOperationTransactionToOriginalState(&foreignSessionTransaction,
+                                                   sessionRoot, &foreignRecoveryErr)) {
+        if (outError) *outError = L"A V6 transaction was incorrectly attributed to another session.";
+        return false;
+    }
+    transaction = std::move(persistedTransaction);
 
     std::error_code moveEc;
     std::filesystem::rename(source, destination, moveEc);
@@ -1293,40 +3011,323 @@ bool RunUiAutomationOperationTransactionRecoveryScenario(std::wstring* outError)
         if (outError) *outError = L"Failed to simulate interrupted operation transaction.";
         return false;
     }
-    if (!RecoverOperationTransactionToOriginalState(&transaction, sessionRoot, &err)) {
-        if (outError) *outError = L"Failed to recover interrupted operation transaction.\n" + err;
+    if (RecoverOperationTransactionToOriginalState(&transaction, sessionRoot, &err)) {
+        if (outError) *outError = L"Recovery overwrote an observed rewrite without explicit user action.";
         return false;
     }
 
-    std::string recoveredSource;
-    std::string recoveredRewrite;
-    std::error_code destinationEc;
-    const bool destinationExists = std::filesystem::exists(destination, destinationEc);
-    if (!ReadOperationFileBytes(source, recoveredSource, &err) ||
-        !ReadOperationFileBytes(rewriteTarget, recoveredRewrite, &err) ||
-        recoveredSource != sourceOriginal ||
-        recoveredRewrite != rewriteOriginal ||
-        destinationEc || destinationExists) {
-        if (outError) *outError = L"Recovered operation transaction did not restore original files.";
+    std::string preservedDestination;
+    std::string preservedRewrite;
+    if (!ReadOperationFileBytes(destination, preservedDestination, &err) ||
+        !ReadOperationFileBytes(rewriteTarget, preservedRewrite, &err) ||
+        preservedDestination != sourceOriginal || preservedRewrite != rewriteObserved) {
+        if (outError) *outError = L"Recovery changed an observed operation member without explicit user action.";
         return false;
     }
 
-    bool preservedObserved = false;
-    std::error_code iterEc;
-    for (std::filesystem::directory_iterator it(transaction.dir, iterEc), end;
-         !iterEc && it != end; it.increment(iterEc)) {
-        const std::wstring name = it->path().filename().wstring();
-        if (name.rfind(L"observed_", 0) != 0) continue;
-        std::string observedBytes;
-        if (ReadOperationFileBytes(it->path(), observedBytes, &err) &&
-            observedBytes == rewriteObserved) {
-            preservedObserved = true;
-            break;
-        }
-    }
-    if (iterEc || !preservedObserved) {
-        if (outError) *outError = L"Recovery did not retain the observed intermediate rewrite bytes.";
+    // This is fixture cleanup after the non-destructive assertion above.  It
+    // never targets a user-selected operation path and verifies the expected
+    // bytes before returning the fixture to its initial state.
+    std::error_code restoreEc;
+    std::filesystem::rename(destination, source, restoreEc);
+    if (restoreEc || !writeFixture(rewriteTarget, rewriteOriginal) ||
+        !WriteOperationTransactionManifest(transaction, "recovered", &err)) {
+        if (outError) *outError = L"Failed to clean up the operation recovery fixture.";
         return false;
     }
+
+    // Exercise the actual persistent NoteId catalog boundary. A note move
+    // interrupted before rebinding has a catalog still at its source alias,
+    // so it can be automatically reversed without any catalog write. Once a
+    // durable rebind starts, recovery must instead preserve evidence.
+    const std::filesystem::path noteSource = sessionRoot / L"__ui_operation_tx_note_source.clro";
+    const std::filesystem::path noteDestination = sessionRoot / L"__ui_operation_tx_note_destination.clro";
+    const std::string noteOriginal = "operation-note-source-original";
+    if (!writeFixture(noteSource, noteOriginal)) {
+        if (outError) *outError = L"Failed to prepare note-alias recovery fixture.\n" + err;
+        return false;
+    }
+    std::wstring noteIdentityErr;
+    const note::NoteIdentity noteIdentity =
+        note::ResolveRuntimeNoteIdentityPath(noteSource.wstring(), &noteIdentityErr);
+    if (!noteIdentity.valid() || !noteIdentityErr.empty()) {
+        if (outError) *outError = L"Failed to allocate note-alias fixture identity.\n" + noteIdentityErr;
+        return false;
+    }
+    const std::vector<std::pair<std::filesystem::path, std::filesystem::path>> noteMoves{
+        {noteSource, noteDestination}};
+    const std::vector<OperationTransactionNoteAlias> noteAliases{
+        {noteIdentity.note_id, noteSource, noteDestination, "prepared"}};
+    NoteLinkRewritePlan emptyRewritePlan;
+    OperationTransaction preRebindTransaction;
+    if (!PrepareOperationTransaction(noteMoves, emptyRewritePlan, noteAliases, {},
+                                     &preRebindTransaction, &err) ||
+        !WriteOperationTransactionManifest(preRebindTransaction, "applying", &err) ||
+        !ApplyOperationTransactionMoves(&preRebindTransaction, &err) ||
+        !RecoverOperationTransactionToOriginalState(&preRebindTransaction, sessionRoot, &err)) {
+        if (outError) *outError = L"Note move before alias rebind was not safely recovered.\n" + err;
+        return false;
+    }
+    const auto recoveredSourceId = note::FindRuntimeNoteIdentityPath(noteSource.wstring(), &noteIdentityErr);
+    const auto recoveredDestinationId = note::FindRuntimeNoteIdentityPath(noteDestination.wstring(), &noteIdentityErr);
+    std::error_code noteSourceEc;
+    std::error_code noteDestinationEc;
+    const bool noteSourceExists = std::filesystem::exists(noteSource, noteSourceEc);
+    const bool noteDestinationExists = std::filesystem::exists(noteDestination, noteDestinationEc);
+    if (!recoveredSourceId.has_value() || *recoveredSourceId != noteIdentity.note_id ||
+        recoveredDestinationId.has_value() || !noteSourceExists || noteSourceEc ||
+        noteDestinationExists || noteDestinationEc) {
+        if (outError) *outError = L"Note recovery changed the catalog or file aliases inconsistently.";
+        return false;
+    }
+
+    OperationTransaction postRebindTransaction;
+    if (!PrepareOperationTransaction(noteMoves, emptyRewritePlan, noteAliases, {},
+                                     &postRebindTransaction, &err) ||
+        !WriteOperationTransactionManifest(postRebindTransaction, "applying", &err) ||
+        !ApplyOperationTransactionMoves(&postRebindTransaction, &err) ||
+        !ApplyOperationTransactionNoteAliases(&postRebindTransaction, &err)) {
+        if (outError) *outError = L"Failed to apply a durable note-alias fixture transition.\n" + err;
+        return false;
+    }
+    const auto reboundSourceId = note::FindRuntimeNoteIdentityPath(noteSource.wstring(), &noteIdentityErr);
+    const auto reboundDestinationId = note::FindRuntimeNoteIdentityPath(noteDestination.wstring(), &noteIdentityErr);
+    if (reboundSourceId.has_value() || !reboundDestinationId.has_value() ||
+        *reboundDestinationId != noteIdentity.note_id ||
+        RecoverOperationTransactionToOriginalState(&postRebindTransaction, sessionRoot, &err)) {
+        if (outError) *outError = L"Recovery did not preserve a completed note-alias member as evidence.";
+        return false;
+    }
+    std::wstring fixtureRebindErr;
+    std::error_code noteRestoreEc;
+    const bool rebindCleaned = note::RebindRuntimeNoteIdentityPath(
+        noteIdentity.note_id, noteDestination.wstring(), noteSource.wstring(), &fixtureRebindErr);
+    if (rebindCleaned) {
+        std::filesystem::rename(noteDestination, noteSource, noteRestoreEc);
+    }
+    if (!rebindCleaned || noteRestoreEc ||
+        !WriteOperationTransactionManifest(postRebindTransaction, "recovered", &err)) {
+        if (outError) *outError = L"Failed to clean up the note-alias recovery fixture.\n" +
+                                  (fixtureRebindErr.empty() ? err : fixtureRebindErr);
+        return false;
+    }
+
+    // PDF and LinkSet use the workspace resource catalog rather than a name-
+    // derived identity. Verify the same conservative pre/post-rebind boundary
+    // with a PDF member: files may be reversed before catalog rebind begins,
+    // but a durable alias update remains RecoveryRequired evidence.
+    const std::filesystem::path resourceSource = sessionRoot / L"__ui_operation_tx_resource_source.pdf";
+    const std::filesystem::path resourceDestination = sessionRoot / L"__ui_operation_tx_resource_destination.pdf";
+    const std::string resourceOriginal = "operation-resource-source-original";
+    if (!writeFixture(resourceSource, resourceOriginal)) {
+        if (outError) *outError = L"Failed to prepare resource-alias recovery fixture.\n" + err;
+        return false;
+    }
+    std::wstring resourceIdentityErr;
+    const auto resourceIdentity = ResolveRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, resourceSource.wstring(), &resourceIdentityErr);
+    if (!resourceIdentity.has_value() || !resourceIdentityErr.empty()) {
+        if (outError) *outError = L"Failed to allocate resource-alias fixture identity.\n" + resourceIdentityErr;
+        return false;
+    }
+    const std::vector<std::pair<std::filesystem::path, std::filesystem::path>> resourceMoves{
+        {resourceSource, resourceDestination}};
+    const std::vector<OperationTransactionResourceAlias> resourceAliases{
+        {resourceIdentity->resource_id, WorkspaceResourceKind::Pdf,
+         resourceSource, resourceDestination, "prepared"}};
+    OperationTransaction preResourceRebindTransaction;
+    if (!PrepareOperationTransaction(resourceMoves, emptyRewritePlan, {}, resourceAliases,
+                                     &preResourceRebindTransaction, &err) ||
+        !WriteOperationTransactionManifest(preResourceRebindTransaction, "applying", &err) ||
+        !ApplyOperationTransactionMoves(&preResourceRebindTransaction, &err) ||
+        !RecoverOperationTransactionToOriginalState(&preResourceRebindTransaction, sessionRoot, &err)) {
+        if (outError) *outError = L"Resource move before alias rebind was not safely recovered.\n" + err;
+        return false;
+    }
+    const auto recoveredResourceSource = FindRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, resourceSource.wstring(), &resourceIdentityErr);
+    const auto recoveredResourceDestination = FindRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, resourceDestination.wstring(), &resourceIdentityErr);
+    std::error_code resourceSourceEc;
+    std::error_code resourceDestinationEc;
+    const bool resourceSourceExists = std::filesystem::exists(resourceSource, resourceSourceEc);
+    const bool resourceDestinationExists = std::filesystem::exists(resourceDestination, resourceDestinationEc);
+    if (!recoveredResourceSource.has_value() ||
+        recoveredResourceSource->resource_id != resourceIdentity->resource_id ||
+        recoveredResourceDestination.has_value() || !resourceSourceExists || resourceSourceEc ||
+        resourceDestinationExists || resourceDestinationEc) {
+        if (outError) *outError = L"Resource recovery changed the catalog or file aliases inconsistently.";
+        return false;
+    }
+
+    OperationTransaction postResourceRebindTransaction;
+    if (!PrepareOperationTransaction(resourceMoves, emptyRewritePlan, {}, resourceAliases,
+                                     &postResourceRebindTransaction, &err) ||
+        !WriteOperationTransactionManifest(postResourceRebindTransaction, "applying", &err) ||
+        !ApplyOperationTransactionMoves(&postResourceRebindTransaction, &err) ||
+        !ApplyOperationTransactionResourceAliases(&postResourceRebindTransaction, &err)) {
+        if (outError) *outError = L"Failed to apply a durable resource-alias fixture transition.\n" + err;
+        return false;
+    }
+    const auto reboundResourceSource = FindRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, resourceSource.wstring(), &resourceIdentityErr);
+    const auto reboundResourceDestination = FindRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, resourceDestination.wstring(), &resourceIdentityErr);
+    if (reboundResourceSource.has_value() || !reboundResourceDestination.has_value() ||
+        reboundResourceDestination->resource_id != resourceIdentity->resource_id ||
+        RecoverOperationTransactionToOriginalState(&postResourceRebindTransaction, sessionRoot, &err)) {
+        if (outError) *outError = L"Recovery did not preserve a completed resource-alias member as evidence.";
+        return false;
+    }
+    std::error_code resourceRestoreEc;
+    std::filesystem::rename(resourceDestination, resourceSource, resourceRestoreEc);
+    std::wstring resourceRebindErr;
+    const bool resourceRebindCleaned = !resourceRestoreEc &&
+        RebindRuntimeWorkspaceResourceIdentityPath(
+            resourceIdentity->resource_id, WorkspaceResourceKind::Pdf,
+            resourceDestination.wstring(), resourceSource.wstring(),
+            resourceIdentity->fingerprint, &resourceRebindErr);
+    if (!resourceRebindCleaned ||
+        !WriteOperationTransactionManifest(postResourceRebindTransaction, "recovered", &err)) {
+        if (outError) *outError = L"Failed to clean up the resource-alias recovery fixture.\n" +
+                                  (resourceRebindErr.empty() ? err : resourceRebindErr);
+        return false;
+    }
+
+    // Exercise the process-local Workspace Operation undo/redo path with a
+    // PDF ResourceId. The fixture intentionally skips view reopening (owner
+    // is null) so it isolates transaction/catalog correctness from rendering.
+    const std::filesystem::path historySource = sessionRoot / L"__ui_workspace_history_source.pdf";
+    const std::filesystem::path historyDestination = sessionRoot / L"__ui_workspace_history_destination.pdf";
+    if (!writeFixture(historySource, "workspace-history-original")) {
+        if (outError) *outError = L"Failed to prepare workspace-history fixture.\n" + err;
+        return false;
+    }
+    const auto historyIdentity = ResolveRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, historySource.wstring(), &resourceIdentityErr);
+    if (!historyIdentity.has_value() || !resourceIdentityErr.empty()) {
+        if (outError) *outError = L"Failed to allocate workspace-history resource ID.\n" + resourceIdentityErr;
+        return false;
+    }
+    const std::vector<std::pair<std::filesystem::path, std::filesystem::path>> historyMoves{
+        {historySource, historyDestination}};
+    const std::vector<OperationTransactionResourceAlias> historyAliases{
+        {historyIdentity->resource_id, WorkspaceResourceKind::Pdf,
+         historySource, historyDestination, "prepared"}};
+    OperationTransaction historyTransaction;
+    if (!PrepareOperationTransaction(historyMoves, emptyRewritePlan, {}, historyAliases,
+                                     &historyTransaction, &err) ||
+        !WriteOperationTransactionManifest(historyTransaction, "applying", &err) ||
+        !ApplyOperationTransactionMoves(&historyTransaction, &err) ||
+        !ApplyOperationTransactionResourceAliases(&historyTransaction, &err) ||
+        !WriteOperationTransactionManifest(historyTransaction, "applied", &err) ||
+        !WriteOperationTransactionManifest(historyTransaction, "committed", &err)) {
+        if (outError) *outError = L"Failed to commit workspace-history fixture.\n" + err;
+        return false;
+    }
+    RecordCommittedWorkspaceOperation(historyTransaction);
+    if (!CanExecuteWorkspaceOperationUndoRedo(/*undo=*/true) ||
+        CanExecuteWorkspaceOperationUndoRedo(/*undo=*/false) ||
+        !ExecuteWorkspaceOperationUndoRedo(nullptr, /*undo=*/true)) {
+        if (outError) *outError = L"Workspace operation undo was not available or did not execute.";
+        return false;
+    }
+    const auto historyUndoSource = FindRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, historySource.wstring(), &resourceIdentityErr);
+    const auto historyUndoDestination = FindRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, historyDestination.wstring(), &resourceIdentityErr);
+    std::error_code historySourceEc;
+    std::error_code historyDestinationEc;
+    const bool historySourceExists = std::filesystem::exists(historySource, historySourceEc);
+    const bool historyDestinationExists = std::filesystem::exists(historyDestination, historyDestinationEc);
+    if (!historyUndoSource.has_value() ||
+        historyUndoSource->resource_id != historyIdentity->resource_id ||
+        historyUndoDestination.has_value() || !historySourceExists || historySourceEc ||
+        historyDestinationExists || historyDestinationEc ||
+        !CanExecuteWorkspaceOperationUndoRedo(/*undo=*/false) ||
+        !ExecuteWorkspaceOperationUndoRedo(nullptr, /*undo=*/false)) {
+        if (outError) *outError = L"Workspace operation undo did not preserve a valid redo entry.";
+        return false;
+    }
+    const auto historyRedoSource = FindRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, historySource.wstring(), &resourceIdentityErr);
+    const auto historyRedoDestination = FindRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, historyDestination.wstring(), &resourceIdentityErr);
+    std::error_code historyRedoDestinationEc;
+    const bool historyRedoDestinationExists =
+        std::filesystem::exists(historyDestination, historyRedoDestinationEc);
+    if (historyRedoSource.has_value() || !historyRedoDestination.has_value() ||
+        historyRedoDestination->resource_id != historyIdentity->resource_id ||
+        !historyRedoDestinationExists || historyRedoDestinationEc) {
+        if (outError) *outError = L"Workspace operation redo did not restore the resource postcondition.";
+        return false;
+    }
+    if (!ExecuteWorkspaceOperationUndoRedo(nullptr, /*undo=*/true) ||
+        !WriteOperationTransactionManifest(historyTransaction, "recovered", &err)) {
+        if (outError) *outError = L"Failed to clean up workspace-history fixture.\n" + err;
+        return false;
+    }
+    s_workspaceOperationHistory = {};
+
+    // A link rewrite is restored from the verified backup captured by the
+    // opposite transaction. This verifies Undo -> Redo -> Undo without
+    // treating a path or a live annotation model as the source of truth.
+    const std::filesystem::path rewriteHistorySource = sessionRoot / L"__ui_workspace_rewrite_source.pdf";
+    const std::filesystem::path rewriteHistoryDestination = sessionRoot / L"__ui_workspace_rewrite_destination.pdf";
+    const std::filesystem::path rewriteHistoryTarget = sessionRoot / L"__ui_workspace_rewrite_target.clrop";
+    const std::string rewriteHistoryOriginal = "workspace-rewrite-original";
+    const std::string rewriteHistoryModified = "workspace-rewrite-modified";
+    if (!writeFixture(rewriteHistorySource, "workspace-rewrite-pdf") ||
+        !writeFixture(rewriteHistoryTarget, rewriteHistoryOriginal)) {
+        if (outError) *outError = L"Failed to prepare workspace rewrite-history fixture.\n" + err;
+        return false;
+    }
+    const auto rewriteHistoryIdentity = ResolveRuntimeWorkspaceResourceIdentityPath(
+        WorkspaceResourceKind::Pdf, rewriteHistorySource.wstring(), &resourceIdentityErr);
+    if (!rewriteHistoryIdentity.has_value() || !resourceIdentityErr.empty()) {
+        if (outError) *outError = L"Failed to allocate workspace rewrite-history resource ID.\n" + resourceIdentityErr;
+        return false;
+    }
+    NoteLinkRewritePlan rewriteHistoryPlan;
+    rewriteHistoryPlan.files.push_back({rewriteHistoryTarget, L"", {}});
+    const std::vector<std::pair<std::filesystem::path, std::filesystem::path>> rewriteHistoryMoves{
+        {rewriteHistorySource, rewriteHistoryDestination}};
+    const std::vector<OperationTransactionResourceAlias> rewriteHistoryAliases{
+        {rewriteHistoryIdentity->resource_id, WorkspaceResourceKind::Pdf,
+         rewriteHistorySource, rewriteHistoryDestination, "prepared"}};
+    OperationTransaction rewriteHistoryTransaction;
+    if (!PrepareOperationTransaction(rewriteHistoryMoves, rewriteHistoryPlan, {}, rewriteHistoryAliases,
+                                     &rewriteHistoryTransaction, &err) ||
+        !WriteOperationTransactionManifest(rewriteHistoryTransaction, "applying", &err) ||
+        !BeginOperationTransactionRewrite(&rewriteHistoryTransaction, 0, &err) ||
+        !writeFixture(rewriteHistoryTarget, rewriteHistoryModified) ||
+        !CompleteOperationTransactionRewrite(&rewriteHistoryTransaction, 0, &err) ||
+        !ApplyOperationTransactionMoves(&rewriteHistoryTransaction, &err) ||
+        !ApplyOperationTransactionResourceAliases(&rewriteHistoryTransaction, &err) ||
+        !WriteOperationTransactionManifest(rewriteHistoryTransaction, "applied", &err) ||
+        !WriteOperationTransactionManifest(rewriteHistoryTransaction, "committed", &err)) {
+        if (outError) *outError = L"Failed to commit workspace rewrite-history fixture.\n" + err;
+        return false;
+    }
+    RecordCommittedWorkspaceOperation(rewriteHistoryTransaction);
+    std::string rewriteHistoryObserved;
+    if (!ExecuteWorkspaceOperationUndoRedo(nullptr, /*undo=*/true) ||
+        !ReadOperationFileBytes(rewriteHistoryTarget, rewriteHistoryObserved, &err) ||
+        rewriteHistoryObserved != rewriteHistoryOriginal) {
+        if (outError) *outError = L"Workspace operation undo did not restore the link rewrite backup.\n" + err;
+        return false;
+    }
+    if (!ExecuteWorkspaceOperationUndoRedo(nullptr, /*undo=*/false) ||
+        !ReadOperationFileBytes(rewriteHistoryTarget, rewriteHistoryObserved, &err) ||
+        rewriteHistoryObserved != rewriteHistoryModified) {
+        if (outError) *outError = L"Workspace operation redo did not restore the link rewrite postcondition.\n" + err;
+        return false;
+    }
+    if (!ExecuteWorkspaceOperationUndoRedo(nullptr, /*undo=*/true) ||
+        !WriteOperationTransactionManifest(rewriteHistoryTransaction, "recovered", &err)) {
+        if (outError) *outError = L"Failed to clean up workspace rewrite-history fixture.\n" + err;
+        return false;
+    }
+    s_workspaceOperationHistory = {};
     return true;
 }

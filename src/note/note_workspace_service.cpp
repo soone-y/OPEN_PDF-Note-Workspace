@@ -78,7 +78,7 @@ NoteWorkspaceService::ResolveIndexFromKernel(
     std::wstring targetPath,
     const LocalNoteKernel& kernel) {
     if (!snapshotIdentity.valid() || !kernel.valid() ||
-        (kernel.content_kind() == NoteContentKind::Markdown &&
+        (kernel.content_kind() != NoteContentKind::PlainText &&
          (!kernel.CanReadSyntax() || !kernel.CanReadSemantic()))) {
         return nullptr;
     }

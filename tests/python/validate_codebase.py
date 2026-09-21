@@ -59,6 +59,26 @@ def compile_python_files() -> list[str]:
     return errors
 
 
+def find_windows_powershell_encoding_violations() -> list[str]:
+    """Require a BOM for PowerShell 5.1 scripts containing non-ASCII source."""
+    errors: list[str] = []
+    scripts_root = REPO_ROOT / "tests" / "scripts"
+    if not scripts_root.exists():
+        return errors
+
+    for path in sorted(scripts_root.rglob("*.ps1")):
+        raw = path.read_bytes()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            continue
+        if any(ord(character) > 0x7F for character in text) and not raw.startswith(b"\xef\xbb\xbf"):
+            errors.append(
+                f"{path.relative_to(REPO_ROOT).as_posix()}: non-ASCII PowerShell source must use a UTF-8 BOM for Windows PowerShell 5.1"
+            )
+    return errors
+
+
 def iter_source_files() -> list[Path]:
     files: list[Path] = []
     for source_dir in SOURCE_DIRS:
@@ -395,10 +415,14 @@ def find_annotation_summary_regressions() -> list[str]:
     layout = REPO_ROOT / "src" / "ui" / "layout.cpp"
     layout_text = layout.read_text(encoding="utf-8", errors="ignore")
     required_layout = {
-        "P3-17: the lower aggregate/selected summary is intentionally hidden":
-            "annotation panel layout must document that the summary area is intentionally hidden",
-        "hidePos(g_hAnnotSummary);":
-            "annotation panel layout must hide the unused summary area",
+        "const int panelSummaryH = 20;":
+            "annotation panel layout must reserve a compact save-status row",
+        "const int panelListMinH = 48;":
+            "annotation panel layout must reserve visible annotation-list rows",
+        "status and list are the":
+            "annotation panel layout must prioritize recovery controls over optional actions",
+        "addPos(g_hAnnotSummary, x, y, w, panelSummaryH);":
+            "annotation panel layout must place the save-status row",
         "addPos(g_hAnnotList, x, y, w, listH);":
             "annotation panel list must consume the remaining panel height",
     }
@@ -510,7 +534,8 @@ def find_palette_regressions() -> list[str]:
         },
         "src/settings/settings_palette.cppinc": {
             "DrawPaletteSlotButton": "settings dialog must draw visible palette slots",
-            "OpenChooseColorForPaletteSlot": "settings dialog must allow choosing a palette slot color",
+            "OpenPaletteColorEditorForSlot": "settings dialog must allow choosing a palette slot color",
+            "ShowPaletteColorEditorDialog": "palette editing must use the application-owned dialog",
         },
         "src/settings/settings_annot.cppinc": {
             "SaveUserPaletteColorsForSettings": "settings dialog must save changed palette colors",
@@ -630,13 +655,38 @@ def find_operation_feedback_regressions() -> list[str]:
         if "s_noteOverlayRefreshTargetRevision != CurrentEditRevision()" not in content:
             errors.append(f"{main_window_proc.name}: RefreshNoteOverlayNow must check s_noteOverlayRefreshTargetRevision != CurrentEditRevision()")
             
-    # 2. Check WM_ENDSESSION calls RunSaveAndIntegrateTransaction
+    # 2. WM_ENDSESSION must preserve recovery data without integrating into an
+    # original. Windows can terminate the process immediately after it returns.
     if main_window_proc.exists():
         content = main_window_proc.read_text(encoding="utf-8", errors="ignore")
-        if "WM_ENDSESSION" in content and "RunSaveAndIntegrateTransaction" not in content:
-            errors.append(f"{main_window_proc.name}: WM_ENDSESSION must call RunSaveAndIntegrateTransaction")
+        end_session_start = content.find("case WM_ENDSESSION:")
+        end_session_end = content.find("case WM_DESTROY:", end_session_start)
+        end_session_block = content[end_session_start:end_session_end]
+        if (end_session_start >= 0 and
+                "PreserveUnsavedChangesForSystemEndSession" not in end_session_block):
+            errors.append(f"{main_window_proc.name}: WM_ENDSESSION must preserve recoverable staged changes")
+        if "RunSaveAndIntegrateTransaction" in end_session_block:
+            errors.append(f"{main_window_proc.name}: WM_ENDSESSION must not integrate staged data into originals")
+        if "CancelOfficeConversionJobsForExit" not in end_session_block:
+            errors.append(f"{main_window_proc.name}: WM_ENDSESSION must terminate Office conversion jobs")
+
+    # 3. The read-only viewer must cancel an in-flight load and atomically
+    # snapshot its persistent session when Windows ends the session.
+    readonly_main = REPO_ROOT / "src/readonly_viewer/main.cpp"
+    if readonly_main.exists():
+        content = readonly_main.read_text(encoding="utf-8", errors="ignore")
+        end_session_start = content.find("case WM_ENDSESSION:")
+        end_session_end = content.find("case WM_CLOSE:", end_session_start)
+        end_session_block = content[end_session_start:end_session_end]
+        if (end_session_start < 0 or
+                "g_loadCancelRequested = true" not in end_session_block or
+                "SaveReadonlySession" not in end_session_block):
+            errors.append(f"{readonly_main.name}: WM_ENDSESSION must cancel loading and preserve the persistent session")
+        if ("void EndCancellableLoad()" not in content or
+                "PostMessageW(g_hwndMain, WM_CLOSE" not in content):
+            errors.append(f"{readonly_main.name}: a user close during loading must resume after cancellation")
             
-    # 3. Check CommitActiveNoteEditBoundary validates g_currentNotePath
+    # 4. Check CommitActiveNoteEditBoundary validates g_currentNotePath
     note_ops = REPO_ROOT / "src/note_view/note_view_note_ops.cppinc"
     if note_ops.exists():
         content = note_ops.read_text(encoding="utf-8", errors="ignore")
@@ -657,6 +707,15 @@ def find_runtime_safety_regressions() -> list[str]:
     for needle, message in required_office.items():
         if needle not in office_text:
             errors.append(f"src/workspace/workspace_actions.cpp: {message}")
+    background_conversion_contract = (
+        "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
+        "AssignProcessToJobObject",
+        "kMaxParallelOfficeConversions = 2",
+        "std::thread(RunOfficeBackgroundJob, raw).detach()",
+        "kMsgOfficeConversionWorkerComplete",
+    )
+    if any(needle not in office_text for needle in background_conversion_contract):
+        errors.append("src/workspace/workspace_actions.cpp: Office conversion must use bounded background workers and a kill-on-close Job Object")
     for forbidden in ("Word.Application", "PowerPoint.Application", "Excel.Application", "Workbooks.Open",
                       '$ext -match "xls"', '$ext -eq ".xlsx"', '$ext -eq ".xls"'):
         if forbidden in office_text:
@@ -1193,12 +1252,27 @@ def find_link_workflow_regressions() -> list[str]:
             "JumpToPdfPoint(g_hPdfView, ann.pageIndex, ann.x1, ann.y1)": "PDF link jump must navigate to the marker point",
             "JumpToNoteLinkId(linkId": "link jump must fall back to note targets when no PDF marker is found",
             "LinkIdAtCharIndex(g_hNoteEdit, caret)": "keyboard link activation must resolve the link ID under the note caret",
-            "if (NoteLinkRenderGraceRemainingMs() > 0 && line == caretLine) return false;": "a clicked link must remain rendered until its double-click is resolved",
+            "if (link_render_grace_active && line == caret_line) return false;": "a clicked link must remain rendered until its double-click is resolved",
         },
         "src/note_view/note_view_input_proc.cppinc": {
             "const bool ctrlAltClick =": "note links must support an explicit Ctrl+Alt click activation gesture",
             "if (ctrlAltClick && !g_linkPending.active)": "Ctrl+Alt link activation must not interfere with link creation mode",
-            "HandleLinkIdJump(*linkId, GetParent(hWnd), g_currentNotePath, idx);": "Ctrl+Alt click must use the shared internal-link jump resolver",
+            "HandleLinkIdJump(*linkId, GetParent(hWnd), g_currentNotePath, idx)": "Ctrl+Alt click must use the shared internal-link jump resolver",
+        },
+        "src/pdf_view/input.cppinc": {
+            "RecordAnnotAdd(static_cast<int>(g_annots.size() - 1), g_annots.back());": "PDF link endpoints must enter annotation undo history",
+            "MarkAnnotsDirty(GetParent(hwnd));": "PDF link endpoints must enter the recoverable annotation stage path",
+            "RememberPendingLinkPdfPath(CurrentLogicalPdfPath());": "PDF link endpoints must remain tracked across a PDF switch",
+            "FinalizePendingLinkModeIfReady(owner);": "PDF link completion must use the shared cross-view finalizer",
+        },
+        "src/pdf_view/annotation_edit.cppinc": {
+            "DiscardPendingLinkAnnotHistory(linkId);": "canceling a pending PDF link must not leave undo history that resurrects an endpoint",
+            "InvalidatePendingAnnotStageCommands(CurrentLogicalPdfPath());": "canceling a pending PDF link must checkpoint its removed endpoint rather than stale add commands",
+            "SynchronizePendingPdfLinkEndpointAfterHistoryReplay(cmd, /*undo=*/true);": "undoing a pending PDF endpoint must reconcile the pending-link count",
+            "SynchronizePendingPdfLinkEndpointAfterHistoryReplay(cmd, /*undo=*/false);": "redoing a pending PDF endpoint must reconcile the pending-link count",
+        },
+        "src/note_view/note_view_note_ops.cppinc": {
+            "SynchronizePendingNoteLinkPointAfterUndoRedo(g_noteUndoTextSnapshot);": "note undo/redo must reconcile a pending link endpoint from post-replay text",
         },
     }
     for rel, needles in required_by_file.items():
@@ -1210,17 +1284,38 @@ def find_link_workflow_regressions() -> list[str]:
 
     main_text = (REPO_ROOT / "src/main.cpp").read_text(encoding="utf-8", errors="ignore")
     start_pos = main_text.find("g_linkPending.id = GenerateLinkId();")
-    finalize_pos = main_text.find("static void FinalizePendingLinkModeIfReady")
+    finalize_pos = main_text.find("void FinalizePendingLinkModeIfReady")
     cancel_pos = main_text.find("void CancelPendingLinkMode")
     switch_pos = main_text.find("static void PreparePendingLinkForPdfSwitch")
-    if start_pos < 0 or finalize_pos < 0 or cancel_pos < 0 or switch_pos < 0:
+    remember_pdf_pos = main_text.find("void RememberPendingLinkPdfPath")
+    if (start_pos < 0 or finalize_pos < 0 or cancel_pos < 0 or switch_pos < 0 or
+            remember_pdf_pos < 0):
         errors.append("src/main.cpp: pending link workflow must keep explicit start, finalize, cancel, and PDF-switch paths")
+    pdf_input_text = (REPO_ROOT / "src/pdf_view/input.cppinc").read_text(encoding="utf-8", errors="ignore")
+    pdf_link_create_pos = pdf_input_text.find("if (g_linkPending.active && !g_linkPending.id.empty()")
+    pdf_link_add_pos = pdf_input_text.find("RecordAnnotAdd(", pdf_link_create_pos)
+    pdf_link_dirty_pos = pdf_input_text.find("MarkAnnotsDirty(GetParent(hwnd));", pdf_link_add_pos)
+    pdf_link_track_pos = pdf_input_text.find("RememberPendingLinkPdfPath(CurrentLogicalPdfPath());", pdf_link_dirty_pos)
+    pdf_link_finalize_pos = pdf_input_text.find("FinalizePendingLinkModeIfReady(owner);", pdf_link_track_pos)
+    if (pdf_link_create_pos < 0 or pdf_link_add_pos < pdf_link_create_pos or
+            pdf_link_dirty_pos < pdf_link_add_pos or pdf_link_track_pos < pdf_link_dirty_pos or
+            pdf_link_finalize_pos < pdf_link_track_pos):
+        errors.append("src/pdf_view/input.cppinc: every PDF link endpoint must enter history, dirty stage tracking, and the shared finalizer in that order")
     input_text = (REPO_ROOT / "src/note_view/note_view_input_proc.cppinc").read_text(encoding="utf-8", errors="ignore")
     dblclk_pos = input_text.find("case WM_LBUTTONDBLCLK")
-    hit_test_pos = input_text.find("HitTestMarkupPosition(hWnd", dblclk_pos)
-    clear_grace_pos = input_text.find("ClearNoteLinkRenderGrace(hWnd);", dblclk_pos)
-    if dblclk_pos < 0 or hit_test_pos < 0 or clear_grace_pos < 0 or clear_grace_pos < hit_test_pos:
-        errors.append("src/note_view/note_view_input_proc.cppinc: link double-click must resolve rendered hit coordinates before clearing link render grace")
+    pointer_hit_pos = input_text.find("ResolveNotePointerPresentationHit(", dblclk_pos)
+    activation_pos = input_text.find("if (pointerHit.raw_index.has_value())", dblclk_pos)
+    jump_pos = input_text.find("HandleLinkIdJump(*linkId", activation_pos)
+    clear_grace_pos = input_text.find("ClearNoteLinkRenderGrace(hWnd);", jump_pos)
+    resolver_pos = input_text.find("static NotePointerPresentationHit ResolveNotePointerPresentationHit")
+    native_hit_pos = input_text.find("HitTestNativeNoteRawPosition", resolver_pos)
+    structured_hit_pos = input_text.find("HitTestMarkupPosition", resolver_pos)
+    native_index_conversion_pos = input_text.find("RichEditIndexToRawTextIndex", resolver_pos)
+    if (dblclk_pos < 0 or pointer_hit_pos < 0 or activation_pos < 0 or jump_pos < 0 or
+            clear_grace_pos < 0 or clear_grace_pos < jump_pos or resolver_pos < 0 or
+            native_hit_pos < resolver_pos or structured_hit_pos < resolver_pos or
+            native_index_conversion_pos < resolver_pos):
+        errors.append("src/note_view/note_view_input_proc.cppinc: link double-click must preserve its visible owner and select native/structured hit coordinates before fallback")
     return errors
 def find_assist_pane_visibility_regressions() -> list[str]:
     errors: list[str] = []
@@ -1681,6 +1776,30 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         if needle not in release_text:
             errors.append("release.ps1: Lite-only release sets must be rejected and -Clean must not create a release set")
             break
+    release_test_contract = (
+        '[switch]$Test,',
+        '$testOutputBase = Join-Path (Get-ReleaseSetBaseDirectory) "TEST_ONLY_DO_NOT_PUBLISH"',
+        'pdf_note_workspace_TEST_ONLY_DO_NOT_PUBLISH_ja_full',
+        '"-NoChecksums",',
+        '"-TestOnly"',
+        'TEST ONLY 出力が完了しました。',
+    )
+    for needle in release_test_contract:
+        if needle not in release_text:
+            errors.append("release.ps1: -Test must create only a clearly marked non-ZIP JA Full local output")
+            break
+    package_test_contract = (
+        '[switch]$TestOnly,',
+        '[switch]$NoChecksums,',
+        'if ($TestOnly -and $Zip)',
+        'if ($NoChecksums -and -not $TestOnly)',
+        'TEST_ONLY_DO_NOT_PUBLISH.txt',
+        'NOT A RELEASE SET OR DISTRIBUTABLE',
+    )
+    for needle in package_test_contract:
+        if needle not in make_release_text and needle not in package_text:
+            errors.append("pack_release.ps1: test-only output must be marked and must reject ZIP creation")
+            break
     if 'if ($Clean -and $Rebuild) {' not in build_text:
         errors.append("build.ps1: mutually exclusive -Clean and -Rebuild must be rejected before invoking a build")
     deferred_gate_contract = (
@@ -1717,6 +1836,70 @@ def find_pdf_textbox_tap_commit_regressions() -> list[str]:
     return errors
 
 
+def find_note_tex_route_regressions() -> list[str]:
+    errors: list[str] = []
+    actions_path = REPO_ROOT / "src/workspace/workspace_actions.cpp"
+    actions_text = actions_path.read_text(encoding="utf-8", errors="ignore")
+
+    def creation_section(start_marker: str, end_marker: str, description: str) -> str:
+        start = actions_text.find(start_marker)
+        end = actions_text.find(end_marker, start)
+        if start < 0 or end < 0:
+            errors.append(f"src/workspace/workspace_actions.cpp: {description} must remain isolated for extension validation")
+            return ""
+        return actions_text[start:end]
+
+    supported_extensions = creation_section(
+        "bool IsSupportedNewNoteExtension",
+        "std::wstring DefaultNewNoteStem",
+        "new-note extension allowlist",
+    )
+    save_dialog = creation_section(
+        "std::optional<std::wstring> PromptNoteFileNameWithSaveDialog",
+        "std::optional<std::wstring> PromptCurrentNoteFileNameWithSaveDialog",
+        "new-note save-dialog filters",
+    )
+    extension_menu = creation_section(
+        "bool ShowNewNoteButtonContextMenu",
+        "enum class ImportOneResult",
+        "new-note extension menu",
+    )
+    for section, description in (
+        (supported_extensions, "new-note extension allowlist"),
+        (save_dialog, "new-note save-dialog filters"),
+        (extension_menu, "new-note extension menu"),
+    ):
+        if 'L".tex"' in section:
+            errors.append(f"src/workspace/workspace_actions.cpp: {description} must not offer .tex creation")
+
+    route_text = (REPO_ROOT / "src/note_view/note_view_shared.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    required_route_contract = {
+        'if (ext == L".tex") return NoteContentRoute::TeX;': ".tex must remain openable as TeX source",
+        "return note::NoteContentKind::TeXSource;": ".tex must keep a dedicated math-only source kind",
+        "return CurrentNoteContentRoute() != NoteContentRoute::PlainText;": ".tex must support the render overlay",
+        "BuildTeXMathRenderCacheLine": ".tex must render only its TeX math spans",
+        "CurrentNoteUsesTeXMathOnlyRender": ".tex render cache must not apply Markdown presentation",
+        "HasOnlyTeXLineWhitespaceAfter": ".tex block math must retain trailing source text rather than hiding it",
+        "active_display_math_first_line": "rendered display math must switch as one raw surface while it is edited",
+    }
+    for needle, description in required_route_contract.items():
+        if needle not in route_text:
+            errors.append(f"src/note_view/note_view_shared.cppinc: {description}")
+    parser_text = (REPO_ROOT / "src/note/note_parser.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    if "NoteDocument ParseTeXMathDocument" not in parser_text or "CollectTeXSourceCommentSpans" not in parser_text:
+        errors.append("src/note/note_parser.cpp: TeX math parsing must keep source comments and non-math text raw")
+    parser_tests = (REPO_ROOT / "tests/unit/note_parser_tests.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    if "TeX source parser extracts completed TeX math but ignores comments" not in parser_tests:
+        errors.append("tests/unit/note_parser_tests.cpp: TeX math-only parsing must be covered")
+    return errors
+
+
 def find_note_render_incremental_regressions() -> list[str]:
     errors: list[str] = []
     required_by_file = {
@@ -1739,12 +1922,49 @@ def find_note_render_incremental_regressions() -> list[str]:
             "lineSpacingGraph = *pendingGraph;": "line spacing refresh must carry the dirty graph into its fast path",
             "note::NoteDirtyGraphAllowsLineSpacingFastPath(*lineSpacingGraph)": "line spacing refresh must use dirty-graph fast-path eligibility",
             "InvalidateNoteRenderDirtyLines(g_hNoteEdit, dirtyRange": "note repaint must target dirty render lines when possible",
+            "struct NoteEditorTextCoreBinding": "zero-copy TextCore access must carry an editor-bound document identity",
+            "editorTextCoreBinding.Matches(sourceIdentity)": "TextCore reuse must require the editor-bound revision",
+            "core->MatchesRaw(observedText)": "the editor binding must be published from an exact canonical-text comparison",
+            "std::upper_bound(": "rendered caret boundaries must retain logarithmic raw-offset lookup",
+            "if (!layoutFrame.renderActive && !GetCharPos(hWnd, lineStart, &linePos))": "structured run placement must not query RichEdit positions per extent line",
+            "flowEndX = std::max(flowEndX, segBaseX + segWidth);": "rendered flow extent must include first-glyph bearing alignment",
+            "g_noteImeCompositionRequiresWholeViewFallback = true;": "structural IME edits must keep the current composition in whole-view fallback",
         },
         "src/note_view/note_view_note_ops.cppinc": {
             "IsNoteLineRawHelper(hWnd, line)": "note render overlay must identify raw helper lines",
             "isStaleEditingLine": "note render overlay must isolate stale editing lines",
             "drawStaleRawLine": "note render overlay must draw current raw text only for stale/raw lines",
-            "if (renderActive && rawLine) {": "caret raw line must use native RichEdit drawing instead of stale overlay drawing",
+            "NotePresentationLineSurface::NativeRaw": "caret raw line must use native RichEdit drawing instead of stale overlay drawing",
+            "CurrentNoteTextCoreModel()": "pending render-canvas expansion must use the synchronized TextCore",
+            "currentLogicalStartsForStale": "stale paint must reuse its frame-local logical-line mapping",
+            "FindLogicalLineForRaw(currentTextCore.line_starts, idx)": "stable link lookup must reuse the TextCore line index",
+            "FindLogicalLineForRaw(logicalStarts, *nativeHitRaw)": "stable hit testing must reuse its selected line index",
+            "editorLineLayout.HitTest(clientX, clientY)": "structured hit testing must share EditorLineLayout geometry",
+            "selectionSegmentRangeRect(": "structured selection must share EditorLineLayout geometry",
+            "selectionSegmentBoundaryScratch.push_back({segStart, segmentX})": "anchored selection must begin at its own rendered run position",
+            "note::EditorLineLayout segmentLayout": "anchored selection must use a local shared-layout view",
+            "BuildRenderedSegmentPlacements(hWnd, hdc, line,": "structured horizontal extent must share run placement geometry",
+            "PaintNativeNoteClient(hWnd, hdc, nativeRawRegion);": "structured paint must clip native RichEdit text to NativeRaw lines",
+            "ResolveNoteNativePaintScope(frameAction)": "native paint scope must come from the presentation policy",
+            "CanReuseCommittedLayoutForImeComposition(hWnd)": "hybrid IME painting must require an explicit local-layout proof",
+            "g_noteRenderStaleLines.first != g_noteRenderStaleLines.last": "IME hybrid reuse must reject multi-line stale ranges",
+        },
+        "src/note/note_presentation.cpp": {
+            "NoteNativePaintScope ResolveNoteNativePaintScope": "native text paint scope must be a pure presentation policy",
+            "NotePresentationPlan ResolveNotePresentationPlan": "frame ownership must be resolved by the pure presentation plan",
+            "EditorLineLayout::TextRangeRect": "shared editor-line geometry must provide source-range rectangles",
+            "EditorLineLayout::HitTest": "shared editor-line geometry must provide hit testing",
+            "state.ime_composition_can_reuse_committed_layout": "stale IME composition must not reuse committed lines without adapter proof",
+        },
+        "src/ui/core/main_window_proc.cppinc": {
+            "ExpandNoteRenderCanvasForPendingEdit(g_hNoteEdit);": "same-line note edits must expand the raw helper canvas before the deferred render refresh",
+            "NoteEditorTextMutationObserved(g_hNoteEdit);": "every RichEdit EN_CHANGE must invalidate the zero-copy TextCore binding first",
+        },
+        "src/note_view/note_view_input_helpers.cppinc": {
+            "DrawNoteEditVisualAssistOverlay": "note visual assists must have one paint entry point",
+            "GetEditTextRangeForIndexing(hWnd, lineStart, lineEnd)": "visible tab/whitespace assists must read only the display-line range",
+            "IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd)": "IME geometry must require the editor-bound TextCore revision",
+            "presentationFrame.plan.caret_presenter": "IME caret ownership must come from the presentation plan",
         },
     }
     for rel, needles in required_by_file.items():
@@ -1758,6 +1978,111 @@ def find_note_render_incremental_regressions() -> list[str]:
     fallback_pos = shared_text.find("RebuildMarkdownRenderCache(text);", incremental_pos)
     if incremental_pos < 0 or fallback_pos < 0 or incremental_pos > fallback_pos:
         errors.append("src/note_view/note_view_shared.cppinc: dirty-graph incremental render refresh must be attempted before full render cache rebuild")
+    ops_text = (REPO_ROOT / "src/note_view/note_view_note_ops.cppinc").read_text(encoding="utf-8", errors="ignore")
+    expand_pos = ops_text.find("void ExpandNoteRenderCanvasForPendingEdit")
+    next_measure_pos = ops_text.find("static int MeasureRenderedContentBottomPx", expand_pos)
+    if expand_pos < 0 or next_measure_pos < 0:
+        errors.append("src/note_view/note_view_note_ops.cppinc: pending render-canvas expansion must remain an isolated helper")
+    else:
+        expand_text = ops_text[expand_pos:next_measure_pos]
+        if "GetEditTextForIndexing(hWnd)" in expand_text or "BuildLogicalLineStartsFromIndexingText" in expand_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: pending render-canvas expansion must not copy or split the full note")
+    helper_text = (REPO_ROOT / "src/note_view/note_view_input_helpers.cppinc").read_text(encoding="utf-8", errors="ignore")
+    assist_pos = helper_text.find("static void DrawNoteEditVisualAssistOverlay")
+    next_helper_pos = helper_text.find("// ---------------------------------------------------------------------\n// NoteEdit", assist_pos)
+    if assist_pos < 0 or next_helper_pos < 0:
+        errors.append("src/note_view/note_view_input_helpers.cppinc: visual assist paint must remain an isolated helper")
+    elif "GetEditTextForIndexing(hWnd)" in helper_text[assist_pos:next_helper_pos]:
+        errors.append("src/note_view/note_view_input_helpers.cppinc: visual assist paint must not read the full note")
+    ime_pos = helper_text.find("static bool TryGetNoteImeCaretRect")
+    ime_end = helper_text.find("void SyncNoteImeCandidateWindowToCaret", ime_pos)
+    if ime_pos < 0 or ime_end < 0:
+        errors.append("src/note_view/note_view_input_helpers.cppinc: IME caret resolution must remain an isolated helper")
+    else:
+        ime_text = helper_text[ime_pos:ime_end]
+        if "GetNoteLogicalLineStarts(hWnd" in ime_text:
+            errors.append("src/note_view/note_view_input_helpers.cppinc: IME caret resolution must not rebuild a full line index")
+        if "GetWindowTextLengthW(hWnd)" in ime_text:
+            errors.append("src/note_view/note_view_input_helpers.cppinc: IME caret resolution must not use text length as a TextCore identity proof")
+    overlay_pos = ops_text.find("static void DrawHighlightOverlay")
+    next_measure_pos = ops_text.find("static int MeasureRenderedLineVisualWidth", overlay_pos)
+    if overlay_pos < 0 or next_measure_pos < 0:
+        errors.append("src/note_view/note_view_note_ops.cppinc: highlight overlay must remain an isolated paint helper")
+    else:
+        overlay_text = ops_text[overlay_pos:next_measure_pos]
+        if "GetNoteLogicalLineStarts(hWnd" in overlay_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: current highlight paint must reuse TextCore/frame line indices")
+        if "BuildNoteRawLineSurfaceResolver(hWnd)" not in overlay_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: visible line surfaces must share one raw-line resolver per paint")
+        if "IsNoteLineRawHelper(hWnd, line)" in overlay_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: visible line surfaces must not reread selection state per line")
+    link_pos = ops_text.find("static std::optional<std::wstring> LinkIdAtCharIndex")
+    rendered_caret_pos = ops_text.find("static bool TryGetRenderedCaretRect")
+    raw_caret_pos = ops_text.find("static bool TryGetRawCaretRect", rendered_caret_pos)
+    if rendered_caret_pos < 0 or raw_caret_pos < 0 or link_pos < 0:
+        errors.append("src/note_view/note_view_note_ops.cppinc: rendered and raw caret geometry must remain isolated helpers")
+    else:
+        rendered_caret_text = ops_text[rendered_caret_pos:raw_caret_pos]
+        raw_caret_text = ops_text[raw_caret_pos:link_pos]
+        if "GetNoteLogicalLineStarts(hWnd" in rendered_caret_text or "RefreshMarkdownRenderCache(" in rendered_caret_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: rendered caret geometry must reuse the bound TextCore snapshot")
+        if "GetNoteLogicalLineStarts(hWnd" in raw_caret_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: raw caret geometry must reuse the bound TextCore line index")
+    native_hit_pos = ops_text.find("static std::optional<size_t> HitTestNativeNoteRawPosition", link_pos)
+    if link_pos < 0 or native_hit_pos < 0:
+        errors.append("src/note_view/note_view_note_ops.cppinc: link lookup must remain an isolated helper")
+    elif "GetNoteLogicalLineStarts(hWnd" in ops_text[link_pos:native_hit_pos]:
+        errors.append("src/note_view/note_view_note_ops.cppinc: stable link lookup must not rebuild the line index")
+    hit_pos = ops_text.find("static std::optional<size_t> HitTestMarkupPosition")
+    next_math_pos = ops_text.find("static mathrender::Layout MeasureMathLineLayout", hit_pos)
+    if hit_pos < 0 or next_math_pos < 0:
+        errors.append("src/note_view/note_view_note_ops.cppinc: markup hit testing must remain an isolated helper")
+    elif "GetNoteLogicalLineStarts(hWnd" in ops_text[hit_pos:next_math_pos]:
+        errors.append("src/note_view/note_view_note_ops.cppinc: stable markup hit testing must not rebuild the line index")
+    boundary_pos = shared_text.find("static bool BuildRenderedBoundariesForLine")
+    boundary_end = shared_text.find("static int FindLineForRaw", boundary_pos)
+    if boundary_pos < 0 or boundary_end < 0:
+        errors.append("src/note_view/note_view_shared.cppinc: rendered boundary generation must remain an isolated helper")
+    elif "GetNoteLogicalLineStarts(hWnd" in shared_text[boundary_pos:boundary_end]:
+        errors.append("src/note_view/note_view_shared.cppinc: stable rendered boundaries must reuse the TextCore line index")
+    selection_pos = helper_text.find("static bool ResolveNoteLineSelectionHit")
+    selection_end = helper_text.find("static bool SelectNoteLines", selection_pos)
+    if selection_pos < 0 or selection_end < 0:
+        errors.append("src/note_view/note_view_input_helpers.cppinc: line selection hit testing must remain an isolated helper")
+    elif "GetNoteLogicalLineStarts(hWnd" not in helper_text[selection_pos:selection_end]:
+        errors.append("src/note_view/note_view_input_helpers.cppinc: line selection hit testing must retain an unsynchronized fallback")
+    input_proc_text = (REPO_ROOT / "src/note_view/note_view_input_proc.cppinc").read_text(encoding="utf-8", errors="ignore")
+    main_switch_pos = input_proc_text.find("    switch (msg) {", input_proc_text.find("if (IsNoteOpeningFocusVisualHoldActive"))
+    paint_pos = input_proc_text.find("case WM_PAINT:", main_switch_pos)
+    paint_end = input_proc_text.find("case WM_IME_STARTCOMPOSITION:", paint_pos)
+    if paint_pos < 0 or paint_end < 0:
+        errors.append("src/note_view/note_view_input_proc.cppinc: note paint must remain a bounded message handler")
+    else:
+        paint_text = input_proc_text[paint_pos:paint_end]
+        if "SendMessageW(hWnd, WM_PRINTCLIENT" in paint_text:
+            errors.append("src/note_view/note_view_input_proc.cppinc: native text printing must be owned by the presentation path")
+        if "PaintNativeNoteClient(hWnd, paintDC);" not in paint_text:
+            errors.append("src/note_view/note_view_input_proc.cppinc: resize drag must retain the full native fallback")
+    resolver_pos = shared_text.find("static NoteRawLineSurfaceResolver BuildNoteRawLineSurfaceResolver")
+    resolver_end = shared_text.find("static void BeginNoteOpeningFocusVisualHold", resolver_pos)
+    if resolver_pos < 0 or resolver_end < 0:
+        errors.append("src/note_view/note_view_shared.cppinc: raw line ownership must be resolved by one reusable value")
+    else:
+        resolver_text = shared_text[resolver_pos:resolver_end]
+        if "IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd)" not in resolver_text:
+            errors.append("src/note_view/note_view_shared.cppinc: raw line ownership must prefer the synchronized TextCore")
+        if "SendMessageW(hWnd, EM_GETSEL" not in resolver_text:
+            errors.append("src/note_view/note_view_shared.cppinc: raw line ownership must capture selection once per resolver")
+    frame_pos = ops_text.find("static NoteRenderPresentationFrame BuildNoteRenderPresentationFrame")
+    frame_end = ops_text.find("static void RefreshNoteRenderPresentationFrameAfterCommit", frame_pos)
+    if frame_pos < 0 or frame_end < 0:
+        errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame resolution must remain isolated")
+    else:
+        frame_text = ops_text[frame_pos:frame_end]
+        if "const bool textCoreEditorCurrent = IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd);" not in frame_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame resolution must capture the TextCore/editor binding once")
+        if "NotePresentationFrameState{renderActive, false, false, false, false, false," not in frame_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: unbound TextCore/editor state must select whole-view native fallback")
     return errors
 
 
@@ -1833,7 +2158,7 @@ def find_layout_flicker_regressions() -> list[str]:
             "EndDeferWindowPos(hdwp)": "layout must commit child move batches atomically",
             "RedrawLayoutRegion(hWnd, &result.rootDirtyRect)": "layout must redraw only the union of changed old/new bounds when possible",
             "result.bottomPaneBoundsChanged && pass == LayoutPass::Commit": "bottom pane refresh must be tied to committed bounds changes",
-            "RefreshBottomPaneView();": "bottom pane refresh must occur after committed layout changes",
+            "RefreshCurrentNoteBottomPane();": "bottom pane refresh must occur after committed layout changes",
         },
         "src/ui/core/main_window_proc.cppinc": {
             "case WM_ERASEBKGND:": "main window must handle background erase explicitly",
@@ -2028,10 +2353,92 @@ def find_multi_instance_launch_regressions() -> list[str]:
         errors.append("src/readonly_viewer/main.cpp: tab-transfer IPC must bound and validate incoming paths")
     return errors
 
+
+def find_persistence_view_boundary_regressions() -> list[str]:
+    """Keep persistence independent from the concrete RichEdit implementation."""
+    errors: list[str] = []
+    stage_path = REPO_ROOT / "src/file_output/file_output_stage.cpp"
+    output_path = REPO_ROOT / "src/file_output/file_output.cpp"
+    bridge_path = REPO_ROOT / "src/bridge/view_bridge.h"
+    note_view_path = REPO_ROOT / "src/note_view/note_view_shared.cppinc"
+
+    stage_text = stage_path.read_text(encoding="utf-8", errors="ignore")
+    output_text = output_path.read_text(encoding="utf-8", errors="ignore")
+    bridge_text = bridge_path.read_text(encoding="utf-8", errors="ignore")
+    note_view_text = note_view_path.read_text(encoding="utf-8", errors="ignore")
+
+    for relative_path, text in ((stage_path, stage_text), (output_path, output_text)):
+        if '#include "note_view/note_view.h"' in text:
+            errors.append(
+                f"{relative_path.relative_to(REPO_ROOT)}: persistence must use view_bridge, not note_view internals"
+            )
+    pdf_view_text = (REPO_ROOT / "src/pdf_view/pdf_view.cpp").read_text(encoding="utf-8", errors="ignore")
+    if '#include "note_view/note_view.h"' in pdf_view_text:
+        errors.append("src/pdf_view/pdf_view.cpp: cross-view operations must use view_bridge, not note_view internals")
+    workspace_actions_text = (REPO_ROOT / "src/workspace/workspace_actions.cpp").read_text(encoding="utf-8", errors="ignore")
+    if '#include "note_view/note_view.h"' in workspace_actions_text:
+        errors.append("src/workspace/workspace_actions.cpp: workspace lifecycle must use view_bridge, not note_view internals")
+    workspace_config_text = (REPO_ROOT / "src/workspace/workspace_config_io.cpp").read_text(encoding="utf-8", errors="ignore")
+    if '#include "note_view/note_view.h"' in workspace_config_text:
+        errors.append("src/workspace/workspace_config_io.cpp: workspace configuration must use view_bridge, not note_view internals")
+    settings_core_text = (REPO_ROOT / "src/settings/settings_core_api.cpp").read_text(encoding="utf-8", errors="ignore")
+    if '#include "note_view/note_view.h"' in settings_core_text:
+        errors.append("src/settings/settings_core_api.cpp: settings must use view_bridge, not note_view internals")
+    search_text = (REPO_ROOT / "src/search/search.cpp").read_text(encoding="utf-8", errors="ignore")
+    if '#include "note_view/note_view.h"' in search_text:
+        errors.append("src/search/search.cpp: search must use view_bridge, not note_view internals")
+    layout_text = (REPO_ROOT / "src/ui/layout.cpp").read_text(encoding="utf-8", errors="ignore")
+    if '#include "note_view/note_view.h"' in layout_text:
+        errors.append("src/ui/layout.cpp: layout must use view_bridge, not note_view internals")
+    for relative_path in ("src/ui/menus/main_menu_snapshot.cpp", "src/ui/menus/menu_build.cpp"):
+        menu_text = (REPO_ROOT / relative_path).read_text(encoding="utf-8", errors="ignore")
+        if '#include "note_view/note_view.h"' in menu_text:
+            errors.append(f"{relative_path}: menus must use view_bridge, not note_view internals")
+    for forbidden in ("g_hNoteEdit", "EM_GETSEL", "EM_GETSCROLLPOS", "EM_SETMODIFY"):
+        if forbidden in stage_text:
+            errors.append(
+                f"src/file_output/file_output_stage.cpp: editor-specific {forbidden} must stay in note_view"
+            )
+
+    bridge_contract = (
+        "struct NoteEditorPersistenceState",
+        "HasCurrentNoteEditorForPath",
+        "CaptureCurrentNoteEditorPersistenceState",
+        "ClearNoteEditorSilently",
+        "RefreshCurrentNoteBottomPane",
+        "ExitCurrentNoteNormalMode",
+        "RefreshCurrentNoteAfterFontChange",
+        "ApplyCurrentNoteViewConfiguration",
+        "CurrentNoteEditorIsModified",
+        "CanExecuteNoteUndoRedoFromFocus",
+        "ClearCurrentNoteSearchMarker",
+        "SetCurrentNoteSearchMarker",
+        "SelectCurrentNoteLine",
+        "MarkCurrentNoteEditorPersisted",
+        "SynchronizeActiveNoteEditorToKernel",
+        "CommitActiveNoteEditBoundary",
+    )
+    if any(needle not in bridge_text for needle in bridge_contract):
+        errors.append("src/bridge/view_bridge.h: note persistence boundary contract is incomplete")
+
+    implementation_contract = (
+        "bool HasCurrentNoteEditorForPath",
+        "CaptureCurrentNoteEditorPersistenceState",
+        "void MarkCurrentNoteEditorPersisted",
+    )
+    if any(needle not in note_view_text for needle in implementation_contract):
+        errors.append("src/note_view/note_view_shared.cppinc: note persistence boundary implementation is incomplete")
+    return errors
+
 def main() -> int:
     problems: list[str] = []
 
     problems.extend(compile_python_files())
+
+    powershell_encoding_problems = find_windows_powershell_encoding_violations()
+    if powershell_encoding_problems:
+        problems.append("Windows PowerShell encoding violation(s) detected:")
+        problems.extend(powershell_encoding_problems)
 
     fs_problems = find_new_throwing_filesystem_calls()
     if fs_problems:
@@ -2149,6 +2556,10 @@ def main() -> int:
     if note_save_history_problems:
         problems.append("note save-history regression(s) detected:")
         problems.extend(note_save_history_problems)
+    note_tex_route_problems = find_note_tex_route_regressions()
+    if note_tex_route_problems:
+        problems.append("note TeX route regression(s) detected:")
+        problems.extend(note_tex_route_problems)
     note_render_incremental_problems = find_note_render_incremental_regressions()
     if note_render_incremental_problems:
         problems.append("note render incremental regression(s) detected:")
@@ -2189,6 +2600,10 @@ def main() -> int:
     if multi_instance_problems:
         problems.append("multi-instance launch regression(s) detected:")
         problems.extend(multi_instance_problems)
+    persistence_view_boundary_problems = find_persistence_view_boundary_regressions()
+    if persistence_view_boundary_problems:
+        problems.append("persistence/view boundary regression(s) detected:")
+        problems.extend(persistence_view_boundary_problems)
 
     if problems:
         for item in problems:

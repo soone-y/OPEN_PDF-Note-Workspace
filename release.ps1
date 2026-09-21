@@ -3,6 +3,7 @@ param(
     [switch]$Lite,
     [switch]$Rebuild,
     [switch]$Clean,
+    [switch]$Test,
     [switch]$VerboseOutput,
     [switch]$DeferPostCreationValidation,
     [switch]$AllLocales,
@@ -59,22 +60,29 @@ function Invoke-RequiredScript {
     }
 }
 
-function Get-ReleasePairDirectory {
-    $versionFile = Join-Path $PSScriptRoot "REPO_VERSION.txt"
-    $version = if (Test-Path -LiteralPath $versionFile) { (Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8).Trim() } else { "unknown" }
-    $safeVersion = ($version -replace '[^0-9A-Za-z._-]+', '_').Trim('_')
-    if ([string]::IsNullOrWhiteSpace($safeVersion)) { $safeVersion = "unknown" }
-    $base = if ([string]::IsNullOrWhiteSpace($ReleaseSetBaseDir)) {
+function Get-ReleaseSetBaseDirectory {
+    if ([string]::IsNullOrWhiteSpace($ReleaseSetBaseDir)) {
         Join-Path (Split-Path -Parent $PSScriptRoot) "PDF-Note-ReleaseSet"
     }
     else {
         [System.IO.Path]::GetFullPath($ReleaseSetBaseDir)
     }
+}
+
+function Get-ReleasePairDirectory {
+    $versionFile = Join-Path $PSScriptRoot "REPO_VERSION.txt"
+    $version = if (Test-Path -LiteralPath $versionFile) { (Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8).Trim() } else { "unknown" }
+    $safeVersion = ($version -replace '[^0-9A-Za-z._-]+', '_').Trim('_')
+    if ([string]::IsNullOrWhiteSpace($safeVersion)) { $safeVersion = "unknown" }
+    $base = Get-ReleaseSetBaseDirectory
     $stamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
     return (Join-Path $base "pdf_note_workspace_release_${safeVersion}_${stamp}")
 }
 
 $buildScript = Join-Path $PSScriptRoot "build.ps1"
+$workspaceBuildScript = Join-Path $PSScriptRoot "scripts\build\build_workspace.ps1"
+$readOnlyViewerBuildScript = Join-Path $PSScriptRoot "scripts\build\build_readonly_viewer.ps1"
+$packReleaseScript = Join-Path $PSScriptRoot "scripts\release\pack_release.ps1"
 $releaseSetScript = Join-Path $PSScriptRoot "scripts/release/make_release_set.ps1"
 
 if ($Lite) {
@@ -89,6 +97,15 @@ if ($Clean -and $Rebuild) {
 if ($Clean -and $DeferPostCreationValidation) {
     throw "-Clean と -DeferPostCreationValidation は同時に指定できません。-Clean はrelease setを作成しない清掃専用の操作です。"
 }
+if ($Test -and ($Lite -or $Clean -or $AllLocales -or $DeferPostCreationValidation)) {
+    throw "-Test は JA通常版の非ZIP確認出力専用です。-Lite、-Clean、-AllLocales、-DeferPostCreationValidation は併用できません。"
+}
+if ($Test -and $PSBoundParameters.ContainsKey("Locale") -and $Locale -ne "ja") {
+    throw "-Test は日本語通常版だけを作成します。-Locale en は指定できません。"
+}
+if ($Test -and -not [string]::IsNullOrWhiteSpace($ReleaseSetBaseDir)) {
+    throw "-Test の出力先は PDF-Note-ReleaseSet\\TEST_ONLY_DO_NOT_PUBLISH に固定です。-ReleaseSetBaseDir は指定できません。"
+}
 
 if ($Clean) {
     $cleanLocales = if ($AllLocales) { @("ja", "en") } else { @($Locale) }
@@ -99,6 +116,34 @@ if ($Clean) {
         Invoke-RequiredScript -ScriptPath $buildScript -Arguments $buildArgs -Description "ビルド成果物の削除"
     }
     Write-Host "清掃が完了しました。release set は作成していません。" -ForegroundColor Green
+    Stop-RunLog
+    exit 0
+}
+
+if ($Test) {
+    $testOutputBase = Join-Path (Get-ReleaseSetBaseDirectory) "TEST_ONLY_DO_NOT_PUBLISH"
+    Write-Info "TEST ONLY: 日本語通常版の非ZIP確認出力を作成します。これはrelease setでも配布物でもpublish候補でもありません。"
+    Write-Info "TEST ONLY output base: $testOutputBase"
+
+    $fullBuildArgs = @("-Locale", "ja")
+    if ($Rebuild) { $fullBuildArgs += "-Rebuild" }
+    if ($VerboseOutput) { $fullBuildArgs += "-VerboseOutput" }
+    Invoke-RequiredScript -ScriptPath $workspaceBuildScript -Arguments $fullBuildArgs -Description "TEST ONLY 日本語通常版のビルド"
+
+    $viewerBuildArgs = @("-Locale", "ja")
+    if ($Rebuild) { $viewerBuildArgs += "-Rebuild" }
+    if ($VerboseOutput) { $viewerBuildArgs += "-VerboseOutput" }
+    Invoke-RequiredScript -ScriptPath $readOnlyViewerBuildScript -Arguments $viewerBuildArgs -Description "TEST ONLY 閲覧専用ビューアーのビルド"
+
+    $testPackageArgs = @(
+        "-OutBaseDir", $testOutputBase,
+        "-NamePrefix", "pdf_note_workspace_TEST_ONLY_DO_NOT_PUBLISH_ja_full",
+        "-Locale", "ja",
+        "-NoChecksums",
+        "-TestOnly"
+    )
+    Invoke-RequiredScript -ScriptPath $packReleaseScript -Arguments $testPackageArgs -Description "TEST ONLY 非ZIP確認出力の作成"
+    Write-Host "TEST ONLY 出力が完了しました。PDF-Note-ReleaseSet\\TEST_ONLY_DO_NOT_PUBLISH 配下は提出・publish・配布に使用できません。" -ForegroundColor Yellow
     Stop-RunLog
     exit 0
 }

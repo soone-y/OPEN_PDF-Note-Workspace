@@ -8,3 +8,4 @@ void ShowHelpDialog(HWND owner);
 // The guide and viewer are resolved only relative to this executable.
 void OpenBundledHelpGuide(HWND owner);
 void ShowPdfInfoDialog(HWND owner);
+void ShowNoteInfoDialog(HWND owner);

@@ -6,8 +6,9 @@
 #include "file_output/file_output.h"
 #include "app/main_escape_backup.h"
 #include "workspace/main_workspace_logs.h"
+#include "workspace/file_ops.h"
 #include "pdf_view/pdf_view.h"
-#include "note_view/note_view.h"
+#include "bridge/view_bridge.h"
 
 #include <windows.h>
 
@@ -54,7 +55,7 @@ MainMenuStateSnapshot CaptureMainMenuStateSnapshot() {
         L"CaptureMainMenuStateSnapshot",
         L"after_has_staged elapsed_ms=" + preview_trace::ElapsedMs(startTick) +
         L" hasStagedDiffs=" + preview_trace::Bool(state.hasStagedDiffs));
-    state.noteEditorDirty = g_hNoteEdit && (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0);
+    state.noteEditorDirty = CurrentNoteEditorIsModified();
     state.noteDirty = g_noteDirty;
     state.annotsDirty = g_annotsDirty;
     state.noteNeedsIntegrate = g_noteNeedsIntegrate;
@@ -81,8 +82,11 @@ MainMenuStateSnapshot CaptureMainMenuStateSnapshot() {
     state.leftPaneCollapsed = g_leftPaneCollapsed;
     // The focused editor is the only undo/redo target. Do not fall back to a
     // previously active document when a list, dialog, or no control is focused.
-    state.canUndo = CanExecuteNoteUndoRedoFromFocus(true) || CanExecutePdfUndoRedoFromFocus(true);
-    state.canRedo = CanExecuteNoteUndoRedoFromFocus(false) || CanExecutePdfUndoRedoFromFocus(false);
+    const bool workspaceUndoAllowed = !g_pdf.editingText;
+    state.canUndo = CanExecuteNoteUndoRedoFromFocus(true) || CanExecutePdfUndoRedoFromFocus(true) ||
+                    (workspaceUndoAllowed && CanExecuteWorkspaceOperationUndoRedo(true));
+    state.canRedo = CanExecuteNoteUndoRedoFromFocus(false) || CanExecutePdfUndoRedoFromFocus(false) ||
+                    (workspaceUndoAllowed && CanExecuteWorkspaceOperationUndoRedo(false));
     preview_trace::Append(
         L"CaptureMainMenuStateSnapshot",
         L"end elapsed_ms=" + preview_trace::ElapsedMs(startTick) +

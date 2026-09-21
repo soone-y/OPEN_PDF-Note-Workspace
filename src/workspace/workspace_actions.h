@@ -39,6 +39,9 @@ void CreateNewClroInSession(HWND hWnd);
 std::filesystem::path CurrentNoteDirectory();
 std::wstring DefaultBlankPdfFileName();
 std::filesystem::path CurrentPdfDirectory();
+bool SessionFilesUseRootDirectory();
+std::filesystem::path NoteDirectoryForSession(const std::filesystem::path& sessionRoot);
+std::filesystem::path PdfDirectoryForSession(const std::filesystem::path& sessionRoot);
 bool TryParsePositiveDoubleToken(const std::wstring& token, double* out);
 bool TryParsePositiveIntToken(const std::wstring& token, int minValue, int maxValue, int* out);
 bool TryResolveBlankPdfPreset(const std::wstring& token, double* outWPt, double* outHPt);
@@ -75,6 +78,13 @@ std::filesystem::path OfficeConversionInitialDirectory();
 bool ConvertOfficeFilesToCurrentSession(HWND hWnd);
 bool ConvertOfficeFileToCurrentSession(HWND hWnd, const std::filesystem::path& src);
 bool ConvertMissingOfficeFilesUnderDirectory(HWND hWnd, const std::filesystem::path& directoryRoot);
+// Called only by the UI thread.  Conversion work is performed by background
+// workers and this consumes their posted completion records.
+void HandleOfficeConversionWorkerCompletion(HWND hWnd, LPARAM result);
+// Cancellation is safe during a normal close and WM_ENDSESSION.  It terminates
+// the Job Object, which includes LibreOffice children as well as soffice.com.
+void CancelOfficeConversionJobsForExit();
+bool HasActiveOfficeConversionJobs();
 bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstring>& paths);
 bool ImportFileToCurrentSession(HWND hWnd);
 std::vector<std::wstring> PickFoldersWithInitial(HWND parent, const std::filesystem::path& initialDir, const std::wstring& title);

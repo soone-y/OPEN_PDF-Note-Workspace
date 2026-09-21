@@ -1,0 +1,6 @@
+Number,Item,Status,Minutes,Note
+1,Basic operation,Complete,15,"Open a PDF and add one annotation"
+2,Markdown,Reviewing,20,"Try headings, lists, and code"
+3,TeX,Not started,25,"Read the source for math and a table"
+4,"CSV, text",Complete,5,"Quote a value that contains a comma"
+5,Quotation marks,Reviewing,5,"Write ""double quotes"" by doubling them"

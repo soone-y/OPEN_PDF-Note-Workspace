@@ -2,7 +2,7 @@
 #include "ui/layout.h"
 
 #include "core/app_core.h"
-#include "note_view/note_view.h"
+#include "bridge/view_bridge.h"
 
 #include <algorithm>
 #include <initializer_list>
@@ -99,7 +99,7 @@ static void MarkChanged(LayoutApplyResult& result, HWND hwnd) {
 
 static void UpdateLayoutDependentViews(const LayoutApplyResult& result, LayoutPass pass) {
     if (result.bottomPaneBoundsChanged && pass == LayoutPass::Commit) {
-        RefreshBottomPaneView();
+        RefreshCurrentNoteBottomPane();
     }
 }
 
@@ -156,7 +156,9 @@ static int LayoutAnnotToolbar(int baseX, int baseY, int areaW, PlaceFn place) {
     const int comboH = 24;
     const int colorSize = 20;
     const int gap = 6;
-    const int minColW = 110;
+    // Keep the tool families in two columns in a narrow right pane. This leaves
+    // vertical room for the annotation list instead of silently collapsing it.
+    const int minColW = 80;
 
     int x = baseX + padding;
     int y = baseY + padding;
@@ -447,8 +449,13 @@ static LayoutCalc ComputeLayout(HWND hWnd, LayoutState inState, bool forApply) {
 
     int toolbarH = LayoutAnnotToolbar(0, 0, c.rightW,
                                       [](HWND, int, int, int, int) {});
+    // The annotation list is the recovery surface for existing work. Reserve
+    // enough room for its status and at least two visible rows before allowing
+    // optional toolbar controls to consume the complete top pane.
+    constexpr int kMinAnnotPanelHeight = 16 + 20 + 4 + 48;
+    const int maxToolbarH = std::max(32, c.topH - kMinAnnotPanelHeight);
     c.toolbarH = std::max(32, toolbarH);
-    c.toolbarH = std::min(c.toolbarH, c.topH);
+    c.toolbarH = std::min(c.toolbarH, maxToolbarH);
 
     if (forApply) {
         // Apply only the current user-selected state. A layout refresh must not
@@ -712,8 +719,12 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
     std::vector<HWND> placedToolbarControls;
     placedToolbarControls.reserve(32 + g_colorButtons.size());
     LayoutAnnotToolbar(0, 0, c.rightW, [&](HWND w, int x, int y, int ww, int hh) {
-        if (w) placedToolbarControls.push_back(w);
-        addPos(w, x, y, ww, hh, true, true);
+        if (y + hh <= c.toolbarH) {
+            if (w) placedToolbarControls.push_back(w);
+            addPos(w, x, y, ww, hh, true, true);
+        } else {
+            addPos(w, 0, 0, 0, 0, false, true);
+        }
     });
 
     bool mergeNote = (!noteAtTop &&
@@ -729,6 +740,8 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
     const int panelPad = 8;
     const int panelRowH = 24;
     const int panelGap = 6;
+    const int panelSummaryH = 20;
+    const int panelListMinH = 48;
     int panelX = c.rightX;
     int panelW = c.rightW;
     auto hidePos = [&](HWND w) {
@@ -770,7 +783,7 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
     // Never allow annotation controls to overlap split bands. If there's not enough
     // vertical space (e.g. toolbar takes most of the top pane), collapse controls
     // to 0-size so the splitter band remains visible/clickable.
-    if (!showAnnotPanel || panelTopH <= panelPad * 2) {
+    if (!showAnnotPanel || panelTopH < panelPad * 2 + panelSummaryH + panelGap + panelListMinH) {
         hidePos(g_hAnnotSettings);
         hidePos(g_hAnnotClear);
         hidePos(g_hAnnotList);
@@ -783,35 +796,32 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
         int w = std::max(0, panelW - panelPad * 2);
         int buttonW = w;
 
-        auto canPlace = [&](int needH) {
-            return (needH > 0) && (y + needH <= innerBottom);
+        auto canReserveList = [&](int needH) {
+            return needH > 0 && y + needH + panelListMinH <= innerBottom;
         };
 
-        if (canPlace(panelRowH)) {
+        addPos(g_hAnnotSummary, x, y, w, panelSummaryH);
+        y += panelSummaryH + panelGap;
+
+        // Settings and clear are convenient, but the status and list are the
+        // controls that prevent work from becoming invisible in a short pane.
+        if (canReserveList(panelRowH + panelGap)) {
             addPos(g_hAnnotSettings, x, y, buttonW, panelRowH);
             y += panelRowH + panelGap;
         } else {
             hidePos(g_hAnnotSettings);
-            hidePos(g_hAnnotClear);
-            hidePos(g_hAnnotList);
-            hidePos(g_hAnnotSummary);
-            // No room for the panel at all.
-            y = innerBottom;
         }
 
-        if (y < innerBottom && canPlace(panelRowH)) {
+        if (canReserveList(panelRowH + panelGap)) {
             addPos(g_hAnnotClear, x, y, buttonW, panelRowH);
             y += panelRowH + panelGap;
         } else {
             hidePos(g_hAnnotClear);
         }
 
-        if (y < innerBottom) {
-            // P3-17: the lower aggregate/selected summary is intentionally hidden;
-            // give the annotation list all remaining panel height.
-            int listH = std::max(0, innerBottom - y);
+        int listH = std::max(0, innerBottom - y);
+        if (listH >= panelListMinH) {
             addPos(g_hAnnotList, x, y, w, listH);
-            hidePos(g_hAnnotSummary);
         } else {
             hidePos(g_hAnnotList);
             hidePos(g_hAnnotSummary);

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "reviewed_on": "2026-08-12",
-  "review_valid_until": "2026-09-11",
+  "reviewed_on": "2026-09-16",
+  "review_valid_until": "2026-10-16",
   "release_decision": "pass",
   "components": [
     {
@@ -14,10 +14,11 @@
       ],
       "sources": [
         "https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F7988",
+        "https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/7988/",
         "https://www.chromium.org/Home/chromium-security/pdfium-security/"
       ],
       "decision": "pass",
-      "required_action": "No open action for this review window; retain PDF parser fuzzing and re-review on the next PDFium update."
+      "required_action": "Reviewed the pinned chromium/7988 branch and the documented PDFium security process on 2026-09-16. No release-blocking advisory was identified in the reviewed sources for this review window. Retain PDF parser fuzzing and repeat the review on the next PDFium update."
     },
     {
       "name": "LibreOffice custom runtime",
@@ -30,7 +31,7 @@
         "https://www.libreoffice.org/security/"
       ],
       "decision": "pass",
-      "required_action": "No open action for this review window; retain the custom patch series, runtime communication gate, and DOCX/PPTX conversion smoke tests."
+      "required_action": "Reviewed the vendor security advisories on 2026-09-16. The bundled 26.2.5.2 runtime is later than the 26.2.3 and 26.2.4 releases identified there as fixes for the applicable 2026 advisories. Retain the custom patch series, runtime communication gate, and DOCX/PPTX conversion smoke tests."
     },
     {
       "name": "MD4C",
@@ -42,11 +43,12 @@
       ],
       "sources": [
         "https://github.com/mity/md4c/releases/tag/release-0.5.3",
+        "https://github.com/mity/md4c/blob/master/CHANGELOG.md",
         "https://osv.dev/vulnerability/OSV-2022-126",
         "https://github.com/mity/md4c/commit/f7c8db7588573f3b0de166166a6f6756baf222dc"
       ],
       "decision": "pass",
-      "required_action": "Retain the Japanese whitespace/punctuation patch and deterministic fuzz regression. OSV-2022-126 omits a fixed event, but identifies 62b60979f6a281b2b3cf883abc84299431fe2f76 as the introducing commit. Upstream f7c8db7588573f3b0de166166a6f6756baf222dc corrected the affected virtual-closer rollback state approximately one hour later, and GitHub ancestry confirms the pinned commit is 246 commits ahead of that fix. The public regression input completed under GCC AddressSanitizer and UndefinedBehaviorSanitizer on 2026-08-12. The old-version comparison was discontinued and was not used as evidence."
+      "required_action": "Retain the Japanese whitespace/punctuation patch and deterministic fuzz regression. OSV-2022-126 omits a fixed event, but identifies 62b60979f6a281b2b3cf883abc84299431fe2f76 as the introducing commit. Upstream f7c8db7588573f3b0de166166a6f6756baf222dc corrected the affected virtual-closer rollback state approximately one hour later, and GitHub ancestry confirms the pinned commit is 246 commits ahead of that fix. The public regression input completed under GCC AddressSanitizer and UndefinedBehaviorSanitizer on 2026-08-12. The changelog and OSV record were rechecked on 2026-09-16; no newly identified release-blocking advisory was found in those reviewed sources. The old-version comparison was discontinued and was not used as evidence."
     },
     {
       "name": "zlib runtime",
@@ -61,7 +63,7 @@
         "https://zlib.net/"
       ],
       "decision": "pass",
-      "required_action": "No open action for this review window; keep the vendored runtime hash check and forbidden crc32_combine import check."
+      "required_action": "Reviewed the official 1.3.2 release information on 2026-09-16. No release-blocking advisory was identified in the reviewed sources for this review window; keep the vendored runtime hash check and forbidden crc32_combine import check."
     }
   ]
 }

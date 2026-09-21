@@ -385,7 +385,7 @@ void ClearPdfState() {
     g_annotsRequireStrongValidation = false;
     g_annotsLoadedPdfIdValid = false;
     g_annotsLoadedPdfId = clrop::PdfId{};
-    ClearAnnotHistory();
+    ClearPdfAnnotationHistory();
     ResetEditOriginal();
     RefreshAnnotPanel();
     g_pendingInitialFitWidth = false;

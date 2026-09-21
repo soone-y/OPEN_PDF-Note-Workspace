@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <iterator>
 #include <string_view>
 #include <vector>
 
@@ -18,6 +19,9 @@ namespace note {
 namespace {
 
 constexpr size_t kInvalidIndex = static_cast<size_t>(-1);
+// Kept only in the parser input copy. It has the same UTF-16 width as a
+// backtick, so MD4C offsets remain offsets into the canonical source.
+constexpr wchar_t kTableLiteralBacktickSentinel = L'\uE000';
 
 struct RangeAccumulator {
     bool has_span = false;
@@ -160,6 +164,122 @@ size_t SkipLineBreak(const std::wstring& raw, size_t pos) {
     return pos;
 }
 
+bool IsEscapedAt(std::wstring_view text, size_t position) {
+    if (position == 0 || position > text.size()) return false;
+    size_t slashCount = 0;
+    for (size_t cursor = position; cursor > 0 && text[cursor - 1] == L'\\'; --cursor) {
+        ++slashCount;
+    }
+    return (slashCount % 2) != 0;
+}
+
+bool IsMarkdownTableDividerLine(std::wstring_view line) {
+    bool hasPipe = false;
+    bool hasDash = false;
+    for (wchar_t ch : line) {
+        if (ch == L'|') {
+            hasPipe = true;
+        } else if (ch == L'-') {
+            hasDash = true;
+        } else if (ch != L':' && ch != L' ' && ch != L'\t') {
+            return false;
+        }
+    }
+    return hasPipe && hasDash;
+}
+
+bool HasMarkdownTableCellSeparator(std::wstring_view line) {
+    for (size_t index = 0; index < line.size(); ++index) {
+        if (line[index] == L'|' && !IsEscapedAt(line, index)) return true;
+    }
+    return false;
+}
+
+// A code span is contained by one Markdown table cell.  If a run of
+// backticks has no same-length partner before the cell boundary, treating it
+// as a literal preserves the table structure instead of allowing MD4C to
+// consume separators and cells while searching later on the row.
+void SanitizeUnmatchedTableCellBackticks(const std::wstring& source,
+                                         size_t start,
+                                         size_t end,
+                                         std::wstring* parserInput) {
+    if (!parserInput || start >= end || end > source.size() || end > parserInput->size()) return;
+
+    struct BacktickRun {
+        size_t start = 0;
+        size_t length = 0;
+    };
+    std::vector<BacktickRun> unmatched;
+    for (size_t cursor = start; cursor < end;) {
+        if (source[cursor] != L'`' || IsEscapedAt(source, cursor)) {
+            ++cursor;
+            continue;
+        }
+        const size_t runStart = cursor;
+        while (cursor < end && source[cursor] == L'`') ++cursor;
+        const size_t runLength = cursor - runStart;
+        const auto partner = std::find_if(
+            unmatched.rbegin(), unmatched.rend(), [runLength](const BacktickRun& candidate) {
+                return candidate.length == runLength;
+            });
+        if (partner != unmatched.rend()) {
+            unmatched.erase(std::next(partner).base());
+        } else {
+            unmatched.push_back(BacktickRun{runStart, runLength});
+        }
+    }
+    for (const BacktickRun& run : unmatched) {
+        for (size_t index = 0; index < run.length; ++index) {
+            (*parserInput)[run.start + index] = kTableLiteralBacktickSentinel;
+        }
+    }
+}
+
+void SanitizeMarkdownTableLiteralBackticks(const std::wstring& source,
+                                           std::wstring* parserInput) {
+    if (!parserInput || parserInput->size() != source.size()) return;
+
+    auto sanitizeRow = [&source, parserInput](size_t start, size_t end) {
+        size_t cellStart = start;
+        for (size_t cursor = start; cursor < end; ++cursor) {
+            if (source[cursor] != L'|' || IsEscapedAt(source, cursor)) continue;
+            SanitizeUnmatchedTableCellBackticks(source, cellStart, cursor, parserInput);
+            cellStart = cursor + 1;
+        }
+        SanitizeUnmatchedTableCellBackticks(source, cellStart, end, parserInput);
+    };
+
+    for (size_t rowStart = 0; rowStart < source.size();) {
+        size_t headerEnd = FindNextLineBreak(source, rowStart);
+        if (headerEnd == std::wstring::npos) headerEnd = source.size();
+        const size_t dividerStart = SkipLineBreak(source, headerEnd);
+        if (dividerStart >= source.size()) break;
+        size_t dividerEnd = FindNextLineBreak(source, dividerStart);
+        if (dividerEnd == std::wstring::npos) dividerEnd = source.size();
+        const std::wstring_view header(source.data() + rowStart, headerEnd - rowStart);
+        const std::wstring_view divider(source.data() + dividerStart, dividerEnd - dividerStart);
+        if (!HasMarkdownTableCellSeparator(header) || !IsMarkdownTableDividerLine(divider)) {
+            rowStart = dividerStart;
+            continue;
+        }
+
+        sanitizeRow(rowStart, headerEnd);
+        rowStart = SkipLineBreak(source, dividerEnd);
+        while (rowStart < source.size()) {
+            size_t rowEnd = FindNextLineBreak(source, rowStart);
+            if (rowEnd == std::wstring::npos) rowEnd = source.size();
+            const std::wstring_view row(source.data() + rowStart, rowEnd - rowStart);
+            if (!HasMarkdownTableCellSeparator(row)) break;
+            sanitizeRow(rowStart, rowEnd);
+            if (rowEnd >= source.size()) {
+                rowStart = source.size();
+                break;
+            }
+            rowStart = SkipLineBreak(source, rowEnd);
+        }
+    }
+}
+
 bool IsThematicBreakLine(std::wstring_view line) {
     size_t pos = 0;
     while (pos < line.size() && (line[pos] == L' ' || line[pos] == L'\t')) ++pos;
@@ -263,7 +383,14 @@ Span FindTextSpan(ParseContext* ctx,
         return span;
     }
 
-    const std::wstring_view needle(text, size);
+    std::wstring literalNeedle;
+    std::wstring_view needle(text, size);
+    if (needle.find(kTableLiteralBacktickSentinel) != std::wstring_view::npos) {
+        literalNeedle.assign(needle);
+        std::replace(literalNeedle.begin(), literalNeedle.end(),
+                     kTableLiteralBacktickSentinel, L'`');
+        needle = literalNeedle;
+    }
     size_t pos = cursor;
     size_t end = cursor;
     bool found = false;
@@ -638,6 +765,11 @@ NoteDocument ParseNoteDocumentWithMd4c(const NoteTextModel& model) {
     ctx.model = &model;
     ctx.out = &out;
 
+    // The source is never changed. This same-width parser copy only prevents
+    // an unmatched cell-local backtick from crossing a Markdown table column.
+    std::wstring parserInput = model.raw;
+    SanitizeMarkdownTableLiteralBackticks(model.raw, &parserInput);
+
     MD_PARSER parser{};
     parser.abi_version = 0;
     parser.flags = MD_FLAG_NOHTML |
@@ -653,8 +785,8 @@ NoteDocument ParseNoteDocumentWithMd4c(const NoteTextModel& model) {
     parser.debug_log = DebugLog;
     parser.syntax = nullptr;
 
-    const int rc = md_parse(model.raw.data(),
-                            static_cast<MD_SIZE>(model.raw.size()),
+    const int rc = md_parse(parserInput.data(),
+                            static_cast<MD_SIZE>(parserInput.size()),
                             &parser,
                             &ctx);
 

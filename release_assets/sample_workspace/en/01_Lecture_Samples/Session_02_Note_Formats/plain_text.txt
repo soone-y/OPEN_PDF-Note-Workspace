@@ -1,0 +1,17 @@
+Plain-text note
+
+Use this .txt file for a short memo with no formatting rules. Other text editors can read and edit the same text.
+
+Date: 2026-09-15
+Purpose: record a point quickly without choosing a format.
+
+Check before the next session
+- Add one annotation to a sample PDF
+- Confirm the display after saving
+- Add a short observation here
+
+# This is not a heading
+**This is not bold**
+<u>This is not underlined</>
+
+Every symbol is saved as ordinary text.

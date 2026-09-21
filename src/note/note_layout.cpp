@@ -8,6 +8,7 @@ bool operator==(const NoteLayoutLineMetrics& lhs,
                 const NoteLayoutLineMetrics& rhs) {
     return lhs.line_height_permille == rhs.line_height_permille &&
            lhs.max_font_px == rhs.max_font_px &&
+           lhs.exact_line_height_px == rhs.exact_line_height_px &&
            lhs.top_margin_percent_override == rhs.top_margin_percent_override &&
            lhs.visual_ascent_px == rhs.visual_ascent_px &&
            lhs.visual_descent_px == rhs.visual_descent_px;
@@ -38,7 +39,8 @@ void NoteLayoutMetricsSnapshot::Reset() {
 bool SameParagraphSpacing(const NoteLayoutLineMetrics& lhs,
                           const NoteLayoutLineMetrics& rhs) {
     return lhs.line_height_permille == rhs.line_height_permille &&
-           lhs.max_font_px == rhs.max_font_px;
+           lhs.max_font_px == rhs.max_font_px &&
+           lhs.exact_line_height_px == rhs.exact_line_height_px;
 }
 
 bool SameParagraphSpacing(const std::vector<NoteLayoutLineMetrics>& lhs,

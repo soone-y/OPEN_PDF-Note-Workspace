@@ -146,7 +146,7 @@ try {
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY", $(if ($PdfOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY", $(if ($PdfiumRawOnly) { "1" } else { $null }), "Process")
 
-    $proc = Start-Process -FilePath $exePath -WorkingDirectory $binDir -PassThru
+    $proc = Start-Process -FilePath $exePath -WorkingDirectory $binDir -WindowStyle Hidden -PassThru
     $deadline = (Get-Date).AddSeconds($timeoutSec)
     while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 250
@@ -170,6 +170,10 @@ try {
     $result = Get-Content -LiteralPath $resultFile -Raw
     if (-not $result.StartsWith("OK")) {
         throw ("UI automation reported failure:`n{0}" -f $result.Trim())
+    }
+    $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
+    if ($traceText -notmatch "(?m)^automation:toolbar_fonts_ok$") {
+        throw "UI automation did not verify the common font of every toolbar control."
     }
     if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly) -and
         (-not (Test-Path -LiteralPath $noteStageDir) -or

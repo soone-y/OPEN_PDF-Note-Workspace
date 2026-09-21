@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$InputDir = ".local\修正版_変換検証ファイル一式",
     [string]$Soffice = "third_party\libreoffice\custom_runtime\instdir\program\soffice.com",

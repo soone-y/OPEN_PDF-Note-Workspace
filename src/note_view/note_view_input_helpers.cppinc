@@ -96,7 +96,10 @@ static bool HandleNoteCtrlUndoRedo(HWND hWnd, WPARAM wParam, bool* outTextChange
     // EN_CHANGE can be deferred by RichEdit. Capture that last user edit
     // before judging history availability so Ctrl+Z never silently loses it.
     RecordCurrentNoteTextEditForUndo(hWnd);
-    if (!CanExecuteNoteUndoRedoFromFocus(wantUndo)) return true;
+    if (!CanExecuteNoteUndoRedoFromFocus(wantUndo)) {
+        ExecuteWorkspaceOperationUndoRedo(GetParent(hWnd), wantUndo);
+        return true;
+    }
 
     const std::wstring beforeText = GetEditText(hWnd);
     const bool executed = ExecuteNoteUndoRedoFromFocus(GetParent(hWnd), wantUndo);
@@ -233,20 +236,30 @@ static bool TryGetNoteImeCaretRect(HWND hWnd, RECT* outRect) {
     HDC hdc = GetDC(hWnd);
     if (!hdc) return TryGetNativeNoteCaretRect(hWnd, outRect);
 
+    const NoteRenderPresentationFrame presentationFrame =
+        BuildNoteRenderPresentationFrame(hWnd, /*captureStaleText=*/false);
+    const bool useCommittedCaretGeometry =
+        presentationFrame.plan.caret_presenter == note::NoteCaretPresenter::CommittedLayout;
+
+    // A current, stable structured snapshot is the preferred geometry source.
+    // The resolver above has already ruled out stale/commit-barrier frames;
+    // otherwise this path remains false and native raw owns the caret.
+    const bool stableRenderGeometryAvailable =
+        IsNoteRenderActive() && CanReadStableRenderDerivedState(/*requireExactRevision=*/false) &&
+        useCommittedCaretGeometry;
+
     bool ok = false;
-    if (IsNoteRenderActive() && CanReadStableRenderDerivedState(/*requireExactRevision=*/false)) {
+    if (stableRenderGeometryAvailable) {
         int line = -1;
         const note::NoteTextModel& currentText = CurrentNoteTextCoreModel();
-        const int editorLength = GetWindowTextLengthW(hWnd);
-        if (editorLength >= 0 &&
-            currentText.raw.size() == static_cast<size_t>(editorLength) &&
+        if (IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd) &&
             !currentText.line_starts.empty()) {
             line = FindLogicalLineForRaw(currentText.line_starts, caret);
         } else {
-            const std::vector<size_t> logicalStarts = GetNoteLogicalLineStarts(hWnd);
-            if (!logicalStarts.empty()) {
-                line = FindLogicalLineForRaw(logicalStarts, caret);
-            }
+            // BuildNoteRenderPresentationFrame has already selected a native
+            // fallback for an unbound editor. Do not recreate a full line
+            // index here merely to guess structured caret geometry.
+            line = -1;
         }
         if (line >= 0 && line < static_cast<int>(g_lineCache.size())) {
             if (!IsNoteLineRawHelper(hWnd, line)) {
@@ -391,8 +404,31 @@ static bool ShouldSyncNativeNoteCaretAfterDefaultMessage(UINT msg) {
     }
 }
 
+static bool ShouldRefreshNoteLineSpacingForPresentationSurface(UINT msg) {
+    switch (msg) {
+    case WM_CHAR:
+    case WM_KEYDOWN:
+    case WM_PASTE:
+    case WM_CUT:
+    case WM_UNDO:
+    case EM_REDO:
+    case WM_CLEAR:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+    case WM_MOUSEMOVE:
+    case WM_SETFOCUS:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void SyncRenderDrivenNoteInputUi(HWND hWnd, UINT msg) {
     if (!hWnd || GetFocus() != hWnd) return;
+    if (ShouldRefreshNoteLineSpacingForPresentationSurface(msg)) {
+        RefreshNoteLineSpacingForPresentationSurface(hWnd);
+    }
     if (ShouldSyncNativeNoteCaretAfterDefaultMessage(msg)) {
         SyncNativeCaretVisibilityForRenderState(hWnd);
     }
@@ -471,8 +507,20 @@ static bool ResolveNoteLineSelectionRangeByLine(HWND hWnd, int line, size_t* out
     if (!hWnd || line < 0 || !outStart || !outEndWithBreak) return false;
     const bool renderActive = IsNoteRenderActive();
     if (renderActive) {
-        std::wstring indexingText;
-        std::vector<size_t> starts = GetNoteLogicalLineStarts(hWnd, &indexingText);
+        const note::NoteTextModel& currentTextCore = CurrentNoteTextCoreModel();
+        std::wstring ownedIndexingText;
+        std::wstring_view indexingText;
+        std::vector<size_t> ownedStarts;
+        const std::vector<size_t>* startsPtr = nullptr;
+        if (CanReadStableRenderDerivedState() && !currentTextCore.line_starts.empty()) {
+            indexingText = currentTextCore.raw;
+            startsPtr = &currentTextCore.line_starts;
+        } else {
+            ownedStarts = GetNoteLogicalLineStarts(hWnd, &ownedIndexingText);
+            indexingText = ownedIndexingText;
+            startsPtr = &ownedStarts;
+        }
+        const std::vector<size_t>& starts = *startsPtr;
         if (starts.empty()) {
             *outStart = 0;
             *outEndWithBreak = 0;
@@ -540,12 +588,24 @@ static bool ResolveNoteLineSelectionHit(HWND hWnd,
     lineHeight = std::max(1, lineHeight);
     spaceW = std::max(1, spaceW);
 
-    std::wstring indexingText;
-    std::vector<size_t> logicalStarts;
+    const note::NoteTextModel& currentTextCore = CurrentNoteTextCoreModel();
+    std::wstring ownedIndexingText;
+    std::wstring_view indexingText;
+    std::vector<size_t> ownedLogicalStarts;
+    const std::vector<size_t>* logicalStartsPtr = nullptr;
     const bool renderActive = layoutFrame.renderActive;
     if (renderActive) {
-        logicalStarts = GetNoteLogicalLineStarts(hWnd, &indexingText);
+        if (CanReadStableRenderDerivedState() && !currentTextCore.line_starts.empty()) {
+            indexingText = currentTextCore.raw;
+            logicalStartsPtr = &currentTextCore.line_starts;
+        } else {
+            ownedLogicalStarts = GetNoteLogicalLineStarts(hWnd, &ownedIndexingText);
+            indexingText = ownedIndexingText;
+            logicalStartsPtr = &ownedLogicalStarts;
+        }
     }
+    const std::vector<size_t> emptyLogicalStarts;
+    const std::vector<size_t>& logicalStarts = logicalStartsPtr ? *logicalStartsPtr : emptyLogicalStarts;
     int lineCount = renderActive
         ? std::max<int>(1, static_cast<int>(logicalStarts.size()))
         : std::max(1, static_cast<int>(SendMessageW(hWnd, EM_GETLINECOUNT, 0, 0)));
@@ -1190,7 +1250,6 @@ static void DrawNoteEditVisualAssistOverlay(HWND hWnd, HDC hdc) {
     int lineCount = std::max(1, static_cast<int>(SendMessageW(hWnd, EM_GETLINECOUNT, 0, 0)));
     int visible = std::max<int>(1, static_cast<int>((rc.bottom - rc.top) / lineH + 3));
     int lastLine = std::min(lineCount - 1, firstLine + visible);
-    const std::wstring text = GetEditTextForIndexing(hWnd);
     for (int line = std::max(0, firstLine); line <= lastLine; ++line) {
         LRESULT lineStartRes = SendMessageW(hWnd, EM_LINEINDEX, static_cast<WPARAM>(line), 0);
         if (lineStartRes < 0) continue;
@@ -1207,18 +1266,27 @@ static void DrawNoteEditVisualAssistOverlay(HWND hWnd, HDC hdc) {
                       DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_NOCLIP);
         }
         if (!g_noteShowInvisibleChars) continue;
-        size_t lineEnd = FindNoteLineEnd(text, lineStart);
-        for (size_t i = lineStart; i < lineEnd && i < text.size(); ++i) {
-            const wchar_t ch = text[i];
+        LRESULT lineEndRes = (line + 1 < lineCount)
+            ? SendMessageW(hWnd, EM_LINEINDEX, static_cast<WPARAM>(line + 1), 0)
+            : GetWindowTextLengthW(hWnd);
+        if (lineEndRes < 0 || static_cast<size_t>(lineEndRes) <= lineStart) continue;
+        const size_t lineEnd = static_cast<size_t>(lineEndRes);
+        // The assist overlay paints only visible display lines. Read precisely
+        // that range rather than the full note on every WM_PAINT; this keeps
+        // tabs visible without making a long document's paint cost O(N).
+        const std::wstring lineText = GetEditTextRangeForIndexing(hWnd, lineStart, lineEnd);
+        for (size_t offset = 0; offset < lineText.size(); ++offset) {
+            const wchar_t ch = lineText[offset];
             if (ch != L' ' && ch != L'\t' && ch != 0x3000) continue;
             POINT p{};
-            if (!GetCharPos(hWnd, i, &p)) continue;
+            if (!GetCharPos(hWnd, lineStart + offset, &p)) continue;
             const wchar_t* mark = (ch == L'\t') ? L"\u2192" : L"\u00b7";
             TextOutW(hdc, p.x, p.y, mark, 1);
         }
-        if (lineEnd < text.size() && IsNoteLineBreakChar(text[lineEnd])) {
+        if (!lineText.empty() && IsNoteLineBreakChar(lineText.back())) {
             POINT p{};
-            if (GetCharPos(hWnd, lineEnd, &p)) {
+            const size_t breakIndex = lineStart + lineText.size() - 1;
+            if (GetCharPos(hWnd, breakIndex, &p)) {
                 TextOutW(hdc, p.x, p.y, L"\u00b6", 1);
             }
         }

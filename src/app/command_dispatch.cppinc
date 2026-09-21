@@ -79,6 +79,15 @@ static bool ExecuteFocusedUndoRedo(HWND owner, bool undo) {
     if (CanExecutePdfUndoRedoFromFocus(undo)) {
         return ExecutePdfUndoRedoFromFocus(owner, undo);
     }
+    // An active textbox is an uncommitted document boundary.  Do not let a
+    // failed or exhausted textbox history fall through to a workspace file
+    // operation while that boundary is still live.
+    if (g_pdf.editingText) {
+        return false;
+    }
+    if (CanExecuteWorkspaceOperationUndoRedo(undo)) {
+        return ExecuteWorkspaceOperationUndoRedo(owner, undo);
+    }
     return false;
 }
 
@@ -898,11 +907,9 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         if (!CanStartExportCommand(hWnd, id)) break;
         ExportDialogResult result{};
         result.kind = ExportDialogKind::PdfAll;
-        // The quick path promises a selectable/copyable annotated PDF.
-        result.standardTextAnnots = true;
-        // Keep TextBox wrapping aligned with the PDF-pane display.
-        result.matchPdfPaneTextLayout = true;
-        result.pdfScale = 1.0;
+        result.standardTextAnnots = g_config.quickPdfStandardTextAnnots;
+        result.matchPdfPaneTextLayout = g_config.quickPdfMatchPdfPaneTextLayout;
+        result.pdfScale = static_cast<double>(std::clamp(g_config.quickPdfScalePercent, 13, 800)) / 100.0;
         ExecuteUnifiedExports(hWnd, {result});
         break;
     }
@@ -910,9 +917,18 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         if (!CanStartExportCommand(hWnd, id)) break;
         ExportDialogResult result{};
         result.kind = ExportDialogKind::NoteText;
-        result.textOptions.mathMode = file_output::MathMode::Raw;
-        result.textOptions.markupMode = file_output::MarkupMode::Simplified;
-        result.textOptions.includeCommentLines = true;
+        result.textOptions.mathMode = g_config.quickNoteMathPlaceholder
+                                          ? file_output::MathMode::Placeholder
+                                          : file_output::MathMode::Raw;
+        if (g_config.quickNoteMathPlaceholder) {
+            std::wstring placeholder = TrimWhitespace(g_config.quickNoteMathPlaceholderText);
+            if (placeholder.empty()) placeholder = L"[math]";
+            result.textOptions.mathPlaceholder = WideToUTF8(placeholder);
+        }
+        result.textOptions.markupMode = g_config.quickNoteStripMarkup
+                                            ? file_output::MarkupMode::Simplified
+                                            : file_output::MarkupMode::Raw;
+        result.textOptions.includeCommentLines = g_config.quickNoteIncludeComments;
         ExecuteUnifiedExports(hWnd, {result});
         break;
     }
@@ -1124,6 +1140,9 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         break;
     case ID_OP_LAUNCH_READONLY_VIEWER:
         LaunchReadOnlyViewerEmpty(hWnd);
+        break;
+    case ID_OP_OPEN_READONLY_VIEWER_FILE:
+        OpenReadOnlyViewerCurrentOrPickFile(hWnd);
         break;
     case ID_OP_CLOSE_ALL_READONLY_VIEWERS:
         CloseAllReadOnlyViewerWindows(hWnd);
@@ -1469,17 +1488,23 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         JumpToPage(g_hPdfView, page - 1);
         break;
     }
+    case ID_VIEW_CLOSE_PDF:
+        (void)CloseFileDisplayFromContext(hWnd, /*isNote=*/false, CurrentLogicalPdfPath());
+        break;
+    case ID_VIEW_CLOSE_NOTE:
+        (void)CloseFileDisplayFromContext(hWnd, /*isNote=*/true, g_currentNotePath);
+        break;
     case ID_VIEW_BOTTOM_NOTE:
-        SetBottomPanePinMode(BottomPanePin::Note, BottomNoteMode::Legacy);
+        SetBottomPaneRuntimeMode(BottomPanePin::Note, BottomNoteMode::Legacy);
         break;
     case ID_VIEW_BOTTOM_HEADINGS:
-        SetBottomPanePinMode(BottomPanePin::Note, BottomNoteMode::Headings);
+        SetBottomPaneRuntimeMode(BottomPanePin::Note, BottomNoteMode::Headings);
         break;
     case ID_VIEW_BOTTOM_MATH:
-        SetBottomPanePinMode(BottomPanePin::Math, g_bottomNoteMode);
+        SetBottomPaneRuntimeMode(BottomPanePin::Math, g_bottomNoteMode);
         break;
     case ID_VIEW_BOTTOM_ASSIST:
-        SetBottomPanePinMode(BottomPanePin::Note, BottomNoteMode::Assist);
+        SetBottomPaneRuntimeMode(BottomPanePin::Note, BottomNoteMode::Assist);
         break;
     case ID_VIEW_NOTE_WRAP:
         ToggleNoteWrapSetting();
@@ -1506,12 +1531,6 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_SETTINGS_PRESET_LOAD:
         LoadSettingsPreset(hWnd);
         break;
-    case ID_SETTINGS_BUNDLE_EXPORT:
-        ExportAllUserSettings(hWnd);
-        break;
-    case ID_SETTINGS_BUNDLE_IMPORT:
-        ImportAllUserSettings(hWnd);
-        break;
     case ID_LECTURE_SCHEDULE:
         ShowScheduleWindow(hWnd);
         break;
@@ -1526,6 +1545,9 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         break;
     case ID_HELP_PDF_INFO:
         ShowPdfInfoDialog(hWnd);
+        break;
+    case ID_HELP_NOTE_INFO:
+        ShowNoteInfoDialog(hWnd);
         break;
     case ID_HELP_SHOW_LOG_PATH: {
         std::wstring label = localization::Text(L"app.command.4ad6a4c90048");
@@ -1565,7 +1587,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         InvalidateThemeButton(g_hBtnToggleAnn);
         break;
     case ID_ANNOT_PANEL_SETTINGS:
-        ShowAnnotationSettingsDialog(hWnd);
+        ShowAnnotationSettingsForTool(hWnd, g_toolMode);
         break;
     case ID_ANNOT_PANEL_CLEAR:
         ClearAllAnnotationsWithUndo(hWnd);
@@ -1623,7 +1645,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         break;
     case ID_TOOL_COLOR_CUSTOM: {
         COLORREF picked = g_paletteCustomColor;
-        if (PickColorDialog(hWnd, picked, &picked, /*trackDialogCustom=*/true)) {
+        if (ShowPaletteColorEditorDialog(hWnd, picked, &picked)) {
             ApplyPaletteCustomColor(hWnd, picked);
             if (g_hPdfView) {
                 ApplyActiveColorToSelectedAnnotation(g_hPdfView);

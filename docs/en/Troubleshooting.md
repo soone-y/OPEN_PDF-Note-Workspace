@@ -10,7 +10,7 @@ If saving, loading, or display fails, do not delete, move, or overwrite the affe
 - Check whether another application has the same PDF or note open.
 - Keep `__resource__`, copy the entire workspace to another writable location, and check there.
 
-See [Saving and Recovery](Save_and_Recovery.md) for staged data and recovery.
+See [Saving and Recovery](Save_and_Recovery.md) for protected work and recovery.
 
 ## Cannot open or display a file
 

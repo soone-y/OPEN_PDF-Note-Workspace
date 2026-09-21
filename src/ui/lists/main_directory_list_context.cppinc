@@ -61,7 +61,7 @@ static bool ShowDirectoryHierarchyItemContextMenu(HWND list, LPARAM lParam) {
         bool ok = item.kind == DirectoryHierarchyItemKind::Folder
             ? LaunchReadOnlyViewerForFolder(owner ? owner : popup, item.path)
             : (item.kind == DirectoryHierarchyItemKind::Note || item.kind == DirectoryHierarchyItemKind::Clrop)
-                ? LaunchReadOnlyViewerForNote(owner ? owner : popup, item.path)
+                ? LaunchReadOnlyViewerForFile(owner ? owner : popup, item.path)
             : LaunchReadOnlyViewerForPdf(owner ? owner : popup, item.path);
         if (ok && IsWindow(popup)) DestroyWindow(popup);
         return ok;
@@ -376,13 +376,8 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
 
     ui::context_menu::PopupMenu menu;
     if (!menu) return false;
-    constexpr UINT kCmdNewLecture = 1;
     constexpr UINT kCmdNewSession = 2;
     constexpr UINT kCmdNewNoteClro = 3;
-    constexpr UINT kCmdNewNoteMarkdown = 4;
-    constexpr UINT kCmdNewNoteText = 5;
-    constexpr UINT kCmdNewNoteTex = 6;
-    constexpr UINT kCmdNewNoteCsv = 7;
     constexpr UINT kCmdOpenInApp = 8;
     constexpr UINT kCmdOpenReadOnly = 9;
     constexpr UINT kCmdOpenExplorer = 10;
@@ -394,77 +389,59 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdDelete = 16;
     constexpr UINT kCmdCloseLecture = 17;
     constexpr UINT kCmdCloseSession = 18;
-    constexpr UINT kCmdCloseFile = 19;
     constexpr UINT kCmdReload = 20;
-    // Keep the core commands in the same order as the file lists.  A command
-    // that has no meaningful target in this pane remains visible but disabled.
-    AppendMenuW(menu.get(), MF_STRING, kCmdNewLecture,
-                localization::Text(L"ui.directory_list.23af32fea7bb").c_str());
-    AppendMenuW(menu.get(),
-                canCreateSession ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdNewSession,
-                localization::Text(L"ui.directory_list.5e4fd1449672").c_str());
-    HMENU noteMenu = CreatePopupMenu();
-    if (noteMenu) {
-        AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteClro, L".clro");
-        AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteMarkdown, L".md");
-        AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteText, L".txt");
-        AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteTex, L".tex");
-        AppendMenuW(noteMenu, MF_STRING, kCmdNewNoteCsv, L".csv");
-        AppendMenuW(menu.get(),
-                    canCreateNote ? MF_POPUP : (MF_POPUP | MF_GRAYED),
-                    reinterpret_cast<UINT_PTR>(noteMenu),
+
+    AppendMenuW(menu.get(), MF_STRING, kCmdOpenInApp,
+                localization::Text(L"ui.directory_list.de691a7bc023").c_str());
+    AppendMenuW(menu.get(), MF_STRING, kCmdOpenReadOnly,
+                localization::Text(L"ui.directory_list.154ade32c630").c_str());
+    if (isLectureList && canCreateSession) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdNewSession,
+                    localization::Text(L"ui.directory_list.5e4fd1449672").c_str());
+    }
+    if (!isLectureList && canCreateNote) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdNewNoteClro,
                     localization::Text(L"ui.directory_list.5d611a60297c").c_str());
+    }
+    if (!kIsLiteEdition) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdConvertOffice,
+                    localization::Text(L"ui.directory_list.f1b464c0e53e").c_str());
     }
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu.get(), MF_STRING, kCmdReload,
                 localization::Text(L"ui.directory_list.018a2719c366").c_str());
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenInApp, localization::Text(L"ui.directory_list.de691a7bc023").c_str()},
-        {kCmdOpenReadOnly, localization::Text(L"ui.directory_list.154ade32c630").c_str()},
-    });
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenExplorer, localization::Text(L"ui.directory_list.9208055ca154").c_str()},
-        {kCmdShowHierarchy, localization::Text(L"ui.directory_list.752b401aff9a").c_str()},
-        {kCmdShowPath, localization::Text(L"ui.directory_list.14a4b0c697e4").c_str()},
-        {kCmdCopyPath, localization::Text(L"ui.directory_list.9806c16958b1").c_str()},
-    });
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    if (!kIsLiteEdition) {
-        AppendMenuW(menu.get(),
-                    MF_STRING,
-                    kCmdConvertOffice,
-                    localization::Text(L"ui.directory_list.f1b464c0e53e").c_str());
+    HMENU fileMenu = CreatePopupMenu();
+    if (fileMenu) {
+        ui::context_menu::AppendPathContextMenuItems(fileMenu, {
+            {kCmdOpenExplorer, localization::Text(L"ui.directory_list.9208055ca154").c_str()},
+            {kCmdShowHierarchy, localization::Text(L"ui.directory_list.752b401aff9a").c_str()},
+            {kCmdShowPath, localization::Text(L"ui.directory_list.14a4b0c697e4").c_str()},
+            {kCmdCopyPath, localization::Text(L"ui.directory_list.9806c16958b1").c_str()},
+        });
+        AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu),
+                    localization::Text(L"menu.context.file").c_str());
+    }
+    if (canRename || (isLectureList ? canCloseLecture : canCloseSession)) {
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     }
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu.get(), canCloseLecture ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdCloseLecture, localization::Text(L"ui.directory_list.8bd547f6bad9").c_str());
-    AppendMenuW(menu.get(), canCloseSession ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdCloseSession, localization::Text(L"ui.directory_list.8b37e122658e").c_str());
-    AppendMenuW(menu.get(), MF_STRING | MF_GRAYED, kCmdCloseFile,
-                localization::Text(L"ui.directory_list.ce4e384de3db").c_str());
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu.get(),
-                canRename ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdRename,
-                localization::Text(L"ui.directory_list.b351979601ed").c_str());
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu.get(),
-                canDelete ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdDelete,
-                deleteLabel.c_str());
+    if (canRename) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdRename,
+                    localization::Text(L"ui.directory_list.b351979601ed").c_str());
+    }
+    if (isLectureList ? canCloseLecture : canCloseSession) {
+        AppendMenuW(menu.get(), MF_STRING,
+                    isLectureList ? kCmdCloseLecture : kCmdCloseSession,
+                    localization::Text(isLectureList ? L"ui.directory_list.8bd547f6bad9"
+                                                     : L"ui.directory_list.8b37e122658e").c_str());
+    }
+    if (canDelete) {
+        AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu.get(), MF_STRING, kCmdDelete, deleteLabel.c_str());
+    }
     SetForegroundWindow(owner);
     const UINT cmd = menu.TrackCommand(owner, screenPt,
                                        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
     menu.Close();
-    if (cmd == kCmdNewLecture) {
-        ShowNewLectureDialog(owner);
-        RefreshMainMenuBar(owner);
-        return true;
-    }
     if (cmd == kCmdNewSession && canCreateSession) {
         if (isLectureList) {
             const bool lectureChanged = SetListboxSelAndNotify(g_hLectureList, index);
@@ -480,16 +457,7 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
         RefreshMainMenuBar(owner);
         return true;
     }
-    const wchar_t* noteExtension = nullptr;
-    switch (cmd) {
-    case kCmdNewNoteClro: noteExtension = L".clro"; break;
-    case kCmdNewNoteMarkdown: noteExtension = L".md"; break;
-    case kCmdNewNoteText: noteExtension = L".txt"; break;
-    case kCmdNewNoteTex: noteExtension = L".tex"; break;
-    case kCmdNewNoteCsv: noteExtension = L".csv"; break;
-    default: break;
-    }
-    if (noteExtension && canCreateNote) {
+    if (cmd == kCmdNewNoteClro && canCreateNote) {
         if (!SaveNoteIfDirty(owner)) return true;
         const bool sessionChanged = SetListboxSelAndNotify(g_hSessionList, index);
         if (!sessionChanged &&
@@ -499,7 +467,7 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
         if (NormalizePathKeyForList(g_currentSessionPath) != NormalizePathKeyForList(root.wstring())) {
             return true;
         }
-        CreateNewNoteWithExtensionInSession(owner, noteExtension);
+        CreateNewNoteWithExtensionInSession(owner, L".clro");
         RefreshMainMenuBar(owner);
         return true;
     }

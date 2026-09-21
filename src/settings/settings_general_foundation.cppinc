@@ -13,7 +13,7 @@ constexpr DWORD_PTR kColorDefaultData = 0xFFFFFFFFu;
 constexpr DWORD_PTR kComboBoxErrData = static_cast<DWORD_PTR>(CB_ERR);
 constexpr int kGeneralDlgWidth = 920;
 constexpr int kGeneralDlgHeight = 780;
-constexpr int kGeneralSectionCount = 6;
+constexpr int kGeneralSectionCount = 5;
 constexpr int IDC_GENERAL_CATEGORY_BUTTON_BASE = 1600;
 constexpr int IDC_GENERAL_SECTION_LIST = 4188;
 static std::wstring DefaultNameRule() {
@@ -28,8 +28,7 @@ enum GeneralSectionIndex : int {
     kGeneralSectionNote = 1,
     kGeneralSectionSave = 2,
     kGeneralSectionSchedule = 3,
-    kGeneralSectionLayout = 4,
-    kGeneralSectionDebug = 5,
+    kGeneralSectionDebug = 4,
 };
 
 static void EnsureScheduleStartTimesCapacity(std::vector<std::wstring>& times) {
@@ -80,6 +79,7 @@ enum : int {
     IDC_TOUCHPAD_INVERT_VERTICAL = 4120,
     IDC_TOUCHPAD_INVERT_HORIZONTAL = 4121,
     IDC_PDF_SINGLE_PAGE_MODE = 4140,
+    IDC_PDF_ZOOM_OVERLAY = 4141,
     IDC_PDF_FLOW_MODE = 4184,
     IDC_SCHEDULE_PERIODS = 4160,
     IDC_SCHEDULE_TIME_EDIT,
@@ -116,7 +116,8 @@ enum : int {
     IDC_SESSION_SORT = 4210,
     IDC_SESSION_NUMBERING = 4211,
     IDC_POINTER_OFFSET_X = 4212,
-    IDC_POINTER_OFFSET_Y = 4213
+    IDC_POINTER_OFFSET_Y = 4213,
+    IDC_SESSION_FILE_LAYOUT = 4214
 };
 
 enum class GeneralSettingsPageMode {
@@ -319,6 +320,11 @@ struct PdfFlowModeOption {
     const wchar_t* value;
 };
 
+static const ShortcutLayoutOption kSessionFileLayoutOptions[] = {
+    { L"settings.general.session_file_layout_separate", L"separate_directories" },
+    { L"settings.general.session_file_layout_root", L"session_root" }
+};
+
 static const PdfFlowModeOption kPdfFlowModeOptions[] = {
     { L"settings.pdf_flow.v_ttb", L"v_ttb" },
     { L"settings.pdf_flow.v_btu", L"v_btu" },
@@ -393,6 +399,7 @@ struct GeneralSettingsCtx {
     HWND chkTouchpadInvertVertical = nullptr;
     HWND chkTouchpadInvertHorizontal = nullptr;
     HWND chkPdfSinglePageMode = nullptr;
+    HWND chkPdfZoomOverlay = nullptr;
     HWND chkAutoPairBrackets = nullptr;
     HWND chkFullWidthParenCaretInside = nullptr;
     HWND chkFullWidthParenCancelNextLeft = nullptr;
@@ -406,6 +413,7 @@ struct GeneralSettingsCtx {
     HWND cbLectureSort = nullptr;
     HWND cbSessionSort = nullptr;
     HWND cbSessionNumbering = nullptr;
+    HWND cbSessionFileLayout = nullptr;
     HWND cbSessionAutoOpenMode = nullptr;
     HWND chkSessionAutoOpenPair = nullptr;
     HWND btnShortcutEdit = nullptr;
@@ -463,7 +471,7 @@ static void UpdateGeneralSectionNavUi(GeneralSettingsCtx* ctx, int sectionIndex)
     if (!ctx) return;
     int clamped = std::clamp(sectionIndex, 0, std::max(0, ctx->sectionCount - 1));
     if (ctx->navList) {
-        SendMessageW(ctx->navList, LB_SETCURSEL, clamped, 0);
+        SendMessageW(ctx->navList, CB_SETCURSEL, clamped, 0);
     }
 }
 
@@ -784,27 +792,6 @@ static LRESULT CALLBACK SettingsScrollPanelProc(HWND hWnd, UINT msg, WPARAM wPar
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-static LRESULT CALLBACK SettingsNavListSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
-                                                    LPARAM lParam, UINT_PTR subclassId,
-                                                    DWORD_PTR refData) {
-    (void)wParam;
-    (void)lParam;
-    (void)subclassId;
-    (void)refData;
-    switch (msg) {
-    case WM_MOUSEWHEEL:
-    case WM_MOUSEHWHEEL:
-        // The left navigation is for explicit jumps only; wheel should scroll the content pane instead.
-        if (HWND parent = GetParent(hWnd)) {
-            return SendMessageW(parent, msg, wParam, lParam);
-        }
-        return 0;
-    default:
-        break;
-    }
-    return DefSubclassProc(hWnd, msg, wParam, lParam);
-}
-
 static void EnsureSettingsScrollPanelClass() {
     static bool registered = false;
     if (registered) return;
@@ -833,6 +820,8 @@ static void ScrollGeneralSettingsTo(HWND hWnd, GeneralSettingsCtx* ctx, int newP
     si.fMask = SIF_POS;
     si.nPos = clamped;
     SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+    UpdateGeneralSectionNavUi(ctx, SettingsSectionForScrollPosition(
+        ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
 }
 
 static void JumpGeneralSettingsToSection(HWND hWnd, GeneralSettingsCtx* ctx, int sectionIndex) {
@@ -844,13 +833,10 @@ static void JumpGeneralSettingsToSection(HWND hWnd, GeneralSettingsCtx* ctx, int
 static void LayoutGeneralSettingsChrome(HWND hWnd, GeneralSettingsCtx* ctx) {
     if (!hWnd || !ctx) return;
 
-    const bool showNoteSectionOnly = ctx->pageMode == GeneralSettingsPageMode::Note;
-    (void)showNoteSectionOnly;
-    const bool useSectionNav = true;
     const int pad = ScaleY(hWnd, 12);
     const int rowH = std::max(ScaleY(hWnd, 24), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
-    const int navW = useSectionNav ? ScaleY(hWnd, ctx->embedded ? 170 : 200) : 0;
-    const int columnGap = useSectionNav ? ScaleY(hWnd, 18) : 0;
+    const int sectionNavH = rowH;
+    const int sectionNavGap = ScaleY(hWnd, 8);
     const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
     const int titleH = std::max(rowH, ScaleY(hWnd, 30));
 
@@ -874,8 +860,10 @@ static void LayoutGeneralSettingsChrome(HWND hWnd, GeneralSettingsCtx* ctx) {
     int panelTop = pad + headerH;
     int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
     int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
-    int contentPaneX = pad + navW + columnGap;
-    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - contentPaneX - pad);
+    int contentPaneX = pad;
+    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - pad * 2);
+    int contentPanelTop = panelTop + sectionNavH + sectionNavGap;
+    int contentPanelH = std::max(ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
 
     if (!ctx->embedded && ctx->headerTitle) {
         SetWindowPos(ctx->headerTitle, nullptr, pad, pad, clientW - pad * 2, titleH,
@@ -888,15 +876,14 @@ static void LayoutGeneralSettingsChrome(HWND hWnd, GeneralSettingsCtx* ctx) {
     if (!ctx->embedded) {
         LayoutHeaderSectionButtons(hWnd, ctx->categoryButtons, pad, sectionButtonTop, clientW - pad * 2, sectionButtonH);
     }
-    if (ctx->navList && useSectionNav) {
-        SetWindowPos(ctx->navList, nullptr, pad, panelTop, navW, panelH,
+    if (ctx->navList) {
+        int sectionNavW = std::min(contentPaneW, ScaleY(hWnd, ctx->embedded ? 360 : 400));
+        SetWindowPos(ctx->navList, nullptr, contentPaneX, panelTop, sectionNavW, sectionNavH,
                      SWP_NOZORDER | SWP_NOACTIVATE);
         ShowWindow(ctx->navList, SW_SHOW);
-    } else if (ctx->navList) {
-        ShowWindow(ctx->navList, SW_HIDE);
     }
     if (ctx->scrollPanel) {
-        SetWindowPos(ctx->scrollPanel, nullptr, contentPaneX, panelTop, contentPaneW, panelH,
+        SetWindowPos(ctx->scrollPanel, nullptr, contentPaneX, contentPanelTop, contentPaneW, contentPanelH,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (!ctx->embedded) {

@@ -5,6 +5,7 @@
 #include "workspace/workspace_actions.h"
 #include "workspace/workspace_config_io.h"
 #include "workspace/workspace_write_lock.h"
+#include "workspace/workspace_resource_identity.h"
 #include "ui/dialogs/dialogs.h"
 #include "core/app_core.h"
 #include "core/localization.h"
@@ -20,7 +21,10 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <optional>
+#include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 // Forward decls for internal functions shared between the two cppinc files
 static bool EnsureOperationReadyForPath(HWND owner,

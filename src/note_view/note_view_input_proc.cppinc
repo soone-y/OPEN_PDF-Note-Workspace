@@ -108,6 +108,65 @@ static bool s_noteTouchPanning = false;
 static UINT32 s_noteTouchPanPointerId = 0;
 static POINT s_noteTouchPanAnchor = {0, 0};
 
+struct NotePointerPresentationHit {
+    std::optional<size_t> raw_index;
+    bool native_raw_surface = true;
+};
+
+// A double-click must use the coordinate system of the text the user can
+// actually see. A currently NativeRaw row belongs to RichEdit; a Structured
+// row belongs to the render layout. In particular, do not use the structured
+// hit test to reinterpret a raw <link=...> source row.
+static NotePointerPresentationHit ResolveNotePointerPresentationHit(HWND hWnd,
+                                                                     int clientX,
+                                                                     int clientY) {
+    NotePointerPresentationHit hit;
+    const std::optional<size_t> nativeHit =
+        HitTestNativeNoteRawPosition(hWnd, clientX, clientY);
+    if (!nativeHit.has_value()) {
+        if (IsNoteRenderActive()) {
+            hit.native_raw_surface = false;
+            hit.raw_index = HitTestMarkupPosition(hWnd, clientX, clientY);
+            if (!hit.raw_index.has_value()) {
+                hit.native_raw_surface = true;
+            }
+        }
+        return hit;
+    }
+
+    // EM_CHARFROMPOS reports RichEdit character indices. Convert before
+    // querying source spans, otherwise every preceding CRLF shifts a raw
+    // link hit to the right in the canonical note text.
+    const size_t nativeRawIndex = RichEditIndexToRawTextIndex(
+        CurrentNoteSyntaxSource().raw, *nativeHit);
+    if (!IsNoteRenderActive()) {
+        hit.raw_index = nativeRawIndex;
+        return hit;
+    }
+
+    const int nativeLine = FindLineForRaw(nativeRawIndex);
+    const NoteRawLineSurfaceResolver resolver = BuildNoteRawLineSurfaceResolver(hWnd);
+    const note::NotePresentationLineSurface surface =
+        note::ResolveNotePresentationLineSurface(
+            resolver.RequestsNativeRaw(nativeLine),
+            IsNoteNativeRawSurfaceSuppressed(hWnd),
+            /*stale_editing_line=*/false);
+    if (note::NotePresentationSurfaceUsesNativeLineMetrics(surface)) {
+        hit.raw_index = nativeRawIndex;
+        return hit;
+    }
+
+    hit.native_raw_surface = false;
+    hit.raw_index = HitTestMarkupPosition(hWnd, clientX, clientY);
+    if (!hit.raw_index.has_value()) {
+        // A structured hit test can fail during a transitional repaint. Keep
+        // the native position as a conservative, editable fallback.
+        hit.native_raw_surface = true;
+        hit.raw_index = nativeRawIndex;
+    }
+    return hit;
+}
+
 LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     ScopedNoteViewContextBinding viewContextBinding(hWnd);
     NoteInputLatencyTrace inputLatencyTrace(hWnd, msg, wParam);
@@ -241,7 +300,8 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         break;
     case WM_PAINT: {
-        CommitNoteRenderStateBeforePaintIfNeeded(hWnd);
+        NoteRenderPresentationFrame presentationFrame = BuildNoteRenderPresentationFrame(hWnd);
+        CommitNoteRenderStateBeforePaintIfNeeded(hWnd, &presentationFrame);
         if (UpdateNoteVisualAssistMargins(hWnd, false)) {
             UpdateNoteFormatRect(hWnd);
         }
@@ -293,18 +353,9 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         DrawNoteCurrentLineHighlight(hWnd, paintDC, true);
 
-        // EDIT の WM_PRINTCLIENT は clip / viewport などの DC 状態を変更しうる。
-        // そのまま overlay を描くと raw 側の描画幅に引きずられてしまうので、
-        // RichEdit の描画と overlay 描画の DC 状態を分離する。
-        int savedPaintDc = SaveDC(paintDC);
-        SendMessageW(hWnd, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(paintDC),
-                    PRF_CLIENT);
-        if (savedPaintDc != 0) {
-            RestoreDC(paintDC, savedPaintDc);
-        }
-
-        // ハイライトはその上に重ねる。RichEdit の生テキスト描画が残した
-        // clip / origin / text alignment にレンダー表示を引きずらせない。
+        // The presentation path owns WM_PRINTCLIENT as well as the overlay.
+        // It limits native text to NativeRaw lines before drawing structured
+        // lines, so the two paths never paint one logical line together.
         int savedOverlayDc = SaveDC(paintDC);
         if (savedOverlayDc != 0) {
             SetMapMode(paintDC, MM_TEXT);
@@ -315,7 +366,11 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SetTextAlign(paintDC, TA_LEFT | TA_TOP | TA_NOUPDATECP);
         }
         if (!(g_draggingLeft || g_draggingRight || g_draggingHoriz || g_draggingLeftTop || g_draggingLeftMid)) {
-            DrawHighlightOverlay(hWnd, paintDC);
+            DrawHighlightOverlay(hWnd, paintDC, presentationFrame);
+        } else {
+            // Dragging intentionally suppresses structured repaint work; keep
+            // the fully functional native view while the layout is moving.
+            PaintNativeNoteClient(hWnd, paintDC);
         }
         DrawNoteCurrentLineHighlight(hWnd, paintDC, false);
         DrawNoteEditVisualAssistOverlay(hWnd, paintDC);
@@ -347,6 +402,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_IME_STARTCOMPOSITION: {
         MaybeReleaseNoteChangeSuppression(hWnd);
         g_noteImeComposing = true;
+        g_noteImeCompositionRequiresWholeViewFallback = false;
         if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
         LRESULT res = CallWindowProcW(g_oldNoteProc, hWnd, msg, wParam, lParam);
         SyncNoteImeCandidateWindowToCaret(hWnd);
@@ -355,6 +411,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_IME_ENDCOMPOSITION: {
         MaybeReleaseNoteChangeSuppression(hWnd);
         g_noteImeComposing = false;
+        g_noteImeCompositionRequiresWholeViewFallback = false;
         if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
         PostMessageW(GetParent(hWnd), kMsgNoteOverlayUpdate, 1, static_cast<LPARAM>(CurrentEditRevision()));
         LRESULT res = CallWindowProcW(g_oldNoteProc, hWnd, msg, wParam, lParam);
@@ -369,6 +426,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         if (lParam & GCS_RESULTSTR) {
             g_noteImeComposing = false;
+            g_noteImeCompositionRequiresWholeViewFallback = false;
             if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
             PostMessageW(GetParent(hWnd), kMsgNoteOverlayUpdate, 1, static_cast<LPARAM>(CurrentEditRevision()));
         }
@@ -678,6 +736,8 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     return 0;
                 }
             } else if (TryIndentSelectedMarkdownLines(hWnd)) {
+                return 0;
+            } else if (TryHandleCurrentMarkdownListTab(hWnd)) {
                 return 0;
             }
             {
@@ -1001,13 +1061,16 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_noteVimModeEnabled && g_noteNormalMode && !g_noteCmdlineActive) {
             return 0;
         }
-        MaybeReleaseNoteChangeSuppression(hWnd);
         if (msg == WM_UNDO || msg == EM_REDO) {
+            MaybeReleaseNoteChangeSuppression(hWnd);
             const bool undo = msg == WM_UNDO;
             // Match the Ctrl+Z path: an edit notification may still be queued
             // when an IME or RichEdit command immediately requests undo.
             RecordCurrentNoteTextEditForUndo(hWnd);
-            if (!CanExecuteNoteUndoRedoFromFocus(undo)) return 0;
+            if (!CanExecuteNoteUndoRedoFromFocus(undo)) {
+                ExecuteWorkspaceOperationUndoRedo(GetParent(hWnd), undo);
+                return 0;
+            }
             const bool manageRedraw = !g_noteImeComposing && !IsNoteRenderSwitchInProgress();
             if (manageRedraw) SendMessageW(hWnd, WM_SETREDRAW, FALSE, 0);
             const uint64_t beforeRevision = CurrentEditRevision();
@@ -1023,22 +1086,90 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             return 0;
         }
-        if (msg == WM_PASTE) {
-            if (auto clip = GetClipboardUnicodeText(hWnd)) {
-                DWORD selStart = 0;
-                DWORD selEnd = 0;
-                SendMessageW(hWnd, EM_GETSEL,
-                             reinterpret_cast<WPARAM>(&selStart),
-                             reinterpret_cast<LPARAM>(&selEnd));
-                DWORD start = std::min(selStart, selEnd);
-                size_t normalizedLen = NormalizeTextForNoteIndexing(*clip).size();
-                DWORD insertedLen = static_cast<DWORD>(
+        if (msg == WM_PASTE || msg == WM_CUT) {
+            // Complete IME and reconcile any older edit before using a
+            // selection as the precondition for a new clipboard operation.
+            if (!SynchronizeActiveNoteEditorToKernel(GetParent(hWnd))) {
+                preview_trace::Append(L"NoteClipboard", L"operation=sync_rejected");
+                return 0;
+            }
+
+            DWORD selStart = 0;
+            DWORD selEnd = 0;
+            SendMessageW(hWnd, EM_GETSEL,
+                         reinterpret_cast<WPARAM>(&selStart),
+                         reinterpret_cast<LPARAM>(&selEnd));
+            const DWORD start = std::min(selStart, selEnd);
+
+            if (msg == WM_PASTE) {
+                const auto clip = GetClipboardUnicodeText(hWnd);
+                // Treat an empty CF_UNICODETEXT payload as a no-op. It must
+                // not become a destructive replacement of the selection.
+                if (!clip.has_value()) {
+                    preview_trace::Append(L"NoteClipboard", L"operation=paste clipboard=unavailable");
+                    return 0;
+                }
+                if (clip->empty()) {
+                    preview_trace::Append(L"NoteClipboard", L"operation=paste clipboard=empty");
+                    return 0;
+                }
+                const size_t normalizedLen = NormalizeTextForNoteIndexing(*clip).size();
+                const DWORD insertedLen = static_cast<DWORD>(
                     std::min<size_t>(normalizedLen,
                                      static_cast<size_t>(std::numeric_limits<DWORD>::max() - start)));
+                MaybeReleaseNoteChangeSuppression(hWnd);
                 RegisterExpectedNoteTextEdit(hWnd, selStart, selEnd, *clip,
                                              start + insertedLen, start + insertedLen);
+                const uint64_t beforeRevision = CurrentEditRevision();
+                SendMessageW(hWnd, EM_REPLACESEL, TRUE,
+                             reinterpret_cast<LPARAM>(clip->c_str()));
+                RecordCurrentNoteTextEditForUndo(hWnd);
+                preview_trace::Append(
+                    L"NoteClipboard",
+                    L"operation=paste applied=" +
+                        preview_trace::Bool(CurrentEditRevision() != beforeRevision));
+                if (CurrentEditRevision() == beforeRevision) {
+                    RequestNoteContentRefreshAfterEdit(hWnd);
+                }
+                SyncRenderDrivenNoteInputUi(hWnd, msg);
+                return 0;
             }
-        } else if (msg == WM_CUT || msg == WM_CLEAR) {
+
+            if (selStart == selEnd) {
+                // Preserve the native no-selection behavior; it cannot
+                // delete text and needs no history reservation.
+                MaybeReleaseNoteChangeSuppression(hWnd);
+                return CallWindowProcW(g_oldNoteProc, hWnd, msg, wParam, lParam);
+            }
+
+            const std::wstring indexedText = GetEditTextForIndexing(hWnd);
+            const size_t selectionStart = std::min<size_t>(start, indexedText.size());
+            const size_t selectionEnd = std::min<size_t>(std::max(selStart, selEnd), indexedText.size());
+            std::wstring clipboardText;
+            clipboardText.reserve(selectionEnd - selectionStart);
+            for (size_t i = selectionStart; i < selectionEnd; ++i) {
+                if (indexedText[i] == L'\n') {
+                    clipboardText.append(L"\r\n");
+                } else {
+                    clipboardText.push_back(indexedText[i]);
+                }
+            }
+            // Cut is two effects. Do not make the destructive effect
+            // reachable unless the clipboard effect has succeeded.
+            if (!SetClipboardUnicodeText(hWnd, clipboardText)) return 0;
+            MaybeReleaseNoteChangeSuppression(hWnd);
+            RegisterExpectedNoteTextEdit(hWnd, selStart, selEnd, L"", start, start);
+            const uint64_t beforeRevision = CurrentEditRevision();
+            const LRESULT result = CallWindowProcW(g_oldNoteProc, hWnd, WM_CLEAR, 0, 0);
+            RecordCurrentNoteTextEditForUndo(hWnd);
+            if (CurrentEditRevision() == beforeRevision) {
+                RequestNoteContentRefreshAfterEdit(hWnd);
+            }
+            SyncRenderDrivenNoteInputUi(hWnd, msg);
+            return result;
+        }
+        MaybeReleaseNoteChangeSuppression(hWnd);
+        if (msg == WM_CLEAR) {
             DWORD selStart = 0;
             DWORD selEnd = 0;
             SendMessageW(hWnd, EM_GETSEL,
@@ -1113,11 +1244,14 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             ClearSearchHitHighlight(false);
         }
         if (HandleNoteLineSelectionMouseDown(hWnd, lParam)) {
+            RefreshNoteLineSpacingForPresentationSurface(hWnd);
             return 0;
         }
         if (HandleNoteNormalModeMouseDown(hWnd, lParam)) {
+            RefreshNoteLineSpacingForPresentationSurface(hWnd);
             return 0;
         }
+        g_notePointerMovedCaretRaw = false;
         const bool isCtrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         if (!isCtrlDown) {
             g_ctrlRenderSelecting = false;
@@ -1164,22 +1298,13 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 selEndLine_now = FindLineForRaw(static_cast<size_t>(endPos));
                 if (selEndLine_now < selStartLine_now) std::swap(selStartLine_now, selEndLine_now);
             }
-            const std::optional<size_t> hit =
-                HitTestMarkupPosition(hWnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            const NotePointerPresentationHit pointerHit =
+                ResolveNotePointerPresentationHit(
+                    hWnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            const std::optional<size_t>& hit = pointerHit.raw_index;
             int hitLine_now = caretLine_now;
             if (hit) {
                 hitLine_now = FindLineForRaw(*hit);
-            } else if (IsRichEditControl(hWnd)) {
-                POINTL pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-                LRESULT res = SendMessageW(hWnd, EM_CHARFROMPOS, 0, reinterpret_cast<LPARAM>(&pt));
-                if (res >= 0) {
-                    hitLine_now = FindLineForRaw(static_cast<size_t>(res));
-                }
-            } else {
-                LRESULT res = SendMessageW(hWnd, EM_CHARFROMPOS, 0, lParam);
-                if (res != -1) {
-                    hitLine_now = FindLineForRaw(static_cast<size_t>(LOWORD(res)));
-                }
             }
             bool rawLine = (selStart_raw != selEnd_raw) ? (hitLine_now >= selStartLine_now && hitLine_now <= selEndLine_now)
                                          : (hitLine_now == caretLine_now);
@@ -1193,13 +1318,16 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     (GetKeyState(VK_MENU) & 0x8000) != 0;
                 if (ctrlAltClick && !g_linkPending.active) {
                     if (auto linkId = LinkIdAtCharIndex(hWnd, idx)) {
-                        ClearNoteLinkRenderGrace(hWnd);
-                        HandleLinkIdJump(*linkId, GetParent(hWnd), g_currentNotePath, idx);
+                        if (!HandleLinkIdJump(*linkId, GetParent(hWnd), g_currentNotePath, idx)) {
+                            ClearNoteLinkRenderGrace(hWnd);
+                        }
                         UpdateNotePreviewFromEdit(hWnd);
                         return 0;
                     }
                 }
                 if (g_notePendingLinkClickInsert) {
+                    g_notePointerMovedCaretRaw = (selStart_raw != selEnd_raw) ||
+                        idx != static_cast<size_t>(selEnd_raw);
                     ClearNoteLinkRenderGrace(hWnd);
                     g_notePendingCaretIdx = static_cast<size_t>(-1);
                     SendMessageW(hWnd, EM_SETSEL,
@@ -1210,19 +1338,28 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     SyncRenderDrivenNoteInputUi(hWnd, WM_LBUTTONDOWN);
                     return 0;
                 }
-                auto linkId = LinkIdAtCharIndex(hWnd, idx);
+                const std::optional<std::wstring> linkId = LinkIdAtCharIndex(hWnd, idx);
+                const bool keepStructuredLinkForDoubleClick =
+                    linkId.has_value() && !pointerHit.native_raw_surface;
+                g_notePointerMovedCaretRaw = keepStructuredLinkForDoubleClick
+                    ? false
+                    : ((selStart_raw != selEnd_raw) || idx != static_cast<size_t>(selEnd_raw));
                 if (linkId) {
-                    DWORD now = GetTickCount();
-                    if (*linkId == g_noteLastClickLinkId && (now - g_noteLastClickTime < GetDoubleClickTime())) {
-                        // potential dblclk
+                    if (keepStructuredLinkForDoubleClick) {
+                        const DWORD now = GetTickCount();
+                        if (*linkId == g_noteLastClickLinkId &&
+                            (now - g_noteLastClickTime < GetDoubleClickTime())) {
+                            // The first click already owns the double-click window.
+                        } else {
+                            g_noteLastClickLinkId = *linkId;
+                            g_noteLastClickPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                            StartNoteLinkRenderGrace(hWnd);
+                        }
                     } else {
-                        g_noteLastClickLinkId = *linkId;
-                        g_noteLastClickPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-                        StartNoteLinkRenderGrace(hWnd);
-                        g_notePendingCaretIdx = static_cast<size_t>(-1);
-                        SendMessageW(hWnd, EM_SETSEL,
-                                     static_cast<WPARAM>(idx),
-                                     static_cast<LPARAM>(idx));
+                        // The source row is already NativeRaw. Do not start a
+                        // render grace that would replace it before the second
+                        // click; native coordinates remain authoritative.
+                        ClearNoteLinkRenderGrace(hWnd);
                     }
                 } else {
                     ClearNoteLinkRenderGrace(hWnd);
@@ -1242,6 +1379,10 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 SyncRenderDrivenNoteInputUi(hWnd, WM_LBUTTONDOWN);
                 return 0;
             } else {
+                // The native control will resolve this uncommon hit after the
+                // subclass returns. Prefer the raw owner for that pending
+                // caret move over keeping an unrelated structured row alive.
+                g_notePointerMovedCaretRaw = true;
                 ClearNoteLinkRenderGrace(hWnd);
                 g_notePendingCaretIdx = static_cast<size_t>(-1);
             }
@@ -1259,9 +1400,11 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         RecordRecentMouseMove(hWnd, &pt);
         if (HandleNoteLineSelectionMouseMove(hWnd, wParam, lParam)) {
+            RefreshNoteLineSpacingForPresentationSurface(hWnd);
             return 0;
         }
         if (HandleNoteNormalModeMouseMove(hWnd, wParam, lParam)) {
+            RefreshNoteLineSpacingForPresentationSurface(hWnd);
             return 0;
         }
         if (g_notePendingLinkClickInsert && (wParam & MK_LBUTTON)) {
@@ -1306,10 +1449,12 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 InvalidateRect(g_hBottomMath, nullptr, FALSE);
             }
             InvalidateRect(hWnd, nullptr, FALSE);
+            RefreshNoteLineSpacingForPresentationSurface(hWnd);
             MaybeFlushNoteStageOnCaretOrFocusChange(hWnd, false);
             return 0;
         }
         if (msg == WM_LBUTTONUP && HandleNoteNormalModeMouseUp(hWnd)) {
+            RefreshNoteLineSpacingForPresentationSurface(hWnd);
             return 0;
         }
         if (msg == WM_LBUTTONUP && g_notePendingLinkClickInsert) {
@@ -1372,6 +1517,9 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_noteHasFocus = false;
         g_noteImeComposing = false;
         ClearRenderInsertGrace(hWnd);
+        // Focus loss hands the rows back to Structured presentation. Restore
+        // any display-formula/table row metrics before its next paint.
+        RefreshNoteLineSpacingForPresentationSurface(hWnd);
         FlushPendingMathRecompute(hWnd); // Ensure final edits are reflected if typing was active before focus leaves.
         MaybeFlushNoteStageOnCaretOrFocusChange(hWnd, true);
         if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
@@ -1440,64 +1588,19 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_notePendingLinkClickInsert = false;
         g_notePendingCaretIdx = static_cast<size_t>(-1);
 
-        DWORD selStart_raw = 0, selEnd_raw = 0;
-        SendMessageW(hWnd, EM_GETSEL, reinterpret_cast<WPARAM>(&selStart_raw), reinterpret_cast<LPARAM>(&selEnd_raw));
-        int caretLine = FindLineForRaw(static_cast<size_t>(selStart_raw));
-        bool hasSelection = (selStart_raw != selEnd_raw);
-        int selStartLine = caretLine;
-        int selEndLine = caretLine;
-        if (hasSelection) {
-            DWORD endPos = (selEnd_raw > selStart_raw) ? (selEnd_raw - 1) : selEnd_raw;
-            selStartLine = FindLineForRaw(static_cast<size_t>(selStart_raw));
-            selEndLine = FindLineForRaw(static_cast<size_t>(endPos));
-            if (selEndLine < selStartLine) std::swap(selStartLine, selEndLine);
-        }
-
-        int charIdxRaw = GetCharIndexFromPos(hWnd, lParam);
-        const bool renderActive = (g_noteRenderEnabled && !g_noteRawOnly);
-        int hitLine = -1;
-        std::optional<size_t> markupHitIdx;
-        if (renderActive) {
-            if (auto hitPos = HitTestMarkupPosition(hWnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
-                markupHitIdx = *hitPos;
-                hitLine = FindLineForRaw(*hitPos);
-            }
-        }
-        if (hitLine < 0 && charIdxRaw >= 0) {
-            hitLine = FindLineForRaw(static_cast<size_t>(charIdxRaw));
-        }
-        bool rawLike = true;
-        if (renderActive) {
-            rawLike = false;
-            if (g_noteHasFocus) {
-                rawLike = !IsNoteOpeningFocusVisualHoldActive() &&
-                    (hasSelection ? (hitLine >= selStartLine && hitLine <= selEndLine)
-                                  : (hitLine == caretLine));
-            }
-            if (g_linkPending.active && !g_linkPending.id.empty() &&
-                (IsRenderInsertGraceActiveForLine(hitLine) ||
-                 IsRenderInsertGraceActiveForLine(caretLine))) {
-                rawLike = false;
-            }
-        }
-
-        size_t hitIdx = static_cast<size_t>(-1);
-        if (renderActive && !rawLike) {
-            if (markupHitIdx) hitIdx = *markupHitIdx;
-        }
-        if (hitIdx == static_cast<size_t>(-1) && charIdxRaw >= 0) {
-            hitIdx = static_cast<size_t>(charIdxRaw);
-        }
-        if (hitIdx == static_cast<size_t>(-1)) {
-            hitIdx = static_cast<size_t>(selStart_raw);
-        }
-        hitIdx = ClampNoteRawIndex(hitIdx);
-        // Keep the first click's rendered coordinate system through hit
-        // resolution. Clearing earlier makes the double-click position map
-        // into the raw <link=...> token rather than the link text.
-        ClearNoteLinkRenderGrace(hWnd);
+        DWORD selStart_raw = 0;
+        SendMessageW(hWnd, EM_GETSEL, reinterpret_cast<WPARAM>(&selStart_raw), 0);
+        const NotePointerPresentationHit pointerHit =
+            ResolveNotePointerPresentationHit(
+                hWnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        const bool rawLike = pointerHit.native_raw_surface;
+        const size_t hitIdx = ClampNoteRawIndex(
+            pointerHit.raw_index.value_or(static_cast<size_t>(selStart_raw)));
 
         if (g_linkPending.active && !g_linkPending.id.empty()) {
+            // Position has already been resolved against the visible owner.
+            // The link-creation path may now consume its independent grace.
+            ClearNoteLinkRenderGrace(hWnd);
             SendMessageW(hWnd, EM_SETSEL,
                          static_cast<WPARAM>(hitIdx),
                          static_cast<LPARAM>(hitIdx));
@@ -1508,14 +1611,20 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
 
-        if (renderActive && markupHitIdx) {
-            if (auto linkId = LinkIdAtCharIndex(hWnd, *markupHitIdx)) {
-                if (HandleLinkIdJump(*linkId, GetParent(hWnd), g_currentNotePath, *markupHitIdx)) {
+        if (pointerHit.raw_index.has_value()) {
+            if (const auto linkId = LinkIdAtCharIndex(hWnd, hitIdx)) {
+                // Do not clear render grace before this call. A structured
+                // link must remain structured through the jump; a NativeRaw
+                // link has no grace and therefore remains native raw.
+                if (HandleLinkIdJump(*linkId, GetParent(hWnd), g_currentNotePath, hitIdx)) {
                     UpdateNotePreviewFromEdit(hWnd);
                     return 0;
                 }
             }
         }
+        // This was not a resolved link activation. Return to the usual
+        // double-click behavior, including the ordinary raw editing surface.
+        ClearNoteLinkRenderGrace(hWnd);
         if (HandleNoteNormalModeMouseDown(hWnd, lParam)) {
             return 0;
         }

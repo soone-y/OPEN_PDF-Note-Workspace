@@ -46,6 +46,11 @@
     .site-map-group-title { margin: 8px 0 -2px; color: var(--ink); font-size: 14px; font-weight: 700; }
     .site-map-outside { margin: 14px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--subtle); font-size: 13px; }
     .site-map-outside strong { color: var(--ink); }
+    .document-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .document-grid a { display: block; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: inherit; text-decoration: none; }
+    .document-grid a:hover, .document-grid a:focus-visible { border-color: var(--green); background: var(--blue-wash); }
+    .document-grid strong { display: block; color: var(--blue); font-size: 15px; }
+    .document-grid span { display: block; margin-top: 3px; color: var(--subtle); font-size: 12px; line-height: 1.55; }
     .note { margin: 28px 0 0; padding-left: 14px; border-left: 3px solid var(--peach); color: var(--subtle); font-size: 14px; }
     a:focus-visible { outline: 3px solid var(--peach); outline-offset: 3px; }
     .utility-row { display: flex; justify-content: flex-end; align-items: center; gap: 18px; margin: 0 0 18px; }
@@ -57,7 +62,7 @@
     html[data-contrast="high"] .entry-list a { border-width: 2px; }
     html[data-contrast="high"] .site-map, html[data-contrast="high"] .site-map-node { border-width: 2px; }
     html[data-contrast="high"] .entry-list a:hover, html[data-contrast="high"] .entry-list a:focus-visible { background: var(--blue-wash); outline: 3px solid var(--peach); outline-offset: 3px; }
-    @media (max-width: 560px) { body { padding: 0; } main { border: 0; border-radius: 0; min-height: 100vh; padding: 28px 20px; } .site-map { padding: 18px; } .site-map-row { grid-template-columns: 1fr; } .site-map-arrow { min-height: 28px; transform: rotate(90deg); } .site-map-arrow span { display: none; } }
+    @media (max-width: 560px) { body { padding: 0; } main { border: 0; border-radius: 0; min-height: 100vh; padding: 28px 20px; } .site-map { padding: 18px; } .site-map-row, .document-grid { grid-template-columns: 1fr; } .site-map-arrow { min-height: 28px; transform: rotate(90deg); } .site-map-arrow span { display: none; } }
   </style>
 </head>
 <body>
@@ -67,7 +72,7 @@
       <label class="contrast-toggle"><input id="contrast-toggle" type="checkbox"><span>高コントラスト</span></label>
     </div>
     <h1>PDF Note Workspace<br>文書ポータル</h1>
-    <p class="lead">人が読む公開文書を、目的別に案内しています。見出しとリンクを整えているため、AIも同じ本文を参照できます。</p>
+    <p class="lead">アプリを使うときに必要な説明を、目的別に案内しています。初めて使う方は「はじめて使う方へ」から進んでください。</p>
     <div class="external-links">
       <a href="https://pdf-note-workspace.soone-y.com/">紹介サイト</a>
       <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases">配布物を入手する</a>
@@ -75,30 +80,27 @@
     </div>
 
     <ul class="entry-list">
-      <li><a href="README.html"><strong>プロジェクトの概要</strong><span>配布物、通常版とLite版、基本方針を確認する</span></a></li>
-      <li><a href="docs/ja/README.html"><strong>日本語の文書</strong><span>導入、操作、保存・復元、ファイル形式、トラブル対処の詳細一覧</span></a></li>
-      <li><a href="introduction/index.html"><strong>背景・設計・確認資料</strong><span>設計の考え方、利用判断、根拠と確認範囲を読む</span></a></li>
-      <li><a href="LICENSES_INDEX.html"><strong>ライセンスと第三者通知</strong><span>利用条件と、利用している第三者コンポーネントを確認する</span></a></li>
+      <li><a href="docs/ja/README.html"><strong>はじめて使う方へ</strong><span>配布物の展開から、起動、基本操作までを順に案内します</span></a></li>
+      <li><a href="README.html"><strong>配布物と通常版・Lite版</strong><span>どの配布物を選ぶか、含まれる機能と基本方針を確認します</span></a></li>
     </ul>
 
     <section class="site-map" aria-labelledby="site-map-title">
-      <h2 id="site-map-title">利用目的に応じた案内と確認先<span class="site-map-current">（現在地：文書ポータルの案内ページ）</span></h2>
-      <p>利用者は導入・操作・保存の文書から、高度な利用や検証を行う方は背景資料と公開リポジトリから読み始められます。</p>
+      <h2 id="site-map-title">文書の全体像<span class="site-map-current">（現在地：文書ポータルの案内ページ）</span></h2>
+      <p>必要な内容を選んで読めます。ファイル名が英語でも、各ページの見出しと本文は日本語です。</p>
       <div class="site-map-flow">
-        <div class="site-map-group-title">利用者 — アプリを導入・使用する</div>
-        <div class="site-map-row">
-          <a class="site-map-node" href="README.html"><strong>プロジェクトの概要</strong><span>まず用途、通常版・Lite版、基本方針を確認する</span></a>
-          <div class="site-map-arrow" aria-hidden="true">→<span>使い方へ</span></div>
-          <a class="site-map-node" href="docs/ja/README.html"><strong>日本語の文書</strong><span>セットアップ、操作、保存・復元、ファイル形式、問題対処を読む</span></a>
-        </div>
-        <div class="site-map-group-title">高度利用者・開発を検討する方 — 設計、実装、検証範囲を確かめる</div>
-        <div class="site-map-row">
-          <a class="site-map-node" href="introduction/index.html"><strong>背景・設計・確認資料</strong><span>設計の理由、評価時の見方、公開文書で確認できる範囲を読む</span></a>
-          <div class="site-map-arrow" aria-hidden="true">→<span>実体を確認</span></div>
-          <a class="site-map-node" href="https://github.com/soone-y/OPEN_PDF-Note-Workspace"><strong>GitHub リポジトリ</strong><span>実装、テスト、履歴を確認する。ポータルだけでは確認できない事実の確認先</span></a>
+        <div class="site-map-group-title">アプリを使うための文書</div>
+        <div class="document-grid">
+          <a href="docs/ja/Getting_Started.html"><strong>セットアップ</strong><span>ZIPの展開、ショートカット、更新を行う</span></a>
+          <a href="docs/ja/Using_the_App.html"><strong>アプリの使い方</strong><span>起動、ワークスペース、ノート、出力を知る</span></a>
+          <a href="docs/ja/Save_and_Recovery.html"><strong>保存と復元</strong><span>作業の保護、バックアップ、復元を確認する</span></a>
+          <a href="docs/ja/File_Formats.html"><strong>ファイル形式</strong><span>PDF、注釈、ノートのファイルの違いを知る</span></a>
+          <a href="docs/ja/CLRO_Note_Format.html"><strong>`.clro` ノート形式</strong><span>ノートの役割、記法、他ソフトとの扱いを知る</span></a>
+          <a href="docs/ja/CLROP_Annotation_Format.html"><strong>`.clrop` 注釈データ</strong><span>PDFとの対応、保存する内容、扱い方を知る</span></a>
+          <a href="docs/ja/Troubleshooting.html"><strong>困ったとき</strong><span>起動、保存、ファイルの問題を切り分ける</span></a>
+          <a href="docs/ja/Help_Reference.html"><strong>ヘルプの全項目</strong><span>メニュー、設定、出力を詳しく調べる</span></a>
         </div>
       </div>
-      <div class="site-map-outside"><strong>利用条件</strong>は<a href="LICENSES_INDEX.html">ライセンスと第三者通知</a>で確認します。これは利用者・高度利用者のどちらにも共通です。<strong>アプリを入手する場合</strong>は、<a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases">GitHub Releases</a>から通常版またはLite版のZIPを選びます。</div>
+      <div class="site-map-outside"><strong>ほかの公開資料:</strong> <a href="DOCUMENTATION.html">すべての公開文書の一覧</a>、<a href="LICENSES_INDEX.html">ライセンスと第三者通知</a>、<a href="introduction/index.html">背景・設計・確認資料</a>を確認できます。ソース、Issue、公開履歴は<a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace">GitHubリポジトリ</a>にあります。</div>
     </section>
 
     <p class="note">背景・設計・確認資料は、見出し・表・構造化記法で整理しています。人が読める説明を正本とし、AIも同じ公開資料を参照できます。</p>

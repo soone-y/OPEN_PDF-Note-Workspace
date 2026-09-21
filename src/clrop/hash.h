@@ -1,10 +1,16 @@
 #pragma once
 
+#include <filesystem>
 #include <string>
 
 #include "types.h"
 
 namespace clrop {
+
+// Calculates a complete SHA-256 for a local regular file.  This is deliberately
+// uncached: callers use it for persistent transaction preconditions, where a
+// path/mtime cache would turn an external change into an unsafe false match.
+bool ComputeFileSha256(const std::filesystem::path& path, std::string* outSha256);
 
 // PDFファイルから size + page_count + page_sizes_pt を計算する。path は参照情報として格納。
 // 取得できない値がある場合は、利用できた範囲まで返す。

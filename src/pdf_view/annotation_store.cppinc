@@ -271,15 +271,6 @@ private:
 };
 
 #ifndef PDF_NOTE_ANNOT_HISTORY_PARSER_ONLY
-static void WarnAnnotHistorySaveFailure(const std::wstring& detail) {
-    if (g_annotHistorySaveWarned) return;
-    g_annotHistorySaveWarned = true;
-    HWND owner = g_hPdfView ? GetParent(g_hPdfView) : nullptr;
-    std::wstring msg = L"注釈履歴の保存に失敗しました。";
-    if (!detail.empty()) msg += L"\n" + detail;
-    ShowPdfSoftNotice(owner, msg, SoftNoticeKind::Warning);
-}
-
 static void WarnAnnotHistoryLoadFailure(const std::wstring& detail) {
     if (g_annotHistoryLoadWarned) return;
     g_annotHistoryLoadWarned = true;
@@ -813,69 +804,21 @@ static bool SaveAnnotHistoryIfNeeded() {
             L"skip=clean elapsed_ms=" + preview_trace::ElapsedMs(startTick));
         return true;
     }
-    if (!IsAnnotHistoryEnabledForPdf(g_pdf.path)) {
-        g_annotHistoryDirty = false;
-        g_annotHistorySaveWarned = false;
-        preview_trace::Append(
-            L"SaveAnnotHistoryIfNeeded",
-            L"skip=disabled pdfPath=" + g_pdf.path +
-            L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-        return true;
-    }
-    std::filesystem::path path(AnnotHistoryPathForPdf(g_pdf.path));
-    if (!path.parent_path().empty()) {
-        std::error_code ec;
-        std::filesystem::create_directories(path.parent_path(), ec);
-        if (ec) {
-            preview_trace::Append(
-                L"SaveAnnotHistoryIfNeeded",
-                L"create_dir_failed path=" + path.wstring() +
-                L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-            WarnAnnotHistorySaveFailure(L"保存先の作成に失敗しました: " + path.parent_path().wstring());
-            return false;
-        }
-    }
-    std::ostringstream oss;
-    oss << '{';
-    oss << "\"version\":1,";
-    oss << "\"undo\":";
-    WriteCommandArray(oss, g_annotUndo);
-    oss << ",\"redo\":";
-    WriteCommandArray(oss, g_annotRedo);
-    oss << '}';
-    std::string data = oss.str();
-    std::filesystem::path preferredTmp;
-    std::filesystem::path quarantineDir;
-    if (!g_workspaceRoot.empty()) {
-        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
-        preferredTmp = resource / L"__tmp__";
-        quarantineDir = resource / L"__escape__";
-    }
-    std::wstring werr;
-    if (!atomic_write::AtomicWriteUtf8(path, data, preferredTmp, quarantineDir, &werr)) {
-        preview_trace::Append(
-            L"SaveAnnotHistoryIfNeeded",
-            L"write_failed path=" + path.wstring() +
-            L" elapsed_ms=" + preview_trace::ElapsedMs(startTick) +
-            L" err=" + werr);
-        std::wstring msg = L"ファイルの書き込みに失敗しました: " + path.wstring();
-        if (!werr.empty()) msg += L"\n" + werr;
-        WarnAnnotHistorySaveFailure(msg);
-        return false;
-    }
+    // Annotation history is session-only. Persisting a separate history file
+    // before its matching .clrop checkpoint commits can make an inverse apply
+    // against unrelated annotations after a crash or failed stage save.
+    // Leave old files untouched; they are handled explicitly on load below.
     g_annotHistoryDirty = false;
-    g_annotHistorySaveWarned = false;
     preview_trace::Append(
         L"SaveAnnotHistoryIfNeeded",
-        L"end path=" + path.wstring() +
-        L" undoCount=" + std::to_wstring(g_annotUndo.size()) +
+        L"skip=session_only undoCount=" + std::to_wstring(g_annotUndo.size()) +
         L" redoCount=" + std::to_wstring(g_annotRedo.size()) +
         L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
     return true;
 }
 
 static bool LoadAnnotHistoryForCurrentPdf() {
-    ClearAnnotHistory();
+    ClearPdfAnnotationHistory();
     g_annotHistoryLoadWarned = false;
     if (!IsAnnotHistoryEnabledForPdf(g_pdf.path)) return true;
     std::filesystem::path path(AnnotHistoryPathForPdf(g_pdf.path));
@@ -902,42 +845,20 @@ static bool LoadAnnotHistoryForCurrentPdf() {
     AnnotHistoryJsonValue root;
     AnnotHistoryJsonParser parser(json);
     if (!parser.Parse(root)) {
-        std::filesystem::path quarantineDir;
-        if (!g_workspaceRoot.empty()) {
-            quarantineDir = std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
-        }
-        std::filesystem::path moved;
-        atomic_write::QuarantineFileBestEffort(path, quarantineDir, &moved);
-        ClearAnnotHistory();
-        std::wstring msg = L"JSONの解析に失敗しました: " + path.wstring();
-        if (!moved.empty()) msg += L"\n退避: " + moved.wstring();
-        WarnAnnotHistoryLoadFailure(msg);
+        WarnAnnotHistoryLoadFailure(
+            L"注釈履歴JSONを解析できません。元ファイルを保持したため、自動では変更しません: " +
+            path.wstring());
         return false;
     }
-    if (const auto* undoVal = FindField(root, "undo")) {
-        if (undoVal->type == AnnotHistoryJsonValue::Type::Array) {
-            for (const auto& v : undoVal->arr) {
-                AnnotCommand cmd;
-                if (ParseCommand(v, cmd)) g_annotUndo.push_back(std::move(cmd));
-            }
-        }
-    }
-    if (const auto* redoVal = FindField(root, "redo")) {
-        if (redoVal->type == AnnotHistoryJsonValue::Type::Array) {
-            for (const auto& v : redoVal->arr) {
-                AnnotCommand cmd;
-                if (ParseCommand(v, cmd)) g_annotRedo.push_back(std::move(cmd));
-            }
-        }
-    }
-    TrimAnnotHistory();
-    if (g_annotRedo.size() > kAnnotHistoryLimit) {
-        size_t drop = g_annotRedo.size() - kAnnotHistoryLimit;
-        g_annotRedo.erase(g_annotRedo.begin(), g_annotRedo.begin() + drop);
-    }
+    // Version-1 history lacks a binding to a .clrop content fingerprint and
+    // persistence revision. It can be read for compatibility, but cannot be
+    // safely migrated or replayed into the current annotation set. Do not
+    // delete, quarantine, or overwrite it; start a new session history.
     g_annotHistoryDirty = false;
-    g_annotHistoryLoadWarned = false;
-    return true;
+    WarnAnnotHistoryLoadFailure(
+        L"既存の注釈履歴は対応する注釈内容を検証できないため復元しません。元ファイルは保持されています: " +
+        path.wstring());
+    return false;
 }
 
 bool SaveAnnotationsIfDirty(HWND owner) {
@@ -972,18 +893,13 @@ bool SaveAnnotationsIfDirty(HWND owner) {
 
 void InvalidateAnnotHistoryForPath(const std::wstring& path) {
     if (path.empty()) return;
-    std::filesystem::path historyPath(path);
-    historyPath.replace_extension(L".annot_history.json");
-    if (!historyPath.empty()) {
-        std::error_code ec;
-        std::filesystem::remove(historyPath, ec);
-    }
+    // Legacy history is evidence, not a disposable cache. Integration,
+    // recovery, or a move must never remove it automatically.
     if (g_pdf.kind == DocKind::Pdf && !g_pdf.path.empty()) {
         std::filesystem::path currentPdf(g_pdf.path);
         std::filesystem::path currentClrop = clrop_bridge::ClropPathForPdf(g_pdf.path);
         if (path == currentPdf.wstring() || path == currentClrop.wstring()) {
-            ClearAnnotHistory();
-            g_annotHistorySaveWarned = false;
+            ClearPdfAnnotationHistory();
             g_annotHistoryLoadWarned = false;
             RefreshAnnotPanel();
         }
@@ -1205,7 +1121,7 @@ bool LoadAnnotationsForCurrentPdf(HWND owner) {
     g_annotsNeedsIntegrate = false;
     ClearLoadedAnnotationIdentityState();
     if (g_pdfPreviewActive) {
-        ClearAnnotHistory();
+        ClearPdfAnnotationHistory();
         RefreshAnnotPanel();
         preview_trace::Append(
             L"LoadAnnotationsForCurrentPdf",
@@ -1213,7 +1129,7 @@ bool LoadAnnotationsForCurrentPdf(HWND owner) {
         return true;
     }
     if (g_pdf.kind != DocKind::Pdf) {
-        ClearAnnotHistory();
+        ClearPdfAnnotationHistory();
         RefreshAnnotPanel();
         preview_trace::Append(
             L"LoadAnnotationsForCurrentPdf",

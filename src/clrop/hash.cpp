@@ -309,21 +309,28 @@ bool TryPopulatePdfFastFingerprint(const std::wstring& pdfPath, clrop::PdfId* ou
     return true;
 }
 
-bool FillSha256(const std::wstring& pdfPath, clrop::PdfId* out) {
-    if (!out) return false;
-    out->sha256.clear();
-    if (pdfPath.empty()) return false;
+bool ComputeSha256ForLocalRegularFile(const std::filesystem::path& path,
+                                      std::string* outSha256) {
+    if (outSha256) outSha256->clear();
+    if (path.empty()) return false;
 
-    const std::wstring openPath = ToExtendedPathIfAbsolute(pdfPath);
+    const std::wstring openPath = ToExtendedPathIfAbsolute(path.wstring());
     HANDLE hFile = CreateFileW(openPath.c_str(),
                                GENERIC_READ,
                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                nullptr,
                                OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN |
+                                   FILE_FLAG_OPEN_REPARSE_POINT,
                                nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
-        out->sha256.clear();
+        return false;
+    }
+
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(hFile, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        CloseHandle(hFile);
         return false;
     }
 
@@ -343,7 +350,7 @@ bool FillSha256(const std::wstring& pdfPath, clrop::PdfId* out) {
 
     std::array<std::uint8_t, 32> digest{};
     ShaFinal(ctx, digest);
-    out->sha256 = ToHex(digest);
+    if (outSha256) *outSha256 = ToHex(digest);
     return true;
 }
 
@@ -353,6 +360,10 @@ bool NearlyEqualPageSize(double a, double b) {
 }
 
 } // namespace
+
+bool ComputeFileSha256(const std::filesystem::path& path, std::string* outSha256) {
+    return ComputeSha256ForLocalRegularFile(path, outSha256);
+}
 
 clrop::PdfId ComputePdfFastId(const std::wstring& pdfPath) {
     clrop::PdfId id;
@@ -398,7 +409,7 @@ clrop::PdfId ComputePdfId(const std::wstring& pdfPath) {
 
     id = ComputePdfFastId(pdfPath);
     id.path = pdfPath;
-    (void)FillSha256(pdfPath, &id);
+    (void)ComputeFileSha256(std::filesystem::path(pdfPath), &id.sha256);
 
     if (haveMeta) {
         StoreCachedPdfId(NormalizePathKey(pdfPath), size, mtimeMs, id, /*hasStrongHash=*/!id.sha256.empty());

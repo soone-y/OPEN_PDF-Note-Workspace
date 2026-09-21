@@ -158,8 +158,16 @@ NoteKernelApplyResult LocalNoteKernel::ApplyUserEdit(
 std::optional<NoteKernelHistoryResult> LocalNoteKernel::Undo(bool renderActive) {
     const auto replay = history_.PeekUndo();
     if (!replay.has_value()) return std::nullopt;
+    const std::wstring& raw = text_core_.model().raw;
+    if (!NoteHistoryReplayMatchesCurrentText(*replay, raw) ||
+        replay->edit.start.value > raw.size() ||
+        replay->edit.deleted_len != replay->expected_deleted_text.size() ||
+        replay->edit.deleted_len > raw.size() - replay->edit.start.value ||
+        raw.compare(replay->edit.start.value, replay->edit.deleted_len,
+                    replay->expected_deleted_text) != 0) {
+        return std::nullopt;
+    }
     NoteKernelHistoryResult result;
-    result.selection = replay->selection;
     result.apply_result = Apply(replay->edit, renderActive);
     if (!result.applied()) return std::nullopt;
     if (!history_.CommitUndo()) return std::nullopt;
@@ -169,8 +177,16 @@ std::optional<NoteKernelHistoryResult> LocalNoteKernel::Undo(bool renderActive) 
 std::optional<NoteKernelHistoryResult> LocalNoteKernel::Redo(bool renderActive) {
     const auto replay = history_.PeekRedo();
     if (!replay.has_value()) return std::nullopt;
+    const std::wstring& raw = text_core_.model().raw;
+    if (!NoteHistoryReplayMatchesCurrentText(*replay, raw) ||
+        replay->edit.start.value > raw.size() ||
+        replay->edit.deleted_len != replay->expected_deleted_text.size() ||
+        replay->edit.deleted_len > raw.size() - replay->edit.start.value ||
+        raw.compare(replay->edit.start.value, replay->edit.deleted_len,
+                    replay->expected_deleted_text) != 0) {
+        return std::nullopt;
+    }
     NoteKernelHistoryResult result;
-    result.selection = replay->selection;
     result.apply_result = Apply(replay->edit, renderActive);
     if (!result.applied()) return std::nullopt;
     if (!history_.CommitRedo()) return std::nullopt;
@@ -370,7 +386,9 @@ bool LocalNoteKernel::TryApplyIncrementalSyntax(const TextEdit& edit) {
 NoteKernelRefreshResult LocalNoteKernel::RebuildAll(
     std::optional<NoteDirtyGraph> consumedDirtyGraph) {
     syntax_source_ = text_core_.model();
-    document_ = ParseNoteDocument(syntax_source_);
+    document_ = content_kind_ == NoteContentKind::TeXSource
+        ? ParseTeXMathDocument(syntax_source_)
+        : ParseNoteDocument(syntax_source_);
     SetNoteDocumentSourceIdentity(
         &document_,
         NoteDerivedSnapshotIdentity{

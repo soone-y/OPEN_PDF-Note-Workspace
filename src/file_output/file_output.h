@@ -11,7 +11,8 @@
 // pdf_view TU で実装。services 層からは本ヘッダ経由で参照する。
 void InvalidateAnnotHistoryForPath(const std::wstring& path);
 bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
-                                       const std::wstring& blockedMessage);
+                                       const std::wstring& blockedMessage,
+                                       const std::wstring& confirmation);
 
 namespace file_output {
 
@@ -130,6 +131,9 @@ bool SaveNoteFile(HWND owner);
 [[nodiscard]] bool SaveNoteIfDirty(HWND owner);
 bool EnsureCurrentNotePathForStage(HWND owner);
 [[nodiscard]] bool SaveAnnotationsIfDirty(HWND owner);
+// Preserve editable state during WM_ENDSESSION. This only writes recoverable
+// stage data; it never integrates into the original files or presents UI.
+[[nodiscard]] bool PreserveUnsavedChangesForSystemEndSession(HWND owner) noexcept;
 void NotifyNoteStageEdit(HWND owner);
 void ResetNoteStageSaveTracking(HWND owner);
 void ConfigureAutoStageSaveScheduling(HWND owner);
@@ -207,6 +211,8 @@ bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standard
 bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standardTextAnnots, double exportScale);
 bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standardTextAnnots, double exportScale,
                               bool matchPdfPaneTextLayout, std::wstring* outSavedPath = nullptr);
+bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, const std::wstring& outPath,
+                              bool standardTextAnnots, double exportScale, bool matchPdfPaneTextLayout);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool standardTextAnnots);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std::wstring& outPath);

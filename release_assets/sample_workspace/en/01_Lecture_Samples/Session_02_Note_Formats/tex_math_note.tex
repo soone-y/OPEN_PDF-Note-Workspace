@@ -1,0 +1,37 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{Session 02 -- TeX Source Example}
+\author{PDF Note Workspace}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Text and mathematics}
+Write inline mathematics as $E = mc^2$.
+
+\begin{align}
+  \sum_{k=1}^{n} k &= \frac{n(n+1)}{2}, \\
+  \int_0^1 x^2\,dx &= \frac{1}{3}.
+\end{align}
+
+\section{List and table}
+\begin{itemize}
+  \item Divide a document into sections.
+  \item Number mathematical expressions.
+  \item Typeset a table.
+\end{itemize}
+
+\begin{tabular}{lll}
+\toprule
+Syntax & Purpose & Example \\
+\midrule
+\verb|\section| & heading & \verb|\section{Title}| \\
+\verb|$...$| & inline mathematics & \verb|$a+b$| \\
+\verb|align| & aligned expressions & \verb|a &= b| \\
+\bottomrule
+\end{tabular}
+
+\end{document}

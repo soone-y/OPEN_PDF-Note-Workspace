@@ -1,39 +1,27 @@
 # データ構造
 
-## 1. 注釈保存ファイル (`.clrop` - ClassRoom PDF Annotation)
+## 1. 注釈保存ファイル (`.clrop` - Classroom PDF Annotation)
 
-`.clrop` は、PDF 本体を一切傷つけずに注釈・手書きペン・テキスト・図形を別保存するための標準 JSON フォーマットです。
+`.clrop` は、PDF 本体を直接書き換えずに、注釈を別保存する version 1 の JSON ファイルです。名前は Classroom に由来する `.clro` の PDF 注釈版を表します。PDFを確認する情報と、ページごとの注釈を持ちます。
 
 ### 全体構造 (Root JSON Schema)
 
 ```json
 {
   "version": 1,
-  "app_version": "0.9.003",
-  "target_pdf_hash": "a1b2c3d4...",
-  "page_count": 12,
+  "pdf_id": {
+    "path": "lecture.pdf",
+    "size": 123456,
+    "page_count": 12,
+    "sha256": "..."
+  },
   "pages": [
     {
-      "page_index": 0,
-      "annotations": [
+      "page": 0,
+      "items": [
         {
-          "id": "annot-uuid-1",
-          "type": "ink",
-          "color": "#FF0000",
-          "opacity": 1.0,
-          "thickness": 2.5,
-          "points": [
-            { "x": 100.5, "y": 200.0 },
-            { "x": 105.0, "y": 202.5 }
-          ]
-        },
-        {
-          "id": "annot-uuid-2",
           "type": "text",
-          "color": "#0000FF",
-          "font_size": 14,
-          "bounds": { "x": 50, "y": 80, "w": 200, "h": 100 },
-          "content": "ここに注釈メモ"
+          "content": "annotation text"
         }
       ]
     }
@@ -41,28 +29,21 @@
 }
 ```
 
-### 注釈オブジェクトプロパティ (`AnnotationObject`)
+これは構造を説明するための簡略例です。注釈の種類ごとに位置、線、色、文字、数式、リンク先、図形などの項目が変わります。
 
-| フィールド | 型 | 説明 |
-| :--- | :--- | :--- |
-| `id` | string | 注釈ごとの固有識別子 (UUID v4) |
-| `type` | string | `ink` (フリーハンド), `highlight` (マーカー), `text` (テキスト), `rect` (矩形), `line` (直線), `math` (TeX数式) |
-| `color` | string | HEX カラーコード (`#RRGGBB` または `#RRGGBBAA`) |
-| `thickness` | number | 線の太さ（ピクセル） |
-| `opacity` | number | 不透明度 (`0.0` 〜 `1.0`) |
-| `points` | array | `ink` / `line` の場合の座標配列 `[ {x, y}, ... ]` |
-| `bounds` | object | `text` / `rect` の描画領域 `{x, y, w, h}` |
-| `content` | string | `text` や `math` の内容テキスト |
+利用者向けの扱いと、PDFと一緒に移動する理由は [`.clrop` PDF注釈データ](../../docs/ja/CLROP_Annotation_Format.md) を参照してください。
 
 ---
 
-## 2. アプリ標準ノート (`.clro` - ClassRoom Note)
+## 2. アプリ標準ノート (`.clro` - Classroom Note)
 
-`.clro` は、Markdown をハイパーセットとしてサポートする標準テキストノートです。
+`.clro` は、Classroom に由来する、本ソフトが新しく作る標準ノートの拡張子です。中身はUTF-8のテキストで、`.md` / `.markdown` と同じ Markdown/MD4C のノート経路で扱います。
 
-- **フォーマット**: UTF-8 エンコーディングのテキストファイル（BOMなし）。
-- **Markdown 互換性**: 標準的な GFM (GitHub Flavored Markdown) をそのまま開くことが可能。
-- **拡張機能**: TeX 数式ブロック (`$$ ... $$`), Mermaid ダイアグラム (` ```mermaid ... ``` `) のローカル表示に対応。
+- **役割**: 新規作成、候補名、既定の命名規則に使う本ソフト中心のノートです。
+- **記法**: 見出し、箇条書き、強調、リンクなどの Markdown 系記法に加え、対応する独自 markup、数式、ノートリンクを扱います。
+- **互換性**: 一般的な Markdown は他ソフトでも読めることがありますが、本ソフトが対応していない Markdown の全機能や、GitHubと同じ表示を保証するものではありません。
+
+利用者向けの記法、`.md` との使い分け、他ソフトで開く場合の注意は [`.clro` ノート形式](../../docs/ja/CLRO_Note_Format.md) を参照してください。
 
 ---
 

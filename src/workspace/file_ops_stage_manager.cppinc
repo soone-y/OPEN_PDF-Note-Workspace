@@ -379,6 +379,18 @@ static LRESULT CALLBACK StageManagerDialogProc(HWND hWnd, UINT msg, WPARAM wPara
 }
 
 void ShowStageManagerDialog(HWND owner) {
+    // The dialog is a review point for all work that would be integrated, not
+    // only checkpoints written by an earlier timer.  Make a fresh protected
+    // checkpoint first; these APIs never write the original note or .clrop.
+    // Keep the dialog available if staging fails (for example during IME
+    // composition), so previously protected work remains inspectable.
+    const bool noteStaged = file_output::SaveNoteIfDirty(owner);
+    const bool annotationsStaged =
+        noteStaged && file_output::SaveAnnotationsIfDirty(owner);
+    if (!noteStaged || !annotationsStaged) {
+        RefreshMainWindowUiState(owner);
+    }
+
     StageManagerDialogState ctx;
     WNDCLASSW wc{};
     wc.lpfnWndProc = StageManagerDialogProc;

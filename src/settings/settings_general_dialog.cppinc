@@ -49,10 +49,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         const int dayGap = ScaleY(hWnd, 6);
         const bool showBasicSections = ctx->pageMode == GeneralSettingsPageMode::Basic;
         const bool showNoteSectionOnly = ctx->pageMode == GeneralSettingsPageMode::Note;
-        const bool useSectionNav = true;
-
-        const int navW = useSectionNav ? ScaleY(hWnd, ctx->embedded ? 170 : 200) : 0;
-        const int columnGap = useSectionNav ? ScaleY(hWnd, 18) : 0;
+        const int sectionNavH = rowH;
+        const int sectionNavGap = ScaleY(hWnd, 8);
         const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
         const int titleH = std::max(rowH, ScaleY(hWnd, 30));
         const std::wstring subtitle = localization::Text(L"settings.general.151942ba553f").c_str();
@@ -64,8 +62,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         const int panelTop = pad + headerH;
         const int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
         const int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
-        const int contentPaneX = pad + navW + columnGap;
-        const int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - contentPaneX - pad);
+        const int contentPaneX = pad;
+        const int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - pad * 2);
+        const int contentPanelTop = panelTop + sectionNavH + sectionNavGap;
+        const int contentPanelH = std::max(ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
         const int contentW = std::max(0, contentPaneW - pad * 2);
         int y = pad;
 
@@ -98,20 +98,21 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                                           showNoteSectionOnly ? kSettingsNavNote : kSettingsNavGeneral);
         }
 
-        if (useSectionNav) {
-            ctx->navList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                                           pad, panelTop, navW, panelH,
+        {
+            int sectionNavW = std::min(contentPaneW, ScaleY(hWnd, ctx->embedded ? 360 : 400));
+            ctx->navList = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
+                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+                                           contentPaneX, panelTop, sectionNavW, ScaleY(hWnd, 240),
                                            hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_GENERAL_SECTION_LIST)),
                                            g_hInst, nullptr);
             SetUIFont(ctx->navList);
             SetSettingsNavFont(ctx->navList);
-            SetWindowSubclass(ctx->navList, SettingsNavListSubclassProc, 1, 0);
+            ui::GuardComboAgainstAccidentalChange(ctx->navList);
         }
 
         ctx->scrollPanel = CreateWindowExW(0, L"SettingsScrollPanelClass", L"",
                                            WS_CHILD | WS_VISIBLE,
-                                           contentPaneX, panelTop, contentPaneW, panelH,
+                                           contentPaneX, contentPanelTop, contentPaneW, contentPanelH,
                                            hWnd, nullptr, g_hInst, nullptr);
 
         int controlW = SettingsControlWidth(hWnd, contentW, ctx->embedded, 320, 520);
@@ -165,6 +166,13 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 break;
             }
         }
+        std::wstring defaultSessionFileLayoutLabel = localization::Text(kSessionFileLayoutOptions[0].label);
+        for (const auto& opt : kSessionFileLayoutOptions) {
+            if (defaults.sessionFileLayout == opt.value) {
+                defaultSessionFileLayoutLabel = localization::Text(opt.label);
+                break;
+            }
+        }
         std::wstring defaultNoteSystemLabel = localization::Text(kNoteSystemOptions[0].label);
         NoteSystem defaultNoteSystem = ParseNoteSystem(defaults.noteSystem);
         for (const auto& opt : kNoteSystemOptions) {
@@ -177,13 +185,6 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         for (const auto& opt : kAutoSaveOptions) {
             if (NormalizeAutoStageSaveSeconds(defaults.autoSaveSeconds) == opt.seconds) {
                 defaultAutoSaveLabel = localization::Text(opt.label);
-                break;
-            }
-        }
-        std::wstring defaultAutoIntegrateLabel = localization::Text(kAutoIntegrateOptions[0].label);
-        for (const auto& opt : kAutoIntegrateOptions) {
-            if (defaults.autoIntegrateSeconds == opt.seconds) {
-                defaultAutoIntegrateLabel = localization::Text(opt.label);
                 break;
             }
         }
@@ -357,6 +358,9 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
 
         if (showBasicSections) {
             beginSection(kGeneralSectionDisplay, localization::Text(L"settings.general.section_display").c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.caeaed7a80fa").c_str(), defaultBottomPaneLabel));
+            ctx->cbBottomPane = addCombo(IDC_BOTTOM_PANE, false, controlW);
+
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.5c3d07c45ba5").c_str(), defaultThemeLabel));
             ctx->cbTone = addCombo(IDC_TONE, false, controlW);
             {
@@ -399,6 +403,12 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             ctx->chkPdfSinglePageMode = addCheck(
                 IDC_PDF_SINGLE_PAGE_MODE,
                 localization::Text(L"settings.general.ba5d74bf8466").c_str(),
+                wideW);
+
+            addLabel(localization::Text(L"settings.general.pdf_zoom_overlay").c_str());
+            ctx->chkPdfZoomOverlay = addCheck(
+                IDC_PDF_ZOOM_OVERLAY,
+                localization::Text(L"settings.general.show").c_str(),
                 wideW);
 
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.d756a8fbd401").c_str(), defaultSelectionStyleLabel));
@@ -576,9 +586,6 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             ctx->cbAutoSave = addCombo(IDC_AUTOSAVE, false, controlW);
             addLabel(localization::Text(L"settings.general.bee182ab69e9").c_str());
 
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.cf96ac0a658a").c_str(), defaultAutoIntegrateLabel));
-            ctx->cbAutoIntegrate = addCombo(IDC_AUTOINTEGRATE, false, controlW);
-
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.f7252c3f810f"), DefaultNameRule()));
             int editW = std::min(contentW, wideW);
             int editX = pad + std::max(0, contentW - editW);
@@ -657,11 +664,12 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                                                            L"settings.general.session_numbering_parent")).c_str(),
                          defaultSessionNumberingLabel));
             ctx->cbSessionNumbering = addCombo(IDC_SESSION_NUMBERING, false, controlW);
+            addLabel(SettingLabelWithDefault(
+                         localization::Text(L"settings.general.session_file_layout").c_str(),
+                         defaultSessionFileLayoutLabel));
+            ctx->cbSessionFileLayout = addCombo(IDC_SESSION_FILE_LAYOUT, false, controlW);
+            addLabel(localization::Text(L"settings.general.session_file_layout_hint").c_str());
             addLabel(localization::Text(L"settings.general.e28bd1fb61a4").c_str());
-
-            beginSection(kGeneralSectionLayout, localization::Text(L"settings.general.section_layout").c_str());
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.caeaed7a80fa").c_str(), defaultBottomPaneLabel));
-            ctx->cbBottomPane = addCombo(IDC_BOTTOM_PANE, false, controlW);
 
             beginSection(kGeneralSectionDebug, localization::Text(L"settings.general.4b6e39f0a93f").c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.08ddd9365fa2").c_str(),
@@ -722,7 +730,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
 
         ctx->contentHeight = y + pad;
         int frameH = std::max(0, winH - clientH);
-        int desiredClientH = headerH + std::max(ctx->contentHeight, ScaleY(hWnd, 360)) + panelBottomPad;
+        int desiredClientH = headerH + sectionNavH + sectionNavGap +
+                             std::max(ctx->contentHeight, ScaleY(hWnd, 360)) + panelBottomPad;
         int desiredHeight = std::max(ScaleY(hWnd, kGeneralDlgHeight), desiredClientH + frameH);
         int maxHeight = (workH > 0) ? std::max(0, workH - margin) : desiredHeight;
         if (maxHeight > 0) desiredHeight = std::min(desiredHeight, maxHeight);
@@ -744,12 +753,14 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         }
         UpdateToneEditButtonEnabled(ctx);
         if (ctx->cbBottomPane) {
+            const BottomPanePin configuredPin = ParseBottomPanePin(g_config.bottomPanePin);
+            const BottomNoteMode configuredNoteMode = ParseBottomNoteMode(g_config.bottomNoteMode);
             int sel = 0;
             for (size_t i = 0; i < std::size(kBottomPaneOptions); ++i) {
                 SendMessageW(ctx->cbBottomPane, CB_ADDSTRING, 0,
                              reinterpret_cast<LPARAM>(localization::Text(kBottomPaneOptions[i].label).c_str()));
-                if (kBottomPaneOptions[i].pin == g_bottomPanePin &&
-                    kBottomPaneOptions[i].noteMode == g_bottomNoteMode) {
+                if (kBottomPaneOptions[i].pin == configuredPin &&
+                    kBottomPaneOptions[i].noteMode == configuredNoteMode) {
                     sel = static_cast<int>(i);
                 }
             }
@@ -822,6 +833,19 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             }
             SendMessageW(ctx->cbSessionNumbering, CB_SETCURSEL, sel, 0);
         }
+        if (ctx->cbSessionFileLayout) {
+            std::wstring layout = g_config.sessionFileLayout;
+            std::transform(layout.begin(), layout.end(), layout.begin(), ::towlower);
+            int sel = 0;
+            for (size_t i = 0; i < std::size(kSessionFileLayoutOptions); ++i) {
+                SendMessageW(ctx->cbSessionFileLayout, CB_ADDSTRING, 0,
+                             reinterpret_cast<LPARAM>(localization::Text(kSessionFileLayoutOptions[i].label).c_str()));
+                if (!layout.empty() && layout == kSessionFileLayoutOptions[i].value) {
+                    sel = static_cast<int>(i);
+                }
+            }
+            SendMessageW(ctx->cbSessionFileLayout, CB_SETCURSEL, sel, 0);
+        }
         if (ctx->cbSessionAutoOpenMode) {
             std::wstring mode = g_config.sessionAutoOpenMode;
             std::transform(mode.begin(), mode.end(), mode.begin(), ::towlower);
@@ -854,6 +878,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->chkPdfSinglePageMode) {
             SendMessageW(ctx->chkPdfSinglePageMode, BM_SETCHECK,
                          g_config.pdfSinglePageMode ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        if (ctx->chkPdfZoomOverlay) {
+            SendMessageW(ctx->chkPdfZoomOverlay, BM_SETCHECK,
+                         g_config.showPdfZoomOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
         }
         if (ctx->cbSelectionStyle) {
             std::wstring style = g_config.selectionStyle;
@@ -1144,7 +1172,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                          g_config.debugLogs.startupWatchdog ? BST_CHECKED : BST_UNCHECKED, 0);
         }
         if (ctx->navList) {
-            SendMessageW(ctx->navList, LB_RESETCONTENT, 0, 0);
+                SendMessageW(ctx->navList, CB_RESETCONTENT, 0, 0);
             if (showNoteSectionOnly) {
                 const std::array<std::wstring, 4> noteSectionLabels = {
                     localization::Text(L"settings.general.d6ae379cb93d").c_str(),
@@ -1155,7 +1183,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 const int noteSectionCount = std::min<int>(ctx->sectionCount,
                                                            static_cast<int>(std::size(noteSectionLabels)));
                 for (int i = 0; i < noteSectionCount; ++i) {
-                    SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(noteSectionLabels[i].c_str()));
+                    SendMessageW(ctx->navList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(noteSectionLabels[i].c_str()));
                 }
             } else {
                 const std::array<std::wstring, kGeneralSectionCount> sectionLabels = {
@@ -1164,11 +1192,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                     localization::Text(L"settings.general.bb3c59ed98e5").c_str(),
                     localization::Text(g_config.studentMode ? L"settings.general.schedule_nav_student"
                                                             : L"settings.general.schedule_nav_parent").c_str(),
-                    localization::Text(L"settings.general.aa88cca5f6ab").c_str(),
                     localization::Text(L"settings.general.4b6e39f0a93f").c_str(),
                 };
                 for (int i = 0; i < ctx->sectionCount && i < kGeneralSectionCount; ++i) {
-                    SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(sectionLabels[i].c_str()));
+                    SendMessageW(ctx->navList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(sectionLabels[i].c_str()));
                 }
             }
             int initialSection = showNoteSectionOnly ? 0
@@ -1214,6 +1241,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             if (ctx->contentHeight > 0) {
                 UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
                                    &ctx->scrollPos, &ctx->scrollMax);
+                UpdateGeneralSectionNavUi(ctx, SettingsSectionForScrollPosition(
+                    ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
             }
         }
         break;
@@ -1293,8 +1322,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         int code = HIWORD(wParam);
         LogPanelEvent(L"General", L"WM_COMMAND", id, code, reinterpret_cast<HWND>(lParam));
         if (!ctx) break;
-        if (id == IDC_GENERAL_SECTION_LIST && code == LBN_SELCHANGE) {
-            int sel = static_cast<int>(SendMessageW(ctx->navList, LB_GETCURSEL, 0, 0));
+        if (id == IDC_GENERAL_SECTION_LIST && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(ctx->navList, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {
                 UpdateGeneralSectionNavUi(ctx, sel);
                 JumpGeneralSettingsToSection(hWnd, ctx, sel);

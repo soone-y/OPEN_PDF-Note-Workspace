@@ -555,6 +555,13 @@ bool IsLikelyBinary(const std::vector<unsigned char>& bytes) {
 
 bool g_loadInProgress = false;
 bool g_loadCancelRequested = false;
+enum class ViewerExitRequest {
+    None,
+    UserClose,
+    SystemEndSession,
+};
+ViewerExitRequest g_viewerExitRequest = ViewerExitRequest::None;
+bool g_systemEndSessionSessionSaved = false;
 
 void PumpLoadCancellation() {
     MSG message{};
@@ -578,6 +585,9 @@ void BeginCancellableLoad(HWND owner, const std::wstring& status) {
 
 void EndCancellableLoad() {
     g_loadInProgress = false;
+    if (g_viewerExitRequest == ViewerExitRequest::UserClose && g_hwndMain && IsWindow(g_hwndMain)) {
+        PostMessageW(g_hwndMain, WM_CLOSE, 0, 0);
+    }
 }
 
 std::wstring DecodeTextBytes(const std::vector<unsigned char>& bytes) {
@@ -2900,15 +2910,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case textviewer::mermaid::kOpenDetachedDiagramMessage:
             OpenDetachedDiagramWindow();
             return 0;
+        case WM_QUERYENDSESSION:
+            // Reply promptly; session persistence belongs to WM_ENDSESSION.
+            g_viewerExitRequest = ViewerExitRequest::SystemEndSession;
+            return TRUE;
+        case WM_ENDSESSION:
+            if (wParam == TRUE) {
+                g_viewerExitRequest = ViewerExitRequest::SystemEndSession;
+                g_loadCancelRequested = true;
+                if (g_persistSessionEnabled && !g_systemEndSessionSessionSaved) {
+                    std::wstring ignored;
+                    (void)SaveReadonlySession(&ignored);
+                    g_systemEndSessionSessionSaved = true;
+                }
+            } else if (g_viewerExitRequest == ViewerExitRequest::SystemEndSession) {
+                g_viewerExitRequest = ViewerExitRequest::None;
+                g_loadCancelRequested = false;
+            }
+            return 0;
         case WM_CLOSE:
             if (g_loadInProgress) {
+                g_viewerExitRequest = ViewerExitRequest::UserClose;
                 g_loadCancelRequested = true;
                 return 0;
             }
             DestroyWindow(hWnd);
             return 0;
         case WM_DESTROY:
-            if (g_persistSessionEnabled) {
+            if (g_persistSessionEnabled && !g_systemEndSessionSessionSaved) {
                 std::wstring ignored;
                 const bool saved = SaveReadonlySession(&ignored);
                 (void)saved;

@@ -6,7 +6,7 @@
 #include "core/font_list.h"
 #include "file_output/file_output.h"
 #include "math/math_render.h"
-#include "note_view/note_view.h"
+#include "bridge/view_bridge.h"
 
 #include <algorithm>
 
@@ -51,10 +51,10 @@ void ApplyNoteFont() {
         SendMessageW(g_hNoteEdit, WM_SETFONT, reinterpret_cast<WPARAM>(active), TRUE);
         InvalidateRect(g_hNoteEdit, nullptr, TRUE);
         // Ensure markup caches reflect font-size-dependent tags like <s+10> / <s=-5>.
-        RecomputeMathFromNote();
+        RefreshCurrentNoteAfterFontChange();
         return;
     }
-    UpdateNoteLineSpacing();
+    RefreshCurrentNoteAfterFontChange();
 }
 
 void ApplyNoteSystem(HWND hWnd) {
@@ -72,15 +72,7 @@ void ApplyNoteSystem(HWND hWnd) {
     g_noteBgColor = g_config.noteBgColor;
     g_noteFgColor = g_config.noteFgColor;
     mathrender::SetSupSubGapSupPercent(g_config.noteMathSupSubGapSupPercent);
-    if (!g_noteVimModeEnabled && g_noteNormalMode) {
-        g_noteNormalMode = false;
-        OnExitNoteNormalMode();
-    }
-    if (g_hNoteEdit) {
-        RecomputeMathFromNote();
-        UpdateNoteViewMode();
-        InvalidateRect(g_hNoteEdit, nullptr, TRUE);
-    }
+    ApplyCurrentNoteViewConfiguration();
 }
 
 void UpdateMathListVisibility() {

@@ -2,7 +2,7 @@
 
 同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)
 
-このフォルダは、利用者と開発者が目的別に読める文書の入口です。初めての方は、上から順に必要な文書だけ読めば使い始められます。
+このフォルダは、アプリを使うための説明の入口です。初めての方は、上から順に必要な文書だけ読めば使い始められます。
 
 初めて使う場合は、まず [Getting_Started.md](Getting_Started.md) を読んで ZIP を展開し、その後 [Using_the_App.md](Using_the_App.md) を読んでください。
 
@@ -29,11 +29,13 @@ Lite版はウィンドウ名に `Lite` と表示されます。Lite版へ DOCX/P
 
 | 文書 | 読む場面 |
 | --- | --- |
-| [Getting_Started.md](Getting_Started.md) | ZIP の展開、ショートカット、関連付け、更新、削除を行いたい |
-| [Using_the_App.md](Using_the_App.md) | 起動、ワークスペース、ノート作成、基本保存を知りたい |
+| [Getting_Started.md](Getting_Started.md) | ZIP の展開、ショートカット、関連付け、更新を行いたい |
+| [Using_the_App.md](Using_the_App.md) | 起動、ノート作成、基本保存を知りたい |
 | [Help_Reference.md](Help_Reference.md) | アプリ内ヘルプの全項目、メニュー、設定、出力を詳しく調べたい |
 | [File_Formats.md](File_Formats.md) | `.clro`、`.md`、`.txt`、`.clrop` の違いを知りたい |
-| [Save_and_Recovery.md](Save_and_Recovery.md) | 保存、stage、バックアップ、復元を理解したい |
+| [CLRO_Note_Format.md](CLRO_Note_Format.md) | `.clro` ノートの役割、記法、他ソフトとの扱いを知りたい |
+| [CLROP_Annotation_Format.md](CLROP_Annotation_Format.md) | PDFと `.clrop` 注釈データの対応と中身を知りたい |
+| [Save_and_Recovery.md](Save_and_Recovery.md) | 保存、作業保護、バックアップ、復元を理解したい |
 | [Troubleshooting.md](Troubleshooting.md) | 困ったときの一次対応と、解決のための知識を得たい |
 
 アプリ内では「ヘルプ」から同じ主題をカテゴリ別に確認できます。ヘルプは外部サイトへ接続しません。

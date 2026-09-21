@@ -5,8 +5,13 @@
 #include "core/secure_memory.h"
 #include "ui/noop_nav_guard.h"
 
+#include <commctrl.h>
+
 #include <algorithm>
+#include <cwchar>
+#include <cwctype>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -20,6 +25,44 @@ struct UiMessageRepeatState {
 };
 
 static UiMessageRepeatState g_silentMessageDialogRepeatState;
+static std::vector<HWND> g_appExitDismissibleDialogs;
+static std::vector<HWND> g_appExitBlockingDialogs;
+
+static void RegisterAppExitDialog(std::vector<HWND>& dialogs, HWND hWnd) {
+    if (!hWnd || std::find(dialogs.begin(), dialogs.end(), hWnd) != dialogs.end()) return;
+    dialogs.push_back(hWnd);
+}
+
+static void RegisterAppExitDismissibleDialogInternal(HWND hWnd) {
+    RegisterAppExitDialog(g_appExitDismissibleDialogs, hWnd);
+}
+
+static void RegisterAppExitBlockingDialogInternal(HWND hWnd) {
+    RegisterAppExitDialog(g_appExitBlockingDialogs, hWnd);
+}
+
+static void UnregisterAppExitDialogInternal(HWND hWnd) {
+    auto eraseDialog = [hWnd](std::vector<HWND>& dialogs) {
+        dialogs.erase(std::remove(dialogs.begin(), dialogs.end(), hWnd), dialogs.end());
+    };
+    eraseDialog(g_appExitDismissibleDialogs);
+    eraseDialog(g_appExitBlockingDialogs);
+}
+
+static void DismissAppExitDismissibleDialogsInternal() {
+    const std::vector<HWND> dialogs = g_appExitDismissibleDialogs;
+    for (HWND hWnd : dialogs) {
+        if (IsWindow(hWnd)) SendMessageW(hWnd, WM_CLOSE, 0, 0);
+    }
+}
+
+static bool HasAppExitBlockingDialogInternal() {
+    g_appExitBlockingDialogs.erase(
+        std::remove_if(g_appExitBlockingDialogs.begin(), g_appExitBlockingDialogs.end(),
+                       [](HWND hWnd) { return !IsWindow(hWnd); }),
+        g_appExitBlockingDialogs.end());
+    return !g_appExitBlockingDialogs.empty();
+}
 
 // Keep modal retry failures from reopening the same dialog in a tight loop.
 static bool ShouldSuppressRepeatedUiMessage(UiMessageRepeatState& state,
@@ -338,6 +381,167 @@ bool PromptSimpleText(HWND owner, const std::wstring& title,
         return true;
     }
     return false;
+}
+
+struct BlankPdfSizeOption {
+    std::wstring label;
+    double widthPt = 0.0;
+    double heightPt = 0.0;
+};
+
+struct BlankPdfOptionsDialog {
+    HWND sizeCombo{};
+    HWND pageCountEdit{};
+    std::vector<BlankPdfSizeOption> sizes;
+    BlankPdfDialogOptions result{};
+    bool ok = false;
+    bool done = false;
+};
+
+static constexpr int kBlankPdfSizeComboId = 501;
+static constexpr int kBlankPdfPageCountEditId = 502;
+
+static bool TryReadBlankPdfPageCount(HWND edit, int* out) {
+    if (!edit || !out) return false;
+    const int length = GetWindowTextLengthW(edit);
+    std::wstring text(static_cast<size_t>(std::max(0, length)) + 1, L'\0');
+    const int copied = GetWindowTextW(edit, text.data(), length + 1);
+    text.resize(static_cast<size_t>(std::max(0, copied)));
+    text = TrimWhitespace(text);
+    if (text.empty()) return false;
+    wchar_t* end = nullptr;
+    const long value = std::wcstol(text.c_str(), &end, 10);
+    if (end == text.c_str()) return false;
+    while (*end && std::iswspace(*end)) ++end;
+    if (*end || value < 1 || value > 500) return false;
+    *out = static_cast<int>(value);
+    return true;
+}
+
+static LRESULT CALLBACK BlankPdfOptionsDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    BlankPdfOptionsDialog* ctx = reinterpret_cast<BlankPdfOptionsDialog*>(
+        GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = reinterpret_cast<BlankPdfOptionsDialog*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        CreateWindowExW(0, L"STATIC", localization::Text(L"dialog.blank_pdf.size_label").c_str(),
+                        WS_CHILD | WS_VISIBLE, 12, 14, 110, 20, hWnd, nullptr, cs->hInstance, nullptr);
+        ctx->sizeCombo = CreateWindowExW(0, L"COMBOBOX", L"",
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                          124, 10, 230, 180, hWnd,
+                                          reinterpret_cast<HMENU>(kBlankPdfSizeComboId), cs->hInstance, nullptr);
+        for (const auto& size : ctx->sizes) {
+            SendMessageW(ctx->sizeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(size.label.c_str()));
+        }
+        SendMessageW(ctx->sizeCombo, CB_SETCURSEL, 0, 0);
+
+        CreateWindowExW(0, L"STATIC", localization::Text(L"dialog.blank_pdf.page_count_label").c_str(),
+                        WS_CHILD | WS_VISIBLE, 12, 54, 110, 20, hWnd, nullptr, cs->hInstance, nullptr);
+        ctx->pageCountEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"1",
+                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                                              124, 50, 90, 24, hWnd,
+                                              reinterpret_cast<HMENU>(kBlankPdfPageCountEditId),
+                                              cs->hInstance, nullptr);
+        CreateWindowExW(0, L"STATIC", localization::Text(L"dialog.blank_pdf.page_count_hint").c_str(),
+                        WS_CHILD | WS_VISIBLE, 224, 54, 130, 20, hWnd, nullptr, cs->hInstance, nullptr);
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"dialog.blank_pdf.create").c_str(),
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 174, 96, 84, 28, hWnd,
+                        reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"dialog.save_path.cancel").c_str(),
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 270, 96, 84, 28, hWnd,
+                        reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
+        SetFocus(ctx->sizeCombo);
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    }
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        FillRect(hdc, &rc, bg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+        return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (DrawThemeButton(dis)) return TRUE;
+        break;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            const LRESULT selected = SendMessageW(ctx->sizeCombo, CB_GETCURSEL, 0, 0);
+            int pageCount = 0;
+            if (selected == CB_ERR || selected < 0 ||
+                selected >= static_cast<LRESULT>(ctx->sizes.size()) ||
+                !TryReadBlankPdfPageCount(ctx->pageCountEdit, &pageCount)) {
+                ShowSoftNotice(hWnd, localization::Text(L"dialog.blank_pdf.page_count_invalid"),
+                               SoftNoticeKind::Warning);
+                SetFocus(ctx->pageCountEdit);
+                return 0;
+            }
+            const auto& size = ctx->sizes[static_cast<size_t>(selected)];
+            ctx->result.widthPt = size.widthPt;
+            ctx->result.heightPt = size.heightPt;
+            ctx->result.pageCount = pageCount;
+            ctx->ok = true;
+            ctx->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            ctx->done = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        if (ctx) ctx->done = true;
+        DestroyWindow(hWnd);
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+bool PromptBlankPdfOptions(HWND owner, const std::wstring& title, BlankPdfDialogOptions& out) {
+    BlankPdfOptionsDialog ctx;
+    ctx.sizes = {
+        { localization::Text(L"dialog.blank_pdf.size.a4_portrait"), 595.0, 842.0 },
+        { localization::Text(L"dialog.blank_pdf.size.a4_landscape"), 842.0, 595.0 },
+        { localization::Text(L"dialog.blank_pdf.size.a5_portrait"), 420.0, 595.0 },
+        { localization::Text(L"dialog.blank_pdf.size.a5_landscape"), 595.0, 420.0 },
+        { localization::Text(L"dialog.blank_pdf.size.b5_portrait"), 516.0, 729.0 },
+        { localization::Text(L"dialog.blank_pdf.size.b5_landscape"), 729.0, 516.0 },
+        { localization::Text(L"dialog.blank_pdf.size.letter_portrait"), 612.0, 792.0 },
+        { localization::Text(L"dialog.blank_pdf.size.letter_landscape"), 792.0, 612.0 },
+    };
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = BlankPdfOptionsDlgProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = L"BlankPdfOptionsDlg";
+    RegisterClassW(&wc);
+    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title.c_str(),
+                                  WS_CAPTION | WS_POPUPWINDOW,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 380, 170,
+                                  owner, nullptr, g_hInst, &ctx);
+    if (!window) return false;
+    PlaceOwnedPopupAtAppTopLeft(window, owner);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+    RunDialogMessageLoop(window, &ctx.done);
+    if (!ctx.ok) return false;
+    out = ctx.result;
+    return true;
 }
 
 struct SavePathDialog {
@@ -689,11 +893,13 @@ struct PasswordInputDialog {
     HWND panel{};
     HWND label{};
     HWND edit{};
+    HWND confirmationCheck{};
     HWND okButton{};
     HWND cancelButton{};
     RECT panelRect{};
     std::wstring title;
     std::wstring message;
+    std::wstring confirmation;
     std::wstring result;
     DWORD createdMessageTime = 0;
     ULONGLONG createdTick = 0;
@@ -845,7 +1051,8 @@ static void LayoutPasswordOverlay(PasswordInputDialog* ctx) {
     const int panelW = std::min(PasswordOverlayScale(ctx->anchor, 392),
                                 std::max(PasswordOverlayScale(ctx->anchor, 260),
                                          clientW - margin * 2));
-    const int panelH = PasswordOverlayScale(ctx->anchor, 170);
+    const bool requiresConfirmation = !ctx->confirmation.empty();
+    const int panelH = PasswordOverlayScale(ctx->anchor, requiresConfirmation ? 214 : 170);
     const int x = static_cast<int>(host.left) + (clientW - panelW) / 2;
     const int y = static_cast<int>(host.top) + (clientH - panelH) / 2;
     ctx->panelRect = { x, y, x + panelW, y + panelH };
@@ -856,7 +1063,8 @@ static void LayoutPasswordOverlay(PasswordInputDialog* ctx) {
     const int buttonH = PasswordOverlayScale(ctx->anchor, 26);
     const int buttonGap = PasswordOverlayScale(ctx->anchor, 20);
     const int contentW = panelW - pad * 2;
-    const int buttonY = PasswordOverlayScale(ctx->anchor, 100);
+    const int confirmationY = PasswordOverlayScale(ctx->anchor, 96);
+    const int buttonY = PasswordOverlayScale(ctx->anchor, requiresConfirmation ? 144 : 100);
     const int buttonsW = buttonW * 2 + buttonGap;
     const int buttonX = (panelW - buttonsW) / 2;
 
@@ -871,6 +1079,10 @@ static void LayoutPasswordOverlay(PasswordInputDialog* ctx) {
     if (ctx->edit) {
         SetWindowPos(ctx->edit, HWND_TOP, pad, PasswordOverlayScale(ctx->anchor, 64),
                      contentW, editH, SWP_NOACTIVATE);
+    }
+    if (ctx->confirmationCheck) {
+        SetWindowPos(ctx->confirmationCheck, HWND_TOP, pad, confirmationY,
+                     contentW, PasswordOverlayScale(ctx->anchor, 34), SWP_NOACTIVATE);
     }
     if (ctx->okButton) {
         SetWindowPos(ctx->okButton, HWND_TOP, buttonX, buttonY, buttonW, buttonH, SWP_NOACTIVATE);
@@ -940,13 +1152,15 @@ static void DestroyPasswordOverlay(PasswordInputDialog* ctx) {
         }
     }
     ctx->disabledAnnotationControls.clear();
-    HWND controls[] = { ctx->cancelButton, ctx->okButton, ctx->edit, ctx->label, ctx->panel };
+    HWND controls[] = { ctx->cancelButton, ctx->okButton, ctx->confirmationCheck,
+                        ctx->edit, ctx->label, ctx->panel };
     for (HWND control : controls) {
         if (control && IsWindow(control)) DestroyWindow(control);
     }
     ctx->panel = nullptr;
     ctx->label = nullptr;
     ctx->edit = nullptr;
+    ctx->confirmationCheck = nullptr;
     ctx->okButton = nullptr;
     ctx->cancelButton = nullptr;
     if (ctx->anchor && IsWindow(ctx->anchor)) {
@@ -961,13 +1175,15 @@ static void DestroyPasswordOverlay(PasswordInputDialog* ctx) {
 static bool IsPasswordOverlayControl(const PasswordInputDialog* ctx, HWND hwnd) {
     return ctx && hwnd && (hwnd == ctx->panel || IsChild(ctx->panel, hwnd) ||
                            hwnd == ctx->label ||
-                           hwnd == ctx->edit || hwnd == ctx->okButton ||
+                           hwnd == ctx->edit || hwnd == ctx->confirmationCheck ||
+                           hwnd == ctx->okButton ||
                            hwnd == ctx->cancelButton);
 }
 
 static bool IsPasswordOverlayFocusableControl(const PasswordInputDialog* ctx, HWND hwnd) {
     return ctx && hwnd && (hwnd == ctx->panel || hwnd == ctx->edit ||
-                           hwnd == ctx->okButton || hwnd == ctx->cancelButton ||
+                           hwnd == ctx->confirmationCheck || hwnd == ctx->okButton ||
+                           hwnd == ctx->cancelButton ||
                            IsChild(ctx->panel, hwnd));
 }
 
@@ -989,6 +1205,13 @@ static bool AcceptPasswordOverlay(PasswordInputDialog* ctx) {
     if (value.empty()) {
         ShowSoftNotice(ctx->anchor,
                        localization::Text(L"dialog.input.enter_password"),
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+    if (ctx->confirmationCheck &&
+        SendMessageW(ctx->confirmationCheck, BM_GETCHECK, 0, 0) != BST_CHECKED) {
+        ShowSoftNotice(ctx->anchor,
+                       localization::Text(L"dialog.input.confirm_output_permission"),
                        SoftNoticeKind::Warning);
         return false;
     }
@@ -1072,6 +1295,13 @@ static bool CreatePasswordOverlay(PasswordInputDialog* ctx, HWND owner) {
                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
                                 0, 0, 1, 1, ctx->panel, reinterpret_cast<HMENU>(101),
                                 g_hInst, nullptr);
+    if (!ctx->confirmation.empty()) {
+        ctx->confirmationCheck = CreateWindowExW(0, L"BUTTON", ctx->confirmation.c_str(),
+                                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                                                      BS_AUTOCHECKBOX | BS_MULTILINE,
+                                                  0, 0, 1, 1, ctx->panel,
+                                                  reinterpret_cast<HMENU>(102), g_hInst, nullptr);
+    }
     ctx->okButton = CreateWindowExW(0, L"BUTTON", L"OK",
                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                                     0, 0, 1, 1, ctx->panel, reinterpret_cast<HMENU>(IDOK),
@@ -1080,13 +1310,17 @@ static bool CreatePasswordOverlay(PasswordInputDialog* ctx, HWND owner) {
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                         0, 0, 1, 1, ctx->panel, reinterpret_cast<HMENU>(IDCANCEL),
                                         g_hInst, nullptr);
-    if (!ctx->label || !ctx->edit || !ctx->okButton || !ctx->cancelButton) {
+    if (!ctx->label || !ctx->edit ||
+        (!ctx->confirmation.empty() && !ctx->confirmationCheck) ||
+        !ctx->okButton || !ctx->cancelButton) {
         DestroyPasswordOverlay(ctx);
         return false;
     }
 
-    HWND fontControls[] = { ctx->label, ctx->edit, ctx->okButton, ctx->cancelButton };
+    HWND fontControls[] = { ctx->label, ctx->edit, ctx->confirmationCheck,
+                            ctx->okButton, ctx->cancelButton };
     for (HWND control : fontControls) {
+        if (!control) continue;
         if (g_hUIFont) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g_hUIFont), TRUE);
     }
     SendMessageW(ctx->edit, EM_SETPASSWORDCHAR, static_cast<WPARAM>(L'*'), 0);
@@ -1150,16 +1384,20 @@ static void RunPasswordOverlayMessageLoop(PasswordInputDialog* ctx) {
             }
             if (msg.wParam == VK_TAB && IsPasswordOverlayControl(ctx, msg.hwnd)) {
                 const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                HWND order[] = { ctx->edit, ctx->okButton, ctx->cancelButton };
+                std::vector<HWND> order{ ctx->edit };
+                if (ctx->confirmationCheck) order.push_back(ctx->confirmationCheck);
+                order.push_back(ctx->okButton);
+                order.push_back(ctx->cancelButton);
+                const int orderCount = static_cast<int>(order.size());
                 int index = 0;
-                for (int i = 0; i < 3; ++i) {
-                    if (msg.hwnd == order[i]) {
+                for (int i = 0; i < orderCount; ++i) {
+                    if (msg.hwnd == order[static_cast<size_t>(i)]) {
                         index = i;
                         break;
                     }
                 }
-                index = shift ? (index + 2) % 3 : (index + 1) % 3;
-                SetFocus(order[index]);
+                index = shift ? (index + orderCount - 1) % orderCount : (index + 1) % orderCount;
+                SetFocus(order[static_cast<size_t>(index)]);
                 continue;
             }
         }
@@ -1191,10 +1429,12 @@ static void RunPasswordOverlayMessageLoop(PasswordInputDialog* ctx) {
 }
 
 bool PromptPasswordText(HWND owner, const std::wstring& title,
-                        const std::wstring& message, std::wstring& out) {
+                        const std::wstring& message, std::wstring& out,
+                        const std::wstring& confirmation) {
     PasswordInputDialog ctx;
     ctx.title = title;
     ctx.message = message;
+    ctx.confirmation = confirmation;
     HWND previousFocus = GetFocus();
     if (!CreatePasswordOverlay(&ctx, owner)) return false;
     RunPasswordOverlayMessageLoop(&ctx);
@@ -1382,7 +1622,9 @@ struct RestoreBackupDialogCtx {
     HWND label{};
     HWND list{};
     std::filesystem::path backupRoot;
+    std::wstring actionText;
     std::vector<std::filesystem::path> metaPaths;
+    std::vector<std::wstring> destinationPaths;
     std::filesystem::path result;
     bool ok = false;
     bool done = false;
@@ -1477,6 +1719,7 @@ static LRESULT CALLBACK RestoreBackupDlgProc(HWND hWnd, UINT msg, WPARAM wParam,
                 display += e.metaPath.filename().wstring();
             }
             ctx->metaPaths.push_back(e.metaPath);
+            ctx->destinationPaths.push_back(e.destPath);
             SendMessageW(ctx->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(display.c_str()));
         }
         if (!entries.empty()) {
@@ -1485,13 +1728,18 @@ static LRESULT CALLBACK RestoreBackupDlgProc(HWND hWnd, UINT msg, WPARAM wParam,
         }
 
         std::wstring openFolderTxt = localization::Text(L"dialog.common.78f2c08a8845");
-        std::wstring restoreTxt = localization::Text(L"dialog.common.575a7e91c663");
+        std::wstring detailsTxt = localization::Text(L"dialog.common.backup_details");
+        const std::wstring actionTxt = ctx->actionText.empty()
+                                           ? localization::Text(L"dialog.common.575a7e91c663")
+                                           : ctx->actionText;
         std::wstring cancelTxt = localization::Text(L"dialog.common.3672b0b92134");
 
         CreateWindowExW(0, L"BUTTON", openFolderTxt.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         margin, btnY, 150, btnH, hWnd, reinterpret_cast<HMENU>(102), cs->hInstance, nullptr);
+        CreateWindowExW(0, L"BUTTON", detailsTxt.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        margin + 160, btnY, 150, btnH, hWnd, reinterpret_cast<HMENU>(103), cs->hInstance, nullptr);
         
-        CreateWindowExW(0, L"BUTTON", restoreTxt.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", actionTxt.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         width - margin - 2*btnW - 10, btnY, btnW, btnH, hWnd, reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
         
         CreateWindowExW(0, L"BUTTON", cancelTxt.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
@@ -1532,6 +1780,22 @@ static LRESULT CALLBACK RestoreBackupDlgProc(HWND hWnd, UINT msg, WPARAM wParam,
             ShellExecuteW(nullptr, L"open", ctx->backupRoot.wstring().c_str(), nullptr, nullptr, SW_SHOW);
             return 0;
         }
+        if (id == 103) {
+            const int sel = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
+            if (sel < 0 || sel >= static_cast<int>(ctx->metaPaths.size())) return 0;
+            std::vector<SilentDialogPath> paths;
+            if (sel < static_cast<int>(ctx->destinationPaths.size()) && !ctx->destinationPaths[sel].empty()) {
+                paths.push_back({localization::Text(L"dialog.common.backup_destination"),
+                                 ctx->destinationPaths[sel]});
+            }
+            paths.push_back({localization::Text(L"dialog.common.backup_metadata"),
+                             ctx->metaPaths[sel].wstring()});
+            ShowSilentMessageDialog(hWnd,
+                                    localization::Text(L"dialog.common.backup_details_title"),
+                                    localization::Text(L"dialog.common.backup_details_message"),
+                                    SoftNoticeKind::Info, paths);
+            return 0;
+        }
         if (id == IDOK || (id == 101 && code == LBN_DBLCLK)) {
             int sel = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
             if (sel >= 0 && sel < static_cast<int>(ctx->metaPaths.size())) {
@@ -1557,11 +1821,14 @@ static LRESULT CALLBACK RestoreBackupDlgProc(HWND hWnd, UINT msg, WPARAM wParam,
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-bool PromptRestoreBackupList(HWND owner, const std::filesystem::path& backupRoot, std::filesystem::path& outPickedMeta) {
+bool PromptBackupList(HWND owner,
+                      const std::filesystem::path& backupRoot,
+                      const std::wstring& title,
+                      const std::wstring& actionText,
+                      std::filesystem::path& outPickedMeta) {
     RestoreBackupDialogCtx ctx;
     ctx.backupRoot = backupRoot;
-
-    std::wstring title = localization::Text(L"dialog.common.95d9abd66237");
+    ctx.actionText = actionText;
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = RestoreBackupDlgProc;
@@ -1592,8 +1859,7 @@ constexpr int kSilentDialogIdButton1 = 5102;
 constexpr int kSilentDialogIdButton2 = 5103;
 constexpr int kSilentDialogIdButton3 = 5104;
 constexpr int kSilentDialogIdButton4 = 5105;
-constexpr int kSilentDialogIdPathBase = 5200;
-constexpr int kSilentDialogIdCopyPathBase = 5300;
+constexpr int kSilentDialogIdCopyPaths = 5200;
 constexpr size_t kSilentDialogMaxPaths = 3;
 
 struct SilentDialogButtonSpec {
@@ -1612,10 +1878,10 @@ struct SilentDialogState {
     HWND button2{};
     HWND button3{};
     HWND button4{};
-    std::vector<HWND> pathLabels;
-    std::vector<HWND> pathButtons;
-    std::vector<HWND> copyPathButtons;
-    std::vector<bool> expandedPaths;
+    HWND copyPathsButton{};
+    HWND pathTooltip{};
+    std::wstring pathTooltipText;
+    bool pathTooltipTracking = false;
     std::wstring defaultOkLabel;
     std::wstring defaultCancelLabel;
     std::wstring defaultYesLabel;
@@ -1659,12 +1925,146 @@ static std::wstring NormalizeNewlinesForDrawText(const std::wstring& text) {
     return out;
 }
 
-static std::wstring CompactDiagnosticPath(const std::wstring& path) {
-    constexpr size_t kMaxVisibleChars = 72;
-    constexpr size_t kPrefixChars = 20;
-    constexpr size_t kSuffixChars = 48;
-    if (path.size() <= kMaxVisibleChars) return path;
-    return path.substr(0, kPrefixChars) + L"…" + path.substr(path.size() - kSuffixChars);
+static bool FitsInlinePathWidth(HWND anchor, const std::wstring& text, int maxWidthPx) {
+    if (text.empty() || maxWidthPx <= 0) return false;
+    const HWND dcOwner = anchor ? anchor : GetDesktopWindow();
+    HDC hdc = GetDC(dcOwner);
+    if (!hdc) return false;
+    HFONT oldFont = nullptr;
+    if (g_hUIFont) oldFont = static_cast<HFONT>(SelectObject(hdc, g_hUIFont));
+    SIZE size{};
+    const bool measured = GetTextExtentPoint32W(hdc, text.c_str(), static_cast<int>(text.size()), &size) != FALSE;
+    if (oldFont) SelectObject(hdc, oldFont);
+    ReleaseDC(dcOwner, hdc);
+    return measured && size.cx <= maxWidthPx;
+}
+
+static std::wstring CompactDiagnosticPath(HWND anchor, int maxWidthPx, const std::wstring& path) {
+    constexpr size_t kVisiblePathComponents = 6;
+    constexpr size_t kLeadingPathComponents = 3;
+    constexpr size_t kTrailingPathComponents = 2;
+    static const std::wstring userProfile = [] {
+        const DWORD chars = GetEnvironmentVariableW(L"USERPROFILE", nullptr, 0);
+        if (chars <= 1) return std::wstring();
+        std::wstring value(chars, L'\0');
+        const DWORD copied = GetEnvironmentVariableW(L"USERPROFILE", value.data(), chars);
+        if (copied == 0 || copied >= chars) return std::wstring();
+        value.resize(copied);
+        while (value.size() > 3 && (value.back() == L'\\' || value.back() == L'/')) value.pop_back();
+        return value;
+    }();
+
+    std::wstring display = path;
+    if (!userProfile.empty() && path.size() >= userProfile.size() &&
+        CompareStringOrdinal(path.data(), static_cast<int>(userProfile.size()),
+                             userProfile.data(), static_cast<int>(userProfile.size()), TRUE) == CSTR_EQUAL &&
+        (path.size() == userProfile.size() || path[userProfile.size()] == L'\\' || path[userProfile.size()] == L'/')) {
+        display = L"~" + path.substr(userProfile.size());
+    }
+
+    const bool isUnc = display.size() >= 2 &&
+        (display[0] == L'\\' || display[0] == L'/') && display[0] == display[1];
+    std::vector<std::wstring> components;
+    for (size_t begin = 0; begin < display.size();) {
+        while (begin < display.size() && (display[begin] == L'\\' || display[begin] == L'/')) ++begin;
+        const size_t end = display.find_first_of(L"\\/", begin);
+        if (end == std::wstring::npos) {
+            if (begin < display.size()) components.push_back(display.substr(begin));
+            break;
+        }
+        if (end > begin) components.push_back(display.substr(begin, end - begin));
+        begin = end + 1;
+    }
+    auto buildSummary = [&](size_t leadingCount, size_t trailingCount) {
+        if (components.size() <= leadingCount + trailingCount) return display;
+        std::wstring result = (leadingCount > 0 && isUnc) ? L"\\\\" : L"";
+        auto appendComponent = [&](const std::wstring& component) {
+            if (!result.empty() && result.back() != L'\\') result += L"\\";
+            result += component;
+        };
+        for (size_t i = 0; i < leadingCount; ++i) appendComponent(components[i]);
+        if (!result.empty() && result.back() != L'\\') result += L"\\";
+        result += L"…";
+        for (size_t i = components.size() - trailingCount; i < components.size(); ++i) {
+            appendComponent(components[i]);
+        }
+        return result;
+    };
+
+    const std::wstring semanticSummary = components.size() <= kVisiblePathComponents
+        ? display
+        : buildSummary(kLeadingPathComponents, kTrailingPathComponents);
+    if (FitsInlinePathWidth(anchor, semanticSummary, maxWidthPx)) return semanticSummary;
+    if (components.empty()) return display;
+
+    const std::vector<std::pair<size_t, size_t>> alternatives = {
+        {2, 2}, {1, 2}, {1, 1}, {0, 2}, {0, 1},
+    };
+    for (const auto& [leadingCount, trailingCount] : alternatives) {
+        if (components.size() <= leadingCount + trailingCount) continue;
+        const std::wstring candidate = buildSummary(leadingCount, trailingCount);
+        if (FitsInlinePathWidth(anchor, candidate, maxWidthPx)) return candidate;
+    }
+    // A component is never cut in the information summary. If an individual
+    // filename alone exceeds the available width, keep it intact rather than
+    // producing a misleading partial name.
+    return buildSummary(0, 1);
+}
+
+static void AppendCompactPathsToMessage(HWND anchor, int maxWidthPx, std::wstring& message,
+                                        const std::vector<SilentDialogPath>& paths) {
+    const size_t count = std::min(paths.size(), kSilentDialogMaxPaths);
+    for (size_t i = 0; i < count; ++i) {
+        const auto& path = paths[i];
+        if (!message.empty()) message += L"\n";
+        const std::wstring label = path.label.empty()
+            ? localization::Text(L"dialog.path.label")
+            : path.label;
+        message += label;
+        message += L"\n";
+        message += CompactDiagnosticPath(anchor, maxWidthPx, path.value);
+    }
+}
+
+static std::wstring FullPathsForClipboard(const std::vector<SilentDialogPath>& paths) {
+    std::wstring text;
+    const size_t count = std::min(paths.size(), kSilentDialogMaxPaths);
+    for (size_t i = 0; i < count; ++i) {
+        const auto& path = paths[i];
+        if (!text.empty()) text += L"\r\n\r\n";
+        text += path.label.empty() ? localization::Text(L"dialog.path.label") : path.label;
+        text += L"\r\n";
+        text += path.value;
+    }
+    return text;
+}
+
+static int DialogScale(HWND hWnd, int pxAt96Dpi);
+
+static void AddSilentDialogPathTooltip(SilentDialogState* ctx, HINSTANCE instance) {
+    if (!ctx || !ctx->hwnd || !ctx->editMessage || ctx->options.paths.empty()) return;
+    ctx->pathTooltipText = FullPathsForClipboard(ctx->options.paths);
+    if (ctx->pathTooltipText.empty()) return;
+
+    ctx->pathTooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                       WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                                       CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                                       ctx->hwnd, nullptr, instance, nullptr);
+    if (!ctx->pathTooltip) return;
+    SendMessageW(ctx->pathTooltip, TTM_SETMAXTIPWIDTH, 0, DialogScale(ctx->hwnd, 640));
+    SendMessageW(ctx->pathTooltip, TTM_SETDELAYTIME, TTDT_INITIAL, MAKELPARAM(400, 0));
+    SendMessageW(ctx->pathTooltip, TTM_ACTIVATE, TRUE, 0);
+    TOOLINFOW tool{};
+    tool.cbSize = sizeof(tool);
+    tool.uFlags = TTF_IDISHWND;
+    tool.hwnd = ctx->hwnd;
+    tool.uId = reinterpret_cast<UINT_PTR>(ctx->editMessage);
+    tool.lpszText = ctx->pathTooltipText.data();
+    if (!SendMessageW(ctx->pathTooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool))) {
+        DestroyWindow(ctx->pathTooltip);
+        ctx->pathTooltip = nullptr;
+        ctx->pathTooltipText.clear();
+    }
 }
 
 static bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
@@ -1691,24 +2091,6 @@ static bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
     }
     CloseClipboard();
     return true;
-}
-
-static void AddPathToolTip(HWND dialog, HWND control, const std::wstring& path) {
-    if (!dialog || !control || path.empty()) return;
-    HWND tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
-                                   WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
-                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
-                                   dialog, nullptr, g_hInst, nullptr);
-    if (!tooltip) return;
-    TOOLINFOW tool{};
-    tool.cbSize = sizeof(tool);
-    tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-    tool.hwnd = dialog;
-    tool.uId = reinterpret_cast<UINT_PTR>(control);
-    tool.lpszText = const_cast<wchar_t*>(path.c_str());
-    if (!SendMessageW(tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool))) {
-        DestroyWindow(tooltip);
-    }
 }
 
 static int DialogScale(HWND hWnd, int pxAt96Dpi) {
@@ -1914,6 +2296,24 @@ static void CloseSilentDialog(SilentDialogState* ctx, SilentDialogResult result)
 static LRESULT CALLBACK SilentDialogEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                              UINT_PTR idSubclass, DWORD_PTR refData) {
     auto* ctx = reinterpret_cast<SilentDialogState*>(refData);
+    if (msg == WM_MOUSEMOVE && ctx && ctx->pathTooltip) {
+        if (!ctx->pathTooltipTracking) {
+            TRACKMOUSEEVENT tracking{ sizeof(tracking), TME_LEAVE, hWnd, 0 };
+            ctx->pathTooltipTracking = TrackMouseEvent(&tracking) != FALSE;
+        }
+        MSG relay{};
+        relay.hwnd = hWnd;
+        relay.message = msg;
+        relay.wParam = wParam;
+        relay.lParam = lParam;
+        relay.time = GetMessageTime();
+        GetCursorPos(&relay.pt);
+        SendMessageW(ctx->pathTooltip, TTM_RELAYEVENT, 0, reinterpret_cast<LPARAM>(&relay));
+    }
+    if (msg == WM_MOUSELEAVE && ctx) {
+        ctx->pathTooltipTracking = false;
+        if (ctx->pathTooltip) SendMessageW(ctx->pathTooltip, TTM_POP, 0, 0);
+    }
     if (msg == WM_KEYDOWN) {
         MSG edgeNavMsg{};
         edgeNavMsg.hwnd = hWnd;
@@ -1946,20 +2346,6 @@ static LRESULT CALLBACK SilentDialogEditProc(HWND hWnd, UINT msg, WPARAM wParam,
     return DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
-static LRESULT CALLBACK SilentDialogPathProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
-                                             UINT_PTR idSubclass, DWORD_PTR refData) {
-    auto* ctx = reinterpret_cast<SilentDialogState*>(refData);
-    if (!ctx || !ctx->hwnd) return DefSubclassProc(hWnd, msg, wParam, lParam);
-    const int pathId = kSilentDialogIdPathBase + static_cast<int>(idSubclass);
-    if (msg == WM_LBUTTONUP ||
-        (msg == WM_KEYDOWN && (wParam == VK_RETURN || wParam == VK_SPACE))) {
-        SendMessageW(ctx->hwnd, WM_COMMAND, MAKEWPARAM(pathId, BN_CLICKED),
-                     reinterpret_cast<LPARAM>(hWnd));
-        return 0;
-    }
-    return DefSubclassProc(hWnd, msg, wParam, lParam);
-}
-
 static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     SilentDialogState* ctx = reinterpret_cast<SilentDialogState*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
     switch (msg) {
@@ -1975,20 +2361,13 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         const int buttonW = DialogScale(hWnd, ctx->buttonCount >= 4 ? 112 : 160);
         const int buttonH = DialogScale(hWnd, 28);
         const int buttonGap = DialogScale(hWnd, 10);
-        const int pathLabelH = DialogScale(hWnd, 18);
-        const int pathControlH = DialogScale(hWnd, 24);
-        const int pathRowH = pathLabelH + pathControlH + DialogScale(hWnd, 8);
-        const size_t pathCount = std::min(ctx->options.paths.size(), kSilentDialogMaxPaths);
-
         RECT client{};
         GetClientRect(hWnd, &client);
         int clientW = client.right - client.left;
         int clientH = client.bottom - client.top;
         int buttonsY = clientH - margin - buttonH;
         int messageTop = margin + labelH + DialogScale(hWnd, 8);
-        int pathAreaH = static_cast<int>(pathCount) * pathRowH;
-        int messageH = std::max(DialogScale(hWnd, 96),
-                                buttonsY - messageTop - pathAreaH - DialogScale(hWnd, 10));
+        int messageH = std::max(DialogScale(hWnd, 96), buttonsY - messageTop - DialogScale(hWnd, 10));
 
         const std::wstring kindLabel = SilentDialogKindLabel(ctx->options);
         ctx->labelKind = CreateWindowExW(0, L"STATIC", kindLabel.c_str(),
@@ -2004,44 +2383,17 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         if (ctx->editMessage) {
             SetWindowSubclass(ctx->editMessage, SilentDialogEditProc, 1, reinterpret_cast<DWORD_PTR>(ctx));
             SendMessageW(ctx->editMessage, EM_SETSEL, 0, 0);
+            AddSilentDialogPathTooltip(ctx, cs->hInstance);
         }
 
-        ctx->pathLabels.reserve(pathCount);
-        ctx->pathButtons.reserve(pathCount);
-        ctx->copyPathButtons.reserve(pathCount);
-        ctx->expandedPaths.assign(pathCount, false);
-        const int pathTop = messageTop + messageH + DialogScale(hWnd, 8);
-        const int copyButtonW = DialogScale(hWnd, 76);
-        const int pathButtonW = std::max(DialogScale(hWnd, 140),
-                                         clientW - margin * 2 - copyButtonW - DialogScale(hWnd, 8));
-        for (size_t i = 0; i < pathCount; ++i) {
-            const auto& path = ctx->options.paths[i];
-            const int rowTop = pathTop + static_cast<int>(i) * pathRowH;
-            const std::wstring label = path.label.empty()
-                ? localization::Text(L"dialog.path.label")
-                : path.label;
-            HWND pathLabel = CreateWindowExW(0, L"STATIC", label.c_str(), WS_CHILD | WS_VISIBLE,
-                                              margin, rowTop, clientW - margin * 2, pathLabelH,
-                                              hWnd, nullptr, cs->hInstance, nullptr);
-            HWND pathButton = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", CompactDiagnosticPath(path.value).c_str(),
-                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY,
-                                               margin, rowTop + pathLabelH, pathButtonW, pathControlH,
-                                               hWnd, reinterpret_cast<HMENU>(kSilentDialogIdPathBase + i),
-                                               cs->hInstance, nullptr);
-            HWND copyButton = CreateWindowExW(0, L"BUTTON", localization::Text(L"dialog.path.copy").c_str(),
-                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                               margin + pathButtonW + DialogScale(hWnd, 8),
-                                               rowTop + pathLabelH, copyButtonW, pathControlH,
-                                               hWnd, reinterpret_cast<HMENU>(kSilentDialogIdCopyPathBase + i),
-                                               cs->hInstance, nullptr);
-            ctx->pathLabels.push_back(pathLabel);
-            ctx->pathButtons.push_back(pathButton);
-            ctx->copyPathButtons.push_back(copyButton);
-            if (pathButton) {
-                SetWindowSubclass(pathButton, SilentDialogPathProc, static_cast<UINT_PTR>(i),
-                                  reinterpret_cast<DWORD_PTR>(ctx));
-            }
-            AddPathToolTip(hWnd, pathButton, path.value);
+        if (!ctx->options.paths.empty()) {
+            const int copyPathsW = DialogScale(hWnd, 120);
+            ctx->copyPathsButton = CreateWindowExW(0, L"BUTTON",
+                                                    localization::Text(L"dialog.path.copy_all").c_str(),
+                                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                    margin, buttonsY, copyPathsW, buttonH,
+                                                    hWnd, reinterpret_cast<HMENU>(kSilentDialogIdCopyPaths),
+                                                    cs->hInstance, nullptr);
         }
 
         int totalButtonsW = (buttonW * ctx->buttonCount) + (buttonGap * std::max(0, ctx->buttonCount - 1));
@@ -2067,9 +2419,7 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         applyFont(ctx->button2);
         applyFont(ctx->button3);
         applyFont(ctx->button4);
-        for (HWND control : ctx->pathLabels) applyFont(control);
-        for (HWND control : ctx->pathButtons) applyFont(control);
-        for (HWND control : ctx->copyPathButtons) applyFont(control);
+        applyFont(ctx->copyPathsButton);
 
         HWND focus = GetDlgItem(hWnd, defaultId);
         if (focus) SetFocus(focus);
@@ -2109,19 +2459,8 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
     case WM_COMMAND: {
         int id = LOWORD(wParam);
         if (!ctx) break;
-        if (id >= kSilentDialogIdPathBase &&
-            id < kSilentDialogIdPathBase + static_cast<int>(ctx->pathButtons.size())) {
-            const size_t index = static_cast<size_t>(id - kSilentDialogIdPathBase);
-            ctx->expandedPaths[index] = !ctx->expandedPaths[index];
-            const std::wstring& path = ctx->options.paths[index].value;
-            SetWindowTextW(ctx->pathButtons[index],
-                           (ctx->expandedPaths[index] ? path : CompactDiagnosticPath(path)).c_str());
-            return 0;
-        }
-        if (id >= kSilentDialogIdCopyPathBase &&
-            id < kSilentDialogIdCopyPathBase + static_cast<int>(ctx->copyPathButtons.size())) {
-            const size_t index = static_cast<size_t>(id - kSilentDialogIdCopyPathBase);
-            if (CopyTextToClipboard(hWnd, ctx->options.paths[index].value)) {
+        if (id == kSilentDialogIdCopyPaths) {
+            if (CopyTextToClipboard(hWnd, FullPathsForClipboard(ctx->options.paths))) {
                 ShowSoftNotice(hWnd, localization::Text(L"dialog.path.copied"), SoftNoticeKind::Info);
             } else {
                 ShowSoftNotice(hWnd, localization::Text(L"dialog.path.copy_failed"), SoftNoticeKind::Warning);
@@ -2150,12 +2489,39 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             return 0;
         }
         break;
+    case WM_DESTROY:
+        UnregisterAppExitDialog(hWnd);
+        if (ctx && ctx->pathTooltip && IsWindow(ctx->pathTooltip)) {
+            DestroyWindow(ctx->pathTooltip);
+            ctx->pathTooltip = nullptr;
+        }
+        break;
     default:
         break;
     }
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 } // namespace
+
+void RegisterAppExitDismissibleDialog(HWND hWnd) {
+    RegisterAppExitDismissibleDialogInternal(hWnd);
+}
+
+void RegisterAppExitBlockingDialog(HWND hWnd) {
+    RegisterAppExitBlockingDialogInternal(hWnd);
+}
+
+void UnregisterAppExitDialog(HWND hWnd) {
+    UnregisterAppExitDialogInternal(hWnd);
+}
+
+void DismissAppExitDismissibleDialogs() {
+    DismissAppExitDismissibleDialogsInternal();
+}
+
+bool HasAppExitBlockingDialog() {
+    return HasAppExitBlockingDialogInternal();
+}
 
 SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& options) {
     SilentDialogState ctx;
@@ -2164,32 +2530,35 @@ SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& optio
     if (ctx.options.title.empty()) {
         ctx.options.title = localization::Text(L"dialog.title.notice");
     }
-    ctx.options.message = NormalizeNewlinesForEditControl(ctx.options.message);
     ctx.options.paths.erase(
         std::remove_if(ctx.options.paths.begin(), ctx.options.paths.end(),
                        [](const SilentDialogPath& path) { return path.value.empty(); }),
-        ctx.options.paths.end());
-
+                       ctx.options.paths.end());
     const HWND anchor = ctx.owner ? ctx.owner : GetDesktopWindow();
     const int baseWidth = (ctx.options.preferredWidthPx > 0) ? ctx.options.preferredWidthPx : 560;
-    const int width = std::clamp(DialogScale(anchor, baseWidth), DialogScale(anchor, 360), DialogScale(anchor, 760));
+    const bool needsCopyActionSpace = !ctx.options.paths.empty() &&
+        (ctx.options.buttons == SilentDialogButtons::OkYesNoCancel ||
+         ctx.options.buttons == SilentDialogButtons::YesNoCancel);
+    const int requiredBaseWidth = needsCopyActionSpace ? std::max(baseWidth, 680) : baseWidth;
+    const int width = std::clamp(DialogScale(anchor, requiredBaseWidth),
+                                 DialogScale(anchor, 360), DialogScale(anchor, 760));
     const int margin = DialogScale(anchor, 12);
     const int labelH = DialogScale(anchor, 20);
     const int buttonH = DialogScale(anchor, 28);
     const int buttonBandH = buttonH + DialogScale(anchor, 18);
-    const int pathRowH = DialogScale(anchor, 50);
-    const int pathAreaH = static_cast<int>(std::min(ctx.options.paths.size(), kSilentDialogMaxPaths)) * pathRowH;
     const int textWidth = std::max(DialogScale(anchor, 220), width - margin * 2 - DialogScale(anchor, 8));
+    AppendCompactPathsToMessage(anchor, textWidth, ctx.options.message, ctx.options.paths);
+    ctx.options.message = NormalizeNewlinesForEditControl(ctx.options.message);
     const SIZE measured = MeasureSilentDialogMessage(anchor, ctx.options.message, textWidth);
     const int messageH = std::clamp(static_cast<int>(measured.cy) + DialogScale(anchor, 20),
                                     DialogScale(anchor, 96),
                                     DialogScale(anchor, 280));
-    // CreateWindowExW receives an outer-window height.  Reserve the non-client
-    // area so the minimum message area and path rows do not overlap the buttons.
+    // CreateWindowExW receives an outer-window height. Reserve the non-client
+    // area so the message and the shared action row do not overlap.
     const int nonClientHeight = std::max(0, GetSystemMetrics(SM_CYCAPTION)) +
                                 std::max(0, GetSystemMetrics(SM_CYDLGFRAME)) * 2;
     const int height = margin + labelH + DialogScale(anchor, 8) + messageH +
-                       DialogScale(anchor, 8) + pathAreaH + buttonBandH + margin + nonClientHeight;
+                       DialogScale(anchor, 8) + buttonBandH + margin + nonClientHeight;
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = SilentDialogProc;
@@ -2204,6 +2573,7 @@ SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& optio
                              CW_USEDEFAULT, CW_USEDEFAULT, width, height,
                              ctx.owner, nullptr, g_hInst, &ctx);
     if (!w) return SilentDialogResult::None;
+    RegisterAppExitDismissibleDialog(w);
     PlaceSilentDialogWindow(w, ctx.owner, ctx.options.placement);
     ctx.ownerWasEnabled = ctx.owner && IsWindow(ctx.owner) && IsWindowEnabled(ctx.owner);
     if (ctx.ownerWasEnabled) {

@@ -1,7 +1,7 @@
 # Office conversion fixtures
 
 This directory contains the tracked Office conversion fixture set used to validate
-the reduced LibreOffice runtime. It includes four `.docx` and four `.pptx` files
+the reduced LibreOffice runtime. It includes six `.docx` and six `.pptx` files
 covering charts, tables, fonts, shapes, images, SmartArt, equations, multilingual
 text, fields, content controls, and embedded objects.
 

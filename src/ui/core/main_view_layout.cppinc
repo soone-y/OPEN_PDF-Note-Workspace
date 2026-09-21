@@ -56,6 +56,20 @@ static void InstallAnnotOptionCycleCombo(HWND combo) {
     SetWindowSubclass(combo, AnnotOptionCycleComboProc, 2, 0);
 }
 
+static BOOL CALLBACK ApplyToolbarChildUIFont(HWND child, LPARAM) {
+    // The toolbar may grow new controls as annotation tools evolve.  Keep this
+    // centralized pass as the safe fallback when an individual creation site
+    // misses SetUIFont().
+    SetUIFont(child);
+    return TRUE;
+}
+
+static void ApplyToolbarChildUIFonts() {
+    if (g_hPdfToolbar && IsWindow(g_hPdfToolbar)) {
+        EnumChildWindows(g_hPdfToolbar, ApplyToolbarChildUIFont, 0);
+    }
+}
+
 static void CreateChildren(HWND hWnd) {
     g_hLectureList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
                                      WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP |
@@ -101,8 +115,8 @@ static void CreateChildren(HWND hWnd) {
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ANNOT_PANEL_LIST)),
                                    g_hInst, nullptr);
     g_hAnnotSummary = CreateWindowExW(0, L"STATIC", L"",
-                                      WS_CHILD | SS_LEFT | SS_NOPREFIX,
-                                      0, 0, 100, 60, hWnd, nullptr, g_hInst, nullptr);
+                                      WS_CHILD | SS_LEFT | SS_NOPREFIX | SS_NOTIFY,
+                                      0, 0, 100, 24, hWnd, nullptr, g_hInst, nullptr);
     static HMODULE s_msftedit = nullptr;
     static HMODULE s_riched20 = nullptr;
     if (!s_msftedit) {
@@ -773,6 +787,7 @@ static void CreateChildren(HWND hWnd) {
     SetUIFont(g_hBtnModeArrow);
     SetUIFont(g_hBtnModeWave);
     SetUIFont(g_hBtnModeFreehand);
+    SetUIFont(g_hBtnModeShape);
     SetUIFont(g_hBtnModeEraser);
     SetUIFont(g_hBtnPaletteCustom);
     SetUIFont(g_hComboFont);
@@ -794,6 +809,7 @@ static void CreateChildren(HWND hWnd) {
     SetUIFont(g_hComboShapeKind);
     SetUIFont(g_hComboShapeDrawMode);
     SetUIFont(g_hComboMagnifierShape);
+    ApplyToolbarChildUIFonts();
     g_toolMode = ToolMode::Select;
     SetModeButtons();
     if (g_hBottomNote) ShowWindow(g_hBottomNote, SW_HIDE);
@@ -840,6 +856,7 @@ struct SessionOrganizeStats {
     int renamedOnConflict = 0;
     int failed = 0;
     std::vector<std::wstring> failures;
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> movedPaths;
 };
 
 static std::filesystem::path BuildConflictFreePath(const std::filesystem::path& destDir,
@@ -859,82 +876,81 @@ static std::filesystem::path BuildConflictFreePath(const std::filesystem::path& 
 static SessionOrganizeStats NormalizeCacheSession(const std::filesystem::path& sessionRoot) {
     SessionOrganizeStats stats;
     std::error_code ec;
-    auto pdfDir  = sessionRoot / L"pdf";
-    auto noteDir = sessionRoot / L"note";
-    std::filesystem::create_directories(pdfDir, ec);
-    if (ec) {
-        stats.failed++;
-        stats.failures.push_back(L"failed to create directory: " + pdfDir.wstring());
-        return stats;
-    }
-    ec.clear();
-    std::filesystem::create_directories(noteDir, ec);
-    if (ec) {
-        stats.failed++;
-        stats.failures.push_back(L"failed to create directory: " + noteDir.wstring());
-        return stats;
-    }
-    ec.clear();
-
-    for (const auto& entry : std::filesystem::directory_iterator(sessionRoot, ec)) {
-        bool isReparse = false;
-        if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
-        std::error_code stEc;
-        if (!entry.is_regular_file(stEc) || stEc) continue;
-        auto src = entry.path();
-        auto ext = src.extension().wstring();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-        bool isPdf = IsPdfFile(src);
-        bool isClrop = (ext == L".clrop");
-
-        std::filesystem::path destDir;
-        if (isPdf || IsImageFile(src) || isClrop) {
-            destDir = pdfDir;
-        } else if (IsNoteFile(src)) {
-            destDir = noteDir;
-        } else {
-            continue;
-        }
-        stats.candidates++;
-
-        std::filesystem::path dest = destDir / src.filename();
-        if (CanonicalOrSelf(src) == CanonicalOrSelf(dest)) continue;
-        if (std::filesystem::exists(dest, ec) && !ec) {
-            dest = BuildConflictFreePath(destDir, src.filename());
-            if (dest.filename() != src.filename()) {
-                stats.renamedOnConflict++;
-            }
+    const bool rootLayout = SessionFilesUseRootDirectory();
+    const auto pdfDir = PdfDirectoryForSession(sessionRoot);
+    const auto noteDir = NoteDirectoryForSession(sessionRoot);
+    if (!rootLayout) {
+        std::filesystem::create_directories(pdfDir, ec);
+        if (ec) {
+            stats.failed++;
+            stats.failures.push_back(L"failed to create directory: " + pdfDir.wstring());
+            return stats;
         }
         ec.clear();
+        std::filesystem::create_directories(noteDir, ec);
+        if (ec) {
+            stats.failed++;
+            stats.failures.push_back(L"failed to create directory: " + noteDir.wstring());
+            return stats;
+        }
+    }
 
-        std::filesystem::rename(src, dest, ec);
-        if (!ec) {
-            if (isPdf) {
-                MovePdfViewInfoPath(src.wstring(), dest.wstring());
+    std::vector<std::filesystem::path> sourceDirs;
+    if (rootLayout) {
+        sourceDirs = { sessionRoot / L"pdf", sessionRoot / L"note" };
+    } else {
+        sourceDirs = { sessionRoot };
+    }
+    for (const auto& sourceDir : sourceDirs) {
+        ec.clear();
+        if (!std::filesystem::exists(sourceDir, ec) || ec ||
+            !std::filesystem::is_directory(sourceDir, ec) || ec) continue;
+        for (const auto& entry : std::filesystem::directory_iterator(sourceDir, ec)) {
+            bool isReparse = false;
+            if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
+            std::error_code stEc;
+            if (!entry.is_regular_file(stEc) || stEc) continue;
+            const auto src = entry.path();
+            auto ext = src.extension().wstring();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+            const bool isPdf = IsPdfFile(src);
+            const bool isClrop = (ext == L".clrop");
+
+            std::filesystem::path destDir;
+            if (isPdf || IsImageFile(src) || isClrop) destDir = pdfDir;
+            else if (IsNoteFile(src)) destDir = noteDir;
+            else continue;
+
+            std::filesystem::path dest = destDir / src.filename();
+            if (CanonicalOrSelf(src) == CanonicalOrSelf(dest)) continue;
+            stats.candidates++;
+            if (std::filesystem::exists(dest, ec) && !ec) {
+                dest = BuildConflictFreePath(destDir, src.filename());
+                if (dest.filename() != src.filename()) stats.renamedOnConflict++;
             }
+            ec.clear();
+
+            std::filesystem::rename(src, dest, ec);
+            if (ec) {
+                ec.clear();
+                std::filesystem::copy_file(src, dest, std::filesystem::copy_options::none, ec);
+                if (ec) {
+                    stats.failed++;
+                    stats.failures.push_back(src.wstring() + L" -> " + dest.wstring());
+                    continue;
+                }
+                ec.clear();
+                std::filesystem::remove(src, ec);
+                if (ec) {
+                    stats.failed++;
+                    stats.failures.push_back(L"copied but source remove failed: " + src.wstring());
+                    continue;
+                }
+            }
+            if (isPdf) MovePdfViewInfoPath(src.wstring(), dest.wstring());
+            stats.movedPaths.emplace_back(src, dest);
             stats.moved++;
-            continue;
         }
-
-        ec.clear();
-        std::filesystem::copy_file(src, dest, std::filesystem::copy_options::none, ec);
-        if (ec) {
-            stats.failed++;
-            stats.failures.push_back(src.wstring() + L" -> " + dest.wstring());
-            continue;
-        }
-
-        ec.clear();
-        std::filesystem::remove(src, ec);
-        if (ec) {
-            stats.failed++;
-            stats.failures.push_back(L"copied but source remove failed: " + src.wstring());
-            continue;
-        }
-        if (isPdf) {
-            MovePdfViewInfoPath(src.wstring(), dest.wstring());
-        }
-        stats.moved++;
     }
     return stats;
 }
@@ -954,38 +970,20 @@ static void OrganizeCurrentSessionFiles(HWND hWnd) {
         return;
     }
 
-    int candidates = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(sessionRoot, ec)) {
-        bool isReparse = false;
-        if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
-        std::error_code stEc;
-        if (!entry.is_regular_file(stEc) || stEc) continue;
-        auto path = entry.path();
-        auto ext = path.extension().wstring();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-        bool isClrop = (ext == L".clrop");
-        if (IsPdfFile(path) || IsImageFile(path) || isClrop || IsNoteFile(path)) {
-            ++candidates;
-        }
-    }
-    if (candidates <= 0) {
-        std::wstring msg = localization::Text(L"ui.layout.1bf8d874725d").c_str();
-        ShowSoftNotice(hWnd, msg);
-        return;
-    }
-
     if (!SaveNoteIfDirty(hWnd)) return;
 
-    std::filesystem::path pdfDir  = sessionRoot / L"pdf";
-    std::filesystem::path noteDir = sessionRoot / L"note";
+    const std::filesystem::path pdfDir = PdfDirectoryForSession(sessionRoot);
+    const std::filesystem::path noteDir = NoteDirectoryForSession(sessionRoot);
+    std::filesystem::path sourcePdfPath;
+    std::filesystem::path sourceNotePath;
     std::filesystem::path reopenPdfPath;
     std::filesystem::path reloadNotePath;
 
     if (g_pdf.kind != DocKind::None && !CurrentLogicalPdfPath().empty()) {
         std::filesystem::path currentPdf(CurrentLogicalPdfPath());
-        bool isAtRoot = (CanonicalOrSelf(currentPdf.parent_path()) == CanonicalOrSelf(sessionRoot));
-        if (isAtRoot && (IsPdfFile(currentPdf) || IsImageFile(currentPdf))) {
-            reopenPdfPath = pdfDir / currentPdf.filename();
+        if (CanonicalOrSelf(currentPdf.parent_path()) != CanonicalOrSelf(pdfDir) &&
+            (IsPdfFile(currentPdf) || IsImageFile(currentPdf))) {
+            sourcePdfPath = currentPdf;
             if (IsPdfFile(currentPdf)) {
                 SaveLastPdfViewInfo();
             }
@@ -995,12 +993,29 @@ static void OrganizeCurrentSessionFiles(HWND hWnd) {
     }
     if (!g_currentNotePath.empty()) {
         std::filesystem::path currentNote(g_currentNotePath);
-        if (CanonicalOrSelf(currentNote.parent_path()) == CanonicalOrSelf(sessionRoot) && IsNoteFile(currentNote)) {
-            reloadNotePath = noteDir / currentNote.filename();
+        if (CanonicalOrSelf(currentNote.parent_path()) != CanonicalOrSelf(noteDir) && IsNoteFile(currentNote)) {
+            sourceNotePath = currentNote;
         }
     }
 
     SessionOrganizeStats organizeStats = NormalizeCacheSession(sessionRoot);
+    for (const auto& moved : organizeStats.movedPaths) {
+        if (!sourcePdfPath.empty() && CanonicalOrSelf(moved.first) == CanonicalOrSelf(sourcePdfPath)) {
+            reopenPdfPath = moved.second;
+        }
+        if (!sourceNotePath.empty() && CanonicalOrSelf(moved.first) == CanonicalOrSelf(sourceNotePath)) {
+            reloadNotePath = moved.second;
+        }
+    }
+    // A copy can succeed while removing its source fails.  Keep the already
+    // opened document usable from its original path in that recoverable case.
+    if (reopenPdfPath.empty() && !sourcePdfPath.empty() && std::filesystem::exists(sourcePdfPath, ec)) {
+        reopenPdfPath = sourcePdfPath;
+    }
+    ec.clear();
+    if (reloadNotePath.empty() && !sourceNotePath.empty() && std::filesystem::exists(sourceNotePath, ec)) {
+        reloadNotePath = sourceNotePath;
+    }
     RefreshCurrentSessionFiles();
 
     if (!reloadNotePath.empty() && std::filesystem::exists(reloadNotePath, ec)) {
@@ -1034,6 +1049,9 @@ static void OrganizeCurrentSessionFiles(HWND hWnd) {
             msg += localization::Text(L"ui.layout.bf239e8b9a66").c_str();
         }
     }
+    if (organizeStats.failed > 0 && organizeStats.moved > 0) {
+        msg += localization::Text(L"ui.layout.6212da2d3a1c").c_str();
+    }
 
     if (g_hBtnModeMarker) ShowWindow(g_hBtnModeMarker, SW_HIDE);
     if (g_hBtnModeMarkerFree) ShowWindow(g_hBtnModeMarkerFree, SW_HIDE);
@@ -1049,27 +1067,6 @@ static void OrganizeCurrentSessionFiles(HWND hWnd) {
     } else {
         ShowSoftNotice(hWnd, msg);
     }
-}
-
-static int PromptCompleteOffStageActionOnExit(HWND hWnd) {
-    std::wstring msg = localization::Text(L"ui.layout.exit_with_staged_changes");
-    const std::wstring stagedLocations = file_output::FormatStagedDiffLocationSummary();
-    if (!stagedLocations.empty()) {
-        msg += localization::Text(L"ui.layout.b5f076b437eb").c_str();
-        msg += stagedLocations;
-    }
-    SilentDialogOptions dialog;
-    dialog.title = localization::Text(L"ui.layout.4ee6e941fd06").c_str();
-    dialog.message = msg;
-    dialog.kind = SoftNoticeKind::Warning;
-    dialog.buttons = SilentDialogButtons::YesNoCancel;
-    dialog.defaultResult = SilentDialogResult::Yes;
-    dialog.escapeResult = SilentDialogResult::Cancel;
-    dialog.preferredWidthPx = 680;
-    SilentDialogResult res = ShowSilentDialog(hWnd, dialog);
-    if (res == SilentDialogResult::Yes) return IDYES;
-    if (res == SilentDialogResult::No) return IDNO;
-    return IDCANCEL;
 }
 
 static bool CommitActiveEditsForAppExit(HWND hWnd) {
@@ -1167,6 +1164,11 @@ static bool HandleAppExit(HWND hWnd) {
     if (s_managedAbnormalExit.requested) {
         return HandleManagedAbnormalExit(hWnd);
     }
+    DismissAppExitDismissibleDialogs();
+    if (HasAppExitBlockingDialog()) {
+        preview_trace::Append(L"HandleAppExit", L"abort=exit_blocking_dialog_open");
+        return false;
+    }
     CancelPendingLinkMode(hWnd);
     if (!CommitActiveEditsForAppExit(hWnd)) {
         preview_trace::Append(
@@ -1176,53 +1178,19 @@ static bool HandleAppExit(HWND hWnd) {
     }
     RememberCurrentSessionFiles();
     const std::wstring previewTempPath = g_pdfPreviewTempPath;
-    if (!SaveNoteIfDirty(hWnd)) {
+    // Normal application exit is also a durable boundary.  It creates the
+    // pre-save backup and atomically integrates the protected work; the user
+    // must not have to choose an internal checkpoint implementation detail.
+    // On failure the transaction leaves recoverable work intact and exit is
+    // canceled, so the original is never silently skipped or overwritten.
+    if (!file_output::RunSaveAndIntegrateTransaction(hWnd)) {
         preview_trace::Append(
             L"HandleAppExit",
-            L"abort=save_note_if_dirty_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            L"abort=save_and_integrate_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
         return PromptStayOrOpenDiffManager(
             hWnd,
             localization::Text(L"ui.layout.d7f54787589f").c_str(),
             localization::Text(L"ui.layout.f2484c529c40").c_str());
-    }
-    if (!SaveAnnotationsIfDirty(hWnd)) {
-        preview_trace::Append(
-            L"HandleAppExit",
-            L"abort=save_annotations_if_dirty_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-        return PromptStayOrOpenDiffManager(
-            hWnd,
-            localization::Text(L"ui.layout.d7f54787589f").c_str(),
-            localization::Text(L"ui.layout.f2484c529c40").c_str());
-    }
-    const bool hasStagedDiffs = file_output::HasAnyStagedDiffs();
-    preview_trace::Append(
-        L"HandleAppExit",
-        L"post_stage_save hasStagedDiffs=" + preview_trace::Bool(hasStagedDiffs) +
-        L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-    if (hasStagedDiffs) {
-        int action = PromptCompleteOffStageActionOnExit(hWnd);
-        preview_trace::Append(
-            L"HandleAppExit",
-            L"staged_action=" + std::to_wstring(action) +
-            L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-        if (action == IDCANCEL) {
-            preview_trace::Append(
-                L"HandleAppExit",
-                L"abort=user_canceled elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-            return false;
-        }
-        if (action == IDYES) {
-            if (!file_output::IntegrateStagedNoteAndAnnotations(hWnd)) {
-                preview_trace::Append(
-                    L"HandleAppExit",
-                    L"abort=integrate_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-                return false;
-            }
-        } else {
-            preview_trace::Append(
-                L"HandleAppExit",
-                L"exit_with_staged_diffs elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-        }
     }
     FinalizeAppExitState(hWnd, previewTempPath);
     preview_trace::Append(
@@ -1234,13 +1202,10 @@ static bool HandleAppExit(HWND hWnd) {
 
 static bool PrepareWorkspaceRestart(HWND hWnd) {
     RememberCurrentSessionFiles();
-    if (!SaveNoteIfDirty(hWnd)) {
-        return PromptStayOrOpenDiffManager(
-            hWnd,
-            localization::Text(L"ui.layout.e2cceab67405").c_str(),
-            localization::Text(L"ui.layout.4628424dc46e").c_str());
-    }
-    if (!SaveAnnotationsIfDirty(hWnd)) {
+    // A root switch must not force a potentially expensive original-file
+    // integration.  Keep a recoverable checkpoint under the old root before
+    // changing it; explicit save, exit, and output own integration instead.
+    if (!SaveNoteIfDirty(hWnd) || !SaveAnnotationsIfDirty(hWnd)) {
         return PromptStayOrOpenDiffManager(
             hWnd,
             localization::Text(L"ui.layout.e2cceab67405").c_str(),
@@ -1322,6 +1287,15 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
     {
         std::wstring identityErr;
         if (!note::ConfigureRuntimeNoteIdentityStore(
+                std::filesystem::path(g_workspaceRoot), &identityErr)) {
+            std::wstring message = localization::Text(L"ui.layout.a1495b07a2ac").c_str();
+            if (!identityErr.empty()) message += L"\n\n" + identityErr;
+            ShowSoftNotice(hWnd, message, SoftNoticeKind::Warning);
+        }
+    }
+    {
+        std::wstring identityErr;
+        if (!ConfigureRuntimeWorkspaceResourceCatalog(
                 std::filesystem::path(g_workspaceRoot), &identityErr)) {
             std::wstring message = localization::Text(L"ui.layout.a1495b07a2ac").c_str();
             if (!identityErr.empty()) message += L"\n\n" + identityErr;

@@ -258,6 +258,29 @@ std::vector<Span> CollectLiteralSpans(const NoteTextModel& model, const NoteDocu
     return merged;
 }
 
+std::vector<Span> CollectTeXSourceCommentSpans(std::wstring_view raw) {
+    std::vector<Span> spans;
+    size_t lineStart = 0;
+    while (lineStart < raw.size()) {
+        size_t lineEnd = lineStart;
+        while (lineEnd < raw.size() && raw[lineEnd] != L'\r' && raw[lineEnd] != L'\n') {
+            ++lineEnd;
+        }
+        for (size_t pos = lineStart; pos < lineEnd; ++pos) {
+            if (raw[pos] == L'%' && !IsBackslashEscaped(raw, pos)) {
+                spans.push_back(Span{{pos}, {lineEnd}});
+                break;
+            }
+        }
+        if (lineEnd >= raw.size()) break;
+        if (raw[lineEnd] == L'\r' && lineEnd + 1 < raw.size() && raw[lineEnd + 1] == L'\n') {
+            ++lineEnd;
+        }
+        lineStart = lineEnd + 1;
+    }
+    return spans;
+}
+
 bool IsInsideAnySpan(const std::vector<Span>& spans, Span span) {
     for (const auto& candidate : spans) {
         if (span.start < candidate.end && span.end > candidate.start) {
@@ -1050,9 +1073,13 @@ bool FindBackslashMathClose(std::wstring_view raw,
     return false;
 }
 
-void ExtractTexMathSpans(const NoteTextModel& model, NoteDocument* doc) {
+void ExtractTexMathSpans(const NoteTextModel& model,
+                         NoteDocument* doc,
+                         bool texSource = false) {
     if (!doc) return;
-    const std::vector<Span> literalSpans = CollectLiteralSpans(model, *doc);
+    const std::vector<Span> literalSpans = texSource
+        ? CollectTeXSourceCommentSpans(model.raw)
+        : CollectLiteralSpans(model, *doc);
     size_t literalIndex = 0;
     size_t pos = 0;
     while (pos < model.raw.size()) {
@@ -1288,6 +1315,29 @@ void PostProcessNoteDocument(const NoteTextModel& model, NoteDocument* doc) {
 NoteDocument ParseNoteDocument(const NoteTextModel& model) {
     NoteDocument doc = ParseNoteDocumentWithMd4c(model);
     PostProcessNoteDocument(model, &doc);
+    return doc;
+}
+
+NoteDocument ParseTeXMathDocument(const NoteTextModel& model) {
+    NoteDocument doc;
+    doc.meta = model.meta;
+    SetNoteDocumentSourceRevision(&doc, model.revision);
+    if (!model.raw.empty()) {
+        BlockNode block;
+        block.kind = BlockKind::Paragraph;
+        block.span = Span{{0}, {model.raw.size()}};
+        block.loc = ResolveLineColumn(model, 0);
+        block.first_inline = 0;
+        block.inline_count = 1;
+        doc.blocks.push_back(std::move(block));
+
+        InlineNode text;
+        text.kind = InlineKind::Text;
+        text.span = Span{{0}, {model.raw.size()}};
+        text.parent_block = 0;
+        doc.inlines.push_back(std::move(text));
+    }
+    ExtractTexMathSpans(model, &doc, /*texSource=*/true);
     return doc;
 }
 

@@ -532,6 +532,28 @@ NoteIdentity ResolveRuntimeNoteIdentityPath(const std::wstring& absolutePath,
     return *registry.FindNote(noteId);
 }
 
+std::optional<NoteId> FindRuntimeNoteIdentityPath(const std::wstring& absolutePath,
+                                                   std::wstring* outError) {
+    if (outError) outError->clear();
+    const std::wstring absoluteKey = NormalizePathKey(absolutePath);
+    if (absoluteKey.empty()) {
+        if (outError) *outError = L"note identity lookup path is invalid";
+        return std::nullopt;
+    }
+    RuntimeStoreState& state = RuntimeStore();
+    const std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.configured) {
+        const auto identity = RuntimeNoteIdentityRegistry().FindPath(absoluteKey);
+        return identity.has_value() ? std::optional<NoteId>(identity->note_id) : std::nullopt;
+    }
+    const auto relativeKey = RelativeKeyForPath(state, absoluteKey);
+    if (!relativeKey.has_value()) {
+        if (outError) *outError = L"note identity lookup path is outside the workspace";
+        return std::nullopt;
+    }
+    return state.catalog.FindPath(*relativeKey);
+}
+
 bool RebindRuntimeNoteIdentityPath(NoteId noteId,
                                    const std::wstring& oldAbsolutePath,
                                    const std::wstring& newAbsolutePath,

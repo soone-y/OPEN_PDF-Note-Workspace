@@ -69,6 +69,10 @@ static void ApplyPdfScaleDirect(HWND pdfWnd, double newScale, POINT focusInClien
     }
     
     InvalidateRect(pdfWnd, nullptr, FALSE);
+    if (g_hBottomNote && g_bottomPanePin == BottomPanePin::Note &&
+        g_bottomNoteMode == BottomNoteMode::Assist) {
+        InvalidateRect(g_hBottomNote, nullptr, FALSE);
+    }
 }
 
 static bool TryApplyInitialFitWidth(HWND pdfWnd) {

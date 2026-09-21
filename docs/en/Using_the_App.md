@@ -2,9 +2,8 @@
 
 ## Start working
 
-1. Create or select a workspace in a writable location.
-2. Open a PDF and add notes or annotations as needed.
-3. Save your work, then run integrated save when you finish.
+1. Open a PDF and add notes or annotations as needed.
+2. Save your work, then run integrated save when you finish.
 
 To protect original PDFs, the application keeps annotations and work data as separate recoverable data. If you are unsure about a save destination or displayed content, stop making changes and read [Saving and Recovery](Save_and_Recovery.md).
 

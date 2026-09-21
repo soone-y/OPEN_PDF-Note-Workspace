@@ -134,7 +134,7 @@ $sampleGuidePdf = Join-Path $repoRoot "release_assets\sample_workspace\ja\01_講
 if (-not (Test-Path -LiteralPath $sampleGuidePdf)) {
     throw "Sample workspace template is missing basic usage guide PDF: $sampleGuidePdf"
 }
-$sampleSpecPdf = Join-Path $repoRoot "release_assets\sample_workspace\ja\01_講義サンプル\第02回_最初期構想\PDF学習ワークスペース統合画面構成および基本仕様書.pdf"
+$sampleSpecPdf = Join-Path $repoRoot "release_assets\sample_workspace\ja\01_講義サンプル\第03回_最初期構想\PDF学習ワークスペース統合画面構成および基本仕様書.pdf"
 if (-not (Test-Path -LiteralPath $sampleSpecPdf)) {
     throw "Sample workspace template is missing specification PDF: $sampleSpecPdf"
 }
@@ -142,10 +142,9 @@ $englishSampleGuidePdf = Join-Path $repoRoot "release_assets\sample_workspace\en
 if (-not (Test-Path -LiteralPath $englishSampleGuidePdf)) {
     throw "English sample workspace template is missing basic workflow PDF: $englishSampleGuidePdf"
 }
-$englishPresentationConversionPdf = Join-Path $repoRoot "release_assets\sample_workspace\en\01_Lecture_Samples\Session_03_Office_Conversion\presentation_conversion_result.pdf"
-$englishDocumentConversionPdf = Join-Path $repoRoot "release_assets\sample_workspace\en\01_Lecture_Samples\Session_03_Office_Conversion\document_conversion_result.pdf"
-if (-not (Test-Path -LiteralPath $englishPresentationConversionPdf) -or -not (Test-Path -LiteralPath $englishDocumentConversionPdf)) {
-    throw "English sample workspace template is missing Full-only conversion-result PDFs."
+$englishNativeChartPdf = Join-Path $repoRoot "release_assets\sample_workspace\en\01_Lecture_Samples\Session_04_Office_Conversion\feature_overview_and_charts_conversion_result.pdf"
+if (-not (Test-Path -LiteralPath $englishNativeChartPdf)) {
+    throw "English sample workspace template is missing the Full-only conversion-result PDF."
 }
 $lectureContainerDryRunHits = @($dryRun | Select-String -SimpleMatch "01_講義サンプル")
 if ($lectureContainerDryRunHits.Count -eq 0) {
@@ -218,7 +217,7 @@ $liteArtifactHits = @($liteDryRun | Select-String -SimpleMatch "out\bin_lite\pdf
 if ($liteArtifactHits.Count -eq 0) {
     throw "Lite pack_release dry-run did not use the Lite executable artifact"
 }
-$liteConversionSampleHits = @($liteDryRun | Select-String -SimpleMatch "第03回_Office変換")
+$liteConversionSampleHits = @($liteDryRun | Select-String -SimpleMatch "第04回_Office変換")
 if ($liteConversionSampleHits.Count -ne 0) {
     throw "Lite pack_release dry-run included Japanese conversion-result sample files"
 }

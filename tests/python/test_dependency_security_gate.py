@@ -27,6 +27,7 @@ class DependencySecurityGateTests(unittest.TestCase):
 
     def test_blocked_review_fails_closed(self) -> None:
         review = json.loads(REVIEW.read_text(encoding="utf-8"))
+        review["review_valid_until"] = "2099-01-01"
         review["release_decision"] = "blocked"
         review["components"][0]["decision"] = "blocked"
         with tempfile.TemporaryDirectory() as directory:

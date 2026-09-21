@@ -687,10 +687,12 @@ static void DrawMagnifierLens(HDC hdc, const RECT& client) {
     int srcX = center.x - srcW / 2;
     int srcY = center.y - srcH / 2;
     const int cursorGap = std::max(8, MulDiv(16, dpi, 96));
-    int lensLeft = center.x + cursorGap;
-    int lensTop = center.y + cursorGap;
-    if (lensLeft + lensW > client.right) lensLeft = center.x - lensW - cursorGap;
-    if (lensTop + lensH > client.bottom) lensTop = center.y - lensH - cursorGap;
+    int lensLeft = center.x - lensW / 2;
+    int lensTop = center.y - lensH / 2;
+    if (g_magnifierPosition == MagnifierPosition::UpperLeft) {
+        lensLeft = center.x - lensW - cursorGap;
+        lensTop = center.y - lensH - cursorGap;
+    }
     lensLeft = std::clamp(lensLeft, static_cast<int>(client.left), static_cast<int>(client.right) - lensW);
     lensTop = std::clamp(lensTop, static_cast<int>(client.top), static_cast<int>(client.bottom) - lensH);
     RECT lens{ lensLeft, lensTop, lensLeft + lensW, lensTop + lensH };
@@ -717,13 +719,6 @@ static void DrawMagnifierLens(HDC hdc, const RECT& client) {
     } else {
         Rectangle(hdc, lens.left, lens.top, lens.right, lens.bottom);
     }
-    const int crossHalf = std::max(3, MulDiv(6, dpi, 96));
-    const int crossX = lens.left + lensW / 2;
-    const int crossY = lens.top + lensH / 2;
-    MoveToEx(hdc, crossX - crossHalf, crossY, nullptr);
-    LineTo(hdc, crossX + crossHalf + 1, crossY);
-    MoveToEx(hdc, crossX, crossY - crossHalf, nullptr);
-    LineTo(hdc, crossX, crossY + crossHalf + 1);
     SelectObject(hdc, oldBrush);
     SelectObject(hdc, oldPen);
     DeleteObject(pen);
@@ -1646,22 +1641,25 @@ static bool CanCopySelectedPdfText(HWND owner) {
 
 static bool CopyTextToClipboard(HWND hwnd, const std::wstring& text) {
     if (text.empty()) return false;
-    if (!OpenClipboard(hwnd)) return false;
-    EmptyClipboard();
     size_t bytes = (text.size() + 1) * sizeof(wchar_t);
     HGLOBAL hmem = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (!hmem) {
-        CloseClipboard();
-        return false;
-    }
+    if (!hmem) return false;
     void* dst = GlobalLock(hmem);
     if (!dst) {
         GlobalFree(hmem);
-        CloseClipboard();
         return false;
     }
     std::memcpy(dst, text.c_str(), bytes);
     GlobalUnlock(hmem);
+    if (!OpenClipboard(hwnd)) {
+        GlobalFree(hmem);
+        return false;
+    }
+    if (!EmptyClipboard()) {
+        CloseClipboard();
+        GlobalFree(hmem);
+        return false;
+    }
     if (!SetClipboardData(CF_UNICODETEXT, hmem)) {
         GlobalFree(hmem);
         CloseClipboard();
@@ -2313,7 +2311,7 @@ static void ShowPdfContextMenu(HWND hwnd, POINT screenPt) {
             g_pdf.suppressNextImeResultReturnChar = false;
             g_pdf.imeResultMessageTime = 0;
             g_pdf.editLayoutDirty = true;
-            if (PasteClipboardToEdit(hwnd)) {
+            if (PasteClipboardIntoActivePdfTextBox(hwnd)) {
                 RecalcEditingTextboxSize(true);
                 EnsureEditingTextBoxVisible(hwnd, L"ctx_paste_text");
                 UpdateImeWindowPosition(hwnd, true);

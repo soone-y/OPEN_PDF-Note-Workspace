@@ -31,6 +31,7 @@ constexpr int IDC_ANNOT_TEXT_READABLE_BACKGROUND = 1033;
 constexpr int IDC_ANNOT_ARROW_HEAD = 1034;
 constexpr int IDC_ANNOT_MAGNIFIER_ZOOM = 1035;
 constexpr int IDC_ANNOT_MAGNIFIER_SIZE = 1036;
+constexpr int IDC_ANNOT_MAGNIFIER_POSITION = 1037;
 constexpr int IDC_ANNOT_CATEGORY_BUTTON_BASE = 1100;
 
 constexpr int kAnnotSectionCount = 6;
@@ -86,6 +87,7 @@ struct AnnotSettingsCtx {
     HWND cbMagnifierShape = nullptr;
     HWND cbMagnifierZoom = nullptr;
     HWND cbMagnifierSize = nullptr;
+    HWND cbMagnifierPosition = nullptr;
     HWND btnPaletteCustom = nullptr;
     HWND previewPaletteCustom = nullptr;
     HWND lbTools = nullptr;
@@ -98,6 +100,7 @@ struct AnnotSettingsCtx {
     std::vector<AnnotToolUiState> expandedToolStates;
     int sectionTops[kAnnotSectionCount]{};
     int sectionCount = 0;
+    int initialSection = kAnnotSectionText;
     int scrollPos = 0;
     int scrollMax = 0;
     int wheelRemainder = 0;
@@ -109,7 +112,7 @@ static void UpdateAnnotSectionNavUi(AnnotSettingsCtx* ctx, int sectionIndex) {
     if (!ctx) return;
     int clamped = std::clamp(sectionIndex, 0, std::max(0, ctx->sectionCount - 1));
     if (ctx->navList) {
-        SendMessageW(ctx->navList, LB_SETCURSEL, clamped, 0);
+        SendMessageW(ctx->navList, CB_SETCURSEL, clamped, 0);
     }
 }
 
@@ -549,6 +552,8 @@ static void ScrollAnnotSettingsTo(HWND hWnd, AnnotSettingsCtx* ctx, int newPos) 
     si.fMask = SIF_POS;
     si.nPos = clamped;
     SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+    UpdateAnnotSectionNavUi(ctx, SettingsSectionForScrollPosition(
+        ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
 }
 
 static void JumpAnnotSettingsToSection(HWND hWnd, AnnotSettingsCtx* ctx, int sectionIndex) {
@@ -562,8 +567,8 @@ static void LayoutAnnotSettingsChrome(HWND hWnd, AnnotSettingsCtx* ctx) {
 
     const int pad = ScaleY(hWnd, 12);
     const int rowH = std::max(ScaleY(hWnd, 26), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
-    const int navW = ScaleY(hWnd, ctx->embedded ? 170 : 200);
-    const int columnGap = ScaleY(hWnd, 18);
+    const int sectionNavH = rowH;
+    const int sectionNavGap = ScaleY(hWnd, 8);
     const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
     const int titleH = std::max(rowH, ScaleY(hWnd, 30));
 
@@ -587,8 +592,10 @@ static void LayoutAnnotSettingsChrome(HWND hWnd, AnnotSettingsCtx* ctx) {
     int panelTop = pad + headerH;
     int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
     int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
-    int contentPaneX = pad + navW + columnGap;
-    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - contentPaneX - pad);
+    int contentPaneX = pad;
+    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - pad * 2);
+    int contentPanelTop = panelTop + sectionNavH + sectionNavGap;
+    int contentPanelH = std::max(ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
 
     if (!ctx->embedded && ctx->headerTitle) {
         SetWindowPos(ctx->headerTitle, nullptr, pad, pad, clientW - pad * 2, titleH,
@@ -602,11 +609,12 @@ static void LayoutAnnotSettingsChrome(HWND hWnd, AnnotSettingsCtx* ctx) {
         LayoutHeaderSectionButtons(hWnd, ctx->categoryButtons, pad, sectionButtonTop, clientW - pad * 2, sectionButtonH);
     }
     if (ctx->navList) {
-        SetWindowPos(ctx->navList, nullptr, pad, panelTop, navW, panelH,
+        int sectionNavW = std::min(contentPaneW, ScaleY(hWnd, ctx->embedded ? 360 : 400));
+        SetWindowPos(ctx->navList, nullptr, contentPaneX, panelTop, sectionNavW, sectionNavH,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (ctx->scrollPanel) {
-        SetWindowPos(ctx->scrollPanel, nullptr, pad + navW + columnGap, panelTop, contentPaneW, panelH,
+        SetWindowPos(ctx->scrollPanel, nullptr, contentPaneX, contentPanelTop, contentPaneW, contentPanelH,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (!ctx->embedded) {
@@ -728,6 +736,8 @@ static void ApplyAnnotationSettings(AnnotSettingsCtx* ctx) {
     g_magnifierZoom = static_cast<double>(GetSelectedComboInt(ctx->cbMagnifierZoom,
         static_cast<int>(std::llround(g_magnifierZoom * 100.0)))) / 100.0;
     g_magnifierSizeDip = std::clamp(GetSelectedComboInt(ctx->cbMagnifierSize, g_magnifierSizeDip), 80, 240);
+    g_magnifierPosition = static_cast<MagnifierPosition>(GetSelectedComboInt(
+        ctx->cbMagnifierPosition, static_cast<int>(g_magnifierPosition)));
     // sync toolbar option selections (without relayout)
     EnsureComboSelectFontFace(g_hComboFont, g_textFontName);
     SyncToolbarFontSizeCombo();
@@ -775,8 +785,8 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         GetClientRect(hWnd, &rc);
         int clientW = std::max(0, static_cast<int>(rc.right - rc.left));
         int clientH = std::max(0, static_cast<int>(rc.bottom - rc.top));
-        const int navW = ScaleY(hWnd, ctx->embedded ? 170 : 200);
-        const int columnGap = ScaleY(hWnd, 18);
+        const int sectionNavH = rowH;
+        const int sectionNavGap = ScaleY(hWnd, 8);
         const int footerH = ctx->embedded ? 0 : ScaleY(hWnd, 54);
         const int titleH = std::max(rowH, ScaleY(hWnd, 30));
         const std::wstring subtitle = localization::Text(L"settings.annot.151942ba553f").c_str();
@@ -788,8 +798,10 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         const int panelTop = pad + headerH;
         const int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
         const int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
-        const int contentPaneX = pad + navW + columnGap;
-        const int contentPaneW = std::max(ScaleY(hWnd, 340), clientW - contentPaneX - pad);
+        const int contentPaneX = pad;
+        const int contentPaneW = std::max(ScaleY(hWnd, 340), clientW - pad * 2);
+        const int contentPanelTop = panelTop + sectionNavH + sectionNavGap;
+        const int contentPanelH = std::max(ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
         int contentW = std::max(0, contentPaneW - pad * 2);
         int controlW = SettingsControlWidth(hWnd, contentW, ctx->embedded, 280, 460);
         int fontControlW = SettingsControlWidth(hWnd, contentW, ctx->embedded, 320, 560);
@@ -821,18 +833,19 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             UpdateSettingsCategoryButtons(ctx->categoryButtons, kSettingsNavAnnot);
         }
 
-        ctx->navList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                                       pad, panelTop, navW, panelH,
+        int sectionNavW = std::min(contentPaneW, ScaleY(hWnd, ctx->embedded ? 360 : 400));
+        ctx->navList = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+                                       contentPaneX, panelTop, sectionNavW, ScaleY(hWnd, 240),
                                        hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ANNOT_SECTION_LIST)),
                                        g_hInst, nullptr);
         SetUIFont(ctx->navList);
         SetSettingsNavFont(ctx->navList);
-        SetWindowSubclass(ctx->navList, SettingsNavListSubclassProc, 1, 0);
+        ui::GuardComboAgainstAccidentalChange(ctx->navList);
 
         ctx->scrollPanel = CreateWindowExW(0, L"SettingsScrollPanelClass", L"",
                                            WS_CHILD | WS_VISIBLE,
-                                           contentPaneX, panelTop, contentPaneW, panelH,
+                                           contentPaneX, contentPanelTop, contentPaneW, contentPanelH,
                                            hWnd, nullptr, g_hInst, nullptr);
 
         WorkspaceConfig defaults;
@@ -871,6 +884,9 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 : localization::Text(L"settings.annot.magnifier_shape.circle"));
         std::wstring defaultMagnifierZoom = FormatSig2W(defaults.magnifierZoom) + L"×";
         std::wstring defaultMagnifierSize = std::to_wstring(defaults.magnifierSizeDip) + L" DIP";
+        std::wstring defaultMagnifierPosition = ParseMagnifierPosition(defaults.magnifierPosition) == MagnifierPosition::UpperLeft
+            ? localization::Text(L"settings.annot.magnifier_position.upper_left")
+            : localization::Text(L"settings.annot.magnifier_position.center");
         std::wstring defaultPaletteColor = HexColorW(defaults.paletteCustomColor);
 
         ctx->expandedToolOrder = AnnotToolModeUiOrder();
@@ -1040,6 +1056,8 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         ctx->cbMagnifierZoom = addCombo(IDC_ANNOT_MAGNIFIER_ZOOM, false, controlW);
         addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.magnifier_size").c_str(), defaultMagnifierSize));
         ctx->cbMagnifierSize = addCombo(IDC_ANNOT_MAGNIFIER_SIZE, false, controlW);
+        addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.magnifier_position").c_str(), defaultMagnifierPosition));
+        ctx->cbMagnifierPosition = addCombo(IDC_ANNOT_MAGNIFIER_POSITION, false, controlW);
 
         addLabel(SettingLabelWithDefault(localization::Text(L"settings.annot.6ae2fdfbdb43").c_str(), defaultPaletteColor));
         ctx->palettePreviewColor = g_paletteCustomColor;
@@ -1176,7 +1194,8 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         GetWindowRect(hWnd, &winRc);
         int winH = std::max(0, static_cast<int>(winRc.bottom - winRc.top));
         int frameH = std::max(0, winH - clientH);
-        int desiredClientH = headerH + std::max(ctx->contentHeight, ScaleY(hWnd, 360)) + panelBottomPad;
+        int desiredClientH = headerH + sectionNavH + sectionNavGap +
+                             std::max(ctx->contentHeight, ScaleY(hWnd, 360)) + panelBottomPad;
         int desiredHeight = std::max(ScaleY(hWnd, 720), desiredClientH + frameH);
         int maxHeight = (workH > 0) ? std::max(0, workH - margin) : desiredHeight;
         if (maxHeight > 0) desiredHeight = std::min(desiredHeight, maxHeight);
@@ -1191,6 +1210,8 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         ctx->scrollPos = 0;
         UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
                            &ctx->scrollPos, &ctx->scrollMax);
+        UpdateAnnotSectionNavUi(ctx, SettingsSectionForScrollPosition(
+            ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
 
         // populate combos
         if (ctx->cbTextFont) {
@@ -1363,6 +1384,16 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             }
             SelectComboByItemData(ctx->cbMagnifierSize, static_cast<DWORD_PTR>(g_magnifierSizeDip));
         }
+        if (ctx->cbMagnifierPosition) {
+            SendMessageW(ctx->cbMagnifierPosition, CB_RESETCONTENT, 0, 0);
+            int idx = static_cast<int>(SendMessageW(ctx->cbMagnifierPosition, CB_ADDSTRING, 0,
+                                                    reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.magnifier_position.center").c_str())));
+            if (idx >= 0) SendMessageW(ctx->cbMagnifierPosition, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierPosition::Center));
+            idx = static_cast<int>(SendMessageW(ctx->cbMagnifierPosition, CB_ADDSTRING, 0,
+                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.magnifier_position.upper_left").c_str())));
+            if (idx >= 0) SendMessageW(ctx->cbMagnifierPosition, CB_SETITEMDATA, idx, static_cast<LPARAM>(MagnifierPosition::UpperLeft));
+            SelectComboByItemData(ctx->cbMagnifierPosition, static_cast<DWORD_PTR>(g_magnifierPosition));
+        }
 
         if (ctx->cbShapeKind) {
             SendMessageW(ctx->cbShapeKind, CB_RESETCONTENT, 0, 0);
@@ -1413,11 +1444,14 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 localization::Text(L"settings.annot.bdf7dceea954").c_str(),
                 localization::Text(L"settings.annot.82b287bb6494").c_str(),
             };
-            SendMessageW(ctx->navList, LB_RESETCONTENT, 0, 0);
+            SendMessageW(ctx->navList, CB_RESETCONTENT, 0, 0);
             for (int i = 0; i < ctx->sectionCount && i < kAnnotSectionCount; ++i) {
-                SendMessageW(ctx->navList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(sectionLabels[i].c_str()));
+                SendMessageW(ctx->navList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(sectionLabels[i].c_str()));
             }
-            UpdateAnnotSectionNavUi(ctx, 0);
+            const int initialSection = std::clamp(ctx->initialSection, 0,
+                                                  std::max(0, ctx->sectionCount - 1));
+            UpdateAnnotSectionNavUi(ctx, initialSection);
+            JumpAnnotSettingsToSection(hWnd, ctx, initialSection);
         }
 
         ApplyThemeToDialog(hWnd);
@@ -1457,6 +1491,8 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             if (ctx->contentHeight > 0) {
                 UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
                                    &ctx->scrollPos, &ctx->scrollMax);
+                UpdateAnnotSectionNavUi(ctx, SettingsSectionForScrollPosition(
+                    ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
             }
         }
         break;
@@ -1540,8 +1576,8 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
         LogPanelEvent(L"Annot", L"WM_COMMAND", id, code, reinterpret_cast<HWND>(lParam));
-        if (ctx && id == IDC_ANNOT_SECTION_LIST && code == LBN_SELCHANGE) {
-            int sel = static_cast<int>(SendMessageW(ctx->navList, LB_GETCURSEL, 0, 0));
+        if (ctx && id == IDC_ANNOT_SECTION_LIST && code == CBN_SELCHANGE) {
+            int sel = static_cast<int>(SendMessageW(ctx->navList, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {
                 UpdateAnnotSectionNavUi(ctx, sel);
                 JumpAnnotSettingsToSection(hWnd, ctx, sel);
@@ -1699,37 +1735,43 @@ constexpr int kUnifiedSettingsDlgWidth = 980;
 constexpr int kUnifiedSettingsDlgHeight = 820;
 constexpr int IDC_UNIFIED_SETTINGS_TAB = 7100;
 constexpr int IDC_UNIFIED_SETTINGS_APPLY = 7101;
+constexpr int IDC_UNIFIED_SETTINGS_REVERT_PAGE = 7102;
 
 struct UnifiedSettingsShellCtx {
     HWND owner = nullptr;
     bool done = false;
     int currentCategory = kSettingsNavGeneral;
+    int initialAnnotSection = -1;
     HWND tabCategories = nullptr;
+    HWND labelApplyHint = nullptr;
     HWND btnOk = nullptr;
     HWND btnApply = nullptr;
+    HWND btnRevert = nullptr;
     HWND btnCancel = nullptr;
     HWND childBasic = nullptr;
     HWND childNote = nullptr;
     HWND childMarkup = nullptr;
     HWND childAnnot = nullptr;
     HWND childPalette = nullptr;
+    HWND childAssets = nullptr;
     std::unique_ptr<GeneralSettingsCtx> basicCtx;
     std::unique_ptr<GeneralSettingsCtx> noteCtx;
     std::unique_ptr<MarkupSettingsCtx> markupCtx;
     std::unique_ptr<AnnotSettingsCtx> annotCtx;
     std::unique_ptr<PaletteSettingsCtx> paletteCtx;
+    std::unique_ptr<SettingsAssetsCtx> assetsCtx;
 };
 
 static int UnifiedSettingsTabIndexFromCategory(int category) {
     return std::clamp(category,
                       static_cast<int>(kSettingsNavGeneral),
-                      static_cast<int>(kSettingsNavPalette));
+                      static_cast<int>(kSettingsNavAssets));
 }
 
 static int UnifiedSettingsCategoryFromTabIndex(int tabIndex) {
     return std::clamp(tabIndex,
                       static_cast<int>(kSettingsNavGeneral),
-                      static_cast<int>(kSettingsNavPalette));
+                      static_cast<int>(kSettingsNavAssets));
 }
 
 static void UpdateUnifiedSettingsTab(UnifiedSettingsShellCtx* ctx) {
@@ -1817,6 +1859,7 @@ static HWND EnsureUnifiedAnnotPage(HWND parent, UnifiedSettingsShellCtx* shell) 
     const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
     shell->annotCtx = std::make_unique<AnnotSettingsCtx>();
     shell->annotCtx->embedded = true;
+    shell->annotCtx->initialSection = shell->initialAnnotSection;
     shell->childAnnot = CreateWindowExW(0, kClass, L"",
                                         WS_CHILD | WS_VISIBLE | WS_VSCROLL,
                                         0, 0, childSize.cx, childSize.cy,
@@ -1837,6 +1880,19 @@ static HWND EnsureUnifiedPalettePage(HWND parent, UnifiedSettingsShellCtx* shell
                                           0, 0, childSize.cx, childSize.cy,
                                           parent, nullptr, g_hInst, shell->paletteCtx.get());
     return shell->childPalette;
+}
+
+static HWND EnsureUnifiedAssetsPage(HWND parent, UnifiedSettingsShellCtx* shell) {
+    if (!parent || !shell) return nullptr;
+    if (shell->childAssets) return shell->childAssets;
+    EnsureSettingsAssetsPageClass();
+    const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
+    shell->assetsCtx = std::make_unique<SettingsAssetsCtx>();
+    shell->childAssets = CreateWindowExW(0, L"SettingsAssetsPageClass", L"",
+                                         WS_CHILD | WS_VISIBLE,
+                                         0, 0, childSize.cx, childSize.cy,
+                                         parent, nullptr, g_hInst, shell->assetsCtx.get());
+    return shell->childAssets;
 }
 
 static void LayoutUnifiedSettingsShell(HWND hWnd, UnifiedSettingsShellCtx* ctx) {
@@ -1866,32 +1922,42 @@ static void LayoutUnifiedSettingsShell(HWND hWnd, UnifiedSettingsShellCtx* ctx) 
 
     const int childX = pad;
     const int childW = std::max(ScaleY(hWnd, 360), clientW - pad * 2);
-    for (HWND child : { ctx->childBasic, ctx->childNote, ctx->childMarkup, ctx->childAnnot, ctx->childPalette }) {
+    for (HWND child : { ctx->childBasic, ctx->childNote, ctx->childMarkup, ctx->childAnnot, ctx->childPalette, ctx->childAssets }) {
         if (!child) continue;
         SetWindowPos(child, nullptr, childX, childTop, childW, childH, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
+    const int revertW = ScaleY(hWnd, 148);
+    const int applyW = ScaleY(hWnd, 88);
     const int okW = ScaleY(hWnd, 88);
     const int cancelW = ScaleY(hWnd, 108);
-    const int applyW = ScaleY(hWnd, 88);
-    const int totalButtonW = okW + gap + cancelW + gap + applyW;
-    const int xOk = std::max(pad, clientW - pad - totalButtonW);
+    const int totalButtonW = revertW + gap + applyW + gap + okW + gap + cancelW;
+    const int xRevert = std::max(pad, clientW - pad - totalButtonW);
+    const int xApply = xRevert + revertW + gap;
+    const int xOk = xApply + applyW + gap;
     const int xCancel = xOk + okW + gap;
-    const int xApply = xCancel + cancelW + gap;
+    if (ctx->labelApplyHint) {
+        SetWindowPos(ctx->labelApplyHint, nullptr, pad, footerY,
+                     std::max(0, xRevert - pad - gap), footerH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (ctx->btnRevert) {
+        SetWindowPos(ctx->btnRevert, nullptr, xRevert, footerY, revertW, footerH, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (ctx->btnApply) {
+        SetWindowPos(ctx->btnApply, nullptr, xApply, footerY, applyW, footerH, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
     if (ctx->btnOk) {
         SetWindowPos(ctx->btnOk, nullptr, xOk, footerY, okW, footerH, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (ctx->btnCancel) {
         SetWindowPos(ctx->btnCancel, nullptr, xCancel, footerY, cancelW, footerH, SWP_NOZORDER | SWP_NOACTIVATE);
     }
-    if (ctx->btnApply) {
-        SetWindowPos(ctx->btnApply, nullptr, xApply, footerY, applyW, footerH, SWP_NOZORDER | SWP_NOACTIVATE);
-    }
 }
 
 static void ShowUnifiedSettingsPage(HWND hWnd, UnifiedSettingsShellCtx* ctx, int category) {
     if (!hWnd || !ctx) return;
-    ctx->currentCategory = std::clamp(category, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavPalette));
+    ctx->currentCategory = std::clamp(category, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavAssets));
     HWND target = nullptr;
     switch (ctx->currentCategory) {
     case kSettingsNavGeneral:
@@ -1915,11 +1981,14 @@ static void ShowUnifiedSettingsPage(HWND hWnd, UnifiedSettingsShellCtx* ctx, int
     case kSettingsNavPalette:
         target = EnsureUnifiedPalettePage(hWnd, ctx);
         break;
+    case kSettingsNavAssets:
+        target = EnsureUnifiedAssetsPage(hWnd, ctx);
+        break;
     default:
         break;
     }
 
-    for (HWND child : { ctx->childBasic, ctx->childNote, ctx->childMarkup, ctx->childAnnot, ctx->childPalette }) {
+    for (HWND child : { ctx->childBasic, ctx->childNote, ctx->childMarkup, ctx->childAnnot, ctx->childPalette, ctx->childAssets }) {
         if (!child) continue;
         ShowWindow(child, child == target ? SW_SHOW : SW_HIDE);
     }
@@ -1950,6 +2019,43 @@ static void ApplyUnifiedSettings(UnifiedSettingsShellCtx* ctx) {
             RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
         }
     }
+}
+
+static void RevertUnifiedSettingsPage(HWND hWnd, UnifiedSettingsShellCtx* ctx) {
+    if (!hWnd || !ctx) return;
+    switch (ctx->currentCategory) {
+    case kSettingsNavGeneral:
+        if (ctx->childBasic) DestroyWindow(ctx->childBasic);
+        ctx->childBasic = nullptr;
+        ctx->basicCtx.reset();
+        break;
+    case kSettingsNavNote:
+        if (ctx->childNote) DestroyWindow(ctx->childNote);
+        ctx->childNote = nullptr;
+        ctx->noteCtx.reset();
+        break;
+    case kSettingsNavMarkup:
+        if (ctx->childMarkup) DestroyWindow(ctx->childMarkup);
+        ctx->childMarkup = nullptr;
+        ctx->markupCtx.reset();
+        break;
+    case kSettingsNavAnnot:
+        if (ctx->childAnnot) DestroyWindow(ctx->childAnnot);
+        ctx->childAnnot = nullptr;
+        ctx->annotCtx.reset();
+        break;
+    case kSettingsNavPalette:
+        if (ctx->childPalette) DestroyWindow(ctx->childPalette);
+        ctx->childPalette = nullptr;
+        ctx->paletteCtx.reset();
+        break;
+    case kSettingsNavAssets:
+        RefreshSettingsAssetEntries(ctx->assetsCtx.get());
+        return;
+    default:
+        return;
+    }
+    ShowUnifiedSettingsPage(hWnd, ctx, ctx->currentCategory);
 }
 
 static bool DrawUnifiedSettingsTabItem(UnifiedSettingsShellCtx* ctx, const DRAWITEMSTRUCT* dis) {
@@ -2024,22 +2130,31 @@ static LRESULT CALLBACK UnifiedSettingsShellProc(HWND hWnd, UINT msg, WPARAM wPa
                              reinterpret_cast<LPARAM>(&item));
             }
         }
-        ctx->btnOk = CreateWindowExW(0, L"BUTTON", UiOkLabel(),
+        ctx->labelApplyHint = CreateWindowExW(0, L"STATIC", localization::Text(L"settings.unified.apply_hint").c_str(),
+                                               WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+                                               0, 0, 100, 24, hWnd, nullptr, g_hInst, nullptr);
+        ctx->btnOk = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.unified.save_close").c_str(),
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                                      0, 0, 88, 32, hWnd,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)),
                                      g_hInst, nullptr);
-        ctx->btnCancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel().c_str(),
+        ctx->btnRevert = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.unified.revert_page").c_str(),
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                          0, 0, 148, 32, hWnd,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_UNIFIED_SETTINGS_REVERT_PAGE)),
+                                          g_hInst, nullptr);
+        ctx->btnCancel = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.unified.close_without_saving").c_str(),
                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                          0, 0, 108, 32, hWnd,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)),
                                          g_hInst, nullptr);
-        ctx->btnApply = CreateWindowExW(0, L"BUTTON", UiApplyLabel().c_str(),
+        ctx->btnApply = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.unified.save_apply").c_str(),
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                         0, 0, 88, 32, hWnd,
                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_UNIFIED_SETTINGS_APPLY)),
                                         g_hInst, nullptr);
-        for (HWND child : { ctx->tabCategories, ctx->btnOk, ctx->btnCancel, ctx->btnApply }) {
+        for (HWND child : { ctx->tabCategories, ctx->labelApplyHint, ctx->btnOk, ctx->btnCancel,
+                           ctx->btnApply, ctx->btnRevert }) {
             SetUIFont(child);
         }
         SetSettingsCategoryFont(ctx->tabCategories);
@@ -2101,6 +2216,11 @@ static LRESULT CALLBACK UnifiedSettingsShellProc(HWND hWnd, UINT msg, WPARAM wPa
             ShowSoftNotice(hWnd, localization::Text(L"settings.annot.fca7cf56577e").c_str());
             return 0;
         }
+        if (id == IDC_UNIFIED_SETTINGS_REVERT_PAGE) {
+            RevertUnifiedSettingsPage(hWnd, ctx);
+            ShowSoftNotice(hWnd, localization::Text(L"settings.unified.reverted_page"));
+            return 0;
+        }
         if (id == IDCANCEL || id == 0) {
             ctx->done = true;
             DestroyWindow(hWnd);
@@ -2119,6 +2239,7 @@ static LRESULT CALLBACK UnifiedSettingsShellProc(HWND hWnd, UINT msg, WPARAM wPa
         DestroyWindow(hWnd);
         return 0;
     case WM_DESTROY:
+        UnregisterAppExitDialog(hWnd);
         if (ctx) RestoreOwnerAfterModal(ctx->owner);
         if (ctx) ctx->done = true;
         return 0;

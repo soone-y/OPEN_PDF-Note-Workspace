@@ -41,12 +41,16 @@ void SetPdfSearchPointMarker(int pageIndex, double xPt, double yPt);
 void ClearPdfSearchResultMarker();
 [[nodiscard]] bool SaveAnnotationsIfDirty(HWND owner);
 void MarkAnnotsDirty(HWND owner);
+// Annotation undo/redo is intentionally limited to the current session and
+// document. Clear it at a document boundary or an isolated local test.
+void ClearPdfAnnotationHistory();
 void InvalidateAnnotHistoryForPath(const std::wstring& path);
 bool LoadAnnotationsForCurrentPdf(HWND owner);
 bool MergeStagedAnnotationsIntoCurrentPdf(HWND owner, const std::filesystem::path& stagePath);
 bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path);
 bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
-                                       const std::wstring& blockedMessage);
+                                       const std::wstring& blockedMessage,
+                                       const std::wstring& confirmation = L"");
 void CommitActiveTextEditing(bool commit);
 void ClearPdfTextSelection();
 void ClearPdfAnnotationSelection();
@@ -59,6 +63,9 @@ bool DuplicateAnnotationAtIndex(HWND owner, int index);
 bool ReorderAnnotationAtIndex(HWND owner, int index, bool bringToFront);
 bool UpdateAnnotationAtIndex(HWND owner, int index, const Annotation& after);
 bool ApplyCurrentToolbarStyleToAnnotation(HWND owner, int index);
+// Converts a recognized freehand stroke to a shape/line using the active
+// correction policy. Returns false when the stroke should remain freehand.
+bool TryCorrectFreehandAnnotation(const Annotation& source, Annotation* corrected);
 bool ExportPdfWithAnnotations(HWND owner);
 void ClearAllAnnotationsWithUndo(HWND owner);
 bool AddMathAnnotationFromList(HWND pdfWnd, int mathIndex, const POINT& screenPt);
@@ -82,4 +89,8 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // インラインテキスト編集を終了（commit=trueなら確定、falseなら破棄）
 void EndInlineTextEditing(HWND pdfWnd, bool commit);
+
+// アクティブな PDF TextBox へ clipboard の Unicode text を貼り付ける。
+// 成功時は本文・selectionを一つのローカル編集履歴として記録する。
+bool PasteClipboardIntoActivePdfTextBox(HWND pdfWnd);
 

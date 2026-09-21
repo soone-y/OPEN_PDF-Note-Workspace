@@ -1,7 +1,7 @@
 // file: settings/settings_unified.cppinc
 // Included by settings.cpp (single TU).
 
-static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory) {
+static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initialAnnotSection) {
     static const wchar_t kClass[] = L"UnifiedSettingsShellClass";
     static bool registered = false;
     if (!registered) {
@@ -18,7 +18,8 @@ static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory) {
 
     UnifiedSettingsShellCtx ctx{};
     ctx.owner = owner;
-    ctx.currentCategory = std::clamp(initialCategory, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavPalette));
+    ctx.currentCategory = std::clamp(initialCategory, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavAssets));
+    ctx.initialAnnotSection = initialAnnotSection;
 
     if (owner) EnableWindow(owner, FALSE);
     const int dpiRef = GetDpiY(owner);
@@ -33,6 +34,7 @@ static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory) {
         if (owner) EnableWindow(owner, TRUE);
         return;
     }
+    RegisterAppExitBlockingDialog(w);
     PlaceOwnedPopupAtAppTopLeft(w, owner);
 
     ShowWindow(w, SW_SHOW);
@@ -50,7 +52,40 @@ static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory) {
 } // namespace
 
 void ShowAnnotationSettingsDialog(HWND owner) {
-    ShowUnifiedSettingsDialog(owner, kSettingsNavAnnot);
+    ShowUnifiedSettingsDialog(owner, kSettingsNavAnnot, kAnnotSectionText);
+}
+
+static int AnnotSettingsSectionForTool(ToolMode mode) {
+    switch (mode) {
+    case ToolMode::TextBox:
+        return kAnnotSectionText;
+    case ToolMode::MarkerText:
+    case ToolMode::MarkerTextUnderline:
+    case ToolMode::MarkerTextColor:
+    case ToolMode::MarkerFree:
+        return kAnnotSectionMarker;
+    case ToolMode::Shape:
+        return kAnnotSectionShape;
+    case ToolMode::Magnifier:
+        return kAnnotSectionLensPalette;
+    case ToolMode::Freehand:
+    case ToolMode::Line:
+    case ToolMode::Arrow:
+    case ToolMode::Wave:
+    case ToolMode::MarkerLine:
+    case ToolMode::MarkerArrow:
+    case ToolMode::MarkerWave:
+        return kAnnotSectionStroke;
+    case ToolMode::Select:
+    case ToolMode::Pan:
+    case ToolMode::Eraser:
+    default:
+        return kAnnotSectionToolbar;
+    }
+}
+
+void ShowAnnotationSettingsForTool(HWND owner, ToolMode mode) {
+    ShowUnifiedSettingsDialog(owner, kSettingsNavAnnot, AnnotSettingsSectionForTool(mode));
 }
 
 static void LogPanelEvent(const wchar_t* panel,

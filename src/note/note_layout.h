@@ -10,6 +10,11 @@ namespace note {
 struct NoteLayoutLineMetrics {
     int line_height_permille = 1000;
     int max_font_px = 0;
+    // A positive value replaces the native paragraph height for a structured
+    // syntax-only line.  It is deliberately separate from max_font_px: the
+    // latter can only expand a text line, while a hidden Markdown table
+    // delimiter must collapse to its one-pixel visual boundary.
+    int exact_line_height_px = 0;
     int top_margin_percent_override = 0;
     int visual_ascent_px = 0;
     int visual_descent_px = 0;

@@ -1,0 +1,38 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{第02回 -- TeX 原文の例}
+\author{PDF Note Workspace}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{文章と数式}
+本文中では $E = mc^2$ のように数式を書けます。
+
+\begin{align}
+  \sum_{k=1}^{n} k &= \frac{n(n+1)}{2}, \\
+  \int_0^1 x^2\,dx &= \frac{1}{3}.
+\end{align}
+
+\section{リストと表}
+\begin{itemize}
+  \item 文書の章を分ける
+  \item 数式番号を付ける
+  \item 組版用の表を作る
+\end{itemize}
+
+\begin{tabular}{lll}
+\toprule
+記法 & 用途 & 例 \\
+\midrule
+\verb|\section| & 見出し & \verb|\section{題名}| \\
+\verb|$...$| & インライン数式 & \verb|$a+b$| \\
+\verb|align| & 複数行数式 & \verb|a &= b| \\
+\bottomrule
+\end{tabular}
+
+\end{document}

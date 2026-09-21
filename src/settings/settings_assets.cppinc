@@ -1,0 +1,454 @@
+// file: settings/settings_assets.cppinc
+// Included by settings.cpp (single TU).
+
+namespace {
+
+constexpr int IDC_SETTINGS_ASSETS_LIST = 7130;
+constexpr int IDC_SETTINGS_ASSETS_REFRESH = 7131;
+constexpr int IDC_SETTINGS_ASSETS_PREVIEW = 7132;
+constexpr int IDC_SETTINGS_ASSETS_GLOBAL_MEMOS = 7133;
+constexpr int IDC_SETTINGS_ASSETS_PRESET_SAVE = 7134;
+constexpr int IDC_SETTINGS_ASSETS_PRESET_LOAD = 7135;
+constexpr int IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE = 7138;
+constexpr int IDC_SETTINGS_ASSETS_COPY_PATH = 7139;
+
+struct SettingsAssetEntry {
+    std::wstring label;
+    std::filesystem::path path;
+    bool exists = false;
+    bool directory = false;
+    bool expectedDirectory = false;
+};
+
+struct SettingsAssetsCtx {
+    HWND list = nullptr;
+    HWND btnRefresh = nullptr;
+    HWND btnCopyPath = nullptr;
+    HWND btnPreview = nullptr;
+    HWND btnGlobalMemos = nullptr;
+    HWND btnPresetSave = nullptr;
+    HWND btnPresetLoad = nullptr;
+    HWND preview = nullptr;
+    HWND previewLabel = nullptr;
+    bool previewVisible = false;
+    std::vector<SettingsAssetEntry> entries;
+};
+
+static int SettingsAssetsItemHeight(HWND hWnd) {
+    const int pad = ScaleY(hWnd, 7);
+    const int titleH = FontLineHeightPx(hWnd, g_hUIFont);
+    return std::max(ScaleY(hWnd, 58), titleH * 2 + pad * 5);
+}
+
+static HFONT SettingsAssetsPathFont(HWND hWnd) {
+    static HFONT cachedFont = nullptr;
+    static HFONT cachedSource = nullptr;
+    static int cachedDpi = 0;
+    const int dpi = GetDpiY(hWnd);
+    if (cachedFont && cachedSource == g_hUIFont && cachedDpi == dpi) return cachedFont;
+    if (cachedFont) {
+        DeleteObject(cachedFont);
+        cachedFont = nullptr;
+    }
+    cachedSource = g_hUIFont;
+    cachedDpi = dpi;
+    LOGFONTW lf{};
+    if (!g_hUIFont || GetObjectW(g_hUIFont, sizeof(lf), &lf) != sizeof(lf)) return nullptr;
+    if (lf.lfHeight < 0) {
+        lf.lfHeight = -std::max(1, MulDiv(-lf.lfHeight, 90, 100));
+    } else if (lf.lfHeight > 0) {
+        lf.lfHeight = std::max(1, MulDiv(lf.lfHeight, 90, 100));
+    }
+    cachedFont = CreateFontIndirectW(&lf);
+    return cachedFont;
+}
+
+static bool CopySettingsAssetPathToClipboard(HWND owner, const std::wstring& path) {
+    if (path.empty() || !OpenClipboard(owner)) return false;
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (path.size() + 1) * sizeof(wchar_t));
+    if (!memory) {
+        CloseClipboard();
+        return false;
+    }
+    void* destination = GlobalLock(memory);
+    if (!destination) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return false;
+    }
+    memcpy(destination, path.c_str(), (path.size() + 1) * sizeof(wchar_t));
+    GlobalUnlock(memory);
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return false;
+    }
+    CloseClipboard();
+    return true;
+}
+
+static std::wstring SettingsAssetPreviewText(const SettingsAssetEntry& entry) {
+    if (entry.path.empty()) return localization::Text(L"settings.assets.preview_no_target");
+    std::error_code ec;
+    if (!std::filesystem::exists(entry.path, ec) || ec) {
+        return localization::Text(L"settings.assets.preview_missing");
+    }
+    if (std::filesystem::is_directory(entry.path, ec) && !ec) {
+        std::vector<std::wstring> names;
+        for (std::filesystem::directory_iterator it(entry.path, ec), end; !ec && it != end; it.increment(ec)) {
+            names.push_back(it->path().filename().wstring());
+            if (names.size() >= 200) break;
+        }
+        std::sort(names.begin(), names.end());
+        std::wstring text = localization::Text(L"settings.assets.preview_directory") + L"\r\n";
+        for (const auto& name : names) text += name + L"\r\n";
+        if (ec) text += localization::Text(L"settings.assets.preview_read_failed");
+        return text;
+    }
+    const auto bytes = std::filesystem::file_size(entry.path, ec);
+    if (ec || bytes > 2 * 1024 * 1024) return localization::Text(L"settings.assets.preview_too_large");
+    std::ifstream stream(entry.path, std::ios::binary);
+    if (!stream) return localization::Text(L"settings.assets.preview_read_failed");
+    std::string utf8((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    return UTF8ToWide(utf8);
+}
+
+static bool SettingsAssetIsDirectory(const SettingsAssetEntry& entry) {
+    return entry.exists && entry.directory;
+}
+
+static void UpdateSettingsAssetPreviewUi(SettingsAssetsCtx* ctx, bool loadContent) {
+    if (!ctx || !ctx->list || !ctx->preview || !ctx->btnPreview || !ctx->btnCopyPath || !ctx->previewLabel) return;
+    const int selected = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
+    if (selected == LB_ERR) {
+        EnableWindow(ctx->btnPreview, FALSE);
+        EnableWindow(ctx->btnCopyPath, FALSE);
+        return;
+    }
+    const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, selected, 0));
+    if (index >= ctx->entries.size()) return;
+    const auto& entry = ctx->entries[index];
+    const bool directory = SettingsAssetIsDirectory(entry);
+    SetWindowTextW(ctx->btnPreview, localization::Text(directory
+        ? L"settings.assets.show_directory_contents" : L"settings.assets.show_file_contents").c_str());
+    SetWindowTextW(ctx->previewLabel, localization::Text(directory
+        ? L"settings.assets.preview_directory_label" : L"settings.assets.preview_file_label").c_str());
+    EnableWindow(ctx->btnPreview, entry.exists ? TRUE : FALSE);
+    EnableWindow(ctx->btnCopyPath, entry.path.empty() ? FALSE : TRUE);
+    if (loadContent) {
+        SetWindowTextW(ctx->preview, SettingsAssetPreviewText(entry).c_str());
+        SendMessageW(ctx->preview, EM_SETSEL, 0, 0);
+    } else if (ctx->previewVisible) {
+        SetWindowTextW(ctx->preview, L"");
+    }
+}
+
+static std::filesystem::path SettingsAssetsExecutableDirectory() {
+    std::vector<wchar_t> buffer(260);
+    for (;;) {
+        const DWORD copied = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (copied == 0) return {};
+        if (copied < buffer.size() - 1) {
+            return std::filesystem::path(std::wstring(buffer.data(), copied)).parent_path();
+        }
+        if (buffer.size() >= 32768) return {};
+        buffer.resize(buffer.size() * 2);
+    }
+}
+
+static void RefreshSettingsAssetEntries(SettingsAssetsCtx* ctx) {
+    if (!ctx) return;
+    const std::filesystem::path exeDir = SettingsAssetsExecutableDirectory();
+    const std::filesystem::path root(g_workspaceRoot);
+    const std::filesystem::path resource = root.empty() ? std::filesystem::path{} : root / L"__resource__";
+    const std::filesystem::path setup = exeDir.empty() ? std::filesystem::path{} : exeDir / L"pdf_workspace_setup.json";
+    const std::filesystem::path settings = resource.empty() ? std::filesystem::path{} : resource / L"__settings__";
+    const std::filesystem::path themes = resource.empty() ? std::filesystem::path{} : resource / L"__theme__";
+    const std::filesystem::path palette = settings.empty() ? std::filesystem::path{} : settings / L"user_palette.json";
+    const std::filesystem::path shortcuts = settings.empty() ? std::filesystem::path{} : settings / L"tool_shortcuts.json";
+    const std::filesystem::path schedule = settings.empty() ? std::filesystem::path{} : settings / L"schedule.json";
+    const std::filesystem::path globalMemos = settings.empty() ? std::filesystem::path{} : settings / L"global_memos.json";
+    const std::filesystem::path themeCatalog = themes.empty() ? std::filesystem::path{} : themes / L"theme.json";
+    ctx->entries = {
+        { localization::Text(L"settings.assets.executable_directory"), exeDir, false, false, true },
+        { localization::Text(L"settings.assets.setup"), setup },
+        { localization::Text(L"settings.assets.workspace_directory"), root, false, false, true },
+        { localization::Text(L"settings.assets.workspace_config"), root.empty() ? std::filesystem::path{} : root / L"workspace.json" },
+        { localization::Text(L"settings.assets.resource_directory"), resource, false, false, true },
+        { localization::Text(L"settings.assets.settings_directory"), settings, false, false, true },
+        { localization::Text(L"settings.assets.palette"), palette },
+        { localization::Text(L"settings.assets.shortcuts"), shortcuts },
+        { localization::Text(L"settings.assets.schedule"), schedule },
+        { localization::Text(L"settings.assets.global_memos"), globalMemos },
+        { localization::Text(L"settings.assets.theme_directory"), themes, false, false, true },
+        { localization::Text(L"settings.assets.theme_catalog"), themeCatalog },
+    };
+    if (!themes.empty()) {
+        std::error_code ec;
+        for (std::filesystem::directory_iterator it(themes, ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code typeError;
+            if (!it->is_regular_file(typeError) || typeError) continue;
+            const auto path = it->path();
+            const std::wstring filename = path.filename().wstring();
+            if (_wcsnicmp(filename.c_str(), L"theme_", 6) != 0 || _wcsicmp(path.extension().c_str(), L".json") != 0) continue;
+            ctx->entries.push_back({ localization::Text(L"settings.assets.theme_file") + L": " + filename, path });
+        }
+    }
+    for (auto& entry : ctx->entries) {
+        std::error_code ec;
+        entry.exists = !entry.path.empty() && std::filesystem::exists(entry.path, ec) && !ec;
+        entry.directory = entry.exists
+            ? (std::filesystem::is_directory(entry.path, ec) && !ec)
+            : entry.expectedDirectory;
+    }
+
+    if (!ctx->list) return;
+    SendMessageW(ctx->list, LB_RESETCONTENT, 0, 0);
+    SendMessageW(ctx->list, LB_SETITEMHEIGHT, 0, SettingsAssetsItemHeight(ctx->list));
+    int widestRow = 0;
+    HDC dc = GetDC(ctx->list);
+    HGDIOBJ oldFont = (dc && g_hUIFont) ? SelectObject(dc, g_hUIFont) : nullptr;
+    for (size_t i = 0; i < ctx->entries.size(); ++i) {
+        const auto& entry = ctx->entries[i];
+        const std::wstring status = localization::Text(entry.exists
+            ? L"settings.assets.present" : L"settings.assets.missing");
+        const std::wstring row = entry.label + L" — " + status + L" — " + entry.path.wstring();
+        const int index = static_cast<int>(SendMessageW(ctx->list, LB_ADDSTRING, 0,
+                                                         reinterpret_cast<LPARAM>(row.c_str())));
+        if (index >= 0) SendMessageW(ctx->list, LB_SETITEMDATA, index, static_cast<LPARAM>(i));
+        if (dc) {
+            SIZE measured{};
+            if (GetTextExtentPoint32W(dc, row.c_str(), static_cast<int>(row.size()), &measured)) {
+                widestRow = std::max(widestRow, static_cast<int>(measured.cx));
+            }
+        }
+    }
+    if (dc && oldFont) SelectObject(dc, oldFont);
+    if (dc) ReleaseDC(ctx->list, dc);
+    SendMessageW(ctx->list, LB_SETHORIZONTALEXTENT, widestRow + ScaleY(ctx->list, 16), 0);
+    if (!ctx->entries.empty()) SendMessageW(ctx->list, LB_SETCURSEL, 0, 0);
+    UpdateSettingsAssetPreviewUi(ctx, false);
+}
+
+static LRESULT CALLBACK SettingsAssetsPageProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<SettingsAssetsCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = reinterpret_cast<SettingsAssetsCtx*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        if (!ctx) return -1;
+        ctx->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_HSCROLL | LBS_NOTIFY |
+                                        WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                                    0, 0, 100, 100, hWnd,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_ASSETS_LIST)),
+                                    g_hInst, nullptr);
+        ctx->btnRefresh = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.assets.refresh").c_str(),
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                          0, 0, 100, 28, hWnd,
+                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_ASSETS_REFRESH)),
+                                         g_hInst, nullptr);
+        const auto createButton = [&](int id, const wchar_t* labelId) {
+            return CreateWindowExW(0, L"BUTTON", localization::Text(labelId).c_str(),
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                   0, 0, 100, 28, hWnd,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+        };
+        ctx->btnPreview = createButton(IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE, L"settings.assets.show_file_contents");
+        ctx->btnCopyPath = createButton(IDC_SETTINGS_ASSETS_COPY_PATH, L"settings.assets.copy_path");
+        ctx->btnGlobalMemos = createButton(IDC_SETTINGS_ASSETS_GLOBAL_MEMOS, L"settings.assets.global_memos_manage");
+        ctx->btnPresetSave = createButton(IDC_SETTINGS_ASSETS_PRESET_SAVE, L"settings.assets.preset_save");
+        ctx->btnPresetLoad = createButton(IDC_SETTINGS_ASSETS_PRESET_LOAD, L"settings.assets.preset_load");
+        ctx->previewLabel = CreateWindowExW(0, L"STATIC", L"",
+                                             WS_CHILD | SS_LEFT | SS_CENTERIMAGE,
+                                             0, 0, 100, 24, hWnd, nullptr, g_hInst, nullptr);
+        ctx->preview = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                       WS_CHILD | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
+                                           ES_AUTOHSCROLL | ES_READONLY | WS_VSCROLL | WS_HSCROLL,
+                                       0, 0, 100, 100, hWnd,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_ASSETS_PREVIEW)),
+                                       g_hInst, nullptr);
+        for (HWND child : {ctx->list, ctx->btnRefresh, ctx->btnCopyPath, ctx->btnPreview, ctx->btnGlobalMemos, ctx->btnPresetSave,
+                           ctx->btnPresetLoad, ctx->previewLabel, ctx->preview}) SetUIFont(child);
+        RefreshSettingsAssetEntries(ctx);
+        return 0;
+    }
+    case WM_SIZE: {
+        if (!ctx) return 0;
+        RECT rc{};
+        GetClientRect(hWnd, &rc);
+        const int width = std::max(0, static_cast<int>(rc.right - rc.left));
+        const int height = std::max(0, static_cast<int>(rc.bottom - rc.top));
+        const int pad = ScaleY(hWnd, 12);
+        const int gap = ScaleY(hWnd, 8);
+        const int buttonH = std::max(ScaleY(hWnd, 28), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
+        const int buttonW = std::max(ScaleY(hWnd, 108), (width - pad * 2 - gap * 3) / 4);
+        const int previewLabelH = FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 4);
+        const int previewH = ctx->previewVisible ? std::max(ScaleY(hWnd, 140), height / 3) : 0;
+        const int previewAreaH = ctx->previewVisible ? previewLabelH + gap + previewH + gap : 0;
+        const int listH = std::max(ScaleY(hWnd, 120), height - pad * 3 - buttonH * 2 - gap * 3 - previewAreaH);
+        if (ctx->list) SetWindowPos(ctx->list, nullptr, pad, pad, std::max(0, width - pad * 2), listH,
+                                    SWP_NOZORDER | SWP_NOACTIVATE);
+        const int buttonsY = pad + listH + gap;
+        const int secondButtonsY = buttonsY + buttonH + gap;
+        const std::array<HWND, 4> firstRow = {ctx->btnRefresh, ctx->btnCopyPath, ctx->btnPreview, ctx->btnGlobalMemos};
+        for (size_t i = 0; i < firstRow.size(); ++i) {
+            if (firstRow[i]) SetWindowPos(firstRow[i], nullptr, pad + static_cast<int>(i) * (buttonW + gap), buttonsY,
+                                           buttonW, buttonH, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        const std::array<HWND, 2> secondRow = {ctx->btnPresetSave, ctx->btnPresetLoad};
+        const int presetButtonW = std::max(ScaleY(hWnd, 150), (width - pad * 2 - gap) / 2);
+        for (size_t i = 0; i < secondRow.size(); ++i) {
+            HWND button = secondRow[i];
+            if (button) SetWindowPos(button, nullptr, pad + static_cast<int>(i) * (presetButtonW + gap), secondButtonsY,
+                                     presetButtonW, buttonH, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        const int previewY = secondButtonsY + buttonH + gap;
+        if (ctx->previewLabel) SetWindowPos(ctx->previewLabel, nullptr, pad, previewY,
+                                            std::max(0, width - pad * 2), previewLabelH,
+                                            SWP_NOZORDER | SWP_NOACTIVATE);
+        if (ctx->preview) SetWindowPos(ctx->preview, nullptr, pad, previewY + previewLabelH + gap,
+                                       std::max(0, width - pad * 2), previewH,
+                                       SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        return 0;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+        return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
+    case WM_DRAWITEM: {
+        const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (!ctx || !draw || draw->CtlID != IDC_SETTINGS_ASSETS_LIST || draw->itemID == static_cast<UINT>(-1)) break;
+        const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, draw->itemID, 0));
+        if (index >= ctx->entries.size()) return TRUE;
+        const auto& entry = ctx->entries[index];
+        const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+        const COLORREF background = selected ? g_theme.selectionBg : g_theme.panelBg;
+        const COLORREF text = selected ? g_theme.selectionText : g_theme.panelText;
+        HBRUSH brush = CreateSolidBrush(background);
+        FillRect(draw->hDC, &draw->rcItem, brush);
+        DeleteObject(brush);
+        SetBkMode(draw->hDC, TRANSPARENT);
+        SetTextColor(draw->hDC, text);
+        HFONT oldFont = g_hUIFont ? static_cast<HFONT>(SelectObject(draw->hDC, g_hUIFont)) : nullptr;
+        const int pad = ScaleY(ctx->list, 7);
+        const int lineH = FontLineHeightPx(ctx->list, g_hUIFont);
+        RECT titleRect = draw->rcItem;
+        titleRect.left += pad;
+        titleRect.top += pad;
+        titleRect.bottom = titleRect.top + lineH;
+        const std::wstring status = localization::Text(entry.exists
+            ? L"settings.assets.present" : L"settings.assets.missing");
+        const std::wstring type = localization::Text(entry.directory
+            ? L"settings.assets.type_directory" : L"settings.assets.type_file");
+        const std::wstring title = L"[" + type + L"] " + entry.label + L" — " + status;
+        DrawTextW(draw->hDC, title.c_str(), -1, &titleRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        HFONT pathFont = SettingsAssetsPathFont(ctx->list);
+        HFONT oldPathFont = pathFont ? static_cast<HFONT>(SelectObject(draw->hDC, pathFont)) : nullptr;
+        const int pathLineH = FontLineHeightPx(ctx->list, pathFont ? pathFont : g_hUIFont);
+        RECT pathRect = titleRect;
+        pathRect.top += lineH + pad * 2;
+        pathRect.bottom = pathRect.top + pathLineH;
+        DrawTextW(draw->hDC, entry.path.c_str(), -1, &pathRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        HPEN separator = CreatePen(PS_SOLID, 1, g_theme.splitterLine);
+        HGDIOBJ oldPen = SelectObject(draw->hDC, separator);
+        MoveToEx(draw->hDC, draw->rcItem.left, draw->rcItem.bottom - 1, nullptr);
+        LineTo(draw->hDC, draw->rcItem.right, draw->rcItem.bottom - 1);
+        SelectObject(draw->hDC, oldPen);
+        DeleteObject(separator);
+        if (oldPathFont) SelectObject(draw->hDC, oldPathFont);
+        if (oldFont) SelectObject(draw->hDC, oldFont);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (!ctx) break;
+        switch (LOWORD(wParam)) {
+        case IDC_SETTINGS_ASSETS_REFRESH:
+            RefreshSettingsAssetEntries(ctx);
+            return 0;
+        case IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE:
+            ctx->previewVisible = true;
+            ShowWindow(ctx->previewLabel, SW_SHOW);
+            ShowWindow(ctx->preview, SW_SHOW);
+            UpdateSettingsAssetPreviewUi(ctx, true);
+            SendMessageW(hWnd, WM_SIZE, 0, 0);
+            return 0;
+        case IDC_SETTINGS_ASSETS_COPY_PATH: {
+            const int selected = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
+            if (selected == LB_ERR) return 0;
+            const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, selected, 0));
+            if (index >= ctx->entries.size()) return 0;
+            const bool copied = CopySettingsAssetPathToClipboard(hWnd, ctx->entries[index].path.wstring());
+            ShowSoftNotice(hWnd, localization::Text(copied
+                ? L"settings.assets.path_copied" : L"settings.assets.path_copy_failed"),
+                copied ? SoftNoticeKind::Info : SoftNoticeKind::Warning);
+            return 0;
+        }
+        case IDC_SETTINGS_ASSETS_GLOBAL_MEMOS:
+            ShowGlobalMemoWindow(hWnd);
+            return 0;
+        case IDC_SETTINGS_ASSETS_PRESET_SAVE:
+            SaveSettingsPreset(hWnd);
+            RefreshSettingsAssetEntries(ctx);
+            return 0;
+        case IDC_SETTINGS_ASSETS_PRESET_LOAD:
+            LoadSettingsPreset(hWnd);
+            RefreshSettingsAssetEntries(ctx);
+            return 0;
+        case IDC_SETTINGS_ASSETS_LIST:
+            if (HIWORD(wParam) == LBN_SELCHANGE) {
+                UpdateSettingsAssetPreviewUi(ctx, false);
+                return 0;
+            }
+            if (HIWORD(wParam) == LBN_DBLCLK) {
+                POINT point{};
+                GetCursorPos(&point);
+                ScreenToClient(ctx->list, &point);
+                const LRESULT hit = SendMessageW(ctx->list, LB_ITEMFROMPOINT, 0,
+                                                 MAKELPARAM(point.x, point.y));
+                if (HIWORD(hit) != 0) return 0;
+                const int item = LOWORD(hit);
+                RECT itemRect{};
+                if (SendMessageW(ctx->list, LB_GETITEMRECT, item, reinterpret_cast<LPARAM>(&itemRect)) == LB_ERR ||
+                    point.y < itemRect.top + SettingsAssetsItemHeight(ctx->list) / 2) {
+                    return 0;
+                }
+                const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, item, 0));
+                if (index >= ctx->entries.size()) return 0;
+                const bool copied = CopySettingsAssetPathToClipboard(hWnd, ctx->entries[index].path.wstring());
+                ShowSoftNotice(hWnd, localization::Text(copied
+                    ? L"settings.assets.path_copied" : L"settings.assets.path_copy_failed"),
+                    copied ? SoftNoticeKind::Info : SoftNoticeKind::Warning);
+                return 0;
+            }
+            break;
+        }
+        break;
+    case WM_DESTROY:
+        if (ctx) ctx->entries.clear();
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static void EnsureSettingsAssetsPageClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = SettingsAssetsPageProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"SettingsAssetsPageClass";
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+} // namespace

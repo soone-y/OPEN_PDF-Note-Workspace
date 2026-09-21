@@ -8,7 +8,6 @@
 #include "pdf_view/pdf_view.h"
 #include "core/preview_trace.h"
 #include "core/atomic_write.h"
-#include "note_view/note_view.h"
 #include "settings/settings.h"
 #include "bridge/view_bridge.h"
 #include "core/font_list.h"
@@ -112,7 +111,7 @@ void ApplyConfigToUI(HWND hWnd) {
     mathrender::SetSupSubGapSupPercent(g_config.noteMathSupSubGapSupPercent);
     if (!g_noteVimModeEnabled) {
         g_noteNormalMode = false;
-        OnExitNoteNormalMode();
+        ExitCurrentNoteNormalMode();
     }
     g_noteGridEnabled = false;
     g_noteGridPitch = g_config.noteGridPitch;
@@ -155,6 +154,7 @@ void ApplyConfigToUI(HWND hWnd) {
     g_magnifierShape = ParseMagnifierShape(g_config.magnifierShape);
     g_magnifierZoom = std::clamp(g_config.magnifierZoom, 1.25, 4.0);
     g_magnifierSizeDip = std::clamp(g_config.magnifierSizeDip, 80, 240);
+    g_magnifierPosition = ParseMagnifierPosition(g_config.magnifierPosition);
     g_shapeKind = ParseShapeKind(g_config.shapeKind);
     g_shapeDrawMode = ParseShapeDrawMode(g_config.shapeDrawMode);
     const auto firstAvailableMode = [](ToolMode fallback, auto predicate) {
@@ -294,7 +294,7 @@ void ApplyConfigToUI(HWND hWnd) {
     }
     LayoutChildren(hWnd);
     UpdateMathListVisibility();
-    RefreshBottomPaneView();
+    RefreshCurrentNoteBottomPane();
     ApplyActiveColorForMode(hWnd, g_toolMode);
     UpdateToolbarUI(hWnd);
     UpdateAutoSaveTimer(hWnd);
@@ -330,7 +330,7 @@ void ClearPdfAndNoteSelection() {
 
     ClearNoteEditorSilently(GetParent(g_hNoteEdit));
     g_previewNote.clear();
-    RefreshBottomPaneView();
+    RefreshCurrentNoteBottomPane();
 }
 
 bool SaveNoteIfDirty(HWND hWnd) {
@@ -625,115 +625,33 @@ bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path
     return true;
 }
 
-static std::filesystem::path WeaklyCanonicalNoThrow(const std::filesystem::path& p) {
-    if (p.empty()) return {};
-    std::error_code ec;
-    auto can = std::filesystem::weakly_canonical(p, ec);
-    if (ec) return {};
-    return can;
-}
-
-static bool IsPathUnderDir(const std::filesystem::path& dir, const std::filesystem::path& path) {
-    if (dir.empty() || path.empty()) return false;
-    auto dirCan = WeaklyCanonicalNoThrow(dir);
-    auto pathCan = WeaklyCanonicalNoThrow(path);
-    if (dirCan.empty() || pathCan.empty()) return false;
-
-    std::filesystem::path rel = pathCan.lexically_relative(dirCan);
-    if (rel.empty()) return false;
-    if (rel.is_absolute()) return false;
-
-    auto it = rel.begin();
-    if (it == rel.end()) return false;
-    if (*it == L"..") return false;
-    return true;
-}
-
-static std::optional<std::wstring> PickFileUnderLocked(HWND owner,
-                                                       const std::filesystem::path& dir,
-                                                       const std::wstring& title) {
-    auto picked = PickFileUnder(owner, dir, title);
-    if (!picked) return std::nullopt;
-    std::filesystem::path pickedPath(*picked);
-    if (!IsPathUnderDir(dir, pickedPath)) {
-        std::wstring msg = L"指定フォルダの外のファイルは選択できません。\n\nroot:\n" +
-                           dir.wstring() + L"\n\npicked:\n" + pickedPath.wstring();
-        const std::wstring dialogTitle = title.empty() ? GetUiText().menuSettings : title;
-        ShowSilentMessageDialog(owner, dialogTitle, msg, SoftNoticeKind::Warning);
-        return std::nullopt;
-    }
-    return pickedPath.wstring();
-}
-
-static std::wstring SanitizePresetName(const std::wstring& name) {
-    std::wstring out;
-    out.reserve(name.size());
-    for (wchar_t c : name) {
-        switch (c) {
-        case L'\\': case L'/': case L':': case L'*':
-        case L'?': case L'"': case L'<': case L'>': case L'|':
-            out.push_back(L'_');
-            break;
-        default:
-            if (c < 0x20) {
-                out.push_back(L'_');
-            } else {
-                out.push_back(c);
-            }
-            break;
-        }
-    }
-    out = TrimWhitespace(out);
-    while (!out.empty() && (out.back() == L' ' || out.back() == L'.')) {
-        out.pop_back();
-    }
-    if (out == L"." || out == L"..") out.clear();
-    return out;
+namespace {
+static bool PickSettingsPresetSavePath(HWND owner, std::filesystem::path* outPath);
+static bool PickSettingsPresetOpenPath(HWND owner, std::filesystem::path* outPath);
 }
 
 void SaveSettingsPreset(HWND hWnd) {
     try {
     const auto& ui = GetUiText();
     if (g_workspaceRoot.empty()) {
-        ShowSoftNotice(hWnd, L"ワークスペースが開かれていません。", SoftNoticeKind::Warning);
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.config_io.55c168692754").c_str(),
+                       SoftNoticeKind::Warning);
         return;
     }
-    std::filesystem::path settingsDir;
-    if (!EnsureWorkspaceResourceDirs(&settingsDir)) {
-        ShowSoftNotice(hWnd, L"__resource__ の作成に失敗しました。", SoftNoticeKind::Warning);
+    std::filesystem::path presetPath;
+    if (!PickSettingsPresetSavePath(hWnd, &presetPath)) return;
+    std::wstring err;
+    if (!ExportSettingsPresetToFile(presetPath, &err)) {
+        ShowSilentMessageDialog(hWnd, ui.menuSettings,
+                                localization::Text(L"workspace.config_io.59f0b7d1f221"),
+                                SoftNoticeKind::Warning,
+                                {{localization::Text(L"dialog.path.destination"), presetPath.wstring()}});
         return;
     }
-    std::wstring name;
-    if (!PromptSimpleText(hWnd, L"プリセット名", L"", name)) return;
-    name = SanitizePresetName(name);
-    if (name.empty()) {
-        ShowSoftNotice(hWnd, L"プリセット名が無効です。", SoftNoticeKind::Warning);
-        return;
-    }
-    std::filesystem::path fileName(name);
-    if (!fileName.has_extension()) fileName += L".json";
-    std::filesystem::path presetPath = settingsDir / fileName;
-    std::error_code existsEc;
-    if (std::filesystem::exists(presetPath, existsEc) && !existsEc) {
-        std::wstring msg = L"既に存在します。上書きしますか？";
-        SilentDialogOptions options;
-        options.title = ui.menuSettings;
-        options.message = msg;
-        options.kind = SoftNoticeKind::Warning;
-        options.buttons = SilentDialogButtons::YesNo;
-        options.defaultResult = SilentDialogResult::No;
-        options.escapeResult = SilentDialogResult::No;
-        options.paths = {{L"", presetPath.wstring()}};
-        if (ShowSilentDialog(hWnd, options) != SilentDialogResult::Yes) {
-            return;
-        }
-    }
-    PersistConfig();
-    if (!SaveWorkspaceConfigToFile(presetPath, g_config)) {
-        ShowSoftNotice(hWnd, L"設定プリセットを保存できませんでした。", SoftNoticeKind::Warning);
-        return;
-    }
-    ShowSoftNotice(hWnd, L"設定プリセットを保存しました。");
+    ShowSilentMessageDialog(hWnd, ui.menuSettings,
+                            localization::Text(L"workspace.config_io.d573cf2c8ffb"),
+                            SoftNoticeKind::Info,
+                            {{localization::Text(L"dialog.path.destination"), presetPath.wstring()}});
     } catch (const std::exception& ex) {
         AppendMainOperationExceptionLog("SaveSettingsPreset", ex.what());
         ReportMainOperationException(hWnd, L"設定プリセット保存");
@@ -747,23 +665,44 @@ void LoadSettingsPreset(HWND hWnd) {
     try {
     const auto& ui = GetUiText();
     if (g_workspaceRoot.empty()) {
-        ShowSoftNotice(hWnd, L"ワークスペースが開かれていません。", SoftNoticeKind::Warning);
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.config_io.55c168692754").c_str(),
+                       SoftNoticeKind::Warning);
         return;
     }
-    std::filesystem::path settingsDir;
-    if (!EnsureWorkspaceResourceDirs(&settingsDir)) {
-        ShowSoftNotice(hWnd, L"__resource__ の作成に失敗しました。", SoftNoticeKind::Warning);
+    std::filesystem::path pickedPath;
+    if (!PickSettingsPresetOpenPath(hWnd, &pickedPath)) return;
+    if (!ConfirmMainYesNo(hWnd, ui.menuSettings,
+                          localization::Text(L"workspace.config_io.0d32b1c7e154").c_str(),
+                          SoftNoticeKind::Warning, SilentDialogResult::No, SilentDialogResult::No)) {
         return;
     }
-    auto picked = PickFileUnderLocked(hWnd, settingsDir, L"設定プリセットを選択");
-    if (!picked) return;
+    if (ToLowerAscii(pickedPath.extension().wstring()) == L".pnssettings") {
+        std::filesystem::path recoveryBackup;
+        if (!ImportSettingsPresetFromFile(pickedPath, nullptr, &recoveryBackup)) {
+            std::vector<SilentDialogPath> paths = {
+                {localization::Text(L"dialog.path.source"), pickedPath.wstring()},
+            };
+            if (!recoveryBackup.empty()) {
+                paths.push_back({localization::Text(L"workspace.config_io.8d9f0b9e9d60"),
+                                 recoveryBackup.wstring()});
+            }
+            ShowSilentMessageDialog(hWnd, ui.menuSettings,
+                                    localization::Text(L"workspace.config_io.fc3104c42d86"),
+                                    SoftNoticeKind::Warning, paths);
+            return;
+        }
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.config_io.bb59d199ea60").c_str());
+        return;
+    }
+    // Legacy single-file presets remain readable. Newly saved presets are
+    // complete .pnssettings files and can be shared between installations.
     std::wstring err;
-    auto loaded = LoadWorkspaceConfigFromFile(std::filesystem::path(*picked), &err);
+    auto loaded = LoadWorkspaceConfigFromFile(pickedPath, &err);
     if (!loaded) {
-        std::wstring msg = L"設定プリセットの読み込みに失敗しました。";
-        if (!err.empty()) msg += L"\n\n理由:\n" + err;
-        ShowSilentMessageDialog(hWnd, ui.menuSettings, msg, SoftNoticeKind::Warning,
-                                {{L"", std::filesystem::path(*picked).wstring()}});
+        ShowSilentMessageDialog(hWnd, ui.menuSettings,
+                                localization::Text(L"workspace.config_io.fc3104c42d86"),
+                                SoftNoticeKind::Warning,
+                                {{localization::Text(L"dialog.path.source"), pickedPath.wstring()}});
         return;
     }
     WorkspaceConfig preset = *loaded;
@@ -775,7 +714,7 @@ void LoadSettingsPreset(HWND hWnd) {
     g_config = preset;
     ApplyConfigToUI(hWnd);
     PersistConfig();
-    ShowSoftNotice(hWnd, L"設定プリセットを読み込みました。");
+    ShowSoftNotice(hWnd, localization::Text(L"workspace.config_io.bb59d199ea60").c_str());
     } catch (const std::exception& ex) {
         AppendMainOperationExceptionLog("LoadSettingsPreset", ex.what());
         ReportMainOperationException(hWnd, L"設定プリセット読込");
@@ -786,9 +725,9 @@ void LoadSettingsPreset(HWND hWnd) {
 }
 
 namespace {
-struct SettingsBundleEntry { const wchar_t* name; std::filesystem::path path; };
+struct SettingsBundleEntry { std::wstring name; std::filesystem::path path; };
 struct SettingsFileSnapshot {
-    const wchar_t* name = L"";
+    std::wstring name;
     std::filesystem::path path;
     std::optional<std::string> bytes;
 };
@@ -796,10 +735,44 @@ struct SettingsFileSnapshot {
 static std::vector<SettingsBundleEntry> CurrentSettingsBundleEntries() {
     const std::filesystem::path root(g_workspaceRoot);
     const std::filesystem::path settings = root / L"__resource__" / L"__settings__";
-    return {{L"workspace.json", root / L"workspace.json"},
-            {L"user_palette.json", settings / L"user_palette.json"},
-            {L"tool_shortcuts.json", settings / L"tool_shortcuts.json"},
-            {L"schedule.json", settings / L"schedule.json"}};
+    const std::filesystem::path themes = root / L"__resource__" / L"__theme__";
+    std::vector<SettingsBundleEntry> entries = {
+        {L"workspace.json", root / L"workspace.json"},
+        {L"user_palette.json", settings / L"user_palette.json"},
+        {L"tool_shortcuts.json", settings / L"tool_shortcuts.json"},
+        {L"schedule.json", settings / L"schedule.json"},
+        {L"theme/theme.json", themes / L"theme.json"},
+    };
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(themes, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->is_symlink(ec) || !it->is_regular_file(ec)) { ec.clear(); continue; }
+        const std::wstring name = it->path().filename().wstring();
+        const bool valid = name.size() > 11 && name.rfind(L"theme_", 0) == 0 &&
+                           name.compare(name.size() - 5, 5, L".json") == 0 &&
+                           name.find_first_of(L"\\/:") == std::wstring::npos;
+        if (valid) entries.push_back({L"theme/" + name, it->path()});
+    }
+    return entries;
+}
+
+static bool IsThemeBundleEntryName(const std::wstring& name) {
+    if (name == L"theme/theme.json") return true;
+    if (name.rfind(L"theme/theme_", 0) != 0 || name.size() < 5 ||
+        name.compare(name.size() - 5, 5, L".json") != 0) return false;
+    const std::wstring file = name.substr(6);
+    return file.find_first_of(L"\\/:*?\"<>|") == std::wstring::npos &&
+           file.find(L"..") == std::wstring::npos;
+}
+
+static std::filesystem::path SettingsBundleEntryPath(const std::wstring& name) {
+    const std::filesystem::path root(g_workspaceRoot);
+    const std::filesystem::path settings = root / L"__resource__" / L"__settings__";
+    if (name == L"workspace.json") return root / L"workspace.json";
+    if (name == L"user_palette.json") return settings / L"user_palette.json";
+    if (name == L"tool_shortcuts.json") return settings / L"tool_shortcuts.json";
+    if (name == L"schedule.json") return settings / L"schedule.json";
+    if (IsThemeBundleEntryName(name)) return root / L"__resource__" / L"__theme__" / name.substr(6);
+    return {};
 }
 
 static bool ReadBundleBytes(const std::filesystem::path& path, std::string* out) {
@@ -1013,9 +986,9 @@ static bool ParseSettingsBundle(const std::string& input, std::map<std::wstring,
         size_t size = 0;
         try { size = static_cast<size_t>(std::stoull(line.substr(tab + 1))); } catch (...) { return false; }
         if (size > kMaxEntryBytes || size > input.size() - pos) return false;
-        if (name != "workspace.json" && name != "user_palette.json" &&
-            name != "tool_shortcuts.json" && name != "schedule.json") return false;
-        if (!out->emplace(UTF8ToWide(name), input.substr(pos, size)).second) return false;
+        const std::wstring wideName = UTF8ToWide(name);
+        if (SettingsBundleEntryPath(wideName).empty()) return false;
+        if (!out->emplace(wideName, input.substr(pos, size)).second) return false;
         pos += size;
         if (pos >= input.size() || input[pos++] != '\n') return false;
     }
@@ -1035,7 +1008,7 @@ static bool BuildCurrentSettingsBundle(std::string* out, std::wstring* outErr) {
     for (const auto& entry : CurrentSettingsBundleEntries()) {
         std::string bytes;
         if (!ReadBundleBytes(entry.path, &bytes)) continue;
-        if (std::wstring(entry.name) == L"workspace.json") hasWorkspace = true;
+        if (entry.name == L"workspace.json") hasWorkspace = true;
         *out += WideToUTF8(entry.name) + "\t" + std::to_string(bytes.size()) + "\n" + bytes + "\n";
     }
     if (!hasWorkspace) {
@@ -1065,7 +1038,7 @@ static bool WriteAtomicSettingsBytes(const std::filesystem::path& path,
     return atomic_write::AtomicWriteBytes(path, bytes.data(), bytes.size(), parent, parent, outErr);
 }
 
-static bool PickSettingsBundleSavePath(HWND owner, std::filesystem::path* outPath) {
+static bool PickSettingsPresetSavePath(HWND owner, std::filesystem::path* outPath) {
     if (!outPath) return false;
     outPath->clear();
     IFileSaveDialog* dialog = nullptr;
@@ -1081,7 +1054,7 @@ static bool PickSettingsBundleSavePath(HWND owner, std::filesystem::path* outPat
     };
     dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
     dialog->SetDefaultExtension(L"pnssettings");
-    dialog->SetFileName(L"pdf_note_user_settings_transfer.pnssettings");
+    dialog->SetFileName(L"pdf_note_settings_preset.pnssettings");
     FILEOPENDIALOGOPTIONS options{};
     if (SUCCEEDED(dialog->GetOptions(&options))) {
         options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOREADONLYRETURN | FOS_OVERWRITEPROMPT;
@@ -1111,7 +1084,7 @@ static bool PickSettingsBundleSavePath(HWND owner, std::filesystem::path* outPat
     return !outPath->empty();
 }
 
-static bool PickSettingsBundleOpenPath(HWND owner, std::filesystem::path* outPath) {
+static bool PickSettingsPresetOpenPath(HWND owner, std::filesystem::path* outPath) {
     if (!outPath) return false;
     outPath->clear();
     IFileOpenDialog* dialog = nullptr;
@@ -1212,14 +1185,27 @@ static bool ValidateSettingsBundleForImport(const std::map<std::wstring, std::st
     return true;
 }
 
-static std::vector<SettingsFileSnapshot> CaptureSettingsFileSnapshot() {
+static std::vector<SettingsFileSnapshot> CaptureSettingsFileSnapshot(const std::map<std::wstring, std::string>& incoming) {
     std::vector<SettingsFileSnapshot> snapshot;
+    std::set<std::wstring> seen;
     for (const auto& entry : CurrentSettingsBundleEntries()) {
         SettingsFileSnapshot s;
         s.name = entry.name;
         s.path = entry.path;
         std::string bytes;
         if (ReadBundleBytes(entry.path, &bytes)) s.bytes = std::move(bytes);
+        snapshot.push_back(std::move(s));
+        seen.insert(entry.name);
+    }
+    for (const auto& kv : incoming) {
+        if (!seen.insert(kv.first).second) continue;
+        const std::filesystem::path path = SettingsBundleEntryPath(kv.first);
+        if (path.empty()) continue;
+        SettingsFileSnapshot s;
+        s.name = kv.first;
+        s.path = path;
+        std::string bytes;
+        if (ReadBundleBytes(path, &bytes)) s.bytes = std::move(bytes);
         snapshot.push_back(std::move(s));
     }
     return snapshot;
@@ -1257,7 +1243,9 @@ static std::filesystem::path CreateSettingsImportBackupDir(const std::vector<Set
                  << (s.bytes ? "present" : "missing") << "\n";
         if (!s.bytes) continue;
         std::wstring writeErr;
-        const std::filesystem::path backupFile = backupDir / s.name;
+        std::wstring backupName = s.name;
+        std::replace(backupName.begin(), backupName.end(), L'/', L'_');
+        const std::filesystem::path backupFile = backupDir / backupName;
         if (!atomic_write::AtomicWriteBytes(backupFile, s.bytes->data(), s.bytes->size(),
                                             backupDir, backupDir, &writeErr)) {
             if (outErr) *outErr = L"could not write settings import backup: " + writeErr;
@@ -1298,13 +1286,15 @@ static bool RestoreSettingsFileSnapshot(const std::vector<SettingsFileSnapshot>&
 }
 } // namespace
 
-bool ExportAllUserSettingsToFile(const std::filesystem::path& outputPath, std::wstring* outErr) {
+bool ExportSettingsPresetToFile(const std::filesystem::path& outputPath, std::wstring* outErr) {
     std::string bundle;
     if (!BuildCurrentSettingsBundle(&bundle, outErr)) return false;
     return WriteAtomicSettingsBytes(outputPath, bundle, outErr);
 }
 
-bool ImportAllUserSettingsFromFile(const std::filesystem::path& inputPath, std::wstring* outErr) {
+bool ImportSettingsPresetFromFile(const std::filesystem::path& inputPath, std::wstring* outErr,
+                                  std::filesystem::path* outRecoveryBackup) {
+    if (outRecoveryBackup) outRecoveryBackup->clear();
     if (g_workspaceRoot.empty()) {
         if (outErr) *outErr = L"workspace is not open";
         return false;
@@ -1319,17 +1309,20 @@ bool ImportAllUserSettingsFromFile(const std::filesystem::path& inputPath, std::
     bool canUseRawWorkspaceJson = false;
     if (!ValidateSettingsBundleForImport(entries, &imported, &canUseRawWorkspaceJson, outErr)) return false;
 
-    const auto snapshot = CaptureSettingsFileSnapshot();
+    const auto snapshot = CaptureSettingsFileSnapshot(entries);
     const std::filesystem::path backupDir = CreateSettingsImportBackupDir(snapshot, outErr);
     if (backupDir.empty()) return false;
+    if (outRecoveryBackup) *outRecoveryBackup = backupDir;
 
     std::wstring applyErr;
     bool applied = false;
     try {
         int auxWrites = 0;
         for (const auto& entry : CurrentSettingsBundleEntries()) {
-            const std::wstring name(entry.name);
-            if (name == L"workspace.json") continue;
+            const std::wstring& name = entry.name;
+            // Theme entries are additive. Removing a custom theme merely because a
+            // different preset does not reference it would lose user data.
+            if (name == L"workspace.json" || IsThemeBundleEntryName(name)) continue;
             const auto importedEntry = entries.find(name);
             fault_injection::MaybeThrow(L"settings_import_before_aux_write");
             if (importedEntry == entries.end()) {
@@ -1345,6 +1338,18 @@ bool ImportAllUserSettingsFromFile(const std::filesystem::path& inputPath, std::
             }
             ++auxWrites;
             if (auxWrites == 1) fault_injection::MaybeThrow(L"settings_import_after_first_aux_write");
+        }
+        if (applyErr.empty()) {
+            for (const auto& kv : entries) {
+                if (!IsThemeBundleEntryName(kv.first)) continue;
+                const std::filesystem::path target = SettingsBundleEntryPath(kv.first);
+                fault_injection::MaybeThrow(L"settings_import_before_aux_write");
+                if (target.empty() || !WriteAtomicSettingsBytes(target, kv.second, &applyErr)) {
+                    applyErr = L"could not write imported theme file: " + target.wstring() + L"\n" + applyErr;
+                    break;
+                }
+                ++auxWrites;
+            }
         }
         if (applyErr.empty()) {
             fault_injection::MaybeThrow(L"settings_import_before_workspace_write");
@@ -1380,48 +1385,10 @@ bool ImportAllUserSettingsFromFile(const std::filesystem::path& inputPath, std::
         return false;
     }
 
+    LoadThemeConfig(g_workspaceRoot);
     g_config = LoadWorkspaceConfig(g_workspaceRoot);
     ApplyConfigToUI(nullptr);
     return true;
-}
-
-void ExportAllUserSettings(HWND hWnd) {
-    if (g_workspaceRoot.empty()) {
-        ShowSoftNotice(hWnd, localization::Text(L"workspace.config_io.55c168692754").c_str(),
-                       SoftNoticeKind::Warning);
-        return;
-    }
-    std::filesystem::path outputPath;
-    if (!PickSettingsBundleSavePath(hWnd, &outputPath)) return;
-    std::wstring err;
-    if (!ExportAllUserSettingsToFile(outputPath, &err)) {
-        std::wstring msg = localization::Text(L"workspace.config_io.59f0b7d1f221").c_str();
-        if (!err.empty()) msg += L"\n\n" + err;
-        ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
-        return;
-    }
-    ShowSoftNotice(hWnd,
-                   (localization::Text(L"workspace.config_io.d573cf2c8ffb").c_str()) +
-                   outputPath.wstring());
-}
-
-void ImportAllUserSettings(HWND hWnd) {
-    if (g_workspaceRoot.empty()) {
-        ShowSoftNotice(hWnd, localization::Text(L"workspace.config_io.55c168692754").c_str(),
-                       SoftNoticeKind::Warning);
-        return;
-    }
-    std::filesystem::path inputPath;
-    if (!PickSettingsBundleOpenPath(hWnd, &inputPath)) return;
-    std::wstring err;
-    if (!ImportAllUserSettingsFromFile(inputPath, &err)) {
-        std::wstring msg = localization::Text(L"workspace.config_io.fc3104c42d86").c_str();
-        if (!err.empty()) msg += L"\n\n" + err;
-        ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
-        return;
-    }
-    ShowSoftNotice(hWnd,
-                   localization::Text(L"workspace.config_io.bb59d199ea60").c_str());
 }
 
 void SaveAllManual(HWND hWnd) {
@@ -1545,12 +1512,14 @@ void ShowRecoveryDialog(HWND hWnd) {
         if (ShowSilentDialog(hWnd, confirm) != SilentDialogResult::Yes) return;
     }
 
-    auto pickedMeta = PickFileUnderLocked(hWnd, backupRoot,
-        localization::Text(L"workspace.config_io.77e6fe1774c0").c_str());
-    if (!pickedMeta) return;
+    std::filesystem::path pickedMeta;
+    if (!PromptBackupList(hWnd, backupRoot, ui.menuRecovery,
+                          localization::Text(L"dialog.common.575a7e91c663"), pickedMeta)) {
+        return;
+    }
 
     std::filesystem::path restoredDest;
-    if (!file_output::RestoreFromBackupMeta(hWnd, std::filesystem::path(*pickedMeta), &restoredDest)) {
+    if (!file_output::RestoreFromBackupMeta(hWnd, pickedMeta, &restoredDest)) {
         return;
     }
 
@@ -1598,7 +1567,10 @@ void ShowRestoreBackupListDialogAndExecute(HWND hWnd) {
     std::filesystem::path backupRoot = resource / L"__escape__" / L"backup";
     std::filesystem::path pickedMeta;
     
-    if (PromptRestoreBackupList(hWnd, backupRoot, pickedMeta)) {
+    if (PromptBackupList(hWnd, backupRoot,
+                         localization::Text(L"dialog.common.95d9abd66237"),
+                         localization::Text(L"dialog.common.575a7e91c663"),
+                         pickedMeta)) {
         std::filesystem::path restoredDest;
         if (!file_output::RestoreFromBackupMeta(hWnd, pickedMeta, &restoredDest)) {
             return;
@@ -1633,11 +1605,11 @@ void ShowDeleteSavedBackupDialog(HWND hWnd) {
     }
 
     std::filesystem::path backupRoot = std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__" / L"backup";
-    auto pickedMeta = PickFileUnderLocked(hWnd, backupRoot,
-        localization::Text(L"workspace.config_io.8e84626c6132").c_str());
-    if (!pickedMeta) return;
-
-    std::filesystem::path selected(*pickedMeta);
+    std::filesystem::path selected;
+    if (!PromptBackupList(hWnd, backupRoot, ui.menuDeleteBackup,
+                          localization::Text(L"menu.common.delete"), selected)) {
+        return;
+    }
     const std::wstring fileName = selected.filename().wstring();
     if (fileName.size() < 9 || fileName.rfind(L".meta.txt") != fileName.size() - 9) {
         ShowMainMessageDialog(

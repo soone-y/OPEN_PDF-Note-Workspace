@@ -1,6 +1,7 @@
 // file: help.cpp
 #include "help/help.h"
 
+#include "bridge/view_bridge.h"
 #include "core/app_core.h"
 #include "core/localization.h"
 #include "core/path_safety.h"
@@ -9,8 +10,10 @@
 #include "workspace/workspace_actions.h"
 
 #include <shellapi.h>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <vector>
 
@@ -38,6 +41,8 @@ struct HelpDialogCtx {
     int currentSection = 0;
     size_t nextSearchOffset = 0;
     int nextGlobalSearchSection = 0;
+    size_t searchMatchIndex = 0;
+    bool searchUsesAllSections = false;
     bool ownerRestored = false;
     bool done = false;
 };
@@ -46,7 +51,9 @@ struct PdfInfoDialogCtx {
     HWND owner = nullptr;
     HWND edit = nullptr;
     HWND btnCopy = nullptr;
+    HWND btnCopyPaths = nullptr;
     HWND btnClose = nullptr;
+    std::wstring pathClipboardText;
     bool done = false;
 };
 
@@ -67,6 +74,32 @@ static std::wstring NormalizeNewlines(const std::wstring& s) {
         }
     }
     return out;
+}
+
+static bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
+    if (text.empty()) return false;
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) return false;
+    void* destination = GlobalLock(memory);
+    if (!destination) {
+        GlobalFree(memory);
+        return false;
+    }
+    memcpy(destination, text.c_str(), bytes);
+    GlobalUnlock(memory);
+    if (!OpenClipboard(owner)) {
+        GlobalFree(memory);
+        return false;
+    }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+        CloseClipboard();
+        GlobalFree(memory);
+        return false;
+    }
+    CloseClipboard();
+    return true;
 }
 
 // The in-app help is intentionally a quick, read-only reference rather than a
@@ -244,7 +277,7 @@ static std::wstring DefaultHelpTextJa() {
     return std::wstring(
         L"■ 概要\n"
         L"このソフトは、PDF に対するノート作成や注釈編集を安全に扱うためのローカル専用ツールです。\n"
-        L"編集中に原本 PDF を直接書き換えず、まずワークスペース内へ保存してから統合します。\n"
+        L"編集内容は内部で自動保護し、必要な時だけ原本へ安全に保存します。\n"
         L"\n"
         L"■ 試験的な機能\n"
         L"- 数式の扱い（MathBox 入力、ノート内の数式表示を含む）は試験的です。\n"
@@ -255,17 +288,17 @@ static std::wstring DefaultHelpTextJa() {
     ) + OfficeConversionHelpTextJa() +
         L"■ まず知っておきたいこと\n"
         L"- 原本不変: 編集中は原本 PDF / 元ノートを直接上書きしません。\n"
-        L"- ステージ保存: 変更はまず一時領域に保存されます。\n"
-        L"- 統合保存: Ctrl+S、終了時、または保存メニューから原本へ反映します。\n"
+        L"- 自動作業保護: 変更は原本とは別に内部で保護されます。\n"
+        L"- 作業保存: Ctrl+S、保存メニュー、通常終了、または出力の直前に原本へ反映します。\n"
         L"- バックアップ: 原本へ統合する前にバックアップを作成します。\n"
         L"\n"
         L"■ 保存の考え方\n"
-        L"- ステージ: まだ原本へ反映していない編集内容です。\n"
-        L"- 統合: ステージを原本へ反映して保存する処理です。\n"
-        L"- ノートの自動stage保護: 行移動・フォーカス離脱・保存前・6〜20秒無操作で stage に反映します。\n"
-        L"- 注釈の自動stage保護: 設定した間隔で stage に反映します。\n"
-        L"- 自動統合: 現在は使っていません。原本反映は Ctrl+S / 保存メニュー / 終了確認で行います。\n"
-        L"- 原本へ保存した後の undo/redo 履歴は保持対象外です。保存後に戻したい場合は復元/バックアップを使います。\n"
+        L"- 自動作業保護: 原本へ反映していない編集内容を、内部の復旧用データとして保持します。\n"
+        L"- 作業保存: 自動作業保護の内容を確認して原本へ安全に反映する処理です。\n"
+        L"- ノートの自動作業保護: 行移動・フォーカス離脱・保存前・6〜20秒無操作で更新します。\n"
+        L"- 注釈の自動作業保護: 設定した間隔で更新します。\n"
+        L"- 切替時: 原本を書き換えず、自動作業保護だけを更新します。\n"
+        L"- 原本へ保存した後の undo/redo 履歴は保持対象外です。PDF位置または最終オープン時刻を戻す場合は復元メニューを使います。バックアップは復元メニューの一覧から復元または個別に削除できます。\n"
         L"\n"
         L"■ ノート形式\n"
         L"- 新規ノートは本ソフトのノート形式である .clro として作成されます。\n"
@@ -275,9 +308,9 @@ static std::wstring DefaultHelpTextJa() {
         L"\n"
         L"■ 推奨される保存手順\n"
         L"1) ノートや注釈を編集する\n"
-        L"2) 自動stage保護で途中状態を保持する\n"
-        L"3) 区切りのよいタイミングで Ctrl+S または保存メニューから統合する\n"
-        L"4) 現在のノートだけを保存したい場合は、ノート単体保存を使う\n"
+        L"2) 自動作業保護で途中状態を保持する\n"
+        L"3) 区切りのよいタイミングで Ctrl+S または「保存 → 作業保存」を実行する\n"
+        L"4) 必要な場合だけ「保存 → 保存状態を確認」で保護中の作業を確認する\n"
         L"\n"
         L"■ 安全性について\n"
         L"- 原本への保存は、別ファイルへ完全に書き出してから置換する方式です。\n"
@@ -290,31 +323,23 @@ static std::wstring DefaultHelpTextJa() {
         L"- 必要に応じてパスワード入力で再オープンできますが、利用可否の判断そのものを置き換えるものではありません。\n"
         L"- OS標準OCR、スクリーンショット、他のPDFビューアや外部ツールによる取得・出力は、このアプリでは制御しません。\n"
         L"\n"
-        L"■ 差分管理\n"
-        L"メニュー: 操作 → 差分管理... / 保存 → 差分管理...\n"
-        L"- 採用: 原本を変えず、この stage を現在の採用状態にします。\n"
-        L"- 元へ統合: stage を原本へ反映し、成功時に stage を削除します。\n"
-        L"- 破棄: stage だけを削除します。原本は変わりません。\n"
+        L"■ 保存状態の確認\n"
+        L"メニュー: 保存 → 保存状態を確認\n"
+        L"- 採用: 原本を変えず、保護中の作業を現在の採用状態にします。\n"
+        L"- 原本へ保存: 保護中の作業を原本へ反映し、成功時に内部データを整理します。\n"
+        L"- 破棄: 保護中の作業だけを削除します。原本は変わりません。\n"
         L"\n"
         L"■ 復元 / バックアップ\n"
-        L"メニュー: 保存 → 復元/バックアップ...\n"
-        L"- [はい] バックアップから復元: 保存済みバックアップを復元します。\n"
-        L"- [いいえ] 未統合の差分を統合: 現在採用中の stage を原本へ反映します。\n"
+        L"メニュー: 復元 → PDF位置 / 最終オープン時刻\n"
+        L"- PDF位置と最終オープン時刻は、削除または復元を選べます。\n"
+        L"- ファイル最終オープン履歴では、回次ごとの最後に開いたPDF／ノートの記録を削除または復元できます。バックアップは一覧から復元または個別に削除できます。\n"
         L"\n"
         L"復元前に確認してください:\n"
-        L"- 未統合のノートや注釈があると、復元後に原本だけ古い状態へ戻ることがあります。\n"
-        L"- 必要なら差分管理で内容を確認するか、先に Ctrl+S で統合してください。\n"
-        L"- 復元対象は .meta.txt で選びます。対象ファイルを確認してから実行してください。\n"
-        L"\n"
-        L"復元の手順:\n"
-        L"1) 保存 → 復元/バックアップ... を開く\n"
-        L"2) [はい] バックアップから復元する を選ぶ\n"
-        L"3) __resource__/__escape__/backup 配下の .meta.txt を選ぶ\n"
-        L"4) 記録された保存先 (dest) へ復元する\n"
-        L"5) 現在開いている対象なら画面表示も再読込される\n"
+        L"- 保護中のノートや注釈があると、復元後に原本だけ古い状態へ戻ることがあります。\n"
+        L"- 必要なら保存メニューの「保存状態を確認」で内容を確認するか、先に Ctrl+S で保存してください。\n"
         L"\n"
         L"■ 保存先の目安\n"
-        L"- ステージ: __resource__/__tmp__/__stage__/\n"
+        L"- 自動作業保護: __resource__/__tmp__/__stage__/\n"
         L"- バックアップ本体: __resource__/__escape__/backup/.../*.bak\n"
         L"- バックアップ情報: __resource__/__escape__/backup/.../*.bak.meta.txt\n"
         L"- ノート保存失敗時の退避: __resource__/__escape__/note_recovery/\n"
@@ -348,7 +373,7 @@ static std::wstring DefaultHelpTextEn() {
     return std::wstring(
         L"■ Overview\n"
         L"This app is a local-only tool for working safely with PDF notes and annotations.\n"
-        L"While editing, it avoids modifying the original PDF directly and stages changes first.\n"
+        L"While editing, it protects work internally and updates original files only when needed.\n"
         L"\n"
         L"■ Experimental Features\n"
         L"- Math handling, including MathBox input and note-side math rendering, is experimental.\n"
@@ -359,17 +384,17 @@ static std::wstring DefaultHelpTextEn() {
     ) + OfficeConversionHelpTextEn() +
         L"■ What To Know First\n"
         L"- Original files are not overwritten during editing.\n"
-        L"- Changes are first saved into a staged area.\n"
-        L"- Ctrl+S, exit, or the Save menu integrates staged changes into the originals.\n"
+        L"- Changes are protected internally before the original files are updated.\n"
+        L"- Ctrl+S, Save Work, normal exit, and pre-output saving update the originals.\n"
         L"- A backup is created before integration.\n"
         L"\n"
         L"■ How Saving Works\n"
-        L"- Stage: edits saved locally but not yet applied to the original files.\n"
-        L"- Integrate: apply staged edits to the original files.\n"
-        L"- Note auto-stage protection: stage on line move, focus leave, save, or 6-20s idle.\n"
-        L"- Annotation auto-stage protection: stage on the configured background interval.\n"
-        L"- Auto-integrate is currently unused. Originals are updated only by Ctrl+S, Save, or exit confirmation.\n"
-        L"- Undo/redo history is not retained after saving to the original files. Use Recovery / Backups if you need to return to the previous saved state.\n"
+        L"- Automatic work protection: local recovery data that has not yet been applied to the original files.\n"
+        L"- Save Work: safely apply protected work to the original files.\n"
+        L"- Note protection updates on line move, focus leave, save, or 6-20s idle.\n"
+        L"- Annotation protection updates on the configured background interval.\n"
+        L"- Switching documents or root folders only updates protected work; it does not write original files.\n"
+        L"- Undo/redo history is not retained after saving to the original files. Use Restore for PDF-position or last-open-time recovery; backups can be restored or individually deleted from the Restore menu.\n"
         L"\n"
         L"■ Note Formats\n"
         L"- New notes are created as .clro, the application's note format, by default.\n"
@@ -379,9 +404,9 @@ static std::wstring DefaultHelpTextEn() {
         L"\n"
         L"■ Recommended Flow\n"
         L"1) Edit notes or annotations\n"
-        L"2) Let auto-stage protection keep intermediate work\n"
-        L"3) Integrate with Ctrl+S or the Save menu at safe checkpoints\n"
-        L"4) Use note-only save when you want to write only the current note\n"
+        L"2) Let automatic work protection keep intermediate work\n"
+        L"3) Use Ctrl+S or Save > Save Work at safe checkpoints\n"
+        L"4) Use Save > Review Save Status only when you need to inspect protected work\n"
         L"\n"
         L"■ Safety\n"
         L"- Original files are replaced only after a full temporary write completes.\n"
@@ -394,31 +419,23 @@ static std::wstring DefaultHelpTextEn() {
         L"- Reopening with a password is supported when needed, but that does not replace the need to follow the usage terms themselves.\n"
         L"- This app does not control OS OCR, screenshots, other PDF viewers, or external tools.\n"
         L"\n"
-        L"■ Diff Manager\n"
-        L"Menu: Operations -> Diff Manager... / Save -> Diff Manager...\n"
-        L"- Activate: mark a staged version as the current one without writing to the original.\n"
-        L"- Integrate: apply the stage to the original file and remove it on success.\n"
-        L"- Discard: remove only the stage. The original file is unchanged.\n"
+        L"■ Review Save Status\n"
+        L"Menu: Save -> Review Save Status\n"
+        L"- Activate: mark protected work as current without writing to the original.\n"
+        L"- Save to original: apply protected work to the original file and clean it up on success.\n"
+        L"- Discard: remove only the protected work. The original file is unchanged.\n"
         L"\n"
-        L"■ Recovery / Backups\n"
-        L"Menu: Save -> Recovery / Backups...\n"
-        L"- [Yes] Restore from backup: restore a saved backup.\n"
-        L"- [No] Integrate staged diffs: apply the currently adopted stage to the original file.\n"
+        L"■ Restore / backups\n"
+        L"Menu: Restore -> PDF Position / Last Open Time\n"
+        L"- PDF position and last-open time can be deleted or restored.\n"
+        L"- File last-open history can delete or restore each session's last-open PDF and note record. Backups can be restored or individually deleted from their list.\n"
         L"\n"
         L"Check before restoring:\n"
-        L"- If you still have unintegrated note or annotation diffs, restoring may move only the original file back.\n"
-        L"- Review Diff Manager first, or integrate with Ctrl+S if that is your intent.\n"
-        L"- Choose the correct .meta.txt file for the item you want to restore.\n"
-        L"\n"
-        L"Restore steps:\n"
-        L"1) Open Save -> Recovery / Backups...\n"
-        L"2) Choose [Yes] Restore from backup\n"
-        L"3) Select a .meta.txt file under __resource__/__escape__/backup\n"
-        L"4) Restore to the recorded destination (dest)\n"
-        L"5) If the restored target is open, the view reloads\n"
+        L"- If protected note or annotation work remains, restoring may move only the original file back.\n"
+        L"- Review save status from Save, or save with Ctrl+S if that is your intent.\n"
         L"\n"
         L"■ Typical Locations\n"
-        L"- Stage: __resource__/__tmp__/__stage__/\n"
+        L"- Automatic work protection: __resource__/__tmp__/__stage__/\n"
         L"- Backup data: __resource__/__escape__/backup/.../*.bak\n"
         L"- Backup metadata: __resource__/__escape__/backup/.../*.bak.meta.txt\n"
         L"- Recovery copies for note save failures: __resource__/__escape__/note_recovery/\n"
@@ -636,30 +653,30 @@ static std::wstring HelpSectionBody(int section, bool english) {
                L"\r\n\r\n左のカテゴリから詳しい説明を選べます。検索欄では現在のカテゴリ内を検索します。";
     case kHelpSectionSoftware:
         return english
-            ? L"■ Main application\r\n- Create and open workspaces, edit notes and PDF annotations, save, recover, and export.\r\n- It works locally and does not use online conversion or update checks.\r\n\r\n■ Read-only Viewer\r\n- Opens bundled Markdown documents and files for reference without using the file association.\r\n- Use Help > Detailed guide when you need the longer bundled documents.\r\n"
-            : L"■ メインソフト\r\n- ワークスペースを開き、ノート・PDF注釈を編集、保存、復元、出力します。\r\n- オンライン変換・更新確認・外部通信は使いません。\r\n\r\n■ 読み取り専用Viewer\r\n- 同梱Markdownなどを、関連付けに頼らず参照するための別ソフトです。\r\n- 長い案内は「詳細な案内」から開きます。\r\n";
+            ? L"■ Main application\r\n- Choose a root folder, edit notes and PDF annotations, save, recover, and export.\r\n- It works locally and does not use online conversion or update checks.\r\n\r\n■ Read-only Viewer\r\n- Opens bundled Markdown documents and files for reference without using the file association.\r\n- Use Help > Detailed guide when you need the longer bundled documents.\r\n"
+            : L"■ メインソフト\r\n- ルートフォルダを指定し、ノート・PDF注釈を編集、保存、復元、出力します。\r\n- オンライン変換・更新確認・外部通信は使いません。\r\n\r\n■ 読み取り専用Viewer\r\n- 同梱Markdownなどを、関連付けに頼らず参照するための別ソフトです。\r\n- 長い案内は「詳細な案内」から開きます。\r\n";
     case kHelpSectionFiles:
         return english
-            ? L"■ Workspace and files\r\n- File menu: open/reload a workspace; create lectures, sessions, and .clro notes; import files or folders.\r\n- Drop one or more files onto the PDF or note list to copy them into the current session. Folders cannot be dropped. Imported files are sorted automatically by format.\r\n- Operations: rename or move the current PDF/note only after selecting it.\r\n- Organize session files groups supported files in a session; review the result before saving.\r\n\r\n■ Formats\r\n- PDF and .clrop annotations are a pair. .clro/.md are notes; .txt/.csv are plain text.\r\n- UNC paths and reparse-point folders are not used as workspace roots, so local data stays predictable.\r\n"
-            : L"■ ワークスペースとファイル\r\n- ファイルメニューから、ワークスペースを開く／再読込する、講義・回次・.clroノートを作る、ファイルやフォルダを取り込みます。\r\n- PDF欄またはノート欄へ、1個以上のファイルをドロップすると現在の回次へコピーして取り込みます。フォルダーのドロップは非対応です。取り込み後は形式別に自動分類されます。\r\n- 操作メニューの名前変更・移動は、選択中のPDFまたはノートだけを対象にします。\r\n- 回次のファイル整理は対応形式をまとめます。保存前に結果を確認してください。\r\n\r\n■ 形式\r\n- PDFと.clropは組です。.clro/.mdはノート、.txt/.csvは書式なしテキストです。\r\n- UNCや再解析ポイントのフォルダは、保存先を取り違えないためワークスペースのルートに使いません。\r\n";
+            ? L"■ Root folder and files\r\n- File menu: choose/reload the root folder; create lectures, sessions, and .clro notes; import files or folders.\r\n- Drop one or more files onto the PDF or note list to copy them into the current session. Folders cannot be dropped. Imported files are sorted automatically by format.\r\n- Operations: rename or move the current PDF/note only after selecting it.\r\n- Organize session files groups supported files in a session; review the result before saving.\r\n\r\n■ Formats\r\n- PDF and .clrop annotations are a pair. .clro/.md are notes; .txt/.csv are plain text.\r\n- UNC paths and reparse-point folders are not used as root folders, so local data stays predictable.\r\n"
+            : L"■ ルートフォルダとファイル\r\n- ファイルメニューから、ルートフォルダを指定／再読み込みする、講義・回次・.clroノートを作る、ファイルやフォルダを取り込みます。\r\n- PDF欄またはノート欄へ、1個以上のファイルをドロップすると現在の回次へコピーして取り込みます。フォルダーのドロップは非対応です。取り込み後は形式別に自動分類されます。\r\n- 操作メニューの名前変更・移動は、選択中のPDFまたはノートだけを対象にします。\r\n- 回次のファイル整理は対応形式をまとめます。保存前に結果を確認してください。\r\n\r\n■ 形式\r\n- PDFと.clropは組です。.clro/.mdはノート、.txt/.csvは書式なしテキストです。\r\n- UNCや再解析ポイントのフォルダは、保存先を取り違えないためルートフォルダに使いません。\r\n";
     case kHelpSectionMenus:
         return english
-            ? L"■ Menu map\r\n- File: create, import, open, reload, organize, and open folders.\r\n- Edit: undo/redo the active editing history.\r\n- Operations: viewer, local conversion, blank PDF, rename/move, and Diff Manager.\r\n- View: zoom, layout, page navigation, and note wrapping.\r\n- Save: integrate changes, save a note, inspect stages, recover, or manage backups.\r\n- Export: create separate PDF, image, text, Markdown, HTML, or combined outputs.\r\n- Settings: change behavior deliberately; Help: reference and diagnostics.\r\n"
-            : L"■ メニューの地図\r\n- ファイル: 作成、取込み、開く、再読込、整理、フォルダを開く。\r\n- 編集: 現在の編集履歴を元に戻す／やり直す。\r\n- 操作: Viewer、ローカル変換、空白PDF、名前変更・移動、差分管理。\r\n- 表示: 拡大率、画面構成、ページ移動、ノート折返し。\r\n- 保存: 統合保存、ノート保存、stage確認、復元、バックアップ管理。\r\n- 出力: PDF、画像、テキスト、Markdown、HTML、まとめて出力を別ファイルで作成。\r\n- 設定: 動作を意図して変える項目。ヘルプ: 参照と診断です。\r\n";
+            ? L"■ Menu map\r\n- File: create/import items, choose or reload the root folder, organize files, and open folders in Explorer.\r\n- Edit: undo/redo, rename, or move the current PDF or note.\r\n- View: closing, page navigation, zoom, scrolling, readability, note wrapping, and the left column.\r\n- Save: save the current work to the original or review protected work. Restore contains protected position/history recovery.\r\n- Output: quick PDF and TXT-note output, or the output dialog for PDF, PNG, TXT, Markdown, and HTML.\r\n- Tools: global memos, the read-only viewer, local conversion, and blank-PDF creation.\r\n- Search opens its dialog directly. Settings includes the unified dialog, palette, and presets. Help provides reference and diagnostics.\r\n"
+            : L"■ メニューの地図\r\n- ファイル: 作成・取込み、ルートフォルダの指定／再読込み、整理、エクスプローラーで開く操作です。\r\n- 編集: 現在のPDFまたはノートの取り消し／やりなおし、名前変更、移動です。\r\n- 表示: 閉じる、ページ移動、ズーム、スクロール、可視性、ノート折り返し、左カラムです。\r\n- 保存: 作業保存で原本へ安全に保存し、必要な場合に保存状態を確認します。復元には位置・履歴の復元をまとめます。\r\n- 出力: 簡単PDFと簡単ノート（txt）、またはPDF・PNG・txt・Markdown・HTMLを扱う出力ダイアログです。\r\n- ツール: 全体メモ、閲覧専用ソフト、ローカル変換、白紙PDF作成です。\r\n- 検索はダイアログを直接開きます。設定は統合ダイアログ、パレット、プリセットをまとめます。ヘルプは参照と診断です。\r\n";
     case kHelpSectionExtensions:
         return NormalizeNewlines(CustomExtensionHelpText());
     case kHelpSectionSaving:
         return english
-            ? L"■ Safe saving\r\n- Editing does not directly overwrite the original PDF or note.\r\n- Auto-stage protection keeps intermediate edits before integration.\r\n- Ctrl+S and the Save menu integrate staged changes after a safe write and backup.\r\n\r\n■ Recovery\r\n- Use Save > Recovery / Backups to restore a saved backup or integrate adopted staged changes.\r\n- Review staged changes before restoring when you have unfinished work.\r\n\r\n■ Typical locations\r\n- Stage: __resource__/__tmp__/__stage__/\r\n- Backups: __resource__/__escape__/backup/\r\n- Note recovery: __resource__/__escape__/note_recovery/\r\n"
-            : L"■ 安全な保存\r\n- 編集中に元の PDF やノートを直接上書きしません。\r\n- 自動 stage 保護により、統合前の編集途中も保持します。\r\n- Ctrl+S と保存メニューは、安全な書込みとバックアップ作成の後に stage を原本へ統合します。\r\n\r\n■ 復元\r\n- 「保存 > 復元/バックアップ...」から保存済みバックアップの復元、または採用済み stage の統合を行えます。\r\n- 未完了の作業があるときは、復元前に差分内容を確認してください。\r\n\r\n■ 主な保存先\r\n- stage: __resource__/__tmp__/__stage__/\r\n- バックアップ: __resource__/__escape__/backup/\r\n- ノート復旧: __resource__/__escape__/note_recovery/\r\n";
+            ? L"■ Safe saving\r\n- Editing does not directly overwrite the original PDF or note.\r\n- Automatic work protection keeps intermediate edits for recovery.\r\n- Ctrl+S, Save > Save Work, normal exit, and pre-output processing create a backup and safely save to the original.\r\n- Document/session switching keeps protected work and does not write originals.\r\n\r\n■ Restore\r\n- Restore > PDF Position and Restore > Last Open Time can delete or restore the corresponding protected state.\r\n- Restore > File Last-Open History can delete or restore each session's last-open PDF and note record. Restore > Backups lists saved backups for restoration or individual deletion.\r\n- Review Save Status before restoring when protected work remains.\r\n\r\n■ Typical locations\r\n- Internal work protection: __resource__/__tmp__/__stage__/\r\n- Backups: __resource__/__escape__/backup/\r\n- Note recovery: __resource__/__escape__/note_recovery/\r\n"
+            : L"■ 安全な保存\r\n- 編集中に元の PDF やノートを直接上書きしません。\r\n- 自動作業保護により、編集途中も復旧できるよう保持します。\r\n- Ctrl+S、「保存 > 作業保存」、通常終了、出力の直前には、バックアップを作成してから安全に原本へ保存します。\r\n- ファイル・回次・授業の切替では、保護中の作業を残し、原本は書き換えません。\r\n\r\n■ 復元\r\n- 「復元 > PDF位置」「復元 > 最終オープン時刻」では、対応する保護状態を削除または復元できます。\r\n- 「復元 > ファイル最終オープン履歴」では、回次ごとの最後に開いたPDF／ノートの記録を削除または復元できます。「復元 > バックアップ」では、保存済みバックアップを一覧から復元または個別に削除できます。\r\n- 保護中の作業があるときは、復元前に「保存状態を確認」を開いてください。\r\n\r\n■ 主な保存先\r\n- 内部作業保護: __resource__/__tmp__/__stage__/\r\n- バックアップ: __resource__/__escape__/backup/\r\n- ノート復旧: __resource__/__escape__/note_recovery/\r\n";
     case kHelpSectionOutput:
         return english
-            ? L"■ Quick and detailed export\r\n- Quick export creates an annotation PDF or a note text/Markdown/HTML file with standard choices.\r\n- Detailed export lets you choose PDF pages, PNG, note format, or PDF + note together.\r\n- Settings export/import transfers settings between versions; it is not a workspace backup.\r\n\r\n■ Safety\r\n- Export creates a separate result. Check the destination and result; protected PDFs can restrict copy and export.\r\n"
-            : L"■ 簡単出力と詳細出力\r\n- 簡単出力は、標準的な選択で注釈入りPDFやノートのtxt／Markdown／HTMLを作ります。\r\n- 詳細出力では、PDFページ、PNG、ノート形式、PDFとノートのまとめ出力を選びます。\r\n- 設定の書出し／読込みはバージョン移行用で、ワークスペースのバックアップではありません。\r\n\r\n■ 安全性\r\n- 出力は別の結果ファイルを作ります。保存先と結果を確認してください。保護付きPDFではコピー・出力が制限されます。\r\n";
+            ? L"■ Quick output\r\n- Quick PDF exports the current PDF with annotations. Configure its scale and annotation options in Output Dialog > Save as Quick PDF.\r\n- Quick Note exports the current note as TXT; TXT is the default quick-note format. Configure its text options in Output Dialog > Save as Quick Note. View quick output settings opens a compact summary that can be closed immediately.\r\n\r\n■ Output dialog\r\n- Choose annotated PDF, selected-page PDF, PNG, TXT, Markdown, or HTML. Set a destination folder and output file name, then export that one output directly or add multiple settings to the queue and select Export.\r\n- Select a reservation to change its destination or file name, then choose Update reservation. Export selected runs only that reservation. Output safely integrates current edits first; the open original and duplicate queued destinations are rejected.\r\n- The results dialog can reveal output in Explorer. PDFs can open in the read-only viewer; other formats open in their associated application.\r\n\r\n■ Safety\r\n- Output creates a separate result. Existing output files require explicit overwrite confirmation; protected PDFs can restrict copy and export.\r\n"
+            : L"■ 簡単出力\r\n- 簡単PDFは、現在のPDFを注釈入りの別ファイルへ出力します。出力ダイアログで倍率・注釈を設定し「簡単PDFに設定」を選ぶと、その設定を使います。\r\n- 簡単ノートは、現在のノートをtxtで出力します。簡単出力の規定形式はtxtです。出力ダイアログでテキストの設定を保存できます。「簡単出力設定を見る」では、現在の設定をすぐ閉じられる小さなウィンドウで確認できます。\r\n\r\n■ 出力ダイアログ\r\n- 注釈PDF、ページ指定PDF、PNG、txt、Markdown、HTMLを選べます。保存先フォルダと出力ファイル名を指定し、予約がなければその1件を「出力」で実行できます。複数の設定は予約に追加して「出力」でまとめて実行できます。\r\n- 予約を選び、保存先・ファイル名を変更して「予約を更新」できます。「選択を出力」はその予約1件だけを実行します。出力前には現在の変更を安全に統合し、原本と同じ出力先や予約間の重複を防ぎます。\r\n- 出力後の結果一覧から、エクスプローラーで表示できます。PDFは閲覧専用ソフトで開き、その他の形式は対応アプリで開けます。\r\n\r\n■ 安全性\r\n- 出力は別の結果ファイルを作ります。既存の出力先だけは上書きを確認します。保護付きPDFではコピー・出力が制限されます。\r\n";
     case kHelpSectionView:
         return english
-            ? L"■ View menu\r\n- Reset/set zoom and use first/previous/next/last/jump-to page for PDF navigation.\r\n- Left column changes workspace navigation visibility. Bottom-right panel can show note, headings, math, or assist.\r\n- Readable low-contrast text improves difficult PDF text; single-page mode and scroll direction change reading behavior.\r\n- Note wrap is unavailable while rendered note mode requires its own layout.\r\n"
-            : L"■ 表示メニュー\r\n- 拡大率を初期化／指定し、先頭・前・次・末尾・ページ指定でPDFを移動します。\r\n- 左カラムはワークスペース一覧の表示、右下表示はノート・見出し・数式・補助を切り替えます。\r\n- 低コントラスト文字を可読化、単一ページ、スクロール方向は閲覧方法を変えます。\r\n- ノート折返しは、レンダリング表示のレイアウトが必要な場合には使えません。\r\n";
+            ? L"■ View menu\r\n- Reset/set zoom and use first/previous/next/last/jump-to page for PDF navigation.\r\n- Left column changes workspace navigation visibility. Bottom-right pane function switches between note, headings, math, and status assist immediately for the current run. Status assist has a subtle dedicated header and scrolls vertically when needed. Its Change settings group contains only controls available from this pane, including the zoom display drawn over the PDF; turning it off keeps the page number visible. Monitor contains information only. Enabling keyboard controls moves focus directly to the note's normal mode. It does not save the pane choice; reloading the root folder or starting again restores the General settings default.\r\n- Readable low-contrast text improves difficult PDF text; single-page mode and scroll direction change reading behavior.\r\n- Note wrap is unavailable while rendered note mode requires its own layout.\r\n"
+            : L"■ 表示メニュー\r\n- 拡大率を初期化／指定し、先頭・前・次・末尾・ページ指定でPDFを移動します。\r\n- 左カラムはワークスペース一覧の表示、右下領域の機能はノート・見出し・数式・状態アシストへこの起動中だけ即時に切り替えます。状態アシストは色で強調せず、控えめな専用見出しでノート欄と区別します。内容が収まらない場合は縦スクロールできます。「変更できる項目」にはPDF上の倍率表示を含む、この欄から操作できる設定だけを置きます。OFFにしてもページ番号は残ります。「監視する項目」には確認用の情報だけを置きます。キーボード操作をONにすると、入力先は直ちにノートの通常モードへ移ります。領域の選択は保存されず、ルートフォルダを再読み込みしたとき・次回起動時は設定ダイアログの標準状態に戻ります。\r\n- 低コントラスト文字を可読化、単一ページ、スクロール方向は閲覧方法を変えます。\r\n- ノート折返しは、レンダリング表示のレイアウトが必要な場合には使えません。\r\n";
     case kHelpSectionNotes:
         return english
             ? L"■ Note syntax\r\n- .clro, .md, and .markdown use the Markdown/MD4C route.\r\n- Supported custom markup can be combined with Markdown when needed.\r\n- Math notation is experimental; verify the display before relying on it.\r\n\r\n■ Plain text\r\n- .txt does not parse Markdown or custom markup. It has no rendered display or note-link features.\r\n"
@@ -670,8 +687,8 @@ static std::wstring HelpSectionBody(int section, bool english) {
             : L"■ 注釈ツール\r\n- 選択、移動、消しゴム、拡大鏡は操作モードです。テキスト、マーカー、ペン、直線、波線、矢印、図形は.clropに保存する注釈を作ります。\r\n- 注釈設定では、フォント、線幅、線種、矢印、塗りつぶし、マーカー表示、手書き補正を選びます。\r\n\r\n■ 色とパレット\r\n- ツールごとの色に加え、再利用する色をユーザーパレットとカスタム色で管理します。\r\n- Ctrl+↑／Ctrl+↓は現在の注釈ツール色を切り替えます。共通色を変える前に、ツール設定とパレット設定を確認してください。\r\n";
     case kHelpSectionSettings:
         return english
-            ? L"■ Settings categories\r\n- General: display/operation, note behavior, file/save protection, schedules/list order, layout, and developer diagnostics.\r\n- Note: fonts, rendering, wrapping, Vim-style editing, input, and markup-related behavior.\r\n- Annotation: tool appearance and behavior. Markup: supported note markup. Palette: reusable annotation colors.\r\n\r\n■ Applying settings\r\n- Use settings presets for a deliberate set of choices. Use version-migration export/import when moving settings, not when backing up documents.\r\n- Some diagnostic log choices apply on the next launch. Settings do not rewrite existing PDF or note originals.\r\n"
-            : L"■ 設定のカテゴリ\r\n- 一般設定: 表示と操作、ノート、ファイル／保存、スケジュールと一覧順、画面構成、開発者向け診断。\r\n- ノート設定: フォント、レンダリング、折返し、Vim的編集、入力、記法に関わる挙動。\r\n- 注釈設定: ツールの見た目と動作。markup設定: ノート記法。パレット設定: 再利用する注釈色です。\r\n\r\n■ 設定の反映\r\n- 設定プリセットは意図した組合せを保存します。バージョン移行用の書出し／読込みは、文書バックアップには使いません。\r\n- 一部の診断ログ設定は次回起動時に反映されます。設定変更で既存PDFやノート原本を書き換えません。\r\n";
+            ? L"■ Settings categories\r\n- General: display/operation, note behavior, file/save protection, schedules/list order, and developer diagnostics. Choose the bottom-right pane function in Display and Interaction.\r\n- Note: fonts, rendering, wrapping, Vim-style editing, input, and markup-related behavior.\r\n- Annotation: tool appearance and behavior. Markup: supported note markup. Palette: reusable annotation colors.\r\n- Use the section selector at the top of a settings tab to jump directly to a section. It follows the section currently shown while you scroll.\r\n\r\n■ Applying settings\r\n- A settings preset stores the settings set, palette, shortcuts, schedule, and selected/custom themes. It never contains documents and can be loaded in another installation.\r\n- Loading first confirms replacement, keeps a recovery copy, and is not a document backup.\r\n- Some diagnostic log choices apply on the next launch. Settings do not rewrite existing PDF or note originals.\r\n"
+            : L"■ 設定のカテゴリ\r\n- 一般設定: 表示と操作、ノート、ファイル／保存、スケジュールと一覧順、開発者向け診断。右下領域の機能は「表示と操作」で選びます。\r\n- ノート設定: フォント、レンダリング、折返し、Vim的編集、入力、記法に関わる挙動。\r\n- 注釈設定: ツールの見た目と動作。markup設定: ノート記法。パレット設定: 再利用する注釈色です。\r\n- 各設定タブの上部にある節の選択欄で、目的の節へ直接移動できます。本文をスクロールすると表示中の節に自動で切り替わります。\r\n\r\n■ 設定の反映\r\n- 設定プリセットは設定、パレット、ショートカット、時間割、選択中／カスタムテーマをまとめて保存します。文書は含まず、別の環境でも読み込めます。\r\n- 読込み前に置換を確認し、既存設定を退避します。文書バックアップには使いません。\r\n- 一部の診断ログ設定は次回起動時に反映されます。設定変更で既存PDFやノート原本を書き換えません。\r\n";
     case kHelpSectionShortcuts:
         return english
             ? L"■ Annotation shortcuts\r\n- Ctrl+Alt+number or a numpad key selects an annotation tool. Ctrl+Alt+arrow cycles tool category/detail; Ctrl+Up/Down cycles the current tool color.\r\n\r\n■ Vim-style note editing\r\n- The note settings can enable Vim-style behavior, caret-line raw text, and whether a click enters insert mode.\r\n- Text input, PDF text boxes, and IME composition take priority; do not assume navigation keys are commands while entering text.\r\n- Fixed annotation navigation keys cannot be replaced by the shortcut editor.\r\n"
@@ -693,12 +710,26 @@ constexpr int kHelpFindAllId = 1009;
 constexpr int kHelpMinWidth = 640;
 constexpr int kHelpMinHeight = 460;
 
-static void UpdateHelpDialogContent(HelpDialogCtx* ctx) {
+static void SetHelpFindButtonMode(HelpDialogCtx* ctx, bool next) {
+    if (!ctx || !ctx->btnFind) return;
+    SetWindowTextW(ctx->btnFind,
+                   localization::Text(next ? L"help.next" : L"help.search").c_str());
+}
+
+static void ResetHelpSearch(HelpDialogCtx* ctx) {
+    if (!ctx) return;
+    ctx->nextSearchOffset = 0;
+    ctx->nextGlobalSearchSection = ctx->currentSection;
+    ctx->searchMatchIndex = 0;
+    ctx->searchUsesAllSections = false;
+    SetHelpFindButtonMode(ctx, false);
+}
+
+static void UpdateHelpDialogContent(HelpDialogCtx* ctx, bool resetSearch = true) {
     if (!ctx) return;
     const bool english = IsEnglishUi();
     ctx->bodyText = HelpSectionBody(ctx->currentSection, english);
-    ctx->nextSearchOffset = 0;
-    ctx->nextGlobalSearchSection = ctx->currentSection;
+    if (resetSearch) ResetHelpSearch(ctx);
     if (ctx->title) SetWindowTextW(ctx->title, HelpSectionTitle(ctx->currentSection).c_str());
     if (ctx->subtitle) SetWindowTextW(ctx->subtitle, HelpSectionSubtitle(ctx->currentSection).c_str());
     if (ctx->edit) {
@@ -723,7 +754,8 @@ enum class HelpSearchStatus {
     NoMatchInAll,
 };
 
-static void ShowHelpSearchStatus(HelpDialogCtx* ctx, HelpSearchStatus status, bool allHelp = false) {
+static void ShowHelpSearchStatus(HelpDialogCtx* ctx, HelpSearchStatus status, bool allHelp = false,
+                                 size_t currentMatch = 0, size_t totalMatches = 0) {
     if (!ctx || !ctx->subtitle) return;
     std::wstring text = HelpSectionSubtitle(ctx->currentSection);
     if (status == HelpSearchStatus::EmptyQuery) {
@@ -731,11 +763,49 @@ static void ShowHelpSearchStatus(HelpDialogCtx* ctx, HelpSearchStatus status, bo
     } else if (status == HelpSearchStatus::NoMatch) {
         text += localization::Text(L"help.search.no_match_section");
     } else if (status == HelpSearchStatus::FoundInAll) {
-        text += localization::Text(L"help.search.found_all");
+        text += localization::Format(L"help.search.match_all", {
+            {L"CURRENT", std::to_wstring(currentMatch)},
+            {L"TOTAL", std::to_wstring(totalMatches)},
+        });
+    } else if (status == HelpSearchStatus::Ready && totalMatches != 0) {
+        text += localization::Format(L"help.search.match_section", {
+            {L"CURRENT", std::to_wstring(currentMatch)},
+            {L"TOTAL", std::to_wstring(totalMatches)},
+        });
     } else if (status == HelpSearchStatus::NoMatchInAll) {
         text += localization::Text(L"help.search.no_match_all");
     }
     SetWindowTextW(ctx->subtitle, text.c_str());
+}
+
+static size_t CountHelpMatches(const std::wstring& haystack, const std::wstring& needle) {
+    if (needle.empty()) return 0;
+    size_t count = 0;
+    size_t offset = 0;
+    while (true) {
+        const size_t position = haystack.find(needle, offset);
+        if (position == std::wstring::npos) return count;
+        ++count;
+        offset = position + needle.size();
+    }
+}
+
+static size_t CountHelpMatchesInAllSections(const std::wstring& needle) {
+    size_t total = 0;
+    for (int section = 0; section < kHelpSectionCount; ++section) {
+        std::wstring haystack = HelpSectionBody(section, IsEnglishUi());
+        std::transform(haystack.begin(), haystack.end(), haystack.begin(), ::towlower);
+        total += CountHelpMatches(haystack, needle);
+    }
+    return total;
+}
+
+static void PrepareHelpSearch(HelpDialogCtx* ctx, bool allHelp) {
+    if (!ctx || ctx->searchUsesAllSections == allHelp) return;
+    ctx->nextSearchOffset = 0;
+    ctx->nextGlobalSearchSection = ctx->currentSection;
+    ctx->searchMatchIndex = 0;
+    ctx->searchUsesAllSections = allHelp;
 }
 
 static std::wstring GetControlText(HWND control) {
@@ -749,6 +819,7 @@ static std::wstring GetControlText(HWND control) {
 
 static void FindInHelpSection(HelpDialogCtx* ctx) {
     if (!ctx || !ctx->search || !ctx->edit) return;
+    PrepareHelpSearch(ctx, false);
     std::wstring needle = GetControlText(ctx->search);
     if (needle.empty()) {
         ShowHelpSearchStatus(ctx, HelpSearchStatus::EmptyQuery);
@@ -758,14 +829,19 @@ static void FindInHelpSection(HelpDialogCtx* ctx) {
     std::wstring haystack = ctx->bodyText;
     std::transform(needle.begin(), needle.end(), needle.begin(), ::towlower);
     std::transform(haystack.begin(), haystack.end(), haystack.begin(), ::towlower);
+    const size_t totalMatches = CountHelpMatches(haystack, needle);
     size_t pos = haystack.find(needle, ctx->nextSearchOffset);
     if (pos == std::wstring::npos && ctx->nextSearchOffset != 0) pos = haystack.find(needle);
     if (pos == std::wstring::npos) {
+        SetHelpFindButtonMode(ctx, false);
         ShowHelpSearchStatus(ctx, HelpSearchStatus::NoMatch);
         SetFocus(ctx->search);
         return;
     }
-    ShowHelpSearchStatus(ctx, HelpSearchStatus::Ready);
+    ctx->searchMatchIndex = (ctx->searchMatchIndex % totalMatches) + 1;
+    SetHelpFindButtonMode(ctx, true);
+    ShowHelpSearchStatus(ctx, HelpSearchStatus::Ready, false,
+                         ctx->searchMatchIndex, totalMatches);
     ctx->nextSearchOffset = pos + needle.size();
     SendMessageW(ctx->edit, EM_SETSEL, static_cast<WPARAM>(pos),
                  static_cast<LPARAM>(pos + needle.size()));
@@ -777,7 +853,7 @@ static void ShowHelpSearchMatch(HelpDialogCtx* ctx, int section, size_t position
     if (!ctx || !ctx->edit || section < 0 || section >= kHelpSectionCount) return;
     ctx->currentSection = section;
     if (ctx->nav) SendMessageW(ctx->nav, LB_SETCURSEL, section, 0);
-    UpdateHelpDialogContent(ctx);
+    UpdateHelpDialogContent(ctx, false);
     SendMessageW(ctx->edit, EM_SETSEL, static_cast<WPARAM>(position),
                  static_cast<LPARAM>(position + length));
     SendMessageW(ctx->edit, EM_SCROLLCARET, 0, 0);
@@ -786,6 +862,7 @@ static void ShowHelpSearchMatch(HelpDialogCtx* ctx, int section, size_t position
 
 static void FindInAllHelpSections(HelpDialogCtx* ctx) {
     if (!ctx || !ctx->search || !ctx->edit) return;
+    PrepareHelpSearch(ctx, true);
     std::wstring needle = GetControlText(ctx->search);
     if (needle.empty()) {
         ShowHelpSearchStatus(ctx, HelpSearchStatus::EmptyQuery, true);
@@ -793,6 +870,13 @@ static void FindInAllHelpSections(HelpDialogCtx* ctx) {
         return;
     }
     std::transform(needle.begin(), needle.end(), needle.begin(), ::towlower);
+    const size_t totalMatches = CountHelpMatchesInAllSections(needle);
+    if (totalMatches == 0) {
+        SetHelpFindButtonMode(ctx, false);
+        ShowHelpSearchStatus(ctx, HelpSearchStatus::NoMatchInAll, true);
+        SetFocus(ctx->search);
+        return;
+    }
     const int startSection = std::clamp(ctx->nextGlobalSearchSection, 0, kHelpSectionCount - 1);
     const size_t startOffset = ctx->nextSearchOffset;
     for (int step = 0; step < kHelpSectionCount; ++step) {
@@ -805,7 +889,10 @@ static void FindInAllHelpSections(HelpDialogCtx* ctx) {
         ShowHelpSearchMatch(ctx, section, position, needle.size());
         ctx->nextGlobalSearchSection = section;
         ctx->nextSearchOffset = position + needle.size();
-        ShowHelpSearchStatus(ctx, HelpSearchStatus::FoundInAll);
+        ctx->searchMatchIndex = (ctx->searchMatchIndex % totalMatches) + 1;
+        SetHelpFindButtonMode(ctx, true);
+        ShowHelpSearchStatus(ctx, HelpSearchStatus::FoundInAll, true,
+                             ctx->searchMatchIndex, totalMatches);
         return;
     }
     if (startOffset != 0) {
@@ -816,7 +903,10 @@ static void FindInAllHelpSections(HelpDialogCtx* ctx) {
             ShowHelpSearchMatch(ctx, startSection, position, needle.size());
             ctx->nextGlobalSearchSection = startSection;
             ctx->nextSearchOffset = position + needle.size();
-            ShowHelpSearchStatus(ctx, HelpSearchStatus::FoundInAll);
+            ctx->searchMatchIndex = (ctx->searchMatchIndex % totalMatches) + 1;
+            SetHelpFindButtonMode(ctx, true);
+            ShowHelpSearchStatus(ctx, HelpSearchStatus::FoundInAll, true,
+                                 ctx->searchMatchIndex, totalMatches);
             return;
         }
     }
@@ -907,7 +997,7 @@ static LRESULT CALLBACK HelpDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                       0, 0, 0, 0, hWnd,
                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kHelpSearchId)), g_hInst, nullptr);
-        ctx->btnFind = CreateWindowExW(0, L"BUTTON", localization::Text(L"help.find_next").c_str(),
+        ctx->btnFind = CreateWindowExW(0, L"BUTTON", localization::Text(L"help.search").c_str(),
                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                                        0, 0, 0, 0, hWnd,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kHelpFindId)), g_hInst, nullptr);
@@ -991,8 +1081,7 @@ static LRESULT CALLBACK HelpDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         }
         if (id == kHelpSearchId && HIWORD(wParam) == EN_CHANGE && ctx) {
-            ctx->nextSearchOffset = 0;
-            ctx->nextGlobalSearchSection = ctx->currentSection;
+            ResetHelpSearch(ctx);
             ShowHelpSearchStatus(ctx, HelpSearchStatus::Ready);
             return 0;
         }
@@ -1061,7 +1150,9 @@ static std::optional<std::wstring> PdfMetaText(FPDF_DOCUMENT doc, const char* ta
     if (!doc || !tag) return std::nullopt;
     std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
     unsigned long bytes = FPDF_GetMetaText(doc, tag, nullptr, 0);
-    if (bytes <= sizeof(wchar_t) || (bytes % sizeof(wchar_t)) != 0) return std::nullopt;
+    constexpr unsigned long kMaxPdfMetadataBytes = 64u * 1024u;
+    if (bytes <= sizeof(wchar_t) || bytes > kMaxPdfMetadataBytes ||
+        (bytes % sizeof(wchar_t)) != 0) return std::nullopt;
     std::wstring buf;
     buf.resize(bytes / sizeof(wchar_t));
     if (!FPDF_GetMetaText(doc, tag, buf.data(), bytes)) return std::nullopt;
@@ -1126,12 +1217,25 @@ static std::wstring FormatPermissionsLine(bool isEn, unsigned long userPerms) {
     return ss.str();
 }
 
-static std::wstring BuildPdfInfoText() {
+static std::wstring BuildPdfInfoText(std::wstring* outPathClipboardText) {
+    if (outPathClipboardText) outPathClipboardText->clear();
     const bool isEn = IsEnglishUi();
     std::wstring out;
     auto line = [&](const std::wstring& s) {
         out += s;
         out += L"\r\n";
+    };
+    auto addPathToClipboard = [&](const std::wstring& label, const std::wstring& path) {
+        if (!outPathClipboardText || path.empty()) return;
+        if (!outPathClipboardText->empty()) *outPathClipboardText += L"\r\n\r\n";
+        *outPathClipboardText += label;
+        *outPathClipboardText += L":\r\n";
+        *outPathClipboardText += path;
+    };
+    auto displayName = [](const std::wstring& path) {
+        if (path.empty()) return std::wstring(L"-");
+        const std::wstring name = std::filesystem::path(path).filename().wstring();
+        return name.empty() ? path : name;
     };
 
     line(isEn ? L"PDF Info" : L"PDF情報");
@@ -1141,7 +1245,8 @@ static std::wstring BuildPdfInfoText() {
         line(isEn ? L"No PDF is currently open." : L"現在PDFが開かれていません。");
         if (!g_currentNotePath.empty()) {
             line(L"");
-            line((isEn ? L"Note file: " : L"ノート: ") + g_currentNotePath);
+            line((isEn ? L"Note file: " : L"ノート: ") + displayName(g_currentNotePath));
+            addPathToClipboard(isEn ? L"Note file" : L"ノートファイル", g_currentNotePath);
             if (auto sz = TryFileSize(std::filesystem::path(g_currentNotePath))) {
                 line((isEn ? L"Note size: " : L"ノートサイズ: ") + FormatBytes(*sz));
             }
@@ -1149,9 +1254,15 @@ static std::wstring BuildPdfInfoText() {
         return out;
     }
 
-    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+    std::unique_lock<std::recursive_mutex> pdfiumLock(g_pdfiumMutex, std::defer_lock);
+    if (!pdfiumLock.try_lock()) {
+        line(isEn ? L"PDF information is temporarily unavailable while the document is busy."
+                  : L"PDFの処理中のため、詳細情報を一時的に取得できません。");
+        return out;
+    }
     const std::wstring pdfPath = g_pdf.path;
-    line((isEn ? L"File: " : L"ファイル: ") + (pdfPath.empty() ? L"-" : pdfPath));
+    line((isEn ? L"File: " : L"ファイル: ") + displayName(pdfPath));
+    addPathToClipboard(isEn ? L"PDF file" : L"PDFファイル", pdfPath);
     if (!pdfPath.empty()) {
         if (auto sz = TryFileSize(std::filesystem::path(pdfPath))) {
             line((isEn ? L"File size: " : L"ファイルサイズ: ") + FormatBytes(*sz));
@@ -1235,7 +1346,8 @@ static std::wstring BuildPdfInfoText() {
     if (!pdfPath.empty()) {
         const auto clropPath = clrop_bridge::ClropPathForPdf(pdfPath);
         if (!clropPath.empty()) {
-            line((isEn ? L".clrop: " : L".clrop: ") + clropPath);
+            line((isEn ? L".clrop: " : L".clrop: ") + displayName(clropPath));
+            addPathToClipboard(isEn ? L".clrop file" : L".clropファイル", clropPath);
             if (auto sz = TryFileSize(std::filesystem::path(clropPath))) {
                 line((isEn ? L".clrop size: " : L".clrop サイズ: ") + FormatBytes(*sz));
             } else {
@@ -1244,7 +1356,8 @@ static std::wstring BuildPdfInfoText() {
         }
     }
     if (!g_currentNotePath.empty()) {
-        line((isEn ? L"Note file: " : L"ノートファイル: ") + g_currentNotePath);
+        line((isEn ? L"Note file: " : L"ノートファイル: ") + displayName(g_currentNotePath));
+        addPathToClipboard(isEn ? L"Note file" : L"ノートファイル", g_currentNotePath);
         if (auto sz = TryFileSize(std::filesystem::path(g_currentNotePath))) {
             line((isEn ? L"Note size: " : L"ノートサイズ: ") + FormatBytes(*sz));
         }
@@ -1276,6 +1389,7 @@ static LRESULT CALLBACK PdfInfoDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                                     g_hInst, nullptr);
 
         const std::wstring copyLabel = localization::Text(L"help.f9d8ec40980e");
+        const std::wstring copyPathsLabel = localization::Text(L"help.pdf_info.copy_paths");
         const std::wstring closeLabel = localization::Text(L"help.603bc62f3f34");
         ctx->btnClose = CreateWindowExW(0, L"BUTTON", closeLabel.c_str(),
                                         WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
@@ -1284,17 +1398,24 @@ static LRESULT CALLBACK PdfInfoDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                                         g_hInst, nullptr);
         ctx->btnCopy = CreateWindowExW(0, L"BUTTON", copyLabel.c_str(),
                                        WS_CHILD | WS_VISIBLE,
-                                       rc.right - pad - btnW * 2 - 8, btnY, btnW, btnH, hWnd,
+                                       rc.right - pad - btnW * 3 - 16, btnY, btnW, btnH, hWnd,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(1102)),
                                        g_hInst, nullptr);
+        ctx->btnCopyPaths = CreateWindowExW(0, L"BUTTON", copyPathsLabel.c_str(),
+                                            WS_CHILD | WS_VISIBLE,
+                                            rc.right - pad - btnW * 2 - 8, btnY, btnW, btnH, hWnd,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(1103)),
+                                            g_hInst, nullptr);
 
         SetUIFont(ctx->edit);
         SetUIFont(ctx->btnCopy);
+        SetUIFont(ctx->btnCopyPaths);
         SetUIFont(ctx->btnClose);
 
-        const auto text = NormalizeNewlines(BuildPdfInfoText());
+        const auto text = NormalizeNewlines(BuildPdfInfoText(&ctx->pathClipboardText));
         SetWindowTextW(ctx->edit, text.c_str());
         SendMessageW(ctx->edit, EM_SETSEL, 0, 0);
+        if (ctx->btnCopyPaths && ctx->pathClipboardText.empty()) EnableWindow(ctx->btnCopyPaths, FALSE);
 
         ApplyThemeToDialog(hWnd);
         return 0;
@@ -1338,7 +1459,10 @@ static LRESULT CALLBACK PdfInfoDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             MoveWindow(ctx->btnClose, rc.right - pad - btnW, btnY, btnW, btnH, TRUE);
         }
         if (ctx->btnCopy) {
-            MoveWindow(ctx->btnCopy, rc.right - pad - btnW * 2 - 8, btnY, btnW, btnH, TRUE);
+            MoveWindow(ctx->btnCopy, rc.right - pad - btnW * 3 - 16, btnY, btnW, btnH, TRUE);
+        }
+        if (ctx->btnCopyPaths) {
+            MoveWindow(ctx->btnCopyPaths, rc.right - pad - btnW * 2 - 8, btnY, btnW, btnH, TRUE);
         }
         return 0;
     }
@@ -1350,6 +1474,10 @@ static LRESULT CALLBACK PdfInfoDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 SendMessageW(ctx->edit, WM_COPY, 0, 0);
                 SendMessageW(ctx->edit, EM_SETSEL, 0, 0);
             }
+            return 0;
+        }
+        if (id == 1103) {
+            if (ctx) CopyTextToClipboard(hWnd, ctx->pathClipboardText);
             return 0;
         }
         if (id == IDOK || id == IDCANCEL) {
@@ -1484,5 +1612,31 @@ void ShowPdfInfoDialog(HWND owner) {
         EnableWindow(owner, TRUE);
         SetActiveWindow(owner);
     }
+}
+
+void ShowNoteInfoDialog(HWND owner) {
+    const std::wstring title = localization::Text(L"help.note_info.title");
+    if (g_currentNotePath.empty()) {
+        ShowSilentMessageDialog(owner, title, localization::Text(L"help.note_info.no_note"), SoftNoticeKind::Info);
+        return;
+    }
+
+    const std::filesystem::path path(g_currentNotePath);
+    std::wstring extension = path.extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
+    const std::wstring route = (extension == L".txt" || extension == L".csv") ? L"TXT" : L"Markdown/MD4C";
+    const auto fileSize = TryFileSize(path);
+    const std::wstring size = fileSize.has_value() ? FormatBytes(*fileSize)
+                                                    : localization::Text(L"help.note_info.size_unavailable");
+    const bool hasPendingChanges = CurrentNoteEditorIsModified() || g_noteDirty || g_noteNeedsIntegrate;
+    const std::wstring message = localization::Format(L"help.note_info.summary", {
+        {L"NAME", path.filename().wstring()},
+        {L"FORMAT", (extension.empty() ? L"-" : extension) + L" / " + route},
+        {L"SIZE", size},
+        {L"PENDING", localization::Text(hasPendingChanges ? L"help.note_info.pending_yes"
+                                                            : L"help.note_info.pending_no")},
+    });
+    ShowSilentMessageDialog(owner, title, message, SoftNoticeKind::Info,
+                            {{localization::Text(L"help.note_info.path"), g_currentNotePath}});
 }
 

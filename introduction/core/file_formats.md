@@ -21,8 +21,13 @@ ROLE: 本ソフト標準ノート形式 (UTF-8 Markdownテキスト)
 MUTABILITY: アプリおよび外部エディタで編集可能
 EVIDENCE: docs/ja/File_Formats.md
 
-[EXT_SPEC: .md / .markdown / .tex / .txt / .csv]
-ROLE: 互換Markdown、TeX、書式なしテキストノート
+[EXT_SPEC: .md / .markdown / .txt / .csv]
+ROLE: 互換Markdown、書式なしテキストノート
+MUTABILITY: 編集可能。勝手に .clro へ自動改名されない
+EVIDENCE: docs/ja/File_Formats.md
+
+[EXT_SPEC: .tex]
+ROLE: 既存 TeX 原文の読込み・表示
 MUTABILITY: 編集可能。勝手に .clro へ自動改名されない
 EVIDENCE: docs/ja/File_Formats.md
 

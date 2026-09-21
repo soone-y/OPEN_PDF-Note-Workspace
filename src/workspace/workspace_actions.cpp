@@ -5,7 +5,7 @@
 #include "core/ui_prompts.h"
 #include "core/ui_notify.h"
 #include "core/atomic_write.h"
-#include "note_view/note_view.h"
+#include "bridge/view_bridge.h"
 #include <fpdfview.h>
 #include <fpdf_save.h>
 #include <fpdf_edit.h>
@@ -19,8 +19,13 @@
 #include <algorithm>
 #include <array>
 #include <map>
+#include <atomic>
 #include <cwctype>
+#include <deque>
 #include <fstream>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include "office/docx_space_protection.h"
 
 // file: main/workspace_actions.cppinc
@@ -289,7 +294,6 @@ void ShowNewSessionDialog(HWND owner) {
     const auto& ui = GetUiText();
     std::error_code ec;
 
-    // Directory format only.
     std::filesystem::path sessionPath = lectureDir / name;
     const bool sessionExists = std::filesystem::exists(sessionPath, ec);
     if (ec) {
@@ -300,7 +304,7 @@ void ShowNewSessionDialog(HWND owner) {
         ShowSoftNotice(owner, ui.errSessionExists, SoftNoticeKind::Warning);
         return;
     }
-    std::filesystem::create_directories(sessionPath / L"note", ec);
+    std::filesystem::create_directories(NoteDirectoryForSession(sessionPath), ec);
     if (ec) {
         ShowSoftNotice(owner, ui.errSessionCreate, SoftNoticeKind::Error);
         return;
@@ -475,7 +479,7 @@ std::wstring s_newNoteExtension = L".clro";
 
 bool IsSupportedNewNoteExtension(const std::wstring& ext) {
     std::wstring lower = ToLowerAscii(ext);
-    return lower == L".clro" || lower == L".txt" || lower == L".csv" || lower == L".md" || lower == L".tex";
+    return lower == L".clro" || lower == L".txt" || lower == L".csv" || lower == L".md";
 }
 
 std::wstring DefaultNewNoteStem() {
@@ -580,8 +584,7 @@ void CreateNewNoteInSession(HWND hWnd,
         if (idx <= 1) return baseName + ext;
         return baseName + L"_Page" + std::to_wstring(idx) + ext;
     };
-    // Notes are created under the note directory so the note list picks them up reliably.
-    std::filesystem::path noteDir = dir / L"note";
+    std::filesystem::path noteDir = NoteDirectoryForSession(dir);
     std::error_code ec;
     std::filesystem::create_directories(noteDir, ec);
     if (ec) {
@@ -649,7 +652,7 @@ void CreateNewNoteWithExtensionInSession(HWND hWnd, const std::wstring& extensio
 
 std::filesystem::path CurrentNoteDirectory() {
     if (g_currentSessionPath.empty()) return {};
-    return std::filesystem::path(g_currentSessionPath) / L"note";
+    return NoteDirectoryForSession(std::filesystem::path(g_currentSessionPath));
 }
 
 
@@ -659,7 +662,21 @@ std::wstring DefaultBlankPdfFileName() {
 
 std::filesystem::path CurrentPdfDirectory() {
     if (g_currentSessionPath.empty()) return {};
-    return std::filesystem::path(g_currentSessionPath) / L"pdf";
+    return PdfDirectoryForSession(std::filesystem::path(g_currentSessionPath));
+}
+
+bool SessionFilesUseRootDirectory() {
+    std::wstring value = g_config.sessionFileLayout;
+    std::transform(value.begin(), value.end(), value.begin(), ::towlower);
+    return value == L"session_root" || value == L"root" || value == L"flat";
+}
+
+std::filesystem::path NoteDirectoryForSession(const std::filesystem::path& sessionRoot) {
+    return SessionFilesUseRootDirectory() ? sessionRoot : sessionRoot / L"note";
+}
+
+std::filesystem::path PdfDirectoryForSession(const std::filesystem::path& sessionRoot) {
+    return SessionFilesUseRootDirectory() ? sessionRoot : sessionRoot / L"pdf";
 }
 
 bool TryParsePositiveDoubleToken(const std::wstring& token, double* out) {
@@ -1045,18 +1062,12 @@ void CreateBlankPdfInCurrentSession(HWND hWnd) {
         return;
     }
 
-    std::wstring input;
-    const std::wstring initial = L"A4, 1";
-    const std::wstring title = ui.menuCreateBlankPdf +
-        (localization::Text(L"workspace.actions.2199209545da").c_str());
-    if (!PromptSimpleText(hWnd, title, initial, input)) return;
+    BlankPdfDialogOptions options{};
+    if (!PromptBlankPdfOptions(hWnd, ui.menuCreateBlankPdf, options)) return;
     BlankPdfSpec spec{};
-    if (!TryParseBlankPdfSpec(input, &spec)) {
-        ShowSoftNotice(hWnd,
-                       localization::Text(L"workspace.actions.3b9424d6c649").c_str(),
-                       SoftNoticeKind::Warning);
-        return;
-    }
+    spec.widthPt = options.widthPt;
+    spec.heightPt = options.heightPt;
+    spec.pageCount = options.pageCount;
 
     auto dest = PromptBlankPdfPath(hWnd, pdfDir);
     if (!dest) return;
@@ -1084,15 +1095,13 @@ std::optional<std::wstring> PromptNoteFileNameWithSaveDialog(HWND owner,
         { L"Markdown note (*.md)", L"*.md" },
         { L"CLRO note (*.clro)", L"*.clro" },
         { L"Text note (*.txt)", L"*.txt" },
-        { L"TeX note (*.tex)", L"*.tex" },
         { L"CSV note (*.csv)", L"*.csv" },
     };
     UINT filterIndex = 1;
     std::wstring ext = ToLowerAscii(defaultExt);
     if (ext == L".clro") filterIndex = 2;
     else if (ext == L".txt") filterIndex = 3;
-    else if (ext == L".tex") filterIndex = 4;
-    else if (ext == L".csv") filterIndex = 5;
+    else if (ext == L".csv") filterIndex = 4;
     std::wstring defaultExtNoDot = ext;
     if (!defaultExtNoDot.empty() && defaultExtNoDot.front() == L'.') {
         defaultExtNoDot.erase(defaultExtNoDot.begin());
@@ -1180,8 +1189,7 @@ bool ShowNewNoteButtonContextMenu(HWND hWnd, LPARAM lParam) {
         { 1, L".md" },
         { 2, L".clro" },
         { 3, L".txt" },
-        { 4, L".tex" },
-        { 5, L".csv" },
+        { 4, L".csv" },
     };
     for (const auto& item : kExtItems) {
         UINT flags = MF_STRING;
@@ -1274,10 +1282,10 @@ std::filesystem::path ImportDestinationDirForSource(const std::filesystem::path&
     auto ext = src.extension().wstring();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
     if (IsPdfFile(src) || IsImageFile(src) || ext == L".clrop" || IsOfficeImportSourcePath(src)) {
-        return sessionRoot / L"pdf";
+        return PdfDirectoryForSession(sessionRoot);
     }
     if (IsNoteFile(src)) {
-        return sessionRoot / L"note";
+        return NoteDirectoryForSession(sessionRoot);
     }
     return sessionRoot;
 }
@@ -2052,32 +2060,54 @@ std::wstring QuoteWindowsCommandLineArg(const std::wstring& arg) {
     return out;
 }
 
-std::wstring FileUrlFromLocalPath(const std::filesystem::path& path) {
-    std::wstring w = std::filesystem::absolute(path).wstring();
-    std::replace(w.begin(), w.end(), L'\\', L'/');
-    if (w.size() >= 2 && w[1] == L':') {
-        w.insert(w.begin(), L'/');
-    }
+bool FileUrlFromLocalPath(const std::filesystem::path& path,
+                          std::wstring* outUrl,
+                          std::wstring* outErr) {
+    if (!outUrl) return false;
+    outUrl->clear();
+    if (outErr) outErr->clear();
 
-    std::string utf8 = WideToUTF8(w);
-    std::string encoded;
-    constexpr char hex[] = "0123456789ABCDEF";
-    for (unsigned char c : utf8) {
-        const bool keep =
-            (c >= 'A' && c <= 'Z') ||
-            (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') ||
-            c == '-' || c == '_' || c == '.' || c == '~' ||
-            c == '/' || c == ':';
-        if (keep) {
-            encoded.push_back(static_cast<char>(c));
-        } else {
-            encoded.push_back('%');
-            encoded.push_back(hex[(c >> 4) & 0xF]);
-            encoded.push_back(hex[c & 0xF]);
+    try {
+        std::error_code ec;
+        const std::filesystem::path absolutePath = std::filesystem::absolute(path, ec);
+        if (ec || absolutePath.empty()) {
+            if (outErr) {
+                *outErr = L"Failed to resolve a local file URL path: " + path.wstring();
+                if (ec) *outErr += L" (" + UTF8ToWide(ec.message()) + L")";
+            }
+            return false;
         }
+
+        std::wstring w = absolutePath.wstring();
+        std::replace(w.begin(), w.end(), L'\\', L'/');
+        if (w.size() >= 2 && w[1] == L':') {
+            w.insert(w.begin(), L'/');
+        }
+
+        std::string utf8 = WideToUTF8(w);
+        std::string encoded;
+        constexpr char hex[] = "0123456789ABCDEF";
+        for (unsigned char c : utf8) {
+            const bool keep =
+                (c >= 'A' && c <= 'Z') ||
+                (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') ||
+                c == '-' || c == '_' || c == '.' || c == '~' ||
+                c == '/' || c == ':';
+            if (keep) {
+                encoded.push_back(static_cast<char>(c));
+            } else {
+                encoded.push_back('%');
+                encoded.push_back(hex[(c >> 4) & 0xF]);
+                encoded.push_back(hex[c & 0xF]);
+            }
+        }
+        *outUrl = L"file://" + UTF8ToWide(encoded);
+        return true;
+    } catch (...) {
+        if (outErr) *outErr = L"Failed to construct a local file URL path: " + path.wstring();
+        return false;
     }
-    return L"file://" + UTF8ToWide(encoded);
 }
 
 bool WriteLibreOfficeProfilePathConfig(const std::filesystem::path& profileDir,
@@ -2098,12 +2128,23 @@ bool WriteLibreOfficeProfilePathConfig(const std::filesystem::path& profileDir,
         return false;
     }
 
-    auto urlUtf8 = [](const std::filesystem::path& path) {
-        return WideToUTF8(FileUrlFromLocalPath(path));
-    };
-    const std::string workUrl = urlUtf8(workDir);
-    const std::string backupUrl = urlUtf8(backupDir);
-    const std::string tempUrl = urlUtf8(tempDir);
+    std::wstring workFileUrl;
+    std::wstring backupFileUrl;
+    std::wstring tempFileUrl;
+    std::wstring urlErr;
+    if (!FileUrlFromLocalPath(workDir, &workFileUrl, &urlErr) ||
+        !FileUrlFromLocalPath(backupDir, &backupFileUrl, &urlErr) ||
+        !FileUrlFromLocalPath(tempDir, &tempFileUrl, &urlErr)) {
+        if (outErr) {
+            *outErr = (localization::Text(L"workspace.actions.93a04e4e1379").c_str()) +
+                      officeTempDir.wstring();
+            if (!urlErr.empty()) *outErr += L"\n" + urlErr;
+        }
+        return false;
+    }
+    const std::string workUrl = WideToUTF8(workFileUrl);
+    const std::string backupUrl = WideToUTF8(backupFileUrl);
+    const std::string tempUrl = WideToUTF8(tempFileUrl);
 
     auto appendSinglePath = [](std::ostringstream& xml,
                                const char* name,
@@ -2140,18 +2181,12 @@ bool WriteLibreOfficeProfilePathConfig(const std::filesystem::path& profileDir,
     xml << "</oor:data>\n";
 
     const std::filesystem::path configPath = userDir / L"registrymodifications.xcu";
-    std::ofstream out(configPath, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        if (outErr) *outErr = (localization::Text(L"workspace.actions.0e1e227b47da").c_str()) +
-                              configPath.wstring();
-        return false;
-    }
     const std::string data = xml.str();
-    out.write(data.data(), static_cast<std::streamsize>(data.size()));
-    out.flush();
-    if (!out) {
+    std::wstring writeErr;
+    if (!atomic_write::AtomicWriteUtf8(configPath, data, userDir, profileDir, &writeErr)) {
         if (outErr) *outErr = (localization::Text(L"workspace.actions.9b716b3f9fd8").c_str()) +
-                              configPath.wstring();
+                              configPath.wstring() +
+                              (writeErr.empty() ? L"" : L"\n" + writeErr);
         return false;
     }
     return true;
@@ -2651,9 +2686,20 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
         return false;
     }
 
+    std::wstring profileUrl;
+    std::wstring profileUrlErr;
+    if (!FileUrlFromLocalPath(profileDir, &profileUrl, &profileUrlErr)) {
+        CleanupLibreOfficePythonCacheBestEffort(soffice);
+        if (outErr) {
+            *outErr = (localization::Text(L"workspace.actions.021e608ea70b").c_str()) + profileDir.wstring();
+            if (!profileUrlErr.empty()) *outErr += L"\n" + profileUrlErr;
+        }
+        return false;
+    }
+
     std::wstring cmd = QuoteWindowsCommandLineArg(soffice.wstring()) +
         L" --headless --nologo --nodefault --nolockcheck --nofirststartwizard --norestore" +
-        L" " + QuoteWindowsCommandLineArg(L"-env:UserInstallation=" + FileUrlFromLocalPath(profileDir)) +
+        L" " + QuoteWindowsCommandLineArg(L"-env:UserInstallation=" + profileUrl) +
         L" --convert-to pdf" +
         L" --outdir " + QuoteWindowsCommandLineArg(outDir.wstring()) +
         L" " + QuoteWindowsCommandLineArg(sourceOfficeCopy.wstring());
@@ -2817,6 +2863,281 @@ bool ValidateLibreOfficeConversionPathBudget(const std::filesystem::path& tempDi
     return true;
 }
 
+// LibreOffice may detach its actual converter from soffice.com.  Put the
+// launcher in a kill-on-close Job Object before waiting for output so cancel,
+// logoff and shutdown apply to the complete process tree, not just the first
+// process we happened to create.
+struct OfficeConversionWorkerControl {
+    std::atomic_bool cancelRequested{false};
+    std::mutex jobMutex;
+    HANDLE job = nullptr;
+};
+
+void AddImportFailure(ImportBatchStats& stats, const std::filesystem::path& src,
+                      const std::wstring& detail);
+static void ShowOfficeOpenConversionResult(HWND hWnd, const ImportBatchStats& stats, size_t selectedCount);
+void ShowOfficeConversionBatchResult(HWND hWnd, const ImportBatchStats& stats, size_t selectedCount);
+
+static void CancelOfficeConversionWorker(OfficeConversionWorkerControl& control) {
+    control.cancelRequested.store(true, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(control.jobMutex);
+    if (control.job) TerminateJobObject(control.job, ERROR_CANCELLED);
+}
+
+static bool WaitForOfficeWorkerHandle(HANDLE process, DWORD timeoutMs,
+                                      OfficeConversionWorkerControl& control) {
+    const ULONGLONG started = GetTickCount64();
+    for (;;) {
+        if (control.cancelRequested.load(std::memory_order_acquire)) return false;
+        const DWORD wait = WaitForSingleObject(process, 100);
+        if (wait == WAIT_OBJECT_0) return true;
+        if (wait != WAIT_TIMEOUT) return false;
+        if (GetTickCount64() - started >= timeoutMs) return false;
+    }
+}
+
+static bool WaitForOfficeWorkerPdf(const std::filesystem::path& expectedPdf,
+                                   DWORD timeoutMs,
+                                   OfficeConversionWorkerControl& control) {
+    const ULONGLONG started = GetTickCount64();
+    uintmax_t size = 0;
+    ULONGLONG stableSince = 0;
+    bool seen = false;
+    for (;;) {
+        if (control.cancelRequested.load(std::memory_order_acquire)) return false;
+        std::error_code ec;
+        if (std::filesystem::exists(expectedPdf, ec) && !ec &&
+            std::filesystem::is_regular_file(expectedPdf, ec) && !ec) {
+            const uintmax_t next = std::filesystem::file_size(expectedPdf, ec);
+            const ULONGLONG now = GetTickCount64();
+            if (!ec && next >= 5) {
+                if (seen && next == size && now - stableSince >= 750) return true;
+                if (!seen || next != size) { size = next; stableSince = now; seen = true; }
+            }
+        }
+        if (GetTickCount64() - started >= timeoutMs) return false;
+        Sleep(100);
+    }
+}
+
+static bool RunLibreOfficePdfConversionInWorker(
+    const std::filesystem::path& sourceOfficeCopy,
+    const std::filesystem::path& outDir,
+    const std::filesystem::path& profileDir,
+    OfficeConversionWorkerControl& control,
+    std::wstring* outErr) {
+    if (outErr) outErr->clear();
+    const std::filesystem::path soffice = FindLibreOfficeSoffice();
+    if (soffice.empty()) {
+        if (outErr) *outErr = localization::Text(L"workspace.actions.94c16d03c7a1").c_str();
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(outDir, ec);
+    if (!ec) std::filesystem::create_directories(profileDir, ec);
+    if (ec || !WriteLibreOfficeProfilePathConfig(profileDir, profileDir.parent_path() / L"local", outErr)) {
+        if (outErr && outErr->empty()) *outErr = localization::Text(L"workspace.actions.2b4708c6cff7").c_str();
+        return false;
+    }
+    std::wstring profileUrl;
+    std::wstring profileUrlErr;
+    if (!FileUrlFromLocalPath(profileDir, &profileUrl, &profileUrlErr)) {
+        if (outErr) {
+            *outErr = (localization::Text(L"workspace.actions.021e608ea70b").c_str()) + profileDir.wstring();
+            if (!profileUrlErr.empty()) *outErr += L"\n" + profileUrlErr;
+        }
+        return false;
+    }
+    std::wstring cmd = QuoteWindowsCommandLineArg(soffice.wstring()) +
+        L" --headless --nologo --nodefault --nolockcheck --nofirststartwizard --norestore" +
+        L" " + QuoteWindowsCommandLineArg(L"-env:UserInstallation=" + profileUrl) +
+        L" --convert-to pdf --outdir " + QuoteWindowsCommandLineArg(outDir.wstring()) +
+        L" " + QuoteWindowsCommandLineArg(sourceOfficeCopy.wstring());
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (!job) { if (outErr) *outErr = localization::Text(L"workspace.actions.71d5b158f91d").c_str(); return false; }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+        CloseHandle(job); if (outErr) *outErr = localization::Text(L"workspace.actions.71d5b158f91d").c_str(); return false;
+    }
+    { std::lock_guard<std::mutex> lock(control.jobMutex); control.job = job;
+      if (control.cancelRequested.load(std::memory_order_acquire)) TerminateJobObject(job, ERROR_CANCELLED); }
+    if (control.cancelRequested.load(std::memory_order_acquire)) {
+        { std::lock_guard<std::mutex> lock(control.jobMutex); control.job = nullptr; }
+        CloseHandle(job);
+        if (outErr) *outErr = localization::Text(L"workspace.actions.10e2c376855f").c_str();
+        return false;
+    }
+    STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end()); mutableCmd.push_back(L'\0');
+    const BOOL created = CreateProcessW(soffice.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE,
+                                        CREATE_NO_WINDOW, nullptr, outDir.c_str(), &si, &pi);
+    if (!created || !AssignProcessToJobObject(job, pi.hProcess)) {
+        if (created) { TerminateProcess(pi.hProcess, ERROR_CANCELLED); CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+        { std::lock_guard<std::mutex> lock(control.jobMutex); control.job = nullptr; }
+        CloseHandle(job);
+        if (outErr) *outErr = localization::Text(L"workspace.actions.77746f1852f2").c_str();
+        return false;
+    }
+    const bool launcherExited = WaitForOfficeWorkerHandle(pi.hProcess, 5 * 60 * 1000, control);
+    DWORD exitCode = 1;
+    if (launcherExited) GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    const std::filesystem::path expected = outDir / (sourceOfficeCopy.stem().wstring() + L".pdf");
+    const bool outputReady = launcherExited && exitCode == 0 &&
+        WaitForOfficeWorkerPdf(expected, 30 * 1000, control);
+    if (!outputReady) {
+        const bool canceledByUserOrExit = control.cancelRequested.load(std::memory_order_acquire);
+        // A timeout still has to kill the complete process tree, but must stay
+        // distinguishable from an explicit cancel in the result summary.
+        { std::lock_guard<std::mutex> lock(control.jobMutex);
+          if (control.job) TerminateJobObject(control.job, ERROR_TIMEOUT); }
+        if (outErr) {
+            if (canceledByUserOrExit) {
+                *outErr = localization::Text(L"workspace.actions.10e2c376855f").c_str();
+            } else if (launcherExited && exitCode != 0) {
+                *outErr = (localization::Text(L"workspace.actions.d64078e4d8b8").c_str()) +
+                          std::to_wstring(exitCode);
+            } else {
+                *outErr = localization::Text(L"workspace.actions.c64dc4973a9a").c_str();
+            }
+        }
+    }
+    { std::lock_guard<std::mutex> lock(control.jobMutex); control.job = nullptr; }
+    CloseHandle(job);
+    return outputReady;
+}
+
+enum class OfficeBackgroundBatchKind { Standard, OpenMissing };
+struct OfficeBackgroundJob {
+    OfficeConversionWorkerControl control;
+    std::filesystem::path source, sessionRoot, tempDir, generatedPdf;
+    std::wstring failure;
+    bool canceled = false;
+};
+struct OfficeBackgroundResult { OfficeBackgroundJob* job = nullptr; };
+struct OfficeBackgroundBatch {
+    HWND owner = nullptr;
+    OfficeBackgroundBatchKind kind = OfficeBackgroundBatchKind::Standard;
+    size_t selectedCount = 0, completedCount = 0;
+    ImportBatchStats stats;
+    std::deque<std::unique_ptr<OfficeBackgroundJob>> pending;
+    std::vector<std::unique_ptr<OfficeBackgroundJob>> active;
+};
+static std::unique_ptr<OfficeBackgroundBatch> s_officeBackgroundBatch;
+constexpr size_t kMaxParallelOfficeConversions = 2;
+static bool s_officeSecurityCheckNoticeShown = false;
+
+static void RunOfficeBackgroundJob(OfficeBackgroundJob* job) {
+    if (!job) return;
+    try {
+        std::wstring tempErr;
+        job->tempDir = MakeUniqueOfficeImportTempDir(&tempErr);
+        if (job->tempDir.empty()) job->failure = tempErr;
+        if (job->failure.empty() && !ValidateLibreOfficeConversionPathBudget(job->tempDir, job->source, &job->failure)) {}
+        const std::filesystem::path input = job->tempDir / L"input";
+        const std::filesystem::path output = job->tempDir / L"output";
+        const std::filesystem::path profile = job->tempDir / L"profile";
+        const std::filesystem::path staged = input / job->source.filename();
+        std::error_code ec;
+        if (job->failure.empty()) { std::filesystem::create_directories(input, ec); if (ec) job->failure = localization::Text(L"workspace.actions.c529a2026b78").c_str(); }
+        if (job->failure.empty() && !CopyFileForImportSafely(job->source, staged, &job->failure)) {}
+        if (job->failure.empty() && !office::ValidateOfficePackageForOfflineConversion(staged, &job->failure)) {}
+        if (job->failure.empty() && !RunLibreOfficePdfConversionInWorker(staged, output, profile, job->control, &job->failure)) {}
+        if (job->failure.empty() && !FindLibreOfficeGeneratedPdf(output, output / (staged.stem().wstring() + L".pdf"), &job->generatedPdf, &job->failure)) {}
+        if (job->failure.empty() && !ValidateImportPdfFile(job->generatedPdf, &job->failure)) {}
+    } catch (...) {
+        job->failure = localization::Text(L"workspace.actions.43223a01deaf").c_str();
+    }
+    job->canceled = job->control.cancelRequested.load(std::memory_order_acquire);
+    auto* result = new OfficeBackgroundResult{job};
+    if (!PostMessageW(g_hMainWnd, kMsgOfficeConversionWorkerComplete, 0, reinterpret_cast<LPARAM>(result))) delete result;
+}
+
+static void StartMoreOfficeBackgroundJobs() {
+    if (!s_officeBackgroundBatch) return;
+    while (!s_officeBackgroundBatch->pending.empty() &&
+           s_officeBackgroundBatch->active.size() < kMaxParallelOfficeConversions) {
+        auto job = std::move(s_officeBackgroundBatch->pending.front());
+        s_officeBackgroundBatch->pending.pop_front();
+        OfficeBackgroundJob* raw = job.get();
+        s_officeBackgroundBatch->active.push_back(std::move(job));
+        std::thread(RunOfficeBackgroundJob, raw).detach();
+    }
+}
+
+static bool StartOfficeBackgroundBatch(HWND hWnd, const std::filesystem::path& sessionRoot,
+                                       const std::vector<std::filesystem::path>& sources,
+                                       OfficeBackgroundBatchKind kind) {
+    if (sources.empty()) return false;
+    if (s_officeBackgroundBatch) {
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.office_conversion_already_running").c_str(),
+                       SoftNoticeKind::Info);
+        return false;
+    }
+    auto batch = std::make_unique<OfficeBackgroundBatch>();
+    batch->owner = hWnd; batch->kind = kind; batch->selectedCount = sources.size();
+    for (const auto& source : sources) {
+        auto job = std::make_unique<OfficeBackgroundJob>(); job->source = source; job->sessionRoot = sessionRoot;
+        batch->pending.push_back(std::move(job));
+    }
+    s_officeBackgroundBatch = std::move(batch);
+    BeginOfficeConversionProgress(hWnd, sources.size(), sources.front());
+    if (!s_officeSecurityCheckNoticeShown) {
+        s_officeSecurityCheckNoticeShown = true;
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.office_first_security_check").c_str(),
+                       SoftNoticeKind::Info);
+    }
+    StartMoreOfficeBackgroundJobs();
+    return true;
+}
+
+bool HasActiveOfficeConversionJobs() { return static_cast<bool>(s_officeBackgroundBatch); }
+void CancelOfficeConversionJobsForExit() {
+    if (!s_officeBackgroundBatch) return;
+    for (auto& job : s_officeBackgroundBatch->pending) CancelOfficeConversionWorker(job->control);
+    for (auto& job : s_officeBackgroundBatch->active) CancelOfficeConversionWorker(job->control);
+}
+
+void HandleOfficeConversionWorkerCompletion(HWND hWnd, LPARAM payload) {
+    std::unique_ptr<OfficeBackgroundResult> result(reinterpret_cast<OfficeBackgroundResult*>(payload));
+    if (!result || !s_officeBackgroundBatch || !result->job) return;
+    auto& batch = *s_officeBackgroundBatch;
+    auto it = std::find_if(batch.active.begin(), batch.active.end(), [&](const auto& p) { return p.get() == result->job; });
+    if (it == batch.active.end()) return;
+    OfficeBackgroundJob& job = **it;
+    if (job.canceled) { batch.stats.canceled = true; ++batch.stats.skipped; }
+    else if (!job.failure.empty()) AddImportFailure(batch.stats, job.source, job.failure);
+    else {
+        std::wstring failure;
+        const ImportOneResult imported = ImportPreparedFileToDestination(hWnd, job.generatedPdf,
+            PdfDirectoryForSession(job.sessionRoot) / (job.source.stem().wstring() + L".pdf"), &failure);
+        if (imported == ImportOneResult::Imported) ++batch.stats.imported;
+        else if (imported == ImportOneResult::Skipped) ++batch.stats.skipped;
+        else AddImportFailure(batch.stats, job.source, failure);
+    }
+    RemoveOfficeImportTempDirBestEffort(job.tempDir);
+    batch.active.erase(it); ++batch.completedCount;
+    if (batch.stats.canceled) {
+        while (!batch.pending.empty()) {
+            ++batch.stats.skipped;
+            ++batch.completedCount;
+            batch.pending.pop_front();
+        }
+    } else StartMoreOfficeBackgroundJobs();
+    if (batch.completedCount < batch.selectedCount) {
+        UpdateOfficeConversionProgress(hWnd, batch.completedCount + 1, batch.selectedCount,
+            !batch.active.empty() ? batch.active.front()->source : std::filesystem::path{});
+        return;
+    }
+    const auto kind = batch.kind; const auto stats = batch.stats; const size_t total = batch.selectedCount;
+    s_officeBackgroundBatch.reset(); EndOfficeConversionProgress(hWnd);
+    if (stats.imported > 0) RefreshCurrentSessionFiles();
+    if (kind == OfficeBackgroundBatchKind::OpenMissing) ShowOfficeOpenConversionResult(hWnd, stats, total);
+    else ShowOfficeConversionBatchResult(hWnd, stats, total);
+}
+
 ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
                                                              const std::filesystem::path& sessionRoot,
                                                              const std::filesystem::path& src,
@@ -2910,7 +3231,7 @@ ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
         return ImportOneResult::Failed;
     }
 
-    std::filesystem::path dest = sessionRoot / L"pdf" / (src.stem().wstring() + L".pdf");
+    std::filesystem::path dest = PdfDirectoryForSession(sessionRoot) / (src.stem().wstring() + L".pdf");
     ImportOneResult result = ImportPreparedFileToDestination(hWnd, generatedPdf, dest, outFailure);
     RemoveOfficeImportTempDirBestEffort(tempDir);
     return result;
@@ -3109,7 +3430,7 @@ void CollectOfficeFilesMissingPdfForOpen(const std::filesystem::path& sessionRoo
     std::unordered_set<std::wstring> seenDest;
     out.reserve(candidates.size());
     for (const auto& src : candidates) {
-        std::filesystem::path dest = sessionRoot / L"pdf" / (src.stem().wstring() + L".pdf");
+        std::filesystem::path dest = PdfDirectoryForSession(sessionRoot) / (src.stem().wstring() + L".pdf");
         std::wstring destKey = OfficeOpenPathKey(dest);
         if (destKey.empty() || !seenDest.insert(destKey).second) continue;
         out.push_back(src);
@@ -3191,41 +3512,11 @@ bool ConvertMissingOfficeFilesUnderDirectory(HWND hWnd, const std::filesystem::p
         return false;
     }
 
-    ImportBatchStats stats;
-    for (size_t i = 0; i < pending.size(); ++i) {
-        const auto& src = pending[i];
-        if (HasSameStemPdfForOfficeOpen(sessionRoot, src)) {
-            ++stats.skipped;
-            continue;
-        }
-        UpdateOfficeConversionProgress(hWnd, i + 1, pending.size(), src);
-        std::wstring failure;
-        ImportOneResult result = ImportOfficeFileAsPdfToCurrentSession(hWnd, sessionRoot, src, &failure);
-        switch (result) {
-        case ImportOneResult::Imported:
-            ++stats.imported;
-            break;
-        case ImportOneResult::Skipped:
-            ++stats.skipped;
-            break;
-        case ImportOneResult::Canceled:
-            stats.canceled = true;
-            stats.skipped += static_cast<int>(pending.size() - i);
-            break;
-        case ImportOneResult::Failed:
-            AddImportFailure(stats, src, failure);
-            break;
-        }
-        if (stats.canceled) break;
+    if (!StartOfficeBackgroundBatch(hWnd, sessionRoot, pending, OfficeBackgroundBatchKind::OpenMissing)) {
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.16e28f2bd7d3").c_str(), SoftNoticeKind::Info);
+        return false;
     }
-    EndOfficeConversionProgress(hWnd);
-
-    if (stats.imported > 0 &&
-        OfficeOpenPathKey(std::filesystem::path(g_currentSessionPath)) == OfficeOpenPathKey(sessionRoot)) {
-        RefreshCurrentSessionFiles();
-    }
-    ShowOfficeOpenConversionResult(hWnd, stats, pending.size());
-    return stats.imported > 0;
+    return true;
 }
 
 std::filesystem::path OfficeConversionInitialDirectory() {
@@ -3329,7 +3620,7 @@ bool ConvertOfficeFilesToCurrentSession(HWND hWnd) {
     auto picked = PickOfficeFilesUnder(hWnd, OfficeConversionInitialDirectory(), ui.menuConvertOfficeToPdf);
     if (picked.empty()) return false;
 
-    ImportBatchStats stats;
+    std::vector<std::filesystem::path> valid;
     for (size_t i = 0; i < picked.size(); ++i) {
         const auto& path = picked[i];
         std::filesystem::path src(path);
@@ -3337,18 +3628,18 @@ bool ConvertOfficeFilesToCurrentSession(HWND hWnd) {
 
         if (!IsOfficeImportSourcePath(src)) {
             failure = localization::Text(L"workspace.actions.21b94e09fe6e").c_str();
-            AddImportFailure(stats, src, failure);
+            ShowSoftNotice(hWnd, failure, SoftNoticeKind::Warning);
             continue;
         }
         if (IsUnsupportedImportSourcePath(src)) {
             failure = localization::Text(L"workspace.actions.fdb3da0b190c").c_str();
-            AddImportFailure(stats, src, failure);
+            ShowSoftNotice(hWnd, failure, SoftNoticeKind::Warning);
             continue;
         }
         bool isReparse = false;
         if (TryIsReparsePointNoFollow(src, isReparse) && isReparse) {
             failure = localization::Text(L"workspace.actions.c561ef5cdc8e").c_str();
-            AddImportFailure(stats, src, failure);
+            ShowSoftNotice(hWnd, failure, SoftNoticeKind::Warning);
             continue;
         }
         ec.clear();
@@ -3356,36 +3647,13 @@ bool ConvertOfficeFilesToCurrentSession(HWND hWnd) {
             !std::filesystem::is_regular_file(src, ec) || ec) {
             ec.clear();
             failure = localization::Text(L"workspace.actions.dd51d40539be").c_str();
-            AddImportFailure(stats, src, failure);
+            ShowSoftNotice(hWnd, failure, SoftNoticeKind::Warning);
             continue;
         }
 
-        UpdateOfficeConversionProgress(hWnd, i + 1, picked.size(), src);
-        ImportOneResult result = ImportOfficeFileAsPdfToCurrentSession(hWnd, sessionRoot, src, &failure);
-        switch (result) {
-        case ImportOneResult::Imported:
-            ++stats.imported;
-            break;
-        case ImportOneResult::Skipped:
-            ++stats.skipped;
-            break;
-        case ImportOneResult::Canceled:
-            stats.canceled = true;
-            stats.skipped += static_cast<int>(picked.size() - i);
-            break;
-        case ImportOneResult::Failed:
-            AddImportFailure(stats, src, failure);
-            break;
-        }
-        if (stats.canceled) break;
+        valid.push_back(src);
     }
-    EndOfficeConversionProgress(hWnd);
-
-    if (stats.imported > 0) {
-        RefreshCurrentSessionFiles();
-    }
-    ShowOfficeConversionBatchResult(hWnd, stats, picked.size());
-    return stats.imported > 0;
+    return StartOfficeBackgroundBatch(hWnd, sessionRoot, valid, OfficeBackgroundBatchKind::Standard);
 }
 
 bool ConvertOfficeFileToCurrentSession(HWND hWnd, const std::filesystem::path& src) {
@@ -3449,34 +3717,7 @@ bool ConvertOfficeFileToCurrentSession(HWND hWnd, const std::filesystem::path& s
         return false;
     }
 
-    ImportOneResult result = ImportOfficeFileAsPdfToCurrentSession(hWnd, sessionRoot, src, &failure);
-    switch (result) {
-    case ImportOneResult::Imported:
-        RefreshCurrentSessionFiles();
-        ShowSoftNotice(hWnd,
-                       (localization::Text(L"workspace.actions.95bd93f5ef87").c_str()) + src.filename().wstring(),
-                       SoftNoticeKind::Info);
-        return true;
-    case ImportOneResult::Skipped:
-        ShowSoftNotice(hWnd,
-                       localization::Text(L"workspace.actions.51cf4b2aba12").c_str(),
-                       SoftNoticeKind::Info);
-        return false;
-    case ImportOneResult::Canceled:
-        ShowSoftNotice(hWnd,
-                       localization::Text(L"workspace.actions.a48dae3b505b").c_str(),
-                       SoftNoticeKind::Info);
-        return false;
-    case ImportOneResult::Failed:
-        ShowSilentMessageDialog(hWnd,
-                                ui.menuConvertOfficeToPdf,
-                                failure.empty()
-                                    ? (localization::Text(L"workspace.actions.c9f1690f2821").c_str())
-                                    : failure,
-                                SoftNoticeKind::Error);
-        return false;
-    }
-    return false;
+    return StartOfficeBackgroundBatch(hWnd, sessionRoot, {src}, OfficeBackgroundBatchKind::Standard);
 }
 
 enum class DroppedOfficeImportChoice {
@@ -3627,51 +3868,10 @@ bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstrin
         if (officeChoice == DroppedOfficeImportChoice::ImportOriginal) {
             for (const auto& src : officeFiles) importOne(src, /*convertOffice=*/false);
         } else if (officeChoice == DroppedOfficeImportChoice::Convert) {
-            struct FailedOfficeConversion {
-                std::filesystem::path source;
-                std::wstring failure;
-            };
-            std::vector<FailedOfficeConversion> failedConversions;
-            for (size_t i = 0; i < officeFiles.size(); ++i) {
-                UpdateOfficeConversionProgress(hWnd, i + 1, officeFiles.size(), officeFiles[i]);
-                std::wstring failure;
-                const ImportOneResult result =
-                    ImportOneFileToCurrentSession(hWnd, sessionRoot, officeFiles[i], &failure);
-                if (result == ImportOneResult::Failed) {
-                    failedConversions.push_back({officeFiles[i], std::move(failure)});
-                } else {
-                    recordImportResult(officeFiles[i], result, failure);
-                }
-                if (stats.canceled) {
-                    stats.skipped += static_cast<int>(officeFiles.size() - i);
-                    break;
-                }
-            }
-            EndOfficeConversionProgress(hWnd);
-            if (!failedConversions.empty()) {
-                std::wstring message = localization::Text(L"workspace.actions.b5dc9584dd5d").c_str();
-                const size_t limit = std::min<size_t>(failedConversions.size(), 8);
-                for (size_t i = 0; i < limit; ++i) {
-                    message += L"\n - " + failedConversions[i].source.filename().wstring();
-                }
-                if (failedConversions.size() > limit) message += L"\n - ...";
-                SilentDialogOptions fallback;
-                fallback.title = OfficeOpenConversionTitle();
-                fallback.message = message;
-                fallback.kind = SoftNoticeKind::Warning;
-                fallback.buttons = SilentDialogButtons::YesNo;
-                fallback.yesLabel = localization::Text(L"workspace.actions.af160d2feda0").c_str();
-                fallback.noLabel = localization::Text(L"workspace.actions.8ccdf346762f").c_str();
-                fallback.defaultResult = SilentDialogResult::No;
-                fallback.escapeResult = SilentDialogResult::No;
-                if (ShowSilentDialog(hWnd, fallback) == SilentDialogResult::Yes) {
-                    for (const auto& failed : failedConversions) importOne(failed.source, /*convertOffice=*/false);
-                } else {
-                    for (const auto& failed : failedConversions) {
-                        recordImportResult(failed.source, ImportOneResult::Failed, failed.failure);
-                    }
-                }
-            }
+            // The regular-file portion has already been imported on the UI
+            // thread.  Start Office files separately so drag and drop never
+            // reintroduces the old synchronous LibreOffice wait loop.
+            StartOfficeBackgroundBatch(hWnd, sessionRoot, officeFiles, OfficeBackgroundBatchKind::Standard);
         } else {
             stats.skipped += static_cast<int>(officeFiles.size());
         }
@@ -3717,9 +3917,13 @@ bool ImportFileToCurrentSession(HWND hWnd) {
     }
 
     ImportBatchStats stats;
-    for (size_t i = 0; i < picked.size(); ++i) {
-        const auto& path = picked[i];
+    std::vector<std::filesystem::path> officeFiles;
+    for (const auto& path : picked) {
         std::filesystem::path src(path);
+        if (IsOfficeImportSourcePath(src)) {
+            officeFiles.push_back(std::move(src));
+            continue;
+        }
         std::wstring failure;
         ImportOneResult result = ImportOneFileToCurrentSession(hWnd, sessionRoot, src, &failure);
         switch (result) {
@@ -3736,15 +3940,15 @@ bool ImportFileToCurrentSession(HWND hWnd) {
             AddImportFailure(stats, src, failure);
             break;
         }
-        if (stats.canceled) {
-            stats.skipped += static_cast<int>(picked.size() - i);
-            break;
-        }
     }
+
+    const bool officeStarted = !officeFiles.empty() && HasOfficeConversionFeature() &&
+        kOfficePdfConversionApprovedForUse &&
+        StartOfficeBackgroundBatch(hWnd, sessionRoot, officeFiles, OfficeBackgroundBatchKind::Standard);
 
     if (stats.imported > 0) {
         RefreshCurrentSessionFiles();
     }
     ShowImportBatchResult(hWnd, stats, picked.size());
-    return stats.imported > 0;
+    return stats.imported > 0 || officeStarted;
 }

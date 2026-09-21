@@ -12,6 +12,7 @@ namespace note {
 
 enum class NoteContentKind {
     PlainText,
+    TeXSource,
     Markdown,
 };
 
@@ -43,7 +44,6 @@ struct NoteKernelRefreshResult {
 
 struct NoteKernelHistoryResult {
     NoteKernelApplyResult apply_result{};
-    NoteTextSelection selection{};
 
     bool applied() const { return apply_result.applied(); }
 };

@@ -74,55 +74,6 @@ static EmptyClroDeleteResult DeleteEmptyClroNoteFile(const std::filesystem::path
     return EmptyClroDeleteResult::Deleted;
 }
 
-static std::optional<std::filesystem::path> FileContextSessionPath(
-    const std::filesystem::path& filePath) {
-    const std::filesystem::path file = CanonicalOrSelf(filePath);
-    if (file.empty() || !IsWorkspaceManagedDirectoryTarget(file)) return std::nullopt;
-
-    for (const std::wstring& lectureValue : g_lectures) {
-        const std::filesystem::path lecture = CanonicalOrSelf(std::filesystem::path(lectureValue));
-        if (lecture.empty() || !IsPathUnderRoot(file, lecture)) continue;
-
-        std::filesystem::path session = file.parent_path();
-        const std::wstring container = ToLowerAscii(session.filename().wstring());
-        if (container == L"pdf" || container == L"note") session = session.parent_path();
-        if (session.empty() ||
-            CanonicalOrSelf(session.parent_path()) != lecture ||
-            IsDirectFilesSessionPath(session.wstring(), lecture.wstring()) ||
-            !IsWorkspaceManagedDirectoryTarget(session)) {
-            continue;
-        }
-        return session;
-    }
-    return std::nullopt;
-}
-
-static bool ActivateFileContextSession(HWND owner, const std::filesystem::path& sessionPath) {
-    const std::filesystem::path session = CanonicalOrSelf(sessionPath);
-    const std::filesystem::path lecture = CanonicalOrSelf(session.parent_path());
-    if (session.empty() || lecture.empty()) return false;
-
-    const int lectureIndex = FindLectureIndexByPath(lecture.wstring());
-    if (lectureIndex < 0) return false;
-    const bool lectureChanged = SetListboxSelAndNotify(g_hLectureList, lectureIndex);
-    if (!lectureChanged &&
-        NormalizePathKeyForList(g_currentLecturePath) != NormalizePathKeyForList(lecture.wstring())) {
-        NotifyListboxSelChange(g_hLectureList);
-    }
-    if (NormalizePathKeyForList(g_currentLecturePath) != NormalizePathKeyForList(lecture.wstring())) {
-        return false;
-    }
-
-    const int sessionIndex = FindSessionIndexByPath(session.wstring());
-    if (sessionIndex < 0) return false;
-    const bool sessionChanged = SetListboxSelAndNotify(g_hSessionList, sessionIndex);
-    if (!sessionChanged &&
-        NormalizePathKeyForList(g_currentSessionPath) != NormalizePathKeyForList(session.wstring())) {
-        NotifyListboxSelChange(g_hSessionList);
-    }
-    return NormalizePathKeyForList(g_currentSessionPath) == NormalizePathKeyForList(session.wstring());
-}
-
 static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     if (!list || (list != g_hPdfList && list != g_hNoteList)) return false;
     HWND owner = GetParent(list);
@@ -154,35 +105,12 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     const bool canDeleteEmptyClro = isNoteList && IsEmptyClroNoteEligibleForDeletion(selectedPath);
     const bool isPinnedTemporaryPath = IsPinnedTemporaryFilePath(file.path, isNoteList);
     const bool isTemporaryPath = IsTemporaryFilePathInCurrentList(file.path, isNoteList);
-    const bool canCreateSession =
-        !g_currentLecturePath.empty() &&
-        IsWorkspaceManagedDirectoryTarget(std::filesystem::path(g_currentLecturePath));
-    const bool canCreateNote =
-        !g_currentSessionPath.empty() &&
-        IsWorkspaceManagedDirectoryTarget(std::filesystem::path(g_currentSessionPath)) &&
-        !IsDirectFilesSessionPath(g_currentSessionPath, g_currentLecturePath);
-    const auto selectedFileSession = FileContextSessionPath(selectedPath);
-    const bool canCreateNoteInSelectedFileSession = selectedFileSession.has_value();
-    const bool canCloseLecture = !g_currentLecturePath.empty();
-    const bool canCloseSession = !g_currentSessionPath.empty();
     const std::wstring openedPath = isNoteList ? g_currentNotePath : CurrentLogicalPdfPath();
     const bool canCloseFile = !openedPath.empty() &&
         NormalizePathKeyForList(file.path) == NormalizePathKeyForList(openedPath);
 
     ui::context_menu::PopupMenu menu;
     if (!menu) return false;
-    constexpr UINT kCmdNewLecture = 1;
-    constexpr UINT kCmdNewSession = 2;
-    constexpr UINT kCmdNewSelectedNoteClro = 3;
-    constexpr UINT kCmdNewSelectedNoteMarkdown = 4;
-    constexpr UINT kCmdNewSelectedNoteText = 5;
-    constexpr UINT kCmdNewSelectedNoteTex = 6;
-    constexpr UINT kCmdNewSelectedNoteCsv = 7;
-    constexpr UINT kCmdNewCurrentNoteClro = 8;
-    constexpr UINT kCmdNewCurrentNoteMarkdown = 9;
-    constexpr UINT kCmdNewCurrentNoteText = 10;
-    constexpr UINT kCmdNewCurrentNoteTex = 11;
-    constexpr UINT kCmdNewCurrentNoteCsv = 12;
     constexpr UINT kCmdOpenInApp = 13;
     constexpr UINT kCmdOpenReadOnly = 14;
     constexpr UINT kCmdOpenExplorer = 15;
@@ -195,138 +123,73 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdPinTemporaryPath = 22;
     constexpr UINT kCmdUnpinTemporaryPath = 23;
     constexpr UINT kCmdRemoveTemporaryPath = 24;
-    constexpr UINT kCmdCloseLecture = 25;
-    constexpr UINT kCmdCloseSession = 26;
     constexpr UINT kCmdCloseFile = 27;
     constexpr UINT kCmdReload = 28;
-    AppendMenuW(menu.get(), MF_STRING, kCmdNewLecture,
-                localization::Text(L"ui.pdf_list.23af32fea7bb").c_str());
-    AppendMenuW(menu.get(),
-                canCreateSession ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdNewSession,
-                localization::Text(L"ui.pdf_list.5e4fd1449672").c_str());
-    HMENU noteMenu = CreatePopupMenu();
-    HMENU selectedSessionNoteMenu = CreatePopupMenu();
-    HMENU currentSessionNoteMenu = CreatePopupMenu();
-    if (noteMenu && selectedSessionNoteMenu && currentSessionNoteMenu) {
-        const auto appendExtensions = [](HMENU target, UINT firstCommand) {
-            AppendMenuW(target, MF_STRING, firstCommand, L".clro");
-            AppendMenuW(target, MF_STRING, firstCommand + 1, L".md");
-            AppendMenuW(target, MF_STRING, firstCommand + 2, L".txt");
-            AppendMenuW(target, MF_STRING, firstCommand + 3, L".tex");
-            AppendMenuW(target, MF_STRING, firstCommand + 4, L".csv");
-        };
-        appendExtensions(selectedSessionNoteMenu, kCmdNewSelectedNoteClro);
-        appendExtensions(currentSessionNoteMenu, kCmdNewCurrentNoteClro);
-        AppendMenuW(noteMenu,
-                    canCreateNoteInSelectedFileSession ? MF_POPUP : (MF_POPUP | MF_GRAYED),
-                    reinterpret_cast<UINT_PTR>(selectedSessionNoteMenu),
-                    localization::Text(L"ui.pdf_list.1b4bcad2d222").c_str());
-        AppendMenuW(noteMenu,
-                    canCreateNote ? MF_POPUP : (MF_POPUP | MF_GRAYED),
-                    reinterpret_cast<UINT_PTR>(currentSessionNoteMenu),
-                    localization::Text(L"ui.pdf_list.a2ac54b74f06").c_str());
-        AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(noteMenu),
-                    localization::Text(L"ui.pdf_list.5d611a60297c").c_str());
-    } else {
-        if (selectedSessionNoteMenu) DestroyMenu(selectedSessionNoteMenu);
-        if (currentSessionNoteMenu) DestroyMenu(currentSessionNoteMenu);
-        if (noteMenu) DestroyMenu(noteMenu);
-    }
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu.get(), MF_STRING, kCmdReload,
-                localization::Text(L"ui.pdf_list.018a2719c366").c_str());
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenInApp,
-         officeFile
-             ? (localization::Text(L"ui.pdf_list.7470105ed551").c_str())
-             : (localization::Text(L"ui.pdf_list.de691a7bc023").c_str())},
-    });
-    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenReadOnly, localization::Text(L"ui.pdf_list.154ade32c630").c_str(),
-         !isNoteList && file.isPdf},
-    });
     const bool imageFile = !isNoteList && IsImageFile(selectedPath);
+
+    AppendMenuW(menu.get(), MF_STRING, kCmdOpenInApp,
+                officeFile
+                    ? (localization::Text(L"ui.pdf_list.7470105ed551").c_str())
+                    : (localization::Text(L"ui.pdf_list.de691a7bc023").c_str()));
+    if (!isNoteList && file.isPdf) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdOpenReadOnly,
+                    localization::Text(L"ui.pdf_list.154ade32c630").c_str());
+    }
     if (imageFile) {
         AppendMenuW(menu.get(), MF_STRING, kCmdConvertImageToPdf,
                     localization::Text(L"ui.pdf_list.4d1ad08173d8").c_str());
     }
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenExplorer, localization::Text(L"ui.pdf_list.9208055ca154").c_str()},
-        {kCmdShowHierarchy, localization::Text(L"ui.pdf_list.752b401aff9a").c_str(), canShowHierarchy},
-        {kCmdShowPath, localization::Text(L"ui.pdf_list.14a4b0c697e4").c_str()},
-        {kCmdCopyPath, localization::Text(L"ui.pdf_list.9806c16958b1").c_str()},
-    });
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu.get(),
-                MF_STRING,
-                isPinnedTemporaryPath ? kCmdUnpinTemporaryPath : kCmdPinTemporaryPath,
-                isPinnedTemporaryPath
-                    ? (localization::Text(L"ui.pdf_list.8ba171ca98b1").c_str())
-                    : (localization::Text(L"ui.pdf_list.664d20d41490").c_str()));
-    AppendMenuW(menu.get(),
-                isTemporaryPath ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdRemoveTemporaryPath,
-                localization::Text(L"ui.pdf_list.a56d092851ca").c_str());
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu.get(), canCloseLecture ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdCloseLecture, localization::Text(L"ui.pdf_list.8bd547f6bad9").c_str());
-    AppendMenuW(menu.get(), canCloseSession ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdCloseSession, localization::Text(L"ui.pdf_list.8b37e122658e").c_str());
-    AppendMenuW(menu.get(), canCloseFile ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdCloseFile, localization::Text(L"ui.pdf_list.ce4e384de3db").c_str());
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu.get(),
-                canRename ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdRename,
-                localization::Text(L"ui.pdf_list.b351979601ed").c_str());
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu.get(),
-                canDeleteEmptyClro ? MF_STRING : (MF_STRING | MF_GRAYED),
-                kCmdDeleteEmptyClro,
-                localization::Text(L"ui.pdf_list.985ebbf796f6").c_str());
+    AppendMenuW(menu.get(), MF_STRING, kCmdReload,
+                localization::Text(L"ui.pdf_list.018a2719c366").c_str());
+
+    HMENU fileMenu = CreatePopupMenu();
+    if (fileMenu) {
+        AppendMenuW(fileMenu, MF_STRING, kCmdReload,
+                    localization::Text(L"ui.pdf_list.018a2719c366").c_str());
+        AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
+        ui::context_menu::AppendPathContextMenuItems(fileMenu, {
+            {kCmdOpenExplorer, localization::Text(L"ui.pdf_list.9208055ca154").c_str()},
+            {kCmdShowHierarchy, localization::Text(L"ui.pdf_list.752b401aff9a").c_str(), canShowHierarchy},
+            {kCmdShowPath, localization::Text(L"ui.pdf_list.14a4b0c697e4").c_str()},
+            {kCmdCopyPath, localization::Text(L"ui.pdf_list.9806c16958b1").c_str()},
+        });
+        AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu),
+                    localization::Text(L"menu.context.file").c_str());
+    }
+
+    if (canRename || canCloseFile) {
+        AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    }
+    if (canRename) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdRename,
+                    localization::Text(L"ui.pdf_list.b351979601ed").c_str());
+    }
+    if (canCloseFile) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdCloseFile,
+                    localization::Text(L"ui.pdf_list.ce4e384de3db").c_str());
+    }
+    if (isPinnedTemporaryPath || isTemporaryPath) {
+        AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu.get(), MF_STRING,
+                    isPinnedTemporaryPath ? kCmdUnpinTemporaryPath : kCmdPinTemporaryPath,
+                    isPinnedTemporaryPath
+                        ? (localization::Text(L"ui.pdf_list.8ba171ca98b1").c_str())
+                        : (localization::Text(L"ui.pdf_list.664d20d41490").c_str()));
+        if (isTemporaryPath) {
+            AppendMenuW(menu.get(), MF_STRING, kCmdRemoveTemporaryPath,
+                        localization::Text(L"ui.pdf_list.a56d092851ca").c_str());
+        }
+    }
+    if (canDeleteEmptyClro) {
+        AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu.get(), MF_STRING, kCmdDeleteEmptyClro,
+                    localization::Text(L"ui.pdf_list.985ebbf796f6").c_str());
+    }
     SetForegroundWindow(owner);
     const UINT cmd = menu.TrackCommand(owner, screenPt,
                                        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
     menu.Close();
-    if (cmd == kCmdNewLecture) {
-        ShowNewLectureDialog(owner);
-        RefreshMainMenuBar(owner);
-        return true;
-    }
-    if (cmd == kCmdNewSession && canCreateSession) {
-        ShowNewSessionDialog(owner);
-        RefreshMainMenuBar(owner);
-        return true;
-    }
-    const wchar_t* noteExtension = nullptr;
-    bool createInSelectedFileSession = false;
-    switch (cmd) {
-    case kCmdNewSelectedNoteClro: noteExtension = L".clro"; createInSelectedFileSession = true; break;
-    case kCmdNewSelectedNoteMarkdown: noteExtension = L".md"; createInSelectedFileSession = true; break;
-    case kCmdNewSelectedNoteText: noteExtension = L".txt"; createInSelectedFileSession = true; break;
-    case kCmdNewSelectedNoteTex: noteExtension = L".tex"; createInSelectedFileSession = true; break;
-    case kCmdNewSelectedNoteCsv: noteExtension = L".csv"; createInSelectedFileSession = true; break;
-    case kCmdNewCurrentNoteClro: noteExtension = L".clro"; break;
-    case kCmdNewCurrentNoteMarkdown: noteExtension = L".md"; break;
-    case kCmdNewCurrentNoteText: noteExtension = L".txt"; break;
-    case kCmdNewCurrentNoteTex: noteExtension = L".tex"; break;
-    case kCmdNewCurrentNoteCsv: noteExtension = L".csv"; break;
-    default: break;
-    }
-    if (noteExtension && (!createInSelectedFileSession || canCreateNoteInSelectedFileSession) &&
-        (createInSelectedFileSession || canCreateNote)) {
-        if (!SaveNoteIfDirty(owner)) return true;
-        if (createInSelectedFileSession &&
-            (!selectedFileSession || !ActivateFileContextSession(owner, *selectedFileSession))) {
-            return true;
-        }
-        CreateNewNoteWithExtensionInSession(owner, noteExtension);
-        RefreshMainMenuBar(owner);
-        return true;
-    }
     if (cmd == kCmdOpenInApp) {
         if (officeFile) {
             return ConvertOfficeFileToCurrentSession(owner, selectedPath);
@@ -349,12 +212,6 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         ShowSoftNotice(owner, localization::Text(L"ui.pdf_list.c5a835a713a3").c_str(),
                        SoftNoticeKind::Info);
         return true;
-    }
-    if (cmd == kCmdCloseLecture && canCloseLecture) {
-        return CloseLectureDisplayFromContext(owner, g_currentLecturePath);
-    }
-    if (cmd == kCmdCloseSession && canCloseSession) {
-        return CloseSessionDisplayFromContext(owner, g_currentSessionPath);
     }
     if (cmd == kCmdCloseFile && canCloseFile) {
         return CloseFileDisplayFromContext(owner, isNoteList, file.path);

@@ -40,8 +40,8 @@ enum class SilentDialogPlacement {
     OwnerUpperLeft
 };
 
-// A display-only path.  `value` is never used for file operations; it lets a
-// diagnostic show a compact, expandable representation without losing the
+// A display-only path. `value` is never used for file operations; dialogs show
+// only a bounded compact representation and offer explicit copying of the
 // exact path that the operation reported.
 struct SilentDialogPath {
     std::wstring label;

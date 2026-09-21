@@ -2,8 +2,9 @@
 """Build the deliberately limited static public site.
 
 The output directory is intentionally separate from application build output.
-It contains only files selected here and is used by GitHub Pages. Existing
-output is never overwritten by this tool.
+It contains only files selected here and is used by GitHub Pages. An explicit
+replacement preserves the prior generation unless the staged generation is
+ready to take its place.
 """
 
 from __future__ import annotations
@@ -118,6 +119,42 @@ def replace_version_tokens(site_dir: Path, version: str) -> None:
         markdown_file.write_text(text.replace(VERSION_TOKEN, version), encoding="utf-8")
 
 
+def replace_staged_site(staging_dir: Path) -> None:
+    """Install a complete staged site without deleting the current generation first."""
+    OUTPUT_DIR.parent.mkdir(parents=True, exist_ok=True)
+    previous_dir: Path | None = None
+    if OUTPUT_DIR.exists():
+        previous_dir = OUTPUT_DIR.with_name(f".public-site-previous-{uuid.uuid4().hex}")
+        # A locked output fails here while the existing published generation is
+        # still intact. Do not use rmtree before the replacement is ready.
+        OUTPUT_DIR.rename(previous_dir)
+
+    try:
+        staging_dir.rename(OUTPUT_DIR)
+    except OSError as install_error:
+        if previous_dir is not None and previous_dir.exists() and not OUTPUT_DIR.exists():
+            try:
+                previous_dir.rename(OUTPUT_DIR)
+            except OSError as restore_error:
+                raise RuntimeError(
+                    f"could not install staged site ({install_error}) or restore the prior generation ({restore_error})"
+                ) from restore_error
+        raise
+
+    if previous_dir is None:
+        return
+    try:
+        shutil.rmtree(previous_dir)
+    except OSError as cleanup_error:
+        # The new complete generation is already installed. Retain the prior
+        # one rather than risking the generated site when a viewer still holds
+        # a file handle; .gitignore excludes this recoverable residue.
+        print(
+            f"Public-site build retained previous generation at {previous_dir}: {cleanup_error}",
+            file=sys.stderr,
+        )
+
+
 def build_site(*, replace: bool = False, documentation_portal: bool = False) -> int:
     if OUTPUT_DIR.exists():
         if not replace:
@@ -155,10 +192,7 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
         if render_human_docs([str(staging_dir)]) != 0:
             raise RuntimeError("render_human_docs.py failed")
 
-        if OUTPUT_DIR.exists():
-            shutil.rmtree(OUTPUT_DIR)
-        OUTPUT_DIR.parent.mkdir(parents=True, exist_ok=True)
-        staging_dir.rename(OUTPUT_DIR)
+        replace_staged_site(staging_dir)
         print(f"Built selected public documentation: {OUTPUT_DIR}")
         return 0
     except Exception as error:

@@ -3,7 +3,6 @@
 #include "core/app_core.h"
 #include "core/text_encoding.h"
 #include "bridge/view_bridge.h"
-#include "file_output/file_output.h"
 #include "note/note_identity.h"
 #include "note/note_dirty_graph.h"
 #include <optional>
@@ -41,11 +40,14 @@ void PreserveRenderedNoteOpeningView();
 // Emits focus, selection, and raw-line state to the opt-in preview trace.
 // No note text or full path is included.
 void TraceCurrentNoteFocusState(const wchar_t* origin);
-void ClearNoteEditorSilently(HWND hWnd, const std::wstring& nextNotePath = L"");
 bool SaveNoteFile(HWND hWnd);
 void ClearCurrentNoteUndoHistory();
 void ResetNoteEditHistorySnapshot(HWND hEdit);
 void RecordCurrentNoteTextEditForUndo(HWND hEdit);
+// Called for every RichEdit EN_CHANGE before the document kernel observes the
+// mutation. It invalidates the zero-copy TextCore-to-editor binding until the
+// canonical edit has been accepted.
+void NoteEditorTextMutationObserved(HWND hEdit);
 // Reconcile any RichEdit mutation with the document-local kernel before a
 // command observes, saves, or replaces the current note.
 [[nodiscard]] bool SynchronizeActiveNoteEditorToKernel(HWND owner);
@@ -62,6 +64,7 @@ void RefreshBottomPaneView(bool synchronousPaint = true);
 void UpdateNoteViewMode();
 void EnsureInactiveCachedNoteEditWindowsParked();
 void UpdateNoteLineSpacing(std::optional<note::NoteDirtyGraph> pendingGraph = std::nullopt);
+void RefreshNoteLineSpacingForPresentationSurface(HWND hWnd);
 void ExpandNoteRenderCanvasForPendingEdit(HWND hWnd);
 void SyncNoteImeCandidateWindowToCaret(HWND hWnd);
 void ToggleNoteWrapSetting();

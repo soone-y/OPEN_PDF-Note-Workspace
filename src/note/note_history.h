@@ -1,16 +1,19 @@
 #pragma once
 
+#include "core/sha256.h"
 #include "note/note_model.h"
 #include "note/note_text_boundaries.h"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <vector>
 
 namespace note {
 
-// UTF-16 offsets are preserved exactly so undo/redo restores the user's caret
-// and selection, not merely the text.
+// UTF-16 offsets describe the selection at an edit boundary. They are used to
+// decide whether adjacent edits can coalesce; replay must not teleport the UI
+// back to these historic view positions.
 struct NoteTextSelection {
     Utf16CodeUnitOffset anchor{};
     Utf16CodeUnitOffset caret{};
@@ -26,8 +29,21 @@ enum class NoteHistoryOperationKind {
 
 struct NoteHistoryReplay {
     TextEdit edit;
-    NoteTextSelection selection;
+    // The canonical text that must still occupy edit.start..edit.deleted_len
+    // immediately before replay.  A matching range is a precondition, not a
+    // best-effort hint: replaying against different text would make an undo
+    // entry mutate unrelated user content.
+    std::wstring expected_deleted_text;
+    core_hash::Sha256Digest expected_content_fingerprint{};
+    size_t expected_content_length = 0;
 };
+
+// Uses the same canonical UTF-16LE representation as TextEdit. SHA-256 makes
+// a stale in-process entry computationally infeasible to confuse with the
+// current full text; it is not an authorization or persistence mechanism.
+[[nodiscard]] bool NoteHistoryReplayMatchesCurrentText(
+    const NoteHistoryReplay& replay,
+    std::wstring_view currentText);
 
 // Per-NoteId, UI-independent undo/redo history. The caller applies the
 // returned replay through the canonical text core and commits it only on
@@ -59,6 +75,10 @@ private:
         NoteHistoryOperationKind kind = NoteHistoryOperationKind::Other;
         std::optional<TextUnitClass> unit_class;
         uint64_t tick = 0;
+        core_hash::Sha256Digest before_content_fingerprint{};
+        size_t before_content_length = 0;
+        core_hash::Sha256Digest after_content_fingerprint{};
+        size_t after_content_length = 0;
     };
 
     static bool CanMerge(const Entry& previous, const Entry& next);

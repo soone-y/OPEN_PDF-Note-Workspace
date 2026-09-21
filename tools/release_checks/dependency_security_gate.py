@@ -21,6 +21,7 @@ ALLOWED_SOURCE_HOSTS = {
     "chromium.googlesource.com",
     "github.com",
     "osv.dev",
+    "pdfium.googlesource.com",
     "www.chromium.org",
     "www.libreoffice.org",
     "zlib.net",

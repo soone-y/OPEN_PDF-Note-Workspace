@@ -19,7 +19,6 @@
 #include "note/note_math.h"
 #include "note/note_parser.h"
 #include "note/note_persistence.h"
-#include "note/note_presentation.h"
 #include "note/note_revision_gate.h"
 #include "note/note_semantic_index.h"
 #include "note/note_transaction.h"
@@ -32,6 +31,7 @@
 #include "app/main_close_policy.h"
 #include "core/setup_json_policy.h"
 #include "core/cache_dir_policy.h"
+#include "core/sha256.h"
 
 std::wstring UTF8ToWide(const std::string& s) {
     if (s.empty()) return L"";
@@ -70,6 +70,17 @@ void Expect(bool condition, const char* message) {
     }
     std::cout << "[FAIL] " << message << "\n";
     ++g_failed;
+}
+
+std::string Sha256Hex(const core_hash::Sha256Digest& digest) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string text;
+    text.reserve(digest.size() * 2);
+    for (const std::uint8_t value : digest) {
+        text.push_back(kHex[value >> 4]);
+        text.push_back(kHex[value & 0x0f]);
+    }
+    return text;
 }
 
 const note::Diagnostic* FindDiagnostic(const note::NoteDocument& doc, std::wstring_view code) {
@@ -149,6 +160,13 @@ note::NoteDocument ParseMd4c(std::wstring text) {
     return note::ParseNoteDocument(model);
 }
 
+note::NoteDocument ParseTeXSource(std::wstring text) {
+    note::NoteMetadata meta;
+    meta.file_name = L"note.tex";
+    note::NoteTextModel model = note::MakeNoteTextModel(std::move(meta), std::move(text), 1);
+    return note::ParseTeXMathDocument(model);
+}
+
 std::pair<note::NoteTextModel, note::NoteDocument> BuildMd4cModelAndDoc(std::wstring text) {
     note::NoteMetadata meta;
     meta.file_name = L"note.md";
@@ -169,6 +187,15 @@ bool ApplyTextEditKeepsLineStartsInSync(std::wstring text, note::TextEdit edit) 
 
 int main() {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+
+    {
+        core_hash::Sha256 hasher;
+        static constexpr std::uint8_t kAbc[] = {'a', 'b', 'c'};
+        hasher.Update(kAbc, sizeof(kAbc));
+        Expect(Sha256Hex(hasher.Finalize()) ==
+                   "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+               "SHA-256 integrity guard matches the standard abc test vector");
+    }
 
     {
         const std::wstring text = L"abc\r\nかな、e\x0301\xD83D\xDE00";
@@ -455,55 +482,6 @@ int main() {
     }
 
     {
-        using Action = note::NotePresentationFrameAction;
-        Expect(note::ResolveNotePresentationFrameAction({false, true, true, false, false}) ==
-                   Action::RawFallback,
-               "presentation policy uses raw fallback when render mode is disabled");
-        Expect(note::ResolveNotePresentationFrameAction({true, true, true, false, false}) ==
-                   Action::RenderCurrent,
-               "presentation policy renders a current committed cache");
-        Expect(note::ResolveNotePresentationFrameAction({true, true, false, true, false}) ==
-                   Action::ReuseCommittedLayout,
-               "presentation policy keeps committed layout for a same-line pending edit");
-        Expect(note::ResolveNotePresentationFrameAction({true, true, false, true, true}) ==
-                   Action::CommitBeforePaint,
-               "presentation policy commits line-count changes before paint");
-        Expect(note::ResolveNotePresentationFrameAction({true, true, false, false, true}) ==
-                   Action::CommitBeforePaint,
-               "presentation policy treats pending line-count repair as a paint barrier");
-        Expect(note::ResolveNotePresentationFrameAction({true, true, false, true, false, true}) ==
-                   Action::RawFallback,
-               "presentation policy keeps IME composition on the raw edit surface when cache is stale");
-        Expect(note::ResolveNotePresentationFrameAction({true, true, true, true, false, true}) ==
-                   Action::RenderCurrent,
-               "presentation policy can render the current cache while IME state is already synchronized");
-        Expect(note::ResolveNotePresentationFrameAction({true, false, false, true, false}) ==
-                   Action::RawFallback,
-               "presentation policy refuses reuse without a committed cache");
-
-        const std::wstring indexedMultiline = L"# title\nbody";
-        Expect(note::RichEditWindowTextLengthForIndexedText(indexedMultiline) ==
-                   indexedMultiline.size() + 1,
-               "presentation length keeps RichEdit CRLF distinct from indexed line breaks");
-        Expect(note::RichEditWindowTextLengthForIndexedText(L"single line") == 11,
-               "presentation length leaves a single indexed line unchanged");
-
-        const note::NoteDerivedRefreshPlan lightweight =
-            note::ResolveNoteDerivedRefreshPlan({false, false, false});
-        const note::NoteDerivedRefreshPlan headings =
-            note::ResolveNoteDerivedRefreshPlan({false, false, true});
-        const note::NoteDerivedRefreshPlan render =
-            note::ResolveNoteDerivedRefreshPlan({true, false, false});
-        const note::NoteDerivedRefreshPlan mathPane =
-            note::ResolveNoteDerivedRefreshPlan({false, true, false});
-        Expect(lightweight.lightweight() && lightweight.refresh_assist &&
-                   headings.refresh_syntax && !headings.refresh_render_plan &&
-                   render.refresh_syntax && render.refresh_render_plan &&
-                   mathPane.refresh_syntax && mathPane.refresh_render_plan,
-               "derived refresh policy separates semantic panes from render-plan work");
-    }
-
-    {
         using Action = main_close_policy::CloseRequestAction;
         Expect(main_close_policy::ResolveCloseRequestAction({true, false, false, false}) ==
                    Action::IgnoreAlreadyExiting,
@@ -647,6 +625,12 @@ int main() {
         Expect(!note::LayoutMetricsUnchangedOutsideRange(lines, visualOnly, 1, 1),
                "layout dirty-range check rejects changes outside the requested line");
 
+        std::vector<note::NoteLayoutLineMetrics> compactSyntaxLine = lines;
+        compactSyntaxLine[1].exact_line_height_px = 1;
+        Expect(!note::SameParagraphSpacing(lines, compactSyntaxLine) &&
+                   !note::LayoutMetricsUnchangedOutsideRange(lines, compactSyntaxLine, 0, 0),
+               "a collapsed structured syntax line updates paragraph geometry and invalidation");
+
         snapshot.Reset();
         Expect(!snapshot.source_identity.valid() && snapshot.lines.empty(),
                "layout metrics reset clears identity and line records together");
@@ -686,7 +670,7 @@ int main() {
                "local note kernel incrementally commits ordinary text edits");
 
         const size_t lineBreakAt = kernel.text_core().model().raw.size();
-        kernel.Apply(note::TextEdit{lineBreakAt, 0, L"\n"}, true);
+        (void)kernel.Apply(note::TextEdit{lineBreakAt, 0, L"\n"}, true);
         const note::NoteKernelRefreshResult deferred = kernel.RefreshDerived();
         Expect(deferred.kind == note::NoteKernelRefreshKind::Deferred &&
                    kernel.has_deferred_full_refresh() &&
@@ -698,8 +682,8 @@ int main() {
                    repaired.current && !kernel.has_deferred_full_refresh(),
                "local note kernel repairs deferred structure with one full snapshot commit");
 
-        kernel.Apply(note::TextEdit{kernel.text_core().model().raw.size(), 0, L"a"}, true);
-        kernel.Apply(note::TextEdit{kernel.text_core().model().raw.size(), 0, L"b"}, true);
+        (void)kernel.Apply(note::TextEdit{kernel.text_core().model().raw.size(), 0, L"a"}, true);
+        (void)kernel.Apply(note::TextEdit{kernel.text_core().model().raw.size(), 0, L"b"}, true);
         Expect(kernel.requires_full_refresh(),
                "local note kernel coalesces multiple pending edits into a full refresh barrier");
         const note::NoteKernelRefreshResult coalesced = kernel.RefreshDerived();
@@ -721,6 +705,19 @@ int main() {
                    kernel.text_core().MatchesRaw(L"plain") &&
                    !kernel.CanReadSyntax(),
                "local note kernel keeps plain text canonical without fabricating syntax state");
+
+        kernel.Reset(owner,
+                     note::NoteMetadata{L"kernel.tex", L"kernel"},
+                     L"# TeX source\n$x$\n",
+                     31,
+                     4,
+                     note::NoteContentKind::TeXSource);
+        const note::NoteKernelRefreshResult tex = kernel.RefreshDerived();
+        Expect(tex.kind == note::NoteKernelRefreshKind::Full && tex.current &&
+                   kernel.CanReadSyntax() && kernel.CanReadSemantic() &&
+                   kernel.document().math_spans.size() == 1 &&
+                   kernel.semantic_index().headings.empty(),
+               "local note kernel derives TeX math without interpreting TeX source as Markdown");
     }
 
     {
@@ -912,22 +909,36 @@ int main() {
         const note::NoteTextSelection emptySelection{{0}, {0}};
         const note::NoteTextSelection afterA{{1}, {1}};
         const note::NoteTextSelection afterB{{2}, {2}};
-        historyKernel.ApplyUserEdit(note::TextEdit{0, 0, L"a"}, emptySelection,
-                                    afterA, note::NoteHistoryOperationKind::Typing,
-                                    100, false);
-        historyKernel.ApplyUserEdit(note::TextEdit{1, 0, L"b"}, afterA,
-                                    afterB, note::NoteHistoryOperationKind::Typing,
-                                    200, false);
+        (void)historyKernel.ApplyUserEdit(note::TextEdit{0, 0, L"a"}, emptySelection,
+                                          afterA, note::NoteHistoryOperationKind::Typing,
+                                          100, false);
+        (void)historyKernel.ApplyUserEdit(note::TextEdit{1, 0, L"b"}, afterA,
+                                          afterB, note::NoteHistoryOperationKind::Typing,
+                                          200, false);
         Expect(historyKernel.CanUndo() && historyKernel.text_core().MatchesRaw(L"ab"),
                "kernel history owns user edits for one note id");
         const auto undo = historyKernel.Undo(false);
-        Expect(undo.has_value() && undo->selection.caret.value == 0 &&
-                   historyKernel.text_core().MatchesRaw(L""),
-               "merged typing undo restores both text and original caret");
+        Expect(undo.has_value() && historyKernel.text_core().MatchesRaw(L""),
+               "merged typing undo restores text without prescribing UI selection");
         const auto redo = historyKernel.Redo(false);
-        Expect(redo.has_value() && redo->selection.caret.value == 2 &&
-                   historyKernel.text_core().MatchesRaw(L"ab"),
-               "kernel history redo restores merged typing and final caret");
+        Expect(redo.has_value() && historyKernel.text_core().MatchesRaw(L"ab"),
+               "kernel history redo restores text without prescribing UI selection");
+
+        note::LocalNoteKernel guardedHistoryKernel;
+        guardedHistoryKernel.Reset(note::NoteId{780}, metadata, L"", 1, 0,
+                                   note::NoteContentKind::PlainText);
+        (void)guardedHistoryKernel.ApplyUserEdit(
+            note::TextEdit{0, 0, L"a"}, emptySelection, afterA,
+            note::NoteHistoryOperationKind::Typing, 100, false);
+        const auto guardedUndo = guardedHistoryKernel.Undo(false);
+        const auto unrelatedInsert = guardedHistoryKernel.Apply(
+            note::TextEdit{0, 0, L"b"}, false);
+        const auto rejectedRedo = guardedHistoryKernel.Redo(false);
+        Expect(guardedUndo.has_value() && unrelatedInsert.applied() &&
+                   !rejectedRedo.has_value() && guardedHistoryKernel.CanRedo() &&
+                   !guardedHistoryKernel.CanUndo() &&
+                   guardedHistoryKernel.text_core().MatchesRaw(L"b"),
+               "history replay rejects a mismatched current range without moving stacks or text");
         historyKernel.ClearHistory();
         Expect(!historyKernel.CanUndo() && !historyKernel.CanRedo() &&
                    historyKernel.text_core().MatchesRaw(L"ab"),
@@ -952,10 +963,7 @@ int main() {
         const auto undoLineBreak = lineHistoryKernel.Undo(false);
         const auto undoFirstLine = lineHistoryKernel.Undo(false);
         Expect(undoSecondLine.has_value() && undoLineBreak.has_value() && undoFirstLine.has_value() &&
-                   lineHistoryKernel.text_core().MatchesRaw(L"") &&
-                   undoSecondLine->selection.caret.value == 3 &&
-                   undoLineBreak->selection.caret.value == 2 &&
-                   undoFirstLine->selection.caret.value == 0,
+                   lineHistoryKernel.text_core().MatchesRaw(L""),
                "history undo stops at a line boundary before resuming on the preceding line");
 
         note::NoteTextCoreRegistry textCores;
@@ -1549,6 +1557,50 @@ int main() {
     }
 
     {
+        const note::NoteDocument doc = ParseTeXSource(
+            L"# TeX source stays literal\n"
+            L"$x$ % $ignored$\n"
+            L"\\(y + 1\\)\n");
+        Expect(doc.blocks.size() == 1 && doc.inlines.size() == 1 &&
+                   doc.style_spans.empty(),
+               "TeX source parser does not create Markdown structure or styles");
+        Expect(doc.math_spans.size() == 2,
+               "TeX source parser extracts completed TeX math but ignores comments");
+        if (doc.math_spans.size() == 2) {
+            Expect(doc.math_spans[0].normalized_tex == L"x" &&
+                       doc.math_spans[1].normalized_tex == L"y + 1",
+                   "TeX source parser preserves math bodies without Markdown rewriting");
+        }
+    }
+
+    {
+        const note::NoteDocument doc = ParseTeXSource(
+            L"$$\n"
+            L"\\sum_{k=1}^{n} k = \\frac{n(n+1)}{2}\n"
+            L"$$\n");
+        Expect(doc.math_spans.size() == 1 && doc.math_spans[0].diagnostic_ids.empty(),
+               "TeX source sample formula is a supported display-math span");
+        if (doc.math_spans.size() == 1) {
+            const auto node = mathrender::Parse(doc.math_spans[0].normalized_tex);
+            Expect(node != nullptr,
+                   "TeX source sample formula is accepted by the shared math renderer");
+        }
+    }
+
+    {
+        // The note editor uses two spaces to nest a '-' list item.  Four
+        // leading spaces would instead be interpreted as a code block.
+        const note::NoteDocument doc = ParseMd4c(
+            L"- parent\n"
+            L"  - child\n");
+        const note::BlockNode* parentItem = FindBlock(doc, note::BlockKind::ListItem, 0);
+        const note::BlockNode* childItem = FindBlock(doc, note::BlockKind::ListItem, 1);
+        Expect(parentItem != nullptr && childItem != nullptr &&
+                   FindBlock(doc, note::BlockKind::CodeBlock) == nullptr,
+               "two-space unordered-list indent remains Markdown list content");
+    }
+
+    {
         const note::NoteDocument doc = ParseMd4c(
             L"Before\n\n"
             L"---\n\n"
@@ -1603,12 +1655,107 @@ int main() {
         const note::BlockNode* table = FindBlock(doc, note::BlockKind::Table);
         const note::BlockNode* headCell = FindBlock(doc, note::BlockKind::TableHeaderCell);
         const note::BlockNode* bodyCell = FindBlock(doc, note::BlockKind::TableCell);
+        size_t tableIndex = std::numeric_limits<size_t>::max();
+        size_t headCellIndex = std::numeric_limits<size_t>::max();
+        size_t bodyCellIndex = std::numeric_limits<size_t>::max();
+        for (size_t index = 0; index < doc.blocks.size(); ++index) {
+            if (doc.blocks[index].kind == note::BlockKind::Table && tableIndex == std::numeric_limits<size_t>::max()) {
+                tableIndex = index;
+            } else if (doc.blocks[index].kind == note::BlockKind::TableHeaderCell &&
+                       headCellIndex == std::numeric_limits<size_t>::max()) {
+                headCellIndex = index;
+            } else if (doc.blocks[index].kind == note::BlockKind::TableCell &&
+                       bodyCellIndex == std::numeric_limits<size_t>::max()) {
+                bodyCellIndex = index;
+            }
+        }
         Expect(table != nullptr && table->table_column_count == 2,
                "md4c adapter keeps table blocks with column count");
         Expect(headCell != nullptr && headCell->table_cell_align == note::TableCellAlign::Left,
                "md4c adapter keeps table header cell alignment");
         Expect(bodyCell != nullptr,
                "md4c adapter keeps table body cells");
+        const bool headerHierarchy =
+            headCellIndex < doc.blocks.size() &&
+            doc.blocks[headCellIndex].parent < doc.blocks.size() &&
+            doc.blocks[doc.blocks[headCellIndex].parent].kind == note::BlockKind::TableRow &&
+            doc.blocks[doc.blocks[headCellIndex].parent].parent < doc.blocks.size() &&
+            doc.blocks[doc.blocks[doc.blocks[headCellIndex].parent].parent].kind == note::BlockKind::TableHead &&
+            doc.blocks[doc.blocks[doc.blocks[headCellIndex].parent].parent].parent == tableIndex;
+        const bool bodyHierarchy =
+            bodyCellIndex < doc.blocks.size() &&
+            doc.blocks[bodyCellIndex].parent < doc.blocks.size() &&
+            doc.blocks[doc.blocks[bodyCellIndex].parent].kind == note::BlockKind::TableRow &&
+            doc.blocks[doc.blocks[bodyCellIndex].parent].parent < doc.blocks.size() &&
+            doc.blocks[doc.blocks[doc.blocks[bodyCellIndex].parent].parent].kind == note::BlockKind::TableBody &&
+            doc.blocks[doc.blocks[doc.blocks[bodyCellIndex].parent].parent].parent == tableIndex;
+        Expect(headerHierarchy && bodyHierarchy,
+               "md4c adapter preserves table cell-to-row-to-section hierarchy for structured rendering");
+        bool headerInlineHasCellParent = false;
+        for (const note::InlineNode& inlineNode : doc.inlines) {
+            if (inlineNode.parent_block == headCellIndex) {
+                headerInlineHasCellParent = true;
+                break;
+            }
+        }
+        Expect(headerInlineHasCellParent,
+               "md4c adapter assigns table header text to its cell parent");
+    }
+
+    {
+        const std::wstring source =
+            L"| `code` | 用途 | `value` |\n"
+            L"|:--|:--|:--|\n"
+            L"| `name` | インラインコード | `sample` |\n";
+        const note::NoteDocument doc = ParseMd4c(source);
+        const note::InlineNode* headerCode = FindInline(doc, note::InlineKind::Code, 0);
+        const note::InlineNode* bodyCode = FindInline(doc, note::InlineKind::Code, 2);
+        auto hasTableCellParent = [&doc](const note::InlineNode* inlineNode) {
+            if (!inlineNode || inlineNode->parent_block >= doc.blocks.size()) return false;
+            const note::BlockKind kind = doc.blocks[inlineNode->parent_block].kind;
+            return kind == note::BlockKind::TableHeaderCell || kind == note::BlockKind::TableCell;
+        };
+        const bool headerLiteral = headerCode && headerCode->span.end.value <= source.size() &&
+            source.substr(headerCode->span.start.value,
+                          headerCode->span.end.value - headerCode->span.start.value) == L"code";
+        const bool bodyLiteral = bodyCode && bodyCode->span.end.value <= source.size() &&
+            source.substr(bodyCode->span.start.value,
+                          bodyCode->span.end.value - bodyCode->span.start.value) == L"name";
+        Expect(hasTableCellParent(headerCode) && hasTableCellParent(bodyCode) &&
+                   headerLiteral && bodyLiteral,
+               "inline code in table cells retains its literal content and cell ownership");
+    }
+
+    {
+        const std::wstring source =
+            L"| ` | 用途 | `value` |\n"
+            L"|:--|:--|:--|\n"
+            L"| raw | インラインコード | sample |\n";
+        const note::NoteDocument doc = ParseMd4c(source);
+        bool loneBacktickHasTableCellText = false;
+        for (const note::InlineNode& inlineNode : doc.inlines) {
+            if (inlineNode.kind != note::InlineKind::Text ||
+                inlineNode.parent_block >= doc.blocks.size() ||
+                inlineNode.span.end.value > source.size()) {
+                continue;
+            }
+            const note::BlockKind kind = doc.blocks[inlineNode.parent_block].kind;
+            if ((kind == note::BlockKind::TableHeaderCell || kind == note::BlockKind::TableCell) &&
+                source.substr(inlineNode.span.start.value,
+                              inlineNode.span.end.value - inlineNode.span.start.value) == L"`") {
+                loneBacktickHasTableCellText = true;
+                break;
+            }
+        }
+        const note::InlineNode* pairedValue = FindInline(doc, note::InlineKind::Code, 0);
+        const bool pairedValueRemainsCode = pairedValue &&
+            pairedValue->parent_block < doc.blocks.size() &&
+            pairedValue->span.end.value <= source.size() &&
+            source.substr(pairedValue->span.start.value,
+                          pairedValue->span.end.value - pairedValue->span.start.value) == L"value" &&
+            doc.blocks[pairedValue->parent_block].kind == note::BlockKind::TableHeaderCell;
+        Expect(loneBacktickHasTableCellText && pairedValueRemainsCode,
+               "an unmatched table-cell backtick stays literal without disabling paired inline code");
     }
 
     {
@@ -1715,6 +1862,44 @@ int main() {
         Expect(out.find("<u>") == std::string::npos, "plain text export strips legacy style tags");
         Expect(out.find("$x$") == std::string::npos && out.find("x") != std::string::npos,
                "plain text export simplifies math text");
+    }
+
+    {
+        auto parsed = BuildMd4cModelAndDoc(
+            L"# Heading text\n\n"
+            L"- List text\n"
+            L"- [x] Completed task\n"
+            L"> Quote text\n"
+            L"[Link text](link-target) and **strong text**.\n"
+            L"![Image alternative text](image.png)\n"
+            L"| Column heading | Column value |\n"
+            L"| --- | --- |\n"
+            L"| Cell text | Cell value |\n"
+            L"```cpp\n"
+            L"code text\n"
+            L"```\n"
+            L"---\n");
+        note::TextExportConfig config{};
+        config.mathMode = note::ExportTextMathMode::Raw;
+        config.markupMode = note::ExportTextMarkupMode::Simplified;
+        const std::string out = note::ExportPlainText(parsed.first, parsed.second, config);
+        for (const std::string_view visibleText : {
+                 "Heading text", "List text", "Quote text", "Link text",
+                 "strong text", "Image alternative text", "Completed task",
+                 "Column heading", "Column value", "Cell text", "Cell value", "code text"}) {
+            Expect(out.find(visibleText) != std::string::npos,
+                   "plain text export preserves visible Markdown text");
+        }
+        Expect(out.find("# Heading text") == std::string::npos &&
+                   out.find("- List text") == std::string::npos &&
+                   out.find("> Quote text") == std::string::npos &&
+                   out.find("link-target") == std::string::npos &&
+                   out.find("**strong text**") == std::string::npos &&
+                   out.find("![Image alternative text]") == std::string::npos &&
+                   out.find("```cpp") == std::string::npos &&
+                   out.find("[x] Completed task") == std::string::npos &&
+                   out.find("-----") == std::string::npos,
+               "plain text export removes Markdown syntax without removing its text");
     }
 
     {

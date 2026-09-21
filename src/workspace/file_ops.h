@@ -14,6 +14,12 @@ bool RecoverPendingFileOperationTransactionsForSession(
 // Begins a rename or move operation for the currently active file.
 bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly);
 
+// Process-local workspace operation history. It is deliberately separate from
+// focused document editing history and only exposes a transaction while its
+// recorded session is still active.
+bool CanExecuteWorkspaceOperationUndoRedo(bool undo);
+bool ExecuteWorkspaceOperationUndoRedo(HWND owner, bool undo);
+
 // Shows the dialog for managing staged uncommitted file differences.
 void ShowStageManagerDialog(HWND owner);
 

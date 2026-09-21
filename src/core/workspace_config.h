@@ -32,6 +32,9 @@ struct WorkspaceConfig {
     std::wstring pdfFlowMode = L"v_ttb"; // "v_ttb" | "v_btu" | "h_ltr" | "h_rtl"
     int pdfBitmapBudgetMiB = kPdfBitmapBudgetMiBDefault;
     bool pdfSinglePageMode = false;
+    // Page information remains visible; this controls only the zoom percentage
+    // drawn over the upper-left of the PDF view.
+    bool showPdfZoomOverlay = true;
     // When false (the default), the wheel scrolls even while the Pan tool is active.
     // Ctrl+wheel remains the explicit zoom gesture.
     bool panMouseWheelZoom = false;
@@ -55,8 +58,10 @@ struct WorkspaceConfig {
     int defaultLeftSplit2 = 0;
     bool leftPaneCollapsed = false;
     std::wstring language = L"ja"; // "ja" or "en"
-    std::wstring bottomPanePin = L"note"; // "note"(extend) / "math"(preview)
-    std::wstring bottomNoteMode = L"legacy"; // "legacy"(note preview) / "headings"
+    // Persistent default for the bottom-right pane.  The View menu changes
+    // only the runtime selection and never writes these values.
+    std::wstring bottomPanePin = L"note"; // "note" / "math"
+    std::wstring bottomNoteMode = L"legacy"; // "legacy" / "headings" / "assist"
     std::wstring notePlacement = L"bottom"; // "bottom" | "top"; dual notes are not enabled yet
     std::wstring colorTone = L"default";
     // Theme variant applied on top of the selected tone theme:
@@ -85,6 +90,9 @@ struct WorkspaceConfig {
     std::wstring lectureSortMode = L"recent"; // "recent" | "name" | "schedule"
     std::wstring sessionSortMode = L"numeric_asc"; // "numeric_asc" | "numeric_desc" | "name"
     std::wstring sessionNumberingMode = L"count"; // "count" | "max_number"
+    // "separate_directories": <session>/pdf and <session>/note.
+    // "session_root": supported files live directly in <session>.
+    std::wstring sessionFileLayout = L"separate_directories";
     std::wstring sessionAutoOpenMode = L"edit"; // auto-open the sole PDF and note in a session
     bool sessionAutoOpenPairLinked = false;
     // Opt-in only. Sample workspaces use this to select the first session on a
@@ -92,7 +100,7 @@ struct WorkspaceConfig {
     bool startupSelectFirstSession = false;
     bool noteRenderEnabled = true;
     bool noteRawOnly = false;
-    bool noteRenderMath = false;
+    bool noteRenderMath = true;
     bool noteWrapEnabled = true;
     bool noteVimModeEnabled = false;
     bool noteVimCaretLineRawTextVisible = false;
@@ -180,6 +188,7 @@ struct WorkspaceConfig {
     std::wstring magnifierShape = L"circle"; // "circle" | "square" | "horizontal"
     double magnifierZoom = 2.0;
     int magnifierSizeDip = 120;
+    std::wstring magnifierPosition = L"center"; // "center" | "upper_left"
     COLORREF shapeColor = RGB(255, 140, 0);
     std::wstring shapeDetail = L"line";
     std::wstring shapeKind = L"rectangle";
@@ -212,6 +221,16 @@ struct WorkspaceConfig {
     // When true, try to export TextBox annotations as PDF text objects (selectable/searchable).
     // Default is true. If font embedding/rendering cannot be resolved, export falls back to images.
     bool exportStandardTextAnnots = true;
+    // Quick output presets are configured in the unified output dialog. Quick
+    // note output intentionally remains TXT; these values only control its text
+    // treatment and never change source notes.
+    int quickPdfScalePercent = 100;
+    bool quickPdfStandardTextAnnots = true;
+    bool quickPdfMatchPdfPaneTextLayout = true;
+    bool quickNoteStripMarkup = true;
+    bool quickNoteIncludeComments = true;
+    bool quickNoteMathPlaceholder = false;
+    std::wstring quickNoteMathPlaceholderText = L"[math]";
 
     // Debug log outputs under __resource__/__log__/*.log.
     // Changes are persisted immediately, but applied to logging on the next launch.

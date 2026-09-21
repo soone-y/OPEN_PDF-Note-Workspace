@@ -13,6 +13,7 @@
 #include "ui/toolbar.h"
 #include "ui/combobox_guard.h"
 #include "ui/noop_nav_guard.h"
+#include "workspace/workspace_config_io.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -22,6 +23,8 @@
 
 #include <iterator>
 #include <memory>
+#include <filesystem>
+#include <fstream>
 #include <vector>
 
 static void LogPanelEvent(const wchar_t* panel,
@@ -35,5 +38,6 @@ static void LogPanelEvent(const wchar_t* panel,
 #include "settings/settings_shortcut_editor.cppinc"
 #include "settings/settings_markup.cppinc"
 #include "settings/settings_palette.cppinc"
+#include "settings/settings_assets.cppinc"
 #include "settings/settings_annot.cppinc"
 #include "settings/settings_unified.cppinc"

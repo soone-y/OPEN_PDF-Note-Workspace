@@ -192,11 +192,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-weight: 400;
     }}
 
-    .raw-md-link {{
-      font-size: 0.82em;
-      color: var(--text-muted);
-    }}
-
     .header-tools {{ display: inline-flex; align-items: center; gap: 12px; }}
     .language-switch {{ color: var(--link); font-size: 0.82em; font-weight: 600; }}
     .contrast-toggle {{ display: inline-flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 0.82em; font-weight: 600; cursor: pointer; }}
@@ -369,7 +364,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="header-tools">
 {language_switch_html}
       <label class="contrast-toggle"><input id="contrast-toggle" type="checkbox"><span>{contrast_label}</span></label>
-{raw_markdown_html}
     </div>
   </div>
 
@@ -730,10 +724,6 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
     rel_path = md_path.relative_to(site_dir)
     depth = len(rel_path.parts) - 1
     root_rel = "../" * depth if depth > 0 else "./"
-    raw_markdown_html = f'''    <div class="raw-md-link">
-      <a href="{md_path.name}" target="_blank">Raw Markdown</a>
-    </div>'''
-
     # タイトルの抽出
     title_match = re.search(r"^#\s+(.*)$", content, re.MULTILINE)
     title = title_match.group(1).strip() if title_match else md_path.stem
@@ -745,7 +735,6 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
         language_code=language_code,
         contrast_label="High contrast" if language_code == "en" else "高コントラスト",
         root_rel=root_rel,
-        raw_markdown_html=raw_markdown_html,
         navigation_html=navigation_html(root_rel=root_rel, rel_path=rel_path),
         language_switch_html=language_switch_html(root_rel=root_rel, rel_path=rel_path, site_dir=site_dir),
         content_html=body_html

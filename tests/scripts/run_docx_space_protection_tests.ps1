@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Soffice = "",
     [int]$TimeoutSec = 240,

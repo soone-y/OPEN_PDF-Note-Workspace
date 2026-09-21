@@ -1,0 +1,35 @@
+# Standard `.clro` Note
+
+`.clro` is the application's default note format. It supports Markdown plus helper markup for underline, color, background color, and internal-note markers.
+
+## Study checklist
+
+- [x] Read a heading
+- [ ] Edit this item
+- Note: `inline_code`
+- [ ] Try `Save > Save Work`
+
+**bold**, *italic*, ~~strikethrough~~, and `code-style text`
+
+> Start a quotation with `>`. Use the helper markup below only where ordinary Markdown is not enough.
+
+<u>underlined text</>
+
+<char=#1a73e8>blue text</>
+
+<back=#fff2cc>text with a background color</>
+
+<font="Segoe UI"><size=15>text with an explicit font and size</></>
+
+## PDF round-trip link
+
+<link=session-02-pdf-note-link><la><lu>Open the PDF link-practice marker</></></>
+
+Click the link above to move to the blue annotation marker in `pdf_link_practice.pdf` in this folder. Click the blue annotation marker in the PDF to return to this location in the note. The same-named `.clrop` is application-managed data that stores this association, so keep it with the PDF.
+
+| Item | Example | Status |
+| :--- | :---: | ---: |
+| Markdown | headings and lists | checked |
+| Helper markup | underline, color, links | editable |
+
+Math also works: \(a^2 + b^2 = c^2\)

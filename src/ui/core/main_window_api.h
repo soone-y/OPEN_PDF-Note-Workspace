@@ -104,6 +104,11 @@ void EndOfficeConversionProgress(HWND owner);
 std::wstring NowTimestampString();
 
 void CancelPendingLinkMode(HWND owner);
+// Link creation spans the note and PDF views.  Register every PDF endpoint
+// when it is created so cancellation and a later note endpoint can update the
+// same staged annotation data even after a PDF switch.
+void RememberPendingLinkPdfPath(const std::wstring& pdfPath);
+void FinalizePendingLinkModeIfReady(HWND owner);
 void RememberCurrentSessionFiles();
 
 void AppendUiAutomationTrace(const std::wstring& text);
@@ -119,6 +124,7 @@ void AcknowledgeStartupAbort();
 constexpr wchar_t kToolbarHostClass[] = L"PdfWorkspaceToolbarHost";
 constexpr UINT kMsgStartupWatchdogAbort = WM_APP + 200;
 constexpr UINT kMsgSingleInstanceShutdownRequest = WM_APP + 201;
+constexpr UINT kMsgOfficeConversionWorkerComplete = WM_APP + 202;
 
 extern HANDLE g_hSingleInstanceReadyEvent;
 

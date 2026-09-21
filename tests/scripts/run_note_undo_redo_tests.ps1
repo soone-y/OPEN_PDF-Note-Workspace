@@ -13,6 +13,7 @@ $powershellExe = (Get-Command powershell -ErrorAction Stop).Source
 $pythonExe = (Get-Command python -ErrorAction Stop).Source
 $workspaceBuildScript = Join-Path $repoRoot "scripts\build\build_workspace.ps1"
 $noteParserScript = Join-Path $PSScriptRoot "run_note_parser_tests.ps1"
+$notePresentationScript = Join-Path $PSScriptRoot "run_note_presentation_tests.ps1"
 $uiAutomationScript = Join-Path $PSScriptRoot "run_ui_automation_fault_tests.ps1"
 $codebaseValidationScript = Join-Path $repoRoot "tests\python\validate_codebase.py"
 
@@ -47,6 +48,10 @@ Push-Location -LiteralPath $repoRoot
 try {
     Invoke-Check -Name "Note text boundaries and kernel history" -Action {
         Invoke-PowerShellScript -Path $noteParserScript -Arguments @("-ArtifactName", "note_undo_redo_tests")
+    }
+
+    Invoke-Check -Name "Note presentation policy" -Action {
+        Invoke-PowerShellScript -Path $notePresentationScript -Arguments @("-ArtifactName", "note_presentation_tests")
     }
 
     if (-not $SkipCodebaseValidation) {

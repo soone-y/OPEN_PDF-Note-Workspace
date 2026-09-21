@@ -557,6 +557,7 @@ try {
         SourceFiles      = $sourceFiles
         ResourceFiles    = $resourceInputs
         OutputExe        = $outputExe
+        BuildDriverHash  = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
     }
 
     $signatureJson = $signature | ConvertTo-Json -Depth 10 -Compress
@@ -653,6 +654,9 @@ try {
         if (-not (Test-Path -LiteralPath $Object)) {
             return $true
         }
+        if ((Get-Item -LiteralPath $Object).Length -eq 0) {
+            return $true
+        }
 
         $srcTime = (Get-Item -LiteralPath $Source).LastWriteTime
         $objTime = (Get-Item -LiteralPath $Object).LastWriteTime
@@ -680,6 +684,9 @@ try {
         )
 
         if (-not (Test-Path -LiteralPath $Object)) {
+            return $true
+        }
+        if ((Get-Item -LiteralPath $Object).Length -eq 0) {
             return $true
         }
         $objTime = (Get-Item -LiteralPath $Object).LastWriteTime
