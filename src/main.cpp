@@ -12,6 +12,7 @@
 #include "file_output/file_output.h"
 #include "search/search.h"
 #include "schedule/schedule.h"
+#include "workspace/workspace_memo.h"
 #include "settings/settings.h"
 #include "resources/app_resource.h"
 #include "ui/toolbar.h"
@@ -43,6 +44,8 @@ bool HandleMainPdfZoomShortcutInLoop(HWND owner, const MSG& msg);
 #include "workspace/main_workspace_logs.h"
 #include "ui/menus/menu_build.h"
 #include "app/startup_instance.h"
+#include "app/main_window_liveness_policy.h"
+#include "app/main_window_recovery_notice.h"
 #include "ui/core/wheel_routing.h"
 #include "ui/dialogs/annot_math_panel.h"
 #include "note_view/bottom_math_panel.h"
@@ -54,6 +57,7 @@ bool HandleMainPdfZoomShortcutInLoop(HWND owner, const MSG& msg);
 #include <commctrl.h>
 #include <shlobj.h>
 #include <imm.h>
+#include <oleacc.h>
 #include <wincodec.h>
 #include <climits>
 #include <chrono>
@@ -62,12 +66,14 @@ bool HandleMainPdfZoomShortcutInLoop(HWND owner, const MSG& msg);
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cwchar>
 #include <cwctype>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <vector>
 
@@ -79,20 +85,32 @@ void AutoOpenSingleSessionFiles(HWND hWnd);
 static bool ActivateExistingInstance();
 static HANDLE g_hSingleInstanceMutex = nullptr;
 HANDLE g_hSingleInstanceReadyEvent = nullptr;
-static constexpr DWORD kStartupWindowTimeoutMs = 15000;
 static HANDLE g_hStartupWatchdogThread = nullptr;
 static DWORD WINAPI StartupWatchdogThread(LPVOID);
 static void AppendStartupWatchdogLog(const char* line);
+static void RecoverSelfMainWindowOrRequestClose();
 static HANDLE g_hStartupAbortAckEvent = nullptr;
 static DWORD g_mainThreadId = 0;
 // MainWndProc WM_APP message; keep value in the central registry in core/app_core.h.
 // Main thread WM_APP message; keep value in the central registry in core/app_core.h.
 static HANDLE g_hSingleInstanceShutdownRequestEvent = nullptr;
+static HANDLE g_hProcessShutdownRequestEvent = nullptr;
 static HANDLE g_hSingleInstanceShutdownStopEvent = nullptr;
 static HANDLE g_hSingleInstanceShutdownThread = nullptr;
 static DWORD WINAPI SingleInstanceShutdownRequestThread(LPVOID);
+// Workers coalesce diagnostics without touching the app log mutex or disk.
+// Only the UI owner drains them on recovery/cleanup.
+enum class StartupMonitorEvent : unsigned {
+    RecoveryRequested = 1, RequestFailed = 2, UserRequested = 4,
+    NoticeUnavailable = 8, MonitorUnavailable = 16, ShutdownRequested = 32,
+};
+static_assert(std::atomic<unsigned>::is_always_lock_free);
+static std::atomic<unsigned> s_startupMonitorEvents{0};
 // MainWndProc timer ID; keep unique with the MainWndProc timer registry in core/app_core.h.
 static constexpr UINT_PTR kExitRetryTimerId = 0x5E11;
+// MainWndProc: only active while cooperative process-exit observations exist.
+static constexpr UINT_PTR kProcessShutdownObserveTimerId = 0x50C;
+static std::vector<ProcessShutdownObservation> s_processShutdownObservations;
 static bool s_exitInProgress = false;
 static bool s_exitPending = false;
 static bool s_systemEndSessionObserved = false;
@@ -1494,36 +1512,58 @@ static bool OpenPendingStartupDocument(HWND hWnd) {
     return OpenStartupDocumentPath(hWnd, path);
 }
 
+static void PollOtherPackageShutdownRequests(HWND hWnd) {
+    for (auto it = s_processShutdownObservations.begin(); it != s_processShutdownObservations.end();) {
+        const auto status = it->Poll();
+        if (status == ProcessShutdownStatus::Pending) { ++it; continue; }
+        const wchar_t* id = status == ProcessShutdownStatus::Exited ? L"startup.process.exited" :
+            status == ProcessShutdownStatus::TimedOut ? L"startup.process.timeout" : L"startup.process.observe_failed";
+        it = s_processShutdownObservations.erase(it);
+        ShowSoftNotice(hWnd, localization::Text(id),
+                       status == ProcessShutdownStatus::Exited ? SoftNoticeKind::Info : SoftNoticeKind::Warning);
+    }
+    if (s_processShutdownObservations.empty()) KillTimer(hWnd, kProcessShutdownObserveTimerId);
+}
+
 void ShowOtherPackageHeadlessProcessDiagnostics(HWND hWnd) {
     const auto processes = FindOtherPackageHeadlessMainProcesses();
     for (const auto& process : processes) {
         SilentDialogOptions dialog;
-        dialog.title = L"起動時点検";
-        dialog.message =
-            L"別の場所から起動された PDF Note Workspace が、メイン画面を表示せずに実行中です。\n\n"
-            L"場所:\n" + process.packageDirectory +
-            L"\n\n自動では終了しません。保存中でないことを確認してから、通常終了を要求できます。";
+        dialog.title = localization::Text(L"startup.process.title");
+        dialog.message = localization::Text(L"startup.process.detected");
+        dialog.paths = {{localization::Text(L"startup.process.location"), process.packageDirectory}};
+        if (!process.canRequestShutdown) {
+            dialog.message = localization::Text(L"startup.process.legacy");
+            dialog.kind = SoftNoticeKind::Warning;
+            dialog.buttons = SilentDialogButtons::Ok;
+            (void)ShowSilentDialog(hWnd, dialog);
+            continue;
+        }
         dialog.kind = SoftNoticeKind::Warning;
         dialog.buttons = SilentDialogButtons::YesNo;
         dialog.defaultResult = SilentDialogResult::No;
         dialog.escapeResult = SilentDialogResult::No;
-        dialog.yesLabel = L"終了を試みる";
-        dialog.noLabel = L"今回は何もしない";
+        dialog.yesLabel = localization::Text(L"startup.process.try_exit");
+        dialog.noLabel = localization::Text(L"startup.process.leave");
         dialog.preferredWidthPx = 700;
         if (ShowSilentDialog(hWnd, dialog) != SilentDialogResult::Yes) continue;
 
         SilentDialogOptions confirm = dialog;
-        confirm.message = L"別の場所から起動されたメインソフトへ通常終了を要求します。\n\n"
-                          L"保存中の場合は終了処理が完了するまで待ちます。強制終了はしません。\n\n場所:\n" +
-                          process.packageDirectory;
-        confirm.yesLabel = L"終了要求を送る";
+        confirm.message = localization::Text(L"startup.process.confirm");
+        confirm.yesLabel = localization::Text(L"startup.process.send");
         if (ShowSilentDialog(hWnd, confirm) != SilentDialogResult::Yes) continue;
-        if (RequestOtherPackageHeadlessMainProcessShutdown(process.processId)) {
-            ShowSoftNotice(hWnd, L"別の場所から起動されたメインソフトへ通常終了を要求しました。",
-                           SoftNoticeKind::Info);
+        auto observation = RequestOtherPackageHeadlessMainProcessShutdown(process);
+        if (observation) {
+            s_processShutdownObservations.push_back(std::move(*observation));
+            if (SetTimer(hWnd, kProcessShutdownObserveTimerId, 250, nullptr)) {
+                ShowSoftNotice(hWnd, localization::Text(L"startup.process.sent"), SoftNoticeKind::Info);
+                PollOtherPackageShutdownRequests(hWnd);
+            } else {
+                s_processShutdownObservations.clear();
+                ShowSoftNotice(hWnd, localization::Text(L"startup.process.observe_failed"), SoftNoticeKind::Warning);
+            }
         } else {
-            ShowSoftNotice(hWnd, L"終了要求の送信前に対象の状態が変化したため、何も行いませんでした。",
-                           SoftNoticeKind::Warning);
+            ShowSoftNotice(hWnd, localization::Text(L"startup.process.changed"), SoftNoticeKind::Warning);
         }
     }
 }
@@ -1835,14 +1875,19 @@ static std::filesystem::path ExistingDialogDirectoryOrEmpty(const std::filesyste
 }
 
 static std::filesystem::path DialogExeDirectory() {
-    wchar_t exePath[MAX_PATH]{};
-    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if (len == 0 || len == MAX_PATH) {
-        std::error_code ec;
-        auto cur = std::filesystem::current_path(ec);
-        return ec ? std::filesystem::path{} : cur;
+    std::vector<wchar_t> exePath(512, L'\0');
+    for (;;) {
+        const DWORD len = GetModuleFileNameW(nullptr, exePath.data(), static_cast<DWORD>(exePath.size()));
+        if (len > 0 && len + 1 < exePath.size()) {
+            return std::filesystem::path(std::wstring(exePath.data(), len)).parent_path();
+        }
+        if (len == 0 || exePath.size() >= 32768) {
+            std::error_code ec;
+            auto cur = std::filesystem::current_path(ec);
+            return ec ? std::filesystem::path{} : cur;
+        }
+        exePath.resize(exePath.size() * 2, L'\0');
     }
-    return std::filesystem::path(exePath).parent_path();
 }
 
 std::filesystem::path DialogWorkspaceInitialFolder() {
@@ -1969,16 +2014,15 @@ static void CloseAllReadOnlyViewerWindows(HWND owner) {
 }
 
 static std::filesystem::path CurrentMainExecutableDir() {
-    std::wstring buffer(MAX_PATH, L'\0');
-    DWORD len = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    if (len == 0) return {};
-    if (len >= buffer.size()) {
-        buffer.resize(32768, L'\0');
-        len = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-        if (len == 0 || len >= buffer.size()) return {};
+    std::vector<wchar_t> buffer(512, L'\0');
+    for (;;) {
+        const DWORD len = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (len > 0 && len + 1 < buffer.size()) {
+            return std::filesystem::path(std::wstring(buffer.data(), len)).parent_path();
+        }
+        if (len == 0 || buffer.size() >= 32768) return {};
+        buffer.resize(buffer.size() * 2, L'\0');
     }
-    buffer.resize(len);
-    return std::filesystem::path(buffer).parent_path();
 }
 
 static std::filesystem::path FindReadOnlyViewerExecutable() {
@@ -3042,24 +3086,20 @@ static bool OpenOrFocusSelectedNoteAtFileStart(HWND owner) {
     return true;
 }
 
-static void CaptureNoteCaretForNormalMode() {
-    if (!g_hNoteEdit) return;
-    DWORD selStart = 0, selEnd = 0;
-    SendMessageW(g_hNoteEdit, EM_GETSEL,
-                 reinterpret_cast<WPARAM>(&selStart),
-                 reinterpret_cast<LPARAM>(&selEnd));
-    g_noteNormalCaret = selEnd;
+static bool CaptureNoteCaretForNormalMode() {
+    const auto selection = GetNoteEditorSelectionAsCanonical(g_hNoteEdit);
+    if (!selection || selection->second > std::numeric_limits<DWORD>::max()) return false;
+    g_noteNormalCaret = static_cast<DWORD>(selection->second);
+    return true;
 }
 
 static void FocusNoteEditAtNormalCaret() {
     if (!g_hNoteEdit) return;
-    int len = GetWindowTextLengthW(g_hNoteEdit);
-    if (len < 0) len = 0;
-    DWORD caret = std::min<DWORD>(g_noteNormalCaret, static_cast<DWORD>(len));
+    if (!SetNoteEditorSelectionFromCanonical(g_hNoteEdit,
+            static_cast<size_t>(g_noteNormalCaret), static_cast<size_t>(g_noteNormalCaret))) return;
     g_noteNormalMode = false;
     OnExitNoteNormalMode();
     SetFocus(g_hNoteEdit);
-    SendMessageW(g_hNoteEdit, EM_SETSEL, caret, caret);
     SendMessageW(g_hNoteEdit, EM_SCROLLCARET, 0, 0);
     if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
 }
@@ -3101,7 +3141,7 @@ static bool IsExplicitImeTargetWindow(HWND hWnd) {
         return g_pdf.editingText;
     }
     if (hWnd == g_hNoteEdit || (g_hNoteEdit && IsChild(g_hNoteEdit, hWnd))) {
-        return true;
+        return !(g_noteVimModeEnabled && g_noteNormalMode);
     }
     return IsEditableTextInputControl(hWnd);
 }
@@ -3154,6 +3194,13 @@ void EnforceImePolicyForWindow(HWND hWnd) {
 
 bool ShouldSkipImeMessageInLoop(const MSG& msg) {
     HWND focused = GetFocus();
+    // The status pane reports the current focus, including transitions
+    // between lists/PDF/command input that do not notify the note subclass.
+    static HWND previousFocus = nullptr;
+    if (focused != previousFocus) {
+        previousFocus = focused;
+        if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
+    }
     if (focused) {
         EnforceImePolicyForWindow(focused);
     }
@@ -3179,26 +3226,25 @@ bool ShouldSkipImeMessageInLoop(const MSG& msg) {
 
 void EnterNoteNormalMode(HWND hWnd) {
     if (!CommitActiveNoteEditBoundary(hWnd)) return;
-    CaptureNoteCaretForNormalMode();
+    if (!CaptureNoteCaretForNormalMode()) return;
     g_noteNormalMode = g_noteVimModeEnabled;
     if (g_noteNormalMode) {
         OnEnterNoteNormalMode();
+        FocusNoteEditForNormalMode();
     } else {
         OnExitNoteNormalMode();
+        s_skipAutoChildFocusOnce = true;
+        CancelAndDisableMainIme(hWnd);
+        SetFocus(hWnd);
     }
-    s_skipAutoChildFocusOnce = true;
-    CancelAndDisableMainIme(hWnd);
-    SetFocus(hWnd);
     if (g_hNoteEdit) InvalidateRect(g_hNoteEdit, nullptr, FALSE);
     if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
 }
 
-void FocusMainWindowForNoteNormalMode() {
-    HWND owner = (g_hMainWnd && IsWindow(g_hMainWnd)) ? g_hMainWnd : nullptr;
-    if (!owner) return;
-    s_skipAutoChildFocusOnce = true;
-    CancelAndDisableMainIme(owner);
-    SetFocus(owner);
+void FocusNoteEditForNormalMode() {
+    if (!g_hNoteEdit || !IsWindow(g_hNoteEdit)) return;
+    EnforceImePolicyForWindow(g_hNoteEdit);
+    SetFocus(g_hNoteEdit);
     if (g_hNoteEdit) InvalidateRect(g_hNoteEdit, nullptr, FALSE);
     if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
 }
@@ -3730,10 +3776,14 @@ static bool FocusPdfPaneForPaneNav(HWND owner) {
 }
 
 static bool FocusNotePaneForPaneNav(HWND owner) {
-    (void)owner;
     if (!g_hNoteEdit || !IsWindow(g_hNoteEdit)) return false;
-    // Pane navigation is an initial display operation.  Do not enter Vim
-    // normal mode or expose a raw caret line until the user starts editing.
+    if (g_noteVimModeEnabled) {
+        // Keyboard pane navigation must not begin typing implicitly. Reuse
+        // Esc's protected edit/caret boundary; failure keeps the source focus.
+        EnterNoteNormalMode(owner);
+        return g_noteNormalMode && GetFocus() == g_hNoteEdit;
+    }
+    // Standard input keeps the existing opening presentation and input mode.
     PreserveRenderedNoteOpeningView();
     g_noteNormalMode = false;
     OnExitNoteNormalMode();

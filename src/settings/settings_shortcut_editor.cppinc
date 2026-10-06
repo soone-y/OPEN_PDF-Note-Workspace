@@ -301,6 +301,7 @@ static void ShowAnnotToolShortcutEditor(HWND owner) {
     UpdateWindow(hWnd);
     MSG msg;
     while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (HandleWorkspaceMemoMessage(msg)) continue;
         if (ShouldSkipImeMessageInModalLoop(msg)) continue;
         if (!IsDialogMessageW(hWnd, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     }

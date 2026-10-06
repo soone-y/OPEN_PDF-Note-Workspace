@@ -1,10 +1,13 @@
-0.5.3+git.c4be8625eb11725d604232b028df10c2ddf9b577
+0.6.0+git.7fc1815a5eeba2af7d6120a76202bf59f3b6e6e4
 
 Upstream: https://github.com/mity/md4c
-Commit: c4be8625eb11725d604232b028df10c2ddf9b577
-Commit date: 2026-08-06
-Release baseline: release-0.5.3
+Commit: 7fc1815a5eeba2af7d6120a76202bf59f3b6e6e4
+Commit date: 2026-09-17
+Release baseline: v0.6.0 (tagged 2026-09-20)
+Source archive: https://github.com/mity/md4c/archive/7fc1815a5eeba2af7d6120a76202bf59f3b6e6e4.tar.gz
+Source archive SHA256: 924d9a5443b7fa44a341feb027ae7bfd5db7696278920b17474799dce06ed959
 Local changes: patches/0001-japanese-whitespace-and-punctuation.patch
 Security status: OSV-2022-126 omits its fixed event; introduced by 62b60979f6a281b2b3cf883abc84299431fe2f76 and corrected upstream by descendant commit f7c8db7588573f3b0de166166a6f6756baf222dc
-Ancestry evidence: pinned commit is 246 commits ahead of f7c8db7588573f3b0de166166a6f6756baf222dc
-Local evidence: the public regression input completed under GCC ASan/UBSan on 2026-08-12; the discontinued old-version comparison was not used as evidence
+Ancestry evidence: v0.6.0 is 42 commits ahead of the previous c4be8625eb11725d604232b028df10c2ddf9b577 pin, which already contained f7c8db7588573f3b0de166166a6f6756baf222dc
+Allocation-failure fixes: b630227edeb72c696398c25d1e3b84a16c701558, fa0efb890c692d6403fb9aba9e6c8fe20567040d, 47f8f4c2dac829bfbcd88295947b1867faebecde
+Patch comparison: upstream ASCII blank/punctuation macros unchanged; Japanese patch applies without conflict. No new extension flags enabled.

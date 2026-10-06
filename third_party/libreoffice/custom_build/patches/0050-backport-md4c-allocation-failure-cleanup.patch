@@ -1,0 +1,69 @@
+--- a/external/md4c/UnpackedTarball_md4c.mk
++++ b/external/md4c/UnpackedTarball_md4c.mk
+@@ -10,5 +10,10 @@
+ $(eval $(call gb_UnpackedTarball_UnpackedTarball,md4c))
+ $(eval $(call gb_UnpackedTarball_set_tarball,md4c,$(MD4C_TARBALL)))
++$(eval $(call gb_UnpackedTarball_set_patchlevel,md4c,1))
++
++$(eval $(call gb_UnpackedTarball_add_patches,md4c,\
++    external/md4c/allocation-failure-cleanup.patch.1 \
++))
+ 
+ 
+ # vim: set noet sw=4 ts=4:
+--- /dev/null
++++ b/external/md4c/allocation-failure-cleanup.patch.1
+@@ -0,0 +1,53 @@
++# Backport allocation failure fixes to LibreOffice's MD4C 0.5.3 (UTF-8).
++# Upstream: https://github.com/mity/md4c/commit/b630227edeb72c696398c25d1e3b84a16c701558
++# Upstream: https://github.com/mity/md4c/commit/47f8f4c2dac829bfbcd88295947b1867faebecde
++# The reference-definition realloc differs from modern md_add_label_def().
++# Keep 0.5.3's abort cleanup: n_ref_defs commits ownership only on success.
++# Do not port fa0efb890c692d6403fb9aba9e6c8fe20567040d's cleanup removal.
++--- a/src/md4c.c
+++++ b/src/md4c.c
++@@ -1469,10 +1469,17 @@ md_free_attribute(MD_CTX* ctx, MD_ATTRIBUTE_BUILD* build)
++ {
++     MD_UNUSED(ctx);
++ 
++-    if(build->substr_alloc > 0) {
+++    /* Trivial attributes borrow storage; all other builds own these pointers,
+++     * including partial allocations. Clear them for repeated abort cleanup. */
+++    if(build->substr_types != build->trivial_types) {
++         free(build->text);
++         free(build->substr_types);
++         free(build->substr_offsets);
+++        build->text = NULL;
+++        build->substr_types = NULL;
+++        build->substr_offsets = NULL;
+++        build->substr_alloc = 0;
+++        build->substr_count = 0;
++     }
++ }
++ 
++@@ -2240,6 +2247,7 @@ md_is_link_reference_definition(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lin)
++         new_defs = (MD_REF_DEF*) realloc(ctx->ref_defs, ctx->alloc_ref_defs * sizeof(MD_REF_DEF));
++         if(new_defs == NULL) {
++             MD_LOG("realloc() failed.");
+++            ret = -1;
++             goto abort;
++         }
++ 
++@@ -5661,7 +5669,7 @@ md_enter_child_containers(MD_CTX* ctx, int n_children)
++             case _T('*'):
++                 /* Remember offset in ctx->block_bytes so we can revisit the
++                  * block if we detect it is a loose list. */
++-                md_end_current_block(ctx);
+++                MD_CHECK(md_end_current_block(ctx));
++                 c->block_byte_off = ctx->n_block_bytes;
++ 
++                 MD_CHECK(md_push_container_bytes(ctx,
++@@ -6372,7 +6380,7 @@ md_process_doc(MD_CTX *ctx)
++         MD_CHECK(md_process_line(ctx, &pivot_line, line));
++     }
++ 
++-    md_end_current_block(ctx);
+++    MD_CHECK(md_end_current_block(ctx));
++ 
++     MD_CHECK(md_build_ref_def_hashtable(ctx));
++ 

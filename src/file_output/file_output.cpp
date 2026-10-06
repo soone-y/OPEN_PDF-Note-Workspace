@@ -257,11 +257,15 @@ static bool ScalePdfPageInPlace(FPDF_PAGE page, double scale) {
 }
 
 static std::wstring ExeDirectory() {
-    wchar_t buf[MAX_PATH]{};
-    DWORD len = GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(std::size(buf)));
-    if (len == 0 || len >= std::size(buf)) return L"";
-    std::filesystem::path p(buf);
-    return p.parent_path().wstring();
+    std::vector<wchar_t> buf(512, L'\0');
+    for (;;) {
+        const DWORD len = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+        if (len > 0 && len + 1 < buf.size()) {
+            return std::filesystem::path(std::wstring(buf.data(), len)).parent_path().wstring();
+        }
+        if (len == 0 || buf.size() >= 32768) return L"";
+        buf.resize(buf.size() * 2, L'\0');
+    }
 }
 
 static std::wstring DefaultNameFromPath(const std::wstring& path,
@@ -884,12 +888,15 @@ static bool ContainsNoCase(const std::wstring& haystack, const std::wstring& nee
 }
 
 static std::wstring WindowsFontsDir() {
-    wchar_t winDir[MAX_PATH]{};
-    UINT len = GetWindowsDirectoryW(winDir, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) return L"";
-    std::wstring out(winDir);
-    out += L"\\Fonts";
-    return out;
+    std::vector<wchar_t> winDir(512, L'\0');
+    for (;;) {
+        const UINT len = GetWindowsDirectoryW(winDir.data(), static_cast<UINT>(winDir.size()));
+        if (len > 0 && len < winDir.size()) {
+            return std::wstring(winDir.data(), len) + L"\\Fonts";
+        }
+        if (len == 0 || winDir.size() >= 32768) return L"";
+        winDir.resize(winDir.size() * 2, L'\0');
+    }
 }
 
 static std::wstring ExpandEnvIfNeeded(const std::wstring& s) {
@@ -987,7 +994,8 @@ static bool TryGetFontFilePathFromRegistry(const std::wstring& faceName, std::ws
 static bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>& out) {
     out.clear();
     if (path.empty()) return false;
-    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(std::filesystem::path(path));
+    HANDLE hFile = CreateFileW(openPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return false;
 

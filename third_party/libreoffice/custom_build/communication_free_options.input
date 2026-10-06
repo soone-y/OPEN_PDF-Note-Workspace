@@ -1,4 +1,4 @@
-# LibreOffice 26.2.5.2 custom build options for the DOCX/PPTX to PDF engine.
+# LibreOffice 26.2.6.3 custom build options for the DOCX/PPTX to PDF engine.
 # Add compiler and --with-external-tar paths in the generated build input.
 # The build must fail instead of fetching unverified dependency archives.
 --disable-fetch-external

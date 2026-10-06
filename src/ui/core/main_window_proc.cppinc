@@ -5,7 +5,7 @@
 // NOTE: Timer IDs must be unique per HWND to avoid collisions in MainWndProc.
 // Keep this in sync with the MainWndProc timer registry in core/app_core.h.
 static constexpr UINT_PTR kSetupJsonExistenceVerifyTimerId = 0x508;
-static_assert(AllUniqueValues(std::array<UINT_PTR, 9>{
+static_assert(AllUniqueValues(std::array<UINT_PTR, 10>{
     kAutoSaveTimerId,
     kAutoIntegrateTimerId,
     kNoteStageSaveTimerId,
@@ -13,6 +13,7 @@ static_assert(AllUniqueValues(std::array<UINT_PTR, 9>{
     kNoteOverlayRefreshTimerId,
     kNoteFullReparseTimerId,
     kSetupJsonExistenceVerifyTimerId,
+    kProcessShutdownObserveTimerId,
     kExitRetryTimerId,
     ui::kSplitDragTimerId,
 }));
@@ -30,6 +31,8 @@ static ULONGLONG s_noteLastRefreshRequestTick = 0;
 static void PostOtherPackageHeadlessProcessDiagnosticsOnce(HWND hWnd) {
     if (s_otherPackageHeadlessProcessDiagnosticsShown || !hWnd) return;
     s_otherPackageHeadlessProcessDiagnosticsShown = true;
+    // Dedicated tests must not prompt for, or act upon, user app processes.
+    if (IsUiAutomationEnabled()) return;
     constexpr UINT kMsgOtherPackageHeadlessProcessDiagnostics = WM_APP + 213;
     PostMessageW(hWnd, kMsgOtherPackageHeadlessProcessDiagnostics, 0, 0);
 }
@@ -48,6 +51,19 @@ static UINT NoteFullReparseDelayMs() {
         static_cast<int>(kDefaultNoteFullReparseDelayMs / 4), 5000));
 }
 
+// A refresh request that cannot commit during a live IME composition must
+// remain owned by the UI loop. WM_TIMER has already consumed its prior timer
+// before RefreshNoteOverlayNow observes the composition; dropping the request
+// there would leave stale/raw presentation indefinitely when an IME delays or
+// omits its expected end notification.
+static void RequeueNoteOverlayRefreshForCurrentRevision(HWND hWnd) {
+    if (!hWnd) return;
+    s_noteOverlayRefreshTargetRevision = CurrentEditRevision();
+    s_noteOverlayRefreshPending = true;
+    s_noteLastRefreshRequestTick = GetTickCount64();
+    SetTimer(hWnd, kNoteOverlayRefreshTimerId, NoteOverlayRefreshDelayMs(), nullptr);
+}
+
 static HWND ResolveStartupMainFocusTarget(HWND hWnd) {
     if (g_leftPaneCollapsed) {
         if (g_hPdfView && IsWindow(g_hPdfView)) return g_hPdfView;
@@ -61,7 +77,10 @@ static HWND ResolveStartupMainFocusTarget(HWND hWnd) {
 }
 
 static void RefreshNoteOverlayNow() {
-    if (IsNoteImeComposing()) return;
+    if (IsNoteImeComposing()) {
+        RequeueNoteOverlayRefreshForCurrentRevision(g_hMainWnd);
+        return;
+    }
     if (s_noteOverlayRefreshTargetRevision != 0 && s_noteOverlayRefreshTargetRevision != CurrentEditRevision()) {
         s_noteOverlayRefreshPending = false;
         return;
@@ -80,7 +99,18 @@ static void RefreshNoteOverlayNow() {
 
 static void ScheduleNoteOverlayRefresh(HWND hWnd, bool immediate, uint64_t targetRevision = 0) {
     if (!hWnd) hWnd = g_hMainWnd;
-    if (!hWnd || IsNoteImeComposing()) return;
+    if (!hWnd) return;
+    if (IsNoteImeComposing()) {
+        RequeueNoteOverlayRefreshForCurrentRevision(hWnd);
+        return;
+    }
+    // A delayed WM_APP notification may carry the revision captured before a
+    // subsequent delete. Do not let that older *immediate* request cancel the
+    // newer debounce timer: normalize it at the scheduling boundary instead.
+    if (immediate && targetRevision != 0 && targetRevision != CurrentEditRevision()) {
+        targetRevision = CurrentEditRevision();
+        immediate = false;
+    }
     s_noteOverlayRefreshTargetRevision = targetRevision;
     if (immediate) {
         if (hWnd) KillTimer(hWnd, kNoteOverlayRefreshTimerId);
@@ -111,6 +141,14 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         kMsgOtherPackageHeadlessProcessDiagnostics,
     }));
     switch (msg) {
+    case kMsgStartupWatchdogAbort:
+        RecoverSelfMainWindowOrRequestClose();
+        return 0;
+    case kMsgSingleInstanceShutdownRequest:
+        // Independent recovery notice posts to the HWND so nested loops can
+        // dispatch the request. Keep the normal save/cancel/worker protections.
+        PostMessageW(hWnd, WM_CLOSE, 0, 0);
+        return 0;
     case WM_CREATE: {
         DebugAppendLayoutLog(L"WM_CREATE", hWnd, 0, 0);
         CreateChildren(hWnd);
@@ -448,7 +486,14 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
         }
         if (wParam == VK_ESCAPE) {
-            // Esc is handled in the message loop to exit note input focus ("normal mode").
+            // The message loop has already handled IME/textbox boundaries.
+            if (g_noteVimModeEnabled && g_noteNormalMode) {
+                (void)ClearNoteNormalVisualMode();
+                (void)ClearNoteNormalPendingState();
+                FocusNoteEditForNormalMode();
+            } else {
+                EnterNoteNormalMode(hWnd);
+            }
             return 0;
         }
         bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -464,6 +509,23 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             const bool redo = (wParam == 'Y' || wParam == 'R' || (wParam == 'Z' && shiftDown));
             ExecutePdfUndoRedoFromFocus(hWnd, !redo);
             return 0;
+        }
+        if (g_noteVimModeEnabled && g_noteNormalMode && !IsNoteCmdlineActive() &&
+            !ctrlDown && !altDown && g_hNoteEdit) {
+            switch (wParam) {
+            case VK_LEFT:
+            case VK_RIGHT:
+            case VK_UP:
+            case VK_DOWN:
+            case VK_HOME:
+            case VK_END:
+                // Legacy main-owner keys use the same mapping and canonical
+                // caret movement as keys received directly by the note.
+                SendMessageW(g_hNoteEdit, WM_KEYDOWN, wParam, lParam);
+                return 0;
+            default:
+                break;
+            }
         }
         break;
     }
@@ -669,6 +731,13 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         if (from == g_hNoteEdit && code == EN_CHANGE) {
             const bool textModified = (SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0) != 0);
+            if (IsNoteImeCanonicalChangeDeferred(g_hNoteEdit)) {
+                // Provisional editor text is not a canonical edit. Invalidate
+                // only the native binding; do not allocate a path, advance
+                // revisions/history, or request stage writes from this event.
+                NoteEditorTextMutationObserved(g_hNoteEdit);
+                return 0;
+            }
             if (IsNoteChangeSuppressed()) {
                 // EN_CHANGE does not prove user intent. Only an input message or an explicit
                 // edit command may release the post-load transaction latch.
@@ -696,17 +765,28 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (g_currentNotePath.empty()) {
                 return 0;
             }
+            const auto acceptedChange = ObserveCurrentNoteTextChange(g_hNoteEdit);
+            if (acceptedChange == NoteCanonicalTextChangeResult::Unchanged ||
+                acceptedChange == NoteCanonicalTextChangeResult::Deferred) {
+                // Cancellation and delayed native notifications may contain
+                // no canonical mutation. Do not advance revisions or stage
+                // writes just because RichEdit sent EN_CHANGE.
+                return 0;
+            }
+            // Unavailable must remain dirty too: never lose visible input
+            // merely because its canonical acknowledgement failed.
             g_noteDirty = true;
             g_noteNeedsIntegrate = true;
             NotifyEditRevisionChanged();
-            RecordCurrentNoteTextEditForUndo(g_hNoteEdit);
             SetNoteTyping(true);
             const bool commitDerivedFrameBeforePaint =
                 RequiresImmediateNoteDerivedFrameCommit() && !IsNoteImeComposing();
-            if (!commitDerivedFrameBeforePaint && !IsNoteImeComposing()) {
-                // Keep a growing raw helper line reachable while the debounced
-                // render refresh is pending.  This reads the synchronized
-                // TextCore's current line only; it never scans the note here.
+            if (!commitDerivedFrameBeforePaint) {
+                // Legacy rendered mode retains its bounded raw-helper width
+                // update while the debounce is pending. The final route
+                // deliberately makes this a no-op: its accepted-edit path
+                // publishes the final extent/scroll ownership directly and
+                // must not revive the retired canvas for one input frame.
                 ExpandNoteRenderCanvasForPendingEdit(g_hNoteEdit);
             }
             if (commitDerivedFrameBeforePaint) {
@@ -855,6 +935,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
     }
     case WM_TIMER:
+        if (wParam == kProcessShutdownObserveTimerId) {
+            PollOtherPackageShutdownRequests(hWnd);
+            return 0;
+        }
         if (wParam == kSetupJsonExistenceVerifyTimerId) {
             if (s_setupJsonExistenceVerifyPath.empty()) {
                 KillTimer(hWnd, kSetupJsonExistenceVerifyTimerId);
@@ -937,7 +1021,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         break;
     case WM_SETFOCUS:
-        // Main window is a shortcut focus target ("normal mode"). Keep IME disabled here so
+        // Keep IME disabled on the main window so
         // Japanese IME candidate/composition doesn't appear without a text input target.
         CancelAndDisableMainIme(hWnd);
         if (s_skipAutoChildFocusOnce) {
@@ -951,7 +1035,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             return 0;
         }
-        if (g_pdf.kind != DocKind::None && g_hPdfView) {
+        if (g_noteVimModeEnabled && g_noteNormalMode && g_hNoteEdit) {
+            FocusNoteEditForNormalMode();
+        } else if (g_pdf.kind != DocKind::None && g_hPdfView) {
             SetFocus(g_hPdfView);
         } else if (g_hNoteEdit) {
             SetFocus(g_hNoteEdit);
@@ -999,6 +1085,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         if (closeAction == main_close_policy::CloseRequestAction::BypassFinishedAutomation) {
+            if (!SaveWorkspaceMemoForExit()) return 0;
             // Automation has already written its result. Do not enter an unattended
             // staged-diff confirmation; leave any test stage intact for diagnosis.
             s_exitInProgress = true;
@@ -1027,6 +1114,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_ENDSESSION:
         if (wParam == TRUE) {
+            // No modal UI while Windows ends the session; every accepted edit
+            // already has a durable recovery envelope if integration fails.
+            const bool memoSaved = SaveWorkspaceMemoForExit(false);
+            (void)memoSaved;
             s_exitInProgress = true;
             s_exitPending = false;
             KillTimer(hWnd, kNoteStageSaveTimerId);
@@ -1055,6 +1146,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     case WM_DESTROY:
+        PublishSelfMainWindow(nullptr);
+        if (g_hSingleInstanceShutdownStopEvent) SetEvent(g_hSingleInstanceShutdownStopEvent);
+        KillTimer(hWnd, kProcessShutdownObserveTimerId);
+        s_processShutdownObservations.clear();
         KillTimer(hWnd, kNoteStageSaveTimerId);
         KillTimer(hWnd, kAutoSaveTimerId);
         KillTimer(hWnd, kAutoSaveExecuteTimerId);

@@ -121,7 +121,10 @@ static std::wstring GetEditTextRangeForIndexing(HWND hWnd, size_t start, size_t 
         LRESULT copied = SendMessageW(hWnd, EM_GETTEXTRANGE, 0, reinterpret_cast<LPARAM>(&range));
         if (copied < 0) copied = 0;
         text.resize(static_cast<size_t>(copied));
-        return text;
+        // RichEdit positions use one code unit per hard break. Normalize the
+        // returned transport text to the same LF representation as TextEdit
+        // and NoteTextCore before any local mutation validation compares it.
+        return NormalizeTextForNoteIndexing(std::move(text));
     }
 
     std::wstring text = GetEditTextForIndexing(hWnd);
@@ -130,6 +133,106 @@ static std::wstring GetEditTextRangeForIndexing(HWND hWnd, size_t start, size_t 
     end = std::min(end, textLen);
     if (end <= start) return L"";
     return text.substr(start, end - start);
+}
+
+static size_t SaturatingNoteEditorTextOffsetAdd(size_t left, size_t right) {
+    const size_t max = std::numeric_limits<size_t>::max();
+    return right > max - left ? max : left + right;
+}
+
+static bool NoteEditorHasIndexedTextAt(HWND hWnd, size_t offset) {
+    const size_t end = SaturatingNoteEditorTextOffsetAdd(offset, 1);
+    return end > offset && !GetEditTextRangeForIndexing(hWnd, offset, end).empty();
+}
+
+// Resolve a user-visible deletion unit from a small editor neighbourhood.
+// BuildTextUnits is deliberately applied only to the local slice.  The slice
+// grows when (and only when) its left/right edge cuts the candidate unit, so
+// surrogate pairs, combining marks, variation selectors and arbitrarily long
+// ZWJ sequences retain exactly the same semantics as the former whole-note
+// call.  A pathological single huge grapheme may require a matching range;
+// that is inherent in determining its boundary, rather than a normal-note
+// O(N) copy.
+static note::Span PreviousNoteEditorTextUnit(HWND hWnd, size_t caret) {
+    if (!hWnd || caret == 0) return {{caret}, {caret}};
+
+    constexpr size_t kInitialWindow = 64;
+    size_t before = std::min(caret, kInitialWindow);
+    size_t after = kInitialWindow;
+    for (;;) {
+        const size_t start = caret - before;
+        const size_t end = SaturatingNoteEditorTextOffsetAdd(caret, after);
+        const std::wstring text = GetEditTextRangeForIndexing(hWnd, start, end);
+        const size_t localCaret = caret - start;
+        if (text.size() < localCaret) return {{caret}, {caret}};
+
+        const std::vector<note::TextUnit> units = note::BuildTextUnits(text);
+        size_t index = 0;
+        while (index < units.size() && units[index].span.end.value <= localCaret) ++index;
+        const note::Span candidate = index == 0
+            ? note::Span{{localCaret}, {localCaret}}
+            : units[index - 1].span;
+
+        const bool cutsLeft = start != 0 &&
+            (index == 0 || candidate.start.value == 0);
+        const bool cutsRight = index < units.size() &&
+            units[index].span.start.value < localCaret &&
+            units[index].span.end.value == text.size() &&
+            NoteEditorHasIndexedTextAt(hWnd, end);
+        if (!cutsLeft && !cutsRight) {
+            return {{SaturatingNoteEditorTextOffsetAdd(start, candidate.start.value)},
+                    {SaturatingNoteEditorTextOffsetAdd(start, candidate.end.value)}};
+        }
+
+        const size_t nextBefore = cutsLeft
+            ? std::min(caret, SaturatingNoteEditorTextOffsetAdd(before, before))
+            : before;
+        const size_t nextAfter = cutsRight
+            ? SaturatingNoteEditorTextOffsetAdd(after, after)
+            : after;
+        if (nextBefore == before && nextAfter == after) return {{caret}, {caret}};
+        before = nextBefore;
+        after = nextAfter;
+    }
+}
+
+static note::Span NextNoteEditorTextUnit(HWND hWnd, size_t caret) {
+    if (!hWnd) return {{caret}, {caret}};
+
+    constexpr size_t kInitialWindow = 64;
+    size_t before = std::min(caret, kInitialWindow);
+    size_t after = kInitialWindow;
+    for (;;) {
+        const size_t start = caret - before;
+        const size_t end = SaturatingNoteEditorTextOffsetAdd(caret, after);
+        const std::wstring text = GetEditTextRangeForIndexing(hWnd, start, end);
+        const size_t localCaret = caret - start;
+        if (text.size() <= localCaret) return {{caret}, {caret}};
+
+        const std::vector<note::TextUnit> units = note::BuildTextUnits(text);
+        size_t index = 0;
+        while (index < units.size() && units[index].span.end.value <= localCaret) ++index;
+        if (index == units.size()) return {{caret}, {caret}};
+        const note::Span candidate = units[index].span;
+
+        const bool cutsLeft = start != 0 && candidate.start.value == 0;
+        const bool cutsRight = candidate.end.value == text.size() &&
+            NoteEditorHasIndexedTextAt(hWnd, end);
+        if (!cutsLeft && !cutsRight) {
+            return {{SaturatingNoteEditorTextOffsetAdd(start, candidate.start.value)},
+                    {SaturatingNoteEditorTextOffsetAdd(start, candidate.end.value)}};
+        }
+
+        const size_t nextBefore = cutsLeft
+            ? std::min(caret, SaturatingNoteEditorTextOffsetAdd(before, before))
+            : before;
+        const size_t nextAfter = cutsRight
+            ? SaturatingNoteEditorTextOffsetAdd(after, after)
+            : after;
+        if (nextBefore == before && nextAfter == after) return {{caret}, {caret}};
+        before = nextBefore;
+        after = nextAfter;
+    }
 }
 
 static bool RangeContainsIndexingLineBreak(HWND hWnd, size_t start, size_t end) {
@@ -174,6 +277,14 @@ static bool RequiresImmediateNoteContentRefreshForDelete(HWND hWnd, WPARAM vkey)
 static bool TryGetNativeNoteCaretRect(HWND hWnd, RECT* outRect) {
     if (!hWnd || !outRect) return false;
 
+    GUITHREADINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == hWnd &&
+        info.rcCaret.right > info.rcCaret.left && info.rcCaret.bottom > info.rcCaret.top) {
+        *outRect = info.rcCaret;
+        return true;
+    }
+
     POINT pt{};
     if (!GetCaretPos(&pt)) {
         DWORD selStart = 0;
@@ -201,163 +312,294 @@ static bool TryGetNativeNoteCaretRect(HWND hWnd, RECT* outRect) {
         ReleaseDC(hWnd, hdc);
     }
 
-    RECT rc{};
-    GetClientRect(hWnd, &rc);
-    const int leftBound = static_cast<int>(rc.left);
-    const int topBound = static_cast<int>(rc.top);
-    const int rightBound = static_cast<int>(rc.right);
-    const int bottomBound = static_cast<int>(rc.bottom);
-    const int ptX = static_cast<int>(pt.x);
-    const int ptY = static_cast<int>(pt.y);
-    auto clampInt = [](int value, int lo, int hi) {
-        if (value < lo) return lo;
-        if (value > hi) return hi;
-        return value;
+    const auto pixel = [](int64_t value) noexcept {
+        return static_cast<LONG>(std::clamp<int64_t>(
+            value, std::numeric_limits<LONG>::min(), std::numeric_limits<LONG>::max()));
     };
-    const int top = clampInt(ptY, topBound, bottomBound);
-    const int bottom = clampInt(ptY + std::max(2, caretHeight), topBound, bottomBound);
-    outRect->left = clampInt(ptX, leftBound, rightBound);
-    outRect->top = top;
-    const int caretRight = static_cast<int>(outRect->left) + std::max(1, ScaleY(hWnd, 1));
-    outRect->right = (caretRight < rightBound) ? caretRight : rightBound;
-    outRect->bottom = (bottom > top) ? bottom : ((top + 2 < bottomBound) ? top + 2 : bottomBound);
+    *outRect = {pt.x, pt.y,
+        pixel(static_cast<int64_t>(pt.x) + std::max(1, ScaleY(hWnd, 1))),
+        pixel(static_cast<int64_t>(pt.y) + std::max(2, caretHeight))};
+    return outRect->right > outRect->left && outRect->bottom > outRect->top;
+}
+[[nodiscard]] static bool TryGetNoteImeCaretRect(HWND hWnd, RECT* outRect, RECT* outInputBand) {
+    if (!hWnd || !outRect || !outInputBand) return false;
+    // The final frame either provides the exact common caret geometry or is
+    // withdrawn.  A failure must not revive a legacy line-cache measurement;
+    // that would put the IME candidate window on a different visual row.
+    if (FinalFrameCanUseCustomPaint(hWnd)) {
+        if (TryGetFinalNoteRenderCaretRect(hWnd, outRect, outInputBand)) return true;
+        WithdrawFinalNoteRenderFrame(hWnd);
+        InvalidateRect(hWnd, nullptr, FALSE);
+    }
+    if (FinalRenderRouteEnabled(hWnd) && GetViewContext(hWnd).finalNativeRedrawDepth != 0) {
+        return false; // Replacement pending, not a public whole-native view.
+    }
+    if (!TryGetNativeNoteCaretRect(hWnd, outRect)) return false;
+    *outInputBand = *outRect;
     return true;
 }
-static bool TryGetNoteImeCaretRect(HWND hWnd, RECT* outRect) {
-    if (!hWnd || !outRect) return false;
 
-    DWORD selStart = 0;
-    DWORD selEnd = 0;
-    SendMessageW(hWnd, EM_GETSEL,
-                 reinterpret_cast<WPARAM>(&selStart),
-                 reinterpret_cast<LPARAM>(&selEnd));
-    const size_t caret = static_cast<size_t>(std::max(selStart, selEnd));
-
-    HDC hdc = GetDC(hWnd);
-    if (!hdc) return TryGetNativeNoteCaretRect(hWnd, outRect);
-
-    const NoteRenderPresentationFrame presentationFrame =
-        BuildNoteRenderPresentationFrame(hWnd, /*captureStaleText=*/false);
-    const bool useCommittedCaretGeometry =
-        presentationFrame.plan.caret_presenter == note::NoteCaretPresenter::CommittedLayout;
-
-    // A current, stable structured snapshot is the preferred geometry source.
-    // The resolver above has already ruled out stale/commit-barrier frames;
-    // otherwise this path remains false and native raw owns the caret.
-    const bool stableRenderGeometryAvailable =
-        IsNoteRenderActive() && CanReadStableRenderDerivedState(/*requireExactRevision=*/false) &&
-        useCommittedCaretGeometry;
-
-    bool ok = false;
-    if (stableRenderGeometryAvailable) {
-        int line = -1;
-        const note::NoteTextModel& currentText = CurrentNoteTextCoreModel();
-        if (IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd) &&
-            !currentText.line_starts.empty()) {
-            line = FindLogicalLineForRaw(currentText.line_starts, caret);
-        } else {
-            // BuildNoteRenderPresentationFrame has already selected a native
-            // fallback for an unbound editor. Do not recreate a full line
-            // index here merely to guess structured caret geometry.
-            line = -1;
-        }
-        if (line >= 0 && line < static_cast<int>(g_lineCache.size())) {
-            if (!IsNoteLineRawHelper(hWnd, line)) {
-                ok = TryGetRenderedCaretRect(hWnd, hdc, caret, outRect);
-            } else {
-                ok = TryGetRawCaretRect(hWnd, hdc, caret, outRect);
-            }
-        }
+// WM_IME_REQUEST is a separate geometry reader from IMM window setters.
+// The UI thread owns the published frame. Read it only: no IMM polling,
+// parsing, frame publication, selection change or provisional text commit.
+// Failure leaves the caller's buffer untouched; never answer final paint
+// with RichEdit's hidden transport layout. Whole-native paint stays native.
+[[nodiscard]] static bool TryFillFinalNoteImeCharacterPosition(
+    HWND hWnd, IMECHARPOSITION* query) {
+    if (!query || query->dwSize != sizeof(IMECHARPOSITION) ||
+        !FinalFrameCanUseCustomPaint(hWnd)) return false;
+    const auto frame = GetViewContext(hWnd).finalRenderState.frame();
+    const auto* preedit = frame->presentation()->ime_preedit();
+    std::optional<note::Utf16CodeUnitOffset> editorOffset;
+    if (preedit) {
+        // dwCharPos is UTF-16 relative to the composition start, NOT relative
+        // to the current caret or the canonical replacement's old end.
+        const note::Span span = preedit->editor_replacement_span();
+        if (span.end < span.start || query->dwCharPos > span.end.value - span.start.value) return false;
+        editorOffset = note::Utf16CodeUnitOffset{span.start.value + query->dwCharPos};
+    } else if (query->dwCharPos != 0 ||
+               (g_noteImeComposing && !GetViewContext(hWnd).finalImePreedit.awaiting_first_payload())) {
+        return false;
     }
-
-    if (!ok && IsNoteRenderActive()) {
-        ok = TryGetRawCaretRect(hWnd, hdc, caret, outRect);
-    }
-
-    ReleaseDC(hWnd, hdc);
-
-    if (ok) return true;
-    return TryGetNativeNoteCaretRect(hWnd, outRect);
+    // Without preedit, offset zero describes the prediction insertion point.
+    // During preedit, an end boundary is valid (including an empty string).
+    RECT caret{};
+    if (!TryGetFinalNoteRenderCaretRect(hWnd, &caret, nullptr, editorOffset)) return false;
+    RECT client{};
+    if (!GetClientRect(hWnd, &client) || client.right <= client.left || client.bottom <= client.top) return false;
+    POINT point{caret.left, caret.top};
+    POINT top{client.left, client.top};
+    POINT bottom{client.right, client.bottom};
+    if (!ClientToScreen(hWnd, &point) || !ClientToScreen(hWnd, &top) ||
+        !ClientToScreen(hWnd, &bottom)) return false;
+    IMECHARPOSITION result = *query;
+    result.pt = point;
+    result.cLineHeight = static_cast<UINT>(caret.bottom - caret.top);
+    result.rcDocument = {top.x, top.y, bottom.x, bottom.y};
+    *query = result;
+    return true;
 }
 
-void SyncNoteImeCandidateWindowToCaret(HWND hWnd) {
+void SyncNoteImeCandidateWindowToCaret(HWND hWnd, DWORD candidateMask) {
     if (!hWnd || !IsWindow(hWnd)) return;
     if (GetFocus() != hWnd) return;
+    auto& context = GetViewContext(hWnd);
+    if (context.imeCandidateWindowSyncInProgress || context.imeNativeDispatchInProgress) return;
+    context.imeCandidateWindowSyncInProgress = true;
+    struct ScopedCandidateSyncReset {
+        bool& active;
+        ~ScopedCandidateSyncReset() { active = false; }
+    } reset{context.imeCandidateWindowSyncInProgress};
 
     RECT caretRc{};
-    if (!TryGetNoteImeCaretRect(hWnd, &caretRc)) return;
+    RECT inputBand{};
+    if (!TryGetNoteImeCaretRect(hWnd, &caretRc, &inputBand)) return;
+    RECT client{};
+    if (!GetClientRect(hWnd, &client)) return;
+    note::NoteImeClientRect band{inputBand.left, inputBand.top, inputBand.right, inputBand.bottom};
+    if (FinalFrameCanUseCustomPaint(hWnd)) {
+        // Already measured preedit fragments include every wrapped clause.
+        // Protect their visible vertical envelope without scanning the note
+        // or asking IMM to recompute provisional text.
+        const auto frame = context.finalRenderState.frame();
+        for (const auto& decoration : frame->ime_decorations()) {
+            const auto& rect = decoration.rect;
+            const uint64_t origin = context.finalRenderScrollY;
+            const auto clientY = [origin](uint64_t y) noexcept {
+                return y >= origin
+                    ? static_cast<int>(std::min<uint64_t>(y - origin, std::numeric_limits<int>::max()))
+                    : -static_cast<int>(std::min<uint64_t>(origin - y, std::numeric_limits<int>::max()));
+            };
+            band.top = std::min(band.top, clientY(rect.top_px));
+            band.bottom = std::max(band.bottom, clientY(rect.bottom_px));
+        }
+    }
+    const auto placement = note::ResolveNoteImeCandidatePlacement(
+        {caretRc.left, caretRc.top, caretRc.right, caretRc.bottom}, band,
+        {client.left, client.top, client.right, client.bottom}, std::max(1, ScaleY(hWnd, 6)));
+    if (!placement) return;
 
     HIMC himc = ImmGetContext(hWnd);
     if (!himc) return;
+    struct ScopedImeContextRelease {
+        HWND window;
+        HIMC context;
+        ~ScopedImeContextRelease() { ImmReleaseContext(window, context); }
+    } release{hWnd, himc};
 
     COMPOSITIONFORM comp{};
     comp.dwStyle = CFS_POINT;
     comp.ptCurrentPos.x = caretRc.left;
     comp.ptCurrentPos.y = caretRc.top;
-    ImmSetCompositionWindow(himc, &comp);
+    // Query IMM's actual state rather than trusting a cached request: native
+    // RichEdit may reset it between publications. Avoid unchanged setters,
+    // which synchronously notify the control and can make a visible list jump.
+    COMPOSITIONFORM currentComp{};
+    const bool compositionCurrent = ImmGetCompositionWindow(himc, &currentComp) != FALSE &&
+        currentComp.dwStyle == comp.dwStyle &&
+        currentComp.ptCurrentPos.x == comp.ptCurrentPos.x &&
+        currentComp.ptCurrentPos.y == comp.ptCurrentPos.y;
+    const bool compositionPlaced = compositionCurrent || ImmSetCompositionWindow(himc, &comp) != FALSE;
 
     CANDIDATEFORM cand{};
-    cand.dwIndex = 0;
     cand.dwStyle = CFS_EXCLUDE;
-    cand.ptCurrentPos.x = caretRc.left;
-    cand.ptCurrentPos.y = caretRc.bottom;
-    cand.rcArea = caretRc;
-    ImmSetCandidateWindow(himc, &cand);
-
-    ImmReleaseContext(hWnd, himc);
+    cand.ptCurrentPos = {placement->anchor_x, placement->anchor_y};
+    const auto& exclude = placement->exclusion;
+    cand.rcArea = {exclude.left, exclude.top, exclude.right, exclude.bottom};
+    // Desktop IMM accepts candidate list indices 0..3. Notification flags
+    // describe the affected lists; prediction without preedit still uses 0.
+    bool candidatesPlaced = true;
+    if (candidateMask == 0) candidateMask = context.imeCandidateListMask;
+    candidateMask &= 0x0f;
+    if (candidateMask == 0) candidateMask = 1;
+    for (DWORD index = 0; index < 4; ++index) {
+        if ((candidateMask & (DWORD{1} << index)) == 0) continue;
+        cand.dwIndex = index;
+        CANDIDATEFORM current{};
+        const bool candidateCurrent = ImmGetCandidateWindow(himc, index, &current) != FALSE &&
+            current.dwStyle == cand.dwStyle && EqualRect(&current.rcArea, &cand.rcArea) &&
+            current.ptCurrentPos.x == cand.ptCurrentPos.x && current.ptCurrentPos.y == cand.ptCurrentPos.y;
+        const bool placed = candidateCurrent || ImmSetCandidateWindow(himc, &cand) != FALSE;
+        candidatesPlaced = placed && candidatesPlaced;
+    }
+    if ((!compositionPlaced || !candidatesPlaced) && preview_trace::IsEnabled()) {
+        preview_trace::Append(L"NoteImePlacement", L"IMM rejected window positioning; native IME retained");
+    }
 }
 
-void SyncNativeCaretToRenderState(HWND hWnd) {
+// RichEdit's UIA text ranges use its own text layout, not the system caret.
+// Translate the transport viewport around the published insertion point;
+// never write text/selection/character or paragraph formatting, or derive
+// a second visible layout. Only the native formatting viewport moves.
+// At most two origin corrections are allowed (RichEdit rounds scroll and
+// insets). Accessibility alignment must never withdraw a valid paint frame.
+[[nodiscard]] static bool SyncNativeNoteTextAnchor(HWND hWnd, const RECT& target) {
+    if (!IsRichEditControl(hWnd)) return true;
+    auto& context = GetViewContext(hWnd);
+    if (context.finalNativeTextOriginSyncInProgress || context.finalNativeFallbackFormatSyncInProgress) return true;
+    context.finalNativeTextOriginSyncInProgress = true;
+    struct ScopedAnchorReset { bool& active; ~ScopedAnchorReset() { active = false; } }
+        reset{context.finalNativeTextOriginSyncInProgress};
+    const auto frame = context.finalRenderState.frame();
+    if (!frame) return false;
+    size_t transport = 0;
+    std::optional<size_t> canonical;
+    if (!MapFinalEditorOffsetToRichEdit(hWnd, frame->editor_caret(), &transport, &canonical) ||
+        transport > static_cast<size_t>(std::numeric_limits<LONG>::max())) return false;
+    const auto nativePoint = [&]() {
+        POINTL point{std::numeric_limits<LONG>::min(), std::numeric_limits<LONG>::min()};
+        CallWindowProcW(g_oldNoteProc, hWnd, EM_POSFROMCHAR,
+            reinterpret_cast<WPARAM>(&point), static_cast<LPARAM>(transport));
+        return point;
+    };
+    POINTL point = nativePoint();
+    if (point.x == std::numeric_limits<LONG>::min() || point.y == std::numeric_limits<LONG>::min()) return false;
+    if (point.x == target.left && point.y == target.top) return true;
+    // EM_SETSCROLLPOS can move already-painted pixels even without a native
+    // WM_PAINT. Only the final painter may replace those pixels.
+    ScopedFinalNoteNativeRedraw nativeRedraw(hWnd);
+    // Restore bars before releasing redraw, including failure exits.
+    struct ScopedNativeScrollRestoration {
+        HWND window;
+        bool needed = false;
+        ~ScopedNativeScrollRestoration() {
+            if (needed) SyncFinalNoteScrollBars(window);
+        }
+    } restoreScroll{hWnd};
+    POINT scroll{};
+    if (!CallWindowProcW(g_oldNoteProc, hWnd, EM_GETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&scroll))) return false;
+    const auto adjustedScroll = [](LONG origin, LONG native, LONG desired) {
+        return static_cast<LONG>(std::clamp<int64_t>(static_cast<int64_t>(origin) + native - desired,
+            0, std::numeric_limits<LONG>::max()));
+    };
+    POINT next{adjustedScroll(scroll.x, point.x, target.left),
+               adjustedScroll(scroll.y, point.y, target.top)};
+    if (next.x != scroll.x || next.y != scroll.y) {
+        restoreScroll.needed = true;
+        CallWindowProcW(g_oldNoteProc, hWnd, EM_SETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&next));
+    }
+    RECT client{};
+    if (!GetClientRect(hWnd, &client)) return false;
+    if (target.right <= client.left || target.left >= client.right ||
+        target.bottom <= client.top || target.top >= client.bottom) {
+        // There is no visible insertion range to align. Keep the transport's
+        // approximate scroll and the real off-screen system caret; never
+        // collapse its format viewport to follow an off-screen pixel.
+        SyncFinalNoteScrollBars(hWnd);
+        restoreScroll.needed = false;
+        return true;
+    }
+    for (int pass = 0; pass < 2; ++pass) {
+        point = nativePoint();
+        if (point.x == target.left && point.y == target.top) break;
+        RECT rectangle{};
+        if (!GetClientRect(hWnd, &rectangle)) return false;
+        rectangle.left = std::min(rectangle.right, rectangle.left + static_cast<LONG>(kFinalNoteHorizontalPaddingPx));
+        const int64_t x = static_cast<int64_t>(context.finalNativeTextOrigin.x) + target.left - point.x;
+        const int64_t y = static_cast<int64_t>(context.finalNativeTextOrigin.y) + target.top - point.y;
+        if (x < std::numeric_limits<LONG>::min() || x > std::numeric_limits<LONG>::max() - rectangle.right ||
+            y < std::numeric_limits<LONG>::min() || y > std::numeric_limits<LONG>::max() - rectangle.bottom) return false;
+        context.finalNativeTextOrigin = {static_cast<LONG>(x), static_cast<LONG>(y)};
+        OffsetRect(&rectangle, static_cast<int>(x), static_cast<int>(y));
+        restoreScroll.needed = true;
+        CallWindowProcW(g_oldNoteProc, hWnd, EM_SETRECTNP, 0, reinterpret_cast<LPARAM>(&rectangle));
+    }
+    SyncFinalNoteScrollBars(hWnd);
+    restoreScroll.needed = false;
+    point = nativePoint();
+    return context.finalRenderState.frame() == frame && point.x == target.left && point.y == target.top;
+}
+
+void SyncNativeCaretToRenderState(HWND hWnd, bool synchronizeTextAnchor) {
     if (!hWnd || GetFocus() != hWnd) return;
-    if (!IsNoteRenderActive() || g_noteRawOnly) return;
+    if (!FinalFrameCanUseCustomPaint(hWnd)) return;
 
+    const auto requireNativeFallback = [&]() {
+        // Never keep final glyph geometry while the system caret could only
+        // retain an older coordinate. No canonical text or history changes.
+        WithdrawFinalNoteRenderFrame(hWnd);
+        InvalidateRect(hWnd, nullptr, FALSE);
+    };
     RECT rc{};
-    if (TryGetNoteImeCaretRect(hWnd, &rc)) {
-        static HWND s_lastHwnd = nullptr;
-        static int s_lastW = 0;
-        static int s_lastH = 0;
-
-        int w = std::max<int>(1, rc.right - rc.left);
-        int h = std::max<int>(1, rc.bottom - rc.top);
-
-        if (hWnd != s_lastHwnd || w != s_lastW || h != s_lastH) {
-            CreateCaret(hWnd, nullptr, w, h);
-            s_lastHwnd = hWnd;
-            s_lastW = w;
-            s_lastH = h;
-        }
-        SetCaretPos(rc.left, rc.top);
-    }
-}
-
-static bool g_noteRenderCaretSuppressed = false;
-static HWND g_noteRenderCaretSuppressedHwnd = nullptr;
-
-static void ResetRenderSuppressedNativeCaretState(HWND hWnd) {
-    if (g_noteRenderCaretSuppressedHwnd == hWnd) {
-        g_noteRenderCaretSuppressed = false;
-        g_noteRenderCaretSuppressedHwnd = nullptr;
-    }
-}
-
-static void SyncNativeCaretVisibilityForRenderState(HWND hWnd) {
-    if (!hWnd) return;
-
-    const bool shouldSuppress = (GetFocus() == hWnd) && IsNoteRenderActive() && !g_noteRawOnly;
-    if (shouldSuppress) {
-        SyncNativeCaretToRenderState(hWnd);
-        if (!g_noteRenderCaretSuppressed || g_noteRenderCaretSuppressedHwnd != hWnd) {
-            HideCaret(hWnd);
-            g_noteRenderCaretSuppressed = true;
-            g_noteRenderCaretSuppressedHwnd = hWnd;
-        }
+    if (!TryGetFinalNoteRenderCaretRect(hWnd, &rc)) {
+        requireNativeFallback();
         return;
     }
+    if (synchronizeTextAnchor) {
+        const bool aligned = SyncNativeNoteTextAnchor(hWnd, rc);
+        if (!aligned && preview_trace::IsEnabled()) {
+            preview_trace::Append(L"NoteNativeTextAnchor", L"alignment_unavailable; final caret retained");
+        }
+        // Native viewport setters can synchronously publish new client
+        // geometry. The system caret must use that current publication.
+        if (!TryGetFinalNoteRenderCaretRect(hWnd, &rc)) return;
+    }
 
-    if (g_noteRenderCaretSuppressed && g_noteRenderCaretSuppressedHwnd == hWnd) {
-        ShowCaret(hWnd);
-        g_noteRenderCaretSuppressed = false;
-        g_noteRenderCaretSuppressedHwnd = nullptr;
+    // Windows remains the sole caret painter: blink rate, focus lifetime and
+    // accessibility observations stay native. Only its geometry comes from
+    // the published final frame. Do not cache dimensions across focus loss:
+    // RichEdit may have destroyed/recreated the thread's caret in between.
+    DWORD caretWidth = 1;
+    (void)SystemParametersInfoW(SPI_GETCARETWIDTH, 0, &caretWidth, 0);
+    const int width = static_cast<int>(std::clamp<DWORD>(
+        caretWidth, 1, static_cast<DWORD>(std::numeric_limits<int>::max())));
+    const int height = rc.bottom - rc.top;
+    GUITHREADINFO info{};
+    info.cbSize = sizeof(info);
+    const bool haveCaret = GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret == hWnd;
+    if (!haveCaret || info.rcCaret.right - info.rcCaret.left != width ||
+        info.rcCaret.bottom - info.rcCaret.top != height) {
+        if (!CreateCaret(hWnd, nullptr, width, height)) {
+            requireNativeFallback();
+            return;
+        }
+        const bool positioned = SetCaretPos(rc.left, rc.top) != FALSE;
+        // CreateCaret starts hidden. Show exactly once for this new caret;
+        // ordinary geometry synchronization must not alter its hide count.
+        const bool shown = ShowCaret(hWnd) != FALSE;
+        if (!positioned || !shown) requireNativeFallback();
+    } else if (info.rcCaret.left != rc.left || info.rcCaret.top != rc.top) {
+        if (!SetCaretPos(rc.left, rc.top)) requireNativeFallback();
     }
 }
 
@@ -382,8 +624,12 @@ static bool ShouldSyncNoteImeAfterDefaultMessage(UINT msg) {
 
 static bool ShouldSyncNativeNoteCaretAfterDefaultMessage(UINT msg) {
     switch (msg) {
+    case WM_IME_STARTCOMPOSITION:
+    case WM_IME_COMPOSITION:
+    case WM_IME_ENDCOMPOSITION:
     case WM_CHAR:
     case WM_KEYDOWN:
+    case WM_KEYUP:
     case WM_PASTE:
     case WM_CUT:
     case WM_UNDO:
@@ -396,6 +642,7 @@ static bool ShouldSyncNativeNoteCaretAfterDefaultMessage(UINT msg) {
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
     case WM_LBUTTONDBLCLK:
+    case WM_MOUSEMOVE:
     case WM_SIZE:
     case WM_SETFOCUS:
         return true;
@@ -425,14 +672,28 @@ static bool ShouldRefreshNoteLineSpacingForPresentationSurface(UINT msg) {
 }
 
 static void SyncRenderDrivenNoteInputUi(HWND hWnd, UINT msg) {
-    if (!hWnd || GetFocus() != hWnd) return;
+    if (!hWnd) return;
+    const bool focused = GetFocus() == hWnd;
+    const bool refreshFinalFrame = ShouldRefreshFinalNoteRenderAfterInput(msg, 0);
+    // WM_SIZE reaches this function after RichEdit's default window procedure.
+    // Its final geometry must be published even while focus is in another
+    // pane; all other input-driven UI work still belongs to the focused edit.
+    if (!focused && !(msg == WM_SIZE && refreshFinalFrame)) return;
+    if (refreshFinalFrame) {
+        // This runs after the native default procedure has moved its
+        // selection/caret. It only reuses an exact structural publication or
+        // falls back as a whole; WM_PAINT never performs this work.
+        RefreshFinalNoteRenderFrame(hWnd);
+    }
+    if (!focused) return;
     if (ShouldRefreshNoteLineSpacingForPresentationSurface(msg)) {
         RefreshNoteLineSpacingForPresentationSurface(hWnd);
     }
     if (ShouldSyncNativeNoteCaretAfterDefaultMessage(msg)) {
-        SyncNativeCaretVisibilityForRenderState(hWnd);
+        SyncNativeCaretToRenderState(hWnd);
     }
-    if (g_noteImeComposing && ShouldSyncNoteImeAfterDefaultMessage(msg)) {
+    // Prediction lists can exist without a live GCS_COMPSTR session.
+    if (ShouldSyncNoteImeAfterDefaultMessage(msg)) {
         SyncNoteImeCandidateWindowToCaret(hWnd);
     }
 }
@@ -462,7 +723,6 @@ static void MarkNoteUndoRedoTextChangedForSave(HWND hWnd, uint64_t beforeRevisio
     file_output::NotifyNoteStageEdit(owner);
 }
 
-static bool g_noteShowInvisibleChars = false;
 static bool g_noteLineSelectionActive = false;
 static int g_noteLineSelectionAnchorLine = -1;
 static int g_noteLineSelectionLastLine = -1;
@@ -507,20 +767,30 @@ static bool ResolveNoteLineSelectionRangeByLine(HWND hWnd, int line, size_t* out
     if (!hWnd || line < 0 || !outStart || !outEndWithBreak) return false;
     const bool renderActive = IsNoteRenderActive();
     if (renderActive) {
-        const note::NoteTextModel& currentTextCore = CurrentNoteTextCoreModel();
-        std::wstring ownedIndexingText;
-        std::wstring_view indexingText;
-        std::vector<size_t> ownedStarts;
-        const std::vector<size_t>* startsPtr = nullptr;
-        if (CanReadStableRenderDerivedState() && !currentTextCore.line_starts.empty()) {
-            indexingText = currentTextCore.raw;
-            startsPtr = &currentTextCore.line_starts;
-        } else {
-            ownedStarts = GetNoteLogicalLineStarts(hWnd, &ownedIndexingText);
-            indexingText = ownedIndexingText;
-            startsPtr = &ownedStarts;
+        const note::NoteTextCore* core = CurrentNoteTextCore();
+        if (CanReadStableRenderDerivedState() &&
+            IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd) && core && core->valid() &&
+            core->logical_line_count() > 0 &&
+            core->logical_line_count() <= static_cast<size_t>(std::numeric_limits<int>::max())) {
+            const int lineCount = static_cast<int>(core->logical_line_count());
+            line = std::clamp(line, 0, lineCount - 1);
+            size_t lineStart = 0;
+            size_t lineEnd = 0;
+            size_t nextStart = 0;
+            if (!QueryEditorLogicalLineRange(hWnd, line, lineCount,
+                                             &lineStart, &lineEnd, &nextStart)) {
+                return false;
+            }
+            *outStart = lineStart;
+            *outEndWithBreak = (nextStart > lineStart) ? nextStart : lineEnd;
+            return true;
         }
-        const std::vector<size_t>& starts = *startsPtr;
+
+        // This path is only for an unbound/stale editor, where a current
+        // TextCore range cannot be used as a geometry proof.  It preserves
+        // the existing native-text fallback rather than guessing a range.
+        std::wstring ownedIndexingText;
+        const std::vector<size_t> starts = GetNoteLogicalLineStarts(hWnd, &ownedIndexingText);
         if (starts.empty()) {
             *outStart = 0;
             *outEndWithBreak = 0;
@@ -530,7 +800,8 @@ static bool ResolveNoteLineSelectionRangeByLine(HWND hWnd, int line, size_t* out
         size_t lineStart = 0;
         size_t lineEnd = 0;
         size_t nextStart = 0;
-        if (!GetLogicalLineRangeFromStarts(indexingText, starts, line, &lineStart, &lineEnd, &nextStart)) {
+        if (!GetLogicalLineRangeFromStarts(ownedIndexingText, starts, line,
+                                           &lineStart, &lineEnd, &nextStart)) {
             return false;
         }
         *outStart = lineStart;
@@ -588,16 +859,21 @@ static bool ResolveNoteLineSelectionHit(HWND hWnd,
     lineHeight = std::max(1, lineHeight);
     spaceW = std::max(1, spaceW);
 
-    const note::NoteTextModel& currentTextCore = CurrentNoteTextCoreModel();
     std::wstring ownedIndexingText;
     std::wstring_view indexingText;
     std::vector<size_t> ownedLogicalStarts;
     const std::vector<size_t>* logicalStartsPtr = nullptr;
     const bool renderActive = layoutFrame.renderActive;
+    bool useCurrentEditorRanges = false;
+    int currentEditorLineCount = 0;
     if (renderActive) {
-        if (CanReadStableRenderDerivedState() && !currentTextCore.line_starts.empty()) {
-            indexingText = currentTextCore.raw;
-            logicalStartsPtr = &currentTextCore.line_starts;
+        const note::NoteTextCore* core = CurrentNoteTextCore();
+        if (CanReadStableRenderDerivedState() &&
+            IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd) && core && core->valid() &&
+            core->logical_line_count() > 0 &&
+            core->logical_line_count() <= static_cast<size_t>(std::numeric_limits<int>::max())) {
+            useCurrentEditorRanges = true;
+            currentEditorLineCount = static_cast<int>(core->logical_line_count());
         } else {
             ownedLogicalStarts = GetNoteLogicalLineStarts(hWnd, &ownedIndexingText);
             indexingText = ownedIndexingText;
@@ -607,7 +883,8 @@ static bool ResolveNoteLineSelectionHit(HWND hWnd,
     const std::vector<size_t> emptyLogicalStarts;
     const std::vector<size_t>& logicalStarts = logicalStartsPtr ? *logicalStartsPtr : emptyLogicalStarts;
     int lineCount = renderActive
-        ? std::max<int>(1, static_cast<int>(logicalStarts.size()))
+        ? (useCurrentEditorRanges ? currentEditorLineCount
+                                  : std::max<int>(1, static_cast<int>(logicalStarts.size())))
         : std::max(1, static_cast<int>(SendMessageW(hWnd, EM_GETLINECOUNT, 0, 0)));
     int maxLine = lineCount - 1;
 
@@ -625,9 +902,16 @@ static bool ResolveNoteLineSelectionHit(HWND hWnd,
         int top = 0;
         int bottom = 0;
         if (renderActive) {
-            if (!QueryLogicalLineBandFromStarts(hWnd, indexingText, logicalStarts, line, lineHeight,
+            if (useCurrentEditorRanges) {
+                if (!QueryEditorLogicalLineBand(hWnd, line, lineCount, lineHeight,
                                                 &top, &bottom, &lineStart, &lineEnd, &nextStart, &linePos)) {
-                return false;
+                    return false;
+                }
+            } else {
+                if (!QueryLogicalLineBandFromStarts(hWnd, indexingText, logicalStarts, line, lineHeight,
+                                                    &top, &bottom, &lineStart, &lineEnd, &nextStart, &linePos)) {
+                    return false;
+                }
             }
             if (line == maxLine) bottom = std::max(bottom, static_cast<int>(rc.bottom));
             linePos.x = NoteLayoutFrameLineBaseXForRenderState(layoutFrame, linePos.x);
@@ -662,19 +946,33 @@ static bool ResolveNoteLineSelectionHit(HWND hWnd,
         return true;
     };
 
+    auto lineForRawIndex = [&](size_t raw) -> int {
+        if (renderActive) {
+            if (useCurrentEditorRanges) {
+                const LRESULT editorLine = SendMessageW(
+                    hWnd, EM_LINEFROMCHAR, static_cast<WPARAM>(raw), 0);
+                return editorLine >= 0
+                    ? std::clamp(static_cast<int>(editorLine), 0, maxLine)
+                    : -1;
+            }
+            return FindLogicalLineForRaw(logicalStarts, raw);
+        }
+        const LRESULT editorLine = SendMessageW(
+            hWnd, EM_LINEFROMCHAR, static_cast<WPARAM>(raw), 0);
+        return editorLine >= 0 ? static_cast<int>(editorLine) : -1;
+    };
+
     int candidate = -1;
     if (IsRichEditControl(hWnd)) {
         POINTL pt{clientX, clientY};
         LRESULT res = SendMessageW(hWnd, EM_CHARFROMPOS, 0, reinterpret_cast<LPARAM>(&pt));
         if (res >= 0) {
-            candidate = renderActive ? FindLogicalLineForRaw(logicalStarts, static_cast<size_t>(res))
-                                     : static_cast<int>(SendMessageW(hWnd, EM_LINEFROMCHAR, res, 0));
+            candidate = lineForRawIndex(static_cast<size_t>(res));
         }
     } else {
         LRESULT res = SendMessageW(hWnd, EM_CHARFROMPOS, 0, MAKELPARAM(clientX, clientY));
         if (res != -1) {
-            candidate = renderActive ? FindLogicalLineForRaw(logicalStarts, static_cast<size_t>(LOWORD(res)))
-                                     : static_cast<int>(SendMessageW(hWnd, EM_LINEFROMCHAR, LOWORD(res), 0));
+            candidate = lineForRawIndex(static_cast<size_t>(LOWORD(res)));
         }
     }
     if (candidate < 0) candidate = std::max(0, clientY / lineHeight);
@@ -822,6 +1120,82 @@ static bool IsNoteWhitespaceChar(wchar_t ch) {
            ch == 0x3000;
 }
 
+static bool MoveNoteCaretInFinalVerticalLayout(HWND hWnd, WPARAM key, LPARAM keyFlags,
+                                              bool shiftDown) {
+    if (!hWnd || g_noteImeComposing || g_noteNormalMode || !FinalFrameCanUseCustomPaint(hWnd)) return false;
+    note::NoteRenderFinalVerticalMove move;
+    switch (key) {
+    case VK_UP: move = note::NoteRenderFinalVerticalMove::Up; break;
+    case VK_DOWN: move = note::NoteRenderFinalVerticalMove::Down; break;
+    case VK_PRIOR: move = note::NoteRenderFinalVerticalMove::PageUp; break;
+    case VK_NEXT: move = note::NoteRenderFinalVerticalMove::PageDown; break;
+    default: return false;
+    }
+    const note::NoteTextCore* core = CurrentNoteTextCore();
+    auto& context = GetViewContext(hWnd);
+    const auto frame = context.finalRenderState.frame();
+    note::Span selection;
+    note::Utf16CodeUnitOffset active;
+    if (!core || !frame || !frame->presentation() ||
+        !ReadFinalCanonicalSelection(hWnd, *core, &selection, &active)) return false;
+    const note::NoteDerivedSnapshotIdentity source{CurrentNoteTextCoreOwner(), CurrentNoteTextCoreRevision()};
+    const auto previous = context.finalVerticalNavigation;
+    const bool continuing = previous && previous->source == source &&
+        previous->selection.start == selection.start && previous->selection.end == selection.end;
+    size_t anchor = continuing ? previous->anchor : selection.start.value;
+    if (!continuing && frame->editor_selection().start == selection.start &&
+        frame->editor_selection().end == selection.end) {
+        active = frame->editor_caret();
+        anchor = active == selection.start ? selection.end.value : selection.start.value;
+    }
+    note::NoteRenderFinalCaretGeometry caret;
+    if (note::ResolveNoteRenderFinalPresentationCaret(*frame->presentation(), active, &caret) !=
+        note::NoteRenderFinalPresentationInteractionResult::Resolved) return false;
+    const auto layoutKey = frame->presentation()->structural_publication()->layout()->layout_key();
+    const int preferredX = continuing && previous->layoutKey == layoutKey ? previous->preferredX : caret.x_px;
+    const auto sourceLine = note::NoteSourceLineMap::FindByOffset(core->source_line_map(), active);
+    if (!sourceLine) return false;
+    // Preserve the configured last-line Down action using canonical lines,
+    // independent of native wrapping. Repeats never append extra newlines.
+    if (key == VK_DOWN && !shiftDown && selection.start == selection.end &&
+        sourceLine->line_index.value + 1 == core->logical_line_count()) {
+        const auto action = ParseDownKeyLastLineAction(g_config.downKeyLastLineAction);
+        if (keyFlags & 0x40000000) return true;
+        if (action == DownKeyLastLineAction::None) return true;
+        if (action == DownKeyLastLineAction::InsertNewline) {
+            if (sourceLine->line.content_length == 0) return true;
+            const auto transportEnd = FinalRawTextIndexToRichEditIndex(hWnd, *core, core->text_length());
+            if (!transportEnd || *transportEnd >= std::numeric_limits<DWORD>::max()) return false;
+            if (!SetNoteEditorSelectionFromCanonical(hWnd, core->text_length(), core->text_length())) return false;
+            context.finalVerticalNavigation.reset();
+            WithdrawFinalNoteRenderFrame(hWnd);
+            RegisterExpectedCurrentNoteSelectionReplacement(hWnd, L"\r\n",
+                static_cast<DWORD>(*transportEnd + 1), static_cast<DWORD>(*transportEnd + 1));
+            const auto beforeRevision = CurrentEditRevision();
+            SendMessageW(hWnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"\r\n"));
+            if (CurrentEditRevision() == beforeRevision) RequestNoteContentRefreshAfterEdit(hWnd);
+            return true;
+        }
+        if (!SetNoteEditorSelectionFromCanonical(hWnd, core->text_length(), core->text_length())) return false;
+        context.finalVerticalNavigation.reset();
+        WithdrawFinalNoteRenderFrame(hWnd);
+        return true;
+    }
+    RECT client{};
+    if (!GetClientRect(hWnd, &client)) return false;
+    note::Utf16CodeUnitOffset destination;
+    if (note::MoveNoteRenderFinalPresentationVertical(*frame->presentation(), active, preferredX,
+            move, static_cast<uint64_t>(std::max<LONG>(1, client.bottom - client.top)), &destination) !=
+        note::NoteRenderFinalPresentationInteractionResult::Resolved) return false;
+    if (!shiftDown) anchor = destination.value;
+    if (!SetNoteEditorSelectionFromCanonical(hWnd, anchor, destination.value)) return false;
+    context.finalVerticalNavigation = LocalNoteViewContext::FinalVerticalNavigation{
+        source, {{std::min(anchor, destination.value)}, {std::max(anchor, destination.value)}},
+        anchor, destination.value, preferredX, layoutKey};
+    WithdrawFinalNoteRenderFrame(hWnd);
+    return true;
+}
+
 static bool MoveNoteCaretToSmartHomeEnd(HWND hWnd, WPARAM vkey) {
     if (!hWnd || (vkey != VK_HOME && vkey != VK_END)) return false;
     if ((GetKeyState(VK_SHIFT) & 0x8000) || (GetKeyState(VK_CONTROL) & 0x8000) ||
@@ -833,6 +1207,33 @@ static bool MoveNoteCaretToSmartHomeEnd(HWND hWnd, WPARAM vkey) {
                  reinterpret_cast<WPARAM>(&selStart),
                  reinterpret_cast<LPARAM>(&selEnd));
     if (selStart != selEnd) return false;
+
+    if (FinalRenderRouteEnabled(hWnd)) {
+        // Source coordinates belong to the canonical line map, not to
+        // RichEdit's wrapped rows / CRLF transport. Read only this source
+        // line; Home/End must not materialize an arbitrarily long note.
+        const note::NoteTextCore* core = CurrentNoteTextCore();
+        const auto caret = TryMapFinalRouteRichEditIndexToCanonical(hWnd, selStart);
+        if (!core || !core->valid() || !caret.has_value() ||
+            !IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd)) return false;
+        const auto line = note::NoteSourceLineMap::FindByOffset(
+            core->source_line_map(), { *caret });
+        if (!line.has_value()) return false;
+        size_t target = line->content_end.value;
+        if (vkey == VK_HOME) {
+            const std::wstring content = core->CopyRawRange(line->start, line->line.content_length);
+            size_t leading = 0;
+            while (leading < content.size() && (content[leading] == L' ' || content[leading] == L'\t')) {
+                ++leading;
+            }
+            const size_t firstText = line->start.value + leading;
+            target = *caret == firstText ? line->start.value : firstText;
+        }
+        if (!SetNoteEditorSelectionFromCanonical(hWnd, target, target)) return false;
+        SendMessageW(hWnd, EM_SCROLLCARET, 0, 0);
+        InvalidateRect(hWnd, nullptr, FALSE);
+        return true;
+    }
 
     const std::wstring text = GetEditTextForIndexing(hWnd);
     size_t caret = std::min<size_t>(selStart, text.size());
@@ -1146,22 +1547,118 @@ static bool ReplaceCurrentNoteSearchHit(HWND hWnd) {
     return true;
 }
 
-static bool GetNoteImeResultString(HWND hWnd, LPARAM lParam, std::wstring* outResult) {
-    if (outResult) outResult->clear();
+static LRESULT DispatchNoteImeToNative(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto& context = GetViewContext(hWnd);
+    const bool previous = context.imeNativeDispatchInProgress;
+    context.imeNativeDispatchInProgress = true;
+    struct ScopedNativeImeDispatch {
+        HWND window;
+        bool previous;
+        ~ScopedNativeImeDispatch() {
+            // Native dispatch may destroy a window. Do not retain a context
+            // reference or recreate it when unwinding an ended view.
+            const auto found = g_viewContexts.find(window);
+            if (found != g_viewContexts.end()) found->second.imeNativeDispatchInProgress = previous;
+        }
+    } scope{hWnd, previous};
+    return CallWindowProcW(g_oldNoteProc, hWnd, msg, wParam, lParam);
+}
+
+static bool GetNoteImeResultString(HWND hWnd, LPARAM lParam, std::wstring* outResult) noexcept {
     if (!hWnd || !outResult || !(lParam & GCS_RESULTSTR)) return false;
     HIMC himc = ImmGetContext(hWnd);
     if (!himc) return false;
     const LONG kImeMaxBytes = 1 << 20;
-    LONG size = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
-    bool ok = false;
-    if (size > 0 && size < kImeMaxBytes &&
-        (size % static_cast<LONG>(sizeof(wchar_t)) == 0)) {
-        outResult->assign(static_cast<size_t>(size / sizeof(wchar_t)), L'\0');
-        ImmGetCompositionStringW(himc, GCS_RESULTSTR, outResult->data(), size);
-        ok = true;
+    struct ScopedResultContextRelease {
+        HWND window;
+        HIMC context;
+        ~ScopedResultContextRelease() { ImmReleaseContext(window, context); }
+    } release{hWnd, himc};
+    const LONG size = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
+    if (size < 0 || size >= kImeMaxBytes || size % static_cast<LONG>(sizeof(wchar_t)) != 0) return false;
+    try {
+        std::wstring candidate(static_cast<size_t>(size) / sizeof(wchar_t), L'\0');
+        if (size > 0 && ImmGetCompositionStringW(himc, GCS_RESULTSTR, candidate.data(), size) != size) return false;
+        outResult->swap(candidate);
+        return true;
+    } catch (const std::exception&) {
+        return false;
     }
-    ImmReleaseContext(hWnd, himc);
-    return ok;
+}
+
+static bool GetNoteImeCompositionSnapshot(HWND hWnd,
+                                          note::NoteImePreeditPayload* out,
+                                          std::wstring* outResult = nullptr) noexcept {
+    if (!hWnd || !out) return false;
+    HIMC himc = ImmGetContext(hWnd);
+    if (!himc) return false;
+    struct ScopedImeContextRelease {
+        HWND window;
+        HIMC context;
+        ~ScopedImeContextRelease() { ImmReleaseContext(window, context); }
+    } release{hWnd, himc};
+
+    // WM_IME_COMPOSITION flags describe fields that changed, not fields that
+    // exist. Candidate selection can report only COMPATTR or CURSORPOS while
+    // retaining COMPSTR. Read text and cursor from one borrowed IMM context;
+    // never treat a missing change flag as the loss of the session anchor.
+    const LONG kImeMaxBytes = 1 << 20;
+    const LONG size = ImmGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0);
+    if (size < 0 || size >= kImeMaxBytes ||
+        size % static_cast<LONG>(sizeof(wchar_t)) != 0) return false;
+    try {
+        note::NoteImePreeditPayload candidate;
+        std::wstring resultCandidate;
+        if (outResult) {
+            const LONG resultBytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
+            if (resultBytes < 0 || resultBytes >= kImeMaxBytes ||
+                resultBytes % static_cast<LONG>(sizeof(wchar_t)) != 0) return false;
+            resultCandidate.assign(static_cast<size_t>(resultBytes) / sizeof(wchar_t), L'\0');
+            if (resultBytes > 0 && ImmGetCompositionStringW(himc, GCS_RESULTSTR,
+                    resultCandidate.data(), resultBytes) != resultBytes) return false;
+        }
+        candidate.text.assign(static_cast<size_t>(size) / sizeof(wchar_t), L'\0');
+        if (size > 0) {
+            const LONG copied = ImmGetCompositionStringW(himc, GCS_COMPSTR, candidate.text.data(), size);
+            if (copied != size) return false;
+        }
+        // Empty preedit has exactly one possible cursor boundary. Some IMEs
+        // report IMM_ERROR_NODATA for CURSORPOS while resetting their text.
+        const LONG cursor = size == 0 ? 0 :
+            ImmGetCompositionStringW(himc, GCS_CURSORPOS, nullptr, 0);
+        if (cursor < 0 || static_cast<size_t>(cursor) > candidate.text.size()) return false;
+        candidate.caret = {static_cast<size_t>(cursor)};
+        // Optional metadata is captured from the same context, independent of
+        // the change flags. Never attach a partial array to the new text.
+        static_assert(ATTR_INPUT == static_cast<int>(note::NoteImeCharacterAttribute::Input));
+        static_assert(ATTR_FIXEDCONVERTED == static_cast<int>(note::NoteImeCharacterAttribute::FixedConverted));
+        const LONG attributeBytes = ImmGetCompositionStringW(himc, GCS_COMPATTR, nullptr, 0);
+        if (attributeBytes != IMM_ERROR_NODATA && attributeBytes != 0) {
+            if (attributeBytes < 0 || static_cast<size_t>(attributeBytes) != candidate.text.size()) return false;
+            std::vector<BYTE> attributes(static_cast<size_t>(attributeBytes));
+            if (ImmGetCompositionStringW(himc, GCS_COMPATTR, attributes.data(), attributeBytes) != attributeBytes) return false;
+            candidate.attributes.reserve(attributes.size());
+            for (const BYTE attribute : attributes) {
+                const BYTE status = attribute & 0x0f;
+                if (status > ATTR_FIXEDCONVERTED) return false;
+                candidate.attributes.push_back(static_cast<note::NoteImeCharacterAttribute>(status));
+            }
+        }
+        const LONG clauseBytes = ImmGetCompositionStringW(himc, GCS_COMPCLAUSE, nullptr, 0);
+        if (clauseBytes != IMM_ERROR_NODATA && clauseBytes != 0) {
+            if (clauseBytes < 0 || clauseBytes % sizeof(DWORD) != 0 ||
+                static_cast<size_t>(clauseBytes) / sizeof(DWORD) > candidate.text.size() + 1) return false;
+            std::vector<DWORD> clauses(static_cast<size_t>(clauseBytes) / sizeof(DWORD));
+            if (ImmGetCompositionStringW(himc, GCS_COMPCLAUSE, clauses.data(), clauseBytes) != clauseBytes) return false;
+            candidate.clauses.reserve(clauses.size());
+            for (const DWORD offset : clauses) candidate.clauses.push_back({static_cast<size_t>(offset)});
+        }
+        *out = std::move(candidate);
+        if (outResult) outResult->swap(resultCandidate);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 static bool MoveNoteCaretIntoCommittedFullWidthParenPair(HWND hWnd, const std::wstring& committed) {
@@ -1189,7 +1686,7 @@ static bool MoveNoteCaretIntoCommittedFullWidthParenPair(HWND hWnd, const std::w
 }
 
 static bool GetNoteCurrentLineBand(HWND hWnd, RECT* outBand) {
-    if (!hWnd || !outBand || GetFocus() != hWnd) return false;
+    if (!hWnd || !outBand || IsNoteOpeningFocusVisualHoldActive() || GetFocus() != hWnd) return false;
     DWORD selStart = 0, selEnd = 0;
     SendMessageW(hWnd, EM_GETSEL,
                  reinterpret_cast<WPARAM>(&selStart),
@@ -1226,7 +1723,7 @@ static void DrawNoteCurrentLineHighlight(HWND hWnd, HDC hdc, bool fillBand) {
     if (fillBand) {
         HBRUSH br = CreateSolidBrush(col);
         if (br) {
-            FillRect(hdc, &band, br);
+            GetViewContext(hWnd).currentLineHighlightPainted = FillRect(hdc, &band, br) != 0;
             DeleteObject(br);
         }
     }

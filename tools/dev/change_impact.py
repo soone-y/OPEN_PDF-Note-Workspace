@@ -104,8 +104,8 @@ def recommendations_for_paths(paths: Iterable[str], diff_text: str = "") -> dict
     )
 
     if persistence_changed:
-        add_unique(read, "docs/internal/architecture/persistence_保存系現行実装整理方針_2026-04-29.md")
-        add_unique(read, "docs/internal/architecture/persistence_stage保存統合現行整理_2026-04-27.md")
+        add_unique(read, "docs/internal/persistence_保存系現行実装整理方針_2026-04-29.md")
+        add_unique(read, "docs/internal/persistence_stage中心保存設計_2026-04-27.md")
         add_unique(run, "powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_atomic_write_tests.ps1")
         add_unique(run, "powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_fault_injection_tests.ps1")
         add_unique(run, "powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_ui_automation_fault_tests.ps1")
@@ -119,7 +119,7 @@ def recommendations_for_paths(paths: Iterable[str], diff_text: str = "") -> dict
         add_unique(reasons, "Annotation storage changed: confirm round-trip data preservation and file safety.")
 
     if matches("src/note/") or matches("src/note_view/"):
-        add_unique(read, "docs/internal/architecture/note_記法新旧比較仕様_2026-04-14.md")
+        add_unique(read, "docs/internal/note_記法新旧比較仕様_2026-04-14.md")
         add_unique(run, "powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_note_parser_tests.ps1")
         add_unique(reasons, "Note parsing or presentation changed: confirm malformed-input and export regressions.")
 
@@ -144,7 +144,7 @@ def recommendations_for_paths(paths: Iterable[str], diff_text: str = "") -> dict
         add_unique(reasons, "Dependency evidence changed: require a current security review and matching artifact hashes.")
 
     if matches("src/main/") or "src/main.cpp" in normalized or matches("src/settings/"):
-        add_unique(read, "docs/internal/operations/test_main回帰チェック手順_2026-05-22.md")
+        add_unique(read, "docs/internal/test_main回帰チェック手順_2026-05-22.md")
         add_unique(run, "powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_ui_automation_fault_tests.ps1")
         add_unique(reasons, "Application flow or settings changed: confirm UI rollback behavior.")
 
@@ -154,7 +154,7 @@ def recommendations_for_paths(paths: Iterable[str], diff_text: str = "") -> dict
         or "scripts/release/pack_release.ps1" in normalized
         or "pack_release.ps1" in normalized
     ):
-        add_unique(read, "docs/internal/reports/libreoffice_削減追跡表_2026-04-30.md")
+        add_unique(read, "docs/internal/libreoffice_削減追跡表_2026-04-30.md")
         add_unique(run, "python tools/release_checks/libreoffice_runtime_gate.py --image third_party/libreoffice/custom_runtime/instdir")
         add_unique(inspect, "python tools/release_checks/binary_scan.py --include third_party/libreoffice/custom_runtime/instdir/program")
         add_unique(run, "powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_office_conversion_fixture_tests.ps1")

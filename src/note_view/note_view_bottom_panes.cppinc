@@ -10,28 +10,28 @@ static bool IsBottomPaneScrollable(BottomNoteMode mode) {
     return mode == BottomNoteMode::Headings || mode == BottomNoteMode::Assist;
 }
 
+static int MeasureBottomPaneLineHeight(HDC hdc, const RECT& contentRc,
+                                       BottomNoteMode mode, const std::wstring& line) {
+    TEXTMETRICW tm{};
+    GetTextMetricsW(hdc, &tm);
+    const int minimum = std::max<int>(1, static_cast<int>(tm.tmHeight));
+    if (mode == BottomNoteMode::Headings) return minimum + ScaleY(nullptr, 6);
+    RECT measured{0, 0, std::max<LONG>(1, contentRc.right - contentRc.left), 0};
+    DrawTextW(hdc, line.c_str(), -1, &measured,
+        DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+    return std::max<int>(minimum, measured.bottom - measured.top);
+}
+
 static bool TryGetBottomPaneLineRect(HDC hdc,
                                      const RECT& contentRc,
                                      const BottomPaneProjection& projection,
                                      int targetIdx,
                                      RECT* outRc) {
     if (!hdc || targetIdx < 0 || !outRc) return false;
-    TEXTMETRICW tm{};
-    GetTextMetricsW(hdc, &tm);
-    const int minLineH = std::max<int>(1, static_cast<int>(tm.tmHeight));
     std::vector<std::wstring> lines = SplitLines(projection.text);
     int y = contentRc.top - (IsBottomPaneScrollable(projection.mode) ? g_bottomPaneScrollY : 0);
     for (size_t i = 0; i < lines.size(); ++i) {
-        int lineH = minLineH;
-        if (projection.mode == BottomNoteMode::Headings) {
-            lineH += ScaleY(nullptr, 6);
-        } else {
-            int calcW = std::max<int>(1, static_cast<int>(contentRc.right - contentRc.left));
-            RECT calcRc{ 0, 0, calcW, 0 };
-            DrawTextW(hdc, lines[i].c_str(), -1, &calcRc,
-                      DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT);
-            lineH = std::max<int>(minLineH, calcRc.bottom - calcRc.top);
-        }
+        const int lineH = MeasureBottomPaneLineHeight(hdc, contentRc, projection.mode, lines[i]);
         if (static_cast<int>(i) == targetIdx) {
             *outRc = RECT{ contentRc.left, y, contentRc.right, y + lineH };
             return true;
@@ -45,49 +45,15 @@ static int HitTestBottomPaneLine(HDC hdc,
                                  const RECT& contentRc,
                                  const BottomPaneProjection& projection,
                                  int clientY) {
-    if (!hdc) return -1;
-    TEXTMETRICW tm{};
-    GetTextMetricsW(hdc, &tm);
-    const int minLineH = std::max<int>(1, static_cast<int>(tm.tmHeight));
+    if (!hdc || clientY < contentRc.top || clientY >= contentRc.bottom) return -1;
     const std::vector<std::wstring> lines = SplitLines(projection.text);
     int y = contentRc.top - (IsBottomPaneScrollable(projection.mode) ? g_bottomPaneScrollY : 0);
     for (size_t i = 0; i < lines.size(); ++i) {
-        int lineH = minLineH;
-        if (projection.mode == BottomNoteMode::Headings) {
-            lineH += ScaleY(nullptr, 6);
-        } else {
-            int calcW = std::max<int>(1, static_cast<int>(contentRc.right - contentRc.left));
-            RECT calcRc{ 0, 0, calcW, 0 };
-            DrawTextW(hdc, lines[i].c_str(), -1, &calcRc,
-                      DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT);
-            lineH = std::max<int>(minLineH, calcRc.bottom - calcRc.top);
-        }
+        const int lineH = MeasureBottomPaneLineHeight(hdc, contentRc, projection.mode, lines[i]);
         if (clientY >= y && clientY < y + lineH) return static_cast<int>(i);
         y += lineH;
     }
     return -1;
-}
-
-static void DrawBottomAssistSeparatorLine(HWND hWnd,
-                                          HDC hdc,
-                                          const RECT& contentRc,
-                                          const BottomPaneProjection& projection) {
-    if (!projection.drawAssistSeparator) return;
-    RECT sepRc{};
-    if (!TryGetBottomPaneLineRect(hdc, contentRc, projection,
-                                  projection.assistLayout.separatorIdx, &sepRc)) {
-        return;
-    }
-    int padX = ScaleY(hWnd, 10);
-    int y = (sepRc.top + sepRc.bottom) / 2;
-    COLORREF col = BlendColor(g_theme.panelText, g_theme.panelBg, 0.64);
-    HPEN pen = CreatePen(PS_SOLID, 1, col);
-    if (!pen) return;
-    HGDIOBJ oldPen = SelectObject(hdc, pen);
-    MoveToEx(hdc, std::min<int>(sepRc.right, sepRc.left + padX), y, nullptr);
-    LineTo(hdc, std::max<int>(sepRc.left, sepRc.right - padX), y);
-    if (oldPen) SelectObject(hdc, oldPen);
-    DeleteObject(pen);
 }
 
 // The status assist occupies the same lower-right slot as note-oriented panes.
@@ -116,14 +82,57 @@ static void DrawBottomAssistHeader(HWND hWnd, HDC hdc, const RECT& contentRc) {
         : nullptr;
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, g_theme.panelText);
-    const wchar_t* title = IsEnglishUi() ? L"Status assist" : L"状態アシスト";
-    DrawTextW(hdc, title, -1, &titleRc,
+    const auto title = localization::Text(L"ui.menu_bottom_assist");
+    DrawTextW(hdc, title.c_str(), -1, &titleRc,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     if (oldFont) SelectObject(hdc, oldFont);
 }
 
+bool GetNoteStatusAssistRenderControlRect(RECT* outRect) {
+    return GetNoteStatusAssistControlRect(NoteStatusAssistControl::Rendering, outRect);
+}
+
+bool GetNoteStatusAssistControlRect(NoteStatusAssistControl control, RECT* outRect) {
+    // Inspect this pane's visibility, not its ancestor's show state: local
+    // automation paints the same controls under a hidden top-level window.
+    if (!outRect || !g_hBottomNote ||
+        (GetWindowLongPtrW(g_hBottomNote, GWL_STYLE) & WS_VISIBLE) == 0 ||
+        g_bottomNoteMode != BottomNoteMode::Assist ||
+        g_bottomPanePin != BottomPanePin::Note) return false;
+    const BottomPaneProjection projection = BuildCurrentBottomPaneProjection(BottomNoteMode::Assist);
+    int index = -1;
+    switch (control) {
+    case NoteStatusAssistControl::Rendering: index = projection.assistLayout.renderIdx; break;
+    case NoteStatusAssistControl::Vim: index = projection.assistLayout.vimIdx; break;
+    case NoteStatusAssistControl::NormalCaretRaw: index = projection.assistLayout.vimCaretLineRawTextIdx; break;
+    case NoteStatusAssistControl::ClickInsert: index = projection.assistLayout.vimClickInsertIdx; break;
+    case NoteStatusAssistControl::CurrentDisplay: index = projection.assistLayout.noteDisplayIdx; break;
+    case NoteStatusAssistControl::InlineMathVerticalAlignment:
+        index = projection.assistLayout.inlineMathVerticalAlignmentIdx;
+        break;
+    }
+    if (index < 0) return false;
+    RECT content{};
+    if (!GetClientRect(g_hBottomNote, &content)) return false;
+    if (g_noteVimModeEnabled && g_noteNormalMode) {
+        content.bottom = std::max(content.top, content.bottom - ScaleY(g_hBottomNote, 26));
+    }
+    content = BottomAssistBodyRect(g_hBottomNote, content);
+    HDC dc = GetDC(g_hBottomNote);
+    if (!dc) return false;
+    HFONT font = GetBottomAssistFont(g_hBottomNote);
+    HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
+    RECT line{};
+    const bool measured = TryGetBottomPaneLineRect(
+        dc, content, projection, index, &line);
+    if (old) SelectObject(dc, old);
+    ReleaseDC(g_hBottomNote, dc);
+    return measured && IntersectRect(outRect, &content, &line) != FALSE;
+}
+
 static bool ExecuteBottomPaneCommand(HWND hWnd, const BottomPaneCommand& command) {
     const bool pdfOnlyCommand = command.kind == BottomPaneCommandKind::OpenZoomDialog ||
+                                command.kind == BottomPaneCommandKind::TogglePdfPageOverlay ||
                                 command.kind == BottomPaneCommandKind::TogglePdfZoomOverlay ||
                                 command.kind == BottomPaneCommandKind::ToggleAnnotations;
     if (command.kind != BottomPaneCommandKind::None && !pdfOnlyCommand) {
@@ -131,7 +140,7 @@ static bool ExecuteBottomPaneCommand(HWND hWnd, const BottomPaneCommand& command
             !IsActiveNoteViewIdentity(command.sourceIdentity.note_id,
                                       command.viewIdentity.view_id) ||
             command.viewIdentity.note_id != command.sourceIdentity.note_id ||
-            command.sourceIdentity.source_revision != CurrentNoteTextCoreModel().revision) {
+            command.sourceIdentity.source_revision != CurrentNoteTextCoreRevision()) {
             InvalidateRect(hWnd, nullptr, FALSE);
             return true;
         }
@@ -144,6 +153,9 @@ static bool ExecuteBottomPaneCommand(HWND hWnd, const BottomPaneCommand& command
             PostMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_VIEW_SET_ZOOM, 0), 0);
         }
         return true;
+    case BottomPaneCommandKind::TogglePdfPageOverlay:
+        TogglePdfPageOverlaySetting();
+        return true;
     case BottomPaneCommandKind::TogglePdfZoomOverlay:
         TogglePdfZoomOverlaySetting();
         return true;
@@ -153,7 +165,7 @@ static bool ExecuteBottomPaneCommand(HWND hWnd, const BottomPaneCommand& command
         }
         return true;
     case BottomPaneCommandKind::ToggleRender:
-        if (IsNoteImeComposing()) {
+        if (IsNoteImeCanonicalChangeDeferred(g_hNoteEdit) || IsNoteImeComposing()) {
             g_bottomNoteRenderTogglePendingAfterIme = true;
             CommitNoteImeCompositionNow();
             CompletePendingBottomNoteRenderToggleAfterIme();
@@ -165,6 +177,11 @@ static bool ExecuteBottomPaneCommand(HWND hWnd, const BottomPaneCommand& command
         ToggleNoteWrapSetting();
         return true;
     case BottomPaneCommandKind::ToggleVimControls:
+        if (IsNoteImeComposing()) {
+            ShowSoftNotice(g_hMainWnd ? g_hMainWnd : GetParent(hWnd),
+                           localization::Text(L"note.assist.finish_ime_first"), SoftNoticeKind::Info);
+            return true;
+        }
         ToggleNoteVimControlSetting();
         return true;
     case BottomPaneCommandKind::ToggleCaretLineRawText:
@@ -172,6 +189,9 @@ static bool ExecuteBottomPaneCommand(HWND hWnd, const BottomPaneCommand& command
         return true;
     case BottomPaneCommandKind::ToggleClickInsert:
         ToggleNoteVimClickInsertSetting();
+        return true;
+    case BottomPaneCommandKind::CycleInlineMathVerticalAlignment:
+        CycleInlineMathVerticalAlignmentSetting();
         return true;
     case BottomPaneCommandKind::ShowRawFontMenu:
         ShowNoteAssistFontMenu(hWnd, NoteAssistFontTarget::Raw);
@@ -305,9 +325,8 @@ LRESULT CALLBACK BottomNoteProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         const BottomNoteMode bottomMode = g_bottomNoteMode;
         const BottomPaneProjection projection = BuildCurrentBottomPaneProjection(bottomMode);
-        COLORREF textColor = projection.muted
-            ? MutedTextColor(g_noteFgColor)
-            : g_noteFgColor;
+        COLORREF textColor = bottomMode == BottomNoteMode::Assist ? g_theme.panelText
+            : projection.muted ? MutedTextColor(g_noteFgColor) : g_noteFgColor;
         if (projection.highlightBackground) {
             HBRUSH highlight = CreateSolidBrush(g_theme.selectionBg);
             FillRect(paintDC, &rc, highlight);
@@ -378,9 +397,17 @@ LRESULT CALLBACK BottomNoteProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
         } else {
             RECT measureRc{ 0, 0, std::max<LONG>(1, contentRc.right - contentRc.left), 0 };
-            DrawTextW(paintDC, projection.text.c_str(), -1, &measureRc,
-                      DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT);
-            const int totalHeight = std::max<int>(0, static_cast<int>(measureRc.bottom - measureRc.top));
+            const auto assistLines = bottomMode == BottomNoteMode::Assist
+                ? SplitLines(projection.text) : std::vector<std::wstring>{};
+            int totalHeight = 0;
+            if (bottomMode == BottomNoteMode::Assist) {
+                for (const auto& line : assistLines)
+                    totalHeight += MeasureBottomPaneLineHeight(paintDC, contentRc, bottomMode, line);
+            } else {
+                DrawTextW(paintDC, projection.text.c_str(), -1, &measureRc,
+                          DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+                totalHeight = std::max<int>(0, static_cast<int>(measureRc.bottom - measureRc.top));
+            }
             g_bottomPaneMaxScrollY = std::max<int>(0, totalHeight - static_cast<int>(contentRc.bottom - contentRc.top));
             g_bottomPaneScrollY = std::clamp(g_bottomPaneScrollY, 0, g_bottomPaneMaxScrollY);
             SCROLLINFO si{};
@@ -403,10 +430,27 @@ LRESULT CALLBACK BottomNoteProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 IntersectClipRect(paintDC, contentRc.left, contentRc.top,
                                  contentRc.right, contentRc.bottom);
             }
-            DrawTextW(paintDC, projection.text.c_str(), -1, &drawRc,
-                      DT_LEFT | DT_TOP | DT_WORDBREAK);
-            if (projection.drawAssistSeparator) {
-                DrawBottomAssistSeparatorLine(hWnd, paintDC, contentRc, projection);
+            if (bottomMode == BottomNoteMode::Assist) {
+                HBRUSH editableBrush = CreateSolidBrush(BlendColor(g_theme.panelBg, g_theme.accent, 0.12));
+                int y = drawRc.top;
+                for (size_t i = 0; i < assistLines.size(); ++i) {
+                    const int height = MeasureBottomPaneLineHeight(paintDC, contentRc, bottomMode, assistLines[i]);
+                    RECT row{contentRc.left, y, contentRc.right, y + height};
+                    if (row.bottom > contentRc.top && row.top < contentRc.bottom) {
+                        // One command resolver decides both the visual cue
+                        // and the click action; unavailable rows are untinted.
+                        const auto command = BuildBottomPaneCommandForLine(projection, static_cast<int>(i));
+                        if (editableBrush && command.kind != BottomPaneCommandKind::None)
+                            FillRect(paintDC, &row, editableBrush);
+                        DrawTextW(paintDC, assistLines[i].c_str(), -1, &row,
+                            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+                    }
+                    y += height;
+                }
+                if (editableBrush) DeleteObject(editableBrush);
+            } else {
+                DrawTextW(paintDC, projection.text.c_str(), -1, &drawRc,
+                          DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
             }
             if (clipState != 0) {
                 RestoreDC(paintDC, clipState);
@@ -543,8 +587,12 @@ LRESULT CALLBACK BottomNoteProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 HFONT oldFont = font
                     ? static_cast<HFONT>(SelectObject(hdc, font))
                     : nullptr;
-                lineIdx = HitTestBottomPaneLine(hdc, contentRc, projection,
-                                                GET_Y_LPARAM(lParam));
+                const int x = GET_X_LPARAM(lParam);
+                if (bottomMode != BottomNoteMode::Assist ||
+                    (x >= contentRc.left && x < contentRc.right)) {
+                    lineIdx = HitTestBottomPaneLine(hdc, contentRc, projection,
+                                                    GET_Y_LPARAM(lParam));
+                }
                 if (oldFont) SelectObject(hdc, oldFont);
                 ReleaseDC(hWnd, hdc);
             }
@@ -577,6 +625,8 @@ LRESULT CALLBACK BottomNoteProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (IsBottomPaneScrollable(g_bottomNoteMode)) {
             int action = LOWORD(wParam);
             switch (action) {
+            case SB_TOP: g_bottomPaneScrollY = 0; break;
+            case SB_BOTTOM: g_bottomPaneScrollY = g_bottomPaneMaxScrollY; break;
             case SB_LINEUP: g_bottomPaneScrollY -= 20; break;
             case SB_LINEDOWN: g_bottomPaneScrollY += 20; break;
             case SB_PAGEUP: {

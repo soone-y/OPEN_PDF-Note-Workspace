@@ -312,19 +312,6 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             y += rowH + gapY;
             return c;
         };
-        auto addRadio = [&](int id, const wchar_t* label, int w, bool first) -> HWND {
-            int x = pad + std::max(0, contentW - w);
-            DWORD style = WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON;
-            if (first) style |= WS_GROUP;
-            HWND c = CreateWindowExW(0, L"BUTTON", label, style,
-                                     x, y, w, rowH, contentParent,
-                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-                                     g_hInst, nullptr);
-            SetUIFont(c);
-            y += rowH + gapY;
-            return c;
-        };
-
         int sectionTop = y;
         std::wstring sectionTitle;
         const int sectionMargin = ScaleY(hWnd, 10);
@@ -372,25 +359,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 if (ctx->btnToneCreate) EnableWindow(ctx->btnToneCreate, TRUE);
             }
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.e52cc8dfcb2e").c_str(), defaultToneVariantLabel));
-            {
-                ctx->radTonePure = addRadio(IDC_TONE_VARIANT_PURE, localization::Text(L"settings.general.tone_pure").c_str(), checkW, true);
-                ctx->radToneGuard = addRadio(IDC_TONE_VARIANT_GUARD, localization::Text(L"settings.general.tone_guard").c_str(), checkW, false);
-                ctx->radToneEmphasis = addRadio(IDC_TONE_VARIANT_EMPHASIS, localization::Text(L"settings.general.tone_emphasis").c_str(), checkW, false);
-                ctx->radToneWhite = addRadio(IDC_TONE_VARIANT_WHITE, localization::Text(L"settings.general.tone_white").c_str(), checkW, false);
-                ctx->radToneBlack = addRadio(IDC_TONE_VARIANT_BLACK, localization::Text(L"settings.general.tone_black").c_str(), checkW, false);
-                std::wstring v = NormalizeToneVariantValue(g_config.toneVariant);
-                if (v == L"guard" && ctx->radToneGuard) {
-                    SendMessageW(ctx->radToneGuard, BM_SETCHECK, BST_CHECKED, 0);
-                } else if (v == L"emphasis" && ctx->radToneEmphasis) {
-                    SendMessageW(ctx->radToneEmphasis, BM_SETCHECK, BST_CHECKED, 0);
-                } else if (v == L"white" && ctx->radToneWhite) {
-                    SendMessageW(ctx->radToneWhite, BM_SETCHECK, BST_CHECKED, 0);
-                } else if (v == L"black" && ctx->radToneBlack) {
-                    SendMessageW(ctx->radToneBlack, BM_SETCHECK, BST_CHECKED, 0);
-                } else if (ctx->radTonePure) {
-                    SendMessageW(ctx->radTonePure, BM_SETCHECK, BST_CHECKED, 0);
-                }
-            }
+            ctx->cbToneVariant = addCombo(IDC_TONE_VARIANT, false, controlW);
 
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.5b68f59d8849").c_str(), defaultShowMathLabel));
             ctx->chkShowMath = addCheck(IDC_SHOW_MATH, localization::Text(L"settings.general.show").c_str(), checkW);
@@ -403,6 +372,12 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             ctx->chkPdfSinglePageMode = addCheck(
                 IDC_PDF_SINGLE_PAGE_MODE,
                 localization::Text(L"settings.general.ba5d74bf8466").c_str(),
+                wideW);
+
+            addLabel(localization::Text(L"settings.general.pdf_page_overlay").c_str());
+            ctx->chkPdfPageOverlay = addCheck(
+                IDC_PDF_PAGE_OVERLAY,
+                localization::Text(L"settings.general.show").c_str(),
                 wideW);
 
             addLabel(localization::Text(L"settings.general.pdf_zoom_overlay").c_str());
@@ -491,6 +466,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             std::wstring defaultBgLabel = NoteBackgroundLabel(defaults.noteBgSource, defaults.noteBgThemeName, defaults.noteBgColor);
             std::wstring defaultMathMarginLabel = NoteRatioLabel(defaults.noteMathMarginTopPercent);
             std::wstring defaultSupSubLabel = NoteSupSubDistributionLabel(defaults.noteMathSupSubGapSupPercent);
+            std::wstring defaultInlineMathVerticalAlignmentLabel =
+                InlineMathVerticalAlignmentLabel(defaults.noteInlineMathVerticalAlignment);
             std::wstring defaultOverlayRefreshDelayLabel = std::to_wstring(defaults.noteOverlayRefreshDelayMs) + L" ms";
             std::wstring defaultFullReparseDelayLabel = std::to_wstring(defaults.noteFullReparseDelayMs) + L" ms";
 
@@ -568,6 +545,12 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
 
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.e1164e3af8c7").c_str(), defaultSupSubLabel));
             ctx->cbNoteMathSupSub = addCombo(IDC_NOTE_MATH_SUPSUB, false, controlW);
+
+            addLabel(SettingLabelWithDefault(
+                localization::Text(L"settings.general.inline_math_vertical_alignment").c_str(),
+                defaultInlineMathVerticalAlignmentLabel));
+            ctx->cbNoteInlineMathVerticalAlignment =
+                addCombo(IDC_NOTE_INLINE_MATH_VERTICAL_ALIGNMENT, false, controlW);
 
             beginSection(3, localization::Text(L"settings.general.f669fef9c21a").c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.0f0d1e700cd7").c_str(), defaultOverlayRefreshDelayLabel));
@@ -751,6 +734,9 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->cbTone) {
             FillToneComboFromCatalog(ctx->cbTone);
         }
+        if (ctx->cbToneVariant) {
+            FillToneVariantCombo(ctx->cbToneVariant, g_config.toneVariant);
+        }
         UpdateToneEditButtonEnabled(ctx);
         if (ctx->cbBottomPane) {
             const BottomPanePin configuredPin = ParseBottomPanePin(g_config.bottomPanePin);
@@ -882,6 +868,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->chkPdfZoomOverlay) {
             SendMessageW(ctx->chkPdfZoomOverlay, BM_SETCHECK,
                          g_config.showPdfZoomOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        if (ctx->chkPdfPageOverlay) {
+            SendMessageW(ctx->chkPdfPageOverlay, BM_SETCHECK,
+                         g_config.showPdfPageOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
         }
         if (ctx->cbSelectionStyle) {
             std::wstring style = g_config.selectionStyle;
@@ -1038,6 +1028,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         }
         if (ctx->cbNoteMathSupSub) {
             FillNoteRatioCombo(ctx->cbNoteMathSupSub, g_config.noteMathSupSubGapSupPercent, true);
+        }
+        if (ctx->cbNoteInlineMathVerticalAlignment) {
+            FillInlineMathVerticalAlignmentCombo(
+                ctx->cbNoteInlineMathVerticalAlignment, g_config.noteInlineMathVerticalAlignment);
         }
         auto fillDelayCombo = [](HWND combo, std::initializer_list<int> options, int current) {
             if (!combo) return;

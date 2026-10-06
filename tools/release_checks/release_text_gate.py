@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 TEXT_SUFFIXES = {".cfg", ".csv", ".htm", ".html", ".ini", ".json", ".md", ".txt", ".xml"}
 TEXT_FILE_NAMES = {"NOTICE", "README", "LICENSE"}
 TEXT_ROOTS = ("docs", "licenses")
-ROOT_TEXT_FILES = {"manifest.json", "checksums.sha256", "pdf_workspace_setup.json"}
+ROOT_TEXT_FILES = {"manifest.json", "checksums.sha256", "pdf_note_workspace_setup.json"}
 
 
 def is_checked_text_path(relative_path: str) -> bool:

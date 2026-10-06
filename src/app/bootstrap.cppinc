@@ -25,6 +25,28 @@ static void AppendTopLevelExceptionLog(const char* label, const char* detail) {
     AppendAppLogLineUtf8(AppLogKind::Crash, line);
 }
 
+static void RecordStartupMonitorEvent(StartupMonitorEvent event) noexcept {
+    s_startupMonitorEvents.fetch_or(static_cast<unsigned>(event), std::memory_order_relaxed);
+}
+static void DrainStartupMonitorEvents() noexcept {
+    const unsigned events = s_startupMonitorEvents.exchange(0, std::memory_order_relaxed);
+    try {
+        if (events & static_cast<unsigned>(StartupMonitorEvent::RecoveryRequested))
+            AppendStartupWatchdogLog("Main-window monitor: sustained absence; UI recovery requested.");
+        if (events & static_cast<unsigned>(StartupMonitorEvent::RequestFailed))
+            AppendStartupWatchdogLog("Main-window monitor: request failed; forced exit withheld.");
+        if (events & static_cast<unsigned>(StartupMonitorEvent::UserRequested))
+            AppendStartupWatchdogLog("Main-window monitor: user requested recovery/normal close.");
+        if (events & static_cast<unsigned>(StartupMonitorEvent::NoticeUnavailable))
+            AppendStartupWatchdogLog("Main-window monitor: independent notice unavailable; forced exit withheld.");
+        if (events & static_cast<unsigned>(StartupMonitorEvent::MonitorUnavailable))
+            AppendStartupWatchdogLog("Main-window monitor: monitoring unavailable; forced exit withheld.");
+        if (events & static_cast<unsigned>(StartupMonitorEvent::ShutdownRequested))
+            AppendStartupWatchdogLog("Single-instance shutdown request received.");
+    } catch (...) {
+        // Diagnostics must not interrupt cleanup or recovery.
+    }
+}
 static void PrepareStartupWatchdogForShutdown() {
     if (g_hSingleInstanceReadyEvent) {
         SetEvent(g_hSingleInstanceReadyEvent);
@@ -41,6 +63,7 @@ static void PrepareStartupWatchdogForShutdown() {
     if (g_hStartupWatchdogThread) {
         WaitForSingleObject(g_hStartupWatchdogThread, 6000);
     }
+    DrainStartupMonitorEvents();
 }
 
 static void ShutdownBootstrapResources(bool coInitialized, bool pdfiumInitialized) {
@@ -75,6 +98,10 @@ static void ShutdownBootstrapResources(bool coInitialized, bool pdfiumInitialize
     if (g_hSingleInstanceShutdownRequestEvent) {
         CloseHandle(g_hSingleInstanceShutdownRequestEvent);
         g_hSingleInstanceShutdownRequestEvent = nullptr;
+    }
+    if (g_hProcessShutdownRequestEvent) {
+        CloseHandle(g_hProcessShutdownRequestEvent);
+        g_hProcessShutdownRequestEvent = nullptr;
     }
     if (g_hSingleInstanceShutdownStopEvent) {
         CloseHandle(g_hSingleInstanceShutdownStopEvent);
@@ -223,14 +250,16 @@ static DWORD WINAPI SingleInstanceShutdownRequestThread(LPVOID) {
     HANDLE handles[] = {
         g_hSingleInstanceShutdownStopEvent,
         g_hSingleInstanceShutdownRequestEvent,
+        g_hProcessShutdownRequestEvent,
     };
     if (!handles[0] || !handles[1]) return 0;
+    const DWORD count = handles[2] ? 3 : 2;
 
     for (;;) {
-        DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+        DWORD wait = WaitForMultipleObjects(count, handles, FALSE, INFINITE);
         if (wait == WAIT_OBJECT_0) return 0;
-        if (wait == WAIT_OBJECT_0 + 1) {
-            AppendStartupWatchdogLog("Single-instance shutdown request received.");
+        if (wait == WAIT_OBJECT_0 + 1 || wait == WAIT_OBJECT_0 + 2) {
+            RecordStartupMonitorEvent(StartupMonitorEvent::ShutdownRequested);
             if (g_mainThreadId != 0) {
                 PostThreadMessageW(g_mainThreadId, kMsgSingleInstanceShutdownRequest, 0, 0);
             }
@@ -240,51 +269,80 @@ static DWORD WINAPI SingleInstanceShutdownRequestThread(LPVOID) {
     }
 }
 
-static DWORD WINAPI StartupWatchdogThread(LPVOID) {
-    HANDLE ready = g_hSingleInstanceReadyEvent;
-    if (!ready) return 0;
-
-    DWORD res = WaitForSingleObject(ready, kStartupWindowTimeoutMs);
-    if (res == WAIT_OBJECT_0) return 0;
-
-    // If the window exists but the ready event was never signaled, try to recover by showing it.
-    if (HWND existing = FindCurrentPackageMainWindow()) {
-        if (IsIconic(existing)) {
-            ShowWindow(existing, SW_RESTORE);
-        } else {
-            ShowWindow(existing, SW_SHOW);
+static DWORD WINAPI StartupWatchdogThread(LPVOID parameter) {
+    std::unique_ptr<main_window_liveness::NoticeText> text(
+        static_cast<main_window_liveness::NoticeText*>(parameter));
+    try {
+        const HANDLE stop = g_hSingleInstanceShutdownStopEvent;
+        if (!stop || !text) {
+            RecordStartupMonitorEvent(StartupMonitorEvent::MonitorUnavailable);
+            return 1;
         }
-        if (!IsWindowVisible(existing)) {
-            ShowWindow(existing, SW_SHOW);
+        main_window_liveness::Policy policy(GetTickCount64());
+        main_window_liveness::RecoveryNotice notice(std::move(*text), stop);
+        ULONGLONG nextSample = GetTickCount64() + 2000;
+        // Healthy checks remain O(1). The same worker owns the independent
+        // notice and its message queue; it never waits on the main UI thread.
+        for (;;) {
+            const ULONGLONG beforeWait = GetTickCount64();
+            const DWORD timeout = beforeWait >= nextSample ? 0 :
+                static_cast<DWORD>(std::min<ULONGLONG>(2000, nextSample - beforeWait));
+            const DWORD wait = MsgWaitForMultipleObjects(1, &stop, FALSE, timeout, QS_ALLINPUT);
+            if (wait == WAIT_OBJECT_0) return 0;
+            if (wait == WAIT_FAILED) {
+                RecordStartupMonitorEvent(StartupMonitorEvent::MonitorUnavailable);
+                return 1;
+            }
+            const auto command = notice.PumpCommand();
+            if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) return 0;
+            if (command != main_window_liveness::NoticeCommand::None) {
+                const UINT message = command == main_window_liveness::NoticeCommand::NormalClose ?
+                    kMsgSingleInstanceShutdownRequest : kMsgStartupWatchdogAbort;
+                const bool posted = PostSelfMainWindowRecovery(message) ||
+                    PostThreadMessageW(g_mainThreadId, message, 0, 0);
+                notice.ReportRequest(command, posted);
+                RecordStartupMonitorEvent(posted ? StartupMonitorEvent::UserRequested : StartupMonitorEvent::RequestFailed);
+            }
+            const ULONGLONG now = GetTickCount64();
+            if (now < nextSample) continue;
+            nextSample = now + 2000;
+            const bool visible = IsSelfMainWindowVisible();
+            if (visible) notice.Reset();
+            if (policy.Observe(visible, now)) {
+                RecordStartupMonitorEvent(StartupMonitorEvent::RecoveryRequested);
+                // HWND messages also survive nested dialog loops. Posting is
+                // not acknowledgement, recovery, data protection or exit.
+                if (!PostSelfMainWindowRecovery(kMsgStartupWatchdogAbort) &&
+                    !PostThreadMessageW(g_mainThreadId, kMsgStartupWatchdogAbort, 0, 0))
+                    RecordStartupMonitorEvent(StartupMonitorEvent::RequestFailed);
+            }
+            if (policy.TakeNotification() && !notice.Show())
+                RecordStartupMonitorEvent(StartupMonitorEvent::NoticeUnavailable);
         }
-        SetWindowPos(existing, HWND_TOP, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        if (IsWindowVisible(existing)) {
-            SetEvent(ready);
-            return 0;
-        }
+        return 0;
+    } catch (...) {
+        // An unavailable monitor is not permission to discard application state.
+        RecordStartupMonitorEvent(StartupMonitorEvent::MonitorUnavailable);
+        return 1;
     }
-
-    AppendStartupWatchdogLog("Startup watchdog: main window not visible (timeout).");
-
-    if (g_mainThreadId != 0) {
-        PostThreadMessageW(g_mainThreadId, kMsgStartupWatchdogAbort, 0, 0);
-    }
-
-    if (g_hStartupAbortAckEvent) {
-        WaitForSingleObject(g_hStartupAbortAckEvent, 5000);
-    }
-
-    if (!IsSaveOperationInProgress()) {
-        AppendStartupWatchdogLog("Startup watchdog: forcing ExitProcess().");
-        ExitProcess(2);
-    }
-    return 0;
 }
 
 // ---------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------
+static void RecoverSelfMainWindowOrRequestClose() {
+    DrainStartupMonitorEvents();
+    if (g_hStartupAbortAckEvent) SetEvent(g_hStartupAbortAckEvent);
+    if (RestoreSelfMainWindowOnUiThread()) {
+        AppendStartupWatchdogLog("Main-window monitor: main UI restored or already visible.");
+    } else if (PostSelfMainWindowRecovery(WM_CLOSE)) {
+        AppendStartupWatchdogLog("Main-window monitor: normal close requested for verified main UI.");
+    } else {
+        // Neither an acknowledgement nor !saving proves durable recovery.
+        AppendStartupWatchdogLog("Main-window monitor: no main UI; forced exit withheld (recovery unproven).");
+    }
+}
+
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     bool coInitialized = false;
     bool pdfiumInitialized = false;
@@ -325,6 +383,8 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hSingleInstanceReadyEvent = CreateEventW(nullptr, TRUE, FALSE, readyEventName.c_str());
     g_hSingleInstanceShutdownRequestEvent =
         CreateEventW(nullptr, FALSE, FALSE, SingleInstanceShutdownRequestEventName().c_str());
+    g_hProcessShutdownRequestEvent =
+        CreateEventW(nullptr, FALSE, FALSE, ProcessShutdownRequestEventName().c_str());
     if (!g_hSingleInstanceShutdownStopEvent) {
         g_hSingleInstanceShutdownStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     }
@@ -337,7 +397,19 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             CreateThread(nullptr, 0, SingleInstanceShutdownRequestThread, nullptr, 0, nullptr);
     }
     if (g_hSingleInstanceReadyEvent && !g_hStartupWatchdogThread) {
-        g_hStartupWatchdogThread = CreateThread(nullptr, 0, StartupWatchdogThread, nullptr, 0, nullptr);
+        // Resolve locale on the main thread, then transfer immutable text.
+        auto text = std::make_unique<main_window_liveness::NoticeText>();
+        text->title = localization::Text(L"startup.self.title");
+        text->message = localization::Format(L"startup.self.message",
+            {{L"pid", std::to_wstring(GetCurrentProcessId())}});
+        text->retry = localization::Text(L"startup.self.retry");
+        text->normalClose = localization::Text(L"startup.self.normal_close");
+        text->wait = localization::Text(L"startup.self.wait");
+        text->retryPending = localization::Text(L"startup.self.retry_pending");
+        text->closePending = localization::Text(L"startup.self.close_pending");
+        text->requestFailed = localization::Text(L"startup.self.request_failed");
+        g_hStartupWatchdogThread = CreateThread(nullptr, 0, StartupWatchdogThread, text.get(), 0, nullptr);
+        if (g_hStartupWatchdogThread) (void)text.release();
     }
 
     HRESULT hrCoInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -395,6 +467,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                                 CW_USEDEFAULT, CW_USEDEFAULT, 1280, 900,
                                 nullptr, nullptr, g_hInst, nullptr);
     if (!hWnd) {
+        // The monitor now outlives startup. Signal stop and join it before
+        // closing any borrowed event, including the CreateWindow failure path.
+        PrepareStartupWatchdogForShutdown();
         if (g_hSingleInstanceReadyEvent) {
             SetEvent(g_hSingleInstanceReadyEvent);
         }
@@ -423,6 +498,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             CloseHandle(g_hSingleInstanceShutdownRequestEvent);
             g_hSingleInstanceShutdownRequestEvent = nullptr;
         }
+        if (g_hProcessShutdownRequestEvent) {
+            CloseHandle(g_hProcessShutdownRequestEvent);
+            g_hProcessShutdownRequestEvent = nullptr;
+        }
         if (g_hSingleInstanceShutdownStopEvent) {
             CloseHandle(g_hSingleInstanceShutdownStopEvent);
             g_hSingleInstanceShutdownStopEvent = nullptr;
@@ -434,6 +513,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         return 0;
     }
     g_hMainWnd = hWnd;
+    PublishSelfMainWindow(hWnd);
 
     HMENU menu = BuildMenuBar();
     g_hMainMenu = menu;
@@ -453,28 +533,17 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
         if (!msg.hwnd && msg.message == kMsgStartupWatchdogAbort) {
-            if (g_hStartupAbortAckEvent) SetEvent(g_hStartupAbortAckEvent);
-            ShowMainMessageDialog(
-                nullptr,
-                L"PDF Note Workspace",
-                L"起動に失敗しました（メインウィンドウが表示できません）。\n\n"
-                L"タスクマネージャーで \"pdf_note_workspace.exe\" が残っている場合は終了してから、再起動してください。",
-                SoftNoticeKind::Error);
-            if (g_hMainWnd && IsWindow(g_hMainWnd)) {
-                PostMessageW(g_hMainWnd, WM_CLOSE, 0, 0);
-            } else {
-                PostQuitMessage(2);
-            }
+            RecoverSelfMainWindowOrRequestClose();
             continue;
         }
         if (!msg.hwnd && msg.message == kMsgSingleInstanceShutdownRequest) {
-            if (g_hMainWnd && IsWindow(g_hMainWnd)) {
-                PostMessageW(g_hMainWnd, WM_CLOSE, 0, 0);
-            } else {
-                PostQuitMessage(0);
+            if (!PostSelfMainWindowRecovery(WM_CLOSE)) {
+                AppendStartupWatchdogLog("Shutdown request: no main UI; exit withheld (recovery unproven).");
             }
             continue;
         }
+        // Memo input and shortcuts never enter the PDF/main-note routing.
+        if (HandleWorkspaceMemoMessage(msg)) continue;
         if (ShouldSkipImeMessageInLoop(msg)) continue;
         if (RouteWheelToComboListIfNeeded(msg)) continue;
         if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
@@ -542,13 +611,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                         }
                     } else {
                         if (g_noteVimModeEnabled && g_noteNormalMode) {
-                            if (isEscKey || isCtrlBracket) {
-                                bool clearedVisual = ClearNoteNormalVisualMode();
-                                bool clearedPending = ClearNoteNormalPendingState();
-                                if (isEscKey && !clearedVisual && !clearedPending) {
-                                    if (g_hPdfView) SetFocus(g_hPdfView);
-                                }
-                            }
+                            // Esc and Ctrl+[ cancel pending commands/Visual
+                            // without moving the note command owner to PDF.
+                            SendMessageW(hWnd, WM_KEYDOWN, VK_ESCAPE, msg.lParam);
                             continue;
                         }
                         EnterNoteNormalMode(hWnd);

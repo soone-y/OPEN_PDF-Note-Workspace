@@ -175,7 +175,7 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(exportMenu), ui.menuExport.c_str());
 
     HMENU tools = CreatePopupMenu();
-    AppendMenuW(tools, MF_STRING, ID_GLOBAL_MEMOS, text(L"menu.tools.global_memos").c_str());
+    AppendMenuW(tools, MF_STRING, ID_WORKSPACE_MEMO, text(L"menu.tools.workspace_memo").c_str());
     HMENU viewer = CreatePopupMenu();
     AppendMenuW(viewer, MF_STRING, ID_OP_LAUNCH_READONLY_VIEWER, text(L"menu.viewer.launch").c_str());
     AppendMenuW(viewer, MF_STRING, ID_OP_OPEN_READONLY_VIEWER_FILE, text(L"menu.viewer.open_file").c_str());

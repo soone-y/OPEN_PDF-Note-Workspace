@@ -26,16 +26,44 @@ The same note route supports application-specific markup for cases where Markdow
 
 ```text
 <u>underlined text</>
-<char=#1a73e8>blue text</>
-<back=#fff2cc>text with a background color</>
-<link=sample-note><la><lu>an internal-note link marker</></></>
+<char=1a73e8>blue text</>
+<back=fff2cc>text with a background color</>
+<link=sample-note>an internal-note link marker</>
 ```
 
 This markup is not exclusive to `.clro`; `.md` and `.markdown` use the same route. Prefer ordinary Markdown first, then use application-specific markup only where its display or internal links are needed.
 
+## Container blocks
+
+Surround text with standalone `::: note` and `:::` lines to display a block with a background, border, and inset. Headings, emphasis, links, tables, and math inside it retain their normal interpretation. A code block is a block whose body is instead displayed literally.
+
+```text
+::: note
+**Additional information** and `code`
+:::
+```
+
+`note` is an identifying name; a bare `:::` can also open an unnamed block. A named opening line inside a container creates a nested block. An unnamed closing line closes the innermost block and must have at least as many colons as its opening line. Up to three leading spaces are accepted. An unclosed block extends to the end of the document. Styling attributes and folding are not supported.
+
+Editing or selecting a row shows that row's source, not the entire enclosing container. Tables and display math inside it retain their own editing units. TXT output removes the wrapper syntax while preserving its body. Colons inside code or math do not open containers.
+
 ## Mathematics and compatibility
 
-Math can be written with `$...$`, `$$...$$`, `\(...\)`, or `\[...\]`. Math display is experimental, so verify the rendered result for important notes. The older `<math>...</>` form is not accepted as new Markdown/TeX note syntax.
+Math can be written with `$...$`, `$$...$$`, `\(...\)`, or `\[...\]`. Math display is experimental, so verify the rendered result for important notes.
+
+In `.clro`, `.md`, and `.markdown`, `<math>...</math>` can also wrap TeX math. A wrapper within a sentence is inline math; a standalone wrapper, with no surrounding text on its boundary lines, is display math.
+
+```text
+The equation is <math>E = mc^2</math>.
+
+<math>
+\frac{1}{2}
+</math>
+```
+
+Both `</math>` and `</>` close math. Math owns its closing token, so it does not accidentally close surrounding underline or link markup. `<math display=inline>x</>` remains inline even on a standalone row; `<math display='block'>x</math>` requests display math. Values may be unquoted, single-quoted, or double-quoted. Tag names, attribute names, and display values are case-insensitive. Write the opening tag on one row.
+
+Unknown attributes remain in source and Markdown output, are ignored for display, and produce a diagnostic. Invalid or duplicate `display` attributes, unclosed wrappers, and nesting retain source rather than becoming math. Inline math must occupy one row; display math must stand alone without surrounding prose. Code and escaped opening tags are not interpreted. Self-closing tags and MathML are not supported; the body is TeX. Editing shows source for the inline row or the entire display-math block, just like other math delimiters. `.tex` display continues to use TeX math delimiters only.
 
 Other applications can open a `.clro` file as ordinary text. General Markdown may remain readable, but application-specific markup, math rendering, and internal note links are not guaranteed to display or work elsewhere. This application does not promise complete support for every Markdown feature or identical GitHub rendering.
 

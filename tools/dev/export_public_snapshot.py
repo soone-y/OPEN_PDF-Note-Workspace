@@ -21,9 +21,9 @@ from typing import Literal
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_ALLOWLIST = REPO_ROOT / "docs" / "internal" / "operations" / "public_repo_demo許可リスト_2026-07-02.txt"
+DEFAULT_ALLOWLIST = REPO_ROOT / "docs" / "internal" / "public_repo_demo許可リスト_2026-07-02.txt"
 DEFAULT_GITIGNORE_TEMPLATE = (
-    REPO_ROOT / "docs" / "internal" / "operations" / "public_repo_gitignoreテンプレート_2026-07-02.gitignore"
+    REPO_ROOT / "docs" / "internal" / "public_repo_gitignoreテンプレート_2026-07-02.gitignore"
 )
 EXCLUDED_DIR_NAMES = {"__pycache__", ".pytest_cache"}
 EXCLUDED_FILE_SUFFIXES = {".pyc", ".pyo", ".orig", ".rej", ".bak"}
@@ -60,7 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--allowlist",
         type=Path,
         default=DEFAULT_ALLOWLIST,
-        help="Line-based allowlist file. Defaults to the release snapshot allowlist.",
+        help="Line-based allowlist file. Defaults to the demo snapshot allowlist; releases pass their policy explicitly.",
     )
     parser.add_argument(
         "--gitignore-template",

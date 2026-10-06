@@ -35,6 +35,16 @@ if ($functionAst.Count -ne 1) {
 }
 . ([scriptblock]::Create($functionAst[0].Extent.Text))
 
+foreach ($helperName in @("Get-Sha256", "Get-EffectiveAllowlistEntries", "Get-AllowlistDiffLines")) {
+    $helperAst = @($publishAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $helperName
+    }, $true))
+    if ($helperAst.Count -ne 1) { throw "Expected exactly one $helperName function." }
+    . ([scriptblock]::Create($helperAst[0].Extent.Text))
+}
+
 function Assert-Equal {
     param(
         [Parameter(Mandatory)][string]$Actual,
@@ -105,6 +115,28 @@ try {
     }
     $selectedVersion = Get-PreviousPublishedVersion -RecordsDirectory $fixtureDirectory
     Assert-Equal -Actual $selectedVersion -Expected "0.9.503" -Message "A current paired checklist must supply its version from its body, not its filename."
+
+    $policyRoot = Join-Path $fixtureDirectory "internal"
+    $policyArchive = Join-Path $policyRoot "archive\operations"
+    New-Item -ItemType Directory -Path $policyArchive -Force | Out-Null
+    $currentName = "public_repo_release_allowlist_2026-08-24.txt"
+    $currentPolicy = Join-Path $policyRoot $currentName
+    Set-Content -LiteralPath $currentPolicy -Value @("# current", "README.md", "docs/ja/", "docs/en/") -Encoding UTF8
+    $diffLines = @(Get-AllowlistDiffLines -CurrentAllowlistName $currentName -CurrentAllowlistPath $currentPolicy)
+    if (-not ($diffLines -match "初回または履歴未保持")) {
+        throw "A policy without archive history must retain first-policy handling."
+    }
+    $baselineName = "public_repo_release_allowlist_2026-07-28.txt"
+    $baselinePolicy = Join-Path $policyArchive $baselineName
+    Set-Content -LiteralPath $baselinePolicy -Value @("# historical", "README.md", "old.md") -Encoding UTF8
+    $ignoredDirectory = Join-Path $policyArchive "unrelated"
+    New-Item -ItemType Directory -Path $ignoredDirectory | Out-Null
+    Set-Content -LiteralPath (Join-Path $ignoredDirectory "public_repo_release_allowlist_2026-08-23.txt") -Value "unexpected.md" -Encoding UTF8
+    $diffText = (@(Get-AllowlistDiffLines -CurrentAllowlistName $currentName -CurrentAllowlistPath $currentPolicy)) -join "`n"
+    foreach ($expected in @($baselineName, (Get-Sha256 $baselinePolicy), (Get-Sha256 $currentPolicy), "- 追加: 2 件", "- 削除: 1 件", "  - + docs/en/", "  - - old.md")) {
+        if (-not $diffText.Contains($expected)) { throw "Missing archive policy comparison evidence: $expected" }
+    }
+    if ($diffText.Contains("unexpected.md")) { throw "Policy history lookup must not recurse into unrelated trees." }
 }
 finally {
     if (Test-Path -LiteralPath $fixtureDirectory) {

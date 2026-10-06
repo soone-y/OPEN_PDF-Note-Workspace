@@ -4,6 +4,7 @@
 
 #include "core/preview_trace.h"
 #include "core/localization.h"
+#include "pdf_view/keyboard_scroll.h"
 
 static DWORD g_pdfRecentLinkPlacementDblClickSuppressUntil = 0;
 static POINT g_pdfRecentLinkPlacementDblClickSuppressPt = { -1, -1 };
@@ -44,6 +45,14 @@ enum class SinglePageMoveAxis {
 
 static constexpr double kSinglePageOverscrollThresholdPx = 64.0;
 static double g_singlePageOverscroll = 0.0;
+static pdf_keyboard_scroll::Motion g_pdfKeyboardMotion;
+static ULONGLONG g_pdfKeyboardScrollTick = 0;
+
+static void StopPdfKeyboardScroll(HWND hwnd) {
+    g_pdfKeyboardMotion.Reset();
+    g_pdfKeyboardScrollTick = 0;
+    if (hwnd) KillTimer(hwnd, kPdfKeyboardScrollTimerId);
+}
 
 static double CurrentSinglePageRatioX(int pageIndex, int viewW) {
     if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pageRects.size())) return 0.5;
@@ -124,7 +133,7 @@ static bool StepSinglePageKeepingCrossRatio(HWND hwnd, int delta, SinglePageMove
     return true;
 }
 
-static bool ScrollPdfByKeyboard(HWND hwnd, double dx, double dy) {
+static bool ScrollPdfByKeyboard(HWND hwnd, double dx, double dy, bool smooth = false) {
     if (!hwnd || g_pdf.kind == DocKind::None || g_pdf.pageCount <= 0) return false;
     RECT rc{};
     GetClientRect(hwnd, &rc);
@@ -140,17 +149,32 @@ static bool ScrollPdfByKeyboard(HWND hwnd, double dx, double dy) {
             std::abs(g_pdf.scrollY - beforeY) > 0.1) {
             g_singlePageOverscroll = 0.0;
         }
-        if (dy > 0.0 && std::abs(g_pdf.scrollY - beforeY) < 0.1) {
-            return StepSinglePageKeepingCrossRatio(hwnd, 1, SinglePageMoveAxis::Vertical);
-        }
-        if (dy < 0.0 && std::abs(g_pdf.scrollY - beforeY) < 0.1) {
-            return StepSinglePageKeepingCrossRatio(hwnd, -1, SinglePageMoveAxis::Vertical);
-        }
-        if (dx > 0.0 && std::abs(g_pdf.scrollX - beforeX) < 0.1) {
-            return StepSinglePageKeepingCrossRatio(hwnd, 1, SinglePageMoveAxis::Horizontal);
-        }
-        if (dx < 0.0 && std::abs(g_pdf.scrollX - beforeX) < 0.1) {
-            return StepSinglePageKeepingCrossRatio(hwnd, -1, SinglePageMoveAxis::Horizontal);
+        if (smooth) {
+            // Accumulate blocked movement rather than turning a page every frame.
+            const bool vertical = std::abs(dy) >= std::abs(dx);
+            const double move = vertical ? dy : dx;
+            const double applied = vertical ? g_pdf.scrollY - beforeY : g_pdf.scrollX - beforeX;
+            if (std::abs(applied) < 0.1 && std::abs(move) > 0.1) {
+                if ((g_singlePageOverscroll > 0.0) != (move > 0.0)) g_singlePageOverscroll = 0.0;
+                g_singlePageOverscroll += move;
+                if (std::abs(g_singlePageOverscroll) >= kSinglePageOverscrollThresholdPx) {
+                    return StepSinglePageKeepingCrossRatio(hwnd, move > 0.0 ? 1 : -1,
+                        vertical ? SinglePageMoveAxis::Vertical : SinglePageMoveAxis::Horizontal);
+                }
+            }
+        } else {
+            if (dy > 0.0 && std::abs(g_pdf.scrollY - beforeY) < 0.1) {
+                return StepSinglePageKeepingCrossRatio(hwnd, 1, SinglePageMoveAxis::Vertical);
+            }
+            if (dy < 0.0 && std::abs(g_pdf.scrollY - beforeY) < 0.1) {
+                return StepSinglePageKeepingCrossRatio(hwnd, -1, SinglePageMoveAxis::Vertical);
+            }
+            if (dx > 0.0 && std::abs(g_pdf.scrollX - beforeX) < 0.1) {
+                return StepSinglePageKeepingCrossRatio(hwnd, 1, SinglePageMoveAxis::Horizontal);
+            }
+            if (dx < 0.0 && std::abs(g_pdf.scrollX - beforeX) < 0.1) {
+                return StepSinglePageKeepingCrossRatio(hwnd, -1, SinglePageMoveAxis::Horizontal);
+            }
         }
     }
     MarkPdfVirtualScrollInput();
@@ -158,6 +182,23 @@ static bool ScrollPdfByKeyboard(HWND hwnd, double dx, double dy) {
     KillTimer(hwnd, kScrollTimerId);
     InvalidateRect(hwnd, nullptr, FALSE);
     return true;
+}
+
+static void TickPdfKeyboardScroll(HWND hwnd) {
+    if (GetFocus() != hwnd || g_pdf.kind == DocKind::None || g_pdf.pageCount <= 0 ||
+        g_pdf.editingText || IsSaveTransactionRunning() ||
+        (GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000) ||
+        !g_pdfKeyboardMotion.HasKeys()) {
+        StopPdfKeyboardScroll(hwnd);
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    const auto move = g_pdfKeyboardMotion.Advance(
+        static_cast<double>(now - g_pdfKeyboardScrollTick) / 1000.0);
+    g_pdfKeyboardScrollTick = now;
+    if (move.x != 0.0 || move.y != 0.0) {
+        (void)ScrollPdfByKeyboard(hwnd, move.x, move.y, true);
+    }
 }
 
 static bool StepPdfPageByKeyboard(HWND hwnd, int delta) {
@@ -741,6 +782,16 @@ static bool TryShowPdfQuickAnnotRightDrag(HWND hwnd, const POINT& pt) {
 // ---------------------------------------------------------------------
 
 LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // Keyup can be blocked by a save transaction, so cancellation precedes that gate.
+    if (msg == WM_KEYUP && pdf_keyboard_scroll::Motion::KeyIndex(static_cast<unsigned>(wParam)) >= 0) {
+        g_pdfKeyboardMotion.SetKey(static_cast<unsigned>(wParam), false);
+        if (!g_pdfKeyboardMotion.HasKeys()) StopPdfKeyboardScroll(hwnd);
+    }
+    if (msg == WM_LBUTTONDOWN || msg == WM_MBUTTONDOWN || msg == WM_RBUTTONDOWN ||
+        msg == WM_POINTERDOWN || msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL ||
+        msg == WM_SYSKEYDOWN || msg == WM_DESTROY || IsSaveTransactionRunning()) {
+        StopPdfKeyboardScroll(hwnd);
+    }
     if (BlockPdfViewEditInputDuringSave(hwnd, msg, wParam, lParam)) return 0;
     switch (msg) {
     case kMsgTextBoxFontUpdate: {
@@ -2106,6 +2157,8 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
     }
     case WM_KEYDOWN: {
+        const bool movementKey = pdf_keyboard_scroll::Motion::KeyIndex(static_cast<unsigned>(wParam)) >= 0;
+        if (!movementKey && wParam != VK_SHIFT) StopPdfKeyboardScroll(hwnd);
         if (wParam == VK_TAB && !g_pdf.editingText) {
             if (g_hNoteEdit) SetFocus(g_hNoteEdit);
             return 0;
@@ -2120,6 +2173,25 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
         bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (movementKey && !g_pdf.editingText && !ctrlDown && !altDown &&
+            GetFocus() == hwnd && g_pdf.kind != DocKind::None && g_pdf.pageCount > 0) {
+            const bool repeat = (lParam & (1LL << 30)) != 0;
+            if (!repeat) {
+                const bool wasActive = g_pdfKeyboardMotion.HasKeys();
+                g_pdfKeyboardMotion.SetKey(static_cast<unsigned>(wParam), true);
+                if (!wasActive) {
+                    g_pdfKeyboardScrollTick = GetTickCount64();
+                    g_singlePageOverscroll = 0.0;
+                    g_scrollVelocity = 0.0;
+                    CancelPdfScrollbarTrack(hwnd);
+                    KillTimer(hwnd, kScrollTimerId);
+                    if (!SetTimer(hwnd, kPdfKeyboardScrollTimerId, 16, nullptr)) {
+                        StopPdfKeyboardScroll(hwnd);
+                    }
+                }
+            }
+            return 0;
+        }
         const ULONGLONG ignoreUntil = g_pdfIgnoreNextLeftKeyUntilTick;
         if (ignoreUntil != 0) {
             if (!g_pdf.editingText || !g_config.fullWidthParenCancelNextLeft ||
@@ -2578,6 +2650,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
     }
     case WM_TIMER: {
+        if (wParam == kPdfKeyboardScrollTimerId) {
+            TickPdfKeyboardScroll(hwnd);
+            return 0;
+        }
         if (wParam == kZoomTimerId) {
             StepPdfZoomAnimation(hwnd);
             return 0;
@@ -2867,6 +2943,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_KILLFOCUS: {
+        StopPdfKeyboardScroll(hwnd);
         g_pdfIgnoreNextLeftKeyUntilTick = 0;
         if (g_pdf.editingText) {
             HWND nextFocus = reinterpret_cast<HWND>(wParam);

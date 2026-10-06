@@ -1,0 +1,12 @@
+--- a/external/libjpeg-turbo/jconfigint.h
++++ b/external/libjpeg-turbo/jconfigint.h
+@@ -5,7 +5,9 @@
+ 
+ /* How to hide global symbols. */
+ #if defined __GNUC__
+ #define HIDDEN  __attribute__((visibility("hidden")))
++#else
++#define HIDDEN
+ #endif
+ 
+ /* Compiler's inline keyword */

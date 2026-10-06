@@ -4,6 +4,7 @@
 #include "core/localization.h"
 #include "workspace/workspace_write_lock.h"
 #include "core/text_encoding.h"
+#include "core/json_string.h"
 #include "app/startup_instance.h"
 #include "core/font_list.h"
 #include "core/atomic_write.h"
@@ -148,6 +149,7 @@ static bool AtomicWriteUtf8WithWorkspaceDirs(const std::filesystem::path& dest,
                                              const std::filesystem::path& workspaceRoot,
                                              std::wstring* err);
 static void WriteThemeObject(std::ostream& os, const std::string& indent, const ThemeColors& theme);
+[[nodiscard]] static std::string EscapeJsonStringValue(const std::string& value);
 static std::filesystem::path UserPaletteFilePath();
 static bool LoadUserPaletteColors(COLORREF* custom, size_t count);
 static void SaveUserPaletteColors(const COLORREF* custom, size_t count);
@@ -744,7 +746,7 @@ static bool EnsureThemeManualFile(const std::wstring& root) {
     oss << "テーマの基本思想\n";
     oss << "  - 基調色(00AA7B/FFBD85/1D50DDなど)を選び、カラー傾向を上乗せします。\n";
     oss << "  - カラー傾向は workspace.json の toneVariant で指定します:\n";
-    oss << "      pure / guard / emphasis / white / black\n";
+    oss << "      pure / guard / emphasis / white / black / cvd_red_green / cvd_blue_yellow / cvd_monochrome\n";
     oss << "  - toneVariant は見た目の変換であり、テーマファイル(json)自体は書き換えません。\n";
     oss << "\n";
     oss << "theme.json (キャッシュ)\n";
@@ -1070,7 +1072,7 @@ static bool AtomicWriteUtf8WithWorkspaceDirs(const std::filesystem::path& dest,
 
 static void WriteThemeObject(std::ostream& os, const std::string& indent, const ThemeColors& theme) {
     auto writeString = [&](const char* key, const std::string& value, bool trailing = true) {
-        os << indent << "\"" << key << "\": \"" << value << "\"";
+        os << indent << "\"" << key << "\": \"" << EscapeJsonStringValue(value) << "\"";
         if (trailing) os << ",";
         os << "\n";
     };
@@ -1433,17 +1435,17 @@ static void WriteThemeConfig(const std::filesystem::path& path,
     std::ostringstream oss;
     oss << "{\n";
     oss << "  \"format\": \"pdf_note_theme_config_v2\",\n";
-    oss << "  \"current_file\": \"" << WideToUTF8(current) << "\",\n";
+    oss << "  \"current_file\": \"" << EscapeJsonStringValue(WideToUTF8(current)) << "\",\n";
     oss << "  \"verified\": [\n";
     for (size_t i = 0; i < g_themeVerified.size(); ++i) {
         const auto& v = g_themeVerified[i];
         oss << "    {\n";
-        oss << "      \"file\": \"" << WideToUTF8(v.file) << "\",\n";
+        oss << "      \"file\": \"" << EscapeJsonStringValue(WideToUTF8(v.file)) << "\",\n";
         oss << "      \"size\": " << static_cast<unsigned long long>(v.size) << ",\n";
         oss << "      \"mtime_ms\": " << static_cast<long long>(v.mtimeMs) << ",\n";
-        oss << "      \"sha256\": \"" << v.sha256 << "\",\n";
-        oss << "      \"display\": \"" << WideToUTF8(v.displayName) << "\",\n";
-        oss << "      \"display_jp\": \"" << WideToUTF8(v.displayNameJp) << "\",\n";
+        oss << "      \"sha256\": \"" << EscapeJsonStringValue(v.sha256) << "\",\n";
+        oss << "      \"display\": \"" << EscapeJsonStringValue(WideToUTF8(v.displayName)) << "\",\n";
+        oss << "      \"display_jp\": \"" << EscapeJsonStringValue(WideToUTF8(v.displayNameJp)) << "\",\n";
         oss << "      \"accent\": \"" << ColorToHex(v.accent) << "\",\n";
         oss << "      \"noteBg\": \"" << ColorToHex(v.noteBg) << "\"\n";
         oss << "    }" << (i + 1 < g_themeVerified.size() ? "," : "") << "\n";
@@ -2400,6 +2402,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.pdfFlowMode = L"v_ttb";
     cfg.pdfBitmapBudgetMiB = kPdfBitmapBudgetMiBDefault;
     cfg.pdfSinglePageMode = false;
+    cfg.showPdfPageOverlay = true;
     cfg.showPdfZoomOverlay = true;
     cfg.panMouseWheelZoom = false;
     cfg.mouseWheelInvertVertical = false;
@@ -2466,6 +2469,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.noteFullReparseDelayMs = 900;
     cfg.noteMathMarginTopPercent = 75;
     cfg.noteMathSupSubGapSupPercent = 0;
+    cfg.noteInlineMathVerticalAlignment = 2;
     cfg.noteGridEnabled = false;
     cfg.noteGridPitch = 24;
     cfg.selectionStyle = L"windows";
@@ -2628,7 +2632,7 @@ static bool LooksLikeWorkspaceJson(const std::string& rawJson) {
     if (json.front() != '{' || json.back() != '}') return false;
     if (!IsSyntacticallyValidJsonLite(json)) return false;
     // NOTE: shortcuts are no longer persisted in workspace.json.
-static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfBitmapBudgetMiB|pdfSinglePageMode|showPdfZoomOverlay|panMouseWheelZoom|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|quickPdfScalePercent|quickPdfStandardTextAnnots|quickPdfMatchPdfPaneTextLayout|quickNoteStripMarkup|quickNoteIncludeComments|quickNoteMathPlaceholder|quickNoteMathPlaceholderText|sessionSortMode|sessionNumberingMode|sessionFileLayout|sessionAutoOpenMode|sessionAutoOpenPairLinked|startupSelectFirstSession|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
+static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfBitmapBudgetMiB|pdfSinglePageMode|showPdfPageOverlay|showPdfZoomOverlay|panMouseWheelZoom|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|quickPdfScalePercent|quickPdfStandardTextAnnots|quickPdfMatchPdfPaneTextLayout|quickNoteStripMarkup|quickNoteIncludeComments|quickNoteMathPlaceholder|quickNoteMathPlaceholderText|sessionSortMode|sessionNumberingMode|sessionFileLayout|sessionAutoOpenMode|sessionAutoOpenPairLinked|startupSelectFirstSession|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
     return std::regex_search(json, keyRe);
 }
 
@@ -2722,7 +2726,7 @@ static bool IsWorkspaceConfigAutoPersistBlockedForRoot(const std::filesystem::pa
 static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
     static const std::set<std::string> known{
         "classesDir", "cacheDir", "showAnnots", "pdfFlowMode", "pdfBitmapBudgetMiB",
-        "pdfSinglePageMode", "showPdfZoomOverlay", "panMouseWheelZoom", "mouseWheelInvertVertical",
+        "pdfSinglePageMode", "showPdfPageOverlay", "showPdfZoomOverlay", "panMouseWheelZoom", "mouseWheelInvertVertical",
         "mouseWheelInvertHorizontal", "touchpadInvertVertical", "touchpadInvertHorizontal",
         "ownerDrawUi", "useNativeFileDialogs", "developerMode", "studentMode",
         "exportStandardTextAnnots", "quickPdfScalePercent", "quickPdfStandardTextAnnots",
@@ -2744,7 +2748,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "noteWrapEnabled", "noteVimModeEnabled", "noteVimCaretLineRawTextVisible",
         "noteVimClickEntersInsertMode", "noteOverlayRefreshDelayMs", "noteFullReparseDelayMs",
         "noteMathMarginTopPercent",
-        "noteMathSupSubGapSupPercent", "noteGridEnabled", "noteGridPitch", "noteBgColor",
+        "noteMathSupSubGapSupPercent", "noteInlineMathVerticalAlignment", "noteGridEnabled", "noteGridPitch", "noteBgColor",
         "noteFgColor", "noteBgSource", "noteBgThemeName", "noteShortcutBackColor",
         "noteShortcutTextColor", "noteShortcutTextTagKey", "noteShortcutHeadingArrowInvert",
         "noteCustomTagKey", "noteCustomTagBold", "noteCustomTagItalic", "noteCustomTagUnderline",
@@ -2783,37 +2787,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
 }
 
 static bool ParseJsonStringToken(const std::string& json, size_t* pos, std::string* out) {
-    if (!pos || !out || *pos >= json.size() || json[*pos] != '"') return false;
-    out->clear();
-    ++(*pos);
-    while (*pos < json.size()) {
-        char ch = json[*pos];
-        ++(*pos);
-        if (ch == '"') return true;
-        if (ch != '\\') {
-            out->push_back(ch);
-            continue;
-        }
-        if (*pos >= json.size()) return false;
-        char esc = json[*pos];
-        ++(*pos);
-        if (esc == 'u') {
-            if (json.size() - *pos < 4) return false;
-            *pos += 4;
-            out->push_back('?');
-        } else {
-            switch (esc) {
-            case 'b': out->push_back('\b'); break;
-            case 'f': out->push_back('\f'); break;
-            case 'n': out->push_back('\n'); break;
-            case 'r': out->push_back('\r'); break;
-            case 't': out->push_back('\t'); break;
-            case '"': case '\\': case '/': out->push_back(esc); break;
-            default: return false;
-            }
-        }
-    }
-    return false;
+    return json_string::DecodeToken(json, pos, out);
 }
 
 static void SkipJsonWhitespace(const std::string& json, size_t* pos) {
@@ -3064,53 +3038,72 @@ static bool ReadExistingSetupJsonForAutoUpdate(const std::filesystem::path& setu
 }
 
 
+// Locate only a top-level value, honoring JSON escapes and brackets inside strings.
+// Callers replace this span literally so path characters cannot become regex output.
+[[nodiscard]] static bool FindJsonFieldValueRange(const std::string& json,
+                                                  const std::string& key,
+                                                  size_t* start, size_t* end) {
+    if (!start || !end) return false;
+    size_t pos = 0;
+    SkipJsonWhitespace(json, &pos);
+    if (pos >= json.size() || json[pos++] != '{') return false;
+    for (;;) {
+        SkipJsonWhitespace(json, &pos);
+        std::string fieldKey;
+        if (!ParseJsonStringToken(json, &pos, &fieldKey)) return false;
+        SkipJsonWhitespace(json, &pos);
+        if (pos >= json.size() || json[pos++] != ':') return false;
+        SkipJsonWhitespace(json, &pos);
+        const size_t valueStart = pos;
+        if (!ParseJsonValueLite(json, &pos, 0)) return false;
+        if (fieldKey == key) {
+            *start = valueStart;
+            *end = pos;
+            return true;
+        }
+        SkipJsonWhitespace(json, &pos);
+        if (pos >= json.size() || json[pos++] != ',') return false;
+    }
+}
+
 static std::optional<std::string> ParseJsonStringField(const std::string& json, const std::string& key) {
-    std::regex re("\"" + key + "\"\\s*:\\s*");
-    std::smatch m;
-    if (!std::regex_search(json, m, re)) return std::nullopt;
-    size_t pos = static_cast<size_t>(m.position(0) + m.length(0));
+    size_t pos = 0, end = 0;
+    if (!FindJsonFieldValueRange(json, key, &pos, &end)) return std::nullopt;
     std::string value;
     if (!ParseJsonStringToken(json, &pos, &value)) return std::nullopt;
     return value;
 }
 
 static std::string EscapeJsonStringValue(const std::string& value) {
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string escaped;
-    escaped.reserve(value.size() + 8);
-    for (unsigned char ch : value) {
-        switch (ch) {
-        case '"': escaped += "\\\""; break;
-        case '\\': escaped += "\\\\"; break;
-        case '\b': escaped += "\\b"; break;
-        case '\f': escaped += "\\f"; break;
-        case '\n': escaped += "\\n"; break;
-        case '\r': escaped += "\\r"; break;
-        case '\t': escaped += "\\t"; break;
-        default:
-            if (ch < 0x20) {
-                escaped += "\\u00";
-                escaped.push_back(kHex[(ch >> 4) & 0x0f]);
-                escaped.push_back(kHex[ch & 0x0f]);
-            } else {
-                escaped.push_back(static_cast<char>(ch));
-            }
-            break;
-        }
+    return json_string::Escape(value);
+}
+
+static std::vector<std::string> ParseJsonArrayElements(const std::string& json, const std::string& key) {
+    std::vector<std::string> items;
+    size_t pos = 0, end = 0;
+    if (!FindJsonFieldValueRange(json, key, &pos, &end) || json[pos++] != '[') return items;
+    SkipJsonWhitespace(json, &pos);
+    if (pos < end && json[pos] == ']') return items;
+    while (pos < end) {
+        const size_t start = pos;
+        if (!ParseJsonValueLite(json, &pos, 0)) return {};
+        items.push_back(json.substr(start, pos - start));
+        SkipJsonWhitespace(json, &pos);
+        if (pos >= end) return {};
+        if (json[pos] == ']') return items;
+        if (json[pos++] != ',') return {};
+        SkipJsonWhitespace(json, &pos);
     }
-    return escaped;
+    return {};
 }
 
 static std::vector<std::string> ParseJsonStringArrayField(const std::string& json, const std::string& key) {
     std::vector<std::string> items;
-    std::regex re("\"" + key + "\"\\s*:\\s*\\[([^\\]]*)\\]");
-    std::smatch m;
-    if (!std::regex_search(json, m, re)) return items;
-    std::string body = m[1].str();
-    std::regex itemRe("\"([^\"]*)\"");
-    for (auto it = std::sregex_iterator(body.begin(), body.end(), itemRe);
-         it != std::sregex_iterator(); ++it) {
-        items.push_back((*it)[1].str());
+    for (const auto& raw : ParseJsonArrayElements(json, key)) {
+        size_t pos = 0;
+        std::string item;
+        if (!ParseJsonStringToken(raw, &pos, &item) || pos != raw.size()) return {};
+        items.push_back(std::move(item));
     }
     return items;
 }
@@ -3337,9 +3330,9 @@ static std::string BuildUserToolShortcutsJson(const std::vector<AnnotToolShortcu
         if (!first) oss << ",\n";
         first = false;
         if (binding.targetKind == AnnotToolShortcutTargetKind::Category) {
-            oss << "    { \"key\": \"" << WideToUTF8(binding.key) << "\", \"category\": \"" << target << "\" }";
+            oss << "    { \"key\": \"" << EscapeJsonStringValue(WideToUTF8(binding.key)) << "\", \"category\": \"" << target << "\" }";
         } else {
-            oss << "    { \"key\": \"" << WideToUTF8(binding.key) << "\", \"tool\": \"" << target << "\" }";
+            oss << "    { \"key\": \"" << EscapeJsonStringValue(WideToUTF8(binding.key)) << "\", \"tool\": \"" << target << "\" }";
         }
     }
     oss << "\n";
@@ -3374,19 +3367,13 @@ static bool LoadUserToolShortcuts(std::vector<AnnotToolShortcutBinding>& out) {
     }
 
     std::set<UINT> chordSeen;
-    std::regex objRe("\\{([^\\}]*)\\}");
-    std::regex keyRe("\"key\"\\s*:\\s*\"([^\"]+)\"");
-    std::regex toolRe("\"tool\"\\s*:\\s*\"([^\"]+)\"");
-    std::regex categoryRe("\"category\"\\s*:\\s*\"([^\"]+)\"");
-    for (auto it = std::sregex_iterator(json.begin(), json.end(), objRe);
-         it != std::sregex_iterator(); ++it) {
-        std::string body = (*it)[1].str();
-        std::smatch keyMatch;
-        std::smatch toolMatch;
-        std::smatch categoryMatch;
-        const bool hasKey = std::regex_search(body, keyMatch, keyRe);
-        const bool hasTool = std::regex_search(body, toolMatch, toolRe);
-        const bool hasCategory = std::regex_search(body, categoryMatch, categoryRe);
+    for (const auto& body : ParseJsonArrayElements(json, "shortcuts")) {
+        const auto key = ParseJsonStringField(body, "key");
+        const auto tool = ParseJsonStringField(body, "tool");
+        const auto category = ParseJsonStringField(body, "category");
+        const bool hasKey = key.has_value();
+        const bool hasTool = tool.has_value();
+        const bool hasCategory = category.has_value();
         // A binding must name exactly one target. Prefer neither target to an
         // ambiguous tool/category combination so an existing user file is
         // never silently reinterpreted.
@@ -3394,17 +3381,17 @@ static bool LoadUserToolShortcuts(std::vector<AnnotToolShortcutBinding>& out) {
             continue;
         }
         AnnotToolShortcutBinding binding;
-        if (!ParseAnnotToolShortcutKey(keyMatch[1].str(), binding)) continue;
+        if (!ParseAnnotToolShortcutKey(*key, binding)) continue;
         if (IsFixedAnnotToolNavigationShortcut(binding)) continue;
-        if (!toolMatch.empty()) {
+        if (tool) {
             ToolMode mode{};
-            if (!ToolModeFromKey(toolMatch[1].str(), mode)) continue;
+            if (!ToolModeFromKey(*tool, mode)) continue;
             binding.targetKind = AnnotToolShortcutTargetKind::Detail;
             binding.mode = mode;
             binding.family = AnnotToolFamilyForMode(mode);
         } else {
             AnnotToolFamily family{};
-            if (!AnnotToolFamilyFromKey(categoryMatch[1].str(), family)) continue;
+            if (!AnnotToolFamilyFromKey(*category, family)) continue;
             binding.targetKind = AnnotToolShortcutTargetKind::Category;
             binding.family = family;
             binding.mode = ToolMode::Select;
@@ -3587,7 +3574,7 @@ static void SaveScheduleStartTimes(const std::filesystem::path& root, const Work
     oss << "  \"scheduleStartTimes\": [\n";
     for (size_t i = 0; i < kScheduleStartTimesMax; ++i) {
         const std::wstring& t = (i < cfg.scheduleStartTimes.size()) ? cfg.scheduleStartTimes[i] : L"";
-        oss << "    \"" << WideToUTF8(t) << "\"";
+        oss << "    \"" << EscapeJsonStringValue(WideToUTF8(t)) << "\"";
         if (i + 1 < kScheduleStartTimesMax) oss << ",";
         oss << "\n";
     }
@@ -3595,7 +3582,7 @@ static void SaveScheduleStartTimes(const std::filesystem::path& root, const Work
     oss << "  \"scheduleCells\": [\n";
     for (size_t i = 0; i < scheduleCount; ++i) {
         const std::wstring& cell = (i < cfg.scheduleCells.size()) ? cfg.scheduleCells[i] : L"";
-        oss << "    \"" << WideToUTF8(cell) << "\"";
+        oss << "    \"" << EscapeJsonStringValue(WideToUTF8(cell)) << "\"";
         if (i + 1 < scheduleCount) oss << ",";
         oss << "\n";
     }
@@ -3687,10 +3674,7 @@ static std::optional<std::int64_t> ParseJsonI64Field(const std::string& json, co
 
 static std::vector<VerifiedThemeMeta> ParseVerifiedThemes(const std::string& json) {
     std::vector<VerifiedThemeMeta> out;
-    std::regex objRe("\\{[^\\{\\}]*\"file\"\\s*:\\s*\"([^\"]+)\"[^\\{\\}]*\\}");
-    for (auto it = std::sregex_iterator(json.begin(), json.end(), objRe);
-         it != std::sregex_iterator(); ++it) {
-        std::string block = it->str();
+    for (const auto& block : ParseJsonArrayElements(json, "verified")) {
         auto file = ParseJsonStringField(block, "file");
         if (!file) continue;
         VerifiedThemeMeta v;
@@ -4029,6 +4013,28 @@ static COLORREF ThemeVariantTextForBg(COLORREF bg) {
     return ThemeContrastRatio(bg, light) >= ThemeContrastRatio(bg, dark) ? light : dark;
 }
 
+static COLORREF ThemeVariantNeutralize(COLORREF color) {
+    // Preserve perceived brightness while removing a hue that may be confused
+    // with another UI state. PDF page pixels are never processed here.
+    const int gray = static_cast<int>(std::lround(
+        0.2126 * GetRValue(color) + 0.7152 * GetGValue(color) + 0.0722 * GetBValue(color)));
+    const BYTE value = static_cast<BYTE>(std::clamp(gray, 0, 255));
+    return RGB(value, value, value);
+}
+
+static void ThemeVariantNeutralizeSurfaces(ThemeColors& theme) {
+    theme.windowBg = ThemeVariantNeutralize(theme.windowBg);
+    theme.panelBg = ThemeVariantNeutralize(theme.panelBg);
+    theme.menuBg = ThemeVariantNeutralize(theme.menuBg);
+    theme.toolbarBg = ThemeVariantNeutralize(theme.toolbarBg);
+    theme.buttonBg = ThemeVariantNeutralize(theme.buttonBg);
+    theme.buttonBorder = ThemeVariantNeutralize(theme.buttonBorder);
+    theme.splitterBg = ThemeVariantNeutralize(theme.splitterBg);
+    theme.splitterLine = ThemeVariantNeutralize(theme.splitterLine);
+    theme.pdfBg = ThemeVariantNeutralize(theme.pdfBg);
+    theme.noteBg = ThemeVariantNeutralize(theme.noteBg);
+}
+
 static std::wstring NormalizeToneVariantLocal(const std::wstring& value) {
     std::wstring v = value;
     std::transform(v.begin(), v.end(), v.begin(), ::towlower);
@@ -4037,6 +4043,9 @@ static std::wstring NormalizeToneVariantLocal(const std::wstring& value) {
     if (v == L"emphasis" || v == L"accent" || v == L"tone_emphasis" || v == L"toneemphasis") return L"emphasis";
     if (v == L"white") return L"white";
     if (v == L"black") return L"black";
+    if (v == L"cvd_red_green" || v == L"red_green" || v == L"protan_deutan") return L"cvd_red_green";
+    if (v == L"cvd_blue_yellow" || v == L"blue_yellow" || v == L"tritan") return L"cvd_blue_yellow";
+    if (v == L"cvd_monochrome" || v == L"monochrome" || v == L"achromatopsia") return L"cvd_monochrome";
     return L"pure";
 }
 
@@ -4060,6 +4069,26 @@ static ThemeColors ApplyToneVariantToTheme(const ThemeColors& base, const std::w
         t.noteText = ThemeVariantTextForBg(t.noteBg);
         t.selectionText = ThemeVariantTextForBg(t.selectionBg);
         return t;
+    } else if (toneVariant == L"cvd_red_green" || toneVariant == L"cvd_blue_yellow" ||
+               toneVariant == L"cvd_monochrome") {
+        // Presentation profiles, not color-vision simulators: neutralize
+        // surfaces and reserve a high-contrast interaction color. Existing
+        // PDFs, annotations, and saved palette colors are left unchanged.
+        ThemeVariantNeutralizeSurfaces(t);
+        const bool redGreen = toneVariant == L"cvd_red_green";
+        const bool blueYellow = toneVariant == L"cvd_blue_yellow";
+        accent = redGreen ? RGB(0, 114, 178)       // Okabe-Ito blue
+               : blueYellow ? RGB(204, 121, 167)  // Okabe-Ito reddish purple
+               : RGB(48, 48, 48);
+        t.accent = accent;
+        t.menuSelBg = redGreen ? RGB(0, 79, 122)
+                    : blueYellow ? RGB(122, 52, 93)
+                    : RGB(64, 64, 64);
+        t.buttonHot = ThemeVariantLerp(t.buttonBg, accent, 0.16);
+        t.buttonPressed = ThemeVariantLerp(t.buttonBg, accent, 0.32);
+        t.selectionBg = t.menuSelBg;
+        t.buttonBorder = ThemeVariantLerp(t.buttonBorder, accent, 0.55);
+        t.splitterLine = ThemeVariantLerp(t.splitterLine, accent, 0.45);
     } else if (toneVariant == L"emphasis") {
         // Reuse the theme accent across interaction surfaces without recoloring the whole UI.
         t.toolbarBg = ThemeVariantLerp(t.toolbarBg, accent, 0.06);
@@ -5926,6 +5955,9 @@ static std::wstring NormalizeToneVariant(const std::wstring& value) {
     if (v == L"emphasis" || v == L"accent" || v == L"tone_emphasis" || v == L"toneemphasis") return L"emphasis";
     if (v == L"white") return L"white";
     if (v == L"black") return L"black";
+    if (v == L"cvd_red_green" || v == L"red_green" || v == L"protan_deutan") return L"cvd_red_green";
+    if (v == L"cvd_blue_yellow" || v == L"blue_yellow" || v == L"tritan") return L"cvd_blue_yellow";
+    if (v == L"cvd_monochrome" || v == L"monochrome" || v == L"achromatopsia") return L"cvd_monochrome";
     return L"pure";
 }
 
@@ -5947,6 +5979,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto b = ParseJsonBoolField(json, "pdfSinglePageMode")) {
         cfg.pdfSinglePageMode = *b;
+    }
+    if (auto b = ParseJsonBoolField(json, "showPdfPageOverlay")) {
+        cfg.showPdfPageOverlay = *b;
     }
     if (auto b = ParseJsonBoolField(json, "showPdfZoomOverlay")) {
         cfg.showPdfZoomOverlay = *b;
@@ -6177,6 +6212,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto v = ParseJsonIntField(json, "noteMathSupSubGapSupPercent")) {
         cfg.noteMathSupSubGapSupPercent = (*v <= 0) ? 0 : std::clamp(*v, 5, 95);
+    }
+    if (auto v = ParseJsonIntField(json, "noteInlineMathVerticalAlignment")) {
+        cfg.noteInlineMathVerticalAlignment = std::clamp(*v, 0, 2);
     }
     if (auto b = ParseJsonBoolField(json, "noteGridEnabled")) {
         cfg.noteGridEnabled = *b;
@@ -6893,12 +6931,13 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     std::ostringstream ofs;
     if (!ofs) return false;
     ofs << "{\n";
-    ofs << "  \"classesDir\": \"" << WideToUTF8(cfg.classesDir) << "\",\n";
-    ofs << "  \"cacheDir\": \""   << WideToUTF8(cfg.cacheDir)   << "\",\n";
+    ofs << "  \"classesDir\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.classesDir)) << "\",\n";
+    ofs << "  \"cacheDir\": \""   << EscapeJsonStringValue(WideToUTF8(cfg.cacheDir))   << "\",\n";
     ofs << "  \"showAnnots\": "   << (cfg.showAnnots ? "true" : "false") << ",\n";
-    ofs << "  \"pdfFlowMode\": \"" << WideToUTF8(NormalizePdfFlowMode(cfg.pdfFlowMode)) << "\",\n";
+    ofs << "  \"pdfFlowMode\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizePdfFlowMode(cfg.pdfFlowMode))) << "\",\n";
     ofs << "  \"pdfBitmapBudgetMiB\": " << std::clamp(cfg.pdfBitmapBudgetMiB, kPdfBitmapBudgetMiBMin, kPdfBitmapBudgetMiBMax) << ",\n";
     ofs << "  \"pdfSinglePageMode\": " << (cfg.pdfSinglePageMode ? "true" : "false") << ",\n";
+    ofs << "  \"showPdfPageOverlay\": " << (cfg.showPdfPageOverlay ? "true" : "false") << ",\n";
     ofs << "  \"showPdfZoomOverlay\": " << (cfg.showPdfZoomOverlay ? "true" : "false") << ",\n";
     ofs << "  \"panMouseWheelZoom\": " << (cfg.panMouseWheelZoom ? "true" : "false") << ",\n";
     ofs << "  \"mouseWheelInvertVertical\": " << (cfg.mouseWheelInvertVertical ? "true" : "false") << ",\n";
@@ -6942,7 +6981,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     if (cfg.defaultLeftSplit1 > 0) ofs << "  \"defaultLeftSplit1\": " << cfg.defaultLeftSplit1 << ",\n";
     if (cfg.defaultLeftSplit2 > 0) ofs << "  \"defaultLeftSplit2\": " << cfg.defaultLeftSplit2 << ",\n";
     ofs << "  \"leftPaneCollapsed\": " << (cfg.leftPaneCollapsed ? "true" : "false") << ",\n";
-    ofs << "  \"language\": \""   << WideToUTF8(cfg.language.empty() ? L"ja" : cfg.language) << "\",\n";
+    ofs << "  \"language\": \""   << EscapeJsonStringValue(WideToUTF8(cfg.language.empty() ? L"ja" : cfg.language)) << "\",\n";
     if (cfg.markFontPx > 0) ofs << "  \"markFontPx\": " << cfg.markFontPx << ",\n";
     if (cfg.headingFontPx > 0) ofs << "  \"headingFontPx\": " << cfg.headingFontPx << ",\n";
     if (cfg.markColor >= 0) {
@@ -6958,36 +6997,36 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"headingBold\": " << (cfg.headingBold ? "true" : "false") << ",\n";
     ofs << "  \"headingUnderline\": " << (cfg.headingUnderline ? "true" : "false") << ",\n";
     ofs << "  \"headingLeftBar\": " << (cfg.headingLeftBar ? "true" : "false") << ",\n";
-    ofs << "  \"bottomPanePin\": \"" << WideToUTF8(cfg.bottomPanePin.empty() ? L"note" : cfg.bottomPanePin) << "\",\n";
-    ofs << "  \"bottomNoteMode\": \"" << WideToUTF8(cfg.bottomNoteMode.empty() ? L"legacy" : cfg.bottomNoteMode) << "\",\n";
-    ofs << "  \"notePlacement\": \"" << WideToUTF8(NotePlacementToString(ParseNotePlacement(cfg.notePlacement))) << "\",\n";
-    ofs << "  \"colorTone\": \"" << WideToUTF8(cfg.colorTone.empty() ? L"default" : cfg.colorTone) << "\",\n";
-    ofs << "  \"toneVariant\": \"" << WideToUTF8(NormalizeToneVariant(cfg.toneVariant)) << "\",\n";
-    ofs << "  \"quickAnnotPopupPlacement\": \"" << WideToUTF8(cfg.quickAnnotPopupPlacement.empty() ? L"auto" : cfg.quickAnnotPopupPlacement) << "\",\n";
-    ofs << "  \"lectureSortMode\": \"" << WideToUTF8(NormalizeLectureSortMode(cfg.lectureSortMode)) << "\",\n";
-    ofs << "  \"sessionSortMode\": \"" << WideToUTF8(NormalizeSessionSortMode(cfg.sessionSortMode)) << "\",\n";
-    ofs << "  \"sessionNumberingMode\": \"" << WideToUTF8(NormalizeSessionNumberingMode(cfg.sessionNumberingMode)) << "\",\n";
-    ofs << "  \"sessionFileLayout\": \"" << WideToUTF8(NormalizeSessionFileLayout(cfg.sessionFileLayout)) << "\",\n";
-    ofs << "  \"sessionAutoOpenMode\": \"" << WideToUTF8(NormalizeSessionAutoOpenMode(cfg.sessionAutoOpenMode)) << "\",\n";
+    ofs << "  \"bottomPanePin\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.bottomPanePin.empty() ? L"note" : cfg.bottomPanePin)) << "\",\n";
+    ofs << "  \"bottomNoteMode\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.bottomNoteMode.empty() ? L"legacy" : cfg.bottomNoteMode)) << "\",\n";
+    ofs << "  \"notePlacement\": \"" << EscapeJsonStringValue(WideToUTF8(NotePlacementToString(ParseNotePlacement(cfg.notePlacement)))) << "\",\n";
+    ofs << "  \"colorTone\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.colorTone.empty() ? L"default" : cfg.colorTone)) << "\",\n";
+    ofs << "  \"toneVariant\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeToneVariant(cfg.toneVariant))) << "\",\n";
+    ofs << "  \"quickAnnotPopupPlacement\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.quickAnnotPopupPlacement.empty() ? L"auto" : cfg.quickAnnotPopupPlacement)) << "\",\n";
+    ofs << "  \"lectureSortMode\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeLectureSortMode(cfg.lectureSortMode))) << "\",\n";
+    ofs << "  \"sessionSortMode\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeSessionSortMode(cfg.sessionSortMode))) << "\",\n";
+    ofs << "  \"sessionNumberingMode\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeSessionNumberingMode(cfg.sessionNumberingMode))) << "\",\n";
+    ofs << "  \"sessionFileLayout\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeSessionFileLayout(cfg.sessionFileLayout))) << "\",\n";
+    ofs << "  \"sessionAutoOpenMode\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeSessionAutoOpenMode(cfg.sessionAutoOpenMode))) << "\",\n";
     ofs << "  \"sessionAutoOpenPairLinked\": " << (cfg.sessionAutoOpenPairLinked ? "true" : "false") << ",\n";
     ofs << "  \"startupSelectFirstSession\": " << (cfg.startupSelectFirstSession ? "true" : "false") << ",\n";
-    ofs << "  \"selectionStyle\": \"" << WideToUTF8(NormalizeSelectionStyle(cfg.selectionStyle)) << "\",\n";
+    ofs << "  \"selectionStyle\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeSelectionStyle(cfg.selectionStyle))) << "\",\n";
     ofs << "  \"pointerOffsetX\": " << std::clamp(cfg.pointerOffsetX, -20, 20) << ",\n";
     ofs << "  \"pointerOffsetY\": " << std::clamp(cfg.pointerOffsetY, -20, 20) << ",\n";
     ofs << "  \"showMathList\": " << (cfg.showMathList ? "true" : "false") << ",\n";
-    ofs << "  \"downKeyLastLineAction\": \"" << WideToUTF8(DownKeyLastLineActionToString(
-        ParseDownKeyLastLineAction(cfg.downKeyLastLineAction))) << "\",\n";
-    ofs << "  \"leftRightLineMoveAction\": \"" << WideToUTF8(LeftRightLineMoveActionToString(
-        ParseLeftRightLineMoveAction(cfg.leftRightLineMoveAction))) << "\",\n";
+    ofs << "  \"downKeyLastLineAction\": \"" << EscapeJsonStringValue(WideToUTF8(DownKeyLastLineActionToString(
+        ParseDownKeyLastLineAction(cfg.downKeyLastLineAction)))) << "\",\n";
+    ofs << "  \"leftRightLineMoveAction\": \"" << EscapeJsonStringValue(WideToUTF8(LeftRightLineMoveActionToString(
+        ParseLeftRightLineMoveAction(cfg.leftRightLineMoveAction)))) << "\",\n";
     ofs << "  \"autoPairBrackets\": " << (cfg.autoPairBrackets ? "true" : "false") << ",\n";
     ofs << "  \"fullWidthParenCaretInside\": " << (cfg.fullWidthParenCaretInside ? "true" : "false") << ",\n";
     ofs << "  \"fullWidthParenCancelNextLeft\": " << (cfg.fullWidthParenCancelNextLeft ? "true" : "false") << ",\n";
-    ofs << "  \"noteFontName\": \"" << WideToUTF8(cfg.noteFontName.empty() ? GetDefaultFontFaceName() : cfg.noteFontName) << "\",\n";
+    ofs << "  \"noteFontName\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.noteFontName.empty() ? GetDefaultFontFaceName() : cfg.noteFontName)) << "\",\n";
     ofs << "  \"noteFontPt\": " << cfg.noteFontPt << ",\n";
-    ofs << "  \"noteRenderFontName\": \"" << WideToUTF8(cfg.noteRenderFontName.empty() ? cfg.noteFontName : cfg.noteRenderFontName) << "\",\n";
-    ofs << "  \"noteRenderJpFontName\": \"" << WideToUTF8(cfg.noteRenderJpFontName.empty() ? cfg.noteRenderFontName : cfg.noteRenderJpFontName) << "\",\n";
+    ofs << "  \"noteRenderFontName\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.noteRenderFontName.empty() ? cfg.noteFontName : cfg.noteRenderFontName)) << "\",\n";
+    ofs << "  \"noteRenderJpFontName\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.noteRenderJpFontName.empty() ? cfg.noteRenderFontName : cfg.noteRenderJpFontName)) << "\",\n";
     ofs << "  \"noteRenderFontPt\": " << cfg.noteRenderFontPt << ",\n";
-    ofs << "  \"noteSystem\": \"" << WideToUTF8(cfg.noteSystem.empty() ? L"legacy" : cfg.noteSystem) << "\",\n";
+    ofs << "  \"noteSystem\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.noteSystem.empty() ? L"legacy" : cfg.noteSystem)) << "\",\n";
     ofs << "  \"noteRenderEnabled\": " << (cfg.noteRenderEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteRawOnly\": " << (cfg.noteRawOnly ? "true" : "false") << ",\n";
     ofs << "  \"noteRenderMath\": " << (cfg.noteRenderMath ? "true" : "false") << ",\n";
@@ -7000,17 +7039,19 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"noteMathMarginTopPercent\": " << std::clamp(cfg.noteMathMarginTopPercent, 5, 95) << ",\n";
     ofs << "  \"noteMathSupSubGapSupPercent\": "
         << ((cfg.noteMathSupSubGapSupPercent <= 0) ? 0 : std::clamp(cfg.noteMathSupSubGapSupPercent, 5, 95)) << ",\n";
+    ofs << "  \"noteInlineMathVerticalAlignment\": "
+        << std::clamp(cfg.noteInlineMathVerticalAlignment, 0, 2) << ",\n";
     ofs << "  \"noteGridEnabled\": " << (cfg.noteGridEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteGridPitch\": " << cfg.noteGridPitch << ",\n";
     ofs << "  \"noteBgColor\": \"" << ColorToHex(cfg.noteBgColor) << "\",\n";
     ofs << "  \"noteFgColor\": \"" << ColorToHex(cfg.noteFgColor) << "\",\n";
-    ofs << "  \"noteBgSource\": \"" << WideToUTF8(NormalizeNoteBgSource(cfg.noteBgSource)) << "\",\n";
-    ofs << "  \"noteBgThemeName\": \"" << WideToUTF8(cfg.noteBgThemeName) << "\",\n";
+    ofs << "  \"noteBgSource\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeNoteBgSource(cfg.noteBgSource))) << "\",\n";
+    ofs << "  \"noteBgThemeName\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.noteBgThemeName)) << "\",\n";
     ofs << "  \"noteShortcutBackColor\": \"" << ColorToHex(cfg.noteShortcutBackColor) << "\",\n";
     ofs << "  \"noteShortcutTextColor\": \"" << ColorToHex(cfg.noteShortcutTextColor) << "\",\n";
-    ofs << "  \"noteShortcutTextTagKey\": \"" << WideToUTF8(NormalizeShortcutTextTagKey(cfg.noteShortcutTextTagKey)) << "\",\n";
+    ofs << "  \"noteShortcutTextTagKey\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeShortcutTextTagKey(cfg.noteShortcutTextTagKey))) << "\",\n";
     ofs << "  \"noteShortcutHeadingArrowInvert\": " << (cfg.noteShortcutHeadingArrowInvert ? "true" : "false") << ",\n";
-    ofs << "  \"noteCustomTagKey\": \"" << WideToUTF8(NormalizeNoteCustomTagKey(cfg.noteCustomTagKey)) << "\",\n";
+    ofs << "  \"noteCustomTagKey\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeNoteCustomTagKey(cfg.noteCustomTagKey))) << "\",\n";
     ofs << "  \"noteCustomTagBold\": " << (cfg.noteCustomTagBold ? "true" : "false") << ",\n";
     ofs << "  \"noteCustomTagItalic\": " << (cfg.noteCustomTagItalic ? "true" : "false") << ",\n";
     ofs << "  \"noteCustomTagUnderline\": " << (cfg.noteCustomTagUnderline ? "true" : "false") << ",\n";
@@ -7027,9 +7068,9 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"autoIntegrateSeconds\": " << cfg.autoIntegrateSeconds << ",\n";
     ofs << "  \"autoIntegrateCustomMinutes\": " << cfg.autoIntegrateCustomMinutes << ",\n";
     if (!cfg.clroNamePattern.empty()) {
-        ofs << "  \"clroNamePattern\": \"" << WideToUTF8(cfg.clroNamePattern) << "\",\n";
+        ofs << "  \"clroNamePattern\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.clroNamePattern)) << "\",\n";
     }
-    ofs << "  \"textFontName\": \"" << WideToUTF8(cfg.textFontName.empty() ? GetDefaultFontFaceName() : cfg.textFontName) << "\",\n";
+    ofs << "  \"textFontName\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.textFontName.empty() ? GetDefaultFontFaceName() : cfg.textFontName)) << "\",\n";
     ofs << "  \"textFontPt\": " << cfg.textFontPt << ",\n";
     ofs << "  \"textFontUseA4Scale\": " << (cfg.textFontUseA4Scale ? "true" : "false") << ",\n";
     ofs << "  \"textFontActiveSizeSlot\": " << std::clamp(cfg.textFontActiveSizeSlot, 0, 1) << ",\n";
@@ -7043,9 +7084,9 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"lineToolsShareStyle\": " << (cfg.lineToolsShareStyle ? "true" : "false") << ",\n";
     ofs << "  \"lineWidthPt\": " << cfg.lineWidthPt << ",\n";
     ofs << "  \"arrowWidthPt\": " << cfg.arrowWidthPt << ",\n";
-    ofs << "  \"arrowHead\": \"" << WideToUTF8(ArrowHeadToString(ParseArrowHead(cfg.arrowHead))) << "\",\n";
+    ofs << "  \"arrowHead\": \"" << EscapeJsonStringValue(WideToUTF8(ArrowHeadToString(ParseArrowHead(cfg.arrowHead)))) << "\",\n";
     ofs << "  \"waveWidthPt\": " << cfg.waveWidthPt << ",\n";
-    ofs << "  \"lineDashStyle\": \"" << WideToUTF8(NormalizeLineDashStyle(cfg.lineDashStyle)) << "\",\n";
+    ofs << "  \"lineDashStyle\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeLineDashStyle(cfg.lineDashStyle))) << "\",\n";
     ofs << "  \"freehandWidthPt\": " << cfg.freehandWidthPt << ",\n";
     ofs << "  \"markerFreeWidthPt\": " << cfg.markerFreeWidthPt << ",\n";
     ofs << "  \"markerTextWidthPt\": " << cfg.markerTextWidthPt << ",\n";
@@ -7066,21 +7107,21 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"markerTextColor\": \"" << ColorToHex(cfg.markerTextColor) << "\",\n";
     ofs << "  \"shapeColor\": \"" << ColorToHex(cfg.shapeColor) << "\",\n";
     ofs << "  \"paletteCustomColor\": \"" << ColorToHex(cfg.paletteCustomColor) << "\",\n";
-    ofs << "  \"magnifierShape\": \"" << WideToUTF8(MagnifierShapeToString(ParseMagnifierShape(cfg.magnifierShape))) << "\",\n";
+    ofs << "  \"magnifierShape\": \"" << EscapeJsonStringValue(WideToUTF8(MagnifierShapeToString(ParseMagnifierShape(cfg.magnifierShape)))) << "\",\n";
     ofs << "  \"magnifierZoom\": " << std::clamp(cfg.magnifierZoom, 1.25, 4.0) << ",\n";
     ofs << "  \"magnifierSizeDip\": " << std::clamp(cfg.magnifierSizeDip, 80, 240) << ",\n";
-    ofs << "  \"magnifierPosition\": \"" << WideToUTF8(MagnifierPositionToString(ParseMagnifierPosition(cfg.magnifierPosition))) << "\",\n";
-    ofs << "  \"shapeDetail\": \"" << WideToUTF8(cfg.shapeDetail) << "\",\n";
-    ofs << "  \"shapeKind\": \"" << WideToUTF8(ShapeKindToString(ParseShapeKind(cfg.shapeKind))) << "\",\n";
-    ofs << "  \"shapeDrawMode\": \"" << WideToUTF8(ShapeDrawModeToString(ParseShapeDrawMode(cfg.shapeDrawMode))) << "\",\n";
-    ofs << "  \"annotLastMarkerDetail\": \"" << WideToUTF8(cfg.annotLastMarkerDetail) << "\",\n";
-    ofs << "  \"annotLastPenDetail\": \"" << WideToUTF8(cfg.annotLastPenDetail) << "\",\n";
-    ofs << "  \"annotLastShapePresentation\": \"" << WideToUTF8(cfg.annotLastShapePresentation) << "\",\n";
-    ofs << "  \"annotLastShapeGeometry\": \"" << WideToUTF8(cfg.annotLastShapeGeometry) << "\",\n";
-    ofs << "  \"annotLastShapeDetail\": \"" << WideToUTF8(cfg.annotLastShapeDetail) << "\",\n";
-    ofs << "  \"freehandCorrection\": \"" << WideToUTF8(NormalizeFreehandCorrection(cfg.freehandCorrection)) << "\",\n";
-    ofs << "  \"freehandCorrectionStyle\": \"" << WideToUTF8(NormalizeFreehandCorrectionStyle(cfg.freehandCorrectionStyle)) << "\",\n";
-    ofs << "  \"freehandCorrectionFill\": \"" << WideToUTF8(NormalizeFreehandCorrectionFill(cfg.freehandCorrectionFill)) << "\",\n";
+    ofs << "  \"magnifierPosition\": \"" << EscapeJsonStringValue(WideToUTF8(MagnifierPositionToString(ParseMagnifierPosition(cfg.magnifierPosition)))) << "\",\n";
+    ofs << "  \"shapeDetail\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.shapeDetail)) << "\",\n";
+    ofs << "  \"shapeKind\": \"" << EscapeJsonStringValue(WideToUTF8(ShapeKindToString(ParseShapeKind(cfg.shapeKind)))) << "\",\n";
+    ofs << "  \"shapeDrawMode\": \"" << EscapeJsonStringValue(WideToUTF8(ShapeDrawModeToString(ParseShapeDrawMode(cfg.shapeDrawMode)))) << "\",\n";
+    ofs << "  \"annotLastMarkerDetail\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.annotLastMarkerDetail)) << "\",\n";
+    ofs << "  \"annotLastPenDetail\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.annotLastPenDetail)) << "\",\n";
+    ofs << "  \"annotLastShapePresentation\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.annotLastShapePresentation)) << "\",\n";
+    ofs << "  \"annotLastShapeGeometry\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.annotLastShapeGeometry)) << "\",\n";
+    ofs << "  \"annotLastShapeDetail\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.annotLastShapeDetail)) << "\",\n";
+    ofs << "  \"freehandCorrection\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeFreehandCorrection(cfg.freehandCorrection))) << "\",\n";
+    ofs << "  \"freehandCorrectionStyle\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeFreehandCorrectionStyle(cfg.freehandCorrectionStyle))) << "\",\n";
+    ofs << "  \"freehandCorrectionFill\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeFreehandCorrectionFill(cfg.freehandCorrectionFill))) << "\",\n";
     int scheduleDayMask = cfg.scheduleDayMask & 0x7F;
     if (scheduleDayMask == 0) scheduleDayMask = 0x1F;
     int schedulePeriods = std::clamp(cfg.schedulePeriods, 1, 13);
@@ -7363,7 +7404,27 @@ static std::filesystem::path DefaultWorkspaceRootPath(const std::filesystem::pat
 }
 
 static std::filesystem::path ResolveSetupJsonPath(const std::filesystem::path& exeDir) {
+    return exeDir / L"pdf_note_workspace_setup.json";
+}
+
+// Keep the former name readable during the one-way migration.  Never remove it:
+// an older installed app may still rely on it, and preserving it avoids losing a
+// user's last known-good setup if the new file cannot be written.
+static std::filesystem::path LegacySetupJsonPath(const std::filesystem::path& exeDir) {
     return exeDir / L"pdf_workspace_setup.json";
+}
+
+static std::optional<std::filesystem::path> CurrentExecutableDirectoryForSetup() {
+    std::vector<wchar_t> buffer(512, L'\0');
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) return std::nullopt;
+        if (length < buffer.size() - 1) {
+            return std::filesystem::path(std::wstring(buffer.data(), length)).parent_path();
+        }
+        if (buffer.size() >= 32768) return std::nullopt;
+        buffer.resize(buffer.size() * 2, L'\0');
+    }
 }
 
 static std::string WorkspaceRootPathForSetupJson(const std::filesystem::path& exeDir,
@@ -7446,7 +7507,7 @@ static bool WriteSetupJsonFile(const std::filesystem::path& setup,
     std::ostringstream oss;
     oss << "{\n";
     oss << "  \"workspaceRootMode\": \"" << WorkspaceRootModeForSetupJson(exeDir, workspaceRoot) << "\",\n";
-    oss << "  \"workspaceRoot\": \"" << WorkspaceRootPathForSetupJson(exeDir, workspaceRoot) << "\",\n";
+    oss << "  \"workspaceRoot\": \"" << EscapeJsonStringValue(WorkspaceRootPathForSetupJson(exeDir, workspaceRoot)) << "\",\n";
     oss << "  \"tempExternalLectureDirs\": [],\n";
     oss << "  \"annotToolModeOrder\": [";
     {
@@ -7584,7 +7645,32 @@ bool VerifySetupJsonStillExistsReadable(const std::filesystem::path& setupPath, 
 static bool EnsureDefaultSetupJson(const std::filesystem::path& exeDir,
                                    const std::filesystem::path& setup,
                                    std::wstring* outError) {
-    if (std::filesystem::exists(setup)) return true;
+    std::error_code setupEc;
+    if (std::filesystem::exists(setup, setupEc) && !setupEc) return true;
+    if (setupEc) {
+        if (outError) {
+            *outError = L"setup.json の存在を確認できませんでした。\n\n" + setup.wstring() +
+                        L"\n\n理由:\n" + UTF8ToWide(setupEc.message());
+        }
+        return false;
+    }
+    const std::filesystem::path legacy = LegacySetupJsonPath(exeDir);
+    std::error_code legacyEc;
+    if (std::filesystem::exists(legacy, legacyEc) && !legacyEc) {
+        std::string legacyJson;
+        std::wstring legacyReason;
+        if (!ReadExistingSetupJsonForAutoUpdate(legacy, &legacyJson, &legacyReason) ||
+            !AtomicWriteSetupJsonIfValid(setup, legacyJson, &legacyReason)) {
+            if (outError) {
+                *outError = L"旧 setup.json から新しい設定ファイルへ移行できませんでした。旧ファイルは変更していません。\n\n";
+                *outError += L"旧ファイル:\n" + legacy.wstring();
+                *outError += L"\n\n新ファイル:\n" + setup.wstring();
+                if (!legacyReason.empty()) *outError += L"\n\n理由:\n" + legacyReason;
+            }
+            return false;
+        }
+        return true;
+    }
     {
         std::wstring perr;
         if (!TryWriteTempDeleteOnCloseFileInDir(exeDir, &perr)) {
@@ -7660,17 +7746,15 @@ bool ConsumePendingStartupNotice(std::wstring* outText, SoftNoticeKind* outKind)
 }
 
 std::optional<std::wstring> LoadSetupWorkspaceRoot() {
-    wchar_t exePath[MAX_PATH]{};
-    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if (len == 0 || len == MAX_PATH) {
+    const auto exeDir = CurrentExecutableDirectoryForSetup();
+    if (!exeDir) {
         QueuePendingStartupNotice(L"実行ファイルのパス取得に失敗しました。", SoftNoticeKind::Error);
         return std::nullopt;
     }
-    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
-    std::filesystem::path setup = ResolveSetupJsonPath(exeDir);
-    const std::filesystem::path defaultRoot = DefaultWorkspaceRootPath(exeDir);
+    std::filesystem::path setup = ResolveSetupJsonPath(*exeDir);
+    const std::filesystem::path defaultRoot = DefaultWorkspaceRootPath(*exeDir);
     std::wstring setupErr;
-    if (!EnsureDefaultSetupJson(exeDir, setup, &setupErr)) {
+    if (!EnsureDefaultSetupJson(*exeDir, setup, &setupErr)) {
         if (setupErr.empty()) {
             setupErr = L"setup.json の作成に失敗しました。";
         }
@@ -7686,7 +7770,7 @@ std::optional<std::wstring> LoadSetupWorkspaceRoot() {
             message += L"\n\n理由:\n" + readErr;
         }
         message += L"\n\n既定ワークスペースで起動を継続します:\n" + defaultRoot.wstring();
-        const std::filesystem::path quarantined = QuarantineCorruptSetupJson(exeDir, setup);
+        const std::filesystem::path quarantined = QuarantineCorruptSetupJson(*exeDir, setup);
         if (!quarantined.empty()) {
             message += L"\n\n読めない setup.json を退避しました:\n" + quarantined.wstring();
         } else {
@@ -7701,7 +7785,7 @@ std::optional<std::wstring> LoadSetupWorkspaceRoot() {
             L"設定JSONファイルが壊れているため、自動修復や既定値上書きは行いません。\n\npath:\n" +
             setup.wstring() +
             L"\n\n既定ワークスペースで起動を継続します:\n" + defaultRoot.wstring();
-        const std::filesystem::path quarantined = QuarantineCorruptSetupJson(exeDir, setup);
+        const std::filesystem::path quarantined = QuarantineCorruptSetupJson(*exeDir, setup);
         if (!quarantined.empty()) {
             message += L"\n\n読めない setup.json を退避しました:\n" + quarantined.wstring();
         } else {
@@ -7733,7 +7817,7 @@ std::optional<std::wstring> LoadSetupWorkspaceRoot() {
             L"既存 setup.json は上書きしません。\n\npath:\n" +
             setup.wstring() +
             L"\n\n既定ワークスペースで起動を継続します:\n" + defaultRoot.wstring();
-        const std::filesystem::path quarantined = QuarantineCorruptSetupJson(exeDir, setup);
+        const std::filesystem::path quarantined = QuarantineCorruptSetupJson(*exeDir, setup);
         if (!quarantined.empty()) {
             message += L"\n\nworkspaceRoot を読めない setup.json を退避しました:\n" + quarantined.wstring();
         } else {
@@ -7745,7 +7829,7 @@ std::optional<std::wstring> LoadSetupWorkspaceRoot() {
     std::filesystem::path root = UTF8ToWide(*ws);
 
     if (root.is_relative()) {
-        root = exeDir / root;
+        root = *exeDir / root;
     }
     // ディレクトリが存在しなくても作成しない（ここでcreate_directoriesしない）
     std::error_code ec;
@@ -7758,7 +7842,7 @@ std::optional<std::wstring> LoadSetupWorkspaceRoot() {
     bool rootExists = std::filesystem::exists(root, existsEc);
     if (existsEc) rootExists = false;
     if (!rootExists) {
-        if (auto fallback = FindWorkspaceRootFallback(exeDir, root)) {
+        if (auto fallback = FindWorkspaceRootFallback(*exeDir, root)) {
             std::wstring message = g_config.studentMode
                 ? L"指定された授業フォルダが見つからなかったため、候補のワークスペースに切り替えました。\n\n"
                 : L"指定された上位項目フォルダが見つからなかったため、候補のワークスペースに切り替えました。\n\n";
@@ -7775,16 +7859,12 @@ std::optional<std::wstring> LoadSetupWorkspaceRoot() {
     }
 
     // setup.jsonのworkspaceRootを相対/絶対で自動更新
-    std::string desiredPath = WorkspaceRootPathForSetupJson(exeDir, root);
-    std::string desiredMode = WorkspaceRootModeForSetupJson(exeDir, root);
+    std::string desiredPath = WorkspaceRootPathForSetupJson(*exeDir, root);
+    std::string desiredMode = WorkspaceRootModeForSetupJson(*exeDir, root);
     std::string newJson = json;
     bool changed = false;
     if (*ws != desiredPath) {
-        size_t pos = newJson.find(*ws);
-        if (pos != std::string::npos) {
-            newJson.replace(pos, ws->size(), desiredPath);
-            changed = true;
-        }
+        changed |= ReplaceOrInsertJsonStringField(newJson, "workspaceRoot", desiredPath);
     }
     changed |= ReplaceOrInsertJsonStringFieldAfter(newJson, "workspaceRootMode", desiredMode, "workspaceRoot");
     if (changed && setupAutoUpdateAllowed) {
@@ -7814,16 +7894,15 @@ std::optional<std::wstring> LoadSetupWorkspaceRoot() {
         std::wstring setupClassdir = root.filename();
         if (classdir && UTF8ToWide(*classdir) != setupClassdir) {
             // workspace.jsonのclassesDirをsetupのディレクトリ名に更新
-            size_t pos = wsjson_str.find(*classdir);
-            if (pos != std::string::npos) {
-                std::string newWsjson = wsjson_str;
-                std::string newClassdir = WideToUTF8(setupClassdir);
-                newWsjson.replace(pos, classdir->size(), newClassdir);
+            std::string newWsjson = wsjson_str;
+            if (ReplaceOrInsertJsonStringField(newWsjson, "classesDir", WideToUTF8(setupClassdir)) &&
+                IsSyntacticallyValidJsonLite(newWsjson)) {
                 std::wstring werr;
-                AtomicWriteUtf8WithWorkspaceDirs(wsjson, newWsjson, root, &werr);
-                ShowAppCoreSoftNotice(nullptr,
+                if (AtomicWriteUtf8WithWorkspaceDirs(wsjson, newWsjson, root, &werr)) {
+                    ShowAppCoreSoftNotice(nullptr,
                                       L"workspace.json の classesDir を setup.json の内容で更新しました。",
                                       SoftNoticeKind::Info);
+                }
             }
         }
     }
@@ -7838,14 +7917,14 @@ void UpdateSetupJsonWorkspaceRoot(const std::wstring& newRoot) {
     if (newRoot.rfind(L"\\\\", 0) == 0) return;
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(std::filesystem::path(newRoot), isReparse) && isReparse) return;
-    wchar_t exePath[MAX_PATH]{};
-    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if (len == 0 || len == MAX_PATH) return;
-    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
-    std::filesystem::path setup = ResolveSetupJsonPath(exeDir);
-    if (!std::filesystem::exists(setup)) {
-        WriteSetupJsonFile(setup, exeDir, std::filesystem::path(newRoot));
-        return;
+    const auto exeDir = CurrentExecutableDirectoryForSetup();
+    if (!exeDir) return;
+    std::filesystem::path setup = ResolveSetupJsonPath(*exeDir);
+    std::error_code setupEc;
+    if (!std::filesystem::exists(setup, setupEc) && !setupEc) {
+        // This also performs the no-delete legacy migration before updating
+        // workspaceRoot below.
+        if (!EnsureDefaultSetupJson(*exeDir, setup, nullptr)) return;
     }
     std::string json;
     std::wstring blockedReason;
@@ -7857,23 +7936,11 @@ void UpdateSetupJsonWorkspaceRoot(const std::wstring& newRoot) {
         return;
     }
     auto ws = ParseJsonStringField(json, "workspaceRoot");
-    std::string desiredPath = WorkspaceRootPathForSetupJson(exeDir, std::filesystem::path(newRoot));
-    std::string desiredMode = WorkspaceRootModeForSetupJson(exeDir, std::filesystem::path(newRoot));
+    std::string desiredPath = WorkspaceRootPathForSetupJson(*exeDir, std::filesystem::path(newRoot));
+    std::string desiredMode = WorkspaceRootModeForSetupJson(*exeDir, std::filesystem::path(newRoot));
     if (!ws || *ws != desiredPath) {
-        // jsonのworkspaceRootだけ書き換え
         std::string newJson = json;
-        if (ws) {
-            size_t pos = newJson.find(*ws);
-            if (pos != std::string::npos) {
-                newJson.replace(pos, ws->size(), desiredPath);
-            }
-        } else {
-            // workspaceRootがなければ追加（単純な実装）
-            size_t insertPos = newJson.find_last_of('}');
-            if (insertPos != std::string::npos) {
-                newJson.insert(insertPos, ",\n  \"workspaceRoot\": \"" + desiredPath + "\"");
-            }
-        }
+        ReplaceOrInsertJsonStringField(newJson, "workspaceRoot", desiredPath);
         ReplaceOrInsertJsonStringFieldAfter(newJson, "workspaceRootMode", desiredMode, "workspaceRoot");
         if (!newJson.empty()) {
             SaveOperationGuard guard;
@@ -7894,12 +7961,16 @@ void UpdateSetupJsonWorkspaceRoot(const std::wstring& newRoot) {
 
 std::vector<std::wstring> LoadSetupTempExternalLectureDirs() {
     std::vector<std::wstring> result;
-    wchar_t exePath[MAX_PATH]{};
-    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if (len == 0 || len == MAX_PATH) return result;
-    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
-    std::filesystem::path setup = ResolveSetupJsonPath(exeDir);
-    if (!std::filesystem::exists(setup)) return result;
+    const auto exeDir = CurrentExecutableDirectoryForSetup();
+    if (!exeDir) return result;
+    std::filesystem::path setup = ResolveSetupJsonPath(*exeDir);
+    std::error_code setupEc;
+    if (!std::filesystem::exists(setup, setupEc) && !setupEc) {
+        const std::filesystem::path legacy = LegacySetupJsonPath(*exeDir);
+        std::error_code legacyEc;
+        if (!std::filesystem::exists(legacy, legacyEc) || legacyEc) return result;
+        setup = legacy;
+    }
     std::string json = ReadTextFileUtf8(setup);
     if (json.empty()) return result;
     auto entries = ParseJsonStringArrayField(json, "tempExternalLectureDirs");
@@ -7908,7 +7979,7 @@ std::vector<std::wstring> LoadSetupTempExternalLectureDirs() {
         if (item.empty()) continue;
         std::filesystem::path p = UTF8ToWide(item);
         if (p.is_relative()) {
-            p = exeDir / p;
+            p = *exeDir / p;
         }
         std::wstring w = p.wstring();
         if (w.rfind(L"\\\\", 0) == 0) continue; // block UNC/device paths
@@ -7933,18 +8004,21 @@ static std::string BuildSetupPathArrayJson(const std::filesystem::path& exeDir,
         std::string s = WorkspaceRootPathForSetupJson(exeDir, p);
         if (!first) oss << ", ";
         first = false;
-        oss << "\"" << s << "\"";
+        oss << "\"" << EscapeJsonStringValue(s) << "\"";
     }
     oss << "]";
     return oss.str();
 }
 
-bool PersistSetupTempExternalLectureDirs(const std::vector<std::wstring>& dirs) {
-    wchar_t exePath[MAX_PATH]{};
-    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if (len == 0 || len == MAX_PATH) return false;
-    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
-    std::filesystem::path setup = ResolveSetupJsonPath(exeDir);
+bool PersistSetupTempExternalLectureDirs(const std::vector<std::wstring>& dirs,
+                                         std::wstring* outError) {
+    if (outError) outError->clear();
+    const auto exeDir = CurrentExecutableDirectoryForSetup();
+    if (!exeDir) {
+        if (outError) *outError = L"実行ファイルのあるフォルダを取得できませんでした。";
+        return false;
+    }
+    std::filesystem::path setup = ResolveSetupJsonPath(*exeDir);
     std::string json;
     std::error_code existsEc;
     const bool setupExists = std::filesystem::exists(setup, existsEc) && !existsEc;
@@ -7955,24 +8029,34 @@ bool PersistSetupTempExternalLectureDirs(const std::vector<std::wstring>& dirs) 
                 blockedReason += L"\n\n既存 setup.json を保護するため、一時外部講義フォルダ一覧の保存を中止しました。";
                 ShowAppCoreSoftNotice(nullptr, blockedReason, SoftNoticeKind::Warning);
             }
+            if (outError) *outError = blockedReason.empty()
+                ? L"既存の設定ファイルを安全に更新できませんでした。" : blockedReason;
             return false;
         }
     } else {
-        std::filesystem::path root = g_workspaceRoot.empty()
-            ? DefaultWorkspaceRootPath(exeDir)
-            : std::filesystem::path(g_workspaceRoot);
-        if (!WriteSetupJsonFile(setup, exeDir, root)) return false;
+        std::wstring migrationError;
+        if (!EnsureDefaultSetupJson(*exeDir, setup, &migrationError)) {
+            if (outError) *outError = migrationError;
+            return false;
+        }
         json = ReadTextFileUtf8(setup);
-        if (json.empty()) return false;
+        if (json.empty()) {
+            if (outError) *outError = L"作成後の設定ファイルを読み込めませんでした。";
+            return false;
+        }
     }
 
-    std::string arrayJson = BuildSetupPathArrayJson(exeDir, dirs);
+    std::string arrayJson = BuildSetupPathArrayJson(*exeDir, dirs);
     bool changed = ReplaceOrInsertJsonArrayFieldAfter(
         json, "tempExternalLectureDirs", arrayJson, "workspaceRoot");
     if (!changed) return true;
     SaveOperationGuard guard;
     std::wstring werr;
-    return AtomicWriteSetupJsonIfValid(setup, json, &werr);
+    const bool saved = AtomicWriteSetupJsonIfValid(setup, json, &werr);
+    if (!saved && outError) {
+        *outError = werr.empty() ? L"設定ファイルを安全に保存できませんでした。" : werr;
+    }
+    return saved;
 }
 
 static std::string BuildAnnotToolModeOrderArrayJson() {
@@ -8012,13 +8096,11 @@ static std::string BuildAnnotToolModeStateArrayJson() {
 static bool ReplaceOrInsertJsonArrayField(std::string& json,
                                          const std::string& key,
                                          const std::string& newArrayJson) {
-    std::regex re("\"" + key + "\"\\s*:\\s*\\[[^\\]]*\\]");
-    std::smatch m;
-    std::string replacement = "\"" + key + "\": " + newArrayJson;
-    if (std::regex_search(json, m, re)) {
-        std::string before = json;
-        json = std::regex_replace(json, re, replacement, std::regex_constants::format_first_only);
-        return json != before;
+    size_t start = 0, end = 0;
+    if (FindJsonFieldValueRange(json, key, &start, &end)) {
+        if (json.compare(start, end - start, newArrayJson) == 0) return false;
+        json.replace(start, end - start, newArrayJson);
+        return true;
     }
     size_t brace = json.find_last_of('}');
     if (brace == std::string::npos) return false;
@@ -8039,10 +8121,8 @@ static bool ReplaceOrInsertJsonArrayField(std::string& json,
 static bool InsertJsonFieldAfterAnchor(std::string& json,
                                        const std::string& anchorKey,
                                        const std::string& fieldText) {
-    std::regex anchorRe("\"" + anchorKey + "\"\\s*:\\s*(\"[^\"]*\"|\\[[^\\]]*\\])");
-    std::smatch m;
-    if (!std::regex_search(json, m, anchorRe)) return false;
-    size_t anchorEnd = m.position() + m.length();
+    size_t anchorStart = 0, anchorEnd = 0;
+    if (!FindJsonFieldValueRange(json, anchorKey, &anchorStart, &anchorEnd)) return false;
     size_t pos = anchorEnd;
     while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) {
         pos++;
@@ -8063,14 +8143,9 @@ static bool ReplaceOrInsertJsonArrayFieldAfter(std::string& json,
                                                const std::string& key,
                                                const std::string& newArrayJson,
                                                const std::string& anchorKey) {
-    std::regex re("\"" + key + "\"\\s*:\\s*\\[[^\\]]*\\]");
-    std::smatch m;
-    std::string replacement = "\"" + key + "\": " + newArrayJson;
-    if (std::regex_search(json, m, re)) {
-        std::string before = json;
-        json = std::regex_replace(json, re, replacement, std::regex_constants::format_first_only);
-        return json != before;
-    }
+    size_t start = 0, end = 0;
+    if (FindJsonFieldValueRange(json, key, &start, &end))
+        return ReplaceOrInsertJsonArrayField(json, key, newArrayJson);
     std::string field = "  \"" + key + "\": " + newArrayJson;
     if (InsertJsonFieldAfterAnchor(json, anchorKey, field)) return true;
     return ReplaceOrInsertJsonArrayField(json, key, newArrayJson);
@@ -8080,15 +8155,10 @@ static bool ReplaceOrInsertJsonStringFieldAfter(std::string& json,
                                                 const std::string& key,
                                                 const std::string& value,
                                                 const std::string& anchorKey) {
-    std::regex re("\"" + key + "\"\\s*:\\s*\"[^\"]*\"");
-    std::smatch m;
-    std::string replacement = "\"" + key + "\": \"" + value + "\"";
-    if (std::regex_search(json, m, re)) {
-        std::string before = json;
-        json = std::regex_replace(json, re, replacement, std::regex_constants::format_first_only);
-        return json != before;
-    }
-    std::string field = "  \"" + key + "\": \"" + value + "\"";
+    size_t start = 0, end = 0;
+    if (FindJsonFieldValueRange(json, key, &start, &end))
+        return ReplaceOrInsertJsonStringField(json, key, value);
+    std::string field = "  \"" + key + "\": \"" + EscapeJsonStringValue(value) + "\"";
     if (InsertJsonFieldAfterAnchor(json, anchorKey, field)) return true;
     return ReplaceOrInsertJsonStringField(json, key, value);
 }
@@ -8096,13 +8166,12 @@ static bool ReplaceOrInsertJsonStringFieldAfter(std::string& json,
 static bool ReplaceOrInsertJsonStringField(std::string& json,
                                           const std::string& key,
                                           const std::string& value) {
-    std::regex re("\"" + key + "\"\\s*:\\s*\"[^\"]*\"");
-    std::smatch m;
-    std::string replacement = "\"" + key + "\": \"" + value + "\"";
-    if (std::regex_search(json, m, re)) {
-        std::string before = json;
-        json = std::regex_replace(json, re, replacement, std::regex_constants::format_first_only);
-        return json != before;
+    const std::string encodedValue = "\"" + EscapeJsonStringValue(value) + "\"";
+    size_t start = 0, end = 0;
+    if (FindJsonFieldValueRange(json, key, &start, &end)) {
+        if (json.compare(start, end - start, encodedValue) == 0) return false;
+        json.replace(start, end - start, encodedValue);
+        return true;
     }
     size_t brace = json.find_last_of('}');
     if (brace == std::string::npos) return false;
@@ -8114,7 +8183,7 @@ static bool ReplaceOrInsertJsonStringField(std::string& json,
         char last = json[pos - 1];
         if (last == '{' || last == ',') needComma = false;
     }
-    std::string field = "  \"" + key + "\": \"" + value + "\"";
+    std::string field = "  \"" + key + "\": " + encodedValue;
     std::string insert = std::string(needComma ? ",\n" : "\n") + field + "\n";
     json.insert(brace, insert);
     return true;
@@ -8133,11 +8202,9 @@ static bool RemoveJsonScalarOrArrayField(std::string& json, const std::string& k
 }
 
 bool PersistAnnotToolUiConfigToSetupJson() {
-    wchar_t exePath[MAX_PATH]{};
-    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if (len == 0 || len == MAX_PATH) return false;
-    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
-    std::filesystem::path setup = ResolveSetupJsonPath(exeDir);
+    const auto exeDir = CurrentExecutableDirectoryForSetup();
+    if (!exeDir) return false;
+    std::filesystem::path setup = ResolveSetupJsonPath(*exeDir);
 
     std::string json;
     std::error_code existsEc;
@@ -8153,9 +8220,9 @@ bool PersistAnnotToolUiConfigToSetupJson() {
         }
     } else {
         std::filesystem::path root = g_workspaceRoot.empty()
-            ? DefaultWorkspaceRootPath(exeDir)
+            ? DefaultWorkspaceRootPath(*exeDir)
             : std::filesystem::path(g_workspaceRoot);
-        if (!WriteSetupJsonFile(setup, exeDir, root)) return false;
+        if (!EnsureDefaultSetupJson(*exeDir, setup, nullptr)) return false;
         json = ReadTextFileUtf8(setup);
         if (json.empty()) return false;
     }
@@ -8167,10 +8234,10 @@ bool PersistAnnotToolUiConfigToSetupJson() {
     changed |= ReplaceOrInsertJsonArrayField(json, "annotToolModeOrder", BuildAnnotToolModeOrderArrayJson());
     changed |= ReplaceOrInsertJsonArrayField(json, "annotToolModeState", BuildAnnotToolModeStateArrayJson());
     std::filesystem::path root = g_workspaceRoot.empty()
-        ? DefaultWorkspaceRootPath(exeDir)
+        ? DefaultWorkspaceRootPath(*exeDir)
         : std::filesystem::path(g_workspaceRoot);
     changed |= ReplaceOrInsertJsonStringFieldAfter(
-        json, "workspaceRootMode", WorkspaceRootModeForSetupJson(exeDir, root), "workspaceRoot");
+        json, "workspaceRootMode", WorkspaceRootModeForSetupJson(*exeDir, root), "workspaceRoot");
     if (!changed) return true;
 
     SaveOperationGuard guard;
@@ -8209,10 +8276,8 @@ void CheckAndPromptClassdirMismatch(HWND hWnd, const std::wstring& workspaceRoot
                             SilentDialogResult::No, SilentDialogResult::No)) {
         // workspace.jsonのclassesDirをsetup側のディレクトリ名に更新
         std::string newWsjson = wsjson_str;
-        size_t pos = newWsjson.find(*classdir);
-        if (pos != std::string::npos) {
-            std::string newClassdir = WideToUTF8(setupClassdir);
-            newWsjson.replace(pos, classdir->size(), newClassdir);
+        if (ReplaceOrInsertJsonStringField(newWsjson, "classesDir", WideToUTF8(setupClassdir)) &&
+            IsSyntacticallyValidJsonLite(newWsjson)) {
             std::wstring werr;
             if (AtomicWriteUtf8WithWorkspaceDirs(wsjson, newWsjson, std::filesystem::path(workspaceRoot), &werr)) {
                 ShowAppCoreSoftNotice(hWnd, L"workspace.json の classesDir を更新しました。",

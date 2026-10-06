@@ -10,7 +10,7 @@
  
  namespace sd {
  
-@@ -268,7 +270,9 @@ private:
+@@ -268,7 +270,9 @@ protected:
      sal_Int8                mnAction;
      Idle                    maDropErrorIdle;
      Idle                    maDropInsertFileIdle;
@@ -23,13 +23,13 @@
 --- a/sd/inc/pch/precompiled_sd.hxx
 +++ b/sd/inc/pch/precompiled_sd.hxx
 @@ -125,8 +125,10 @@
- #include <svx/svdtypes.hxx>
- #include <svx/svxdlg.hxx>
- #include <svx/svxids.hrc>
+ #include <vcl/wrkwin.hxx>
+ #endif // PCH_LEVEL >= 2
+ #if PCH_LEVEL >= 3
 +#if HAVE_FEATURE_AVMEDIA
  #include <avmedia/mediaplayer.hxx>
  #include <avmedia/mediawindow.hxx>
 +#endif
+ #include <basegfx/basegfxdllapi.h>
+ #include <basegfx/color/bcolor.hxx>
  #include <basegfx/matrix/b2dhommatrix.hxx>
- #include <basegfx/matrix/b2dhommatrixtools.hxx>
- #include <basegfx/numeric/ftools.hxx>

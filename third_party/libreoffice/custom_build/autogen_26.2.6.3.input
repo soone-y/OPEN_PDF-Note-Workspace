@@ -1,0 +1,75 @@
+# Adopted 26.2.6.3 input; rerun runtime and quality gates after input changes.
+# Create C:\lo as a local junction to the private LibreOffice work directory.
+# Keep the actual private directory outside this publicly distributable input.
+# Use native make with MSYSTEM and DEBUG/debug unset. Verify archive hashes
+# before WSL tar extraction where Windows cannot create dangling symlinks.
+# config_host.mk fixes the build PATH at configure time: supply the matching
+# SDK UCRT redist, Git and existing Visual Studio Ninja in configure PATH or
+# explicitly to make. Set NINJA to the verified existing native ninja.exe.
+--with-visual-studio=2026
+--disable-ccache
+--without-package-format
+--with-external-tar=C:/lo/externals
+--with-strawberry-perl-portable=C:/lo/spp
+PKG_CONFIG=C:/msys64/ucrt64/bin/pkgconf.exe
+PYTHON=python.exe
+PYTHON_FOR_BUILD=python.exe
+LO_CLANG_CC=D:/vs18/VC/Tools/Llvm/x64/bin/clang-cl.exe
+LO_CLANG_CXX=D:/vs18/VC/Tools/Llvm/x64/bin/clang-cl.exe
+LIBO_VSWHERE=C:/lo/vsinstaller/vswhere.exe
+LIBO_MSVS_ROOT=D:/vs18
+ac_cv_build=x86_64-pc-cygwin
+ac_cv_build_cpu=x86_64
+ac_cv_build_os=cygwin
+ac_cv_host=x86_64-pc-cygwin
+ac_cv_host_cpu=x86_64
+ac_cv_host_os=cygwin
+# Keep Windows Defender enabled; opt out only from the EICAR exclusion test.
+PDF_NOTE_KEEP_ANTIVIRUS=TRUE
+--disable-fetch-external
+--enable-mergelibs=no
+--disable-curl
+--without-webdav
+--disable-libcmis
+--disable-online-update
+--disable-online-update-mar
+--disable-extension-update
+--disable-breakpad
+--disable-pdfimport
+--disable-pdfium
+--disable-poppler
+--disable-sdremote
+--disable-sdremote-bluetooth
+--with-galleries=no
+--disable-avmedia
+--disable-opencl
+test_libabw=no
+test_libcdr=no
+test_libebook=no
+test_libepubgen=no
+test_libetonyek=no
+test_libfreehand=no
+test_libmspub=no
+test_libmwaw=no
+test_libpagemaker=no
+test_libqxp=no
+test_libstaroffice=no
+test_libvisio=no
+test_libwpd=no
+test_libwpg=no
+test_libwps=no
+test_libzmf=no
+--without-java
+--disable-scripting
+--enable-python=no
+--disable-gpgmepp
+--disable-openssl
+--disable-nss
+--with-tls=no
+--disable-database-connectivity
+--disable-firebird-sdbc
+--disable-report-builder
+--disable-lpsolve
+--disable-coinmp
+--disable-lotuswordpro
+--without-help

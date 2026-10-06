@@ -53,16 +53,32 @@
     .document-grid span { display: block; margin-top: 3px; color: var(--subtle); font-size: 12px; line-height: 1.55; }
     .note { margin: 28px 0 0; padding-left: 14px; border-left: 3px solid var(--peach); color: var(--subtle); font-size: 14px; }
     a:focus-visible { outline: 3px solid var(--peach); outline-offset: 3px; }
-    .utility-row { display: flex; justify-content: flex-end; align-items: center; gap: 18px; margin: 0 0 18px; }
+    .utility-row { display: flex; justify-content: flex-start; align-items: center; gap: 18px; margin: 0 0 18px; }
     .language-link { font-size: 14px; font-weight: 600; }
     .contrast-toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--subtle); font-size: 14px; font-weight: 600; cursor: pointer; }
     .contrast-toggle input { inline-size: 16px; block-size: 16px; accent-color: var(--green); }
+    .site-menu { position: relative; margin-left: auto; }
+    .site-menu summary { display: inline-flex; align-items: center; cursor: pointer; list-style: none; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); font-size: 14px; font-weight: 600; }
+    .site-menu summary::-webkit-details-marker { display: none; }
+    .menu-icon { display: inline-flex; flex-direction: column; justify-content: space-between; width: 14px; height: 12px; margin-right: 7px; }
+    .menu-icon-bar { display: block; width: 100%; height: 2px; border-radius: 1px; background: currentColor; }
+    .site-menu nav { position: absolute; z-index: 1; top: calc(100% + 8px); right: 0; width: min(360px, calc(100vw - 40px)); padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); box-shadow: 0 8px 20px rgb(36 49 47 / 12%); }
+    .site-menu nav a { display: block; padding: 9px 10px; border-radius: 5px; color: var(--ink); font-size: 14px; text-decoration: none; }
+    .site-menu nav a:hover, .site-menu nav a[aria-current="page"] { background: var(--green-wash); color: var(--blue); }
+    .site-menu nav a[aria-current="page"] { font-weight: 700; }
+    .menu-link-title, .menu-link-detail { display: block; }
+    .menu-link-detail { margin-top: 1px; color: var(--subtle); font-size: 12px; font-weight: 400; }
+    .menu-current-label { margin-left: .45em; color: var(--subtle); font-size: .78em; font-weight: 600; white-space: nowrap; }
+    .menu-outside { margin-top: 14px; padding: 10px 6px 6px; border-top: 3px double var(--line); background: var(--page); }
+    .menu-outside a { position: relative; padding-right: 30px; }
+    .menu-outside a::after { content: "↗"; position: absolute; top: 10px; right: 10px; color: var(--subtle); font-size: .9em; }
     html[data-contrast="high"] { --page: #ffffff; --card: #ffffff; --ink: #111111; --subtle: #2b2b2b; --line: #202020; --green: #006b4d; --peach: #9a4e00; --blue: #123bb1; --green-wash: #ffffff; --blue-wash: #ffffff; }
     html[data-contrast="high"] main { box-shadow: none; border-width: 2px; }
     html[data-contrast="high"] .entry-list a { border-width: 2px; }
     html[data-contrast="high"] .site-map, html[data-contrast="high"] .site-map-node { border-width: 2px; }
     html[data-contrast="high"] .entry-list a:hover, html[data-contrast="high"] .entry-list a:focus-visible { background: var(--blue-wash); outline: 3px solid var(--peach); outline-offset: 3px; }
-    @media (max-width: 560px) { body { padding: 0; } main { border: 0; border-radius: 0; min-height: 100vh; padding: 28px 20px; } .site-map { padding: 18px; } .site-map-row, .document-grid { grid-template-columns: 1fr; } .site-map-arrow { min-height: 28px; transform: rotate(90deg); } .site-map-arrow span { display: none; } }
+    html[data-contrast="high"] .site-menu nav { border-width: 2px; box-shadow: none; }
+    @media (max-width: 560px) { body { padding: 0; } main { border: 0; border-radius: 0; min-height: 100vh; padding: 28px 20px; } .site-map { padding: 18px; } .site-map-row, .document-grid { grid-template-columns: 1fr; } .site-map-arrow { min-height: 28px; transform: rotate(90deg); } .site-map-arrow span { display: none; } .utility-row { gap: 10px; } .site-menu nav { width: min(360px, calc(100vw - 40px)); } }
   </style>
 </head>
 <body>
@@ -70,6 +86,23 @@
     <div class="utility-row">
       <a class="language-link" href="en/index.html" lang="en">English</a>
       <label class="contrast-toggle"><input id="contrast-toggle" type="checkbox"><span>高コントラスト</span></label>
+      <details class="site-menu">
+        <summary aria-label="文書メニューを開く"><span class="menu-icon" aria-hidden="true"><span class="menu-icon-bar"></span><span class="menu-icon-bar"></span><span class="menu-icon-bar"></span></span>文書メニュー</summary>
+        <nav aria-label="文書メニュー">
+          <div class="menu-links">
+            <a href="index.html" aria-current="page"><span class="menu-link-title">文書ポータルのトップ<span class="menu-current-label">（現在の文書）</span></span><span class="menu-link-detail">目的別の入口へ戻る</span></a>
+            <a href="README.html"><span class="menu-link-title">プロジェクトの概要</span><span class="menu-link-detail">配布物、通常版・Lite版、基本方針</span></a>
+            <a href="docs/ja/README.html"><span class="menu-link-title">日本語の文書</span><span class="menu-link-detail">導入・操作・保存・トラブル対処</span></a>
+            <a href="introduction/index.html"><span class="menu-link-title">背景・設計・確認資料</span><span class="menu-link-detail">設計の考え方、利用判断、根拠と確認範囲</span></a>
+            <a href="LICENSES_INDEX.html"><span class="menu-link-title">ライセンスと第三者通知</span><span class="menu-link-detail">利用条件と第三者コンポーネント</span></a>
+          </div>
+          <div class="menu-outside">
+            <a href="https://pdf-note-workspace.soone-y.com/"><span class="menu-link-title">紹介サイト</span><span class="menu-link-detail">ソフトの概要と配布先を見る</span></a>
+            <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases"><span class="menu-link-title">配布物を入手する</span><span class="menu-link-detail">GitHub Releases を開く</span></a>
+            <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace"><span class="menu-link-title">GitHub リポジトリ</span><span class="menu-link-detail">ソース、Issue、公開履歴を見る</span></a>
+          </div>
+        </nav>
+      </details>
     </div>
     <h1>PDF Note Workspace<br>文書ポータル</h1>
     <p class="lead">アプリを使うときに必要な説明を、目的別に案内しています。初めて使う方は「はじめて使う方へ」から進んでください。</p>

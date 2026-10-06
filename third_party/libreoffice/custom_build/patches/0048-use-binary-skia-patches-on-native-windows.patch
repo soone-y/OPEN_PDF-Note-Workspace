@@ -1,0 +1,11 @@
+--- a/external/skia/UnpackedTarball_skia.mk
++++ b/external/skia/UnpackedTarball_skia.mk
+@@ -45,7 +45,7 @@
+     windows-avoid-interface-macro.patch.1 \
+ 
+-ifneq ($(MSYSTEM),)
++ifneq ($(strip $(MSYSTEM)$(filter WNT,$(OS))),)
+ # use binary flag so patch from git-bash won't choke on mixed line-endings in patches
+ $(eval $(call gb_UnpackedTarball_set_patchflags,skia,--binary))
+ endif
+ 

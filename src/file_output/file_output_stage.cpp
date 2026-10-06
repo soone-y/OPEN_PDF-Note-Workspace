@@ -1292,7 +1292,8 @@ bool CaptureStageDestinationObservation(const std::filesystem::path &path,
     return false;
   }
 
-  const DWORD attributes = GetFileAttributesW(path.c_str());
+  const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(path);
+  const DWORD attributes = GetFileAttributesW(openPath.c_str());
   if (attributes == INVALID_FILE_ATTRIBUTES) {
     const DWORD error = GetLastError();
     if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
@@ -1953,7 +1954,8 @@ bool DeleteResolvedEmptyClropDestination(const StageMeta &meta,
     return false;
   }
 
-  const DWORD attributes = GetFileAttributesW(meta.destPath.c_str());
+  const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(meta.destPath);
+  const DWORD attributes = GetFileAttributesW(openPath.c_str());
   if (attributes == INVALID_FILE_ATTRIBUTES) {
     const DWORD error = GetLastError();
     if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)

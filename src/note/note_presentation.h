@@ -9,6 +9,17 @@
 
 namespace note {
 
+// Shared applicability for settings dialogs and status-assist commands.
+// Disabling a control does not clear its persisted preference.
+struct NoteInteractionControlAvailability {
+    bool raw_wrap = false;
+    bool normal_caret_raw = false;
+    bool click_enters_insert = false;
+};
+
+[[nodiscard]] NoteInteractionControlAvailability ResolveNoteInteractionControlAvailability(
+    bool render_active, bool vim_enabled) noexcept;
+
 enum class NotePresentationFrameAction {
     RawFallback,
     RenderCurrent,
@@ -43,6 +54,55 @@ enum class NotePresentationReason {
     SnapshotUnavailable,
 };
 
+// Win32 may retain GCS_COMPSTR briefly after GCS_RESULTSTR. Rendering must
+// distinguish that acknowledged result from an editable preedit: otherwise a
+// polling recovery path can incorrectly turn a committed edit back into a
+// whole-document native fallback. The adapter owns the Win32 messages; this
+// small state machine owns only the presentation meaning of those messages.
+enum class NoteImePresentationPhase {
+    Idle,
+    Preedit,
+    ResultCommittedAwaitingEnd,
+    CancelledAwaitingEnd,
+};
+
+enum class NoteImePresentationEvent {
+    StartComposition,
+    ResultCommitted,
+    CancelComposition,
+    EndComposition,
+    FocusLost,
+    ObservedCompositionText,
+    ObservedNoCompositionText,
+};
+
+[[nodiscard]] NoteImePresentationPhase AdvanceNoteImePresentationPhase(
+    NoteImePresentationPhase phase,
+    NoteImePresentationEvent event) noexcept;
+
+[[nodiscard]] bool NoteImePresentationPhaseHasLivePreedit(
+    NoteImePresentationPhase phase) noexcept;
+
+// Client-pixel geometry only; IMM handles monitor edges and candidate size.
+// Protect the whole visible input band, not the one-pixel caret column.
+struct NoteImeClientRect {
+    int left = 0;
+    int top = 0;
+    int right = 0;
+    int bottom = 0;
+};
+struct NoteImeCandidatePlacement {
+    NoteImeClientRect exclusion;
+    // CFS_EXCLUDE point of interest, not the candidate window origin.
+    int anchor_x = 0;
+    int anchor_y = 0;
+};
+[[nodiscard]] std::optional<NoteImeCandidatePlacement> ResolveNoteImeCandidatePlacement(
+    const NoteImeClientRect& caret,
+    const NoteImeClientRect& input_band,
+    const NoteImeClientRect& viewport,
+    int gap_px) noexcept;
+
 // Exactly one surface owns the visible text for each logical line in a frame.
 // NativeRaw leaves the captured RichEdit text visible, OverlayRaw repaints the
 // current raw text itself, and Structured paints the committed render cache.
@@ -69,9 +129,11 @@ struct NotePresentationFrameState {
     bool edit_pending = false;
     bool line_count_may_change = false;
     bool ime_composing = false;
-    // The UI adapter publishes this only after an exact editor-to-TextCore
-    // comparison for the current document revision. A missing binding cannot
-    // safely reuse canonical line geometry in a hybrid frame.
+    // The UI adapter normally publishes this only after an exact
+    // editor-to-TextCore comparison for the current document revision. A live
+    // IME preedit may instead set it only when a bounded start-of-composition
+    // anchor proves the identity and geometry of the committed snapshot; the
+    // preedit itself remains outside the canonical document.
     bool editor_text_core_current = true;
     // The Win32 adapter proves this only when the live composition is confined
     // to its current logical line and no structural/geometry-sensitive edit
@@ -89,6 +151,24 @@ struct NotePresentationPlan {
         return frame_kind == NotePresentationFrameKind::DrawCommitted;
     }
 };
+
+// A table grid is shared by every row in that table, so a stale edit inside a
+// table cannot reuse its prior column geometry.  In contrast, a proven
+// same-line edit outside every committed table may retain the immutable table
+// cache while its one editing row is owned by raw presentation.  This is a
+// policy decision only; the Win32 adapter still verifies the cache snapshot,
+// font metrics, and DPI before reading it.
+struct NoteCommittedTableLayoutReuseState {
+    bool committed_snapshot_available = false;
+    bool editor_text_core_current = false;
+    bool frame_reuses_committed_layout = false;
+    bool stale_range_is_one_line = false;
+    bool stale_line_touches_committed_table = false;
+    bool commit_before_paint = false;
+};
+
+[[nodiscard]] bool CanReuseCommittedTableLayoutForPendingEdit(
+    const NoteCommittedTableLayoutReuseState& state) noexcept;
 
 // Win32-independent geometry for one already-measured logical line. The
 // caller owns the boundary storage for the duration of this value's use; the
@@ -176,6 +256,25 @@ NotePresentationLineSurface ResolveNotePresentationLineSurface(
                                                      bool has_selection,
                                                      int line,
                                                      int caret_line) noexcept;
+
+// Insert-mode editing owns its caret row, or every row intersected by its
+// native selection. Callers pass logical line indices captured from one
+// editor snapshot.
+[[nodiscard]] bool NoteEditingSelectionOwnsRawLine(bool has_selection,
+                                                    int selection_start_line,
+                                                    int selection_end_line,
+                                                    int caret_line,
+                                                    int line) noexcept;
+
+// Normal mode is a user preference independent of Insert mode.  When the
+// preference is on, only its current non-visual caret row is native raw;
+// otherwise normal-mode navigation remains structured.  Visual selections
+// retain their dedicated structured selection presenter.
+[[nodiscard]] bool NoteNormalCaretPreferenceOwnsRawLine(bool normal_mode_active,
+                                                         bool normal_visual_mode,
+                                                         bool show_caret_line_raw,
+                                                         int line,
+                                                         int caret_line) noexcept;
 
 // TeX source is a math-only presentation route: when structured rendering is
 // enabled it renders completed TeX formulae even if the optional Markdown

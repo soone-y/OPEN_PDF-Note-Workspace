@@ -64,7 +64,8 @@ static bool ReadWorkspaceLogFileIdentity(const std::filesystem::path& path,
         return false;
     }
 
-    HANDLE handle = CreateFileW(path.c_str(),
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(path);
+    HANDLE handle = CreateFileW(openPath.c_str(),
                                 FILE_READ_ATTRIBUTES,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                 nullptr,
@@ -428,7 +429,8 @@ static void CleanupFailedArchiveTempFile(HANDLE* handle,
 static bool DeleteWorkspaceLogFile(const WorkspaceLogFileInfo& logFile, std::wstring* outErr) {
     if (outErr) outErr->clear();
 
-    HANDLE handle = CreateFileW(logFile.path.c_str(),
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(logFile.path);
+    HANDLE handle = CreateFileW(openPath.c_str(),
                                 DELETE | FILE_READ_ATTRIBUTES,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                 nullptr,

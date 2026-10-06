@@ -50,7 +50,7 @@ std::filesystem::path DialogWorkspaceInitialFolder();
 std::filesystem::path DialogWorkspaceSelectionInitialFolder();
 std::filesystem::path DialogDownloadsInitialFolder();
 std::filesystem::path DialogDocumentsInitialFolder();
-bool PersistTempExternalLecturesToSetup();
+bool PersistTempExternalLecturesToSetup(std::wstring* outError = nullptr);
 std::optional<std::wstring> PromptExistingLocalPath(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool requireDirectory,
                                                      const std::filesystem::path& highlightPath = {});
 std::optional<std::wstring> PromptExistingLocalPathAppFirst(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool requireDirectory);

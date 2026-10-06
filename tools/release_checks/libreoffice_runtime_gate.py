@@ -94,6 +94,10 @@ def collect_violations(image_root: Path) -> list[RuntimeViolation]:
             max_strings=40,
         )
         relative = path.relative_to(image_root).as_posix()
+        # This runtime's COM entry point is also a Windows PE image; the
+        # generic scanner's allowance for legacy DOS COM files does not apply.
+        if (binary_scan.requires_pe_parse(path) or path.suffix.lower() == ".com") and finding.pe_status != "valid":
+            violations.append(RuntimeViolation("unparseable-pe", relative, finding.pe_status))
         for imported in finding.import_dlls:
             if imported.lower() in PROHIBITED_IMPORTED_DLLS:
                 violations.append(RuntimeViolation("prohibited-import", relative, imported))
@@ -128,7 +132,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     binary_scan.configure_utf8_output()
     args = parse_args(argv)
     image_root = Path(args.image).resolve()
-    violations = collect_violations(image_root)
+    try:
+        violations = collect_violations(image_root)
+    except (OSError, ValueError) as error:
+        print(f"LibreOffice runtime gate could not complete: {error}", file=sys.stderr)
+        return 1
 
     if args.format == "json":
         print(

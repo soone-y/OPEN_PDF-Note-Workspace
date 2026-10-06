@@ -50,7 +50,7 @@ function Test-IsSameOrChildPath([string]$ParentPath, [string]$CandidatePath) {
 }
 
 function Resolve-OperationFile([string]$Pattern) {
-    $operationsDir = Join-Path $repoRoot "docs\internal\operations"
+    $operationsDir = Join-Path $repoRoot "docs\internal"
     $matches = @(Get-ChildItem -LiteralPath $operationsDir -File -Filter $Pattern)
     if ($matches.Count -ne 1) {
         throw "Expected exactly one operations file matching '$Pattern', found $($matches.Count)."

@@ -16,9 +16,11 @@
 | --- | --- | --- | --- |
 | `pdfium/` | PDF の読み込み、描画、テキスト抽出、PDF 書き出し | SDK ヘッダ、import lib、`pdfium.dll`、ライセンス文書 | `pdfium.dll` と PDFium 関連ライセンスを同梱 |
 | `md4c/` | ノート本文の Markdown 解析 | `md4c.c`, `md4c.h` を含む vendor ソースとライセンス文書 | バイナリには静的に組み込まれ、ライセンス文書を同梱 |
-| `libreoffice/` | docx/pptx など Office 文書から PDF へのローカル変換、同梱フォントのアプリ内 private font 利用 | 比較用管理者展開イメージ、通信機能を除いた custom runtime、再現用入力、ライセンス文書 | 通常版は検証済み custom runtime と選択フォントを同梱し、Lite 版は同梱しない |
+| `libreoffice/` | docx/pptx など Office 文書から PDF へのローカル変換、同梱フォントのアプリ内 private font 利用 | 比較・フォント参照用 image、通信機能を除いた custom runtime、再現用入力、ライセンス文書 | 通常版は検証済み runtime を `lo/` へ配置。Lite 版は変換 runtime を含めない。選択 private font は両 edition に同梱 |
 | `zlib/` | DOCX staging ZIP の展開・検証 | 1.3.2 のヘッダ、import library、DLL、版・ライセンス証跡 | 固定した `zlib1.dll` とライセンスを同梱 |
 | `mingw_runtime_licenses/` | MinGW-w64 runtime DLL のライセンス証跡 | `libstdc++`, `libgcc`, `winpthread` 向けライセンス文書 | runtime DLL と対応ライセンスを同梱 |
+
+2026-10-05時点の採用版は、PDFium `156.0.8076.0`、アプリ側MD4C `0.6.0` + 固定commit・日本語patch、zlib `1.3.2`、LibreOffice custom runtime `26.2.6.3`。固定版・hashの正本は各依存の `VERSION` とmanifest、[ライセンス一覧](../LICENSES_INDEX.md)、[第三者notice](../THIRD_PARTY_NOTICES.md)で確認する。LibreOffice内蔵MD4Cは別のUTF-8 `0.5.3`で、custom patch `0050`により必要なallocation失敗処理をbackport済み。アプリ側の更新だけで内蔵コピーも更新済みと扱わない。
 
 ## 共通ルール
 
@@ -47,7 +49,7 @@
   - release に入れるバイナリとライセンス文書が実態と一致していること
 - `.gitignore`
   - 大きな実体や生成物を不用意に Git 追跡せず、必要な README / LICENSE / NOTICE / VERSION は追跡できること
-- `docs/internal/reports/license_棚卸し調査レポート_2026-04-09.md`
+- `docs/internal/archive/reports/license_棚卸し調査レポート_2026-04-09.md`
   - ライセンス整理メモが最新状態に追随していること
 
 ## `pdfium/`
@@ -115,7 +117,7 @@ MD4C はノート本文の Markdown 解析依存です。本アプリでは Mark
 - `scripts/build/build_sources.json` は `third_party/md4c/src/md4c.c` を build source に含めます
 - `scripts/build/build_workspace.ps1` は `third_party/md4c/src` を include path に入れます
 - `md4c.c` は `MD4C_USE_UTF16` を付けてコンパイルします
-- `VERSION` は 0.5.3 以後の固定 upstream commit を記録します
+- `VERSION` は採用 release baseline と完全な upstream commit（現在は v0.6.0）を記録します
 - `patches/0001-japanese-whitespace-and-punctuation.patch` は全角空白と日本語句読点の局所変更を再現します
 
 ### 配布
@@ -144,21 +146,23 @@ LibreOffice は Office 文書を PDF に変換するためのローカル変換�
 ### 保持対象
 
 - `VERSION`
-  - LibreOffice のバージョン、取得元 MSI、ハッシュなどの証跡
+  - 採用 custom runtime `26.2.6.3`、公式core archive・runtime hash、適用patch系列の証跡
 - `README.md`
-  - headless 実行条件、削除済みファイル、使用時の安全条件
+  - 採用runtimeの再現入力、headless条件、安全条件と旧imageの時点記録
+- `custom_runtime/instdir/`
+  - 検証済み変換runtime。実行入口は `program/soffice.com`。大きい実体はGit無視
+- `custom_build/` と `source_archives_26.2.6.3.manifest.tsv` / `external_tarballs_26.2.6.3.manifest.tsv`
+  - build・通信除外・配布縮小の入力、49patch、公式coreと使用83archiveのhash。archive本体・build tree・machine-local設定は公開snapshotへ含めない
 - `image/`
-  - LibreOffice Windows x86_64 管理者展開イメージ
-- `image/program/soffice.com`
-  - アプリから呼ぶ想定の headless 変換入口
-- `image/program/soffice.exe`
-  - GUI-capable entry point。アプリからは使わない方針
+  - 旧 `26.2.3.2` 管理者展開物。選択font・license参照と比較専用。変換runtimeとして採用・配布しない
 - `image/license.txt`, `image/LICENSE.html`, `image/NOTICE`
   - LibreOffice 本体と同梱コンポーネントのライセンス/通知
 
 ### ローカル変更
 
-外部通信禁止と送信機能排除のため、管理者展開イメージから更新/送信系ファイルを削除済みです。削除対象を増減した場合は、この一覧、`third_party/libreoffice/README.md`、`THIRD_PARTY_NOTICES.md` を同じ作業で更新します。
+変換runtimeは公式core sourceから通信・更新・クラッシュ報告・AVMedia・OpenCL・scripting等を除外したcustom buildです。公式MSIの送信ファイルだけを削除したimageで代用しません。現在のpatch系列は0001–0041 / 0043–0050（0042は予約番号）で、公式との重複を比較し、日本語変換修正を保持します。
+
+配布用コピーは `custom_build/release_reduction_manifest.json` で縮小します。Math/Calcの変換構成と保護pathは保持し、Calcの再削減は別の品質比較・利用者判断へ分離します。旧imageの削除一覧は過去の比較記録であり、採用runtimeの削減根拠に流用しません。構成変更時はこの説明、`libreoffice/README.md`、manifest、`THIRD_PARTY_NOTICES.md`を同期します。
 
 ### 実行条件
 
@@ -176,8 +180,9 @@ LibreOffice をアプリから呼ぶ場合は、次を必須条件にします�
 ### 配布
 
 - `scripts/release/pack_release.ps1` は `image/Fonts/` の選択 subset を `libreoffice/image/Fonts/` へコピーします
-- 対応する `license.txt`, `LICENSE.html`, `NOTICE` は `licenses/libreoffice/` へコピーします
-- 標準 release は `libreoffice/custom_runtime/instdir/` に Office 変換 runtime を含みます。変換機能を含めない Lite release では `scripts/release/pack_release.ps1 -Lite` を指定します
+- 通常版は採用 `custom_runtime/instdir/` の一式を配布先の短い `lo/` へコピーし、縮小・runtime gateを適用します。Lite版は `-Lite` により変換runtimeを含めません。選択private fontのコピーはLiteでも行います
+- `license.txt`, `LICENSE.html`, `NOTICE` は `licenses/libreoffice/` へコピーします。runtime同梱時は同梱runtimeの文書を採用し、再現options・manifest・patchも `licenses/libreoffice/custom_build/` に含めます
+- 公開snapshotはallowlist対象の説明・再現入力を含みますが、`image/`、runtime実体、source archive本体、profile/cache、復旧用backupは含めません
 - release 同梱前に、外部通信、自動更新、クラッシュ送信、外部リンク参照、マクロ、音の発生がないことを実機で確認します
 
 ### 安全上の扱い

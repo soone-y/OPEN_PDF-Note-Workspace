@@ -47,12 +47,9 @@ static void ShowAnnotToolShortcutEditor(HWND owner);
 // Reused numeric values in other dialogs are allowed only across different HWNDs.
 enum : int {
     IDC_TONE = 4101,
-    IDC_TONE_VARIANT_PURE,
-    IDC_TONE_VARIANT_GUARD,
-    IDC_TONE_VARIANT_EMPHASIS,
-    IDC_TONE_VARIANT_WHITE,
-    IDC_TONE_VARIANT_BLACK,
-    IDC_BOTTOM_PANE,
+    // 4102--4106 were the retired radio-button controls. Preserve later
+    // control IDs for dialog-message compatibility.
+    IDC_BOTTOM_PANE = 4107,
     IDC_SELECTION_STYLE,
     IDC_QUICKANNOT_POPUP_PLACEMENT,
     IDC_SHORTCUT_TEXT_TAG_KEY,
@@ -80,6 +77,7 @@ enum : int {
     IDC_TOUCHPAD_INVERT_HORIZONTAL = 4121,
     IDC_PDF_SINGLE_PAGE_MODE = 4140,
     IDC_PDF_ZOOM_OVERLAY = 4141,
+    IDC_PDF_PAGE_OVERLAY = 4142,
     IDC_PDF_FLOW_MODE = 4184,
     IDC_SCHEDULE_PERIODS = 4160,
     IDC_SCHEDULE_TIME_EDIT,
@@ -101,6 +99,7 @@ enum : int {
     IDC_NOTE_BG_CUSTOM,
     IDC_NOTE_MATH_MARGIN,
     IDC_NOTE_MATH_SUPSUB,
+    IDC_NOTE_INLINE_MATH_VERTICAL_ALIGNMENT,
     IDC_NOTE_OVERLAY_REFRESH_DELAY,
     IDC_NOTE_FULL_REPARSE_DELAY,
     IDC_DEBUG_LOG_PREVIEW_TRACE,
@@ -117,7 +116,9 @@ enum : int {
     IDC_SESSION_NUMBERING = 4211,
     IDC_POINTER_OFFSET_X = 4212,
     IDC_POINTER_OFFSET_Y = 4213,
-    IDC_SESSION_FILE_LAYOUT = 4214
+    IDC_SESSION_FILE_LAYOUT = 4214,
+    // Keep the legacy sequential IDs above stable; this is a new control.
+    IDC_TONE_VARIANT = 4220
 };
 
 enum class GeneralSettingsPageMode {
@@ -381,11 +382,7 @@ struct GeneralSettingsCtx {
     int reopenSection = kGeneralSectionDisplay;
     int nextDialog = kSettingsNavNone;
     HWND cbTone = nullptr;
-    HWND radTonePure = nullptr;
-    HWND radToneGuard = nullptr;
-    HWND radToneEmphasis = nullptr;
-    HWND radToneWhite = nullptr;
-    HWND radToneBlack = nullptr;
+    HWND cbToneVariant = nullptr;
     HWND btnToneCreate = nullptr;
     HWND btnToneEdit = nullptr;
     HWND cbBottomPane = nullptr;
@@ -399,6 +396,7 @@ struct GeneralSettingsCtx {
     HWND chkTouchpadInvertVertical = nullptr;
     HWND chkTouchpadInvertHorizontal = nullptr;
     HWND chkPdfSinglePageMode = nullptr;
+    HWND chkPdfPageOverlay = nullptr;
     HWND chkPdfZoomOverlay = nullptr;
     HWND chkAutoPairBrackets = nullptr;
     HWND chkFullWidthParenCaretInside = nullptr;
@@ -434,6 +432,7 @@ struct GeneralSettingsCtx {
     HWND btnNoteBgCustom = nullptr;
     HWND cbNoteMathMargin = nullptr;
     HWND cbNoteMathSupSub = nullptr;
+    HWND cbNoteInlineMathVerticalAlignment = nullptr;
     HWND cbNoteOverlayRefreshDelay = nullptr;
     HWND cbNoteFullReparseDelay = nullptr;
     HWND lblNoteRenderLatin = nullptr;
@@ -498,6 +497,18 @@ static std::wstring NoteRenderModeLabel(bool enabled, bool math) {
 static std::wstring NoteRatioLabel(int topPercent) {
     int top = std::clamp(topPercent, 5, 95);
     return std::to_wstring(top) + L":" + std::to_wstring(100 - top);
+}
+
+static int NormalizeInlineMathVerticalAlignment(int value) {
+    return std::clamp(value, 0, 2);
+}
+
+static std::wstring InlineMathVerticalAlignmentLabel(int value) {
+    switch (NormalizeInlineMathVerticalAlignment(value)) {
+    case 0: return localization::Text(L"settings.note_inline_math.top");
+    case 1: return localization::Text(L"settings.note_inline_math.center");
+    default: return localization::Text(L"settings.note_inline_math.bottom");
+    }
 }
 
 static std::wstring NoteSupSubDistributionLabel(int supPercent) {
@@ -573,6 +584,21 @@ static void FillNoteRenderModeCombo(HWND cb, bool enabled, bool math) {
         }
     }
     SendMessageW(cb, CB_SETCURSEL, sel, 0);
+}
+
+static void FillInlineMathVerticalAlignmentCombo(HWND cb, int currentValue) {
+    if (!cb) return;
+    SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+    const int current = NormalizeInlineMathVerticalAlignment(currentValue);
+    for (int value = 0; value <= 2; ++value) {
+        const std::wstring label = InlineMathVerticalAlignmentLabel(value);
+        const int index = static_cast<int>(SendMessageW(
+            cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+        if (index >= 0) {
+            SendMessageW(cb, CB_SETITEMDATA, index, static_cast<LPARAM>(value));
+            if (value == current) SendMessageW(cb, CB_SETCURSEL, index, 0);
+        }
+    }
 }
 
 static void FillNoteGridPitchCombo(HWND cb, int currentPitch) {
@@ -708,17 +734,17 @@ static void UpdateGeneralNoteControlStates(GeneralSettingsCtx* ctx) {
     if (!ctx) return;
     int renderMode = static_cast<int>(SelectedComboItemData(
         ctx->cbNoteRenderMode, static_cast<DWORD_PTR>(CurrentNoteRenderModeValue(g_noteRenderEnabled, g_noteRenderMath))));
-    bool rawMode = (renderMode == 0);
-    if (ctx->chkNoteWrapEnabled) {
-        EnableWindow(ctx->chkNoteWrapEnabled, rawMode);
-    }
-    bool vimEnabled = ctx->chkNoteVimMode &&
+    const bool vimEnabled = ctx->chkNoteVimMode &&
         (SendMessageW(ctx->chkNoteVimMode, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    const auto available = note::ResolveNoteInteractionControlAvailability(renderMode != 0, vimEnabled);
+    if (ctx->chkNoteWrapEnabled) {
+        EnableWindow(ctx->chkNoteWrapEnabled, available.raw_wrap);
+    }
     if (ctx->chkNoteVimCaretLineRawText) {
-        EnableWindow(ctx->chkNoteVimCaretLineRawText, vimEnabled);
+        EnableWindow(ctx->chkNoteVimCaretLineRawText, available.normal_caret_raw);
     }
     if (ctx->chkNoteVimClickInsert) {
-        EnableWindow(ctx->chkNoteVimClickInsert, vimEnabled);
+        EnableWindow(ctx->chkNoteVimClickInsert, available.click_enters_insert);
     }
     bool gridEnabled = ctx->chkNoteGridEnabled &&
         (SendMessageW(ctx->chkNoteGridEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -1211,6 +1237,7 @@ static bool ShowThemeEditDialog(HWND owner, const std::wstring& themeName, Theme
     UpdateWindow(w);
     MSG msg;
     while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (HandleWorkspaceMemoMessage(msg)) continue;
         if (ShouldSkipImeMessageInLoop(msg)) continue;
         if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
         if (!IsDialogMessageW(w, &msg)) {

@@ -24,6 +24,9 @@ static std::wstring NormalizeToneVariantValue(const std::wstring& value) {
     if (v == L"emphasis" || v == L"accent" || v == L"tone_emphasis" || v == L"toneemphasis") return L"emphasis";
     if (v == L"white") return L"white";
     if (v == L"black") return L"black";
+    if (v == L"cvd_red_green" || v == L"red_green" || v == L"protan_deutan") return L"cvd_red_green";
+    if (v == L"cvd_blue_yellow" || v == L"blue_yellow" || v == L"tritan") return L"cvd_blue_yellow";
+    if (v == L"cvd_monochrome" || v == L"monochrome" || v == L"achromatopsia") return L"cvd_monochrome";
     return L"pure";
 }
 
@@ -33,7 +36,29 @@ static std::wstring ToneVariantLabel(const std::wstring& value) {
     if (v == L"emphasis") return localization::Text(L"settings.general.tone_variant.emphasis");
     if (v == L"white") return localization::Text(L"settings.general.tone_variant.white");
     if (v == L"black") return localization::Text(L"settings.general.tone_variant.black");
+    if (v == L"cvd_red_green") return localization::Text(L"settings.general.tone_variant.cvd_red_green");
+    if (v == L"cvd_blue_yellow") return localization::Text(L"settings.general.tone_variant.cvd_blue_yellow");
+    if (v == L"cvd_monochrome") return localization::Text(L"settings.general.tone_variant.cvd_monochrome");
     return localization::Text(L"settings.general.tone_variant.pure");
+}
+
+static constexpr std::array<const wchar_t*, 8> kToneVariantValues{{
+    L"pure", L"guard", L"emphasis", L"white", L"black",
+    L"cvd_red_green", L"cvd_blue_yellow", L"cvd_monochrome",
+}};
+
+static void FillToneVariantCombo(HWND cb, const std::wstring& currentValue) {
+    if (!cb) return;
+    SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+    const std::wstring current = NormalizeToneVariantValue(currentValue);
+    int selected = 0;
+    for (size_t i = 0; i < kToneVariantValues.size(); ++i) {
+        const std::wstring label = ToneVariantLabel(kToneVariantValues[i]);
+        const int index = static_cast<int>(SendMessageW(
+            cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+        if (index >= 0 && current == kToneVariantValues[i]) selected = index;
+    }
+    SendMessageW(cb, CB_SETCURSEL, selected, 0);
 }
 
 static std::wstring GenHexColorW(COLORREF c) {
@@ -343,6 +368,7 @@ static std::wstring LeftRightLineMoveLabel(const std::wstring& action) {
 
 static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     if (!ctx) return;
+    const int previousInlineMathVerticalAlignment = g_config.noteInlineMathVerticalAlignment;
     std::wstring prevLectureSort = g_config.lectureSortMode;
     std::wstring prevSessionSort = g_config.sessionSortMode;
     std::wstring prevSessionNumbering = g_config.sessionNumberingMode;
@@ -353,6 +379,7 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     int prevPointerOffsetX = std::clamp(g_config.pointerOffsetX, -20, 20);
     int prevPointerOffsetY = std::clamp(g_config.pointerOffsetY, -20, 20);
     std::wstring prevPdfFlowMode = NormalizePdfFlowModeValue(g_config.pdfFlowMode);
+    bool prevPdfPageOverlay = g_config.showPdfPageOverlay;
     bool prevPdfZoomOverlay = g_config.showPdfZoomOverlay;
     std::wstring prevThemeName = g_themeName;
     std::wstring prevToneVariant = NormalizeToneVariantValue(g_config.toneVariant);
@@ -383,18 +410,10 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     }
 
     bool toneVariantChanged = false;
-    if (ctx->radTonePure || ctx->radToneGuard || ctx->radToneEmphasis || ctx->radToneWhite || ctx->radToneBlack) {
-        std::wstring toneVariant = L"pure";
-        if (ctx->radToneGuard && SendMessageW(ctx->radToneGuard, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-            toneVariant = L"guard";
-        } else if (ctx->radToneEmphasis && SendMessageW(ctx->radToneEmphasis, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-            toneVariant = L"emphasis";
-        } else if (ctx->radToneWhite && SendMessageW(ctx->radToneWhite, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-            toneVariant = L"white";
-        } else if (ctx->radToneBlack && SendMessageW(ctx->radToneBlack, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-            toneVariant = L"black";
-        }
-        g_config.toneVariant = toneVariant;
+    if (ctx->cbToneVariant) {
+        int selected = static_cast<int>(SendMessageW(ctx->cbToneVariant, CB_GETCURSEL, 0, 0));
+        selected = std::clamp(selected, 0, static_cast<int>(kToneVariantValues.size()) - 1);
+        g_config.toneVariant = kToneVariantValues[static_cast<size_t>(selected)];
         toneVariantChanged = (NormalizeToneVariantValue(g_config.toneVariant) != prevToneVariant);
     }
 
@@ -527,6 +546,11 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
             UpdatePdfSinglePageModeMenuCheck();
         }
     }
+    if (ctx->chkPdfPageOverlay) {
+        g_config.showPdfPageOverlay =
+            (SendMessageW(ctx->chkPdfPageOverlay, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    const bool pdfPageOverlayChanged = (g_config.showPdfPageOverlay != prevPdfPageOverlay);
     if (ctx->chkPdfZoomOverlay) {
         g_config.showPdfZoomOverlay =
             (SendMessageW(ctx->chkPdfZoomOverlay, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -637,6 +661,11 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
             ctx->cbNoteMathSupSub, g_config.noteMathSupSubGapSupPercent));
         g_config.noteMathSupSubGapSupPercent = (supPercent <= 0) ? 0 : std::clamp(supPercent, 5, 95);
         mathrender::SetSupSubGapSupPercent(g_config.noteMathSupSubGapSupPercent);
+    }
+    if (ctx->cbNoteInlineMathVerticalAlignment) {
+        g_config.noteInlineMathVerticalAlignment = NormalizeInlineMathVerticalAlignment(
+            static_cast<int>(SelectedComboItemData(ctx->cbNoteInlineMathVerticalAlignment,
+                                                    g_config.noteInlineMathVerticalAlignment)));
     }
     if (ctx->cbNoteOverlayRefreshDelay) {
         g_config.noteOverlayRefreshDelayMs = std::clamp(
@@ -789,6 +818,9 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     g_noteBgColor = ResolveNoteBackgroundColor(g_config.noteBgSource, g_config.noteBgThemeName, g_config.noteBgColor);
     RefreshNoteBackgroundUi(ctx->owner ? ctx->owner : g_hMainWnd);
     PersistConfig();
+    if (g_config.noteInlineMathVerticalAlignment != previousInlineMathVerticalAlignment) {
+        RefreshNoteRenderForPreferenceChange();
+    }
 
     SettingsApplyEffects effects{};
     effects.updateAutoSaveTimer = true;
@@ -797,14 +829,14 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
                      quickAnnotPopupPlacementChanged || showMathChanged;
     effects.updateMathListVisibility = showMathChanged;
     effects.refreshBottomPane = pinChanged || noteModeChanged;
-    if (pdfZoomOverlayChanged) {
+    if (pdfPageOverlayChanged || pdfZoomOverlayChanged) {
         effects.refreshBottomPane = true;
     }
     effects.reloadLectureList = lectureSortChanged;
     effects.reloadSessionList = sessionSortChanged;
     effects.applyThemeUi = themeUiChanged;
     effects.invalidatePdfView = selectionStyleChanged || pdfFlowModeChanged || pointerOffsetChanged;
-    if (pdfZoomOverlayChanged) {
+    if (pdfPageOverlayChanged || pdfZoomOverlayChanged) {
         effects.invalidatePdfView = true;
     }
     effects.invalidateNoteEdit = true;

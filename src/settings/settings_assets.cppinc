@@ -6,7 +6,7 @@ namespace {
 constexpr int IDC_SETTINGS_ASSETS_LIST = 7130;
 constexpr int IDC_SETTINGS_ASSETS_REFRESH = 7131;
 constexpr int IDC_SETTINGS_ASSETS_PREVIEW = 7132;
-constexpr int IDC_SETTINGS_ASSETS_GLOBAL_MEMOS = 7133;
+constexpr int IDC_SETTINGS_ASSETS_WORKSPACE_MEMO = 7133;
 constexpr int IDC_SETTINGS_ASSETS_PRESET_SAVE = 7134;
 constexpr int IDC_SETTINGS_ASSETS_PRESET_LOAD = 7135;
 constexpr int IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE = 7138;
@@ -18,6 +18,8 @@ struct SettingsAssetEntry {
     bool exists = false;
     bool directory = false;
     bool expectedDirectory = false;
+    bool fileNameOnly = false;
+    std::wstring displayPath = {};
 };
 
 struct SettingsAssetsCtx {
@@ -25,7 +27,7 @@ struct SettingsAssetsCtx {
     HWND btnRefresh = nullptr;
     HWND btnCopyPath = nullptr;
     HWND btnPreview = nullptr;
-    HWND btnGlobalMemos = nullptr;
+    HWND btnWorkspaceMemo = nullptr;
     HWND btnPresetSave = nullptr;
     HWND btnPresetLoad = nullptr;
     HWND preview = nullptr;
@@ -118,6 +120,18 @@ static bool SettingsAssetIsDirectory(const SettingsAssetEntry& entry) {
     return entry.exists && entry.directory;
 }
 
+// Opens only a verified local directory selected from this internal list. It
+// does not mutate the asset and never follows UNC or reparse-point targets.
+static bool OpenSettingsAssetDirectory(HWND owner, const SettingsAssetEntry& entry) {
+    if (!SettingsAssetIsDirectory(entry) || entry.path.empty() || IsUncPath(entry.path)) return false;
+    bool isReparsePoint = false;
+    if (!TryIsReparsePointNoFollow(entry.path, isReparsePoint) || isReparsePoint) return false;
+    const std::wstring parameters = L"\"" + entry.path.wstring() + L"\"";
+    const HINSTANCE opened = ShellExecuteW(owner, L"open", L"explorer.exe", parameters.c_str(),
+                                            nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(opened) > 32;
+}
+
 static void UpdateSettingsAssetPreviewUi(SettingsAssetsCtx* ctx, bool loadContent) {
     if (!ctx || !ctx->list || !ctx->preview || !ctx->btnPreview || !ctx->btnCopyPath || !ctx->previewLabel) return;
     const int selected = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
@@ -129,9 +143,9 @@ static void UpdateSettingsAssetPreviewUi(SettingsAssetsCtx* ctx, bool loadConten
     const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, selected, 0));
     if (index >= ctx->entries.size()) return;
     const auto& entry = ctx->entries[index];
-    const bool directory = SettingsAssetIsDirectory(entry);
+    const bool directory = entry.directory;
     SetWindowTextW(ctx->btnPreview, localization::Text(directory
-        ? L"settings.assets.show_directory_contents" : L"settings.assets.show_file_contents").c_str());
+        ? L"settings.assets.open_directory" : L"settings.assets.show_file_contents").c_str());
     SetWindowTextW(ctx->previewLabel, localization::Text(directory
         ? L"settings.assets.preview_directory_label" : L"settings.assets.preview_file_label").c_str());
     EnableWindow(ctx->btnPreview, entry.exists ? TRUE : FALSE);
@@ -162,17 +176,16 @@ static void RefreshSettingsAssetEntries(SettingsAssetsCtx* ctx) {
     const std::filesystem::path exeDir = SettingsAssetsExecutableDirectory();
     const std::filesystem::path root(g_workspaceRoot);
     const std::filesystem::path resource = root.empty() ? std::filesystem::path{} : root / L"__resource__";
-    const std::filesystem::path setup = exeDir.empty() ? std::filesystem::path{} : exeDir / L"pdf_workspace_setup.json";
+    const std::filesystem::path setup = exeDir.empty() ? std::filesystem::path{} : exeDir / L"pdf_note_workspace_setup.json";
     const std::filesystem::path settings = resource.empty() ? std::filesystem::path{} : resource / L"__settings__";
     const std::filesystem::path themes = resource.empty() ? std::filesystem::path{} : resource / L"__theme__";
     const std::filesystem::path palette = settings.empty() ? std::filesystem::path{} : settings / L"user_palette.json";
     const std::filesystem::path shortcuts = settings.empty() ? std::filesystem::path{} : settings / L"tool_shortcuts.json";
     const std::filesystem::path schedule = settings.empty() ? std::filesystem::path{} : settings / L"schedule.json";
-    const std::filesystem::path globalMemos = settings.empty() ? std::filesystem::path{} : settings / L"global_memos.json";
+    const auto workspaceMemo = WorkspaceMemoPath(root);
+    const auto memoRecovery = root.empty() ? std::filesystem::path{} : workspaceMemo.parent_path() / L"workspace_memo.recovery";
     const std::filesystem::path themeCatalog = themes.empty() ? std::filesystem::path{} : themes / L"theme.json";
     ctx->entries = {
-        { localization::Text(L"settings.assets.executable_directory"), exeDir, false, false, true },
-        { localization::Text(L"settings.assets.setup"), setup },
         { localization::Text(L"settings.assets.workspace_directory"), root, false, false, true },
         { localization::Text(L"settings.assets.workspace_config"), root.empty() ? std::filesystem::path{} : root / L"workspace.json" },
         { localization::Text(L"settings.assets.resource_directory"), resource, false, false, true },
@@ -180,7 +193,10 @@ static void RefreshSettingsAssetEntries(SettingsAssetsCtx* ctx) {
         { localization::Text(L"settings.assets.palette"), palette },
         { localization::Text(L"settings.assets.shortcuts"), shortcuts },
         { localization::Text(L"settings.assets.schedule"), schedule },
-        { localization::Text(L"settings.assets.global_memos"), globalMemos },
+        { localization::Text(L"settings.assets.workspace_memo"), workspaceMemo, false, false, false, true, {} },
+        { localization::Text(L"settings.assets.workspace_memo_recovery"), memoRecovery, false, false, false, true, {} },
+        { localization::Text(L"settings.assets.workspace_memo_backups"),
+          root.empty() ? std::filesystem::path{} : workspaceMemo.parent_path() / L"backups", false, false, true, true, {} },
         { localization::Text(L"settings.assets.theme_directory"), themes, false, false, true },
         { localization::Text(L"settings.assets.theme_catalog"), themeCatalog },
     };
@@ -195,7 +211,14 @@ static void RefreshSettingsAssetEntries(SettingsAssetsCtx* ctx) {
             ctx->entries.push_back({ localization::Text(L"settings.assets.theme_file") + L": " + filename, path });
         }
     }
+    // Keep individual theme files with their directory and catalog; the app
+    // installation paths are a separate, final group.
+    ctx->entries.push_back({ localization::Text(L"settings.assets.executable_directory"), exeDir, false, false, true });
+    ctx->entries.push_back({ localization::Text(L"settings.assets.setup"), setup });
     for (auto& entry : ctx->entries) {
+        // New memo entries show filenames only (path-display contract exception).
+        // Explicit Copy path keeps the original complete path, not this display.
+        entry.displayPath = entry.fileNameOnly ? entry.path.filename().wstring() : entry.path.wstring();
         std::error_code ec;
         entry.exists = !entry.path.empty() && std::filesystem::exists(entry.path, ec) && !ec;
         entry.directory = entry.exists
@@ -213,7 +236,7 @@ static void RefreshSettingsAssetEntries(SettingsAssetsCtx* ctx) {
         const auto& entry = ctx->entries[i];
         const std::wstring status = localization::Text(entry.exists
             ? L"settings.assets.present" : L"settings.assets.missing");
-        const std::wstring row = entry.label + L" — " + status + L" — " + entry.path.wstring();
+        const std::wstring row = entry.label + L" — " + status + L" — " + entry.displayPath;
         const int index = static_cast<int>(SendMessageW(ctx->list, LB_ADDSTRING, 0,
                                                          reinterpret_cast<LPARAM>(row.c_str())));
         if (index >= 0) SendMessageW(ctx->list, LB_SETITEMDATA, index, static_cast<LPARAM>(i));
@@ -258,7 +281,7 @@ static LRESULT CALLBACK SettingsAssetsPageProc(HWND hWnd, UINT msg, WPARAM wPara
         };
         ctx->btnPreview = createButton(IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE, L"settings.assets.show_file_contents");
         ctx->btnCopyPath = createButton(IDC_SETTINGS_ASSETS_COPY_PATH, L"settings.assets.copy_path");
-        ctx->btnGlobalMemos = createButton(IDC_SETTINGS_ASSETS_GLOBAL_MEMOS, L"settings.assets.global_memos_manage");
+        ctx->btnWorkspaceMemo = createButton(IDC_SETTINGS_ASSETS_WORKSPACE_MEMO, L"settings.assets.workspace_memo_open");
         ctx->btnPresetSave = createButton(IDC_SETTINGS_ASSETS_PRESET_SAVE, L"settings.assets.preset_save");
         ctx->btnPresetLoad = createButton(IDC_SETTINGS_ASSETS_PRESET_LOAD, L"settings.assets.preset_load");
         ctx->previewLabel = CreateWindowExW(0, L"STATIC", L"",
@@ -270,7 +293,7 @@ static LRESULT CALLBACK SettingsAssetsPageProc(HWND hWnd, UINT msg, WPARAM wPara
                                        0, 0, 100, 100, hWnd,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_ASSETS_PREVIEW)),
                                        g_hInst, nullptr);
-        for (HWND child : {ctx->list, ctx->btnRefresh, ctx->btnCopyPath, ctx->btnPreview, ctx->btnGlobalMemos, ctx->btnPresetSave,
+        for (HWND child : {ctx->list, ctx->btnRefresh, ctx->btnCopyPath, ctx->btnPreview, ctx->btnWorkspaceMemo, ctx->btnPresetSave,
                            ctx->btnPresetLoad, ctx->previewLabel, ctx->preview}) SetUIFont(child);
         RefreshSettingsAssetEntries(ctx);
         return 0;
@@ -293,7 +316,7 @@ static LRESULT CALLBACK SettingsAssetsPageProc(HWND hWnd, UINT msg, WPARAM wPara
                                     SWP_NOZORDER | SWP_NOACTIVATE);
         const int buttonsY = pad + listH + gap;
         const int secondButtonsY = buttonsY + buttonH + gap;
-        const std::array<HWND, 4> firstRow = {ctx->btnRefresh, ctx->btnCopyPath, ctx->btnPreview, ctx->btnGlobalMemos};
+        const std::array<HWND, 4> firstRow = {ctx->btnRefresh, ctx->btnCopyPath, ctx->btnPreview, ctx->btnWorkspaceMemo};
         for (size_t i = 0; i < firstRow.size(); ++i) {
             if (firstRow[i]) SetWindowPos(firstRow[i], nullptr, pad + static_cast<int>(i) * (buttonW + gap), buttonsY,
                                            buttonW, buttonH, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -354,7 +377,7 @@ static LRESULT CALLBACK SettingsAssetsPageProc(HWND hWnd, UINT msg, WPARAM wPara
         RECT pathRect = titleRect;
         pathRect.top += lineH + pad * 2;
         pathRect.bottom = pathRect.top + pathLineH;
-        DrawTextW(draw->hDC, entry.path.c_str(), -1, &pathRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        DrawTextW(draw->hDC, entry.displayPath.c_str(), -1, &pathRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
         HPEN separator = CreatePen(PS_SOLID, 1, g_theme.splitterLine);
         HGDIOBJ oldPen = SelectObject(draw->hDC, separator);
         MoveToEx(draw->hDC, draw->rcItem.left, draw->rcItem.bottom - 1, nullptr);
@@ -372,12 +395,26 @@ static LRESULT CALLBACK SettingsAssetsPageProc(HWND hWnd, UINT msg, WPARAM wPara
             RefreshSettingsAssetEntries(ctx);
             return 0;
         case IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE:
+        {
+            const int selected = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
+            if (selected == LB_ERR) return 0;
+            const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, selected, 0));
+            if (index >= ctx->entries.size()) return 0;
+            const auto& entry = ctx->entries[index];
+            if (SettingsAssetIsDirectory(entry)) {
+                if (!OpenSettingsAssetDirectory(hWnd, entry)) {
+                    ShowSoftNotice(hWnd, localization::Text(L"settings.assets.directory_open_failed"),
+                                   SoftNoticeKind::Warning);
+                }
+                return 0;
+            }
             ctx->previewVisible = true;
             ShowWindow(ctx->previewLabel, SW_SHOW);
             ShowWindow(ctx->preview, SW_SHOW);
             UpdateSettingsAssetPreviewUi(ctx, true);
             SendMessageW(hWnd, WM_SIZE, 0, 0);
             return 0;
+        }
         case IDC_SETTINGS_ASSETS_COPY_PATH: {
             const int selected = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
             if (selected == LB_ERR) return 0;
@@ -389,8 +426,8 @@ static LRESULT CALLBACK SettingsAssetsPageProc(HWND hWnd, UINT msg, WPARAM wPara
                 copied ? SoftNoticeKind::Info : SoftNoticeKind::Warning);
             return 0;
         }
-        case IDC_SETTINGS_ASSETS_GLOBAL_MEMOS:
-            ShowGlobalMemoWindow(hWnd);
+        case IDC_SETTINGS_ASSETS_WORKSPACE_MEMO:
+            ShowWorkspaceMemoWindow(g_hMainWnd);
             return 0;
         case IDC_SETTINGS_ASSETS_PRESET_SAVE:
             SaveSettingsPreset(hWnd);

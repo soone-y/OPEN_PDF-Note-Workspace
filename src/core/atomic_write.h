@@ -6,43 +6,74 @@
 
 #include <windows.h>
 
+#include "path_safety.h"
+
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace atomic_write {
+
+inline bool EnsureDirectoryExists(const std::filesystem::path& dir) {
+    if (dir.empty()) return true;
+
+    std::vector<std::filesystem::path> missing;
+    std::filesystem::path current = dir;
+    for (;;) {
+        const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(current);
+        const DWORD attrs = GetFileAttributesW(openPath.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES) {
+            if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) return false;
+            break;
+        }
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) return false;
+        missing.push_back(current);
+        const std::filesystem::path parent = current.parent_path();
+        if (parent.empty() || parent == current) return false;
+        current = parent;
+    }
+
+    for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
+        const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(*it);
+        if (CreateDirectoryW(openPath.c_str(), nullptr)) continue;
+        const DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS && DirectoryExistsWin32(*it)) continue;
+        return false;
+    }
+    return true;
+}
 
 inline std::filesystem::path MakeUniqueDestInDir(const std::filesystem::path& dir,
                                                  const std::filesystem::path& baseName) {
     std::filesystem::path base = baseName.filename();
     if (base.empty()) base = L"file";
     std::filesystem::path cand = dir / base;
-    std::error_code ec;
-    if (!std::filesystem::exists(cand, ec)) return cand;
+    if (!PathExistsWin32(cand)) return cand;
     DWORD pid = GetCurrentProcessId();
     ULONGLONG tick = GetTickCount64();
-    std::wstring dirStr = dir.wstring();
     for (int i = 0; i < 64; ++i) {
         std::wstring suffix = L".dup." + std::to_wstring(pid) + L"." +
                               std::to_wstring(static_cast<unsigned long long>(tick)) + L"." + std::to_wstring(i);
         std::wstring baseStr = base.wstring();
-        size_t maxAllowedBaseLen = (dirStr.length() + suffix.length() + 1 < 250)
-                                 ? 250 - (dirStr.length() + suffix.length() + 1) : 0;
-        if (baseStr.length() > maxAllowedBaseLen && maxAllowedBaseLen > 0) {
-            baseStr = baseStr.substr(0, maxAllowedBaseLen);
-        }
+        // Limit only the file-name component.  Limiting the whole path here
+        // used to make a valid deep destination impossible to use.
+        constexpr size_t kMaxFileNameChars = 255;
+        const size_t maxAllowedBaseLen = suffix.length() < kMaxFileNameChars
+                                       ? kMaxFileNameChars - suffix.length() : 1;
+        if (baseStr.length() > maxAllowedBaseLen) baseStr.resize(maxAllowedBaseLen);
         cand = dir / (baseStr + suffix);
-        ec.clear();
-        if (!std::filesystem::exists(cand, ec)) return cand;
+        if (!PathExistsWin32(cand)) return cand;
     }
     std::wstring suffix = L".dup." + std::to_wstring(static_cast<unsigned long long>(tick));
     std::wstring baseStr = base.wstring();
-    size_t maxAllowedBaseLen = (dirStr.length() + suffix.length() + 1 < 250)
-                             ? 250 - (dirStr.length() + suffix.length() + 1) : 0;
-    if (baseStr.length() > maxAllowedBaseLen && maxAllowedBaseLen > 0) {
-        baseStr = baseStr.substr(0, maxAllowedBaseLen);
-    }
+    constexpr size_t kMaxFileNameChars = 255;
+    const size_t maxAllowedBaseLen = suffix.length() < kMaxFileNameChars
+                                   ? kMaxFileNameChars - suffix.length() : 1;
+    if (baseStr.length() > maxAllowedBaseLen) baseStr.resize(maxAllowedBaseLen);
     return dir / (baseStr + suffix);
 }
 
@@ -62,13 +93,18 @@ inline std::wstring Win32ErrorMessage(DWORD code) {
 }
 
 inline std::wstring VolumeRootForPath(const std::filesystem::path& p) {
-    std::wstring w = p.wstring();
+    const std::wstring w = ToExtendedWin32PathIfAbsoluteLocal(p);
     if (w.empty()) return L"";
-    wchar_t root[MAX_PATH + 2]{};
-    if (!GetVolumePathNameW(w.c_str(), root, static_cast<DWORD>(sizeof(root) / sizeof(root[0])))) {
-        return L"";
+    std::vector<wchar_t> root(512, L'\0');
+    for (;;) {
+        if (GetVolumePathNameW(w.c_str(), root.data(), static_cast<DWORD>(root.size()))) {
+            return std::wstring(root.data());
+        }
+        const DWORD error = GetLastError();
+        if (error != ERROR_MORE_DATA && error != ERROR_INSUFFICIENT_BUFFER) return L"";
+        if (root.size() >= 32768) return L"";
+        root.resize(std::min<size_t>(root.size() * 2, 32768), L'\0');
     }
-    return std::wstring(root);
 }
 
 inline bool SameVolume(const std::filesystem::path& a, const std::filesystem::path& b) {
@@ -105,14 +141,12 @@ inline bool QuarantineFileBestEffort(const std::filesystem::path& src,
                                      const std::filesystem::path& quarantineDir,
                                      std::filesystem::path* outMovedPath) {
     if (src.empty() || quarantineDir.empty()) return false;
-    std::error_code ec;
-    std::filesystem::create_directories(quarantineDir, ec);
-    if (ec) return false;
+    if (!EnsureDirectoryExists(quarantineDir)) return false;
 
     for (int attempt = 0; attempt < 64; ++attempt) {
         const std::filesystem::path dest = MakeUniqueDestInDir(quarantineDir, src.filename());
-        const std::wstring sourcePath = src.wstring();
-        const std::wstring destinationPath = dest.wstring();
+        const std::wstring sourcePath = ToExtendedWin32PathIfAbsoluteLocal(src);
+        const std::wstring destinationPath = ToExtendedWin32PathIfAbsoluteLocal(dest);
         if (sourcePath.empty() || destinationPath.empty()) return false;
 
         // Never replace a path that appeared after MakeUniqueDestInDir checked it.
@@ -126,8 +160,7 @@ inline bool QuarantineFileBestEffort(const std::filesystem::path& src,
         if (moveError == ERROR_FILE_EXISTS || moveError == ERROR_ALREADY_EXISTS) continue;
 
         if (CopyFileW(sourcePath.c_str(), destinationPath.c_str(), TRUE)) {
-            ec.clear();
-            std::filesystem::remove(src, ec);
+            DeleteFileW(sourcePath.c_str());
             // Even if source cleanup fails, the recovery copy is complete.
             if (outMovedPath) *outMovedPath = dest;
             return true;
@@ -159,17 +192,14 @@ inline bool CreateUniqueTempFile(const std::filesystem::path& dest,
         return false;
     }
 
-    std::error_code ec;
-    std::filesystem::create_directories(tempDir, ec);
-    if (ec) {
+    if (!EnsureDirectoryExists(tempDir)) {
         // Fallback to destination directory.
-        ec.clear();
         tempDir = dest.parent_path();
         if (!tempDir.empty()) {
-            std::filesystem::create_directories(tempDir, ec);
+            (void)EnsureDirectoryExists(tempDir);
         }
     }
-    if (ec) {
+    if (!DirectoryExistsWin32(tempDir)) {
         if (err) *err = L"Failed to create temp directory: " + tempDir.wstring();
         return false;
     }
@@ -181,19 +211,17 @@ inline bool CreateUniqueTempFile(const std::filesystem::path& dest,
 
     DWORD lastErr = 0;
     std::filesystem::path tmp;
-    std::wstring dirStr = tempDir.wstring();
     for (int i = 0; i < 64; ++i) {
         std::wstring suffix = L".__atomic__." + std::to_wstring(pid) + L"." +
                               std::to_wstring(static_cast<unsigned long long>(tick)) + L"." + std::to_wstring(i) + L".tmp";
         std::wstring baseStr = baseName.wstring();
-        size_t maxAllowedBaseLen = (dirStr.length() + suffix.length() + 1 < 250)
-                                 ? 250 - (dirStr.length() + suffix.length() + 1) : 0;
-        if (baseStr.length() > maxAllowedBaseLen && maxAllowedBaseLen > 0) {
-            baseStr = baseStr.substr(0, maxAllowedBaseLen);
-        }
+        constexpr size_t kMaxFileNameChars = 255;
+        const size_t maxAllowedBaseLen = suffix.length() < kMaxFileNameChars
+                                       ? kMaxFileNameChars - suffix.length() : 1;
+        if (baseStr.length() > maxAllowedBaseLen) baseStr.resize(maxAllowedBaseLen);
         
         tmp = tempDir / (baseStr + suffix);
-        std::wstring w = tmp.wstring();
+        std::wstring w = ToExtendedWin32PathIfAbsoluteLocal(tmp);
         if (w.empty()) continue;
         HANDLE h = CreateFileW(w.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW,
                                FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -224,8 +252,8 @@ inline bool AtomicReplaceFile(const std::filesystem::path& dest,
         if (err) *err = L"Invalid path.";
         return false;
     }
-    std::wstring wDest = dest.wstring();
-    std::wstring wTmp = tmp.wstring();
+    std::wstring wDest = ToExtendedWin32PathIfAbsoluteLocal(dest);
+    std::wstring wTmp = ToExtendedWin32PathIfAbsoluteLocal(tmp);
 
     // Safety: never mutate destination attributes (e.g. clearing read-only).
     // If the destination exists and is read-only, fail and keep/quarantine the temp file.
@@ -234,8 +262,7 @@ inline bool AtomicReplaceFile(const std::filesystem::path& dest,
         if (err) *err = L"Destination file is read-only: " + wDest;
         std::filesystem::path moved;
         if (!QuarantineFileBestEffort(tmp, quarantineDir, &moved)) {
-            std::error_code rmec;
-            std::filesystem::remove(tmp, rmec);
+            DeleteFileW(ToExtendedWin32PathIfAbsoluteLocal(tmp).c_str());
         } else if (err && !moved.empty()) {
             *err += L"\nQuarantined temp file: " + moved.wstring();
         }
@@ -281,8 +308,7 @@ inline bool AtomicReplaceFile(const std::filesystem::path& dest,
         }
         std::filesystem::path moved;
         if (!QuarantineFileBestEffort(tmp, quarantineDir, &moved)) {
-            std::error_code rmec;
-            std::filesystem::remove(tmp, rmec);
+            DeleteFileW(ToExtendedWin32PathIfAbsoluteLocal(tmp).c_str());
         } else if (err && !moved.empty()) {
             *err += L"\nQuarantined temp file: " + moved.wstring();
         }
@@ -291,8 +317,7 @@ inline bool AtomicReplaceFile(const std::filesystem::path& dest,
     if (err) *err = L"Failed to replace destination file: " + wDest + L" (unknown error)";
     std::filesystem::path moved;
     if (!QuarantineFileBestEffort(tmp, quarantineDir, &moved)) {
-        std::error_code rmec;
-        std::filesystem::remove(tmp, rmec);
+        DeleteFileW(ToExtendedWin32PathIfAbsoluteLocal(tmp).c_str());
     } else if (err && !moved.empty()) {
         *err += L"\nQuarantined temp file: " + moved.wstring();
     }
@@ -363,9 +388,7 @@ inline bool AtomicWriteBytes(const std::filesystem::path& dest,
         return false;
     }
     if (!dest.parent_path().empty()) {
-        std::error_code ec;
-        std::filesystem::create_directories(dest.parent_path(), ec);
-        if (ec) {
+        if (!EnsureDirectoryExists(dest.parent_path())) {
             if (err) *err = L"Failed to create destination directory: " + dest.parent_path().wstring();
             return false;
         }
@@ -380,8 +403,7 @@ inline bool AtomicWriteBytes(const std::filesystem::path& dest,
     if (!WriteAllBytesWin32(tmpHandle, tmp, data, size, err)) {
         std::filesystem::path moved;
         if (!QuarantineFileBestEffort(tmp, quarantineDir, &moved)) {
-            std::error_code rmec;
-            std::filesystem::remove(tmp, rmec);
+            DeleteFileW(ToExtendedWin32PathIfAbsoluteLocal(tmp).c_str());
         } else if (err && !moved.empty()) {
             *err += L"\nQuarantined temp file: " + moved.wstring();
         }

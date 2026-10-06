@@ -1,0 +1,6 @@
+# Official core source input for the adopted 26.2.6.3 custom build.
+# Runtime adopted after fixed-input build, runtime gates and quality comparison.
+# No separate dictionaries/help/translations archive is consumed by this configuration.
+# Archive bodies/signatures are outside Git; SHA-256 verified, GPG check not performed.
+archive	source_url	sha256	sha256_url	asc_url
+libreoffice-26.2.6.3.tar.xz	https://download.documentfoundation.org/libreoffice/src/26.2.6/libreoffice-26.2.6.3.tar.xz	3a2570aa7087bf8e0cbdf49ac5bd0e452c2025274af99e07882daa104c5685bd	https://download.documentfoundation.org/libreoffice/src/26.2.6/libreoffice-26.2.6.3.tar.xz.sha256	https://download.documentfoundation.org/libreoffice/src/26.2.6/libreoffice-26.2.6.3.tar.xz.asc

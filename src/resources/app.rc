@@ -1,5 +1,7 @@
 #include "app_resource.h"
 
+1 24 "src/resources/app.manifest"
+
 #ifndef CLROP_READ_ONLY_BUILD
 IDI_APP_ICON ICON "src/resources/icons/app_icon.ico"
 #endif

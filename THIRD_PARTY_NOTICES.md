@@ -9,9 +9,9 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 
 | コンポーネント | 用途 | 同梱形態 | ライセンス参照 |
 | --- | --- | --- | --- |
-| PDFium package `153.0.7988.0` | PDF の読み込み、描画、テキスト抽出、書き出し | `third_party/pdfium/` を同梱。release では `pdfium.dll` と対応ライセンス文書を配布 | `third_party/pdfium/LICENSE`, `third_party/pdfium/licenses/` |
+| PDFium package `156.0.8076.0` | PDF の読み込み、描画、テキスト抽出、書き出し | `third_party/pdfium/` を同梱。release では `pdfium.dll` と対応ライセンス文書を配布 | `third_party/pdfium/LICENSE`, `third_party/pdfium/licenses/` |
 | MD4C | Markdown 解析 | `third_party/md4c/` をリポジトリへ配置。導入時は `md4c.c`, `md4c.h`, `LICENSE.md` を参照 | `third_party/md4c/LICENSE.md` |
-| LibreOffice custom runtime `26.2.5.2` / 比較用 image `26.2.3.2` | 同梱フォントのアプリ内 private font 利用。docx/pptx から PDF への headless 変換 | `image/` は比較・フォント・license 参照用。通信機能を除いた custom runtime を標準 release へ配置する | runtime および `third_party/libreoffice/image/` の `license.txt`, `LICENSE.html`, `NOTICE` |
+| LibreOffice custom runtime `26.2.6.3` / 比較用 image `26.2.3.2` | 同梱フォントのアプリ内 private font 利用。docx/pptx から PDF への headless 変換 | `image/` は比較・フォント・license 参照用。通信機能を除いた custom runtime を標準 release へ配置する | runtime および `third_party/libreoffice/image/` の `license.txt`, `LICENSE.html`, `NOTICE` |
 | MinGW-w64 runtime DLLs | `pdf_note_workspace.exe` と `readonly_viewer.exe` 実行に必要な C++/GCC runtime | `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` を `out/bin/` と release へコピー | `third_party/mingw_runtime_licenses/mingw-w64/` |
 | zlib runtime `1.3.2` | DOCX staging copy の ZIP 展開/検証 | `third_party/zlib/` の固定成果物から `zlib1.dll` を `out/bin/` と release へコピー | `third_party/zlib/LICENSE` |
 
@@ -26,8 +26,8 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
   - `third_party/pdfium/bin/pdfium.dll`
   - release では `pdfium.dll`
 - バージョン:
-  - `third_party/pdfium/VERSION`: `153.0.7988.0`
-  - `third_party/pdfium/PDFiumConfig.cmake`: `153.0.7988.0`
+  - `third_party/pdfium/VERSION`: `156.0.8076.0`
+  - `third_party/pdfium/PDFiumConfig.cmake`: `156.0.8076.0`
 
 ### 2.2 ライセンス文書
 
@@ -47,7 +47,6 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
   - `third_party/pdfium/licenses/libjpeg_turbo.md` / `libjpeg_turbo.ijg` - libjpeg-turbo / IJG notices
   - `third_party/pdfium/licenses/libopenjpeg.txt` - BSD 2-Clause
   - `third_party/pdfium/licenses/libpng.txt` - PNG Reference Library License
-  - `third_party/pdfium/licenses/libtiff.txt` - libtiff permissive license
   - `third_party/pdfium/licenses/llvm-libc.txt` - Apache License 2.0 with LLVM Exceptions
   - `third_party/pdfium/licenses/simdutf.txt` - MIT License
   - `third_party/pdfium/licenses/zlib.txt` - zlib License
@@ -60,9 +59,11 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 
 ### 2.4 ローカル方針
 
-- コンパイル済みの公式バイナリパッケージを直接配置して利用し、本リポジトリ上で PDFium 自体のソースビルドは行いません。
+- コンパイル済みの配布元バイナリパッケージ（Benoit BlanchonのPDFium binaries）を直接配置して利用し、本リポジトリ上で PDFium 自体のソースビルドは行いません。
 - package provenance と標準利用情報として `SOURCE.txt`, `args.gn`, `PDFiumConfig.cmake` を保持します。
 - `include/fpdfview.h.orig` のような作業バックアップは保持・公開しません。
+- ライセンス文書の IJG 相対リンク修正は `patches/0001-fix-ijg-notice-link.patch` で再現します。新版取得後にも適用し、著作権表示とライセンス条件は変更しません。
+
 ## 3. MinGW-w64 runtime
 
 ### 3.1 実装上の位置づけ
@@ -97,13 +98,13 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
   - `third_party/md4c/src/md4c.h`
 - `scripts/build/build_workspace.ps1` は `third_party/md4c/src/md4c.c` を直接コンパイルします。
 - `md4c-html.*` は現時点では使用前提にしません。
-- `VERSION` で 0.5.3 以後の upstream commit を固定し、全角空白・日本語句読点対応だけを `patches/` の局所パッチとして保持します。
+- `VERSION` で v0.6.0 の完全な upstream commit を固定し、全角空白・日本語句読点対応だけを `patches/` の局所パッチとして保持します。
 
 ### 4.2 ライセンス文書
 
 - `third_party/md4c/LICENSE.md`
   - MIT License
-  - Copyright © 2016-2024 Martin Mitáš
+  - Copyright © 2016-2026 Martin Mitáš
 
 ### 4.3 配布時の扱い
 

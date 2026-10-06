@@ -5,12 +5,13 @@ import sys
 import zlib
 
 
-def _extract_obj(pdf: bytes, obj_num: int) -> bytes | None:
-    # Very small, naive parser: enough for PDFs we generate (non-incremental xref not required).
-    m = re.search(rb"[\r\n]%d\s+0\s+obj\b" % obj_num, pdf)
-    if not m:
+def _extract_obj(pdf: bytes, obj_num: int, generation: int) -> bytes | None:
+    # A deliberately limited parser for generated PDFs. Unsupported or
+    # ambiguous structures are inspection failures, never evidence of OK.
+    matches = list(re.finditer(rb"(?:^|[\r\n])%d\s+%d\s+obj\b" % (obj_num, generation), pdf))
+    if len(matches) != 1:
         return None
-    start = m.start()
+    start = matches[0].start()
     end = pdf.find(b"endobj", start)
     if end < 0:
         return None
@@ -18,20 +19,21 @@ def _extract_obj(pdf: bytes, obj_num: int) -> bytes | None:
 
 
 def _extract_stream(obj_bytes: bytes) -> tuple[bytes, bytes] | None:
-    si = obj_bytes.find(b"stream")
-    if si < 0:
+    marker = re.search(rb"\bstream(?:\r\n|\n|\r)", obj_bytes)
+    if marker is None:
         return None
-    after = obj_bytes.find(b"\n", si)
-    if after < 0:
+    header = obj_bytes[:marker.start()]
+    if re.search(rb"/Length\s+\d+\s+\d+\s+R\b", header):
+        # An indirect length needs a real PDF resolver.
         return None
-    data_start = after + 1
-    ei = obj_bytes.find(b"endstream", data_start)
-    if ei < 0:
+    length = re.search(rb"/Length\s+(\d+)\b", header)
+    if length is None:
         return None
-    data = obj_bytes[data_start:ei]
-    if data.endswith(b"\r"):
-        data = data[:-1]
-    header = obj_bytes[:si]
+    data_start = marker.end()
+    data_end = data_start + int(length.group(1))
+    if data_end > len(obj_bytes) or not obj_bytes[data_end:].lstrip(b"\r\n \t").startswith(b"endstream"):
+        return None
+    data = obj_bytes[data_start:data_end]
     return data, header
 
 
@@ -47,32 +49,69 @@ def main(argv: list[str]) -> int:
     ap.add_argument("pdf", type=pathlib.Path)
     args = ap.parse_args(argv)
 
-    pdf = args.pdf.read_bytes()
-    refs = sorted({int(m.group(1)) for m in re.finditer(rb"/SMask\s+(\d+)\s+0\s+R\b", pdf)})
+    try:
+        pdf = args.pdf.read_bytes()
+    except OSError as error:
+        print(f"SMask inspection could not read PDF: {error}", file=sys.stderr)
+        return 1
+    if not pdf.startswith(b"%PDF-"):
+        print("SMask inspection requires a PDF signature.", file=sys.stderr)
+        return 1
+    refs = sorted({(int(m.group(1)), int(m.group(2)))
+                   for m in re.finditer(rb"/SMask\s+(\d+)\s+(\d+)\s+R\b", pdf)})
+    if re.search(rb"/SMask\b(?!\s+(?:\d+\s+\d+\s+R\b|/None\b))", pdf):
+        print("SMask inspection found an unsupported mask reference.", file=sys.stderr)
+        return 1
     if not refs:
         print("OK: no /SMask references found.")
         return 0
 
-    bad: list[int] = []
-    for obj_num in refs:
-        obj = _extract_obj(pdf, obj_num)
+    bad: list[str] = []
+    unreadable: list[str] = []
+    for obj_num, generation in refs:
+        label = f"{obj_num} {generation}"
+        obj = _extract_obj(pdf, obj_num, generation)
         if not obj:
+            unreadable.append(f"{label}: object missing, incomplete, or ambiguous")
             continue
         stream = _extract_stream(obj)
         if not stream:
+            unreadable.append(f"{label}: stream or direct length could not be parsed")
             continue
         data, header = stream
-        if b"/FlateDecode" not in header:
+        if b"/DecodeParms" in header:
+            unreadable.append(f"{label}: unsupported decode parameters")
+            continue
+        filter_match = re.search(rb"/Filter\s*(/FlateDecode\b|\[\s*/FlateDecode\s*\])", header)
+        if b"/Filter" in header and filter_match is None:
+            unreadable.append(f"{label}: unsupported stream filter")
             continue
         try:
-            dec = zlib.decompress(data)
-        except Exception:
+            if filter_match:
+                decoder = zlib.decompressobj()
+                dec = decoder.decompress(data) + decoder.flush()
+                if not decoder.eof or decoder.unused_data:
+                    raise ValueError("incomplete or trailing compressed data")
+            else:
+                dec = data
+            if not dec:
+                raise ValueError("empty mask stream")
+        except (zlib.error, ValueError) as error:
+            unreadable.append(f"{label}: {error}")
             continue
-        if dec and _is_all_zero(dec):
-            bad.append(obj_num)
+        if _is_all_zero(dec):
+            bad.append(label)
+
+    if unreadable:
+        print("SMask inspection could not complete:", file=sys.stderr)
+        for detail in unreadable:
+            print(f"- {detail}", file=sys.stderr)
+        if bad:
+            print("NG: fully-zero /SMask stream(s) detected:", ", ".join(bad))
+        return 1
 
     if bad:
-        print("NG: fully-zero /SMask stream(s) detected:", ", ".join(map(str, bad)))
+        print("NG: fully-zero /SMask stream(s) detected:", ", ".join(bad))
         return 2
 
     print("OK: /SMask streams look non-zero.")
@@ -81,4 +120,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

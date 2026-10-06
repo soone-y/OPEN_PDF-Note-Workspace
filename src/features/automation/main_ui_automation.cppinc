@@ -1,5 +1,295 @@
 // file: main/main_ui_automation.cppinc
 
+#include <cstring>
+#include <uiautomationclient.h>
+#include "pdf_view/keyboard_scroll.h"
+
+// Disposable UI fixture only: borrow the existing native transport boundary
+// to deliver reentrant IME notifications/queries and selection paints while
+// their outer dispatch is still private. No production callback is added.
+struct NoteImeNativeDispatchProbe {
+    WNDPROC native = nullptr;
+    HWND edit = nullptr;
+    unsigned events = 0;
+    unsigned nativeQueries = 0;
+    bool valid = true;
+    unsigned failureMask = 0;
+    bool captureNativeCandidate = false;
+    bool haveNativeCandidate = false;
+    CANDIDATEFORM nativeCandidate{};
+    bool pointerSelectionActive = false;
+    unsigned pointerSelections = 0;
+    bool pointerValid = true;
+};
+static NoteImeNativeDispatchProbe* g_uiAutomationImeNativeProbe = nullptr;
+
+static LRESULT CALLBACK ProbeNoteImeNativeDispatch(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* probe = g_uiAutomationImeNativeProbe;
+    if (!probe || !probe->native) return DefWindowProcW(window, message, wParam, lParam);
+    if (window == probe->edit && message == WM_IME_REQUEST && wParam == IMR_QUERYCHARPOSITION) {
+        ++probe->nativeQueries;
+    }
+    const LRESULT result = CallWindowProcW(probe->native, window, message, wParam, lParam);
+    if (window == probe->edit && message == WM_IME_NOTIFY && probe->captureNativeCandidate) {
+        HIMC imc = ImmGetContext(window);
+        if (imc) {
+            probe->haveNativeCandidate = ImmGetCandidateWindow(imc, 0, &probe->nativeCandidate) != FALSE;
+            ImmReleaseContext(window, imc);
+        }
+    }
+    if (window == probe->edit && message == EM_SETSEL && probe->pointerSelectionActive) {
+        ++probe->pointerSelections;
+        const auto before = ObserveNoteRenderRuntime();
+        SendMessageW(window, WM_PAINT, 0, 0);
+        const auto after = ObserveNoteRenderRuntime();
+        probe->pointerValid = probe->pointerValid && before.nativeRedrawDepth > 0 &&
+            after.clientPaintCount == before.clientPaintCount;
+        return result;
+    }
+    if (window != probe->edit || (message != WM_IME_STARTCOMPOSITION &&
+        message != WM_IME_COMPOSITION && message != WM_IME_ENDCOMPOSITION)) return result;
+    ++probe->events;
+    const auto before = ObserveNoteRenderRuntime();
+    HIMC imc = ImmGetContext(window);
+    if (!imc) { probe->valid = false; return result; }
+    CANDIDATEFORM sentinel{};
+    sentinel.dwStyle = CFS_EXCLUDE;
+    sentinel.ptCurrentPos = {17, 23};
+    sentinel.rcArea = {17, 23, 31, 39};
+    const bool placed = ImmSetCandidateWindow(imc, &sentinel) != FALSE;
+    // The native notification may legitimately reposition its own candidate
+    // window. Only an additional application correction is forbidden while
+    // final geometry is private, so compare against the native result.
+    probe->haveNativeCandidate = false;
+    probe->captureNativeCandidate = true;
+    SendMessageW(window, WM_IME_NOTIFY, IMN_OPENCANDIDATE, 1);
+    probe->captureNativeCandidate = false;
+    SyncNoteImeCandidateWindowToCaret(window);
+    CANDIDATEFORM actual{};
+    const bool read = ImmGetCandidateWindow(imc, 0, &actual) != FALSE;
+    ImmReleaseContext(window, imc);
+    IMECHARPOSITION query{};
+    query.dwSize = sizeof(query);
+    query.pt = {101, 103};
+    const auto untouched = query;
+    const bool refused = SendMessageW(window, WM_IME_REQUEST, IMR_QUERYCHARPOSITION,
+        reinterpret_cast<LPARAM>(&query)) == FALSE && std::memcmp(&query, &untouched, sizeof(query)) == 0;
+    SendMessageW(window, WM_PAINT, 0, 0);
+    const auto after = ObserveNoteRenderRuntime();
+    const bool sameCandidate = read && probe->haveNativeCandidate &&
+        actual.dwStyle == probe->nativeCandidate.dwStyle &&
+        EqualRect(&actual.rcArea, &probe->nativeCandidate.rcArea) &&
+        actual.ptCurrentPos.x == probe->nativeCandidate.ptCurrentPos.x &&
+        actual.ptCurrentPos.y == probe->nativeCandidate.ptCurrentPos.y;
+    // Independent failure bits distinguish an unavailable IMM fixture from
+    // a production query, pixel-publication, or candidate-correction failure.
+    probe->failureMask |= (!placed ? 1u : 0u) | (!read ? 2u : 0u) |
+        (!probe->haveNativeCandidate ? 4u : 0u) | (!sameCandidate ? 8u : 0u) |
+        (!refused ? 16u : 0u) | (probe->nativeQueries != 0 ? 32u : 0u) |
+        (before.nativeRedrawDepth == 0 ? 64u : 0u) |
+        (after.clientPaintCount != before.clientPaintCount ? 128u : 0u);
+    probe->valid = probe->valid && probe->failureMask == 0;
+    return result;
+}
+
+// Read-only UIA client observation on an MTA worker, never on the editor's
+// UI thread. The automation child owns the worker; its existing watchdog
+// bounds an OS/provider hang. No client/provider is installed for normal use.
+struct NoteUiaCaretObservation {
+    HWND edit = nullptr;
+    HRESULT status = E_FAIL;
+    BOOL active = FALSE;
+    bool hasRectangle = false;
+    double rectangle[4]{};
+};
+
+static DWORD WINAPI ReadNoteUiaCaretForAutomation(void* parameter) {
+    std::unique_ptr<std::shared_ptr<NoteUiaCaretObservation>> holder(
+        static_cast<std::shared_ptr<NoteUiaCaretObservation>*>(parameter));
+    const auto observation = *holder;
+    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(initialized)) { observation->status = initialized; return 0; }
+    struct ScopedComExit { ~ScopedComExit() { CoUninitialize(); } } comExit;
+    struct ScopedComRelease {
+        IUnknown* object;
+        ~ScopedComRelease() { if (object) object->Release(); }
+    };
+    IUIAutomation* client = nullptr;
+    observation->status = CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
+        __uuidof(IUIAutomation), reinterpret_cast<void**>(&client));
+    ScopedComRelease releaseClient{client};
+    if (FAILED(observation->status) || !client) return 0;
+    IUIAutomationElement* element = nullptr;
+    observation->status = client->ElementFromHandle(observation->edit, &element);
+    ScopedComRelease releaseElement{element};
+    if (FAILED(observation->status) || !element) return 0;
+    IUIAutomationTextPattern2* pattern = nullptr;
+    observation->status = element->GetCurrentPatternAs(UIA_TextPattern2Id,
+        __uuidof(IUIAutomationTextPattern2), reinterpret_cast<void**>(&pattern));
+    ScopedComRelease releasePattern{pattern};
+    if (FAILED(observation->status) || !pattern) return 0;
+    IUIAutomationTextRange* range = nullptr;
+    observation->status = pattern->GetCaretRange(&observation->active, &range);
+    ScopedComRelease releaseRange{range};
+    if (FAILED(observation->status) || !range) return 0;
+    HMODULE module = LoadLibraryExW(L"oleaut32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!module) { observation->status = HRESULT_FROM_WIN32(GetLastError()); return 0; }
+    struct ScopedDllExit { HMODULE module; ~ScopedDllExit() { FreeLibrary(module); } } dllExit{module};
+    using DestroyArray = HRESULT (WINAPI*)(SAFEARRAY*);
+    using AccessArray = HRESULT (WINAPI*)(SAFEARRAY*, void**);
+    using UnaccessArray = HRESULT (WINAPI*)(SAFEARRAY*);
+    const auto destroyArray = reinterpret_cast<DestroyArray>(GetProcAddress(module, "SafeArrayDestroy"));
+    const auto accessArray = reinterpret_cast<AccessArray>(GetProcAddress(module, "SafeArrayAccessData"));
+    const auto unaccessArray = reinterpret_cast<UnaccessArray>(GetProcAddress(module, "SafeArrayUnaccessData"));
+    if (!destroyArray || !accessArray || !unaccessArray) return 0;
+    SAFEARRAY* rectangles = nullptr;
+    observation->status = range->GetBoundingRectangles(&rectangles);
+    struct ScopedArrayExit {
+        SAFEARRAY* array;
+        DestroyArray destroy;
+        ~ScopedArrayExit() { if (array) (void)destroy(array); }
+    } arrayExit{rectangles, destroyArray};
+    if (FAILED(observation->status) || !rectangles) return 0;
+    if (rectangles->cDims != 1 || rectangles->cbElements != sizeof(double) ||
+        rectangles->rgsabound[0].cElements < 4) return 0;
+    double* values = nullptr;
+    observation->status = accessArray(rectangles, reinterpret_cast<void**>(&values));
+    if (FAILED(observation->status)) return 0;
+    if (values) {
+        std::copy_n(values, 4, observation->rectangle);
+        observation->hasRectangle = true;
+    }
+    observation->status = unaccessArray(rectangles);
+    return 0;
+}
+
+[[nodiscard]] static bool ObserveNoteUiaCaretForAutomation(HWND edit) {
+    const auto before = CaptureNoteUiSnapshot();
+    RECT client{};
+    if (!before.finalFrameActive || !GetClientRect(edit, &client)) return false;
+    if (before.finalCaretClientRect.left < client.left || before.finalCaretClientRect.right > client.right ||
+        before.finalCaretClientRect.top < client.top || before.finalCaretClientRect.bottom > client.bottom) {
+        AppendUiAutomationTrace(L"math_render:native_text_anchor_skipped_not_fully_visible");
+        return true;
+    }
+    CHARRANGE selection{};
+    SendMessageW(edit, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+    if (selection.cpMin != selection.cpMax) return false;
+    POINTL point{LONG_MIN, LONG_MIN};
+    SendMessageW(edit, EM_POSFROMCHAR, reinterpret_cast<WPARAM>(&point), selection.cpMin);
+    const bool nativeMatches = point.x == before.finalCaretClientRect.left &&
+        point.y == before.finalCaretClientRect.top && before.systemCaretMatchesFinal;
+    AppendUiAutomationTrace(L"math_render:native_text_anchor_matches=" + std::to_wstring(nativeMatches) +
+        L" actual=" + std::to_wstring(point.x) + L":" + std::to_wstring(point.y) +
+        L" expected=" + std::to_wstring(before.finalCaretClientRect.left) + L":" +
+        std::to_wstring(before.finalCaretClientRect.top));
+    // Native geometry is required in the ordinary regression run. UIA's
+    // provider query can deadlock inside WM_GETOBJECT even from a separate
+    // client, so keep it as an explicit, watchdog-bounded diagnostic only.
+    wchar_t enableUia[2]{};
+    if (GetEnvironmentVariableW(L"PDF_NOTE_SMALL_UIA_CARET_PROBE", enableUia, 2) != 1 || enableUia[0] != L'1') {
+        AppendUiAutomationTrace(L"math_render:uia_caret_deferred_explicit_diagnostic");
+        return nativeMatches;
+    }
+    const auto observation = std::make_shared<NoteUiaCaretObservation>();
+    observation->edit = edit;
+    auto* holder = new std::shared_ptr<NoteUiaCaretObservation>(observation);
+    HANDLE worker = CreateThread(nullptr, 0, ReadNoteUiaCaretForAutomation, holder, 0, nullptr);
+    if (!worker) { delete holder; return false; }
+    struct ScopedWorkerExit { HANDLE worker; ~ScopedWorkerExit() { CloseHandle(worker); } } workerExit{worker};
+    const ULONGLONG deadline = GetTickCount64() + 10000;
+    for (;;) {
+        const ULONGLONG now = GetTickCount64();
+        if (now >= deadline) { AppendUiAutomationTrace(L"math_render:uia_caret_timeout"); return false; }
+        const DWORD waited = MsgWaitForMultipleObjectsEx(1, &worker,
+            static_cast<DWORD>(deadline - now), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (waited == WAIT_OBJECT_0) break;
+        if (waited != WAIT_OBJECT_0 + 1) return false;
+        MSG message{};
+        for (int pumped = 0; pumped < 64 && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE); ++pumped) {
+            if (message.message == WM_QUIT) { PostQuitMessage(static_cast<int>(message.wParam)); return false; }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    POINT expected{before.finalCaretClientRect.left, before.finalCaretClientRect.top};
+    if (!ClientToScreen(edit, &expected)) return false;
+    AppendUiAutomationTrace(L"math_render:uia_caret hr=" + std::to_wstring(observation->status) +
+        L" active=" + std::to_wstring(observation->active) + L" rectangle=" +
+        std::to_wstring(observation->hasRectangle) + L" actual=" +
+        std::to_wstring(observation->rectangle[0]) + L":" + std::to_wstring(observation->rectangle[1]) +
+        L":" + std::to_wstring(observation->rectangle[3]) + L" expected=" +
+        std::to_wstring(expected.x) + L":" + std::to_wstring(expected.y) + L":" +
+        std::to_wstring(before.finalCaretClientRect.bottom - before.finalCaretClientRect.top));
+    const auto after = CaptureNoteUiSnapshot();
+    return nativeMatches && SUCCEEDED(observation->status) && observation->active && observation->hasRectangle &&
+        observation->rectangle[0] == expected.x && observation->rectangle[1] == expected.y &&
+        observation->rectangle[3] == before.finalCaretClientRect.bottom - before.finalCaretClientRect.top &&
+        note::SameSnapshotIdentity(before.sourceIdentity, after.sourceIdentity) &&
+        before.canonicalText == after.canonicalText && after.finalFrameActive && after.systemCaretMatchesFinal;
+}
+
+// Read the system's MSAA caret as an assistive client would. This is an
+// automation-only observation; no provider, WinEvent hook or IME UI is owned
+// by the application. Load only the Windows system DLL and release its COM
+// object before unloading it. No link/build contract change is needed.
+[[nodiscard]] static bool VerifyAccessibleSystemCaretForAutomation(HWND edit) {
+    GUITHREADINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetGUIThreadInfo(GetCurrentThreadId(), &info) || info.hwndCaret != edit) return false;
+    HMODULE module = LoadLibraryExW(L"oleacc.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!module) return false;
+    struct ScopedModuleRelease {
+        HMODULE module;
+        ~ScopedModuleRelease() { FreeLibrary(module); }
+    } releaseModule{module};
+    using GetAccessible = HRESULT (WINAPI*)(HWND, DWORD, REFIID, void**);
+    const auto getAccessible = reinterpret_cast<GetAccessible>(
+        GetProcAddress(module, "AccessibleObjectFromWindow"));
+    if (!getAccessible) return false;
+    IAccessible* accessible = nullptr;
+    // The hidden automation child need not own the foreground queue. Ask for
+    // this window's caret, not the global foreground caret of another app.
+    const HRESULT obtained = getAccessible(edit, static_cast<DWORD>(OBJID_CARET),
+        __uuidof(IAccessible), reinterpret_cast<void**>(&accessible));
+    if (FAILED(obtained) || !accessible) {
+        AppendUiAutomationTrace(L"math_render:accessible_caret_unavailable hr=" + std::to_wstring(obtained));
+        return false;
+    }
+    struct ScopedAccessibleRelease {
+        IAccessible* accessible;
+        ~ScopedAccessibleRelease() { accessible->Release(); }
+    } releaseAccessible{accessible};
+    VARIANT self{};
+    self.vt = VT_I4;
+    self.lVal = CHILDID_SELF;
+    LONG x = 0, y = 0, width = 0, height = 0;
+    const HRESULT located = accessible->accLocation(&x, &y, &width, &height, self);
+    POINT origin{};
+    if (FAILED(located) || !ClientToScreen(edit, &origin)) {
+        AppendUiAutomationTrace(L"math_render:accessible_caret_location_failed hr=" + std::to_wstring(located));
+        return false;
+    }
+    // Windows may expose an empty accessible caret for this hidden,
+    // background automation child. It is not a measured geometry mismatch.
+    // Skip only that observation; the native/final equality remains required
+    // by the caller. A visible foreground caret returning empty still fails.
+    if (width == 0 && height == 0 &&
+        (!IsWindowVisible(edit) || GetForegroundWindow() != GetAncestor(edit, GA_ROOT))) {
+        AppendUiAutomationTrace(L"math_render:accessible_caret_skipped_hidden_background_empty");
+        return true;
+    }
+    const bool matches = static_cast<int64_t>(x) == static_cast<int64_t>(origin.x) + info.rcCaret.left &&
+        static_cast<int64_t>(y) == static_cast<int64_t>(origin.y) + info.rcCaret.top &&
+        width == info.rcCaret.right - info.rcCaret.left && height == info.rcCaret.bottom - info.rcCaret.top;
+    AppendUiAutomationTrace(L"math_render:accessible_caret_matches=" + std::to_wstring(matches) +
+        L" actual=" + std::to_wstring(x) + L":" + std::to_wstring(y) + L":" + std::to_wstring(height) +
+        L" expected=" + std::to_wstring(static_cast<int64_t>(origin.x) + info.rcCaret.left) + L":" +
+        std::to_wstring(static_cast<int64_t>(origin.y) + info.rcCaret.top) + L":" +
+        std::to_wstring(info.rcCaret.bottom - info.rcCaret.top));
+    return matches;
+}
+
 static bool SetFaultInjectionPointForAutomation(const wchar_t* point) {
     if (!SetEnvironmentVariableW(L"PDF_NOTE_SMALL_ENABLE_FAULT_INJECTION", L"1")) return false;
     return SetEnvironmentVariableW(L"PDF_NOTE_SMALL_THROW_POINT", point ? point : L"");
@@ -204,6 +494,8 @@ static std::wstring DescribeNoteUiSnapshot(const NoteUiSnapshot& snapshot) {
            L", tx_depth=" + std::to_wstring(snapshot.transactionDepth) +
            L", tx_sequence=" + std::to_wstring(snapshot.transactionSequence) +
            L", tx_owner=" + std::to_wstring(snapshot.transactionOwnerNoteId.value) +
+           L", final_caret=" + std::wstring(boolText(snapshot.finalCaretGeometryReady)) +
+           L", system_caret_matches=" + std::wstring(boolText(snapshot.systemCaretMatchesFinal)) +
            L", route=" + std::wstring(boolText(snapshot.markdownRoute)) +
            L", render=" + std::wstring(boolText(snapshot.renderOverlayActive)) +
            L", ready=" + std::wstring(boolText(snapshot.documentReady)) +
@@ -443,6 +735,140 @@ static bool HasPngFileSignature(const std::string& bytes) {
         static_cast<char>(0x89), 'P', 'N', 'G', '\r', '\n', static_cast<char>(0x1a), '\n'};
     return bytes.size() >= sizeof(kSignature) &&
            std::equal(std::begin(kSignature), std::end(kSignature), bytes.begin());
+}
+
+static bool RunUiAutomationPdfKeyboardScrollScenario(HWND owner, std::wstring* outError) {
+    using pdf_keyboard_scroll::Motion;
+    // Fixed time inputs check speed independently of the machine's timer cadence.
+    Motion straight, diagonal, partitioned;
+    straight.SetKey('S', true);
+    diagonal.SetKey('S', true);
+    diagonal.SetKey('D', true);
+    partitioned.SetKey('S', true);
+    const auto one = straight.Advance(0.032);
+    const auto two = diagonal.Advance(0.032);
+    const auto part1 = partitioned.Advance(0.016);
+    const auto part2 = partitioned.Advance(0.016);
+    bool valid = one.y > 0.0 && one.y < 600.0 * 0.032 && one.x == 0.0 &&
+        std::abs(std::hypot(two.x, two.y) - one.y) < 0.00001 &&
+        std::abs(part1.y + part2.y - one.y) < 0.00001;
+    straight.SetKey('S', false);
+    const auto released = straight.Advance(0.016);
+    valid = valid && !straight.HasKeys() && released.x == 0.0 && released.y == 0.0;
+    diagonal.SetKey('A', true);
+    diagonal.SetKey('W', true);
+    const auto opposite = diagonal.Advance(0.016);
+    valid = valid && opposite.x == 0.0 && opposite.y == 0.0;
+    partitioned.Reset();
+    partitioned.SetKey('D', true);
+    const auto delayed = partitioned.Advance(10.0);
+    valid = valid && delayed.x > 0.0 && delayed.x <= 600.0 * 0.05 && delayed.y == 0.0;
+    if (!valid || !g_hPdfView || g_pdf.pages.empty() || g_pdf.editingText) {
+        if (outError) *outError = L"PDF keyboard motion timing/direction contract failed.";
+        return false;
+    }
+
+    const auto savedFlow = g_config.pdfFlowMode;
+    const bool savedSingle = g_config.pdfSinglePageMode;
+    const double savedScale = g_pdf.scale, savedX = g_pdf.scrollX, savedY = g_pdf.scrollY;
+    const HWND savedFocus = GetFocus();
+    std::array<BYTE, 256> savedKeys{};
+    if (!GetKeyboardState(savedKeys.data())) return false;
+    struct RestoreView {
+        std::wstring flow;
+        bool single;
+        double scale, x, y;
+        HWND focus;
+        std::array<BYTE, 256> keys;
+        ~RestoreView() {
+            for (unsigned key : {'W', 'A', 'S', 'D'}) SendMessageW(g_hPdfView, WM_KEYUP, key, 0);
+            g_pdf.editingText = false;
+            SetKeyboardState(keys.data());
+            g_config.pdfSinglePageMode = single;
+            SetPdfFlowMode(g_hPdfView, flow);
+            SetPdfScale(g_hPdfView, scale, POINT{});
+            g_pdf.scrollX = x;
+            g_pdf.scrollY = y;
+            if (focus && IsWindow(focus)) SetFocus(focus);
+        }
+    } restore{savedFlow, savedSingle, savedScale, savedX, savedY, savedFocus, savedKeys};
+    auto keys = savedKeys;
+    keys[VK_CONTROL] = keys[VK_LCONTROL] = keys[VK_RCONTROL] = 0;
+    keys[VK_MENU] = keys[VK_LMENU] = keys[VK_RMENU] = 0;
+    if (!SetKeyboardState(keys.data())) return false;
+    g_config.pdfSinglePageMode = false;
+    SetPdfFlowMode(g_hPdfView, L"v_ttb");
+    SetPdfScale(g_hPdfView, 4.0, POINT{});
+    SetFocus(g_hPdfView);
+    JumpToPdfPoint(g_hPdfView, 0, g_pdf.pages[0].widthPt * 0.5, g_pdf.pages[0].heightPt * 0.5);
+    const double centerX = g_pdf.scrollX, centerY = g_pdf.scrollY;
+    const auto tick = [&]() {
+        Sleep(20);
+        SendMessageW(g_hPdfView, WM_TIMER, kPdfKeyboardScrollTimerId, 0);
+    };
+    for (unsigned key : {'W', 'A', 'S', 'D'}) {
+        g_pdf.scrollX = centerX;
+        g_pdf.scrollY = centerY;
+        SendMessageW(g_hPdfView, WM_KEYDOWN, key, 1);
+        SendMessageW(g_hPdfView, WM_KEYDOWN, key, 0x40000001); // repeat must not add a fixed step
+        valid = valid && g_pdf.scrollX == centerX && g_pdf.scrollY == centerY;
+        tick();
+        const double dx = g_pdf.scrollX - centerX, dy = g_pdf.scrollY - centerY;
+        const bool correctDirection = key == 'W' ? dy < 0.0 && dx == 0.0 :
+            key == 'S' ? dy > 0.0 && dx == 0.0 : key == 'A' ? dx < 0.0 && dy == 0.0 : dx > 0.0 && dy == 0.0;
+        valid = valid && correctDirection && std::hypot(dx, dy) < kScrollStepPx;
+        SendMessageW(g_hPdfView, WM_KEYUP, key, 0xC0000001);
+        tick();
+        valid = valid && g_pdf.scrollX == centerX + dx && g_pdf.scrollY == centerY + dy;
+    }
+    g_pdf.scrollX = centerX;
+    g_pdf.scrollY = centerY;
+    SendMessageW(g_hPdfView, WM_KEYDOWN, VK_DOWN, 1);
+    valid = valid && std::abs(g_pdf.scrollY - centerY - kScrollStepPx) < 0.001;
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'S', 1);
+    SetFocus(owner);
+    const double focusX = g_pdf.scrollX, focusY = g_pdf.scrollY;
+    tick();
+    SetFocus(g_hPdfView);
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'S', 0x40000001);
+    tick();
+    valid = valid && g_pdf.scrollX == focusX && g_pdf.scrollY == focusY;
+    SendMessageW(g_hPdfView, WM_KEYUP, 'S', 0);
+
+    // Existing editing and modifier routes must never arm the motion timer.
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'S', 1);
+    g_pdf.editingText = true;
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'D', 1);
+    tick();
+    SendMessageW(g_hPdfView, WM_KEYUP, 'D', 0);
+    g_pdf.editingText = false;
+    keys[VK_CONTROL] = 0x80;
+    if (!SetKeyboardState(keys.data())) return false;
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'D', 1);
+    tick();
+    valid = valid && g_pdf.scrollX == focusX && g_pdf.scrollY == focusY;
+    keys[VK_CONTROL] = 0;
+    keys[VK_MENU] = 0x80;
+    if (!SetKeyboardState(keys.data())) return false;
+    SendMessageW(g_hPdfView, WM_SYSKEYDOWN, 'D', 1);
+    tick();
+    valid = valid && g_pdf.scrollX == focusX && g_pdf.scrollY == focusY;
+    keys[VK_MENU] = 0;
+    if (!SetKeyboardState(keys.data())) return false;
+    // At a single-page edge, one frame must not turn a page; sustained input may.
+    g_config.pdfSinglePageMode = true;
+    ApplyPdfDisplayMode(g_hPdfView);
+    JumpToPage(g_hPdfView, 0);
+    SendMessageW(g_hPdfView, WM_VSCROLL, SB_BOTTOM, 0);
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'S', 1);
+    tick();
+    valid = valid && g_pdf.singlePageIndex == 0;
+    for (int frame = 0; frame < 20 && g_pdf.singlePageIndex == 0; ++frame) tick();
+    valid = valid && (g_pdf.pageCount == 1 || g_pdf.singlePageIndex == 1);
+    SendMessageW(g_hPdfView, WM_KEYUP, 'S', 0);
+    AppendUiAutomationTrace(L"pdf_keyboard_scroll:directions_repeat_release_focus_edit_ctrl valid=" + std::to_wstring(valid));
+    if (!valid && outError) *outError = L"PDF WASD movement/release/focus/edit/modifier or arrow regression failed.";
+    return valid;
 }
 
 static bool RunUiAutomationPdfiumRawOpenScenario(std::wstring* outError) {
@@ -2790,6 +3216,7 @@ bool PrepareUiAutomationStagedExitScenario(HWND owner, std::wstring* outError) {
 }
 
 static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError) {
+    AppendUiAutomationTrace(L"math_render:begin");
     if (!owner) {
         if (outError) *outError = L"Main window is not ready for math render testing.";
         return false;
@@ -2818,7 +3245,9 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
 
     g_noteRenderEnabled = true;
     g_noteRawOnly = false;
+    AppendUiAutomationTrace(L"math_render:before_load_fixture");
     LoadNoteFile(owner, mathNotePath.wstring());
+    AppendUiAutomationTrace(L"math_render:after_load_fixture");
     SyncBottomPaneAfterNoteLoad(owner);
     SyncLeftPaneSelection();
 
@@ -2828,7 +3257,157 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         return false;
     }
 
+    RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     const NoteUiSnapshot initial = CaptureNoteUiSnapshot();
+    // Passive input at the lower boundary must preserve viewport, selection,
+    // final ownership and source identity. Observe both message completion
+    // and paint: later layout must not conceal a transient native fallback.
+    const auto verifyBottomScrollBoundary = [&](int windowCommand, bool assist) -> bool {
+        SendMessageW(g_hNoteEdit, WM_VSCROLL, SB_BOTTOM, 0);
+        RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        const auto before = CaptureNoteUiSnapshot();
+        const auto beforeRuntime = ObserveNoteRenderRuntime();
+        SCROLLINFO baseline{};
+        baseline.cbSize = sizeof(baseline);
+        baseline.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+        DWORD selectionStart = 0, selectionEnd = 0;
+        SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&selectionStart),
+                     reinterpret_cast<LPARAM>(&selectionEnd));
+        bool valid = before.finalFrameActive && GetScrollInfo(g_hNoteEdit, SB_VERT, &baseline) &&
+            baseline.nPos == std::max(0, baseline.nMax - static_cast<int>(baseline.nPage) + 1);
+        const std::pair<UINT, WPARAM> inputs[] = {
+            {WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA))},
+            {WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA / 8))},
+            {WM_VSCROLL, SB_LINEDOWN}, {WM_VSCROLL, SB_PAGEDOWN}, {WM_VSCROLL, SB_BOTTOM}
+        };
+        const auto unchanged = [&]() {
+            SCROLLINFO current = baseline;
+            DWORD start = 0, end = 0;
+            SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+            const auto runtime = ObserveNoteRenderRuntime();
+            return GetScrollInfo(g_hNoteEdit, SB_VERT, &current) &&
+                current.nMin == baseline.nMin && current.nMax == baseline.nMax &&
+                current.nPage == baseline.nPage && current.nPos == baseline.nPos &&
+                start == selectionStart && end == selectionEnd && runtime.finalFrameActive &&
+                runtime.canonicalRevision == beforeRuntime.canonicalRevision &&
+                runtime.modelMaterializations == beforeRuntime.modelMaterializations &&
+                runtime.nativeFallbackPaintCount == beforeRuntime.nativeFallbackPaintCount;
+        };
+        for (int pass = 0; pass < 8 && valid; ++pass) {
+            for (const auto& input : inputs) {
+                SendMessageW(g_hNoteEdit, input.first, input.second, 0);
+                valid = unchanged();
+                if (!valid) break;
+            }
+            if (!valid) break;
+            SendMessageW(g_hNoteEdit, WM_MOUSEMOVE, 0, MAKELPARAM(16 + pass, 16));
+            valid = unchanged();
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            valid = unchanged() && valid;
+        }
+        const auto after = CaptureNoteUiSnapshot();
+        valid = valid && after.finalFrameActive && after.canonicalText == before.canonicalText &&
+            after.finalRawLineCount == before.finalRawLineCount &&
+            after.finalStructuredLineCount == before.finalStructuredLineCount &&
+            EqualRect(&after.finalCaretClientRect, &before.finalCaretClientRect) &&
+            (GetFocus() != g_hNoteEdit || after.systemCaretMatchesFinal);
+        AppendUiAutomationTrace(L"math_render:bottom_boundary command=" + std::to_wstring(windowCommand) +
+            L" assist=" + std::to_wstring(assist) + L" focused=" + std::to_wstring(GetFocus() == g_hNoteEdit) +
+            L" lines=" + std::to_wstring(before.finalRawLineCount + before.finalStructuredLineCount) +
+            L" valid=" + std::to_wstring(valid) + L" pos=" + std::to_wstring(baseline.nPos));
+        return valid;
+    };
+    // Exercise the root layout, not just the edit's WM_SIZE. Maximization
+    // also refreshes the bottom pane and paints all children synchronously.
+    // No later input/paint may be needed to recover a missing publication.
+    const auto verifyRootMaximizeRoundTrip = [&](bool verifyInput = false) -> bool {
+        WINDOWPLACEMENT placement{};
+        placement.length = sizeof(placement);
+        if (!GetWindowPlacement(owner, &placement))
+            return false;
+        const HWND previousFocus = GetFocus();
+        const auto previousMode = g_bottomNoteMode;
+        const auto previousPin = g_bottomPanePin;
+        bool valid = true;
+        for (const auto mode : {BottomNoteMode::Legacy, BottomNoteMode::Assist}) {
+            g_bottomNoteMode = mode;
+            g_bottomPanePin = BottomPanePin::Note;
+            ui::ApplyLayout(owner, ui::LayoutPass::Commit);
+            RefreshBottomPaneView();
+            for (HWND focus : {g_hNoteList, g_hNoteEdit}) {
+                SetFocus(focus);
+                for (int command : {SW_MAXIMIZE, SW_RESTORE}) {
+                    const auto before = CaptureNoteUiSnapshot();
+                    const auto beforeRuntime = ObserveNoteRenderRuntime();
+                    ShowWindow(owner, command);
+                    // Observe the persistent state too, after queued UI work and
+                    // the whole layout tree's paint, not only SendMessage return.
+                    MSG pending{};
+                    for (int count = 0; count < 64 && PeekMessageW(&pending, nullptr, 0, 0, PM_REMOVE); ++count) {
+                        if (pending.message == WM_QUIT) {
+                            PostQuitMessage(static_cast<int>(pending.wParam));
+                            valid = false;
+                            break;
+                        }
+                        TranslateMessage(&pending);
+                        DispatchMessageW(&pending);
+                    }
+                    RedrawWindow(owner, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                    const auto after = CaptureNoteUiSnapshot();
+                    const auto afterRuntime = ObserveNoteRenderRuntime();
+                    const bool stepValid =
+                        after.finalFrameActive && after.finalStructuredLineCount > 0 &&
+                        after.finalRawLineCount == before.finalRawLineCount &&
+                        after.canonicalText == before.canonicalText &&
+                        afterRuntime.canonicalRevision == beforeRuntime.canonicalRevision &&
+                        afterRuntime.modelMaterializations == beforeRuntime.modelMaterializations &&
+                        afterRuntime.nativeFallbackPaintCount == beforeRuntime.nativeFallbackPaintCount &&
+                        afterRuntime.nativeRedrawDepth == 0 && afterRuntime.nativeRedrawRequested &&
+                        (focus != g_hNoteEdit || after.systemCaretMatchesFinal);
+                    AppendUiAutomationTrace(L"math_render:root_resize command=" + std::to_wstring(command) +
+                                            L" assist=" + std::to_wstring(mode == BottomNoteMode::Assist) +
+                                            L" focused=" + std::to_wstring(focus == g_hNoteEdit) + L" valid=" +
+                                            std::to_wstring(stepValid) + L" final=" +
+                                            std::to_wstring(after.finalFrameActive) + L" native_paints=" +
+                                            std::to_wstring(afterRuntime.nativeFallbackPaintCount -
+                                                            beforeRuntime.nativeFallbackPaintCount));
+                    valid = stepValid && valid;
+                    if (verifyInput && focus == g_hNoteEdit && command == SW_MAXIMIZE) {
+                        const auto original = GetNoteAutomationIndexingText();
+                        SendMessageW(g_hNoteEdit, WM_CHAR, L'q', 1);
+                        const auto inserted = CaptureNoteUiSnapshot();
+                        const bool insertionRestored =
+                            SendUiAutomationNoteUndoChangedText() && GetNoteAutomationIndexingText() == original;
+                        SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_BACK, 1);
+                        SendMessageW(g_hNoteEdit, WM_CHAR, 8, 1);
+                        SendMessageW(g_hNoteEdit, WM_KEYUP, VK_BACK, 0xC0000001);
+                        const auto deleted = CaptureNoteUiSnapshot();
+                        const bool deletionRestored =
+                            SendUiAutomationNoteUndoChangedText() && GetNoteAutomationIndexingText() == original;
+                        const bool inputValid = inserted.finalFrameActive && deleted.finalFrameActive &&
+                                                inserted.canonicalText.size() == after.canonicalText.size() + 1 &&
+                                                deleted.canonicalText.size() + 1 == after.canonicalText.size() &&
+                                                insertionRestored && deletionRestored &&
+                                                CaptureNoteUiSnapshot().finalFrameActive;
+                        AppendUiAutomationTrace(L"math_render:maximized_input assist=" +
+                                                std::to_wstring(mode == BottomNoteMode::Assist) + L" valid=" +
+                                                std::to_wstring(inputValid));
+                        valid = inputValid && valid;
+                    }
+                    valid = verifyBottomScrollBoundary(command, mode == BottomNoteMode::Assist) && valid;
+                }
+            }
+        }
+        g_bottomNoteMode = previousMode;
+        g_bottomPanePin = previousPin;
+        ui::ApplyLayout(owner, ui::LayoutPass::Commit);
+        RefreshBottomPaneView();
+        const bool restored = SetWindowPlacement(owner, &placement) != FALSE;
+        if (previousFocus && IsWindow(previousFocus))
+            SetFocus(previousFocus);
+        return valid && restored;
+    };
+    AppendUiAutomationTrace(L"math_render:after_initial_snapshot");
     if (!initial.markdownRoute) {
         restorePrevious();
         if (outError) *outError = L"Math fixture note did not use the Markdown route.";
@@ -2839,15 +3418,54 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         if (outError) *outError = L"Markdown note document was not ready for math fixture note.";
         return false;
     }
-    if (initial.mathSpanCount < 4) {
+    if (!initial.finalFrameActive || initial.finalStructuredLineCount == 0 ||
+        initial.finalRawLineCount != 0) {
         restorePrevious();
         if (outError) {
-            *outError = L"Expected four math spans in the math fixture note. " +
+            *outError = L"A freshly opened rendered note did not publish one fully structured final frame. " +
                         DescribeNoteUiSnapshot(initial);
         }
         return false;
     }
-    if (initial.renderedMathSegmentCount < 4) {
+    if (!verifyRootMaximizeRoundTrip()) {
+        restorePrevious();
+        if (outError) *outError = L"Root maximization/restore stranded a short note in native raw fallback.";
+        return false;
+    }
+    // The real bundled sample crosses a raw/composed horizontal-scrollbar
+    // threshold. Exercise opening first, then keyboard ownership and editing,
+    // before returning to the math fixture with its opening view unchanged.
+    const auto resizeSamplePath = std::filesystem::path(g_currentSessionPath) / L"note_resize_sample.clro";
+    LoadNoteFile(owner, resizeSamplePath.wstring());
+    SyncBottomPaneAfterNoteLoad(owner);
+    const bool sampleOpened = NormalizePathKey(g_currentNotePath) == NormalizePathKey(resizeSamplePath.wstring()) &&
+        CaptureNoteUiSnapshot().finalFrameActive;
+    bool sampleValid = sampleOpened && verifyRootMaximizeRoundTrip();
+    if (sampleValid) {
+        SetFocus(g_hNoteEdit);
+        SendMessageW(g_hNoteEdit, EM_SETSEL, 2, 2);
+        SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_RIGHT, 1);
+        SendMessageW(g_hNoteEdit, WM_KEYUP, VK_RIGHT, 0xC0000001);
+        sampleValid = verifyRootMaximizeRoundTrip(true);
+    }
+    AppendUiAutomationTrace(L"math_render:bundled_resize_sample valid=" + std::to_wstring(sampleValid));
+    if (!sampleValid) {
+        restorePrevious();
+        if (outError) *outError = L"The bundled sample lost final rendering or input after root maximization.";
+        return false;
+    }
+    LoadNoteFile(owner, mathNotePath.wstring());
+    SyncBottomPaneAfterNoteLoad(owner);
+    SyncLeftPaneSelection();
+    if (initial.mathSpanCount < 6) {
+        restorePrevious();
+        if (outError) {
+            *outError = L"Expected six math spans, including named tags, in the math fixture note. " +
+                        DescribeNoteUiSnapshot(initial);
+        }
+        return false;
+    }
+    if (initial.renderedMathSegmentCount < 6) {
         restorePrevious();
         if (outError) {
             *outError = L"Expected rendered math segments for all math delimiters. " +
@@ -2855,7 +3473,7 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         }
         return false;
     }
-    if (initial.renderedDisplayMathSegmentCount < 2) {
+    if (initial.renderedDisplayMathSegmentCount < 3) {
         restorePrevious();
         if (outError) {
             *outError = L"Expected rendered display-math segments for block delimiters. " +
@@ -2863,7 +3481,7 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         }
         return false;
     }
-    const std::wstring markdownStrongRendered = L"- Bold marker regression";
+    const std::wstring markdownStrongRendered = L"Bold marker regression";
     const std::wstring markdownStrongRawLeak = L"**Bold marker regression";
     if (initial.renderedText.find(markdownStrongRendered) == std::wstring::npos ||
         initial.renderedText.find(markdownStrongRawLeak) != std::wstring::npos) {
@@ -2872,6 +3490,1780 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
             *outError = L"Markdown strong markers leaked into rendered note text. " +
                         DescribeNoteUiSnapshot(initial);
         }
+        return false;
+    }
+
+    // Resolve test points from the published structured caret, then move the
+    // transport caret elsewhere before clicking. Native EM_CHARFROMPOS is
+    // deliberately not an oracle for these pixels (notably after math/table rows).
+    const auto verifyRenderedClickInsertion = [&]() -> bool {
+        const std::wstring original = GetNoteAutomationIndexingText();
+        for (const std::wstring& target : {std::wstring(L"Math UI Fixture"),
+                                          std::wstring(L"Bold marker regression"),
+                                          std::wstring(L"value")}) {
+            for (const size_t delta : {size_t{0}, size_t{2}}) {
+                const int start = FindNoteTextSnippetStart(target);
+                if (start < 0) return false;
+                const size_t expected = static_cast<size_t>(start) + delta;
+                // An unfocused note is structured even after an earlier edit.
+                // The real click below must resolve before taking focus/raw ownership.
+                SetFocus(owner);
+                PreserveRenderedNoteOpeningView();
+                SendMessageW(g_hNoteEdit, EM_SETSEL, expected, expected);
+                RECT client{};
+                GetClientRect(g_hNoteEdit, &client);
+                // EM_SETSEL alone is a transport-only test operation. Complete
+                // the existing unfocused layout event before observing its frame.
+                SendMessageW(g_hNoteEdit, WM_SIZE, SIZE_RESTORED,
+                             MAKELPARAM(client.right - client.left, client.bottom - client.top));
+                RefreshBottomPaneView();
+                RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                NoteUiSnapshot structured = CaptureNoteUiSnapshot();
+                if (!structured.finalFrameActive || structured.finalRawLineCount != 0 ||
+                    !structured.finalCaretGeometryReady) {
+                    AppendUiAutomationTrace(L"render_click:invalid_structured target=" + target +
+                        L" " + DescribeNoteUiSnapshot(structured));
+                    return false;
+                }
+                // Block wrappers can put a formerly visible fixture target
+                // below the viewport. Scroll the published geometry into view;
+                // transport EM_SETSEL does not scroll an unfocused final frame.
+                if (structured.finalCaretClientRect.top < client.top ||
+                    structured.finalCaretClientRect.bottom > client.bottom) {
+                    SendMessageW(g_hNoteEdit, WM_VSCROLL,
+                        structured.finalCaretClientRect.top < client.top ? SB_TOP : SB_BOTTOM, 0);
+                    RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                    structured = CaptureNoteUiSnapshot();
+                    if (!structured.finalFrameActive || !structured.finalCaretGeometryReady) return false;
+                }
+                const RECT caret = structured.finalCaretClientRect;
+                const int x = caret.left;
+                const int y = caret.top + (caret.bottom - caret.top) / 2;
+                if (x < client.left || x >= client.right || y < client.top || y >= client.bottom) {
+                    AppendUiAutomationTrace(L"render_click:outside_viewport target=" + target +
+                        L" point=" + std::to_wstring(x) + L":" + std::to_wstring(y));
+                    return false;
+                }
+                SendMessageW(g_hNoteEdit, EM_SETSEL, 0, 0);
+                SendMessageW(g_hNoteEdit, WM_SIZE, SIZE_RESTORED,
+                             MAKELPARAM(client.right - client.left, client.bottom - client.top));
+                RefreshBottomPaneView();
+                const LPARAM point = MAKELPARAM(x, y);
+                SendMessageW(g_hNoteEdit, WM_LBUTTONDOWN, MK_LBUTTON, point);
+                SendMessageW(g_hNoteEdit, WM_LBUTTONUP, 0, point);
+                DWORD actualStart = 0, actualEnd = 0;
+                SendMessageW(g_hNoteEdit, EM_GETSEL,
+                             reinterpret_cast<WPARAM>(&actualStart),
+                             reinterpret_cast<LPARAM>(&actualEnd));
+                const NoteUiSnapshot clicked = CaptureNoteUiSnapshot();
+                if (actualStart != expected || actualEnd != expected ||
+                    !clicked.finalFrameActive || clicked.finalRawLineCount == 0 ||
+                    clicked.finalStructuredLineCount == 0) {
+                    AppendUiAutomationTrace(L"render_click:expected=" + std::to_wstring(expected) +
+                        L" actual=" + std::to_wstring(actualStart) + L":" + std::to_wstring(actualEnd) +
+                        L" point=" + std::to_wstring(x) + L":" + std::to_wstring(y));
+                    return false;
+                }
+                const bool typed = SendUiAutomationNoteTextInput(L"Q");
+                std::wstring expectedText = original;
+                expectedText.insert(expected, L"Q");
+                const bool insertedAtClick = typed && GetNoteAutomationIndexingText() == expectedText;
+                const bool restored = typed && SendUiAutomationNoteUndoChangedText() &&
+                    GetNoteAutomationIndexingText() == original;
+                if (!insertedAtClick || !restored) {
+                    AppendUiAutomationTrace(L"render_click:input_mismatch target=" + target +
+                        L" inserted=" + std::to_wstring(insertedAtClick) +
+                        L" restored=" + std::to_wstring(restored));
+                    return false;
+                }
+            }
+        }
+        SetFocus(owner);
+        PreserveRenderedNoteOpeningView();
+        SendMessageW(g_hNoteEdit, EM_SETSEL, original.size(), original.size());
+        RECT client{};
+        GetClientRect(g_hNoteEdit, &client);
+        SendMessageW(g_hNoteEdit, WM_SIZE, SIZE_RESTORED,
+                     MAKELPARAM(client.right - client.left, client.bottom - client.top));
+        RefreshBottomPaneView();
+        const auto end = CaptureNoteUiSnapshot();
+        if (!end.finalFrameActive || !end.finalCaretGeometryReady) return false;
+        if (end.finalCaretClientRect.bottom < client.bottom) {
+            const LPARAM blank = MAKELPARAM(client.right / 2, client.bottom - 1);
+            SendMessageW(g_hNoteEdit, WM_LBUTTONDOWN, MK_LBUTTON, blank);
+            SendMessageW(g_hNoteEdit, WM_LBUTTONUP, 0, blank);
+            DWORD first = 0, last = 0;
+            SendMessageW(g_hNoteEdit, EM_GETSEL,
+                         reinterpret_cast<WPARAM>(&first), reinterpret_cast<LPARAM>(&last));
+            if (first != original.size() || last != original.size()) return false;
+            const bool typed = SendUiAutomationNoteTextInput(L"Q");
+            const bool exact = typed && GetNoteAutomationIndexingText() == original + L"Q";
+            const bool restored = typed && SendUiAutomationNoteUndoChangedText() &&
+                GetNoteAutomationIndexingText() == original;
+            if (!exact || !restored) return false;
+            AppendUiAutomationTrace(L"render_click:blank_eof_ok");
+        }
+        return true;
+    };
+    // Exercise the actual post-default RichEdit mutation paths that used to
+    // leave the entire note native raw after typing or Backspace.  Each
+    // assertion observes only the immutable public final frame: a successful
+    // hybrid edit has a local raw owner and still retains structured owners
+    // for unrelated rows.  A withdrawn frame/whole-native fallback is not a
+    // substitute for that successful normal-path state.
+    const auto verifyLocalHybridMutation = [&](const wchar_t* operation) -> bool {
+        RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        const NoteUiSnapshot snapshot = CaptureNoteUiSnapshot();
+        if (snapshot.finalFrameActive && snapshot.finalRawLineCount > 0 &&
+            snapshot.finalStructuredLineCount > 0 && snapshot.systemCaretMatchesFinal) {
+            return true;
+        }
+        if (outError) {
+            *outError = std::wstring(L"Final note rendering lost local hybrid ownership after ") +
+                        operation + L". " + DescribeNoteUiSnapshot(snapshot);
+        }
+        return false;
+    };
+    // Unlike the blank-space click probe, these mutations always run at the
+    // last row (both its start and end), including below the viewport. Only
+    // the disposable automation note is edited; undo restores each probe.
+    const auto verifyEofHybridMutations = [&]() -> bool {
+        const std::wstring original = GetNoteAutomationIndexingText();
+        // Automation's RichEdit indexing text keeps CR while TextCore uses
+        // LF. Their single-unit offsets agree, not their newline characters.
+        std::wstring canonicalOriginal = original;
+        std::replace(canonicalOriginal.begin(), canonicalOriginal.end(), L'\r', L'\n');
+        const size_t lastBreak = original.find_last_of(L"\r\n");
+        const size_t lastLineStart = lastBreak == std::wstring::npos ? 0 : lastBreak + 1;
+        NoteImeNativeDispatchProbe dispatchProbe;
+        dispatchProbe.native = g_oldNoteProc;
+        dispatchProbe.edit = g_hNoteEdit;
+        if (!dispatchProbe.native || g_uiAutomationImeNativeProbe) return false;
+        struct ScopedImeTransportProbe {
+            NoteImeNativeDispatchProbe& probe;
+            explicit ScopedImeTransportProbe(NoteImeNativeDispatchProbe& state) : probe(state) {
+                g_uiAutomationImeNativeProbe = &probe;
+                g_oldNoteProc = ProbeNoteImeNativeDispatch;
+            }
+            ~ScopedImeTransportProbe() {
+                g_oldNoteProc = probe.native;
+                g_uiAutomationImeNativeProbe = nullptr;
+            }
+        } transportProbe{dispatchProbe};
+        const size_t emptyBreak = original.rfind(L"\r\r");
+        if (emptyBreak == std::wstring::npos) return false;
+        const size_t emptyOffset = emptyBreak + 1;
+        SetFocus(owner);
+        SendMessageW(g_hNoteEdit, EM_SETSEL, emptyOffset, emptyOffset);
+        PreserveRenderedNoteOpeningView();
+        RECT client{};
+        GetClientRect(g_hNoteEdit, &client);
+        const auto refreshGeometry = [&]() {
+            SendMessageW(g_hNoteEdit, WM_SIZE, SIZE_RESTORED,
+                MAKELPARAM(client.right - client.left, client.bottom - client.top));
+            SendMessageW(g_hNoteEdit, WM_VSCROLL, SB_BOTTOM, 0);
+        };
+        refreshGeometry();
+        const auto target = CaptureNoteUiSnapshot();
+        const RECT caret = target.finalCaretClientRect;
+        if (!target.finalFrameActive || !target.finalCaretGeometryReady ||
+            caret.top < client.top || caret.bottom > client.bottom) return false;
+        // Move the old caret away without changing structured row geometry.
+        SendMessageW(g_hNoteEdit, EM_SETSEL, original.size(), original.size());
+        refreshGeometry();
+        RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        const auto beforeClick = ObserveNoteRenderRuntime();
+        SCROLLINFO oldScroll{};
+        oldScroll.cbSize = sizeof(oldScroll);
+        oldScroll.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+        const bool hadScroll = GetScrollInfo(g_hNoteEdit, SB_VERT, &oldScroll) != FALSE;
+        const LPARAM point = MAKELPARAM(caret.left, caret.top + (caret.bottom - caret.top) / 2);
+        dispatchProbe.pointerSelectionActive = true;
+        SendMessageW(g_hNoteEdit, WM_LBUTTONDOWN, MK_LBUTTON, point);
+        SendMessageW(g_hNoteEdit, WM_LBUTTONUP, 0, point);
+        dispatchProbe.pointerSelectionActive = false;
+        const bool clickHybrid = verifyLocalHybridMutation(L"empty row click");
+        DWORD clickedFirst = 0, clickedLast = 0;
+        SendMessageW(g_hNoteEdit, EM_GETSEL,
+            reinterpret_cast<WPARAM>(&clickedFirst), reinterpret_cast<LPARAM>(&clickedLast));
+        const auto afterClick = ObserveNoteRenderRuntime();
+        const auto clicked = CaptureNoteUiSnapshot();
+        SCROLLINFO newScroll = oldScroll;
+        const bool clickValid = dispatchProbe.pointerValid && dispatchProbe.pointerSelections > 0 &&
+            clickHybrid && clickedFirst == emptyOffset && clickedLast == emptyOffset &&
+            clicked.finalCaretClientRect.top == caret.top && clicked.finalCaretClientRect.bottom == caret.bottom &&
+            hadScroll && GetScrollInfo(g_hNoteEdit, SB_VERT, &newScroll) &&
+            oldScroll.nMin == newScroll.nMin && oldScroll.nMax == newScroll.nMax &&
+            oldScroll.nPage == newScroll.nPage && oldScroll.nPos == newScroll.nPos &&
+            afterClick.nativeRedrawDepth == 0 && afterClick.nativeRedrawRequested &&
+            afterClick.nativeFallbackPaintCount == beforeClick.nativeFallbackPaintCount &&
+            afterClick.canonicalRevision == beforeClick.canonicalRevision &&
+            GetNoteAutomationIndexingText() == original;
+        AppendUiAutomationTrace(L"math_render:blank_click length=" + std::to_wstring(original.size()) +
+            L" valid=" + std::to_wstring(clickValid) + L" atomic=" + std::to_wstring(dispatchProbe.pointerValid) +
+            L" selected=" + std::to_wstring(clickedFirst) + L" expected=" + std::to_wstring(emptyOffset));
+        if (!clickValid) return false;
+        // START is observable before COMPSTR arrives. Painting each phase
+        // detects a raw gap that assertions only after IME result miss.
+        for (const size_t startOffset : {lastLineStart, original.size()}) {
+            SetFocus(g_hNoteEdit);
+            SendMessageW(g_hNoteEdit, EM_SETSEL, startOffset, startOffset);
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_F24, 1);
+            SendMessageW(g_hNoteEdit, WM_VSCROLL, SB_BOTTOM, 0);
+            // Snapshot diagnostics materialize canonical text; warm them
+            // before measuring whether the event itself rebuilds the model.
+            const auto beforeSnapshot = CaptureNoteUiSnapshot();
+            const auto before = ObserveNoteRenderRuntime();
+            SendMessageW(g_hNoteEdit, WM_IME_STARTCOMPOSITION, 0, 0);
+            const bool hybrid = verifyLocalHybridMutation(L"last-row IME start before COMPSTR");
+            const auto started = ObserveNoteRenderRuntime();
+            DWORD first = 0, last = 0;
+            SendMessageW(g_hNoteEdit, EM_GETSEL,
+                reinterpret_cast<WPARAM>(&first), reinterpret_cast<LPARAM>(&last));
+            const auto snapshot = CaptureNoteUiSnapshot();
+            IMECHARPOSITION position{};
+            position.dwSize = sizeof(position);
+            POINT expectedPosition{snapshot.finalCaretClientRect.left, snapshot.finalCaretClientRect.top};
+            const bool positionCurrent = ClientToScreen(g_hNoteEdit, &expectedPosition) &&
+                SendMessageW(g_hNoteEdit, WM_IME_REQUEST, IMR_QUERYCHARPOSITION,
+                    reinterpret_cast<LPARAM>(&position)) == TRUE &&
+                position.pt.x == expectedPosition.x && position.pt.y == expectedPosition.y &&
+                position.cLineHeight == static_cast<UINT>(snapshot.finalCaretClientRect.bottom -
+                                                         snapshot.finalCaretClientRect.top);
+            HIMC imc = ImmGetContext(g_hNoteEdit);
+            CANDIDATEFORM candidate{};
+            const bool candidateRead = imc && ImmGetCandidateWindow(imc, 0, &candidate) != FALSE;
+            if (imc) ImmReleaseContext(g_hNoteEdit, imc);
+            HDC dc = GetDC(g_hNoteEdit);
+            const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+            if (dc) ReleaseDC(g_hNoteEdit, dc);
+            const int gap = std::max(1, MulDiv(6, dpi > 0 ? dpi : 96, 96));
+            const bool candidateCurrent = candidateRead && candidate.dwStyle == CFS_EXCLUDE &&
+                candidate.rcArea.top == std::max(client.top, snapshot.finalCaretLineClientRect.top) - gap &&
+                candidate.rcArea.bottom == std::min(client.bottom, snapshot.finalCaretLineClientRect.bottom) + gap &&
+                candidate.ptCurrentPos.x == std::clamp(snapshot.finalCaretClientRect.left, client.left, client.right - 1) &&
+                candidate.ptCurrentPos.y == std::clamp(snapshot.finalCaretClientRect.top, client.top, client.bottom - 1);
+            const bool sourcePreserved = beforeSnapshot.finalFrameActive &&
+                beforeSnapshot.canonicalText == canonicalOriginal && snapshot.canonicalText == canonicalOriginal &&
+                first == startOffset && last == startOffset &&
+                snapshot.renderedText.find(original.substr(lastLineStart)) != std::wstring::npos;
+            // A passive geometry refresh between START and COMPSTR must keep
+            // the same proven committed frame, not treat missing text as a
+            // failed IMM read. It also exercises nested native anchor sync.
+            RECT client{};
+            GetClientRect(g_hNoteEdit, &client);
+            SendMessageW(g_hNoteEdit, WM_SIZE, SIZE_RESTORED,
+                MAKELPARAM(client.right - client.left, client.bottom - client.top));
+            const bool pendingHybrid = verifyLocalHybridMutation(L"IME start geometry refresh");
+            SendMessageW(g_hNoteEdit, WM_IME_COMPOSITION, 0, 0);
+            const bool cancelledHybrid = verifyLocalHybridMutation(L"last-row IME cancellation");
+            SendMessageW(g_hNoteEdit, WM_IME_ENDCOMPOSITION, 0, 0);
+            const bool endedHybrid = verifyLocalHybridMutation(L"last-row cancelled IME end");
+            const auto after = ObserveNoteRenderRuntime();
+            const bool valid = dispatchProbe.valid && hybrid && sourcePreserved && positionCurrent && candidateCurrent &&
+                pendingHybrid && cancelledHybrid && endedHybrid &&
+                started.nativeRedrawTransactions == before.nativeRedrawTransactions + 1 &&
+                after.nativeRedrawTransactions == before.nativeRedrawTransactions + 4 &&
+                after.nativeRedrawDepth == 0 && after.nativeRedrawRequested &&
+                after.nativeFallbackPaintCount == before.nativeFallbackPaintCount &&
+                after.canonicalRevision == before.canonicalRevision &&
+                after.modelMaterializations == before.modelMaterializations &&
+                GetNoteAutomationIndexingText() == original;
+            AppendUiAutomationTrace(L"math_render:last_row_ime_cancel offset=" +
+                std::to_wstring(startOffset) + L" length=" + std::to_wstring(original.size()) +
+                L" valid=" + std::to_wstring(valid) + L" native_paints=" +
+                std::to_wstring(after.nativeFallbackPaintCount - before.nativeFallbackPaintCount) +
+                L" hybrid=" + std::to_wstring(hybrid) + L" source=" + std::to_wstring(sourcePreserved) +
+                L" pending=" + std::to_wstring(pendingHybrid) +
+                L" cancelled=" + std::to_wstring(cancelledHybrid) + L" ended=" + std::to_wstring(endedHybrid) +
+                L" scopes=" + std::to_wstring(after.nativeRedrawTransactions - before.nativeRedrawTransactions) +
+                L" started_scopes=" + std::to_wstring(started.nativeRedrawTransactions - before.nativeRedrawTransactions) +
+                L" models=" + std::to_wstring(after.modelMaterializations - before.modelMaterializations) +
+                L" private_ime=" + std::to_wstring(dispatchProbe.valid) +
+                L" private_failures=" + std::to_wstring(dispatchProbe.failureMask) +
+                L" native_queries=" + std::to_wstring(dispatchProbe.nativeQueries) +
+                L" public_query=" + std::to_wstring(positionCurrent) + L" candidate=" + std::to_wstring(candidateCurrent));
+            if (!valid) return false;
+        }
+        for (const auto [input, atLineStart] : {
+                 std::pair{L'Q', false}, std::pair{L'Q', true},
+                 std::pair{L'\r', false}, std::pair{L'\b', false}}) {
+            const size_t offset = atLineStart ? lastLineStart : original.size();
+            SetFocus(g_hNoteEdit);
+            SendMessageW(g_hNoteEdit, EM_SETSEL, offset, offset);
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_F24, 1);
+            SendMessageW(g_hNoteEdit, WM_VSCROLL, SB_BOTTOM, 0);
+            const auto before = ObserveNoteRenderRuntime();
+            if (input == L'\r') {
+                SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_RETURN, 1);
+            }
+            const bool sent = input == L'\b'
+                ? SendUiAutomationNoteBackspace(1)
+                : SendUiAutomationNoteTextInput(std::wstring(1, input));
+            const bool hybrid = verifyLocalHybridMutation(L"EOF mutation");
+            const auto after = ObserveNoteRenderRuntime();
+            const auto snapshot = CaptureNoteUiSnapshot();
+            std::wstring expected = original;
+            if (input == L'\b') expected.pop_back();
+            else expected.insert(offset, 1, input);
+            const bool exact = GetNoteAutomationIndexingText() == expected;
+            AppendUiAutomationTrace(L"math_render:eof_mutation input=" +
+                std::to_wstring(static_cast<unsigned>(input)) + L" length=" +
+                std::to_wstring(original.size()) + L" line_start=" + std::to_wstring(atLineStart) +
+                L" exact=" + std::to_wstring(exact) +
+                L" " + DescribeNoteUiSnapshot(snapshot) + L" native_paints=" +
+                std::to_wstring(after.nativeFallbackPaintCount - before.nativeFallbackPaintCount) +
+                L" frame=" + std::to_wstring(snapshot.finalFrameActive) + L" raw=" +
+                std::to_wstring(snapshot.finalRawLineCount) + L" structured=" +
+                std::to_wstring(snapshot.finalStructuredLineCount) + L" actual_length=" +
+                std::to_wstring(GetNoteAutomationIndexingText().size()));
+            if (input == L'\r') SendMessageW(g_hNoteEdit, WM_KEYUP, VK_RETURN, 0xC0000001);
+            const bool restored = sent && exact && SendUiAutomationNoteUndoChangedText() &&
+                GetNoteAutomationIndexingText() == original;
+            if (!sent || !exact || !hybrid || !restored ||
+                after.nativeFallbackPaintCount != before.nativeFallbackPaintCount) return false;
+        }
+        const size_t insertion = lastLineStart;
+        SendMessageW(g_hNoteEdit, EM_SETSEL, insertion, insertion);
+        SendMessageW(g_hNoteEdit, WM_VSCROLL, SB_BOTTOM, 0);
+        const auto beforeStart = ObserveNoteRenderRuntime();
+        SendMessageW(g_hNoteEdit, WM_IME_STARTCOMPOSITION, 0, 0);
+        const bool startHybrid = verifyLocalHybridMutation(L"last-row IME start");
+        const auto afterStart = ObserveNoteRenderRuntime();
+        const bool startAtomic = afterStart.nativeFallbackPaintCount == beforeStart.nativeFallbackPaintCount &&
+            afterStart.nativeRedrawDepth == 0 && afterStart.nativeRedrawRequested &&
+            afterStart.nativeRedrawTransactions == beforeStart.nativeRedrawTransactions + 1;
+        AppendUiAutomationTrace(L"math_render:eof_ime_start hybrid=" + std::to_wstring(startHybrid) +
+            L" atomic=" + std::to_wstring(startAtomic) + L" native_paints=" +
+            std::to_wstring(afterStart.nativeFallbackPaintCount - beforeStart.nativeFallbackPaintCount));
+        SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"仮"));
+        RecordCurrentNoteTextEditForUndo(g_hNoteEdit);
+        ResetNoteEditHistorySnapshot(g_hNoteEdit);
+        SendMessageW(g_hNoteEdit, EM_SETSEL, insertion, insertion + 1);
+        SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"確未"));
+        note::NoteImePreeditPayload remaining;
+        remaining.text = L"未";
+        remaining.caret = {1};
+        const bool accepted = AcceptNoteImeResultWithContinuation(g_hNoteEdit, L"確", remaining);
+        const bool partialHybrid = verifyLocalHybridMutation(L"EOF IME partial result");
+        AppendUiAutomationTrace(L"math_render:eof_ime accepted=" + std::to_wstring(accepted) +
+            L" hybrid=" + std::to_wstring(partialHybrid) + L" length=" + std::to_wstring(original.size()));
+        SendMessageW(g_hNoteEdit, EM_SETSEL, insertion + 1, insertion + 2);
+        SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+        SendMessageW(g_hNoteEdit, WM_IME_ENDCOMPOSITION, 0, 0);
+        std::wstring expected = original;
+        expected.insert(insertion, L"確");
+        const bool exact = GetNoteAutomationIndexingText() == expected;
+        const bool endedHybrid = verifyLocalHybridMutation(L"EOF IME end");
+        const bool restored = exact && SendUiAutomationNoteUndoChangedText() &&
+            GetNoteAutomationIndexingText() == original;
+        AppendUiAutomationTrace(L"math_render:eof_ime_end exact=" + std::to_wstring(exact) +
+            L" hybrid=" + std::to_wstring(endedHybrid) + L" restored=" + std::to_wstring(restored));
+        return startHybrid && startAtomic && accepted && partialHybrid && endedHybrid && restored;
+    };
+    const auto verifyPopulatedLastRowMutations = [&]() -> bool {
+        const std::wstring original = GetNoteAutomationIndexingText();
+        // Distinguish line start from EOF even when the base fixture ends in
+        // an empty row. Keep an unrelated structured prefix and undo the fixture.
+        InsertSnippetIntoNoteAt(original.size(), L"\nLast input row");
+        const bool valid = verifyEofHybridMutations();
+        const bool restored = SendUiAutomationNoteUndoChangedText() &&
+            GetNoteAutomationIndexingText() == original;
+        return valid && restored;
+    };
+    // The system caret must follow final geometry after each focus lifetime,
+    // not a cached RichEdit row or a persistent caret painted into the canvas.
+    SetFocus(g_hNoteEdit);
+    RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    const NoteUiSnapshot focusedOpening = CaptureNoteUiSnapshot();
+    SetFocus(owner);
+    RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    GUITHREADINFO unfocusedInfo{};
+    unfocusedInfo.cbSize = sizeof(unfocusedInfo);
+    const bool nativeCaretReleased = GetGUIThreadInfo(GetCurrentThreadId(), &unfocusedInfo) &&
+        unfocusedInfo.hwndCaret != g_hNoteEdit;
+    SetFocus(g_hNoteEdit);
+    RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    const NoteUiSnapshot refocusedOpening = CaptureNoteUiSnapshot();
+    if (!focusedOpening.systemCaretMatchesFinal || !nativeCaretReleased ||
+        !refocusedOpening.systemCaretMatchesFinal || !refocusedOpening.finalFrameActive ||
+        focusedOpening.currentLineHighlightPainted || refocusedOpening.currentLineHighlightPainted) {
+        restorePrevious();
+        if (outError) *outError = L"The opening caret lost final geometry or painted an editing-row highlight across focus/refocus.";
+        return false;
+    }
+    // Probe the actual IMM request, not the candidate window's OS-owned UI.
+    // Prediction notifications must work with no live composition session.
+    const auto verifyImeCandidateRequests = [&]() -> bool {
+        const NoteUiSnapshot before = CaptureNoteUiSnapshot();
+        RECT caret = before.finalCaretClientRect;
+        RECT inputBand = before.finalCaretLineClientRect;
+        if (!before.finalFrameActive) {
+            GUITHREADINFO info{};
+            info.cbSize = sizeof(info);
+            if (!GetGUIThreadInfo(GetCurrentThreadId(), &info) || info.hwndCaret != g_hNoteEdit) return false;
+            caret = info.rcCaret;
+            inputBand = caret;
+        }
+        HIMC imc = ImmGetContext(g_hNoteEdit);
+        if (!imc) {
+            AppendUiAutomationTrace(L"math_render:ime_candidate_request_skipped_no_context");
+            return true;
+        }
+        CANDIDATEFORM original{};
+        const bool haveOriginal = ImmGetCandidateWindow(imc, 0, &original) != FALSE;
+        ImmReleaseContext(g_hNoteEdit, imc);
+        bool valid = !IsNoteImeComposing();
+        for (WPARAM event : {WPARAM{IMN_OPENCANDIDATE}, WPARAM{IMN_CHANGECANDIDATE}}) {
+            // Simulate a native reset to the old one-pixel exclusion before
+            // the notification; the subclass must replace it post-default.
+            imc = ImmGetContext(g_hNoteEdit);
+            if (!imc) { valid = false; break; }
+            CANDIDATEFORM stale{};
+            stale.dwStyle = CFS_EXCLUDE;
+            stale.rcArea = caret;
+            stale.ptCurrentPos = {stale.rcArea.left, stale.rcArea.bottom};
+            const bool injected = ImmSetCandidateWindow(imc, &stale) != FALSE;
+            ImmReleaseContext(g_hNoteEdit, imc);
+            // Simulate a native IME handler leaving the system caret at a
+            // transport coordinate. Repair must happen in the notification,
+            // without painting or reparsing to make the assertion pass.
+            if (before.finalFrameActive && !SetCaretPos(caret.left, caret.top + 12)) {
+                valid = false;
+                break;
+            }
+            SendMessageW(g_hNoteEdit, WM_IME_NOTIFY, event, 1);
+            const auto notificationState = CaptureNoteUiSnapshot();
+            const bool accessibleMatches = VerifyAccessibleSystemCaretForAutomation(g_hNoteEdit);
+            AppendUiAutomationTrace(L"math_render:ime_notification_caret_matches=" +
+                std::to_wstring(notificationState.systemCaretMatchesFinal) +
+                L" frame=" + std::to_wstring(notificationState.finalFrameActive));
+            valid = valid && (!before.finalFrameActive || notificationState.systemCaretMatchesFinal) && accessibleMatches;
+            imc = ImmGetContext(g_hNoteEdit);
+            if (!imc) { valid = false; break; }
+            CANDIDATEFORM actual{};
+            const bool read = ImmGetCandidateWindow(imc, 0, &actual) != FALSE;
+            ImmReleaseContext(g_hNoteEdit, imc);
+            RECT client{};
+            GetClientRect(g_hNoteEdit, &client);
+            HDC dc = GetDC(g_hNoteEdit);
+            const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+            if (dc) ReleaseDC(g_hNoteEdit, dc);
+            const int gap = std::max(1, MulDiv(6, dpi > 0 ? dpi : 96, 96));
+            valid = valid && injected && read && actual.dwStyle == CFS_EXCLUDE &&
+                actual.rcArea.left == client.left && actual.rcArea.right == client.right &&
+                actual.rcArea.top == std::max(client.top, inputBand.top) - gap &&
+                actual.rcArea.bottom == std::min(client.bottom, inputBand.bottom) + gap &&
+                actual.ptCurrentPos.x == std::clamp(caret.left, client.left, client.right - 1) &&
+                actual.ptCurrentPos.y == std::clamp(caret.top, client.top, client.bottom - 1);
+        }
+        const NoteUiSnapshot after = CaptureNoteUiSnapshot();
+        valid = valid && !IsNoteImeComposing() && after.finalFrameActive == before.finalFrameActive &&
+            after.canonicalText == before.canonicalText &&
+            after.sourceIdentity.content_revision == before.sourceIdentity.content_revision;
+        if (haveOriginal) {
+            imc = ImmGetContext(g_hNoteEdit);
+            if (imc) {
+                const bool restored = ImmSetCandidateWindow(imc, &original) != FALSE;
+                ImmReleaseContext(g_hNoteEdit, imc);
+                valid = valid && restored;
+            } else valid = false;
+        }
+        AppendUiAutomationTrace(L"math_render:ime_candidate_requests_valid=" + std::to_wstring(valid ? 1 : 0));
+        return valid;
+    };
+    const auto verifyImeCharacterQuery = [&]() -> bool {
+        const auto before = CaptureNoteUiSnapshot();
+        const auto runtimeBefore = ObserveNoteRenderRuntime();
+        if (!before.finalFrameActive || !before.finalCaretGeometryReady) return false;
+        IMECHARPOSITION query{};
+        query.dwSize = sizeof(query);
+        const bool answered = SendMessageW(g_hNoteEdit, WM_IME_REQUEST,
+            IMR_QUERYCHARPOSITION, reinterpret_cast<LPARAM>(&query)) != 0;
+        POINT expected{before.finalCaretClientRect.left, before.finalCaretClientRect.top};
+        RECT document{};
+        GetClientRect(g_hNoteEdit, &document);
+        POINT documentTop{document.left, document.top};
+        POINT documentBottom{document.right, document.bottom};
+        const bool mapped = ClientToScreen(g_hNoteEdit, &expected) &&
+            ClientToScreen(g_hNoteEdit, &documentTop) && ClientToScreen(g_hNoteEdit, &documentBottom);
+        document = {documentTop.x, documentTop.y, documentBottom.x, documentBottom.y};
+        IMECHARPOSITION invalid = query;
+        invalid.dwCharPos = 1; // No live preedit: only offset zero is meaningful.
+        const IMECHARPOSITION originalInvalid = invalid;
+        const bool rejectsOffset = SendMessageW(g_hNoteEdit, WM_IME_REQUEST,
+            IMR_QUERYCHARPOSITION, reinterpret_cast<LPARAM>(&invalid)) == 0 &&
+            std::memcmp(&invalid, &originalInvalid, sizeof(invalid)) == 0;
+        invalid = query;
+        --invalid.dwSize;
+        const IMECHARPOSITION originalSize = invalid;
+        const bool rejectsSize = SendMessageW(g_hNoteEdit, WM_IME_REQUEST,
+            IMR_QUERYCHARPOSITION, reinterpret_cast<LPARAM>(&invalid)) == 0 &&
+            std::memcmp(&invalid, &originalSize, sizeof(invalid)) == 0;
+        const bool rejectsNull = SendMessageW(g_hNoteEdit, WM_IME_REQUEST, IMR_QUERYCHARPOSITION, 0) == 0;
+        const auto runtimeAfter = ObserveNoteRenderRuntime();
+        const bool valid = answered && mapped && rejectsOffset && rejectsSize && rejectsNull &&
+            query.pt.x == expected.x && query.pt.y == expected.y &&
+            query.cLineHeight == static_cast<UINT>(before.finalCaretClientRect.bottom - before.finalCaretClientRect.top) &&
+            EqualRect(&query.rcDocument, &document) &&
+            runtimeBefore.canonicalRevision == runtimeAfter.canonicalRevision &&
+            runtimeBefore.modelMaterializations == runtimeAfter.modelMaterializations;
+        AppendUiAutomationTrace(L"math_render:ime_character_query valid=" + std::to_wstring(valid) +
+            L" answered=" + std::to_wstring(answered) + L" expected_y=" + std::to_wstring(expected.y) +
+            L" actual_y=" + std::to_wstring(query.pt.y));
+        return valid;
+    };
+    if (!verifyImeCandidateRequests() || !verifyImeCharacterQuery()) {
+        restorePrevious();
+        if (outError) *outError = L"IME window request or character query did not use final input geometry without changing canonical text.";
+        return false;
+    }
+    // The same read-only opening policy applies to whole-native raw mode.
+    // Observe the actual FillRect path, not just a predicted policy flag.
+    g_noteRawOnly = true;
+    PreserveRenderedNoteOpeningView();
+    RefreshBottomPaneView();
+    RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    const bool rawOpeningHighlighted = CaptureNoteUiSnapshot().currentLineHighlightPainted;
+    const bool rawImeCandidatePlaced = verifyImeCandidateRequests();
+    g_noteRawOnly = false;
+    RefreshBottomPaneView();
+    if (rawOpeningHighlighted || !rawImeCandidatePlaced) {
+        restorePrevious();
+        if (outError) *outError = L"The raw opening view highlighted an inactive row or lost native IME candidate placement.";
+        return false;
+    }
+    // Real partial-raw ownership keeps the heading's taller allocation, not
+    // its glyph size. Its exclusion must extend past that preserved padding.
+    SetFocus(g_hNoteEdit);
+    SendMessageW(g_hNoteEdit, EM_SETSEL, 2, 2);
+    SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_F24, 0);
+    SendMessageW(g_hNoteEdit, WM_KEYUP, VK_F24, 0);
+    RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    const auto headingInput = CaptureNoteUiSnapshot();
+    const bool headingBandValid = headingInput.finalFrameActive && headingInput.finalRawLineCount > 0 &&
+        headingInput.finalCaretLineClientRect.bottom > headingInput.finalCaretClientRect.bottom &&
+        verifyImeCandidateRequests() && verifyImeCharacterQuery();
+    AppendUiAutomationTrace(L"math_render:ime_heading_band_valid=" + std::to_wstring(headingBandValid) +
+        L" caret_bottom=" + std::to_wstring(headingInput.finalCaretClientRect.bottom) +
+        L" row_bottom=" + std::to_wstring(headingInput.finalCaretLineClientRect.bottom));
+    SetFocus(owner);
+    SendMessageW(g_hNoteEdit, EM_SETSEL, 0, 0);
+    PreserveRenderedNoteOpeningView();
+    SetFocus(g_hNoteEdit);
+    RefreshBottomPaneView();
+    if (!headingBandValid) {
+        restorePrevious();
+        if (outError) *outError = L"IME candidates overlap a heading's preserved raw row allocation.";
+        return false;
+    }
+    // Use the real assist hit-test/command path, not direct flag assignment.
+    // Every cycle must keep the same note/view identity and remain clickable.
+    const auto verifyAssistRenderCycles = [&](bool narrowPane = false) -> bool {
+        const auto savedMode = g_bottomNoteMode;
+        const auto savedPin = g_bottomPanePin;
+        const bool savedEnabled = g_noteRenderEnabled;
+        const bool savedRaw = g_noteRawOnly;
+        const bool savedMath = g_noteRenderMath;
+        const bool configEnabled = g_config.noteRenderEnabled;
+        const bool configRaw = g_config.noteRawOnly;
+        const bool configMath = g_config.noteRenderMath;
+        const int configInlineMathVerticalAlignment = g_config.noteInlineMathVerticalAlignment;
+        const bool savedVim = g_noteVimModeEnabled;
+        const bool savedNormal = g_noteNormalMode;
+        const DWORD savedNormalCaret = g_noteNormalCaret;
+        const HWND savedFocus = GetFocus();
+        const bool savedCaretRaw = g_noteVimCaretLineRawTextVisible;
+        const bool savedClickInsert = g_noteVimClickEntersInsertMode;
+        const bool configVim = g_config.noteVimModeEnabled;
+        const bool configCaretRaw = g_config.noteVimCaretLineRawTextVisible;
+        const bool configClickInsert = g_config.noteVimClickEntersInsertMode;
+        g_bottomNoteMode = BottomNoteMode::Assist;
+        g_bottomPanePin = BottomPanePin::Note;
+        ui::ApplyLayout(owner, ui::LayoutPass::Commit);
+        RefreshBottomPaneView();
+        RefreshMainWindowUiState(owner);
+        const auto originalLayout = ui::GetLayoutState();
+        RECT originalPane{};
+        RECT originalNote{};
+        const auto childRect = [&](HWND child, RECT* out) {
+            if (!GetWindowRect(child, out)) return false;
+            MapWindowPoints(HWND_DESKTOP, owner, reinterpret_cast<POINT*>(out), 2);
+            return true;
+        };
+        const bool originalRectsValid = childRect(g_hBottomNote, &originalPane) &&
+            childRect(g_hNoteEdit, &originalNote);
+        const NoteUiSnapshot before = CaptureNoteUiSnapshot();
+        const std::wstring beforeText = GetNoteAutomationIndexingText();
+        DWORD beforeStart = 0, beforeEnd = 0;
+        SendMessageW(g_hNoteEdit, EM_GETSEL,
+            reinterpret_cast<WPARAM>(&beforeStart), reinterpret_cast<LPARAM>(&beforeEnd));
+        // Only the disposable workspace is changed. Exercise main-window
+        // down/move/live-timer/up dispatch, not child SetWindowPos or layout
+        // assignment. Every exit releases capture; the return drag restores
+        // both neighbouring rectangles and the persisted column width.
+        const auto verifyColumnGeometry = [&](int expectedRight) {
+            RECT pane{}, note{}, client{};
+            const auto bands = ui::GetSplitBands(owner);
+            return originalRectsValid && childRect(g_hBottomNote, &pane) &&
+                childRect(g_hNoteEdit, &note) && GetClientRect(owner, &client) &&
+                ui::GetLayoutState().rightWidth == expectedRight &&
+                pane.left == bands.vRight.right && pane.right == client.right &&
+                pane.right - pane.left == expectedRight &&
+                pane.top == originalPane.top && pane.bottom == originalPane.bottom &&
+                note.left == originalNote.left && note.right == bands.vRight.left &&
+                note.top == originalNote.top && note.bottom == originalNote.bottom;
+        };
+        const auto dragRightColumn = [&](int expectedRight) {
+            const auto layout = ui::GetLayoutState();
+            if (GetCapture() || expectedRight < kMinPane) return false;
+            const auto bands = ui::GetSplitBands(owner);
+            const POINT start{(bands.vRight.left + bands.vRight.right) / 2,
+                              (bands.vRight.top + bands.vRight.bottom) / 2};
+            if (ui::HitTest(bands, start) != ui::SplitHit::VRight) return false;
+            SendMessageW(owner, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(start.x, start.y));
+            bool moved = g_draggingRight && GetCapture() == owner;
+            const int delta = layout.rightWidth - expectedRight;
+            for (int step = 1; moved && step <= 3; ++step) {
+                const int dx = delta * step / 4;
+                SendMessageW(owner, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(start.x + dx, start.y));
+                SendMessageW(owner, WM_TIMER, ui::kSplitDragTimerId, 0);
+                moved = g_draggingRight && GetCapture() == owner &&
+                    verifyColumnGeometry(layout.rightWidth - dx);
+            }
+            // Leave the last move pending: button-up must commit it even
+            // without another timer tick, as in a quick real mouse drag.
+            SendMessageW(owner, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(start.x + delta, start.y));
+            SendMessageW(owner, WM_LBUTTONUP, 0, MAKELPARAM(start.x + delta, start.y));
+            moved = moved && !g_draggingRight && GetCapture() != owner &&
+                verifyColumnGeometry(expectedRight) && g_config.rightWidth == expectedRight;
+            if (g_draggingRight || GetCapture() == owner) SendMessageW(owner, WM_CANCELMODE, 0, 0);
+            const auto after = CaptureNoteUiSnapshot();
+            DWORD startSelection = 0, endSelection = 0;
+            SendMessageW(g_hNoteEdit, EM_GETSEL,
+                reinterpret_cast<WPARAM>(&startSelection), reinterpret_cast<LPARAM>(&endSelection));
+            moved = moved && after.viewIdentity.view_id == before.viewIdentity.view_id &&
+                after.sourceIdentity.note_id == before.sourceIdentity.note_id &&
+                after.sourceIdentity.content_revision == before.sourceIdentity.content_revision &&
+                after.finalFrameActive == (g_noteRenderEnabled && !g_noteRawOnly) &&
+                startSelection == beforeStart && endSelection == beforeEnd &&
+                GetNoteAutomationIndexingText() == beforeText;
+            AppendUiAutomationTrace(L"math_render:assist_splitter_drag from=" +
+                std::to_wstring(layout.rightWidth) + L" to=" + std::to_wstring(expectedRight) +
+                L" valid=" + std::to_wstring(moved));
+            return moved;
+        };
+        bool valid = originalRectsValid;
+        if (narrowPane) valid = valid && originalLayout.rightWidth > 170 && dragRightColumn(170);
+        for (int pass = 0; pass < 6 && valid; ++pass) {
+            // Repeat the same cycles in a narrow pane: wrapped labels must
+            // not shift the hit-test onto a neighbour or a read-only row.
+            if (narrowPane && !verifyColumnGeometry(170)) { valid = false; break; }
+            SendMessageW(g_hBottomNote, WM_VSCROLL, SB_TOP, 0);
+            RedrawWindow(g_hBottomNote, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            RECT control{};
+            bool found = GetNoteStatusAssistRenderControlRect(&control);
+            for (int step = 0; !found && step < 64; ++step) {
+                SendMessageW(g_hBottomNote, WM_VSCROLL, SB_LINEDOWN, 0);
+                RedrawWindow(g_hBottomNote, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                found = GetNoteStatusAssistRenderControlRect(&control);
+            }
+            if (!found) {
+                RECT client{};
+                GetClientRect(g_hBottomNote, &client);
+                AppendUiAutomationTrace(L"math_render:assist_control_not_visible size=" +
+                    std::to_wstring(client.right) + L":" + std::to_wstring(client.bottom) +
+                    L" style=" + std::to_wstring(GetWindowLongPtrW(g_hBottomNote, GWL_STYLE)));
+                valid = false;
+                break;
+            }
+            const bool enabled = g_noteRenderEnabled && !g_noteRawOnly;
+            const bool math = enabled && g_noteRenderMath;
+            const LPARAM point = MAKELPARAM((control.left + control.right) / 2,
+                                           (control.top + control.bottom) / 2);
+            SendMessageW(g_hBottomNote, WM_LBUTTONDOWN, MK_LBUTTON, point);
+            SendMessageW(g_hBottomNote, WM_LBUTTONUP, 0, point);
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            const NoteUiSnapshot after = CaptureNoteUiSnapshot();
+            DWORD afterStart = 0, afterEnd = 0;
+            SendMessageW(g_hNoteEdit, EM_GETSEL,
+                reinterpret_cast<WPARAM>(&afterStart), reinterpret_cast<LPARAM>(&afterEnd));
+            valid = g_noteRenderEnabled == !math && g_noteRawOnly == math &&
+                g_noteRenderMath == (enabled && !math) &&
+                after.viewIdentity.view_id == before.viewIdentity.view_id &&
+                after.viewIdentity.note_id == before.viewIdentity.note_id &&
+                after.sourceIdentity.note_id == before.sourceIdentity.note_id &&
+                after.sourceIdentity.content_revision == before.sourceIdentity.content_revision &&
+                after.finalFrameActive == !math && beforeStart == afterStart && beforeEnd == afterEnd &&
+                GetNoteAutomationIndexingText() == beforeText && !IsNoteRenderSwitchInProgress() &&
+                (!narrowPane || verifyColumnGeometry(170));
+            if (!valid) {
+                AppendUiAutomationTrace(L"math_render:assist_cycle_failed pass=" + std::to_wstring(pass) +
+                    L" before=" + DescribeNoteUiSnapshot(before) + L" after=" + DescribeNoteUiSnapshot(after) +
+                    L" selection=" + std::to_wstring(beforeStart) + L":" + std::to_wstring(beforeEnd) +
+                    L"->" + std::to_wstring(afterStart) + L":" + std::to_wstring(afterEnd));
+            }
+        }
+        if (narrowPane) {
+            const bool draggedBack = dragRightColumn(originalLayout.rightWidth);
+            RECT restoredPane{}, restoredNote{};
+            const auto restoredLayout = ui::GetLayoutState();
+            const bool restoredWidth = draggedBack && childRect(g_hBottomNote, &restoredPane) &&
+                childRect(g_hNoteEdit, &restoredNote) && EqualRect(&restoredPane, &originalPane) &&
+                EqualRect(&restoredNote, &originalNote) &&
+                restoredLayout.leftWidth == originalLayout.leftWidth &&
+                restoredLayout.topHeight == originalLayout.topHeight &&
+                restoredLayout.leftSplit1 == originalLayout.leftSplit1 &&
+                restoredLayout.leftSplit2 == originalLayout.leftSplit2;
+            valid = restoredWidth && valid;
+            if (!restoredWidth) {
+                // Failure cleanup only, never evidence for a passed drag.
+                SendMessageW(owner, WM_CANCELMODE, 0, 0);
+                ui::SetLayoutState(originalLayout);
+                ui::ApplyLayout(owner, ui::LayoutPass::Commit);
+                PersistConfig();
+            }
+            AppendUiAutomationTrace(L"math_render:assist_width_restored valid=" + std::to_wstring(restoredWidth));
+            AppendUiAutomationTrace(valid ? L"math_render:assist_wrapped_cycles_ok"
+                                          : L"math_render:assist_wrapped_cycles_failed");
+        }
+        // Exercise the actual status controls, including conditional rows.
+        // Preference changes must publish immediately, without a later key.
+        const auto clickAssistControl = [&](NoteStatusAssistControl target) {
+            SendMessageW(g_hBottomNote, WM_VSCROLL, SB_TOP, 0);
+            // Publish the new scroll extent after conditional rows change.
+            // Use overlapping small steps, so a clipped header/command bar
+            // cannot make a control fall between two page-sized probes.
+            RedrawWindow(g_hBottomNote, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            for (int step = 0; step < 64; ++step) {
+                RECT control{};
+                if (GetNoteStatusAssistControlRect(target, &control)) {
+                    const auto point = MAKELPARAM((control.left + control.right) / 2,
+                                                 (control.top + control.bottom) / 2);
+                    SendMessageW(g_hBottomNote, WM_LBUTTONDOWN, MK_LBUTTON, point);
+                    SendMessageW(g_hBottomNote, WM_LBUTTONUP, 0, point);
+                    RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                    AppendUiAutomationTrace(L"math_render:assist_click control=" +
+                        std::to_wstring(static_cast<int>(target)) + L" vim=" +
+                        std::to_wstring(g_noteVimModeEnabled) + L" normal=" +
+                        std::to_wstring(g_noteNormalMode) + L" rawPreference=" +
+                        std::to_wstring(g_noteVimCaretLineRawTextVisible) + L" snapshot=" +
+                        DescribeNoteUiSnapshot(CaptureNoteUiSnapshot()));
+                    return true;
+                }
+                SendMessageW(g_hBottomNote, WM_VSCROLL, SB_LINEDOWN, 0);
+                RedrawWindow(g_hBottomNote, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            }
+            AppendUiAutomationTrace(L"math_render:assist_control_unavailable control=" +
+                std::to_wstring(static_cast<int>(target)));
+            return false;
+        };
+        if (valid) {
+            g_noteVimModeEnabled = false;
+            g_noteNormalMode = false;
+            g_noteVimCaretLineRawTextVisible = false;
+            g_noteVimClickEntersInsertMode = false;
+            SetFocus(g_hNoteEdit);
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_F24, 0); // end opening visual hold, no text edit
+            SendMessageW(g_hNoteEdit, WM_KEYUP, VK_F24, 0);
+            RECT hidden{};
+            const int inlineMathVerticalAlignmentBefore =
+                std::clamp(g_config.noteInlineMathVerticalAlignment, 0, 2);
+            valid = !GetNoteStatusAssistControlRect(NoteStatusAssistControl::NormalCaretRaw, &hidden) &&
+                !GetNoteStatusAssistControlRect(NoteStatusAssistControl::ClickInsert, &hidden) &&
+                clickAssistControl(NoteStatusAssistControl::InlineMathVerticalAlignment) &&
+                g_config.noteInlineMathVerticalAlignment == (inlineMathVerticalAlignmentBefore + 1) % 3 &&
+                clickAssistControl(NoteStatusAssistControl::Vim) && g_noteVimModeEnabled && g_noteNormalMode;
+            const auto normal = CaptureNoteUiSnapshot();
+            valid = valid && normal.finalFrameActive && normal.finalRawLineCount == 0 &&
+                clickAssistControl(NoteStatusAssistControl::NormalCaretRaw) &&
+                g_noteVimCaretLineRawTextVisible && g_config.noteVimCaretLineRawTextVisible;
+            const auto raw = CaptureNoteUiSnapshot();
+            valid = valid && raw.finalFrameActive && raw.finalRawLineCount > 0 &&
+                raw.sourceIdentity.content_revision == normal.sourceIdentity.content_revision &&
+                clickAssistControl(NoteStatusAssistControl::NormalCaretRaw) &&
+                !g_noteVimCaretLineRawTextVisible && CaptureNoteUiSnapshot().finalRawLineCount == 0 &&
+                clickAssistControl(NoteStatusAssistControl::ClickInsert) && g_noteVimClickEntersInsertMode &&
+                g_config.noteVimClickEntersInsertMode &&
+                clickAssistControl(NoteStatusAssistControl::CurrentDisplay) &&
+                g_noteRenderEnabled == savedEnabled && g_noteRawOnly == savedRaw &&
+                g_noteRenderMath == savedMath && GetNoteAutomationIndexingText() == beforeText &&
+                clickAssistControl(NoteStatusAssistControl::Vim) && !g_noteVimModeEnabled &&
+                !g_noteNormalMode && g_noteVimClickEntersInsertMode &&
+                !GetNoteStatusAssistControlRect(NoteStatusAssistControl::ClickInsert, &hidden);
+            if (valid) {
+                // An IME start can precede its first composition string. A
+                // settings click must not cancel even this provisional phase.
+                SetFocus(g_hNoteEdit);
+                SendMessageW(g_hNoteEdit, WM_IME_STARTCOMPOSITION, 0, 0);
+                valid = clickAssistControl(NoteStatusAssistControl::Vim) &&
+                    !g_noteVimModeEnabled && !g_noteNormalMode;
+                SendMessageW(g_hNoteEdit, WM_IME_ENDCOMPOSITION, 0, 0);
+                valid = valid && GetNoteAutomationIndexingText() == beforeText &&
+                    CaptureNoteUiSnapshot().sourceIdentity.content_revision == before.sourceIdentity.content_revision;
+            }
+            AppendUiAutomationTrace(valid ? L"math_render:assist_interaction_settings_ok"
+                                          : L"math_render:assist_interaction_settings_failed");
+        }
+        g_noteVimModeEnabled = savedVim;
+        g_noteNormalMode = savedNormal;
+        g_noteNormalCaret = savedNormalCaret;
+        g_noteVimCaretLineRawTextVisible = savedCaretRaw;
+        g_noteVimClickEntersInsertMode = savedClickInsert;
+        g_config.noteVimModeEnabled = configVim;
+        g_config.noteVimCaretLineRawTextVisible = configCaretRaw;
+        g_config.noteVimClickEntersInsertMode = configClickInsert;
+        SendMessageW(g_hNoteEdit, EM_SETSEL, beforeStart, beforeEnd);
+        g_noteRenderEnabled = savedEnabled;
+        g_noteRawOnly = savedRaw;
+        g_noteRenderMath = savedMath;
+        g_config.noteRenderEnabled = configEnabled;
+        g_config.noteRawOnly = configRaw;
+        g_config.noteRenderMath = configMath;
+        g_config.noteInlineMathVerticalAlignment = configInlineMathVerticalAlignment;
+        PersistConfig(); // Only the disposable automation workspace is in scope.
+        g_bottomNoteMode = savedMode;
+        g_bottomPanePin = savedPin;
+        ui::ApplyLayout(owner, ui::LayoutPass::Commit);
+        RefreshBottomPaneView();
+        RefreshMainWindowUiState(owner);
+        if (savedFocus && IsWindow(savedFocus)) SetFocus(savedFocus);
+        return valid;
+    };
+    if (!verifyAssistRenderCycles() || !verifyAssistRenderCycles(true)) {
+        restorePrevious();
+        if (outError) *outError = L"Status assist render-mode cycles changed note identity, selection, or stopped accepting clicks.";
+        return false;
+    }
+    const std::wstring pristineMathText = GetNoteAutomationIndexingText();
+    // Handled navigation must finish publication at key-down, not rely on a
+    // future character/key-up or a paint-side repair. Include unchanged edge
+    // offsets and Smart Home/End's early-return path.
+    SetFocus(g_hNoteEdit);
+    const auto beforeNavigation = ObserveNoteRenderRuntime();
+    for (const WPARAM key : {VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_PRIOR, VK_NEXT, VK_HOME, VK_END}) {
+        SendMessageW(g_hNoteEdit, EM_SETSEL, 0, 0);
+        SendMessageW(g_hNoteEdit, WM_KEYDOWN, key, 1);
+        const auto beforePaint = CaptureNoteUiSnapshot();
+        if (!beforePaint.finalFrameActive || !beforePaint.systemCaretMatchesFinal ||
+            !VerifyAccessibleSystemCaretForAutomation(g_hNoteEdit) || !verifyImeCharacterQuery()) {
+            AppendUiAutomationTrace(L"math_render:navigation_before_paint_failed key=" + std::to_wstring(key));
+            restorePrevious();
+            if (outError) *outError = L"Navigation retained stale system/accessibility caret geometry until paint.";
+            return false;
+        }
+        RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        const auto after = CaptureNoteUiSnapshot();
+        const auto runtime = ObserveNoteRenderRuntime();
+        if (!after.finalFrameActive || after.finalStructuredLineCount == 0 ||
+            after.finalRawLineCount == 0 || !after.systemCaretMatchesFinal ||
+            runtime.canonicalRevision != beforeNavigation.canonicalRevision ||
+            runtime.modelMaterializations != beforeNavigation.modelMaterializations) {
+            AppendUiAutomationTrace(L"math_render:navigation_completion_failed key=" +
+                std::to_wstring(key) + L" snapshot=" + DescribeNoteUiSnapshot(after));
+            restorePrevious();
+            if (outError) *outError = L"Handled navigation did not finish its final frame at key-down.";
+            return false;
+        }
+        SendMessageW(g_hNoteEdit, WM_KEYUP, key, 0xC0000001);
+    }
+    if (GetNoteAutomationIndexingText() != pristineMathText) {
+        restorePrevious();
+        if (outError) *outError = L"Navigation changed the note text.";
+        return false;
+    }
+    AppendUiAutomationTrace(L"math_render:navigation_completion_ok");
+    const std::wstring localEditAnchor = L"Inline paren \\(a + b\\)";
+    const int localEditAnchorStart = FindNoteTextSnippetStart(localEditAnchor);
+    if (localEditAnchorStart < 0) {
+        restorePrevious();
+        if (outError) *outError = L"Could not find the local-edit render fixture anchor.";
+        return false;
+    }
+    const int localEditAnchorEnd = localEditAnchorStart + static_cast<int>(localEditAnchor.size());
+    const size_t localSourceLineBreak = pristineMathText.find_first_of(L"\r\n", localEditAnchorStart);
+    const size_t localSourceLineEnd = localSourceLineBreak == std::wstring::npos
+        ? pristineMathText.size() : localSourceLineBreak;
+    for (const auto key : {VK_HOME, VK_END}) {
+        SendMessageW(g_hNoteEdit, EM_SETSEL, localEditAnchorStart + 3, localEditAnchorStart + 3);
+        SendMessageW(g_hNoteEdit, WM_KEYDOWN, key, 1);
+        DWORD start = 0, end = 0;
+        SendMessageW(g_hNoteEdit, EM_GETSEL,
+            reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+        const DWORD expected = static_cast<DWORD>(key == VK_HOME
+            ? static_cast<size_t>(localEditAnchorStart) : localSourceLineEnd);
+        const auto after = ObserveNoteRenderRuntime();
+        if (start != expected || end != expected || !after.finalFrameActive ||
+            after.canonicalRevision != beforeNavigation.canonicalRevision ||
+            after.modelMaterializations != beforeNavigation.modelMaterializations) {
+            restorePrevious();
+            if (outError) *outError = L"Smart Home/End lost its source-line target or materialized the note.";
+            return false;
+        }
+        SendMessageW(g_hNoteEdit, WM_KEYUP, key, 0xC0000001);
+    }
+    AppendUiAutomationTrace(L"math_render:smart_home_end_source_line_ok");
+    const bool verticalSelectionValid = [&]() {
+        BYTE savedKeyboard[256]{};
+        if (!GetKeyboardState(savedKeyboard)) return false;
+        struct ScopedKeyboardRestore {
+            const BYTE* saved;
+            ~ScopedKeyboardRestore() { SetKeyboardState(const_cast<BYTE*>(saved)); }
+        } restoreKeyboard{savedKeyboard};
+        BYTE keyboard[256]{};
+        std::copy(std::begin(savedKeyboard), std::end(savedKeyboard), std::begin(keyboard));
+        keyboard[VK_CONTROL] = keyboard[VK_MENU] = keyboard[VK_SHIFT] = 0;
+        if (!SetKeyboardState(keyboard)) return false;
+        const DWORD origin = static_cast<DWORD>(localEditAnchorStart + 6);
+        SendMessageW(g_hNoteEdit, EM_SETSEL, origin, origin);
+        // Publish the externally positioned source caret without changing text.
+        SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_LEFT, 1);
+        SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_RIGHT, 1);
+        DWORD initialStart = 0, initialEnd = 0;
+        SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&initialStart), reinterpret_cast<LPARAM>(&initialEnd));
+        if (initialStart != origin || initialEnd != origin) return false;
+        const int previousLine = FindNoteTextSnippetStart(L"Inline dollar $x$");
+        if (previousLine < 0) return false;
+        keyboard[VK_SHIFT] = 0x80;
+        if (!SetKeyboardState(keyboard)) return false;
+        for (const WPARAM key : {VK_UP, VK_DOWN}) {
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, key, 1);
+            DWORD start = 0, end = 0;
+            SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            const auto snapshot = CaptureNoteUiSnapshot();
+            AppendUiAutomationTrace(L"math_render:vertical_step key=" + std::to_wstring(key) +
+                L" start=" + std::to_wstring(start) + L" end=" + std::to_wstring(end) +
+                L" origin=" + std::to_wstring(origin) + L" previous=" + std::to_wstring(previousLine + 6));
+            // Structured and raw rows can have different style metrics. The
+            // target must be on the adjacent source row; reversing uses the
+            // retained display X and must return to the exact origin.
+            if ((key == VK_UP ? (start < static_cast<DWORD>(previousLine) ||
+                    start >= static_cast<DWORD>(localEditAnchorStart)) : start != origin) ||
+                end != origin || !snapshot.finalFrameActive || !snapshot.systemCaretMatchesFinal) return false;
+        }
+        keyboard[VK_SHIFT] = 0;
+        if (!SetKeyboardState(keyboard)) return false;
+        SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_PRIOR, 1);
+        DWORD pageStart = 0, pageEnd = 0;
+        SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&pageStart), reinterpret_cast<LPARAM>(&pageEnd));
+        SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_NEXT, 1);
+        DWORD nextStart = 0, nextEnd = 0;
+        SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&nextStart), reinterpret_cast<LPARAM>(&nextEnd));
+        const auto runtime = ObserveNoteRenderRuntime();
+        AppendUiAutomationTrace(L"math_render:vertical_pages before=" + std::to_wstring(pageStart) +
+            L" after=" + std::to_wstring(nextStart) + L" models=" + std::to_wstring(runtime.modelMaterializations) +
+            L" baseline_models=" + std::to_wstring(beforeNavigation.modelMaterializations));
+        return pageStart == pageEnd && nextStart == nextEnd && nextStart > pageStart &&
+            runtime.finalFrameActive && runtime.canonicalRevision == beforeNavigation.canonicalRevision &&
+            runtime.modelMaterializations == beforeNavigation.modelMaterializations;
+    }();
+    if (!verticalSelectionValid || GetNoteAutomationIndexingText() != pristineMathText) {
+        AppendUiAutomationTrace(L"math_render:vertical_selection_failed snapshot=" + DescribeNoteUiSnapshot(CaptureNoteUiSnapshot()));
+        restorePrevious();
+        if (outError) *outError = L"Final-coordinate vertical/page movement lost selection direction, caret, or source identity.";
+        return false;
+    }
+    AppendUiAutomationTrace(L"math_render:vertical_selection_ok");
+    const std::wstring beforeEofLong = GetNoteAutomationIndexingText();
+    std::wstring eofLongPrefix;
+    for (int block = 0; block < 128; ++block) {
+        eofLongPrefix += L"## EOF heading " + std::to_wstring(block) + L"\n\n"
+            L"Paragraph with **bold** and `code`.\n\n"
+            L"$$\\frac{1}{2}$$\n\n"
+            L"| Item | Example |\n| --- | --- |\n| row | `value` |\n\n\n";
+    }
+    InsertSnippetIntoNoteAt(0, eofLongPrefix);
+    const bool longEofValid = verifyEofHybridMutations() && verifyPopulatedLastRowMutations();
+    const bool eofPrefixRestored = SendUiAutomationNoteUndoChangedText() &&
+        GetNoteAutomationIndexingText() == beforeEofLong;
+    if (!longEofValid || !eofPrefixRestored) {
+        restorePrevious();
+        if (outError && outError->empty()) *outError = L"Long-note EOF mutation or fixture restoration failed.";
+        return false;
+    }
+    if (!verifyEofHybridMutations() || !verifyPopulatedLastRowMutations()) {
+        restorePrevious();
+        if (outError && outError->empty()) *outError = L"EOF input, Enter or Backspace lost final rendering.";
+        return false;
+    }
+    SendMessageW(g_hNoteEdit, EM_SETSEL, localEditAnchorEnd, localEditAnchorEnd);
+    SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_F24, 1);
+    const bool vimVerticalValid = [&]() {
+        const bool savedVim = g_noteVimModeEnabled;
+        const bool savedNormal = g_noteNormalMode;
+        const bool savedRawPreference = g_noteVimCaretLineRawTextVisible;
+        bool valid = true;
+        const DWORD origin = static_cast<DWORD>(localEditAnchorStart + 6);
+        const int previousLine = FindNoteTextSnippetStart(L"Inline dollar $x$");
+        const auto sendPdfCtrlJ = [&]() -> bool {
+            std::array<BYTE, 256> savedKeys{};
+            if (!GetKeyboardState(savedKeys.data())) return false;
+            auto pressedKeys = savedKeys;
+            pressedKeys[VK_CONTROL] = 0x80;
+            pressedKeys[VK_LCONTROL] = 0x80;
+            pressedKeys[VK_SHIFT] = pressedKeys[VK_LSHIFT] = pressedKeys[VK_RSHIFT] = 0;
+            pressedKeys[VK_MENU] = pressedKeys[VK_LMENU] = pressedKeys[VK_RMENU] = 0;
+            if (!SetKeyboardState(pressedKeys.data())) return false;
+            SendMessageW(g_hPdfView, WM_KEYDOWN, 'J', 1);
+            // TranslateMessage may still target the originating PDF HWND.
+            SendMessageW(g_hPdfView, WM_CHAR, L'\n', 1);
+            return SetKeyboardState(savedKeys.data()) != FALSE;
+        };
+        for (const bool rawPreference : {false, true}) {
+            g_noteVimModeEnabled = true;
+            g_noteNormalMode = false;
+            g_noteVimCaretLineRawTextVisible = rawPreference;
+            SetFocus(g_hNoteEdit);
+            SendMessageW(g_hNoteEdit, EM_SETSEL, origin, origin);
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_F24, 1);
+            const auto entrySelection = GetNoteEditorSelectionAsCanonical(g_hNoteEdit);
+            // Exercise Esc while Vim controls are enabled.
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_ESCAPE, 1);
+            valid = valid && g_noteVimModeEnabled && g_noteNormalMode && GetFocus() == g_hNoteEdit;
+            const auto expectedStatus = [](const wchar_t* target, const wchar_t* mode) {
+                const std::wstring targetText = localization::Text(target);
+                return localization::Text(L"note.assist.focus") + L": " + targetText + L"\n" +
+                    localization::Text(L"note.assist.focus_window") + L": " + targetText + L"\n" +
+                    localization::Text(L"note.assist.input_mode") + L": " + localization::Text(mode);
+            };
+            valid = valid && CaptureNoteInputStatusText() ==
+                expectedStatus(L"note.assist.target.note", L"note.assist.input.normal");
+            MSG normalIme{};
+            normalIme.hwnd = g_hNoteEdit;
+            normalIme.message = WM_IME_STARTCOMPOSITION;
+            valid = ShouldSkipImeMessageInLoop(normalIme) && valid;
+            HIMC normalContext = ImmGetContext(g_hNoteEdit);
+            valid = valid && !normalContext;
+            if (normalContext) ImmReleaseContext(g_hNoteEdit, normalContext);
+            SendMessageW(g_hNoteEdit, WM_IME_STARTCOMPOSITION, 0, 0);
+            SendMessageW(g_hNoteEdit, WM_IME_CHAR, 0x3042, 0);
+            SendMessageW(g_hNoteEdit, WM_IME_ENDCOMPOSITION, 0, 0);
+            const auto beforeVimNavigation = ObserveNoteRenderRuntime();
+            AppendUiAutomationTrace(L"math_render:vim_enter raw=" + std::to_wstring(rawPreference) +
+                L" origin=" + std::to_wstring(origin) +
+                L" canonical_before=" + std::to_wstring(entrySelection ? entrySelection->second : SIZE_MAX) +
+                L" canonical_after=" + std::to_wstring(g_noteNormalCaret) +
+                L" snapshot=" + DescribeNoteUiSnapshot(CaptureNoteUiSnapshot()));
+            // Normal keeps input on the note: arrows and hjkl share direction.
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_UP, 1);
+            DWORD start = 0, end = 0;
+            SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+            valid = valid && g_noteNormalMode && start == end && previousLine >= 0 &&
+                start >= static_cast<DWORD>(previousLine) && start < static_cast<DWORD>(localEditAnchorStart);
+            AppendUiAutomationTrace(L"math_render:vim_up start=" + std::to_wstring(start) + L" end=" + std::to_wstring(end));
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'j', 1);
+            SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+            const auto snapshot = CaptureNoteUiSnapshot();
+            const auto runtime = ObserveNoteRenderRuntime();
+            // With Normal raw preference, the destination is structured
+            // until movement hands ownership to raw. Unlike Shift selection
+            // it need not share the origin's source-column metrics.
+            const bool returnedToRow = rawPreference
+                ? start >= static_cast<DWORD>(localEditAnchorStart) && start <= static_cast<DWORD>(localSourceLineEnd)
+                : start == origin;
+            valid = valid && returnedToRow && start == end && snapshot.finalFrameActive &&
+                (rawPreference ? snapshot.finalRawLineCount > 0 : snapshot.finalRawLineCount == 0) &&
+                runtime.canonicalRevision == beforeVimNavigation.canonicalRevision &&
+                runtime.modelMaterializations == beforeVimNavigation.modelMaterializations;
+            AppendUiAutomationTrace(L"math_render:vim_down start=" + std::to_wstring(start) +
+                L" end=" + std::to_wstring(end) + L" raw_lines=" + std::to_wstring(snapshot.finalRawLineCount) +
+                L" frame=" + std::to_wstring(snapshot.finalFrameActive) + L" valid=" + std::to_wstring(valid));
+            const DWORD horizontalOrigin = g_noteNormalCaret;
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'h', 1);
+            valid = valid && g_noteNormalCaret < horizontalOrigin && GetFocus() == g_hNoteEdit;
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_RIGHT, 1);
+            valid = valid && g_noteNormalCaret == horizontalOrigin;
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'l', 1);
+            valid = valid && g_noteNormalCaret > horizontalOrigin;
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_LEFT, 1);
+            valid = valid && g_noteNormalCaret == horizontalOrigin;
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'k', 1);
+            valid = valid && g_noteNormalCaret < horizontalOrigin;
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_DOWN, 1);
+            const DWORD normalPosition = g_noteNormalCaret;
+            valid = valid && normalPosition >= static_cast<DWORD>(localEditAnchorStart) &&
+                normalPosition <= static_cast<DWORD>(localSourceLineEnd);
+
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'v', 1);
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'2', 1);
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_ESCAPE, 1);
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_ESCAPE, 1);
+            valid = valid && g_noteNormalMode && GetFocus() == g_hNoteEdit &&
+                !ClearNoteNormalVisualMode() && !ClearNoteNormalPendingState() &&
+                g_noteNormalCaret == normalPosition;
+
+            // File-start h must stay in the note and consume its count.
+            g_noteNormalCaret = 0;
+            OnEnterNoteNormalMode();
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'2', 1);
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'h', 1);
+            valid = valid && g_noteNormalMode && g_noteNormalCaret == 0 &&
+                !ClearNoteNormalPendingState() && GetFocus() == g_hNoteEdit;
+            g_noteNormalCaret = normalPosition;
+            OnEnterNoteNormalMode();
+            valid = valid && ObserveNoteRenderRuntime().canonicalRevision == beforeVimNavigation.canonicalRevision;
+            AppendUiAutomationTrace(L"math_render:vim_keyboard_contract raw=" +
+                std::to_wstring(rawPreference) + L" valid=" + std::to_wstring(valid));
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'/', 1);
+            HWND searchEdit = GetFocus();
+            EnforceImePolicyForWindow(searchEdit);
+            HIMC searchContext = ImmGetContext(searchEdit);
+            valid = valid && IsNoteCmdlineActive() && searchEdit != g_hNoteEdit && searchContext &&
+                CaptureNoteInputStatusText() ==
+                    expectedStatus(L"note.assist.target.note_search", L"note.assist.input.search");
+            if (searchContext) ImmReleaseContext(searchEdit, searchContext);
+            SendMessageW(searchEdit, WM_KEYDOWN, VK_ESCAPE, 1);
+            valid = valid && !IsNoteCmdlineActive() && GetFocus() == g_hNoteEdit && g_noteNormalMode;
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'i', 1);
+            MSG enterInsert{};
+            const bool queuedInsert = PeekMessageW(&enterInsert, owner,
+                kMsgNoteEnterInsertMode, kMsgNoteEnterInsertMode, PM_REMOVE) != FALSE;
+            if (queuedInsert) DispatchMessageW(&enterInsert);
+            valid = valid && queuedInsert;
+            SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+            valid = valid && !g_noteNormalMode && GetFocus() == g_hNoteEdit &&
+                start == normalPosition && end == normalPosition;
+            HIMC insertContext = ImmGetContext(g_hNoteEdit);
+            const auto insertSnapshot = CaptureNoteUiSnapshot();
+            valid = valid && insertContext && insertSnapshot.finalFrameActive &&
+                insertSnapshot.finalRawLineCount > 0 && CaptureNoteInputStatusText() ==
+                expectedStatus(L"note.assist.target.note", L"note.assist.input.insert");
+            if (insertContext) ImmReleaseContext(g_hNoteEdit, insertContext);
+            SetFocus(g_hPdfView);
+            valid = valid && CaptureNoteInputStatusText().find(
+                localization::Text(L"note.assist.focus_window") + L": " +
+                localization::Text(L"note.assist.target.pdf")) != std::wstring::npos;
+            const uint64_t paneMoveRevision = ObserveNoteRenderRuntime().canonicalRevision;
+            valid = sendPdfCtrlJ() && valid;
+            valid = valid && g_noteNormalMode && GetFocus() == g_hNoteEdit &&
+                g_noteNormalCaret == normalPosition &&
+                ObserveNoteRenderRuntime().canonicalRevision == paneMoveRevision &&
+                CaptureNoteInputStatusText() ==
+                    expectedStatus(L"note.assist.target.note", L"note.assist.input.normal");
+            HIMC returnedContext = ImmGetContext(g_hNoteEdit);
+            valid = valid && !returnedContext;
+            if (returnedContext) ImmReleaseContext(g_hNoteEdit, returnedContext);
+            AppendUiAutomationTrace(L"math_render:pdf_ctrl_j_normal raw=" +
+                std::to_wstring(rawPreference) + L" valid=" + std::to_wstring(valid));
+            FocusNoteEditAtNormalCaret();
+            AppendUiAutomationTrace(L"math_render:vim_focus_ime_status raw=" +
+                std::to_wstring(rawPreference) + L" valid=" + std::to_wstring(valid));
+        }
+        g_noteVimModeEnabled = false;
+        g_noteNormalMode = false;
+        OnExitNoteNormalMode();
+        SetFocus(g_hPdfView);
+        const uint64_t standardPaneMoveRevision = ObserveNoteRenderRuntime().canonicalRevision;
+        valid = sendPdfCtrlJ() && valid;
+        HIMC standardContext = ImmGetContext(g_hNoteEdit);
+        valid = valid && !g_noteNormalMode && GetFocus() == g_hNoteEdit && standardContext &&
+            ObserveNoteRenderRuntime().canonicalRevision == standardPaneMoveRevision &&
+            CaptureNoteInputStatusText().find(localization::Text(L"note.assist.input.standard")) !=
+                std::wstring::npos;
+        if (standardContext) ImmReleaseContext(g_hNoteEdit, standardContext);
+        AppendUiAutomationTrace(L"math_render:pdf_ctrl_j_standard valid=" + std::to_wstring(valid));
+        g_noteVimModeEnabled = savedVim;
+        g_noteNormalMode = savedNormal;
+        g_noteVimCaretLineRawTextVisible = savedRawPreference;
+        OnExitNoteNormalMode();
+        SetFocus(g_hNoteEdit);
+        SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_F24, 1);
+        return valid;
+    }();
+    if (!vimVerticalValid) {
+        // Keep this failure authoritative, but do not prevent unrelated EOF,
+        // deletion, IME and long-note regressions from producing evidence.
+        AppendUiAutomationTrace(L"math_render:vim_vertical_failed_deferred");
+    } else {
+        AppendUiAutomationTrace(L"math_render:vim_vertical_ok");
+    }
+    const std::wstring backspaceProbe = L"final-backspace-probe";
+    SetFocus(g_hNoteEdit);
+    SendMessageW(g_hNoteEdit, EM_SETSEL, static_cast<WPARAM>(localEditAnchorEnd),
+                 static_cast<LPARAM>(localEditAnchorEnd));
+    if (!SendUiAutomationNoteTextInput(backspaceProbe) ||
+        FindNoteTextSnippetStart(backspaceProbe) < 0 ||
+        !verifyLocalHybridMutation(L"ordinary typing") ||
+        !CaptureNoteUiSnapshot().currentLineHighlightPainted) {
+        restorePrevious();
+        if (outError && outError->empty()) {
+            *outError = L"Could not insert the Backspace render probe.";
+        }
+        return false;
+    }
+    for (size_t remaining = backspaceProbe.size(); remaining > 0; --remaining) {
+        if (!SendUiAutomationNoteBackspace(1) || !verifyLocalHybridMutation(L"one Backspace")) {
+            restorePrevious();
+            if (outError && outError->empty()) {
+                *outError = L"Backspace did not preserve a local final-frame owner.";
+            }
+            return false;
+        }
+        // A physical Backspace also produces a translated character and a
+        // key-up. RichEdit has already deleted on key-down, so those no-op
+        // messages must retain the current hybrid frame and revision.
+        const auto afterKey = ObserveNoteRenderRuntime();
+        SendMessageW(g_hNoteEdit, WM_CHAR, L'\b', 1);
+        if (!verifyLocalHybridMutation(L"paired Backspace character") ||
+            ObserveNoteRenderRuntime().canonicalRevision != afterKey.canonicalRevision ||
+            ObserveNoteRenderRuntime().modelMaterializations != afterKey.modelMaterializations) {
+            restorePrevious();
+            if (outError && outError->empty()) *outError = L"Paired Backspace character changed canonical text twice.";
+            return false;
+        }
+        SendMessageW(g_hNoteEdit, WM_KEYUP, VK_BACK, 0xC0000001);
+        if (!verifyLocalHybridMutation(L"Backspace key-up")) {
+            restorePrevious();
+            return false;
+        }
+        if (remaining == backspaceProbe.size()) {
+            const uint64_t stableRevision = CurrentEditRevision();
+            SendMessageW(owner, WM_COMMAND,
+                         MAKEWPARAM(GetDlgCtrlID(g_hNoteEdit), EN_CHANGE),
+                         reinterpret_cast<LPARAM>(g_hNoteEdit));
+            if (CurrentEditRevision() != stableRevision ||
+                !verifyLocalHybridMutation(L"delayed no-op Backspace notification")) {
+                restorePrevious();
+                if (outError && outError->empty()) *outError = L"A delayed no-op notification accepted an unused Backspace ticket.";
+                return false;
+            }
+            // Tab's translated character is deliberately ignored: indentation
+            // belongs to key-down. Its early return must also close the frame.
+            SendMessageW(g_hNoteEdit, WM_CHAR, L'\t', 1);
+            if (CurrentEditRevision() != stableRevision ||
+                !verifyLocalHybridMutation(L"ignored Tab character")) {
+                restorePrevious();
+                return false;
+            }
+        }
+    }
+    if (GetNoteAutomationIndexingText() != pristineMathText) {
+        restorePrevious();
+        if (outError) *outError = L"Backspace render probe did not restore the original note text.";
+        return false;
+    }
+
+    if (!SelectNoteTextSnippet(L"a + b")) {
+        restorePrevious();
+        if (outError) *outError = L"Could not select the final-frame selection-replacement fixture.";
+        return false;
+    }
+    // One input character makes this one Replace history operation.  Multi-
+    // character typing deliberately consists of a replace followed by normal
+    // typing operations, which the general undo/redo scenario covers.
+    const std::wstring selectionReplacement = L"@";
+    if (!SendUiAutomationNoteTextInput(selectionReplacement) ||
+        FindNoteTextSnippetStart(selectionReplacement) < 0 ||
+        !verifyLocalHybridMutation(L"typing over a selection")) {
+        restorePrevious();
+        if (outError && outError->empty()) {
+            *outError = L"Typing over a selection did not reach the final rendering path.";
+        }
+        return false;
+    }
+    const bool selectionUndoChanged = SendUiAutomationNoteUndoChangedText();
+    const bool selectionSourceRestored = FindNoteTextSnippetStart(L"a + b") >= 0;
+    const bool selectionReplacementRemoved = FindNoteTextSnippetStart(selectionReplacement) < 0;
+    const bool selectionUndoHybrid =
+        verifyLocalHybridMutation(L"selection-replacement undo");
+    if (!selectionUndoChanged || !selectionSourceRestored || !selectionReplacementRemoved ||
+        !selectionUndoHybrid) {
+        restorePrevious();
+        if (outError && outError->empty()) {
+            *outError = L"Undo did not restore the selected source through the final rendering path: "
+                        L"changed=" + std::to_wstring(selectionUndoChanged ? 1 : 0) +
+                        L" source=" + std::to_wstring(selectionSourceRestored ? 1 : 0) +
+                        L" replacement_removed=" +
+                        std::to_wstring(selectionReplacementRemoved ? 1 : 0) +
+                        L" hybrid=" + std::to_wstring(selectionUndoHybrid ? 1 : 0);
+        }
+        return false;
+    }
+    if (!SendUiAutomationNoteRedoChangedText() ||
+        FindNoteTextSnippetStart(selectionReplacement) < 0 ||
+        !verifyLocalHybridMutation(L"selection-replacement redo")) {
+        restorePrevious();
+        if (outError && outError->empty()) {
+            *outError = L"Redo did not restore the selected replacement through the final rendering path.";
+        }
+        return false;
+    }
+    if (!SendUiAutomationNoteUndoChangedText() || GetNoteAutomationIndexingText() != pristineMathText ||
+        !verifyLocalHybridMutation(L"selection-replacement restoration")) {
+        restorePrevious();
+        if (outError && outError->empty()) {
+            *outError = L"Final undo did not restore the pristine selection-replacement fixture.";
+        }
+        return false;
+    }
+
+    // A hard break changes following-row geometry. It must synchronously
+    // republish a complete/hybrid final frame, never leave a stale overlay or
+    // whole note raw. Undo the user edit rather than reloading this same
+    // dirty file: a normal file-open must preserve unsaved current content
+    // and is therefore not a valid way to discard the probe.
+    SetFocus(g_hNoteEdit);
+    SendMessageW(g_hNoteEdit, EM_SETSEL, static_cast<WPARAM>(localEditAnchorEnd),
+                 static_cast<LPARAM>(localEditAnchorEnd));
+    // RichEdit handles Enter at the key stage. Include the translated
+    // character too, as a real key press does; Markdown list continuation
+    // consumes that character after performing its replacement at keydown.
+    SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_RETURN, 1);
+    SendMessageW(g_hNoteEdit, WM_CHAR, static_cast<WPARAM>(L'\r'), 0);
+    SendMessageW(g_hNoteEdit, WM_KEYUP, VK_RETURN, 1);
+    const bool hardBreakChangedText = GetNoteAutomationIndexingText() != pristineMathText;
+    const bool hardBreakHybrid = verifyLocalHybridMutation(L"a hard-break edit");
+    const bool hardBreakUndoChanged = hardBreakChangedText && hardBreakHybrid &&
+        SendUiAutomationNoteUndoChangedText();
+    const bool hardBreakUndoRestored = hardBreakUndoChanged &&
+        GetNoteAutomationIndexingText() == pristineMathText;
+    const bool hardBreakUndoHybrid = hardBreakUndoRestored &&
+        verifyLocalHybridMutation(L"hard-break undo");
+    if (!hardBreakChangedText || !hardBreakHybrid || !hardBreakUndoChanged ||
+        !hardBreakUndoRestored || !hardBreakUndoHybrid) {
+        restorePrevious();
+        if (outError && outError->empty()) {
+            *outError = L"A hard-break render edit did not round-trip through final publication: "
+                        L"changed=" + std::to_wstring(hardBreakChangedText ? 1 : 0) +
+                        L" hybrid=" + std::to_wstring(hardBreakHybrid ? 1 : 0) +
+                        L" undo_changed=" + std::to_wstring(hardBreakUndoChanged ? 1 : 0) +
+                        L" restored=" + std::to_wstring(hardBreakUndoRestored ? 1 : 0) +
+                        L" undo_hybrid=" + std::to_wstring(hardBreakUndoHybrid ? 1 : 0);
+        }
+        return false;
+    }
+
+    // A scrollbar range change can synchronously dispatch WM_SIZE from the
+    // RichEdit transport. Exercise an actual narrow/tall transition rather
+    // than merely sending a synthetic size message: final/native ownership
+    // must republish once without reviving a legacy overlay or blocking the
+    // UI thread in a SetScrollInfo -> WM_SIZE loop.
+    auto verifyFinalResizeRoundTrip = [&]() -> bool {
+        if (!g_hNoteEdit || !IsWindow(g_hNoteEdit)) return false;
+        RECT originalScreen{};
+        if (!GetWindowRect(g_hNoteEdit, &originalScreen)) return false;
+        HWND noteParent = GetParent(g_hNoteEdit);
+        if (!noteParent) return false;
+        RECT original = originalScreen;
+        MapWindowPoints(HWND_DESKTOP, noteParent,
+                        reinterpret_cast<LPPOINT>(&original), 2);
+        const int originalWidth = std::max(1, static_cast<int>(original.right - original.left));
+        const int originalHeight = std::max(1, static_cast<int>(original.bottom - original.top));
+        const NoteUiSnapshot beforeResize = CaptureNoteUiSnapshot();
+        const auto restoreBounds = [&]() {
+            SetWindowPos(g_hNoteEdit, nullptr, original.left, original.top,
+                         originalWidth, originalHeight,
+                         SWP_NOACTIVATE | SWP_NOZORDER);
+        };
+        // A single transition catches a direct recursion, but repeated
+        // narrow/restore pairs catch a guard that was only accidentally
+        // cleared after the first nested notification.  Keep every geometry
+        // deliberately small enough to alter both RichEdit's format rect and
+        // the final scrollbar page size.
+        constexpr int kResizeRoundTrips = 4;
+        for (int pass = 0; pass < kResizeRoundTrips; ++pass) {
+            const int divisor = (pass % 2 == 0) ? 2 : 3;
+            const int narrowWidth = std::max(1, originalWidth / divisor);
+            const int narrowHeight = std::max(
+                1, std::min(originalHeight, 64 + pass * 16));
+            if (!SetWindowPos(g_hNoteEdit, nullptr, original.left, original.top,
+                              narrowWidth, narrowHeight,
+                              SWP_NOACTIVATE | SWP_NOZORDER)) {
+                restoreBounds();
+                return false;
+            }
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            const NoteUiSnapshot narrowed = CaptureNoteUiSnapshot();
+            SCROLLINFO narrowedVertical{};
+            narrowedVertical.cbSize = sizeof(narrowedVertical);
+            narrowedVertical.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+            const bool narrowedScrollValid =
+                GetScrollInfo(g_hNoteEdit, SB_VERT, &narrowedVertical) != 0 &&
+                narrowedVertical.nMax >= narrowedVertical.nMin;
+            // Observe event completion BEFORE painting or another input can
+            // repair it. A wheel keeps its source caret but moves client Y;
+            // a scrollbar has the same contract, even if the caret leaves
+            // the viewport. There is no live preedit in this prediction test.
+            const auto verifyScrollCompletion = [&](UINT message, WPARAM command) {
+                const auto before = CaptureNoteUiSnapshot();
+                const auto beforeRuntime = ObserveNoteRenderRuntime();
+                SendMessageW(g_hNoteEdit, message, command, 0);
+                const auto after = CaptureNoteUiSnapshot();
+                const auto afterRuntime = ObserveNoteRenderRuntime();
+                GUITHREADINFO info{};
+                info.cbSize = sizeof(info);
+                const bool haveCaret = GetGUIThreadInfo(GetCurrentThreadId(), &info) != FALSE;
+                bool valid = after.finalFrameActive && after.systemCaretMatchesFinal &&
+                    VerifyAccessibleSystemCaretForAutomation(g_hNoteEdit) &&
+                    after.canonicalText == before.canonicalText &&
+                    afterRuntime.canonicalRevision == beforeRuntime.canonicalRevision &&
+                    afterRuntime.modelMaterializations == beforeRuntime.modelMaterializations;
+                RECT client{};
+                GetClientRect(g_hNoteEdit, &client);
+                const auto& caret = after.finalCaretClientRect;
+                if (valid && caret.top < client.bottom && caret.bottom > client.top) {
+                    HIMC imc = ImmGetContext(g_hNoteEdit);
+                    if (imc) {
+                        CANDIDATEFORM candidate{};
+                        const bool read = ImmGetCandidateWindow(imc, 0, &candidate) != FALSE;
+                        ImmReleaseContext(g_hNoteEdit, imc);
+                        HDC dc = GetDC(g_hNoteEdit);
+                        const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+                        if (dc) ReleaseDC(g_hNoteEdit, dc);
+                        const int gap = std::max(1, MulDiv(6, dpi > 0 ? dpi : 96, 96));
+                        valid = !IsNoteImeComposing() && read && candidate.dwStyle == CFS_EXCLUDE &&
+                            candidate.ptCurrentPos.x == std::clamp(caret.left, client.left, client.right - 1) &&
+                            candidate.ptCurrentPos.y == std::clamp(caret.top, client.top, client.bottom - 1) &&
+                            candidate.rcArea.top == std::max(client.top, after.finalCaretLineClientRect.top) - gap &&
+                            candidate.rcArea.bottom == std::min(client.bottom, after.finalCaretLineClientRect.bottom) + gap;
+                    }
+                }
+                valid = valid && verifyImeCharacterQuery();
+                AppendUiAutomationTrace(L"math_render:scroll_before_paint message=" + std::to_wstring(message) +
+                    L" valid=" + std::to_wstring(valid) + L" final_y=" +
+                    std::to_wstring(after.finalCaretClientRect.top) + L" native_y=" +
+                    std::to_wstring(haveCaret ? info.rcCaret.top : LONG_MAX));
+                return valid;
+            };
+            if (!verifyScrollCompletion(WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA))) ||
+                !verifyScrollCompletion(WM_VSCROLL, SB_TOP) ||
+                !verifyScrollCompletion(WM_VSCROLL, SB_LINEDOWN) ||
+                !verifyScrollCompletion(WM_MOUSEHWHEEL, MAKEWPARAM(0, static_cast<WORD>(WHEEL_DELTA))) ||
+                !verifyScrollCompletion(WM_HSCROLL, SB_LEFT) ||
+                !verifyScrollCompletion(WM_MOUSEWHEEL, MAKEWPARAM(MK_SHIFT, static_cast<WORD>(WHEEL_DELTA)))) {
+                restoreBounds();
+                if (outError) *outError = L"Scrolling retained old system caret coordinates until another event/paint.";
+                return false;
+            }
+            // Scrolling must move the caret with the content, not clamp it
+            // to the viewport's top edge. Windows clips its off-screen caret.
+            SendMessageW(g_hNoteEdit, WM_VSCROLL, SB_BOTTOM, 0);
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            const NoteUiSnapshot scrolled = CaptureNoteUiSnapshot();
+            SCROLLINFO bottomScroll{};
+            bottomScroll.cbSize = sizeof(bottomScroll);
+            bottomScroll.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+            bool stableBottom = GetScrollInfo(g_hNoteEdit, SB_VERT, &bottomScroll) != FALSE &&
+                bottomScroll.nPos == std::max(0, bottomScroll.nMax -
+                    static_cast<int>(bottomScroll.nPage) + 1);
+            const auto bottomObservation = ObserveNoteRenderRuntime();
+            for (int wheel = 0; wheel < 12 && stableBottom; ++wheel) {
+                SendMessageW(g_hNoteEdit, WM_MOUSEWHEEL,
+                    MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), 0);
+                // A real wheel gesture also delivers pointer motion. Neither
+                // this nor a size-only publication may reveal an unmoved caret.
+                SendMessageW(g_hNoteEdit, WM_MOUSEMOVE, 0, MAKELPARAM(16 + wheel, 16));
+                SendMessageW(g_hNoteEdit, WM_SIZE, SIZE_RESTORED,
+                    MAKELPARAM(narrowWidth, narrowHeight));
+                RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                SCROLLINFO current = bottomScroll;
+                const auto observation = ObserveNoteRenderRuntime();
+                stableBottom = GetScrollInfo(g_hNoteEdit, SB_VERT, &current) != FALSE &&
+                    current.nPos == bottomScroll.nPos && observation.finalFrameActive &&
+                    observation.canonicalRevision == bottomObservation.canonicalRevision &&
+                    observation.modelMaterializations == bottomObservation.modelMaterializations;
+                if (!stableBottom) {
+                    AppendUiAutomationTrace(L"math_render:bottom_unstable wheel=" +
+                        std::to_wstring(wheel) + L" pos=" + std::to_wstring(bottomScroll.nPos) +
+                        L"->" + std::to_wstring(current.nPos) + L" revision=" +
+                        std::to_wstring(bottomObservation.canonicalRevision) + L"->" +
+                        std::to_wstring(observation.canonicalRevision) + L" models=" +
+                        std::to_wstring(bottomObservation.modelMaterializations) + L"->" +
+                        std::to_wstring(observation.modelMaterializations));
+                }
+            }
+            // Even Home at the same source offset must reveal the caret after
+            // manual scrolling; a passive-publication guard cannot block input.
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_HOME, 0);
+            SendMessageW(g_hNoteEdit, WM_KEYUP, VK_HOME, 0);
+            SendMessageW(g_hNoteEdit, WM_VSCROLL, SB_BOTTOM, 0);
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_HOME, 0);
+            SendMessageW(g_hNoteEdit, WM_KEYUP, VK_HOME, 0);
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            const NoteUiSnapshot resumed = CaptureNoteUiSnapshot();
+            const bool keyboardRevealedCaret = resumed.finalFrameActive &&
+                resumed.systemCaretMatchesFinal && resumed.finalCaretClientRect.top >= 0 &&
+                resumed.finalCaretClientRect.bottom <= static_cast<int>(narrowedVertical.nPage);
+            restoreBounds();
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            const NoteUiSnapshot restored = CaptureNoteUiSnapshot();
+            if (!narrowed.finalFrameActive || narrowed.finalStructuredLineCount == 0 ||
+                narrowed.finalRawLineCount != beforeResize.finalRawLineCount || !narrowedScrollValid ||
+                !stableBottom || !keyboardRevealedCaret ||
+                !scrolled.finalFrameActive || !scrolled.systemCaretMatchesFinal ||
+                scrolled.finalCaretClientRect.top >= 0 ||
+                !restored.finalFrameActive || restored.finalStructuredLineCount == 0 ||
+                restored.finalRawLineCount != beforeResize.finalRawLineCount) {
+                AppendUiAutomationTrace(L"math_render:resize_failed before_raw=" +
+                    std::to_wstring(beforeResize.finalRawLineCount) + L" narrow_raw=" +
+                    std::to_wstring(narrowed.finalRawLineCount) + L" restored_raw=" +
+                    std::to_wstring(restored.finalRawLineCount) + L" scroll=" +
+                    std::to_wstring(narrowedScrollValid) + L" bottom=" +
+                    std::to_wstring(stableBottom) + L" reveal=" +
+                    std::to_wstring(keyboardRevealedCaret) + L" scrolled_top=" +
+                    std::to_wstring(scrolled.finalCaretClientRect.top) + L" bottom_pos:max:page=" +
+                    std::to_wstring(bottomScroll.nPos) + L":" + std::to_wstring(bottomScroll.nMax) +
+                    L":" + std::to_wstring(bottomScroll.nPage) + L" pass=" +
+                    std::to_wstring(pass) + L" scrolled=" +
+                    DescribeNoteUiSnapshot(scrolled));
+                return false;
+            }
+        }
+        // A collapsed pane has no paintable pixels. Its valid publication
+        // must survive that no-op paint and become usable again on restore.
+        if (!SetWindowPos(g_hNoteEdit, nullptr, original.left, original.top,
+                          originalWidth, 1, SWP_NOACTIVATE | SWP_NOZORDER)) {
+            restoreBounds();
+            return false;
+        }
+        RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        const NoteUiSnapshot collapsed = CaptureNoteUiSnapshot();
+        restoreBounds();
+        RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        return collapsed.finalFrameActive && CaptureNoteUiSnapshot().finalFrameActive;
+    };
+    if (!verifyFinalResizeRoundTrip()) {
+        restorePrevious();
+        if (outError) {
+            *outError =
+                L"Final note rendering did not survive a narrow resize/scrollbar round trip.";
+        }
+        return false;
+    }
+
+    // This exercises only the Win32 cancellation protocol, not a real IME
+    // candidate UI: START followed by a flag-free COMPOSITION must restore
+    // final ownership without relying on a later END notification.
+    const std::wstring beforeImeCancellation = GetNoteAutomationIndexingText();
+    SendMessageW(g_hNoteEdit, WM_IME_STARTCOMPOSITION, 0, 0);
+    SendMessageW(g_hNoteEdit, WM_IME_COMPOSITION, 0, 0);
+    RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    const NoteUiSnapshot cancelledIme = CaptureNoteUiSnapshot();
+    SendMessageW(g_hNoteEdit, WM_IME_ENDCOMPOSITION, 0, 0);
+    if (!cancelledIme.finalFrameActive || cancelledIme.finalStructuredLineCount == 0 ||
+        !cancelledIme.systemCaretMatchesFinal ||
+        GetNoteAutomationIndexingText() != beforeImeCancellation) {
+        restorePrevious();
+        if (outError) *outError = L"IME cancellation stranded native fallback or changed canonical note text.";
+        return false;
+    }
+
+    // Exercise real native EN_CHANGE notifications and the common acceptance
+    // boundary, not a real IMM candidate UI. Provisional mutations cannot
+    // enter canonical history; a partial result is independently undoable
+    // after the remaining composition is cancelled.
+    // A restored composition and a delayed EN_CHANGE are not a user edit.
+    // Check both flag-free cancellation and END-only native cleanup, including
+    // dirty/revision/redo state rather than merely equal visible strings.
+    const auto verifyImeCancellationNoop = [&](bool flagFreeCancel) -> bool {
+        SetFocus(g_hNoteEdit);
+        const auto before = CaptureNoteUiSnapshot();
+        const uint64_t revision = CurrentEditRevision();
+        const bool dirty = g_noteDirty;
+        const bool needsIntegrate = g_noteNeedsIntegrate;
+        const bool redo = CanExecuteNoteUndoRedoFromFocus(false);
+        SendMessageW(g_hNoteEdit, EM_SETSEL, localEditAnchorEnd, localEditAnchorEnd);
+        SendMessageW(g_hNoteEdit, WM_IME_STARTCOMPOSITION, 0, 0);
+        SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"仮"));
+        SendMessageW(g_hNoteEdit, EM_SETSEL, localEditAnchorEnd, localEditAnchorEnd + 1);
+        SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+        if (flagFreeCancel) SendMessageW(g_hNoteEdit, WM_IME_COMPOSITION, 0, 0);
+        SendMessageW(g_hNoteEdit, WM_IME_ENDCOMPOSITION, 0, 0);
+        SendMessageW(owner, WM_COMMAND,
+            MAKEWPARAM(GetDlgCtrlID(g_hNoteEdit), EN_CHANGE), reinterpret_cast<LPARAM>(g_hNoteEdit));
+        const auto after = CaptureNoteUiSnapshot();
+        const bool unchanged = before.canonicalText == after.canonicalText &&
+            CurrentEditRevision() == revision && g_noteDirty == dirty &&
+            g_noteNeedsIntegrate == needsIntegrate &&
+            CanExecuteNoteUndoRedoFromFocus(false) == redo && after.finalFrameActive &&
+            after.systemCaretMatchesFinal && !IsNoteImeCanonicalChangeDeferred(g_hNoteEdit);
+        AppendUiAutomationTrace(L"math_render:ime_cancel_noop flags=" +
+            std::to_wstring(flagFreeCancel) + L" unchanged=" + std::to_wstring(unchanged));
+        return unchanged;
+    };
+    if (!verifyImeCancellationNoop(true) || !verifyImeCancellationNoop(false)) {
+        restorePrevious();
+        if (outError) *outError = L"IME cancellation or a delayed notification changed revision, dirty state or redo history.";
+        return false;
+    }
+
+    const auto verifyImeCanonicalOwnership = [&](bool rawPresentation, int insertion) -> bool {
+        g_noteRawOnly = rawPresentation;
+        UpdateNoteViewMode();
+        SetFocus(g_hNoteEdit);
+        const std::wstring original = GetNoteAutomationIndexingText();
+        // The automation helper retains one CR per RichEdit hard break for
+        // EM_SETSEL coordinates. Canonical text uses one LF at that boundary.
+        std::wstring canonicalOriginal = original;
+        std::replace(canonicalOriginal.begin(), canonicalOriginal.end(), L'\r', L'\n');
+        SendMessageW(g_hNoteEdit, EM_SETSEL, insertion, insertion);
+        SendMessageW(g_hNoteEdit, WM_IME_STARTCOMPOSITION, 0, 0);
+        SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"仮"));
+        RecordCurrentNoteTextEditForUndo(g_hNoteEdit);
+        ResetNoteEditHistorySnapshot(g_hNoteEdit);
+        const bool deferred = IsNoteImeCanonicalChangeDeferred(g_hNoteEdit) &&
+            CaptureNoteUiSnapshot().canonicalText == canonicalOriginal;
+        SendMessageW(g_hNoteEdit, EM_SETSEL, insertion, insertion + 1);
+        SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"確未"));
+        // Refresh unavailability in raw mode must not close the input anchor.
+        SendMessageW(g_hNoteEdit, WM_SIZE, 0, 0);
+        note::NoteImePreeditPayload remaining;
+        remaining.text = L"未";
+        remaining.caret = {1};
+        const bool accepted = deferred &&
+            AcceptNoteImeResultWithContinuation(g_hNoteEdit, L"確", remaining);
+        std::wstring committed = original;
+        committed.insert(static_cast<size_t>(insertion), L"確");
+        std::wstring canonicalCommitted = canonicalOriginal;
+        canonicalCommitted.insert(static_cast<size_t>(insertion), L"確");
+        const NoteUiSnapshot partial = CaptureNoteUiSnapshot();
+        AppendUiAutomationTrace(L"math_render:ime_partial_frame active=" +
+            std::to_wstring(partial.finalFrameActive) + L" structured=" +
+            std::to_wstring(partial.finalStructuredLineCount) + L" caret=" +
+            std::to_wstring(partial.systemCaretMatchesFinal));
+        const bool presentationExact = rawPresentation ? !partial.finalFrameActive :
+            partial.finalFrameActive && partial.finalStructuredLineCount > 0 && partial.systemCaretMatchesFinal;
+        bool characterQueryExact = true;
+        if (accepted && !rawPresentation) {
+            const auto runtimeBefore = ObserveNoteRenderRuntime();
+            IMECHARPOSITION start{};
+            start.dwSize = sizeof(start);
+            IMECHARPOSITION end = start;
+            end.dwCharPos = 1;
+            POINT expected{partial.finalCaretClientRect.left, partial.finalCaretClientRect.top};
+            characterQueryExact = ClientToScreen(g_hNoteEdit, &expected) &&
+                SendMessageW(g_hNoteEdit, WM_IME_REQUEST, IMR_QUERYCHARPOSITION,
+                    reinterpret_cast<LPARAM>(&start)) != 0 &&
+                SendMessageW(g_hNoteEdit, WM_IME_REQUEST, IMR_QUERYCHARPOSITION,
+                    reinterpret_cast<LPARAM>(&end)) != 0 &&
+                end.pt.x == expected.x && end.pt.y == expected.y &&
+                start.pt.x < end.pt.x && start.pt.y == end.pt.y &&
+                start.cLineHeight == end.cLineHeight;
+            IMECHARPOSITION outside = end;
+            outside.dwCharPos = 2;
+            const IMECHARPOSITION originalOutside = outside;
+            characterQueryExact = characterQueryExact &&
+                SendMessageW(g_hNoteEdit, WM_IME_REQUEST, IMR_QUERYCHARPOSITION,
+                    reinterpret_cast<LPARAM>(&outside)) == 0 &&
+                std::memcmp(&outside, &originalOutside, sizeof(outside)) == 0;
+            const auto runtimeAfter = ObserveNoteRenderRuntime();
+            characterQueryExact = characterQueryExact && runtimeAfter.finalFrameActive &&
+                runtimeBefore.canonicalRevision == runtimeAfter.canonicalRevision &&
+                runtimeBefore.modelMaterializations == runtimeAfter.modelMaterializations;
+            AppendUiAutomationTrace(L"math_render:ime_preedit_character_query valid=" +
+                std::to_wstring(characterQueryExact));
+        }
+        const bool partialExact = accepted && partial.canonicalText == canonicalCommitted &&
+            presentationExact && characterQueryExact && IsNoteImeCanonicalChangeDeferred(g_hNoteEdit);
+        const bool rejectsMismatch = accepted &&
+            !AcceptNoteImeResultWithContinuation(g_hNoteEdit, L"誤", remaining) &&
+            CaptureNoteUiSnapshot().canonicalText == canonicalCommitted;
+        SendMessageW(g_hNoteEdit, EM_SETSEL, insertion + 1, insertion + 2);
+        SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+        SendMessageW(g_hNoteEdit, WM_IME_ENDCOMPOSITION, 0, 0);
+        const bool cancelledRemainder = GetNoteAutomationIndexingText() == committed &&
+            CaptureNoteUiSnapshot().canonicalText == canonicalCommitted &&
+            !IsNoteImeCanonicalChangeDeferred(g_hNoteEdit);
+        const bool resultUndo = accepted && cancelledRemainder &&
+            SendUiAutomationNoteUndoChangedText() &&
+            GetNoteAutomationIndexingText() == original &&
+            CaptureNoteUiSnapshot().canonicalText == canonicalOriginal;
+        AppendUiAutomationTrace(L"math_render:ime_canonical_ownership raw=" +
+            std::to_wstring(rawPresentation) + L" deferred=" +
+            std::to_wstring(deferred) + L" partial=" + std::to_wstring(partialExact) +
+            L" mismatch=" + std::to_wstring(rejectsMismatch) +
+            L" cancel=" + std::to_wstring(cancelledRemainder) +
+            L" undo=" + std::to_wstring(resultUndo));
+        return deferred && partialExact && rejectsMismatch && cancelledRemainder && resultUndo;
+    };
+    if (!verifyImeCanonicalOwnership(false, localEditAnchorEnd) ||
+        !verifyImeCanonicalOwnership(true, localEditAnchorEnd)) {
+        restorePrevious();
+        if (outError) *outError = L"IME preedit or partial-result notifications violated canonical text/history ownership.";
+        return false;
+    }
+    g_noteRawOnly = false;
+    UpdateNoteViewMode();
+
+    // A short resized note cannot prove geometry after a large accumulated
+    // native/final height difference. Prefix 1,408 source rows, then query the
+    // original input line near the end through navigation, scrolling and a
+    // partial-result preedit. Undo the fixture edit before all later probes.
+    const std::wstring beforeLongIme = GetNoteAutomationIndexingText();
+    std::wstring longPrefix;
+    for (int block = 0; block < 128; ++block) {
+        longPrefix += L"## Long IME heading " + std::to_wstring(block) + L"\n\n"
+            L"Paragraph with **bold** and `code`.\n\n"
+            L"$$\\frac{1}{2}$$\n\n"
+            L"| Item | Example |\n| --- | --- |\n| row | `value` |\n\n\n";
+    }
+    InsertSnippetIntoNoteAt(0, longPrefix);
+    const int longAnchor = FindNoteTextSnippetStart(localEditAnchor);
+    bool longImeValid = longAnchor >= 0;
+    if (longImeValid) {
+        SetFocus(g_hNoteEdit);
+        SendMessageW(g_hNoteEdit, EM_SETSEL, longAnchor, longAnchor);
+        SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_F24, 1);
+        SendMessageW(g_hNoteEdit, WM_KEYUP, VK_F24, 1);
+        longImeValid = verifyImeCharacterQuery() && verifyImeCandidateRequests() &&
+            ObserveNoteUiaCaretForAutomation(g_hNoteEdit);
+        longImeValid = verifyRootMaximizeRoundTrip(true) && longImeValid;
+        bool navigationAtomic = true;
+        for (WPARAM key : {VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_HOME, VK_END}) {
+            const auto beforeNavigation = ObserveNoteRenderRuntime();
+            const LONG_PTR beforeVisibleStyle = GetWindowLongPtrW(g_hNoteEdit, GWL_STYLE) & WS_VISIBLE;
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, key, 1);
+            const auto afterNavigation = ObserveNoteRenderRuntime();
+            navigationAtomic = beforeNavigation.finalFrameActive && afterNavigation.finalFrameActive &&
+                afterNavigation.nativeRedrawDepth == 0 && afterNavigation.nativeRedrawRequested &&
+                afterNavigation.nativeRedrawTransactions == beforeNavigation.nativeRedrawTransactions +
+                    (beforeVisibleStyle != 0 ? 1 : 0) &&
+                afterNavigation.clientPaintCount == beforeNavigation.clientPaintCount &&
+                afterNavigation.canonicalRevision == beforeNavigation.canonicalRevision &&
+                afterNavigation.modelMaterializations == beforeNavigation.modelMaterializations &&
+                (GetWindowLongPtrW(g_hNoteEdit, GWL_STYLE) & WS_VISIBLE) == beforeVisibleStyle && navigationAtomic;
+            longImeValid = verifyImeCharacterQuery() && ObserveNoteUiaCaretForAutomation(g_hNoteEdit) && longImeValid;
+            SendMessageW(g_hNoteEdit, WM_KEYUP, key, 1);
+        }
+        // An independent outer owner can already have native redraw off.
+        // Nested navigation/anchor work must not turn it back on.
+        bool preservesOuterRedraw = true;
+        SendMessageW(g_hNoteEdit, WM_SETREDRAW, FALSE, 0);
+        for (WPARAM key : {VK_LEFT, VK_RIGHT}) {
+            const auto beforeNavigation = ObserveNoteRenderRuntime();
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, key, 1);
+            SendMessageW(g_hNoteEdit, WM_KEYUP, key, 1);
+            const auto afterNavigation = ObserveNoteRenderRuntime();
+            preservesOuterRedraw = !afterNavigation.nativeRedrawRequested &&
+                afterNavigation.nativeRedrawDepth == 0 && afterNavigation.finalFrameActive &&
+                afterNavigation.nativeRedrawTransactions == beforeNavigation.nativeRedrawTransactions && preservesOuterRedraw;
+        }
+        SendMessageW(g_hNoteEdit, WM_SETREDRAW, TRUE, 0);
+        AppendUiAutomationTrace(L"math_render:navigation_atomic=" + std::to_wstring(navigationAtomic) +
+            L" outer_redraw_preserved=" + std::to_wstring(preservesOuterRedraw));
+        longImeValid = navigationAtomic && preservesOuterRedraw && longImeValid;
+        for (WPARAM command : {SB_TOP, SB_BOTTOM, SB_LINEUP, SB_LINEDOWN}) {
+            SendMessageW(g_hNoteEdit, WM_VSCROLL, command, 0);
+            longImeValid = verifyImeCharacterQuery() && ObserveNoteUiaCaretForAutomation(g_hNoteEdit) && longImeValid;
+        }
+        SendMessageW(g_hNoteEdit, WM_MOUSEWHEEL,
+            MAKEWPARAM(0, static_cast<WORD>(WHEEL_DELTA)), 0);
+        longImeValid = verifyImeCharacterQuery() && longImeValid;
+        longImeValid = verifyImeCanonicalOwnership(false,
+            longAnchor + static_cast<int>(localEditAnchor.size())) && longImeValid;
+        longImeValid = verifyEofHybridMutations() && longImeValid;
+        longImeValid = verifyImeCanonicalOwnership(false,
+            static_cast<int>(GetNoteAutomationIndexingText().size())) && longImeValid;
+    }
+    const bool longFixtureRestored = SendUiAutomationNoteUndoChangedText() &&
+        GetNoteAutomationIndexingText() == beforeLongIme;
+    AppendUiAutomationTrace(L"math_render:long_ime_geometry valid=" + std::to_wstring(longImeValid) +
+        L" restored=" + std::to_wstring(longFixtureRestored) +
+        L" prefix_length=" + std::to_wstring(longPrefix.size()));
+    if (!longImeValid || !longFixtureRestored) {
+        restorePrevious();
+        if (outError) *outError = L"Long-note IME character geometry or fixture undo did not match final presentation.";
         return false;
     }
 
@@ -2886,13 +5278,31 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         return false;
     }
     InsertSnippetIntoNoteAt(static_cast<size_t>(tailAnchorStart) + tailAnchor.size(), tailAppendFirst);
+    AppendUiAutomationTrace(L"math_render:after_first_tail_edit");
     RecomputeMathFromNote();
     InsertSnippetIntoNoteAt(static_cast<size_t>(tailAnchorStart) + tailAnchor.size() +
                                 tailAppendFirst.size(),
                             tailAppendSecond);
-    RecomputeMathFromNote();
+    AppendUiAutomationTrace(L"math_render:after_second_tail_edit");
+    // The UI harness must turn a render exception into a deterministic test
+    // failure instead of letting an exception escape the window procedure.
+    // The product route separately owns its recovery boundary; this records
+    // which final-render transition needs that recovery if it regresses.
+    try {
+        RecomputeMathFromNote();
+    } catch (const std::exception& ex) {
+        restorePrevious();
+        if (outError) {
+            *outError = L"The second rendered-line refresh threw: " + UTF8ToWide(ex.what());
+        }
+        return false;
+    } catch (...) {
+        restorePrevious();
+        if (outError) *outError = L"The second rendered-line refresh threw an unknown exception.";
+        return false;
+    }
     const NoteUiSnapshot tailSnapshot = CaptureNoteUiSnapshot();
-    const bool tailVisible = tailSnapshot.renderedText.find(tailAnchor + tailAppend) != std::wstring::npos;
+    const bool tailVisible = tailSnapshot.renderedText.find(tailAppend) != std::wstring::npos;
     if (!SelectNoteTextSnippet(tailAppend)) {
         restorePrevious();
         if (outError) *outError = L"Could not select trailing render automation insertions for cleanup.";
@@ -2911,9 +5321,10 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         return false;
     }
 
-    // While the normal debounce is pending, a long raw helper line must widen
-    // the render canvas immediately. This catches a regression where the
-    // expansion helper exists but is not connected to EN_CHANGE.
+    // A long same-line edit must widen the final publication's horizontal
+    // extent before the next paint. The final route may not obtain that width
+    // from the retired raw-helper canvas; the observed range comes from the
+    // immutable final frame after the accepted edit.
     const std::wstring pendingWidthProbe(192, L'W');
     const int pendingWidthAnchor = FindNoteTextSnippetStart(tailAnchor);
     if (pendingWidthAnchor < 0) {
@@ -2931,6 +5342,7 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         if (outError) *outError = L"Could not enter the pending-width render probe.";
         return false;
     }
+    AppendUiAutomationTrace(L"math_render:after_width_probe_input");
     SCROLLINFO pendingWidthScroll{};
     pendingWidthScroll.cbSize = sizeof(pendingWidthScroll);
     pendingWidthScroll.fMask = SIF_RANGE | SIF_PAGE;
@@ -2951,7 +5363,7 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
     }
     if (!pendingWidthExpanded) {
         restorePrevious();
-        if (outError) *outError = L"Pending raw helper text did not expand the render horizontal extent.";
+        if (outError) *outError = L"An accepted long edit did not expand the final render horizontal extent.";
         return false;
     }
 
@@ -2993,13 +5405,192 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         return false;
     }
 
+    for (const bool display : {false, true}) {
+        const std::wstring snippet = display ? L"<math display='block'>\\frac{1}{2}</math>" : L"<math display=inline>x^2</>";
+        if (!SelectNoteTextSnippet(snippet)) {
+            restorePrevious();
+            if (outError) *outError = L"Could not select named tag math in the fixture note.";
+            return false;
+        }
+        const NoteUiSnapshot tagged = CaptureNoteUiSnapshot();
+        if (!tagged.selectedMathFound || tagged.selectedMathIsBlock != display ||
+            tagged.selectedMathDelimiter != (display ? L"<math>...</math>" : L"<math>...</>") ||
+            tagged.selectedMathNormalizedText != (display ? L"\\frac{1}{2}" : L"x^2")) {
+            restorePrevious();
+            if (outError) *outError = L"Named tag math selection disagreed with the rendered note model. " +
+                DescribeNoteUiSnapshot(tagged);
+            return false;
+        }
+    }
+
+    // Keep this terminal: the preceding math assertions intentionally use
+    // programmatic selection replacement at unrelated offsets. A real table
+    // caret route must be observed without letting that test-only helper
+    // bypass the native selection transition that follows it.
+    // A keyboard caret move inside a table is an actual post-default input
+    // route. It must retain a final frame and make the table's atomic group
+    // raw while unrelated rows remain structured. The snapshot is read-only
+    // evidence from the same frame used by paint; it never observes LineCache.
+    if (!SelectNoteTextSnippet(L"value")) {
+        restorePrevious();
+        if (outError) *outError = L"Could not select the table cell used for final-frame ownership testing.";
+        return false;
+    }
+    SetFocus(g_hNoteEdit);
+    SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_RIGHT, 1);
+    const NoteUiSnapshot tableCaretSnapshot = CaptureNoteUiSnapshot();
+    if (!tableCaretSnapshot.finalFrameActive ||
+        tableCaretSnapshot.finalRawLineCount < 3 ||
+        tableCaretSnapshot.finalStructuredLineCount == 0) {
+        restorePrevious();
+        if (outError) {
+            *outError =
+                L"A table caret did not make exactly its atomic table surface raw inside the final frame.";
+        }
+        return false;
+    }
+
+    // Measure actual native input + synchronous final paint at three lengths.
+    // Only the owned automation note is changed; exact original text is
+    // restored before switching views. No per-edit full textual snapshot is
+    // allowed inside this probe, or its own diagnostics would hide locality.
+    const auto verifyLongNoteRendering = [&]() -> bool {
+        const std::wstring original = GetNoteAutomationIndexingText();
+        LARGE_INTEGER frequency{};
+        if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return false;
+        const auto replaceAll = [&](const std::wstring& text) {
+            SendMessageW(g_hNoteEdit, EM_SETSEL, 0, -1);
+            SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text.c_str()));
+        };
+        bool valid = true;
+        for (const size_t rows : {128u, 1024u, 4096u}) {
+            // A closed tag must not make unrelated plain-row typing rebuild
+            // the document merely because its conservative flag is sticky.
+            std::wstring fixture = L"<b>Long runtime probe</b>\r\r";
+            size_t middle = 0;
+            for (size_t row = 0; row < rows; ++row) {
+                if (row == rows / 2) middle = fixture.size() + 8;
+                fixture += L"plain row " + std::to_wstring(row) + L" unchanged text\r";
+            }
+            replaceAll(fixture);
+            SetFocus(g_hNoteEdit);
+            SendMessageW(g_hNoteEdit, EM_SETSEL, middle, middle);
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_RIGHT, 1);
+            SendMessageW(g_hNoteEdit, WM_KEYUP, VK_RIGHT, 0xC0000001);
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_LEFT, 1);
+            SendMessageW(g_hNoteEdit, WM_KEYUP, VK_LEFT, 0xC0000001);
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            const auto baseline = ObserveNoteRenderRuntime();
+            std::vector<int64_t> insertMicroseconds;
+            std::vector<int64_t> deleteMicroseconds;
+            insertMicroseconds.reserve(96);
+            deleteMicroseconds.reserve(96);
+            uint64_t revision = baseline.canonicalRevision;
+            valid = baseline.finalFrameActive;
+            for (size_t burst = 0; valid && burst < 8; ++burst) {
+                for (const bool deleting : {false, true}) {
+                    for (size_t edit = 0; valid && edit < 12; ++edit) {
+                        LARGE_INTEGER start{}, finish{};
+                        if (!QueryPerformanceCounter(&start)) { valid = false; break; }
+                        SendMessageW(g_hNoteEdit, deleting ? WM_KEYDOWN : WM_CHAR,
+                                     deleting ? VK_BACK : L'v', deleting ? 1 : 0);
+                        if (deleting) {
+                            SendMessageW(g_hNoteEdit, WM_CHAR, L'\b', 1);
+                            SendMessageW(g_hNoteEdit, WM_KEYUP, VK_BACK, 0xC0000001);
+                        }
+                        RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                        if (!QueryPerformanceCounter(&finish)) { valid = false; break; }
+                        auto& samples = deleting ? deleteMicroseconds : insertMicroseconds;
+                        samples.push_back(static_cast<int64_t>(
+                            static_cast<double>(finish.QuadPart - start.QuadPart) * 1000000.0 /
+                            static_cast<double>(frequency.QuadPart)));
+                        const auto observed = ObserveNoteRenderRuntime();
+                        valid = observed.finalFrameActive && observed.structuralPublicationWasLocalPatch &&
+                            observed.modelMaterializations == baseline.modelMaterializations &&
+                            observed.canonicalRevision == revision + 1;
+                        if (!valid) {
+                            AppendUiAutomationTrace(L"long_note_render:rejected frame=" +
+                                std::to_wstring(observed.finalFrameActive) + L" local=" +
+                                std::to_wstring(observed.structuralPublicationWasLocalPatch) +
+                                L" models_before=" + std::to_wstring(baseline.modelMaterializations) +
+                                L" models_after=" + std::to_wstring(observed.modelMaterializations) +
+                                L" revision_before=" + std::to_wstring(revision) +
+                                L" revision_after=" + std::to_wstring(observed.canonicalRevision));
+                        }
+                        revision = observed.canonicalRevision;
+                    }
+                }
+            }
+            std::sort(insertMicroseconds.begin(), insertMicroseconds.end());
+            std::sort(deleteMicroseconds.begin(), deleteMicroseconds.end());
+            const auto percentile = [](const std::vector<int64_t>& samples, size_t percent) {
+                return samples.empty() ? int64_t{-1} : samples[(samples.size() - 1) * percent / 100];
+            };
+            const bool exact = GetNoteAutomationIndexingText() == fixture;
+            AppendUiAutomationTrace(L"long_note_render:rows=" + std::to_wstring(rows) +
+                L" local=" + std::to_wstring(valid) + L" exact=" + std::to_wstring(exact) +
+                L" insert_samples=" + std::to_wstring(insertMicroseconds.size()) +
+                L" insert_p50_us=" + std::to_wstring(percentile(insertMicroseconds, 50)) +
+                L" insert_p95_us=" + std::to_wstring(percentile(insertMicroseconds, 95)) +
+                L" delete_samples=" + std::to_wstring(deleteMicroseconds.size()) +
+                L" delete_p50_us=" + std::to_wstring(percentile(deleteMicroseconds, 50)) +
+                L" delete_p95_us=" + std::to_wstring(percentile(deleteMicroseconds, 95)));
+            valid = valid && exact;
+            if (!valid) break;
+            // Removing just '>' makes the earlier close unrecognized. This
+            // legitimately changes the suffix style and takes the full path;
+            // it must still publish composed rows without a native paint.
+            const size_t closingEnd = fixture.find(L"</b>") + 4;
+            SendMessageW(g_hNoteEdit, EM_SETSEL, closingEnd, closingEnd);
+            SendMessageW(g_hNoteEdit, WM_KEYDOWN, VK_F24, 1);
+            const auto beforeClosingDeletion = ObserveNoteRenderRuntime();
+            LARGE_INTEGER tagStart{}, tagFinish{};
+            valid = QueryPerformanceCounter(&tagStart) != FALSE;
+            if (valid) valid = SendUiAutomationNoteBackspace(1);
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            valid = QueryPerformanceCounter(&tagFinish) != FALSE && valid;
+            const auto afterClosingDeletion = ObserveNoteRenderRuntime();
+            const auto tagSnapshot = CaptureNoteUiSnapshot();
+            std::wstring withoutClosingEnd = fixture;
+            withoutClosingEnd.erase(closingEnd - 1, 1);
+            valid = valid && GetNoteAutomationIndexingText() == withoutClosingEnd &&
+                tagSnapshot.finalFrameActive && tagSnapshot.finalStructuredLineCount > 0 &&
+                afterClosingDeletion.canonicalRevision == beforeClosingDeletion.canonicalRevision + 1 &&
+                afterClosingDeletion.nativeFallbackPaintCount == beforeClosingDeletion.nativeFallbackPaintCount;
+            const auto tagUs = static_cast<int64_t>(
+                static_cast<double>(tagFinish.QuadPart - tagStart.QuadPart) * 1000000.0 / frequency.QuadPart);
+            AppendUiAutomationTrace(L"long_note_render:closing_delete rows=" + std::to_wstring(rows) +
+                L" valid=" + std::to_wstring(valid) + L" elapsed_us=" + std::to_wstring(tagUs));
+            if (!valid) break;
+        }
+        replaceAll(original);
+        return valid && GetNoteAutomationIndexingText() == original && SaveNoteIfDirty(owner);
+    };
+    if (!verifyLongNoteRendering()) {
+        restorePrevious();
+        if (outError) *outError = L"Long-note input/deletion lost local publication, materialized full text or changed unchanged content.";
+        return false;
+    }
+
+    // Keep real click/focus transitions terminal: the older probes above use
+    // programmatic transport selections and must prepare their own caret state.
+    if (!verifyRenderedClickInsertion()) {
+        restorePrevious();
+        if (outError) *outError = L"A rendered click did not preserve the source position through raw transition and insertion.";
+        return false;
+    }
+    AppendUiAutomationTrace(L"math_render:rendered_click_insertion_ok");
+
     g_noteRenderEnabled = previousRenderEnabled;
     g_noteRawOnly = previousRawOnly;
     const bool restored =
         RestoreUiAutomationNoteSelection(owner, previousNotePath, previousNoteIndex, outError);
     RefreshBottomPaneView();
     RefreshMainWindowUiState(owner);
-    return restored;
+    if (!vimVerticalValid && outError) {
+        *outError = L"Vim vertical movement lost final geometry or its Normal raw preference (other render probes continued).";
+    }
+    return restored && vimVerticalValid;
 }
 
 static bool TestSelectionAndColorIsolationInvariants(HWND owner, std::wstring* outError) {
@@ -3560,6 +6151,28 @@ static bool RunUiAutomationWorkspaceConfigRoundTripScenario(std::wstring* outErr
         PersistConfig();
     };
 
+    // Exercise the production serializer with values that plain JSON interpolation
+    // corrupts. Keep this probe in the disposable automation workspace.
+    WorkspaceConfig textProbe = originalConfig;
+    const std::wstring special = L"日本語 \"引用\" \\ ] } $&\n改行\t末尾 😀";
+    textProbe.classesDir = L"sub\\授業 ] $&";
+    textProbe.clroNamePattern = special;
+    textProbe.noteFontName = special;
+    textProbe.noteBgThemeName = special;
+    textProbe.quickNoteMathPlaceholderText = special;
+    const auto textProbePath = std::filesystem::path(g_workspaceRoot) / L"workspace.json";
+    std::wstring textProbeError;
+    const bool textSaved = SaveWorkspaceConfigToFile(textProbePath, textProbe);
+    const auto textLoaded = textSaved ? LoadWorkspaceConfigFromFile(textProbePath, &textProbeError)
+                                    : std::optional<WorkspaceConfig>{};
+    if (!textLoaded || textLoaded->classesDir != textProbe.classesDir ||
+        textLoaded->clroNamePattern != special || textLoaded->noteFontName != special ||
+        textLoaded->noteBgThemeName != special || textLoaded->quickNoteMathPlaceholderText != special) {
+        restore();
+        if (outError) *outError = L"Workspace JSON string round trip failed: " + textProbeError;
+        return false;
+    }
+
     g_config.language = L"en";
     g_config.pdfBitmapBudgetMiB = kPdfBitmapBudgetMiBMin;
     g_config.pointerOffsetX = 17;
@@ -3980,11 +6593,15 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
     const bool pdfiumRawOnly = ReadMainEnvVar(
         L"PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY", &pdfiumRawOnlyValue) &&
         (pdfiumRawOnlyValue == L"1" || pdfiumRawOnlyValue == L"true");
+    std::wstring mathRenderOnlyValue;
+    const bool mathRenderOnly = ReadMainEnvVar(
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_MATH_RENDER_ONLY", &mathRenderOnlyValue) &&
+        (mathRenderOnlyValue == L"1" || mathRenderOnlyValue == L"true");
     if ((configOnly ? 1 : 0) + (logContractOnly ? 1 : 0) + (configRecoveryOnly ? 1 : 0) +
         (configUnknownFieldOnly ? 1 : 0) + (settingsBundleOnly ? 1 : 0) +
         (helpVisibilityOnly ? 1 : 0) + (dialogOwnerVisibilityOnly ? 1 : 0) +
         (outputExportOnly ? 1 : 0) + (targetSessionOnly ? 1 : 0) + (pdfOnly ? 1 : 0) +
-        (pdfiumRawOnly ? 1 : 0) > 1) {
+        (pdfiumRawOnly ? 1 : 0) + (mathRenderOnly ? 1 : 0) > 1) {
         if (outError) *outError = L"Only one focused UI automation mode may be selected.";
         return false;
     }
@@ -4076,6 +6693,8 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
             return false;
         }
         AppendUiAutomationTrace(L"automation:ensure_pdf_only_ok");
+        if (!RunUiAutomationPdfKeyboardScrollScenario(owner, outError)) return false;
+        AppendUiAutomationTrace(L"automation:pdf_keyboard_scroll_ok");
         return true;
     }
     if (pdfiumRawOnly) {
@@ -4084,6 +6703,22 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
             return false;
         }
         AppendUiAutomationTrace(L"automation:pdfium_raw_open_ok");
+        return true;
+    }
+    // Keep the rendering responsiveness probe independent from clipboard
+    // ownership. Desktop clipboard access is external to this process and
+    // cannot decide whether final publication/scroll reentry is sound.
+    if (mathRenderOnly) {
+        if (!EnsureUiAutomationTargetSession(owner, outError)) {
+            AppendUiAutomationTrace(L"automation:ensure_target_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:ensure_target_ok");
+        if (!RunUiAutomationMathRenderScenario(owner, outError)) {
+            AppendUiAutomationTrace(L"automation:math_render_failed");
+            return false;
+        }
+        AppendUiAutomationTrace(L"automation:math_render_ok");
         return true;
     }
     if (!RunUiAutomationHelpVisibilityScenario(owner, outError)) {

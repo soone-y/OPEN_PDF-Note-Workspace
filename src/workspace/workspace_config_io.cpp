@@ -1,6 +1,7 @@
 #include "workspace/workspace_config_io.h"
 #include "core/localization.h"
 #include "core/app_core.h"
+#include "core/json_string.h"
 #include "ui/core/main_window_api.h"
 #include "ui/dialogs/dialogs.h"
 #include "clrop/bridge.h"
@@ -802,32 +803,8 @@ static void SkipSettingsJsonWhitespace(const std::string& json, size_t* pos) {
 }
 
 static bool ParseSettingsJsonStringToken(const std::string& json, size_t* pos) {
-    if (!pos || *pos >= json.size() || json[*pos] != '"') return false;
-    ++(*pos);
-    while (*pos < json.size()) {
-        const char ch = json[*pos];
-        ++(*pos);
-        if (ch == '"') return true;
-        if (ch != '\\') continue;
-        if (*pos >= json.size()) return false;
-        const char esc = json[*pos];
-        ++(*pos);
-        if (esc == 'u') {
-            if (json.size() - *pos < 4) return false;
-            for (size_t i = 0; i < 4; ++i) {
-                if (!std::isxdigit(static_cast<unsigned char>(json[*pos + i]))) return false;
-            }
-            *pos += 4;
-            continue;
-        }
-        switch (esc) {
-        case '"': case '\\': case '/': case 'b': case 'f': case 'n': case 'r': case 't':
-            break;
-        default:
-            return false;
-        }
-    }
-    return false;
+    std::string decoded;
+    return json_string::DecodeToken(json, pos, &decoded);
 }
 
 static bool ParseSettingsJsonValue(const std::string& json, size_t* pos, int depth);
@@ -950,13 +927,28 @@ static bool IsSettingsJsonObjectSyntaxValid(const std::string& rawJson) {
 static std::optional<std::wstring> ExtractSettingsJsonStringField(const std::string& rawJson,
                                                                   const char* key) {
     if (!key || !*key) return std::nullopt;
-    try {
-        const std::regex re(std::string("\"") + key + "\"\\s*:\\s*\"([^\"]*)\"");
-        std::smatch m;
-        if (std::regex_search(rawJson, m, re)) return UTF8ToWide(m[1].str());
-    } catch (...) {
+    const std::string json = TrimAsciiForSettingsBundle(rawJson);
+    size_t pos = 0;
+    SkipSettingsJsonWhitespace(json, &pos);
+    if (pos >= json.size() || json[pos++] != '{') return std::nullopt;
+    for (;;) {
+        SkipSettingsJsonWhitespace(json, &pos);
+        std::string field;
+        if (!json_string::DecodeToken(json, &pos, &field)) return std::nullopt;
+        SkipSettingsJsonWhitespace(json, &pos);
+        if (pos >= json.size() || json[pos++] != ':') return std::nullopt;
+        SkipSettingsJsonWhitespace(json, &pos);
+        const size_t start = pos;
+        if (!ParseSettingsJsonValue(json, &pos, 0)) return std::nullopt;
+        if (field == key) {
+            size_t cursor = start;
+            std::string decoded;
+            if (!json_string::DecodeToken(json, &cursor, &decoded)) return std::nullopt;
+            return UTF8ToWide(decoded);
+        }
+        SkipSettingsJsonWhitespace(json, &pos);
+        if (pos >= json.size() || json[pos++] != ',') return std::nullopt;
     }
-    return std::nullopt;
 }
 
 static bool EquivalentSettingsPathText(std::wstring a, std::wstring b) {

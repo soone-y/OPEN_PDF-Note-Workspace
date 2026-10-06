@@ -20,7 +20,8 @@ if str(RELEASE_CHECKS_DIR) not in sys.path:
 import binary_scan  # noqa: E402
 
 
-REPORT_VERSION = 1
+REPORT_VERSION = 2
+DEPENDENCY_BINARY_SUFFIXES = binary_scan.BINARY_SUFFIXES | {".bin"}
 DEFAULT_REQUIRED_PATHS = (
     "program/soffice.com",
     "program/soffice.bin",
@@ -182,7 +183,7 @@ def analyze_dependencies(
     binary_paths = [
         root / str(item["path"])
         for item in file_items
-        if Path(str(item["path"])).suffix.casefold() in binary_scan.BINARY_SUFFIXES
+        if Path(str(item["path"])).suffix.casefold() in DEPENDENCY_BINARY_SUFFIXES
     ]
     local_by_name: dict[str, list[str]] = defaultdict(list)
     for path in binary_paths:
@@ -398,6 +399,7 @@ def compare_runtimes(baseline: Path, candidate: Path, *, hashes: bool = False) -
             )
     baseline_bytes = int(before_summary["bytes"])
     candidate_bytes = int(after_summary["bytes"])
+    reduction_bytes = baseline_bytes - candidate_bytes
     return {
         "tool": "libreoffice_runtime_analyzer",
         "report_version": REPORT_VERSION,
@@ -411,6 +413,8 @@ def compare_runtimes(baseline: Path, candidate: Path, *, hashes: bool = False) -
             "baseline_bytes": baseline_bytes,
             "candidate_bytes": candidate_bytes,
             "bytes_delta": candidate_bytes - baseline_bytes,
+            "reduction_bytes": reduction_bytes,
+            "reduction_percent": reduction_bytes * 100 / baseline_bytes if baseline_bytes else None,
             "added_files": len(added),
             "removed_files": len(removed),
             "changed_files": len(changed),
@@ -449,8 +453,11 @@ def print_summary(payload: dict[str, object]) -> None:
         )
     else:
         summary = payload["summary"]
+        reduction_percent = summary["reduction_percent"]
+        reduction_percent_text = "n/a" if reduction_percent is None else f"{reduction_percent:.2f}%"
         print(
-            f"bytes_delta={summary['bytes_delta']} added={summary['added_files']} "
+            f"bytes_delta={summary['bytes_delta']} reduction_bytes={summary['reduction_bytes']} "
+            f"reduction_percent={reduction_percent_text} added={summary['added_files']} "
             f"removed={summary['removed_files']} changed={summary['changed_files']}"
         )
 

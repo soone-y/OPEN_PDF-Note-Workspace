@@ -36,15 +36,23 @@ def load_module(name: str, rel_path: str):
 
 migrate_clrop_v1 = load_module("migrate_clrop_v1", "tools/migration/migrate_clrop_v1.py")
 analyze_build_logs = load_module("analyze_build_logs", "tools/metrics/analyze_build_logs.py")
+distribution_size_report = load_module(
+    "distribution_size_report", "tools/metrics/distribution_size_report.py"
+)
 analyze_document_language = load_module("analyze_document_language", "tools/metrics/analyze_document_language.py")
 analyze_repo = load_module("analyze_repo", "tools/metrics/code_metrics/analyze_repo.py")
 code_metrics_gui = load_module("code_metrics_gui", "tools/metrics/code_metrics/gui.py")
 text_integrity_gate = load_module("text_integrity_gate", "tools/release_checks/text_integrity_gate.py")
 libreoffice_reduce = load_module("libreoffice_reduce", "tools/libreoffice/libreoffice_reduce.py")
+libreoffice_build_env_check = load_module("libreoffice_build_env_check", "tools/libreoffice/libreoffice_build_env_check.py")
 libreoffice_smoke_test = load_module("libreoffice_smoke_test", "tools/libreoffice/libreoffice_smoke_test.py")
 libreoffice_conversion_quality_test = load_module(
     "libreoffice_conversion_quality_test", "tools/libreoffice/libreoffice_conversion_quality_test.py"
 )
+# Include custom build-input regressions in the ordinary Python tools suite.
+LibreOfficeCustomPatchTests = load_module(
+    "libreoffice_custom_patch_tests", "tests/python/test_libreoffice_custom_patches.py"
+).LibreOfficeCustomPatchTests
 render_human_docs = load_module("render_human_docs", "site/github/scripts/render_human_docs.py")
 build_public_site = load_module("build_public_site", "site/github/scripts/build_public_site.py")
 validate_public_site = load_module("validate_public_site", "site/github/scripts/validate_public_site.py")
@@ -88,6 +96,16 @@ sanitize_libreoffice_runtime_release = load_module(
     "sanitize_libreoffice_runtime_release", "tools/release_checks/sanitize_libreoffice_runtime_release.py"
 )
 validate_codebase = load_module("validate_codebase", "tests/python/validate_codebase.py")
+pe_fixtures = load_module("pe_fixtures", "tests/python/pe_fixtures.py")
+# Keep failure-propagation regressions in the ordinary Python tools gate.
+CheckFailureContractTests = load_module(
+    "check_failure_contracts", "tests/python/test_check_failure_contracts.py"
+).CheckFailureContractTests
+
+# Run executable JSON persistence regressions in the ordinary repository gate.
+SetupJsonRoundTripTests = load_module(
+    "setup_json_roundtrip", "tests/python/test_setup_json_roundtrip.py"
+).SetupJsonRoundTripTests
 
 
 def _shortcut_chord(key: str) -> str:
@@ -141,8 +159,9 @@ class AnnotationToolPolicyTests(unittest.TestCase):
         self.assertIn("IDC_PALETTE_EDITOR_HEX", palette)
         self.assertIn("UpdatePaletteEditorFromHex", palette)
         self.assertIn("IDC_PALETTE_EDITOR_CHOICE_BASE", palette)
-        self.assertIn("DrawPaletteSaturationValueCanvas", palette)
-        self.assertIn("DrawPaletteHueCanvas", palette)
+        self.assertIn("EnsurePaletteColorEditorClass", palette)
+        self.assertIn("ShowPaletteColorEditorDialogImpl", palette)
+        self.assertNotIn("IDC_PALETTE_EDITOR_SV", palette)
         self.assertIn("SamplePaletteColorAtCursor", palette)
         self.assertIn("IDC_PALETTE_EDITOR_EYEDROPPER", palette)
         self.assertIn("ShowPaletteColorEditorDialog(hWnd, picked, &picked)", dispatch)
@@ -739,6 +758,22 @@ class AnalyzeRepoTests(unittest.TestCase):
 
 
 class TextIntegrityGateTests(unittest.TestCase):
+    def test_deleted_index_entry_is_not_a_text_read_error(self) -> None:
+        with repo_tempdir() as root:
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            deleted = root / "removed.txt"
+            deleted.write_text("removed\n", encoding="utf-8")
+            kept = root / "kept.json"
+            kept.write_text('{"valid":true}', encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            deleted.unlink()
+            paths = text_integrity_gate.git_visible_paths(root)
+            self.assertEqual([Path("kept.json")], paths)
+            self.assertEqual([], text_integrity_gate.audit_paths(root, paths)["errors"])
+            kept.unlink()  # disappearing after enumeration must still fail closed
+            report = text_integrity_gate.audit_paths(root, paths)
+            self.assertEqual("read-error", report["errors"][0]["kind"])
+
     def test_git_visible_paths_includes_nonignored_untracked_files(self) -> None:
         with repo_tempdir() as root:
             subprocess.run(["git", "init", "--quiet", str(root)], check=True)
@@ -886,6 +921,59 @@ class AnalyzeBuildLogsTests(unittest.TestCase):
             self.assertTrue(report.exists())
             self.assertIn("# Build Log Analysis", report.read_text(encoding="utf-8"))
             self.assertIn("## Summary", stdout.getvalue())
+
+
+class DistributionSizeReportTests(unittest.TestCase):
+    def test_zip_report_uses_compressed_member_sizes_and_accounts_for_overhead(self) -> None:
+        with repo_tempdir() as root:
+            archive_path = root / "distribution.zip"
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.writestr("app/PDFNote.exe", b"x" * 100)
+                archive.writestr("app/assets/icon.PNG", b"y" * 50)
+                archive.writestr("app/docs/guide.pdf", b"z" * 25)
+                archive.writestr("app/notes/lesson.clro", b"n" * 40)
+                archive.writestr("app/annotations/lesson.clrop", b"a" * 30)
+                archive.writestr("app/src/main.cpp", b"c" * 20)
+                archive.writestr("app/fonts/text.ttf", b"f" * 10)
+                archive.writestr("app/README.txt", b"t" * 5)
+
+            report = distribution_size_report.analyze_distribution(archive_path)
+            categories = {row["category"]: row for row in report["categories"]}
+
+            self.assertEqual(report["basis"], "ZIP圧縮後サイズ")
+            self.assertEqual(report["total_size_bytes"], archive_path.stat().st_size)
+            self.assertEqual(categories["実行ファイル・ライブラリ"]["size_bytes"], 100)
+            self.assertEqual(categories["PNG画像"]["size_bytes"], 50)
+            self.assertEqual(categories["PDF"]["size_bytes"], 25)
+            self.assertEqual(categories["ノート (.clro)"]["size_bytes"], 40)
+            self.assertEqual(categories["注釈データ (.clrop)"]["size_bytes"], 30)
+            self.assertEqual(categories["ソースコード・パッチ"]["size_bytes"], 20)
+            self.assertEqual(categories["フォント"]["size_bytes"], 10)
+            self.assertEqual(categories["テキスト・文書"]["size_bytes"], 5)
+            self.assertEqual(
+                categories["ZIP管理情報"]["size_bytes"],
+                archive_path.stat().st_size - 280,
+            )
+            self.assertEqual(sum(row["size_bytes"] for row in report["categories"]), report["total_size_bytes"])
+            self.assertAlmostEqual(sum(row["percent"] for row in report["categories"]), 100.0)
+
+    def test_directory_report_groups_file_sizes_without_modifying_files(self) -> None:
+        with repo_tempdir() as root:
+            distribution = root / "distribution"
+            distribution.mkdir()
+            (distribution / "app.dll").write_bytes(b"a" * 20)
+            (distribution / "photo.webp").write_bytes(b"b" * 30)
+            (distribution / "unknown.xyz").write_bytes(b"c" * 10)
+
+            report = distribution_size_report.analyze_distribution(distribution)
+            categories = {row["category"]: row for row in report["categories"]}
+
+            self.assertEqual(report["basis"], "展開後ファイルサイズ")
+            self.assertEqual(report["total_size_bytes"], 60)
+            self.assertEqual(categories["実行ファイル・ライブラリ"]["percent"], 100 * 20 / 60)
+            self.assertEqual(categories["その他の画像"]["size_bytes"], 30)
+            self.assertEqual(categories["その他"]["size_bytes"], 10)
+            self.assertTrue((distribution / "app.dll").exists())
 
 
 class AnalyzeDocumentLanguageTests(unittest.TestCase):
@@ -1355,7 +1443,7 @@ class ChangeImpactTests(unittest.TestCase):
             ["src/file_output/file_output_stage.cpp", "tools/dev/persistence_index.py"]
         )
 
-        self.assertIn("docs/internal/architecture/persistence_保存系現行実装整理方針_2026-04-29.md", report["read"])
+        self.assertIn("docs/internal/persistence_保存系現行実装整理方針_2026-04-29.md", report["read"])
         self.assertIn("python tools/dev/persistence_index.py --out out/persistence_index.tsv", report["inspect"])
         self.assertIn("python -m unittest tests/python/test_python_tools.py", report["run"])
         self.assertIn(
@@ -1429,6 +1517,35 @@ class ChangeImpactTests(unittest.TestCase):
 
 
 class ExportPublicSnapshotTests(unittest.TestCase):
+    def test_default_policy_paths_resolve_to_current_internal_docs(self) -> None:
+        args = export_public_snapshot.parse_args(["--dest", "unused"])
+        for policy_path in (args.allowlist, args.gitignore_template):
+            with self.subTest(policy=policy_path.name):
+                self.assertEqual(policy_path.parent, REPO_ROOT / "docs" / "internal")
+                self.assertTrue(policy_path.is_file(), f"Missing default policy: {policy_path}")
+
+    def test_main_uses_relocated_default_gitignore_template(self) -> None:
+        with repo_tempdir() as root:
+            internal = root / "docs" / "internal"
+            internal.mkdir(parents=True)
+            allowlist = internal / "allowlist.txt"
+            allowlist.write_text("README.md\n", encoding="utf-8")
+            (root / "README.md").write_text("# Project\n", encoding="utf-8")
+            self.track_current_files(root)
+            dest = root.parent / f"{root.name}_public"
+
+            with redirect_stdout(io.StringIO()):
+                code = export_public_snapshot.main([
+                    "--root", str(root), "--allowlist", str(allowlist), "--dest", str(dest),
+                ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                (dest / ".gitignore").read_bytes(),
+                export_public_snapshot.DEFAULT_GITIGNORE_TEMPLATE.read_bytes(),
+            )
+            self.assertEqual((dest / "README.md").read_text(encoding="utf-8"), "# Project\n")
+
     @staticmethod
     def track_current_files(root: Path) -> None:
         subprocess.run(["git", "init", "-q", str(root)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1895,12 +2012,48 @@ class BinaryScanTests(unittest.TestCase):
             self.assertEqual(output.getvalue().splitlines(), ["visible-ascii", "hidden"])
 
 
+class LibreOfficeBuildEnvironmentTests(unittest.TestCase):
+    def test_missing_empty_or_malformed_checksum_cannot_report_ready(self) -> None:
+        with repo_tempdir() as root:
+            archive = root / "source.tar.xz"
+            archive.write_bytes(b"source")
+            sidecar = root / "source.tar.xz.sha256"
+            for content in (None, "", "not-a-checksum"):
+                with self.subTest(content=content):
+                    if content is not None:
+                        sidecar.write_text(content, encoding="utf-8")
+                    with mock.patch.object(libreoffice_build_env_check, "COMMANDS", []):
+                        result = libreoffice_build_env_check.build_result(root, [archive.name])
+                    self.assertFalse(result["summary"]["ready_for_first_build"])
+                    self.assertEqual(result["summary"]["archive_failures"], [archive.name])
+
+    def test_explicit_external_archive_and_verified_checksum(self) -> None:
+        with repo_tempdir() as root:
+            repo = root / "repo"
+            repo.mkdir()
+            archive = root / "source.tar.xz"
+            archive.write_bytes(b"source")
+            digest = hashlib.sha256(b"source").hexdigest()
+            sidecar = root / "source.tar.xz.sha256"
+            sidecar.write_text(f"{digest}  source.tar.xz\n", encoding="utf-8")
+            with mock.patch.object(libreoffice_build_env_check, "COMMANDS", []):
+                result = libreoffice_build_env_check.build_result(repo, [str(archive)])
+            self.assertTrue(result["summary"]["ready_for_first_build"])
+            self.assertEqual(result["source_archives"][0]["sha256_file"], str(sidecar))
+            sidecar.write_text("0" * 64, encoding="utf-8")
+            self.assertFalse(libreoffice_build_env_check.check_archive(repo, str(archive)).sha256_matches)
+
+    def test_empty_source_selection_is_rejected(self) -> None:
+        with repo_tempdir() as root, self.assertRaises(ValueError):
+            libreoffice_build_env_check.build_result(root, [])
+
+
 class LibreOfficeRuntimeGateTests(unittest.TestCase):
     def test_minimal_converter_without_prohibited_indicator_passes(self) -> None:
         with repo_tempdir() as root:
             program = root / "image" / "program"
             program.mkdir(parents=True)
-            (program / "soffice.com").write_bytes(b"MZ")
+            (program / "soffice.com").write_bytes(pe_fixtures.make_pe())
 
             violations = libreoffice_runtime_gate.collect_violations(root / "image")
 
@@ -1910,8 +2063,8 @@ class LibreOfficeRuntimeGateTests(unittest.TestCase):
         with repo_tempdir() as root:
             program = root / "image" / "program"
             program.mkdir(parents=True)
-            (program / "soffice.com").write_bytes(b"MZ")
-            (program / "libcurl.dll").write_bytes(b"MZ")
+            (program / "soffice.com").write_bytes(pe_fixtures.make_pe())
+            (program / "libcurl.dll").write_bytes(pe_fixtures.make_pe())
 
             violations = libreoffice_runtime_gate.collect_violations(root / "image")
 
@@ -1925,8 +2078,8 @@ class LibreOfficeRuntimeGateTests(unittest.TestCase):
             program.mkdir(parents=True)
             soffice = program / "soffice.com"
             merged = program / "mergedlo.dll"
-            soffice.write_bytes(b"MZ")
-            merged.write_bytes(b"MZ")
+            soffice.write_bytes(pe_fixtures.make_pe())
+            merged.write_bytes(pe_fixtures.make_pe())
 
             def fake_scan(path, _root, _queries, min_string, max_strings):
                 imports = ["WINHTTP.dll"] if path == merged else []
@@ -1937,6 +2090,7 @@ class LibreOfficeRuntimeGateTests(unittest.TestCase):
                     import_symbols=[],
                     matched_strings=[],
                     matched_imports=[],
+                    pe_status="valid",
                 )
 
             with mock.patch.object(libreoffice_runtime_gate.binary_scan, "scan_file", side_effect=fake_scan):
@@ -1952,8 +2106,8 @@ class LibreOfficeRuntimeGateTests(unittest.TestCase):
             program.mkdir(parents=True)
             soffice = program / "soffice.com"
             merged = program / "mergedlo.dll"
-            soffice.write_bytes(b"MZ")
-            merged.write_bytes(b"MZ")
+            soffice.write_bytes(pe_fixtures.make_pe())
+            merged.write_bytes(pe_fixtures.make_pe())
 
             def fake_scan(path, _root, _queries, min_string, max_strings):
                 imports = ["winmm.dll"] if path == merged else []
@@ -1964,6 +2118,7 @@ class LibreOfficeRuntimeGateTests(unittest.TestCase):
                     import_symbols=[],
                     matched_strings=[],
                     matched_imports=[],
+                    pe_status="valid",
                 )
 
             with mock.patch.object(libreoffice_runtime_gate.binary_scan, "scan_file", side_effect=fake_scan):
@@ -1977,8 +2132,8 @@ class LibreOfficeRuntimeGateTests(unittest.TestCase):
             program.mkdir(parents=True)
             soffice = program / "soffice.com"
             merged = program / "mergedlo.dll"
-            soffice.write_bytes(b"MZ")
-            merged.write_bytes(b"MZ")
+            soffice.write_bytes(pe_fixtures.make_pe())
+            merged.write_bytes(pe_fixtures.make_pe())
 
             def fake_scan(path, _root, _queries, min_string, max_strings):
                 markers = ["PlaySoundW"] if path == merged else []
@@ -1989,6 +2144,7 @@ class LibreOfficeRuntimeGateTests(unittest.TestCase):
                     import_symbols=[],
                     matched_strings=[],
                     matched_imports=markers,
+                    pe_status="valid",
                 )
 
             with mock.patch.object(libreoffice_runtime_gate.binary_scan, "scan_file", side_effect=fake_scan):
@@ -2002,7 +2158,7 @@ class LibreOfficeRuntimeGateTests(unittest.TestCase):
         with repo_tempdir() as root:
             program = root / "image" / "program"
             program.mkdir(parents=True)
-            (program / "soffice.com").write_bytes(b"MZ")
+            (program / "soffice.com").write_bytes(pe_fixtures.make_pe())
             (program / "version.ini").write_text("UpdateChannel=LOOnlineUpdater\n", encoding="utf-8")
 
             violations = libreoffice_runtime_gate.collect_violations(root / "image")
@@ -2038,6 +2194,9 @@ class LibreOfficeReleaseRuntimeSanitizerTests(unittest.TestCase):
         }
 
         self.assertTrue(required_paths.isdisjoint(removed_paths))
+        self.assertTrue({"program/scuilo.dll", "share/config/soffice.cfg/modules/scalc", "share/xslt"} <= set(manifest["protected_paths"]))
+        self.assertNotIn("share/config/soffice.cfg/modules/scalc/ui", removed_paths)
+        self.assertNotIn("share/xslt", removed_paths)
 
     def test_removes_sdk_and_rewrites_local_build_paths(self) -> None:
         with repo_tempdir() as root:
@@ -2136,6 +2295,23 @@ class LibreOfficeReleaseRuntimeSanitizerTests(unittest.TestCase):
             self.assertTrue((image / "program" / "soffice.com").exists())
 
 
+    def test_manifest_cannot_remove_descendant_of_protected_directory(self) -> None:
+        for field in ("paths", "globs"):
+            with self.subTest(field=field), repo_tempdir() as root:
+                image = root / "image"
+                protected_dir = image / "share/calc"
+                protected_dir.mkdir(parents=True)
+                data = protected_dir / "needed.xml"
+                data.write_bytes(b"keep")
+                manifest = root / "manifest.json"
+                payload = {"version": 1, "paths": [], "globs": [], "protected_paths": ["share/calc"]}
+                payload[field] = ["share/calc/needed.xml" if field == "paths" else "share/calc/*.xml"]
+                manifest.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    sanitize_libreoffice_runtime_release.sanitize(image, manifest_path=manifest)
+                self.assertEqual(data.read_bytes(), b"keep")
+
+
 class LibreOfficeReduceToolTests(unittest.TestCase):
     def collect(self, image_root: Path, **overrides):
         kwargs = {
@@ -2213,7 +2389,8 @@ class LibreOfficeRuntimeAnalyzerTests(unittest.TestCase):
         for name in libreoffice_runtime_analyzer.DEFAULT_REQUIRED_PATHS:
             path = runtime / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes((name + "\n").encode("utf-8"))
+            path.write_bytes(pe_fixtures.make_pe() if path.suffix.lower() in libreoffice_runtime_analyzer.DEPENDENCY_BINARY_SUFFIXES
+                             else (name + "\n").encode("utf-8"))
         (runtime / "share" / "template").mkdir(parents=True)
         (runtime / "share" / "template" / "sample.ott").write_bytes(b"template")
         return runtime
@@ -2228,6 +2405,33 @@ class LibreOfficeRuntimeAnalyzerTests(unittest.TestCase):
             self.assertEqual(report["inventory"]["summary"]["files"], 6)
             self.assertEqual(len(report["inventory"]["largest_files"]), 3)
             self.assertTrue(all("sha256" in item for item in report["inventory"]["files"]))
+
+    def test_dependency_graph_traverses_soffice_bin_imports(self) -> None:
+        with repo_tempdir() as root:
+            runtime = self.create_runtime(root)
+            program = runtime / "program"
+            (program / "soffice.bin").write_bytes(b"entry")
+            (program / "sal3.dll").write_bytes(b"dependency")
+            (program / "unused.dll").write_bytes(b"unused")
+
+            def fake_parse_pe_imports(data: bytes) -> tuple[list[str], list[str]]:
+                return (["sal3.dll"], []) if data == b"entry" else ([], [])
+
+            with mock.patch.object(
+                libreoffice_runtime_analyzer.binary_scan,
+                "parse_pe_imports",
+                side_effect=fake_parse_pe_imports,
+            ):
+                report = libreoffice_runtime_analyzer.analyze_runtime(runtime)
+
+            dependencies = report["dependencies"]
+            self.assertEqual(dependencies["summary"]["binaries"], 4)
+            self.assertIn("program/sal3.dll", dependencies["reachable_paths"])
+            self.assertIn(
+                {"from": "program/soffice.bin", "to": "program/sal3.dll", "import": "sal3.dll"},
+                dependencies["local_edges"],
+            )
+            self.assertEqual(dependencies["static_unreachable_candidates"], ["program/unused.dll"])
 
     def test_analyze_runtime_fails_when_required_entry_is_missing(self) -> None:
         with repo_tempdir() as root:
@@ -2255,6 +2459,22 @@ class LibreOfficeRuntimeAnalyzerTests(unittest.TestCase):
             self.assertEqual(report["summary"]["bytes_delta"], 0)
             self.assertEqual(report["summary"]["changed_files"], 1)
             self.assertEqual(report["changed"][0]["path"], "share/template/sample.ott")
+
+    def test_compare_reports_reduction_bytes_and_percent(self) -> None:
+        with repo_tempdir() as root:
+            baseline = self.create_runtime(root)
+            candidate = root / "candidate"
+            shutil.copytree(baseline, candidate)
+            (candidate / "share" / "template" / "sample.ott").unlink()
+
+            report = libreoffice_runtime_analyzer.compare_runtimes(baseline, candidate)
+            summary = report["summary"]
+
+            self.assertEqual(summary["reduction_bytes"], len(b"template"))
+            self.assertAlmostEqual(
+                summary["reduction_percent"],
+                summary["reduction_bytes"] * 100 / summary["baseline_bytes"],
+            )
 
     def test_report_writer_refuses_to_modify_analyzed_runtime(self) -> None:
         with repo_tempdir() as root:
@@ -2524,7 +2744,11 @@ class RenderHumanDocsTests(unittest.TestCase):
             self.assertIn('@media (max-width: 560px)', human_html)
             self.assertIn('class="menu-outside"', human_html)
             self.assertIn('content: "↗"', human_html)
+            self.assertIn('class="menu-icon" aria-hidden="true"><span class="menu-icon-bar"></span><span class="menu-icon-bar"></span><span class="menu-icon-bar"></span>', human_html)
+            self.assertIn('.menu-icon-bar {\n      display: block;\n      width: 100%;\n      height: 2px;', human_html)
+            self.assertLess(human_html.index('class="header-tools"'), human_html.index('class="site-menu"'))
             self.assertIn('目的別の入口へ戻る', human_html)
+            self.assertLess(human_html.index('文書ポータルのトップ'), human_html.index('プロジェクトの概要'))
             self.assertLess(human_html.index('プロジェクトの概要'), human_html.index('日本語の文書'))
             self.assertIn('class="language-switch" href="../../docs/en/How_to_Use.html"', human_html)
             self.assertIn('>English</a>', human_html)
@@ -2549,7 +2773,7 @@ class RenderHumanDocsTests(unittest.TestCase):
 class PublicDocumentationStructureTests(unittest.TestCase):
     def test_introduction_tree_is_in_the_public_snapshot_allowlist(self) -> None:
         allowlist = (
-            REPO_ROOT / "docs/internal/operations/public_repo_release_allowlist_2026-08-24.txt"
+            REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-08-24.txt"
         ).read_text(encoding="utf-8-sig")
 
         self.assertIn("\nintroduction/\n", f"\n{allowlist}")
@@ -2557,7 +2781,7 @@ class PublicDocumentationStructureTests(unittest.TestCase):
 
     def test_locale_build_inputs_are_in_the_public_snapshot_allowlist(self) -> None:
         allowlist = (
-            REPO_ROOT / "docs/internal/operations/public_repo_release_allowlist_2026-08-24.txt"
+            REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-08-24.txt"
         ).read_text(encoding="utf-8-sig")
 
         for required in ("locales/", "tools/localization/", "docs/ja/", "docs/en/"):
@@ -2642,6 +2866,9 @@ class PublicSiteValidationTests(unittest.TestCase):
         self.assertIn("はじめて使う方へ", portal)
         self.assertIn('id="site-map-title">文書の全体像', portal)
         self.assertIn("現在地：文書ポータルの案内ページ", portal)
+        self.assertIn('class="site-menu"', portal)
+        self.assertIn('aria-current="page"><span class="menu-link-title">文書ポータルのトップ', portal)
+        self.assertIn('class="menu-outside"', portal)
         for guide in (
             "docs/ja/Getting_Started.html",
             "docs/ja/Using_the_App.html",
@@ -2659,6 +2886,8 @@ class PublicSiteValidationTests(unittest.TestCase):
         self.assertIn('href="../index.html" lang="ja">日本語</a>', english_portal)
         self.assertIn("Getting started", english_portal)
         self.assertIn("Documentation at a glance", english_portal)
+        self.assertIn('class="site-menu"', english_portal)
+        self.assertIn('aria-current="page"><span class="menu-link-title">Documentation portal', english_portal)
         for guide in (
             "../docs/en/Getting_Started.html",
             "../docs/en/Using_the_App.html",
@@ -2676,7 +2905,7 @@ class PublicSiteValidationTests(unittest.TestCase):
         github_portal = (REPO_ROOT / "site/github/index.html").read_text(encoding="utf-8-sig")
         cloudflare_intro = (REPO_ROOT / "site/cloudflare/public/index.html").read_text(encoding="utf-8-sig")
         for source in (github_portal, cloudflare_intro):
-            self.assertIn('class="contrast-toggle"', source)
+            self.assertIn("contrast-toggle", source)
             self.assertIn("pdf-note-workspace-high-contrast", source)
 
     @staticmethod
@@ -2685,6 +2914,9 @@ class PublicSiteValidationTests(unittest.TestCase):
             "index.html": (
                 '<html><meta name="ai-agent-entrypoint" content="introduction/index.html">'
                 '<a href="introduction/index.html">Document index</a>'
+                '<a href="README.html">Project overview</a>'
+                '<a href="https://pdf-note-workspace.soone-y.com/">Product site</a>'
+                '<a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace">GitHub repository</a>'
                 '</html>'
             ),
             "README.md": "# README",
@@ -2692,11 +2924,44 @@ class PublicSiteValidationTests(unittest.TestCase):
             "introduction/project_overview.md": "# AI context",
             "introduction/project_overview.html": "<html></html>",
             "introduction/index.md": "# Documentation index",
-            "introduction/index.html": "<html></html>",
+            "introduction/index.html": '<html><a href="project_overview.html">Project overview</a></html>',
         }.items():
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
+
+    def test_rejects_document_more_than_two_visible_clicks_from_portal(self) -> None:
+        with repo_tempdir() as root:
+            self.write_minimal_site(root)
+            (root / "introduction" / "project_overview.html").write_text(
+                '<html><a href="deep_reference.html">Deep reference</a></html>',
+                encoding="utf-8",
+            )
+            (root / "introduction" / "deep_reference.html").write_text("<html></html>", encoding="utf-8")
+
+            errors = validate_public_site.validate_site(root)
+
+            self.assertIn(
+                "document requires more than 2 visible clicks from portal: "
+                "introduction/deep_reference.html (3)",
+                errors,
+            )
+
+    def test_rejects_document_reachable_only_through_hamburger_menu(self) -> None:
+        with repo_tempdir() as root:
+            self.write_minimal_site(root)
+            (root / "introduction" / "index.html").write_text(
+                '<html><details class="site-menu"><a href="project_overview.html">Project overview</a></details></html>',
+                encoding="utf-8",
+            )
+
+            errors = validate_public_site.validate_site(root)
+
+            self.assertIn(
+                "document is not reachable from the portal without opening a hamburger menu: "
+                "introduction/project_overview.html",
+                errors,
+            )
 
     def test_rejects_development_only_reference(self) -> None:
         with repo_tempdir() as root:
@@ -2965,6 +3230,16 @@ class OfficeLocalizationTests(unittest.TestCase):
         self.assertFalse(re.search(r'L"[^"\\\r\n]*[\u3040-\u30ff\u3400-\u9fff]', source))
         self.assertTrue(ids <= set(ja))
         self.assertTrue(ids <= set(en))
+
+
+class OfficeStagingHarnessTests(unittest.TestCase):
+    def test_office_conversion_uses_a_complete_docx_after_cpp_staging(self) -> None:
+        script = (REPO_ROOT / "tests/scripts/run_docx_space_protection_tests.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Invoke-DocxProtectionExpectSuccess -Source $fixture -Dest $conversionStaged", script)
+        self.assertIn('Copy-Item -LiteralPath $conversionStaged -Destination (Join-Path $conversionInputDir "app_staged.docx")', script)
+        self.assertNotIn('Copy-Item -LiteralPath $staged -Destination (Join-Path $conversionInputDir "app_staged.docx")', script)
+        self.assertEqual(script.count('Hash -ne $originalFixtureHash'), 2)
+        self.assertIn('"--docx-space-protection", "off"', script)
 
 
 class ReleaseLocaleContentGateTests(unittest.TestCase):

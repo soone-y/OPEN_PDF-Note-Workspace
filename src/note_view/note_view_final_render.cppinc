@@ -1,0 +1,1356 @@
+// Final note-render view bridge.  This fragment is intentionally placed after
+// note_view_shared.cppinc: it owns one per-HWND final adapter state but does
+// not own canonical text, persistence, or legacy render caches.
+//
+// The important boundary is event -> immutable frame -> paint.  WM_PAINT may
+// only consume the current frame.  It never repairs editor text, measures a
+// new publication, or falls back to a legacy overlay. If no current frame is
+// available, the caller paints the entire client through native RichEdit.
+
+// Defined by the later input fragment; publication and input share one
+// system-caret presenter, not an independently positioned paint caret.
+void SyncNativeCaretToRenderState(HWND hWnd, bool synchronizeTextAnchor);
+
+namespace {
+
+constexpr int kFinalNoteHorizontalPaddingPx = 8;
+
+[[nodiscard]] uint64_t AppendFinalLayoutHash(uint64_t hash,
+                                               const void* data,
+                                               size_t size) noexcept {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (size_t index = 0; index < size; ++index) {
+        hash ^= bytes[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+[[nodiscard]] uint64_t CurrentFinalFontMetricsRevision(HDC hdc) noexcept {
+    if (!hdc) return 0;
+    LOGFONTW font{};
+    const HGDIOBJ selected = GetCurrentObject(hdc, OBJ_FONT);
+    if (!selected || GetObjectW(selected, sizeof(font), &font) != sizeof(font)) return 0;
+    TEXTMETRICW metrics{};
+    if (!GetTextMetricsW(hdc, &metrics)) return 0;
+    uint64_t hash = UINT64_C(1469598103934665603);
+    hash = AppendFinalLayoutHash(hash, &font, sizeof(font));
+    hash = AppendFinalLayoutHash(hash, &metrics, sizeof(metrics));
+    return hash == 0 ? 1 : hash;
+}
+
+[[nodiscard]] bool ReadFinalCanonicalSelection(
+    HWND hWnd,
+    const note::NoteTextCore& textCore,
+    note::Span* outSelection,
+    note::Utf16CodeUnitOffset* outCaret) noexcept {
+    if (!hWnd || !outSelection || !outCaret || !textCore.valid()) return false;
+    DWORD selectionStart = 0;
+    DWORD selectionEnd = 0;
+    SendMessageW(hWnd, EM_GETSEL, reinterpret_cast<WPARAM>(&selectionStart),
+                 reinterpret_cast<LPARAM>(&selectionEnd));
+    const auto start = IsRichEditControl(hWnd)
+        ? note::NoteSourceLineMap::RichEditIndexToCanonicalOffset(
+              textCore.source_line_map(), static_cast<size_t>(selectionStart))
+        : std::optional<note::Utf16CodeUnitOffset>{note::Utf16CodeUnitOffset{
+              std::min(static_cast<size_t>(selectionStart), textCore.text_length())}};
+    const auto end = IsRichEditControl(hWnd)
+        ? note::NoteSourceLineMap::RichEditIndexToCanonicalOffset(
+              textCore.source_line_map(), static_cast<size_t>(selectionEnd))
+        : std::optional<note::Utf16CodeUnitOffset>{note::Utf16CodeUnitOffset{
+              std::min(static_cast<size_t>(selectionEnd), textCore.text_length())}};
+    if (!start.has_value() || !end.has_value()) return false;
+    const size_t boundedStart = std::min(start->value, textCore.text_length());
+    const size_t boundedEnd = std::min(end->value, textCore.text_length());
+    outSelection->start = {std::min(boundedStart, boundedEnd)};
+    outSelection->end = {std::max(boundedStart, boundedEnd)};
+    *outCaret = {boundedEnd};
+    if (g_noteVimModeEnabled && g_noteNormalMode &&
+        static_cast<size_t>(g_noteNormalCaret) >= outSelection->start.value &&
+        static_cast<size_t>(g_noteNormalCaret) <= outSelection->end.value) {
+        *outCaret = {static_cast<size_t>(g_noteNormalCaret)};
+    }
+    const auto& navigation = GetViewContext(hWnd).finalVerticalNavigation;
+    if (navigation && navigation->source == note::NoteDerivedSnapshotIdentity{
+            CurrentNoteTextCoreOwner(), CurrentNoteTextCoreRevision()} &&
+        navigation->selection.start == outSelection->start &&
+        navigation->selection.end == outSelection->end) {
+        *outCaret = {navigation->active};
+    }
+    return true;
+}
+
+[[nodiscard]] std::optional<note::LineIndex> FinalLineAtOffset(
+    const note::NoteTextCore& textCore,
+    note::Utf16CodeUnitOffset offset) noexcept {
+    const auto line = note::NoteSourceLineMap::FindByOffset(textCore.source_line_map(), offset);
+    return line.has_value() ? std::optional<note::LineIndex>(line->line_index) : std::nullopt;
+}
+
+// Keep the final route independent of the legacy cache namespace while using
+// the same RichEdit CRLF transport rule.  The canonical source index remains
+// the only value stored in final frames.
+[[nodiscard]] std::optional<size_t> FinalRawTextIndexToRichEditIndex(
+    HWND hWnd,
+    const note::NoteTextCore& textCore,
+    size_t rawOffset) noexcept {
+    rawOffset = std::min(rawOffset, textCore.text_length());
+    if (!IsRichEditControl(hWnd)) return std::optional<size_t>{rawOffset};
+    return note::NoteSourceLineMap::CanonicalOffsetToRichEditIndex(
+        textCore.source_line_map(), {rawOffset});
+}
+
+[[nodiscard]] bool FinalFrameCanUseCustomPaint(HWND hWnd) noexcept {
+    if (!hWnd || !IsNoteRenderActive() || g_noteShowInvisibleChars ||
+        g_noteShowLineNumbers || IsNoteRenderSwitchInProgress()) {
+        return false;
+    }
+    const LocalNoteViewContext& context = GetViewContext(hWnd);
+    if (!context.finalRenderState.has_frame()) return false;
+    if (g_noteImeComposing) {
+        const note::NoteTextCore* core = CurrentNoteTextCore();
+        return core && core->valid() && context.finalImePreedit.active() &&
+            context.finalImePreedit.source_identity() ==
+                note::NoteDerivedSnapshotIdentity{core->note_id(), core->content_revision()};
+    }
+    return IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd);
+}
+
+// This is deliberately weaker than FinalFrameCanUseCustomPaint: it answers
+// whether the final route owns the next publication attempt, before a frame
+// exists.  A failed attempt still takes the one whole-native fallback, but a
+// successful attempt must not first rebuild the retired LineCache/overlay.
+[[nodiscard]] bool FinalRenderRouteEnabled(HWND hWnd) noexcept {
+    return hWnd && IsNoteRenderActive() && !g_noteShowInvisibleChars &&
+        !g_noteShowLineNumbers && !IsNoteRenderSwitchInProgress();
+}
+
+// Input outside a current final frame (most notably the short withdrawal
+// interval before a replacement publication) still needs an exact transport
+// conversion if it is going to change canonical selection state.  The final
+// route must not fall back to scanning CurrentNoteSyntaxSource().raw: that
+// string can be both stale and O(N) for a click near the end of a long note.
+// A missing proof intentionally returns no coordinate, so the caller lets the
+// whole-native fallback handle the input instead of guessing.
+[[nodiscard]] std::optional<size_t> TryMapFinalRouteCanonicalOffsetToRichEdit(
+    HWND hWnd, size_t canonicalOffset) noexcept {
+    if (!FinalRenderRouteEnabled(hWnd)) return std::nullopt;
+    const note::NoteTextCore* textCore = CurrentNoteTextCore();
+    if (!textCore || !textCore->valid()) return std::nullopt;
+    canonicalOffset = std::min(canonicalOffset, textCore->text_length());
+    const auto mapCommittedOffset = [&]() -> std::optional<size_t> {
+        return FinalRawTextIndexToRichEditIndex(hWnd, *textCore, canonicalOffset);
+    };
+
+    const auto& frame = GetViewContext(hWnd).finalRenderState.frame();
+    const note::NoteRenderFinalImePreeditPresentation* preedit =
+        frame && frame->valid() && frame->presentation()
+            ? frame->presentation()->ime_preedit() : nullptr;
+    if (!g_noteImeComposing || !preedit || !preedit->Matches(*textCore)) {
+        return IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd)
+            ? mapCommittedOffset() : std::nullopt;
+    }
+
+    const note::Span oldReplacement = preedit->canonical_replacement_span();
+    const note::Span newReplacement = preedit->editor_replacement_span();
+    // A canonical coordinate inside the replaced committed text has no
+    // unique RichEdit destination while IMM owns the temporary text.  Never
+    // choose a side implicitly; the native control remains the owner there.
+    if (canonicalOffset >= oldReplacement.start.value &&
+        canonicalOffset <= oldReplacement.end.value) {
+        return std::nullopt;
+    }
+    const auto committed = mapCommittedOffset();
+    if (!committed.has_value()) return std::nullopt;
+    if (canonicalOffset < oldReplacement.start.value) return committed;
+    const int64_t delta = static_cast<int64_t>(newReplacement.end.value -
+                                                newReplacement.start.value) -
+        static_cast<int64_t>(oldReplacement.end.value - oldReplacement.start.value);
+    const int64_t richEditOffset = static_cast<int64_t>(*committed) + delta;
+    if (richEditOffset < 0 ||
+        static_cast<uint64_t>(richEditOffset) > std::numeric_limits<size_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<size_t>(richEditOffset);
+}
+
+[[nodiscard]] std::optional<size_t> TryMapFinalRouteRichEditIndexToCanonical(
+    HWND hWnd, size_t richEditIndex) noexcept {
+    if (!FinalRenderRouteEnabled(hWnd)) return std::nullopt;
+    const note::NoteTextCore* textCore = CurrentNoteTextCore();
+    if (!textCore || !textCore->valid()) return std::nullopt;
+    const auto mapCommittedOffset = [&](size_t richEditOffset) -> std::optional<size_t> {
+        if (!IsRichEditControl(hWnd)) {
+            return std::min(richEditOffset, textCore->text_length());
+        }
+        const auto canonical = note::NoteSourceLineMap::RichEditIndexToCanonicalOffset(
+            textCore->source_line_map(), richEditOffset);
+        return canonical.has_value() ? std::optional<size_t>{canonical->value} : std::nullopt;
+    };
+
+    const auto& frame = GetViewContext(hWnd).finalRenderState.frame();
+    const note::NoteRenderFinalImePreeditPresentation* preedit =
+        frame && frame->valid() && frame->presentation()
+            ? frame->presentation()->ime_preedit() : nullptr;
+    if (!g_noteImeComposing || !preedit || !preedit->Matches(*textCore)) {
+        return IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd)
+            ? mapCommittedOffset(richEditIndex) : std::nullopt;
+    }
+
+    const note::Span oldReplacement = preedit->canonical_replacement_span();
+    const note::Span newReplacement = preedit->editor_replacement_span();
+    const auto richReplacementStart = FinalRawTextIndexToRichEditIndex(
+        hWnd, *textCore, oldReplacement.start.value);
+    if (!richReplacementStart.has_value()) return std::nullopt;
+    const size_t preeditLength = newReplacement.end.value - newReplacement.start.value;
+    if (preeditLength > std::numeric_limits<size_t>::max() - *richReplacementStart) {
+        return std::nullopt;
+    }
+    const size_t richReplacementEnd = *richReplacementStart + preeditLength;
+    if (richEditIndex <= *richReplacementStart) {
+        return mapCommittedOffset(richEditIndex);
+    }
+    if (richEditIndex < richReplacementEnd) {
+        // Composition-internal selection/caret has no committed source
+        // coordinate. The caller deliberately retains native ownership.
+        return std::nullopt;
+    }
+    const int64_t delta = static_cast<int64_t>(newReplacement.end.value -
+                                                newReplacement.start.value) -
+        static_cast<int64_t>(oldReplacement.end.value - oldReplacement.start.value);
+    const int64_t committedRichEditOffset = static_cast<int64_t>(richEditIndex) - delta;
+    if (committedRichEditOffset < 0 ||
+        static_cast<uint64_t>(committedRichEditOffset) > std::numeric_limits<size_t>::max()) {
+        return std::nullopt;
+    }
+    return mapCommittedOffset(static_cast<size_t>(committedRichEditOffset));
+}
+
+// RichEdit remains alive for editing, accessibility, and the one whole-client
+// fallback, but it is not a second layout or scrollbar authority while the
+// final route owns the view. Keep its transport rectangle compatible with
+// the final painter's single horizontal padding and suppress synchronous
+// resize re-entry from EM_SETRECTNP. The caller treats `true` as a complete
+// final-route format operation and must not execute the legacy canvas/scroll
+// branch afterwards.
+static bool ApplyFinalNoteNativeFallbackFormatRect(HWND hWnd) noexcept {
+    if (!FinalRenderRouteEnabled(hWnd)) return false;
+    if (!IsRichEditControl(hWnd)) return true;
+
+    LocalNoteViewContext& context = GetViewContext(hWnd);
+    if (context.finalNativeFallbackFormatSyncInProgress) return true;
+    context.finalNativeFallbackFormatSyncInProgress = true;
+    struct ScopedNativeFallbackFormatReset {
+        bool& in_progress;
+        ~ScopedNativeFallbackFormatReset() { in_progress = false; }
+    } reset{context.finalNativeFallbackFormatSyncInProgress};
+    context.finalNativeTextOrigin = {};
+
+    RECT client{};
+    GetClientRect(hWnd, &client);
+    client.left = std::min(client.right,
+                           client.left + static_cast<LONG>(kFinalNoteHorizontalPaddingPx));
+    // Final layout is explicitly non-wrapping. A later whole-native fallback
+    // retains that transport policy, but its raw glyphs and native scroll
+    // position are deliberately not used to paint a final frame.
+    SendMessageW(hWnd, EM_SETTARGETDEVICE, 0, 1);
+    SendMessageW(hWnd, EM_SETRECTNP, 0, reinterpret_cast<LPARAM>(&client));
+    return true;
+}
+
+[[nodiscard]] bool BuildFinalLayoutKey(HWND hWnd,
+                                        HDC hdc,
+                                        note::NoteRenderLayoutKey* outKey) noexcept {
+    if (!hWnd || !hdc || !outKey) return false;
+    RECT client{};
+    GetClientRect(hWnd, &client);
+    const int width = static_cast<int>(client.right - client.left);
+    const int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
+    const int dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
+    uint64_t fontRevision = CurrentFinalFontMetricsRevision(hdc);
+    if (width <= 0 || dpiX <= 0 || dpiY <= 0 || fontRevision == 0) return false;
+    // The chosen vertical alignment changes placement geometry. Include it in
+    // the immutable layout identity so an existing publication is never
+    // reused after the option changes.
+    const int inlineMathAlignment = std::clamp(g_config.noteInlineMathVerticalAlignment, 0, 2);
+    fontRevision = AppendFinalLayoutHash(fontRevision, &inlineMathAlignment, sizeof(inlineMathAlignment));
+    if (fontRevision == 0) fontRevision = 1;
+
+    note::NoteRenderLayoutKey key;
+    key.client_width_px = static_cast<uint32_t>(width);
+    key.dpi_x = static_cast<uint32_t>(dpiX);
+    key.dpi_y = static_cast<uint32_t>(dpiY);
+    key.font_metrics_revision = fontRevision;
+    key.tab_columns = 4;
+    key.horizontal_padding_px = kFinalNoteHorizontalPaddingPx;
+    // Render-enabled notes deliberately retain the established horizontal
+    // scrolling policy.  Raw-only wrapping is a different editor mode and
+    // must not leak into this structural layout key.
+    key.word_wrap = false;
+    if (!key.valid()) return false;
+    *outKey = key;
+    return true;
+}
+
+[[nodiscard]] bool BuildFinalOwnerInput(
+    HWND hWnd,
+    const note::NoteTextCore& textCore,
+    bool isImePreedit,
+    const std::optional<note::LineIndex>& imeLine,
+    note::Span selection,
+    note::Utf16CodeUnitOffset caret,
+    note::NotePresentationOwnerInput* out) noexcept {
+    if (!hWnd || !out || !textCore.valid() || textCore.logical_line_count() == 0) return false;
+    note::NotePresentationOwnerInput input;
+    input.render_active = true;
+    input.editor_text_core_current = true;
+    input.ime_preedit = isImePreedit;
+    input.ime_preedit_can_reuse_committed_layout = isImePreedit;
+    input.visible_lines = {{0}, {textCore.logical_line_count()}};
+
+    std::optional<note::LineIndex> firstLine;
+    std::optional<note::LineIndex> lastLine;
+    if (isImePreedit) {
+        firstLine = imeLine;
+        lastLine = imeLine;
+    } else {
+        firstLine = FinalLineAtOffset(textCore, selection.start);
+        const note::Utf16CodeUnitOffset selectionLast =
+            selection.end > selection.start ? note::Utf16CodeUnitOffset{selection.end.value - 1}
+                                            : caret;
+        lastLine = FinalLineAtOffset(textCore, selectionLast);
+    }
+    // IME caret coordinates include transient text and can exceed the
+    // committed source length at EOF. Its canonical anchor already owns a
+    // logical row; never reinterpret the virtual caret as a source offset.
+    const std::optional<note::LineIndex> caretLine = isImePreedit
+        ? imeLine : FinalLineAtOffset(textCore, caret);
+    if (!firstLine.has_value() || !lastLine.has_value() || !caretLine.has_value()) return false;
+    input.caret_line = caretLine->value;
+
+    bool requestRaw = false;
+    if (isImePreedit) {
+        requestRaw = true;
+    } else {
+        const bool vimNormal = g_noteVimModeEnabled && g_noteNormalMode;
+        const HWND focus = GetFocus();
+        const HWND owner = g_hMainWnd ? g_hMainWnd : GetParent(hWnd);
+        // Normal-mode commands are dispatched by the main window, not by
+        // RichEdit. It still owns this note's caret; an unrelated pane or
+        // dialog does not. Keep the Insert-mode focus rule unchanged.
+        const bool focused = focus == hWnd || (vimNormal && owner && focus == owner);
+        const bool openingStructured = g_noteOpeningFocusVisualHold && !g_notePointerMovedCaretRaw;
+        const bool linkGrace = NoteLinkRenderGraceRemainingMs() > 0 &&
+            !g_notePointerMovedCaretRaw;
+        const bool linkInsertion = g_linkPending.active && !g_linkPending.id.empty();
+        const bool vimVisual = vimNormal && g_noteNormalVisualMode;
+        if (focused && !openingStructured && !linkGrace && !linkInsertion &&
+            !g_ctrlRenderSelecting && !g_ctrlRenderSelected) {
+            if (vimNormal) {
+                requestRaw = !vimVisual && g_noteVimCaretLineRawTextVisible;
+                firstLine = caretLine;
+                lastLine = caretLine;
+            } else {
+                requestRaw = true;
+            }
+        }
+    }
+    if (requestRaw) {
+        const size_t first = std::min(firstLine->value, lastLine->value);
+        const size_t last = std::max(firstLine->value, lastLine->value);
+        if (last >= textCore.logical_line_count()) return false;
+        input.requested_editor_lines.push_back({{first}, {last + 1}});
+    }
+    *out = std::move(input);
+    return true;
+}
+
+[[nodiscard]] bool BuildFinalImePreedit(
+    HWND hWnd,
+    const note::NoteTextCore& textCore,
+    std::optional<note::NoteRenderFinalImePreeditPresentation>* outPreedit,
+    note::Span* outEditorSelection,
+    note::Utf16CodeUnitOffset* outEditorCaret,
+    std::optional<note::LineIndex>* outLine) noexcept {
+    if (!hWnd || !outPreedit || !outEditorSelection || !outEditorCaret || !outLine) return false;
+    outPreedit->reset();
+    *outLine = std::nullopt;
+    if (!g_noteImeComposing) return true;
+
+    const NoteFinalImePreeditState& state = GetViewContext(hWnd).finalImePreedit;
+    if (!state.active() || state.source_identity() !=
+            note::NoteDerivedSnapshotIdentity{textCore.note_id(), textCore.content_revision()} ||
+        !state.has_payload() ||
+        state.composition_caret().value > state.composition_text().size()) {
+        return false;
+    }
+    const auto line = FinalLineAtOffset(textCore, state.canonical_replacement().start);
+    if (!line.has_value()) return false;
+    if (state.composition_caret().value > std::numeric_limits<size_t>::max() -
+            state.canonical_replacement().start.value) return false;
+    const size_t editorCaret = state.canonical_replacement().start.value + state.composition_caret().value;
+    try {
+        note::NoteRenderFinalImePreeditInput input;
+        input.canonical_replacement_span = state.canonical_replacement();
+        input.composition_text = state.composition_text();
+        input.composition_attributes = state.composition_attributes();
+        input.composition_clauses = state.composition_clauses();
+        input.editor_selection = {{editorCaret}, {editorCaret}};
+        note::NoteRenderFinalImePreeditPresentation preedit;
+        if (note::NoteRenderFinalImePreeditPresentation::Build(textCore, input, &preedit) !=
+                note::NoteRenderFinalImePreeditPresentationBuildResult::Built ||
+            !preedit.valid()) {
+            return false;
+        }
+        *outEditorSelection = preedit.editor_selection();
+        *outEditorCaret = preedit.editor_selection().end;
+        *outLine = line;
+        *outPreedit = std::move(preedit);
+        return true;
+    } catch (const std::exception&) {
+        // Copying the bounded IMM payload into the build input can also fail;
+        // this noexcept edge must select native fallback, not terminate.
+        return false;
+    }
+}
+
+[[nodiscard]] int ClampFinalScrollAxis(uint64_t extent, int viewport, int requested) noexcept {
+    if (requested <= 0 || viewport <= 0 || extent <= static_cast<uint64_t>(viewport)) return 0;
+    const uint64_t maximum = extent - static_cast<uint64_t>(viewport);
+    const uint64_t bounded = std::min<uint64_t>(maximum, static_cast<uint64_t>(requested));
+    return bounded > static_cast<uint64_t>(std::numeric_limits<int>::max())
+        ? std::numeric_limits<int>::max() : static_cast<int>(bounded);
+}
+
+static void SyncFinalNoteScrollBars(HWND hWnd) noexcept {
+    if (!hWnd) return;
+    LocalNoteViewContext& context = GetViewContext(hWnd);
+    // Win32 can dispatch WM_SIZE synchronously from SetScrollInfo.  That
+    // message reaches the RichEdit subclass, which may republish the final
+    // frame.  Do not let that nested refresh start another SetScrollInfo
+    // cycle; the outer synchronization will finish with the current viewport
+    // state.  Keep a value copy of the immutable frame as well: a nested
+    // publication may replace the adapter's stored shared_ptr while this
+    // function is still using the prior frame's geometry.
+    if (context.finalRenderScrollSyncInProgress) return;
+    context.finalRenderScrollSyncInProgress = true;
+    struct ScopedScrollSyncReset {
+        bool& in_progress;
+        ~ScopedScrollSyncReset() { in_progress = false; }
+    } reset{context.finalRenderScrollSyncInProgress};
+    const auto frame = context.finalRenderState.frame();
+    if (!frame || !frame->valid() || !frame->presentation()) return;
+    RECT client{};
+    GetClientRect(hWnd, &client);
+    const int clientWidth = std::max(0, static_cast<int>(client.right - client.left));
+    const int clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
+    const uint64_t contentHeight = frame->presentation()->line_layouts().total_height_px();
+    uint64_t extent = 0;
+    if (frame->HorizontalExtent(&extent) !=
+        note::NoteRenderFinalPresentationInteractionResult::Resolved) {
+        return;
+    }
+    context.finalRenderScrollY = contentHeight <= static_cast<uint64_t>(clientHeight)
+        ? 0 : std::min(context.finalRenderScrollY,
+                       contentHeight - static_cast<uint64_t>(clientHeight));
+    g_noteRenderScrollX = ClampFinalScrollAxis(extent, clientWidth, g_noteRenderScrollX);
+
+    auto asScrollMax = [](uint64_t value) noexcept {
+        return value == 0 ? 0 : static_cast<int>(std::min<uint64_t>(
+            value - 1, static_cast<uint64_t>(std::numeric_limits<int>::max())));
+    };
+    SCROLLINFO vertical{};
+    vertical.cbSize = sizeof(vertical);
+    vertical.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    vertical.nMin = 0;
+    vertical.nMax = asScrollMax(contentHeight);
+    vertical.nPage = static_cast<UINT>(std::max(0, clientHeight));
+    vertical.nPos = static_cast<int>(std::min<uint64_t>(
+        context.finalRenderScrollY, static_cast<uint64_t>(std::numeric_limits<int>::max())));
+
+    SCROLLINFO horizontal{};
+    horizontal.cbSize = sizeof(horizontal);
+    horizontal.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    horizontal.nMin = 0;
+    horizontal.nMax = asScrollMax(extent);
+    horizontal.nPage = static_cast<UINT>(std::max(0, clientWidth));
+    horizontal.nPos = g_noteRenderScrollX;
+
+    // Reapplying an identical SCROLLINFO can still make RichEdit synchronously
+    // send WM_SIZE. Avoid that needless event; a changed bar is handled by the
+    // bounded final-publication replay below.
+    const auto setIfChanged = [&](int bar, const SCROLLINFO& requested) {
+        SCROLLINFO current{};
+        current.cbSize = sizeof(current);
+        current.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+        if (GetScrollInfo(hWnd, bar, &current) &&
+            current.nMin == requested.nMin && current.nMax == requested.nMax &&
+            current.nPage == requested.nPage && current.nPos == requested.nPos) {
+            return;
+        }
+        SetScrollInfo(hWnd, bar, &requested, TRUE);
+    };
+    setIfChanged(SB_VERT, vertical);
+    setIfChanged(SB_HORZ, horizontal);
+}
+
+// RichEdit may scroll its private viewport as a side effect of keyboard or
+// Vim movement.  A published final frame deliberately does not borrow that
+// viewport: it owns its own origin. Reveal only a new source/caret geometry
+// or explicit keyboard input. Passive publications preserve the user's
+// viewport, including at the lower scroll limit. The remembered geometry
+// survives frame withdrawal but is never used for paint or hit testing.
+static void EnsureFinalNoteRenderCaretVisible(HWND hWnd) noexcept {
+    if (!hWnd || (GetFocus() != hWnd &&
+        !(g_noteVimModeEnabled && g_noteNormalMode && GetFocus() == g_hMainWnd))) return;
+    LocalNoteViewContext& context = GetViewContext(hWnd);
+    const auto& frame = context.finalRenderState.frame();
+    if (!frame || !frame->valid()) return;
+    note::NoteRenderFinalCaretGeometry caret{};
+    if (frame->Caret(&caret) != note::NoteRenderFinalPresentationInteractionResult::Resolved) {
+        return;
+    }
+    const note::NoteDerivedSnapshotIdentity source{
+        CurrentNoteTextCoreOwner(), CurrentNoteTextCoreRevision()};
+    const auto previous = context.finalRenderLastCaret;
+    const bool unchanged = context.finalRenderLastCaretSource == source && previous &&
+        previous->source_offset == caret.source_offset && previous->line_index == caret.line_index &&
+        previous->x_px == caret.x_px && previous->top_px == caret.top_px &&
+        previous->bottom_px == caret.bottom_px;
+    context.finalRenderLastCaretSource = source;
+    context.finalRenderLastCaret = caret;
+    if (unchanged) return;
+    RECT client{};
+    GetClientRect(hWnd, &client);
+    const int clientWidth = std::max(0, static_cast<int>(client.right - client.left));
+    const int clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
+    if (clientHeight > 0) {
+        const uint64_t viewport = static_cast<uint64_t>(clientHeight);
+        const uint64_t visibleBottom = context.finalRenderScrollY >
+                std::numeric_limits<uint64_t>::max() - viewport
+            ? std::numeric_limits<uint64_t>::max()
+            : context.finalRenderScrollY + viewport;
+        if (caret.top_px < context.finalRenderScrollY) {
+            context.finalRenderScrollY = caret.top_px;
+        } else if (caret.bottom_px > visibleBottom) {
+            context.finalRenderScrollY = caret.bottom_px > viewport
+                ? caret.bottom_px - viewport : 0;
+        }
+    }
+    if (clientWidth > 0) {
+        const int64_t caretX = caret.x_px;
+        const int64_t visibleLeft = std::max<int64_t>(0, g_noteRenderScrollX);
+        const int64_t visibleRight = visibleLeft + clientWidth;
+        if (caretX < visibleLeft) {
+            g_noteRenderScrollX = static_cast<int>(std::max<int64_t>(0, caretX));
+        } else if (caretX >= visibleRight) {
+            const int64_t requested = caretX - clientWidth + 1;
+            g_noteRenderScrollX = static_cast<int>(std::clamp<int64_t>(
+                requested, 0, std::numeric_limits<int>::max()));
+        }
+    }
+}
+
+} // namespace
+
+// Shared fragments that maintain RichEdit's fallback metrics need this small
+// query without depending on the final bridge's private helper namespace.
+static bool IsFinalFramePaintingActive(HWND hWnd) noexcept {
+    return FinalFrameCanUseCustomPaint(hWnd);
+}
+
+NoteRenderRuntimeObservation ObserveNoteRenderRuntime() noexcept {
+    NoteRenderRuntimeObservation observation;
+    if (g_hNoteEdit) {
+        const auto& context = GetViewContext(g_hNoteEdit);
+        observation.nativeRedrawDepth = context.finalNativeRedrawDepth;
+        observation.nativeRedrawRequested = context.nativeRedrawRequested;
+        observation.nativeRedrawTransactions = context.finalNativeRedrawTransactions;
+        observation.clientPaintCount = context.noteClientPaintCount;
+        observation.nativeFallbackPaintCount = context.noteNativeFallbackPaintCount;
+    }
+    const auto* core = CurrentNoteTextCore();
+    if (!core || !core->valid()) return observation;
+    observation.canonicalRevision = core->content_revision();
+    observation.modelMaterializations = core->model_materialization_count();
+    observation.finalFrameActive = FinalFrameCanUseCustomPaint(g_hNoteEdit);
+    observation.structuralPublicationWasLocalPatch = observation.finalFrameActive &&
+        GetViewContext(g_hNoteEdit).finalStructuralPublicationWasLocalPatch;
+    return observation;
+}
+
+// UI automation observes the same immutable source/presentation chain as
+// paint.  This is intentionally an observation-only, test/diagnostic helper:
+// it may enumerate every row to form a textual assertion, but it is never
+// called by WM_PAINT, input, hit test, caret, or ordinary rendering.
+static bool PopulateNoteUiSnapshotFromFinalFrame(HWND hWnd,
+                                                 NoteUiSnapshot* snapshot) noexcept {
+    if (!hWnd || !snapshot || !FinalFrameCanUseCustomPaint(hWnd)) return false;
+    try {
+        const auto& frame = GetViewContext(hWnd).finalRenderState.frame();
+        if (!frame || !frame->valid() || !frame->presentation()) return false;
+        const auto& presentation = frame->presentation();
+        const auto& structural = presentation->structural_publication();
+        if (!structural || !structural->source_plan() || !structural->source_plan()->syntax()) {
+            return false;
+        }
+        const auto& sourcePlan = structural->source_plan();
+        const auto& syntax = sourcePlan->syntax();
+        snapshot->renderedText.clear();
+        snapshot->renderedMathSegmentCount = 0;
+        snapshot->renderedDisplayMathSegmentCount = 0;
+        snapshot->finalFrameActive = true;
+        snapshot->finalCaretGeometryReady =
+            TryGetFinalNoteRenderCaretRect(hWnd, &snapshot->finalCaretClientRect,
+                                           &snapshot->finalCaretLineClientRect);
+        GUITHREADINFO caretInfo{};
+        caretInfo.cbSize = sizeof(caretInfo);
+        if (snapshot->finalCaretGeometryReady &&
+            GetGUIThreadInfo(GetCurrentThreadId(), &caretInfo)) {
+            const RECT& expected = snapshot->finalCaretClientRect;
+            snapshot->systemCaretMatchesFinal = caretInfo.hwndCaret == hWnd &&
+                caretInfo.rcCaret.left == expected.left && caretInfo.rcCaret.top == expected.top &&
+                caretInfo.rcCaret.bottom - caretInfo.rcCaret.top == expected.bottom - expected.top;
+        }
+        snapshot->finalStructuredLineCount = 0;
+        snapshot->finalRawLineCount = 0;
+        for (size_t lineValue = 0; lineValue < sourcePlan->line_count(); ++lineValue) {
+            const note::LineIndex lineIndex{lineValue};
+            note::NoteRenderSourceLinePlan sourceLine;
+            const std::optional<note::NoteRenderFinalSurfaceKind> surface =
+                presentation->SurfaceAt(lineIndex);
+            if (!surface || !sourcePlan->ResolveLine(lineIndex, &sourceLine)) return false;
+            if (*surface == note::NoteRenderFinalSurfaceKind::RawPaint) {
+                ++snapshot->finalRawLineCount;
+            } else {
+                ++snapshot->finalStructuredLineCount;
+            }
+            if (lineValue > 0) snapshot->renderedText.push_back(L'\n');
+            for (const note::NoteRenderSourceRun& run : sourceLine.runs) {
+                if (run.kind == note::NoteRenderSourceRunKind::InlineMath ||
+                    run.kind == note::NoteRenderSourceRunKind::BlockMath) {
+                    ++snapshot->renderedMathSegmentCount;
+                    if (run.kind == note::NoteRenderSourceRunKind::BlockMath) {
+                        ++snapshot->renderedDisplayMathSegmentCount;
+                    }
+                }
+            }
+            if (*surface == note::NoteRenderFinalSurfaceKind::RawPaint) {
+                note::NoteRenderFinalRawLineSurface rawLine;
+                if (!presentation->ResolveRawLine(lineIndex, &rawLine)) return false;
+                snapshot->renderedText += rawLine.display.display_text;
+                continue;
+            }
+            for (const note::NoteRenderSourceRun& run : sourceLine.runs) {
+                note::NoteRenderFinalDisplayRun display;
+                if (note::BuildNoteRenderFinalDisplayRun(*syntax, run, &display) !=
+                    note::NoteRenderFinalDisplayRunBuildResult::Built) {
+                    return false;
+                }
+                snapshot->renderedText += display.display_text;
+            }
+        }
+        return true;
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+static void WithdrawFinalNoteRenderFrame(HWND hWnd) {
+    if (!hWnd) return;
+    // Input temporarily withdraws a frame before publishing its replacement.
+    // Keep the transport origin across that private gap: resetting RichEdit's
+    // viewport here would reformat the entire native document per character.
+    // A genuine whole-native paint restores its neutral rectangle separately.
+    GetViewContext(hWnd).finalRenderState.ClearFrame();
+}
+
+static void ClearFinalNoteRenderState(HWND hWnd) {
+    if (!hWnd) return;
+    LocalNoteViewContext& context = GetViewContext(hWnd);
+    context.finalRenderState.Clear();
+    context.finalStructuralPublicationWasLocalPatch = false;
+    context.finalRenderScrollY = 0;
+    context.finalRenderLastCaretSource = {};
+    context.finalRenderLastCaret.reset();
+    context.finalVerticalNavigation.reset();
+    // Input ownership ends only at result/end/focus/note lifecycle events,
+    // independently of whether a structured presentation is available.
+}
+
+// Must run after a canonical editor event, never from WM_PAINT. `acceptedEdit`
+// is supplied only by the exact RichEdit ticket path; every other change is a
+// complete transaction, which is deliberately safer than guessing a delta.
+static bool RefreshFinalNoteRenderFrameOnce(
+    HWND hWnd,
+    const std::optional<note::TextEdit>& acceptedEdit = std::nullopt) {
+    if (!hWnd || !IsNoteRenderActive() || g_noteShowInvisibleChars || g_noteShowLineNumbers ||
+        IsNoteRenderSwitchInProgress()) {
+        // Rendering availability must not erase the input session anchor:
+        // raw mode and visual-assist mode still need canonical IME ownership.
+        ClearFinalNoteRenderState(hWnd);
+        return false;
+    }
+    const note::NoteTextCore* textCore = CurrentNoteTextCore();
+    if (!textCore || !textCore->valid()) {
+        WithdrawFinalNoteRenderFrame(hWnd);
+        return false;
+    }
+
+    std::optional<note::NoteRenderFinalImePreeditPresentation> imePreedit;
+    note::Span editorSelection{};
+    note::Utf16CodeUnitOffset editorCaret{};
+    std::optional<note::LineIndex> imeLine;
+    // START has an exact canonical anchor but no provisional text yet. Only
+    // this session phase may publish committed geometry without a payload;
+    // a failed later IMM read must still use the existing safe fallback.
+    const bool committedImeStart = g_noteImeComposing &&
+        GetViewContext(hWnd).finalImePreedit.awaiting_first_payload();
+    const bool livePreedit = g_noteImeComposing && !committedImeStart;
+    if (livePreedit) {
+        if (!BuildFinalImePreedit(hWnd, *textCore, &imePreedit, &editorSelection,
+                                  &editorCaret, &imeLine)) {
+            if (preview_trace::IsEnabled()) {
+                preview_trace::Append(L"FinalNoteFrameWithdraw", L"reason=ime_preedit_proof revision=" +
+                    std::to_wstring(textCore->content_revision()) + L" length=" +
+                    std::to_wstring(textCore->text_length()));
+            }
+            WithdrawFinalNoteRenderFrame(hWnd);
+            return false;
+        }
+    } else {
+        if (!IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd) ||
+            !ReadFinalCanonicalSelection(hWnd, *textCore, &editorSelection, &editorCaret)) {
+            if (preview_trace::IsEnabled()) {
+                preview_trace::Append(L"FinalNoteFrameWithdraw", L"reason=editor_binding_or_selection revision=" +
+                    std::to_wstring(textCore->content_revision()) + L" length=" +
+                    std::to_wstring(textCore->text_length()));
+            }
+            WithdrawFinalNoteRenderFrame(hWnd);
+            return false;
+        }
+        if (committedImeStart) {
+            const auto& session = GetViewContext(hWnd).finalImePreedit;
+            if (!g_noteImeComposing || !session.active() || session.has_payload() ||
+                session.source_identity() != note::NoteDerivedSnapshotIdentity{
+                    textCore->note_id(), textCore->content_revision()} ||
+                session.canonical_replacement().start != editorSelection.start ||
+                session.canonical_replacement().end != editorSelection.end) {
+                WithdrawFinalNoteRenderFrame(hWnd);
+                return false;
+            }
+        }
+    }
+
+    note::NotePresentationOwnerInput ownerInput;
+    if (!BuildFinalOwnerInput(hWnd, *textCore, livePreedit, imeLine, editorSelection,
+                              editorCaret, &ownerInput)) {
+        if (preview_trace::IsEnabled()) {
+            preview_trace::Append(L"FinalNoteFrameWithdraw", L"reason=owner_input ime=" +
+                preview_trace::Bool(livePreedit) + L" revision=" +
+                std::to_wstring(textCore->content_revision()) + L" length=" +
+                std::to_wstring(textCore->text_length()) + L" editor_caret=" +
+                std::to_wstring(editorCaret.value) + L" ime_line=" +
+                (imeLine ? std::to_wstring(imeLine->value) : L"none"));
+        }
+        WithdrawFinalNoteRenderFrame(hWnd);
+        return false;
+    }
+
+    HDC measurementDc = GetDC(hWnd);
+    if (!measurementDc) {
+        WithdrawFinalNoteRenderFrame(hWnd);
+        return false;
+    }
+    HFONT activeFont = GetActiveNoteFont();
+    HGDIOBJ oldFont = activeFont ? SelectObject(measurementDc, activeFont) : nullptr;
+    note::NoteRenderLayoutKey layoutKey;
+    const bool keyBuilt = BuildFinalLayoutKey(hWnd, measurementDc, &layoutKey);
+    note::NoteRenderFinalWin32AdapterStateRefreshResult refreshResult =
+        note::NoteRenderFinalWin32AdapterStateRefreshResult::InvalidInput;
+    if (keyBuilt) {
+        note::NoteRenderFinalWin32AdapterStateInput input;
+        input.text_core = textCore;
+        input.content_kind = CurrentNoteContentKind();
+        input.layout_key = layoutKey;
+        input.owner_input = std::move(ownerInput);
+        input.ime_preedit = std::move(imePreedit);
+        input.editor_selection = editorSelection;
+        input.editor_caret = editorCaret;
+        input.measurement_dc = measurementDc;
+        input.measurement_options.inline_math_vertical_alignment =
+            static_cast<note::NoteRenderInlineMathVerticalAlignment>(
+                std::clamp(g_config.noteInlineMathVerticalAlignment, 0, 2));
+        refreshResult = GetViewContext(hWnd).finalRenderState.Refresh(
+            input, livePreedit ? std::nullopt : acceptedEdit);
+    }
+    if (oldFont) SelectObject(measurementDc, oldFont);
+    ReleaseDC(hWnd, measurementDc);
+    if (acceptedEdit && refreshResult != note::NoteRenderFinalWin32AdapterStateRefreshResult::PublishedLocalPatch &&
+        preview_trace::IsEnabled()) {
+        preview_trace::Append(L"FinalNoteLocalPatch", L"result=" + std::to_wstring(static_cast<int>(refreshResult)));
+    }
+
+    const bool published = refreshResult ==
+            note::NoteRenderFinalWin32AdapterStateRefreshResult::PublishedReusedStructural ||
+        refreshResult == note::NoteRenderFinalWin32AdapterStateRefreshResult::PublishedLocalPatch ||
+        refreshResult == note::NoteRenderFinalWin32AdapterStateRefreshResult::PublishedComplete;
+    if (!published || !GetViewContext(hWnd).finalRenderState.has_frame()) {
+        if (preview_trace::IsEnabled()) {
+            preview_trace::Append(L"FinalNoteFrameWithdraw", L"reason=publication result=" +
+                std::to_wstring(static_cast<int>(refreshResult)) + L" revision=" +
+                std::to_wstring(textCore->content_revision()) + L" caret=" +
+                std::to_wstring(editorCaret.value));
+        }
+        // Refresh already withdrew the public frame. Keep a whole native
+        // fallback until a later event can prove a complete replacement.
+        return false;
+    }
+    if (refreshResult != note::NoteRenderFinalWin32AdapterStateRefreshResult::PublishedReusedStructural) {
+        GetViewContext(hWnd).finalStructuralPublicationWasLocalPatch = refreshResult ==
+            note::NoteRenderFinalWin32AdapterStateRefreshResult::PublishedLocalPatch;
+    }
+    EnsureFinalNoteRenderCaretVisible(hWnd);
+    SyncFinalNoteScrollBars(hWnd);
+    InvalidateRect(hWnd, nullptr, FALSE);
+    return true;
+}
+
+// A single publication can resize RichEdit's client geometry when a scrollbar
+// appears. RichEdit then synchronously sends WM_SIZE; its pre-default path
+// correctly withdraws the old geometry, but must not recursively publish
+// while the first transaction still owns its DC and scroll update. Coalesce
+// that request and replay it from the final geometry. The number of passes is
+// bounded: vertical/horizontal scrollbar visibility can settle at most once
+// per axis, and an unstable Win32 control must fall back to native paint
+// instead of holding the UI thread in an unbounded transaction.
+static bool RefreshFinalNoteRenderFrame(
+    HWND hWnd,
+    const std::optional<note::TextEdit>& acceptedEdit = std::nullopt) {
+    if (!hWnd) return false;
+    LocalNoteViewContext& context = GetViewContext(hWnd);
+    if (context.finalRenderPublicationInProgress) {
+        context.finalRenderPublicationPending = true;
+        return context.finalRenderState.has_frame();
+    }
+
+    constexpr int kMaxPublicationPasses = 3;
+    std::optional<note::TextEdit> passEdit = acceptedEdit;
+    bool published = false;
+    for (int pass = 0; pass < kMaxPublicationPasses; ++pass) {
+        bool replayRequested = false;
+        {
+            context.finalRenderPublicationPending = false;
+            context.finalRenderPublicationInProgress = true;
+            struct ScopedFinalPublicationReset {
+                LocalNoteViewContext& context;
+                ~ScopedFinalPublicationReset() { context.finalRenderPublicationInProgress = false; }
+            } publicationReset{context};
+            published = RefreshFinalNoteRenderFrameOnce(hWnd, passEdit);
+            replayRequested = context.finalRenderPublicationPending;
+        }
+
+        if (replayRequested) {
+            if (preview_trace::IsEnabled()) {
+                RECT client{};
+                GetClientRect(hWnd, &client);
+                preview_trace::Append(L"FinalNoteGeometryReplay",
+                    L"pass=" + std::to_wstring(pass) + L" published=" + preview_trace::Bool(published) +
+                    L" client=" + std::to_wstring(client.right) + L"x" + std::to_wstring(client.bottom));
+            }
+            passEdit.reset();
+            continue;
+        }
+        if (!published || !context.finalRenderState.has_frame()) return false;
+        // Native dispatch can leave its caret at raw transport coordinates.
+        // Publish the final geometry before returning from the event, including
+        // IME cursor-only/partial-result events that have no WM_CHAR hook.
+        SyncNativeCaretToRenderState(hWnd);
+        // A result-only event or no-op WM_CHAR can publish after the native
+        // IME notification. Predictions also need this final, not raw, origin.
+        SyncNoteImeCandidateWindowToCaret(hWnd);
+        return context.finalRenderState.has_frame();
+    }
+
+    context.finalRenderPublicationPending = false;
+    preview_trace::Append(L"FinalNoteGeometryReplay", L"exhausted; native fallback");
+    // The last replay still caused a synchronous geometry invalidation. Do
+    // not expose a frame whose placement may describe an earlier client size.
+    WithdrawFinalNoteRenderFrame(hWnd);
+    return false;
+}
+
+static void BeginFinalNoteImePreedit(HWND hWnd) {
+    WithdrawFinalNoteRenderFrame(hWnd);
+    if (!hWnd) return;
+    NoteFinalImePreeditState& state = GetViewContext(hWnd).finalImePreedit;
+    state.Reset();
+    const note::NoteTextCore* core = CurrentNoteTextCore();
+    note::Span selection{};
+    note::Utf16CodeUnitOffset ignoredCaret{};
+    if (!core || !core->valid() || !IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd) ||
+        !ReadFinalCanonicalSelection(hWnd, *core, &selection, &ignoredCaret)) {
+        return;
+    }
+    if (!state.Begin({core->note_id(), core->content_revision()}, selection)) return;
+}
+
+static void UpdateFinalNoteImePreedit(HWND hWnd,
+                                      const note::NoteImePreeditPayload& composition) {
+    if (!hWnd) return;
+    NoteFinalImePreeditState& state = GetViewContext(hWnd).finalImePreedit;
+    const auto result = state.Update(composition.text, composition.caret,
+                                     composition.attributes, composition.clauses);
+    if (result != note::NoteRenderFinalImePreeditUpdateResult::Updated &&
+        result != note::NoteRenderFinalImePreeditUpdateResult::UpdatedEmptyComposition) {
+        WithdrawFinalNoteRenderFrame(hWnd);
+        return;
+    }
+}
+
+static void SuspendFinalNoteImePreedit(HWND hWnd) {
+    if (!hWnd) return;
+    GetViewContext(hWnd).finalImePreedit.Suspend();
+    WithdrawFinalNoteRenderFrame(hWnd);
+}
+
+static void EndFinalNoteImePreedit(HWND hWnd) {
+    if (!hWnd) return;
+    GetViewContext(hWnd).finalImePreedit.Reset();
+}
+
+static bool TryPaintFinalNoteRenderFrame(HWND hWnd, HDC hdc) {
+    if (!hWnd || !hdc || !FinalFrameCanUseCustomPaint(hWnd)) return false;
+    const LocalNoteViewContext& context = GetViewContext(hWnd);
+    const auto& frame = context.finalRenderState.frame();
+    if (!frame || !frame->valid()) return false;
+
+    // The current-line surface is non-text decoration, but it must use final
+    // line geometry rather than RichEdit's raw row heights.
+    note::NoteRenderFinalCaretGeometry caret{};
+    if (!IsNoteOpeningFocusVisualHoldActive() && GetFocus() == hWnd && frame->Caret(&caret) ==
+            note::NoteRenderFinalPresentationInteractionResult::Resolved) {
+        const auto location = note::NoteRenderLineLayoutMap::LineAt(
+            frame->presentation()->line_layouts(), caret.line_index);
+        if (location.has_value() && location->bottom_px >= context.finalRenderScrollY &&
+            location->top_px <= context.finalRenderScrollY +
+                static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+            const uint64_t top = location->top_px > context.finalRenderScrollY
+                ? location->top_px - context.finalRenderScrollY : 0;
+            const uint64_t bottom = location->bottom_px > context.finalRenderScrollY
+                ? location->bottom_px - context.finalRenderScrollY : 0;
+            if (top <= static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
+                bottom <= static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+                RECT client{};
+                GetClientRect(hWnd, &client);
+                RECT band{client.left, static_cast<int>(top), client.right,
+                          static_cast<int>(bottom)};
+                const COLORREF color = BlendColor(
+                    g_noteBgColor, g_theme.accent,
+                    (Luma(g_noteBgColor) >= 128) ? 0.08 : 0.16);
+                HBRUSH brush = CreateSolidBrush(color);
+                if (brush) {
+                    GetViewContext(hWnd).currentLineHighlightPainted = FillRect(hdc, &band, brush) != 0;
+                    DeleteObject(brush);
+                }
+            }
+        }
+    }
+
+    HFONT activeFont = GetActiveNoteFont();
+    HGDIOBJ oldFont = activeFont ? SelectObject(hdc, activeFont) : nullptr;
+    note::NoteRenderFinalWin32PaintState paint;
+    paint.horizontal_scroll_px = std::max(0, g_noteRenderScrollX);
+    paint.vertical_scroll_px = context.finalRenderScrollY;
+    paint.paint_caret = false;
+    paint.theme.text = g_noteFgColor;
+    paint.theme.background = g_noteBgColor;
+    paint.theme.caret = g_noteFgColor;
+    paint.theme.selection_surface = GetSysColor(COLOR_HIGHLIGHT);
+    paint.theme.link = BlendColor(g_theme.accent, g_noteFgColor, 0.20);
+    const bool painted = frame->Paint(hdc, paint);
+    if (oldFont) SelectObject(hdc, oldFont);
+    // A publication that cannot paint is no longer a usable coordinate
+    // system.  Keeping it would let the next hit test or IME query use final
+    // geometry while this paint used the whole-native fallback.  Withdraw it
+    // before returning so the next interaction has the same owner as the
+    // pixels currently shown.
+    if (!painted) {
+        RECT failureClient{};
+        GetClientRect(hWnd, &failureClient);
+        preview_trace::Append(
+            L"FinalNoteRenderPaint",
+            L"failed frame_valid=" + preview_trace::Bool(frame->valid()) +
+            L" presentation_valid=" + preview_trace::Bool(
+                frame->presentation() && frame->presentation()->valid()) +
+            L" client=" + std::to_wstring(
+                std::max(0, static_cast<int>(failureClient.right - failureClient.left))) + L"x" +
+                std::to_wstring(std::max(0, static_cast<int>(failureClient.bottom - failureClient.top))));
+        WithdrawFinalNoteRenderFrame(hWnd);
+    }
+    return painted;
+}
+
+static bool TryGetFinalNoteRenderHit(HWND hWnd,
+                                     int clientX,
+                                     int clientY,
+                                     note::NoteRenderFinalHit* outHit) {
+    if (!hWnd || !outHit || !FinalFrameCanUseCustomPaint(hWnd) || clientX < 0 || clientY < 0) {
+        return false;
+    }
+    const LocalNoteViewContext& context = GetViewContext(hWnd);
+    const auto& frame = context.finalRenderState.frame();
+    if (!frame) return false;
+    const int64_t contentX64 = static_cast<int64_t>(clientX) + g_noteRenderScrollX;
+    if (contentX64 < std::numeric_limits<int>::min() ||
+        contentX64 > std::numeric_limits<int>::max()) return false;
+    const uint64_t contentY = context.finalRenderScrollY + static_cast<uint64_t>(clientY);
+    const auto& presentation = frame->presentation();
+    if (presentation && contentY >= presentation->line_layouts().total_height_px()) {
+        // The blank client area below the document still belongs to this
+        // frame. Clicking there starts editing at EOF, not at a position
+        // guessed from RichEdit's unrelated raw row heights.
+        RECT client{};
+        if (!GetClientRect(hWnd, &client) || clientY >= client.bottom ||
+            clientX >= client.right || presentation->line_layouts().line_count() == 0) return false;
+        const auto& structural = presentation->structural_publication();
+        if (!structural || !structural->syntax()) return false;
+        const auto* preedit = presentation->ime_preedit();
+        const note::Utf16CodeUnitOffset end{
+            preedit ? preedit->coordinate_map().new_source_length()
+                    : structural->syntax()->source_root().text_length()};
+        *outHit = {};
+        outHit->line_index = {presentation->line_layouts().line_count() - 1};
+        outHit->source_offset = end;
+        outHit->source_span = {end, end};
+        return true;
+    }
+    return frame->HitTest(static_cast<int>(contentX64), contentY, outHit) ==
+        note::NoteRenderFinalPresentationInteractionResult::Resolved;
+}
+
+// Converts a final frame's editor coordinate back to the native RichEdit
+// transport coordinate. During preedit, only the replacement interior lacks
+// a canonical source offset; it still has an exact native position relative
+// to the captured replacement boundary.
+static bool MapFinalEditorOffsetToRichEdit(HWND hWnd,
+                                           note::Utf16CodeUnitOffset editorOffset,
+                                           size_t* outRichEditOffset,
+                                           std::optional<size_t>* outCanonicalOffset) {
+    if (!hWnd || !outRichEditOffset || !outCanonicalOffset ||
+        !FinalFrameCanUseCustomPaint(hWnd)) return false;
+    const note::NoteTextCore* core = CurrentNoteTextCore();
+    const auto& frame = GetViewContext(hWnd).finalRenderState.frame();
+    if (!core || !core->valid() || !frame || !frame->presentation()) return false;
+    const note::NoteRenderFinalImePreeditPresentation* preedit =
+        frame->presentation()->ime_preedit();
+    if (!preedit) {
+        if (editorOffset.value > core->text_length()) return false;
+        const auto richEditOffset = FinalRawTextIndexToRichEditIndex(
+            hWnd, *core, editorOffset.value);
+        if (!richEditOffset.has_value()) return false;
+        *outCanonicalOffset = editorOffset.value;
+        *outRichEditOffset = *richEditOffset;
+        return true;
+    }
+
+    const note::Span oldReplacement = preedit->canonical_replacement_span();
+    const note::Span newReplacement = preedit->editor_replacement_span();
+    if (editorOffset.value > preedit->coordinate_map().new_source_length()) return false;
+    if (editorOffset <= newReplacement.start) {
+        if (editorOffset.value > oldReplacement.start.value) return false;
+        const auto richEditOffset = FinalRawTextIndexToRichEditIndex(
+            hWnd, *core, editorOffset.value);
+        if (!richEditOffset.has_value()) return false;
+        *outCanonicalOffset = editorOffset.value;
+        *outRichEditOffset = *richEditOffset;
+        return true;
+    }
+    const auto richReplacementStart =
+        FinalRawTextIndexToRichEditIndex(hWnd, *core, oldReplacement.start.value);
+    if (!richReplacementStart.has_value()) return false;
+    if (editorOffset < newReplacement.end) {
+        const size_t replacementInteriorOffset =
+            editorOffset.value - newReplacement.start.value;
+        if (replacementInteriorOffset >
+            std::numeric_limits<size_t>::max() - *richReplacementStart) {
+            return false;
+        }
+        *outCanonicalOffset = std::nullopt;
+        *outRichEditOffset = *richReplacementStart + replacementInteriorOffset;
+        return true;
+    }
+    note::Utf16CodeUnitOffset canonical{};
+    if (!preedit->MapEditorUnchangedBoundary(
+            editorOffset, note::NoteSourceEditBoundarySide::AfterReplacement, &canonical) ||
+        canonical.value > core->text_length()) {
+        return false;
+    }
+    const int64_t transportDelta = static_cast<int64_t>(newReplacement.end.value -
+                                                         newReplacement.start.value) -
+        static_cast<int64_t>(oldReplacement.end.value - oldReplacement.start.value);
+    const auto unchangedRichEditOffset = FinalRawTextIndexToRichEditIndex(
+        hWnd, *core, canonical.value);
+    if (!unchangedRichEditOffset.has_value()) return false;
+    const int64_t rich = static_cast<int64_t>(*unchangedRichEditOffset) +
+        transportDelta;
+    if (rich < 0 || static_cast<uint64_t>(rich) > std::numeric_limits<size_t>::max()) return false;
+    *outCanonicalOffset = canonical.value;
+    *outRichEditOffset = static_cast<size_t>(rich);
+    return true;
+}
+
+// Returns a canonical source boundary only when the current final frame can
+// prove one.  Preedit-internal offsets deliberately have no canonical value;
+// callers retain their existing selection rather than guessing through
+// RichEdit or the retired presentation cache.
+static std::optional<size_t> HitTestFinalNoteRenderRawPosition(
+    HWND hWnd, int clientX, int clientY) {
+    note::NoteRenderFinalHit hit{};
+    if (!TryGetFinalNoteRenderHit(hWnd, clientX, clientY, &hit)) return std::nullopt;
+    size_t richEditOffset = 0;
+    std::optional<size_t> canonicalOffset;
+    if (!MapFinalEditorOffsetToRichEdit(
+            hWnd, hit.source_offset, &richEditOffset, &canonicalOffset)) {
+        return std::nullopt;
+    }
+    return canonicalOffset;
+}
+
+// Link dispatch is semantic interaction, not a second hit-test.  Keyboard
+// activation and RawPaint links have no reason to reconstruct legacy line
+// segments: the published final source plan already carries the persisted
+// LinkId style for this exact canonical revision.
+static std::optional<std::wstring> ResolveFinalLegacyLinkIdAtCanonicalOffset(
+    HWND hWnd, size_t canonicalOffset) {
+    if (!hWnd || !FinalFrameCanUseCustomPaint(hWnd) ||
+        !NoteContentRouteSupportsLinkTargets(CurrentNoteContentRoute())) {
+        return std::nullopt;
+    }
+    try {
+        const LocalNoteViewContext& context = GetViewContext(hWnd);
+        const auto& frame = context.finalRenderState.frame();
+        if (!frame || !frame->valid() || !frame->presentation()) return std::nullopt;
+        const auto& structural = frame->presentation()->structural_publication();
+        if (!structural || !structural->valid() || !structural->syntax() ||
+            !structural->source_plan()) {
+            return std::nullopt;
+        }
+        const note::NoteTextCore* core = CurrentNoteTextCore();
+        if (!core || !core->valid() || canonicalOffset > core->text_length()) {
+            return std::nullopt;
+        }
+        const auto location = note::NoteSourceLineMap::FindByOffset(
+            structural->syntax()->source_line_map(), {canonicalOffset});
+        if (!location.has_value()) return std::nullopt;
+        note::NoteRenderSourceLinePlan sourceLine;
+        if (!structural->source_plan()->ResolveLine(location->line_index, &sourceLine)) {
+            return std::nullopt;
+        }
+        for (const note::NoteRenderSourceRun& run : sourceLine.runs) {
+            if (canonicalOffset < run.source_span.start.value ||
+                canonicalOffset >= run.source_span.end.value) {
+                continue;
+            }
+            for (const note::NoteRenderSourceStyleAttribute& style : run.styles) {
+                if (style.kind == note::StyleKind::LinkId && !style.value.empty()) {
+                    return style.value;
+                }
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        return std::nullopt;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] static bool TryGetFinalNoteRenderCaretRect(
+    HWND hWnd, RECT* outRect, RECT* outInputBand,
+    std::optional<note::Utf16CodeUnitOffset> editorOffset) {
+    if (!hWnd || !outRect || !FinalFrameCanUseCustomPaint(hWnd)) return false;
+    const LocalNoteViewContext& context = GetViewContext(hWnd);
+    const auto& frame = context.finalRenderState.frame();
+    if (!frame) return false;
+    note::NoteRenderFinalCaretGeometry caret{};
+    const auto resolved = editorOffset
+        ? note::ResolveNoteRenderFinalPresentationEditorCaret(*frame->presentation(), *editorOffset, &caret)
+        : frame->Caret(&caret);
+    if (resolved != note::NoteRenderFinalPresentationInteractionResult::Resolved) return false;
+    if (caret.bottom_px <= caret.top_px) return false;
+    // Keep the real content-to-client translation, including negative Y.
+    // Clamping to the viewport pins an off-screen caret to the top edge and
+    // can give std::clamp an inverted range in a zero-height client.
+    const int height = static_cast<int>(std::min<uint64_t>(
+        caret.bottom_px - caret.top_px, std::numeric_limits<int>::max()));
+    const uint64_t origin = context.finalRenderScrollY;
+    const int top = caret.top_px >= origin
+        ? static_cast<int>(std::min<uint64_t>(caret.top_px - origin,
+              static_cast<uint64_t>(std::numeric_limits<int>::max() - height)))
+        : -static_cast<int>(std::min<uint64_t>(origin - caret.top_px,
+              static_cast<uint64_t>(std::numeric_limits<int>::max())));
+    const int64_t x = static_cast<int64_t>(caret.x_px) - g_noteRenderScrollX;
+    outRect->left = static_cast<int>(std::clamp<int64_t>(
+        x, std::numeric_limits<int>::min(), std::numeric_limits<int>::max() - 1));
+    outRect->right = outRect->left + 1;
+    outRect->top = top;
+    outRect->bottom = top + height;
+    if (outInputBand) {
+        // A hybrid heading/table/math row can retain more allocated height
+        // than its raw glyph fragment. Candidate windows must avoid that
+        // entire row, while the native caret keeps the actual glyph height.
+        const auto line = note::NoteRenderLineLayoutMap::LineAt(
+            frame->presentation()->line_layouts(), caret.line_index);
+        if (!line) return false;
+        const auto clientY = [origin](uint64_t y) noexcept {
+            return y >= origin
+                ? static_cast<int>(std::min<uint64_t>(y - origin, std::numeric_limits<int>::max()))
+                : -static_cast<int>(std::min<uint64_t>(origin - y, std::numeric_limits<int>::max()));
+        };
+        *outInputBand = {outRect->left, clientY(line->top_px),
+                         outRect->right, clientY(line->bottom_px)};
+    }
+    return true;
+}
+
+static bool ScrollFinalNoteRenderBy(HWND hWnd, int horizontalDelta, int verticalDelta) {
+    if (!hWnd || !FinalFrameCanUseCustomPaint(hWnd)) return false;
+    LocalNoteViewContext& context = GetViewContext(hWnd);
+    const auto& frame = context.finalRenderState.frame();
+    if (!frame) return false;
+    RECT client{};
+    GetClientRect(hWnd, &client);
+    const int clientWidth = std::max(0, static_cast<int>(client.right - client.left));
+    const int clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
+    uint64_t extent = 0;
+    if (frame->HorizontalExtent(&extent) !=
+        note::NoteRenderFinalPresentationInteractionResult::Resolved) return false;
+    const uint64_t height = frame->presentation()->line_layouts().total_height_px();
+    const int64_t nextX = static_cast<int64_t>(g_noteRenderScrollX) + horizontalDelta;
+    const int64_t nextY = static_cast<int64_t>(context.finalRenderScrollY) + verticalDelta;
+    g_noteRenderScrollX = ClampFinalScrollAxis(
+        extent, clientWidth, static_cast<int>(std::clamp<int64_t>(
+            nextX, 0, std::numeric_limits<int>::max())));
+    const uint64_t maxY = height > static_cast<uint64_t>(clientHeight)
+        ? height - static_cast<uint64_t>(clientHeight) : 0;
+    context.finalRenderScrollY = static_cast<uint64_t>(std::clamp<int64_t>(
+        nextY, 0, maxY > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
+                      ? std::numeric_limits<int64_t>::max() : static_cast<int64_t>(maxY)));
+    SyncFinalNoteScrollBars(hWnd);
+    // Wheel/scrollbar handlers consume their message without native dispatch
+    // or the post-default input synchronizer. Finish this coordinate change
+    // here, before paint or another event can observe the old system caret.
+    // Predictions also exist outside an active preedit. Reuse the published
+    // frame; do not reveal the source caret, republish or parse during scroll.
+    SyncNativeCaretToRenderState(hWnd);
+    SyncNoteImeCandidateWindowToCaret(hWnd);
+    InvalidateRect(hWnd, nullptr, FALSE);
+    return true;
+}
+
+static bool HandleFinalNoteRenderScrollCommand(HWND hWnd, bool horizontal, WPARAM wParam) {
+    if (!hWnd || !FinalFrameCanUseCustomPaint(hWnd)) return false;
+    RECT client{};
+    GetClientRect(hWnd, &client);
+    const int page = horizontal
+        ? std::max(1, static_cast<int>(client.right - client.left))
+        : std::max(1, static_cast<int>(client.bottom - client.top));
+    const int line = std::max(8, ScaleY(hWnd, 24));
+    SCROLLINFO scroll{};
+    scroll.cbSize = sizeof(scroll);
+    scroll.fMask = SIF_TRACKPOS | SIF_POS | SIF_RANGE | SIF_PAGE;
+    GetScrollInfo(hWnd, horizontal ? SB_HORZ : SB_VERT, &scroll);
+    const int current = horizontal
+        ? g_noteRenderScrollX
+        : static_cast<int>(std::min<uint64_t>(GetViewContext(hWnd).finalRenderScrollY,
+            static_cast<uint64_t>(std::numeric_limits<int>::max())));
+    int target = current;
+    switch (LOWORD(wParam)) {
+    case SB_LINEUP:
+        target -= line;
+        break;
+    case SB_LINEDOWN:
+        target += line;
+        break;
+    case SB_PAGEUP:
+        target -= page;
+        break;
+    case SB_PAGEDOWN:
+        target += page;
+        break;
+    case SB_THUMBPOSITION:
+    case SB_THUMBTRACK:
+        target = scroll.nTrackPos;
+        break;
+    case SB_TOP:
+        target = 0;
+        break;
+    case SB_BOTTOM:
+        target = scroll.nMax;
+        break;
+    default:
+        return true;
+    }
+    const int64_t delta64 = static_cast<int64_t>(target) - current;
+    const int delta = static_cast<int>(std::clamp<int64_t>(
+        delta64, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()));
+    return horizontal ? ScrollFinalNoteRenderBy(hWnd, delta, 0)
+                      : ScrollFinalNoteRenderBy(hWnd, 0, delta);
+}
+
+static bool ShouldRefreshFinalNoteRenderAfterInput(UINT message, WPARAM wParam) noexcept {
+    switch (message) {
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+    case WM_MOUSEMOVE:
+    case WM_SIZE:
+    case WM_VSCROLL:
+    case WM_HSCROLL:
+        return true;
+    case WM_KEYDOWN:
+        // SyncRenderDrivenNoteInputUi receives the post-default message kind
+        // but not its key. A structural publication is reused here; a
+        // following WM_CHAR with an accepted edit immediately supersedes it.
+        (void)wParam;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool NoteInputMayInvalidateFinalFrame(UINT message, WPARAM wParam) noexcept {
+    switch (message) {
+    case WM_CHAR:
+    case WM_PASTE:
+    case WM_CUT:
+    case WM_CLEAR:
+    case WM_UNDO:
+    case EM_REDO:
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+    case WM_SIZE:
+    case WM_IME_STARTCOMPOSITION:
+    case WM_IME_ENDCOMPOSITION:
+    case WM_IME_COMPOSITION:
+        return true;
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK:
+        // Pointer coordinates belong to the frame still visible to the user.
+        // Resolve its source boundary first; the post-input synchronizer then
+        // publishes the new raw/structured owner and selection together.
+        return false;
+    case WM_KEYDOWN:
+        return wParam == VK_BACK || wParam == VK_DELETE || wParam == VK_RETURN ||
+            wParam == VK_TAB || wParam == VK_LEFT || wParam == VK_RIGHT ||
+            wParam == VK_UP || wParam == VK_DOWN || wParam == VK_HOME ||
+            wParam == VK_END || wParam == VK_PRIOR || wParam == VK_NEXT;
+    default:
+        return false;
+    }
+}

@@ -471,14 +471,16 @@ bool HasExtensionCaseInsensitive(const std::wstring& path, const wchar_t* ext) {
 
 bool FileExistsRegular(const std::wstring& path) {
     if (path.empty()) return false;
-    DWORD attrs = GetFileAttributesW(path.c_str());
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(std::filesystem::path(path));
+    DWORD attrs = GetFileAttributesW(openPath.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES &&
            (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
 bool DirectoryExists(const std::filesystem::path& path) {
     if (path.empty()) return false;
-    DWORD attrs = GetFileAttributesW(path.wstring().c_str());
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(path);
+    DWORD attrs = GetFileAttributesW(openPath.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES &&
            (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
@@ -682,7 +684,8 @@ bool ReadFileBytesShared(const std::wstring& path, std::vector<unsigned char>& o
     out.clear();
     if (path.empty()) return false;
 
-    HANDLE file = CreateFileW(path.c_str(),
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(std::filesystem::path(path));
+    HANDLE file = CreateFileW(openPath.c_str(),
                               GENERIC_READ,
                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               nullptr,
@@ -731,7 +734,8 @@ bool ReadFileBytesSharedLimited(const std::wstring& path,
     out.clear();
     if (path.empty()) return false;
 
-    HANDLE file = CreateFileW(path.c_str(),
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(std::filesystem::path(path));
+    HANDLE file = CreateFileW(openPath.c_str(),
                               GENERIC_READ,
                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               nullptr,
@@ -878,7 +882,10 @@ void LoadReadonlyViewerSettings() {
 
 std::optional<std::filesystem::path> ReadSetupWorkspaceRootForOpenDialog(
     const std::filesystem::path& exeDir) {
-    const std::filesystem::path setup = exeDir / L"pdf_workspace_setup.json";
+    const std::filesystem::path canonicalSetup = exeDir / L"pdf_note_workspace_setup.json";
+    const std::filesystem::path legacySetup = exeDir / L"pdf_workspace_setup.json";
+    const std::filesystem::path setup = FileExistsRegular(canonicalSetup.wstring())
+        ? canonicalSetup : legacySetup;
     if (!FileExistsRegular(setup.wstring())) return std::nullopt;
 
     std::vector<unsigned char> bytes;
@@ -1051,7 +1058,8 @@ std::optional<std::wstring> PromptLocalOpenPath(HWND owner) {
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
-    const DWORD attributes = GetFileAttributesW(state.result.c_str());
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(std::filesystem::path(state.result));
+    const DWORD attributes = GetFileAttributesW(openPath.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES &&
         (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
         g_state.status = L"Reparse point paths are not supported.";
@@ -1132,7 +1140,8 @@ std::optional<std::wstring> PromptNativeOpenPath(HWND owner) {
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
-    const DWORD attributes = GetFileAttributesW(result->c_str());
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(std::filesystem::path(*result));
+    const DWORD attributes = GetFileAttributesW(openPath.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
         g_state.status = L"Selected file was not found.";
         if (owner) InvalidateRect(owner, nullptr, FALSE);

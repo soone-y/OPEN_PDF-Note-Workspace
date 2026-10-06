@@ -441,8 +441,8 @@ try {
     $snapshotScript = Join-Path $scriptRoot "export_public_snapshot.ps1"
     if (-not (Test-Path -LiteralPath $snapshotScript)) { throw "Missing public snapshot entry script: $snapshotScript" }
     $snapshotArgs = @("--dest", $publicSnapshotDir)
-    $releasePublicAllowlist = Join-Path $repoRoot "docs\internal\operations\public_repo_release_allowlist_2026-08-24.txt"
-    $releaseArtifactManifest = Join-Path $repoRoot "docs\internal\operations\public_repo_release_artifact_manifest_2026-08-12.tsv"
+    $releasePublicAllowlist = Join-Path $repoRoot "docs\internal\public_repo_release_allowlist_2026-08-24.txt"
+    $releaseArtifactManifest = Join-Path $repoRoot "docs\internal\public_repo_release_artifact_manifest_2026-08-12.tsv"
     if ([string]::IsNullOrWhiteSpace($PublicAllowlist)) {
         if (-not (Test-Path -LiteralPath $releasePublicAllowlist -PathType Leaf)) {
             throw "Missing release public allowlist: $releasePublicAllowlist"

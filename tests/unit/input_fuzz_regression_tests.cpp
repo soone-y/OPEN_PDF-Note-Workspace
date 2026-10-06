@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "clrop/json.h"
+#include "fpdf_save.h"
 #include "fpdfview.h"
 #include "note/note_model.h"
 #include "note/note_parser.h"
@@ -85,17 +86,54 @@ std::vector<uint8_t> ReadBytes(const wchar_t* path) {
     return std::vector<uint8_t>(std::istreambuf_iterator<char>(input), {});
 }
 
-bool ExercisePdf(std::basic_string_view<uint8_t> bytes) {
+struct PdfWriteBuffer : FPDF_FILEWRITE {
+    std::vector<uint8_t> bytes;
+    PdfWriteBuffer() {
+        version = 1;
+        WriteBlock = [](FPDF_FILEWRITE* writer, const void* data, unsigned long size) -> int {
+            auto& output = static_cast<PdfWriteBuffer*>(writer)->bytes;
+            constexpr size_t kLimit = 16 * 1024 * 1024;
+            if (size == 0) return 1;
+            if (!data) return 0;
+            if (size > kLimit - output.size()) return 0;
+            try {
+                const auto* begin = static_cast<const uint8_t*>(data);
+                output.insert(output.end(), begin, begin + size);
+                return 1;
+            } catch (...) { return 0; }
+        };
+    }
+};
+
+[[nodiscard]] bool ExercisePdf(std::basic_string_view<uint8_t> bytes) {
     if (bytes.empty()) return false;
     FPDF_DOCUMENT document = FPDF_LoadMemDocument64(bytes.data(), bytes.size(), nullptr);
     if (!document) return false;
     const int pageCount = FPDF_GetPageCount(document);
-    if (pageCount > 0 && pageCount < 10000) {
+    bool rendered = pageCount > 0 && pageCount < 10000;
+    if (rendered) {
         FPDF_PAGE page = FPDF_LoadPage(document, 0);
-        if (page) FPDF_ClosePage(page);
+        rendered = page != nullptr;
+        if (page) {
+            FPDF_BITMAP bitmap = FPDFBitmap_Create(64, 64, 0);
+            rendered = bitmap != nullptr;
+            if (bitmap) {
+                FPDFBitmap_FillRect(bitmap, 0, 0, 64, 64, 0xffffffff);
+                FPDF_RenderPageBitmap(bitmap, page, 0, 0, 64, 64, 0, 0);
+                FPDFBitmap_Destroy(bitmap);
+            }
+            FPDF_ClosePage(page);
+        }
     }
+    PdfWriteBuffer output;
+    const bool saved = rendered && FPDF_SaveAsCopy(document, &output, FPDF_NO_INCREMENTAL);
     FPDF_CloseDocument(document);
-    return true;
+    if (!saved || output.bytes.empty()) return false;
+    FPDF_DOCUMENT reloaded = FPDF_LoadMemDocument64(output.bytes.data(), output.bytes.size(), nullptr);
+    if (!reloaded) return false;
+    const bool samePageCount = FPDF_GetPageCount(reloaded) == pageCount;
+    FPDF_CloseDocument(reloaded);
+    return samePageCount;
 }
 
 bool ExerciseImage(IWICImagingFactory* factory, std::basic_string_view<uint8_t> bytes) {
@@ -181,14 +219,32 @@ int main() {
         if (!clrop::ParseClropFromJson(clropSeed, document, error)) ++failures;
     }
 
-    const std::wstring noteSeed =
-        L"# Heading\n\n- [x] item\n\nText **bold** $x^2$ <link=dest>jump</>\n";
-    for (uint32_t round = 0; round < kMutationRounds; ++round) {
-        note::NoteMetadata metadata;
-        metadata.file_name = L"fuzz.md";
-        note::NoteTextModel model = note::MakeNoteTextModel(
-            std::move(metadata), Mutate<wchar_t>(noteSeed, round), round + 1);
-        (void)note::ParseNoteDocument(model);
+    for (const std::wstring noteSeed : {
+            L"# Heading\n\n- [x] item\n\nText **bold** $x^2$ <link=dest>jump</>\n",
+            L"before\r\n::: note\r\n**body** $x$\r\n::: inner\r\n# Heading\r\n:::\r\n"
+            L"```md\r\n::: literal\r\n```\r\n:::\r\nafter",
+            L"before <math>x^2</math> after\r\n<math>\r\n\\frac{1}{2}\r\n</math>\r\n"
+            L"<math>nested <math>x</math></math>\r\n`<math>literal</math>`\r\n<math>unclosed",
+            L"<u>text <math display=inline future='a>b'>x</> tail</>\r\n"
+            L"<math display='block'>\r\n\\frac{1}{2}\r\n</>\r\n<math display=\"unfinished"}) {
+        for (uint32_t round = 0; round < kMutationRounds; ++round) {
+            note::NoteMetadata metadata;
+            metadata.file_name = L"fuzz.md";
+            const note::NoteTextModel model = note::MakeNoteTextModel(
+                std::move(metadata), Mutate<wchar_t>(noteSeed, round), round + 1);
+            const note::NoteDocument parsed = note::ParseNoteDocument(model);
+            for (size_t index = 0; index < parsed.blocks.size(); ++index) {
+                const auto& block = parsed.blocks[index];
+                if (block.span.end < block.span.start || block.span.end.value > model.raw.size() ||
+                    (block.parent != static_cast<size_t>(-1) &&
+                     (block.parent >= parsed.blocks.size() || block.parent == index))) ++failures;
+            }
+            for (const auto& math : parsed.math_spans) {
+                if (math.span.end < math.span.start || math.span.end.value > model.raw.size() ||
+                    math.content_span.start < math.span.start || math.content_span.end > math.span.end ||
+                    math.content_span.end < math.content_span.start) ++failures;
+            }
+        }
     }
 
     const std::string annotationHistorySeed =

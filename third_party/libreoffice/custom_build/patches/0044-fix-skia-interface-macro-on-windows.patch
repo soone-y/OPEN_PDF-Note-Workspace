@@ -10,32 +10,21 @@
  # use binary flag so patch from git-bash won't choke on mixed line-endings in patches
 --- /dev/null
 +++ b/external/skia/windows-avoid-interface-macro.patch.1
-@@ -0,0 +1,25 @@
-+--- a/src/gpu/vk/vulkanmemoryallocator/VulkanAMDMemoryAllocator.h
-++++ b/src/gpu/vk/vulkanmemoryallocator/VulkanAMDMemoryAllocator.h
-+@@ -31,7 +31,7 @@ public:
-+                                              VkDevice device,
-+                                              uint32_t physicalDeviceVersion,
-+                                              const VulkanExtensions* extensions,
-+-                                             const VulkanInterface* interface,
-++                                             const VulkanInterface* vkInterface,
-+                                              ThreadSafe,
-+                                              std::optional<VkDeviceSize> blockSize);
-+ 
+@@ -0,0 +1,17 @@
 +--- a/src/gpu/vk/vulkanmemoryallocator/VulkanAMDMemoryAllocator.cpp
 ++++ b/src/gpu/vk/vulkanmemoryallocator/VulkanAMDMemoryAllocator.cpp
-+@@ -27,10 +27,10 @@ sk_sp<VulkanMemoryAllocator> VulkanAMDMemoryAllocator::Make(VkInstance instance,
++@@ -26,11 +26,11 @@ sk_sp<VulkanMemoryAllocator> VulkanAMDMemoryAllocator::Make(VkInstance instance,
 +                                                             VkDevice device,
 +                                                             uint32_t physicalDeviceVersion,
 +                                                             const VulkanExtensions* extensions,
 +-                                                            const VulkanInterface* interface,
-++                                                            const VulkanInterface* vkInterface,
+++                                                            const VulkanInterface* vinterface,
 +                                                             ThreadSafe threadSafe,
 +                                                             std::optional<VkDeviceSize> blockSize) {
 +-#define SKGPU_COPY_FUNCTION(NAME) functions.vk##NAME = interface->fFunctions.f##NAME
 +-#define SKGPU_COPY_FUNCTION_KHR(NAME) functions.vk##NAME##KHR = interface->fFunctions.f##NAME
-++#define SKGPU_COPY_FUNCTION(NAME) functions.vk##NAME = vkInterface->fFunctions.f##NAME
-++#define SKGPU_COPY_FUNCTION_KHR(NAME) functions.vk##NAME##KHR = vkInterface->fFunctions.f##NAME
+++#define SKGPU_COPY_FUNCTION(NAME) functions.vk##NAME = vinterface->fFunctions.f##NAME
+++#define SKGPU_COPY_FUNCTION_KHR(NAME) functions.vk##NAME##KHR = vinterface->fFunctions.f##NAME
 + 
 +     VmaVulkanFunctions functions;
 +     // We should be setting all the required functions (at least through vulkan 1.1), but this is

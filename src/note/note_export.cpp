@@ -502,6 +502,12 @@ std::wstring RenderPlainBlock(const NoteTextModel& model,
         }
         return out;
     }
+    case BlockKind::FencedContainer: {
+        for (size_t child : children[blockIndex]) {
+            out += RenderPlainBlock(model, doc, children, child, config);
+        }
+        return out;
+    }
     case BlockKind::Table:
     case BlockKind::TableHead:
     case BlockKind::TableBody:
@@ -785,6 +791,9 @@ std::string RenderHtmlBlock(const NoteTextModel& model,
     }
     case BlockKind::Quote:
         return "<blockquote>\n" + RenderHtmlChildren(model, doc, children, blockIndex, config) + "</blockquote>\n";
+    case BlockKind::FencedContainer:
+        return "<div class=\"note-container\" style=\"background:#f7f6f2;border:1px solid #b0aea6;padding:0.5em;\">\n" +
+               RenderHtmlChildren(model, doc, children, blockIndex, config) + "</div>\n";
     case BlockKind::Table:
         return "<table>\n" + RenderHtmlChildren(model, doc, children, blockIndex, config) + "</table>\n";
     case BlockKind::TableHead:

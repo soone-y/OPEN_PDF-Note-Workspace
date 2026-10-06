@@ -59,6 +59,7 @@ inline constexpr int    kMinListHeight   = 60;
 // PdfViewProc timers:
 //   0x2001 kScrollTimerId
 //   0x2002 kPdfVirtualRenderTimerId
+//   0x2003 kPdfKeyboardScrollTimerId
 //   0x2005 kZoomTimerId (defined in pdf_view/view_state.cppinc)
 //   0x504  kAutoScrollTimerId
 // MainWndProc timers:
@@ -69,6 +70,7 @@ inline constexpr int    kMinListHeight   = 60;
 //   0x508  kSetupJsonExistenceVerifyTimerId (defined in main/main_window_proc.cppinc)
 //   0x509  kNoteOverlayRefreshTimerId
 //   0x50A  kNoteFullReparseTimerId
+//   0x50C  kProcessShutdownObserveTimerId (main.cpp; only while exit confirmation is pending)
 // NoteEditProc timers:
 //   0x50B  kNoteLinkRenderGraceTimerId
 //   0x5E11 kExitRetryTimerId (defined in main.cpp)
@@ -76,6 +78,7 @@ inline constexpr int    kMinListHeight   = 60;
 // ---------------------------------------------------------------------
 inline constexpr UINT_PTR kScrollTimerId = 0x2001;
 inline constexpr UINT_PTR kPdfVirtualRenderTimerId = 0x2002;
+inline constexpr UINT_PTR kPdfKeyboardScrollTimerId = 0x2003;
 inline constexpr int kPdfBitmapBudgetMiBDefault = 128;
 inline constexpr int kPdfBitmapBudgetMiBMin = 32;
 inline constexpr int kPdfBitmapBudgetMiBMax = 1024;
@@ -88,9 +91,10 @@ inline constexpr UINT_PTR kNoteOverlayRefreshTimerId = 0x509;
 inline constexpr UINT_PTR kNoteFullReparseTimerId = 0x50A;
 inline constexpr UINT_PTR kNoteLinkRenderGraceTimerId = 0x50B;
 
-static_assert(AllUniqueValues(std::array<UINT_PTR, 3>{
+static_assert(AllUniqueValues(std::array<UINT_PTR, 4>{
     kScrollTimerId,
     kPdfVirtualRenderTimerId,
+    kPdfKeyboardScrollTimerId,
     kAutoScrollTimerId,
 }));
 static_assert(AllUniqueValues(std::array<UINT_PTR, 7>{

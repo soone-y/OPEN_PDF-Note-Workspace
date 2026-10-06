@@ -8,6 +8,74 @@
 
 namespace note {
 
+NoteInteractionControlAvailability ResolveNoteInteractionControlAvailability(
+    bool renderActive, bool vimEnabled) noexcept {
+    return {!renderActive, renderActive && vimEnabled, vimEnabled};
+}
+
+NoteImePresentationPhase AdvanceNoteImePresentationPhase(
+    NoteImePresentationPhase phase,
+    NoteImePresentationEvent event) noexcept {
+    switch (event) {
+    case NoteImePresentationEvent::StartComposition:
+        return NoteImePresentationPhase::Preedit;
+    case NoteImePresentationEvent::ResultCommitted:
+        return NoteImePresentationPhase::ResultCommittedAwaitingEnd;
+    case NoteImePresentationEvent::CancelComposition:
+        return NoteImePresentationPhase::CancelledAwaitingEnd;
+    case NoteImePresentationEvent::EndComposition:
+    case NoteImePresentationEvent::FocusLost:
+        return NoteImePresentationPhase::Idle;
+    case NoteImePresentationEvent::ObservedNoCompositionText:
+        // An empty preedit is not an end/result event: the IME may still own
+        // a selected replacement. Accepting that temporary deletion into the
+        // canonical document would corrupt history before commit/cancel.
+        return phase;
+    case NoteImePresentationEvent::ObservedCompositionText:
+        // GCS_RESULTSTR is an acknowledgement that the source text is no
+        // longer provisional. Some IMEs retain GCS_COMPSTR until END; that
+        // residue must not revive Preedit or suppress the final render pass.
+        // A flag-free cancellation has the same terminal ownership rule.
+        return phase == NoteImePresentationPhase::ResultCommittedAwaitingEnd ||
+               phase == NoteImePresentationPhase::CancelledAwaitingEnd
+            ? phase
+            : NoteImePresentationPhase::Preedit;
+    }
+    return NoteImePresentationPhase::Idle;
+}
+
+bool NoteImePresentationPhaseHasLivePreedit(
+    NoteImePresentationPhase phase) noexcept {
+    return phase == NoteImePresentationPhase::Preedit;
+}
+
+std::optional<NoteImeCandidatePlacement> ResolveNoteImeCandidatePlacement(
+    const NoteImeClientRect& caret,
+    const NoteImeClientRect& input_band,
+    const NoteImeClientRect& viewport,
+    int gap_px) noexcept {
+    if (gap_px < 0 || viewport.right <= viewport.left || viewport.bottom <= viewport.top ||
+        caret.right <= caret.left || caret.bottom <= caret.top ||
+        caret.top >= viewport.bottom || caret.bottom <= viewport.top ||
+        input_band.top > caret.top || input_band.bottom < caret.bottom) return std::nullopt;
+    const auto pixel = [](int64_t value) noexcept {
+        return static_cast<int>(std::clamp<int64_t>(
+            value, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()));
+    };
+    NoteImeCandidatePlacement result;
+    result.exclusion = {viewport.left,
+        pixel(static_cast<int64_t>(std::max(viewport.top, input_band.top)) - gap_px),
+        viewport.right,
+        pixel(static_cast<int64_t>(std::min(viewport.bottom, input_band.bottom)) + gap_px)};
+    result.anchor_x = std::clamp(caret.left, viewport.left, viewport.right - 1);
+    // CFS_EXCLUDE takes a point of interest (the caret), NOT the candidate
+    // window's upper-left corner. Keep that point inside the visible client
+    // even at its last row; only the exclusion retains clearance beyond it.
+    // IMM owns the candidate size and above/below choice at monitor edges.
+    result.anchor_y = std::clamp(caret.top, viewport.top, viewport.bottom - 1);
+    return result;
+}
+
 NotePresentationPlan ResolveNotePresentationPlan(
     const NotePresentationFrameState& state) noexcept {
     NotePresentationPlan plan;
@@ -65,6 +133,16 @@ NotePresentationFrameAction ResolveNotePresentationFrameAction(
             : NotePresentationFrameAction::RenderCurrent;
     }
     return NotePresentationFrameAction::RawFallback;
+}
+
+bool CanReuseCommittedTableLayoutForPendingEdit(
+    const NoteCommittedTableLayoutReuseState& state) noexcept {
+    return state.committed_snapshot_available &&
+        state.editor_text_core_current &&
+        state.frame_reuses_committed_layout &&
+        state.stale_range_is_one_line &&
+        !state.stale_line_touches_committed_table &&
+        !state.commit_before_paint;
 }
 
 EditorLineLayout::EditorLineLayout(EditorLineRect line_rect,
@@ -196,6 +274,28 @@ bool NotePointerMovedCaretOwnsRawLine(bool pointer_moved_caret,
                                       int caret_line) noexcept {
     return pointer_moved_caret && editor_has_focus && !normal_mode_active &&
         !has_selection && line >= 0 && line == caret_line;
+}
+
+bool NoteEditingSelectionOwnsRawLine(bool has_selection,
+                                     int selection_start_line,
+                                     int selection_end_line,
+                                     int caret_line,
+                                     int line) noexcept {
+    if (line < 0) return false;
+    if (!has_selection) return line == caret_line;
+    if (selection_end_line < selection_start_line) {
+        std::swap(selection_start_line, selection_end_line);
+    }
+    return line >= selection_start_line && line <= selection_end_line;
+}
+
+bool NoteNormalCaretPreferenceOwnsRawLine(bool normal_mode_active,
+                                          bool normal_visual_mode,
+                                          bool show_caret_line_raw,
+                                          int line,
+                                          int caret_line) noexcept {
+    return normal_mode_active && !normal_visual_mode && show_caret_line_raw &&
+        line >= 0 && line == caret_line;
 }
 
 bool NoteMathRenderEnabledForRoute(bool render_active,

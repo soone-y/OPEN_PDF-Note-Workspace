@@ -10,6 +10,7 @@
 #include <string>
 
 #include "core/app_core.h"
+#include "core/atomic_write.h"
 
 namespace {
 
@@ -69,6 +70,43 @@ int main() {
            "absolute local path is converted to extended Win32 path");
     Expect(PathExistsWin32(fs::path(extended)),
            "extended Win32 path still resolves to the local file");
+    Expect(ToExtendedWin32PathIfAbsoluteLocal(fs::path(extended)) == extended,
+           "already-extended local path is not rewritten");
+    Expect(ToExtendedWin32PathIfAbsoluteLocal(fs::path(L"\\\\server\\share\\doc.pdf")) ==
+               L"\\\\?\\UNC\\server\\share\\doc.pdf",
+           "absolute UNC path is converted to extended UNC form");
+    Expect(ToExtendedWin32PathIfAbsoluteLocal(fs::path(L"C:relative\\doc.pdf")) ==
+               L"C:relative\\doc.pdf",
+           "drive-relative path is not incorrectly converted to an absolute extended path");
+
+    fs::path deepDirectory = root;
+    for (int index = 0; index < 30; ++index) {
+        deepDirectory /= L"long_path_segment_" + std::to_wstring(index);
+    }
+    const fs::path deepFile = deepDirectory / L"path_safety.txt";
+    Expect(deepFile.wstring().size() > MAX_PATH,
+           "long-path fixture exceeds MAX_PATH");
+    Expect(atomic_write::EnsureDirectoryExists(deepDirectory),
+           "long-path parent directory is created through extended Win32 APIs");
+    const std::wstring deepOpenPath = ToExtendedWin32PathIfAbsoluteLocal(deepFile);
+    HANDLE deepHandle = CreateFileW(deepOpenPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    const char deepPayload[] = "deep";
+    DWORD deepWritten = 0;
+    const bool deepWrittenOk = deepHandle != INVALID_HANDLE_VALUE &&
+                               WriteFile(deepHandle, deepPayload, sizeof(deepPayload) - 1, &deepWritten, nullptr) &&
+                               deepWritten == sizeof(deepPayload) - 1;
+    if (deepHandle != INVALID_HANDLE_VALUE) CloseHandle(deepHandle);
+    Expect(deepWrittenOk, "extended Win32 write succeeds beyond MAX_PATH");
+    Expect(RegularFileExistsWin32(deepFile),
+           "path-safety helpers inspect a file beyond MAX_PATH");
+    std::string deepBytes;
+    Expect(ReadFileBytesWin32(deepFile, deepBytes) && deepBytes == "deep",
+           "path-safety helpers read a file beyond MAX_PATH");
+    DeleteFileW(deepOpenPath.c_str());
+    for (fs::path current = deepDirectory; current != root; current = current.parent_path()) {
+        RemoveDirectoryW(ToExtendedWin32PathIfAbsoluteLocal(current).c_str());
+    }
 
     bool isReparse = true;
     Expect(TryIsReparsePointNoFollow(localFile, isReparse) && !isReparse,

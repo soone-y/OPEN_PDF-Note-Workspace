@@ -6,7 +6,7 @@
 
 初めて使う場合は、まず [Getting_Started.md](Getting_Started.md) を読んで ZIP を展開し、その後 [Using_the_App.md](Using_the_App.md) を読んでください。
 
-配布フォルダ内の EXE、DLL、`pdf_workspace_setup.json` は一緒に置いたまま使い、起動場所を変えたい場合はショートカットを作成してください。
+配布フォルダ内の EXE、DLL、`pdf_note_workspace_setup.json` は一緒に置いたまま使い、起動場所を変えたい場合はショートカットを作成してください。旧版の `pdf_workspace_setup.json` は読み取り互換のため残して構いません。
 
 ## 通常版と Lite版の選び方
 

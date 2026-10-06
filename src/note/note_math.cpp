@@ -1,22 +1,11 @@
 #include "note/note_math.h"
+#include "note/note_syntax_lexical.h"
 
 #include <algorithm>
 #include <cwctype>
 
 namespace note {
 namespace {
-
-bool EqualsAsciiNoCase(std::wstring_view lhs, std::wstring_view rhs) {
-    if (lhs.size() != rhs.size()) return false;
-    for (size_t i = 0; i < lhs.size(); ++i) {
-        wchar_t l = lhs[i];
-        wchar_t r = rhs[i];
-        if (l >= L'A' && l <= L'Z') l = static_cast<wchar_t>(l - L'A' + L'a');
-        if (r >= L'A' && r <= L'Z') r = static_cast<wchar_t>(r - L'A' + L'a');
-        if (l != r) return false;
-    }
-    return true;
-}
 
 std::wstring TrimWhitespace(std::wstring_view text) {
     size_t start = 0;
@@ -79,35 +68,14 @@ void PushError(MathInputAnalysis* out,
     out->diagnostics.push_back(std::move(diag));
 }
 
-bool StartsLegacyMathOpenTag(std::wstring_view text, size_t* outTagEnd) {
-    if (!outTagEnd) return false;
-    if (text.empty() || text[0] != L'<') return false;
-    size_t cursor = 1;
-    if (cursor + 4 > text.size()) return false;
-    if (!EqualsAsciiNoCase(text.substr(cursor, 4), L"math")) return false;
-    cursor += 4;
-    if (cursor >= text.size()) return false;
-    if (!(text[cursor] == L'>' || iswspace(text[cursor]) || text[cursor] == L'/')) return false;
-    while (cursor < text.size() && text[cursor] != L'>') {
-        ++cursor;
-    }
-    if (cursor >= text.size() || text[cursor] != L'>') return false;
-    *outTagEnd = cursor + 1;
-    return true;
-}
-
 size_t FindLegacyMathClose(std::wstring_view text,
                            size_t start,
                            size_t* outCloseLen) {
     if (outCloseLen) *outCloseLen = 0;
     for (size_t pos = start; pos < text.size(); ++pos) {
-        if (text[pos] != L'<') continue;
-        if (pos + 3 <= text.size() && text[pos + 1] == L'/' && text[pos + 2] == L'>') {
-            if (outCloseLen) *outCloseLen = 3;
-            return pos;
-        }
-        if (pos + 7 <= text.size() && EqualsAsciiNoCase(text.substr(pos, 7), L"</math>")) {
-            if (outCloseLen) *outCloseLen = 7;
+        if (text[pos] != L'<' || IsBackslashEscaped(text, pos)) continue;
+        if (const size_t length = NoteMathCloseTagLength(text.substr(pos))) {
+            if (outCloseLen) *outCloseLen = length;
             return pos;
         }
     }
@@ -192,11 +160,16 @@ MathInputAnalysis AnalyzeMathBoxInput(std::wstring_view rawText) {
         : MathKind::Inline;
     out.content_text = NormalizeMathText(out.trimmed_text);
 
-    size_t openTagEnd = 0;
-    if (StartsLegacyMathOpenTag(out.trimmed_text, &openTagEnd)) {
+    NoteMathOpenTag opening;
+    if (TryParseNoteMathOpenTag(out.trimmed_text, {0}, &opening)) {
+        const size_t openTagEnd = opening.end.value;
         out.has_wrapping = true;
         out.flavor = MathInputFlavor::Markup;
         out.delimiter = MathDelimiter::LegacyMathTag;
+        if (!opening.complete || opening.self_closing || !opening.valid_attributes) {
+            PushError(&out, L"NOTE-E-MATHBOX-MATH-TAG", L"Invalid math opening tag or display attribute.", {0, openTagEnd});
+            return out;
+        }
         size_t closeLen = 0;
         size_t closePos = FindLegacyMathClose(out.trimmed_text, openTagEnd, &closeLen);
         if (closePos == std::wstring::npos) {
@@ -207,9 +180,17 @@ MathInputAnalysis AnalyzeMathBoxInput(std::wstring_view rawText) {
             return out;
         }
         out.content_text = NormalizeMathText(out.trimmed_text.substr(openTagEnd, closePos - openTagEnd));
+        if (closeLen == 7) out.delimiter = MathDelimiter::MathTag;
         out.kind = ContainsLineBreak(out.trimmed_text, 0, closePos + closeLen)
             ? MathKind::Block
             : MathKind::Inline;
+        if (opening.display == NoteMathTagDisplay::Block) out.kind = MathKind::Block;
+        if (opening.display == NoteMathTagDisplay::Inline) {
+            if (out.kind == MathKind::Block) {
+                PushError(&out, L"NOTE-E-MATHBOX-MATH-TAG", L"Inline math must occupy one row.", {0, closePos + closeLen});
+            }
+            out.kind = MathKind::Inline;
+        }
         return out;
     }
 
@@ -302,6 +283,8 @@ std::wstring MathDelimiterLabel(MathDelimiter delimiter) {
         return L"\\[...\\]";
     case MathDelimiter::LegacyMathTag:
         return L"<math>...</>";
+    case MathDelimiter::MathTag:
+        return L"<math>...</math>";
     default:
         break;
     }

@@ -23,8 +23,8 @@ DEFAULT_GROUPS = (
 )
 DEFAULT_EXTENSIONS = (".md", ".txt")
 DEFAULT_EXCLUDES = (
-    "**/LICENSE*", "**/COPYING*", "**/NOTICE*", "**/docs/internal/reports/**",
-    "**/docs/internal/operations/publish_records/**",
+    "**/LICENSE*", "**/COPYING*", "**/NOTICE*", "**/docs/internal/archive/reports/**",
+    "**/docs/internal/archive/operations/publish_records/**",
 )
 # Particles and common function words are removed only from the simple tokenizer.
 DEFAULT_STOP_WORDS = frozenset(

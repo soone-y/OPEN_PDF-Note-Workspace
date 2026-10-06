@@ -41,6 +41,7 @@ static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initi
     UpdateWindow(w);
     MSG msg;
     while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (HandleWorkspaceMemoMessage(msg)) continue;
         if (ShouldSkipImeMessageInModalLoop(msg)) continue;
         if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
         if (!IsDialogMessageW(w, &msg)) {

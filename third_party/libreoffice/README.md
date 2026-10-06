@@ -1,9 +1,11 @@
 # LibreOffice
 
-This directory contains a local LibreOffice administrative image for future
-Office document to PDF conversion.
+This directory records the adopted communication-free LibreOffice 26.2.6.3
+custom runtime and its reproducible inputs, plus an older administrative image
+used only for selected private fonts, notices, and comparison. The old image is
+not the application's conversion runtime.
 
-## Version
+## Retained Administrative Image Version (Not The Adopted Runtime)
 
 - Product: LibreOffice 26.2.3.2
 - Windows package: `LibreOffice_26.2.3_Win_x86-64.msi`
@@ -18,7 +20,22 @@ administrative image.
 
 ## Source Archives For Custom Build
 
-The custom LibreOffice runtime is built from official LibreOffice 26.2.5.2 source archives, not from the Windows MSI administrative image. The retained administrative image above remains at 26.2.3.2 and is used only for selected private fonts, notices, and comparison; it is not the release conversion runtime.
+The custom LibreOffice runtime is built from the official LibreOffice 26.2.6.3 core source archive, not from the Windows MSI administrative image. The retained administrative image above remains at 26.2.3.2 and is used only for selected private fonts, notices, and comparison; it is not the release conversion runtime.
+
+The repository-local runtime and `VERSION` identify the adopted 26.2.6.3
+build. The current patch directory includes rebased `0044` (keep the official
+Skia declaration fix; patch only its implementation), `0048`/`0049` build
+fixes, and `0050` allocation-failure backports for LibreOffice's separate
+MD4C 0.5.3 copy. The completed build and reduced runtime passed static gates,
+original-preserving conversion, and direct comparison with 26.2.5.2 across
+12 documents/89 pages with no differences in text, fonts, structure, semantics
+or raster pixels above the fixed threshold. This is scoped migration evidence,
+not application-wide release approval or an exhaustive input-safety proof.
+The verified source/cache inputs are recorded in
+`source_archives_26.2.6.3.manifest.tsv` and
+`external_tarballs_26.2.6.3.manifest.tsv`; its public local configuration
+is `custom_build/autogen_26.2.6.3.input`. Prior version manifests and autogen
+inputs retained in the development repository are historical, not active inputs.
 
 Archive bodies and detached signatures are not tracked in Git because they are
 large enough to interfere with normal GitHub synchronization. If the exact
@@ -28,27 +45,24 @@ it as a separate source bundle instead of committing it to the repository.
 The custom build source inputs are identified by these official archive names,
 source URLs, and SHA-256 hashes:
 
-The same information is also recorded in `source_archives_26.2.5.2.manifest.tsv` for line-based verification tooling.
+The same information is also recorded in `source_archives_26.2.6.3.manifest.tsv` for line-based verification tooling. No separate Help, dictionaries or translations archive is consumed by this configuration.
 
-The observed external tarball cache present during this build is recorded in `external_tarballs_26.2.5.2.manifest.tsv` with file names, sizes, and SHA-256 hashes. It can include retained versions that the selected build configuration did not consume; `download.lst` and the generated build graph determine the actual inputs. The tarball bodies are not tracked in Git.
+The 83 selected external archives are recorded in `external_tarballs_26.2.6.3.manifest.tsv` with file names, sizes, and SHA-256 hashes. They were selected using `download.lst` and the generated build graph and all hashes were verified. Unused retained cache versions are not listed. The tarball bodies are not tracked in Git.
 
 | Archive | Source URL | SHA-256 |
 | --- | --- | --- |
-| `libreoffice-26.2.5.2.tar.xz` | `https://download.documentfoundation.org/libreoffice/src/26.2.5/libreoffice-26.2.5.2.tar.xz` | `8ec785ee1fd1a1d9b9d8eba1c8ff7556695ca8f02e1f7a26bef8cd540f669fea` |
-| `libreoffice-dictionaries-26.2.5.2.tar.xz` | `https://download.documentfoundation.org/libreoffice/src/26.2.5/libreoffice-dictionaries-26.2.5.2.tar.xz` | `81f70748287ae25e4b142b3aa5b595daec3d61dad03eb1453cdb35ff837909e3` |
-| `libreoffice-help-26.2.5.2.tar.xz` | `https://download.documentfoundation.org/libreoffice/src/26.2.5/libreoffice-help-26.2.5.2.tar.xz` | `73fbe02eb53408e11121da9a170bc4a9c2250b5baaa8851c65b3f70e88841703` |
-| `libreoffice-translations-26.2.5.2.tar.xz` | `https://download.documentfoundation.org/libreoffice/src/26.2.5/libreoffice-translations-26.2.5.2.tar.xz` | `44f1dbdefe0dab21293297cacb8af8d6a7bece4ce95ded7f25c24837bd067fb7` |
+| `libreoffice-26.2.6.3.tar.xz` | `https://download.documentfoundation.org/libreoffice/src/26.2.6/libreoffice-26.2.6.3.tar.xz` | `3a2570aa7087bf8e0cbdf49ac5bd0e452c2025274af99e07882daa104c5685bd` |
 
 The reproducible custom build inputs are:
 
-- `custom_build/autogen_26.2.5.2.input`
+- `custom_build/autogen_26.2.6.3.input`
 - `custom_build/communication_free_options.input`
 - `custom_build/release_reduction_manifest.json`
 - `custom_build/patches/*.patch`
 
 Patch number `0042` is deliberately reserved. An experimental WSL-helper
 approach was reverted before adoption; do not recreate or renumber it during
-future rebases. The applied series is `0001`-`0041` and `0043`-`0047`.
+future rebases. The applied series is `0001`-`0041` and `0043`-`0050`.
 
 The generated source tree, external tarball cache, downloaded source archives,
 detached signatures, and built `instdir` remain outside Git unless a later
@@ -59,16 +73,16 @@ publication review explicitly changes that policy.
 A user can verify the custom LibreOffice source basis without trusting the
 large archive bodies in this repository:
 
-1. Read `source_archives_26.2.5.2.manifest.tsv` and download each official LibreOffice archive,
+1. Read `source_archives_26.2.6.3.manifest.tsv` and download each official LibreOffice archive,
    `.sha256`, and `.asc` file from the listed official URLs.
 2. Check each downloaded archive with SHA-256 and compare it with the
    manifest value. On Windows, `Get-FileHash -Algorithm SHA256 <archive>`
    is sufficient for the hash comparison.
 3. Optionally verify each detached signature with GPG after importing the
    relevant LibreOffice release signing key: `gpg --verify <archive>.asc <archive>`.
-4. Compare `external_tarballs_26.2.5.2.manifest.tsv` with any retained or
+4. Compare `external_tarballs_26.2.6.3.manifest.tsv` with any retained or
    republished external tarball cache. This confirms the dependency archive
-   names, sizes, and SHA-256 hashes observed in the custom build workspace backup.
+   names, sizes, and SHA-256 hashes actually selected for this build.
 5. Review `custom_build/communication_free_options.input` and
    `custom_build/release_reduction_manifest.json` and `custom_build/patches/*.patch`
    to inspect every repository-maintained
@@ -82,14 +96,30 @@ bodies and detached signatures as release assets or a separate source bundle.
 
 ## Layout
 
+- `custom_runtime/instdir/program/soffice.com`
+  - Adopted local headless conversion entry point. Standard releases copy this
+    runtime to the short `lo/` directory; Lite releases omit it.
+- `custom_runtime/instdir/license.txt`, `LICENSE.html`, `NOTICE`
+  - Notices for the adopted runtime. When bundled, these supply
+    `licenses/libreoffice/`, alongside the custom build reproduction inputs.
+- `custom_build/` and the adopted source/cache manifests
+  - Versioned configuration, reduction policy, patches, and exact input hashes.
+- `image/Fonts/`
+  - Selected private font source, copied to `libreoffice/image/Fonts/` for both
+    Full and Lite. This does not distribute the old image's executable runtime.
 - `image/program/soffice.com`
-  - Console entry point to use from conversion code.
+  - Historical comparison entry point only; do not use as the app converter.
 - `image/program/soffice.exe`
   - GUI-capable entry point. Do not use from this app.
 - `image/license.txt`, `image/LICENSE.html`, `image/NOTICE`
   - LibreOffice and bundled component license notices.
 
-## Local Policy Changes
+## Historical Administrative Image Policy Changes
+
+The following lists describe the retained 26.2.3.2 comparison image, not the
+adopted 26.2.6.3 build or its release reduction policy. Current reduction is
+controlled by `custom_build/release_reduction_manifest.json`; its protected
+Math/Calc paths and their ancestors/descendants must not be removed.
 
 The following files were removed from the administrative image because this app
 must not include update or send-mail entry points:
@@ -320,7 +350,7 @@ startup imports from `mergedlo.dll` and related libraries, especially
 `orcus.dll`, `CoinMP.dll`, and `lpsolve55.dll`.
 
 The A-path custom build plan is tracked in
-`docs/internal/plans/libreoffice_カスタムビルド実装計画_2026-05-04.md`. Use
+`docs/internal/libreoffice_カスタムビルド実装計画_2026-05-04.md`. Use
 `tools/libreoffice/libreoffice_build_env_check.py` first; it is read-only and does not
 download, install, extract, or build anything.
 
@@ -329,7 +359,7 @@ The fixed first-pass exclusion options for that build are recorded in
 `tools/release_checks/libreoffice_runtime_gate.py` before any release packaging or app
 enablement decision.
 
-For the 26.2.5.2 Windows build, run native `make.exe` with `MSYSTEM` unset so
+For the 26.2.6.3 Windows build, run native `make.exe` with `MSYSTEM` unset so
 LibreOffice does not mistake the MSYS shell for its WSL path-conversion mode.
 The pinned ZXing 2.3.0 and zstd 1.5.7 archives contain dangling symbolic links;
 if Windows tar cannot create them, verify the archive against `download.lst`
@@ -337,8 +367,8 @@ and pre-extract that archive with WSL tar into its `workdir/UnpackedTarball`
 directory. Do not replace the link with a copied file or modify the archived
 input.
 
-As of 2026-08-12, the current A-path build output is produced outside the
-repository at `<LO_WORKDIR>\src\libreoffice-26.2.5.2\instdir`.
+As of 2026-10-05, the current A-path build output is produced outside the
+repository at `<LO_WORKDIR>\src\libreoffice-26.2.6.3\instdir`.
 That output has passed the runtime gate and the focused binary scan for the
 network/audio indicators used by this repository, and DOCX/PPTX smoke
 conversion has succeeded. Do not rebuild it for every verification run; reuse
@@ -413,19 +443,42 @@ subsequently checked for files outside the DOCX/PPTX headless-conversion path.
 Isolated removal trials first removed 596 files and 15,698,131 bytes while
 retaining the Math and Calc execution closure. A second, conversion-only pass
 then removed GUI themes, palettes, toolbars, fingerprints, and the Writer,
-Calc, and Draw UI definitions. The current runtime contains 1,050 files and
+Calc, and Draw UI definitions. The runtime at that measurement contained 1,050 files and
 291,100,469 bytes: 1,301 files and 35,051,848 bytes below the corrected
 2,351-file baseline. All eight documents and 63 pages still convert with no
 quality-report difference, structural issue, or new semantic issue.
 
-The accepted removal includes unreferenced conversion/UI DLLs and unused
+The historical accepted removal includes unreferenced conversion/UI DLLs and unused
 `soffice.cfg` subtrees for unsupported modules. Removing the complete
 `soffice.cfg` tree, the common GUI configuration as a whole, or additional
 small common UI directories prevented source documents from loading and was
 rejected. `program/scdlo.dll`, `program/scuilo.dll`, and
 `share/config/soffice.cfg/modules/scalc` remain protected even though the
 current fixture run did not load them, because they belong to the embedded
-Excel conversion closure.
+Excel conversion closure. Later reduction trials did not show conversion
+defects and the release manifest removed some of this configuration. For the
+2026-10-05 migration the user chose to retain Calc again, including its UI
+configuration and XSLT, and defer any further reduction to a separate quality
+comparison. The release manifest now protects those paths and rejects removal
+of their ancestors or descendants. This decision does not reclassify the
+previous successful reduction trials as failures.
+
+The adopted 26.2.6.3 reduced runtime (2026-10-05) contains 1,285 files and
+295,300,247 bytes before any local launch. Its 63 private fonts match the
+previous runtime byte-for-byte. Build retry05 and the MD4C rebuild/relink
+retry06 completed successfully. The actual embedded UTF-8 MD4C parser passed
+181 allocation/callback-abort cases; the separate app UTF-16 parser passed 142.
+The DOCX staging harness now converts a complete fixture through the actual
+C++ staging path rather than trying to convert its intentionally minimal ZIP
+unit fixture. Both old and new runtimes pass this corrected test, including
+original-file hash checks. The direct old/new 12-document/89-page comparison
+also passed after reduction; reference-PDF differences remain unchanged.
+
+Use the read-only source/build checks with explicit external archive inputs,
+for example `libreoffice_build_env_check.py --archive <core.tar.xz>` and
+`libreoffice_source_scan.py --archive <core.tar.xz>`. Defaults identify the
+adopted core only, not unused Help/dictionary/translation archives. A missing,
+empty, malformed or mismatching SHA-256 sidecar is not build readiness.
 
 `presets/` is retained because deleting it prevents a new LibreOffice user
 profile from being initialized. The Impress UI definitions are retained

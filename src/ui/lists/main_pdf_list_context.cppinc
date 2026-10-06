@@ -14,7 +14,8 @@ static bool IsEmptyClroNoteEligibleForDeletion(const std::filesystem::path& path
                    [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
     if (extension != L".clro") return false;
 
-    const DWORD attributes = GetFileAttributesW(path.c_str());
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(path);
+    const DWORD attributes = GetFileAttributesW(openPath.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES ||
         (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
         (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
@@ -34,7 +35,8 @@ static EmptyClroDeleteResult DeleteEmptyClroNoteFile(const std::filesystem::path
         return EmptyClroDeleteResult::NotEligible;
     }
 
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ,
+    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(path);
+    HANDLE file = CreateFileW(openPath.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ,
                               nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (file == INVALID_HANDLE_VALUE) {

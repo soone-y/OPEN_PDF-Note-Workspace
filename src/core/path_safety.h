@@ -53,7 +53,9 @@ inline std::wstring ToExtendedWin32PathIfAbsoluteLocal(const std::filesystem::pa
     if (s.empty()) return s;
     std::replace(s.begin(), s.end(), L'/', L'\\');
     if (s.rfind(L"\\\\?\\", 0) == 0) return s;
-    if (s.size() >= 2 && s[1] == L':') {
+    // A drive-relative path such as "C:notes\\a.pdf" is not absolute and
+    // cannot be converted to an extended path without changing its meaning.
+    if (s.size() >= 3 && s[1] == L':' && (s[2] == L'\\' || s[2] == L'/')) {
         return L"\\\\?\\" + s;
     }
     if (s.rfind(L"\\\\", 0) == 0) {

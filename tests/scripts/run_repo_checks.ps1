@@ -3,6 +3,7 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipReadOnlyViewerBuild,
     [switch]$SkipAtomicWrite,
+    [switch]$SkipWorkspaceMemoTests,
     [switch]$SkipPathSafety,
     [switch]$SkipFaultInjection,
     [switch]$SkipNoteParserTests,
@@ -47,6 +48,7 @@ $buildScript = Join-Path $repoRoot "build.ps1"
 $releaseScript = Join-Path $repoRoot "release.ps1"
 $workspaceBuildScript = Join-Path $repoRoot "scripts\build\build_workspace.ps1"
 $atomicWriteScript = Join-Path $PSScriptRoot "run_atomic_write_tests.ps1"
+$workspaceMemoTestScript = Join-Path $PSScriptRoot "run_workspace_memo_tests.ps1"
 $pathSafetyScript = Join-Path $PSScriptRoot "run_path_safety_tests.ps1"
 $faultInjectionScript = Join-Path $PSScriptRoot "run_fault_injection_tests.ps1"
 $noteParserScript = Join-Path $PSScriptRoot "run_note_parser_tests.ps1"
@@ -203,7 +205,13 @@ function Invoke-Step {
     Write-Host ("== {0} ==" -f $Name) -ForegroundColor Cyan
     Write-Host ("log: {0}" -f $script:CurrentStepLogPath) -ForegroundColor DarkCyan
     try {
-        & $Action
+        # Step actions have a void/throw contract. PowerShell's success output
+        # is not an exit status; false, 0, or other returned values cannot
+        # establish that a check completed. Diagnostics use Write-Host/logs.
+        $actionOutput = @(& $Action)
+        if ($actionOutput.Count -ne 0) {
+            throw "Check action returned unexpected output: $Name. Use throw for failure and Write-Host or step logs for diagnostics."
+        }
         $sw.Stop()
         Write-StepLogFooter -Status "PASS" -Elapsed $sw.Elapsed
         Write-Host ("[PASS] {0} ({1}s)" -f $Name, [Math]::Round($sw.Elapsed.TotalSeconds, 1)) -ForegroundColor Green
@@ -534,10 +542,7 @@ function Invoke-SafetyScans {
 
 function Invoke-BinaryArtifactScan {
     if (-not (Test-Path -LiteralPath $binaryOutputDir) -or -not (Test-Path -LiteralPath $liteBinaryOutputDir)) {
-        if ($SkipBuild) {
-            Write-Host "[SKIP] Binary Artifact Network Import Scan: Full or Lite output does not exist and build was skipped."
-            return
-        }
+        # SkipBuild skips compilation, not a selected artifact inspection.
         throw "Missing Full or Lite build output directory for binary artifact scan."
     }
     if ($SkipBuild) {
@@ -573,6 +578,7 @@ $repoCheckExitCode = 0
 Push-Location -LiteralPath $repoRoot
 try {
     Assert-ScriptExists -Path $atomicWriteScript
+    Assert-ScriptExists -Path $workspaceMemoTestScript
     Assert-ScriptExists -Path $pathSafetyScript
     Assert-ScriptExists -Path $faultInjectionScript
     Assert-ScriptExists -Path $noteParserScript
@@ -648,6 +654,14 @@ try {
     if (-not $SkipAtomicWrite) {
         Invoke-Step -Name "Atomic Write Tests" -Action {
             Invoke-ChildPowerShellScript -ScriptPath $atomicWriteScript
+        }
+    }
+
+    if (-not $SkipWorkspaceMemoTests) {
+        Invoke-Step -Name "Workspace Memo Tests" -Action {
+            $memoArguments = @()
+            if (-not $SkipUiAutomation) { $memoArguments += "-AppIntegration" }
+            Invoke-ChildPowerShellScript -ScriptPath $workspaceMemoTestScript -Arguments $memoArguments
         }
     }
 

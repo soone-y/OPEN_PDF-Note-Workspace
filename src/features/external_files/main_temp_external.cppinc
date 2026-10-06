@@ -19,13 +19,13 @@ static void LoadTempExternalLecturesFromSetup() {
     }
 }
 
-bool PersistTempExternalLecturesToSetup() {
+bool PersistTempExternalLecturesToSetup(std::wstring* outError) {
     std::vector<std::wstring> dirs;
     dirs.reserve(g_tempExternalLectures.size());
     for (const auto& item : g_tempExternalLectures) {
         if (!item.path.empty()) dirs.push_back(item.path);
     }
-    return PersistSetupTempExternalLectureDirs(dirs);
+    return PersistSetupTempExternalLectureDirs(dirs, outError);
 }
 
 static bool RemoveTempExternalLecturePath(const std::wstring& lecturePath) {

@@ -1,5 +1,7 @@
 # 主な機能とよくある質問
 
+英語版は [Features FAQ](../en/features_faq.md) を参照してください。
+
 ---
 
 ## 1. FILE_FORMAT_COMPATIBILITY

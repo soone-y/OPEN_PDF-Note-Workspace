@@ -28,7 +28,7 @@ WORKSPACE_ROOT_RE = re.compile(r'"workspaceRoot"\s*:\s*"([^"]+)"')
 TEMP_EXTERNAL_DIRS_RE = re.compile(r'"tempExternalLectureDirs"\s*:\s*\[(.*?)\]', re.DOTALL)
 QUOTED_STRING_RE = re.compile(r'"([^"]*)"')
 RESOURCE_DIR_NAME = "__resource__"
-SETUP_JSON_NAMES = ("pdf_workspace_setup.json", "pdf_viewer_setup.json")
+SETUP_JSON_NAMES = ("pdf_note_workspace_setup.json", "pdf_workspace_setup.json", "pdf_viewer_setup.json")
 
 RECOGNIZED_TYPES = {
     "text",
@@ -690,7 +690,7 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--root", help="Workspace root directory to scan recursively.")
     ap.add_argument(
         "--setup-json",
-        help="Path to pdf_workspace_setup.json or pdf_viewer_setup.json used to resolve workspaceRoot.",
+        help="Path to pdf_note_workspace_setup.json, legacy pdf_workspace_setup.json, or pdf_viewer_setup.json used to resolve workspaceRoot.",
     )
     ap.add_argument("--dry-run", action="store_true", help="Show actions without modifying files.")
     ap.add_argument("--force", action="store_true", help="Rewrite even already-current v1 files.")

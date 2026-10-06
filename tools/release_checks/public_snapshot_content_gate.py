@@ -42,24 +42,46 @@ FORBIDDEN_SUFFIXES = {
 TEXT_SUFFIXES = {
     "",
     ".bat",
+    ".c",
+    ".c++",
+    ".cc",
     ".cfg",
     ".cmake",
+    ".cmd",
     ".cpp",
     ".cppinc",
+    ".css",
     ".csv",
+    ".cxx",
+    ".def",
     ".h",
+    ".hh",
+    ".hpp",
+    ".htm",
     ".html",
+    ".hxx",
     ".in",
     ".inc",
     ".ini",
     ".input",
+    ".inl",
+    ".ipp",
+    ".js",
     ".json",
+    ".jsx",
     ".md",
     ".patch",
+    ".psd1",
     ".ps1",
+    ".psm1",
     ".py",
+    ".rc",
+    ".rcinc",
     ".sh",
     ".tsv",
+    ".ts",
+    ".tsx",
+    ".toml",
     ".txt",
     ".xml",
     ".yml",
@@ -94,11 +116,18 @@ def path_is_forbidden(relative: PurePosixPath) -> bool:
 
 
 def iter_files(snapshot: Path) -> Iterable[Path]:
-    for path in sorted(snapshot.rglob("*")):
-        if path.is_symlink():
-            yield path
-        elif path.is_file():
-            yield path
+    def reject_walk_error(error: OSError) -> None:
+        raise error
+
+    # rglob can suppress directory access errors. An unreadable subtree must
+    # not turn into a successful scan of only the accessible files.
+    for directory, names, files in os.walk(snapshot, onerror=reject_walk_error, followlinks=False):
+        for name in sorted(names):
+            path = Path(directory) / name
+            if path.is_symlink():
+                yield path
+        for name in sorted(files):
+            yield Path(directory) / name
 
 
 def user_path_violation(text: str) -> bool:
@@ -161,12 +190,16 @@ def scan_text_content(
 
 
 def scan_text(path: Path, relative: PurePosixPath, host_literals: tuple[str, ...]) -> list[Violation]:
-    if path.suffix.lower() not in TEXT_SUFFIXES or path.stat().st_size > MAX_TEXT_BYTES:
+    if path.suffix.lower() not in TEXT_SUFFIXES:
         return []
     try:
+        if path.stat().st_size > MAX_TEXT_BYTES:
+            return [Violation("public-text-scan-limit-exceeded", relative.as_posix())]
         content = path.read_bytes()
     except OSError:
         return [Violation("unreadable-public-text", relative.as_posix())]
+    if len(content) > MAX_TEXT_BYTES:
+        return [Violation("public-text-scan-limit-exceeded", relative.as_posix())]
     return scan_text_content(decode_text_bytes(content), relative, host_literals)
 
 
@@ -196,7 +229,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
     args = parser.parse_args(argv)
-    violations = collect_violations(args.snapshot.resolve())
+    try:
+        violations = collect_violations(args.snapshot.resolve())
+    except OSError as error:
+        print(f"Public snapshot content gate could not complete: {error}", file=sys.stderr)
+        return 1
     if violations:
         print("Public snapshot content gate failed:", file=sys.stderr)
         for violation in violations:

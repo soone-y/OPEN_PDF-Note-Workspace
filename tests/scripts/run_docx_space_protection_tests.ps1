@@ -33,6 +33,7 @@ $zip64LikeFixture = Join-Path $outDir "docx_space_protection_zip64_like.docx"
 $oversizedExpansionFixture = Join-Path $outDir "docx_space_protection_oversized_expansion.docx"
 $externalRelationshipFixture = Join-Path $outDir "docx_space_protection_external_relationship.docx"
 $conversionInputDir = Join-Path $outDir "docx_space_protection_conversion_input"
+$conversionStaged = Join-Path $outDir "docx_space_protection_real_staged.docx"
 
 $compiler = Get-Command g++ -ErrorAction SilentlyContinue
 if (-not $compiler) {
@@ -471,8 +472,15 @@ try {
         if (-not (Test-Path -LiteralPath $smokeTool)) {
             throw "Missing tool: $smokeTool"
         }
+        # Minimal ZIP fixtures above test the staging parser, not a complete
+        # Office package. Convert a real DOCX through the same C++ staging path.
+        $originalFixtureHash = (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash
+        Invoke-DocxProtectionExpectSuccess -Source $fixture -Dest $conversionStaged -Label "real Office DOCX"
+        if ((Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash -ne $originalFixtureHash) {
+            throw "real Office DOCX source changed during staging"
+        }
         New-Item -ItemType Directory -Force -Path $conversionInputDir | Out-Null
-        Copy-Item -LiteralPath $staged -Destination (Join-Path $conversionInputDir "app_staged.docx") -Force
+        Copy-Item -LiteralPath $conversionStaged -Destination (Join-Path $conversionInputDir "app_staged.docx") -Force
         $pptxFixture = (Get-ChildItem -LiteralPath $fixtureDir -Filter "*.pptx" -File | Select-Object -First 1).FullName
         if (-not $pptxFixture) {
             throw "PPTX fixture was not found: $fixtureDir"
@@ -496,6 +504,9 @@ try {
         & $pythonExe @smokeArgs
         if ($LASTEXITCODE -ne 0) {
             throw "app-staged LibreOffice smoke conversion failed"
+        }
+        if ((Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash -ne $originalFixtureHash) {
+            throw "real Office DOCX source changed during conversion"
         }
     }
 

@@ -5,4 +5,3 @@
 
 void ShowScheduleWindow(HWND parent);
 void RefreshScheduleWindowLectureNames();
-void ShowGlobalMemoWindow(HWND parent);

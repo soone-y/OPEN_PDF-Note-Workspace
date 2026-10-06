@@ -49,6 +49,26 @@ $core = Get-SourceText "src/core/app_core.cpp"
 Require-Text $core "BroadcastThemeChangedToThreadWindows(owner);" "theme changes must refresh open dialogs"
 Require-Text $core "bg = g_theme.selectionBg;" "checked owner-draw buttons must use selectionBg"
 Require-Text $core "text = g_theme.selectionText;" "checked owner-draw buttons must use selectionText"
+foreach ($profile in @("cvd_red_green", "cvd_blue_yellow", "cvd_monochrome")) {
+    Require-Text $core $profile "color-vision theme profile must be recognized"
+}
+Require-Text $core "ThemeVariantNeutralizeSurfaces(t);" "color-vision profiles must neutralize theme surfaces"
+
+$generalControls = Get-SourceText "src/settings/settings_general_controls.cppinc"
+Require-Text $generalControls "kToneVariantValues" "color-vision profiles must be selectable from one value list"
+Require-Text $generalControls "ctx->cbToneVariant" "color-vision profile selection must read the list control"
+
+$generalDialog = Get-SourceText "src/settings/settings_general_dialog.cppinc"
+Require-Text $generalDialog "addCombo(IDC_TONE_VARIANT" "color-vision profile selection must use a compact list"
+Forbid-Text $generalDialog "addRadio(IDC_TONE_VARIANT" "color-vision profile selection must not use radio buttons"
+
+$paletteEditor = Get-SourceText "src/settings/settings_palette.cppinc"
+Require-Text $paletteEditor "IDC_PALETTE_EDITOR_RED" "palette editor must retain numeric RGB input"
+Require-Text $paletteEditor "IDC_PALETTE_EDITOR_HEX" "palette editor must retain hexadecimal input"
+Forbid-Text $paletteEditor "IDC_PALETTE_EDITOR_SV" "palette editor must not offer a click-and-drag color canvas"
+Require-Text $paletteEditor "IDC_PALETTE_EDITOR_EYEDROPPER" "palette editor must offer one-shot screen color sampling"
+Require-Text $paletteEditor "case WM_LBUTTONUP:" "eyedropper must pick a color only after the next click"
+Forbid-Text $paletteEditor "case WM_MOUSEMOVE:" "eyedropper must not continuously sample cursor movement"
 
 $fontList = Get-SourceText "src/core/font_list.h"
 Require-Text $fontList "selected ? theme.selectionBg : theme.panelBg" "font combo selection must use the active theme"

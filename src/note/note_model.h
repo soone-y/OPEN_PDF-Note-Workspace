@@ -87,6 +87,7 @@ enum class BlockKind {
     ListItem,
     Quote,
     CodeBlock,
+    FencedContainer,
     HorizontalRule,
     Table,
     TableHead,
@@ -147,6 +148,7 @@ enum class MathDelimiter {
     BackslashParen,
     BackslashBracket,
     LegacyMathTag,
+    MathTag,
 };
 
 enum class DiagnosticSeverity {
@@ -170,6 +172,8 @@ struct BlockNode {
     int table_column_count = 0;
     TableCellAlign table_cell_align = TableCellAlign::Default;
     std::wstring info_string;
+    size_t fence_marker_count = 0;
+    bool fence_closed = false;
 };
 
 struct InlineNode {

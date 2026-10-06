@@ -1,6 +1,7 @@
 #include "theme/built_in_theme.h"
 #include "clrop/json.h"
 #include "core/text_encoding.h"
+#include "core/json_string.h"
 #include "core/atomic_write.h"
 #include "core/localization.h"
 
@@ -1803,7 +1804,8 @@ bool IsSupportedLocalPath(const std::wstring& path) {
     const std::filesystem::path relativePath = filePath.relative_path();
     for (auto it = relativePath.begin(); it != relativePath.end(); ++it) {
         current /= *it;
-        const DWORD attributes = GetFileAttributesW(current.c_str());
+        const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(current);
+        const DWORD attributes = GetFileAttributesW(openPath.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return false;
     }
     return true;
@@ -1817,15 +1819,19 @@ struct StoredReadonlySession {
     int selectedTab = -1;
 };
 
-std::filesystem::path ViewerExeDirectory() {
+std::filesystem::path ViewerExecutablePath() {
     std::vector<wchar_t> buffer(512, L'\0');
     for (;;) {
         const DWORD size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
         if (size == 0) return {};
-        if (size + 1 < buffer.size()) return std::filesystem::path(std::wstring(buffer.data(), size)).parent_path();
+        if (size + 1 < buffer.size()) return std::filesystem::path(std::wstring(buffer.data(), size));
         if (buffer.size() >= 32768) return {};
         buffer.resize(buffer.size() * 2, L'\0');
     }
+}
+
+std::filesystem::path ViewerExeDirectory() {
+    return ViewerExecutablePath().parent_path();
 }
 
 std::string EscapeJsonString(const std::string& value) {
@@ -1896,13 +1902,8 @@ bool JsonStringMember(const std::string& object, const char* key, std::wstring* 
     std::string raw;
     if (!value || !JsonObjectMember(object, key, &raw) || raw.size() < 2 || raw.front() != '"' || raw.back() != '"') return false;
     std::string decoded;
-    for (size_t i = 1; i + 1 < raw.size(); ++i) {
-        if (raw[i] != '\\') { decoded += raw[i]; continue; }
-        if (++i + 1 >= raw.size()) return false;
-        switch (raw[i]) { case '"': decoded += '"'; break; case '\\': decoded += '\\'; break; case '/': decoded += '/'; break;
-        case 'b': decoded += '\b'; break; case 'f': decoded += '\f'; break; case 'n': decoded += '\n'; break; case 'r': decoded += '\r'; break; case 't': decoded += '\t'; break;
-        default: return false; }
-    }
+    size_t pos = 0;
+    if (!json_string::DecodeToken(raw, &pos, &decoded) || pos != raw.size()) return false;
     *value = UTF8ToWide(decoded);
     return true;
 }
@@ -1982,7 +1983,12 @@ void RestoreReadonlySession(HWND owner) {
     const std::filesystem::path dir = ViewerExeDirectory();
     if (dir.empty()) return;
     StoredReadonlySession shared, privateState;
-    const bool hasShared = ReadReadonlySessionFile(dir / L"pdf_workspace_setup.json", &shared);
+    const std::filesystem::path sharedSetup = dir / L"pdf_note_workspace_setup.json";
+    const std::filesystem::path legacySharedSetup = dir / L"pdf_workspace_setup.json";
+    std::error_code sharedSetupEc;
+    const bool canonicalSetupExists = std::filesystem::exists(sharedSetup, sharedSetupEc) && !sharedSetupEc;
+    const bool hasShared = ReadReadonlySessionFile(
+        canonicalSetupExists ? sharedSetup : legacySharedSetup, &shared);
     const bool hasPrivate = ReadReadonlySessionFile(dir / L"readonly_setup.json", &privateState);
     // The dedicated file is the user's explicit choice.  It can disable restoration
     // even when a previously distributed/shared setup still contains old paths.
@@ -2282,14 +2288,22 @@ bool IsTrustedReadonlyViewerWindow(HWND hwnd) {
     if (processId == 0) return false;
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
     if (!process) return false;
-    wchar_t senderPath[MAX_PATH]{};
-    DWORD senderPathLength = MAX_PATH;
-    const bool gotSenderPath = QueryFullProcessImageNameW(process, 0, senderPath, &senderPathLength) != FALSE;
+    std::vector<wchar_t> senderPath(512, L'\0');
+    std::wstring senderImagePath;
+    for (;;) {
+        DWORD senderPathLength = static_cast<DWORD>(senderPath.size());
+        if (QueryFullProcessImageNameW(process, 0, senderPath.data(), &senderPathLength)) {
+            senderImagePath.assign(senderPath.data(), senderPathLength);
+            break;
+        }
+        const DWORD error = GetLastError();
+        if (error != ERROR_INSUFFICIENT_BUFFER || senderPath.size() >= 32768) break;
+        senderPath.resize(senderPath.size() * 2, L'\0');
+    }
     CloseHandle(process);
-    wchar_t currentPath[MAX_PATH]{};
-    const DWORD currentPathLength = GetModuleFileNameW(nullptr, currentPath, MAX_PATH);
-    return gotSenderPath && currentPathLength > 0 && currentPathLength < MAX_PATH &&
-           _wcsicmp(senderPath, currentPath) == 0;
+    const std::filesystem::path currentPath = ViewerExecutablePath();
+    return !senderImagePath.empty() && !currentPath.empty() &&
+           _wcsicmp(senderImagePath.c_str(), currentPath.c_str()) == 0;
 }
 
 void SendTabTransferAcknowledgement(HWND source, ULONG_PTR token) {
@@ -2320,14 +2334,13 @@ bool MoveTabToWindow(HWND owner, int index, HWND target) {
 
 bool MoveTabToNewWindow(HWND owner, int index) {
     if (index < 0 || index >= static_cast<int>(g_tabs.size())) return false;
-    wchar_t exePath[MAX_PATH]{};
-    const DWORD length = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if (length == 0 || length >= MAX_PATH) return false;
+    const std::filesystem::path exePath = ViewerExecutablePath();
+    if (exePath.empty()) return false;
     const ULONG_PTR token = g_nextTabTransferToken++;
     const std::wstring params = L"--open \"" + g_tabs[static_cast<size_t>(index)].path +
         L"\" --transfer-source " + std::to_wstring(reinterpret_cast<UINT_PTR>(owner)) +
         L" --transfer-token " + std::to_wstring(token);
-    const HINSTANCE result = ShellExecuteW(owner, L"open", exePath, params.c_str(), nullptr, SW_SHOWNORMAL);
+    const HINSTANCE result = ShellExecuteW(owner, L"open", exePath.c_str(), params.c_str(), nullptr, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32) return false;
     g_pendingTabTransfers.push_back({token, g_tabs[static_cast<size_t>(index)].path});
     return true;
@@ -3077,15 +3090,13 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
             // A restored session already chose the folder/tab state; never replace it
             // with a release-directory scan.
         } else {
-        wchar_t exePathBuf[MAX_PATH]{};
-        const DWORD exePathLength = GetModuleFileNameW(NULL, exePathBuf, MAX_PATH);
-        if (exePathLength == 0 || exePathLength >= MAX_PATH) {
+        const std::filesystem::path exePath = ViewerExecutablePath();
+        if (exePath.empty()) {
             PopulateReleaseDocuments({});
             if (argv) LocalFree(argv);
             DestroyWindow(hwnd);
             return 0;
         }
-        std::filesystem::path exePath(exePathBuf);
         const std::filesystem::path exeDir = exePath.parent_path();
         const std::filesystem::path rootsToScan[] = {
             exeDir,

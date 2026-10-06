@@ -82,6 +82,7 @@ static void DrawTextBoxReadableBackground(HDC hdc, const RECT& r, const Annotati
 static void DrawPolylineAlphaPx(HDC hdc, const std::vector<POINT>& pts, int penW, COLORREF color, BYTE alpha);
 static COLORREF DarkenColor(COLORREF c, double factor = 0.85);
 static void CommitTextEditing(HWND hwnd, bool commit);
+static void StopPdfKeyboardScroll(HWND hwnd);
 static bool PtRectToClientRect(int pageIndex, double x1, double y1, double x2, double y2, RECT& out);
 static bool GetEditingInnerRectClient(RECT* outInner, int* outWidth);
 static bool GetEditingInnerRectLayout(RECT* outInner, int* outWidth);

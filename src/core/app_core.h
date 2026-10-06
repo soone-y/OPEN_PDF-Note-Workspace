@@ -891,7 +891,8 @@ std::optional<std::wstring> ConsumePendingSetupJsonExistenceCheckPath();
 bool VerifySetupJsonStillExistsReadable(const std::filesystem::path& setupPath, std::wstring* outErr = nullptr);
 void UpdateSetupJsonWorkspaceRoot(const std::wstring& newRoot);
 std::vector<std::wstring> LoadSetupTempExternalLectureDirs();
-bool PersistSetupTempExternalLectureDirs(const std::vector<std::wstring>& dirs);
+bool PersistSetupTempExternalLectureDirs(const std::vector<std::wstring>& dirs,
+                                         std::wstring* outError = nullptr);
 void CheckAndPromptClassdirMismatch(HWND hWnd, const std::wstring& workspaceRoot);
 
 // ---------------------------------------------------------------------

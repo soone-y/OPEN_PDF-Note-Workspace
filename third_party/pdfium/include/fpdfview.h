@@ -287,8 +287,7 @@ typedef struct FPDF_LIBRARY_CONFIG_ {
 
   // Version 5 - Experimental.
 
-  // Explicit specification of font library to use when |m_RendererType| is set
-  // to |FPDF_RENDERERTYPE_SKIA|.
+  // Explicit specification of font library to use.
   // |m_FontLibraryType| must be a valid value for |FPDF_LIBRARY_CONFIG|
   // versions of this level or higher, or else the initialization will fail with
   // an immediate crash.
@@ -303,6 +302,12 @@ typedef struct FPDF_LIBRARY_CONFIG_ {
   // is enabled. For setting the bool to true to have an effect, PDFium must be
   // built with |PDF_ENABLE_BROTLI|.
   FPDF_BOOL m_BrotliEnabled;
+
+  // Version 7 - Experimental.
+
+  // Boolean to specify whether PDFium creates a dedicated v8::Isolate for each
+  // document. When true, |m_pIsolate| must be NULL.
+  FPDF_BOOL m_IsolatePerDocument;
 } FPDF_LIBRARY_CONFIG;
 
 // Function: FPDF_InitLibraryWithConfig

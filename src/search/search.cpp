@@ -5,6 +5,7 @@
 
 #include "resources/app_resource.h"
 #include "core/app_core.h"
+#include "workspace/workspace_memo.h"
 #include "core/localization.h"
 #include "core/fault_injection.h"
 #include "clrop/bridge.h"
@@ -19,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <climits>
+#include <fstream>
 #include <optional>
 
 namespace {
@@ -42,6 +44,7 @@ constexpr int IDC_SEARCH_RANGE_BASE = 4110;
 constexpr int IDC_SEARCH_INCLUDE_TEMP_EXTERNAL = 4119;
 constexpr int IDC_SEARCH_TARGET_BASE = 4130;
 constexpr int IDC_SEARCH_OPTION_BASE = 4140;
+constexpr int IDC_SEARCH_WORKSPACE_MEMO = 4143;
 constexpr UINT kSearchTimerId = 4120;
 constexpr UINT kSearchTimerIntervalMs = 30;
 constexpr int kSearchEnumStepsPerTick = 120;
@@ -78,6 +81,7 @@ struct SearchUiStrings {
     std::wstring normalizeWidthKanaLabel;
     std::wstring ignoreCaseLabel;
     std::wstring translucentLabel;
+    std::wstring workspaceMemoLabel;
     std::wstring resultLabel;
     std::wstring resultHint;
     std::wstring hideResultLabel;
@@ -118,7 +122,7 @@ static SearchUiStrings GetSearchUiStrings() {
     SearchUiStrings s{
         text(L"search.ui.title"), text(L"search.ui.query_label"), text(L"search.ui.query_hint"), text(L"search.ui.query_cue"),
         text(L"search.ui.run"), text(L"search.ui.cancel"), text(L"search.ui.range_label"), text(L"search.ui.target_label"),
-        text(L"search.ui.options"), text(L"search.ui.normalize"), text(L"search.ui.ignore_case"), text(L"search.ui.translucent"),
+        text(L"search.ui.options"), text(L"search.ui.normalize"), text(L"search.ui.ignore_case"), text(L"search.ui.translucent"), text(L"search.ui.workspace_memo"),
         text(L"search.ui.results"), text(L"search.ui.result_hint"), text(L"search.ui.hide_result"), text(L"search.ui.open_readonly"),
         text(L"search.ui.status"), text(L"search.ui.summary"), text(L"search.ui.ready"), text(L"search.ui.searching"),
         text(L"search.ui.done"), text(L"search.ui.canceled"), text(L"search.ui.hits"), text(L"search.ui.files"), text(L"search.ui.pages"),
@@ -234,6 +238,7 @@ struct SearchCtx {
     HWND optNormalizeWidthKana = nullptr;
     HWND optIgnoreCase = nullptr;
     HWND optTranslucent = nullptr;
+    HWND btnWorkspaceMemo = nullptr;
     HWND labelResults = nullptr;
     HWND results = nullptr;
     HWND owner = nullptr;
@@ -2641,6 +2646,10 @@ static void LayoutSearchWindow(HWND hWnd, SearchCtx* ctx) {
         }
     }
     y += ((3 + optCols - 1) / optCols) * (radioH + radioGapY) + gap;
+    if (ctx->btnWorkspaceMemo) {
+        MoveWindow(ctx->btnWorkspaceMemo, x, y, contentW, rowH, TRUE);
+        y += rowH + gap;
+    }
     if (ctx->labelResults) {
         MoveWindow(ctx->labelResults, x, y, contentW, labelH, TRUE);
     }
@@ -2750,6 +2759,11 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
                                               0, 0, 0, 0, hWnd,
                                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCH_OPTION_TRANSLUCENT)),
                                               g_hInst, nullptr);
+        ctx->btnWorkspaceMemo = CreateWindowExW(0, L"BUTTON", ui.workspaceMemoLabel.c_str(),
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                             0, 0, 0, 0, hWnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCH_WORKSPACE_MEMO)),
+                                             g_hInst, nullptr);
         if (ctx->optNormalizeWidthKana) SendMessageW(ctx->optNormalizeWidthKana, BM_SETCHECK, BST_CHECKED, 0);
         if (ctx->optIgnoreCase) SendMessageW(ctx->optIgnoreCase, BM_SETCHECK, BST_CHECKED, 0);
         if (ctx->optTranslucent) SendMessageW(ctx->optTranslucent, BM_SETCHECK, BST_CHECKED, 0);
@@ -2783,6 +2797,7 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         SetUIFont(ctx->optNormalizeWidthKana);
         SetUIFont(ctx->optIgnoreCase);
         SetUIFont(ctx->optTranslucent);
+        SetUIFont(ctx->btnWorkspaceMemo);
         SetUIFont(ctx->labelResults);
         SetUIFont(ctx->results);
         if (ctx->edit) {
@@ -2810,7 +2825,7 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
         if (mmi) {
             mmi->ptMinTrackSize.x = 620;
-            mmi->ptMinTrackSize.y = 600;
+            mmi->ptMinTrackSize.y = 640;
             return 0;
         }
         break;
@@ -2894,6 +2909,10 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             ApplySearchWindowTranslucency(hWnd, ctx);
             return 0;
         }
+        if (id == IDC_SEARCH_WORKSPACE_MEMO && code == BN_CLICKED) {
+            ShowWorkspaceMemoWindow(g_hMainWnd);
+            return 0;
+        }
         if (id >= IDC_SEARCH_RANGE_BASE && id < IDC_SEARCH_RANGE_BASE + kSearchRangeCount) {
             UpdateTemporaryExternalScopeControl(ctx);
             return 0;
@@ -2922,6 +2941,7 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 
 } // namespace
 
+
 void ShowSearchWindow(HWND parent) {
     try {
     fault_injection::MaybeThrow(L"ShowSearchWindow:start");
@@ -2947,7 +2967,7 @@ void ShowSearchWindow(HWND parent) {
     const auto ui = GetSearchUiStrings();
     g_hSearchWnd = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_LAYERED, kSearchWndClass, ui.title.c_str(),
                                    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_SIZEBOX,
-                                   CW_USEDEFAULT, CW_USEDEFAULT, 760, 620,
+                                   CW_USEDEFAULT, CW_USEDEFAULT, 760, 660,
                                    nullptr, nullptr, g_hInst, parent);
     if (g_hSearchWnd) {
         PlaceOwnedPopupAtAppTopLeft(g_hSearchWnd, parent);

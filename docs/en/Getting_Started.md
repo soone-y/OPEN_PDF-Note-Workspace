@@ -2,7 +2,7 @@
 
 ## Start the application
 
-Run `pdf_note_workspace.exe` from the distribution folder. Use `readonly_viewer.exe` when you only need to view files. Keep the EXEs, DLLs, and `pdf_workspace_setup.json` together in that folder.
+Run `pdf_note_workspace.exe` from the distribution folder. Use `readonly_viewer.exe` when you only need to view files. Keep the EXEs, DLLs, and `pdf_note_workspace_setup.json` together in that folder. A legacy `pdf_workspace_setup.json` is read once and safely copied to the new name; the legacy file is not removed.
 
 ## Workspace
 

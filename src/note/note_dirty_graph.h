@@ -1,8 +1,10 @@
 #pragma once
 
+#include "note/note_influence.h"
 #include "note/note_model.h"
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -50,6 +52,10 @@ struct NoteDirtyGraph {
     bool layout_dirty = false;
     bool render_stale = false;
     bool line_count_may_change = false;
+    // True only when a scope has proved that the line's parser exit state is
+    // unchanged.  The render cache may then compare the first unchanged tail
+    // row and stop at that fixed point even when the row is styled as code.
+    bool downstream_parser_state_proven_unchanged = false;
     NoteDirtyLineRange stale_lines;
 };
 
@@ -62,7 +68,18 @@ bool TextEditsEqual(const TextEdit& lhs, const TextEdit& rhs);
 NoteDirtyGraph BuildNoteDirtyGraph(std::wstring_view beforeText,
                                    const std::vector<size_t>& beforeLineStarts,
                                    const TextEdit& edit,
-                                   bool renderActive);
+                                   bool renderActive,
+                                   const NoteInfluenceScope* influence = nullptr);
+
+// Builds only the already-proven ordinary-line case.  Unlike the general
+// builder it never reads or constructs document-wide text: the caller must
+// prove that deletedText is the exact local range, that the edit is
+// delimiter-free, and that the single source row remains a paragraph.
+[[nodiscard]] std::optional<NoteDirtyGraph>
+BuildNoteDirtyGraphForProvenLocalEdit(const TextEdit& edit,
+                                      std::wstring_view deletedText,
+                                      bool renderActive,
+                                      const NoteInfluenceScope& influence);
 bool NoteDirtyGraphAllowsRenderEarlyStop(const NoteDirtyGraph& graph,
                                          bool lineCountChanged);
 bool NoteDirtyGraphAllowsLineSpacingFastPath(const NoteDirtyGraph& graph);

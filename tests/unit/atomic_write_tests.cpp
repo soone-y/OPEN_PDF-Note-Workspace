@@ -172,6 +172,52 @@ static bool TestAtomicWriteCreatesParentDirs(const fs::path& root) {
     return ok && ReadAll(dest) == payload;
 }
 
+static bool TestAtomicWriteLongPath(const fs::path& root) {
+    fs::path deep = root;
+    for (int i = 0; i < 30; ++i) {
+        deep /= L"long_segment_" + std::to_wstring(i);
+    }
+    const fs::path dest = deep / L"saved.txt";
+    if (dest.wstring().size() <= MAX_PATH) return false;
+
+    const std::string payload = "long-path-write";
+    std::wstring err;
+    if (!atomic_write::AtomicWriteBytes(dest, payload.data(), payload.size(),
+                                        deep / L"tmp", deep / L"escape", &err)) {
+        return false;
+    }
+    std::string read;
+    const bool directReadOk = ReadFileBytesWin32(dest, read) && read == payload;
+
+    // The application still uses std::filesystem and iostreams for safe
+    // enumeration and parsing paths.  Verify the active toolchain handles
+    // those operations after the destination exceeded MAX_PATH as well.
+    std::error_code ec;
+    const bool filesystemReadOk = std::filesystem::exists(dest, ec) && !ec &&
+                                  std::filesystem::is_regular_file(dest, ec) && !ec &&
+                                  std::filesystem::file_size(dest, ec) == payload.size() && !ec;
+    std::string iostreamRead;
+    const bool iostreamReadOk = TryReadAll(dest, &iostreamRead) && iostreamRead == payload;
+
+    const fs::path copied = deep / L"copied.txt";
+    const fs::path renamed = deep / L"renamed.txt";
+    const bool copyOk = std::filesystem::copy_file(dest, copied, fs::copy_options::none, ec) && !ec;
+    ec.clear();
+    std::filesystem::rename(copied, renamed, ec);
+    const bool renameOk = !ec && std::filesystem::exists(renamed, ec) && !ec;
+    ec.clear();
+    const bool removeOk = std::filesystem::remove(renamed, ec) && !ec;
+
+    // Do not rely on the C++ runtime's legacy-path cleanup in this test.
+    DeleteFileW(ToExtendedWin32PathIfAbsoluteLocal(dest).c_str());
+    (void)RemoveDirectoryW(ToExtendedWin32PathIfAbsoluteLocal(deep / L"tmp").c_str());
+    (void)RemoveDirectoryW(ToExtendedWin32PathIfAbsoluteLocal(deep / L"escape").c_str());
+    for (fs::path current = deep; current != root; current = current.parent_path()) {
+        (void)RemoveDirectoryW(ToExtendedWin32PathIfAbsoluteLocal(current).c_str());
+    }
+    return directReadOk && filesystemReadOk && iostreamReadOk && copyOk && renameOk && removeOk;
+}
+
 static bool TestCreateUniqueTempFileCreatesReservedFileAndHandle(const fs::path& root) {
     fs::path dest = root / L"temp_target.txt";
     std::wstring err;
@@ -533,6 +579,7 @@ int main() {
     run("AtomicWrite locked target preserves original", &TestAtomicWriteLockedTargetPreservesOriginal);
     run("AtomicWrite zero bytes", &TestAtomicWriteZeroBytes);
     run("AtomicWrite creates parent dirs", &TestAtomicWriteCreatesParentDirs);
+    run("AtomicWrite supports a path longer than MAX_PATH", &TestAtomicWriteLongPath);
     run("CreateUniqueTempFile creates reserved file and handle", &TestCreateUniqueTempFileCreatesReservedFileAndHandle);
     run("CreateUniqueTempFile avoids existing reserved name", &TestCreateUniqueTempFileAvoidsExistingReservedName);
     run("AtomicWrite empty destination fails", &TestAtomicWriteEmptyDestinationFails);

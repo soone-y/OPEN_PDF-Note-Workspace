@@ -322,11 +322,12 @@ static COLORREF SelectionFillColor() {
         : kPdfSelectionColor;
 }
 // NOTE: Timer IDs must be unique per HWND to avoid collisions in PdfViewProc.
-// Keep this in sync with the PdfViewProc timer registry in core/app_core.h.
+// Keep this in sync with the PdfViewProc timer registry in core/constants.h.
 static constexpr UINT_PTR kZoomTimerId = 0x2005;
-static_assert(AllUniqueValues(std::array<UINT_PTR, 4>{
+static_assert(AllUniqueValues(std::array<UINT_PTR, 5>{
     kScrollTimerId,
     kPdfVirtualRenderTimerId,
+    kPdfKeyboardScrollTimerId,
     kZoomTimerId,
     kAutoScrollTimerId,
 }));

@@ -137,7 +137,6 @@
     "share/basic",
     "share/classification",
     "share/config/soffice.cfg/cui",
-    "share/config/soffice.cfg/modules/scalc/ui",
     "share/config/soffice.cfg/modules/scanner",
     "share/config/soffice.cfg/modules/schart",
     "share/config/soffice.cfg/modules/sglobal",
@@ -167,8 +166,7 @@
     "share/tipoftheday",
     "share/toolbarmode",
     "share/wizards",
-    "share/wordbook",
-    "share/xslt"
+    "share/wordbook"
   ],
   "globs": [
     "share/config/images_*.zip",
@@ -204,6 +202,16 @@
     "program/soffice.bin",
     "program/fundamental.ini",
     "program/services.rdb",
-    "program/types.rdb"
+    "program/types.rdb",
+    "program/smlo.dll",
+    "program/scdlo.dll",
+    "program/scfiltlo.dll",
+    "program/sclo.dll",
+    "program/scnlo.dll",
+    "program/scuilo.dll",
+    "share/calc",
+    "share/config/soffice.cfg/modules/scalc",
+    "share/registry/calc.xcd",
+    "share/xslt"
   ]
 }

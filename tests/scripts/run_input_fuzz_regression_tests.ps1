@@ -16,12 +16,14 @@ $compilerDir = Split-Path -Parent $compiler.Source
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 Push-Location -LiteralPath $repoRoot
 try {
+    & (Join-Path $PSScriptRoot "run_md4c_allocation_failure_tests.ps1")
     & $compiler.Source -x c -std=c99 -O2 -Wall -DMD4C_USE_UTF16 -Ithird_party/md4c/src `
         -c third_party/md4c/src/md4c.c -o $md4cObject
     if ($LASTEXITCODE -ne 0) { throw "MD4C compile failed" }
 
     & $compiler.Source -std=gnu++17 -O2 -Wall -Isrc -Ithird_party/md4c/src `
         -Ithird_party/pdfium/include $source src/clrop/json.cpp src/note/note_model.cpp `
+        src/note/note_syntax_lexical.cpp `
         src/note/note_md4c_adapter.cpp src/note/note_parser.cpp $md4cObject `
         third_party/pdfium/lib/pdfium.dll.lib -lole32 -lwindowscodecs -o $exe
     if ($LASTEXITCODE -ne 0) { throw "input fuzz regression compile failed" }

@@ -148,11 +148,10 @@ void PushDiagnostic(NoteDocument* out,
 }
 
 size_t FindNextLineBreak(const std::wstring& raw, size_t cursor) {
-    size_t cr = raw.find(L'\r', cursor);
-    size_t lf = raw.find(L'\n', cursor);
-    if (cr == std::wstring::npos) return lf;
-    if (lf == std::wstring::npos) return cr;
-    return std::min(cr, lf);
+    // Searching separately rescans the entire remaining LF-only source for
+    // a nonexistent CR at every paragraph. Stop at the first break of either
+    // kind, preserving CR/LF/CRLF coordinates without quadratic tail scans.
+    return raw.find_first_of(L"\r\n", cursor);
 }
 
 size_t SkipLineBreak(const std::wstring& raw, size_t pos) {

@@ -86,12 +86,14 @@ python tools/metrics/analyze_build_logs.py --format json --top 20 > out/reports/
 
 実装本体は `tools/dev/export_public_snapshot.py` にあります。`release.ps1` はこのツールを `public_repo_release_allowlist_2026-08-24.txt` とともに呼び出し、公開用 source snapshot を作ります。allowlist配下でもGit未追跡ファイルがあれば停止し、Git追跡済みの入力だけをコピーします。例外は、専用artifact manifestにパスとSHA-256を固定したGit管理外vendor artifactだけです。単体実行では、対象に応じた専用allowlistと、必要な場合は`--artifact-manifest`を明示指定します。
 
+既定allowlistは `docs/internal/public_repo_demo許可リスト_2026-07-02.txt`、既定gitignoreテンプレートは `docs/internal/public_repo_gitignoreテンプレート_2026-07-02.gitignore` を参照します。既定allowlistはデモ用です。通常Releaseではrelease用allowlistを明示指定し、テンプレートを省略した場合も internal 直下の現行ファイルを使います。
+
 ### 特徴
 - コピー元の開発リポジトリは変更しません。
 - 出力先が非空ディレクトリの場合は失敗し、既存内容を上書きしません。
 - 出力先が開発リポジトリ配下の場合は失敗し、誤って作業ツリーへ公開物を混在させることを防ぎます。
 - `__pycache__/`, `.pyc`, `.pyo`, `Thumbs.db`, `Desktop.ini` などの生成キャッシュは既定で除外します。
-- 公開用 `.gitignore` は `docs/internal/operations/public_repo_gitignoreテンプレート_2026-07-02.gitignore` から生成します。
+- 公開用 `.gitignore` は `docs/internal/public_repo_gitignoreテンプレート_2026-07-02.gitignore` から生成します。
 
 `release.ps1` は作成後に `tools/release_checks/public_snapshot_content_gate.py` で個人・ローカル環境情報、秘密情報、内部パス、ログ、archive本体、開発履歴集計がないことを確認します。その後 `tools/release_checks/release_set_integrity_gate.py` を実行し、release set直下の `public_snapshot_manifest.json` にsnapshotの全ファイル・ツリーハッシュ・許可リストのSHA-256を固定します。`publish.ps1 -Mode Verify` はcontent gateを再実行してから、この記録と実snapshotを照合し、通常版・Lite版のZIPが展開版と全ファイル単位で一致することも確認します。
 

@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,6 +27,33 @@ ALLOWED_SOURCE_HOSTS = {
     "www.libreoffice.org",
     "zlib.net",
 }
+
+LOCAL_PATCHES = (
+    ("third_party/md4c", "patches/0001-japanese-whitespace-and-punctuation.patch"),
+    ("third_party/pdfium", "patches/0001-fix-ijg-notice-link.patch"),
+)
+
+
+def validate_local_patches(root: Path) -> list[str]:
+    """Check actual patch effects; Git must run at root, not a vendor subdirectory."""
+    errors = []
+    for directory, patch in LOCAL_PATCHES:
+        patch_path = root / directory / patch
+        if not patch_path.is_file():
+            errors.append(f"required local patch missing: {directory}/{patch}")
+            continue
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), "apply", "--reverse", "--check",
+                 f"--directory={directory}", str(patch_path.resolve())],
+                capture_output=True, check=False, timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            errors.append(f"cannot verify local patch {directory}/{patch}: {exc}")
+            continue
+        if result.returncode != 0:
+            errors.append(f"required local patch is not reproducible in vendor input: {directory}/{patch}")
+    return errors
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,8 +109,8 @@ def local_version(component: dict, evidence: Path) -> str:
         return match.group(1)
     if name == "MD4C":
         version = evidence.read_text(encoding="utf-8").splitlines()[0].strip()
-        if not re.fullmatch(r"0\.5\.3\+git\.[0-9a-f]{40}", version):
-            raise ValueError("MD4C VERSION must pin the full post-0.5.3 upstream commit")
+        if not re.fullmatch(r"\d+\.\d+\.\d+\+git\.[0-9a-f]{40}", version):
+            raise ValueError("MD4C VERSION must pin a release baseline and full upstream commit")
         return version
     if name == "zlib runtime":
         version = evidence.read_text(encoding="utf-8").splitlines()[0].strip()
@@ -112,7 +140,7 @@ def repository_path(value: object, field: str) -> Path:
 
 
 def validate(review: dict) -> list[str]:
-    errors: list[str] = []
+    errors: list[str] = validate_local_patches(REPO_ROOT)
     if review.get("schema_version") != 1:
         errors.append("schema_version must be 1")
     try:

@@ -1,4 +1,5 @@
 #include "note/note_dirty_graph.h"
+#include "note/note_syntax_lexical.h"
 
 #include <algorithm>
 #include <string>
@@ -36,6 +37,79 @@ NoteDirtySyntaxFeature AddFeature(NoteDirtySyntaxFeature features,
                                   NoteDirtySyntaxFeature feature) {
     return static_cast<NoteDirtySyntaxFeature>(
         static_cast<uint32_t>(features) | static_cast<uint32_t>(feature));
+}
+
+void ApplyInfluenceSyntaxFeatures(NoteDirtyGraph* graph,
+                                  NoteInfluenceScopeKind kind) {
+    if (!graph) return;
+    switch (kind) {
+    case NoteInfluenceScopeKind::InlineLink:
+        graph->syntax_features = AddFeature(
+            graph->syntax_features, NoteDirtySyntaxFeature::Link);
+        break;
+    case NoteInfluenceScopeKind::InlineCode:
+    case NoteInfluenceScopeKind::CodeBlock:
+    case NoteInfluenceScopeKind::CodeBlockContent:
+        graph->syntax_features = AddFeature(
+            graph->syntax_features, NoteDirtySyntaxFeature::CodeFence);
+        break;
+    case NoteInfluenceScopeKind::ContainerContent:
+        graph->syntax_features = AddFeature(
+            graph->syntax_features, NoteDirtySyntaxFeature::BlockStructure);
+        break;
+    case NoteInfluenceScopeKind::InlineMath:
+    case NoteInfluenceScopeKind::InlineMathContent:
+    case NoteInfluenceScopeKind::BlockMath:
+        graph->syntax_features = AddFeature(
+            graph->syntax_features, NoteDirtySyntaxFeature::Math);
+        break;
+    case NoteInfluenceScopeKind::SharedTableGeometry:
+        graph->syntax_features = AddFeature(
+            graph->syntax_features, NoteDirtySyntaxFeature::BlockStructure);
+        break;
+    case NoteInfluenceScopeKind::Container:
+        graph->syntax_features = AddFeature(
+            graph->syntax_features, NoteDirtySyntaxFeature::BlockStructure);
+        break;
+    case NoteInfluenceScopeKind::Unknown:
+    case NoteInfluenceScopeKind::LocalLine:
+        break;
+    }
+}
+
+bool ApplyLocalInfluenceScope(NoteDirtyGraph* graph,
+                              const std::vector<size_t>& beforeLineStarts,
+                              bool renderActive,
+                              const NoteInfluenceScope* influence) {
+    if (!graph || !influence || !influence->permits_local_dirty_graph ||
+        !influence->source_lines.valid || beforeLineStarts.empty()) {
+        return false;
+    }
+
+    const size_t maxLine = beforeLineStarts.size() - 1;
+    const size_t first = std::min(influence->source_lines.first, maxLine);
+    const size_t last = std::min(
+        std::max(influence->source_lines.first, influence->source_lines.last), maxLine);
+    ApplyInfluenceSyntaxFeatures(graph, influence->kind);
+    const bool delimitedGroup =
+        influence->kind == NoteInfluenceScopeKind::CodeBlock ||
+        influence->kind == NoteInfluenceScopeKind::BlockMath ||
+        influence->kind == NoteInfluenceScopeKind::SharedTableGeometry;
+    graph->propagation = delimitedGroup
+        ? NoteDirtyPropagation::DelimiterRegion
+        : NoteDirtyPropagation::LocalLine;
+    graph->structure_dirty = influence->kind == NoteInfluenceScopeKind::SharedTableGeometry;
+    graph->downstream_parser_state_proven_unchanged =
+        influence->kind == NoteInfluenceScopeKind::LocalLine ||
+        influence->kind == NoteInfluenceScopeKind::CodeBlockContent ||
+        influence->kind == NoteInfluenceScopeKind::ContainerContent ||
+        influence->kind == NoteInfluenceScopeKind::InlineMathContent;
+
+    if (renderActive) {
+        graph->render_stale = true;
+        graph->stale_lines = {true, first, last};
+    }
+    return true;
 }
 
 bool ContainsAny(std::wstring_view text, std::wstring_view chars) {
@@ -236,7 +310,8 @@ bool TextEditsEqual(const TextEdit& lhs, const TextEdit& rhs) {
 NoteDirtyGraph BuildNoteDirtyGraph(std::wstring_view beforeText,
                                    const std::vector<size_t>& beforeLineStarts,
                                    const TextEdit& edit,
-                                   bool renderActive) {
+                                   bool renderActive,
+                                   const NoteInfluenceScope* influence) {
     NoteDirtyGraph graph;
     if (edit.deleted_len == 0 && edit.inserted_text.empty()) return graph;
 
@@ -270,6 +345,16 @@ NoteDirtyGraph BuildNoteDirtyGraph(std::wstring_view beforeText,
     }
     graph.structure_dirty = graph.edit_kind == NoteEditKind::LineBreakOnly ||
                             graph.edit_kind == NoteEditKind::StructuralText;
+
+    // A scope is accepted only when it was derived from the exact pre-edit
+    // immutable document and the edit neither removes nor inserts a delimiter.
+    // It supplies the source lines directly, avoiding the former afterText
+    // materialization / all-line-start rebuild on ordinary document text.
+    if (graph.edit_kind == NoteEditKind::PlainText &&
+        ValidLineStarts(beforeLineStarts, beforeText.size()) &&
+        ApplyLocalInfluenceScope(&graph, beforeLineStarts, renderActive, influence)) {
+        return graph;
+    }
 
     std::wstring changedText;
     changedText.reserve(deletedText.size() + edit.inserted_text.size());
@@ -347,6 +432,25 @@ NoteDirtyGraph BuildNoteDirtyGraph(std::wstring_view beforeText,
         size_t expandedFirst = std::min(first, afterMaxLine);
         size_t expandedLast = std::min(last, afterMaxLine);
         bool delimiterRegion = false;
+        const bool currentIsBoundedLookBehindDelimiter =
+            IsNoteBoundedLookBehindDelimiterLine(affectedLine);
+        const bool nextIsBoundedLookBehindDelimiter =
+            affectedAfterLine < afterMaxLine &&
+            IsNoteBoundedLookBehindDelimiterLine(
+                LineTextAt(afterText, afterStarts, affectedAfterLine + 1));
+        if (currentIsBoundedLookBehindDelimiter && affectedAfterLine > 0) {
+            expandedFirst = std::min(expandedFirst, affectedAfterLine - 1);
+            delimiterRegion = true;
+        }
+        if (nextIsBoundedLookBehindDelimiter) {
+            expandedLast = std::max(expandedLast, affectedAfterLine + 1);
+            delimiterRegion = true;
+        }
+        if (currentIsBoundedLookBehindDelimiter || nextIsBoundedLookBehindDelimiter) {
+            graph.syntax_features = AddFeature(
+                graph.syntax_features, NoteDirtySyntaxFeature::BlockStructure);
+            graph.structure_dirty = true;
+        }
         if (HasNoteDirtySyntaxFeature(
                 graph.syntax_features, NoteDirtySyntaxFeature::CodeFence)) {
             expandedFirst = std::min(
@@ -394,11 +498,50 @@ NoteDirtyGraph BuildNoteDirtyGraph(std::wstring_view beforeText,
     return graph;
 }
 
+std::optional<NoteDirtyGraph>
+BuildNoteDirtyGraphForProvenLocalEdit(const TextEdit& edit,
+                                      std::wstring_view deletedText,
+                                      bool renderActive,
+                                      const NoteInfluenceScope& influence) {
+    if ((edit.deleted_len == 0 && edit.inserted_text.empty()) ||
+        deletedText.size() != edit.deleted_len ||
+        (influence.kind != NoteInfluenceScopeKind::LocalLine &&
+         influence.kind != NoteInfluenceScopeKind::CodeBlockContent &&
+         influence.kind != NoteInfluenceScopeKind::ContainerContent &&
+         influence.kind != NoteInfluenceScopeKind::InlineMathContent) ||
+        !influence.permits_local_dirty_graph || !influence.source_lines.valid ||
+        influence.source_lines.first != influence.source_lines.last ||
+        ContainsNoteStructuralText(deletedText) ||
+        ContainsNoteStructuralText(edit.inserted_text) ||
+        deletedText.find_first_of(L"|>") != std::wstring_view::npos ||
+        edit.inserted_text.find_first_of(L"|>") != std::wstring::npos) {
+        return std::nullopt;
+    }
+
+    NoteDirtyGraph graph;
+    graph.has_edit = true;
+    graph.edit = edit;
+    graph.edit_kind = NoteEditKind::PlainText;
+    graph.propagation = NoteDirtyPropagation::LocalLine;
+    graph.content_dirty = true;
+    graph.syntax_dirty = true;
+    graph.render_dirty = true;
+    graph.layout_dirty = true;
+    graph.downstream_parser_state_proven_unchanged = true;
+    if (renderActive) {
+        graph.render_stale = true;
+        graph.stale_lines = {true, influence.source_lines.first,
+                             influence.source_lines.last};
+    }
+    return graph;
+}
+
 bool NoteDirtyGraphAllowsRenderEarlyStop(const NoteDirtyGraph& graph,
                                          bool lineCountChanged) {
     return !lineCountChanged &&
            graph.edit_kind == NoteEditKind::PlainText &&
-           graph.syntax_features == NoteDirtySyntaxFeature::None;
+           (graph.syntax_features == NoteDirtySyntaxFeature::None ||
+            graph.downstream_parser_state_proven_unchanged);
 }
 
 bool NoteDirtyGraphAllowsLineSpacingFastPath(const NoteDirtyGraph& graph) {

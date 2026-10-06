@@ -1534,8 +1534,8 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_LECTURE_SCHEDULE:
         ShowScheduleWindow(hWnd);
         break;
-    case ID_GLOBAL_MEMOS:
-        ShowGlobalMemoWindow(hWnd);
+    case ID_WORKSPACE_MEMO:
+        ShowWorkspaceMemoWindow(g_hMainWnd);
         break;
     case ID_SEARCH:
         ToggleSearchWindow(hWnd);

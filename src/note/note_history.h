@@ -2,6 +2,7 @@
 
 #include "core/sha256.h"
 #include "note/note_model.h"
+#include "note/note_text_piece_sequence.h"
 #include "note/note_text_boundaries.h"
 
 #include <array>
@@ -36,6 +37,10 @@ struct NoteHistoryReplay {
     std::wstring expected_deleted_text;
     core_hash::Sha256Digest expected_content_fingerprint{};
     size_t expected_content_length = 0;
+    // In-process entries use an immutable canonical snapshot.  It is stronger
+    // than a full-text hash and lets replay reject unrelated edits without
+    // materializing the current document.
+    NoteTextPieceSequence::Snapshot expected_snapshot;
 };
 
 // Uses the same canonical UTF-16LE representation as TextEdit. SHA-256 makes
@@ -60,11 +65,23 @@ public:
                 NoteTextSelection selectionAfter,
                 NoteHistoryOperationKind kind,
                 uint64_t tick);
+    bool Record(const NoteTextPieceSequence::Snapshot& before,
+                const NoteTextPieceSequence::Snapshot& after,
+                std::wstring removedText,
+                const TextEdit& forward,
+                NoteTextSelection selectionBefore,
+                NoteTextSelection selectionAfter,
+                NoteHistoryOperationKind kind,
+                uint64_t tick);
 
     [[nodiscard]] std::optional<NoteHistoryReplay> PeekUndo() const;
     [[nodiscard]] std::optional<NoteHistoryReplay> PeekRedo() const;
-    bool CommitUndo();
-    bool CommitRedo();
+    // Reserve the opposite stack before mutating canonical text.  Once this
+    // succeeds, Commit* can move an entry without allocating after the edit.
+    [[nodiscard]] bool PrepareUndo();
+    [[nodiscard]] bool PrepareRedo();
+    bool CommitUndo(const NoteTextPieceSequence::Snapshot& currentSnapshot);
+    bool CommitRedo(const NoteTextPieceSequence::Snapshot& currentSnapshot);
 
 private:
     struct Entry {
@@ -79,10 +96,13 @@ private:
         size_t before_content_length = 0;
         core_hash::Sha256Digest after_content_fingerprint{};
         size_t after_content_length = 0;
+        NoteTextPieceSequence::Snapshot before_snapshot;
+        NoteTextPieceSequence::Snapshot after_snapshot;
     };
 
     static bool CanMerge(const Entry& previous, const Entry& next);
     static void Merge(Entry* previous, Entry next);
+    bool Store(Entry next);
 
     std::vector<Entry> undo_;
     std::vector<Entry> redo_;

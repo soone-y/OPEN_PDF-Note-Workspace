@@ -315,14 +315,19 @@ void ShowNewSessionDialog(HWND owner) {
 }
 
 std::filesystem::path ExeDirPath() {
-    wchar_t exePath[MAX_PATH]{};
-    DWORD len = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if (len == 0 || len == MAX_PATH) {
-        std::error_code ec;
-        auto cur = std::filesystem::current_path(ec);
-        return ec ? std::filesystem::path{} : cur;
+    std::vector<wchar_t> exePath(512, L'\0');
+    for (;;) {
+        const DWORD len = GetModuleFileNameW(nullptr, exePath.data(), static_cast<DWORD>(exePath.size()));
+        if (len > 0 && len + 1 < exePath.size()) {
+            return std::filesystem::path(std::wstring(exePath.data(), len)).parent_path();
+        }
+        if (len == 0 || exePath.size() >= 32768) {
+            std::error_code ec;
+            auto cur = std::filesystem::current_path(ec);
+            return ec ? std::filesystem::path{} : cur;
+        }
+        exePath.resize(exePath.size() * 2, L'\0');
     }
-    return std::filesystem::path(exePath).parent_path();
 }
 
 bool AddTempExternalLecture(HWND owner,
@@ -391,11 +396,16 @@ bool AddTempExternalLecture(HWND owner,
     g_tempExternalLectures.push_back({canon});
     if (!persistAndRefresh) return true;
 
-    if (!PersistTempExternalLecturesToSetup()) {
+    std::wstring persistError;
+    if (!PersistTempExternalLecturesToSetup(&persistError)) {
         if (owner) {
-            const std::wstring msg = localization::Text(
+            std::wstring msg = localization::Text(
                 g_config.studentMode ? L"workspace.actions.external.save_failed.one.student"
                                     : L"workspace.actions.external.save_failed.one.parent");
+            if (!persistError.empty() && persistError.find(L":\\") == std::wstring::npos &&
+                persistError.find(L"\\\\") == std::wstring::npos) {
+                msg += L"\n\n" + persistError;
+            }
             ShowSilentMessageDialog(owner, GetUiText().menuAddTempExternalLecture, msg, SoftNoticeKind::Warning);
         }
     }
@@ -421,11 +431,16 @@ void AddTempExternalLectures(HWND owner, const std::vector<std::wstring>& lectur
     }
     if (added == 0) return;
 
-    if (!PersistTempExternalLecturesToSetup()) {
+    std::wstring persistError;
+    if (!PersistTempExternalLecturesToSetup(&persistError)) {
         if (owner) {
-            const std::wstring msg = localization::Text(
+            std::wstring msg = localization::Text(
                 g_config.studentMode ? L"workspace.actions.external.save_failed.multiple.student"
                                     : L"workspace.actions.external.save_failed.multiple.parent");
+            if (!persistError.empty() && persistError.find(L":\\") == std::wstring::npos &&
+                persistError.find(L"\\\\") == std::wstring::npos) {
+                msg += L"\n\n" + persistError;
+            }
             ShowSilentMessageDialog(owner, GetUiText().menuAddTempExternalLecture, msg, SoftNoticeKind::Warning);
         }
     }
@@ -2426,10 +2441,18 @@ void CleanupMarkedOfficeImportTempDirBestEffort(const std::filesystem::path& dir
 }
 
 std::filesystem::path OfficeImportTempRootPath() {
-    wchar_t tempPath[MAX_PATH + 1]{};
-    const DWORD length = GetTempPathW(MAX_PATH, tempPath);
-    if (length == 0 || length >= MAX_PATH) return {};
-    return std::filesystem::path(tempPath) / L"PDFNoteWorkspace" / L"office_import";
+    std::vector<wchar_t> tempPath(512, L'\0');
+    for (;;) {
+        const DWORD length = GetTempPathW(static_cast<DWORD>(tempPath.size()), tempPath.data());
+        if (length > 0 && length < tempPath.size()) {
+            return std::filesystem::path(std::wstring(tempPath.data(), length)) /
+                   L"PDFNoteWorkspace" / L"office_import";
+        }
+        if (length == 0 || tempPath.size() >= 32768) return {};
+        // When the supplied buffer is insufficient, GetTempPathW returns the
+        // required size including the terminator.
+        tempPath.resize(std::min<size_t>(std::max<size_t>(tempPath.size() * 2, length + 1), 32768), L'\0');
+    }
 }
 
 std::filesystem::path MakeOfficeImportTempRoot(std::wstring* outErr) {
@@ -2654,6 +2677,12 @@ bool WaitForExpectedLibreOfficePdf(const std::filesystem::path& expectedPdf,
     }
 }
 
+bool ValidateLibreOfficeHandoffPathBudget(const std::filesystem::path& soffice,
+                                          const std::filesystem::path& sourceOfficeCopy,
+                                          const std::filesystem::path& outDir,
+                                          const std::filesystem::path& profileDir,
+                                          std::wstring* outErr);
+
 bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
                                         const std::filesystem::path& outDir,
                                         const std::filesystem::path& profileDir,
@@ -2664,6 +2693,9 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     std::filesystem::path soffice = FindLibreOfficeSoffice();
     if (soffice.empty()) {
         if (outErr) *outErr = localization::Text(L"workspace.actions.94c16d03c7a1").c_str();
+        return false;
+    }
+    if (!ValidateLibreOfficeHandoffPathBudget(soffice, sourceOfficeCopy, outDir, profileDir, outErr)) {
         return false;
     }
     CleanupLibreOfficePythonCacheBestEffort(soffice);
@@ -2932,6 +2964,9 @@ static bool RunLibreOfficePdfConversionInWorker(
         if (outErr) *outErr = localization::Text(L"workspace.actions.94c16d03c7a1").c_str();
         return false;
     }
+    if (!ValidateLibreOfficeHandoffPathBudget(soffice, sourceOfficeCopy, outDir, profileDir, outErr)) {
+        return false;
+    }
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
     if (!ec) std::filesystem::create_directories(profileDir, ec);
@@ -3090,6 +3125,44 @@ static bool StartOfficeBackgroundBatch(HWND hWnd, const std::filesystem::path& s
                        SoftNoticeKind::Info);
     }
     StartMoreOfficeBackgroundJobs();
+    return true;
+}
+
+bool ValidateLibreOfficeHandoffPathBudget(const std::filesystem::path& soffice,
+                                          const std::filesystem::path& sourceOfficeCopy,
+                                          const std::filesystem::path& outDir,
+                                          const std::filesystem::path& profileDir,
+                                          std::wstring* outErr) {
+    // Check the paths exactly as they will be handed to LibreOffice. This is
+    // deliberately repeated after staging so a future entry point cannot
+    // bypass the user-visible safety boundary.
+    constexpr size_t kSafePathLength = 220;
+    const std::filesystem::path expectedPdf = outDir /
+        (sourceOfficeCopy.stem().wstring() + L".pdf");
+    const std::filesystem::path profileRegistry = profileDir / L"user" /
+        L"registrymodifications.xcu";
+    const std::filesystem::path profileProbe = profileDir / L"user" /
+        L"uno_packages" / L"cache" / L"registry" /
+        L"com.sun.star.comp.deployment.configuration.PackageRegistryBackend" / L"backenddb.xml";
+    const std::array<std::pair<const wchar_t*, std::filesystem::path>, 6> paths = {{
+        {L"LibreOffice", soffice},
+        {L"input", sourceOfficeCopy},
+        {L"output folder", outDir},
+        {L"expected PDF", expectedPdf},
+        {L"profile", profileRegistry},
+        {L"profile cache", profileProbe},
+    }};
+    for (const auto& [role, path] : paths) {
+        const size_t length = path.wstring().size();
+        if (length <= kSafePathLength) continue;
+        if (outErr) {
+            *outErr = localization::Text(L"workspace.actions.2f67bd1d6fec").c_str();
+            *outErr += L"\n" + std::wstring(role) + L": " + path.wstring();
+            *outErr += L"\nlength=" + std::to_wstring(length) +
+                       L" (limit=" + std::to_wstring(kSafePathLength) + L")";
+        }
+        return false;
+    }
     return true;
 }
 

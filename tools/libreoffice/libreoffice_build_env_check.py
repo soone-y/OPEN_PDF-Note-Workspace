@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
@@ -16,10 +17,7 @@ from typing import Sequence
 
 
 ARCHIVES = [
-    "third_party/libreoffice/source_archives/libreoffice-26.2.5.2.tar.xz",
-    "third_party/libreoffice/source_archives/libreoffice-dictionaries-26.2.5.2.tar.xz",
-    "third_party/libreoffice/source_archives/libreoffice-help-26.2.5.2.tar.xz",
-    "third_party/libreoffice/source_archives/libreoffice-translations-26.2.5.2.tar.xz",
+    "third_party/libreoffice/source_archives/libreoffice-26.2.6.3.tar.xz",
 ]
 
 COMMANDS = [
@@ -127,7 +125,8 @@ def read_expected_sha256(path: Path) -> str | None:
     text = path.read_text(encoding="utf-8", errors="ignore").strip()
     if not text:
         return None
-    return text.split()[0].lower()
+    value = text.split()[0].lower()
+    return value if re.fullmatch(r"[0-9a-f]{64}", value) else None
 
 
 def calculate_sha256(path: Path) -> str:
@@ -141,27 +140,33 @@ def calculate_sha256(path: Path) -> str:
 def check_archive(repo_root: Path, relative: str) -> ArchiveCheck:
     path = repo_root / relative
     sha_file = path.with_suffix(path.suffix + ".sha256")
+    try:
+        sha_display = str(sha_file.relative_to(repo_root))
+    except ValueError:
+        sha_display = str(sha_file)
     if not path.exists():
-        return ArchiveCheck(relative, False, None, str(sha_file.relative_to(repo_root)), None, "missing")
+        return ArchiveCheck(relative, False, None, sha_display, None, "missing")
     expected = read_expected_sha256(sha_file)
     if expected is None:
         return ArchiveCheck(
             relative,
             True,
             path.stat().st_size,
-            str(sha_file.relative_to(repo_root)),
+            sha_display,
             None,
-            "sha256 sidecar missing or empty",
+            "sha256 sidecar missing, empty or malformed",
         )
     actual = calculate_sha256(path)
     matches = actual == expected
     detail = "sha256 ok" if matches else f"sha256 mismatch: actual {actual}"
-    return ArchiveCheck(relative, True, path.stat().st_size, str(sha_file.relative_to(repo_root)), matches, detail)
+    return ArchiveCheck(relative, True, path.stat().st_size, sha_display, matches, detail)
 
 
-def build_result(repo_root: Path) -> dict[str, object]:
+def build_result(repo_root: Path, archive_names: Sequence[str] | None = None) -> dict[str, object]:
+    if archive_names is not None and not archive_names:
+        raise ValueError("At least one source archive is required")
     commands = [check_command(*item) for item in COMMANDS]
-    archives = [check_archive(repo_root, item) for item in ARCHIVES]
+    archives = [check_archive(repo_root, item) for item in (ARCHIVES if archive_names is None else archive_names)]
     env_vars = [
         EnvVarCheck(name, name in os.environ and bool(os.environ.get(name)), os.environ.get(name))
         for name in VS_ENV_VARS
@@ -170,7 +175,7 @@ def build_result(repo_root: Path) -> dict[str, object]:
         item.name for item in commands if item.required == "required" and item.status != "found"
     ]
     archive_failures = [
-        item.path for item in archives if not item.exists or item.sha256_matches is False
+        item.path for item in archives if not item.exists or item.sha256_matches is not True
     ]
     return {
         "host": {
@@ -213,7 +218,7 @@ def print_text(result: dict[str, object]) -> None:
 
     print("\nSource archives")
     for item in result["source_archives"]:
-        marker = "OK" if item["exists"] and item["sha256_matches"] is not False else "MISS"
+        marker = "OK" if item["exists"] and item["sha256_matches"] is True else "MISS"
         size = item["size_bytes"] or 0
         print(f"  {marker:4} {item['path']} ({size / 1024 / 1024:.2f} MB) - {item['detail']}")
 
@@ -232,6 +237,7 @@ def parse_args() -> argparse.Namespace:
         description="Check local prerequisites for a custom LibreOffice build without changing files."
     )
     parser.add_argument("--repo-root", default=".", help="Repository root. Defaults to current directory.")
+    parser.add_argument("--archive", action="append", help="Explicit archive path (absolute or repository-relative); repeat for multiple inputs.")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     return parser.parse_args()
 
@@ -239,7 +245,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     repo_root = Path(args.repo_root).resolve()
-    result = build_result(repo_root)
+    result = build_result(repo_root, args.archive)
     if args.format == "json":
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:

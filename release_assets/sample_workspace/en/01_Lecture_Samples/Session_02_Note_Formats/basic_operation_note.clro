@@ -15,9 +15,9 @@
 
 <u>underlined text</>
 
-<char=#1a73e8>blue text</>
+<char=1a73e8>blue text</>
 
-<back=#fff2cc>text with a background color</>
+<back=fff2cc>text with a background color</>
 
 <font="Segoe UI"><size=15>text with an explicit font and size</></>
 

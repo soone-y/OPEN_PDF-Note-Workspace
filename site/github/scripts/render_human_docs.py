@@ -107,21 +107,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     .site-menu summary::-webkit-details-marker {{ display: none; }}
     .menu-icon {{
-      display: inline-block;
+      display: inline-flex;
+      flex-direction: column;
+      justify-content: space-between;
       width: 14px;
-      height: 10px;
+      height: 12px;
       margin-right: 7px;
-      border-top: 2px solid currentColor;
-      border-bottom: 2px solid currentColor;
-      position: relative;
     }}
-    .menu-icon::after {{
-      content: "";
-      position: absolute;
-      left: 0;
-      right: 0;
-      top: 4px;
-      border-top: 2px solid currentColor;
+    .menu-icon-bar {{
+      display: block;
+      width: 100%;
+      height: 2px;
+      border-radius: 1px;
+      background: currentColor;
     }}
     .site-menu summary:hover {{
       background-color: var(--note-bg);
@@ -193,6 +191,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }}
 
     .header-tools {{ display: inline-flex; align-items: center; gap: 12px; }}
+    .site-menu {{ margin-left: auto; }}
     .language-switch {{ color: var(--link); font-size: 0.82em; font-weight: 600; }}
     .contrast-toggle {{ display: inline-flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 0.82em; font-weight: 600; cursor: pointer; }}
     .contrast-toggle input {{ inline-size: 15px; block-size: 15px; accent-color: var(--accent); }}
@@ -342,7 +341,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       body {{ padding: 0; }}
       .container {{ min-height: 100vh; padding: 26px 18px; border: 0; border-top: 4px solid var(--note-border); border-radius: 0; box-shadow: none; }}
       .doc-header {{ align-items: flex-start; margin-bottom: 20px; }}
-      .header-tools {{ width: 100%; justify-content: space-between; gap: 8px; }}
+      .header-tools {{ justify-content: flex-start; gap: 8px; }}
       .site-menu nav {{ width: min(360px, calc(100vw - 36px)); }}
       h1 {{ font-size: 1.65em; }}
       h2 {{ font-size: 1.24em; }}
@@ -360,11 +359,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 <div class="container">
   <div class="doc-header">
-{navigation_html}
     <div class="header-tools">
 {language_switch_html}
       <label class="contrast-toggle"><input id="contrast-toggle" type="checkbox"><span>{contrast_label}</span></label>
     </div>
+{navigation_html}
   </div>
 
   <main>
@@ -622,11 +621,24 @@ def format_inline(text: str, root_rel: str) -> str:
 
 def language_switch_html(*, root_rel: str, rel_path: Path, site_dir: Path) -> str:
     """Return a same-document language switch for language-specific docs."""
-    if rel_path.parts[:2] not in (("docs", "ja"), ("docs", "en")):
+    introduction_counterparts = {
+        Path("introduction/index.md"): Path("introduction/en/index.md"),
+        Path("introduction/project_overview.md"): Path("introduction/en/project_overview.md"),
+        Path("introduction/core/features_faq.md"): Path("introduction/en/features_faq.md"),
+        Path("introduction/core/file_formats.md"): Path("introduction/en/file_formats.md"),
+    }
+    if rel_path.parts[:2] in (("docs", "ja"), ("docs", "en")):
+        current_locale = rel_path.parts[1]
+        other_locale = "en" if current_locale == "ja" else "ja"
+        counterpart = Path("docs") / other_locale / Path(*rel_path.parts[2:])
+    elif rel_path in introduction_counterparts:
+        current_locale = "ja"
+        counterpart = introduction_counterparts[rel_path]
+    elif rel_path in introduction_counterparts.values():
+        current_locale = "en"
+        counterpart = next(source for source, target in introduction_counterparts.items() if target == rel_path)
+    else:
         return ""
-    current_locale = rel_path.parts[1]
-    other_locale = "en" if current_locale == "ja" else "ja"
-    counterpart = Path("docs") / other_locale / Path(*rel_path.parts[2:])
     if not (site_dir / counterpart).is_file():
         return ""
     counterpart_html = counterpart.with_suffix(".html").as_posix()
@@ -637,7 +649,11 @@ def language_switch_html(*, root_rel: str, rel_path: Path, site_dir: Path) -> st
 
 def navigation_html(*, root_rel: str, rel_path: Path) -> str:
     """Render a one-language navigation menu and highlight the current section."""
-    locale = rel_path.parts[1] if rel_path.parts[:2] in (("docs", "ja"), ("docs", "en")) else "ja"
+    locale = (
+        rel_path.parts[1]
+        if rel_path.parts[:2] in (("docs", "ja"), ("docs", "en"), ("introduction", "en"))
+        else "ja"
+    )
     if rel_path.parts[0] == "introduction":
         current_section = "背景・設計・確認資料"
     elif rel_path.parts[:2] == ("docs", "en"):
@@ -653,13 +669,13 @@ def navigation_html(*, root_rel: str, rel_path: Path) -> str:
 
     if locale == "en":
         portal_entries = (
+            ("Documentation portal", "Return to the English-language entry point", f"{root_rel}en/index.html", "Documentation portal"),
             ("Project overview", "Packages, Standard and Lite editions, and core policies", f"{root_rel}README.html", "Project overview"),
             ("User documentation", "Setup, use, saving and recovery, file formats, and troubleshooting", f"{root_rel}docs/en/README.html", "User documentation"),
-            ("Background, design, and verification (Japanese)", "Design rationale, evaluation, evidence, and verification scope", f"{root_rel}introduction/index.html", "Background, design, and verification"),
+            ("Background, design, and verification", "Selected English material plus Japanese reference documents", f"{root_rel}introduction/en/index.html", "Background, design, and verification"),
             ("Licenses and third-party notices", "Terms and third-party components", f"{root_rel}LICENSES_INDEX.html", "Licenses and third-party notices"),
         )
         outside_entries = (
-            ("English documentation portal", "Return to the English-language entry point", f"{root_rel}en/index.html"),
             ("Product site", "Read an overview and find downloads", "https://pdf-note-workspace.soone-y.com/"),
             ("Get the release", "Open GitHub Releases", "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases", None),
             ("GitHub repository", "Browse source, issues, and public history", "https://github.com/soone-y/OPEN_PDF-Note-Workspace", None),
@@ -668,13 +684,13 @@ def navigation_html(*, root_rel: str, rel_path: Path) -> str:
         menu_aria_label = "Open documentation menu"
     else:
         portal_entries = (
+            ("文書ポータルのトップ", "目的別の入口へ戻る", f"{root_rel}index.html", "文書ポータル"),
             ("プロジェクトの概要", "配布物、通常版・Lite版、基本方針", f"{root_rel}README.html", "プロジェクトの概要"),
             ("日本語の文書", "導入・操作・保存・トラブル対処", f"{root_rel}docs/ja/README.html", "使い方・セットアップ"),
             ("背景・設計・確認資料", "設計の考え方、利用判断、根拠と確認範囲", f"{root_rel}introduction/index.html", "背景・設計・確認資料"),
             ("ライセンスと第三者通知", "利用条件と第三者コンポーネント", f"{root_rel}LICENSES_INDEX.html", "ライセンスと第三者通知"),
         )
         outside_entries = (
-            ("文書ポータルのトップ", "目的別の入口へ戻る", f"{root_rel}index.html"),
             ("紹介サイト", "ソフトの概要と配布先を見る", "https://pdf-note-workspace.soone-y.com/"),
             ("配布物を入手する", "GitHub Releases を開く", "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases", None),
             ("GitHub リポジトリ", "ソース、Issue、公開履歴を見る", "https://github.com/soone-y/OPEN_PDF-Note-Workspace", None),
@@ -706,7 +722,7 @@ def navigation_html(*, root_rel: str, rel_path: Path) -> str:
         for label, detail, href, *_ in outside_entries
     )
     return f"""    <details class=\"site-menu\">
-      <summary aria-label=\"{menu_aria_label}\"><span class=\"menu-icon\" aria-hidden=\"true\"></span>{menu_label}</summary>
+      <summary aria-label=\"{menu_aria_label}\"><span class=\"menu-icon\" aria-hidden=\"true\"><span class=\"menu-icon-bar\"></span><span class=\"menu-icon-bar\"></span><span class=\"menu-icon-bar\"></span></span>{menu_label}</summary>
       <nav aria-label=\"{menu_label}\">
         <div class=\"menu-links\">
 {portal_entry_html}
@@ -729,7 +745,11 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
     title = title_match.group(1).strip() if title_match else md_path.stem
 
     body_html = simple_markdown_to_html(content, root_rel)
-    language_code = rel_path.parts[1] if rel_path.parts[:2] in (("docs", "ja"), ("docs", "en")) else "ja"
+    language_code = (
+        rel_path.parts[1]
+        if rel_path.parts[:2] in (("docs", "ja"), ("docs", "en"), ("introduction", "en"))
+        else "ja"
+    )
     full_html = HTML_TEMPLATE.format(
         title=html.escape(title),
         language_code=language_code,

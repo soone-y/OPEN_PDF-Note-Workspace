@@ -295,6 +295,7 @@ void SetPdfSearchPointMarker(int pageIndex, double xPt, double yPt) {
 }
 
 void ClearPdfState() {
+    StopPdfKeyboardScroll(g_hPdfView);
     if (!IsDocumentOpenLockTransitionActive() && !g_pdf.path.empty()) {
         ReleaseDocumentOpenLock(std::filesystem::path(g_pdf.path));
     }

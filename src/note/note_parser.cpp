@@ -1,9 +1,11 @@
 #include "note/note_parser.h"
 
 #include "note/note_md4c_adapter.h"
+#include "note/note_syntax_lexical.h"
 
 #include <algorithm>
 #include <cwctype>
+#include <iterator>
 #include <optional>
 #include <string_view>
 
@@ -97,38 +99,6 @@ bool IsBackslashEscaped(std::wstring_view text, size_t pos) {
     return (count % 2) == 1;
 }
 
-bool TryParseFenceRun(std::wstring_view raw,
-                     size_t lineStart,
-                     size_t lineEnd,
-                     wchar_t* outMarker,
-                     size_t* outCount,
-                     bool closingOnly) {
-    if (!outMarker || !outCount) return false;
-    size_t start = lineStart;
-    while (start < lineEnd && (raw[start] == L' ' || raw[start] == L'\t')) {
-        ++start;
-    }
-    if (start >= lineEnd) return false;
-    const wchar_t marker = raw[start];
-    if (marker != L'`' && marker != L'~') return false;
-
-    size_t count = 0;
-    while (start + count < lineEnd && raw[start + count] == marker) {
-        ++count;
-    }
-    if (count < 3) return false;
-    if (closingOnly) {
-        size_t tail = start + count;
-        while (tail < lineEnd) {
-            if (!iswspace(raw[tail])) return false;
-            ++tail;
-        }
-    }
-    *outMarker = marker;
-    *outCount = count;
-    return true;
-}
-
 std::vector<Span> CollectRawMarkdownLiteralSpans(std::wstring_view raw) {
     std::vector<Span> spans;
     std::vector<Span> fencedSpans;
@@ -145,21 +115,20 @@ std::vector<Span> CollectRawMarkdownLiteralSpans(std::wstring_view raw) {
         if (lineSpanEnd > lineStart && raw[lineSpanEnd - 1] == L'\n') --lineSpanEnd;
         if (lineSpanEnd > lineStart && raw[lineSpanEnd - 1] == L'\r') --lineSpanEnd;
 
-        wchar_t marker = 0;
-        size_t count = 0;
+        NoteCodeFenceRun fenceRun;
         if (!inFence) {
-            if (TryParseFenceRun(raw, lineStart, lineSpanEnd, &marker, &count, false)) {
+            if (TryParseNoteCodeFenceRun(raw, {lineStart}, {lineSpanEnd}, false, &fenceRun)) {
                 inFence = true;
-                fenceMarker = marker;
-                fenceCount = count;
+                fenceMarker = fenceRun.marker;
+                fenceCount = fenceRun.marker_count;
                 fenceStart = lineStart;
             }
             continue;
         }
 
-        if (TryParseFenceRun(raw, lineStart, lineSpanEnd, &marker, &count, true) &&
-            marker == fenceMarker &&
-            count >= fenceCount) {
+        if (TryParseNoteCodeFenceRun(raw, {lineStart}, {lineSpanEnd}, true, &fenceRun) &&
+            fenceRun.marker == fenceMarker &&
+            fenceRun.marker_count >= fenceCount) {
             fencedSpans.push_back(Span{fenceStart, lineEnd});
             inFence = false;
             fenceMarker = 0;
@@ -235,12 +204,26 @@ std::vector<Span> CollectLiteralSpans(const NoteTextModel& model, const NoteDocu
         if (block.kind == BlockKind::CodeBlock && block.span.end > block.span.start) {
             spans.push_back(block.span);
         }
+        if (block.kind == BlockKind::FencedContainer && block.span.end > block.span.start) {
+            const auto addFence = [&](size_t start) {
+                const size_t end = model.raw.find_first_of(L"\r\n", start);
+                spans.push_back({{start}, {end == std::wstring::npos ? model.raw.size() : end}});
+            };
+            addFence(block.span.start.value);
+            if (block.fence_closed) {
+                const auto next = std::upper_bound(model.line_starts.begin(), model.line_starts.end(),
+                                                    block.span.end.value - 1);
+                if (next != model.line_starts.begin()) addFence(*std::prev(next));
+            }
+        }
     }
     for (const auto& inlineNode : doc.inlines) {
         if (inlineNode.kind == InlineKind::Code && inlineNode.span.end > inlineNode.span.start) {
             spans.push_back(inlineNode.span);
         }
     }
+    // Once extracted, TeX bodies are literal to heading/style post-processing.
+    for (const auto& math : doc.math_spans) spans.push_back(math.span);
     std::sort(spans.begin(), spans.end(), [](const Span& lhs, const Span& rhs) {
         if (lhs.start != rhs.start) return lhs.start < rhs.start;
         return lhs.end < rhs.end;
@@ -554,6 +537,14 @@ bool ParseMarkupBool(std::wstring_view value) {
            lowered == L"yes";
 }
 
+std::wstring NormalizeMarkupColor(std::wstring value) {
+    if (value.size() != 6) return value;
+    for (const wchar_t ch : value) {
+        if (!iswxdigit(ch)) return value;
+    }
+    return L"#" + value;
+}
+
 bool TryParseMarkupTag(std::wstring_view raw,
                        size_t openPos,
                        size_t* outTagEnd,
@@ -670,10 +661,10 @@ bool ParseStyleOpenTag(std::wstring_view content, StyleFrame* outFrame) {
         if (lowered == L"char" || lowered == L"c") {
             AddCloseAlias(&outFrame->close_aliases, L"char");
             AddCloseAlias(&outFrame->close_aliases, L"c");
-            outFrame->specs.push_back(StyleSpec{StyleKind::TextColor, trimmedValue});
+            outFrame->specs.push_back(StyleSpec{StyleKind::TextColor, NormalizeMarkupColor(trimmedValue)});
             recognized = true;
         } else if (lowered == L"back") {
-            pushSpec(StyleKind::BackgroundColor, trimmedValue);
+            pushSpec(StyleKind::BackgroundColor, NormalizeMarkupColor(trimmedValue));
         } else if (lowered == L"font" || lowered == L"f") {
             AddCloseAlias(&outFrame->close_aliases, L"font");
             AddCloseAlias(&outFrame->close_aliases, L"f");
@@ -1088,6 +1079,70 @@ void ExtractTexMathSpans(const NoteTextModel& model,
         }
         if (pos >= model.raw.size()) break;
 
+        // Math owns both closing forms before style parsing sees them.
+        // Rejected/incomplete headers advance too: never rescan a suffix.
+        NoteMathOpenTag opening;
+        if (!texSource && model.raw[pos] == L'<' && !IsBackslashEscaped(model.raw, pos) &&
+            TryParseNoteMathOpenTag(model.raw, {pos}, &opening)) {
+            const size_t start = pos;
+            size_t cursor = opening.end.value;
+            size_t depth = 1;
+            size_t closing = model.raw.size();
+            size_t closeLength = 0;
+            bool nested = false;
+            bool interrupted = false;
+            size_t closingLiteral = literalIndex;
+            while (opening.complete && !opening.self_closing && cursor < model.raw.size()) {
+                if (SkipLiteralSpanAt(literalSpans, &closingLiteral, &cursor)) {
+                    interrupted = true;
+                    break; // Never bridge a code or container boundary.
+                }
+                if (model.raw[cursor] != L'<' || IsBackslashEscaped(model.raw, cursor)) {
+                    ++cursor;
+                    continue;
+                }
+                const std::wstring_view suffix = std::wstring_view(model.raw).substr(cursor);
+                NoteMathOpenTag inner;
+                if (TryParseNoteMathOpenTag(model.raw, {cursor}, &inner)) {
+                    if (!inner.self_closing) ++depth;
+                    nested = true;
+                    cursor = inner.end.value;
+                } else if (const size_t length = NoteMathCloseTagLength(suffix)) {
+                    closing = cursor;
+                    closeLength = length;
+                    cursor += length;
+                    if (--depth == 0) break;
+                } else {
+                    ++cursor;
+                }
+            }
+            const bool complete = !interrupted && depth == 0;
+            const bool standalone = complete && IsStandaloneMathRange(model.raw, start, cursor);
+            const bool multiline = complete && ContainsLineBreak(model.raw, start, cursor);
+            const bool block = opening.display == NoteMathTagDisplay::Block ||
+                (opening.display == NoteMathTagDisplay::Automatic && standalone);
+            const bool invalidPlacement = complete && ((block && !standalone) || (!block && multiline));
+            if (!complete || !opening.valid_attributes || nested || invalidPlacement) {
+                AppendDiagnostic(doc, L"NOTE-E-MATH-TAG",
+                                 L"Math tags require a non-nested closing pair and valid display attributes; block math must stand alone and inline math must occupy one row.",
+                                 Span{start, cursor}, DiagnosticSeverity::Error);
+            } else {
+                const size_t mathIndex = AppendMathSpan(
+                    doc, block ? MathKind::Block : MathKind::Inline,
+                    closeLength == 3 ? MathDelimiter::LegacyMathTag : MathDelimiter::MathTag,
+                    Span{start, cursor}, Span{opening.end, {closing}},
+                    NormalizeMathText(std::wstring_view(model.raw).substr(opening.end.value, closing - opening.end.value)));
+                AddMathSupportDiagnostics(doc, mathIndex);
+                if (opening.unknown_attributes) {
+                    AppendDiagnostic(doc, L"NOTE-W-MATH-TAG-ATTRIBUTE",
+                                     L"Unknown math attributes are preserved in source but ignored for display.",
+                                     Span{{start}, opening.end}, DiagnosticSeverity::Warning);
+                }
+            }
+            pos = cursor;
+            continue;
+        }
+
         if (pos + 1 < model.raw.size() &&
             model.raw[pos] == L'$' &&
             model.raw[pos + 1] == L'$' &&
@@ -1260,61 +1315,146 @@ void ApplyHeadingTagPromotion(const NoteTextModel& model, NoteDocument* doc) {
     }
 }
 
-bool StartsLegacyMathTag(std::wstring_view raw, size_t pos, size_t* outEnd) {
-    if (pos >= raw.size() || raw[pos] != L'<') return false;
-    size_t cursor = pos + 1;
-    if (cursor < raw.size() && raw[cursor] == L'/') {
-        ++cursor;
-    }
-    if (cursor + 4 > raw.size()) return false;
-    if (!EqualsAsciiNoCase(raw.substr(cursor, 4), L"math")) return false;
-    cursor += 4;
-    if (cursor >= raw.size()) return false;
-    if (!(raw[cursor] == L'>' || iswspace(raw[cursor]) || raw[cursor] == L'/')) return false;
-    while (cursor < raw.size() && raw[cursor] != L'>') {
-        ++cursor;
-    }
-    if (cursor >= raw.size() || raw[cursor] != L'>') return false;
-    if (outEnd) *outEnd = cursor + 1;
-    return true;
-}
-
-void RejectLegacyMathTags(const NoteTextModel& model, NoteDocument* doc) {
-    if (!doc) return;
-    const std::vector<Span> literalSpans = CollectLiteralSpans(model, *doc);
-    size_t pos = 0;
-    while (pos < model.raw.size()) {
-        size_t tagEnd = 0;
-        if (!StartsLegacyMathTag(model.raw, pos, &tagEnd)) {
-            ++pos;
-            continue;
-        }
-
-        Span tagSpan{pos, tagEnd};
-        if (!IsInsideAnySpan(literalSpans, tagSpan)) {
-            AppendDiagnostic(doc,
-                             L"NOTE-E-LEGACY-MATH",
-                             L"Legacy <math> syntax is not accepted in the new Markdown/TeX path. Use $...$, $$...$$, \\(...\\), or \\[...\\].",
-                             tagSpan,
-                             DiagnosticSeverity::Error);
-        }
-        pos = std::max(tagEnd, pos + 1);
-    }
-}
-
 void PostProcessNoteDocument(const NoteTextModel& model, NoteDocument* doc) {
     if (!doc) return;
+    ExtractTexMathSpans(model, doc);
     ApplyHeadingTagPromotion(model, doc);
     ApplyLegacyMarkupStyleSpans(model, doc);
-    ExtractTexMathSpans(model, doc);
-    RejectLegacyMathTags(model, doc);
+}
+
+// The parser owns container boundaries; placement never rediscovers them.
+// Parse disjoint body regions so paragraphs/lazy list continuations cannot
+// cross an opening or closing fence. Source and recovery data stay unchanged;
+// every local parser offset is translated back to canonical UTF-16 offsets.
+void AppendMarkdownRegion(const NoteTextModel& source, Span region,
+                          size_t owner, NoteDocument* out) {
+    if (region.end <= region.start) return;
+    const NoteTextModel local = MakeNoteTextModel(
+        source.meta, source.raw.substr(region.start.value, region.end - region.start), source.revision);
+    NoteDocument parsed = ParseNoteDocumentWithMd4c(local);
+    const size_t blockBase = out->blocks.size();
+    const size_t inlineBase = out->inlines.size();
+    const LineColumn regionLocation = ResolveLineColumn(source, region.start.value);
+    const auto translate = [region](Span* span) {
+        span->start += region.start.value;
+        span->end += region.start.value;
+    };
+    for (BlockNode& block : parsed.blocks) {
+        translate(&block.span);
+        if (block.loc.line == 1) block.loc.column += regionLocation.column - 1;
+        block.loc.line += regionLocation.line - 1;
+        block.parent = block.parent == static_cast<size_t>(-1) ? owner : blockBase + block.parent;
+        block.first_inline += inlineBase;
+        out->blocks.push_back(std::move(block));
+    }
+    for (InlineNode& node : parsed.inlines) {
+        translate(&node.span);
+        if (node.parent_block != static_cast<size_t>(-1)) node.parent_block += blockBase;
+        out->inlines.push_back(std::move(node));
+    }
+    for (Diagnostic& diagnostic : parsed.diagnostics) {
+        translate(&diagnostic.span);
+        out->diagnostics.push_back(std::move(diagnostic));
+    }
+}
+
+[[nodiscard]] NoteDocument ParseMarkdownContainers(const NoteTextModel& model) {
+    NoteDocument out;
+    out.meta = model.meta;
+    SetNoteDocumentSourceRevision(&out, model.revision);
+    // Literal code and complete math have precedence over container fences.
+    NoteDocument protectedDocument;
+    ExtractTexMathSpans(model, &protectedDocument);
+    std::vector<Span> protectedSpans = CollectRawMarkdownLiteralSpans(model.raw);
+    for (const MathSpan& math : protectedDocument.math_spans) {
+        const auto next = std::upper_bound(model.line_starts.begin(), model.line_starts.end(), math.span.start.value);
+        if (next != model.line_starts.begin()) {
+            const size_t start = *std::prev(next);
+            size_t end = model.raw.find_first_of(L"\r\n", start);
+            if (end == std::wstring::npos) end = model.raw.size();
+            NoteContainerFenceRun fence;
+            if (TryParseNoteContainerFenceRun(
+                    std::wstring_view(model.raw).substr(start, end - start), &fence)) continue;
+        }
+        protectedSpans.push_back(math.span);
+    }
+    std::sort(protectedSpans.begin(), protectedSpans.end(), [](Span lhs, Span rhs) {
+        return lhs.start < rhs.start;
+    });
+    std::vector<size_t> stack;
+    size_t protectedIndex = 0;
+    size_t regionStart = 0;
+    for (size_t line = 0; line < model.line_starts.size(); ++line) {
+        const size_t start = model.line_starts[line];
+        const size_t next = line + 1 < model.line_starts.size()
+            ? model.line_starts[line + 1] : model.raw.size();
+        size_t end = next;
+        while (end > start && (model.raw[end - 1] == L'\r' || model.raw[end - 1] == L'\n')) --end;
+        while (protectedIndex < protectedSpans.size() &&
+               protectedSpans[protectedIndex].end.value <= start) ++protectedIndex;
+        if (protectedIndex < protectedSpans.size() &&
+            protectedSpans[protectedIndex].start.value < end) continue;
+        NoteContainerFenceRun fence;
+        const std::wstring_view text(model.raw.data() + start, end - start);
+        if (!TryParseNoteContainerFenceRun(text, &fence)) continue;
+        const bool bare = fence.info_span.start == fence.info_span.end;
+        if (bare && !stack.empty() &&
+            fence.marker_count < out.blocks[stack.back()].fence_marker_count) continue;
+        const size_t owner = stack.empty() ? static_cast<size_t>(-1) : stack.back();
+        AppendMarkdownRegion(model, {{regionStart}, {start}}, owner, &out);
+        if (bare && !stack.empty()) {
+            out.blocks[stack.back()].span.end = {next};
+            out.blocks[stack.back()].fence_closed = true;
+            stack.pop_back();
+        } else {
+            BlockNode block;
+            block.kind = BlockKind::FencedContainer;
+            block.span = {{start}, {model.raw.size()}};
+            block.loc = ResolveLineColumn(model, start);
+            block.parent = owner;
+            block.first_inline = out.inlines.size();
+            block.fence_marker_count = fence.marker_count;
+            block.info_string = std::wstring(text.substr(fence.info_span.start.value,
+                                                         fence.info_span.end - fence.info_span.start));
+            stack.push_back(out.blocks.size());
+            out.blocks.push_back(std::move(block));
+        }
+        regionStart = next;
+    }
+    AppendMarkdownRegion(model, {{regionStart}, {model.raw.size()}},
+                         stack.empty() ? static_cast<size_t>(-1) : stack.back(), &out);
+    return out;
 }
 
 } // namespace
 
 NoteDocument ParseNoteDocument(const NoteTextModel& model) {
-    NoteDocument doc = ParseNoteDocumentWithMd4c(model);
+    NoteDocument doc = model.raw.find(L":::") == std::wstring::npos
+        ? ParseNoteDocumentWithMd4c(model) : ParseMarkdownContainers(model);
     PostProcessNoteDocument(model, &doc);
+    // Legacy standalone heading promotion appends new roots after parsing.
+    // Attach those roots to the narrowest parsed enclosing container too.
+    std::vector<size_t> containers;
+    for (size_t index = 0; index < doc.blocks.size(); ++index) {
+        if (doc.blocks[index].kind == BlockKind::FencedContainer) containers.push_back(index);
+    }
+    if (containers.empty()) return doc;
+    for (BlockNode& block : doc.blocks) {
+        if (block.parent != static_cast<size_t>(-1) ||
+            block.origin != BlockOrigin::LegacyHeadingTag) continue;
+        const auto next = std::upper_bound(containers.begin(), containers.end(), block.span.start,
+            [&](Utf16CodeUnitOffset position, size_t index) {
+                return position < doc.blocks[index].span.start;
+            });
+        if (next == containers.begin()) continue;
+        for (size_t index = *std::prev(next); index != kInvalidIndex; index = doc.blocks[index].parent) {
+            const BlockNode& owner = doc.blocks[index];
+            if (owner.span.start < block.span.start && owner.span.end >= block.span.end) {
+                block.parent = index;
+                break;
+            }
+        }
+    }
     return doc;
 }
 

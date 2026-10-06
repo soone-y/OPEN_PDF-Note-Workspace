@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import struct
 import sys
@@ -119,32 +120,56 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def iter_binary_files(root: Path, includes: Sequence[str], all_files: bool) -> Iterable[Path]:
+def iter_binary_files(
+    root: Path, includes: Sequence[str], all_files: bool, *, require_files: bool = False,
+) -> Iterable[Path]:
     roots = list(includes) if includes else ["."]
     for include in roots:
         base = root / include
         if not base.exists():
-            continue
-        candidates = [base] if base.is_file() else base.rglob("*")
+            raise FileNotFoundError(f"scan target does not exist: {base}")
+        matched = 0
+
+        def reject_walk_error(error: OSError) -> None:
+            raise error
+
+        def walk_files() -> Iterable[Path]:
+            for directory, _names, files in os.walk(base, onerror=reject_walk_error, followlinks=False):
+                for name in files:
+                    yield Path(directory) / name
+
+        if base.is_file():
+            candidates = [base]
+        elif base.is_dir():
+            candidates = walk_files()
+        else:
+            raise OSError(f"scan target is not a readable file or directory: {base}")
         for path in candidates:
             if not path.is_file():
-                continue
+                raise OSError(f"enumerated scan file is unavailable: {path}")
             if all_files or path.suffix.lower() in BINARY_SUFFIXES:
+                matched += 1
                 yield path
+        if require_files and matched == 0:
+            raise ValueError(f"scan target contains no matching files: {base}")
 
 
 def c_string(data: bytes, offset: int) -> str:
     if offset < 0 or offset >= len(data):
-        return ""
+        raise ValueError("invalid PE string offset")
     end = data.find(b"\0", offset)
     if end < 0:
-        end = min(len(data), offset + 4096)
-    return data[offset:end].decode("ascii", errors="ignore")
+        raise ValueError("unterminated PE string")
+    value = data[offset:end].decode("ascii")
+    if not value:
+        raise ValueError("empty PE import name")
+    return value
 
 
 def rva_to_offset(rva: int, sections: Sequence[Section]) -> int | None:
     for section in sections:
-        size = max(section.virtual_size, section.raw_size)
+        # Virtual padding has no bytes in the on-disk image.
+        size = section.raw_size
         if section.virtual_address <= rva < section.virtual_address + size:
             return section.raw_pointer + (rva - section.virtual_address)
     return None
@@ -167,23 +192,40 @@ def parse_pe_imports_with_status(data: bytes) -> tuple[list[str], list[str], str
         section_count = struct.unpack_from("<H", data, coff + 2)[0]
         optional_size = struct.unpack_from("<H", data, coff + 16)[0]
         optional = coff + 20
+        if optional + optional_size > len(data):
+            raise ValueError("truncated PE optional header")
         magic = struct.unpack_from("<H", data, optional)[0]
         if magic == 0x10B:
-            import_dir_rva = struct.unpack_from("<I", data, optional + 104)[0]
+            directory_offset = 96
             thunk_size = 4
             ordinal_mask = 0x80000000
         elif magic == 0x20B:
-            import_dir_rva = struct.unpack_from("<I", data, optional + 120)[0]
+            directory_offset = 112
             thunk_size = 8
             ordinal_mask = 0x8000000000000000
         else:
             return [], [], "invalid-pe"
+        if optional_size < directory_offset:
+            raise ValueError("PE optional header is too short")
+        directory_count = struct.unpack_from("<I", data, optional + directory_offset - 4)[0]
+        if directory_count > (optional_size - directory_offset) // 8:
+            raise ValueError("PE data directories exceed the optional header")
+        import_dir_rva, import_dir_size = (0, 0)
+        if directory_count >= 2:
+            import_dir_rva, import_dir_size = struct.unpack_from(
+                "<II", data, optional + directory_offset + 8,
+            )
+        header_size = struct.unpack_from("<I", data, optional + 60)[0]
 
         section_table = optional + optional_size
+        if section_table + section_count * 40 > len(data):
+            raise ValueError("truncated PE section table")
         sections: list[Section] = []
         for idx in range(section_count):
             entry = section_table + idx * 40
             virtual_size, virtual_address, raw_size, raw_pointer = struct.unpack_from("<IIII", data, entry + 8)
+            if raw_size and raw_pointer + raw_size > len(data):
+                raise ValueError("truncated PE section data")
             sections.append(
                 Section(
                     virtual_address=virtual_address,
@@ -193,58 +235,73 @@ def parse_pe_imports_with_status(data: bytes) -> tuple[list[str], list[str], str
                 )
             )
 
-        import_offset = rva_to_offset(import_dir_rva, sections)
-        if import_offset is None:
+        if import_dir_rva == 0 and import_dir_size == 0:
             return [], [], "valid"
+        if import_dir_rva == 0 or import_dir_size < 20:
+            raise ValueError("invalid PE import directory")
+
+        def resolve(rva: int, size: int) -> int:
+            if rva == 0:
+                raise ValueError("null PE import RVA")
+            if rva < header_size and rva + size <= min(header_size, len(data)):
+                return rva
+            offset = rva_to_offset(rva, sections)
+            if offset is None or offset + size > len(data):
+                raise ValueError("unmapped PE import RVA")
+            if not any(
+                section.virtual_address <= rva and
+                rva + size <= section.virtual_address + section.raw_size
+                for section in sections
+            ):
+                raise ValueError("PE import crosses a section boundary")
+            return offset
+
+        def import_name(rva: int, hint_size: int = 0) -> str:
+            offset = resolve(rva, hint_size + 1)
+            value = c_string(data, offset + hint_size)
+            resolve(rva, hint_size + len(value) + 1)
+            return value
 
         dlls: list[str] = []
         symbols: list[str] = []
         seen_dlls: set[str] = set()
         seen_symbols: set[str] = set()
-        pos = import_offset
-        for _ in range(2048):
-            if pos + 20 > len(data):
-                break
+        for descriptor_index in range(min(2048, import_dir_size // 20)):
+            pos = resolve(import_dir_rva + descriptor_index * 20, 20)
             original_first_thunk, _time, _chain, name_rva, first_thunk = struct.unpack_from("<IIIII", data, pos)
-            if not any((original_first_thunk, name_rva, first_thunk)):
+            if not any((original_first_thunk, _time, _chain, name_rva, first_thunk)):
                 break
-            name_offset = rva_to_offset(name_rva, sections)
-            dll = c_string(data, name_offset) if name_offset is not None else ""
-            if dll and dll.lower() not in seen_dlls:
+            dll = import_name(name_rva)
+            if dll.lower() not in seen_dlls:
                 seen_dlls.add(dll.lower())
                 dlls.append(dll)
 
             thunk_rva = original_first_thunk or first_thunk
-            thunk_offset = rva_to_offset(thunk_rva, sections)
-            if thunk_offset is not None:
-                for thunk_idx in range(4096):
-                    entry_off = thunk_offset + thunk_idx * thunk_size
-                    if entry_off + thunk_size > len(data):
-                        break
-                    if thunk_size == 4:
-                        thunk = struct.unpack_from("<I", data, entry_off)[0]
-                    else:
-                        thunk = struct.unpack_from("<Q", data, entry_off)[0]
-                    if thunk == 0:
-                        break
-                    if thunk & ordinal_mask:
-                        continue
-                    import_name_offset = rva_to_offset(thunk, sections)
-                    if import_name_offset is None or import_name_offset + 2 >= len(data):
-                        continue
-                    symbol = c_string(data, import_name_offset + 2)
-                    if symbol and symbol.lower() not in seen_symbols:
-                        seen_symbols.add(symbol.lower())
-                        symbols.append(symbol)
-            pos += 20
+            for thunk_idx in range(4096):
+                entry_off = resolve(thunk_rva + thunk_idx * thunk_size, thunk_size)
+                thunk = struct.unpack_from("<I" if thunk_size == 4 else "<Q", data, entry_off)[0]
+                if thunk == 0:
+                    break
+                if thunk & ordinal_mask:
+                    continue
+                symbol = import_name(thunk, hint_size=2)
+                if symbol.lower() not in seen_symbols:
+                    seen_symbols.add(symbol.lower())
+                    symbols.append(symbol)
+            else:
+                raise ValueError("PE import thunk limit exceeded without a terminator")
+        else:
+            raise ValueError("PE import directory has no terminator within its bounds")
         return dlls, symbols, "valid"
-    except (struct.error, ValueError):
+    except (struct.error, ValueError, UnicodeError):
         return [], [], "invalid-pe"
 
 
 def parse_pe_imports(data: bytes) -> tuple[list[str], list[str]]:
-    """Return PE imports while preserving the original public two-value API."""
-    dlls, symbols, _status = parse_pe_imports_with_status(data)
+    """Return two values on success; callers must not mistake parse failure for no imports."""
+    dlls, symbols, status = parse_pe_imports_with_status(data)
+    if status != "valid":
+        raise ValueError(f"unable to inspect PE imports: {status}")
     return dlls, symbols
 
 
@@ -325,10 +382,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("error: --fail-on-import requires at least one --imported-dll value.")
         return 2
     queries = [] if args.imports_only else (args.query or list(DEFAULT_QUERIES))
-    findings = [
-        scan_file(path, root, queries, args.min_string, args.max_strings, args.all_strings)
-        for path in sorted(set(iter_binary_files(root, args.include, args.all_files)))
-    ]
+    try:
+        findings = [
+            scan_file(path, root, queries, args.min_string, args.max_strings, args.all_strings)
+            for path in sorted(set(iter_binary_files(
+                root, args.include, args.all_files,
+                require_files=args.fail_on_import or args.fail_on_unparseable_pe,
+            )))
+        ]
+    except (OSError, ValueError) as error:
+        print(f"Binary scan could not complete: {error}", file=sys.stderr)
+        return 2
     imported_dlls = {name.lower() for name in args.imported_dll}
     importers = [
         finding for finding in findings

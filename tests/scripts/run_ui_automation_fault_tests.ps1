@@ -11,12 +11,13 @@ param(
     [switch]$TargetSessionOnly,
     [switch]$PdfOnly,
     [switch]$PdfiumRawOnly,
+    [switch]$MathRenderOnly,
     [switch]$SkipPngExport
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-if (@(@($ConfigOnly, $LogContractOnly, $ConfigRecoveryOnly, $ConfigUnknownFieldOnly, $SettingsBundleOnly, $HelpVisibilityOnly, $DialogOwnerVisibilityOnly, $OutputExportOnly, $TargetSessionOnly, $PdfOnly, $PdfiumRawOnly) | Where-Object { $_ }).Count -gt 1) {
+if (@(@($ConfigOnly, $LogContractOnly, $ConfigRecoveryOnly, $ConfigUnknownFieldOnly, $SettingsBundleOnly, $HelpVisibilityOnly, $DialogOwnerVisibilityOnly, $OutputExportOnly, $TargetSessionOnly, $PdfOnly, $PdfiumRawOnly, $MathRenderOnly) | Where-Object { $_ }).Count -gt 1) {
     throw "Only one focused UI automation mode may be used at once."
 }
 if ($SkipPngExport -and -not $OutputExportOnly) {
@@ -72,6 +73,10 @@ if ($ConfigUnknownFieldOnly) {
   "debugLogOfficeConversion": false
 }
 '@
+} elseif ($MathRenderOnly) {
+    # The focused final-render probe keeps a local, disposable event trace so
+    # a failed publication can be diagnosed without the clipboard suite.
+    $workspaceJson = '{"classesDir":".","noteRenderEnabled":true,"noteRawOnly":false,"noteRenderMath":true,"debugLogPreviewTrace":true}'
 }
 Set-Content -LiteralPath (Join-Path $workspaceRoot "workspace.json") -Encoding UTF8 -Value $workspaceJson
 $expectedCorruptWorkspaceJson = if ($ConfigRecoveryOnly) {
@@ -81,6 +86,13 @@ $expectedCorruptWorkspaceJson = if ($ConfigRecoveryOnly) {
 }
 if (-not ($ConfigOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly)) {
     $fixtureDestination = Join-Path $workspaceRoot "lecture1\session1"
+    # The bundled first-session note has raw markup wider than its composed
+    # surface. Maximization can hide the final horizontal bar while native
+    # RichEdit still needs it; short synthetic notes do not exercise this.
+    # Keep this script ASCII-compatible with Windows PowerShell 5.1.
+    $resizeSampleRelative = [regex]::Unescape('release_assets/sample_workspace/ja/01_\u8b1b\u7fa9\u30b5\u30f3\u30d7\u30eb/\u7b2c01\u56de_\u57fa\u672c\u64cd\u4f5c/\u30ce\u30fc\u30c8_\u57fa\u672c\u64cd\u4f5c.clro')
+    $resizeSample = Join-Path $repoRoot $resizeSampleRelative
+    Copy-Item -LiteralPath $resizeSample -Destination (Join-Path $fixtureDestination "note_resize_sample.clro")
     Get-ChildItem -LiteralPath $fixtureSessionSource -Force | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $fixtureDestination -Recurse -Force
     }
@@ -119,6 +131,7 @@ $savedEnv = @{
     "PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_MATH_RENDER_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_MATH_RENDER_ONLY", "Process")
 }
 
 function Restore-Env {
@@ -145,6 +158,7 @@ try {
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY", $(if ($TargetSessionOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY", $(if ($PdfOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY", $(if ($PdfiumRawOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_MATH_RENDER_ONLY", $(if ($MathRenderOnly) { "1" } else { $null }), "Process")
 
     $proc = Start-Process -FilePath $exePath -WorkingDirectory $binDir -WindowStyle Hidden -PassThru
     $deadline = (Get-Date).AddSeconds($timeoutSec)
@@ -171,16 +185,34 @@ try {
     if (-not $result.StartsWith("OK")) {
         throw ("UI automation reported failure:`n{0}" -f $result.Trim())
     }
+    if ($MathRenderOnly) {
+        # A frame published before WM_PAINT is not sufficient evidence: a
+        # failed paint withdraws it and silently switches to native raw.
+        # Include startup's empty view as well as the opened-note scenario.
+        $paintTracePath = Join-Path $workspaceRoot "__resource__\__log__\preview_trace.log"
+        if (-not (Test-Path -LiteralPath $paintTracePath)) {
+            throw "The focused rendering test did not create its required paint trace."
+        }
+        if (Select-String -LiteralPath $paintTracePath -Pattern '\[FinalNoteRenderPaint\] failed' -Quiet) {
+            throw "A published final frame failed actual paint; see the local preview trace."
+        }
+        if (Select-String -LiteralPath $paintTracePath -Pattern '\[FinalNoteGeometryReplay\] exhausted' -Quiet) {
+            throw "Final scrollbar/client geometry did not converge; see the local preview trace."
+        }
+    }
     $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
     if ($traceText -notmatch "(?m)^automation:toolbar_fonts_ok$") {
         throw "UI automation did not verify the common font of every toolbar control."
     }
-    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly) -and
+    if ($MathRenderOnly -and $traceText -notmatch "(?m)^automation:math_render_ok$") {
+        throw "Final rendering automation did not complete its math/resize responsiveness probe."
+    }
+    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly) -and
         (-not (Test-Path -LiteralPath $noteStageDir) -or
          -not (Get-ChildItem -LiteralPath $noteStageDir -File -ErrorAction SilentlyContinue))) {
         throw "UI automation did not preserve the staged-exit note diff."
     }
-    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly)) {
+    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly)) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:output_export_ok$") {
             throw "UI automation did not complete the output export scenario."
@@ -235,7 +267,7 @@ try {
         }
     }
     }
-    if (-not ($LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly) -and $result -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
+    if (-not ($LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly) -and $result -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
             throw "UI automation did not complete the workspace configuration round-trip scenario."
@@ -301,7 +333,7 @@ try {
             throw "Settings bundle import did not leave a recovery backup."
         }
     }
-    $expectsHelpVisibility = $HelpVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly)
+    $expectsHelpVisibility = $HelpVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly)
     if ($expectsHelpVisibility) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:help_visibility_ok$") {
@@ -311,7 +343,7 @@ try {
             throw "UI automation did not keep the main window visible while closing help."
         }
     }
-    $expectsDialogOwnerVisibility = $DialogOwnerVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly)
+    $expectsDialogOwnerVisibility = $DialogOwnerVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly)
     if ($expectsDialogOwnerVisibility) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:dialog_owner_visibility_ok$") {

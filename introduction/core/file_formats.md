@@ -1,5 +1,7 @@
 # ファイル形式と保存
 
+英語版は [File Formats and Persistence](../en/file_formats.md) を参照してください。
+
 ---
 
 ## 1. FILE_EXTENSION_SPECIFICATION

@@ -681,7 +681,7 @@ try {
         else {
             Write-Info "Writing sanitized release setup JSON."
             Write-ReleaseSetupJson `
-                -DestPath (Join-Path $outDir "pdf_workspace_setup.json") `
+                -DestPath (Join-Path $outDir "pdf_note_workspace_setup.json") `
                 -WorkspaceRootRelativePath (Get-RelativePathWithinRelease -BaseDir $outDir -TargetPath $defaultWorkspacePath)
         }
     }

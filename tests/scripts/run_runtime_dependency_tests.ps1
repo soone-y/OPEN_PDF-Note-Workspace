@@ -104,7 +104,8 @@ Write-Host "Scanning out/bin for network-capable imports..." -ForegroundColor Cy
     --imported-dll $networkImportDlls[3] `
     --imported-dll $networkImportDlls[4] `
     --imported-dll $networkImportDlls[5] `
-    --fail-on-import
+    --fail-on-import `
+    --fail-on-unparseable-pe
 if ($LASTEXITCODE -ne 0) {
     throw "binary network import scan failed"
 }

@@ -16,10 +16,7 @@ from typing import Iterable
 
 
 DEFAULT_ARCHIVES = [
-    "third_party/libreoffice/source_archives/libreoffice-26.2.5.2.tar.xz",
-    "third_party/libreoffice/source_archives/libreoffice-dictionaries-26.2.5.2.tar.xz",
-    "third_party/libreoffice/source_archives/libreoffice-help-26.2.5.2.tar.xz",
-    "third_party/libreoffice/source_archives/libreoffice-translations-26.2.5.2.tar.xz",
+    "third_party/libreoffice/source_archives/libreoffice-26.2.6.3.tar.xz",
 ]
 
 TEXT_SUFFIXES = {
@@ -139,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--archive",
         action="append",
-        help="Archive path relative to repo root. Defaults to bundled LibreOffice archives.",
+        help="Archive path (absolute or repository-relative). Defaults to the adopted core archive name; downloads remain outside Git.",
     )
     parser.add_argument(
         "--query",

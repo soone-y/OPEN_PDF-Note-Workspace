@@ -1100,6 +1100,10 @@ static void FinalizeAppExitState(HWND hWnd, const std::wstring& previewTempPath)
 }
 
 static bool HandleManagedAbnormalExit(HWND hWnd) {
+    if (!SaveWorkspaceMemoForExit()) {
+        ClearManagedAbnormalExitRequest();
+        return false;
+    }
     const ULONGLONG startTick = preview_trace::TickNow();
     preview_trace::Append(
         L"ManagedAbnormalExit",
@@ -1169,6 +1173,7 @@ static bool HandleAppExit(HWND hWnd) {
         preview_trace::Append(L"HandleAppExit", L"abort=exit_blocking_dialog_open");
         return false;
     }
+    if (!SaveWorkspaceMemoForExit()) return false;
     CancelPendingLinkMode(hWnd);
     if (!CommitActiveEditsForAppExit(hWnd)) {
         preview_trace::Append(
@@ -1201,6 +1206,7 @@ static bool HandleAppExit(HWND hWnd) {
 }
 
 static bool PrepareWorkspaceRestart(HWND hWnd) {
+    if (!PrepareWorkspaceMemoRootChange()) return false;
     RememberCurrentSessionFiles();
     // A root switch must not force a potentially expensive original-file
     // integration.  Keep a recoverable checkpoint under the old root before
@@ -1268,6 +1274,8 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
             return;
         }
     }
+    // Save while the old root still owns its write lock.
+    if (!PrepareWorkspaceMemoRootChange()) return;
     std::wstring workspaceLockError;
     if (!AcquireWorkspaceWriteLock(std::filesystem::path(root), &workspaceLockError)) {
         std::wstring msg = localization::Text(L"ui.layout.888f6f981299").c_str();
@@ -1278,6 +1286,7 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
             L"abort=workspace_write_lock elapsed_ms=" + preview_trace::ElapsedMs(startTick));
         return;
     }
+    ResetWorkspaceMemoForRootChange();
     g_workspaceRoot = root;
     SetAppLogWorkspaceRoot(g_workspaceRoot);
     g_config = LoadWorkspaceConfig(g_workspaceRoot);

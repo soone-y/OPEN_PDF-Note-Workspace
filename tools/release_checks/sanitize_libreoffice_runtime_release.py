@@ -146,7 +146,7 @@ def remove_manifest_extras(
         if not path.exists() and not path.is_symlink():
             return
         resolved = ensure_inside_image(path, image)
-        if any(resolved == item or resolved in item.parents for item in protected):
+        if any(resolved == item or resolved in item.parents or item in resolved.parents for item in protected):
             raise ValueError(f"reduction manifest targets protected runtime path: {resolved}")
         targets.add(resolved)
 

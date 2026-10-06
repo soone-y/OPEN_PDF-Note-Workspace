@@ -447,7 +447,8 @@ try {
         throw "Localization catalog preparation failed for locale '$Locale'."
     }
 
-    $resourceInputs = @($resourceSource, $resourceHeader, $readOnlyViewerIconSource)
+    $resourceManifest = "src/resources/app.manifest"
+    $resourceInputs = @($resourceSource, $resourceHeader, $resourceManifest, $readOnlyViewerIconSource)
     $missingResourceInputs = @($resourceInputs | Where-Object { -not (Test-Path -LiteralPath $_) })
     if ($missingResourceInputs.Count -gt 0) {
         Write-Host "Missing resource files required for read-only viewer icon:" -ForegroundColor Red

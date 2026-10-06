@@ -1,6 +1,7 @@
 #include "note/note_history.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace note {
 namespace {
@@ -67,6 +68,7 @@ TextState DescribeAppliedEdit(std::wstring_view before, const TextEdit& edit) {
 
 bool NoteHistoryReplayMatchesCurrentText(const NoteHistoryReplay& replay,
                                          std::wstring_view currentText) {
+    if (replay.expected_snapshot.valid()) return false;
     const TextState state = DescribeText(currentText);
     return state.length == replay.expected_content_length &&
            state.fingerprint == replay.expected_content_fingerprint;
@@ -115,16 +117,52 @@ bool NoteHistory::Record(std::wstring_view textBefore,
         next.unit_class = units.front().klass;
     }
 
-    redo_.clear();
-    if (!undo_.empty() && CanMerge(undo_.back(), next)) {
-        Merge(&undo_.back(), std::move(next));
-    } else {
-        undo_.push_back(std::move(next));
-        if (undo_.size() > kMaxHistoryEntries) {
-            undo_.erase(undo_.begin());
-        }
+    return Store(std::move(next));
+}
+
+bool NoteHistory::Record(const NoteTextPieceSequence::Snapshot& before,
+                         const NoteTextPieceSequence::Snapshot& after,
+                         std::wstring removedText,
+                         const TextEdit& forward,
+                         NoteTextSelection selectionBefore,
+                         NoteTextSelection selectionAfter,
+                         NoteHistoryOperationKind kind,
+                         uint64_t tick) {
+    if (!before.valid() || !after.valid() ||
+        forward.start.value > before.text_length() ||
+        forward.deleted_len > before.text_length() - forward.start.value ||
+        removedText.size() != forward.deleted_len ||
+        (forward.deleted_len == 0 && forward.inserted_text.empty()) ||
+        forward.inserted_text.size() > std::numeric_limits<size_t>::max() -
+                                           (before.text_length() - forward.deleted_len) ||
+        after.text_length() != before.text_length() - forward.deleted_len +
+                                   forward.inserted_text.size()) {
+        return false;
     }
-    return true;
+
+    Entry next;
+    next.forward = forward;
+    next.inverse.start = forward.start;
+    next.inverse.deleted_len = forward.inserted_text.size();
+    next.inverse.inserted_text = std::move(removedText);
+    next.selectionBefore = selectionBefore;
+    next.selectionAfter = selectionAfter;
+    next.kind = kind;
+    next.tick = tick;
+    next.before_snapshot = before;
+    next.after_snapshot = after;
+    const std::wstring_view affected = forward.inserted_text.empty()
+        ? std::wstring_view(next.inverse.inserted_text)
+        : std::wstring_view(forward.inserted_text);
+    const std::vector<TextUnit> units = BuildTextUnits(affected);
+    if (!units.empty() && units.front().klass != TextUnitClass::LineBreak &&
+        std::all_of(units.begin(), units.end(), [&](const TextUnit& unit) {
+            return unit.klass == units.front().klass;
+        })) {
+        next.unit_class = units.front().klass;
+    }
+
+    return Store(std::move(next));
 }
 
 std::optional<NoteHistoryReplay> NoteHistory::PeekUndo() const {
@@ -132,7 +170,8 @@ std::optional<NoteHistoryReplay> NoteHistory::PeekUndo() const {
     const Entry& entry = undo_.back();
     return NoteHistoryReplay{entry.inverse, entry.forward.inserted_text,
                              entry.after_content_fingerprint,
-                             entry.after_content_length};
+                             entry.after_content_length,
+                             entry.after_snapshot};
 }
 
 std::optional<NoteHistoryReplay> NoteHistory::PeekRedo() const {
@@ -140,20 +179,82 @@ std::optional<NoteHistoryReplay> NoteHistory::PeekRedo() const {
     const Entry& entry = redo_.back();
     return NoteHistoryReplay{entry.forward, entry.inverse.inserted_text,
                              entry.before_content_fingerprint,
-                             entry.before_content_length};
+                             entry.before_content_length,
+                             entry.before_snapshot};
 }
 
-bool NoteHistory::CommitUndo() {
+bool NoteHistory::PrepareUndo() {
     if (undo_.empty()) return false;
+    try {
+        if (redo_.size() == redo_.capacity()) redo_.reserve(redo_.size() + 1);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool NoteHistory::PrepareRedo() {
+    if (redo_.empty()) return false;
+    try {
+        if (undo_.size() == undo_.capacity()) undo_.reserve(undo_.size() + 1);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool NoteHistory::CommitUndo(const NoteTextPieceSequence::Snapshot& currentSnapshot) {
+    if (undo_.empty() || !currentSnapshot.valid() || redo_.size() == redo_.capacity()) {
+        return false;
+    }
     redo_.push_back(std::move(undo_.back()));
     undo_.pop_back();
+    // Applying an inverse constructs a new persistent root even when it
+    // reproduces the old text.  The next redo must therefore expect this
+    // actual published root, rather than the historical pre-edit root.
+    redo_.back().before_snapshot = currentSnapshot;
+    // The state reached by this undo is also the post-state of the preceding
+    // undo entry.  Keep the adjacent stack boundary in the same published
+    // root so a second undo does not reject text that is semantically equal
+    // but structurally reconstructed.
+    if (!undo_.empty()) undo_.back().after_snapshot = currentSnapshot;
     return true;
 }
 
-bool NoteHistory::CommitRedo() {
-    if (redo_.empty()) return false;
+bool NoteHistory::CommitRedo(const NoteTextPieceSequence::Snapshot& currentSnapshot) {
+    if (redo_.empty() || !currentSnapshot.valid() || undo_.size() == undo_.capacity()) {
+        return false;
+    }
     undo_.push_back(std::move(redo_.back()));
     redo_.pop_back();
+    // Symmetrically, publish the root produced by replaying forward as the
+    // expected state for a following undo.
+    undo_.back().after_snapshot = currentSnapshot;
+    // The state reached by this redo is the pre-state of the next redo entry.
+    // Refresh that adjacent boundary for the same reason as CommitUndo.
+    if (!redo_.empty()) redo_.back().before_snapshot = currentSnapshot;
+    return true;
+}
+
+bool NoteHistory::Store(Entry next) {
+    try {
+        if (!undo_.empty() && CanMerge(undo_.back(), next)) {
+            // Merge a temporary entry first.  A failed allocation then leaves
+            // both the prior undo chain and the redo chain intact.
+            Entry merged = undo_.back();
+            Merge(&merged, std::move(next));
+            undo_.back() = std::move(merged);
+        } else {
+            // A new entry only invalidates redo after it has been stored.
+            undo_.push_back(std::move(next));
+            if (undo_.size() > kMaxHistoryEntries) {
+                undo_.erase(undo_.begin());
+            }
+        }
+    } catch (...) {
+        return false;
+    }
+    redo_.clear();
     return true;
 }
 
@@ -206,6 +307,7 @@ void NoteHistory::Merge(Entry* previous, Entry next) {
     previous->tick = next.tick;
     previous->after_content_fingerprint = next.after_content_fingerprint;
     previous->after_content_length = next.after_content_length;
+    previous->after_snapshot = std::move(next.after_snapshot);
 }
 
 } // namespace note

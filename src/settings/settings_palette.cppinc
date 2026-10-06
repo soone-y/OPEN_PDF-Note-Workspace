@@ -14,10 +14,7 @@ constexpr int IDC_PALETTE_EDITOR_GREEN = 5221;
 constexpr int IDC_PALETTE_EDITOR_BLUE = 5222;
 constexpr int IDC_PALETTE_EDITOR_PREVIEW = 5223;
 constexpr int IDC_PALETTE_EDITOR_HEX = 5224;
-constexpr int IDC_PALETTE_EDITOR_SV = 5225;
-constexpr int IDC_PALETTE_EDITOR_HUE = 5226;
 constexpr int IDC_PALETTE_EDITOR_EYEDROPPER = 5227;
-constexpr int IDC_PALETTE_EDITOR_STATUS = 5228;
 constexpr int IDC_PALETTE_EDITOR_CHOICE_BASE = 5230;
 constexpr int IDC_PALETTE_EDITOR_CHOICE_COUNT = 8;
 
@@ -100,60 +97,10 @@ struct PaletteColorEditorCtx {
     bool syncingFields = false;
     bool eyedropperActive = false;
     COLORREF eyedropperInitialColor = RGB(0, 0, 0);
-    double hue = 0.0;
-    double saturation = 0.0;
-    double value = 0.0;
     HWND preview = nullptr;
-    HWND saturationValue = nullptr;
-    HWND hueStrip = nullptr;
-    HWND status = nullptr;
     std::array<COLORREF, IDC_PALETTE_EDITOR_CHOICE_COUNT> choices{};
     size_t choiceCount = 0;
 };
-
-static COLORREF PaletteColorFromHsv(double hue, double saturation, double value) {
-    hue = std::fmod(std::max(0.0, hue), 360.0);
-    saturation = std::clamp(saturation, 0.0, 1.0);
-    value = std::clamp(value, 0.0, 1.0);
-    const double chroma = value * saturation;
-    const double sector = hue / 60.0;
-    const double x = chroma * (1.0 - std::abs(std::fmod(sector, 2.0) - 1.0));
-    double r = 0.0, g = 0.0, b = 0.0;
-    if (sector < 1.0) { r = chroma; g = x; }
-    else if (sector < 2.0) { r = x; g = chroma; }
-    else if (sector < 3.0) { g = chroma; b = x; }
-    else if (sector < 4.0) { g = x; b = chroma; }
-    else if (sector < 5.0) { r = x; b = chroma; }
-    else { r = chroma; b = x; }
-    const double match = value - chroma;
-    return RGB(static_cast<BYTE>(std::lround((r + match) * 255.0)),
-               static_cast<BYTE>(std::lround((g + match) * 255.0)),
-               static_cast<BYTE>(std::lround((b + match) * 255.0)));
-}
-
-static void PaletteColorToHsv(COLORREF color, double* outHue, double* outSaturation, double* outValue) {
-    const double r = GetRValue(color) / 255.0;
-    const double g = GetGValue(color) / 255.0;
-    const double b = GetBValue(color) / 255.0;
-    const double maximum = std::max({r, g, b});
-    const double minimum = std::min({r, g, b});
-    const double delta = maximum - minimum;
-    double hue = 0.0;
-    if (delta > 0.0) {
-        if (maximum == r) hue = 60.0 * std::fmod((g - b) / delta, 6.0);
-        else if (maximum == g) hue = 60.0 * ((b - r) / delta + 2.0);
-        else hue = 60.0 * ((r - g) / delta + 4.0);
-        if (hue < 0.0) hue += 360.0;
-    }
-    if (outHue) *outHue = hue;
-    if (outSaturation) *outSaturation = maximum <= 0.0 ? 0.0 : delta / maximum;
-    if (outValue) *outValue = maximum;
-}
-
-static bool PaletteColorIsDark(COLORREF color) {
-    const int luminance = 299 * GetRValue(color) + 587 * GetGValue(color) + 114 * GetBValue(color);
-    return luminance < 128000;
-}
 
 static bool TryReadPaletteChannel(HWND hWnd, int id, BYTE* out) {
     if (!out) return false;
@@ -228,23 +175,9 @@ static void SetPaletteEditorColor(HWND hWnd, PaletteColorEditorCtx* ctx, COLORRE
     const std::wstring hex = PaletteEditorHex(color);
     SetWindowTextW(GetDlgItem(hWnd, IDC_PALETTE_EDITOR_HEX), hex.c_str());
     ctx->color = color;
-    PaletteColorToHsv(color, &ctx->hue, &ctx->saturation, &ctx->value);
     ctx->syncingFields = false;
     if (ctx->preview) InvalidateRect(ctx->preview, nullptr, TRUE);
-    if (ctx->saturationValue) InvalidateRect(ctx->saturationValue, nullptr, TRUE);
-    if (ctx->hueStrip) InvalidateRect(ctx->hueStrip, nullptr, TRUE);
     InvalidateRect(hWnd, nullptr, FALSE);
-}
-
-static void UpdatePaletteEyedropperUi(HWND hWnd, PaletteColorEditorCtx* ctx) {
-    if (!ctx) return;
-    const std::wstring button = localization::Text(L"settings.palette.eyedropper");
-    SetWindowTextW(GetDlgItem(hWnd, IDC_PALETTE_EDITOR_EYEDROPPER), button.c_str());
-    if (!ctx->status) return;
-    const std::wstring status = ctx->eyedropperActive
-        ? localization::Text(L"settings.palette.eyedropper_hint")
-        : L"";
-    SetWindowTextW(ctx->status, status.c_str());
 }
 
 static bool SamplePaletteColorAtCursor(COLORREF* outColor) {
@@ -258,75 +191,6 @@ static bool SamplePaletteColorAtCursor(COLORREF* outColor) {
     if (color == CLR_INVALID) return false;
     *outColor = color;
     return true;
-}
-
-static void UpdatePaletteEditorFromCanvas(HWND hWnd, PaletteColorEditorCtx* ctx, HWND canvas, bool hueCanvas) {
-    if (!ctx || !canvas) return;
-    POINT pt{};
-    if (!GetCursorPos(&pt) || !ScreenToClient(canvas, &pt)) return;
-    RECT rc{};
-    GetClientRect(canvas, &rc);
-    const int width = static_cast<int>(std::max<LONG>(1, rc.right - rc.left));
-    const int height = static_cast<int>(std::max<LONG>(1, rc.bottom - rc.top));
-    if (pt.x < 0 || pt.y < 0 || pt.x >= width || pt.y >= height) return;
-    if (hueCanvas) {
-        ctx->hue = 360.0 * static_cast<double>(pt.y) / std::max(1, height - 1);
-    } else {
-        ctx->saturation = static_cast<double>(pt.x) / std::max(1, width - 1);
-        ctx->value = 1.0 - static_cast<double>(pt.y) / std::max(1, height - 1);
-    }
-    const double hue = ctx->hue;
-    const double saturation = ctx->saturation;
-    const double value = ctx->value;
-    SetPaletteEditorColor(hWnd, ctx, PaletteColorFromHsv(hue, saturation, value));
-    // RGB gray has no mathematical hue. Keep the explicit canvas selection so
-    // choosing a hue before saturation still updates the gradient correctly.
-    ctx->hue = hue;
-    ctx->saturation = saturation;
-    ctx->value = value;
-    if (ctx->saturationValue) InvalidateRect(ctx->saturationValue, nullptr, TRUE);
-    if (ctx->hueStrip) InvalidateRect(ctx->hueStrip, nullptr, TRUE);
-}
-
-static void DrawPaletteSaturationValueCanvas(const DRAWITEMSTRUCT* dis, const PaletteColorEditorCtx* ctx) {
-    if (!dis || !ctx) return;
-    const RECT rc = dis->rcItem;
-    const int width = static_cast<int>(std::max<LONG>(1, rc.right - rc.left));
-    const int height = static_cast<int>(std::max<LONG>(1, rc.bottom - rc.top));
-    for (int y = 0; y < height; ++y) {
-        const double value = 1.0 - static_cast<double>(y) / std::max(1, height - 1);
-        for (int x = 0; x < width; ++x) {
-            const double saturation = static_cast<double>(x) / std::max(1, width - 1);
-            SetPixelV(dis->hDC, rc.left + x, rc.top + y, PaletteColorFromHsv(ctx->hue, saturation, value));
-        }
-    }
-    const int markerX = rc.left + static_cast<int>(std::lround(ctx->saturation * std::max(0, width - 1)));
-    const int markerY = rc.top + static_cast<int>(std::lround((1.0 - ctx->value) * std::max(0, height - 1)));
-    HPEN marker = CreatePen(PS_SOLID, 2, PaletteColorIsDark(ctx->color) ? RGB(255, 255, 255) : RGB(0, 0, 0));
-    HGDIOBJ oldPen = SelectObject(dis->hDC, marker);
-    HGDIOBJ oldBrush = SelectObject(dis->hDC, GetStockObject(HOLLOW_BRUSH));
-    Ellipse(dis->hDC, markerX - 5, markerY - 5, markerX + 6, markerY + 6);
-    SelectObject(dis->hDC, oldBrush);
-    SelectObject(dis->hDC, oldPen);
-    DeleteObject(marker);
-}
-
-static void DrawPaletteHueCanvas(const DRAWITEMSTRUCT* dis, const PaletteColorEditorCtx* ctx) {
-    if (!dis || !ctx) return;
-    const RECT rc = dis->rcItem;
-    const int width = static_cast<int>(std::max<LONG>(1, rc.right - rc.left));
-    const int height = static_cast<int>(std::max<LONG>(1, rc.bottom - rc.top));
-    for (int y = 0; y < height; ++y) {
-        const COLORREF color = PaletteColorFromHsv(360.0 * static_cast<double>(y) / std::max(1, height - 1), 1.0, 1.0);
-        for (int x = 0; x < width; ++x) SetPixelV(dis->hDC, rc.left + x, rc.top + y, color);
-    }
-    const int markerY = rc.top + static_cast<int>(std::lround(ctx->hue / 360.0 * std::max(0, height - 1)));
-    HPEN marker = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
-    HGDIOBJ oldPen = SelectObject(dis->hDC, marker);
-    MoveToEx(dis->hDC, rc.left, markerY, nullptr);
-    LineTo(dis->hDC, rc.right, markerY);
-    SelectObject(dis->hDC, oldPen);
-    DeleteObject(marker);
 }
 
 static bool ReadPaletteEditorColor(HWND hWnd, COLORREF* out) {
@@ -374,11 +238,6 @@ static void EnsurePaletteColorEditorClass() {
             const int choiceW = ScaleY(hWnd, 28);
             const int choiceGap = ScaleY(hWnd, 6);
             const int y0 = pad;
-            const int canvasX = pad + ScaleY(hWnd, 150);
-            const int canvasY = y0;
-            const int canvasW = ScaleY(hWnd, 220);
-            const int canvasH = ScaleY(hWnd, 180);
-            const int hueW = ScaleY(hWnd, 22);
             const std::array<std::pair<const wchar_t*, int>, 3> channels{{
                 {L"R", IDC_PALETTE_EDITOR_RED}, {L"G", IDC_PALETTE_EDITOR_GREEN}, {L"B", IDC_PALETTE_EDITOR_BLUE}
             }};
@@ -399,12 +258,6 @@ static void EnsurePaletteColorEditorClass() {
             ctx->preview = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
                                            pad, previewY, previewW, previewH, hWnd,
                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_PREVIEW)), g_hInst, nullptr);
-            ctx->saturationValue = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW | SS_NOTIFY,
-                                                    canvasX, canvasY, canvasW, canvasH, hWnd,
-                                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_SV)), g_hInst, nullptr);
-            ctx->hueStrip = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW | SS_NOTIFY,
-                                            canvasX + canvasW + gap, canvasY, hueW, canvasH, hWnd,
-                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_HUE)), g_hInst, nullptr);
             const int hexY = previewY + previewH + gap;
             HWND hexLabel = CreateWindowExW(0, L"STATIC", L"HEX", WS_CHILD | WS_VISIBLE,
                                              pad, hexY + ScaleY(hWnd, 4), labelW + ScaleY(hWnd, 14), rowH,
@@ -428,24 +281,20 @@ static void EnsurePaletteColorEditorClass() {
                                               g_hInst, nullptr);
                 SetUIFont(choice);
             }
+            const int eyedropperY = choiceY + 2 * (rowH + gap);
             HWND eyedropper = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.palette.eyedropper").c_str(),
                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                              canvasX, canvasY + canvasH + gap, ScaleY(hWnd, 156), rowH, hWnd,
+                                              pad, eyedropperY, ScaleY(hWnd, 156), rowH, hWnd,
                                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_EYEDROPPER)), g_hInst, nullptr);
             SetUIFont(eyedropper);
-            ctx->status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-                                          canvasX, canvasY + canvasH + gap + rowH + ScaleY(hWnd, 4),
-                                          canvasW + hueW + gap, rowH * 2, hWnd,
-                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_STATUS)), g_hInst, nullptr);
-            SetUIFont(ctx->status);
-            const int buttonY = choiceY + 2 * rowH + gap + ScaleY(hWnd, 14);
+            const int buttonY = eyedropperY + rowH + ScaleY(hWnd, 14);
             HWND ok = CreateWindowExW(0, L"BUTTON", UiApplyLabel().c_str(),
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                                      canvasX + canvasW + hueW + gap - buttonW * 2 - gap, buttonY, buttonW, rowH,
+                                      pad, buttonY, buttonW, rowH,
                                       hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
             HWND cancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel().c_str(),
                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                          canvasX + canvasW + hueW + gap - buttonW, buttonY, buttonW, rowH,
+                                          pad + buttonW + gap, buttonY, buttonW, rowH,
                                           hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
             SetUIFont(ok);
             SetUIFont(cancel);
@@ -455,14 +304,6 @@ static void EnsurePaletteColorEditorClass() {
         case WM_DRAWITEM: {
             auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
             if (!ctx || !dis) break;
-            if (dis->CtlID == IDC_PALETTE_EDITOR_SV) {
-                DrawPaletteSaturationValueCanvas(dis, ctx);
-                return TRUE;
-            }
-            if (dis->CtlID == IDC_PALETTE_EDITOR_HUE) {
-                DrawPaletteHueCanvas(dis, ctx);
-                return TRUE;
-            }
             if (dis->CtlID >= IDC_PALETTE_EDITOR_CHOICE_BASE &&
                 dis->CtlID < IDC_PALETTE_EDITOR_CHOICE_BASE + static_cast<UINT>(ctx->choiceCount)) {
                 const size_t idx = static_cast<size_t>(dis->CtlID - IDC_PALETTE_EDITOR_CHOICE_BASE);
@@ -481,19 +322,10 @@ static void EnsurePaletteColorEditorClass() {
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
             const int code = HIWORD(wParam);
-            if (id == IDC_PALETTE_EDITOR_SV && code == STN_CLICKED) {
-                UpdatePaletteEditorFromCanvas(hWnd, ctx, ctx->saturationValue, false);
-                return 0;
-            }
-            if (id == IDC_PALETTE_EDITOR_HUE && code == STN_CLICKED) {
-                UpdatePaletteEditorFromCanvas(hWnd, ctx, ctx->hueStrip, true);
-                return 0;
-            }
             if (id == IDC_PALETTE_EDITOR_EYEDROPPER && code == BN_CLICKED) {
                 ctx->eyedropperInitialColor = ctx->color;
                 ctx->eyedropperActive = true;
                 SetCapture(hWnd);
-                UpdatePaletteEyedropperUi(hWnd, ctx);
                 return 0;
             }
             if (id >= IDC_PALETTE_EDITOR_CHOICE_BASE &&
@@ -546,42 +378,24 @@ static void EnsurePaletteColorEditorClass() {
             }
             break;
         }
-        case WM_MOUSEMOVE:
-            if (ctx && ctx->eyedropperActive) {
-                COLORREF sampled{};
-                if (SamplePaletteColorAtCursor(&sampled)) SetPaletteEditorColor(hWnd, ctx, sampled);
-                return 0;
-            }
-            break;
         case WM_LBUTTONUP:
             if (ctx && ctx->eyedropperActive) {
                 COLORREF sampled{};
                 if (SamplePaletteColorAtCursor(&sampled)) SetPaletteEditorColor(hWnd, ctx, sampled);
                 ctx->eyedropperActive = false;
                 if (GetCapture() == hWnd) ReleaseCapture();
-                UpdatePaletteEyedropperUi(hWnd, ctx);
                 return 0;
             }
             break;
         case WM_CAPTURECHANGED:
-            if (ctx && ctx->eyedropperActive) {
-                ctx->eyedropperActive = false;
-                UpdatePaletteEyedropperUi(hWnd, ctx);
-            }
+            if (ctx && ctx->eyedropperActive) ctx->eyedropperActive = false;
             break;
         case WM_KEYDOWN:
             if (ctx && ctx->eyedropperActive && wParam == VK_ESCAPE) {
                 ctx->eyedropperActive = false;
                 SetPaletteEditorColor(hWnd, ctx, ctx->eyedropperInitialColor);
                 if (GetCapture() == hWnd) ReleaseCapture();
-                UpdatePaletteEyedropperUi(hWnd, ctx);
                 return 0;
-            }
-            break;
-        case WM_SETCURSOR:
-            if (ctx && ctx->eyedropperActive) {
-                SetCursor(LoadCursor(nullptr, IDC_CROSS));
-                return TRUE;
             }
             break;
         case WM_CTLCOLORSTATIC:
@@ -617,7 +431,6 @@ static bool ShowPaletteColorEditorDialogImpl(HWND owner, COLORREF initial, COLOR
     PaletteColorEditorCtx ctx{};
     ctx.owner = owner;
     ctx.color = initial;
-    PaletteColorToHsv(initial, &ctx.hue, &ctx.saturation, &ctx.value);
     if (choices) {
         ctx.choiceCount = std::min(choiceCount, ctx.choices.size());
         std::copy_n(choices, ctx.choiceCount, ctx.choices.begin());
@@ -626,7 +439,7 @@ static bool ShowPaletteColorEditorDialogImpl(HWND owner, COLORREF initial, COLOR
     const int dpi = GetDpiY(owner);
     HWND hWnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"PaletteColorEditorDlgClass",
                                 GetUiText().menuPaletteSettings.c_str(), WS_CAPTION | WS_POPUPWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(520, dpi, 96), MulDiv(330, dpi, 96),
+                                CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(300, dpi, 96), MulDiv(360, dpi, 96),
                                 owner, nullptr, g_hInst, &ctx);
     if (!hWnd) {
         RestoreOwnerAfterModal(owner);
@@ -636,6 +449,7 @@ static bool ShowPaletteColorEditorDialogImpl(HWND owner, COLORREF initial, COLOR
     ShowWindow(hWnd, SW_SHOW);
     MSG msg;
     while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (HandleWorkspaceMemoMessage(msg)) continue;
         if (ShouldSkipImeMessageInModalLoop(msg)) continue;
         if (ctx.eyedropperActive && msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
             SendMessageW(hWnd, WM_KEYDOWN, VK_ESCAPE, 0);

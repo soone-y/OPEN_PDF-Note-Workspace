@@ -32,8 +32,9 @@ struct WorkspaceConfig {
     std::wstring pdfFlowMode = L"v_ttb"; // "v_ttb" | "v_btu" | "h_ltr" | "h_rtl"
     int pdfBitmapBudgetMiB = kPdfBitmapBudgetMiBDefault;
     bool pdfSinglePageMode = false;
-    // Page information remains visible; this controls only the zoom percentage
-    // drawn over the upper-left of the PDF view.
+    // These independently control the page number and zoom percentage drawn
+    // over the upper-left of the PDF view.
+    bool showPdfPageOverlay = true;
     bool showPdfZoomOverlay = true;
     // When false (the default), the wheel scrolls even while the Pan tool is active.
     // Ctrl+wheel remains the explicit zoom gesture.
@@ -69,7 +70,10 @@ struct WorkspaceConfig {
     // - "guard": keep the palette while guarding text contrast
     // - "white": shift toward a white-based palette while keeping the accent
     // - "black": shift toward a dark palette while keeping the accent
-    std::wstring toneVariant = L"pure"; // "pure" | "guard" | "emphasis" | "white" | "black"
+    // - "cvd_red_green": neutral UI surfaces with a blue interaction color (P/D type support)
+    // - "cvd_blue_yellow": neutral UI surfaces with a magenta interaction color (T type support)
+    // - "cvd_monochrome": neutral UI surfaces and grayscale interactions
+    std::wstring toneVariant = L"pure"; // "pure" | "guard" | "emphasis" | "white" | "black" | CVD profiles
     std::wstring quickAnnotPopupPlacement = L"auto"; // "auto" | "boundary" | "up" | "down"
     bool ownerDrawUi = false;
     bool useNativeFileDialogs = false;
@@ -112,6 +116,9 @@ struct WorkspaceConfig {
     int noteMathMarginTopPercent = 75;
     // 0 = auto, 5..95 = allocate this percent of additional super/sub gap to superscripts.
     int noteMathSupSubGapSupPercent = 0;
+    // 0 = top, 1 = center, 2 = bottom. Bottom keeps inline formula bottoms stable
+    // when a superscript, subscript, or fraction increases the math box height.
+    int noteInlineMathVerticalAlignment = 2;
     bool noteGridEnabled = false;
     int noteGridPitch = 24;
     std::wstring selectionStyle = L"windows"; // "windows" | "theme"

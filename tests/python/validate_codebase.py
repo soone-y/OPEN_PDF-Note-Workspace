@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import py_compile
 import re
 import sys
@@ -22,6 +23,9 @@ SAFE_WITH_EC_RE = re.compile(r",\s*[A-Za-z_]\w*\s*\)")
 SAFE_CURRENT_PATH_RE = re.compile(r"std::filesystem::current_path\(\s*[A-Za-z_]\w*\s*\)")
 RAW_WIN32_TIMER_ID_RE = re.compile(
     r"\b(?:SetTimer|KillTimer)\s*\([^,\n]+,\s*(?:0x[0-9A-Fa-f]+|\d+)\b"
+)
+FIXED_MAX_PATH_BUFFER_RE = re.compile(
+    r"\b(?:wchar_t|WCHAR)\s+\w+\s*\[\s*MAX_PATH(?:\s*[+\-]\s*\d+)?\s*\]"
 )
 COMMAND_ID_ENUM_RE = re.compile(r"enum\s+CommandId\s*:\s*int\s*\{(?P<body>.*?)\n\};", re.DOTALL)
 INT_CONSTANT_RE_TEMPLATE = r"\b(?:inline\s+)?constexpr\s+int\s+{name}\s*=\s*(?P<value>-?(?:0x[0-9A-Fa-f]+|\d+))\s*;"
@@ -158,6 +162,39 @@ def find_raw_win32_timer_ids() -> list[str]:
                     continue
                 if RAW_WIN32_TIMER_ID_RE.search(line):
                     errors.append(f"{rel}:{lineno}: {line}")
+    return errors
+
+
+def find_long_path_contract_violations() -> list[str]:
+    """Keep the executable and its build/test paths long-path aware."""
+    errors: list[str] = []
+    manifest = REPO_ROOT / "src" / "resources" / "app.manifest"
+    resource = REPO_ROOT / "src" / "resources" / "app.rc"
+    workspace_build = REPO_ROOT / "scripts" / "build" / "build_workspace.ps1"
+    viewer_build = REPO_ROOT / "scripts" / "build" / "build_readonly_viewer.ps1"
+    atomic_test = REPO_ROOT / "tests" / "scripts" / "run_atomic_write_tests.ps1"
+
+    required_files = (manifest, resource, workspace_build, viewer_build, atomic_test)
+    if any(not path.is_file() for path in required_files):
+        return ["long-path contract: required manifest, build, or test file is missing"]
+
+    manifest_text = manifest.read_text(encoding="utf-8", errors="ignore")
+    if "longPathAware" not in manifest_text or ">true<" not in manifest_text:
+        errors.append("src/resources/app.manifest: longPathAware=true is required")
+    if '1 24 "src/resources/app.manifest"' not in resource.read_text(encoding="utf-8", errors="ignore"):
+        errors.append("src/resources/app.rc: application manifest must be embedded as resource 1/24")
+    for path in (workspace_build, viewer_build):
+        if "src/resources/app.manifest" not in path.read_text(encoding="utf-8", errors="ignore"):
+            errors.append(f"{path.relative_to(REPO_ROOT).as_posix()}: manifest must be a tracked resource input")
+    test_text = atomic_test.read_text(encoding="utf-8", errors="ignore")
+    if "atomic_write_tests_resource.o" not in test_text or "windres" not in test_text:
+        errors.append("tests/scripts/run_atomic_write_tests.ps1: atomic-write test must link the long-path manifest")
+
+    for path in iter_source_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for line_number, raw in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+            if FIXED_MAX_PATH_BUFFER_RE.search(raw):
+                errors.append(f"{rel}:{line_number}: fixed MAX_PATH path buffer is forbidden; use a growing buffer")
     return errors
 
 
@@ -707,6 +744,20 @@ def find_runtime_safety_regressions() -> list[str]:
     for needle, message in required_office.items():
         if needle not in office_text:
             errors.append(f"src/workspace/workspace_actions.cpp: {message}")
+    handoff_contract = (
+        "bool ValidateLibreOfficeHandoffPathBudget",
+        "ValidateLibreOfficeHandoffPathBudget(soffice, sourceOfficeCopy, outDir, profileDir, outErr)",
+        "{L\"LibreOffice\", soffice}",
+        "{L\"profile cache\", profileProbe}",
+    )
+    if any(needle not in office_text for needle in handoff_contract):
+        errors.append(
+            "src/workspace/workspace_actions.cpp: LibreOffice handoff paths must be validated before process launch"
+        )
+    if office_text.count("ValidateLibreOfficeHandoffPathBudget(soffice, sourceOfficeCopy, outDir, profileDir, outErr)") < 2:
+        errors.append(
+            "src/workspace/workspace_actions.cpp: both foreground and background LibreOffice launches must validate handoff paths"
+        )
     background_conversion_contract = (
         "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
         "AssignProcessToJobObject",
@@ -1272,7 +1323,7 @@ def find_link_workflow_regressions() -> list[str]:
             "SynchronizePendingPdfLinkEndpointAfterHistoryReplay(cmd, /*undo=*/false);": "redoing a pending PDF endpoint must reconcile the pending-link count",
         },
         "src/note_view/note_view_note_ops.cppinc": {
-            "SynchronizePendingNoteLinkPointAfterUndoRedo(g_noteUndoTextSnapshot);": "note undo/redo must reconcile a pending link endpoint from post-replay text",
+            "SynchronizePendingNoteLinkPointAfterUndoRedo(replayedText);": "note undo/redo must reconcile a pending link endpoint from post-replay text",
         },
     }
     for rel, needles in required_by_file.items():
@@ -1308,14 +1359,25 @@ def find_link_workflow_regressions() -> list[str]:
     jump_pos = input_text.find("HandleLinkIdJump(*linkId", activation_pos)
     clear_grace_pos = input_text.find("ClearNoteLinkRenderGrace(hWnd);", jump_pos)
     resolver_pos = input_text.find("static NotePointerPresentationHit ResolveNotePointerPresentationHit")
+    final_hit_pos = input_text.find("TryGetFinalNoteRenderHit", resolver_pos)
+    final_only_guard_pos = input_text.find("if (FinalFrameCanUseCustomPaint(hWnd))", final_hit_pos)
     native_hit_pos = input_text.find("HitTestNativeNoteRawPosition", resolver_pos)
-    structured_hit_pos = input_text.find("HitTestMarkupPosition", resolver_pos)
-    native_index_conversion_pos = input_text.find("RichEditIndexToRawTextIndex", resolver_pos)
+    native_index_conversion_pos = input_text.find(
+        "MapEditorTransportToCanonicalNoteOffsetForInput(hWnd, *nativeHit)", native_hit_pos
+    )
     if (dblclk_pos < 0 or pointer_hit_pos < 0 or activation_pos < 0 or jump_pos < 0 or
             clear_grace_pos < 0 or clear_grace_pos < jump_pos or resolver_pos < 0 or
-            native_hit_pos < resolver_pos or structured_hit_pos < resolver_pos or
-            native_index_conversion_pos < resolver_pos):
-        errors.append("src/note_view/note_view_input_proc.cppinc: link double-click must preserve its visible owner and select native/structured hit coordinates before fallback")
+            final_hit_pos < resolver_pos or final_only_guard_pos < final_hit_pos or
+            native_hit_pos < final_only_guard_pos or
+            native_index_conversion_pos < native_hit_pos):
+        errors.append("src/note_view/note_view_input_proc.cppinc: link double-click must preserve final-frame coordinates and use whole-native fallback without legacy structured hit testing")
+    resolver_end = input_text.find("\n}\n\nLRESULT CALLBACK NoteEditProc", resolver_pos)
+    if resolver_end < 0:
+        errors.append("src/note_view/note_view_input_proc.cppinc: final/native pointer resolver must remain a bounded helper")
+    elif "HitTestMarkupPosition" in input_text[resolver_pos:resolver_end]:
+        errors.append("src/note_view/note_view_input_proc.cppinc: final/native pointer resolver must not revive the retired markup hit-test path")
+    elif "RichEditIndexToRawTextIndex" in input_text[resolver_pos:resolver_end]:
+        errors.append("src/note_view/note_view_input_proc.cppinc: final/native pointer resolver must not linearly scan canonical text for a RichEdit coordinate")
     return errors
 def find_assist_pane_visibility_regressions() -> list[str]:
     errors: list[str] = []
@@ -1744,7 +1806,7 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
             errors.append("tools/dev/export_public_snapshot.py: public snapshots must reject unreviewed Git-untracked files")
             break
     public_allowlist_text = (
-        REPO_ROOT / "docs/internal/operations/public_repo_release_allowlist_2026-08-24.txt"
+        REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-08-24.txt"
     ).read_text(encoding="utf-8-sig", errors="ignore")
     for required in ("locales/", "tools/localization/", "docs/ja/", "docs/en/"):
         if required not in public_allowlist_text:
@@ -1900,6 +1962,751 @@ def find_note_tex_route_regressions() -> list[str]:
     return errors
 
 
+def find_final_render_publication_boundary_regressions() -> list[str]:
+    """Keep the complete final route together in the shipped application."""
+    errors: list[str] = []
+    final_modules = (
+        "src/note/note_parser_checkpoint.cpp",
+        "src/note/note_source_coordinate_transform.cpp",
+        "src/note/note_syntax_snapshot.cpp",
+        "src/note/note_syntax_document.cpp",
+        "src/note/note_render_layout_snapshot.cpp",
+        "src/note/note_render_source_plan.cpp",
+        "src/note/note_render_placement_snapshot.cpp",
+        "src/note/note_presentation_owner_plan.cpp",
+        "src/note/note_render_final_publication.cpp",
+        "src/note/note_render_final_transaction.cpp",
+        "src/note/note_render_final_interaction.cpp",
+        "src/note/note_render_final_display_run.cpp",
+        "src/note/note_render_final_presentation_snapshot.cpp",
+        "src/note/note_render_final_presentation_interaction.cpp",
+        "src/note/note_render_final_ime_preedit_presentation.cpp",
+        "src/note/note_render_final_win32_adapter.cpp",
+        "src/note/note_render_final_style.cpp",
+        "src/note/note_render_final_gdi_measurement_provider.cpp",
+        "src/note/note_render_final_gdi_painter.cpp",
+    )
+    manifest_path = REPO_ROOT / "scripts/build/build_sources.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"scripts/build/build_sources.json: cannot verify final-render runtime boundary: {exc}"]
+
+    shipped_sources = set(manifest.get("BuildSourceFiles", ()))
+    for module in final_modules:
+        if module not in shipped_sources:
+            errors.append(
+                f"scripts/build/build_sources.json: final-render runtime module is missing from the application build ({module})"
+            )
+
+    note_view_fragments = set(
+        manifest.get("TranslationUnitDesign", {})
+        .get("UnityBuildFragments", {})
+        .get("src/note_view/note_view.cpp", ())
+    )
+    if "note_view/note_view_final_render.cppinc" not in note_view_fragments:
+        errors.append(
+            "scripts/build/build_sources.json: note_view final-render bridge must remain in the note_view unity root"
+        )
+
+    parser_test_script = (REPO_ROOT / "tests/scripts/run_note_parser_tests.ps1").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    for module in final_modules:
+        if module not in parser_test_script:
+            errors.append(
+                f"tests/scripts/run_note_parser_tests.ps1: final-render differential test must compile {module}"
+            )
+
+    note_view_root = (REPO_ROOT / "src/note_view/note_view.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    note_view_final = (REPO_ROOT / "src/note_view/note_view_final_render.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    if '#include "note/note_render_final_win32_adapter.h"' not in note_view_root:
+        errors.append("src/note_view/note_view.cpp: final adapter must be owned by the note view")
+    for needle in (
+        "NoteRenderFinalWin32AdapterState",
+        "RefreshFinalNoteRenderFrame",
+        "TryPaintFinalNoteRenderFrame",
+        "TryGetFinalNoteRenderHit",
+        "TryGetFinalNoteRenderCaretRect",
+        "ResolveFinalLegacyLinkIdAtCanonicalOffset",
+        "HandleFinalNoteRenderScrollCommand",
+    ):
+        if needle not in note_view_final:
+            errors.append(
+                f"src/note_view/note_view_final_render.cppinc: final runtime bridge must retain {needle}"
+            )
+
+    # Input and hit-testing are on the interactive path.  They may use the
+    # immutable source-line aggregates, but must not materialize the entire
+    # canonical model merely to translate RichEdit's CRLF coordinate system.
+    source_line_map_header = (REPO_ROOT / "src/note/note_source_line_map.h").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    source_line_map_impl = (REPO_ROOT / "src/note/note_source_line_map.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    for needle in (
+        "rich_edit_text_length() const noexcept",
+        "CanonicalOffsetToRichEditIndex",
+        "RichEditIndexToCanonicalOffset",
+    ):
+        if needle not in source_line_map_header:
+            errors.append(
+                f"src/note/note_source_line_map.h: final input coordinate aggregate must retain {needle}"
+            )
+    for needle in (
+        "CanonicalOffsetToRichEditIndex",
+        "RichEditIndexToCanonicalOffset",
+        "SubtreeRichEditTextLength",
+    ):
+        if needle not in source_line_map_impl:
+            errors.append(
+                f"src/note/note_source_line_map.cpp: final input coordinate aggregate must implement {needle}"
+            )
+    if ("textCore.model()" in note_view_final or "core->model()" in note_view_final or
+            "RichEditIndexToRawTextIndex(" in note_view_final):
+        errors.append(
+            "src/note_view/note_view_final_render.cppinc: final selection and hit mapping must not materialize or linearly scan complete canonical text"
+        )
+    if ("NoteSourceLineMap::CanonicalOffsetToRichEditIndex" not in note_view_final or
+            "NoteSourceLineMap::RichEditIndexToCanonicalOffset" not in note_view_final):
+        errors.append(
+            "src/note_view/note_view_final_render.cppinc: final selection and hit mapping must use the persistent source-line coordinate aggregate"
+        )
+
+    adapter_header = (REPO_ROOT / "src/note/note_render_final_win32_adapter.h").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    adapter_impl = (REPO_ROOT / "src/note/note_render_final_win32_adapter.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    for needle in (
+        "NoteRenderFinalWin32AdapterStateTestWork",
+        "local_transaction_attempts",
+        "complete_transaction_attempts",
+        "test_work() const noexcept",
+    ):
+        if needle not in adapter_header:
+            errors.append(
+                f"src/note/note_render_final_win32_adapter.h: final publication decision accounting must retain {needle}"
+            )
+    for needle in (
+        "++test_work_.local_transaction_attempts;",
+        "++test_work_.local_transaction_builds;",
+        "++test_work_.complete_transaction_attempts;",
+        "++test_work_.complete_transaction_builds;",
+    ):
+        if needle not in adapter_impl:
+            errors.append(
+                f"src/note/note_render_final_win32_adapter.cpp: final publication decision accounting must retain {needle}"
+            )
+    parser_test_source = (REPO_ROOT / "tests/unit/note_parser_tests.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    if "a 4096-row final adapter edit uses one local transaction" not in parser_test_source:
+        errors.append(
+            "tests/unit/note_parser_tests.cpp: long final-adapter local transaction work contract must be covered"
+        )
+    if "converts canonical and RichEdit CRLF coordinates without text access" not in parser_test_source:
+        errors.append(
+            "tests/unit/note_parser_tests.cpp: persistent canonical/RichEdit coordinate conversion must be covered"
+        )
+
+    # The final modules are now part of the shipped, atomic route. Leaving a
+    # pre-cutover "test-only" contract in their public comments invites a
+    # future caller to treat them as optional migration artifacts again.
+    for rel in (
+        "src/note/note_presentation_owner_plan.h",
+        "src/note/note_render_placement_snapshot.h",
+        "src/note/note_render_final_publication.h",
+        "src/note/note_render_final_transaction.h",
+    ):
+        runtime_contract_text = (REPO_ROOT / rel).read_text(
+            encoding="utf-8", errors="ignore"
+        )
+        for stale_contract in (
+            "remains differential-test-only",
+            "remains test-only until",
+            "remains parser-test-only",
+        ):
+            if stale_contract in runtime_contract_text:
+                errors.append(
+                    f"{rel}: shipped final-render contracts must not describe the runtime route as {stale_contract}"
+                )
+
+    final_paint_pos = note_view_final.find("static bool TryPaintFinalNoteRenderFrame")
+    final_paint_end = note_view_final.find("static bool TryGetFinalNoteRenderHit", final_paint_pos)
+    if (final_paint_pos < 0 or final_paint_end < final_paint_pos or
+            "if (!painted)" not in note_view_final[final_paint_pos:final_paint_end] or
+            "WithdrawFinalNoteRenderFrame(hWnd);" not in note_view_final[final_paint_pos:final_paint_end]):
+        errors.append(
+            "src/note_view/note_view_final_render.cppinc: a final paint failure must withdraw its publication before native fallback"
+        )
+
+    input_proc = (REPO_ROOT / "src/note_view/note_view_input_proc.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    paint_pos = input_proc.find("case WM_PAINT")
+    final_paint_pos = input_proc.find("TryPaintFinalNoteRenderFrame", paint_pos)
+    native_paint_pos = input_proc.find("PaintNativeNoteClient", final_paint_pos)
+    if paint_pos < 0 or final_paint_pos < paint_pos or native_paint_pos < final_paint_pos:
+        errors.append(
+            "src/note_view/note_view_input_proc.cppinc: paint must choose final-frame paint or one whole-native fallback"
+        )
+    else:
+        fallback_pos = input_proc.find("if (!finalPainted)", final_paint_pos)
+        fallback_native_pos = input_proc.find("PaintNativeNoteClient", fallback_pos)
+        fallback_reset_pos = input_proc.find("paintNoteBackground(paintDC);", fallback_pos)
+        if (fallback_pos < 0 or fallback_native_pos < fallback_pos or
+                fallback_reset_pos < fallback_pos or fallback_reset_pos > fallback_native_pos):
+            errors.append(
+                "src/note_view/note_view_input_proc.cppinc: native fallback after final paint failure must erase partial final pixels first"
+            )
+    if "DrawHighlightOverlay(" in input_proc[paint_pos:]:
+        errors.append(
+            "src/note_view/note_view_input_proc.cppinc: final paint must not reintroduce the retired clipped overlay"
+        )
+
+    # WM_SIZE is an invalidating input event: the pre-dispatch guard withdraws
+    # the immutable frame before RichEdit consumes the resize. A note can be
+    # opened while another pane owns focus, so the synchronizer must make
+    # this refresh exception to its focus rule. Final-scrollbar acknowledgement
+    # must not reformat native raw extents; external resizes still dispatch
+    # natively before the normal post-default publication.
+    resize_pos = input_proc.find("case WM_SIZE:", input_proc.find("case WM_TIMER:"))
+    resize_end = input_proc.find("case WM_LBUTTONDBLCLK", resize_pos)
+    if resize_pos < 0 or resize_end < resize_pos:
+        errors.append(
+            "src/note_view/note_view_input_proc.cppinc: live WM_SIZE handling must remain a bounded input branch"
+        )
+    else:
+        resize_text = input_proc[resize_pos:resize_end]
+        format_rect_pos = resize_text.find("UpdateNoteFormatRect(hWnd);")
+        invalidate_pos = resize_text.find("InvalidateRect(hWnd, nullptr, FALSE);", max(0, format_rect_pos))
+        if (format_rect_pos < 0 or invalidate_pos < format_rect_pos or
+                "RefreshFinalNoteRenderFrame(hWnd);" in resize_text):
+            errors.append(
+                "src/note_view/note_view_input_proc.cppinc: WM_SIZE must update geometry and defer exactly one final/native publication until after the native procedure"
+            )
+        scrollbar_ack = resize_text[:max(0, format_rect_pos)]
+        if ("FinalRenderRouteEnabled(hWnd)" not in scrollbar_ack or
+                "finalRenderScrollSyncInProgress" not in scrollbar_ack or
+                "SyncRenderDrivenNoteInputUi(hWnd, msg);" not in scrollbar_ack or
+                "return 0;" not in scrollbar_ack or "CallWindowProc" in scrollbar_ack):
+            errors.append(
+                "src/note_view/note_view_input_proc.cppinc: final-scrollbar WM_SIZE must close/coalesce final publication without native raw reformatting"
+            )
+
+    input_helpers = (REPO_ROOT / "src/note_view/note_view_input_helpers.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    sync_input_pos = input_helpers.find("static void SyncRenderDrivenNoteInputUi")
+    sync_input_end = input_helpers.find("static void RequestNoteContentRefreshAfterEdit", sync_input_pos)
+    if sync_input_pos < 0 or sync_input_end < sync_input_pos:
+        errors.append(
+            "src/note_view/note_view_input_helpers.cppinc: post-default final-frame input synchronizer must remain bounded"
+        )
+    else:
+        sync_input_text = input_helpers[sync_input_pos:sync_input_end]
+        resize_exception_pos = sync_input_text.find("msg == WM_SIZE && refreshFinalFrame")
+        refresh_pos = sync_input_text.find("RefreshFinalNoteRenderFrame(hWnd);")
+        unfocused_return_pos = sync_input_text.find("if (!focused) return;", refresh_pos)
+        if (resize_exception_pos < 0 or refresh_pos < resize_exception_pos or
+                unfocused_return_pos < refresh_pos):
+            errors.append(
+                "src/note_view/note_view_input_helpers.cppinc: post-default WM_SIZE must republish final/native ownership while unfocused, without running focused-only input work"
+            )
+    ime_caret_pos = input_helpers.find("static bool TryGetNoteImeCaretRect")
+    final_caret_pos = input_helpers.find("TryGetFinalNoteRenderCaretRect", ime_caret_pos)
+    native_caret_pos = input_helpers.find("TryGetNativeNoteCaretRect", final_caret_pos)
+    if (ime_caret_pos < 0 or final_caret_pos < ime_caret_pos or
+            native_caret_pos < final_caret_pos or
+            "BuildNoteRenderPresentationFrame" in input_helpers[ime_caret_pos:native_caret_pos]):
+        errors.append(
+            "src/note_view/note_view_input_helpers.cppinc: IME caret must use final geometry or whole-native fallback, never a legacy presentation frame"
+        )
+
+    note_ops = (REPO_ROOT / "src/note_view/note_view_note_ops.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    recompute_pos = note_ops.find("void RecomputeMathFromNote()")
+    final_semantic_pos = note_ops.find("RefreshNoteSyntaxStageFromCanonicalCore", recompute_pos)
+    editor_read_pos = note_ops.find("GetEditTextForIndexing(g_hNoteEdit)", recompute_pos)
+    if (recompute_pos < 0 or final_semantic_pos < recompute_pos or
+            editor_read_pos < final_semantic_pos or
+            "editor_full_read=false" not in note_ops[final_semantic_pos:editor_read_pos]):
+        errors.append(
+            "src/note_view/note_view_note_ops.cppinc: final-frame semantic refresh must consume the canonical root before any whole-editor recovery read"
+        )
+    final_fallback_pos = note_ops.find("stage=final_native_fallback", editor_read_pos)
+    legacy_layout_pos = note_ops.find("RefreshNoteRenderAndLayoutStage(", editor_read_pos)
+    if (final_fallback_pos < editor_read_pos or legacy_layout_pos < final_fallback_pos or
+            "withdrawn_no_legacy_rebuild" not in note_ops[final_fallback_pos:legacy_layout_pos]):
+        errors.append(
+            "src/note_view/note_view_note_ops.cppinc: a failed final publication must choose whole-native fallback without rebuilding the retired LineCache"
+        )
+    link_lookup_pos = note_ops.find("static std::optional<std::wstring> LinkIdAtCharIndex")
+    final_link_lookup_pos = note_ops.find("ResolveFinalLegacyLinkIdAtCanonicalOffset", link_lookup_pos)
+    line_cache_link_lookup_pos = note_ops.find("const LineCache& cache", link_lookup_pos)
+    if (link_lookup_pos < 0 or final_link_lookup_pos < link_lookup_pos or
+            line_cache_link_lookup_pos < final_link_lookup_pos):
+        errors.append(
+            "src/note_view/note_view_note_ops.cppinc: final-frame link lookup must resolve the immutable source plan before any legacy cache fallback"
+        )
+
+    note_ui_header = (REPO_ROOT / "src/note_view/note_view.h").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    if ("bool finalFrameActive = false;" not in note_ui_header or
+            "size_t finalStructuredLineCount = 0;" not in note_ui_header or
+            "size_t finalRawLineCount = 0;" not in note_ui_header):
+        errors.append(
+            "src/note_view/note_view.h: UI automation must expose only read-only final-frame ownership facts"
+        )
+    final_snapshot_pos = note_view_final.find("static bool PopulateNoteUiSnapshotFromFinalFrame")
+    final_snapshot_end = note_view_final.find("static void WithdrawFinalNoteRenderFrame", final_snapshot_pos)
+    if (final_snapshot_pos < 0 or final_snapshot_end < final_snapshot_pos):
+        errors.append(
+            "src/note_view/note_view_final_render.cppinc: final-frame UI observation must remain isolated"
+        )
+    else:
+        final_snapshot_text = note_view_final[final_snapshot_pos:final_snapshot_end]
+        for required in (
+            "snapshot->finalFrameActive = true;",
+            "++snapshot->finalStructuredLineCount;",
+            "++snapshot->finalRawLineCount;",
+        ):
+            if required not in final_snapshot_text:
+                errors.append(
+                    "src/note_view/note_view_final_render.cppinc: final-frame UI observation must report immutable surface ownership"
+                )
+                break
+    final_scroll_sync_pos = note_view_final.find("static void SyncFinalNoteScrollBars")
+    final_scroll_sync_end = note_view_final.find(
+        "static void EnsureFinalNoteRenderCaretVisible", final_scroll_sync_pos
+    )
+    if (final_scroll_sync_pos < 0 or final_scroll_sync_end < final_scroll_sync_pos or
+            "if (context.finalRenderScrollSyncInProgress) return;" not in
+            note_view_final[final_scroll_sync_pos:final_scroll_sync_end] or
+            "ScopedScrollSyncReset" not in
+            note_view_final[final_scroll_sync_pos:final_scroll_sync_end] or
+            "const auto frame = context.finalRenderState.frame();" not in
+            note_view_final[final_scroll_sync_pos:final_scroll_sync_end] or
+            "bool finalRenderScrollSyncInProgress = false;" not in
+            (REPO_ROOT / "src/note_view/note_view_shared.cppinc").read_text(
+                encoding="utf-8", errors="ignore"
+            )):
+        errors.append(
+            "src/note_view: final scrollbar synchronization must reject synchronous Win32 reentry and retain its immutable frame"
+        )
+    final_refresh_pos = note_view_final.find("static bool RefreshFinalNoteRenderFrame")
+    final_refresh_end = note_view_final.find("static void BeginFinalNoteImePreedit", final_refresh_pos)
+    final_refresh_text = note_view_final[final_refresh_pos:final_refresh_end]
+    if (final_refresh_pos < 0 or final_refresh_end < final_refresh_pos or
+            "if (context.finalRenderPublicationInProgress)" not in final_refresh_text or
+            "ScopedFinalPublicationReset" not in final_refresh_text or
+            "bool finalRenderPublicationInProgress = false;" not in
+            (REPO_ROOT / "src/note_view/note_view_shared.cppinc").read_text(
+                encoding="utf-8", errors="ignore"
+            ) or
+            "bool finalRenderPublicationPending = false;" not in
+            (REPO_ROOT / "src/note_view/note_view_shared.cppinc").read_text(
+                encoding="utf-8", errors="ignore"
+            ) or
+            "constexpr int kMaxPublicationPasses = 3;" not in final_refresh_text):
+        errors.append(
+            "src/note_view: final publication must reject synchronous Win32 reentry before it can recursively measure or publish"
+        )
+    final_format_pos = note_view_final.find("static bool ApplyFinalNoteNativeFallbackFormatRect")
+    final_format_end = note_view_final.find("[[nodiscard]] bool BuildFinalLayoutKey", final_format_pos)
+    shared_format_pos = (REPO_ROOT / "src/note_view/note_view_shared.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    ).find("static void UpdateNoteFormatRect(HWND hWnd)")
+    shared_format_end = (REPO_ROOT / "src/note_view/note_view_shared.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    ).find("static std::wstring ToLowerAscii", shared_format_pos)
+    final_format_text = note_view_final[final_format_pos:final_format_end]
+    shared_format_text = (REPO_ROOT / "src/note_view/note_view_shared.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    )[shared_format_pos:shared_format_end]
+    final_branch_pos = shared_format_text.find("ApplyFinalNoteNativeFallbackFormatRect(hWnd)")
+    legacy_canvas_pos = shared_format_text.find("const bool nextRenderActive")
+    if (final_format_pos < 0 or final_format_end < final_format_pos or
+            shared_format_pos < 0 or shared_format_end < shared_format_pos or
+            final_branch_pos < 0 or legacy_canvas_pos < final_branch_pos or
+            "finalNativeFallbackFormatSyncInProgress" not in final_format_text or
+            "EM_SETTARGETDEVICE" not in final_format_text or
+            "EM_SETRECTNP" not in final_format_text or
+            "SetScrollInfo" in final_format_text):
+        errors.append(
+            "src/note_view: final route must give RichEdit only a guarded transport rectangle and must not derive legacy scrollbars"
+        )
+    shared_all = (REPO_ROOT / "src/note_view/note_view_shared.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    line_spacing_pos = shared_all.find("void RefreshNoteLineSpacingForPresentationSurface")
+    line_spacing_text = shared_all[line_spacing_pos:]
+    if (line_spacing_pos < 0 or
+            "FinalRenderRouteEnabled(hWnd)" not in line_spacing_text or
+            line_spacing_text.find("FinalRenderRouteEnabled(hWnd)") >
+            line_spacing_text.find("CollectNoteNativeRawMetricLines")):
+        errors.append(
+            "src/note_view/note_view_shared.cppinc: final native fallback must not revive legacy line-spacing/cache ownership"
+        )
+    input_proc = (REPO_ROOT / "src/note_view/note_view_input_proc.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    wheel_pos = input_proc.find("case WM_MOUSEHWHEEL:")
+    wheel_end = input_proc.find("case WM_RBUTTONDOWN:", wheel_pos)
+    hscroll_pos = input_proc.find("case WM_HSCROLL:")
+    hscroll_end = input_proc.find("case WM_TIMER:", hscroll_pos)
+    final_input_guard = "if (FinalRenderRouteEnabled(hWnd)) break;"
+    legacy_hscroll_guard = "if (IsNoteRenderActive() && !FinalRenderRouteEnabled(hWnd))"
+    if (wheel_pos < 0 or wheel_end < wheel_pos or
+            final_input_guard not in input_proc[wheel_pos:wheel_end] or
+            hscroll_pos < 0 or hscroll_end < hscroll_pos or
+            legacy_hscroll_guard not in input_proc[hscroll_pos:hscroll_end]):
+        errors.append(
+            "src/note_view/note_view_input_proc.cppinc: final native fallback must pass horizontal scroll input to RichEdit instead of the retired canvas"
+        )
+    final_input_raw_uses = input_proc.count("CurrentNoteSyntaxSource().raw")
+    if (final_input_raw_uses != 2 or
+            "TryMapFinalRouteCanonicalOffsetToRichEdit" not in input_proc or
+            "TryMapFinalRouteRichEditIndexToCanonical" not in input_proc):
+        errors.append(
+            "src/note_view/note_view_input_proc.cppinc: final input must confine legacy raw-string coordinate scans to the non-final bridge branches"
+        )
+    if ("TryMapFinalRouteCanonicalOffsetToRichEdit" not in note_view_final or
+            "TryMapFinalRouteRichEditIndexToCanonical" not in note_view_final or
+            "NoteSourceLineMap::CanonicalOffsetToRichEditIndex" not in note_view_final or
+            "NoteSourceLineMap::RichEditIndexToCanonicalOffset" not in note_view_final or
+            "editor_replacement_span" not in note_view_final):
+        errors.append(
+            "src/note_view/note_view_final_render.cppinc: final input transport must resolve both directions through the persistent source-line map, including proven IME preedit boundaries"
+        )
+    expand_pos = (REPO_ROOT / "src/note_view/note_view_note_ops.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    ).find("void ExpandNoteRenderCanvasForPendingEdit")
+    expand_end = (REPO_ROOT / "src/note_view/note_view_note_ops.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    ).find("static int MeasureRenderedContentBottomPx", expand_pos)
+    if (expand_pos < 0 or expand_end < expand_pos or
+            "if (FinalRenderRouteEnabled(hWnd)) return;" not in
+            (REPO_ROOT / "src/note_view/note_view_note_ops.cppinc").read_text(
+                encoding="utf-8", errors="ignore"
+            )[expand_pos:expand_end]):
+        errors.append(
+            "src/note_view/note_view_note_ops.cppinc: final route must not expand the retired helper canvas during an edit"
+        )
+    ui_automation = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    for required in (
+        "A freshly opened rendered note did not publish one fully structured final frame.",
+        "Final note rendering did not survive a narrow resize/scrollbar round trip.",
+        "constexpr int kResizeRoundTrips = 4;",
+        "A table caret did not make exactly its atomic table surface raw inside the final frame.",
+    ):
+        if required not in ui_automation:
+            errors.append(
+                "src/features/automation/main_ui_automation.cppinc: UI automation must exercise final-frame structured/raw ownership"
+            )
+            break
+
+    shared = (REPO_ROOT / "src/note_view/note_view_shared.cppinc").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    switch_begin = shared.find("bool BeginNoteRenderSwitch()")
+    switch_end = shared.find("void EndNoteRenderSwitch()")
+    switch_end_finish = shared.find("bool IsNoteRenderSwitchInProgress()", switch_end)
+    if (switch_begin < 0 or switch_end < switch_begin or switch_end_finish < switch_end):
+        errors.append(
+            "src/note_view/note_view_shared.cppinc: render mode transition must retain bounded begin/end ownership"
+        )
+    else:
+        begin_text = shared[switch_begin:switch_end]
+        end_text = shared[switch_end:switch_end_finish]
+        withdraw_pos = begin_text.find("WithdrawFinalNoteRenderFrame(g_hNoteEdit);")
+        freeze_pos = begin_text.find("SendMessageW(g_hNoteEdit, WM_SETREDRAW, FALSE, 0);")
+        unblocked_pos = end_text.find("g_noteRenderSwitchBlocked = false;")
+        publish_pos = end_text.find("RecomputeMathFromNote();", unblocked_pos)
+        expose_pos = end_text.find("SendMessageW(hWnd, WM_SETREDRAW, TRUE, 0);")
+        if (withdraw_pos < 0 or freeze_pos < withdraw_pos or
+                unblocked_pos < 0 or publish_pos < unblocked_pos or
+                expose_pos < publish_pos):
+            errors.append(
+                "src/note_view/note_view_shared.cppinc: a mode transition must withdraw the old frame, publish final/native ownership while frozen, then expose it"
+            )
+
+    toggle_pos = shared.find("static void ToggleNoteRenderSetting()")
+    toggle_end = shared.find("static void CompletePendingBottomNoteRenderToggleAfterIme", toggle_pos)
+    if toggle_pos < 0 or toggle_end < toggle_pos:
+        errors.append(
+            "src/note_view/note_view_shared.cppinc: render toggle must remain a bounded state transition"
+        )
+    else:
+        toggle_text = shared[toggle_pos:toggle_end]
+        if ("RefreshMarkdownRenderCache(" in toggle_text or
+                "UpdateNoteLineSpacing(" in toggle_text):
+            errors.append(
+                "src/note_view/note_view_shared.cppinc: render toggle must not rebuild the retired LineCache or line-spacing route before final publication"
+            )
+
+    load_pos = note_ops.find("void LoadNoteFile(")
+    clear_pos = note_ops.find("void ClearNoteEditorSilently(")
+    save_pos = note_ops.find("bool SaveNoteFile(", clear_pos)
+    if load_pos < 0 or clear_pos < load_pos or save_pos < clear_pos:
+        errors.append(
+            "src/note_view/note_view_note_ops.cppinc: note load/clear must retain bounded switch transitions"
+        )
+    else:
+        load_text = note_ops[load_pos:clear_pos]
+        clear_text = note_ops[clear_pos:save_pos]
+        if "RecomputeMathFromNote();" in load_text or "RecomputeMathFromNote();" in clear_text:
+            errors.append(
+                "src/note_view/note_view_note_ops.cppinc: load/clear must defer publication to EndNoteRenderSwitch rather than taking a legacy switch-time route"
+            )
+
+    for rel in (
+        "src/note/note_render_final_publication.h",
+        "src/note/note_render_final_publication.cpp",
+        "src/note/note_render_final_transaction.h",
+        "src/note/note_render_final_transaction.cpp",
+    ):
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8", errors="ignore")
+        for forbidden in (
+            "LineCache",
+            "RenderLineStore",
+            "ActiveNoteRenderSnapshot",
+            "windows.h",
+            "gdi32",
+        ):
+            if forbidden in text:
+                errors.append(
+                    f"{rel}: final publication must stay independent from legacy or Win32 rendering state ({forbidden})"
+                )
+
+    transaction_header = (REPO_ROOT / "src/note/note_render_final_transaction.h").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    transaction_impl = (REPO_ROOT / "src/note/note_render_final_transaction.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    for needle in (
+        "BuildComplete",
+        "NoteRenderFinalMeasurementProvider",
+        "NoteRenderFinalMeasuredFrame",
+        "NoteSyntaxSnapshot::BuildFromTextCore",
+        "NoteRenderSourcePlan::Build",
+        "measurementProvider.Measure",
+        "NoteRenderLineLayoutMap::Build",
+        "NoteRenderLayoutSnapshot::Build",
+        "NoteRenderPlacementSnapshot::Build",
+        "NoteRenderFinalPublication::Build",
+        "NoteRenderFinalPublication::BuildWithCheckpoint",
+        "BuildLocalPlainTextPatch",
+        "MeasureReplacement",
+        "RequiresNativeFallback",
+    ):
+        if needle not in transaction_header and needle not in transaction_impl:
+            errors.append(
+                f"src/note/note_render_final_transaction.*: complete final transaction must retain {needle}"
+            )
+    parser_test_source = (REPO_ROOT / "tests/unit/note_parser_tests.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    if "NoteRenderFinalTransaction::BuildComplete" not in parser_test_source:
+        errors.append(
+            "tests/unit/note_parser_tests.cpp: complete final transaction must be covered by an atomic-publication test"
+        )
+    if "NoteRenderFinalTransaction::BuildLocalPlainTextPatch" not in parser_test_source:
+        errors.append(
+            "tests/unit/note_parser_tests.cpp: local final transaction must be covered by an atomic-publication test"
+        )
+    publication_header = (REPO_ROOT / "src/note/note_render_final_publication.h").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    publication_impl = (REPO_ROOT / "src/note/note_render_final_publication.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    for needle in (
+        "BuildWithCheckpoint",
+        "continuity_checkpoint_",
+        "has_continuity_checkpoint",
+        "HasExactCheckpoint",
+    ):
+        if needle not in publication_header and needle not in publication_impl:
+            errors.append(
+                f"src/note/note_render_final_publication.*: complete transaction continuity must retain {needle}"
+            )
+
+    source_plan_header = (REPO_ROOT / "src/note/note_render_source_plan.h").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    source_plan_impl = (REPO_ROOT / "src/note/note_render_source_plan.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    for needle in (
+        "SourcePlanRelativeBoundary",
+        "NoteRenderSourcePlanStorage",
+        "NoteRenderSourcePlanLocalPatchWork",
+        "tail_line_payload_rewrites",
+        "SharesLinePayloadForDifferentialTest",
+        "ProvesUnchangedRowsFrom",
+        "NoteRenderAtomicGroupQueryWork",
+        "BuildIntervalIndex",
+        "AppendIntersecting",
+    ):
+        if needle not in source_plan_header and needle not in source_plan_impl:
+            errors.append(
+                f"src/note/note_render_source_plan.*: persistent local source-plan splice must retain {needle}"
+            )
+    if "std::vector<NoteRenderSourceLinePlan> lines_;" in source_plan_header:
+        errors.append(
+            "src/note/note_render_source_plan.h: source-plan rows must not regress to a fully copied vector member"
+        )
+    if "std::any_of(storage->groups_.begin(), storage->groups_.end()" in source_plan_impl:
+        errors.append(
+            "src/note/note_render_source_plan.cpp: atomic-group lookup must not regress to a linear full-group scan"
+        )
+
+    checkpoint_header = (REPO_ROOT / "src/note/note_parser_checkpoint.h").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    checkpoint_impl = (REPO_ROOT / "src/note/note_parser_checkpoint.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    for needle in (
+        "NoteParserCheckpointStorage",
+        "BuildNoteParserCheckpointLocalPlainTextPatch",
+        "NoteParserCheckpointLocalPatchWork",
+        "SharesLinePayloadForDifferentialTest",
+        "NoteSourceLineMap::LineAt",
+    ):
+        if needle not in checkpoint_header and needle not in checkpoint_impl:
+            errors.append(
+                f"src/note/note_parser_checkpoint.*: persistent checkpoint state must retain {needle}"
+            )
+    if "std::vector<NoteParserLineCheckpoint> lines;" in checkpoint_header:
+        errors.append(
+            "src/note/note_parser_checkpoint.h: checkpoint rows must not regress to a fully copied vector member"
+        )
+    syntax_snapshot_impl = (REPO_ROOT / "src/note/note_syntax_snapshot.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    syntax_snapshot_header = (REPO_ROOT / "src/note/note_syntax_snapshot.h").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    if "NoteSourceLineMap::SameSnapshotIdentity" not in syntax_snapshot_impl:
+        errors.append(
+            "src/note/note_syntax_snapshot.cpp: local snapshot must bind its checkpoint to the exact source-line-map identity"
+        )
+    for needle in (
+        "NoteSyntaxDocument::Build(",
+        "NoteSyntaxDocument::BuildLocalPlainTextPatch",
+        "NoteTextPieceSequence::CopyRange",
+        "CopyDocumentForCompleteBuild",
+    ):
+        if needle not in syntax_snapshot_impl:
+            errors.append(
+                f"src/note/note_syntax_snapshot.cpp: final persistent syntax snapshot must retain {needle}"
+            )
+    for forbidden in (
+        "NoteTextModel source_;",
+        "NoteDocument document_;",
+        "NoteInfluenceIndex influence_index_;",
+        "SemanticIndexSnapshot semantic_index_;",
+    ):
+        if forbidden in syntax_snapshot_header:
+            errors.append(
+                f"src/note/note_syntax_snapshot.h: final snapshot must not retain a legacy full-sized member ({forbidden})"
+            )
+
+    if "syntax->source()" in source_plan_impl or "previous->syntax_->source()" in source_plan_impl:
+        errors.append(
+            "src/note/note_render_source_plan.cpp: final source plan must read only explicit snapshot ranges, never a legacy source model"
+        )
+    if "syntax->document()" in source_plan_impl:
+        errors.append(
+            "src/note/note_render_source_plan.cpp: final source plan must not retain or consume a legacy snapshot document"
+        )
+    if "CopyDocumentForCompleteBuild" in source_plan_impl:
+        errors.append(
+            "src/note/note_render_source_plan.cpp: final source-plan construction must resolve NoteSyntaxDocument directly, never materialize a legacy NoteDocument"
+        )
+    if "NoteDocument" in source_plan_impl:
+        errors.append(
+            "src/note/note_render_source_plan.cpp: final source-plan construction must not carry any legacy NoteDocument representation"
+        )
+    for needle in (
+        "syntax->syntax_document()",
+        "CopySourceRange",
+        "document.ResolveBlock",
+        "document.ResolveInline",
+        "document.ResolveStyle",
+        "document.ResolveMath",
+    ):
+        if needle not in source_plan_impl:
+            errors.append(
+                f"src/note/note_render_source_plan.cpp: final source plan must retain direct persistent syntax access ({needle})"
+            )
+
+    syntax_document_header = (REPO_ROOT / "src/note/note_syntax_document.h").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    syntax_document_impl = (REPO_ROOT / "src/note/note_syntax_document.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    for needle in (
+        "NoteSyntaxDocumentStorage",
+        "NoteSyntaxDocumentSpanIndex",
+        "RelativeSpan",
+        "BuildLocalPlainTextPatch",
+        "PermitsPlainTextLeafEdit",
+        "NoteSyntaxDocumentQueryWork",
+        "SharesNodePayloadForDifferentialTest",
+        "CopyDocumentForCompleteBuild",
+        "NoteSourceLineMap::SameSnapshotIdentity",
+        "tail_node_payload_rewrites",
+    ):
+        if needle not in syntax_document_header and needle not in syntax_document_impl:
+            errors.append(
+                f"src/note/note_syntax_document.*: persistent final syntax document must retain {needle}"
+            )
+    if "std::vector<StoredNode> nodes_;" in syntax_document_impl:
+        errors.append(
+            "src/note/note_syntax_document.cpp: final syntax nodes must not regress to a fully copied vector member"
+        )
+
+    placement_header = (REPO_ROOT / "src/note/note_render_placement_snapshot.h").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    placement_impl = (REPO_ROOT / "src/note/note_render_placement_snapshot.cpp").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    for needle in (
+        "PlacementRelativeBoundary",
+        "NoteRenderPlacementStorage",
+        "NoteRenderPlacementSnapshotLocalSpliceWork",
+        "tail_line_payload_rewrites",
+        "SharesLinePayloadForDifferentialTest",
+        "ProvesUnchangedRowsFrom",
+    ):
+        if needle not in placement_header and needle not in placement_impl:
+            errors.append(
+                f"src/note/note_render_placement_snapshot.*: persistent local placement splice must retain {needle}"
+            )
+    if "std::vector<NoteRenderLinePlacement> line_placements_;" in placement_header:
+        errors.append(
+            "src/note/note_render_placement_snapshot.h: placement rows must not regress to a fully copied vector member"
+        )
+    return errors
+
+
 def find_note_render_incremental_regressions() -> list[str]:
     errors: list[str] = []
     required_by_file = {
@@ -1929,16 +2736,22 @@ def find_note_render_incremental_regressions() -> list[str]:
             "if (!layoutFrame.renderActive && !GetCharPos(hWnd, lineStart, &linePos))": "structured run placement must not query RichEdit positions per extent line",
             "flowEndX = std::max(flowEndX, segBaseX + segWidth);": "rendered flow extent must include first-glyph bearing alignment",
             "g_noteImeCompositionRequiresWholeViewFallback = true;": "structural IME edits must keep the current composition in whole-view fallback",
+            "struct NoteImeCompositionPresentationAnchor": "IME hybrid painting must retain a bounded preedit anchor rather than a text copy",
+            "CanRetainCommittedNoteLayoutDuringImeComposition": "IME hybrid painting must prove anchor geometry before reusing a committed snapshot",
+            "TryMapCommittedRawIndexThroughImeComposition": "IME hybrid painting must map committed source offsets through a preedit delta",
+            "currentNextLineStart.y - currentLineStart.y": "IME hybrid painting must reject a preedit that changes following-row geometry",
+            "AdvanceNoteImePresentationPhaseForWindow": "IME presentation must have one event-driven phase transition owner",
+            "ResultCommittedAwaitingEnd": "an IME result must remain committed despite residual IMM composition text",
         },
         "src/note_view/note_view_note_ops.cppinc": {
             "IsNoteLineRawHelper(hWnd, line)": "note render overlay must identify raw helper lines",
             "isStaleEditingLine": "note render overlay must isolate stale editing lines",
             "drawStaleRawLine": "note render overlay must draw current raw text only for stale/raw lines",
             "NotePresentationLineSurface::NativeRaw": "caret raw line must use native RichEdit drawing instead of stale overlay drawing",
-            "CurrentNoteTextCoreModel()": "pending render-canvas expansion must use the synchronized TextCore",
+            "const note::NoteTextCore* core = CurrentNoteTextCore();": "pending render-canvas expansion and local geometry must use the synchronized TextCore",
             "currentLogicalStartsForStale": "stale paint must reuse its frame-local logical-line mapping",
-            "FindLogicalLineForRaw(currentTextCore.line_starts, idx)": "stable link lookup must reuse the TextCore line index",
-            "FindLogicalLineForRaw(logicalStarts, *nativeHitRaw)": "stable hit testing must reuse its selected line index",
+            "QueryEditorLogicalLineRange(hWnd, line, lineCount, &lineStart": "stable link lookup must use the current editor-line range",
+            "lineForRawIndex(*nativeHitRaw)": "stable hit testing must map its selected offset through the local editor-line adapter",
             "editorLineLayout.HitTest(clientX, clientY)": "structured hit testing must share EditorLineLayout geometry",
             "selectionSegmentRangeRect(": "structured selection must share EditorLineLayout geometry",
             "selectionSegmentBoundaryScratch.push_back({segStart, segmentX})": "anchored selection must begin at its own rendered run position",
@@ -1948,6 +2761,9 @@ def find_note_render_incremental_regressions() -> list[str]:
             "ResolveNoteNativePaintScope(frameAction)": "native paint scope must come from the presentation policy",
             "CanReuseCommittedLayoutForImeComposition(hWnd)": "hybrid IME painting must require an explicit local-layout proof",
             "g_noteRenderStaleLines.first != g_noteRenderStaleLines.last": "IME hybrid reuse must reject multi-line stale ranges",
+            "bindingCurrentForPresentation": "a proven IME anchor must be the only alternate to a current TextCore binding",
+            "TryGetNoteImeCompositionAnchorLine(hWnd, &imeAnchorLine)": "IME native ownership must remain on the anchored logical row",
+            "const bool imeComposing = IsNoteImeComposing();": "frame presentation must use the event-owned IME phase rather than a second IMM poll",
         },
         "src/note/note_presentation.cpp": {
             "NoteNativePaintScope ResolveNoteNativePaintScope": "native text paint scope must be a pure presentation policy",
@@ -1955,16 +2771,26 @@ def find_note_render_incremental_regressions() -> list[str]:
             "EditorLineLayout::TextRangeRect": "shared editor-line geometry must provide source-range rectangles",
             "EditorLineLayout::HitTest": "shared editor-line geometry must provide hit testing",
             "state.ime_composition_can_reuse_committed_layout": "stale IME composition must not reuse committed lines without adapter proof",
+            "NoteImePresentationPhase::ResultCommittedAwaitingEnd": "a pure IME phase machine must preserve acknowledged results until WM_IME_END",
         },
         "src/ui/core/main_window_proc.cppinc": {
-            "ExpandNoteRenderCanvasForPendingEdit(g_hNoteEdit);": "same-line note edits must expand the raw helper canvas before the deferred render refresh",
+            "ExpandNoteRenderCanvasForPendingEdit(g_hNoteEdit);": "legacy rendered mode must retain its bounded pending raw-helper canvas update",
+            "The final route": "the final route must document that pending raw-helper canvas expansion is intentionally bypassed",
             "NoteEditorTextMutationObserved(g_hNoteEdit);": "every RichEdit EN_CHANGE must invalidate the zero-copy TextCore binding first",
         },
         "src/note_view/note_view_input_helpers.cppinc": {
             "DrawNoteEditVisualAssistOverlay": "note visual assists must have one paint entry point",
             "GetEditTextRangeForIndexing(hWnd, lineStart, lineEnd)": "visible tab/whitespace assists must read only the display-line range",
-            "IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd)": "IME geometry must require the editor-bound TextCore revision",
-            "presentationFrame.plan.caret_presenter": "IME caret ownership must come from the presentation plan",
+            "FinalFrameCanUseCustomPaint(hWnd)": "IME caret ownership must first use the current final-frame contract",
+            "TryGetFinalNoteRenderCaretRect(hWnd, outRect, outInputBand)": "IME geometry must come from the same final frame as glyph painting",
+            "WithdrawFinalNoteRenderFrame(hWnd);": "an unresolved final caret must withdraw the frame rather than reuse legacy geometry",
+            "GetNoteImeCompositionSnapshot": "IME preedit text and caret must be captured together without reading the complete editor",
+        },
+        "src/note_view/note_view_input_proc.cppinc": {
+            "BeginNoteImeCompositionPresentationAnchor(hWnd);": "IME start must capture the preedit's committed row before RichEdit mutates it",
+            "UpdateNoteImeCompositionPresentationAnchor(hWnd, composition.text);": "IME updates must publish only bounded preedit geometry",
+            "ClearNoteImeCompositionPresentationAnchor(hWnd);": "IME completion must discard the temporary anchor before markup refresh",
+            "note::NoteImePresentationEvent::ResultCommitted": "GCS_RESULTSTR must end provisional IME presentation before RichEdit emits EN_CHANGE",
         },
     }
     for rel, needles in required_by_file.items():
@@ -2002,6 +2828,8 @@ def find_note_render_incremental_regressions() -> list[str]:
         ime_text = helper_text[ime_pos:ime_end]
         if "GetNoteLogicalLineStarts(hWnd" in ime_text:
             errors.append("src/note_view/note_view_input_helpers.cppinc: IME caret resolution must not rebuild a full line index")
+        if "CurrentNoteTextCoreModel()" in ime_text:
+            errors.append("src/note_view/note_view_input_helpers.cppinc: IME caret resolution must not materialize the canonical model")
         if "GetWindowTextLengthW(hWnd)" in ime_text:
             errors.append("src/note_view/note_view_input_helpers.cppinc: IME caret resolution must not use text length as a TextCore identity proof")
     overlay_pos = ops_text.find("static void DrawHighlightOverlay")
@@ -2012,6 +2840,12 @@ def find_note_render_incremental_regressions() -> list[str]:
         overlay_text = ops_text[overlay_pos:next_measure_pos]
         if "GetNoteLogicalLineStarts(hWnd" in overlay_text:
             errors.append("src/note_view/note_view_note_ops.cppinc: current highlight paint must reuse TextCore/frame line indices")
+        if "CurrentNoteTextCoreModel()" in overlay_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: highlight paint must not materialize the canonical model for line geometry")
+        if "GetEditTextForIndexing(hWnd)" in overlay_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: highlight paint must not copy the complete editor for a stale row")
+        if "QueryEditorLogicalLineBand(hWnd" not in overlay_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: highlight paint must query current line geometry through the local editor-line adapter")
         if "BuildNoteRawLineSurfaceResolver(hWnd)" not in overlay_text:
             errors.append("src/note_view/note_view_note_ops.cppinc: visible line surfaces must share one raw-line resolver per paint")
         if "IsNoteLineRawHelper(hWnd, line)" in overlay_text:
@@ -2024,33 +2858,73 @@ def find_note_render_incremental_regressions() -> list[str]:
     else:
         rendered_caret_text = ops_text[rendered_caret_pos:raw_caret_pos]
         raw_caret_text = ops_text[raw_caret_pos:link_pos]
-        if "GetNoteLogicalLineStarts(hWnd" in rendered_caret_text or "RefreshMarkdownRenderCache(" in rendered_caret_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: rendered caret geometry must reuse the bound TextCore snapshot")
-        if "GetNoteLogicalLineStarts(hWnd" in raw_caret_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: raw caret geometry must reuse the bound TextCore line index")
+        if ("GetNoteLogicalLineStarts(hWnd" in rendered_caret_text or
+                "CurrentNoteTextCoreModel()" in rendered_caret_text or
+                "RefreshMarkdownRenderCache(" in rendered_caret_text):
+            errors.append("src/note_view/note_view_note_ops.cppinc: rendered caret geometry must use the local editor-line adapter")
+        if ("GetNoteLogicalLineStarts(hWnd" in raw_caret_text or
+                "CurrentNoteTextCoreModel()" in raw_caret_text):
+            errors.append("src/note_view/note_view_note_ops.cppinc: raw caret geometry must use the local editor-line adapter")
     native_hit_pos = ops_text.find("static std::optional<size_t> HitTestNativeNoteRawPosition", link_pos)
     if link_pos < 0 or native_hit_pos < 0:
         errors.append("src/note_view/note_view_note_ops.cppinc: link lookup must remain an isolated helper")
-    elif "GetNoteLogicalLineStarts(hWnd" in ops_text[link_pos:native_hit_pos]:
-        errors.append("src/note_view/note_view_note_ops.cppinc: stable link lookup must not rebuild the line index")
+    elif ("GetNoteLogicalLineStarts(hWnd" in ops_text[link_pos:native_hit_pos] or
+            "CurrentNoteTextCoreModel()" in ops_text[link_pos:native_hit_pos]):
+        errors.append("src/note_view/note_view_note_ops.cppinc: stable link lookup must use the local editor-line adapter")
     hit_pos = ops_text.find("static std::optional<size_t> HitTestMarkupPosition")
     next_math_pos = ops_text.find("static mathrender::Layout MeasureMathLineLayout", hit_pos)
     if hit_pos < 0 or next_math_pos < 0:
         errors.append("src/note_view/note_view_note_ops.cppinc: markup hit testing must remain an isolated helper")
-    elif "GetNoteLogicalLineStarts(hWnd" in ops_text[hit_pos:next_math_pos]:
-        errors.append("src/note_view/note_view_note_ops.cppinc: stable markup hit testing must not rebuild the line index")
-    boundary_pos = shared_text.find("static bool BuildRenderedBoundariesForLine")
+    else:
+        hit_text = ops_text[hit_pos:next_math_pos]
+        if ("GetNoteLogicalLineStarts(hWnd" in hit_text or
+                "CurrentNoteTextCoreModel()" in hit_text or
+                "GetEditTextForIndexing(hWnd)" in hit_text):
+            errors.append("src/note_view/note_view_note_ops.cppinc: stable markup hit testing must not materialize the complete note")
+        if ("QueryEditorLogicalLineBand(hWnd" not in hit_text or
+                "QueryEditorLogicalLineRange(hWnd" not in hit_text):
+            errors.append("src/note_view/note_view_note_ops.cppinc: stable markup hit testing must use the local editor-line adapter")
+    boundary_pos = shared_text.find("static bool BuildRenderedBoundariesForLineWithScratch")
     boundary_end = shared_text.find("static int FindLineForRaw", boundary_pos)
     if boundary_pos < 0 or boundary_end < 0:
         errors.append("src/note_view/note_view_shared.cppinc: rendered boundary generation must remain an isolated helper")
-    elif "GetNoteLogicalLineStarts(hWnd" in shared_text[boundary_pos:boundary_end]:
-        errors.append("src/note_view/note_view_shared.cppinc: stable rendered boundaries must reuse the TextCore line index")
+    elif ("GetNoteLogicalLineStarts(hWnd" in shared_text[boundary_pos:boundary_end] or
+            "CurrentNoteTextCoreModel()" in shared_text[boundary_pos:boundary_end] or
+            "QueryEditorLogicalLineRange(hWnd" not in shared_text[boundary_pos:boundary_end]):
+        errors.append("src/note_view/note_view_shared.cppinc: rendered boundaries must use the local editor-line range")
+    placement_pos = shared_text.find("static bool BuildRenderedSegmentPlacements")
+    placement_end = shared_text.find("static bool BuildRenderedBoundariesForLineWithScratch", placement_pos)
+    if placement_pos < 0 or placement_end < 0:
+        errors.append("src/note_view/note_view_shared.cppinc: rendered segment placement must remain an isolated helper")
+    else:
+        placement_text = shared_text[placement_pos:placement_end]
+        if ("GetNoteLogicalLineStarts(hWnd" in placement_text or
+                "GetEditTextForIndexing(hWnd)" in placement_text):
+            errors.append("src/note_view/note_view_shared.cppinc: rendered segment placement must not copy the complete editor")
+        if "const RenderedLinePlacement* editorLineRange" not in placement_text:
+            errors.append("src/note_view/note_view_shared.cppinc: rendered segment placement must accept a local editor-line range")
+    find_line_pos = shared_text.find("static int FindLineForRaw(size_t raw) {")
+    find_line_end = shared_text.find("static int FindBoundaryIndexAtOrBefore", find_line_pos)
+    if find_line_pos < 0 or find_line_end < 0:
+        errors.append("src/note_view/note_view_shared.cppinc: normal-mode line lookup must remain an isolated helper")
+    else:
+        find_line_text = shared_text[find_line_pos:find_line_end]
+        if "CurrentNoteTextCoreModel()" in find_line_text:
+            errors.append("src/note_view/note_view_shared.cppinc: normal-mode line lookup must not materialize the canonical model")
+        if "EM_LINEFROMCHAR" not in find_line_text:
+            errors.append("src/note_view/note_view_shared.cppinc: normal-mode line lookup must use current editor line coordinates")
     selection_pos = helper_text.find("static bool ResolveNoteLineSelectionHit")
     selection_end = helper_text.find("static bool SelectNoteLines", selection_pos)
     if selection_pos < 0 or selection_end < 0:
         errors.append("src/note_view/note_view_input_helpers.cppinc: line selection hit testing must remain an isolated helper")
-    elif "GetNoteLogicalLineStarts(hWnd" not in helper_text[selection_pos:selection_end]:
-        errors.append("src/note_view/note_view_input_helpers.cppinc: line selection hit testing must retain an unsynchronized fallback")
+    else:
+        selection_text = helper_text[selection_pos:selection_end]
+        if "GetNoteLogicalLineStarts(hWnd" not in selection_text:
+            errors.append("src/note_view/note_view_input_helpers.cppinc: line selection hit testing must retain an unsynchronized fallback")
+        if "CurrentNoteTextCoreModel()" in selection_text:
+            errors.append("src/note_view/note_view_input_helpers.cppinc: stable line selection must use the local editor-line adapter")
+        if "QueryEditorLogicalLineBand(hWnd" not in selection_text:
+            errors.append("src/note_view/note_view_input_helpers.cppinc: stable line selection must query current row geometry locally")
     input_proc_text = (REPO_ROOT / "src/note_view/note_view_input_proc.cppinc").read_text(encoding="utf-8", errors="ignore")
     main_switch_pos = input_proc_text.find("    switch (msg) {", input_proc_text.find("if (IsNoteOpeningFocusVisualHoldActive"))
     paint_pos = input_proc_text.find("case WM_PAINT:", main_switch_pos)
@@ -2081,8 +2955,61 @@ def find_note_render_incremental_regressions() -> list[str]:
         frame_text = ops_text[frame_pos:frame_end]
         if "const bool textCoreEditorCurrent = IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd);" not in frame_text:
             errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame resolution must capture the TextCore/editor binding once")
+        if "bool bindingCurrentForFrame = textCoreEditorCurrent;" not in frame_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame binding recovery must retain the initial binding proof")
+        if ("captureStaleText &&\n"
+                "            TryRepairNoteTextCoreEditorBindingForPaint(hWnd, &frame.currentTextForStale)" not in frame_text):
+            errors.append("src/note_view/note_view_note_ops.cppinc: binding recovery must be paint-only and reuse its one text snapshot")
+        if "GetEditTextForIndexing(hWnd)" in frame_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame line-count selection must not read the complete editor")
+        if "core->logical_line_count() != g_lineCache.size()" not in frame_text:
+            errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame stale line count must use the current TextCore scalar")
         if "NotePresentationFrameState{renderActive, false, false, false, false, false," not in frame_text:
             errors.append("src/note_view/note_view_note_ops.cppinc: unbound TextCore/editor state must select whole-view native fallback")
+    editor_line_pos = shared_text.find("static bool QueryEditorLogicalLineRange")
+    editor_line_end = shared_text.find("static bool InvalidateNoteRenderDirtyLines", editor_line_pos)
+    if editor_line_pos < 0 or editor_line_end < 0:
+        errors.append("src/note_view/note_view_shared.cppinc: local editor-line geometry must remain an isolated helper")
+    else:
+        editor_line_text = shared_text[editor_line_pos:editor_line_end]
+        if ("EM_LINEINDEX" not in editor_line_text or
+                "EM_LINELENGTH" not in editor_line_text or
+                "GetCharPos" not in editor_line_text):
+            errors.append("src/note_view/note_view_shared.cppinc: local editor-line geometry must use RichEdit line and position APIs")
+        if "GetEditTextForIndexing(hWnd)" in editor_line_text or "CurrentNoteTextCoreModel()" in editor_line_text:
+            errors.append("src/note_view/note_view_shared.cppinc: local editor-line geometry must not materialize the complete note")
+    main_window_text = (REPO_ROOT / "src/ui/core/main_window_proc.cppinc").read_text(
+        encoding="utf-8", errors="ignore")
+    if "static void RequeueNoteOverlayRefreshForCurrentRevision(HWND hWnd)" not in main_window_text:
+        errors.append("src/ui/core/main_window_proc.cppinc: deferred overlay refresh must retain a retry owner")
+    if main_window_text.count("RequeueNoteOverlayRefreshForCurrentRevision(g_hMainWnd);") != 1:
+        errors.append("src/ui/core/main_window_proc.cppinc: only a live IME may requeue a timer-level overlay refresh")
+    if "RequeueNoteOverlayRefreshForCurrentRevision(hWnd);" not in main_window_text:
+        errors.append("src/ui/core/main_window_proc.cppinc: input changes during IME must schedule a post-composition overlay refresh")
+    if ("if (immediate && targetRevision != 0 && targetRevision != CurrentEditRevision())" not in
+            main_window_text):
+        errors.append("src/ui/core/main_window_proc.cppinc: stale immediate overlay requests must normalize at scheduling")
+    ime_input_text = (REPO_ROOT / "src/note_view/note_view_input_proc.cppinc").read_text(
+        encoding="utf-8", errors="ignore")
+    result_pos = ime_input_text.find("case WM_IME_COMPOSITION: {")
+    default_proc_pos = ime_input_text.find(
+        "LRESULT res = DispatchNoteImeToNative(hWnd, msg, wParam, lParam);", result_pos)
+    result_refresh_pos = ime_input_text.find(
+        "PostMessageW(GetParent(hWnd), kMsgNoteOverlayUpdate, 1,", default_proc_pos)
+    if result_pos < 0 or default_proc_pos < 0 or result_refresh_pos < default_proc_pos:
+        errors.append("src/note_view/note_view_input_proc.cppinc: IME result must request markup only after RichEdit accepts canonical text")
+    if ("IsNoteImeCanonicalChangeDeferred(g_hNoteEdit)" not in main_window_text or
+            "AcceptNoteImeResultWithContinuation(hWnd, imeResult, composition)" not in ime_input_text):
+        errors.append("IME preedit EN_CHANGE must defer canonical edits and accept continuing results through the proven result-only boundary")
+    change_pos = main_window_text.find("if (from == g_hNoteEdit && code == EN_CHANGE) {")
+    change_end = main_window_text.find("if (from == g_hAnnotSummary", change_pos)
+    change_text = main_window_text[change_pos:change_end]
+    acknowledgement_pos = change_text.find("const auto acceptedChange = ObserveCurrentNoteTextChange(g_hNoteEdit);")
+    revision_pos = change_text.find("NotifyEditRevisionChanged();")
+    if (change_pos < 0 or change_end < 0 or acknowledgement_pos < 0 or revision_pos < acknowledgement_pos or
+            "acceptedChange == NoteCanonicalTextChangeResult::Unchanged" not in change_text or
+            "acceptedChange == NoteCanonicalTextChangeResult::Deferred" not in change_text):
+        errors.append("note EN_CHANGE must acknowledge canonical mutation before revisions/staging and preserve unchanged/deferred state")
     return errors
 
 
@@ -2101,24 +3028,35 @@ def find_note_ime_layout_coordinate_regressions() -> list[str]:
         },
         "src/note_view/note_view_input_helpers.cppinc": {
             "TryGetNoteImeCaretRect": "IME candidate positioning must use one caret-rect resolver",
-            "IsNoteRenderActive() && CanReadStableRenderDerivedState": "IME caret resolution must prefer stable render-derived coordinates when available",
-            "!IsNoteLineRawHelper(hWnd, line)": "IME caret resolution must distinguish rendered lines from raw helper lines",
-            "TryGetRenderedCaretRect(hWnd, hdc, caret, outRect)": "IME caret resolution must use rendered caret geometry for rendered lines",
-            "TryGetRawCaretRect(hWnd, hdc, caret, outRect)": "IME caret resolution must use raw caret geometry for caret/IME helper lines",
-            "return TryGetNativeNoteCaretRect(hWnd, outRect);": "IME caret resolution must fall back to native RichEdit geometry",
-            "ImmSetCompositionWindow(himc, &comp);": "IME composition window must be positioned from the resolved caret rect",
-            "ImmSetCandidateWindow(himc, &cand);": "IME candidate window must be positioned from the resolved caret rect",
-            "SetCaretPos(rc.left, rc.top);": "native caret must be synchronized to the resolved render/raw caret rect",
+            "FinalFrameCanUseCustomPaint(hWnd)": "IME caret resolution must prefer the published final frame when it paints the client",
+            "TryGetFinalNoteRenderCaretRect(hWnd, outRect, outInputBand)": "IME caret geometry must use the final frame for both raw and structured surfaces",
+            "WithdrawFinalNoteRenderFrame(hWnd);": "a failed final caret lookup must choose whole-native fallback rather than legacy geometry",
+            "if (!TryGetNativeNoteCaretRect(hWnd, outRect)) return false;": "IME caret resolution must fall back to native RichEdit geometry",
+            "*outInputBand = *outRect;": "whole-native IME input band must use the actual native caret geometry",
+            "ImmSetCompositionWindow(himc, &comp)": "IME composition window must be positioned from the resolved caret rect",
+            "ImmSetCandidateWindow(himc, &cand)": "IME candidate window must use the resolved input-band exclusion",
+            "note::ResolveNoteImeCandidatePlacement": "IME candidate exclusion must protect visible input and DPI-scaled clearance",
+            "frame->ime_decorations()": "wrapped preedit exclusion must use the same measured fragments as painting",
+            "note::NoteImeClientRect band{inputBand.left, inputBand.top, inputBand.right, inputBand.bottom}": "IME exclusion must use the allocated input band rather than just glyph height",
+            "context.imeCandidateWindowSyncInProgress": "IMM positioning must guard synchronous notification reentry",
+            "ScopedImeContextRelease": "IMM positioning must release its borrowed context on every return path",
+            "if (ShouldSyncNoteImeAfterDefaultMessage(msg))": "prediction positioning must not require a live composition session",
+            "SetCaretPos(rc.left, rc.top)": "native caret must be synchronized to the resolved render/raw caret rect",
+            "GetGUIThreadInfo(GetCurrentThreadId(), &info)": "native caret synchronization must inspect the current focus lifetime rather than cached shape",
+            "SPI_GETCARETWIDTH": "final caret width must respect the Windows accessibility setting",
+            "if (!positioned || !shown) requireNativeFallback();": "failed native caret placement must withdraw final geometry without changing text",
         },
-        "src/note_view/note_view_note_ops.cppinc": {
-            "TryGetRenderedCaretRect": "rendered caret geometry must remain available for IME and native caret sync",
-            "TryGetRawCaretRect": "raw caret geometry must remain available for IME and native caret sync",
-            "NoteLayoutFrameClientXFromNativeLineX(layoutFrame, linePos.x, caretPos.x)": "raw caret X must translate native RichEdit X through the shared layout frame",
-            "NoteLayoutFrameLineBaseXForRenderState(layoutFrame, linePos.x) + w": "rendered caret X must be measured from the shared render line base",
-            "if (renderActive && !IsNoteImeComposing())": "IME composition must not replace native/raw caret X with stale rendered text measurement",
+        "src/note_view/note_view_final_render.cppinc": {
+            "paint.paint_caret = false;": "runtime final paint must not duplicate the Windows caret",
+            "frame->Caret(&caret)": "final IME caret geometry must be resolved from the immutable published frame",
+            "clientY(line->bottom_px)": "IME input band must include preserved raw row height from the final allocation",
+            "context.finalRenderScrollY": "final caret geometry must use the same vertical scroll origin as painting",
+            "FinalRawTextIndexToRichEditIndex": "final source positions must be translated to RichEdit only at the input transport edge",
         },
         "src/note_view/note_view_input_proc.cppinc": {
             "SyncNoteImeCandidateWindowToCaret(hWnd);": "note input procedure must resync IME candidate position after IME and scroll-affecting events",
+            "case WM_IME_NOTIFY: {": "prediction open/change notifications must synchronize their placement post-default",
+            "wParam == IMN_OPENCANDIDATE || wParam == IMN_CHANGECANDIDATE": "candidate notifications must include both initial display and updates",
             "if (g_noteImeComposing) SyncNoteImeCandidateWindowToCaret(hWnd);": "scroll and layout changes during composition must resync the IME candidate window",
         },
     }
@@ -2135,6 +3073,33 @@ def find_note_ime_layout_coordinate_regressions() -> list[str]:
     candidate_pos = helper_text.find("ImmSetCandidateWindow", sync_pos)
     if resolver_pos < 0 or sync_pos < 0 or composition_pos < 0 or candidate_pos < 0 or resolver_pos > sync_pos or composition_pos > candidate_pos:
         errors.append("src/note_view/note_view_input_helpers.cppinc: IME candidate sync must use the shared caret rect resolver before setting composition/candidate windows")
+    snapshot_pos = helper_text.find("static bool GetNoteImeCompositionSnapshot")
+    snapshot_end = helper_text.find("static bool MoveNoteCaretIntoCommittedFullWidthParenPair", snapshot_pos)
+    if snapshot_pos < 0 or snapshot_end < 0:
+        errors.append("src/note_view/note_view_input_helpers.cppinc: IMM snapshot reading must remain a bounded helper")
+    else:
+        snapshot_text = helper_text[snapshot_pos:snapshot_end]
+        if "lParam" in snapshot_text:
+            errors.append("src/note_view/note_view_input_helpers.cppinc: IMM field availability must not depend on composition change flags")
+        for needle in ("ScopedImeContextRelease", "if (copied != size) return false;", "GCS_CURSORPOS", "GCS_COMPATTR", "GCS_COMPCLAUSE", "catch (const std::exception&)"):
+            if needle not in snapshot_text:
+                errors.append("src/note_view/note_view_input_helpers.cppinc: IMM text/cursor snapshot must release its context and reject partial reads or allocation failure")
+                break
+    input_text = (REPO_ROOT / "src/note_view/note_view_input_proc.cppinc").read_text(encoding="utf-8", errors="ignore")
+    ime_pos = input_text.find("case WM_IME_COMPOSITION: {")
+    default_pos = input_text.find("CallWindowProcW(g_oldNoteProc", ime_pos)
+    read_pos = input_text.find("GetNoteImeCompositionSnapshot", ime_pos)
+    observe_pos = input_text.find("note::NoteImePresentationEvent::ObservedCompositionText", ime_pos)
+    if min(ime_pos, default_pos, read_pos, observe_pos) < 0 or not (read_pos < default_pos and observe_pos < default_pos):
+        errors.append("src/note_view/note_view_input_proc.cppinc: IMM preedit must be normalized before RichEdit's nested EN_CHANGE")
+    focus_pos = input_text.find("case WM_KILLFOCUS: {")
+    focus_end = input_text.find("case WM_VSCROLL:", focus_pos)
+    focus_text = input_text[focus_pos:focus_end]
+    settle_pos = focus_text.find("DispatchNoteImeToNative(hWnd, msg, wParam, lParam)")
+    reset_pos = focus_text.find("EndFinalNoteImePreedit(hWnd)")
+    flush_pos = focus_text.find("MaybeFlushNoteStageOnCaretOrFocusChange")
+    if min(focus_pos, focus_end, settle_pos, reset_pos, flush_pos) < 0 or not (settle_pos < reset_pos < flush_pos) or "return result;" not in focus_text:
+        errors.append("src/note_view/note_view_input_proc.cppinc: focus loss must settle native input once, close the preedit session, then flush canonical stage")
     ops_text = (REPO_ROOT / "src/note_view/note_view_note_ops.cppinc").read_text(encoding="utf-8", errors="ignore")
     rendered_pos = ops_text.find("static bool TryGetRenderedCaretRect")
     raw_pos = ops_text.find("static bool TryGetRawCaretRect")
@@ -2267,7 +3232,7 @@ def find_multi_instance_launch_regressions() -> list[str]:
     required_by_file = {
         "src/app/startup_instance.cpp": {
             'CanonicalPackageKey()': "single-instance scope must derive from the package setup path",
-            'L"pdf_workspace_setup.json"': "single-instance scope must include the adjacent setup file",
+            'L"pdf_note_workspace_setup.json"': "single-instance scope must include the adjacent setup file",
             'PackageInstanceSuffix()': "mutex and events must be namespaced per package",
             'CanonicalPackageKeyForExecutablePath': "package identity must be reusable for target-process validation",
             'QueryFullProcessImageNameW': "window activation must verify the target process package",
@@ -2450,6 +3415,11 @@ def main() -> int:
         problems.append("raw Win32 timer ID literal(s) detected; use a named constant:")
         problems.extend(raw_timer_ids)
 
+    long_path_problems = find_long_path_contract_violations()
+    if long_path_problems:
+        problems.append("long-path contract violation(s) detected:")
+        problems.extend(long_path_problems)
+
     ui_string_problems = find_forbidden_ui_strings()
     if ui_string_problems:
         problems.append("forbidden UI string(s) detected:")
@@ -2560,6 +3530,10 @@ def main() -> int:
     if note_tex_route_problems:
         problems.append("note TeX route regression(s) detected:")
         problems.extend(note_tex_route_problems)
+    final_render_publication_boundary_problems = find_final_render_publication_boundary_regressions()
+    if final_render_publication_boundary_problems:
+        problems.append("final render publication boundary regression(s) detected:")
+        problems.extend(final_render_publication_boundary_problems)
     note_render_incremental_problems = find_note_render_incremental_regressions()
     if note_render_incremental_problems:
         problems.append("note render incremental regression(s) detected:")

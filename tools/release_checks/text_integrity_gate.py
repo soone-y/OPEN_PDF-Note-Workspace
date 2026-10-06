@@ -50,9 +50,20 @@ def git_visible_paths(root: Path) -> list[Path]:
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"git ls-files failed: {detail or completed.returncode}")
+    deleted = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--deleted"],
+        capture_output=True, check=False,
+    )
+    if deleted.returncode != 0:
+        detail = deleted.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git deleted-path enumeration failed: {detail or deleted.returncode}")
+    deleted_paths = set(deleted.stdout.split(b"\0"))
     paths: list[Path] = []
     for raw_path in completed.stdout.split(b"\0"):
-        if not raw_path:
+        # Deleted working-tree entries have no bytes to audit. Required-file
+        # existence remains the responsibility of manifest/license/code gates.
+        # A later read failure on any enumerated existing file still fails.
+        if not raw_path or raw_path in deleted_paths:
             continue
         try:
             relative = raw_path.decode("utf-8", errors="strict")

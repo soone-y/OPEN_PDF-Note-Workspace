@@ -2,9 +2,19 @@
 # MD4C Change Log
 
 
-## Next Version (Work in Progress)
+## Version 0.6.0
 
 New Features:
+
+  * Add blank line preservation, enabled with the flag
+    `MD_FLAG_PRESERVEBLANKLINES`.
+
+    Normally any run of blank lines separating two blocks is collapsed into a
+    single block boundary. With the flag, each run is instead reported as a
+    block `MD_BLOCK_BLANK` whose detail (`MD_BLOCK_BLANK_DETAIL`) holds the
+    number of blank lines. This is a deviation from CommonMark, intended for
+    WYSIWYG-like applications which need to reproduce the vertical spacing of
+    the source.
 
   * Add highlight span extension, enabled with the flag `MD_FLAG_HIGHLIGHT`.
 
@@ -56,7 +66,10 @@ New Features:
 Changes:
 
   * Permissive autolinks (`MD_FLAG_PERMISSIVExxxAUTOLINKS` flags) have been
-    improved and some links with non-alphanumeric characters are now recognized.
+    improved in several ways:
+     - some more links with non-alphanumeric characters are now recognized,
+     - e-mails with explicit `mailto:` prefix are now recognized,
+     - `xmpp:` links are now recognized.
 
     However please note this will always be a subject of painful search for
     reasonable trade-off between recognizing more obscure URLs versus opening
@@ -70,6 +83,15 @@ Changes:
   * Better detection (and suppression) of too sparse tables, which would
     otherwise generate too disproportionately large output.
     (See [#345](https://github.com/mity/md4c/pull/345) for more information.)
+
+  * For the sake completeness, we've made our Unicode-specific code compliant
+    to Unicode 18.0, again.
+
+    Explanation: By mistake we added into MD4C version 0.5.3 support for the
+    Unicode standard based on pre-release version of it (probably 18.0.0 alfa).
+    This has now been amended and our Unicode data tables re-generated with the
+    correct final official version 18.0.0 of the standard. (Resulting in
+    exactly the same tables, so strictly speaking this is a non-change.)
 
 Fixes:
 
@@ -96,6 +118,20 @@ Fixes:
     Fix check that the standard CommonMark URI autolink's scheme must begin with
     an alpha-numerical character, not any ASCII character.
 
+  * [#398](https://github.com/mity/md4c/pull/398),
+    [#399](https://github.com/mity/md4c/pull/399),
+    [#400](https://github.com/mity/md4c/pull/400):
+    Fix multiple memory management errors in error paths.
+
+    Big thanks especially to [Ilia Alshanetsky](https://github.com/iliaal) for
+    detecting and fixing all of these.
+
+  * [#413](https://github.com/mity/md4c/issues/413):
+    Fix a case of incorrect ending of a list.
+
+  * [#414](https://github.com/mity/md4c/issues/414):
+    Fix thematic break detection just after link reference definition.
+
 
 ## Version 0.5.3
 
@@ -110,7 +146,7 @@ Changes:
     tiny bit more permissive, allowing `+` and `-` characters to be anywhere
     in the path portion of the URL. This also improves compatibility with GFM.
 
-  * Make Unicode-specific code compliant to Unicode 18.0.
+  * Make Unicode-specific code compliant to Unicode 18.0.0.
 
 Fixes:
 

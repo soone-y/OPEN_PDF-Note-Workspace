@@ -8,8 +8,10 @@ import json
 import re
 import sys
 import xml.etree.ElementTree as element_tree
+from collections import deque
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -27,10 +29,44 @@ DOCUMENTATION_PORTAL_REQUIRED_FILES = (
 )
 PORTAL_ENTRY_LINKS = ("introduction/index.html",)
 HIGH_CONTRAST_STORAGE_KEY = "pdf-note-workspace-high-contrast"
+MAX_VISIBLE_PORTAL_CLICKS = 2
+PORTAL_EXTERNAL_LINKS = (
+    "https://pdf-note-workspace.soone-y.com/",
+    "https://github.com/soone-y/OPEN_PDF-Note-Workspace",
+)
 MARKDOWN_LINK = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HTML_LINK = re.compile(r"(?:href|src)=[\"']([^\"'#]+)", re.IGNORECASE)
 HTML_META = re.compile(r"<meta\s+[^>]*?name=[\"']([^\"']+)[\"'][^>]*?content=[\"']([^\"']*)[\"']", re.IGNORECASE)
 HTML_ID = re.compile(r"\bid=[\"']([^\"']+)[\"']", re.IGNORECASE)
+
+
+class VisibleAnchorParser(HTMLParser):
+    """Collect anchors a reader can use without opening a site-menu."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hrefs: list[str] = []
+        self._details_stack: list[bool] = []
+        self._site_menu_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag.lower() == "details":
+            is_site_menu = "site-menu" in (attributes.get("class") or "").split()
+            self._details_stack.append(is_site_menu)
+            if is_site_menu:
+                self._site_menu_depth += 1
+            return
+        if tag.lower() == "a" and self._site_menu_depth == 0:
+            href = attributes.get("href")
+            if href:
+                self.hrefs.append(href)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "details" or not self._details_stack:
+            return
+        if self._details_stack.pop():
+            self._site_menu_depth -= 1
 
 
 def local_target(value: str) -> str | None:
@@ -170,6 +206,59 @@ def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
     for target in PORTAL_ENTRY_LINKS:
         if target not in linked_targets:
             errors.append(f"index.html must visibly link to common entry document: {target}")
+    visible = VisibleAnchorParser()
+    visible.feed(text)
+    for target in PORTAL_EXTERNAL_LINKS:
+        if target not in visible.hrefs:
+            errors.append(f"index.html must visibly link to portal external destination: {target}")
+
+
+def visible_local_html_links(site: Path, source_path: Path) -> set[Path]:
+    """Return local HTML targets linked outside a collapsible site-menu."""
+    parser = VisibleAnchorParser()
+    parser.feed(source_path.read_text(encoding="utf-8-sig"))
+    site_root = site.resolve()
+    targets: set[Path] = set()
+    for href in parser.hrefs:
+        parts = urlsplit(href)
+        if parts.scheme or parts.netloc or not parts.path:
+            continue
+        target = (source_path.parent / unquote(parts.path)).resolve()
+        if target == site_root or site_root not in target.parents:
+            continue
+        if target.suffix.lower() == ".html" and target.is_file():
+            targets.add(target.relative_to(site_root))
+    return targets
+
+
+def validate_portal_click_depth(site: Path, errors: list[str]) -> None:
+    """Keep every public HTML document within two visible portal links."""
+    root = site / "index.html"
+    if not root.is_file():
+        return
+    pages = {path.relative_to(site) for path in site.rglob("*.html")}
+    distances: dict[Path, int] = {Path("index.html"): 0}
+    pending: deque[Path] = deque([Path("index.html")])
+    while pending:
+        current = pending.popleft()
+        for target in visible_local_html_links(site, site / current):
+            if target not in pages or target in distances:
+                continue
+            distances[target] = distances[current] + 1
+            pending.append(target)
+
+    for page in sorted(pages, key=lambda value: value.as_posix()):
+        clicks = distances.get(page)
+        if clicks is None:
+            errors.append(
+                "document is not reachable from the portal without opening a hamburger menu: "
+                f"{page.as_posix()}"
+            )
+        elif clicks > MAX_VISIBLE_PORTAL_CLICKS:
+            errors.append(
+                f"document requires more than {MAX_VISIBLE_PORTAL_CLICKS} visible clicks from portal: "
+                f"{page.as_posix()} ({clicks})"
+            )
 
 
 def resolve_child(root: Path, relative: object, *, label: str) -> Path:
@@ -307,6 +396,7 @@ def validate_site(
     validate_structured_files(site, errors)
     validate_local_links(site, errors)
     validate_portal_entrypoint(site, errors)
+    validate_portal_click_depth(site, errors)
     validate_rendered_human_docs(site, errors)
     validate_rendered_fragments(site, errors)
     if source_root is not None or allowlist_path is not None:

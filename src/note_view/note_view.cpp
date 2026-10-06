@@ -4,6 +4,7 @@
 
 #include "core/ui_prompts.h"
 #include "bridge/view_bridge.h"
+#include "note/note_render_final_win32_adapter.h"
 #include "ui/noop_nav_guard.h"
 #include "workspace/workspace_write_lock.h"
 #include "workspace/file_ops.h"
@@ -17,6 +18,7 @@ enum class PaneNavContext {
 bool HandlePaneDirectionalNavigation(HWND owner, PaneNavContext context, HWND source, WPARAM vkey);
 
 #include "note_view_shared.cppinc"
+#include "note_view_final_render.cppinc"
 #include "note_view_note_ops.cppinc"
 #include "note_view_bottom_panes.cppinc"
 #include "note_view_input.cppinc"
