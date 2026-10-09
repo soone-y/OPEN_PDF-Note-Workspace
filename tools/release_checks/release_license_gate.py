@@ -51,16 +51,20 @@ def validate_release_directory(release_dir: Path, locale: str = "ja") -> list[st
     return errors
 
 
-def zip_entry_for_release_file(zip_file: zipfile.ZipFile, release_dir: Path, relative_path: str) -> str | None:
+def zip_entry_for_release_file(
+    zip_file: zipfile.ZipFile, release_dir: Path, relative_path: str, archive_root: str | None = None
+) -> str | None:
     """Find exactly one ZIP member for a required file below the release root."""
-    expected = PurePosixPath(release_dir.name, *PurePosixPath(relative_path).parts).as_posix()
+    expected = PurePosixPath(archive_root or release_dir.name, *PurePosixPath(relative_path).parts).as_posix()
     names = [name for name in zip_file.namelist() if name.rstrip("/") == expected]
     if len(names) == 1:
         return names[0]
     return None
 
 
-def validate_release_zip(release_dir: Path, zip_path: Path, locale: str = "ja") -> list[str]:
+def validate_release_zip(
+    release_dir: Path, zip_path: Path, locale: str = "ja", archive_root: str | None = None
+) -> list[str]:
     """Require each ZIP to contain byte-identical required license files."""
     errors: list[str] = []
     if not zip_path.is_file() or zip_path.stat().st_size == 0:
@@ -77,7 +81,7 @@ def validate_release_zip(release_dir: Path, zip_path: Path, locale: str = "ja") 
                 directory_path = release_dir / relative_path
                 if not directory_path.is_file():
                     continue
-                member = zip_entry_for_release_file(archive, release_dir, relative_path)
+                member = zip_entry_for_release_file(archive, release_dir, relative_path, archive_root)
                 if member is None:
                     errors.append(f"release ZIP is missing required license file: {relative_path}")
                     continue
@@ -104,6 +108,7 @@ def validate_release_set(release_set: Path) -> list[str]:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         components = manifest["components"]
+        zip_roots = manifest.get("zip_roots", {})
         locale = manifest["locale"]
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
         return [f"invalid release-set manifest: {manifest_path} ({error})"]
@@ -111,6 +116,8 @@ def validate_release_set(release_set: Path) -> list[str]:
     if locale not in {"ja", "en"}:
         return ["release-set locale must be ja or en"]
     errors: list[str] = []
+    if not isinstance(zip_roots, dict):
+        return ["release-set manifest has invalid ZIP root metadata"]
     for label, directory_key, zip_key in (
         ("full", "release", "release_zip"),
         ("Lite", "release_lite", "release_lite_zip"),
@@ -122,7 +129,11 @@ def validate_release_set(release_set: Path) -> list[str]:
             errors.append(str(error))
             continue
         errors.extend(f"{label}: {error}" for error in validate_release_directory(release_dir, locale))
-        errors.extend(f"{label}: {error}" for error in validate_release_zip(release_dir, zip_path, locale))
+        archive_root = zip_roots.get(zip_key)
+        if archive_root is not None and not isinstance(archive_root, str):
+            errors.append(f"{label}: release-set manifest has an invalid ZIP root")
+            continue
+        errors.extend(f"{label}: {error}" for error in validate_release_zip(release_dir, zip_path, locale, archive_root))
     return errors
 
 

@@ -1,4 +1,5 @@
 #include "workspace/workspace_config_io.h"
+#include "app/main_escape_backup.h"
 #include "core/localization.h"
 #include "core/app_core.h"
 #include "core/json_string.h"
@@ -9,6 +10,7 @@
 #include "pdf_view/pdf_view.h"
 #include "core/preview_trace.h"
 #include "core/atomic_write.h"
+#include "diagnostics/normal_operations.h"
 #include "settings/settings.h"
 #include "bridge/view_bridge.h"
 #include "core/font_list.h"
@@ -16,6 +18,7 @@
 #include "core/fault_injection.h"
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <regex>
@@ -24,6 +27,7 @@
 #include <shobjidl.h>
 #include <sstream>
 #include <unordered_set>
+#include <vector>
 
 // file: main/workspace_config.cppinc
 // NOTE: Included by workspace_controller.cppinc. Keep configuration/state helpers
@@ -501,7 +505,7 @@ bool EnsureWorkspaceResourceDirsWithErr(const std::wstring& root,
         if (outErr) *outErr = L"workspace root is empty";
         return false;
     }
-    std::filesystem::path resource = std::filesystem::path(root) / L"__resource__";
+    std::filesystem::path resource = std::filesystem::path(root) / L"__pdf_note_workspace__";
     std::filesystem::path settings = resource / L"__settings__";
     std::filesystem::path cache = resource / L"__tmp__";
     std::filesystem::path escape = resource / L"__escape__";
@@ -629,6 +633,473 @@ bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path
 namespace {
 static bool PickSettingsPresetSavePath(HWND owner, std::filesystem::path* outPath);
 static bool PickSettingsPresetOpenPath(HWND owner, std::filesystem::path* outPath);
+
+enum class WorkspaceToolsPage { Presets, Restore };
+
+class ScopedWorkspaceToolsDialogOwner {
+public:
+    explicit ScopedWorkspaceToolsDialogOwner(HWND owner) : owner_(owner) {
+        wasEnabled_ = owner_ && IsWindow(owner_) && IsWindowEnabled(owner_);
+        if (wasEnabled_) EnableWindow(owner_, FALSE);
+    }
+
+    ~ScopedWorkspaceToolsDialogOwner() {
+        if (wasEnabled_ && owner_ && IsWindow(owner_)) {
+            EnableWindow(owner_, TRUE);
+            SetActiveWindow(owner_);
+        }
+    }
+
+    ScopedWorkspaceToolsDialogOwner(const ScopedWorkspaceToolsDialogOwner&) = delete;
+    ScopedWorkspaceToolsDialogOwner& operator=(const ScopedWorkspaceToolsDialogOwner&) = delete;
+
+private:
+    HWND owner_{};
+    bool wasEnabled_ = false;
+};
+
+struct SettingsPresetDialogCtx {
+    HWND dialog = nullptr;
+    bool done = false;
+    WorkspaceToolsPage page = WorkspaceToolsPage::Presets;
+    UINT commandId = 0;
+    std::vector<HWND> presetControls;
+    std::vector<HWND> restoreControls;
+    HWND subtitle = nullptr;
+    UINT dpi = 96;
+    int scrollY = 0;
+    int contentHeight = 0;
+    bool layingOut = false;
+};
+
+constexpr wchar_t kSettingsPresetDialogClass[] = L"PdfNoteSettingsPresetDialog";
+// Keep navigation separate from Win32's IDOK / IDCANCEL commands.
+constexpr int kWorkspaceToolsPresetTab = 7101;
+constexpr int kWorkspaceToolsRestoreTab = 7102;
+constexpr int kSettingsPresetSaveButton = 10;
+constexpr int kSettingsPresetLoadButton = 11;
+constexpr int kWorkspaceToolsRestorePdfPosition = 20;
+constexpr int kWorkspaceToolsRestoreLectureLastOpen = 21;
+constexpr int kWorkspaceToolsRestoreSessionLastOpen = 22;
+constexpr int kWorkspaceToolsRestoreSavedFiles = 23;
+constexpr int kWorkspaceToolsResetPdfPosition = 24;
+constexpr int kWorkspaceToolsResetLectureLastOpen = 25;
+constexpr int kWorkspaceToolsResetSessionLastOpen = 26;
+constexpr int kWorkspaceToolsDeleteSavedFiles = 27;
+constexpr int kSettingsPresetCloseButton = 30;
+
+static void SetPresetDialogFont(HWND control) {
+    if (control) SetUIFont(control);
+}
+
+static HWND AddWorkspaceToolsText(HWND parent, const std::wstring& text, int x, int y, int width, int height,
+                                  std::vector<HWND>* group) {
+    HWND control = CreateWindowExW(0, L"STATIC", text.c_str(), WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                   x, y, width, height, parent, nullptr, g_hInst, nullptr);
+    SetPresetDialogFont(control);
+    if (group) group->push_back(control);
+    return control;
+}
+
+static HWND AddWorkspaceToolsButton(HWND parent, const std::wstring& text, int id, int x, int y, int width,
+                                    bool primary, std::vector<HWND>* group) {
+    HWND control = CreateWindowExW(0, L"BUTTON", text.c_str(),
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                                       (primary ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON),
+                                   x, y, width, 26, parent,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+    SetPresetDialogFont(control);
+    if (group) group->push_back(control);
+    return control;
+}
+
+static HWND AddWorkspaceToolsTab(HWND parent, const std::wstring& text, int id, int x) {
+    HWND control = CreateWindowExW(0, L"BUTTON", text.c_str(),
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_PUSHLIKE |
+                                       (id == kWorkspaceToolsPresetTab ? WS_GROUP : 0),
+                                   x, 60, 160, 26, parent,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+    SetPresetDialogFont(control);
+    return control;
+}
+
+static void AddWorkspaceToolsSeparator(HWND parent, int y, std::vector<HWND>* group) {
+    RECT client{};
+    GetClientRect(parent, &client);
+    HWND control = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                                   12, y, std::max(0L, client.right - 24), 2, parent, nullptr, g_hInst, nullptr);
+    if (group) group->push_back(control);
+}
+
+static UINT WorkspaceToolsDpi(HWND window) {
+    using GetWindowDpi = UINT (WINAPI*)(HWND);
+    const FARPROC address = GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+    GetWindowDpi query = nullptr;
+    static_assert(sizeof(query) == sizeof(address));
+    std::memcpy(&query, &address, sizeof(query));
+    if (query && window) { const UINT dpi = query(window); if (dpi) return dpi; }
+    HDC dc = GetDC(window);
+    const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+    if (dc) ReleaseDC(window, dc);
+    return static_cast<UINT>(std::max(96, dpi));
+}
+
+// Text is measured using the same UI font as the output dialog. Scaling only
+// fixed pixels is insufficient for translations, larger fonts and narrow screens.
+static void LayoutWorkspaceTools(SettingsPresetDialogCtx* ctx) {
+    if (!ctx || !ctx->dialog || ctx->layingOut || ctx->presetControls.size() != 13 ||
+        ctx->restoreControls.size() != 21) return;
+    ctx->layingOut = true;
+    HWND window = ctx->dialog;
+    const auto scale = [ctx](int value) { return MulDiv(value, ctx->dpi, 96); };
+    RECT client{}; GetClientRect(window, &client);
+    const int pad = scale(12), gap = scale(8);
+    const int width = std::max(1, static_cast<int>(client.right) - pad * 2);
+    const auto textSize = [window](HWND control, int width, bool singleLine) {
+        const int length = GetWindowTextLengthW(control);
+        std::wstring text(static_cast<size_t>(std::max(0, length)) + 1, L'\0');
+        GetWindowTextW(control, text.data(), static_cast<int>(text.size()));
+        HDC dc = GetDC(window);
+        if (!dc) return SIZE{width, 24};
+        HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0)));
+        RECT measured{0, 0, width, 0};
+        DrawTextW(dc, text.c_str(), -1, &measured,
+                  DT_CALCRECT | DT_NOPREFIX | (singleLine ? DT_SINGLELINE : DT_WORDBREAK));
+        SelectObject(dc, old); ReleaseDC(window, dc);
+        return SIZE{measured.right, std::max(1L, measured.bottom)};
+    };
+    const int rowH = std::max(scale(28), static_cast<int>(textSize(GetDlgItem(window, 30), width, true).cy) + gap);
+    const auto buttonW = [&](HWND button, int minimum) {
+        return std::min(width, std::max(scale(minimum), static_cast<int>(textSize(button, width, true).cx) + pad * 2));
+    };
+    const auto place = [&](HWND control, int x, int y, int w, int h) {
+        SetWindowPos(control, nullptr, x, y - ctx->scrollY, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    };
+    const auto text = [&](HWND control, int& y, int w) {
+        const int h = static_cast<int>(textSize(control, w, false).cy) + scale(2);
+        place(control, pad, y, w, h); y += h + gap;
+    };
+    const auto separator = [&](HWND control, int& y) {
+        place(control, pad, y, width, scale(2)); y += scale(2) + gap;
+    };
+    int y = pad;
+    text(ctx->subtitle, y, width);
+    HWND presetTab = GetDlgItem(window, kWorkspaceToolsPresetTab);
+    HWND restoreTab = GetDlgItem(window, kWorkspaceToolsRestoreTab);
+    const int tabW = std::max(buttonW(presetTab, 160), buttonW(restoreTab, 160));
+    place(presetTab, pad, y, std::min(tabW, (width - gap) / 2), rowH);
+    place(restoreTab, pad + (width + gap) / 2, y, std::min(tabW, (width - gap) / 2), rowH);
+    y += rowH + pad;
+    const int pageTop = y;
+    auto& presets = ctx->presetControls;
+    for (size_t i = 0; i < 11; ++i) {
+        if (i == 1 || i == 4 || i == 7 || i == 10) separator(presets[i], y);
+        else text(presets[i], y, width);
+    }
+    const int saveW = buttonW(presets[11], 154), loadW = buttonW(presets[12], 154);
+    place(presets[11], pad, y, saveW, rowH);
+    if (saveW + gap + loadW > width) {
+        y += rowH + gap; place(presets[12], pad, y, loadW, rowH);
+    } else place(presets[12], pad + saveW + gap, y, loadW, rowH);
+    const int presetEnd = y + rowH + pad;
+    y = pageTop;
+    auto& restore = ctx->restoreControls;
+    text(restore[0], y, width);
+    for (size_t row = 0; row < 4; ++row) {
+        const size_t first = 1 + row * 5;
+        HWND action = restore[first + 2], remove = restore[first + 3];
+        const int actionW = std::max(buttonW(action, 130), buttonW(remove, 130));
+        const bool stacked = width < scale(500);
+        const int descriptionW = stacked ? width : std::max(1, width - actionW - pad);
+        const int top = y;
+        text(restore[first], y, descriptionW);
+        text(restore[first + 1], y, descriptionW);
+        const int actionTop = stacked ? y : top;
+        place(action, pad + width - actionW, actionTop, actionW, rowH);
+        place(remove, pad + width - actionW, actionTop + rowH + gap, actionW, rowH);
+        y = std::max(y, actionTop + rowH * 2 + gap) + gap;
+        if (row < 3) separator(restore[first + 4], y);
+    }
+    text(restore[20], y, width);
+    y = std::max(presetEnd, y);
+    HWND close = GetDlgItem(window, kSettingsPresetCloseButton);
+    const int closeW = buttonW(close, 100);
+    place(close, pad + width - closeW, y, closeW, rowH);
+    ctx->contentHeight = y + rowH + pad;
+    const int boundedScroll = std::clamp(ctx->scrollY, 0, std::max(0, ctx->contentHeight - static_cast<int>(client.bottom)));
+    SCROLLINFO scroll{sizeof(scroll), SIF_RANGE | SIF_PAGE | SIF_POS, 0, ctx->contentHeight - 1,
+                      static_cast<UINT>(std::max(0L, client.bottom)), boundedScroll, 0};
+    SetScrollInfo(window, SB_VERT, &scroll, TRUE);
+    ctx->layingOut = false;
+    if (boundedScroll != ctx->scrollY) { ctx->scrollY = boundedScroll; LayoutWorkspaceTools(ctx); }
+}
+
+static void ShowWorkspaceToolsPage(SettingsPresetDialogCtx* ctx, WorkspaceToolsPage page) {
+    if (!ctx) return;
+    ctx->page = page;
+    if (HWND presetsTab = GetDlgItem(ctx->dialog, kWorkspaceToolsPresetTab)) {
+        SendMessageW(presetsTab, BM_SETCHECK, page == WorkspaceToolsPage::Presets ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    if (HWND restoreTab = GetDlgItem(ctx->dialog, kWorkspaceToolsRestoreTab)) {
+        SendMessageW(restoreTab, BM_SETCHECK, page == WorkspaceToolsPage::Restore ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    for (HWND control : ctx->presetControls) ShowWindow(control, page == WorkspaceToolsPage::Presets ? SW_SHOW : SW_HIDE);
+    for (HWND control : ctx->restoreControls) ShowWindow(control, page == WorkspaceToolsPage::Restore ? SW_SHOW : SW_HIDE);
+    LayoutWorkspaceTools(ctx);
+}
+
+static LRESULT CALLBACK SettingsPresetDialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<SettingsPresetDialogCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_NCCREATE: {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        ctx = create ? static_cast<SettingsPresetDialogCtx*>(create->lpCreateParams) : nullptr;
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        // Native initialization stores the caption passed to CreateWindowExW.
+        // Returning TRUE directly bypassed it and left the title bar blank.
+        return ctx ? DefWindowProcW(hWnd, message, wParam, lParam) : FALSE;
+    }
+    case WM_CREATE: {
+        if (!ctx) return -1;
+        ctx->dialog = hWnd;
+        // Match the output dialog's common font, 12px margin and 26px actions.
+        // The window caption owns the title; the body starts with its purpose.
+        RECT client{};
+        GetClientRect(hWnd, &client);
+        constexpr int pad = 12;
+        const int width = static_cast<int>(client.right);
+        const int contentW = width - pad * 2;
+        ctx->dpi = WorkspaceToolsDpi(hWnd);
+        ctx->subtitle = AddWorkspaceToolsText(hWnd, localization::Text(L"settings.workspace_tools.subtitle"), pad, 12, contentW, 38,
+                              nullptr);
+        AddWorkspaceToolsTab(hWnd, localization::Text(L"settings.workspace_tools.tab_presets"),
+                             kWorkspaceToolsPresetTab, pad);
+        AddWorkspaceToolsTab(hWnd, localization::Text(L"settings.workspace_tools.tab_restore"),
+                             kWorkspaceToolsRestoreTab, pad + 170);
+
+        AddWorkspaceToolsText(hWnd, localization::Text(L"settings.preset.dialog_intro"), pad, 108, contentW, 28,
+                              &ctx->presetControls);
+        AddWorkspaceToolsSeparator(hWnd, 140, &ctx->presetControls);
+        AddWorkspaceToolsText(hWnd, localization::Text(L"settings.preset.how_to"), pad, 152, contentW, 22,
+                              &ctx->presetControls);
+        AddWorkspaceToolsText(hWnd, localization::Text(L"settings.preset.how_to_body"), pad, 176, contentW, 42,
+                              &ctx->presetControls);
+        AddWorkspaceToolsSeparator(hWnd, 224, &ctx->presetControls);
+        AddWorkspaceToolsText(hWnd, localization::Text(L"settings.preset.when_to_use"), pad, 232, contentW, 22,
+                              &ctx->presetControls);
+        AddWorkspaceToolsText(hWnd, localization::Text(L"settings.preset.when_to_use_body"), pad, 256, contentW, 42,
+                              &ctx->presetControls);
+        AddWorkspaceToolsSeparator(hWnd, 304, &ctx->presetControls);
+        AddWorkspaceToolsText(hWnd, localization::Text(L"settings.preset.contents"), pad, 312, contentW, 22,
+                              &ctx->presetControls);
+        AddWorkspaceToolsText(hWnd, localization::Text(L"settings.preset.contents_body"), pad, 336, contentW, 48,
+                              &ctx->presetControls);
+        AddWorkspaceToolsSeparator(hWnd, 398, &ctx->presetControls);
+        AddWorkspaceToolsButton(hWnd, localization::Text(L"settings.preset.save"), kSettingsPresetSaveButton,
+                                pad, 414, 154, true, &ctx->presetControls);
+        AddWorkspaceToolsButton(hWnd, localization::Text(L"settings.preset.load"), kSettingsPresetLoadButton,
+                                pad + 164, 414, 154, false, &ctx->presetControls);
+
+        AddWorkspaceToolsText(hWnd, localization::Text(L"settings.restore.dialog_intro"), pad, 108, contentW, 34,
+                              &ctx->restoreControls);
+        const EscapeBackupPresence backups = ScanEscapeBackupPresence();
+        const auto addRestoreRow = [&](int top, const wchar_t* titleId, const wchar_t* bodyId, int restoreButtonId,
+                                       int deleteButtonId, bool available) {
+            AddWorkspaceToolsText(hWnd, localization::Text(titleId), pad, top, contentW - 150, 20,
+                                  &ctx->restoreControls);
+            AddWorkspaceToolsText(hWnd, localization::Text(bodyId), pad, top + 22, contentW - 150, 30,
+                                  &ctx->restoreControls);
+            HWND button = AddWorkspaceToolsButton(hWnd, localization::Text(L"settings.restore.action"), restoreButtonId,
+                                                  width - pad - 130, top + 5, 130, false, &ctx->restoreControls);
+            EnableWindow(button, available ? TRUE : FALSE);
+            AddWorkspaceToolsButton(hWnd, localization::Text(L"settings.restore.delete_action"), deleteButtonId,
+                                    width - pad - 130, top + 38, 130, false, &ctx->restoreControls);
+        };
+        addRestoreRow(160, L"settings.restore.pdf_position", L"settings.restore.pdf_position_body",
+                      kWorkspaceToolsRestorePdfPosition, kWorkspaceToolsResetPdfPosition,
+                      backups.hasPdfPositionBackup);
+        AddWorkspaceToolsSeparator(hWnd, 228, &ctx->restoreControls);
+        addRestoreRow(234, L"settings.restore.lecture_last_open", L"settings.restore.lecture_last_open_body",
+                      kWorkspaceToolsRestoreLectureLastOpen, kWorkspaceToolsResetLectureLastOpen,
+                      backups.hasLectureLastOpenBackup);
+        AddWorkspaceToolsSeparator(hWnd, 302, &ctx->restoreControls);
+        addRestoreRow(308, L"settings.restore.session_last_open", L"settings.restore.session_last_open_body",
+                      kWorkspaceToolsRestoreSessionLastOpen, kWorkspaceToolsResetSessionLastOpen,
+                      backups.hasSessionLastOpenBackup);
+        AddWorkspaceToolsSeparator(hWnd, 376, &ctx->restoreControls);
+        addRestoreRow(382, L"settings.restore.saved_files", L"settings.restore.saved_files_body",
+                      kWorkspaceToolsRestoreSavedFiles, kWorkspaceToolsDeleteSavedFiles,
+                      backups.hasSavedFileBackup);
+        AddWorkspaceToolsText(hWnd, localization::Text(L"settings.restore.availability_hint"), pad, 460, contentW, 24,
+                              &ctx->restoreControls);
+        AddWorkspaceToolsButton(hWnd, localization::Text(L"settings.preset.close"), kSettingsPresetCloseButton,
+                                width - pad - 100, 502, 100, false, nullptr);
+        ApplyThemeToDialog(hWnd);
+        ShowWorkspaceToolsPage(ctx, ctx->page);
+        return 0;
+    }
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(hWnd);
+        LayoutWorkspaceTools(ctx);
+        return 0;
+    case WM_SIZE:
+        LayoutWorkspaceTools(ctx);
+        return 0;
+    case WM_GETMINMAXINFO: {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+        const UINT dpi = ctx ? ctx->dpi : 96;
+        limits->ptMinTrackSize = POINT{MulDiv(360, dpi, 96), MulDiv(240, dpi, 96)};
+        return 0;
+    }
+    case WM_DPICHANGED: {
+        if (!ctx) break;
+        ctx->dpi = HIWORD(wParam);
+        const auto* suggested = reinterpret_cast<const RECT*>(lParam);
+        if (suggested) SetWindowPos(hWnd, nullptr, suggested->left, suggested->top,
+            suggested->right - suggested->left, suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        LayoutWorkspaceTools(ctx);
+        return 0;
+    }
+    case WM_MOUSEWHEEL:
+    case WM_VSCROLL: {
+        if (!ctx) break;
+        SCROLLINFO info{}; info.cbSize = sizeof(info); info.fMask = SIF_ALL;
+        GetScrollInfo(hWnd, SB_VERT, &info);
+        int position = ctx->scrollY;
+        const int step = MulDiv(32, ctx->dpi, 96);
+        if (message == WM_MOUSEWHEEL) position -= GET_WHEEL_DELTA_WPARAM(wParam) * step * 3 / WHEEL_DELTA;
+        else switch (LOWORD(wParam)) {
+            case SB_LINEUP: position -= step; break;
+            case SB_LINEDOWN: position += step; break;
+            case SB_PAGEUP: position -= static_cast<int>(info.nPage); break;
+            case SB_PAGEDOWN: position += static_cast<int>(info.nPage); break;
+            case SB_THUMBTRACK: position = info.nTrackPos; break;
+            case SB_TOP: position = 0; break;
+            case SB_BOTTOM: position = info.nMax; break;
+            default: break;
+        }
+        ctx->scrollY = std::clamp(position, 0, std::max(0, info.nMax + 1 - static_cast<int>(info.nPage)));
+        LayoutWorkspaceTools(ctx); InvalidateRect(hWnd, nullptr, TRUE);
+        return 0;
+    }
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT client{};
+        GetClientRect(hWnd, &client);
+        HBRUSH background = g_hThemeWindowBrush ? g_hThemeWindowBrush : GetSysColorBrush(COLOR_WINDOW);
+        FillRect(hdc, &client, background);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+        return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
+    case WM_DRAWITEM:
+        if (DrawThemeButton(reinterpret_cast<LPDRAWITEMSTRUCT>(lParam))) return TRUE;
+        break;
+    case WM_COMMAND:
+        if (!ctx || HIWORD(wParam) != BN_CLICKED) break;
+        if (LOWORD(wParam) == IDCANCEL) { DestroyWindow(hWnd); return 0; }
+        switch (LOWORD(wParam)) {
+        case kWorkspaceToolsPresetTab: ShowWorkspaceToolsPage(ctx, WorkspaceToolsPage::Presets); return 0;
+        case kWorkspaceToolsRestoreTab: ShowWorkspaceToolsPage(ctx, WorkspaceToolsPage::Restore); return 0;
+        case kSettingsPresetSaveButton: ctx->commandId = ID_SETTINGS_PRESET_SAVE; DestroyWindow(hWnd); return 0;
+        case kSettingsPresetLoadButton: ctx->commandId = ID_SETTINGS_PRESET_LOAD; DestroyWindow(hWnd); return 0;
+        case kWorkspaceToolsRestorePdfPosition: ctx->commandId = ID_TEMP_RESTORE_PDF_POSITION; DestroyWindow(hWnd); return 0;
+        case kWorkspaceToolsRestoreLectureLastOpen: ctx->commandId = ID_TEMP_RESTORE_LECTURE_LAST_OPEN; DestroyWindow(hWnd); return 0;
+        case kWorkspaceToolsRestoreSessionLastOpen: ctx->commandId = ID_TEMP_RESTORE_SESSION_LAST_OPEN; DestroyWindow(hWnd); return 0;
+        case kWorkspaceToolsRestoreSavedFiles: ctx->commandId = ID_FILE_RESTORE_BACKUP; DestroyWindow(hWnd); return 0;
+        case kWorkspaceToolsResetPdfPosition: ctx->commandId = ID_TEMP_RESET_PDF_POSITION; DestroyWindow(hWnd); return 0;
+        case kWorkspaceToolsResetLectureLastOpen: ctx->commandId = ID_TEMP_RESET_LECTURE_LAST_OPEN; DestroyWindow(hWnd); return 0;
+        case kWorkspaceToolsResetSessionLastOpen: ctx->commandId = ID_TEMP_RESET_SESSION_LAST_OPEN; DestroyWindow(hWnd); return 0;
+        case kWorkspaceToolsDeleteSavedFiles: ctx->commandId = ID_FILE_DELETE_BACKUP; DestroyWindow(hWnd); return 0;
+        case kSettingsPresetCloseButton: DestroyWindow(hWnd); return 0;
+        default: break;
+        }
+        break;
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) { DestroyWindow(hWnd); return 0; }
+        break;
+    case WM_CLOSE:
+        if (ctx) ctx->done = true;
+        DestroyWindow(hWnd);
+        return 0;
+    case WM_DESTROY:
+        UnregisterAppExitDialog(hWnd);
+        if (ctx) ctx->done = true;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hWnd, message, wParam, lParam);
+}
+}
+
+static void ShowWorkspaceToolsDialog(HWND owner, WorkspaceToolsPage initialPage) {
+    SettingsPresetDialogCtx ctx{};
+    ctx.page = initialPage;
+    WNDCLASSW cls{};
+    cls.lpfnWndProc = SettingsPresetDialogProc;
+    cls.hInstance = g_hInst;
+    cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cls.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    cls.lpszClassName = kSettingsPresetDialogClass;
+    if (!RegisterClassW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+
+    ctx.dpi = WorkspaceToolsDpi(owner);
+    const int width = MulDiv(756, ctx.dpi, 96);
+    const int height = MulDiv(576, ctx.dpi, 96);
+    ScopedWorkspaceToolsDialogOwner modalOwner(owner);
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
+        kSettingsPresetDialogClass, localization::Text(L"settings.workspace_tools.title").c_str(),
+        WS_CAPTION | WS_POPUPWINDOW | WS_THICKFRAME | WS_VSCROLL, CW_USEDEFAULT, CW_USEDEFAULT, width, height,
+        owner, nullptr, g_hInst, &ctx);
+    if (!dialog) return;
+    RECT bounds{}, client{}; GetWindowRect(dialog, &bounds); GetClientRect(dialog, &client);
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromWindow(dialog, MONITOR_DEFAULTTONEAREST), &monitor);
+    const int frameHeight = static_cast<int>(bounds.bottom - bounds.top - client.bottom);
+    SetWindowPos(dialog, nullptr, 0, 0, std::min(width, static_cast<int>(monitor.rcWork.right - monitor.rcWork.left)),
+        std::min(ctx.contentHeight + frameHeight, static_cast<int>(monitor.rcWork.bottom - monitor.rcWork.top)),
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    RegisterAppExitBlockingDialog(dialog);
+    PlaceOwnedPopupAtAppTopLeft(dialog, owner);
+    ShowWindow(dialog, SW_SHOW);
+    UpdateWindow(dialog);
+
+    MSG msg{};
+    HWND previousFocus = GetFocus();
+    while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (ShouldSkipImeMessageInLoop(msg)) continue;
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        // Tab navigation must reveal an off-screen action on small displays.
+        HWND focus = GetFocus();
+        if (focus != previousFocus && focus && IsChild(dialog, focus) && IsWindow(dialog)) {
+            RECT focused{}, viewport{}; GetWindowRect(focus, &focused); GetClientRect(dialog, &viewport);
+            MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&focused), 2);
+            if (focused.top < 0 || focused.bottom > viewport.bottom) {
+                ctx.scrollY += focused.top < 0 ? focused.top : focused.bottom - viewport.bottom;
+                LayoutWorkspaceTools(&ctx);
+            }
+        }
+        previousFocus = focus;
+    }
+
+    if (ctx.commandId && owner && IsWindow(owner)) {
+        SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ctx.commandId, 0), 0);
+    }
+}
+
+void ShowSettingsPresetDialog(HWND owner) {
+    ShowWorkspaceToolsDialog(owner, WorkspaceToolsPage::Presets);
+}
+
+void ShowWorkspaceRestoreDialog(HWND owner) {
+    ShowWorkspaceToolsDialog(owner, WorkspaceToolsPage::Restore);
 }
 
 void SaveSettingsPreset(HWND hWnd) {
@@ -735,8 +1206,8 @@ struct SettingsFileSnapshot {
 
 static std::vector<SettingsBundleEntry> CurrentSettingsBundleEntries() {
     const std::filesystem::path root(g_workspaceRoot);
-    const std::filesystem::path settings = root / L"__resource__" / L"__settings__";
-    const std::filesystem::path themes = root / L"__resource__" / L"__theme__";
+    const std::filesystem::path settings = root / L"__pdf_note_workspace__" / L"__settings__";
+    const std::filesystem::path themes = root / L"__pdf_note_workspace__" / L"__theme__";
     std::vector<SettingsBundleEntry> entries = {
         {L"workspace.json", root / L"workspace.json"},
         {L"user_palette.json", settings / L"user_palette.json"},
@@ -767,12 +1238,12 @@ static bool IsThemeBundleEntryName(const std::wstring& name) {
 
 static std::filesystem::path SettingsBundleEntryPath(const std::wstring& name) {
     const std::filesystem::path root(g_workspaceRoot);
-    const std::filesystem::path settings = root / L"__resource__" / L"__settings__";
+    const std::filesystem::path settings = root / L"__pdf_note_workspace__" / L"__settings__";
     if (name == L"workspace.json") return root / L"workspace.json";
     if (name == L"user_palette.json") return settings / L"user_palette.json";
     if (name == L"tool_shortcuts.json") return settings / L"tool_shortcuts.json";
     if (name == L"schedule.json") return settings / L"schedule.json";
-    if (IsThemeBundleEntryName(name)) return root / L"__resource__" / L"__theme__" / name.substr(6);
+    if (IsThemeBundleEntryName(name)) return root / L"__pdf_note_workspace__" / L"__theme__" / name.substr(6);
     return {};
 }
 
@@ -1019,15 +1490,12 @@ static bool WriteAtomicSettingsBytes(const std::filesystem::path& path,
         if (outErr) *outErr = L"empty output path";
         return false;
     }
-    std::error_code cwdEc;
-    const std::filesystem::path parent = path.parent_path().empty()
-        ? std::filesystem::current_path(cwdEc)
-        : path.parent_path();
-    if (cwdEc) {
-        if (outErr) *outErr = L"could not resolve current directory";
+    if (!path.is_absolute() || path.parent_path().empty()) {
+        if (outErr) *outErr = L"output path must be explicitly selected and absolute";
         return false;
     }
-    return atomic_write::AtomicWriteBytes(path, bytes.data(), bytes.size(), parent, parent, outErr);
+    const auto parent = path.parent_path();
+    return write_checks::ObservedWriteBytes(g_workspaceRoot, path, bytes.data(), bytes.size(), parent, parent, outErr);
 }
 
 static bool PickSettingsPresetSavePath(HWND owner, std::filesystem::path* outPath) {
@@ -1086,6 +1554,8 @@ static bool PickSettingsPresetOpenPath(HWND owner, std::filesystem::path* outPat
     const std::wstring settingsFilter = localization::Text(L"workspace.config_io.a22471ca2933").c_str();
     const std::wstring allFilesFilter = localization::Text(L"workspace.config_io.4de7ee3c7424").c_str();
     dialog->SetTitle(title.c_str());
+    // Choosing a preset is followed by a separate apply confirmation.
+    (void)dialog->SetOkButtonLabel(localization::Text(L"ui.local_path.e5d546893d24").c_str());
     COMDLG_FILTERSPEC filters[] = {
         {settingsFilter.c_str(), L"*.pnssettings"},
         {allFilesFilter.c_str(), L"*.*"}
@@ -1144,7 +1614,7 @@ static bool ValidateSettingsBundleForImport(const std::map<std::wstring, std::st
     const std::filesystem::path temp = settingsDir / (L".__import_workspace__." +
         std::to_wstring(static_cast<unsigned long long>(GetTickCount64())) + L".json");
     std::wstring err;
-    if (!atomic_write::AtomicWriteUtf8(temp, ws->second, settingsDir, settingsDir, &err)) {
+    if (!write_checks::ObservedWriteUtf8(g_workspaceRoot, temp, ws->second, settingsDir, settingsDir, &err)) {
         if (outErr) *outErr = L"could not stage imported workspace.json: " + err;
         return false;
     }
@@ -1207,7 +1677,7 @@ static std::filesystem::path CreateSettingsImportBackupDir(const std::vector<Set
                                                            std::wstring* outErr) {
     const std::filesystem::path root(g_workspaceRoot);
     if (root.empty()) return {};
-    const std::filesystem::path escapeRoot = root / L"__resource__" / L"__escape__";
+    const std::filesystem::path escapeRoot = root / L"__pdf_note_workspace__" / L"__escape__";
     std::error_code ec;
     std::filesystem::create_directories(escapeRoot, ec);
     if (ec) {
@@ -1238,7 +1708,7 @@ static std::filesystem::path CreateSettingsImportBackupDir(const std::vector<Set
         std::wstring backupName = s.name;
         std::replace(backupName.begin(), backupName.end(), L'/', L'_');
         const std::filesystem::path backupFile = backupDir / backupName;
-        if (!atomic_write::AtomicWriteBytes(backupFile, s.bytes->data(), s.bytes->size(),
+        if (!write_checks::ObservedWriteBytes(g_workspaceRoot, backupFile, s.bytes->data(), s.bytes->size(),
                                             backupDir, backupDir, &writeErr)) {
             if (outErr) *outErr = L"could not write settings import backup: " + writeErr;
             return {};
@@ -1246,7 +1716,7 @@ static std::filesystem::path CreateSettingsImportBackupDir(const std::vector<Set
     }
     std::wstring writeErr;
     const std::string manifestBytes = manifest.str();
-    if (!atomic_write::AtomicWriteUtf8(backupDir / L"manifest.txt", manifestBytes, backupDir, backupDir, &writeErr)) {
+    if (!write_checks::ObservedWriteUtf8(g_workspaceRoot, backupDir / L"manifest.txt", manifestBytes, backupDir, backupDir, &writeErr)) {
         if (outErr) *outErr = L"could not write settings import backup manifest: " + writeErr;
         return {};
     }
@@ -1470,7 +1940,7 @@ void ShowRecoveryDialog(HWND hWnd) {
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
         return;
     }
-    std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
+    std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
     std::filesystem::path backupRoot = resource / L"__escape__" / L"backup";
 
     std::wstring msg = localization::Text(L"workspace.recovery.action_prompt");
@@ -1480,6 +1950,8 @@ void ShowRecoveryDialog(HWND hWnd) {
     dialog.message = msg;
     dialog.kind = SoftNoticeKind::Warning;
     dialog.buttons = SilentDialogButtons::YesNoCancel;
+    dialog.yesLabel = localization::Text(L"dialog.action.restore");
+    dialog.noLabel = localization::Text(L"dialog.action.save");
     dialog.defaultResult = SilentDialogResult::Cancel;
     dialog.escapeResult = SilentDialogResult::Cancel;
     SilentDialogResult res = ShowSilentDialog(hWnd, dialog);
@@ -1555,7 +2027,7 @@ void ShowRestoreBackupListDialogAndExecute(HWND hWnd) {
         if (ShowSilentDialog(hWnd, confirm) != SilentDialogResult::Yes) return;
     }
 
-    std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
+    std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
     std::filesystem::path backupRoot = resource / L"__escape__" / L"backup";
     std::filesystem::path pickedMeta;
     
@@ -1596,7 +2068,7 @@ void ShowDeleteSavedBackupDialog(HWND hWnd) {
         return;
     }
 
-    std::filesystem::path backupRoot = std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__" / L"backup";
+    std::filesystem::path backupRoot = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__" / L"backup";
     std::filesystem::path selected;
     if (!PromptBackupList(hWnd, backupRoot, ui.menuDeleteBackup,
                           localization::Text(L"menu.common.delete"), selected)) {

@@ -124,10 +124,10 @@ static LRESULT CALLBACK NewLectureDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                             g_hInst, nullptr);
             bx += 44;
         }
-        CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"common.ok").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         60, 124, 80, 28, hWnd, reinterpret_cast<HMENU>(IDOK),
                         g_hInst, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         160, 124, 80, 28, hWnd, reinterpret_cast<HMENU>(IDCANCEL),
                         g_hInst, nullptr);
         SetFocus(ctx->edit);
@@ -277,6 +277,7 @@ struct SimpleInputDialog {
     std::wstring title;
     std::wstring initial;
     std::wstring result;
+    SimpleTextValidator validate;
     bool ok = false;
     bool done = false;
 };
@@ -297,10 +298,10 @@ static LRESULT CALLBACK SimpleInputDlgProc(HWND hWnd, UINT msg, WPARAM wParam, L
             SetWindowTextW(ctx->edit, ctx->initial.c_str());
             SendMessageW(ctx->edit, EM_SETSEL, 0, -1);
         }
-        CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"common.ok").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         70, 50, 80, 26, hWnd, reinterpret_cast<HMENU>(IDOK),
                         cs->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         180, 50, 80, 26, hWnd, reinterpret_cast<HMENU>(IDCANCEL),
                         cs->hInstance, nullptr);
         SetFocus(ctx->edit);
@@ -333,9 +334,15 @@ static LRESULT CALLBACK SimpleInputDlgProc(HWND hWnd, UINT msg, WPARAM wParam, L
     }
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK) {
-            wchar_t buf[512]{};
-            int len = GetWindowTextW(ctx->edit, buf, 511);
-            ctx->result.assign(buf, buf + len);
+            const int length = GetWindowTextLengthW(ctx->edit);
+            std::wstring input(static_cast<size_t>(std::max(0, length)) + 1, L'\0');
+            const int copied = GetWindowTextW(ctx->edit, input.data(), static_cast<int>(input.size()));
+            input.resize(static_cast<size_t>(std::max(0, copied)));
+            if (ctx->validate && !ctx->validate(hWnd, input)) {
+                SetFocus(ctx->edit);
+                return 0;
+            }
+            ctx->result = std::move(input);
             ctx->ok = true;
             ctx->done = true;
             DestroyWindow(hWnd);
@@ -357,10 +364,12 @@ static LRESULT CALLBACK SimpleInputDlgProc(HWND hWnd, UINT msg, WPARAM wParam, L
 }
 
 bool PromptSimpleText(HWND owner, const std::wstring& title,
-                      const std::wstring& initial, std::wstring& out) {
+                      const std::wstring& initial, std::wstring& out,
+                      const SimpleTextValidator& validate) {
     SimpleInputDialog ctx;
     ctx.title = title;
     ctx.initial = initial;
+    ctx.validate = validate;
     WNDCLASSW wc{};
     wc.lpfnWndProc = SimpleInputDlgProc;
     wc.hInstance = g_hInst;
@@ -542,154 +551,6 @@ bool PromptBlankPdfOptions(HWND owner, const std::wstring& title, BlankPdfDialog
     if (!ctx.ok) return false;
     out = ctx.result;
     return true;
-}
-
-struct SavePathDialog {
-    HWND folder{};
-    HWND fileName{};
-    std::wstring title;
-    std::wstring directory;
-    std::wstring defaultName;
-    std::wstring result;
-    SavePathPromptResult action = SavePathPromptResult::Cancel;
-    bool done = false;
-};
-
-static constexpr int kSavePathDialogOpenSystemId = 102;
-
-static LRESULT CALLBACK SavePathDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    SavePathDialog* ctx = reinterpret_cast<SavePathDialog*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
-    switch (msg) {
-    case WM_CREATE: {
-        auto cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        ctx = reinterpret_cast<SavePathDialog*>(cs->lpCreateParams);
-        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
-        const std::wstring folderLabel = localization::Text(L"dialog.save_path.folder_label");
-        CreateWindowExW(0, L"STATIC", folderLabel.c_str(),
-                        WS_CHILD | WS_VISIBLE, 12, 12, 150, 20, hWnd, nullptr, cs->hInstance, nullptr);
-        ctx->folder = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", ctx->directory.c_str(),
-                                      WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                                      12, 34, 716, 24, hWnd, nullptr, cs->hInstance, nullptr);
-        const std::wstring fileNameLabel = localization::Text(L"dialog.save_path.file_name_label");
-        CreateWindowExW(0, L"STATIC", fileNameLabel.c_str(),
-                        WS_CHILD | WS_VISIBLE, 12, 70, 150, 20, hWnd, nullptr, cs->hInstance, nullptr);
-        ctx->fileName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", ctx->defaultName.c_str(),
-                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                                        12, 92, 716, 24, hWnd, reinterpret_cast<HMENU>(101),
-                                        cs->hInstance, nullptr);
-        const std::wstring systemDialogLabel = localization::Text(L"dialog.save_path.system_dialog");
-        CreateWindowExW(0, L"BUTTON", systemDialogLabel.c_str(),
-                        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 12, 132, 170, 28, hWnd,
-                        reinterpret_cast<HMENU>(kSavePathDialogOpenSystemId), cs->hInstance, nullptr);
-        const std::wstring saveLabel = localization::Text(L"dialog.save_path.save");
-        CreateWindowExW(0, L"BUTTON", saveLabel.c_str(),
-                        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 512, 132, 100, 28, hWnd,
-                        reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
-        const std::wstring cancelLabel = localization::Text(L"dialog.save_path.cancel");
-        CreateWindowExW(0, L"BUTTON", cancelLabel.c_str(),
-                        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 628, 132, 100, 28, hWnd,
-                        reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
-        if (ctx->folder) SendMessageW(ctx->folder, EM_SETSEL, 0, 0);
-        if (ctx->fileName) {
-            SendMessageW(ctx->fileName, EM_SETSEL, 0, -1);
-            SetFocus(ctx->fileName);
-        }
-        ApplyThemeToDialog(hWnd);
-        return 0;
-    }
-    case WM_THEMECHANGED:
-        ApplyThemeToDialog(hWnd);
-        return 0;
-    case WM_ERASEBKGND: {
-        HDC hdc = reinterpret_cast<HDC>(wParam);
-        RECT rc{};
-        GetClientRect(hWnd, &rc);
-        HBRUSH bg = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-        FillRect(hdc, &rc, bg);
-        return 1;
-    }
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLOREDIT:
-    case WM_CTLCOLORLISTBOX:
-    case WM_CTLCOLORBTN: {
-        HDC hdc = reinterpret_cast<HDC>(wParam);
-        HWND ctl = reinterpret_cast<HWND>(lParam);
-        return ThemeCtlColorPanel(ctl, hdc);
-    }
-    case WM_DRAWITEM: {
-        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
-        if (DrawThemeButton(dis)) return TRUE;
-        break;
-    }
-    case WM_COMMAND:
-        if (LOWORD(wParam) == IDOK) {
-            const int len = ctx && ctx->fileName ? GetWindowTextLengthW(ctx->fileName) : 0;
-            std::wstring name(static_cast<size_t>(std::max(0, len)) + 1, L'\0');
-            if (ctx && ctx->fileName && len > 0) {
-                const int copied = GetWindowTextW(ctx->fileName, name.data(), len + 1);
-                name.resize(static_cast<size_t>(std::max(0, copied)));
-            } else {
-                name.clear();
-            }
-            name = TrimWhitespace(name);
-            if (name.empty()) {
-                ShowSoftNotice(hWnd, localization::Text(L"dialog.input.enter_file_name"),
-                               SoftNoticeKind::Warning);
-                return 0;
-            }
-            ctx->result = std::move(name);
-            ctx->action = SavePathPromptResult::DirectInput;
-            ctx->done = true;
-            DestroyWindow(hWnd);
-            return 0;
-        }
-        if (LOWORD(wParam) == kSavePathDialogOpenSystemId) {
-            ctx->action = SavePathPromptResult::OpenSystemDialog;
-            ctx->done = true;
-            DestroyWindow(hWnd);
-            return 0;
-        }
-        if (LOWORD(wParam) == IDCANCEL) {
-            ctx->done = true;
-            DestroyWindow(hWnd);
-            return 0;
-        }
-        break;
-    case WM_CLOSE:
-        if (ctx) ctx->done = true;
-        DestroyWindow(hWnd);
-        return 0;
-    }
-    return DefWindowProcW(hWnd, msg, wParam, lParam);
-}
-
-SavePathPromptResult PromptSavePath(HWND owner, const std::wstring& title,
-                                    const std::wstring& directory,
-                                    const std::wstring& defaultName,
-                                    std::wstring& outFileName) {
-    SavePathDialog ctx;
-    ctx.title = title;
-    ctx.directory = directory;
-    ctx.defaultName = defaultName;
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = SavePathDlgProc;
-    wc.hInstance = g_hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"SavePathDialog";
-    RegisterClassW(&wc);
-    HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 756, 210,
-                             owner, nullptr, g_hInst, &ctx);
-    if (!w) return SavePathPromptResult::Cancel;
-    PlaceOwnedPopupAtAppTopLeft(w, owner);
-    ShowWindow(w, SW_SHOW);
-    UpdateWindow(w);
-    RunDialogMessageLoop(w, &ctx.done);
-    if (ctx.action == SavePathPromptResult::DirectInput) {
-        outFileName = std::move(ctx.result);
-    }
-    return ctx.action;
 }
 
 struct CreateNameDialog {
@@ -1302,11 +1163,11 @@ static bool CreatePasswordOverlay(PasswordInputDialog* ctx, HWND owner) {
                                                   0, 0, 1, 1, ctx->panel,
                                                   reinterpret_cast<HMENU>(102), g_hInst, nullptr);
     }
-    ctx->okButton = CreateWindowExW(0, L"BUTTON", L"OK",
+    ctx->okButton = CreateWindowExW(0, L"BUTTON", localization::Text(L"common.ok").c_str(),
                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                                     0, 0, 1, 1, ctx->panel, reinterpret_cast<HMENU>(IDOK),
                                     g_hInst, nullptr);
-    ctx->cancelButton = CreateWindowExW(0, L"BUTTON", L"Cancel",
+    ctx->cancelButton = CreateWindowExW(0, L"BUTTON", localization::Text(L"common.cancel").c_str(),
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                         0, 0, 1, 1, ctx->panel, reinterpret_cast<HMENU>(IDCANCEL),
                                         g_hInst, nullptr);
@@ -1523,10 +1384,10 @@ static LRESULT CALLBACK SelectPathDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             SetFocus(ctx->list);
         }
 
-        CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"common.ok").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         370, buttonY, buttonW, buttonH, hWnd, reinterpret_cast<HMENU>(IDOK),
                         cs->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         470, buttonY, buttonW, buttonH, hWnd, reinterpret_cast<HMENU>(IDCANCEL),
                         cs->hInstance, nullptr);
         ApplyThemeToDialog(hWnd);
@@ -1886,6 +1747,7 @@ struct SilentDialogState {
     std::wstring defaultCancelLabel;
     std::wstring defaultYesLabel;
     std::wstring defaultNoLabel;
+    std::wstring keepOpenLabel;
     SilentDialogButtonSpec buttonSpecs[4]{};
     int buttonCount = 0;
     SilentDialogResult result = SilentDialogResult::None;
@@ -2055,7 +1917,9 @@ static void AddSilentDialogPathTooltip(SilentDialogState* ctx, HINSTANCE instanc
     SendMessageW(ctx->pathTooltip, TTM_SETDELAYTIME, TTDT_INITIAL, MAKELPARAM(400, 0));
     SendMessageW(ctx->pathTooltip, TTM_ACTIVATE, TRUE, 0);
     TOOLINFOW tool{};
-    tool.cbSize = sizeof(tool);
+    // The app also uses classic common controls. Their tooltip rejects the
+    // newer lpReserved tail; V2 covers every field used here on both versions.
+    tool.cbSize = TTTOOLINFOW_V2_SIZE;
     tool.uFlags = TTF_IDISHWND;
     tool.hwnd = ctx->hwnd;
     tool.uId = reinterpret_cast<UINT_PTR>(ctx->editMessage);
@@ -2182,6 +2046,10 @@ static void ResolveSilentDialogButtons(SilentDialogState* ctx) {
     ctx->defaultCancelLabel = localization::Text(L"dialog.button.cancel");
     ctx->defaultYesLabel = localization::Text(L"dialog.button.yes");
     ctx->defaultNoLabel = localization::Text(L"dialog.button.no");
+    ctx->keepOpenLabel = localization::Text(L"dialog.button.keep_open");
+    if (ctx->options.buttons == SilentDialogButtons::Ok) {
+        ctx->defaultOkLabel = localization::Text(L"common.close");
+    }
     const wchar_t* ok = ctx->options.okLabel.empty() ? ctx->defaultOkLabel.c_str() : ctx->options.okLabel.c_str();
     const wchar_t* cancel = ctx->options.cancelLabel.empty() ? ctx->defaultCancelLabel.c_str() : ctx->options.cancelLabel.c_str();
     const wchar_t* yes = ctx->options.yesLabel.empty() ? ctx->defaultYesLabel.c_str() : ctx->options.yesLabel.c_str();
@@ -2195,11 +2063,21 @@ static void ResolveSilentDialogButtons(SilentDialogState* ctx) {
         ctx->buttonSpecs[0] = { kSilentDialogIdButton1, SilentDialogResult::Ok, ok };
         ctx->buttonSpecs[1] = { kSilentDialogIdButton2, SilentDialogResult::Cancel, cancel };
         ctx->buttonCount = 2;
+        if (ctx->options.okLabel.empty() && ctx->options.cancelLabel.empty()) {
+            ctx->buttonSpecs[1] = { kSilentDialogIdButton2, SilentDialogResult::None, ctx->keepOpenLabel.c_str() };
+            ctx->buttonSpecs[2] = { kSilentDialogIdButton3, SilentDialogResult::Cancel, cancel };
+            ctx->buttonCount = 3;
+        }
         break;
     case SilentDialogButtons::YesNo:
         ctx->buttonSpecs[0] = { kSilentDialogIdButton1, SilentDialogResult::Yes, yes };
         ctx->buttonSpecs[1] = { kSilentDialogIdButton2, SilentDialogResult::No, no };
         ctx->buttonCount = 2;
+        if (ctx->options.yesLabel.empty() && ctx->options.noLabel.empty()) {
+            ctx->buttonSpecs[1] = { kSilentDialogIdButton2, SilentDialogResult::None, ctx->keepOpenLabel.c_str() };
+            ctx->buttonSpecs[2] = { kSilentDialogIdButton3, SilentDialogResult::No, no };
+            ctx->buttonCount = 3;
+        }
         break;
     case SilentDialogButtons::YesNoCancel:
         ctx->buttonSpecs[0] = { kSilentDialogIdButton1, SilentDialogResult::Yes, yes };
@@ -2477,6 +2355,9 @@ static LRESULT CALLBACK SilentDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         }
         for (int i = 0; i < ctx->buttonCount; ++i) {
             if (ctx->buttonSpecs[i].id == id) {
+                // None is the explicit keep-open choice, never a caller result.
+                // Do not release the modal owner or advance the pending operation.
+                if (ctx->buttonSpecs[i].result == SilentDialogResult::None) return 0;
                 CloseSilentDialog(ctx, ctx->buttonSpecs[i].result);
                 return 0;
             }
@@ -2536,9 +2417,12 @@ SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& optio
                        ctx.options.paths.end());
     const HWND anchor = ctx.owner ? ctx.owner : GetDesktopWindow();
     const int baseWidth = (ctx.options.preferredWidthPx > 0) ? ctx.options.preferredWidthPx : 560;
-    const bool needsCopyActionSpace = !ctx.options.paths.empty() &&
-        (ctx.options.buttons == SilentDialogButtons::OkYesNoCancel ||
-         ctx.options.buttons == SilentDialogButtons::YesNoCancel);
+    ResolveSilentDialogButtons(&ctx);
+    if (ctx.buttonCount == 3 && ctx.buttonSpecs[1].result == SilentDialogResult::None) {
+        if (!ctx.options.message.empty()) ctx.options.message += L"\n\n";
+        ctx.options.message += localization::Text(L"dialog.button.choice_hint");
+    }
+    const bool needsCopyActionSpace = !ctx.options.paths.empty() && ctx.buttonCount >= 3;
     const int requiredBaseWidth = needsCopyActionSpace ? std::max(baseWidth, 680) : baseWidth;
     const int width = std::clamp(DialogScale(anchor, requiredBaseWidth),
                                  DialogScale(anchor, 360), DialogScale(anchor, 760));
@@ -2548,6 +2432,10 @@ SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& optio
     const int buttonBandH = buttonH + DialogScale(anchor, 18);
     const int textWidth = std::max(DialogScale(anchor, 220), width - margin * 2 - DialogScale(anchor, 8));
     AppendCompactPathsToMessage(anchor, textWidth, ctx.options.message, ctx.options.paths);
+    if (!ctx.options.additionalInformation.empty()) {
+        if (!ctx.options.message.empty()) ctx.options.message += L"\n\n";
+        ctx.options.message += ctx.options.additionalInformation;
+    }
     ctx.options.message = NormalizeNewlinesForEditControl(ctx.options.message);
     const SIZE measured = MeasureSilentDialogMessage(anchor, ctx.options.message, textWidth);
     const int messageH = std::clamp(static_cast<int>(measured.cy) + DialogScale(anchor, 20),

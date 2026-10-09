@@ -31,6 +31,26 @@ original-preserving conversion, and direct comparison with 26.2.5.2 across
 12 documents/89 pages with no differences in text, fonts, structure, semantics
 or raster pixels above the fixed threshold. This is scoped migration evidence,
 not application-wide release approval or an exhaustive input-safety proof.
+On 2026-10-06, LO-024 enabled the official `--enable-readonly-installset`
+option to omit the shared extension-cache write probe. The rebuilt deployment
+library was the only runtime file with a changed hash; Calc/Math, dictionaries,
+and all other runtime files remain present. Direct comparisons covered the same
+12 documents/89 pages and 12 supplementary samples/20 pages (11 official
+regression samples and one existing OLE sample) without differences. With Windows
+Controlled Folder Access enabled, the shared
+cache block events changed from four to zero for the protected-folder DOCX/PPTX
+smoke test. These checks do not establish exhaustive conversion quality or
+independent visual/audible acceptance. Additional Calc reduction remains a
+separate, unadopted trial.
+On 2026-10-07, patch `0051` added long local Windows path support in SAL:
+canonical URL/native conversion (including the 248-unit directory boundary),
+directory enumeration, explicit TMP/TEMP resolution, and atomic temporary-file
+reservation. Only `sal3.dll` changed; the complete prior runtime is retained for
+recovery. Fourteen fresh-profile DOCX/PPTX cases cover Unicode, spaces, and paths
+through 500 UTF-16 units. Scoped baseline comparisons covered 12 fixed documents
+(67 pages) and 11 official quick samples (13 pages) without differences. This is
+not full-corpus reduction acceptance or a claim that every maximum-length path
+works. See the long-path implementation record in `docs/internal/`.
 The verified source/cache inputs are recorded in
 `source_archives_26.2.6.3.manifest.tsv` and
 `external_tarballs_26.2.6.3.manifest.tsv`; its public local configuration
@@ -62,7 +82,7 @@ The reproducible custom build inputs are:
 
 Patch number `0042` is deliberately reserved. An experimental WSL-helper
 approach was reverted before adoption; do not recreate or renumber it during
-future rebases. The applied series is `0001`-`0041` and `0043`-`0050`.
+future rebases. The applied series is `0001`-`0041` and `0043`-`0051`.
 
 The generated source tree, external tarball cache, downloaded source archives,
 detached signatures, and built `instdir` remain outside Git unless a later
@@ -323,7 +343,7 @@ Required process settings:
 
 - Set `PYTHONDONTWRITEBYTECODE=1` defensively.
 - Set `PYTHONPYCACHEPREFIX` to an app-managed ignored directory such as
-  `__resource__/__libreoffice_pycache` defensively if the bundled image ever
+  `__pdf_note_workspace__/__libreoffice_pycache` defensively if the bundled image ever
   regains Python support.
 - Clean any LibreOffice-image `__pycache__` directories before and after
   conversion.

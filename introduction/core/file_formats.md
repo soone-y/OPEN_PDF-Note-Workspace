@@ -47,15 +47,15 @@ EVIDENCE: docs/ja/Using_the_App.md
 <persistence_model>
   <step id="stage" type="temporary_protection">
     <description>編集途中の保護領域 (クラッシュ・電源断対策)</description>
-    <path>__resource__/__tmp__/__stage__/</path>
+    <path>__pdf_note_workspace__/__tmp__/__stage__/</path>
   </step>
   <step id="backup" type="recovery_copy">
     <description>Ctrl+S 統合保存時に生成されるバックアップ</description>
-    <path>__resource__/__escape__/backup/</path>
+    <path>__pdf_note_workspace__/__escape__/backup/</path>
   </step>
   <step id="note_recovery" type="emergency_dump">
     <description>ノート保存失敗時の退避データ</description>
-    <path>__resource__/__escape__/note_recovery/</path>
+    <path>__pdf_note_workspace__/__escape__/note_recovery/</path>
   </step>
   <step id="consolidated_save" type="explicit_write">
     <description>Ctrl+S または保存メニュー選択による正規ファイル統合</description>

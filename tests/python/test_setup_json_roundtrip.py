@@ -23,6 +23,7 @@ def production_sections(source: str) -> str:
         ("static std::string ReadTextFileUtf8(const std::filesystem::path& p) {", "static std::optional<bool> QuerySystemTouchpadInvertVertical("),
         ("static bool ParseJsonStringToken(", "static bool WorkspaceJsonHasUnknownTopLevelFields("),
         ("static bool SetupJsonHasUnknownTopLevelFields(", "static std::wstring SetupJsonAutoUpdateBlockedReason("),
+        ("[[nodiscard]] static std::filesystem::path QuarantineCorruptSetupJson(", "static std::wstring WorkspaceConfigRootKeyForCompare("),
         ("static setup_json_policy::AutoUpdateDecision ResolveSetupJsonAutoUpdateDecision(", "static bool ReadExistingSetupJsonForAutoUpdate("),
         ("// Locate only a top-level value,", "static const char* ToolModeKey("),
         ("static std::filesystem::path ResolveSetupJsonPath(", "static bool WriteSetupJsonFile("),
@@ -77,6 +78,7 @@ class SetupJsonRoundTripTests(unittest.TestCase):
 #include <string>
 #include <vector>
 #include "core/atomic_write.h"
+#include "diagnostics/normal_operations.h"
 #include "core/text_encoding.h"
 #include "core/json_string.h"
 #include "core/theme_types.h"
@@ -116,11 +118,12 @@ void LeaveSaveOperation();
                 if mode == "empty":
                     self.assertEqual(saved["tempExternalLectureDirs"], [])
                 if mode == "strings":
-                    schedule = json.loads((app / "__resource__/__settings__/schedule.json").read_text(encoding="utf-8"))
+                    schedule = json.loads((app / "__pdf_note_workspace__/__settings__/schedule.json").read_text(encoding="utf-8"))
                     self.assertIn('"', schedule["scheduleCells"][0])
                     self.assertIn("\n", schedule["scheduleCells"][0])
                     theme = json.loads((app / "theme_fixture.json").read_text(encoding="utf-8"))
                     self.assertIn('"', theme["verified"][0]["display"])
+            subprocess.run([str(executable), "recovery"], env=environment, check=True, timeout=20)
 
 
 if __name__ == "__main__":

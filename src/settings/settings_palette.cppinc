@@ -9,6 +9,8 @@ constexpr int IDC_PALETTE_SLOT_BASE = 5200;
 constexpr int IDC_PALETTE_SLOT_COUNT = 8;
 constexpr int IDC_PALETTE_INFO = 5216;
 constexpr int IDC_PALETTE_SELECTED_INFO = 5217;
+constexpr int IDC_PALETTE_SELECTED_PREVIEW = 5218;
+constexpr int IDC_PALETTE_EDITOR_RED_LABEL = 5219;
 constexpr int IDC_PALETTE_EDITOR_RED = 5220;
 constexpr int IDC_PALETTE_EDITOR_GREEN = 5221;
 constexpr int IDC_PALETTE_EDITOR_BLUE = 5222;
@@ -17,6 +19,9 @@ constexpr int IDC_PALETTE_EDITOR_HEX = 5224;
 constexpr int IDC_PALETTE_EDITOR_EYEDROPPER = 5227;
 constexpr int IDC_PALETTE_EDITOR_CHOICE_BASE = 5230;
 constexpr int IDC_PALETTE_EDITOR_CHOICE_COUNT = 8;
+constexpr int IDC_PALETTE_EDITOR_GREEN_LABEL = 5240;
+constexpr int IDC_PALETTE_EDITOR_BLUE_LABEL = 5241;
+constexpr int IDC_PALETTE_EDITOR_HEX_LABEL = 5242;
 
 struct PaletteSettingsCtx {
     HWND owner = nullptr;
@@ -34,6 +39,16 @@ struct PaletteSettingsCtx {
     HWND btnOpen = nullptr;
     HWND btnClose = nullptr;
     HWND selectedInfo = nullptr;
+    HWND selectedPreview = nullptr;
+    std::array<HWND, 4> editorLabels{};
+    HWND editRed = nullptr;
+    HWND editGreen = nullptr;
+    HWND editBlue = nullptr;
+    HWND editHex = nullptr;
+    HWND btnEyedropper = nullptr;
+    bool syncingFields = false;
+    bool eyedropperActive = false;
+    COLORREF eyedropperInitialColor = RGB(0, 0, 0);
 };
 
 static void DrawPaletteSlotButton(const DRAWITEMSTRUCT* dis, COLORREF color, bool isTargetSlot, bool isChangedSlot) {
@@ -82,6 +97,17 @@ static void DrawPaletteSlotButton(const DRAWITEMSTRUCT* dis, COLORREF color, boo
         RECT rcFocus = rc;
         InflateRect(&rcFocus, -3, -3);
         DrawFocusRect(dis->hDC, &rcFocus);
+    }
+
+    if (dis->CtlID >= IDC_PALETTE_SLOT_BASE &&
+        dis->CtlID < IDC_PALETTE_SLOT_BASE + IDC_PALETTE_SLOT_COUNT) {
+        // Slot numbers remain visible even when adjacent palette colors are similar.
+        const int luminance = (GetRValue(color) * 299 + GetGValue(color) * 587 + GetBValue(color) * 114) / 1000;
+        SetBkMode(dis->hDC, TRANSPARENT);
+        SetTextColor(dis->hDC, luminance >= 150 ? RGB(20, 20, 20) : RGB(255, 255, 255));
+        const std::wstring slotNumber = std::to_wstring(dis->CtlID - IDC_PALETTE_SLOT_BASE + 1);
+        DrawTextW(dis->hDC, slotNumber.c_str(), -1, &rc,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 }
 
@@ -288,7 +314,7 @@ static void EnsurePaletteColorEditorClass() {
                                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_EYEDROPPER)), g_hInst, nullptr);
             SetUIFont(eyedropper);
             const int buttonY = eyedropperY + rowH + ScaleY(hWnd, 14);
-            HWND ok = CreateWindowExW(0, L"BUTTON", UiApplyLabel().c_str(),
+            HWND ok = CreateWindowExW(0, L"BUTTON", UiOkLabel().c_str(),
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                                       pad, buttonY, buttonW, rowH,
                                       hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
@@ -464,38 +490,6 @@ static bool ShowPaletteColorEditorDialogImpl(HWND owner, COLORREF initial, COLOR
     return ctx.accepted;
 }
 
-static bool OpenPaletteColorEditorForSlot(HWND owner, COLORREF* colors, int slot,
-                                          PaletteSettingsCtx* paletteCtx = nullptr) {
-    if (!colors) return false;
-    if (slot < 0 || slot >= IDC_PALETTE_SLOT_COUNT) slot = 0;
-    if (paletteCtx) {
-        paletteCtx->selectedSlot = slot;
-        paletteCtx->changedSlot = -1;
-    }
-    COLORREF picked = colors[slot];
-    if (!ShowPaletteColorEditorDialogImpl(owner, colors[slot], &picked, colors, IDC_PALETTE_SLOT_COUNT)) {
-        if (paletteCtx) {
-            paletteCtx->selectedSlot = slot;
-            paletteCtx->changedSlot = -1;
-        }
-        if (owner && IsWindow(owner)) {
-            InvalidateRect(owner, nullptr, TRUE);
-            UpdateWindow(owner);
-        }
-        return false;
-    }
-
-    colors[slot] = picked;
-    if (paletteCtx) {
-        paletteCtx->selectedSlot = slot;
-        paletteCtx->changedSlot = slot;
-    }
-    if (owner && IsWindow(owner)) {
-        InvalidateRect(owner, nullptr, TRUE);
-    }
-    return true;
-}
-
 MAYBE_UNUSED static std::wstring PaletteHexColorW(COLORREF c) {
     wchar_t buf[16]{};
     swprintf(buf, std::size(buf), L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
@@ -521,6 +515,138 @@ static void UpdatePaletteSelectedInfo(PaletteSettingsCtx* ctx) {
         text += localization::Text(L"settings.palette.8c31962ed379");
     }
     SetWindowTextW(ctx->selectedInfo, text.c_str());
+    if (ctx->selectedPreview) InvalidateRect(ctx->selectedPreview, nullptr, TRUE);
+}
+
+static void SyncPaletteSettingsEditor(HWND hWnd, PaletteSettingsCtx* ctx, COLORREF color, HWND source = nullptr) {
+    if (!ctx) return;
+    ctx->syncingFields = true;
+    const std::array<std::pair<HWND, BYTE>, 3> channels{{
+        {ctx->editRed, GetRValue(color)}, {ctx->editGreen, GetGValue(color)}, {ctx->editBlue, GetBValue(color)},
+    }};
+    for (const auto& [edit, value] : channels) {
+        // Do not replace the field/group being typed into (caret and partial
+        // input belong to the user); only synchronize the other representation.
+        if (edit && source != ctx->editRed && source != ctx->editGreen && source != ctx->editBlue)
+            SetWindowTextW(edit, std::to_wstring(value).c_str());
+    }
+    if (ctx->editHex && source != ctx->editHex) SetWindowTextW(ctx->editHex, PaletteEditorHex(color).c_str());
+    ctx->syncingFields = false;
+}
+
+static void SetPaletteSettingsColor(HWND hWnd, PaletteSettingsCtx* ctx, COLORREF color, bool markChanged,
+                                    HWND source = nullptr) {
+    if (!ctx) return;
+    const int idx = std::clamp(ctx->selectedSlot, 0, IDC_PALETTE_SLOT_COUNT - 1);
+    ctx->colors[idx] = color;
+    ctx->changedSlot = markChanged ? idx : -1;
+    SyncPaletteSettingsEditor(hWnd, ctx, color, source);
+    UpdatePaletteSelectedInfo(ctx);
+    InvalidateRect(hWnd, nullptr, TRUE);
+}
+
+static void UpdatePaletteSettingsFromRgb(HWND hWnd, PaletteSettingsCtx* ctx, HWND source) {
+    if (!ctx || ctx->syncingFields) return;
+    COLORREF color{};
+    if (ReadPaletteEditorRgb(hWnd, &color)) SetPaletteSettingsColor(hWnd, ctx, color, true, source);
+}
+
+static void UpdatePaletteSettingsFromHex(HWND hWnd, PaletteSettingsCtx* ctx) {
+    if (!ctx || ctx->syncingFields) return;
+    COLORREF color{};
+    if (TryReadPaletteHex(hWnd, &color)) SetPaletteSettingsColor(hWnd, ctx, color, true, ctx->editHex);
+}
+
+static bool ValidatePaletteSettingsEditor(HWND hWnd, PaletteSettingsCtx* ctx) {
+    if (!ctx) return false;
+    COLORREF color{};
+    if (ReadPaletteEditorColor(hWnd, &color)) return true;
+    ShowSoftNotice(hWnd, localization::Text(L"settings.palette.invalid_color"), SoftNoticeKind::Warning);
+    HWND invalid = ctx->editHex;
+    for (int id : {IDC_PALETTE_EDITOR_RED, IDC_PALETTE_EDITOR_GREEN, IDC_PALETTE_EDITOR_BLUE}) {
+        BYTE value = 0;
+        if (!TryReadPaletteChannel(hWnd, id, &value)) { invalid = GetDlgItem(hWnd, id); break; }
+    }
+    SetFocus(invalid);
+    return false;
+}
+
+static void LayoutPaletteSettingsPage(HWND hWnd, PaletteSettingsCtx* ctx) {
+    if (!hWnd || !ctx) return;
+    RECT clientRc{};
+    GetClientRect(hWnd, &clientRc);
+    const int clientW = std::max(0, static_cast<int>(clientRc.right - clientRc.left));
+    const int clientH = std::max(0, static_cast<int>(clientRc.bottom - clientRc.top));
+    const int pad = ScaleY(hWnd, 16);
+    const int gap = ScaleY(hWnd, 10);
+    const int rowH = std::max(ScaleY(hWnd, 30), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
+    const int gridY = ctx->embedded ? pad : (pad + rowH + ScaleY(hWnd, 40));
+    const int minSlotW = ScaleY(hWnd, 44);
+    const int fullRowMinW = IDC_PALETTE_SLOT_COUNT * minSlotW +
+                            (IDC_PALETTE_SLOT_COUNT - 1) * gap;
+    // A full row is the normal presentation.  Only narrow windows fold it into
+    // two rows, so that the color choices remain usable at high DPI as well.
+    const bool fullRow = clientW - pad * 2 >= fullRowMinW;
+    const int columns = fullRow ? IDC_PALETTE_SLOT_COUNT : 4;
+    const bool sideBySide = fullRow && clientW >= fullRowMinW + ScaleY(hWnd, 250) + pad * 3;
+    const int leftW = sideBySide
+        ? std::clamp(clientW * 55 / 100, fullRowMinW, clientW - ScaleY(hWnd, 250) - pad * 3)
+        : std::max(ScaleY(hWnd, 280), clientW - pad * 2);
+    const int slotW = std::max(minSlotW, (leftW - (columns - 1) * gap) / columns);
+    const int slotH = std::max(ScaleY(hWnd, 54), rowH + ScaleY(hWnd, 18));
+    for (int i = 0; i < IDC_PALETTE_SLOT_COUNT; ++i) {
+        const int row = i / columns;
+        const int col = i % columns;
+        if (HWND slot = GetDlgItem(hWnd, IDC_PALETTE_SLOT_BASE + i)) {
+            SetWindowPos(slot, nullptr, pad + col * (slotW + gap), gridY + row * (slotH + gap), slotW, slotH,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    const int rows = (IDC_PALETTE_SLOT_COUNT + columns - 1) / columns;
+    const int actionY = gridY + rows * slotH + (rows - 1) * gap + ScaleY(hWnd, 14);
+    if (ctx->btnClose) {
+        SetWindowPos(ctx->btnClose, nullptr, pad + std::min(leftW, ScaleY(hWnd, 190)) + gap, actionY,
+                     ScaleY(hWnd, 96), rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    const int rightX = sideBySide ? pad + leftW + ScaleY(hWnd, 24) : pad;
+    const int rightY = sideBySide ? gridY : actionY + ScaleY(hWnd, 18);
+    const int rightW = sideBySide ? std::max(ScaleY(hWnd, 210), clientW - rightX - pad) : leftW;
+    const int previewH = std::max(ScaleY(hWnd, 104), std::min(ScaleY(hWnd, 168), clientH / 4));
+    if (ctx->selectedPreview) {
+        SetWindowPos(ctx->selectedPreview, nullptr, rightX, rightY, rightW, previewH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (ctx->selectedInfo) {
+        SetWindowPos(ctx->selectedInfo, nullptr, rightX, rightY + previewH + gap, rightW,
+                     ScaleY(hWnd, 52),
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    const int editorY = rightY + previewH + gap + ScaleY(hWnd, 58);
+    const int channelGap = ScaleY(hWnd, 8);
+    const int channelW = std::max(ScaleY(hWnd, 54), (rightW - channelGap * 2) / 3);
+    const std::array<HWND, 3> channelEdits{{ctx->editRed, ctx->editGreen, ctx->editBlue}};
+    for (int i = 0; i < 3; ++i) {
+        const int x = rightX + i * (channelW + channelGap);
+        if (ctx->editorLabels[static_cast<size_t>(i)]) {
+            SetWindowPos(ctx->editorLabels[static_cast<size_t>(i)], nullptr, x, editorY, channelW, rowH,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if (channelEdits[static_cast<size_t>(i)]) {
+            SetWindowPos(channelEdits[static_cast<size_t>(i)], nullptr, x, editorY + rowH, channelW, rowH,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+    const int hexY = editorY + rowH * 2 + gap;
+    const int eyeW = std::min(ScaleY(hWnd, 156), std::max(ScaleY(hWnd, 92), rightW / 3));
+    if (ctx->editorLabels[3]) SetWindowPos(ctx->editorLabels[3], nullptr, rightX, hexY, ScaleY(hWnd, 42), rowH,
+                                            SWP_NOZORDER | SWP_NOACTIVATE);
+    if (ctx->editHex) SetWindowPos(ctx->editHex, nullptr, rightX + ScaleY(hWnd, 44), hexY,
+                                   std::max(ScaleY(hWnd, 64), rightW - ScaleY(hWnd, 44) - eyeW - gap), rowH,
+                                   SWP_NOZORDER | SWP_NOACTIVATE);
+    if (ctx->btnEyedropper) SetWindowPos(ctx->btnEyedropper, nullptr, rightX + rightW - eyeW, hexY, eyeW, rowH,
+                                         SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 static void EnsurePaletteSettingsClass() {
@@ -572,7 +698,7 @@ static void EnsurePaletteSettingsClass() {
                 int yy = gridY + row * (slotH + gap);
                 std::wstring label = std::to_wstring(i + 1);
                 HWND btn = CreateWindowExW(0, L"BUTTON", label.c_str(),
-                                           WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
+                                           WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_NOTIFY | WS_TABSTOP,
                                            x, yy, slotW, slotH, hWnd,
                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_SLOT_BASE + i)),
                                            g_hInst, nullptr);
@@ -582,21 +708,10 @@ static void EnsurePaletteSettingsClass() {
             int rows = (IDC_PALETTE_SLOT_COUNT + columns - 1) / columns;
             int y = gridY + rows * slotH + std::max(0, rows - 1) * gap + ScaleY(hWnd, 10);
             int btnH = rowH;
-            int okW = ScaleY(hWnd, 130);
             int cancelW = ScaleY(hWnd, 96);
-            int btnGap = ScaleY(hWnd, 10);
             int totalW = columns * slotW + (columns - 1) * gap;
             int xCancel = pad + totalW - cancelW;
-            int xOk = ctx->embedded ? (pad + totalW - okW) : (xCancel - btnGap - okW);
 
-            const std::wstring openLabel = ctx->embedded
-                ? localization::Text(L"settings.palette.023caed2a143")
-                : localization::Text(L"settings.palette.0e945dc66d38");
-            ctx->btnOpen = CreateWindowExW(0, L"BUTTON", openLabel.c_str(),
-                                           WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                           xOk, y, okW, btnH, hWnd,
-                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
-            SetUIFont(ctx->btnOpen);
             if (!ctx->embedded) {
                 ctx->btnClose = CreateWindowExW(0, L"BUTTON",
                                                 UiCloseLabel().c_str(),
@@ -618,10 +733,52 @@ static void EnsurePaletteSettingsClass() {
                                                 hWnd,
                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_SELECTED_INFO)),
                                                 g_hInst, nullptr);
+            ctx->selectedPreview = CreateWindowExW(0, L"STATIC", L"",
+                                                   WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+                                                   pad, infoY, infoW, ScaleY(hWnd, 96),
+                                                   hWnd,
+                                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_SELECTED_PREVIEW)),
+                                                   g_hInst, nullptr);
+            const std::array<std::pair<const wchar_t*, int>, 4> editorLabels{{
+                {L"R", IDC_PALETTE_EDITOR_RED_LABEL}, {L"G", IDC_PALETTE_EDITOR_GREEN_LABEL},
+                {L"B", IDC_PALETTE_EDITOR_BLUE_LABEL}, {L"HEX", IDC_PALETTE_EDITOR_HEX_LABEL},
+            }};
+            for (size_t i = 0; i < editorLabels.size(); ++i) {
+                ctx->editorLabels[i] = CreateWindowExW(0, L"STATIC", editorLabels[i].first,
+                                                        WS_CHILD | WS_VISIBLE,
+                                                        pad, infoY, ScaleY(hWnd, 40), rowH,
+                                                        hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(editorLabels[i].second)),
+                                                        g_hInst, nullptr);
+                SetUIFont(ctx->editorLabels[i]);
+            }
+            const std::array<std::pair<int, HWND*>, 3> channels{{
+                {IDC_PALETTE_EDITOR_RED, &ctx->editRed}, {IDC_PALETTE_EDITOR_GREEN, &ctx->editGreen},
+                {IDC_PALETTE_EDITOR_BLUE, &ctx->editBlue},
+            }};
+            for (const auto& [id, target] : channels) {
+                *target = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                                          pad, infoY, ScaleY(hWnd, 64), rowH, hWnd,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+                SetUIFont(*target);
+            }
+            ctx->editHex = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                           pad, infoY, ScaleY(hWnd, 128), rowH, hWnd,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_HEX)), g_hInst, nullptr);
+            ctx->btnEyedropper = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.palette.eyedropper").c_str(),
+                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                                 pad, infoY, ScaleY(hWnd, 156), rowH, hWnd,
+                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_EYEDROPPER)),
+                                                 g_hInst, nullptr);
+            SetUIFont(ctx->editHex);
+            SetUIFont(ctx->btnEyedropper);
             SetUIFont(ctx->selectedInfo);
             UpdatePaletteSelectedInfo(ctx);
+            SyncPaletteSettingsEditor(hWnd, ctx, ctx->colors[ctx->selectedSlot]);
 
             ApplyThemeToDialog(hWnd);
+            LayoutPaletteSettingsPage(hWnd, ctx);
             return 0;
         }
         case WM_THEMECHANGED:
@@ -646,6 +803,16 @@ static void EnsurePaletteSettingsClass() {
         case WM_DRAWITEM: {
             auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
             if (!ctx || !dis) break;
+            if (dis->CtlID == IDC_PALETTE_SELECTED_PREVIEW) {
+                const int idx = std::clamp(ctx->selectedSlot, 0, IDC_PALETTE_SLOT_COUNT - 1);
+                HBRUSH fill = CreateSolidBrush(ctx->colors[idx]);
+                FillRect(dis->hDC, &dis->rcItem, fill);
+                DeleteObject(fill);
+                HBRUSH border = CreateSolidBrush(g_theme.buttonBorder);
+                FrameRect(dis->hDC, &dis->rcItem, border);
+                DeleteObject(border);
+                return TRUE;
+            }
             if (!IsPaletteSlotId(static_cast<int>(dis->CtlID))) break;
             int idx = static_cast<int>(dis->CtlID) - IDC_PALETTE_SLOT_BASE;
             if (idx < 0 || idx >= IDC_PALETTE_SLOT_COUNT) break;
@@ -654,14 +821,26 @@ static void EnsurePaletteSettingsClass() {
             DrawPaletteSlotButton(dis, ctx->colors[idx], isTargetSlot, isChangedSlot);
             return TRUE;
         }
+        case WM_SIZE:
+            LayoutPaletteSettingsPage(hWnd, ctx);
+            return 0;
         case WM_COMMAND: {
             int id = LOWORD(wParam);
+            int code = HIWORD(wParam);
             if (!ctx) break;
-            if (id == IDOK) {
-                if (OpenPaletteColorEditorForSlot(hWnd, ctx->colors, ctx->selectedSlot, ctx)) {
-                    InvalidateRect(hWnd, nullptr, TRUE);
-                }
-                UpdatePaletteSelectedInfo(ctx);
+            if (id == IDC_PALETTE_EDITOR_EYEDROPPER && code == BN_CLICKED) {
+                ctx->eyedropperInitialColor = ctx->colors[std::clamp(ctx->selectedSlot, 0, IDC_PALETTE_SLOT_COUNT - 1)];
+                ctx->eyedropperActive = true;
+                SetCapture(hWnd);
+                return 0;
+            }
+            if (code == EN_CHANGE && (id == IDC_PALETTE_EDITOR_RED || id == IDC_PALETTE_EDITOR_GREEN ||
+                                      id == IDC_PALETTE_EDITOR_BLUE)) {
+                UpdatePaletteSettingsFromRgb(hWnd, ctx, reinterpret_cast<HWND>(lParam));
+                return 0;
+            }
+            if (code == EN_CHANGE && id == IDC_PALETTE_EDITOR_HEX) {
+                UpdatePaletteSettingsFromHex(hWnd, ctx);
                 return 0;
             }
             if (id == IDCANCEL || id == 0) {
@@ -670,15 +849,37 @@ static void EnsurePaletteSettingsClass() {
                 return 0;
             }
             if (IsPaletteSlotId(id)) {
+                if (!ValidatePaletteSettingsEditor(hWnd, ctx)) return 0;
                 int idx = id - IDC_PALETTE_SLOT_BASE;
                 ctx->selectedSlot = idx;
                 ctx->changedSlot = -1;
+                SyncPaletteSettingsEditor(hWnd, ctx, ctx->colors[idx]);
                 InvalidateRect(hWnd, nullptr, TRUE);
                 UpdatePaletteSelectedInfo(ctx);
                 return 0;
             }
             break;
         }
+        case WM_LBUTTONUP:
+            if (ctx && ctx->eyedropperActive) {
+                COLORREF sampled{};
+                if (SamplePaletteColorAtCursor(&sampled)) SetPaletteSettingsColor(hWnd, ctx, sampled, true);
+                ctx->eyedropperActive = false;
+                if (GetCapture() == hWnd) ReleaseCapture();
+                return 0;
+            }
+            break;
+        case WM_CAPTURECHANGED:
+            if (ctx && ctx->eyedropperActive) ctx->eyedropperActive = false;
+            break;
+        case WM_KEYDOWN:
+            if (ctx && ctx->eyedropperActive && wParam == VK_ESCAPE) {
+                ctx->eyedropperActive = false;
+                SetPaletteSettingsColor(hWnd, ctx, ctx->eyedropperInitialColor, false);
+                if (GetCapture() == hWnd) ReleaseCapture();
+                return 0;
+            }
+            break;
         case WM_CLOSE:
             if (ctx && ctx->embedded) return 0;
             DestroyWindow(hWnd);

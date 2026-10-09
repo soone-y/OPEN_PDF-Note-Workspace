@@ -52,6 +52,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_atomic_wri
 ./release.ps1
 ```
 
-Do not distribute `out/` directly. Use the Full or Lite folder or ZIP created in a release set. The Full edition includes the verified LibreOffice conversion runtime; Lite does not. To make a short development build of Lite only, use `./build.ps1 -Lite`.
+Do not distribute `out/` directly. Use the Full or Lite folder or ZIP created in a release set. ZIP filenames include locale and edition; their extracted top-level folder is `PDF-Note-Workspace-<version>`. The Full edition includes the verified LibreOffice conversion runtime; Lite does not. To make a short development build of Lite only, use `./build.ps1 -Lite`.
 
 Use `scripts/release/make_release_set.ps1` or `scripts/release/pack_release.ps1` only when adjusting release names, output paths, or bundled contents.

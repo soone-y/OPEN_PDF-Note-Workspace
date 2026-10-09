@@ -171,7 +171,7 @@ def validate_external_snapshot(release_set: Path, snapshot_root: Path) -> list[s
     return errors
 
 
-def validate_release_zip(release_dir: Path, zip_path: Path) -> list[str]:
+def validate_release_zip(release_dir: Path, zip_path: Path, archive_root: str | None = None) -> list[str]:
     errors: list[str] = []
     if not release_dir.is_dir():
         return [f"release directory does not exist: {release_dir}"]
@@ -187,7 +187,7 @@ def validate_release_zip(release_dir: Path, zip_path: Path) -> list[str]:
             seen: set[str] = set()
             unexpected: set[str] = set()
             changed: set[str] = set()
-            prefix = f"{release_dir.name}/"
+            prefix = f"{archive_root or release_dir.name}/"
             for info in archive.infolist():
                 member = PurePosixPath(info.filename)
                 if member.is_absolute() or ".." in member.parts:
@@ -251,7 +251,7 @@ def parse_build_info(path: Path) -> dict[str, str]:
     return values
 
 
-def validate_release_metadata(release_set: Path, components: dict[str, object]) -> list[str]:
+def validate_release_metadata(release_set: Path, components: dict[str, object], zip_roots: dict[str, object]) -> list[str]:
     errors: list[str] = []
     try:
         release_manifest = json.loads((release_set / "release_set_manifest.json").read_text(encoding="utf-8-sig"))
@@ -263,6 +263,13 @@ def validate_release_metadata(release_set: Path, components: dict[str, object]) 
         return ["release-set app_version is empty"]
     if locale not in ("ja", "en"):
         return ["release-set locale must be ja or en"]
+    expected_archive_root = f"PDF-Note-Workspace-{version}"
+    for root_key in ("release_zip", "release_lite_zip"):
+        archive_root = zip_roots.get(root_key)
+        if archive_root is not None and archive_root != expected_archive_root:
+            errors.append(
+                f"release-set ZIP root for {root_key} must be {expected_archive_root!r} for app_version {version!r}"
+            )
     for label, directory_key, expected_edition in (("full", "release", "full"), ("Lite", "release_lite", "lite")):
         try:
             release_dir = child_path(release_set, components.get(directory_key), label=f"{label} directory")
@@ -306,8 +313,15 @@ def validate_release_set(release_set: Path) -> list[str]:
         components, _ = load_release_components(release_set)
     except ValueError as error:
         return [str(error)]
+    try:
+        manifest = json.loads((release_set / "release_set_manifest.json").read_text(encoding="utf-8-sig"))
+        zip_roots = manifest.get("zip_roots", {})
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as error:
+        return [f"invalid release-set ZIP root metadata: {error}"]
+    if not isinstance(zip_roots, dict):
+        return ["release-set manifest has invalid ZIP root metadata"]
     errors = validate_snapshot_manifest(release_set, components)
-    errors.extend(validate_release_metadata(release_set, components))
+    errors.extend(validate_release_metadata(release_set, components, zip_roots))
     for label, directory_key, zip_key in (("full", "release", "release_zip"), ("Lite", "release_lite", "release_lite_zip")):
         directory_value = components.get(directory_key)
         zip_value = components.get(zip_key)
@@ -319,7 +333,11 @@ def validate_release_set(release_set: Path) -> list[str]:
         except ValueError as error:
             errors.append(str(error))
             continue
-        errors.extend(f"{label}: {error}" for error in validate_release_zip(release_dir, zip_path))
+        archive_root = zip_roots.get(zip_key)
+        if archive_root is not None and not isinstance(archive_root, str):
+            errors.append(f"{label}: release-set manifest has an invalid ZIP root")
+            continue
+        errors.extend(f"{label}: {error}" for error in validate_release_zip(release_dir, zip_path, archive_root))
     return errors
 
 

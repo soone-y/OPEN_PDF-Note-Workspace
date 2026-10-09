@@ -4,7 +4,9 @@
 #include "clrop/bridge.h"
 #include "clrop/hash.h"
 #include "core/annot_commands.h"
+#include "core/annot_stage_replay.h"
 #include "core/atomic_write.h"
+#include "diagnostics/normal_operations.h"
 #include "core/localization.h"
 #include "core/preview_trace.h"
 #include "core/ui_notify.h"
@@ -607,7 +609,7 @@ std::filesystem::path WorkspaceTmpRoot() {
 std::filesystem::path WorkspaceEscapeRoot() {
   if (g_workspaceRoot.empty())
     return {};
-  return std::filesystem::path(g_workspaceRoot) / L"__resource__" /
+  return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" /
          L"__escape__";
 }
 
@@ -1158,7 +1160,7 @@ bool SaveNoteStageState(const std::filesystem::path &stagePath,
   bytes += "--DATA--\n";
   bytes += state.textTailBytes;
   std::wstring err;
-  if (!atomic_write::AtomicWriteBytes(statePath, bytes.data(), bytes.size(),
+  if (!write_checks::ObservedWriteBytes(std::filesystem::path{}, statePath, bytes.data(), bytes.size(),
                                       statePath.parent_path(),
                                       WorkspaceEscapeRoot(), &err)) {
     if (outErr)
@@ -1189,7 +1191,7 @@ bool WriteNoteJournalSegment(const std::filesystem::path &stagePath,
   }
   const auto path = BuildNoteJournalPath(stagePath, revision);
   std::wstring err;
-  if (!atomic_write::AtomicWriteBytes(path, bytes.data(), bytes.size(),
+  if (!write_checks::ObservedWriteBytes(std::filesystem::path{}, path, bytes.data(), bytes.size(),
                                       path.parent_path(), WorkspaceEscapeRoot(),
                                       &err)) {
     if (outErr)
@@ -1269,6 +1271,7 @@ struct StageMeta {
   std::optional<bool> destinationExistedAtStage;
   std::optional<uint64_t> destinationFingerprintAtStage;
   std::optional<uint64_t> revision;
+  AnnotNumericPrecision annotationNumericPrecision = AnnotNumericPrecision::Legacy12;
   std::optional<uint64_t> noteId;
   std::optional<uint64_t> contentRevision;
   std::optional<uint64_t> basePersistenceRevision;
@@ -1453,7 +1456,10 @@ std::filesystem::path BuildStagePath(file_output::StagedDiffKind kind,
 
 bool WriteStageMetaFile(const StageMeta &meta, std::wstring *outErr = nullptr) {
   if (meta.metaPath.empty() || meta.stagePath.empty() ||
-      meta.targetPath.empty()) {
+      meta.targetPath.empty() ||
+      (meta.kind == file_output::StagedDiffKind::Clrop &&
+       meta.annotationNumericPrecision != AnnotNumericPrecision::Legacy12 &&
+       meta.annotationNumericPrecision != AnnotNumericPrecision::RoundTrip17)) {
     if (outErr)
       *outErr = L"Invalid stage meta path.";
     return false;
@@ -1469,6 +1475,9 @@ bool WriteStageMetaFile(const StageMeta &meta, std::wstring *outErr = nullptr) {
   }
   if (meta.revision.has_value()) {
     oss << "rev=" << *meta.revision << "\n";
+  }
+  if (meta.kind == file_output::StagedDiffKind::Clrop) {
+    oss << "annotation_numeric_precision=" << static_cast<int>(meta.annotationNumericPrecision) << "\n";
   }
   if (meta.noteId.has_value()) {
     oss << "note_id=" << *meta.noteId << "\n";
@@ -1495,7 +1504,7 @@ bool WriteStageMetaFile(const StageMeta &meta, std::wstring *outErr = nullptr) {
   std::wstring err;
   const auto preferredTmp = meta.metaPath.parent_path();
   const auto quarantine = WorkspaceEscapeRoot();
-  if (!atomic_write::AtomicWriteUtf8(meta.metaPath, oss.str(), preferredTmp,
+  if (!write_checks::ObservedWriteUtf8(std::filesystem::path{}, meta.metaPath, oss.str(), preferredTmp,
                                      quarantine, &err)) {
     if (outErr)
       *outErr = err;
@@ -1577,6 +1586,7 @@ bool LoadStageMetaFile(const std::filesystem::path &metaPath,
 
   std::istringstream iss(*bytes);
   std::string line;
+  bool sawAnnotationPrecision = false;
   while (std::getline(iss, line)) {
     if (!line.empty() && line.back() == '\r')
       line.pop_back();
@@ -1605,6 +1615,12 @@ bool LoadStageMetaFile(const std::filesystem::path &metaPath,
       meta.destinationFingerprintAtStage = ParseUint64(UTF8ToWide(value));
     } else if (key == "rev") {
       meta.revision = ParseUint64(UTF8ToWide(value));
+    } else if (key == "annotation_numeric_precision") {
+      // Keep an unsupported stage visible, but never replay or rewrite it.
+      meta.annotationNumericPrecision = sawAnnotationPrecision || (value != "12" && value != "17")
+          ? AnnotNumericPrecision::Unsupported
+          : (value == "12" ? AnnotNumericPrecision::Legacy12 : AnnotNumericPrecision::RoundTrip17);
+      sawAnnotationPrecision = true;
     } else if (key == "note_id") {
       meta.noteId = ParseUint64(UTF8ToWide(value));
     } else if (key == "content_rev") {
@@ -1702,6 +1718,7 @@ bool CopyFileWithDirs(const std::filesystem::path &src,
       *outErr = L"Invalid copy path.";
     return false;
   }
+  write_checks::NormalOperation observation({}, dest); // Managed backup path identifies its owner.
   if (!dest.parent_path().empty() && !EnsureDir(dest.parent_path())) {
     if (outErr)
       *outErr = L"Failed to create destination directory.";
@@ -1716,6 +1733,7 @@ bool CopyFileWithDirs(const std::filesystem::path &src,
           L"Failed to copy file: " + src.wstring() + L" -> " + dest.wstring();
     return false;
   }
+  observation.Success();
   return true;
 }
 
@@ -1903,7 +1921,7 @@ bool CreateBackupIfNeeded(file_output::StagedDiffKind kind,
   oss << "dest=" << WideToUTF8(destPath.wstring()) << "\n";
   oss << "backup=" << WideToUTF8(bak.wstring()) << "\n";
   std::wstring err;
-  if (!atomic_write::AtomicWriteUtf8(meta, oss.str(), meta.parent_path(),
+  if (!write_checks::ObservedWriteUtf8(std::filesystem::path{}, meta, oss.str(), meta.parent_path(),
                                      WorkspaceEscapeRoot(), &err)) {
     if (outErr)
       *outErr = err;
@@ -1919,14 +1937,17 @@ bool CreateBackupIfNeeded(file_output::StagedDiffKind kind,
 
 bool AtomicWriteVerified(const std::filesystem::path &destPath,
                          std::string_view bytes,
+                         const std::filesystem::path &observationRoot,
                          std::wstring *outErr = nullptr) {
   if (destPath.empty()) {
     if (outErr)
       *outErr = L"Destination path is empty.";
     return false;
   }
+  write_checks::NormalOperation observation(observationRoot, destPath);
+  write_checks::IgnoreNormalOperations ignore;
   std::wstring err;
-  if (!atomic_write::AtomicWriteBytes(destPath, bytes.data(), bytes.size(),
+  if (!write_checks::ObservedWriteBytes(std::filesystem::path{}, destPath, bytes.data(), bytes.size(),
                                       destPath.parent_path(),
                                       WorkspaceEscapeRoot(), &err)) {
     if (outErr)
@@ -1939,6 +1960,7 @@ bool AtomicWriteVerified(const std::filesystem::path &destPath,
       *outErr = L"Written file verification failed: " + destPath.wstring();
     return false;
   }
+  observation.Success();
   return true;
 }
 
@@ -2110,21 +2132,24 @@ void DiscardAnnotJournalSegmentsForBase(const std::wstring &targetPath,
 bool LoadResolvedStageAnnotationsForMeta(
     const StageMeta &meta, std::vector<Annotation> *outAnnotations,
     std::wstring *outErr = nullptr) {
-  if (outAnnotations)
-    outAnnotations->clear();
   if (!outAnnotations || meta.kind != file_output::StagedDiffKind::Clrop)
     return false;
-  if (meta.stagePath.empty() || meta.targetPath.empty()) {
+  if (meta.stagePath.empty() || meta.targetPath.empty() ||
+      (meta.annotationNumericPrecision != AnnotNumericPrecision::Legacy12 &&
+       meta.annotationNumericPrecision != AnnotNumericPrecision::RoundTrip17)) {
     if (outErr)
       *outErr = localization::Text(L"file_output.stage.annotation_stage_metadata_invalid");
     return false;
   }
 
+  // Publish only the complete checkpoint + journal replay. On failure, keep
+  // the caller state and all recovery files unchanged.
+  std::vector<Annotation> resolved;
   bool mismatch = false;
   std::wstring err;
   clrop::PdfId loadedId{};
   if (!clrop_bridge::LoadAnnotations(
-          meta.stagePath.wstring(), meta.targetPath, *outAnnotations, mismatch,
+          meta.stagePath.wstring(), meta.targetPath, resolved, mismatch,
           &loadedId, err, clrop_bridge::LoadAnnotationsValidation::Strong)) {
     if (outErr) {
       *outErr = err.empty()
@@ -2143,6 +2168,7 @@ bool LoadResolvedStageAnnotationsForMeta(
     return false;
   }
 
+  annot_stage_replay::State replay(resolved.size(), meta.annotationNumericPrecision);
   const uint64_t baseRevision = meta.revision.value_or(0);
   for (const auto &seg : ListAnnotJournalSegmentsForTarget(meta.targetPath)) {
     if (seg.baseRevision != baseRevision || seg.revision <= baseRevision)
@@ -2183,17 +2209,19 @@ bool LoadResolvedStageAnnotationsForMeta(
       }
       return false;
     }
-    for (const auto &cmd : commands) {
-      if (!ApplyAnnotCommandToList(outAnnotations, cmd)) {
+    for (size_t commandIndex = 0; commandIndex < commands.size(); ++commandIndex) {
+      if (!replay.Apply(&resolved, commands[commandIndex])) {
         if (outErr) {
           *outErr = localization::Text(
-              L"file_output.stage.annotation_journal_parse_failed");
+              L"file_output.stage.annotation_journal_precondition_failed");
           *outErr += L"\njournal path: " + seg.path.wstring();
+          *outErr += L"\ncommand: " + std::to_wstring(commandIndex + 1);
         }
         return false;
       }
     }
   }
+  outAnnotations->swap(resolved);
   return true;
 }
 
@@ -2598,7 +2626,7 @@ bool WriteNoteEditJournalSegment(const std::filesystem::path &stagePath,
   const std::string bytes = SerializeNoteByteEdit(edit);
   const auto path = BuildNoteEditJournalPath(stagePath, revision);
   std::wstring err;
-  if (!atomic_write::AtomicWriteBytes(path, bytes.data(), bytes.size(),
+  if (!write_checks::ObservedWriteBytes(std::filesystem::path{}, path, bytes.data(), bytes.size(),
                                       path.parent_path(), WorkspaceEscapeRoot(),
                                       &err)) {
     if (outErr)
@@ -2818,7 +2846,7 @@ std::optional<StageMeta> StageNoteSnapshotWithBytes(
   meta.metaPath = StageMetaPath(meta.stagePath);
 
   std::wstring err;
-  if (!atomic_write::AtomicWriteBytes(
+  if (!write_checks::ObservedWriteBytes(std::filesystem::path{},
           meta.stagePath, bytes.data(), bytes.size(),
           meta.stagePath.parent_path(), WorkspaceEscapeRoot(), &err)) {
     if (outErr)
@@ -2946,6 +2974,12 @@ StageAnnotationCheckpointWithData(const std::wstring &pdfPath,
       *outErr = localization::Text(L"file_output.stage.pdf_not_open");
     return std::nullopt;
   }
+  const auto precisionStage = FindLatestStageMeta(file_output::StagedDiffKind::Clrop, pdfPath);
+  if (precisionStage && !annot_stage_replay::IsCheckpointPrecision(precisionStage->annotationNumericPrecision)) {
+    if (outErr)
+      *outErr = localization::Text(L"file_output.stage.annotation_stage_metadata_invalid");
+    return std::nullopt;
+  }
   const auto dir = StageDir(file_output::StagedDiffKind::Clrop);
   if (!EnsureDir(dir)) {
     if (outErr)
@@ -2954,6 +2988,7 @@ StageAnnotationCheckpointWithData(const std::wstring &pdfPath,
   }
   StageMeta meta;
   meta.kind = file_output::StagedDiffKind::Clrop;
+  meta.annotationNumericPrecision = AnnotNumericPrecision::RoundTrip17;
   meta.targetPath = pdfPath;
   meta.destPath = std::filesystem::path(clrop_bridge::ClropPathForPdf(pdfPath));
   meta.revision = NextRevisionFor(meta.kind, meta.targetPath);
@@ -3009,7 +3044,7 @@ bool WriteAnnotJournalSegment(const std::wstring &pdfPath,
       NextRevisionFor(file_output::StagedDiffKind::Clrop, pdfPath);
   const auto path = BuildAnnotJournalPath(pdfPath, baseRevision, revision);
   std::wstring err;
-  if (!atomic_write::AtomicWriteUtf8(path, json, path.parent_path(),
+  if (!write_checks::ObservedWriteUtf8(std::filesystem::path{}, path, json, path.parent_path(),
                                      WorkspaceEscapeRoot(), &err)) {
     if (outErr)
       *outErr = err;
@@ -3024,6 +3059,7 @@ bool TryAppendPendingAnnotJournal(const std::wstring &pdfPath,
   const auto latestStage =
       FindLatestStageMeta(file_output::StagedDiffKind::Clrop, pdfPath);
   if (pdfPath.empty() || !latestStage.has_value() ||
+      !annot_stage_replay::IsCheckpointPrecision(latestStage->annotationNumericPrecision) ||
       !latestStage->revision.has_value() || g_pdf.editingText ||
       !CollectPendingAnnotStageCommands(pdfPath, &pendingCommands) ||
       pendingCommands.empty()) {
@@ -3275,7 +3311,7 @@ bool IntegrateStageMetaToDestination(HWND owner, const StageMeta &meta,
     const ULONGLONG writeStartTick = preview_trace::TickNow();
     const bool atomicWriteOk = deleteEmptyClrop
         ? DeleteResolvedEmptyClropDestination(meta, &writeErr)
-        : AtomicWriteVerified(meta.destPath, bytesToWrite, &writeErr);
+        : AtomicWriteVerified(meta.destPath, bytesToWrite, std::filesystem::path(g_workspaceRoot), &writeErr);
     preview_trace::Append(
         L"IntegrateStage",
         std::wstring(deleteEmptyClrop ? L"delete_empty_clrop"
@@ -3373,6 +3409,7 @@ StageMeta StageMetaFromEntry(const file_output::StagedDiffEntry &entry) {
 }
 
 bool WriteStageMetaToDestinationOnWorker(const StageMeta &meta,
+                                         const std::filesystem::path &observationRoot,
                                          std::wstring *outErr = nullptr) {
   if (meta.destPath.empty()) {
     if (outErr)
@@ -3465,7 +3502,7 @@ bool WriteStageMetaToDestinationOnWorker(const StageMeta &meta,
     }
     const bool writeOk = deleteEmptyClrop
         ? DeleteResolvedEmptyClropDestination(meta, &writeErr)
-        : AtomicWriteVerified(meta.destPath, bytesToWrite, &writeErr);
+        : AtomicWriteVerified(meta.destPath, bytesToWrite, observationRoot, &writeErr);
     if (!writeOk) {
       if (outErr)
         *outErr = writeErr;
@@ -3874,6 +3911,14 @@ bool SaveAnnotationsIfDirty(HWND owner) {
 
   std::wstring err;
   ULONGLONG stepStartTick = preview_trace::TickNow();
+  const auto precisionStage = FindLatestStageMeta(StagedDiffKind::Clrop, pdfPath);
+  if (precisionStage && !annot_stage_replay::IsCheckpointPrecision(precisionStage->annotationNumericPrecision)) {
+    // Do not turn an unsupported checkpoint into a new snapshot or discard its
+    // journals through the match-to-original fallback. Keep dirty/pending state.
+    err = localization::Text(L"file_output.stage.annotation_stage_metadata_invalid");
+    ShowStageMessageDialog(owner, localization::Text(L"file_output.stage.98d4f8e406e9"), err);
+    return false;
+  }
   const bool strongValidated =
       EnsureFastLoadedAnnotationsStrongValidatedBeforeSave(owner, pdfPath,
                                                            &err);
@@ -4517,12 +4562,13 @@ StartBackgroundSaveAndIntegrateTransaction(HWND owner) {
 
   try {
     std::thread([postOwner, entries = std::move(latestEntries),
+                 observationRoot = std::filesystem::path(g_workspaceRoot),
                  result]() mutable {
       try {
         for (const auto &entry : entries) {
           std::wstring err;
           if (!WriteStageMetaToDestinationOnWorker(StageMetaFromEntry(entry),
-                                                   &err)) {
+                                                   observationRoot, &err)) {
             result->ok = false;
             result->error =
                 err.empty()
@@ -4990,8 +5036,8 @@ bool LoadResolvedStagedAnnotations(const std::wstring &pdfPath,
                                    const std::filesystem::path &stagePath,
                                    std::vector<Annotation> *outAnnotations,
                                    std::wstring *outErr) {
-  if (outAnnotations)
-    outAnnotations->clear();
+  if (!outAnnotations)
+    return false;
   StageMeta meta;
   if (!stagePath.empty()) {
     if (!LoadStageMetaFile(StageMetaPath(stagePath), &meta)) {
@@ -5121,7 +5167,7 @@ bool RestoreFromBackupMeta(HWND owner,
         owner, localization::Text(L"file_output.stage.5c4b18ff1f3d"), err);
     return false;
   }
-  if (!AtomicWriteVerified(meta.destPath, *backupBytes, &err)) {
+  if (!AtomicWriteVerified(meta.destPath, *backupBytes, std::filesystem::path(g_workspaceRoot), &err)) {
     ShowStageMessageDialog(
         owner, localization::Text(L"file_output.stage.5c4b18ff1f3d"), err);
     return false;

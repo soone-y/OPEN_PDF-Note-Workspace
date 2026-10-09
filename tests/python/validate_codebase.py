@@ -571,7 +571,7 @@ def find_palette_regressions() -> list[str]:
         },
         "src/settings/settings_palette.cppinc": {
             "DrawPaletteSlotButton": "settings dialog must draw visible palette slots",
-            "OpenPaletteColorEditorForSlot": "settings dialog must allow choosing a palette slot color",
+            "SetPaletteSettingsColor": "settings dialog must allow directly editing a palette slot color",
             "ShowPaletteColorEditorDialog": "palette editing must use the application-owned dialog",
         },
         "src/settings/settings_annot.cppinc": {
@@ -841,7 +841,9 @@ def find_runtime_safety_regressions() -> list[str]:
         "kMaxAnnotHistoryJsonDepth",
         "ReadFileBytesNoFollowLimitedWin32(path, kMaxAnnotHistoryJsonBytes, json)",
         "MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS",
-        "endPtr != numStr.c_str() + numStr.size()",
+        "std::from_chars(number.data(), number.data() + number.size(), val)",
+        "parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size()",
+        "!std::isfinite(val)",
         "if (!closed) return false;",
     )
     if any(needle not in annotation_history_text for needle in annotation_history_contract):
@@ -961,6 +963,8 @@ def find_annotation_layer_regressions() -> list[str]:
             "DarkenColor(ann.color, 0.85)": "free/text markers must keep the darkened viewer color policy",
             "DrawDashedArrowLinePx": "arrow annotations must preserve dash-aware antialiased viewer drawing",
             "DrawDashedLinePx": "line annotations must preserve dash-aware antialiased viewer drawing",
+            "if (std::isfinite(partPt) && partPt > 0.0)": "viewer dash normalization must reject nonfinite/nonpositive render segments",
+            "if (pattern.size() == 1) pattern.push_back(pattern.front());": "viewer must normalize a single dash in its temporary rendering pattern",
         },
         "src/file_output/file_output.cpp": {
             "enum class AnnotationRenderMode": "export rendering must keep viewer-like and PDF-like annotation render modes explicit",
@@ -981,8 +985,8 @@ def find_annotation_layer_regressions() -> list[str]:
             "if (s == \"text_color\") { out = Annotation::Type::TextColor; return true; }": "TextColor must remain loadable from .clrop",
             "if (s == \"marker_free\") { out = Annotation::Type::MarkerFree; return true; }": "MarkerFree must remain loadable from .clrop",
             "oss << \",\\\"dash\\\":[\";": "dash pattern must be persisted to .clrop",
-            "std::clamp(part, 0.25, 240.0)": "loaded dash lengths must be clamped to a safe range",
-            "if (out.dash.size() == 1) out.dash.push_back(out.dash.front());": "single dash values must be normalized to on/off pairs",
+            'GetNumberArrayField(v, "dash", out.dash)': "journal loading must preserve dash entries and their count",
+            "return AnnotationJsonNumbersFinite(out);": "journal loading must reject nonfinite dash data without normalizing saved values",
         },
         "src/file_output/file_output_stage.cpp": {
             "if (a.dash.size() != b.dash.size())": "staged annotation comparison must include dash pattern length",
@@ -1124,8 +1128,11 @@ def find_existing_pdf_annotation_policy_regressions() -> list[str]:
         "src/file_output/file_output.cpp": {
             "CurrentLogicalPdfAnnotations()": "PDF export must read application annotations from the logical app annotation list",
             "FPDF_CreateNewDocument()": "PDF export must create a new destination document",
+            "dest = pdf_annotation_export::CreateDocument()": "annotated PDF export must create an empty output copy with valid default font resources",
             "FPDF_ImportPages(dest, srcDoc": "PDF export must copy pages into the destination document before adding app annotations",
             "AddAnnotationsToPage(annots": "PDF export must add only application annotations to the destination copy",
+            "pdf_annotation_export::Finalize(page)": "PDF output must finalize annotation references before saving, without depending on preview rendering",
+            "pdf_annotation_export::CanScaleExisting(page, exportScale)": "native annotated input must reject unsupported non-unit scaling before saving",
             "PickSavePath(owner, GetUiText().menuExportPdf.c_str()": "PDF export must require an explicit output path",
             "IsSamePath(std::filesystem::path(outPath), std::filesystem::path(CurrentLogicalPdfPath()))": "PDF export must reject overwriting the currently opened original PDF path",
             "WarnExportOverwriteOriginal(owner, /*isPdf=*/true);": "attempted original overwrite must produce a quiet warning instead of replacing the source PDF",
@@ -1134,6 +1141,11 @@ def find_existing_pdf_annotation_policy_regressions() -> list[str]:
         "src/core/app_core.cpp": {
             "const std::vector<Annotation>* CurrentLogicalPdfAnnotations()": "logical PDF annotations must expose the app-side annotation list",
             "return &g_annots;": "logical PDF annotations must not alias native PDF annotation objects",
+        },
+        "src/file_output/pdf_annotation_export.cpp": {
+            "FPDFPage_CreateAnnot(destination, subtype)": "native annotations must be created only on the output destination",
+            "destination == scratch": "the output and scratch page must not alias",
+            "Annotation::Type::TextColor) return false": "the annotation writer must reject original-text recoloring",
         },
     }
     for rel, needles in required_by_file.items():
@@ -1162,6 +1174,10 @@ def find_existing_pdf_annotation_policy_regressions() -> list[str]:
             text = path.read_text(encoding="utf-8", errors="ignore")
             for needle in forbidden_native_pdf_annotation_writes:
                 if needle in text:
+                    # Explicit output-copy policy: this isolated writer is used
+                    # only with a newly created destination, never the source PDF.
+                    if rel == "src/file_output/pdf_annotation_export.cpp":
+                        continue
                     errors.append(f"{rel}: native PDF annotation mutation API must not be used without an explicit read-only/import policy: {needle}")
     return errors
 
@@ -1178,6 +1194,7 @@ def find_png_export_quality_regressions() -> list[str]:
             "pixelCount > file_output::kPdfPngMaxPixels": "PNG export API must reject oversized rasters before allocation",
             "kPdfPngMaxDimensionPx": "PNG export API must reject oversized dimensions before allocation",
             "SavePngWic(outPath, pixels.data(), outWidthPx, outHeightPx, stride, dpi": "PNG export must preserve the calculated DPI in output metadata",
+            "0, FPDF_ANNOT | FPDF_LCD_TEXT)": "PNG export must render native PDF annotations as well as the separate app layer",
         },
         "src/ui/dialogs/export_dialog.cpp": {
             "288 DPI": "PNG export UI must present a high-detail preset",
@@ -1707,6 +1724,8 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
     distribution_name_contract = (
         'function Get-DistributionZipName',
         'pdf_note_workspace_${Version}_${Locale}_${Edition}.zip',
+        'function Get-DistributionArchiveRootName',
+        'PDF-Note-Workspace-$Version',
         '-Locale $Locale -Edition "full"',
         '-Locale $Locale -Edition "lite"',
     )

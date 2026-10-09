@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "note/note_export.h"
+#include "note/note_input_assist.h"
 #include "note/note_dirty_graph.h"
 #include "note/note_influence.h"
 #include "note/note_identity.h"
@@ -474,6 +475,43 @@ int main() {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 
     {
+        note::InputAssistFormat format;
+        const std::wstring body = L"  English text\t日本語\x3000本文  \r\n\r\n second line\n";
+        Expect(note::BuildInputAssistSnippet(body, format) == body,
+               "input assist preserves spaces, blank lines and every newline convention without formatting");
+        format.bold = format.italic = format.strike = true;
+        const auto formatted = note::BuildInputAssistSnippet(body, format);
+        Expect(formatted == L"  ~~***English text\t日本語\x3000本文***~~  \r\n\r\n ~~***second line***~~\n",
+               "input assist keeps boundary whitespace outside Markdown delimiters on each selected line");
+        const auto model = note::MakeNoteTextModel({L"assist.clro", L""}, formatted, 1);
+        const auto doc = note::ParseNoteDocument(model);
+        const auto html = note::ExportHtml(model, doc, note::MarkupExportConfig{});
+        Expect(html.find("<strong>") != std::string::npos && html.find("<em>") != std::string::npos &&
+               html.find("<del>") != std::string::npos,
+               "input assist Markdown emphasis is recognized by the current parser and HTML exporter");
+        format.heading_level = 2;
+        format.attributes = {L"u", L"char=#cc0000", L"back=#ffffaa", L"s=18", L"l=assist-link", L"la", L"lu"};
+        const auto heading = note::BuildInputAssistSnippet(L"Heading", format);
+        const auto headingModel = note::MakeNoteTextModel({L"assist.md", L""}, heading, 2);
+        const auto headingDoc = note::ParseNoteDocument(headingModel);
+        const auto headingHtml = note::ExportHtml(headingModel, headingDoc, note::MarkupExportConfig{});
+        Expect(!headingDoc.blocks.empty() && headingDoc.blocks.front().kind == note::BlockKind::Heading &&
+               headingDoc.blocks.front().level == 2 && headingHtml.find("<strong>") != std::string::npos &&
+               FindStyleSpan(headingDoc, note::StyleKind::Underline),
+               "input assist combines Markdown headings and emphasis with supported auxiliary attributes");
+        Expect(note::FrameInputAssistBlock(L"# Heading", L'a', L'b') == L"\r\n# Heading\r\n" &&
+               note::FrameInputAssistBlock(L"- item\r\n", L'\r', L'x') == L"- item\r\n" &&
+               note::FrameInputAssistBlock(L"> quote", 0, 0) == L"> quote",
+               "block assists separate paragraph fragments without redundant boundary newlines");
+        format = {};
+        format.heading_level = 9;
+        Expect(note::BuildInputAssistSnippet(L"Heading", format) == L"###### Heading" &&
+               note::BuildInputAssistSnippet(L" \t\x3000\r\n", format) == L" \t\x3000\r\n" &&
+               note::BuildInputAssistSnippet(L"", format).empty(),
+               "input assist limits headings to Markdown levels and adds no invented text to empty input");
+    }
+
+    {
         const std::wstring text = L"before\r\n::: note\r\n# 見出し\r\n**本文** $x$\r\n"
             L"::: inner\r\n`code`\r\n:::\r\n```md\r\n::: literal\r\n```\r\n:::\r\nafter";
         const auto model = note::MakeNoteTextModel({L"container.md", L""}, text, 1);
@@ -864,9 +902,9 @@ int main() {
 
     {
         using Decision = cache_dir_policy::CacheDirDecision;
-        Expect(cache_dir_policy::ResolveCacheDirDecision(L"__resource__/__tmp__") ==
+        Expect(cache_dir_policy::ResolveCacheDirDecision(L"__pdf_note_workspace__/__tmp__") ==
                    Decision::ManagedDefault &&
-                   cache_dir_policy::ResolveCacheDirDecision(L"__resource__\\__tmp__") ==
+                   cache_dir_policy::ResolveCacheDirDecision(L"__pdf_note_workspace__\\__tmp__") ==
                        Decision::ManagedDefault &&
                    cache_dir_policy::ResolveCacheDirDecision(L"") == Decision::ManagedDefault,
                "cache dir policy accepts only the reserved resource tmp cache as the default");
@@ -876,7 +914,7 @@ int main() {
                        Decision::UnsafeCustom &&
                    cache_dir_policy::ResolveCacheDirDecision(L"somewhere/__cache__") ==
                        Decision::UnsafeCustom &&
-                   cache_dir_policy::ResolveCacheDirDecision(L"__resource__/user-cache") ==
+                   cache_dir_policy::ResolveCacheDirDecision(L"__pdf_note_workspace__/user-cache") ==
                        Decision::UnsafeCustom,
                "cache dir policy rejects user-like or arbitrary cache directories");
         Expect(cache_dir_policy::EffectiveCacheDir(L"bin") ==
@@ -5126,6 +5164,128 @@ int main() {
                 gdiStylePublication->layout()->line_layouts(), {0});
             return layout.has_value() && layout->layout.height_px >= 80;
         }();
+        // Glyph-end and right-side blank clicks must address different raw
+        // boundaries when a structured line ends in hidden closing syntax.
+        const auto trailingSyntaxClicks = [&](const wchar_t* text, uint32_t dpi, uint32_t width) {
+            note::NoteTextCore core;
+            core.Reset(note::NoteId{1017},
+                note::NoteMetadata{L"click-suffix.md", L"click-suffix"}, text, 431, 3);
+            auto build = gdiInput;
+            build.layout_key = {width, dpi, dpi, 7, 4, 8, true};
+            build.owner_input.visible_lines = {{0}, {core.logical_line_count()}};
+            std::shared_ptr<const note::NoteRenderFinalPublication> publication;
+            if (note::NoteRenderFinalTransaction::BuildComplete(core, build, gdiProvider, &publication) !=
+                    note::NoteRenderFinalCompleteBuildResult::Built || !publication) return false;
+            note::NoteRenderFinalWin32AdapterInput input;
+            input.text_core = &core;
+            input.structural_publication = publication;
+            input.owner_input = build.owner_input;
+            input.measurement_dc = gdiMeasurementDc;
+            std::shared_ptr<const note::NoteRenderFinalWin32AdapterFrame> frame;
+            if (note::NoteRenderFinalWin32AdapterFrame::Build(input, &frame) !=
+                    note::NoteRenderFinalWin32AdapterBuildResult::Built || !frame) return false;
+            note::NoteRenderSourceLinePlan source;
+            note::NoteRenderLinePlacement placement;
+            const auto layout = note::NoteRenderLineLayoutMap::LineAt(
+                publication->layout()->line_layouts(), {0});
+            if (!layout || !publication->source_plan()->ResolveLine({0}, &source) ||
+                !publication->placement()->ResolveLine({0}, &placement)) return false;
+            size_t visible = source.runs.size();
+            while (visible > 0 && source.runs[visible - 1].kind ==
+                   note::NoteRenderSourceRunKind::HiddenSyntax) --visible;
+            if (visible == 0 || visible == source.runs.size()) return false;
+            const auto beforeClose = source.runs[visible - 1].source_span.end;
+            const auto& run = placement.runs[visible - 1];
+            if (run.fragments.empty()) return false;
+            const auto& fragment = run.fragments.back();
+            const auto glyphEnd = std::find_if(run.boundaries.rbegin(), run.boundaries.rend(),
+                [&](const auto& value) { return value.source_offset == beforeClose; });
+            if (glyphEnd == run.boundaries.rend()) return false;
+            const uint64_t y = layout->top_px + fragment.top_offset_px;
+            int right = fragment.x_px + fragment.width_px;
+            for (size_t index = 0; index < source.runs.size(); ++index) {
+                if (source.runs[index].kind == note::NoteRenderSourceRunKind::HiddenSyntax) continue;
+                for (const auto& part : placement.runs[index].fragments) {
+                    if (part.top_offset_px <= fragment.top_offset_px &&
+                        fragment.top_offset_px - part.top_offset_px < part.height_px) {
+                        right = std::max(right, part.x_px + part.width_px);
+                    }
+                }
+            }
+            for (const auto& decoration : placement.decorations) {
+                if (decoration.kind == note::NoteRenderVisualDecorationKind::InlineCodeSurface &&
+                    fragment.top_offset_px >= decoration.top_offset_px &&
+                    fragment.top_offset_px < decoration.bottom_offset_px) {
+                    right = std::max(right, decoration.right_px);
+                }
+            }
+            const auto verify = [&](int x, uint64_t hitY, note::Utf16CodeUnitOffset expected,
+                                    bool blank) {
+                note::NoteRenderFinalHit committed, presented;
+                return note::HitTestNoteRenderFinalPublication(*publication, x, hitY, &committed) ==
+                        note::NoteRenderFinalInteractionResult::Resolved &&
+                    frame->HitTest(x, hitY, &presented) ==
+                        note::NoteRenderFinalPresentationInteractionResult::Resolved &&
+                    committed.source_offset == expected && presented.source_offset == expected &&
+                    (!blank || (!committed.is_link && !presented.is_link &&
+                                committed.link_target.empty() && presented.link_target.empty()));
+            };
+            if (!verify(glyphEnd->x_px, y, beforeClose, false) ||
+                !verify(right, y, beforeClose, false) ||
+                !verify(right + 12, y, source.content_span.end, true)) return false;
+            if (run.fragments.size() > 1) {
+                const auto& first = run.fragments.front();
+                note::NoteRenderFinalHit hit;
+                if (frame->HitTest(first.x_px + first.width_px + 12,
+                        layout->top_px + first.top_offset_px, &hit) !=
+                        note::NoteRenderFinalPresentationInteractionResult::Resolved ||
+                    hit.source_offset == source.content_span.end) return false;
+            }
+            // The click's raw offset must survive ownership change. Raw
+            // clicks still use visible source glyphs, including closing tags.
+            input.owner_input.caret_line = 0;
+            input.owner_input.requested_editor_lines = {{{0}, {1}}};
+            for (const auto offset : {beforeClose, source.content_span.end}) {
+                input.editor_caret = offset;
+                input.editor_selection = {offset, offset};
+                note::NoteRenderFinalCaretGeometry caret;
+                note::NoteRenderFinalHit hit;
+                std::shared_ptr<const note::NoteRenderFinalWin32AdapterFrame> raw;
+                if (note::NoteRenderFinalWin32AdapterFrame::Build(input, &raw) !=
+                        note::NoteRenderFinalWin32AdapterBuildResult::Built || !raw ||
+                    raw->Caret(&caret) != note::NoteRenderFinalPresentationInteractionResult::Resolved ||
+                    raw->HitTest(caret.x_px, caret.top_px, &hit) !=
+                        note::NoteRenderFinalPresentationInteractionResult::Resolved ||
+                    hit.source_offset != offset) return false;
+            }
+            return true;
+        };
+        for (int dpi : {96, 144, 192}) {
+            Expect(trailingSyntaxClicks(L"<b>本文</b>", dpi, 640),
+                   "closing-tag blank click selects after the tag at each DPI");
+            Expect(trailingSyntaxClicks(L"<b>本文</>\r\nnext", dpi, 640),
+                   "legacy closing-tag blank click stops before the newline");
+            Expect(trailingSyntaxClicks(L"<b><i>本文</i></b>", dpi, 640),
+                   "nested closing-tag blank click selects after all closing tags");
+            Expect(trailingSyntaxClicks(L"<link=note-target>本文</>", dpi, 640),
+                   "blank beyond a link has no jump target and selects after its close");
+            Expect(trailingSyntaxClicks(L"**本文**", dpi, 640),
+                   "Markdown closing-marker blank click follows the same source contract");
+            Expect(trailingSyntaxClicks(L"<b>`code`</b>", dpi, 640),
+                   "inline-code chip padding is content, not trailing blank space");
+            Expect(trailingSyntaxClicks(L"<b>alpha beta gamma delta epsilon 日本語</b>", dpi, 96),
+                   "earlier soft-wrap row cannot jump past the logical closing tag");
+        }
+        const bool suffixBlankExceptions = [&]() {
+            note::NoteRenderSourceLinePlan source;
+            note::NoteRenderLinePlacement placement;
+            if (!gdiTablePublication ||
+                !gdiTablePublication->source_plan()->ResolveLine({0}, &source) ||
+                !gdiTablePublication->placement()->ResolveLine({0}, &placement)) return false;
+            return !note::ResolveNoteRenderTrailingSyntaxBlankHit(source, placement, 100000, 0);
+        }();
+        Expect(suffixBlankExceptions, "table trailing pipe retains cell-based click mapping");
+
         note::NoteTextCore gdiPositionStyleCore;
         gdiPositionStyleCore.Reset(
             note::NoteId{1007}, note::NoteMetadata{L"gdi-position-style.md", L"gdi-position-style"},

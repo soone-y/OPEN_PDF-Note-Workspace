@@ -366,8 +366,9 @@ static std::wstring LeftRightLineMoveLabel(const std::wstring& action) {
     return localization::Text(kLeftRightLineMoveOptions[0].label);
 }
 
-static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
-    if (!ctx) return;
+static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
+    if (!ctx) return false;
+    const WorkspaceConfig previousConfig = g_config;
     const int previousInlineMathVerticalAlignment = g_config.noteInlineMathVerticalAlignment;
     std::wstring prevLectureSort = g_config.lectureSortMode;
     std::wstring prevSessionSort = g_config.sessionSortMode;
@@ -791,10 +792,10 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
                 scheduleMask |= (1 << i);
             }
         }
+        scheduleMask &= 0x7F;
+        if (scheduleMask == 0) scheduleMask = kDefaultScheduleMask;
+        g_config.scheduleDayMask = scheduleMask;
     }
-    scheduleMask &= 0x7F;
-    if (scheduleMask == 0) scheduleMask = kDefaultScheduleMask;
-    g_config.scheduleDayMask = scheduleMask;
     if (ctx->cbSchedulePeriods) {
         g_config.schedulePeriods = static_cast<int>(SelectedComboItemData(ctx->cbSchedulePeriods, g_config.schedulePeriods));
     }
@@ -817,7 +818,11 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     }
     g_noteBgColor = ResolveNoteBackgroundColor(g_config.noteBgSource, g_config.noteBgThemeName, g_config.noteBgColor);
     RefreshNoteBackgroundUi(ctx->owner ? ctx->owner : g_hMainWnd);
-    PersistConfig();
+    const bool saved = TryPersistConfig();
+    if (!saved) {
+        RestoreSettingsRuntimeAfterFailedSave(ctx->owner, previousConfig, prevThemeName);
+        return false;
+    }
     if (g_config.noteInlineMathVerticalAlignment != previousInlineMathVerticalAlignment) {
         RefreshNoteRenderForPreferenceChange();
     }
@@ -841,5 +846,6 @@ static void ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     }
     effects.invalidateNoteEdit = true;
     CommitSettingsApplyEffects(ctx->owner, effects);
+    return saved;
 }
 

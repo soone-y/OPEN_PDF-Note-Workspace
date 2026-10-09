@@ -1,0 +1,320 @@
+From: PDF Note Workspace <local@example.invalid>
+Date: Wed, 7 Oct 2026 02:30:00 +0900
+Subject: [PATCH] Support long Windows paths without temporary-directory fallback
+
+Accept absolute long system paths when producing file URLs, avoid duplicate
+separators in extended-path directory enumeration, and use explicit TMP/TEMP
+without GetTempPathW fallback. Reserve temporary files with CREATE_NEW and
+dynamic names instead of the legacy GetTempFileNameW limit.
+
+diff --git a/sal/osl/w32/file_url.cxx b/sal/osl/w32/file_url.cxx
+--- a/sal/osl/w32/file_url.cxx
++++ b/sal/osl/w32/file_url.cxx
+@@ -580,7 +580,7 @@
+     wchar_t* const pPath = szPath;
+     wchar_t* pEnd = pPath;
+     size_t sysPathOffset = 0;
+-    if (sysPath.size() >= MAX_PATH && isAbsolute(sysPath)
++    if (sysPath.size() >= MAX_PATH - 12 && isAbsolute(sysPath)
+         && !o3tl::starts_with(sysPath, WSTR_LONG_PATH_PREFIX))
+     {
+         // Allow GetLongPathNameW consume long paths
+@@ -684,14 +684,14 @@
+             else
+             {
+                 /* do not separate the directory and file case, so the maximal path length without prefix is MAX_PATH-12 */
+-                if ( nDecodedLen - nSkip <= MAX_PATH - 12 )
++                if ( nDecodedLen - nSkip < MAX_PATH - 12 )
+                 {
+                     sTempPath = sDecodedURL->subView(nSkip);
+                 }
+                 else
+                 {
+                     sDecodedURL = GetCaseCorrectPathName(sDecodedURL->subView(nSkip));
+-                    if (sDecodedURL->getLength() <= MAX_PATH - 12
++                    if (sDecodedURL->getLength() < MAX_PATH - 12
+                         || sDecodedURL->startsWith(WSTR_SYSTEM_ROOT_PATH)
+                         || sDecodedURL->startsWith(WSTR_LONG_PATH_PREFIX))
+                     {
+@@ -741,13 +741,20 @@
+     OUString sTempURL;
+     DWORD dwPathType = PATHTYPE_ERROR;
+ 
++    // System paths returned by Windows and by internal path joins may be
++    // longer than MAX_PATH without an extended prefix. URL conversion is not
++    // a legacy Win32 filesystem call: validate absolute drive paths using the
++    // extended form, then emit the same canonical file URL as prefixed input.
++    OUString sPath = strPath ? OUString::unacquired(&strPath) : OUString();
++    if (sPath.getLength() >= MAX_PATH && startsWithDriveColon(sPath)
++        && sPath[2] == '\\')
++        sPath = WSTR_LONG_PATH_PREFIX + sPath;
+     if (strPath)
+-        dwPathType = IsValidFilePath(OUString::unacquired(&strPath), VALIDATEPATH_ALLOW_RELATIVE, nullptr);
++        dwPathType = IsValidFilePath(sPath, VALIDATEPATH_ALLOW_RELATIVE, nullptr);
+ 
+     if (dwPathType)
+     {
+         OUString sTempPath;
+-        const OUString& sPath = OUString::unacquired(&strPath);
+ 
+         if ( dwPathType & PATHTYPE_IS_LONGPATH )
+         {
+diff --git a/sal/osl/w32/file_dirvol.cxx b/sal/osl/w32/file_dirvol.cxx
+--- a/sal/osl/w32/file_dirvol.cxx
++++ b/sal/osl/w32/file_dirvol.cxx
+@@ -359,7 +359,7 @@
+         return nullptr;
+ 
+     std::u16string_view suffix;
+-    if (!path.endsWith(u"\\"))
++    if (path.endsWith(u"\\"))
+         suffix = u"*.*";
+     else
+         suffix = u"\\*.*";
+diff --git a/sal/osl/w32/tempfile.cxx b/sal/osl/w32/tempfile.cxx
+--- a/sal/osl/w32/tempfile.cxx
++++ b/sal/osl/w32/tempfile.cxx
+@@ -25,18 +25,16 @@
+ #include <osl/file.h>
+ #include <o3tl/char16_t2wchar_t.hxx>
+ #include <rtl/ustring.hxx>
++#include <rtl/random.h>
++#include <string>
+ 
+ #include "file-impl.hxx"
+ #include "file_error.hxx"
+ #include "file_url.hxx"
+ #include "path_helper.hxx"
+ 
+-#include <malloc.h>
+ #include <cassert>
+ 
+-// Allocate n number of t's on the stack return a pointer to it in p
+-#define STACK_ALLOC(p, t, n) __try {(p) = static_cast<t*>(_alloca((n)*sizeof(t)));} \
+-                             __except(EXCEPTION_EXECUTE_HANDLER) {(p) = nullptr;}
+ 
+ // Temp file functions
+ 
+@@ -102,127 +100,106 @@
+     return o3tl::toW(sEyeCatcher.getStr());
+ }
+ 
+-static oslFileError osl_win32_GetTempFileName_impl_(
+-    rtl_uString* base_directory, LPWSTR temp_file_name)
+-{
+-    oslFileError osl_error = osl_File_E_None;
+-
+-    if (GetTempFileNameW(
+-            o3tl::toW(rtl_uString_getStr(base_directory)),
+-            getEyeCatcher(),
+-            0,
+-            temp_file_name) == 0)
+-    {
+-        osl_error = oslTranslateFileError(GetLastError());
+-    }
+-
+-    return osl_error;
+-}
+-
+-static bool osl_win32_CreateFile_impl_(
+-    LPCWSTR file_name, bool b_delete_on_close, oslFileHandle* p_handle)
+-{
+-    DWORD  flags = FILE_ATTRIBUTE_NORMAL;
+-    HANDLE hFile;
+-
+-    assert(p_handle);
+-
+-    if (b_delete_on_close)
+-        flags |= FILE_FLAG_DELETE_ON_CLOSE;
+-
+-    hFile = CreateFileW(
+-        file_name,
+-        GENERIC_READ | GENERIC_WRITE,
+-        0,
+-        nullptr,
+-        TRUNCATE_EXISTING,
+-        flags,
+-        nullptr);
+-
+-    // @@@ ERROR HANDLING @@@
+-    if (IsValidHandle(hFile))
+-        *p_handle = osl_createFileHandleFromOSHandle(hFile, osl_File_OpenFlag_Read | osl_File_OpenFlag_Write);
+-
+-    return IsValidHandle(hFile);
+-}
+-
+-static oslFileError osl_createTempFile_impl_(
+-    rtl_uString*   base_directory,
+-    LPWSTR         tmp_name,
+-    bool           b_delete_on_close,
+-    oslFileHandle* pHandle,
+-    rtl_uString**  ppustrTempFileURL)
+-{
+-    oslFileError osl_error;
+-
+-    do
+-    {
+-        osl_error = osl_win32_GetTempFileName_impl_(base_directory, tmp_name);
+-
+-        /*  if file could not be opened try again */
+-
+-        if ((osl_File_E_None != osl_error) || (nullptr == pHandle) ||
+-            osl_win32_CreateFile_impl_(tmp_name, b_delete_on_close, pHandle))
+-            break;
+-
+-    } while(true); // try until success
+-
+-    if ((osl_error == osl_File_E_None) && !b_delete_on_close)
+-    {
+-        rtl_uString* pustr = nullptr;
+-        rtl_uString_newFromStr(&pustr, o3tl::toU(tmp_name));
+-        osl_getFileURLFromSystemPath(pustr, ppustrTempFileURL);
+-        rtl_uString_release(pustr);
+-    }
+-
+-    return osl_error;
+-}
+-
++// GetTempFileNameW has a legacy path limit even when file I/O accepts an
++// extended path. Reserve a random name atomically with CREATE_NEW instead.
+ oslFileError SAL_CALL osl_createTempFile(
+-    rtl_uString*   pustrDirectoryURL,
+-    oslFileHandle* pHandle,
+-    rtl_uString**  ppustrTempFileURL)
+-{
+-    rtl_uString*    base_directory = nullptr;
+-    LPWSTR          tmp_name;
+-    sal_Bool        b_delete_on_close;
+-    oslFileError    osl_error;
+-
+-    osl_error = osl_setup_createTempFile_impl_(
+-        pustrDirectoryURL,
+-        pHandle,
+-        ppustrTempFileURL,
+-        &base_directory,
+-        &b_delete_on_close);
+-
+-    if (osl_error != osl_File_E_None)
+-        return osl_error;
+-
+-    /* allocate enough space on the stack, the file name can not be longer than MAX_PATH */
+-    STACK_ALLOC(tmp_name, WCHAR, (rtl_uString_getLength(base_directory) + MAX_PATH));
+-
+-    if (tmp_name)
+-    {
+-        osl_error = osl_createTempFile_impl_(
+-            base_directory,
+-            tmp_name,
+-            b_delete_on_close,
+-            pHandle,
+-            ppustrTempFileURL);
+-    }
+-    else // stack alloc failed
+-    {
+-        osl_error = osl_File_E_NOMEM;
+-    }
+-
+-    if (base_directory)
+-        rtl_uString_release(base_directory);
+-
+-    return osl_error;
++    rtl_uString* pustrDirectoryURL, oslFileHandle* pHandle,
++    rtl_uString** ppustrTempFileURL)
++{
++    OUString base;
++    sal_Bool deleteOnClose = false;
++    oslFileError error = osl_setup_createTempFile_impl_(
++        pustrDirectoryURL, pHandle, ppustrTempFileURL, &base.pData, &deleteOnClose);
++    if (error != osl_File_E_None)
++        return error;
++    if (pHandle)
++        *pHandle = nullptr;
++
++    std::wstring directory(o3tl::toW(base.getStr()));
++    if (directory.size() >= 3 && directory[1] == L':' && directory[2] == L'\\')
++        directory.insert(0, L"\\\\?\\");
++    if (!directory.empty() && directory.back() != L'\\')
++        directory += L'\\';
++    // 3 prefix characters, 32 random hex characters, suffix and terminating NUL.
++    if (directory.size() + 3 + 32 + 4 + 1 > EXTENDED_MAX_PATH)
++        return osl_File_E_NAMETOOLONG;
++
++    constexpr wchar_t hex[] = L"0123456789abcdef";
++    for (unsigned attempt = 0; attempt < 128; ++attempt)
++    {
++        unsigned char random[16];
++        if (rtl_random_getBytes(nullptr, random, sizeof(random)) != rtl_Random_E_None)
++            return osl_File_E_IO;
++        std::wstring name = directory;
++        LPCWSTR prefix = getEyeCatcher();
++        for (unsigned i = 0; i < 3 && prefix[i]; ++i)
++            name += prefix[i];
++        for (unsigned char value : random)
++        {
++            name += hex[value >> 4];
++            name += hex[value & 15];
++        }
++        name += L".tmp";
++        OUString url;
++        if (ppustrTempFileURL)
++        {
++            OUString native(o3tl::toU(name.c_str()));
++            error = osl_getFileURLFromSystemPath(native.pData, &url.pData);
++            if (error != osl_File_E_None)
++                return error;
++        }
++        HANDLE file = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
++            nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL
++                | (deleteOnClose ? FILE_FLAG_DELETE_ON_CLOSE : 0), nullptr);
++        if (!IsValidHandle(file))
++        {
++            const DWORD cause = GetLastError();
++            if (cause == ERROR_FILE_EXISTS || cause == ERROR_ALREADY_EXISTS)
++                continue;
++            return oslTranslateFileError(cause);
++        }
++        if (pHandle)
++            *pHandle = osl_createFileHandleFromOSHandle(file,
++                osl_File_OpenFlag_Read | osl_File_OpenFlag_Write);
++        else
++            CloseHandle(file);
++        if (ppustrTempFileURL)
++            rtl_uString_assign(ppustrTempFileURL, url.pData);
++        return osl_File_E_None;
++    }
++    return osl_File_E_EXIST;
+ }
+ 
+ oslFileError SAL_CALL osl_getTempDirURL(rtl_uString** pustrTempDir)
+ {
++    // GetTempPathW can ignore over-MAX_PATH environment values and select the
++    // Windows directory instead. An explicit temporary path must never fall
++    // back to a different writable location, even if it cannot be converted.
++    for (LPCWSTR variable : {L"TMP", L"TEMP"})
++    {
++        DWORD required = GetEnvironmentVariableW(variable, nullptr, 0);
++        if (!required)
++            continue;
++        if (required > EXTENDED_MAX_PATH)
++            return osl_File_E_NAMETOOLONG;
++        std::wstring value(required, L'\0');
++        DWORD count = GetEnvironmentVariableW(variable, value.data(), required);
++        if (!count || count >= required)
++            return osl_File_E_INVAL;
++        value.resize(count);
++        const bool drivePath = value.size() >= 3 && value[1] == L':'
++            && (value[2] == L'\\' || value[2] == L'/');
++        const bool extendedDrivePath = value.size() >= 7
++            && value.compare(0, 4, L"\\\\?\\") == 0 && value[5] == L':'
++            && value[6] == L'\\';
++        if (!drivePath && !extendedDrivePath)
++            return osl_File_E_INVAL;
++        if (value.size() > 3 && value.back() == L'\\')
++            value.pop_back();
++        OUString native(o3tl::toU(value.c_str()));
++        return osl_getFileURLFromSystemPath(native.pData, pustrTempDir);
++    }
++
+     osl::LongPathBuffer<sal_Unicode> aBuffer(EXTENDED_MAX_PATH);
+     LPWSTR  lpBuffer = o3tl::toW(aBuffer);
+     DWORD   nBufferLength = aBuffer.getBufSizeInSymbols() - 1;

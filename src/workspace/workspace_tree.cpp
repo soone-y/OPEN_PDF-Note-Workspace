@@ -4,6 +4,7 @@
 #include "workspace/workspace_tree.h"
 #include "core/app_core.h"
 #include "core/preview_trace.h"
+#include "diagnostics/normal_operations.h"
 #include "ui/core/main_window_api.h"
 #include "workspace/workspace_config_io.h"
 #include "workspace/workspace_actions.h"

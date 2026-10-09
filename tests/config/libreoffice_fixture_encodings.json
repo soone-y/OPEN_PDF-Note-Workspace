@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "source_version": "26.2.6.3",
+  "purpose": "Official QA RC4 obfuscation; metadata only; never alter original inputs",
+  "source_test": "unotest/source/cpp/filters-test.cxx",
+  "source_test_sha256": "64626d0c89f710c612f33f7e9781bdfe31e30b8fac980b9eaa983f9f9654d419",
+  "samples": [
+    {
+      "path": "sc/qa/unit/data/xlsx/pass/CVE-2017-0199-1.xlsx",
+      "codec": "rc4-cve",
+      "raw_sha256": "abc4d76e715b64256a38c439b9bd43d0ece2e82d049121a05b357d07c28f6d47",
+      "decoded_sha256": "f09f4632c5b8f2fb6099cc799be2592492269ae35933aa0d7dde240945479c07"
+    },
+    {
+      "path": "sc/qa/unit/data/xlsx/pass/CVE-2017-0199-2.xlsx",
+      "codec": "rc4-cve",
+      "raw_sha256": "251289f2ae750925428923226f6f44b5215b4467acce17e761dc89c9b369f936",
+      "decoded_sha256": "16a545ab49c53424e9207a9c1af116296bc2e5c5a6c98d0d5bbb3b1ee55e453c"
+    },
+    {
+      "path": "sw/qa/core/data/ooxml/fail/EDB-36788-1.docx",
+      "codec": "rc4-cve",
+      "raw_sha256": "7c3462eb56516b262b78e719678df8c4bcd0dcc0a513ddbccbd8c84422e06835",
+      "decoded_sha256": "414dff3364c7dd999d43c7db3ac1db5e649e1cc51133ea29d31a3f34e40ae60b"
+    }
+  ]
+}

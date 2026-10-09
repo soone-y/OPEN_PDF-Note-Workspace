@@ -2208,10 +2208,18 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         }
         if (id == kExportDlgIdBrowseOutputFolder) {
             if (!ctx) return 0;
+            const auto kind = GetExportDialogKind(ctx);
             std::filesystem::path initial(TrimWhitespace(ReadDialogText(ctx->editOutputFolder)));
-            if (initial.empty()) initial = std::filesystem::path(DefaultOutputFolderForKind(GetExportDialogKind(ctx)));
-            auto picked = PickFolderWithInitial(hWnd, initial, localization::Text(L"export.select_output_folder"));
-            if (picked) SetWindowTextW(ctx->editOutputFolder, picked->c_str());
+            if (initial.empty()) initial = std::filesystem::path(DefaultOutputFolderForKind(kind));
+            std::wstring name = TrimWhitespace(ReadDialogText(ctx->editOutputName));
+            if (name.empty()) name = DefaultOutputNameForKind(ctx, kind);
+            auto picked = file_output::PickExportDestination(hWnd, localization::Text(L"export.select_output_path"),
+                                                             initial, name, OutputExtensionForKind(ctx, kind).substr(1));
+            if (picked) {
+                const std::filesystem::path output(*picked);
+                SetWindowTextW(ctx->editOutputFolder, output.parent_path().c_str());
+                SetWindowTextW(ctx->editOutputName, output.filename().c_str());
+            }
             return 0;
         }
         if (id == kExportDlgIdSaveQuickPdf) {

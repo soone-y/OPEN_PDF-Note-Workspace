@@ -225,8 +225,9 @@ struct WorkspaceConfig {
     bool headingLeftBar = true;
 
     // Export options
-    // When true, try to export TextBox annotations as PDF text objects (selectable/searchable).
-    // Default is true. If font embedding/rendering cannot be resolved, export falls back to images.
+    // When true, prefer FreeText with Unicode Contents and a vector appearance.
+    // Default is true. Unrepresentable text appearances fall back to a Stamp
+    // annotation (not to page content). False requests an image-based Stamp.
     bool exportStandardTextAnnots = true;
     // Quick output presets are configured in the unified output dialog. Quick
     // note output intentionally remains TXT; these values only control its text
@@ -239,7 +240,7 @@ struct WorkspaceConfig {
     bool quickNoteMathPlaceholder = false;
     std::wstring quickNoteMathPlaceholderText = L"[math]";
 
-    // Debug log outputs under __resource__/__log__/*.log.
+    // Debug log outputs under __pdf_note_workspace__/__log__/*.log.
     // Changes are persisted immediately, but applied to logging on the next launch.
     AppDebugLogConfig debugLogs;
 };

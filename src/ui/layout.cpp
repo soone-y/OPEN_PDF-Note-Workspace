@@ -577,6 +577,13 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
             y += rowH + gap;
         };
 
+        int inputRowW = std::max(0, innerW);
+        int inputBtnW = std::min(inputRowW, std::min(96, std::max(60, inputRowW / 4)));
+        int inputEditW = std::max(0, inputRowW - inputBtnW - gap);
+        place(g_hBtnShortcutInput, x, y, inputBtnW, rowH);
+        place(g_hShortcutTagEdit, x + inputBtnW + gap, y, inputEditW, rowH);
+        y += rowH + gap;
+
         int linkW = std::max(0, innerW);
         int linkDecorW = 88;
         if (linkDecorW > linkW) linkDecorW = linkW;
@@ -588,13 +595,6 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
         y += rowH + gap;
 
         layoutPaletteRow({ g_hBtnNoteAssistBullet, g_hBtnNoteAssistQuote, g_hBtnNoteAssistPageRef });
-
-        int inputRowW = std::max(0, innerW);
-        int inputBtnW = std::min(inputRowW, std::min(96, std::max(60, inputRowW / 4)));
-        int inputEditW = std::max(0, inputRowW - inputBtnW - gap);
-        place(g_hBtnShortcutInput, x, y, inputBtnW, rowH);
-        place(g_hShortcutTagEdit, x + inputBtnW + gap, y, inputEditW, rowH);
-        y += rowH + gap;
 
         int arrowW = std::min(28, std::max(22, innerW / 6));
         int levelW = std::min(38, std::max(24, innerW / 6));

@@ -13,9 +13,9 @@ def source(path):
 
 class WorkspaceMemoIntegration(unittest.TestCase):
     def test_all_entries_share_manager(self):
-        for path in ("src/search/search.cpp", "src/settings/settings_assets.cppinc",
-                     "src/app/command_dispatch.cppinc"):
+        for path in ("src/search/search.cpp", "src/app/command_dispatch.cppinc"):
             self.assertIn("ShowWorkspaceMemoWindow(g_hMainWnd)", source(path), path)
+        self.assertNotIn("ShowWorkspaceMemoWindow", source("src/settings/settings_assets.cppinc"))
         self.assertIn("ID_WORKSPACE_MEMO", source("src/ui/menus/menu_build.cpp"))
 
     def test_no_old_code_or_locale_ids(self):
@@ -62,7 +62,7 @@ class WorkspaceMemoIntegration(unittest.TestCase):
             self.assertNotIn(old_name, remaining_help.lower())
             self.assertNotIn(menu_name.lower(), remaining_help.lower())
             self.assertIn(f"##{'#' if language == 'ja' else ''} {name}\n", help_text)
-            self.assertIn("__resource__/__memo__/workspace_memo.txt", help_text)
+            self.assertIn("__pdf_note_workspace__/__memo__/workspace_memo.txt", help_text)
 
     def test_exit_and_root_switch_contract(self):
         text = source("src/ui/core/main_view_layout.cppinc")

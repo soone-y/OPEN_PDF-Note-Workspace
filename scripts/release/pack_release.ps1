@@ -188,6 +188,64 @@ function Get-RepoVersion {
     return $version
 }
 
+function Get-DistributionArchiveRootName([string]$RepoVersion) {
+    if ([string]::IsNullOrWhiteSpace($RepoVersion)) {
+        throw "ZIP 内の配布ルート名に必要な版番号を取得できません。REPO_VERSION.txt を確認してください。"
+    }
+    return "PDF-Note-Workspace-$RepoVersion"
+}
+
+function New-DistributionZip([string]$SourceDir, [string]$DestinationZip, [string]$ArchiveRootName) {
+    if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
+        throw "ZIP 化する配布ディレクトリが見つかりません: $SourceDir"
+    }
+    if ($ArchiveRootName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        throw "ZIP 内の配布ルート名が不正です: $ArchiveRootName"
+    }
+
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $sourceRoot = [System.IO.Path]::GetFullPath($SourceDir).TrimEnd('\', '/')
+    $temporaryZip = $DestinationZip + "." + [System.Guid]::NewGuid().ToString("N") + ".tmp"
+    $archive = $null
+    try {
+        $archive = [System.IO.Compression.ZipFile]::Open($temporaryZip, [System.IO.Compression.ZipArchiveMode]::Create)
+        $archive.CreateEntry($ArchiveRootName + "/") | Out-Null
+        foreach ($file in @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Force | Sort-Object FullName)) {
+            $relative = $file.FullName.Substring($sourceRoot.Length).TrimStart('\', '/').Replace('\', '/')
+            if ([string]::IsNullOrWhiteSpace($relative) -or $relative.StartsWith("../") -or $relative.Contains("/../")) {
+                throw "配布 ZIP の相対パスが不正です: $($file.FullName)"
+            }
+            $entry = $archive.CreateEntry(
+                ($ArchiveRootName + "/" + $relative),
+                [System.IO.Compression.CompressionLevel]::Optimal
+            )
+            $entry.LastWriteTime = $file.LastWriteTime
+            $input = $null
+            $output = $null
+            try {
+                $input = [System.IO.File]::OpenRead($file.FullName)
+                $output = $entry.Open()
+                $input.CopyTo($output)
+            }
+            finally {
+                if ($output) { $output.Dispose() }
+                if ($input) { $input.Dispose() }
+            }
+        }
+        $archive.Dispose()
+        $archive = $null
+        [System.IO.File]::Move($temporaryZip, $DestinationZip)
+    }
+    catch {
+        if ($archive) { $archive.Dispose() }
+        if (Test-Path -LiteralPath $temporaryZip) {
+            Remove-Item -Force -LiteralPath $temporaryZip
+        }
+        throw
+    }
+}
+
 function Apply-RepoVersionMarkers([string]$DocsDir, [string]$RepoVersion) {
     $marker = "(ZIP配布物ではここにバージョンが記載されます)"
     if ($DryRun) {
@@ -469,6 +527,7 @@ try {
     }
     $folderName = New-ReleaseFolderName -Prefix $NamePrefix
     $outDir = Join-Path $outBase $folderName
+    $archiveRootName = Get-DistributionArchiveRootName -RepoVersion $repoVersion
     $docsDir = Join-Path $outDir "docs"
     $licensesDir = Join-Path $outDir "licenses"
 
@@ -748,12 +807,13 @@ try {
         $zipPath = Join-Path $outBase ($folderName + ".zip")
         if ($DryRun) {
             Write-Info "[dry-run] zip: $outDir -> $zipPath"
+            Write-Info "[dry-run] ZIP root: $archiveRootName"
         }
         else {
             if (Test-Path -LiteralPath $zipPath) {
-                Remove-Item -Force -LiteralPath $zipPath
+                throw "ZIP output already exists and will not be overwritten: $zipPath"
             }
-            Compress-Archive -LiteralPath $outDir -DestinationPath $zipPath
+            New-DistributionZip -SourceDir $outDir -DestinationZip $zipPath -ArchiveRootName $archiveRootName
         }
     }
 

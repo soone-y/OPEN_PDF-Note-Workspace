@@ -160,7 +160,7 @@ LibreOffice は Office 文書を PDF に変換するためのローカル変換�
 
 ### ローカル変更
 
-変換runtimeは公式core sourceから通信・更新・クラッシュ報告・AVMedia・OpenCL・scripting等を除外したcustom buildです。公式MSIの送信ファイルだけを削除したimageで代用しません。現在のpatch系列は0001–0041 / 0043–0050（0042は予約番号）で、公式との重複を比較し、日本語変換修正を保持します。
+変換runtimeは公式core sourceから通信・更新・クラッシュ報告・AVMedia・OpenCL・scripting等を除外したcustom buildです。公式MSIの送信ファイルだけを削除したimageで代用しません。現在のpatch系列は0001–0041 / 0043–0051（0042は予約番号）で、公式との重複を比較し、日本語変換修正を保持します。
 
 配布用コピーは `custom_build/release_reduction_manifest.json` で縮小します。Math/Calcの変換構成と保護pathは保持し、Calcの再削減は別の品質比較・利用者判断へ分離します。旧imageの削除一覧は過去の比較記録であり、採用runtimeの削減根拠に流用しません。構成変更時はこの説明、`libreoffice/README.md`、manifest、`THIRD_PARTY_NOTICES.md`を同期します。
 

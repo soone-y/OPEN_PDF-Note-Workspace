@@ -384,6 +384,17 @@ NoteRenderFinalPresentationInteractionResult HitTestNoteRenderFinalPresentation(
         return NoteRenderFinalPresentationInteractionResult::Resolved;
     }
     const uint64_t relativeY = contentY - line.layout.top_px;
+    if (!line.raw_surface) {
+        if (const auto suffix = ResolveNoteRenderTrailingSyntaxBlankHit(
+                line.structured_source, line.placement, contentX, relativeY)) {
+            *out = {};
+            out->line_index = line.line_index;
+            out->source_offset = line.structured_source.content_span.end;
+            out->run_index = *suffix;
+            out->source_span = line.structured_source.runs[*suffix].source_span;
+            return NoteRenderFinalPresentationInteractionResult::Resolved;
+        }
+    }
     size_t bestRun = static_cast<size_t>(-1);
     const NoteRenderPlacementBoundary* bestBoundary = nullptr;
     uint64_t bestVerticalDistance = std::numeric_limits<uint64_t>::max();

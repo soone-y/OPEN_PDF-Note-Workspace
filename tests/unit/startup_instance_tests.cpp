@@ -223,10 +223,68 @@ static void TestNoticeCancellation() {
     } catch (...) { CloseHandle(stop); throw; }
     CloseHandle(stop);
 }
+static void TestAutomationExecutionPolicy() {
+    const wchar_t* names[] = {
+        L"PDF_NOTE_SMALL_UI_AUTOMATION",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_LOG_CONTRACT_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_RECOVERY_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_UNKNOWN_FIELD_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_HELP_VISIBILITY_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_DIALOG_OWNER_VISIBILITY_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_OUTPUT_EXPORT_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_MATH_RENDER_ONLY",
+    };
+    struct SavedEnv {
+        const wchar_t* name;
+        bool present;
+        std::wstring value;
+    };
+    std::vector<SavedEnv> saved;
+    struct Restore {
+        std::vector<SavedEnv>& saved;
+        ~Restore() {
+            for (const auto& env : saved)
+                SetEnvironmentVariableW(env.name, env.present ? env.value.c_str() : nullptr);
+        }
+    } restore{saved};
+    for (auto name : names) {
+        std::wstring value;
+        const bool present = ReadMainEnvVar(name, &value);
+        saved.push_back({name, present, value});
+        Check(SetEnvironmentVariableW(name, nullptr), "clear automation mode for policy test");
+    }
+    Check(!IsBackgroundUiAutomationEnabled(), "ordinary launch is foreground-capable");
+    Check(SetEnvironmentVariableW(names[0], L"1"), "enable automation for policy test");
+    Check(!IsBackgroundUiAutomationEnabled(), "full automation requires foreground capability");
+    for (size_t i = 1; i < std::size(names); ++i) {
+        for (auto value : {L"1", L"true"}) {
+            Check(SetEnvironmentVariableW(names[i], value), "select policy mode");
+            Check(IsBackgroundUiAutomationEnabled() == (i <= 5), "mode selects correct display contract");
+        }
+        Check(SetEnvironmentVariableW(names[0], nullptr), "disable automation");
+        Check(!IsBackgroundUiAutomationEnabled(), "mode alone cannot hide a normal launch");
+        Check(SetEnvironmentVariableW(names[0], L"1"), "restore automation");
+        if (i != 1) {
+            Check(SetEnvironmentVariableW(names[1], L"1"), "select conflicting mode");
+            Check(!IsBackgroundUiAutomationEnabled(), "mixed modes cannot opt out of UI checks");
+            Check(SetEnvironmentVariableW(names[1], nullptr), "clear conflicting mode");
+        }
+        Check(SetEnvironmentVariableW(names[i], L"0"), "disable selected mode");
+        Check(!IsBackgroundUiAutomationEnabled(), "false mode does not enable background execution");
+        Check(SetEnvironmentVariableW(names[i], nullptr), "clear selected mode");
+    }
+}
+
 int wmain(int argc, wchar_t** argv) {
     if (argc == 4 && std::wstring(argv[1]) == L"--child")
         return RunChild(argv[2], static_cast<DWORD>(std::stoul(argv[3])));
     try {
+        TestAutomationExecutionPolicy();
         main_window_liveness::Policy policy(100);
         Check(!policy.Observe(false, 15099) && policy.Observe(false, 15100), "startup grace");
         Check(!policy.TakeNotification() && !policy.Observe(false, 20099) &&

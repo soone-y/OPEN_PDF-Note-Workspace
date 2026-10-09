@@ -67,29 +67,38 @@ static bool ValidateOperationDestinationFolder(HWND owner,
     return VerifyDirReadableWritableForEditing(owner, dir, labelId);
 }
 
-static bool ValidateOperationNewFileStem(HWND owner,
-                                         const std::wstring& input,
-                                         const std::wstring& title) {
+// Validation runs while the name dialog is open, before the transaction is
+// built. It only reports failure: no rename, alias update or format conversion.
+[[nodiscard]] static bool ValidateOperationNewFileName(HWND owner,
+                                                       const std::wstring& input,
+                                                       bool isPdf) {
     const bool invalid =
         input.empty() || input == L"." || input == L".." ||
         input.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos ||
-        input.back() == L'.' || input.back() == L' ';
-    if (!invalid) return true;
-    ShowSilentMessageDialog(
-        owner, title,
-        localization::Text(L"workspace.file_ops.2ae983d4d6ad"),
-        SoftNoticeKind::Warning);
-    return false;
+        input.back() == L'.' || input.back() == L' ' ||
+        std::any_of(input.begin(), input.end(), [](wchar_t ch) { return ch < 32; });
+    if (invalid) {
+        ShowSoftNotice(owner, localization::Text(L"workspace.file_ops.2ae983d4d6ad"), SoftNoticeKind::Warning);
+        return false;
+    }
+    const std::filesystem::path name(input);
+    if (isPdf ? ToLowerAscii(name.extension().wstring()) != L".pdf" : !IsNoteFile(name)) {
+        ShowSoftNotice(owner, localization::Text(isPdf ? L"workspace.file_ops.pdf_extension_required"
+                                                      : L"workspace.file_ops.note_extension_required"),
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+    return true;
 }
 
 static std::filesystem::path OperationPreferredTmpDir() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__tmp__";
+    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__tmp__";
 }
 
 static std::filesystem::path OperationQuarantineDir() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
+    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
 }
 
 static bool ReadOperationFileBytes(const std::filesystem::path& path,
@@ -163,7 +172,7 @@ static void CollectSessionPdfPathsRecursive(const std::filesystem::path& root,
 
         std::error_code typeEc;
         if (it->is_directory(typeEc) && !typeEc) {
-            if (ToLowerAscii(path.filename().wstring()) == L"__resource__") {
+            if (ToLowerAscii(path.filename().wstring()) == L"__pdf_note_workspace__") {
                 it.disable_recursion_pending();
             }
             continue;
@@ -2016,6 +2025,8 @@ static bool MaybePreparePairedNoteChangeForPdf(HWND owner,
     dialog.message = msg;
     dialog.kind = SoftNoticeKind::Info;
     dialog.buttons = SilentDialogButtons::YesNoCancel;
+    dialog.yesLabel = localization::Text(L"dialog.action.change_together");
+    dialog.noLabel = localization::Text(L"dialog.action.change_pdf_only");
     dialog.defaultResult = SilentDialogResult::Yes;
     dialog.escapeResult = SilentDialogResult::Cancel;
     const SilentDialogResult res = ShowSilentDialog(owner, dialog);
@@ -2286,8 +2297,11 @@ static bool EnsureOperationReadyForPath(HWND owner,
         if (!stage.empty() && !file_output::IntegrateStagedDiff(owner, stage)) {
             return false;
         }
-    } else {
-        if (!file_output::SaveNoteFile(owner)) return false;
+    } else if (IsNoteFile(src)) {
+        const bool current = AreSameLocalPath(src, std::filesystem::path(g_currentNotePath));
+        if (current ? !file_output::SaveNoteFile(owner) : !file_output::SaveNoteIfDirty(owner)) return false;
+        const auto stage = file_output::FindLatestStagedNotePathFor(src.wstring());
+        if (!stage.empty() && !file_output::IntegrateStagedDiff(owner, stage)) return false;
     }
 
     for (const auto& entry : file_output::ListStagedDiffEntries()) {
@@ -2603,14 +2617,16 @@ bool ExecuteWorkspaceOperationUndoRedo(HWND owner, bool undo) {
     return true;
 }
 
-bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly) {
+static bool RenameOrMoveOperationTarget(HWND owner, bool isPdf, bool renameOnly,
+                                        const std::filesystem::path& src,
+                                        const std::optional<std::filesystem::path>& organizeDestination = std::nullopt) {
     const auto& ui = GetUiText();
     const std::wstring title = renameOnly
         ? (isPdf ? ui.menuRenamePdf : ui.menuRenameNote)
         : (isPdf ? ui.menuMovePdf : ui.menuMoveNote);
-    const std::filesystem::path src = isPdf
-        ? std::filesystem::path(CurrentLogicalPdfPath())
-        : std::filesystem::path(g_currentNotePath);
+    const bool organizing = organizeDestination.has_value();
+    const bool isCurrentTarget = AreSameLocalPath(src, std::filesystem::path(
+        isPdf ? CurrentLogicalPdfPath() : g_currentNotePath));
     std::wstring catalogErr;
     if (!EnsureOperationResourceCatalogConfigured(&catalogErr)) {
         ShowSilentMessageDialog(owner, title,
@@ -2634,15 +2650,20 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
     CancelPendingLinkMode(owner);
 
     std::filesystem::path dest;
-    if (renameOnly) {
+    if (organizing) {
+        dest = *organizeDestination;
+    } else if (renameOnly) {
         std::wstring input;
-        std::wstring initial = src.stem().wstring();
-        if (!PromptSimpleText(owner, title, initial, input)) return false;
+        const std::wstring initial = src.filename().wstring();
+        const auto validateName = [isPdf](HWND dialog, const std::wstring& value) {
+            return ValidateOperationNewFileName(dialog, TrimWhitespace(value), isPdf);
+        };
+        if (!PromptSimpleText(owner, title, initial, input, validateName)) return false;
         input = TrimWhitespace(input);
-        if (!ValidateOperationNewFileStem(owner, input, title)) return false;
-        dest = src.parent_path() / (input + src.extension().wstring());
+        dest = src.parent_path() / input;
     } else {
-        auto picked = PickFolderWithInitial(owner, src.parent_path(), title);
+        auto picked = PickFolderWithInitial(owner, src.parent_path(), title,
+                                            localization::Text(L"dialog.action.select_move_destination"));
         if (!picked) return false;
         dest = std::filesystem::path(*picked) / src.filename();
     }
@@ -2670,7 +2691,7 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
     std::wstring err;
 
     OperationNoteChange noteChange;
-    if (isPdf && !MaybePreparePairedNoteChangeForPdf(owner, src, dest, renameOnly, title, &noteChange)) {
+    if (isPdf && !organizing && !MaybePreparePairedNoteChangeForPdf(owner, src, dest, renameOnly, title, &noteChange)) {
         return false;
     }
 
@@ -2679,7 +2700,7 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
     }
 
     NoteLinkRewritePlan noteRewritePlan;
-    if (!isPdf || noteChange.enabled) {
+    if ((!isPdf && IsNoteFile(src)) || noteChange.enabled) {
         const std::filesystem::path noteSrc = isPdf ? noteChange.src : src;
         const std::filesystem::path noteDest = isPdf ? noteChange.dest : dest;
         if (!PrepareNoteLinkRewritePlan(owner, noteSrc, noteDest, &noteRewritePlan, &err)) {
@@ -2885,7 +2906,9 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
     }
 
     RecordCommittedWorkspaceOperation(transaction);
-    AfterOperationReopenCurrentTarget(owner, dest, isPdf, noteChange.enabled ? &noteChange : nullptr);
+    if (!organizing || isCurrentTarget) {
+        AfterOperationReopenCurrentTarget(owner, dest, isPdf, noteChange.enabled ? &noteChange : nullptr);
+    }
     if (isPdf) {
         MovePdfViewInfoPath(src.wstring(), dest.wstring());
     }
@@ -2901,8 +2924,42 @@ bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly)
     } else if (!isPdf && noteRewritePlan.HasWork()) {
         done += localization::Text(L"workspace.file_ops.4d707f6ff451");
     }
-    ShowSoftNotice(owner, done);
+    if (!organizing) ShowSoftNotice(owner, done);
     return true;
+}
+
+bool RenameOrMoveCurrentOperationTarget(HWND owner, bool isPdf, bool renameOnly) {
+    return RenameOrMoveOperationTarget(owner, isPdf, renameOnly, std::filesystem::path(
+        isPdf ? CurrentLogicalPdfPath() : g_currentNotePath));
+}
+
+bool OrganizeSessionFile(HWND owner, const std::filesystem::path& source,
+                         const std::filesystem::path& destinationDirectory,
+                         std::filesystem::path* movedTo) {
+    if (movedTo) movedTo->clear();
+    const bool bundled = IsPdfFile(source) || IsImageFile(source);
+    // Reserve all sidecar destinations even if this source has no sidecar:
+    // an unrelated annotation file must never attach itself to the moved PDF.
+    std::filesystem::path destination;
+    for (int suffix = 0; suffix < 10000; ++suffix) {
+        destination = destinationDirectory / (suffix == 0 ? source.filename() :
+            std::filesystem::path(source.stem().wstring() + L" (" + std::to_wstring(suffix) + L")" +
+                                  source.extension().wstring()));
+        bool occupied = false;
+        for (const auto& path : {destination,
+                bundled ? std::filesystem::path(clrop_bridge::ClropPathForPdf(destination.wstring())) : destination,
+                bundled ? PdfAnnotHistoryPathForPdf(destination) : destination}) {
+            bool present = false;
+            std::wstring err;
+            if (!IsOperationPathPresent(path, &present, &err)) return false;
+            occupied = occupied || present;
+        }
+        if (occupied) continue;
+        if (!RenameOrMoveOperationTarget(owner, bundled, false, source, destination)) return false;
+        if (movedTo) *movedTo = destination;
+        return true;
+    }
+    return false;
 }
 
 bool RunUiAutomationOperationTransactionRecoveryScenario(std::wstring* outError) {

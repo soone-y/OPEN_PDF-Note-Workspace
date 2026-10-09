@@ -6,6 +6,7 @@
 #include "math/math_render.h"
 #include "clrop/bridge.h"
 #include "file_output/note_snapshot.h"
+#include "file_output/pdf_annotation_export.h"
 #include "note/note_export.h"
 #include "note/note_workspace_service.h"
 #include "fpdf_save.h"
@@ -13,6 +14,7 @@
 #include "fpdf_ppo.h"
 #include "fpdf_transformpage.h"
 #include "core/atomic_write.h"
+#include "diagnostics/normal_operations.h"
 #include "core/fault_injection.h"
 #include "core/localization.h"
 #include "core/preview_trace.h"
@@ -291,10 +293,19 @@ static std::wstring InitialDirForPath(const std::wstring& path) {
     return L"";
 }
 
-static std::optional<std::wstring> ValidatePickedSavePath(HWND owner, std::filesystem::path path) {
+static std::optional<std::wstring> ValidatePickedSavePath(HWND owner, std::filesystem::path path,
+                                                         bool allowExisting = false) {
     if (IsUncPath(path)) {
         ShowFileOutputSoftNotice(owner,
                                  localization::Text(L"file_output.path.unc_unsupported"),
+                                 SoftNoticeKind::Warning);
+        return std::nullopt;
+    }
+    std::error_code parentError;
+    if (!path.is_absolute() || path.filename().empty() ||
+        !write_checks::IsSafeLocalPath(path) ||
+        !std::filesystem::is_directory(path.parent_path(), parentError) || parentError) {
+        ShowFileOutputSoftNotice(owner, localization::Text(L"file_output.path.inspect_failed"),
                                  SoftNoticeKind::Warning);
         return std::nullopt;
     }
@@ -307,6 +318,10 @@ static std::optional<std::wstring> ValidatePickedSavePath(HWND owner, std::files
     }
     std::error_code ec;
     if (std::filesystem::exists(path, ec) && !ec) {
+        if (allowExisting && std::filesystem::is_regular_file(path, ec) && !ec) {
+            RememberPickedSavePathDirectory(path.wstring());
+            return path.wstring();
+        }
         ShowFileOutputSoftNotice(
             owner,
             localization::Text(L"file_output.path.existing_file"),
@@ -329,7 +344,8 @@ static std::optional<std::wstring> PickSavePathWithSystemDialog(HWND owner,
                                                                  const std::wstring& initialDir,
                                                                  const COMDLG_FILTERSPEC* filters,
                                                                  UINT filterCount,
-                                                                 const wchar_t* defaultExt) {
+                                                                 const wchar_t* defaultExt,
+                                                                 bool allowExisting = false) {
     IFileSaveDialog* dialog = nullptr;
     const HRESULT created = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
                                              IID_PPV_ARGS(&dialog));
@@ -340,6 +356,8 @@ static std::optional<std::wstring> PickSavePathWithSystemDialog(HWND owner,
         return std::nullopt;
     }
     dialog->SetTitle(title ? title : L"");
+    // This dialog returns a destination; the caller owns the export itself.
+    (void)dialog->SetOkButtonLabel(localization::Text(L"ui.local_path.choose_destination").c_str());
     if (filters && filterCount > 0) dialog->SetFileTypes(filterCount, filters);
     if (defaultExt && *defaultExt) dialog->SetDefaultExtension(defaultExt);
     dialog->SetFileName(defaultName.c_str());
@@ -380,7 +398,7 @@ static std::optional<std::wstring> PickSavePathWithSystemDialog(HWND owner,
     if (FAILED(gotPath) || !rawPath) return std::nullopt;
     std::filesystem::path path(rawPath);
     CoTaskMemFree(rawPath);
-    return ValidatePickedSavePath(owner, std::move(path));
+    return ValidatePickedSavePath(owner, std::move(path), allowExisting);
 }
 
 static std::optional<std::wstring> PickSavePath(HWND owner,
@@ -389,28 +407,16 @@ static std::optional<std::wstring> PickSavePath(HWND owner,
                                                 const std::wstring& initialDir,
                                                 const COMDLG_FILTERSPEC* filters,
                                                 UINT filterCount,
-                                                const wchar_t* defaultExt) {
-    std::wstring fileName;
-    const SavePathPromptResult choice = PromptSavePath(owner, title ? title : L"", initialDir,
-                                                        defaultName, fileName);
-    if (choice == SavePathPromptResult::Cancel) return std::nullopt;
-    if (choice == SavePathPromptResult::OpenSystemDialog) {
-        return PickSavePathWithSystemDialog(owner, title, defaultName, initialDir,
-                                            filters, filterCount, defaultExt);
+                                                const wchar_t* defaultExt,
+                                                bool allowExisting = false) {
+    const SavePathPromptSelection choice = PromptSavePath(owner, title ? title : L"", initialDir,
+                                                           defaultName, defaultExt ? defaultExt : L"");
+    if (choice.action == SavePathPromptResult::Cancel) return std::nullopt;
+    if (choice.action == SavePathPromptResult::OpenSystemDialog) {
+        return PickSavePathWithSystemDialog(owner, title, choice.fileName, choice.directory.wstring(),
+                                            filters, filterCount, defaultExt, allowExisting);
     }
-
-    std::filesystem::path path(fileName);
-    if (path.has_parent_path() || path.is_absolute()) {
-        ShowFileOutputSoftNotice(owner,
-                                 localization::Text(L"file_output.path.file_name_only"),
-                                 SoftNoticeKind::Warning);
-        return std::nullopt;
-    }
-    if (defaultExt && *defaultExt && !path.has_extension()) {
-        path.replace_extension(std::wstring(L".") + defaultExt);
-    }
-    if (!initialDir.empty()) path = std::filesystem::path(initialDir) / path;
-    return ValidatePickedSavePath(owner, std::move(path));
+    return ValidatePickedSavePath(owner, choice.directory / choice.fileName, allowExisting);
 }
 
 static bool EnsureParentDir(const std::filesystem::path& path) {
@@ -432,12 +438,14 @@ static std::wstring GetEditText(HWND hEdit) {
 
 static bool WriteFileUtf8(const std::wstring& path, const std::string& data) {
     std::filesystem::path p(path);
+    write_checks::NormalOperation observation(g_workspaceRoot, p);
     if (!EnsureParentDir(p)) return false;
     std::wstring err;
     // Export targets may be outside the workspace; keep temp files next to the destination.
     if (!atomic_write::AtomicWriteUtf8(p, data, /*preferredTempDir=*/p.parent_path(), &err)) {
         return false;
     }
+    observation.Success();
     return true;
 }
 static bool SavePngWic(const std::wstring& path, const uint8_t* bgra,
@@ -1397,9 +1405,10 @@ static void AddTextAnnotationBitmap(FPDF_DOCUMENT dest, FPDF_PAGE page, const An
     FPDF_PAGEOBJECT img = FPDFPageObj_NewImageObj(dest);
     if (!img) return;
     FPDF_BITMAP bmp = FPDFBitmap_CreateEx(wPx, hPx, FPDFBitmap_BGRA, buf.data(), stride);
-    if (!bmp) return;
+    if (!bmp) { FPDFPageObj_Destroy(img); return; }
     if (!FPDFImageObj_SetBitmap(&page, 1, img, bmp)) {
         FPDFBitmap_Destroy(bmp);
+        FPDFPageObj_Destroy(img);
         return;
     }
     FPDFBitmap_Destroy(bmp);
@@ -1821,9 +1830,10 @@ static void AddMathAnnotation(FPDF_DOCUMENT dest, FPDF_PAGE page, const Annotati
     FPDF_PAGEOBJECT img = FPDFPageObj_NewImageObj(dest);
     if (!img) return;
     FPDF_BITMAP bmp = FPDFBitmap_CreateEx(wPx, hPx, FPDFBitmap_BGRA, buf.data(), stride);
-    if (!bmp) return;
+    if (!bmp) { FPDFPageObj_Destroy(img); return; }
     if (!FPDFImageObj_SetBitmap(&page, 1, img, bmp)) {
         FPDFBitmap_Destroy(bmp);
+        FPDFPageObj_Destroy(img);
         return;
     }
     FPDFBitmap_Destroy(bmp);
@@ -1861,7 +1871,7 @@ static Annotation ScaleAnnotationForExport(const Annotation& src, double coordSc
     return scaled;
 }
 
-static void AddAnnotationsToPage(const std::vector<Annotation>& annots,
+static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
                                  PdfTextFontCache& fonts,
                                  FPDF_DOCUMENT dest, FPDF_PAGE page, int pageIndex,
                                  bool standardTextAnnots,
@@ -2050,6 +2060,7 @@ static void AddAnnotationsToPage(const std::vector<Annotation>& annots,
             }
 
             if (!hasSegments) {
+                FPDFPageObj_Destroy(path);
                 break;
             }
 
@@ -2186,6 +2197,31 @@ static void AddAnnotationsToPage(const std::vector<Annotation>& annots,
             break;
         }
     }
+}
+
+// Rendering stays in this TU because it shares the existing font/math cache.
+// Only the isolated exporter mutates annotations, on the new output copy.
+[[nodiscard]] static bool AddAnnotationsToPage(const std::vector<Annotation>& annots,
+                                 PdfTextFontCache& fonts, FPDF_DOCUMENT dest,
+                                 FPDF_PAGE page, int pageIndex, bool standardTextAnnots,
+                                 bool matchPdfPaneTextLayout, double coordScale, double bitmapDpiScale) {
+    for (const auto& ann : annots) {
+        if (ann.pageIndex != pageIndex) continue;
+        const int scratchIndex = FPDF_GetPageCount(dest);
+        FPDF_PAGE scratch = FPDFPage_New(dest, scratchIndex, FPDF_GetPageWidthF(page), FPDF_GetPageHeightF(page));
+        if (!scratch) return false;
+        bool ok = false;
+        try {
+            DrawAnnotationAppearance({ann}, fonts, dest, scratch, pageIndex, standardTextAnnots,
+                                     matchPdfPaneTextLayout, coordScale, bitmapDpiScale);
+            const Annotation scaled = ScaleAnnotationForExport(ann, coordScale);
+            ok = pdf_annotation_export::Add(dest, page, scratch, scaled, standardTextAnnots);
+        } catch (...) { /* Discard this output; source and recovery data remain. */ }
+        FPDF_ClosePage(scratch);
+        FPDFPage_Delete(dest, scratchIndex);
+        if (!ok) return false;
+    }
+    return true;
 }
 
 static void FillRectAlpha(HDC hdc, const RECT& r, COLORREF color, BYTE alpha) {
@@ -3068,6 +3104,7 @@ static void DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
 
 static bool SavePdfDocument(FPDF_DOCUMENT doc, const std::wstring& outPath, std::wstring* err) {
     std::filesystem::path dest(outPath);
+    write_checks::NormalOperation observation(g_workspaceRoot, dest);
     if (dest.empty()) {
         if (err) *err = L"Invalid output path.";
         return false;
@@ -3230,6 +3267,7 @@ static bool SavePdfDocument(FPDF_DOCUMENT doc, const std::wstring& outPath, std:
         if (err) *err = repErr.empty() ? L"Failed to replace output file." : repErr;
         return false;
     }
+    observation.Success();
     return true;
 }
 
@@ -3407,7 +3445,7 @@ static bool ExportPdfDocumentWithSpecs(FPDF_DOCUMENT srcDoc,
     PdfTextFontCache fontCache;
     {
         std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
-        dest = FPDF_CreateNewDocument();
+        dest = pdf_annotation_export::CreateDocument();
         if (!dest) {
             if (err) *err = L"Failed to create PDF.";
             return false;
@@ -3447,6 +3485,13 @@ static bool ExportPdfDocumentWithSpecs(FPDF_DOCUMENT srcDoc,
                     dirty = true;
                 }
                 if (exportScale != 1.0) {
+                    if (!pdf_annotation_export::CanScaleExisting(page, exportScale)) {
+                        if (err) *err = localization::Text(L"file_output.pdf.existing_annotation_scale");
+                        ClosePdfTextFonts(fontCache);
+                        FPDF_ClosePage(page);
+                        FPDF_CloseDocument(dest);
+                        return false;
+                    }
                     if (!ScalePdfPageInPlace(page, exportScale)) {
                         if (err) *err = L"Failed to scale PDF page.";
                         ClosePdfTextFonts(fontCache);
@@ -3457,15 +3502,39 @@ static bool ExportPdfDocumentWithSpecs(FPDF_DOCUMENT srcDoc,
                     dirty = true;
                 }
                 if (spec.withAnnotations) {
-                    AddAnnotationsToPage(annots, fontCache, dest, page, spec.pageIndex,
+                    if (!AddAnnotationsToPage(annots, fontCache, dest, page, spec.pageIndex,
                                          standardTextAnnots, matchPdfPaneTextLayout,
-                                         exportScale, /*bitmapDpiScale=*/1.0);
-                    dirty = true;
+                                         exportScale, /*bitmapDpiScale=*/1.0)) {
+                        if (err) *err = localization::Text(L"file_output.pdf.annotation_failed");
+                        ClosePdfTextFonts(fontCache);
+                        FPDF_ClosePage(page);
+                        FPDF_CloseDocument(dest);
+                        return false;
+                    }
+                }
+                if (!pdf_annotation_export::Finalize(page)) {
+                    if (err) *err = localization::Text(L"file_output.pdf.annotation_failed");
+                    ClosePdfTextFonts(fontCache);
+                    FPDF_ClosePage(page);
+                    FPDF_CloseDocument(dest);
+                    return false;
                 }
                 if (dirty) {
-                    FPDFPage_GenerateContent(page);
+                    if (!FPDFPage_GenerateContent(page)) {
+                        if (err) *err = L"Failed to generate output page content.";
+                        ClosePdfTextFonts(fontCache);
+                        FPDF_ClosePage(page);
+                        FPDF_CloseDocument(dest);
+                        return false;
+                    }
                 }
                 FPDF_ClosePage(page);
+            }
+            else {
+                if (err) *err = L"Failed to load output page.";
+                ClosePdfTextFonts(fontCache);
+                FPDF_CloseDocument(dest);
+                return false;
             }
             ++destIndex;
         }
@@ -3482,6 +3551,18 @@ static bool ExportPdfDocumentWithSpecs(FPDF_DOCUMENT srcDoc,
 } // namespace
 
 namespace file_output {
+
+std::optional<std::wstring> PickExportDestination(HWND owner, const std::wstring& title,
+                                                  const std::filesystem::path& initialDirectory,
+                                                  const std::wstring& defaultName,
+                                                  const std::wstring& extension) {
+    const std::wstring pattern = L"*." + extension;
+    COMDLG_FILTERSPEC filters[] = {{pattern.c_str(), pattern.c_str()}};
+    // Selection alone never overwrites. Existing destinations are confirmed by
+    // the export dialog's execution flow, after original/duplicate protection.
+    return PickSavePath(owner, title.c_str(), defaultName, initialDirectory.wstring(),
+                        filters, 1, extension.c_str(), true);
+}
 
 bool ConvertImageToPdf(HWND owner, const std::wstring& imagePath, std::wstring* outPath) {
     if (outPath) outPath->clear();
@@ -3976,7 +4057,9 @@ bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, Pd
             return false;
         }
         FPDFBitmap_FillRect(bitmap, 0, 0, outWidthPx, outHeightPx, 0xFFFFFFFFu);
-        FPDF_RenderPageBitmap(bitmap, page, 0, 0, outWidthPx, outHeightPx, 0, FPDF_LCD_TEXT);
+        // Native PDF annotations are part of the opened document, like in the
+        // PDF pane. includeAnnotations controls only the separate app layer.
+        FPDF_RenderPageBitmap(bitmap, page, 0, 0, outWidthPx, outHeightPx, 0, FPDF_ANNOT | FPDF_LCD_TEXT);
 
         auto* buf = static_cast<uint8_t*>(FPDFBitmap_GetBuffer(bitmap));
         stride = FPDFBitmap_GetStride(bitmap);

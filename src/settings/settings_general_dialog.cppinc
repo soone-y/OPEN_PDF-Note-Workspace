@@ -350,6 +350,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
 
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.5c3d07c45ba5").c_str(), defaultThemeLabel));
             ctx->cbTone = addCombo(IDC_TONE, false, controlW);
+            addLabel(localization::Text(L"settings.general.theme_save_hint"));
             {
                 auto pair = addTwoButtons(IDC_TONE_CREATE, localization::Text(L"settings.general.create_theme").c_str(), buttonW,
                                           IDC_TONE_EDIT, localization::Text(L"settings.general.edit").c_str(), buttonW,
@@ -446,6 +447,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
 
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b8780efbcc5b").c_str(), localization::Text(L"settings.general.1b861de2aac9").c_str()));
             ctx->btnShortcutEdit = addButton(IDC_SHORTCUT_EDIT, localization::Text(L"settings.general.edit").c_str(), buttonW, rowH);
+            addLabel(localization::Text(L"settings.general.shortcut_save_hint"));
         }
 
         if (showNoteSectionOnly) {
@@ -562,6 +564,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
 
         if (showBasicSections) {
             beginSection(kGeneralSectionSave, localization::Text(L"settings.general.section_save").c_str());
+            addLabel(localization::Text(L"settings.general.independent_save_hint"));
             ctx->lblLayoutDefaults = addLabel(localization::Format(L"settings.general.layout_defaults", {{L"VALUE", LayoutDefaultsLabelText()}}));
             addButton(IDC_LAYOUT_DEFAULT_SAVE, localization::Text(L"settings.general.save_layout_defaults").c_str(), contentW, rowH);
 
@@ -594,6 +597,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             beginSection(kGeneralSectionSchedule,
                          localization::Text(scheduleTextId(L"settings.general.schedule_student",
                                                            L"settings.general.schedule_parent")).c_str());
+            addLabel(localization::Text(L"settings.general.schedule_save_hint"));
             addLabel(SettingLabelWithDefault(
                          localization::Text(scheduleTextId(L"settings.general.schedule_days_student",
                                                            L"settings.general.schedule_days_parent")).c_str(),
@@ -665,6 +669,13 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             addLabel(localization::Format(
                 L"settings.general.log_output_path",
                 {{L"PATH", AppLogPath(AppLogKind::Crash).parent_path().wstring()}}));
+            const auto logStatus = diagnostic_log::Inspect(g_workspaceRoot);
+            addLabel(localization::Format(
+                L"settings.general.log_capacity",
+                {{L"BYTES", logStatus.available ? std::to_wstring(logStatus.bytes) : L"?"},
+                 {L"STATE", localization::Text(!logStatus.available ? L"settings.general.log_capacity_unavailable"
+                    : logStatus.stopped ? L"settings.general.log_capacity_stopped"
+                                        : L"settings.general.log_capacity_available")}}));
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.3b1738001136").c_str(),
                                              defaultDebugPreviewTraceLabel));
             ctx->chkDebugLogPreviewTrace = addCheck(IDC_DEBUG_LOG_PREVIEW_TRACE,
@@ -1470,6 +1481,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             return 0;
         }
         if (id == IDC_LAYOUT_DEFAULT_SAVE) {
+            const WorkspaceConfig previousConfig = g_config;
             g_config.defaultLeftWidth = g_leftWidth;
             g_config.defaultRightWidth = g_rightWidth;
             g_config.defaultTopHeight = g_topHeight;
@@ -1492,7 +1504,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 g_config.defaultWindowWidth = windowW;
                 g_config.defaultWindowHeight = windowH;
             }
-            PersistConfig();
+            if (!TryPersistConfig()) {
+                g_config = previousConfig;
+                return 0;
+            }
             if (ctx->lblLayoutDefaults) {
                 std::wstring label = localization::Format(L"settings.general.layout_defaults", {{L"VALUE", LayoutDefaultsLabelText()}});
                 SetWindowTextW(ctx->lblLayoutDefaults, label.c_str());
@@ -1501,7 +1516,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         }
         if (id == IDOK) {
             if (!ctx->embedded) {
-                ApplyGeneralSettings(ctx);
+                if (!ApplyGeneralSettings(ctx)) return 0;
                 ApplyThemeToDialog(hWnd);
                 ctx->ok = true;
                 ShowSoftNotice(hWnd, localization::Text(L"settings.general.fca7cf56577e").c_str());

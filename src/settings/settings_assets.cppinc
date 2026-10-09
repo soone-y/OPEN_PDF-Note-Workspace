@@ -6,11 +6,17 @@ namespace {
 constexpr int IDC_SETTINGS_ASSETS_LIST = 7130;
 constexpr int IDC_SETTINGS_ASSETS_REFRESH = 7131;
 constexpr int IDC_SETTINGS_ASSETS_PREVIEW = 7132;
-constexpr int IDC_SETTINGS_ASSETS_WORKSPACE_MEMO = 7133;
-constexpr int IDC_SETTINGS_ASSETS_PRESET_SAVE = 7134;
-constexpr int IDC_SETTINGS_ASSETS_PRESET_LOAD = 7135;
+constexpr int IDC_SETTINGS_ASSETS_DETAILS = 7136;
+constexpr int IDC_SETTINGS_ASSETS_CLOSE = 7137;
+// SettingsAssetsPageProc owns timer 7140 (cooldown + completed-result display
+// only). Controls 7130-7139 and 7141 belong only to this window. No timer I/O.
+constexpr UINT_PTR kSettingsAssetsCooldownTimerId = 7140;
+constexpr int IDC_SETTINGS_ASSETS_USAGE = 7141;
+// Removed action IDs 7133-7135 stay unused.
+static HWND settingsAssetsWindow = nullptr;
 constexpr int IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE = 7138;
 constexpr int IDC_SETTINGS_ASSETS_COPY_PATH = 7139;
+static_assert(kSettingsAssetsCooldownTimerId > IDC_SETTINGS_ASSETS_COPY_PATH);
 
 struct SettingsAssetEntry {
     std::wstring label;
@@ -20,49 +26,206 @@ struct SettingsAssetEntry {
     bool expectedDirectory = false;
     bool fileNameOnly = false;
     std::wstring displayPath = {};
+    std::error_code checkError = {};
+    bool themeFile = false;
+    std::wstring checkedAt = {};
+    bool hasPrevious = false;
+    bool newlyObserved = false;
+    bool previousExists = false;
+    bool previousDirectory = false;
+    std::error_code previousError = {};
+    std::wstring previousCheckedAt = {};
+    int usageArea = -1;
+    bool hasUsage = false, hasPreviousUsage = false;
+    artifact_usage::Totals usage{}, previousUsage{};
+    std::wstring usageCheckedAt = {}, previousUsageCheckedAt = {};
 };
 
+// UI-thread-owned cache/throttle survive closing this window. Restart resets
+// both. Opening during cooldown displays the last confirmed snapshot.
+static std::vector<SettingsAssetEntry> settingsAssetsCachedEntries;
+static std::wstring settingsAssetsCachedRoot;
+static std::wstring settingsAssetsCachedCheckedAt;
+static ULONGLONG settingsAssetsNextRefresh = 0;
+static bool settingsAssetsRefreshing = false;
+// The worker owns only a captured workspace and its result; it never sees HWND,
+// UI context or mutable globals. An acquire/release done flag publishes once.
+// Closing cancels without waiting for I/O; the captured shared owner survives.
+struct SettingsAssetsUsageJob {
+    std::filesystem::path workspace;
+    std::atomic_bool cancel{false}, done{false};
+    artifact_usage::Result result;
+};
+static std::shared_ptr<SettingsAssetsUsageJob> settingsAssetsUsageJob;
+static ULONGLONG settingsAssetsNextUsage = 0;
+
 struct SettingsAssetsCtx {
+    HWND header = nullptr;
+    HWND btnDetails = nullptr;
+    HWND btnClose = nullptr;
+    bool callerOwns = true;
     HWND list = nullptr;
     HWND btnRefresh = nullptr;
+    HWND btnUsage = nullptr;
     HWND btnCopyPath = nullptr;
     HWND btnPreview = nullptr;
-    HWND btnWorkspaceMemo = nullptr;
-    HWND btnPresetSave = nullptr;
-    HWND btnPresetLoad = nullptr;
     HWND preview = nullptr;
     HWND previewLabel = nullptr;
     bool previewVisible = false;
     std::vector<SettingsAssetEntry> entries;
+    std::wstring snapshotRoot;
+    std::wstring checkedAt;
+    std::wstring refreshText, headerText, usageButtonText;
+    bool refreshFailed = false;
+    bool usageLaunchFailed = false;
 };
 
-static int SettingsAssetsItemHeight(HWND hWnd) {
-    const int pad = ScaleY(hWnd, 7);
-    const int titleH = FontLineHeightPx(hWnd, g_hUIFont);
-    return std::max(ScaleY(hWnd, 58), titleH * 2 + pad * 5);
+static void LayoutSettingsAssets(HWND hWnd, SettingsAssetsCtx* ctx);
+static void ConsumeSettingsAssetsUsage(SettingsAssetsCtx* ctx);
+
+static std::wstring SettingsAssetUsageBytes(std::uint64_t bytes) {
+    const wchar_t* units[] = {L"B", L"KB", L"MB", L"GB", L"TB"};
+    double number = static_cast<double>(bytes); size_t unit = 0;
+    while (number >= 1000 && unit + 1 < std::size(units)) { number /= 1000; ++unit; }
+    wchar_t value[64]{};
+    std::swprintf(value, std::size(value), unit ? L"%.2f" : L"%.0f", number);
+    return localization::Format(L"settings.assets.usage_value", {{L"NUMBER", value}, {L"UNIT", units[unit]}});
+}
+static const wchar_t* SettingsAssetUsageStateId(artifact_usage::State state) {
+    switch (state) {
+    case artifact_usage::State::Complete: return L"settings.assets.usage_complete";
+    case artifact_usage::State::Partial: return L"settings.assets.usage_partial";
+    case artifact_usage::State::Canceled: return L"settings.assets.usage_canceled";
+    case artifact_usage::State::Limited: return L"settings.assets.usage_limited";
+    case artifact_usage::State::Missing: return L"settings.assets.usage_missing";
+    default: return L"settings.assets.usage_unavailable";
+    }
+}
+static std::wstring SettingsAssetUsageSize(const SettingsAssetEntry& entry) {
+    if (!entry.hasUsage) return L"—";
+    const auto state = entry.usage.state;
+    if (state == artifact_usage::State::Missing || state == artifact_usage::State::Unavailable)
+        return localization::Text(SettingsAssetUsageStateId(state));
+    const auto size = SettingsAssetUsageBytes(entry.usage.bytes);
+    return state == artifact_usage::State::Complete ? size :
+        localization::Format(L"settings.assets.usage_observed", {{L"SIZE", size}});
+}
+static std::wstring SettingsAssetUsageDelta(const SettingsAssetEntry& entry) {
+    if (!entry.hasUsage || !entry.hasPreviousUsage || entry.usage.state != artifact_usage::State::Complete ||
+        entry.previousUsage.state != artifact_usage::State::Complete) return L"—";
+    const bool grows = entry.usage.bytes >= entry.previousUsage.bytes;
+    const auto bytes = grows ? entry.usage.bytes - entry.previousUsage.bytes : entry.previousUsage.bytes - entry.usage.bytes;
+    return localization::Format(L"settings.assets.usage_delta_value",
+        {{L"SIGN", bytes ? (grows ? L"+" : L"−") : L""}, {L"SIZE", SettingsAssetUsageBytes(bytes)}});
+}
+static std::wstring SettingsAssetUsageTime(std::uint64_t value) {
+    FILETIME utc{static_cast<DWORD>(value), static_cast<DWORD>(value >> 32)}, local{};
+    SYSTEMTIME time{};
+    if (!value || !FileTimeToLocalFileTime(&utc, &local) || !FileTimeToSystemTime(&local, &time)) return L"—";
+    wchar_t text[32]{};
+    std::swprintf(text, std::size(text), L"%04d-%02d-%02d %02d:%02d:%02d",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond);
+    return text;
 }
 
-static HFONT SettingsAssetsPathFont(HWND hWnd) {
-    static HFONT cachedFont = nullptr;
-    static HFONT cachedSource = nullptr;
-    static int cachedDpi = 0;
-    const int dpi = GetDpiY(hWnd);
-    if (cachedFont && cachedSource == g_hUIFont && cachedDpi == dpi) return cachedFont;
-    if (cachedFont) {
-        DeleteObject(cachedFont);
-        cachedFont = nullptr;
+static const wchar_t* SettingsAssetStatusId(const SettingsAssetEntry& entry) {
+    if (entry.path.empty()) return L"settings.assets.no_target";
+    if (entry.checkError) return L"checks.check_failure";
+    return entry.exists ? L"settings.assets.present" : L"settings.assets.missing";
+}
+
+[[nodiscard]] static const wchar_t* SettingsAssetChangeId(const SettingsAssetEntry& entry) {
+    if (!entry.hasPrevious) return entry.newlyObserved && entry.exists && !entry.checkError
+        ? L"settings.assets.change_new" : L"settings.assets.change_no_previous";
+    if (entry.path.empty()) return L"settings.assets.change_no_previous";
+    if (entry.checkError || entry.previousError) return L"settings.assets.change_unknown";
+    if (entry.previousExists && !entry.exists) return L"settings.assets.change_missing";
+    if (!entry.previousExists && entry.exists) return L"settings.assets.change_present";
+    if (entry.exists && entry.previousDirectory != entry.directory) return L"settings.assets.change_type";
+    return L"settings.assets.change_same";
+}
+
+[[nodiscard]] static std::wstring SettingsAssetCheckTime() {
+    SYSTEMTIME time{}; GetLocalTime(&time);
+    wchar_t text[32]{};
+    if (std::swprintf(text, std::size(text), L"%04d-%02d-%02d %02d:%02d:%02d",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond) < 0) return {};
+    return text;
+}
+
+[[nodiscard]] static bool SameSettingsAssetPath(const std::filesystem::path& left, const std::filesystem::path& right) {
+    return _wcsicmp(left.c_str(), right.c_str()) == 0;
+}
+
+// Compare only completed snapshots of the same workspace. This is memory-only
+// UI state: failed inspections are unknown, not proof of disappearance.
+static void CompareSettingsAssets(std::vector<SettingsAssetEntry>& entries,
+    const std::vector<SettingsAssetEntry>* previous, const std::wstring& checkedAt) {
+    for (auto& entry : entries) {
+        entry.checkedAt = checkedAt;
+        if (!previous) continue;
+        const auto found = std::find_if(previous->begin(), previous->end(), [&](const auto& old) {
+            return SameSettingsAssetPath(old.path, entry.path);
+        });
+        if (found == previous->end()) { entry.newlyObserved = true; continue; }
+        entry.hasPrevious = true;
+        entry.previousExists = found->exists;
+        entry.previousDirectory = found->directory;
+        entry.previousError = found->checkError;
+        entry.previousCheckedAt = found->checkedAt;
+        // Presence refresh never runs a recursive size scan, nor silently makes
+        // an old size current. Keep its distinct measurement timestamp.
+        entry.hasUsage = found->hasUsage; entry.usage = found->usage;
+        entry.usageCheckedAt = found->usageCheckedAt;
+        entry.hasPreviousUsage = found->hasPreviousUsage; entry.previousUsage = found->previousUsage;
+        entry.previousUsageCheckedAt = found->previousUsageCheckedAt;
     }
-    cachedSource = g_hUIFont;
-    cachedDpi = dpi;
-    LOGFONTW lf{};
-    if (!g_hUIFont || GetObjectW(g_hUIFont, sizeof(lf), &lf) != sizeof(lf)) return nullptr;
-    if (lf.lfHeight < 0) {
-        lf.lfHeight = -std::max(1, MulDiv(-lf.lfHeight, 90, 100));
-    } else if (lf.lfHeight > 0) {
-        lf.lfHeight = std::max(1, MulDiv(lf.lfHeight, 90, 100));
+}
+
+static void UpdateSettingsAssetRefreshUi(SettingsAssetsCtx* ctx) try {
+    if (!ctx) return;
+    ConsumeSettingsAssetsUsage(ctx); // Memory-only completion, never filesystem I/O.
+    const auto now = GetTickCount64();
+    const auto remaining = settingsAssetsNextRefresh > now ? settingsAssetsNextRefresh - now : 0;
+    const auto button = remaining ? localization::Format(L"settings.assets.cooldown",
+        {{L"SECONDS", std::to_wstring((remaining + 999) / 1000)}}) : localization::Text(L"settings.assets.refresh");
+    if (button != ctx->refreshText) { SetWindowTextW(ctx->btnRefresh, button.c_str()); ctx->refreshText = button; }
+    EnableWindow(ctx->btnRefresh, !remaining && !settingsAssetsRefreshing);
+    const bool usageBusy = settingsAssetsUsageJob != nullptr;
+    const auto usageRemaining = settingsAssetsNextUsage > now ? settingsAssetsNextUsage - now : 0;
+    const auto usageLabel = usageBusy ? localization::Text(settingsAssetsUsageJob->cancel.load()
+        ? L"settings.assets.usage_canceling" : L"settings.assets.usage_cancel") :
+        usageRemaining ? localization::Format(L"settings.assets.usage_cooldown",
+            {{L"SECONDS", std::to_wstring((usageRemaining + 999) / 1000)}}) : localization::Text(L"settings.assets.usage_measure");
+    if (usageLabel != ctx->usageButtonText) {
+        SetWindowTextW(ctx->btnUsage, usageLabel.c_str()); ctx->usageButtonText = usageLabel;
     }
-    cachedFont = CreateFontIndirectW(&lf);
-    return cachedFont;
+    EnableWindow(ctx->btnUsage, usageBusy ? !settingsAssetsUsageJob->cancel.load() :
+        !usageRemaining && !ctx->snapshotRoot.empty() && ctx->snapshotRoot == g_workspaceRoot);
+    auto header = localization::Text(L"settings.assets.description");
+    header += L"\n" + localization::Format(L"settings.assets.checked_at", {{L"TIME",
+        ctx->checkedAt.empty() ? localization::Text(L"checks.no_record") : ctx->checkedAt}});
+    if (ctx->snapshotRoot != g_workspaceRoot) header += L"\n" + localization::Text(L"settings.assets.target_changed");
+    if (ctx->refreshFailed) header += L"\n" + localization::Text(L"settings.assets.refresh_failed");
+    const auto usage = std::find_if(ctx->entries.begin(), ctx->entries.end(), [](const auto& entry) {
+        return entry.usageArea == static_cast<int>(artifact_usage::Area::All) && entry.hasUsage;
+    });
+    if (usage != ctx->entries.end()) header += L"\n" + localization::Format(L"settings.assets.usage_checked_at",
+        {{L"TIME", usage->usageCheckedAt}}) + L" / " + localization::Text(SettingsAssetUsageStateId(usage->usage.state));
+    if (usageBusy) header += L"\n" + localization::Text(L"settings.assets.usage_running");
+    if (ctx->usageLaunchFailed) header += L"\n" + localization::Text(L"settings.assets.usage_launch_failed");
+    if (header != ctx->headerText) {
+        SetWindowTextW(ctx->header, header.c_str()); ctx->headerText = std::move(header);
+        LayoutSettingsAssets(GetParent(ctx->header), ctx);
+    }
+} catch (...) {
+    // Allocation/display failures must not escape the timer/worker-completion
+    // boundary. Retain the measured snapshot and report on the next update.
+    if (ctx) ctx->usageLaunchFailed = true;
+}
+
+static int SelectedSettingsAsset(const SettingsAssetsCtx* ctx) {
+    return ctx && ctx->list ? ListView_GetNextItem(ctx->list, -1, LVNI_SELECTED) : -1;
 }
 
 static bool CopySettingsAssetPathToClipboard(HWND owner, const std::wstring& path) {
@@ -90,13 +253,22 @@ static bool CopySettingsAssetPathToClipboard(HWND owner, const std::wstring& pat
     return true;
 }
 
+static std::wstring SettingsAssetReadError(const std::error_code& error) {
+    return localization::Text(L"settings.assets.preview_read_failed") + L"\r\n" +
+        std::to_wstring(error.value()) + L": " + UTF8ToWide(error.message());
+}
+
+// Read-only, UI-thread-owned preview. Bound the read itself (the file can grow
+// after size inspection), preserve failures, and never write back to the asset.
 static std::wstring SettingsAssetPreviewText(const SettingsAssetEntry& entry) {
     if (entry.path.empty()) return localization::Text(L"settings.assets.preview_no_target");
     std::error_code ec;
-    if (!std::filesystem::exists(entry.path, ec) || ec) {
+    const auto status = std::filesystem::status(entry.path, ec);
+    if (ec == std::errc::no_such_file_or_directory || (!ec && status.type() == std::filesystem::file_type::not_found)) {
         return localization::Text(L"settings.assets.preview_missing");
     }
-    if (std::filesystem::is_directory(entry.path, ec) && !ec) {
+    if (ec) return SettingsAssetReadError(ec);
+    if (status.type() == std::filesystem::file_type::directory) {
         std::vector<std::wstring> names;
         for (std::filesystem::directory_iterator it(entry.path, ec), end; !ec && it != end; it.increment(ec)) {
             names.push_back(it->path().filename().wstring());
@@ -105,14 +277,29 @@ static std::wstring SettingsAssetPreviewText(const SettingsAssetEntry& entry) {
         std::sort(names.begin(), names.end());
         std::wstring text = localization::Text(L"settings.assets.preview_directory") + L"\r\n";
         for (const auto& name : names) text += name + L"\r\n";
-        if (ec) text += localization::Text(L"settings.assets.preview_read_failed");
+        if (ec) text += SettingsAssetReadError(ec);
         return text;
     }
+    if (status.type() != std::filesystem::file_type::regular)
+        return SettingsAssetReadError(std::make_error_code(std::errc::invalid_argument));
+    constexpr DWORD maxBytes = 2 * 1024 * 1024;
     const auto bytes = std::filesystem::file_size(entry.path, ec);
-    if (ec || bytes > 2 * 1024 * 1024) return localization::Text(L"settings.assets.preview_too_large");
-    std::ifstream stream(entry.path, std::ios::binary);
-    if (!stream) return localization::Text(L"settings.assets.preview_read_failed");
-    std::string utf8((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    if (ec) return SettingsAssetReadError(ec);
+    if (bytes > maxBytes) return localization::Text(L"settings.assets.preview_too_large");
+    const HANDLE file = CreateFileW(ToExtendedWin32PathIfAbsoluteLocal(entry.path).c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return SettingsAssetReadError({static_cast<int>(GetLastError()), std::system_category()});
+    struct ClosePreview { HANDLE file; ~ClosePreview() { CloseHandle(file); } } close{file};
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(file, &info)) return SettingsAssetReadError({static_cast<int>(GetLastError()), std::system_category()});
+    if (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+        return SettingsAssetReadError(std::make_error_code(std::errc::invalid_argument));
+    std::string utf8(maxBytes + 1, '\0'); DWORD read = 0;
+    if (!ReadFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &read, nullptr))
+        return SettingsAssetReadError({static_cast<int>(GetLastError()), std::system_category()});
+    if (read > maxBytes) return localization::Text(L"settings.assets.preview_too_large");
+    if (read != bytes) return SettingsAssetReadError(std::make_error_code(std::errc::io_error));
+    utf8.resize(read);
     return UTF8ToWide(utf8);
 }
 
@@ -134,13 +321,13 @@ static bool OpenSettingsAssetDirectory(HWND owner, const SettingsAssetEntry& ent
 
 static void UpdateSettingsAssetPreviewUi(SettingsAssetsCtx* ctx, bool loadContent) {
     if (!ctx || !ctx->list || !ctx->preview || !ctx->btnPreview || !ctx->btnCopyPath || !ctx->previewLabel) return;
-    const int selected = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
-    if (selected == LB_ERR) {
+    const int selected = SelectedSettingsAsset(ctx);
+    if (selected < 0) {
         EnableWindow(ctx->btnPreview, FALSE);
         EnableWindow(ctx->btnCopyPath, FALSE);
         return;
     }
-    const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, selected, 0));
+    const auto index = static_cast<size_t>(selected);
     if (index >= ctx->entries.size()) return;
     const auto& entry = ctx->entries[index];
     const bool directory = entry.directory;
@@ -151,7 +338,8 @@ static void UpdateSettingsAssetPreviewUi(SettingsAssetsCtx* ctx, bool loadConten
     EnableWindow(ctx->btnPreview, entry.exists ? TRUE : FALSE);
     EnableWindow(ctx->btnCopyPath, entry.path.empty() ? FALSE : TRUE);
     if (loadContent) {
-        SetWindowTextW(ctx->preview, SettingsAssetPreviewText(entry).c_str());
+        try { SetWindowTextW(ctx->preview, SettingsAssetPreviewText(entry).c_str()); }
+        catch (...) { SetWindowTextW(ctx->preview, localization::Text(L"settings.assets.preview_read_failed").c_str()); }
         SendMessageW(ctx->preview, EM_SETSEL, 0, 0);
     } else if (ctx->previewVisible) {
         SetWindowTextW(ctx->preview, L"");
@@ -171,11 +359,11 @@ static std::filesystem::path SettingsAssetsExecutableDirectory() {
     }
 }
 
-static void RefreshSettingsAssetEntries(SettingsAssetsCtx* ctx) {
+static void InspectSettingsAssetEntries(SettingsAssetsCtx* ctx, const std::filesystem::path& root,
+    const std::vector<SettingsAssetEntry>* previous) {
     if (!ctx) return;
     const std::filesystem::path exeDir = SettingsAssetsExecutableDirectory();
-    const std::filesystem::path root(g_workspaceRoot);
-    const std::filesystem::path resource = root.empty() ? std::filesystem::path{} : root / L"__resource__";
+    const std::filesystem::path resource = root.empty() ? std::filesystem::path{} : root / L"__pdf_note_workspace__";
     const std::filesystem::path setup = exeDir.empty() ? std::filesystem::path{} : exeDir / L"pdf_note_workspace_setup.json";
     const std::filesystem::path settings = resource.empty() ? std::filesystem::path{} : resource / L"__settings__";
     const std::filesystem::path themes = resource.empty() ? std::filesystem::path{} : resource / L"__theme__";
@@ -200,292 +388,409 @@ static void RefreshSettingsAssetEntries(SettingsAssetsCtx* ctx) {
         { localization::Text(L"settings.assets.theme_directory"), themes, false, false, true },
         { localization::Text(L"settings.assets.theme_catalog"), themeCatalog },
     };
+    std::error_code themeError, themeEntryError;
     if (!themes.empty()) {
-        std::error_code ec;
-        for (std::filesystem::directory_iterator it(themes, ec), end; !ec && it != end; it.increment(ec)) {
-            std::error_code typeError;
-            if (!it->is_regular_file(typeError) || typeError) continue;
+        for (std::filesystem::directory_iterator it(themes, themeError), end; !themeError && it != end; it.increment(themeError)) {
             const auto path = it->path();
             const std::wstring filename = path.filename().wstring();
             if (_wcsnicmp(filename.c_str(), L"theme_", 6) != 0 || _wcsicmp(path.extension().c_str(), L".json") != 0) continue;
-            ctx->entries.push_back({ localization::Text(L"settings.assets.theme_file") + L": " + filename, path });
+            std::error_code typeError;
+            const bool regular = it->is_regular_file(typeError);
+            if (!regular && !typeError) continue;
+            if (typeError && !themeEntryError) themeEntryError = typeError;
+            ctx->entries.push_back({ localization::Text(L"settings.assets.theme_file") + L": " + filename,
+                path, false, false, false, false, {}, typeError });
+            ctx->entries.back().themeFile = true;
         }
     }
+    // Enumeration alone cannot prove a remembered theme disappeared. Retain
+    // its path and inspect it below, even if enumeration failed or it is gone.
+    // Keep remembered themes through repeated missing results while this
+    // workspace remains selected; switching workspace or restarting resets it.
+    if (previous) for (const auto& old : *previous) {
+        if (!old.themeFile || std::any_of(ctx->entries.begin(), ctx->entries.end(), [&](const auto& entry) {
+            return SameSettingsAssetPath(entry.path, old.path);
+        })) continue;
+        SettingsAssetEntry remembered;
+        remembered.label = old.label; remembered.path = old.path; remembered.themeFile = true;
+        ctx->entries.push_back(std::move(remembered));
+    }
     // Keep individual theme files with their directory and catalog; the app
-    // installation paths are a separate, final group.
+    // installation paths are a separate group before the capacity categories.
     ctx->entries.push_back({ localization::Text(L"settings.assets.executable_directory"), exeDir, false, false, true });
     ctx->entries.push_back({ localization::Text(L"settings.assets.setup"), setup });
-    for (auto& entry : ctx->entries) {
-        // New memo entries show filenames only (path-display contract exception).
-        // Explicit Copy path keeps the original complete path, not this display.
-        entry.displayPath = entry.fileNameOnly ? entry.path.filename().wstring() : entry.path.wstring();
-        std::error_code ec;
-        entry.exists = !entry.path.empty() && std::filesystem::exists(entry.path, ec) && !ec;
-        entry.directory = entry.exists
-            ? (std::filesystem::is_directory(entry.path, ec) && !ec)
-            : entry.expectedDirectory;
+    // Capacity categories follow the existing presence rows.
+    const std::vector<SettingsAssetEntry> usageRows = {
+        { localization::Text(L"settings.assets.usage_logs"), resource.empty() ? std::filesystem::path{} : resource / L"__log__", false, false, true },
+        { localization::Text(L"settings.assets.usage_temporary"), resource.empty() ? std::filesystem::path{} : resource / L"__tmp__", false, false, true },
+        { localization::Text(L"settings.assets.usage_recovery"), resource.empty() ? std::filesystem::path{} : resource / L"__escape__", false, false, true },
+        { localization::Text(L"settings.assets.usage_backups"), resource.empty() ? std::filesystem::path{} : resource / L"__escape__" / L"backup", false, false, true },
+        { localization::Text(L"settings.assets.usage_operations"), resource.empty() ? std::filesystem::path{} : resource / L"__escape__" / L"operation_transactions", false, false, true },
+    };
+    ctx->entries.insert(ctx->entries.end(), usageRows.begin(), usageRows.end());
+    if (!resource.empty()) {
+        const std::array<std::filesystem::path, artifact_usage::kAreaCount> usagePaths = {resource,
+            resource / L"__log__", resource / L"__tmp__", resource / L"__escape__",
+            resource / L"__escape__" / L"backup", resource / L"__escape__" / L"operation_transactions",
+            resource / L"__memo__" / L"backups"};
+        for (auto& entry : ctx->entries) for (size_t i = 0; i < usagePaths.size(); ++i)
+            if (SameSettingsAssetPath(entry.path, usagePaths[i])) entry.usageArea = static_cast<int>(i);
     }
+    for (auto& entry : ctx->entries) {
+        // List rows show folder/file names only. Details and explicit Copy path
+        // keep the original complete path (read-only path-display contract).
+        auto display = entry.path;
+        while (display.has_relative_path() && display.filename().empty()) display = display.parent_path();
+        entry.displayPath = display.filename().empty() ? display.root_path().wstring() : display.filename().wstring();
+        std::error_code ec;
+        entry.directory = entry.expectedDirectory;
+        if (entry.path.empty()) continue;
+        const auto status = std::filesystem::status(entry.path, ec);
+        const bool missing = ec == std::errc::no_such_file_or_directory ||
+            (!ec && status.type() == std::filesystem::file_type::not_found);
+        if (missing) ec.clear(); // Confirmed absence, not an inspection error.
+        if (ec) entry.checkError = ec;
+        if (!ec) {
+            if (!missing && (status.type() == std::filesystem::file_type::unknown || status.type() == std::filesystem::file_type::none))
+                entry.checkError = std::make_error_code(std::errc::io_error);
+            else entry.exists = !missing;
+            if (entry.exists) entry.directory = status.type() == std::filesystem::file_type::directory;
+        }
+        if (entry.path == themes && themeError && themeError != std::errc::no_such_file_or_directory)
+            entry.checkError = themeError; // An incomplete theme listing is not a successful presence check.
+        else if (entry.path == themes && themeEntryError) entry.checkError = themeEntryError;
+    }
+}
 
+static void FillSettingsAssetList(SettingsAssetsCtx* ctx) {
     if (!ctx->list) return;
-    SendMessageW(ctx->list, LB_RESETCONTENT, 0, 0);
-    SendMessageW(ctx->list, LB_SETITEMHEIGHT, 0, SettingsAssetsItemHeight(ctx->list));
-    int widestRow = 0;
-    HDC dc = GetDC(ctx->list);
-    HGDIOBJ oldFont = (dc && g_hUIFont) ? SelectObject(dc, g_hUIFont) : nullptr;
+    ListView_DeleteAllItems(ctx->list);
     for (size_t i = 0; i < ctx->entries.size(); ++i) {
-        const auto& entry = ctx->entries[i];
-        const std::wstring status = localization::Text(entry.exists
-            ? L"settings.assets.present" : L"settings.assets.missing");
-        const std::wstring row = entry.label + L" — " + status + L" — " + entry.displayPath;
-        const int index = static_cast<int>(SendMessageW(ctx->list, LB_ADDSTRING, 0,
-                                                         reinterpret_cast<LPARAM>(row.c_str())));
-        if (index >= 0) SendMessageW(ctx->list, LB_SETITEMDATA, index, static_cast<LPARAM>(i));
-        if (dc) {
-            SIZE measured{};
-            if (GetTextExtentPoint32W(dc, row.c_str(), static_cast<int>(row.size()), &measured)) {
-                widestRow = std::max(widestRow, static_cast<int>(measured.cx));
+        auto& entry = ctx->entries[i];
+        LVITEMW item{}; item.mask = LVIF_TEXT; item.iItem = static_cast<int>(i); item.pszText = entry.label.data();
+        ListView_InsertItem(ctx->list, &item);
+        auto status = localization::Text(SettingsAssetStatusId(entry));
+        auto type = localization::Text(entry.directory ? L"settings.assets.type_directory" : L"settings.assets.type_file");
+        auto change = localization::Text(SettingsAssetChangeId(entry));
+        ListView_SetItemText(ctx->list, item.iItem, 1, status.data());
+        ListView_SetItemText(ctx->list, item.iItem, 2, change.data());
+        ListView_SetItemText(ctx->list, item.iItem, 3, type.data());
+        ListView_SetItemText(ctx->list, item.iItem, 4, entry.displayPath.data());
+        auto size = SettingsAssetUsageSize(entry);
+        auto files = entry.hasUsage && entry.usage.state != artifact_usage::State::Unavailable &&
+            entry.usage.state != artifact_usage::State::Missing ? std::to_wstring(entry.usage.files) : std::wstring(L"—");
+        auto delta = SettingsAssetUsageDelta(entry);
+        ListView_SetItemText(ctx->list, item.iItem, 5, size.data());
+        ListView_SetItemText(ctx->list, item.iItem, 6, files.data());
+        ListView_SetItemText(ctx->list, item.iItem, 7, delta.data());
+    }
+    if (!ctx->entries.empty()) ListView_SetItemState(ctx->list, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    UpdateSettingsAssetPreviewUi(ctx, false);
+}
+
+static void ConsumeSettingsAssetsUsage(SettingsAssetsCtx* ctx) {
+    if (!ctx || !settingsAssetsUsageJob || !settingsAssetsUsageJob->done.load(std::memory_order_acquire)) return;
+    auto job = std::move(settingsAssetsUsageJob);
+    settingsAssetsNextUsage = GetTickCount64() + 10000;
+    if (!SameSettingsAssetPath(job->workspace, std::filesystem::path(ctx->snapshotRoot))) return;
+    try {
+        auto updated = ctx->entries;
+        const auto time = SettingsAssetUsageTime(job->result.checkedAt);
+        for (auto& entry : updated) {
+            if (entry.usageArea < 0 || static_cast<size_t>(entry.usageArea) >= artifact_usage::kAreaCount) continue;
+            entry.hasPreviousUsage = entry.hasUsage; entry.previousUsage = entry.usage;
+            entry.previousUsageCheckedAt = entry.usageCheckedAt;
+            entry.usage = job->result.areas[static_cast<size_t>(entry.usageArea)];
+            entry.hasUsage = true; entry.usageCheckedAt = time;
+        }
+        auto cached = updated;
+        const int selected = SelectedSettingsAsset(ctx);
+        ctx->entries = std::move(updated);
+        if (SameSettingsAssetPath(job->workspace, std::filesystem::path(settingsAssetsCachedRoot)))
+            settingsAssetsCachedEntries = std::move(cached);
+        FillSettingsAssetList(ctx);
+        if (selected >= 0 && static_cast<size_t>(selected) < ctx->entries.size()) {
+            ListView_SetItemState(ctx->list, 0, 0, LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_SetItemState(ctx->list, selected, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        }
+    } catch (...) { ctx->usageLaunchFailed = true; } // Last measurements stay available.
+}
+
+static unsigned __stdcall RunSettingsAssetsUsage(void* argument) {
+    std::unique_ptr<std::shared_ptr<SettingsAssetsUsageJob>> payload(
+        static_cast<std::shared_ptr<SettingsAssetsUsageJob>*>(argument));
+    const auto job = *payload;
+    job->result = artifact_usage::Scan(job->workspace, job->cancel);
+    job->done.store(true, std::memory_order_release);
+    return 0;
+}
+static void StartSettingsAssetsUsage(SettingsAssetsCtx* ctx) {
+    if (!ctx) return;
+    ConsumeSettingsAssetsUsage(ctx);
+    if (settingsAssetsUsageJob) {
+        settingsAssetsUsageJob->cancel.store(true); UpdateSettingsAssetRefreshUi(ctx); return;
+    }
+    if (ctx->snapshotRoot.empty() || ctx->snapshotRoot != g_workspaceRoot || GetTickCount64() < settingsAssetsNextUsage) return;
+    try {
+        auto job = std::make_shared<SettingsAssetsUsageJob>(); job->workspace = ctx->snapshotRoot;
+        auto payload = std::make_unique<std::shared_ptr<SettingsAssetsUsageJob>>(job);
+        const auto thread = _beginthreadex(nullptr, 0, RunSettingsAssetsUsage, payload.get(), 0, nullptr);
+        if (!thread) { ctx->usageLaunchFailed = true; }
+        else {
+            (void)payload.release(); CloseHandle(reinterpret_cast<HANDLE>(thread));
+            settingsAssetsUsageJob = std::move(job); ctx->usageLaunchFailed = false;
+        }
+    } catch (...) { ctx->usageLaunchFailed = true; }
+    UpdateSettingsAssetRefreshUi(ctx);
+}
+
+static void RefreshSettingsAssetEntries(SettingsAssetsCtx* ctx) {
+    if (!ctx) return;
+    if (settingsAssetsRefreshing || GetTickCount64() < settingsAssetsNextRefresh) {
+        if (ctx->entries.empty()) {
+            try {
+                auto entries = settingsAssetsCachedEntries;
+                auto root = settingsAssetsCachedRoot;
+                auto checkedAt = settingsAssetsCachedCheckedAt;
+                ctx->entries = std::move(entries); ctx->snapshotRoot = std::move(root); ctx->checkedAt = std::move(checkedAt);
+                FillSettingsAssetList(ctx);
+            } catch (...) { ctx->refreshFailed = true; }
+        }
+        UpdateSettingsAssetRefreshUi(ctx);
+        return;
+    }
+    {
+        settingsAssetsRefreshing = true;
+        struct Finish {
+            ~Finish() { settingsAssetsRefreshing = false; settingsAssetsNextRefresh = GetTickCount64() + 10000; }
+        } finish;
+        try {
+            SettingsAssetsCtx snapshot;
+            std::wstring root = g_workspaceRoot, cachedRoot = root;
+            const auto* previous = settingsAssetsCachedRoot == root && !settingsAssetsCachedEntries.empty()
+                ? &settingsAssetsCachedEntries : nullptr;
+            InspectSettingsAssetEntries(&snapshot, std::filesystem::path(root), previous);
+            std::wstring checkedAt = SettingsAssetCheckTime(), cachedCheckedAt = checkedAt;
+            CompareSettingsAssets(snapshot.entries, previous, checkedAt);
+            auto cached = snapshot.entries; // Prepare both snapshots before replacing the previous result.
+            ctx->entries = std::move(snapshot.entries); ctx->snapshotRoot = std::move(root); ctx->checkedAt = std::move(checkedAt);
+            settingsAssetsCachedEntries = std::move(cached); settingsAssetsCachedRoot = std::move(cachedRoot);
+            settingsAssetsCachedCheckedAt = std::move(cachedCheckedAt);
+            ctx->refreshFailed = false;
+        } catch (...) { ctx->refreshFailed = true; } // Keep the last confirmed entries.
+    }
+    FillSettingsAssetList(ctx);
+    UpdateSettingsAssetRefreshUi(ctx);
+}
+
+static void ShowSettingsAssetDetails(HWND owner, SettingsAssetsCtx* ctx) {
+    const int selected = SelectedSettingsAsset(ctx);
+    if (selected < 0 || static_cast<size_t>(selected) >= ctx->entries.size()) return;
+    const auto& entry = ctx->entries[selected];
+    SilentDialogOptions options; options.title = entry.label;
+    options.message = localization::Text(L"dialog.details.status") + L"\n" +
+        localization::Text(SettingsAssetStatusId(entry)) +
+        L"\n\n" + localization::Text(L"dialog.details.paths");
+    if (!entry.path.empty()) options.paths.push_back({localization::Text(L"checks.target"), entry.path.wstring()});
+    else options.message += L"\n" + localization::Text(L"checks.no_target");
+    options.additionalInformation = localization::Text(L"dialog.details.additional_information") + L"\n" +
+        localization::Text(L"settings.assets.type") + L": " +
+        localization::Text(entry.directory ? L"settings.assets.type_directory" : L"settings.assets.type_file");
+    options.additionalInformation += L"\n" + localization::Format(L"settings.assets.checked_at", {{L"TIME",
+        entry.checkedAt.empty() ? localization::Text(L"checks.no_record") : entry.checkedAt}}) +
+        L"\n" + localization::Text(L"settings.assets.change") + L": " + localization::Text(SettingsAssetChangeId(entry));
+    if (entry.hasPrevious) {
+        SettingsAssetEntry old;
+        old.path = entry.path; old.exists = entry.previousExists; old.checkError = entry.previousError;
+        options.additionalInformation += L"\n" + localization::Format(L"settings.assets.previous_status",
+            {{L"STATUS", localization::Text(SettingsAssetStatusId(old))}}) + L"\n" +
+            localization::Format(L"settings.assets.previous_checked_at", {{L"TIME", entry.previousCheckedAt}});
+        if (entry.previousError) options.additionalInformation += L"\n" + std::to_wstring(entry.previousError.value()) +
+            L": " + UTF8ToWide(entry.previousError.message());
+    }
+    if (entry.checkError) options.additionalInformation += L"\n" + localization::Text(L"settings.assets.check_failed") +
+        L"\n" + std::to_wstring(entry.checkError.value()) + L": " + UTF8ToWide(entry.checkError.message());
+    if (entry.usageArea >= 0) {
+        options.additionalInformation += L"\n\n" + localization::Text(L"settings.assets.usage_size") + L": " + SettingsAssetUsageSize(entry);
+        if (entry.hasUsage) {
+            options.additionalInformation += L"\n" + localization::Text(SettingsAssetUsageStateId(entry.usage.state)) +
+                L"\n" + localization::Format(L"settings.assets.usage_details",
+                    {{L"BYTES", std::to_wstring(entry.usage.bytes)}, {L"FILES", std::to_wstring(entry.usage.files)},
+                     {L"SKIPPED", std::to_wstring(entry.usage.skipped)}, {L"TIME", entry.usageCheckedAt}});
+            if (entry.usage.error) options.additionalInformation += L"\n" + std::to_wstring(entry.usage.error) +
+                L": " + atomic_write::Win32ErrorMessage(entry.usage.error);
+            if (entry.hasPreviousUsage) options.additionalInformation += L"\n" + localization::Format(L"settings.assets.usage_previous",
+                {{L"TIME", entry.previousUsageCheckedAt}, {L"SIZE", SettingsAssetUsageBytes(entry.previousUsage.bytes)},
+                 {L"STATE", localization::Text(SettingsAssetUsageStateId(entry.previousUsage.state))},
+                 {L"DELTA", SettingsAssetUsageDelta(entry)}});
+        }
+        options.additionalInformation += L"\n" + localization::Text(L"settings.assets.usage_note");
+        if (entry.usageArea == static_cast<int>(artifact_usage::Area::Logs)) {
+            options.additionalInformation += L"\n" + localization::Text(L"settings.assets.usage_logs_note");
+            if (ctx->snapshotRoot == g_workspaceRoot) {
+                // The bounded logger inspects only five small metadata/tail records.
+                const auto log = diagnostic_log::Inspect(ctx->snapshotRoot);
+                options.additionalInformation += L"\n" + localization::Format(L"settings.general.log_capacity",
+                    {{L"BYTES", log.available ? std::to_wstring(log.bytes) : L"?"},
+                     {L"STATE", localization::Text(!log.available ? L"settings.general.log_capacity_unavailable"
+                        : log.stopped ? L"settings.general.log_capacity_stopped" : L"settings.general.log_capacity_available")}});
             }
         }
     }
-    if (dc && oldFont) SelectObject(dc, oldFont);
-    if (dc) ReleaseDC(ctx->list, dc);
-    SendMessageW(ctx->list, LB_SETHORIZONTALEXTENT, widestRow + ScaleY(ctx->list, 16), 0);
-    if (!ctx->entries.empty()) SendMessageW(ctx->list, LB_SETCURSEL, 0, 0);
-    UpdateSettingsAssetPreviewUi(ctx, false);
+    const auto ignored = ShowSilentDialog(owner, options); (void)ignored;
+}
+
+static void LayoutSettingsAssets(HWND hWnd, SettingsAssetsCtx* ctx) {
+    if (!ctx) return;
+    RECT rc{}; GetClientRect(hWnd, &rc);
+    const int pad = ScaleY(hWnd, 12), gap = ScaleY(hWnd, 8);
+    const int width = std::max(1, static_cast<int>(rc.right) - pad * 2);
+    const int buttonH = std::max(ScaleY(hWnd, 30), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
+    const int buttonW = std::max(1, (width - gap * 5) / 6);
+    const int footerY = static_cast<int>(rc.bottom) - pad - buttonH;
+    const int previewH = ctx->previewVisible ? std::max(ScaleY(hWnd, 140), static_cast<int>(rc.bottom) / 3) : 0;
+    const int labelH = FontLineHeightPx(hWnd, g_hUIFont) + gap;
+    const int headerH = std::max(ScaleY(hWnd, 60), MeasureTextHeight(hWnd, ctx->headerText, width, g_hUIFont));
+    const int listY = pad + headerH + gap;
+    const int listH = std::max(1, footerY - gap - listY - (ctx->previewVisible ? previewH + labelH + gap : 0));
+    MoveWindow(ctx->header, pad, pad, width, headerH, TRUE);
+    MoveWindow(ctx->list, pad, listY, width, listH, TRUE);
+    const std::array<HWND, 6> buttons = {ctx->btnDetails, ctx->btnRefresh, ctx->btnUsage, ctx->btnCopyPath, ctx->btnPreview, ctx->btnClose};
+    for (size_t i = 0; i < buttons.size(); ++i) {
+        const int x = pad + static_cast<int>(i) * (buttonW + gap);
+        MoveWindow(buttons[i], x, footerY, buttonW, buttonH, TRUE);
+    }
+    MoveWindow(ctx->previewLabel, pad, listY + listH + gap, width, labelH, TRUE);
+    MoveWindow(ctx->preview, pad, listY + listH + gap + labelH, width, previewH, TRUE);
+    ListView_SetColumnWidth(ctx->list, 0, ScaleY(hWnd, 205));
+    ListView_SetColumnWidth(ctx->list, 1, ScaleY(hWnd, 80));
+    ListView_SetColumnWidth(ctx->list, 2, ScaleY(hWnd, 120));
+    ListView_SetColumnWidth(ctx->list, 3, ScaleY(hWnd, 70));
+    ListView_SetColumnWidth(ctx->list, 4, std::max(ScaleY(hWnd, 130), width - ScaleY(hWnd, 875)));
+    ListView_SetColumnWidth(ctx->list, 5, ScaleY(hWnd, 170));
+    ListView_SetColumnWidth(ctx->list, 6, ScaleY(hWnd, 80));
+    ListView_SetColumnWidth(ctx->list, 7, ScaleY(hWnd, 150));
 }
 
 static LRESULT CALLBACK SettingsAssetsPageProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* ctx = reinterpret_cast<SettingsAssetsCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        ctx = static_cast<SettingsAssetsCtx*>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams);
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+    }
+    if (!ctx) return DefWindowProcW(hWnd, msg, wParam, lParam);
     switch (msg) {
     case WM_CREATE: {
-        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        ctx = reinterpret_cast<SettingsAssetsCtx*>(cs->lpCreateParams);
-        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
-        if (!ctx) return -1;
-        ctx->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
-                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_HSCROLL | LBS_NOTIFY |
-                                        WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
-                                    0, 0, 100, 100, hWnd,
-                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_ASSETS_LIST)),
-                                    g_hInst, nullptr);
-        ctx->btnRefresh = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.assets.refresh").c_str(),
-                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                          0, 0, 100, 28, hWnd,
-                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_ASSETS_REFRESH)),
-                                         g_hInst, nullptr);
-        const auto createButton = [&](int id, const wchar_t* labelId) {
-            return CreateWindowExW(0, L"BUTTON", localization::Text(labelId).c_str(),
-                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                   0, 0, 100, 28, hWnd,
-                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+        const auto create = [&](const wchar_t* cls, const wchar_t* title, DWORD style, int id) {
+            HWND child = CreateWindowExW(0, cls, title, WS_CHILD | style, 0, 0, 0, 0, hWnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+            SetUIFont(child); return child;
         };
-        ctx->btnPreview = createButton(IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE, L"settings.assets.show_file_contents");
-        ctx->btnCopyPath = createButton(IDC_SETTINGS_ASSETS_COPY_PATH, L"settings.assets.copy_path");
-        ctx->btnWorkspaceMemo = createButton(IDC_SETTINGS_ASSETS_WORKSPACE_MEMO, L"settings.assets.workspace_memo_open");
-        ctx->btnPresetSave = createButton(IDC_SETTINGS_ASSETS_PRESET_SAVE, L"settings.assets.preset_save");
-        ctx->btnPresetLoad = createButton(IDC_SETTINGS_ASSETS_PRESET_LOAD, L"settings.assets.preset_load");
-        ctx->previewLabel = CreateWindowExW(0, L"STATIC", L"",
-                                             WS_CHILD | SS_LEFT | SS_CENTERIMAGE,
-                                             0, 0, 100, 24, hWnd, nullptr, g_hInst, nullptr);
-        ctx->preview = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                                       WS_CHILD | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
-                                           ES_AUTOHSCROLL | ES_READONLY | WS_VSCROLL | WS_HSCROLL,
-                                       0, 0, 100, 100, hWnd,
-                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_ASSETS_PREVIEW)),
-                                       g_hInst, nullptr);
-        for (HWND child : {ctx->list, ctx->btnRefresh, ctx->btnCopyPath, ctx->btnPreview, ctx->btnWorkspaceMemo, ctx->btnPresetSave,
-                           ctx->btnPresetLoad, ctx->previewLabel, ctx->preview}) SetUIFont(child);
-        RefreshSettingsAssetEntries(ctx);
-        return 0;
-    }
-    case WM_SIZE: {
-        if (!ctx) return 0;
-        RECT rc{};
-        GetClientRect(hWnd, &rc);
-        const int width = std::max(0, static_cast<int>(rc.right - rc.left));
-        const int height = std::max(0, static_cast<int>(rc.bottom - rc.top));
-        const int pad = ScaleY(hWnd, 12);
-        const int gap = ScaleY(hWnd, 8);
-        const int buttonH = std::max(ScaleY(hWnd, 28), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
-        const int buttonW = std::max(ScaleY(hWnd, 108), (width - pad * 2 - gap * 3) / 4);
-        const int previewLabelH = FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 4);
-        const int previewH = ctx->previewVisible ? std::max(ScaleY(hWnd, 140), height / 3) : 0;
-        const int previewAreaH = ctx->previewVisible ? previewLabelH + gap + previewH + gap : 0;
-        const int listH = std::max(ScaleY(hWnd, 120), height - pad * 3 - buttonH * 2 - gap * 3 - previewAreaH);
-        if (ctx->list) SetWindowPos(ctx->list, nullptr, pad, pad, std::max(0, width - pad * 2), listH,
-                                    SWP_NOZORDER | SWP_NOACTIVATE);
-        const int buttonsY = pad + listH + gap;
-        const int secondButtonsY = buttonsY + buttonH + gap;
-        const std::array<HWND, 4> firstRow = {ctx->btnRefresh, ctx->btnCopyPath, ctx->btnPreview, ctx->btnWorkspaceMemo};
-        for (size_t i = 0; i < firstRow.size(); ++i) {
-            if (firstRow[i]) SetWindowPos(firstRow[i], nullptr, pad + static_cast<int>(i) * (buttonW + gap), buttonsY,
-                                           buttonW, buttonH, SWP_NOZORDER | SWP_NOACTIVATE);
+        const auto button = [&](int id, const wchar_t* label) {
+            return create(L"BUTTON", localization::Text(label).c_str(), WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, id);
+        };
+        ctx->header = create(L"STATIC", localization::Text(L"settings.assets.description").c_str(), WS_VISIBLE, 0);
+        ctx->list = create(WC_LISTVIEWW, L"", WS_VISIBLE | WS_TABSTOP | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, IDC_SETTINGS_ASSETS_LIST);
+        ListView_SetExtendedListViewStyle(ctx->list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        const wchar_t* columns[] = {L"checks.item", L"checks.result", L"settings.assets.change", L"settings.assets.type", L"checks.target",
+            L"settings.assets.usage_size", L"settings.assets.usage_files", L"settings.assets.usage_delta"};
+        for (int i = 0; i < static_cast<int>(std::size(columns)); ++i) {
+            auto title = localization::Text(columns[i]); LVCOLUMNW column{};
+            column.mask = LVCF_TEXT | LVCF_WIDTH; column.pszText = title.data(); column.cx = 140;
+            ListView_InsertColumn(ctx->list, i, &column);
         }
-        const std::array<HWND, 2> secondRow = {ctx->btnPresetSave, ctx->btnPresetLoad};
-        const int presetButtonW = std::max(ScaleY(hWnd, 150), (width - pad * 2 - gap) / 2);
-        for (size_t i = 0; i < secondRow.size(); ++i) {
-            HWND button = secondRow[i];
-            if (button) SetWindowPos(button, nullptr, pad + static_cast<int>(i) * (presetButtonW + gap), secondButtonsY,
-                                     presetButtonW, buttonH, SWP_NOZORDER | SWP_NOACTIVATE);
+        ctx->btnDetails = button(IDC_SETTINGS_ASSETS_DETAILS, L"checks.details");
+        ctx->btnRefresh = button(IDC_SETTINGS_ASSETS_REFRESH, L"settings.assets.refresh");
+        ctx->btnUsage = button(IDC_SETTINGS_ASSETS_USAGE, L"settings.assets.usage_measure");
+        ctx->btnCopyPath = button(IDC_SETTINGS_ASSETS_COPY_PATH, L"settings.assets.copy_path");
+        ctx->btnPreview = button(IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE, L"settings.assets.show_file_contents");
+        ctx->btnClose = button(IDC_SETTINGS_ASSETS_CLOSE, L"checks.close");
+        ctx->previewLabel = create(L"STATIC", L"", 0, 0);
+        ctx->preview = create(L"EDIT", L"", WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY | WS_VSCROLL | WS_HSCROLL, IDC_SETTINGS_ASSETS_PREVIEW);
+        for (HWND child : {ctx->header, ctx->list, ctx->btnDetails, ctx->btnClose, ctx->btnRefresh, ctx->btnUsage,
+            ctx->btnCopyPath, ctx->btnPreview, ctx->previewLabel, ctx->preview}) if (!child) return -1;
+        if (!SetTimer(hWnd, kSettingsAssetsCooldownTimerId, 250, nullptr)) return -1;
+        RefreshSettingsAssetEntries(ctx); LayoutSettingsAssets(hWnd, ctx); return 0;
+    }
+    case WM_SIZE: LayoutSettingsAssets(hWnd, ctx); return 0;
+    case WM_GETMINMAXINFO: {
+        auto* info = reinterpret_cast<MINMAXINFO*>(lParam); info->ptMinTrackSize = {ScaleY(hWnd, 840), ScaleY(hWnd, 570)}; return 0;
+    }
+    case WM_DPICHANGED: {
+        const auto* rect = reinterpret_cast<RECT*>(lParam);
+        SetWindowPos(hWnd, nullptr, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        LayoutSettingsAssets(hWnd, ctx); return 0;
+    }
+    case WM_NOTIFY:
+        if (reinterpret_cast<NMHDR*>(lParam)->idFrom == IDC_SETTINGS_ASSETS_LIST) {
+            if (reinterpret_cast<NMHDR*>(lParam)->code == LVN_ITEMCHANGED) {
+                const auto* change = reinterpret_cast<NMLISTVIEW*>(lParam);
+                if ((change->uChanged & LVIF_STATE) && ((change->uOldState ^ change->uNewState) & LVIS_SELECTED))
+                    UpdateSettingsAssetPreviewUi(ctx, false);
+            }
+            if (reinterpret_cast<NMHDR*>(lParam)->code == NM_DBLCLK) ShowSettingsAssetDetails(hWnd, ctx);
         }
-        const int previewY = secondButtonsY + buttonH + gap;
-        if (ctx->previewLabel) SetWindowPos(ctx->previewLabel, nullptr, pad, previewY,
-                                            std::max(0, width - pad * 2), previewLabelH,
-                                            SWP_NOZORDER | SWP_NOACTIVATE);
-        if (ctx->preview) SetWindowPos(ctx->preview, nullptr, pad, previewY + previewLabelH + gap,
-                                       std::max(0, width - pad * 2), previewH,
-                                       SWP_NOZORDER | SWP_NOACTIVATE);
         return 0;
-    }
-    case WM_THEMECHANGED:
-        ApplyThemeToDialog(hWnd);
-        return 0;
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLORLISTBOX:
-    case WM_CTLCOLORBTN:
-        return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
-    case WM_DRAWITEM: {
-        const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
-        if (!ctx || !draw || draw->CtlID != IDC_SETTINGS_ASSETS_LIST || draw->itemID == static_cast<UINT>(-1)) break;
-        const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, draw->itemID, 0));
-        if (index >= ctx->entries.size()) return TRUE;
-        const auto& entry = ctx->entries[index];
-        const bool selected = (draw->itemState & ODS_SELECTED) != 0;
-        const COLORREF background = selected ? g_theme.selectionBg : g_theme.panelBg;
-        const COLORREF text = selected ? g_theme.selectionText : g_theme.panelText;
-        HBRUSH brush = CreateSolidBrush(background);
-        FillRect(draw->hDC, &draw->rcItem, brush);
-        DeleteObject(brush);
-        SetBkMode(draw->hDC, TRANSPARENT);
-        SetTextColor(draw->hDC, text);
-        HFONT oldFont = g_hUIFont ? static_cast<HFONT>(SelectObject(draw->hDC, g_hUIFont)) : nullptr;
-        const int pad = ScaleY(ctx->list, 7);
-        const int lineH = FontLineHeightPx(ctx->list, g_hUIFont);
-        RECT titleRect = draw->rcItem;
-        titleRect.left += pad;
-        titleRect.top += pad;
-        titleRect.bottom = titleRect.top + lineH;
-        const std::wstring status = localization::Text(entry.exists
-            ? L"settings.assets.present" : L"settings.assets.missing");
-        const std::wstring type = localization::Text(entry.directory
-            ? L"settings.assets.type_directory" : L"settings.assets.type_file");
-        const std::wstring title = L"[" + type + L"] " + entry.label + L" — " + status;
-        DrawTextW(draw->hDC, title.c_str(), -1, &titleRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-        HFONT pathFont = SettingsAssetsPathFont(ctx->list);
-        HFONT oldPathFont = pathFont ? static_cast<HFONT>(SelectObject(draw->hDC, pathFont)) : nullptr;
-        const int pathLineH = FontLineHeightPx(ctx->list, pathFont ? pathFont : g_hUIFont);
-        RECT pathRect = titleRect;
-        pathRect.top += lineH + pad * 2;
-        pathRect.bottom = pathRect.top + pathLineH;
-        DrawTextW(draw->hDC, entry.displayPath.c_str(), -1, &pathRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-        HPEN separator = CreatePen(PS_SOLID, 1, g_theme.splitterLine);
-        HGDIOBJ oldPen = SelectObject(draw->hDC, separator);
-        MoveToEx(draw->hDC, draw->rcItem.left, draw->rcItem.bottom - 1, nullptr);
-        LineTo(draw->hDC, draw->rcItem.right, draw->rcItem.bottom - 1);
-        SelectObject(draw->hDC, oldPen);
-        DeleteObject(separator);
-        if (oldPathFont) SelectObject(draw->hDC, oldPathFont);
-        if (oldFont) SelectObject(draw->hDC, oldFont);
-        return TRUE;
-    }
     case WM_COMMAND:
-        if (!ctx) break;
         switch (LOWORD(wParam)) {
-        case IDC_SETTINGS_ASSETS_REFRESH:
-            RefreshSettingsAssetEntries(ctx);
-            return 0;
-        case IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE:
-        {
-            const int selected = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
-            if (selected == LB_ERR) return 0;
-            const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, selected, 0));
-            if (index >= ctx->entries.size()) return 0;
-            const auto& entry = ctx->entries[index];
+        case IDC_SETTINGS_ASSETS_REFRESH: RefreshSettingsAssetEntries(ctx); return 0;
+        case IDC_SETTINGS_ASSETS_USAGE: StartSettingsAssetsUsage(ctx); return 0;
+        case IDC_SETTINGS_ASSETS_DETAILS: ShowSettingsAssetDetails(hWnd, ctx); return 0;
+        case IDC_SETTINGS_ASSETS_CLOSE: DestroyWindow(hWnd); return 0;
+        case IDC_SETTINGS_ASSETS_PREVIEW_TOGGLE: {
+            const int selected = SelectedSettingsAsset(ctx);
+            if (selected < 0 || static_cast<size_t>(selected) >= ctx->entries.size()) return 0;
+            const auto& entry = ctx->entries[selected];
             if (SettingsAssetIsDirectory(entry)) {
-                if (!OpenSettingsAssetDirectory(hWnd, entry)) {
-                    ShowSoftNotice(hWnd, localization::Text(L"settings.assets.directory_open_failed"),
-                                   SoftNoticeKind::Warning);
-                }
+                if (!OpenSettingsAssetDirectory(hWnd, entry)) ShowSoftNotice(hWnd, localization::Text(L"settings.assets.directory_open_failed"), SoftNoticeKind::Warning);
                 return 0;
             }
-            ctx->previewVisible = true;
-            ShowWindow(ctx->previewLabel, SW_SHOW);
-            ShowWindow(ctx->preview, SW_SHOW);
-            UpdateSettingsAssetPreviewUi(ctx, true);
-            SendMessageW(hWnd, WM_SIZE, 0, 0);
-            return 0;
+            ctx->previewVisible = true; ShowWindow(ctx->previewLabel, SW_SHOW); ShowWindow(ctx->preview, SW_SHOW);
+            UpdateSettingsAssetPreviewUi(ctx, true); LayoutSettingsAssets(hWnd, ctx); return 0;
         }
         case IDC_SETTINGS_ASSETS_COPY_PATH: {
-            const int selected = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
-            if (selected == LB_ERR) return 0;
-            const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, selected, 0));
-            if (index >= ctx->entries.size()) return 0;
-            const bool copied = CopySettingsAssetPathToClipboard(hWnd, ctx->entries[index].path.wstring());
-            ShowSoftNotice(hWnd, localization::Text(copied
-                ? L"settings.assets.path_copied" : L"settings.assets.path_copy_failed"),
-                copied ? SoftNoticeKind::Info : SoftNoticeKind::Warning);
-            return 0;
+            const int selected = SelectedSettingsAsset(ctx);
+            if (selected < 0 || static_cast<size_t>(selected) >= ctx->entries.size()) return 0;
+            const bool copied = CopySettingsAssetPathToClipboard(hWnd, ctx->entries[selected].path.wstring());
+            ShowSoftNotice(hWnd, localization::Text(copied ? L"settings.assets.path_copied" : L"settings.assets.path_copy_failed"), copied ? SoftNoticeKind::Info : SoftNoticeKind::Warning); return 0;
         }
-        case IDC_SETTINGS_ASSETS_WORKSPACE_MEMO:
-            ShowWorkspaceMemoWindow(g_hMainWnd);
-            return 0;
-        case IDC_SETTINGS_ASSETS_PRESET_SAVE:
-            SaveSettingsPreset(hWnd);
-            RefreshSettingsAssetEntries(ctx);
-            return 0;
-        case IDC_SETTINGS_ASSETS_PRESET_LOAD:
-            LoadSettingsPreset(hWnd);
-            RefreshSettingsAssetEntries(ctx);
-            return 0;
-        case IDC_SETTINGS_ASSETS_LIST:
-            if (HIWORD(wParam) == LBN_SELCHANGE) {
-                UpdateSettingsAssetPreviewUi(ctx, false);
-                return 0;
-            }
-            if (HIWORD(wParam) == LBN_DBLCLK) {
-                POINT point{};
-                GetCursorPos(&point);
-                ScreenToClient(ctx->list, &point);
-                const LRESULT hit = SendMessageW(ctx->list, LB_ITEMFROMPOINT, 0,
-                                                 MAKELPARAM(point.x, point.y));
-                if (HIWORD(hit) != 0) return 0;
-                const int item = LOWORD(hit);
-                RECT itemRect{};
-                if (SendMessageW(ctx->list, LB_GETITEMRECT, item, reinterpret_cast<LPARAM>(&itemRect)) == LB_ERR ||
-                    point.y < itemRect.top + SettingsAssetsItemHeight(ctx->list) / 2) {
-                    return 0;
-                }
-                const auto index = static_cast<size_t>(SendMessageW(ctx->list, LB_GETITEMDATA, item, 0));
-                if (index >= ctx->entries.size()) return 0;
-                const bool copied = CopySettingsAssetPathToClipboard(hWnd, ctx->entries[index].path.wstring());
-                ShowSoftNotice(hWnd, localization::Text(copied
-                    ? L"settings.assets.path_copied" : L"settings.assets.path_copy_failed"),
-                    copied ? SoftNoticeKind::Info : SoftNoticeKind::Warning);
-                return 0;
-            }
-            break;
         }
         break;
-    case WM_DESTROY:
-        if (ctx) ctx->entries.clear();
+    case WM_TIMER:
+        if (wParam == kSettingsAssetsCooldownTimerId) UpdateSettingsAssetRefreshUi(ctx);
         return 0;
-    default:
-        break;
+    case WM_CLOSE: DestroyWindow(hWnd); return 0;
+    case WM_DESTROY:
+        if (settingsAssetsUsageJob) settingsAssetsUsageJob->cancel.store(true);
+        KillTimer(hWnd, kSettingsAssetsCooldownTimerId); settingsAssetsWindow = nullptr; return 0;
+    case WM_NCDESTROY:
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0); if (!ctx->callerOwns) delete ctx;
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
     }
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
+} // namespace
 
-static void EnsureSettingsAssetsPageClass() {
-    static bool registered = false;
-    if (registered) return;
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = SettingsAssetsPageProc;
-    wc.hInstance = g_hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    wc.lpszClassName = L"SettingsAssetsPageClass";
-    RegisterClassW(&wc);
-    registered = true;
+void ShowSettingsAssetsDialog(HWND owner) {
+    if (settingsAssetsWindow && IsWindow(settingsAssetsWindow)) {
+        ShowWindow(settingsAssetsWindow, SW_SHOW); SetForegroundWindow(settingsAssetsWindow); return;
+    }
+    WNDCLASSW cls{}; cls.lpfnWndProc = SettingsAssetsPageProc; cls.hInstance = g_hInst;
+    cls.lpszClassName = L"PdfNoteSettingsAssetsWnd"; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cls.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    if (!RegisterClassW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+    auto ctx = std::make_unique<SettingsAssetsCtx>();
+    settingsAssetsWindow = CreateWindowExW(WS_EX_CONTROLPARENT, cls.lpszClassName,
+        localization::Text(L"settings.assets.tab").c_str(), WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, ScaleY(owner, 1120), ScaleY(owner, 620), owner, nullptr, g_hInst, ctx.get());
+    if (!settingsAssetsWindow) return;
+    ctx->callerOwns = false; (void)ctx.release();
+    const auto corners = ui::ApplyAuxiliaryWindowCorners(settingsAssetsWindow); (void)corners;
+    ShowWindow(settingsAssetsWindow, SW_SHOW); UpdateWindow(settingsAssetsWindow);
 }
 
-} // namespace
+bool HandleSettingsAssetsMessage(const MSG& message) {
+    if (!settingsAssetsWindow || !IsWindow(settingsAssetsWindow) || !message.hwnd || GetAncestor(message.hwnd, GA_ROOT) != settingsAssetsWindow) return false;
+    if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) { PostMessageW(settingsAssetsWindow, WM_CLOSE, 0, 0); return true; }
+    MSG copy = message; return IsDialogMessageW(settingsAssetsWindow, &copy) != 0;
+}

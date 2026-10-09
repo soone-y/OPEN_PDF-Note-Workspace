@@ -40,9 +40,11 @@
 
 ## 主な保存先
 
-- 内部作業保護: `__resource__/__tmp__/__stage__/`（通常は操作不要）
-- バックアップ: `__resource__/__escape__/backup/`
-- ノート保存失敗時の退避: `__resource__/__escape__/note_recovery/`
+管理フォルダー名は `__pdf_note_workspace__` です。旧名称フォルダーの自動改名・移行・互換読み込みは行いません。
+
+- 内部作業保護: `__pdf_note_workspace__/__tmp__/__stage__/`（通常は操作不要）
+- バックアップ: `__pdf_note_workspace__/__escape__/backup/`
+- ノート保存失敗時の退避: `__pdf_note_workspace__/__escape__/note_recovery/`
 
 これらのフォルダを、問題の確認前に削除しないでください。
 

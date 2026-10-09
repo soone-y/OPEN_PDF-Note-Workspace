@@ -186,10 +186,10 @@ static LRESULT CALLBACK AnnotShortcutEditorProc(HWND hWnd, UINT msg, WPARAM wPar
         HWND del = CreateWindowExW(0, L"BUTTON", L"削除", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                    pad + ScaleY(hWnd, 90), pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 80), rowH, hWnd,
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorDelete)), g_hInst, nullptr);
-        HWND ok = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        HWND ok = CreateWindowExW(0, L"BUTTON", localization::Text(L"dialog.action.save").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                                   ScaleY(hWnd, 355), pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 80), rowH, hWnd,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
-        HWND cancel = CreateWindowExW(0, L"BUTTON", L"キャンセル", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        HWND cancel = CreateWindowExW(0, L"BUTTON", localization::Text(L"common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                       ScaleY(hWnd, 445), pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 100), rowH, hWnd,
                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
         for (HWND control : { label, ctx->list, keyLabel, ctx->key, targetLabel, ctx->target, add, del, ok, cancel }) SetUIFont(control);

@@ -9,6 +9,7 @@
 #include "pdf_view/pdf_view.h"
 #include "note_view/note_view.h"
 #include "note/note_identity_store.h"
+#include "note/note_input_assist.h"
 #include "file_output/file_output.h"
 #include "search/search.h"
 #include "schedule/schedule.h"
@@ -21,6 +22,7 @@
 #include "clrop/bridge.h"
 #include "ui/splitter.h"
 #include "core/atomic_write.h"
+#include "diagnostics/normal_operations.h"
 #include "workspace/workspace_config_io.h"
 #include "ui/core/main_window_api.h"
 #include "workspace/workspace_actions.h"
@@ -31,6 +33,8 @@
 #include "workspace/workspace_write_lock.h"
 #include "app/main_close_policy.h"
 #include "ui/menus/main_debug_menu.h"
+#include "ui/dialogs/write_checks_dialog.h"
+#include "diagnostics/write_checks.h"
 #include "ui/menus/context_menu_helpers.h"
 #include "app/main_escape_backup.h"
 
@@ -189,13 +193,16 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd);
 void ShowOtherPackageHeadlessProcessDiagnostics(HWND hWnd);
 std::optional<std::wstring> PickFileUnder(HWND owner,
                                                  const std::filesystem::path& initial,
-                                                 const std::wstring& title);
+                                                 const std::wstring& title,
+                                                 const std::wstring& confirmLabel);
 std::vector<std::wstring> PickFilesUnder(HWND owner,
                                                 const std::filesystem::path& initial,
-                                                const std::wstring& title);
+                                                const std::wstring& title,
+                                                const std::wstring& confirmLabel);
 std::vector<std::wstring> PickOfficeFilesUnder(HWND owner,
                                                       const std::filesystem::path& initial,
-                                                      const std::wstring& title);
+                                                      const std::wstring& title,
+                                                      const std::wstring& confirmLabel);
 static std::filesystem::path DialogContextInitialFolder();
 std::filesystem::path DialogWorkspaceInitialFolder();
 namespace {
@@ -292,14 +299,13 @@ std::unordered_map<std::wstring, std::wstring> g_lastNoteBySession;
 std::unordered_map<std::wstring, std::wstring> g_lastPdfBySession;
 std::wstring g_lastStartupLecturePathSaved;
 std::wstring g_lastStartupSessionPathSaved;
-const wchar_t kLectureSettingsDirName[] = L"__resource__";
+const wchar_t kLectureSettingsDirName[] = L"__pdf_note_workspace__";
 static constexpr wchar_t kLectureLastOpenFileName[] = L"lecture_last_open.txt";
 static bool g_scheduleSortTimeSet = false;
 int g_scheduleSortDayIndex = 0;
 int g_scheduleSortMinutes = 0;
 static HBRUSH s_hShortcutTagBrush = nullptr;
 static COLORREF s_shortcutTagBrushColor = CLR_INVALID;
-static bool s_normalizingShortcutBody = false;
 
 
 struct StartupLastOpenTarget {
@@ -375,7 +381,8 @@ static void WriteUiAutomationResult(bool ok, const std::wstring& detail);
 static void RestorePreviousNoteAfterException(HWND owner, const std::wstring& previousNotePath);
 static void RestorePreviousPdfAfterException(HWND owner, const std::wstring& previousPdfPath);
 static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError);
-static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError);
+static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError,
+                                             bool renderedClickOnly = false);
 static void RestoreLectureSessionStateAfterException(HWND owner,
                                                      const std::wstring& previousLecturePath,
                                                      const std::wstring& previousSessionPath,
@@ -1189,7 +1196,7 @@ static std::filesystem::path StartupLastOpenTargetFilePath() {
 
 static std::filesystem::path PdfViewPositionsFilePath() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__tmp__" / L"pdf_view_positions.txt";
+    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__tmp__" / L"pdf_view_positions.txt";
 }
 
 static std::wstring EscapeSessionLastOpenField(const std::wstring& src) {
@@ -1305,12 +1312,12 @@ static bool SaveSessionLastOpenMap() {
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
     if (!g_workspaceRoot.empty()) {
-        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
+        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
         preferredTmp = resource / L"__tmp__";
         quarantineDir = resource / L"__escape__";
     }
     std::wstring err;
-    return atomic_write::AtomicWriteUtf8(path, out, preferredTmp, quarantineDir, &err);
+    return write_checks::ObservedWriteUtf8(g_workspaceRoot, path, out, preferredTmp, quarantineDir, &err);
 }
 
 void LoadSessionLastOpenMap() {
@@ -1359,7 +1366,7 @@ static bool ResetLectureLastOpenTimes(std::filesystem::path* outBackupPath) {
         return true; // already clean
     }
 
-    std::filesystem::path escape = std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
+    std::filesystem::path escape = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
     std::filesystem::path stampDir = escape / NowTimestampString();
     std::filesystem::create_directories(stampDir, ec);
     if (ec) return false;
@@ -1399,7 +1406,7 @@ static bool ResetSessionLastOpenTimes(std::filesystem::path* outBackupPath) {
         return true; // already clean
     }
 
-    std::filesystem::path escape = std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
+    std::filesystem::path escape = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
     std::filesystem::path stampDir = escape / NowTimestampString();
     std::filesystem::create_directories(stampDir, ec);
     if (ec) return false;
@@ -1621,7 +1628,8 @@ static bool PickEscapeBackupFile(HWND owner,
                                  const std::wstring& dialogTitle,
                                  std::filesystem::path* outPath,
                                  std::wstring* outErr,
-                                 bool* outCanceled) {
+                                 bool* outCanceled,
+                                 const std::wstring& confirmLabel) {
     if (outPath) *outPath = std::filesystem::path{};
     if (outErr) outErr->clear();
     if (outCanceled) *outCanceled = false;
@@ -1640,7 +1648,7 @@ static bool PickEscapeBackupFile(HWND owner,
         return false;
     }
 
-    auto picked = PickFileUnder(owner, escapeRoot, dialogTitle);
+    auto picked = PickFileUnder(owner, escapeRoot, dialogTitle, confirmLabel);
     if (!picked) {
         if (outCanceled) *outCanceled = true;
         return false;
@@ -1670,7 +1678,8 @@ static bool RestoreTempDataFromEscape(HWND owner,
                                       std::wstring* outErr,
                                       bool* outCanceled) {
     std::filesystem::path src;
-    if (!PickEscapeBackupFile(owner, expectedNamePrefix, dialogTitle, &src, outErr, outCanceled)) {
+    if (!PickEscapeBackupFile(owner, expectedNamePrefix, dialogTitle, &src, outErr, outCanceled,
+                              localization::Text(L"dialog.action.restore"))) {
         return false;
     }
 
@@ -1683,11 +1692,11 @@ static bool RestoreTempDataFromEscape(HWND owner,
 
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
-    std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
+    std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
     preferredTmp = resource / L"__tmp__";
     quarantineDir = resource / L"__escape__";
     std::wstring writeErr;
-    if (!atomic_write::AtomicWriteUtf8(targetPath, data, preferredTmp, quarantineDir, &writeErr)) {
+    if (!write_checks::ObservedWriteUtf8(g_workspaceRoot, targetPath, data, preferredTmp, quarantineDir, &writeErr)) {
         if (outErr) {
             *outErr = localization::Text(L"main.ui.e373c44ecb75").c_str();
             if (!writeErr.empty()) *outErr += L"\n" + writeErr;
@@ -1733,8 +1742,16 @@ static bool AskDeleteOlderBackups(HWND owner,
     std::wstring msg = localization::Format(L"main.backup.delete_older", {
         { L"KIND", backupKindLabel }
     });
-    *outDeleteOld = ConfirmMainYesNo(owner, menuTitle, msg, SoftNoticeKind::Warning,
-                                     SilentDialogResult::No, SilentDialogResult::No);
+    SilentDialogOptions options;
+    options.title = menuTitle;
+    options.message = msg;
+    options.kind = SoftNoticeKind::Warning;
+    options.buttons = SilentDialogButtons::YesNo;
+    options.yesLabel = localization::Text(L"dialog.action.delete");
+    options.noLabel = localization::Text(L"dialog.action.keep_continue");
+    options.defaultResult = SilentDialogResult::No;
+    options.escapeResult = SilentDialogResult::No;
+    *outDeleteOld = ShowSilentDialog(owner, options) == SilentDialogResult::Yes;
     return true;
 }
 
@@ -1803,12 +1820,12 @@ static bool SaveLectureOpenMap(const std::filesystem::path& path,
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
     if (!g_workspaceRoot.empty()) {
-        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
+        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
         preferredTmp = resource / L"__tmp__";
         quarantineDir = resource / L"__escape__";
     }
     std::wstring err;
-    return atomic_write::AtomicWriteUtf8(path, out, preferredTmp, quarantineDir, &err);
+    return write_checks::ObservedWriteUtf8(g_workspaceRoot, path, out, preferredTmp, quarantineDir, &err);
 }
 
 std::unordered_map<std::wstring, long long> LoadLectureOpenTimes(const std::filesystem::path& path) {
@@ -1958,20 +1975,23 @@ static std::filesystem::path ResolveDialogInitialFolder(const std::filesystem::p
 
 std::optional<std::wstring> PickFileUnder(HWND owner,
                                                  const std::filesystem::path& initial,
-                                                 const std::wstring& title) {
-    return PromptExistingLocalPath(owner, initial, title, /*requireDirectory=*/false);
+                                                 const std::wstring& title,
+                                                 const std::wstring& confirmLabel) {
+    return PromptExistingLocalPath(owner, initial, title, /*requireDirectory=*/false, {}, confirmLabel);
 }
 
 std::vector<std::wstring> PickFilesUnder(HWND owner,
                                                 const std::filesystem::path& initial,
-                                                const std::wstring& title) {
-    return PromptExistingLocalFilesAppFirst(owner, initial, title, /*allowMultiple=*/true);
+                                                const std::wstring& title,
+                                                const std::wstring& confirmLabel) {
+    return PromptExistingLocalFilesAppFirst(owner, initial, title, /*allowMultiple=*/true, confirmLabel);
 }
 
 std::vector<std::wstring> PickOfficeFilesUnder(HWND owner,
                                                       const std::filesystem::path& initial,
-                                                      const std::wstring& title) {
-    return PickFilesUnder(owner, initial, title);
+                                                      const std::wstring& title,
+                                                      const std::wstring& confirmLabel) {
+    return PickFilesUnder(owner, initial, title, confirmLabel);
 }
 
 static constexpr const wchar_t* kReadOnlyViewerWindowClassName = L"PdfReadonlyViewerWindow";
@@ -2215,7 +2235,8 @@ static bool OpenReadOnlyViewerCurrentOrPickFile(HWND owner) {
     // accepts existing local paths and rejects network locations before a
     // viewer process is started.
     const auto selected = PickFileUnder(owner, DialogContextInitialFolder(),
-                                        localization::Text(L"menu.viewer.open_file"));
+                                        localization::Text(L"menu.viewer.open_file"),
+                                        localization::Text(L"ui.local_path.3b3a39d56026"));
     if (!selected.has_value()) return false;
     return IsPdfFile(std::filesystem::path(*selected))
                ? LaunchReadOnlyViewerForPdf(owner, *selected)
@@ -3180,6 +3201,22 @@ static bool IsImeComposingOnWindow(HWND hWnd) {
     const LONG compBytes = ImmGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0);
     ImmReleaseContext(hWnd, himc);
     return compBytes > 0;
+}
+
+// A composition can be active with an empty IMM payload. Track its lifecycle
+// in the actual body edit instead of treating a zero-length payload as idle.
+static bool s_shortcutBodyImeComposing = false;
+static LRESULT CALLBACK ShortcutBodySubclassProc(HWND window, UINT message,
+                                                WPARAM wParam, LPARAM lParam,
+                                                UINT_PTR subclassId, DWORD_PTR) {
+    if (message == WM_IME_STARTCOMPOSITION) s_shortcutBodyImeComposing = true;
+    const LRESULT result = DefSubclassProc(window, message, wParam, lParam);
+    if (message == WM_IME_ENDCOMPOSITION) s_shortcutBodyImeComposing = false;
+    if (message == WM_NCDESTROY) {
+        s_shortcutBodyImeComposing = false;
+        RemoveWindowSubclass(window, ShortcutBodySubclassProc, subclassId);
+    }
+    return result;
 }
 
 void EnforceImePolicyForWindow(HWND hWnd) {
@@ -5810,13 +5847,12 @@ void ApplyActiveColorForMode(HWND hWnd, ToolMode mode) {
 
 void ApplyPaletteCustomColor(HWND hWnd, COLORREF color) {
     const COLORREF prev = g_paletteCustomColor;
-    g_paletteCustomColor = color;
 
     // Palette slot 8 is the single application-owned custom color.
     COLORREF custom[kToolPaletteCommandSlotCapacity]{};
     LoadUserPaletteColorsForSettings(custom, std::size(custom));
-    custom[static_cast<size_t>(kLastOkColorSlotIndex)] = g_paletteCustomColor;
-    SaveUserPaletteColorsForSettings(custom, std::size(custom));
+    custom[static_cast<size_t>(kLastOkColorSlotIndex)] = color;
+    if (!SaveUserPaletteColorsForSettings(custom, std::size(custom))) return;
     // ^ rebuilds g_palette and calls PersistConfig()
 
     if (g_activeColor == prev && prev != color) {
@@ -6350,29 +6386,37 @@ static std::wstring ColorToHexW(COLORREF color) {
 static bool IsRichEditControlWindow(HWND hWnd);
 static std::wstring GetNoteEditTextForIndexing(HWND hEdit);
 
-static std::wstring GetNoteSelectionText() {
+[[nodiscard]] static std::wstring GetNoteAssistRangeText(DWORD start, DWORD end) {
+    if (!g_hNoteEdit || end <= start || end > static_cast<DWORD>(LONG_MAX)) return {};
+    if (IsRichEditControlWindow(g_hNoteEdit)) {
+        std::wstring text(static_cast<size_t>(end - start) + 1, L'\0');
+        TEXTRANGEW range{{static_cast<LONG>(start), static_cast<LONG>(end)}, text.data()};
+        const LRESULT copied = SendMessageW(g_hNoteEdit, EM_GETTEXTRANGE, 0,
+                                            reinterpret_cast<LPARAM>(&range));
+        if (copied <= 0) return {};
+        text.resize(std::min(static_cast<size_t>(copied), text.size() - 1));
+        return text;
+    }
+    const std::wstring text = GetNoteEditTextForIndexing(g_hNoteEdit);
+    const size_t first = std::min<size_t>(start, text.size());
+    const size_t last = std::min<size_t>(end, text.size());
+    return text.substr(first, last - first);
+}
+
+[[nodiscard]] static std::wstring GetNoteSelectionText() {
     if (!g_hNoteEdit) return {};
     DWORD start = 0, end = 0;
     SendMessageW(g_hNoteEdit, EM_GETSEL,
-                 reinterpret_cast<WPARAM>(&start),
-                 reinterpret_cast<LPARAM>(&end));
-    if (end < start) std::swap(start, end);
-    if (end <= start) return {};
+                 reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+    return GetNoteAssistRangeText(std::min(start, end), std::max(start, end));
+}
 
-    const int len = std::max(0, GetWindowTextLengthW(g_hNoteEdit));
-    std::vector<wchar_t> buf(static_cast<size_t>(len) + 1, L'\0');
-    if (IsRichEditControlWindow(g_hNoteEdit)) {
-        LRESULT copied = SendMessageW(g_hNoteEdit, EM_GETSELTEXT, 0, reinterpret_cast<LPARAM>(buf.data()));
-        if (copied > 0) {
-            return std::wstring(buf.data(), static_cast<size_t>(copied));
-        }
-    }
-
-    const std::wstring text = GetNoteEditTextForIndexing(g_hNoteEdit);
-    const size_t safeStart = std::min<size_t>(start, text.size());
-    const size_t safeEnd = std::min<size_t>(end, text.size());
-    if (safeEnd <= safeStart) return {};
-    return text.substr(safeStart, safeEnd - safeStart);
+[[nodiscard]] static std::wstring FrameNoteAssistBlock(std::wstring text, DWORD start, DWORD end) {
+    const auto before = start > 0 ? GetNoteAssistRangeText(start - 1, start) : std::wstring{};
+    const auto after = end < static_cast<DWORD>(LONG_MAX)
+        ? GetNoteAssistRangeText(end, end + 1) : std::wstring{};
+    return note::FrameInputAssistBlock(std::move(text),
+        before.empty() ? 0 : before.back(), after.empty() ? 0 : after.front());
 }
 
 static std::wstring GetShortcutBodyInput() {
@@ -6383,20 +6427,13 @@ static std::wstring GetShortcutBodyInput() {
     int copied = GetWindowTextW(g_hShortcutTagEdit, text.data(), len + 1);
     if (copied < 0) copied = 0;
     text.resize(static_cast<size_t>(copied));
-    auto isAnySpace = [](wchar_t ch) {
-        return (iswspace(ch) != 0) || ch == 0x3000; // include full-width space explicitly
-    };
-    text.erase(std::remove_if(text.begin(), text.end(), isAnySpace), text.end());
     return text;
 }
 
-struct ShortcutTagSpec {
-    std::wstring tag;
-    std::vector<std::wstring> attrs;
-};
+using ShortcutTagSpec = note::InputAssistFormat;
 
 static void UpdateShortcutHeadingLevelLabel() {
-    g_noteShortcutHeadingLevel = std::clamp(g_noteShortcutHeadingLevel, 1, 9);
+    g_noteShortcutHeadingLevel = std::clamp(g_noteShortcutHeadingLevel, 1, 6);
     if (g_hShortcutHeadingLevelLabel) {
         std::wstring level = std::to_wstring(g_noteShortcutHeadingLevel);
         SetWindowTextW(g_hShortcutHeadingLevelLabel, level.c_str());
@@ -6413,32 +6450,32 @@ static std::wstring ResolveShortcutTextTagKey() {
 static ShortcutTagSpec CollectShortcutTagSpec(bool attachLink) {
     ShortcutTagSpec spec{};
     if (ShortcutChkIsChecked(g_hChkShortcutHeading1)) {
-        g_noteShortcutHeadingLevel = std::clamp(g_noteShortcutHeadingLevel, 1, 9);
-        spec.tag = L"h" + std::to_wstring(g_noteShortcutHeadingLevel);
+        g_noteShortcutHeadingLevel = std::clamp(g_noteShortcutHeadingLevel, 1, 6);
+        spec.heading_level = g_noteShortcutHeadingLevel;
     }
     if (ShortcutChkIsChecked(g_hChkShortcutBack)) {
-        spec.attrs.push_back(L"back=" + ColorToHexW(g_noteShortcutBackColor));
+        spec.attributes.push_back(L"back=" + ColorToHexW(g_noteShortcutBackColor));
     }
     if (ShortcutChkIsChecked(g_hChkShortcutChar)) {
-        spec.attrs.push_back(ResolveShortcutTextTagKey() + L"=" + ColorToHexW(g_noteShortcutTextColor));
+        spec.attributes.push_back(ResolveShortcutTextTagKey() + L"=" + ColorToHexW(g_noteShortcutTextColor));
     }
     if (ShortcutChkIsChecked(g_hChkShortcutBold)) {
-        spec.attrs.push_back(L"b");
+        spec.bold = true;
     }
     if (ShortcutChkIsChecked(g_hChkShortcutItalic)) {
-        spec.attrs.push_back(L"i");
+        spec.italic = true;
     }
     if (ShortcutChkIsChecked(g_hChkShortcutStrike)) {
-        spec.attrs.push_back(L"x");
+        spec.strike = true;
     }
     if (ShortcutChkIsChecked(g_hChkShortcutUnderline)) {
-        spec.attrs.push_back(L"u");
+        spec.attributes.push_back(L"u");
     }
     if (attachLink && g_linkPending.active && !g_linkPending.id.empty()) {
-        spec.attrs.push_back(L"l=" + g_linkPending.id);
+        spec.attributes.push_back(L"l=" + g_linkPending.id);
         if (ShortcutChkIsChecked(g_hChkShortcutLinkDecor)) {
-            spec.attrs.push_back(L"la");
-            spec.attrs.push_back(L"lu");
+            spec.attributes.push_back(L"la");
+            spec.attributes.push_back(L"lu");
         }
     }
     if (g_hShortcutIndentEdit) {
@@ -6450,7 +6487,7 @@ static ShortcutTagSpec CollectShortcutTagSpec(bool attachLink) {
             wchar_t* end = nullptr;
             long val = wcstol(text.c_str(), &end, 10);
             if (end != text.c_str()) {
-                spec.attrs.push_back(L"d=" + std::to_wstring(val));
+                spec.attributes.push_back(L"d=" + std::to_wstring(val));
             }
         }
     }
@@ -6469,7 +6506,7 @@ static ShortcutTagSpec CollectShortcutTagSpec(bool attachLink) {
                 wchar_t* end = nullptr;
                 double units = wcstod(raw.c_str(), &end);
                 if (end != raw.c_str() && end && *end == L'\0' && units >= 0.0) {
-                    spec.attrs.push_back(L"m=" + raw);
+                    spec.attributes.push_back(L"m=" + raw);
                 }
             }
         }
@@ -6483,49 +6520,37 @@ static ShortcutTagSpec CollectShortcutTagSpec(bool attachLink) {
             wchar_t* end = nullptr;
             long val = wcstol(text.c_str(), &end, 10);
             if (end != text.c_str() && val > 0) {
-                spec.attrs.push_back(L"s=" + std::to_wstring(val));
+                spec.attributes.push_back(L"s=" + std::to_wstring(val));
             }
         }
     }
     return spec;
 }
 
-static std::wstring BuildOpeningTag(const ShortcutTagSpec& spec) {
-    std::wstring opening = L"<";
-    if (!spec.tag.empty()) {
-        opening += spec.tag;
-    }
-    if (!spec.attrs.empty()) {
-        if (!spec.tag.empty()) opening += L", ";
-        for (size_t i = 0; i < spec.attrs.size(); ++i) {
-            if (i > 0) opening += L", ";
-            opening += spec.attrs[i];
-        }
-    }
-    opening += L">";
-    return opening;
-}
-
-static std::wstring BuildNoteShortcutSnippet() {
+[[nodiscard]] static std::wstring BuildNoteShortcutSnippet() {
     if (!g_hNoteEdit) return {};
     const bool attachLink = (g_linkPending.active && !g_linkPending.id.empty());
-    std::wstring bodyOverride = GetShortcutBodyInput();
-    ShortcutTagSpec spec = CollectShortcutTagSpec(attachLink);
-    std::wstring opening = BuildOpeningTag(spec);
-    std::wstring body = bodyOverride;
-    bool usesSelection = false;
-    if (body.empty() && !attachLink) {
-        body = GetNoteSelectionText();
-        usesSelection = !body.empty();
+    const auto format = CollectShortcutTagSpec(attachLink);
+    if (format.has_formatting() && !NoteInputAssistSupportsMarkup()) {
+        ShowSoftNotice(g_hMainWnd, localization::Text(L"note.input_assist.markdown_only"));
+        return {};
     }
+    std::wstring body = GetShortcutBodyInput();
+    const bool typedBody = !body.empty();
+    if (body.empty() && !attachLink) body = GetNoteSelectionText();
     if (body.empty()) {
-        body = attachLink ? (L"LINK:" + g_linkPending.id + L"(ID)") : L"入力";
+        // No arbitrary placeholder or line break when there is nothing to insert.
+        ShowSoftNotice(g_hMainWnd, localization::Text(L"note.input_assist.need_body"));
+        return {};
     }
-    if (spec.tag.empty() && spec.attrs.empty()) {
-        return usesSelection ? body : (body + L"\r\n");
+    std::wstring snippet = note::BuildInputAssistSnippet(body, format);
+    if (format.heading_level > 0) {
+        DWORD start = 0, end = 0;
+        SendMessageW(g_hNoteEdit, EM_GETSEL,
+            reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+        if (typedBody) start = end = std::max(start, end);
+        snippet = FrameNoteAssistBlock(std::move(snippet), std::min(start, end), std::max(start, end));
     }
-    std::wstring snippet = opening + body + L"</>";
-    if (!usesSelection) snippet += L"\r\n";
     return snippet;
 }
 
@@ -6919,14 +6944,27 @@ static std::wstring BuildNoteClickLinkSnippet(bool needPrefixBreak, bool rawLike
     if (!g_linkPending.active || g_linkPending.id.empty()) return {};
     (void)rawLikeInsert;
     std::wstring body = GetShortcutBodyInput();
-    if (body.empty()) body = L"リンク";
+    if (body.empty()) body = localization::Text(L"note.input_assist.link_body");
     ShortcutTagSpec spec = CollectShortcutTagSpec(true);
-    std::wstring opening = BuildOpeningTag(spec);
-
+    spec.heading_level = 0;
     std::wstring out;
     if (needPrefixBreak) out += L" ";
-    out += opening + body + L"</>";
+    out += note::BuildInputAssistSnippet(body, spec);
     return out;
+}
+
+[[nodiscard]] static bool HandleNoteAssistShortcutInLoop(HWND owner, const MSG& msg) {
+    if (msg.message != WM_KEYDOWN || msg.wParam != VK_RETURN ||
+        !g_hShortcutTagEdit || msg.hwnd != g_hShortcutTagEdit ||
+        GetFocus() != g_hShortcutTagEdit || GetAncestor(msg.hwnd, GA_ROOT) != owner ||
+        (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
+        (GetKeyState(VK_MENU) & 0x8000) != 0 ||
+        (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
+        s_shortcutBodyImeComposing || IsImeComposingOnWindow(g_hShortcutTagEdit)) return false;
+    if (!IsSaveTransactionRunning()) {
+        SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_SHORTCUT_INPUT, 0), 0);
+    }
+    return true;
 }
 
 static bool InsertSnippetIntoNoteAt(size_t pos, const std::wstring& snippet) {
@@ -7848,7 +7886,7 @@ static std::wstring BuildManagedAbnormalExitReportText(bool noteHadDirty,
         AppendManagedAbnormalExitPathBlock(ss, L"Current PDF original", CurrentLogicalPdfPath(), L"(none)");
         AppendManagedAbnormalExitPathBlock(
             ss,
-            L"Emergency backup root (__resource__\\__escape__)",
+            L"Emergency backup root (__pdf_note_workspace__\\__escape__)",
             escapeRoot.wstring(),
             L"(not created)");
         AppendManagedAbnormalExitStagePaths(ss);
@@ -7873,7 +7911,7 @@ static std::wstring BuildManagedAbnormalExitReportText(bool noteHadDirty,
         AppendManagedAbnormalExitPathBlock(ss, L"現在の PDF 原本", CurrentLogicalPdfPath(), L"(なし)");
         AppendManagedAbnormalExitPathBlock(
             ss,
-            L"緊急退避ルート (__resource__\\__escape__)",
+            L"緊急退避ルート (__pdf_note_workspace__\\__escape__)",
             escapeRoot.wstring(),
             L"(未作成)");
         AppendManagedAbnormalExitStagePaths(ss);
@@ -8169,7 +8207,7 @@ static void DeleteWorkspaceLogFiles(HWND owner) {
 }
 
 static bool AreAllDebugLogsEnabled(const AppDebugLogConfig& cfg) {
-    return cfg.previewTrace && cfg.switchTiming && cfg.crash && cfg.startupWatchdog;
+    return cfg.previewTrace && cfg.switchTiming && cfg.crash && cfg.startupWatchdog && cfg.officeConversion;
 }
 
 static void ToggleAllDebugLogs(HWND owner) {
@@ -8186,6 +8224,7 @@ static void ToggleAllDebugLogs(HWND owner) {
     next.debugLogs.switchTiming = enable;
     next.debugLogs.crash = enable;
     next.debugLogs.startupWatchdog = enable;
+    next.debugLogs.officeConversion = enable;
 
     const std::filesystem::path configPath = std::filesystem::path(g_workspaceRoot) / L"workspace.json";
     if (!SaveWorkspaceConfigToFile(configPath, next)) {

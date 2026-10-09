@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <iomanip>
 #include <limits>
@@ -280,7 +281,8 @@ void AppendEscaped(std::ostringstream& oss, const std::string& utf8) {
 }
 
 void AppendDouble(std::ostringstream& oss, double v) {
-    oss << std::setprecision(12) << std::noshowpoint << std::defaultfloat << v;
+    oss << std::setprecision(std::numeric_limits<double>::max_digits10)
+        << std::noshowpoint << std::defaultfloat << v;
 }
 
 void AppendPageSizePair(std::ostringstream& oss, const std::array<double, 2>& sizePt) {
@@ -469,8 +471,29 @@ bool LoadClropFileToSink(const std::wstring& path,
 
 #ifndef CLROP_READ_ONLY_BUILD
 bool SerializeClrop(const clrop::Document& doc, std::string& out, std::wstring& err) {
-    (void)err;
+    const auto finiteValues = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(), [](double v) { return std::isfinite(v); });
+    };
+    for (const auto& size : doc.pdfId.pageSizesPt) {
+        if (!finiteValues(size)) {
+            err = L"Non-finite PDF page size in clrop data.";
+            return false;
+        }
+    }
+    for (const auto& page : doc.pages) {
+        for (const auto& item : page.items) {
+            if (!std::isfinite(item.alpha) || !std::isfinite(item.width) || !std::isfinite(item.pt) ||
+                (item.shapeRotation && !std::isfinite(*item.shapeRotation)) ||
+                (item.bbox && !finiteValues(*item.bbox)) ||
+                (item.p1 && !finiteValues(*item.p1)) || (item.p2 && !finiteValues(*item.p2)) ||
+                !finiteValues(item.path) || !finiteValues(item.dash) || !finiteValues(item.quads)) {
+                err = L"Non-finite annotation value in clrop data.";
+                return false;
+            }
+        }
+    }
     std::ostringstream oss;
+    oss.imbue(std::locale::classic());
     oss << "{";
     oss << "\"version\":1,";
     oss << "\"pdf_id\":{";

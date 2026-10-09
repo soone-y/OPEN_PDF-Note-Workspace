@@ -7,8 +7,14 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import libreoffice_conversion_corpus as corpus
+import libreoffice_conversion_expectations as expectations
+import libreoffice_test_clock as test_clock
 
 
 PROTECTED_PATHS = frozenset(
@@ -87,11 +93,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--work-root")
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--keep-candidate", action="store_true")
+    parser.add_argument("--upstream-source-dir", help="Local official source, never fetched")
+    parser.add_argument("--upstream-group", action="append", default=[])
+    parser.add_argument("--upstream-sample", action="append", default=[])
+    parser.add_argument("--upstream-paired-conversions", action="store_true",
+                        help="Windows immutable-input paired upstream conversions")
+    parser.add_argument('--upstream-fixed-time', type=int, help='Fixed UNIX seconds for owned Win64 upstream converters')
+    parser.add_argument("--acceptance", action="store_true", help="Require complete upstream comparison before reduction acceptance")
     args = parser.parse_args()
     if not args.remove and not args.remove_list:
         parser.error("specify --remove or --remove-list")
     if args.timeout < 1:
         parser.error("--timeout must be positive")
+    if (args.acceptance or args.upstream_group or args.upstream_sample or args.upstream_paired_conversions or args.upstream_fixed_time is not None) and not args.upstream_source_dir:
+        parser.error("--upstream-source-dir is required for upstream selection/acceptance")
+    if args.acceptance and (args.upstream_group or args.upstream_sample):
+        parser.error("acceptance cannot use subset selectors")
     return args
 
 
@@ -260,12 +277,103 @@ def write_json_atomic(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
+def upstream_command(args, repo_root: Path, baseline: Path, candidate: Path, output: Path) -> list[str]:
+    command = [sys.executable, str(repo_root / "tools/libreoffice/libreoffice_upstream_conversion_test.py"),
+               "--source-dir", args.upstream_source_dir,
+               "--catalog", str(repo_root / "tests/config/libreoffice_conversion_corpus.json"),
+               "--baseline-soffice", str(baseline / "program/soffice.com"),
+               "--soffice", str(candidate / "program/soffice.com"),
+               "--output-dir", str(output), "--timeout", str(args.timeout)]
+    if args.acceptance:
+        command.append("--acceptance")
+    if getattr(args, 'upstream_paired_conversions', False):
+        command.append('--paired-conversions')
+    if getattr(args, 'upstream_fixed_time', None) is not None:
+        command += ['--fixed-time', str(args.upstream_fixed_time)]
+    for group in args.upstream_group:
+        command += ["--group", group]
+    for sample in args.upstream_sample:
+        command += ["--sample", sample]
+    return command
+
+
+def upstream_timeout(args, catalog_path: Path = corpus.CATALOG) -> int:
+    selected = corpus.select(corpus.read_catalog(catalog_path), args.upstream_group,
+                             args.upstream_sample, acceptance=args.acceptance)
+    # Two bounded conversions per input plus comparison/startup allowance.
+    # Windows wait APIs reject the former fixed timeout * 30,000 budget.
+    return min(int(threading.TIMEOUT_MAX / 2), len(selected) * (args.timeout * 2 + 300) + 120)
+
+
+def upstream_report_passed(report: dict, *, acceptance: bool, catalog_path: Path = corpus.CATALOG,
+                           expectations_path: Path = expectations.DEFAULT_METADATA) -> bool:
+    summary = report.get("summary", {})
+    count = summary.get("expected_documents", 0)
+    if acceptance:
+        catalog = corpus.read_catalog(catalog_path)
+        expected = {item["path"]: item["sha256"] for item in catalog["samples"]}
+        actual = {item.get("path"): item.get("sha256") for item in report.get("results", [])}
+        if (count != len(expected) or actual != expected or report.get("catalog_sha256") != corpus.sha256(catalog_path)
+                or report.get("selected_groups") or report.get("selected_individual")):
+            return False
+    if report.get('report_version') == 4:
+        try:
+            test_clock.report_audit(report)
+        except (KeyError, TypeError, ValueError, OSError):
+            return False
+    elif 'clock_control' in report:
+        return False
+    if report.get("report_version") in (3, 4):
+        try:
+            catalog = corpus.read_catalog(catalog_path)
+            expected_results = expectations.load_expectations(Path(report["source_dir"]), catalog, expectations_path)
+            results = report.get("results", [])
+            selected = {item["path"]: expected_results[item["path"]] for item in results if item["path"] in expected_results}
+            known = {item["path"]: item["sha256"] for item in catalog["samples"]}
+            if (report.get("expectations_sha256") != corpus.sha256(expectations_path)
+                    or report.get("expectations") != selected
+                    or len({item["path"] for item in results}) != count
+                    or any(known.get(item["path"]) != item.get("sha256") for item in results)
+                    or any(item.get("validation") != expectations.judge(item, expected_results.get(item["path"]))
+                           or item["validation"]["passed"] is not True for item in results)):
+                return False
+            rejections = sum(item["validation"]["kind"] == "EXPECTED_REJECTION" for item in results)
+            audits = report.get("audits", {})
+            return bool(count > 0 and len(results) == count and report.get("mode") == "comparison"
+                        and audits.get("runtime_unchanged") is True and audits.get("expectation_evidence_unchanged") is True
+                        and summary.get("validated_documents") == count and summary.get("validation_failures") == 0
+                        and summary.get("expected_rejections") == rejections and summary.get("errors") == rejections
+                        and summary.get("completed_documents") == count - rejections
+                        and summary.get("different_documents") == 0
+                        and summary.get("quality_comparison") == "completed-for-normal-inputs"
+                        and summary.get("status") == "PASS"
+                        and (not acceptance or (audits.get("acceptance_inventory_unchanged") is True
+                                               and report.get("acceptance") is True
+                                               and summary.get("acceptance_passed") is True)))
+        except (KeyError, TypeError, ValueError, OSError):
+            return False
+    return bool(count > 0 and len(report.get("results", [])) == count
+                and report.get("mode") == "comparison"
+                and all(item.get("error") is None and item.get("changed") is False
+                        and item.get("comparison", {}).get("pages")
+                        and all(item.get("runs", {}).get(label, {}).get("pages", 0) > 0 for label in ("baseline", "candidate"))
+                        for item in report.get("results", []))
+                and summary.get("completed_documents") == count
+                and summary.get("errors") == 0 and summary.get("different_documents") == 0
+                and summary.get("quality_comparison") == "completed"
+                and summary.get("status") == "PASS"
+                and (not acceptance or (report.get("acceptance") is True
+                                       and summary.get("acceptance_passed") is True)))
+
+
 def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[2]
     runtime_root = Path(args.runtime_root).resolve()
     input_dir = Path(args.input_dir).resolve()
     output_path = ensure_outside(Path(args.output), runtime_root)
+    if args.upstream_source_dir and output_path.exists():
+        raise FileExistsError(f"Preserve previous reduction evidence: {output_path}")
     if not (runtime_root / "program" / "soffice.com").is_file():
         raise SystemExit(f"LibreOffice runtime not found: {runtime_root}")
     if not input_dir.is_dir():
@@ -275,6 +383,10 @@ def main() -> int:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     default_work = repo_root / ".local" / "repo_resource" / "tmp" / "libreoffice_removal_trial" / timestamp
     work_root = ensure_outside(Path(args.work_root) if args.work_root else default_work, runtime_root)
+    if args.upstream_source_dir:
+        upstream_source = Path(args.upstream_source_dir).resolve(strict=True)
+        ensure_outside(work_root, upstream_source)
+        ensure_outside(output_path, upstream_source)
     if work_root.exists():
         raise SystemExit(f"work root already exists: {work_root}")
     candidate_root = work_root / "candidate"
@@ -353,17 +465,31 @@ def main() -> int:
             if candidate_report_path.is_file():
                 candidate_report = json.loads(candidate_report_path.read_text(encoding="utf-8"))
                 quality_differences = compare_quality(baseline, candidate_report)
-                quality_ok = not quality_differences
+                quality_ok = checks["quality"]["exit_code"] == 0 and not quality_differences
             else:
                 quality_differences = [
                     {"scope": "quality", "field": "report", "candidate": "missing"}
                 ]
                 quality_ok = False
 
+        upstream_ok = not args.acceptance
+        if args.upstream_source_dir:
+            upstream_output = work_root / "upstream"
+            command = upstream_command(args, repo_root, runtime_root, candidate_root, upstream_output)
+            checks["upstream"] = run_command(command, repo_root, upstream_timeout(args))
+            upstream_report = upstream_output / "report.json"
+            upstream_ok = False
+            if upstream_report.is_file():
+                payload = json.loads(upstream_report.read_text(encoding="utf-8"))
+                upstream_ok = checks["upstream"]["exit_code"] == 0 and upstream_report_passed(payload, acceptance=args.acceptance)
+            checks["upstream"]["report"] = str(upstream_report)
+            checks["upstream"]["complete_pass"] = upstream_ok
+
         passed = (
             checks["runtime_gate"]["exit_code"] == 0
             and checks["smoke"]["exit_code"] == 0
             and quality_ok
+            and upstream_ok
         )
     finally:
         report = {
@@ -371,16 +497,20 @@ def main() -> int:
             "report_version": 1,
             "runtime_root": str(runtime_root),
             "input_dir": str(input_dir),
-            "candidate_root": str(candidate_root) if args.keep_candidate else None,
-            "kept_candidate": args.keep_candidate,
+            "candidate_root": str(candidate_root) if args.keep_candidate or args.upstream_source_dir else None,
+            "kept_candidate": bool(args.keep_candidate or args.upstream_source_dir),
             "passed": passed,
+            "acceptance_passed": bool(args.acceptance and passed),
+            "acceptance_requested": args.acceptance,
             "removed_bytes": sum(record["size_bytes"] for record in removal_records),
             "removals": removal_records,
             "checks": checks,
             "quality_differences": quality_differences,
         }
         write_json_atomic(output_path, report)
-        if not args.keep_candidate and work_root.exists():
+        # Keep upstream evidence on failure/interruption as well as success.
+        # Legacy trials retain their existing cleanup behavior.
+        if not args.keep_candidate and not args.upstream_source_dir and work_root.exists():
             shutil.rmtree(work_root)
 
     print(

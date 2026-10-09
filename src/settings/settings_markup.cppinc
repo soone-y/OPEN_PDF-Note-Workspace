@@ -226,8 +226,10 @@ static void LayoutMarkupSettingsChrome(HWND hWnd, MarkupSettingsCtx* ctx) {
     }
 }
 
-static void ApplyMarkupSettings(MarkupSettingsCtx* ctx) {
-    if (!ctx) return;
+static bool ApplyMarkupSettings(MarkupSettingsCtx* ctx) {
+    if (!ctx) return false;
+    const WorkspaceConfig previousConfig = g_config;
+    const std::wstring previousTheme = g_themeName;
     StoreActiveMarkupCustomTagPreset(ctx);
     if (ctx->cbHeadingFont) {
         g_headingFontPx = static_cast<int>(SelectedComboItemData(ctx->cbHeadingFont, g_headingFontPx));
@@ -278,10 +280,15 @@ static void ApplyMarkupSettings(MarkupSettingsCtx* ctx) {
     }
 
     UpdateNoteLineSpacing();
-    PersistConfig();
+    const bool saved = TryPersistConfig();
+    if (!saved) {
+        RestoreSettingsRuntimeAfterFailedSave(ctx->owner, previousConfig, previousTheme);
+        return false;
+    }
     if (g_hNoteEdit) {
         InvalidateRect(g_hNoteEdit, nullptr, TRUE);
     }
+    return saved;
 }
 
 static int PointsToPixelsY(HWND hWnd, int points) {
@@ -780,7 +787,7 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         }
         if (id == IDOK) {
             if (!ctx->embedded) {
-                ApplyMarkupSettings(ctx);
+                if (!ApplyMarkupSettings(ctx)) return 0;
                 ctx->ok = true;
                 ShowSoftNotice(hWnd, localization::Text(L"settings.markup.applied"));
             }

@@ -602,7 +602,7 @@ bool LoadAnnotations(const std::wstring& clropPath,
             std::filesystem::path wsRoot(g_workspaceRoot);
             std::filesystem::path src(clropPath);
             if (!wsRoot.empty() && IsPathUnderRoot(src, wsRoot)) {
-                std::filesystem::path escapeDir = wsRoot / L"__resource__" / L"__escape__";
+                std::filesystem::path escapeDir = wsRoot / L"__pdf_note_workspace__" / L"__escape__";
                 std::filesystem::path moved;
                 if (atomic_write::QuarantineFileBestEffort(src, escapeDir, &moved) && !moved.empty()) {
                     if (!err.empty()) err += L"\n";
@@ -703,7 +703,7 @@ bool SaveAnnotations(const std::wstring& clropPath,
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
     if (!g_workspaceRoot.empty()) {
-        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
+        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
         preferredTmp = resource / L"__tmp__";
         quarantineDir = resource / L"__escape__";
     }

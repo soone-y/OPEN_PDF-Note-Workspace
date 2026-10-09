@@ -3,6 +3,7 @@
 // single translation unit while physically splitting responsibilities.
 
 #include "ui/noop_nav_guard.h"
+#include "ui/window_corners.h"
 
 static HICON LoadAppWindowIcon(int width, int height) {
     HICON icon = static_cast<HICON>(LoadImageW(g_hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
@@ -346,6 +347,7 @@ static void RecoverSelfMainWindowOrRequestClose() {
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     bool coInitialized = false;
     bool pdfiumInitialized = false;
+    const ui::ScopedAuxiliaryWindowCorners auxiliaryWindowCorners;
 
     try {
     g_hInst = hInstance;
@@ -358,10 +360,26 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     }
     InstallGlobalBeepFilter();
     CaptureStartupDocumentPathFromCommandLine();
+    const bool backgroundAutomation = IsBackgroundUiAutomationEnabled();
+    if (backgroundAutomation) {
+        // The test runner owns this disposable workspace and instance. Never
+        // activate a user's instance or silently use the normal setup fallback.
+        std::wstring root, suffix;
+        if (!TryGetUiAutomationWorkspaceRoot(&root) ||
+            !std::filesystem::path(root).is_absolute() ||
+            !ReadMainEnvVar(L"PDF_NOTE_SMALL_INSTANCE_SUFFIX", &suffix) || suffix.empty()) {
+            return 3;
+        }
+    }
     const std::wstring mutexName = SingleInstanceMutexName();
     const std::wstring readyEventName = SingleInstanceReadyEventName();
     g_hSingleInstanceMutex = CreateMutexW(nullptr, TRUE, mutexName.c_str());
     if (g_hSingleInstanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (backgroundAutomation) {
+            CloseHandle(g_hSingleInstanceMutex);
+            g_hSingleInstanceMutex = nullptr;
+            return 3;
+        }
         const bool activated = WaitAndActivateExistingInstance(2500);
         if (activated && HasPendingStartupOpenDocumentPath()) {
             if (HWND existing = FindCurrentPackageMainWindow()) {
@@ -396,7 +414,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         g_hSingleInstanceShutdownThread =
             CreateThread(nullptr, 0, SingleInstanceShutdownRequestThread, nullptr, 0, nullptr);
     }
-    if (g_hSingleInstanceReadyEvent && !g_hStartupWatchdogThread) {
+    if (!backgroundAutomation && g_hSingleInstanceReadyEvent && !g_hStartupWatchdogThread) {
         // Resolve locale on the main thread, then transfer immutable text.
         auto text = std::make_unique<main_window_liveness::NoticeText>();
         text->title = localization::Text(L"startup.self.title");
@@ -462,8 +480,12 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     twc.lpszClassName = kToolbarHostClass;
     RegisterClassExW(&twc);
 
-    HWND hWnd = CreateWindowExW(0, kMainClass, L"PDF Note Workspace",
-                                WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
+    // Data-only tests still create the real controls and dispatch their normal
+    // messages, but deliberately have no visible root or foreground lifetime.
+    HWND hWnd = CreateWindowExW(backgroundAutomation ? WS_EX_NOACTIVATE : 0,
+                                kMainClass, L"PDF Note Workspace",
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN |
+                                    (backgroundAutomation ? 0 : WS_VISIBLE),
                                 CW_USEDEFAULT, CW_USEDEFAULT, 1280, 900,
                                 nullptr, nullptr, g_hInst, nullptr);
     if (!hWnd) {
@@ -519,11 +541,17 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hMainMenu = menu;
     SetMenu(hWnd, menu);
     g_hAccel = BuildAccelerators();
-    int showCmd = (nCmdShow == SW_HIDE) ? SW_SHOW : nCmdShow;
-    ShowWindow(hWnd, showCmd);
-    ShowWindow(hWnd, SW_SHOW);
-    SetWindowPos(hWnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    UpdateWindow(hWnd);
+    if (!backgroundAutomation) {
+        int showCmd = (nCmdShow == SW_HIDE) ? SW_SHOW : nCmdShow;
+        ShowWindow(hWnd, showCmd);
+        ShowWindow(hWnd, SW_SHOW);
+        SetWindowPos(hWnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        UpdateWindow(hWnd);
+    }
+    if (IsUiAutomationEnabled()) {
+        AppendUiAutomationTrace(backgroundAutomation ? L"automation:execution_background_hidden"
+                                                    : L"automation:execution_foreground_allowed");
+    }
     if (g_hSingleInstanceReadyEvent && IsWindowVisible(hWnd)) {
         SetEvent(g_hSingleInstanceReadyEvent);
     }
@@ -544,7 +572,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         }
         // Memo input and shortcuts never enter the PDF/main-note routing.
         if (HandleWorkspaceMemoMessage(msg)) continue;
+        if (HandleWriteChecksMessage(msg)) continue;
+        if (HandleSettingsAssetsMessage(msg)) continue;
         if (ShouldSkipImeMessageInLoop(msg)) continue;
+        if (HandleNoteAssistShortcutInLoop(hWnd, msg)) continue;
         if (RouteWheelToComboListIfNeeded(msg)) continue;
         if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
         bool traceCtrlSave = false;

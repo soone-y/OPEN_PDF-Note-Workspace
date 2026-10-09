@@ -1,7 +1,11 @@
 LibreOffice 26.2.6.3
 Custom Windows x86_64 runtime
 Official core source archive SHA256 3A2570AA7087BF8E0CBDF49AC5BD0E452C2025274AF99E07882DAA104C5685BD
-Custom patch series 0001 through 0041 and 0043 through 0050 (0042 reserved; not applied)
+Custom patch series 0001 through 0041 and 0043 through 0051 (0042 reserved; not applied)
 Runtime soffice.bin SHA256 5A42EA8DB4331E8373C7583DBCACF3B3552549EA39585B17128EA12A6070031D
+Runtime deployment.dll SHA256 35DAF83B10B5A7D34575BC964E33F364D0461BC4BDB307B6A75F14FBCC7A83F6
+LO-024: --enable-readonly-installset suppresses the shared extension-cache write probe.
 Embedded MD4C 0.5.3 includes allocation-failure cleanup/propagation backport 0050.
 Built with communication, update, crash-reporting, AVMedia, OpenCL, PDFium, Poppler, and scripting features disabled.
+Long local Windows paths: patch 0051 fixes URL/native conversion, directory enumeration and owned temporary-file reservation.
+Runtime sal3.dll SHA256 7B6C23E5EECE33F2453E190EBA813383BEA832CD7C385AD816A8B47D6C4B4392

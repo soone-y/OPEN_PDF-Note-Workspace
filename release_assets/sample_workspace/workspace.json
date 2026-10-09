@@ -1,6 +1,6 @@
 {
   "classesDir": ".",
-  "cacheDir": "__resource__/__tmp__",
+  "cacheDir": "__pdf_note_workspace__/__tmp__",
   "showAnnots": true,
   "pdfFlowMode": "v_ttb",
   "pdfBitmapBudgetMiB": 128,

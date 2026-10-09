@@ -37,12 +37,12 @@ bool SaveStartupLastOpenTarget() {
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
     if (!g_workspaceRoot.empty()) {
-        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__resource__";
+        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
         preferredTmp = resource / L"__tmp__";
         quarantineDir = resource / L"__escape__";
     }
     std::wstring err;
-    if (!atomic_write::AtomicWriteUtf8(path, WideToUTF8(line), preferredTmp, quarantineDir, &err)) {
+    if (!write_checks::ObservedWriteUtf8(g_workspaceRoot, path, WideToUTF8(line), preferredTmp, quarantineDir, &err)) {
         return false;
     }
     g_lastStartupLecturePathSaved = std::move(lecturePath);

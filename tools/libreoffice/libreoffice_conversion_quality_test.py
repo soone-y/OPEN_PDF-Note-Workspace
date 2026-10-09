@@ -157,6 +157,7 @@ def compare_pdfs(
     *,
     dpi: int,
     pixel_threshold: int,
+    save_matching_pages: bool = True,
 ) -> dict[str, object]:
     reference = fitz.open(reference_pdf)
     candidate = fitz.open(candidate_pdf)
@@ -202,7 +203,9 @@ def compare_pdfs(
         cand_text = normalize_text(cand_page.get_text("text"))
         text_ratio = SequenceMatcher(None, ref_text, cand_text).ratio() if ref_text or cand_text else 1.0
         review_path = review_dir / f"page_{index + 1:03d}.png"
-        save_review_image(ref_image, cand_image, review_path, f"page {index + 1}")
+        save_review = save_matching_pages or metrics["different_pixels"] or text_ratio != 1.0 or not page_size_equal
+        if save_review:
+            save_review_image(ref_image, cand_image, review_path, f"page {index + 1}")
         page_results.append(
             {
                 "page": index + 1,
@@ -212,7 +215,7 @@ def compare_pdfs(
                 "reference_text_characters": len(ref_text),
                 "candidate_text_characters": len(cand_text),
                 "text_similarity": text_ratio,
-                "review_image": str(review_path),
+                "review_image": str(review_path) if save_review else None,
                 **metrics,
             }
         )

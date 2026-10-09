@@ -780,7 +780,7 @@ void SetPaletteCustomColor(COLORREF color);
 bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor);
 void SyncUserPaletteToRuntime();
 void LoadUserPaletteColorsForSettings(COLORREF* custom, size_t count);
-void SaveUserPaletteColorsForSettings(const COLORREF* custom, size_t count);
+[[nodiscard]] bool SaveUserPaletteColorsForSettings(const COLORREF* custom, size_t count);
 bool ApplyActivePaletteColorStep(HWND hwnd, int direction, bool focusPdfView);
 const std::vector<AnnotToolShortcutBinding>& AnnotToolShortcutBindings();
 bool ResolveAnnotToolShortcut(const MSG& msg, AnnotToolShortcutBinding* outBinding);
@@ -878,6 +878,8 @@ std::optional<WorkspaceConfig> LoadWorkspaceConfigFromFile(const std::filesystem
 void SaveWorkspaceConfig(const std::wstring& root, const WorkspaceConfig& cfg);
 bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const WorkspaceConfig& cfg);
 void PersistConfig();
+// Explicit settings saves must not report success or close the editor on failure.
+[[nodiscard]] bool TryPersistConfig();
 void SyncToolbarFontSizeCombo();
 std::filesystem::path WorkspaceClassesPath(const std::wstring& root, const WorkspaceConfig& cfg);
 std::filesystem::path WorkspaceCachePath(const std::wstring& root, const WorkspaceConfig& cfg);

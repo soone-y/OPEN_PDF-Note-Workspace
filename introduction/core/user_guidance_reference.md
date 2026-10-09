@@ -20,14 +20,14 @@ EVIDENCE:
 
 ## 2. 利用者が変更できる範囲
 
-利用者がアプリ内の設定画面から調整できる項目には、一般設定、ノート設定、マークアップ設定、注釈設定、カラーパレット設定がある。ノート、PDFテキスト、IME変換中は入力を優先する。注釈ツールのショートカットは設定画面で確認でき、設定ファイルはワークスペース内の `__resource__/__settings__/tool_shortcuts.json` に置かれる。
+利用者がアプリ内の設定画面から調整できる項目には、一般設定、ノート設定、マークアップ設定、注釈設定、カラーパレット設定がある。ノート、PDFテキスト、IME変換中は入力を優先する。注釈ツールのショートカットは設定画面で確認でき、設定ファイルはワークスペース内の `__pdf_note_workspace__/__settings__/tool_shortcuts.json` に置かれる。
 
 ノートと注釈では、既定の選択肢にあるフォントを選べる。ノート内の `font` / `f` タグによる部分的なフォント指定も扱う。フォントの字幅により折り返し位置が変わることがある。
 
 次はカスタマイズの対象として案内しない。
 
 - 配布フォルダ内の EXE、DLL、runtime、`pdf_workspace_setup.json` を個別に移動・混在・改名すること
-- stage、バックアップ、復旧用の `__resource__` 配下を、内容確認前に手動削除すること
+- stage、バックアップ、復旧用の `__pdf_note_workspace__` 配下を、内容確認前に手動削除すること
 - PDFの既定アプリを、利用者の明示操作なしに変更すること
 
 設定ファイルの手編集、未掲載の設定値、版ごとの画面差については、ファイル例だけから断定しない。該当版の設定画面と利用者向け文書を確認する。
@@ -52,9 +52,9 @@ EVIDENCE:
 主な保護領域は次の通りである。
 
 ```text
-stage: __resource__/__tmp__/__stage__/
-backup: __resource__/__escape__/backup/
-note recovery: __resource__/__escape__/note_recovery/
+stage: __pdf_note_workspace__/__tmp__/__stage__/
+backup: __pdf_note_workspace__/__escape__/backup/
+note recovery: __pdf_note_workspace__/__escape__/note_recovery/
 ```
 
 保存後の undo/redo と、保存済みの以前の状態への復元は別である。前者は編集画面の undo/redo、後者は復元/バックアップを案内する。

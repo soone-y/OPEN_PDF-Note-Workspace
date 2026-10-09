@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 
 #include "clrop/json.h"
@@ -181,6 +182,24 @@ bool TestSaveEmptyDestinationFailsWithoutCreatingTmp(const fs::path& root) {
     return !saved && !err.empty() && !tmpExists && !escapeExists;
 }
 
+bool TestNonfiniteDataFailsBeforeReplacingOriginal(const fs::path& root) {
+    const fs::path dest = root / L"nonfinite.clrop";
+    std::wstring err;
+    auto doc = MakeDoc(L"finite.pdf", 100, L"original-id");
+    if (!clrop::SaveClropFile(dest.wstring(), doc, err, root / L"tmp_finite", root / L"escape_finite")) return false;
+    const auto before = ReadAll(dest);
+    for (int field = 0; field < 3; ++field) {
+        auto invalid = doc;
+        if (field == 0) invalid.pages[0].items[0].pt = std::numeric_limits<double>::infinity();
+        if (field == 1) (*invalid.pages[0].items[0].bbox)[0] = std::numeric_limits<double>::quiet_NaN();
+        if (field == 2) invalid.pdfId.pageSizesPt[0][0] = std::numeric_limits<double>::infinity();
+        err.clear();
+        if (clrop::SaveClropFile(dest.wstring(), invalid, err, root / L"tmp_invalid", root / L"escape_invalid") ||
+            err.empty() || ReadAll(dest) != before || HasRegularFileUnder(root / L"tmp_invalid")) return false;
+    }
+    return LoadHasTextItemId(dest, L"original-id");
+}
+
 } // namespace
 
 int main() {
@@ -200,6 +219,7 @@ int main() {
     run("SaveClropFile locked destination fails and preserves original", &TestSaveLockedDestinationFailsAndPreservesOriginal);
     run("SaveClropFile read-only destination fails and preserves original", &TestSaveReadOnlyDestinationFailsAndPreservesOriginal);
     run("SaveClropFile empty destination fails without temp artifacts", &TestSaveEmptyDestinationFailsWithoutCreatingTmp);
+    run("nonfinite data fails before replacing original", &TestNonfiniteDataFailsBeforeReplacingOriginal);
 
     std::error_code ec;
     fs::remove_all(root, ec);

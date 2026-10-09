@@ -1567,7 +1567,7 @@ bool CreatePdfPasswordPrompt(PdfPasswordPromptState* state, HWND owner) {
                                   WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
                                   0, 0, 1, 1, state->panel,
                                   reinterpret_cast<HMENU>(101), instance, nullptr);
-    state->okButton = CreateWindowExW(0, L"BUTTON", L"OK",
+    state->okButton = CreateWindowExW(0, L"BUTTON", localization::Text(L"common.ok").c_str(),
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                                       0, 0, 1, 1, state->panel,
                                       reinterpret_cast<HMENU>(IDOK), instance, nullptr);

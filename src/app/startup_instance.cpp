@@ -3,12 +3,14 @@
 
 #include "core/fault_injection.h"
 #include "core/constants.h"
+#include "ui/window_corners.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cwctype>
 #include <filesystem>
+#include <iterator>
 #include <shellapi.h>
 #include <tlhelp32.h>
 #include <utility>
@@ -228,6 +230,36 @@ bool IsUiAutomationEnabled() {
     std::wstring value;
     if (!ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION", &value)) return false;
     return value == L"1" || value == L"true" || value == L"TRUE" || value == L"on";
+}
+
+bool IsBackgroundUiAutomationEnabled() {
+    if (!IsUiAutomationEnabled()) return false;
+    // Match RunUiAutomationScenarios' mode flags. Mixed modes must never opt
+    // out of UI behavior: the scenario validator reports that input as failure.
+    constexpr const wchar_t* modes[] = {
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_LOG_CONTRACT_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_RECOVERY_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_UNKNOWN_FIELD_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_SETTINGS_BUNDLE_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_HELP_VISIBILITY_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_DIALOG_OWNER_VISIBILITY_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_OUTPUT_EXPORT_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY",
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_MATH_RENDER_ONLY",
+    };
+    int selected = 0;
+    bool background = false;
+    for (size_t i = 0; i < std::size(modes); ++i) {
+        std::wstring value;
+        if (ReadMainEnvVar(modes[i], &value) && (value == L"1" || value == L"true")) {
+            ++selected;
+            background = i < 5;
+        }
+    }
+    return selected == 1 && background;
 }
 
 bool TryGetUiAutomationWorkspaceRoot(std::wstring* out) {
@@ -456,6 +488,9 @@ bool RecoveryNotice::Show() {
         text_.title.c_str(), WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         monitor.rcWork.left, monitor.rcWork.top, 600, 340, nullptr, nullptr, wc.hInstance, this);
     if (!created) return false;
+    // The recovery notice owns a different UI thread from the main hook.
+    const HRESULT cornerResult = ui::ApplyAuxiliaryWindowCorners(created);
+    (void)cornerResult;
     if (!stop_ || !SetTimer(window_, kNoticeStopTimerId, 500, nullptr)) {
         DestroyWindow(window_);
         return false;

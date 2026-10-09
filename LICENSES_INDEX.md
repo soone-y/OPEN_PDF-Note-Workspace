@@ -138,7 +138,7 @@ MinGW-w64 の DLL を release に含める場合、次を同梱します。
 
 - `image/program/libcurl.dll` は `mergedlo.dll` と `LanguageToollo.dll` の import 依存があるため保持します。
 - 起動時は `PYTHONDONTWRITEBYTECODE=1` と `PYTHONPYCACHEPREFIX` を設定し、`third_party/` 配下に Python bytecode を生成させません。
-- 変換前後に LibreOffice image 配下の `__pycache__` を削除し、変換生成物を `third_party/` に残しません。
+- 変換用profile・一時データと子processのPython cache先は、選択したワークスペースの `__pdf_note_workspace__/__tmp__/lo/` 内に指定します。配布runtimeのcacheを自動走査・削除せず、変換生成物を `third_party/` に残しません。
 - `-env:UserInstallation=file:///...` で専用 profile を指定し、利用者の通常 LibreOffice profile を使いません。
 - release 同梱前に、外部通信経路、マクロ、外部リンク/リモート画像参照、クラッシュレポート、更新確認が実行されないことを実機確認します。
 

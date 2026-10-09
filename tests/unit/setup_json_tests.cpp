@@ -152,6 +152,46 @@ int main(int argc, char** argv) {
         Expect(AtomicWriteSetupJsonIfValid(setup, json), "clear save failed");
     } else if (mode == "empty") {
         Expect(LoadSetupTempExternalLectureDirs().empty(), "cleared paths returned after restart");
+    } else if (mode == "recovery") {
+        auto appDir = *exeDir / L"recovery 授業 😀";
+        Expect(atomic_write::EnsureDirectoryExists(appDir), "recovery fixture failed");
+        constexpr char originalBytes[] = "{unreadable original\0 bytes";
+        const std::string original(originalBytes, sizeof(originalBytes) - 1);
+        const auto readBytes = [](const std::filesystem::path& path) {
+            std::string bytes;
+            Expect(ReadFileBytesWin32(path, bytes), "recovery byte read failed");
+            return bytes;
+        };
+        const auto exercise = [&](const std::filesystem::path& dir) {
+            const auto source = dir / L"pdf_note_workspace_setup.json";
+            const auto first = dir / L"pdf_note_workspace_setup.json.unreadable";
+            const auto second = dir / L"pdf_note_workspace_setup.json.unreadable.1";
+            Expect(atomic_write::AtomicWriteBytes(source, original.data(), original.size(), dir, nullptr), "source fixture failed");
+            Expect(QuarantineCorruptSetupJson(dir, source) == first, "recovery did not rename beside exe");
+            Expect(!PathExistsWin32(source) && readBytes(first) == original, "renamed bytes lost");
+            Expect(!PathExistsWin32(dir / L"__pdf_note_workspace__"), "recovery created a directory");
+            Expect(atomic_write::AtomicWriteBytes(source, "new broken", 10, dir, nullptr), "collision source fixture failed");
+            Expect(QuarantineCorruptSetupJson(dir, source) == second, "collision did not select a new name");
+            Expect(readBytes(first) == original && readBytes(second) == "new broken", "collision overwrote recovery data");
+            Expect(QuarantineCorruptSetupJson(dir, source).empty(), "missing source accepted");
+        };
+        exercise(appDir);
+        const auto source = appDir / L"pdf_note_workspace_setup.json";
+        Expect(atomic_write::AtomicWriteBytes(source, original.data(), original.size(), appDir, nullptr), "locked source fixture failed");
+        HANDLE locked = CreateFileW(source.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Expect(locked != INVALID_HANDLE_VALUE, "recovery lock fixture failed");
+        const auto blocked = QuarantineCorruptSetupJson(appDir, source);
+        CloseHandle(locked);
+        Expect(blocked.empty() && readBytes(source) == original, "rename failure damaged source");
+        Expect(!PathExistsWin32(appDir / L"pdf_note_workspace_setup.json.unreadable.2"), "rename failure copied source");
+        Expect(QuarantineCorruptSetupJson(*exeDir, source).empty(), "outside source accepted");
+        Expect(QuarantineCorruptSetupJson(L"relative", source).empty(), "relative directory accepted");
+        const auto directorySource = appDir / L"directory.json";
+        Expect(atomic_write::EnsureDirectoryExists(directorySource), "directory source fixture failed");
+        Expect(QuarantineCorruptSetupJson(appDir, directorySource).empty() && DirectoryExistsWin32(directorySource), "directory renamed as setup");
+        for (int i = 0; i < 8; ++i) appDir /= L"long 授業 path_12345678901234567890";
+        Expect(appDir.wstring().size() > 260 && atomic_write::EnsureDirectoryExists(appDir), "long path fixture failed");
+        exercise(appDir);
     } else {
         Expect(false, "unknown mode");
     }

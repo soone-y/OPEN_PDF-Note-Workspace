@@ -150,6 +150,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         PostMessageW(hWnd, WM_CLOSE, 0, 0);
         return 0;
     case WM_CREATE: {
+        write_checks::EnableNormalObservations(false);
         DebugAppendLayoutLog(L"WM_CREATE", hWnd, 0, 0);
         CreateChildren(hWnd);
         DragAcceptFiles(hWnd, TRUE);
@@ -177,6 +178,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return -1;
         }
         SetAppLogWorkspaceRoot(g_workspaceRoot);
+        write_checks::EnableNormalObservations();
+        const bool startupEvidenceSaved = write_checks::FlushNormalObservations(std::filesystem::path(g_workspaceRoot));
+        (void)startupEvidenceSaved; // Diagnostics must not fail the real startup.
         if (auto pending = ConsumePendingSetupJsonExistenceCheckPath()) {
             s_setupJsonExistenceVerifyPath = *pending;
             s_setupJsonExistenceVerifyAttempt = 0;
@@ -327,7 +331,11 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (s_uiAutomationFinished) return 0;
         s_uiAutomationFinished = true;
         std::wstring error;
-        const bool ok = RunUiAutomationScenarios(hWnd, &error);
+        bool ok = RunUiAutomationScenarios(hWnd, &error);
+        if (IsBackgroundUiAutomationEnabled() && IsWindowVisible(hWnd)) {
+            error = L"Background automation unexpectedly displayed its main window.";
+            ok = false;
+        }
         WriteUiAutomationResult(ok, ok ? L"UI automation passed." : error);
         SetUiAutomationExitCode(ok ? 0 : 3);
         PostMessageW(hWnd, WM_CLOSE, 0, 0);
@@ -692,41 +700,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         if (from == g_hShortcutTagEdit && code == EN_CHANGE) {
-            if (s_normalizingShortcutBody) return 0;
-            if (IsImeComposingOnWindow(g_hShortcutTagEdit)) return 0;
-            int len = GetWindowTextLengthW(g_hShortcutTagEdit);
-            if (len <= 0) return 0;
-            std::wstring text(static_cast<size_t>(len) + 1, L'\0');
-            int copied = GetWindowTextW(g_hShortcutTagEdit, text.data(), len + 1);
-            if (copied < 0) copied = 0;
-            text.resize(static_cast<size_t>(copied));
-            DWORD selStart = 0, selEnd = 0;
-            SendMessageW(g_hShortcutTagEdit, EM_GETSEL,
-                         reinterpret_cast<WPARAM>(&selStart),
-                         reinterpret_cast<LPARAM>(&selEnd));
-            auto isAnySpace = [](wchar_t ch) {
-                return (iswspace(ch) != 0) || ch == 0x3000;
-            };
-            std::wstring cleaned;
-            cleaned.reserve(text.size());
-            DWORD removedBeforeStart = 0;
-            DWORD removedBeforeEnd = 0;
-            for (size_t i = 0; i < text.size(); ++i) {
-                if (isAnySpace(text[i])) {
-                    if (static_cast<DWORD>(i) < selStart) ++removedBeforeStart;
-                    if (static_cast<DWORD>(i) < selEnd) ++removedBeforeEnd;
-                } else {
-                    cleaned.push_back(text[i]);
-                }
-            }
-            if (cleaned != text) {
-                s_normalizingShortcutBody = true;
-                SetWindowTextW(g_hShortcutTagEdit, cleaned.c_str());
-                s_normalizingShortcutBody = false;
-                DWORD newStart = (selStart > removedBeforeStart) ? (selStart - removedBeforeStart) : 0;
-                DWORD newEnd = (selEnd > removedBeforeEnd) ? (selEnd - removedBeforeEnd) : 0;
-                SendMessageW(g_hShortcutTagEdit, EM_SETSEL, newStart, newEnd);
-            }
+            // The body is user text. Preserve spaces and native IME/undo state.
+            // A previous empty-input notice must not remain over the palette
+            // once the user starts entering the requested text.
+            DismissNoteInputAssistNotice(hWnd);
             return 0;
         }
         if (from == g_hNoteEdit && code == EN_CHANGE) {
@@ -1024,6 +1001,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         // Keep IME disabled on the main window so
         // Japanese IME candidate/composition doesn't appear without a text input target.
         CancelAndDisableMainIme(hWnd);
+        if (IsBackgroundUiAutomationEnabled()) return 0;
         if (s_skipAutoChildFocusOnce) {
             s_skipAutoChildFocusOnce = false;
             return 0;
@@ -1146,6 +1124,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     case WM_DESTROY:
+        {
+            const bool evidenceSaved = write_checks::FlushNormalObservations(std::filesystem::path(g_workspaceRoot));
+            (void)evidenceSaved; // Failed evidence remains pending; never overwrite a bad ledger.
+        }
         PublishSelfMainWindow(nullptr);
         if (g_hSingleInstanceShutdownStopEvent) SetEvent(g_hSingleInstanceShutdownStopEvent);
         KillTimer(hWnd, kProcessShutdownObserveTimerId);

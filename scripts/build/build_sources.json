@@ -62,6 +62,10 @@
                              "src/ui/dialogs/dialogs.cpp",
                              "src/ui/dialogs/annot_math_panel.cpp",
                              "src/ui/dialogs/export_dialog.cpp",
+                             "src/ui/dialogs/write_checks_dialog.cpp",
+                             "src/diagnostics/write_checks.cpp",
+                             "src/diagnostics/bounded_log.cpp",
+                             "src/diagnostics/artifact_usage.cpp",
                              "src/app/main_escape_backup.cpp",
                              "src/ui/menus/main_menu_snapshot.cpp",
                              "src/ui/menus/main_debug_menu.cpp",
@@ -138,6 +142,7 @@
                              "src/clrop/hash.cpp",
                              "src/clrop/bridge.cpp",
                              "src/file_output/file_output.cpp",
+                             "src/file_output/pdf_annotation_export.cpp",
                              "src/file_output/file_output_stage.cpp"
                          ]
 }

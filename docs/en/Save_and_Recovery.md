@@ -11,6 +11,8 @@ Edits are protected internally before they are written to an original file. Save
 
 ## Important notes
 
-Check for unintegrated changes before restoring. Use undo/redo for a recent edit; use Restore/Backup for a previously saved state. Do not remove or move `__resource__` before investigating a problem.
+The management folder is named `__pdf_note_workspace__`. Folders using the previous name are not automatically renamed, migrated, or read for compatibility.
+
+Check for unintegrated changes before restoring. Use undo/redo for a recent edit; use Restore/Backup for a previously saved state. Do not remove or move `__pdf_note_workspace__` before investigating a problem.
 
 Before a large edit or external sharing, integrate with `Ctrl+S` and then copy the complete workspace.

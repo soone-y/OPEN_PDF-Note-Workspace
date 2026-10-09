@@ -140,30 +140,12 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(save, saveAllFlags, ID_FILE_SAVE_ALL, text(L"menu.save.work").c_str());
     AppendMenuW(save, hasStagedDiffs ? MF_STRING : (MF_STRING | MF_GRAYED), ID_OP_STAGE_MANAGE,
                 text(L"menu.save.review_diffs").c_str());
+    HMENU savedFileBackups = CreatePopupMenu();
+    AppendMenuW(savedFileBackups, MF_STRING, ID_FILE_RESTORE_BACKUP, text(L"menu.common.restore").c_str());
+    AppendMenuW(savedFileBackups, MF_STRING, ID_FILE_DELETE_BACKUP, text(L"menu.common.delete").c_str());
+    AppendMenuW(save, MF_POPUP, reinterpret_cast<UINT_PTR>(savedFileBackups),
+                text(L"menu.restore.backup").c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(save), ui.menuSave.c_str());
-
-    HMENU restore = CreatePopupMenu();
-    const UINT restorePdfFlags = menuState.hasPdfPositionBackup ? MF_STRING : (MF_STRING | MF_GRAYED);
-    const UINT restoreLecFlags = menuState.hasLectureLastOpenBackup ? MF_STRING : (MF_STRING | MF_GRAYED);
-    HMENU pdfPosition = CreatePopupMenu();
-    AppendMenuW(pdfPosition, MF_STRING, ID_TEMP_RESET_PDF_POSITION, text(L"menu.common.delete").c_str());
-    AppendMenuW(pdfPosition, restorePdfFlags, ID_TEMP_RESTORE_PDF_POSITION, text(L"menu.common.restore").c_str());
-    AppendMenuW(restore, MF_POPUP, reinterpret_cast<UINT_PTR>(pdfPosition), text(L"menu.restore.pdf_position").c_str());
-    HMENU lastOpen = CreatePopupMenu();
-    AppendMenuW(lastOpen, MF_STRING, ID_TEMP_RESET_LECTURE_LAST_OPEN, text(L"menu.common.delete").c_str());
-    AppendMenuW(lastOpen, restoreLecFlags, ID_TEMP_RESTORE_LECTURE_LAST_OPEN, text(L"menu.common.restore").c_str());
-    AppendMenuW(restore, MF_POPUP, reinterpret_cast<UINT_PTR>(lastOpen), text(L"menu.restore.last_open").c_str());
-    const UINT restoreFileHistoryFlags = menuState.hasSessionLastOpenBackup ? MF_STRING : (MF_STRING | MF_GRAYED);
-    HMENU fileHistory = CreatePopupMenu();
-    AppendMenuW(fileHistory, MF_STRING, ID_TEMP_RESET_SESSION_LAST_OPEN, text(L"menu.common.delete").c_str());
-    AppendMenuW(fileHistory, restoreFileHistoryFlags, ID_TEMP_RESTORE_SESSION_LAST_OPEN,
-                text(L"menu.common.restore").c_str());
-    AppendMenuW(restore, MF_POPUP, reinterpret_cast<UINT_PTR>(fileHistory), text(L"menu.restore.file_history").c_str());
-    HMENU backups = CreatePopupMenu();
-    AppendMenuW(backups, MF_STRING, ID_FILE_RESTORE_BACKUP, text(L"menu.common.restore").c_str());
-    AppendMenuW(backups, MF_STRING, ID_FILE_DELETE_BACKUP, text(L"menu.common.delete").c_str());
-    AppendMenuW(restore, MF_POPUP, reinterpret_cast<UINT_PTR>(backups), text(L"menu.restore.backup").c_str());
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(restore), text(L"menu.bar.restore").c_str());
 
     HMENU exportMenu = CreatePopupMenu();
     const UINT exportPdfFlags = MenuStringState(CurrentLogicalPdfDocument() != nullptr);
@@ -196,10 +178,8 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     HMENU settings = CreatePopupMenu();
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_GENERAL, text(L"menu.settings.dialog").c_str());
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_PALETTE, text(L"menu.settings.palette").c_str());
-    HMENU presets = CreatePopupMenu();
-    AppendMenuW(presets, MF_STRING, ID_SETTINGS_PRESET_SAVE, text(L"menu.common.save").c_str());
-    AppendMenuW(presets, MF_STRING, ID_SETTINGS_PRESET_LOAD, text(L"menu.common.load").c_str());
-    AppendMenuW(settings, MF_POPUP, reinterpret_cast<UINT_PTR>(presets), text(L"menu.settings.presets").c_str());
+    AppendMenuW(settings, MF_STRING, ID_SETTINGS_PRESETS, text(L"menu.settings.presets").c_str());
+    AppendMenuW(settings, MF_STRING, ID_WORKSPACE_RESTORE, text(L"menu.bar.restore").c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), ui.menuSettings.c_str());
 
     HMENU help = CreatePopupMenu();
@@ -207,6 +187,8 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(help, MF_STRING, ID_HELP_PDF_INFO, text(L"menu.help.pdf_info").c_str());
     AppendMenuW(help, MF_STRING, ID_HELP_NOTE_INFO, text(L"menu.help.note_info").c_str());
     AppendMenuW(help, MF_STRING, ID_HELP_SHOW_LOG_PATH, text(L"menu.help.log_path").c_str());
+    AppendMenuW(help, MF_STRING, ID_WRITE_CHECKS, text(L"checks.title").c_str());
+    AppendMenuW(help, MF_STRING, ID_SETTINGS_ASSETS, text(L"settings.assets.tab").c_str());
     if (menuState.developerMode) {
         HMENU debug = CreatePopupMenu();
         UINT debugToggleFlags = MF_STRING;

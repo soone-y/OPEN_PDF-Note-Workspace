@@ -12,16 +12,23 @@ param(
     [switch]$PdfOnly,
     [switch]$PdfiumRawOnly,
     [switch]$MathRenderOnly,
-    [switch]$SkipPngExport
+    [switch]$RenderedClickOnly,
+    [switch]$InputAssistOnly,
+    [switch]$SkipPngExport,
+    [ValidateRange(30, 600)]
+    [int]$TimeoutSeconds = 120
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-if (@(@($ConfigOnly, $LogContractOnly, $ConfigRecoveryOnly, $ConfigUnknownFieldOnly, $SettingsBundleOnly, $HelpVisibilityOnly, $DialogOwnerVisibilityOnly, $OutputExportOnly, $TargetSessionOnly, $PdfOnly, $PdfiumRawOnly, $MathRenderOnly) | Where-Object { $_ }).Count -gt 1) {
+if (@(@($ConfigOnly, $LogContractOnly, $ConfigRecoveryOnly, $ConfigUnknownFieldOnly, $SettingsBundleOnly, $HelpVisibilityOnly, $DialogOwnerVisibilityOnly, $OutputExportOnly, $TargetSessionOnly, $PdfOnly, $PdfiumRawOnly, $MathRenderOnly, $InputAssistOnly) | Where-Object { $_ }).Count -gt 1) {
     throw "Only one focused UI automation mode may be used at once."
 }
 if ($SkipPngExport -and -not $OutputExportOnly) {
     throw "-SkipPngExport may only be used together with -OutputExportOnly."
+}
+if ($RenderedClickOnly -and -not $MathRenderOnly) {
+    throw "-RenderedClickOnly requires -MathRenderOnly and selects only its click/insertion/undo probe."
 }
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -32,10 +39,12 @@ $workspaceRoot = Join-Path $outDir "workspace"
 $fixtureSessionSource = Join-Path $repoRoot "tests\fixtures\ui_automation_session"
 $resultFile = Join-Path $outDir "ui_automation_result.txt"
 $traceFile = "$resultFile.trace.txt"
-$noteStageDir = Join-Path $workspaceRoot "__resource__\__tmp__\__stage__\note"
-$outputExportDir = Join-Path $workspaceRoot "__resource__\__tmp__\ui_automation_output"
+$noteStageDir = Join-Path $workspaceRoot "__pdf_note_workspace__\__tmp__\__stage__\note"
+$outputExportDir = Join-Path $workspaceRoot "__pdf_note_workspace__\__tmp__\ui_automation_output"
 $workspaceConfigPath = Join-Path $workspaceRoot "workspace.json"
-$timeoutSec = 120
+# Keep the standard watchdog unchanged; longer suites can explicitly select
+# a bounded budget without disabling timeout cleanup or any assertion.
+$timeoutSec = $TimeoutSeconds
 
 if (-not (Test-Path -LiteralPath $exePath)) {
     throw "Executable not found: $exePath"
@@ -73,7 +82,7 @@ if ($ConfigUnknownFieldOnly) {
   "debugLogOfficeConversion": false
 }
 '@
-} elseif ($MathRenderOnly) {
+} elseif ($MathRenderOnly -or $InputAssistOnly) {
     # The focused final-render probe keeps a local, disposable event trace so
     # a failed publication can be diagnosed without the clipboard suite.
     $workspaceJson = '{"classesDir":".","noteRenderEnabled":true,"noteRawOnly":false,"noteRenderMath":true,"debugLogPreviewTrace":true}'
@@ -131,7 +140,9 @@ $savedEnv = @{
     "PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_INPUT_ASSIST_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_INPUT_ASSIST_ONLY", "Process")
     "PDF_NOTE_SMALL_UI_AUTOMATION_MATH_RENDER_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_MATH_RENDER_ONLY", "Process")
+    "PDF_NOTE_SMALL_UI_AUTOMATION_RENDERED_CLICK_ONLY" = [Environment]::GetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_RENDERED_CLICK_ONLY", "Process")
 }
 
 function Restore-Env {
@@ -140,7 +151,9 @@ function Restore-Env {
     }
 }
 
-Write-Host "Running UI automation tests..." -ForegroundColor Cyan
+$backgroundOnly = $ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $PdfiumRawOnly
+$executionMode = if ($backgroundOnly) { "background; foreground acquisition is a failure" } else { "foreground allowed for UI-dependent checks" }
+Write-Host "Running UI automation tests ($executionMode)..." -ForegroundColor Cyan
 try {
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION", "1", "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_AUTOMATION_WORKSPACE_ROOT", $workspaceRoot, "Process")
@@ -158,24 +171,35 @@ try {
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_TARGET_SESSION_ONLY", $(if ($TargetSessionOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDF_ONLY", $(if ($PdfOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_PDFIUM_RAW_ONLY", $(if ($PdfiumRawOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_INPUT_ASSIST_ONLY", $(if ($InputAssistOnly) { "1" } else { $null }), "Process")
     [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_MATH_RENDER_ONLY", $(if ($MathRenderOnly) { "1" } else { $null }), "Process")
+    [Environment]::SetEnvironmentVariable("PDF_NOTE_SMALL_UI_AUTOMATION_RENDERED_CLICK_ONLY", $(if ($RenderedClickOnly) { "1" } else { $null }), "Process")
 
-    $proc = Start-Process -FilePath $exePath -WorkingDirectory $binDir -WindowStyle Hidden -PassThru
-    $deadline = (Get-Date).AddSeconds($timeoutSec)
-    while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 250
-    }
-    if (-not $proc.HasExited) {
-        try {
-            $proc.Kill()
-            $proc.WaitForExit()
-        } catch {
+    if ($backgroundOnly) {
+        $backgroundRunner = Join-Path $repoRoot "tests\python\run_background_app.py"
+        & python -B $backgroundRunner --cwd $binDir --timeout $timeoutSec -- $exePath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Background automation failed (exit=$LASTEXITCODE)."
         }
-        throw "UI automation test timed out after $timeoutSec seconds."
-    }
-
-    if ($proc.ExitCode -ne 0) {
-        throw "UI automation app exit code was $($proc.ExitCode)."
+    } else {
+        # Preserve the existing UI startup sequence. The app deliberately shows
+        # its main window for these modes, so foreground acquisition is allowed.
+        $proc = Start-Process -FilePath $exePath -WorkingDirectory $binDir -WindowStyle Hidden -PassThru
+        $deadline = (Get-Date).AddSeconds($timeoutSec)
+        while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+        }
+        if (-not $proc.HasExited) {
+            try {
+                $proc.Kill()
+                $proc.WaitForExit()
+            } catch {
+            }
+            throw "UI automation test timed out after $timeoutSec seconds."
+        }
+        if ($proc.ExitCode -ne 0) {
+            throw "UI automation app exit code was $($proc.ExitCode)."
+        }
     }
     if (-not (Test-Path -LiteralPath $resultFile)) {
         throw "UI automation result file was not created."
@@ -189,7 +213,7 @@ try {
         # A frame published before WM_PAINT is not sufficient evidence: a
         # failed paint withdraws it and silently switches to native raw.
         # Include startup's empty view as well as the opened-note scenario.
-        $paintTracePath = Join-Path $workspaceRoot "__resource__\__log__\preview_trace.log"
+        $paintTracePath = Join-Path $workspaceRoot "__pdf_note_workspace__\__log__\preview_trace.log"
         if (-not (Test-Path -LiteralPath $paintTracePath)) {
             throw "The focused rendering test did not create its required paint trace."
         }
@@ -201,18 +225,35 @@ try {
         }
     }
     $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
+    $expectedExecution = if ($backgroundOnly) { "background_hidden" } else { "foreground_allowed" }
+    if ($traceText -notmatch "(?m)^automation:execution_$expectedExecution$") {
+        throw "UI automation did not confirm the required execution mode: $expectedExecution."
+    }
     if ($traceText -notmatch "(?m)^automation:toolbar_fonts_ok$") {
         throw "UI automation did not verify the common font of every toolbar control."
     }
-    if ($MathRenderOnly -and $traceText -notmatch "(?m)^automation:math_render_ok$") {
+    $fullSuite = -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly -or $InputAssistOnly)
+    if ($fullSuite -and $traceText -notmatch "(?m)^automation:organize_dirty_annotations_ok$") {
+        throw "UI automation did not verify unsaved annotation preservation during file organization."
+    }
+    if ($InputAssistOnly -and $traceText -notmatch "(?m)^automation:input_assist_ok$") {
+        throw "Input assist automation completion marker was not found."
+    }
+    if ($RenderedClickOnly -and
+        ($traceText -notmatch "(?m)^automation:rendered_click_ok$" -or
+         $traceText -notmatch "(?m)^math_render:rendered_click_only$" -or
+         $traceText -notmatch "(?m)^math_render:rendered_click_insertion_ok$")) {
+        throw "Rendered click-only automation did not verify insertion and undo."
+    }
+    if ($MathRenderOnly -and -not $RenderedClickOnly -and $traceText -notmatch "(?m)^automation:math_render_ok$") {
         throw "Final rendering automation did not complete its math/resize responsiveness probe."
     }
-    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly) -and
+    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly -or $InputAssistOnly) -and
         (-not (Test-Path -LiteralPath $noteStageDir) -or
          -not (Get-ChildItem -LiteralPath $noteStageDir -File -ErrorAction SilentlyContinue))) {
         throw "UI automation did not preserve the staged-exit note diff."
     }
-    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly)) {
+    if (-not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly -or $InputAssistOnly)) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:output_export_ok$") {
             throw "UI automation did not complete the output export scenario."
@@ -267,7 +308,7 @@ try {
         }
     }
     }
-    if (-not ($LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly) -and $result -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
+    if (-not ($LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly -or $InputAssistOnly) -and $result -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:workspace_config_roundtrip_ok$") {
             throw "UI automation did not complete the workspace configuration round-trip scenario."
@@ -278,7 +319,7 @@ try {
         if ($traceText -notmatch "(?m)^automation:app_log_contract_ok$") {
             throw "UI automation did not complete the app-log contract scenario."
         }
-        $logDir = Join-Path $workspaceRoot "__resource__\__log__"
+        $logDir = Join-Path $workspaceRoot "__pdf_note_workspace__\__log__"
         $token = "automation-log-contract"
         foreach ($name in @("preview_trace.log", "crash.log")) {
             $path = Join-Path $logDir $name
@@ -287,7 +328,7 @@ try {
                 throw "Enabled app log did not contain the contract token: $name"
             }
         }
-        foreach ($name in @("switch_timing.log", "startup_watchdog.log")) {
+        foreach ($name in @("switch_timing.log", "startup_watchdog.log", "office_conversion.log")) {
             $path = Join-Path $logDir $name
             if ((Test-Path -LiteralPath $path) -and
                 (Get-Content -LiteralPath $path -Raw -Encoding UTF8) -match [regex]::Escape($token)) {
@@ -303,7 +344,7 @@ try {
         if (Test-Path -LiteralPath $workspaceConfigPath) {
             throw "Corrupt workspace.json was recreated during the recovery test."
         }
-        $escapeFiles = Get-ChildItem -LiteralPath (Join-Path $workspaceRoot "__resource__\__escape__") -File -ErrorAction SilentlyContinue
+        $escapeFiles = Get-ChildItem -LiteralPath (Join-Path $workspaceRoot "__pdf_note_workspace__\__escape__") -File -ErrorAction SilentlyContinue
         if (-not $escapeFiles) {
             throw "Corrupt workspace.json was not quarantined."
         }
@@ -326,14 +367,14 @@ try {
         if ($traceText -notmatch "(?m)^automation:settings_bundle_ok$") {
             throw "UI automation did not complete the settings bundle scenario."
         }
-        $escapeDir = Join-Path $workspaceRoot "__resource__\__escape__"
+        $escapeDir = Join-Path $workspaceRoot "__pdf_note_workspace__\__escape__"
         $bundleBackups = Get-ChildItem -LiteralPath $escapeDir -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -like "settings_import_*" -and (Test-Path -LiteralPath (Join-Path $_.FullName "manifest.txt")) }
         if (-not $bundleBackups) {
             throw "Settings bundle import did not leave a recovery backup."
         }
     }
-    $expectsHelpVisibility = $HelpVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly)
+    $expectsHelpVisibility = $HelpVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $DialogOwnerVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly -or $InputAssistOnly)
     if ($expectsHelpVisibility) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:help_visibility_ok$") {
@@ -343,7 +384,7 @@ try {
             throw "UI automation did not keep the main window visible while closing help."
         }
     }
-    $expectsDialogOwnerVisibility = $DialogOwnerVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly)
+    $expectsDialogOwnerVisibility = $DialogOwnerVisibilityOnly -or -not ($ConfigOnly -or $LogContractOnly -or $ConfigRecoveryOnly -or $ConfigUnknownFieldOnly -or $SettingsBundleOnly -or $HelpVisibilityOnly -or $OutputExportOnly -or $TargetSessionOnly -or $PdfOnly -or $PdfiumRawOnly -or $MathRenderOnly -or $InputAssistOnly)
     if ($expectsDialogOwnerVisibility) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
         if ($traceText -notmatch "(?m)^automation:dialog_owner_visibility_ok$") {
@@ -360,4 +401,8 @@ finally {
     Restore-Env
 }
 
-Write-Host "All UI automation tests passed." -ForegroundColor Green
+if ($RenderedClickOnly) {
+    Write-Host "Rendered click/insertion/undo subset passed; full rendering suite was not selected." -ForegroundColor Green
+} else {
+    Write-Host "All selected UI automation tests passed." -ForegroundColor Green
+}

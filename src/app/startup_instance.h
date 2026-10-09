@@ -11,6 +11,8 @@ inline constexpr ULONG_PTR kCopyDataOpenDocumentPath = 0x50445731; // "PDW1"
 
 bool ReadMainEnvVar(const wchar_t* name, std::wstring* out);
 bool IsUiAutomationEnabled();
+// Only data-only automation modes may omit display, startup focus and UI recovery.
+[[nodiscard]] bool IsBackgroundUiAutomationEnabled();
 bool TryGetUiAutomationWorkspaceRoot(std::wstring* out);
 int UiAutomationExitCode();
 void SetUiAutomationExitCode(int code);

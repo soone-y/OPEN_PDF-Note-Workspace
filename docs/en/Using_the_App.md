@@ -27,6 +27,32 @@ Several related features have different purposes and storage locations. This app
 
 When you need a PDF with annotations for sharing or submission, export a new PDF without changing the original. See [File Formats](File_Formats.md) for the PDF/`.clrop` relationship and moving precautions.
 
+## Annotations in exported PDFs
+
+The main application's combined PDF export puts the PDF and its separate-file annotations into one new PDF. Writing is saved as standard PDF annotations, so it remains accessible as annotations after export.
+
+Flattening makes the writing part of the page content rather than separate annotations. The main application does not flatten its exported writing. Compatible PDF applications can list, move or remove these annotations. Editing their text and geometry depends on the application and annotation type.
+
+| Writing | PDF annotation |
+| --- | --- |
+| Text highlights | `Highlight`, with text ranges and color. |
+| Handwriting, free markers, lines, arrows and waves | `Ink`, with stroke points and appearance. Arrows and waves remain ink strokes, not native line annotations. |
+| Text boxes | `FreeText` by default, retaining Unicode contents and a vector appearance. When the appearance cannot be preserved, export uses `Stamp`. |
+| Rectangles and squares | `Square`; circles and ellipses use `Circle`. |
+| Math, other shapes and note-link markers | `Stamp`, preserving appearance. Expressions or link IDs remain in annotation contents; note markers do not become clickable PDF links. |
+
+Turning off **Prefer FreeText** exports text boxes as image-based `Stamp` annotations. This option applies only to text boxes; there is no PDF-annotation/flattened-output switch.
+
+The bundled read-only viewer uses a different output method: its annotated-PDF export flattens the writing from `.clrop` into page content. Export from the main application when you need standard PDF annotations.
+
+Normal saving still uses a separate `.clrop` file. Exported PDF annotations are not imported into the application's editable annotation data. Keep the original PDF and `.clrop` for further work in this application.
+
+If an annotation cannot be created, export stops before writing the result. Text recoloring requires changing the original page text and remains unsupported for annotated-PDF export; selecting affected pages stops output without creating a file.
+
+If the source PDF already contains native PDF annotations, export at 1x. Non-unit scaling stops before replacing the destination because existing annotation geometry and appearances cannot yet be transformed reliably. Scaling remains available when the source PDF has no native annotations and only separate app annotations are added.
+
+PNG output also displays native annotations contained in the PDF. **Include annotations** controls the additional separate-file app layer; it does not remove native PDF annotations.
+
 ## Full and Lite editions
 
 - The Full edition can use the bundled conversion features.

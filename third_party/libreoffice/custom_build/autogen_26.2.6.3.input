@@ -34,6 +34,9 @@ PDF_NOTE_KEEP_ANTIVIRUS=TRUE
 --disable-online-update
 --disable-online-update-mar
 --disable-extension-update
+# LO-024: do not probe shared extension-cache write access in the install tree.
+# User-profile caches and bundled dictionary loading remain enabled.
+--enable-readonly-installset
 --disable-breakpad
 --disable-pdfimport
 --disable-pdfium

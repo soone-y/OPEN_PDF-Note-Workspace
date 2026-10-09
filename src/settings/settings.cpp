@@ -2,9 +2,15 @@
 #include "settings/settings.h"
 
 #include "core/app_core.h"
+#include "core/atomic_write.h"
 #include "core/font_list.h"
 #include "core/localization.h"
 #include "core/path_safety.h"
+#include "diagnostics/bounded_log.h"
+#include "diagnostics/artifact_usage.h"
+#include "ui/window_corners.h"
+#include <atomic>
+#include <process.h>
 #include "pdf_view/pdf_view.h"
 #include "note_view/note_view.h"
 #include "note/note_presentation.h"
@@ -25,6 +31,7 @@
 #include <richedit.h>
 
 #include <iterator>
+#include <cwchar>
 #include <memory>
 #include <filesystem>
 #include <fstream>

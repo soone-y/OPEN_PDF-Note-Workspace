@@ -159,7 +159,7 @@ DEFAULT_EXCLUDE_DIRS = {
     "release",
     "third_party",
     "workspace",
-    "__resource__",
+    "__pdf_note_workspace__",
     ".venv",
     "venv",
     "__pycache__",

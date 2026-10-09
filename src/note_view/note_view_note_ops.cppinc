@@ -2994,10 +2994,7 @@ void LoadNoteFile(HWND hWnd, const std::wstring& path) {
                 g_noteNeedsIntegrate = true;
                 diskOk = true;
             } else {
-                std::wstring msg =
-                    L"未統合の差分が見つかりました。\n\n"
-                    L"[はい] 差分を復元 (編集欄に適用)\n"
-                    L"[いいえ] いまは復元しない（差分は保持）";
+                std::wstring msg = localization::Text(L"dialog.recovery.note_prompt");
                 SilentDialogOptions options;
                 options.title = L"Note recovery";
                 options.message = msg;
@@ -3234,22 +3231,47 @@ void CommitPendingNoteClickCaret() {
     InvalidateRect(g_hNoteEdit, nullptr, FALSE);
 }
 
-void InsertSnippetIntoNote(const std::wstring& snippet) {
+bool NoteInputAssistSupportsMarkup() {
+    return CurrentNoteContentRoute() == NoteContentRoute::MarkdownMd4c;
+}
+
+[[nodiscard]] static bool InsertSnippetIntoNoteImpl(const std::wstring& snippet, bool verifyInsertion) {
     if (!HasOpenNote()) {
         MaybeShowNoteOpenNotice(g_hNoteEdit ? GetParent(g_hNoteEdit) : g_hMainWnd);
-        return;
+        return false;
     }
+    if (!g_hNoteEdit || snippet.empty()) return false;
     ReleaseNoteChangeSuppressionForUserEdit();
     CommitPendingNoteClickCaret();
     DWORD start = 0, end = 0;
     SendMessageW(g_hNoteEdit, EM_GETSEL,
                  reinterpret_cast<WPARAM>(&start),
                  reinterpret_cast<LPARAM>(&end));
+    const size_t base = std::min(start, end);
+    const auto inserted = NormalizeTextForNoteIndexing(snippet);
+    if (verifyInsertion) {
+        GETTEXTLENGTHEX lengthQuery{GTL_NUMCHARS | GTL_PRECISE, 1200};
+        const LRESULT nativeLength = IsRichEditControl(g_hNoteEdit)
+            ? SendMessageW(g_hNoteEdit, EM_GETTEXTLENGTHEX, reinterpret_cast<WPARAM>(&lengthQuery), 0)
+            : GetWindowTextLengthW(g_hNoteEdit);
+        if (nativeLength < 0 || base > static_cast<size_t>(LONG_MAX)) {
+            ShowSoftNotice(g_hMainWnd, localization::Text(L"note.input_assist.insert_failed"));
+            return false;
+        }
+        const size_t currentLength = static_cast<size_t>(nativeLength);
+        const size_t removed = std::min<size_t>(std::max(start, end) - base, currentLength);
+        const size_t limit = static_cast<size_t>(SendMessageW(g_hNoteEdit, EM_GETLIMITTEXT, 0, 0));
+        if (inserted.size() > static_cast<size_t>(LONG_MAX) - base ||
+            (limit > 0 && (currentLength - removed > limit || inserted.size() > limit - (currentLength - removed)))) {
+            ShowSoftNotice(g_hMainWnd, localization::Text(L"note.input_assist.insert_failed"));
+            return false;
+        }
+    }
     SendMessageW(g_hNoteEdit, EM_SETSEL, start, end);
     {
         DWORD base = std::min(start, end);
         DWORD insertedLen = static_cast<DWORD>(
-            std::min<size_t>(NormalizeTextForNoteIndexing(snippet).size(),
+            std::min<size_t>(inserted.size(),
                              static_cast<size_t>(std::numeric_limits<DWORD>::max() - base)));
         RegisterExpectedCurrentNoteSelectionReplacement(g_hNoteEdit, snippet,
                                                         base + insertedLen,
@@ -3260,6 +3282,18 @@ void InsertSnippetIntoNote(const std::wstring& snippet) {
     if (HWND parent = GetParent(g_hNoteEdit)) {
         PostMessageW(parent, kMsgNoteOverlayUpdate, 0, static_cast<LPARAM>(CurrentEditRevision()));
     }
+    if (!verifyInsertion) return true;
+    const bool verified = GetEditTextRangeForIndexing(g_hNoteEdit, base, base + inserted.size()) == inserted;
+    if (!verified) ShowSoftNotice(g_hMainWnd, localization::Text(L"note.input_assist.insert_failed"));
+    return verified;
+}
+
+bool TryInsertSnippetIntoNote(const std::wstring& snippet) {
+    return InsertSnippetIntoNoteImpl(snippet, true);
+}
+
+void InsertSnippetIntoNote(const std::wstring& snippet) {
+    (void)InsertSnippetIntoNoteImpl(snippet, false);
 }
 
 bool InsertSnippetIntoCurrentNoteAt(size_t pos, const std::wstring& snippet) {

@@ -10,6 +10,7 @@ param(
     [switch]$SkipMermaidSubsetParserTests,
     [switch]$SkipClropJsonDirectParseTests,
     [switch]$SkipInputFuzzRegressionTests,
+    [switch]$SkipPdfAnnotationExportTests,
     [switch]$SkipClropFileSafetyTests,
     [switch]$SkipDocxSpaceProtectionTests,
     [switch]$SkipTextEncodingTests,
@@ -32,6 +33,12 @@ param(
     [switch]$IncludeMemoryDiagnostics,
     [switch]$IncludeOfficeConversionTests,
     [string]$OfficeSoffice = "",
+    [string]$OfficeUpstreamSourceDir = $env:LO_TEST_SOURCE_DIR,
+    [string]$OfficeBaselineSoffice = "",
+    [string]$OfficeUpstreamGroup = "",
+    [string]$OfficeUpstreamSample = "",
+    [switch]$OfficeReductionAcceptance,
+    [Nullable[int]]$OfficeFixedTime = $null,
     [switch]$KeepOfficeConversionOutputs,
     [switch]$Rebuild,
     [switch]$Release,
@@ -42,6 +49,23 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($null -ne $OfficeFixedTime) {
+    if ([string]::IsNullOrWhiteSpace($OfficeUpstreamSourceDir) -or [string]::IsNullOrWhiteSpace($OfficeBaselineSoffice)) {
+        throw "Office fixed-time comparison requires an upstream source and preserved baseline runtime."
+    }
+    $IncludeOfficeConversionTests = $true
+}
+
+if ($OfficeReductionAcceptance) {
+    if ([string]::IsNullOrWhiteSpace($OfficeUpstreamSourceDir) -or [string]::IsNullOrWhiteSpace($OfficeBaselineSoffice)) {
+        throw "Office reduction acceptance requires an upstream source and preserved baseline runtime."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OfficeUpstreamGroup) -or -not [string]::IsNullOrWhiteSpace($OfficeUpstreamSample)) {
+        throw "Office reduction acceptance cannot use subset selectors."
+    }
+    $IncludeOfficeConversionTests = $true
+}
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $buildScript = Join-Path $repoRoot "build.ps1"
@@ -55,6 +79,7 @@ $noteParserScript = Join-Path $PSScriptRoot "run_note_parser_tests.ps1"
 $mermaidSubsetParserScript = Join-Path $PSScriptRoot "run_mermaid_subset_parser_tests.ps1"
 $clropJsonDirectParseScript = Join-Path $PSScriptRoot "run_clrop_json_direct_parse_tests.ps1"
 $inputFuzzRegressionScript = Join-Path $PSScriptRoot "run_input_fuzz_regression_tests.ps1"
+$pdfAnnotationExportScript = Join-Path $PSScriptRoot "run_pdf_annotation_export_tests.ps1"
 $clropFileSafetyScript = Join-Path $PSScriptRoot "run_clrop_file_safety_tests.ps1"
 $docxSpaceProtectionScript = Join-Path $PSScriptRoot "run_docx_space_protection_tests.ps1"
 $textEncodingScript = Join-Path $PSScriptRoot "run_text_encoding_tests.ps1"
@@ -68,6 +93,7 @@ $workspaceConfigUnknownFieldTestScript = Join-Path $PSScriptRoot "run_workspace_
 $appLogContractTestScript = Join-Path $PSScriptRoot "run_app_log_contract_tests.ps1"
 $publishVersionHistoryTestScript = Join-Path $PSScriptRoot "run_publish_version_history_tests.ps1"
 $officeConversionFixtureScript = Join-Path $PSScriptRoot "run_office_conversion_fixture_tests.ps1"
+$officeUpstreamConversionScript = Join-Path $PSScriptRoot "run_office_upstream_conversion_tests.ps1"
 $uiAutomationScript = Join-Path $PSScriptRoot "run_ui_automation_fault_tests.ps1"
 $memoryDiagnosticsScript = Join-Path $PSScriptRoot "run_memory_diagnostics.ps1"
 $pythonToolTestScript = Join-Path $repoRoot "tests\python\test_python_tools.py"
@@ -434,8 +460,16 @@ function Assert-FileOutputSystemDialogPolicy {
 
     $source = Get-Content -LiteralPath $path -Raw -Encoding UTF8
     $picker = $source.IndexOf("PickSavePathWithSystemDialog")
-    $choice = $source.IndexOf("const SavePathPromptResult choice = PromptSavePath")
-    $explicitBranch = $source.IndexOf("if (choice == SavePathPromptResult::OpenSystemDialog)", $choice)
+    $choice = $source.IndexOf("const SavePathPromptSelection choice = PromptSavePath")
+    if ($choice -lt 0) {
+        throw "System save dialog policy violation: the save-path selection result is missing."
+    }
+    # PromptSavePath returns OpenSystemDialog only for the user's standard-dialog
+    # setting or the explicit handoff button; both paths keep caller validation.
+    $explicitBranch = $source.IndexOf("if (choice.action == SavePathPromptResult::OpenSystemDialog)", $choice)
+    if ($explicitBranch -lt 0) {
+        throw "System save dialog policy violation: the explicit standard-dialog branch is missing."
+    }
     $pickerCall = $source.IndexOf("return PickSavePathWithSystemDialog", $explicitBranch)
     if ($picker -lt 0 -or $choice -lt 0 -or $explicitBranch -lt $choice -or $pickerCall -lt $explicitBranch) {
         throw "System save dialog policy violation: file_output must reach PickSavePathWithSystemDialog only after the explicit OpenSystemDialog choice."
@@ -456,6 +490,9 @@ function Invoke-SafetyScans {
         'https?://schemas\.openxmlformats\.org/',
         'https?://purl\.org/',
         '\\third_party\\zlib\\include\\zlib\.h:\d+:.*https://datatracker\.ietf\.org/doc/html/rfc1950\b',
+        # MD4C test input only: callbacks consume parser data and never open links.
+        # Match the complete fixture line; other URLs/APIs in this file still fail.
+        '^\.[\\/]tests[\\/]unit[\\/]md4c_allocation_failure_tests\.c:\d+:\s*"https://example\.invalid/ test@example\.invalid\\n"\),\s*$',
         '\\publish\.ps1:\d+:.*https://github\.com/\$Repository/commit/\$commitHash'
     )
 
@@ -595,6 +632,7 @@ try {
     Assert-ScriptExists -Path $appLogContractTestScript
     Assert-ScriptExists -Path $publishVersionHistoryTestScript
     Assert-ScriptExists -Path $officeConversionFixtureScript
+    Assert-ScriptExists -Path $officeUpstreamConversionScript
     Assert-ScriptExists -Path $uiAutomationScript
     Assert-ScriptExists -Path $pythonToolTestScript
     Assert-ScriptExists -Path $cloudflareSiteValidationScript
@@ -701,6 +739,12 @@ try {
         }
     }
 
+    if (-not $SkipPdfAnnotationExportTests) {
+        Invoke-Step -Name "PDF Annotation Export And Interoperability Tests" -Action {
+            Invoke-ChildPowerShellScript -ScriptPath $pdfAnnotationExportScript
+        }
+    }
+
     if (-not $SkipClropFileSafetyTests) {
         Invoke-Step -Name "Clrop File Safety Tests" -Action {
             Invoke-ChildPowerShellScript -ScriptPath $clropFileSafetyScript
@@ -792,6 +836,29 @@ try {
             }
             if ($KeepOfficeConversionOutputs) { $officeArgs += "-Keep" }
             Invoke-ChildPowerShellScript -ScriptPath $officeConversionFixtureScript -Arguments $officeArgs
+        }
+        if ([string]::IsNullOrWhiteSpace($OfficeUpstreamSourceDir)) {
+            Write-Host "[SKIP] Upstream Office Conversion: set -OfficeUpstreamSourceDir or LO_TEST_SOURCE_DIR. Not evidence for LibreOffice reduction quality."
+        }
+        else {
+            $upstreamStep = if ($OfficeReductionAcceptance) { "Office Reduction Full Corpus Acceptance" }
+            elseif ([string]::IsNullOrWhiteSpace($OfficeBaselineSoffice)) {
+                "Upstream Office Conversion Only"
+            } else { "Upstream Office PDF Regression Comparison" }
+            Invoke-Step -Name $upstreamStep -Action {
+                $upstreamArgs = @("-SourceDir", $OfficeUpstreamSourceDir)
+                if (-not [string]::IsNullOrWhiteSpace($OfficeSoffice)) {
+                    $upstreamArgs += @("-Soffice", $OfficeSoffice)
+                }
+                if (-not [string]::IsNullOrWhiteSpace($OfficeBaselineSoffice)) {
+                    $upstreamArgs += @("-BaselineSoffice", $OfficeBaselineSoffice)
+                }
+                if (-not [string]::IsNullOrWhiteSpace($OfficeUpstreamGroup)) { $upstreamArgs += @("-Group", $OfficeUpstreamGroup) }
+                if (-not [string]::IsNullOrWhiteSpace($OfficeUpstreamSample)) { $upstreamArgs += @("-Sample", $OfficeUpstreamSample) }
+                if ($OfficeReductionAcceptance) { $upstreamArgs += "-Acceptance" }
+                if ($null -ne $OfficeFixedTime) { $upstreamArgs += @("-FixedTime", "$OfficeFixedTime") }
+                Invoke-ChildPowerShellScript -ScriptPath $officeUpstreamConversionScript -Arguments $upstreamArgs
+            }
         }
     }
 

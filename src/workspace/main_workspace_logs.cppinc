@@ -4,7 +4,7 @@
 
 static std::filesystem::path WorkspaceLogDirectory() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__log__";
+    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__log__";
 }
 
 static std::wstring WorkspaceLogArchiveBaseName() {
@@ -39,12 +39,13 @@ static std::wstring WorkspaceLogLowerAscii(std::wstring value) {
     return value;
 }
 
-static const std::array<AppLogKind, 4>& WorkspaceManagedLogKinds() {
-    static const std::array<AppLogKind, 4> kKinds = {
+static const std::array<AppLogKind, 5>& WorkspaceManagedLogKinds() {
+    static const std::array<AppLogKind, 5> kKinds = {
         AppLogKind::PreviewTrace,
         AppLogKind::SwitchTiming,
         AppLogKind::Crash,
         AppLogKind::StartupWatchdog,
+        AppLogKind::OfficeConversion,
     };
     return kKinds;
 }

@@ -636,8 +636,13 @@ static void LayoutAnnotSettingsChrome(HWND hWnd, AnnotSettingsCtx* ctx) {
     }
 }
 
-static void ApplyAnnotationSettings(AnnotSettingsCtx* ctx) {
-    if (!ctx) return;
+static bool ApplyAnnotationSettings(AnnotSettingsCtx* ctx) {
+    if (!ctx) return false;
+    const WorkspaceConfig previousConfig = g_config;
+    const std::wstring previousTheme = g_themeName;
+    const auto previousOrder = AnnotToolModeUiOrder();
+    std::vector<AnnotToolUiState> previousStates;
+    for (ToolMode mode : previousOrder) previousStates.push_back(AnnotToolModeUiStateFor(mode));
     if (ctx->cbTextFont) {
         int sel = static_cast<int>(SendMessageW(ctx->cbTextFont, CB_GETCURSEL, 0, 0));
         if (sel >= 0) {
@@ -744,12 +749,22 @@ static void ApplyAnnotationSettings(AnnotSettingsCtx* ctx) {
     SyncWidthComboToMode(g_toolMode);
 
     ApplyAnnotToolModeUiConfig(ctx->expandedToolOrder, ctx->expandedToolStates, false);
-    PersistAnnotToolUiConfigToSetupJson();
+    if (!PersistAnnotToolUiConfigToSetupJson()) {
+        ApplyAnnotToolModeUiConfig(previousOrder, previousStates, false);
+        RestoreSettingsRuntimeAfterFailedSave(ctx->owner, previousConfig, previousTheme);
+        return false;
+    }
 
-    PersistConfig();
+    const bool saved = TryPersistConfig();
+    if (!saved) {
+        ApplyAnnotToolModeUiConfig(previousOrder, previousStates, false);
+        RestoreSettingsRuntimeAfterFailedSave(ctx->owner, previousConfig, previousTheme);
+        return false;
+    }
     if (g_hPdfView) PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
     ApplyActiveColorForMode(ctx->owner, g_toolMode);
     UpdateToolbarUI(ctx->owner);
+    return saved;
 }
 
 static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1599,7 +1614,7 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         }
         if (id == IDOK && ctx) {
             if (!ctx->embedded) {
-                ApplyAnnotationSettings(ctx);
+                if (!ApplyAnnotationSettings(ctx)) return 0;
                 ctx->ok = true;
                 ShowSoftNotice(hWnd, localization::Text(L"settings.annot.fca7cf56577e").c_str());
             }
@@ -1753,25 +1768,23 @@ struct UnifiedSettingsShellCtx {
     HWND childMarkup = nullptr;
     HWND childAnnot = nullptr;
     HWND childPalette = nullptr;
-    HWND childAssets = nullptr;
     std::unique_ptr<GeneralSettingsCtx> basicCtx;
     std::unique_ptr<GeneralSettingsCtx> noteCtx;
     std::unique_ptr<MarkupSettingsCtx> markupCtx;
     std::unique_ptr<AnnotSettingsCtx> annotCtx;
     std::unique_ptr<PaletteSettingsCtx> paletteCtx;
-    std::unique_ptr<SettingsAssetsCtx> assetsCtx;
 };
 
 static int UnifiedSettingsTabIndexFromCategory(int category) {
     return std::clamp(category,
                       static_cast<int>(kSettingsNavGeneral),
-                      static_cast<int>(kSettingsNavAssets));
+                      static_cast<int>(kSettingsNavPalette));
 }
 
 static int UnifiedSettingsCategoryFromTabIndex(int tabIndex) {
     return std::clamp(tabIndex,
                       static_cast<int>(kSettingsNavGeneral),
-                      static_cast<int>(kSettingsNavAssets));
+                      static_cast<int>(kSettingsNavPalette));
 }
 
 static void UpdateUnifiedSettingsTab(UnifiedSettingsShellCtx* ctx) {
@@ -1809,6 +1822,7 @@ static HWND EnsureUnifiedBasicPage(HWND parent, UnifiedSettingsShellCtx* shell) 
     EnsureGeneralSettingsClass();
     const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
     shell->basicCtx = std::make_unique<GeneralSettingsCtx>();
+    shell->basicCtx->owner = shell->owner;
     shell->basicCtx->embedded = true;
     shell->basicCtx->pageMode = GeneralSettingsPageMode::Basic;
     shell->basicCtx->initialSection = kGeneralSectionDisplay;
@@ -1826,6 +1840,7 @@ static HWND EnsureUnifiedNotePage(HWND parent, UnifiedSettingsShellCtx* shell) {
     EnsureGeneralSettingsClass();
     const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
     shell->noteCtx = std::make_unique<GeneralSettingsCtx>();
+    shell->noteCtx->owner = shell->owner;
     shell->noteCtx->embedded = true;
     shell->noteCtx->pageMode = GeneralSettingsPageMode::Note;
     shell->noteCtx->initialSection = 0;
@@ -1843,6 +1858,7 @@ static HWND EnsureUnifiedMarkupPage(HWND parent, UnifiedSettingsShellCtx* shell)
     EnsureMarkupSettingsClass();
     const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
     shell->markupCtx = std::make_unique<MarkupSettingsCtx>();
+    shell->markupCtx->owner = shell->owner;
     shell->markupCtx->embedded = true;
     shell->childMarkup = CreateWindowExW(0, kClass, L"",
                                          WS_CHILD | WS_VISIBLE | WS_VSCROLL,
@@ -1858,6 +1874,7 @@ static HWND EnsureUnifiedAnnotPage(HWND parent, UnifiedSettingsShellCtx* shell) 
     EnsureAnnotationSettingsClass();
     const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
     shell->annotCtx = std::make_unique<AnnotSettingsCtx>();
+    shell->annotCtx->owner = shell->owner;
     shell->annotCtx->embedded = true;
     shell->annotCtx->initialSection = shell->initialAnnotSection;
     shell->childAnnot = CreateWindowExW(0, kClass, L"",
@@ -1874,25 +1891,13 @@ static HWND EnsureUnifiedPalettePage(HWND parent, UnifiedSettingsShellCtx* shell
     EnsurePaletteSettingsClass();
     const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
     shell->paletteCtx = std::make_unique<PaletteSettingsCtx>();
+    shell->paletteCtx->owner = shell->owner;
     shell->paletteCtx->embedded = true;
     shell->childPalette = CreateWindowExW(0, kClass, L"",
                                           WS_CHILD | WS_VISIBLE,
                                           0, 0, childSize.cx, childSize.cy,
                                           parent, nullptr, g_hInst, shell->paletteCtx.get());
     return shell->childPalette;
-}
-
-static HWND EnsureUnifiedAssetsPage(HWND parent, UnifiedSettingsShellCtx* shell) {
-    if (!parent || !shell) return nullptr;
-    if (shell->childAssets) return shell->childAssets;
-    EnsureSettingsAssetsPageClass();
-    const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
-    shell->assetsCtx = std::make_unique<SettingsAssetsCtx>();
-    shell->childAssets = CreateWindowExW(0, L"SettingsAssetsPageClass", L"",
-                                         WS_CHILD | WS_VISIBLE,
-                                         0, 0, childSize.cx, childSize.cy,
-                                         parent, nullptr, g_hInst, shell->assetsCtx.get());
-    return shell->childAssets;
 }
 
 static void LayoutUnifiedSettingsShell(HWND hWnd, UnifiedSettingsShellCtx* ctx) {
@@ -1922,7 +1927,7 @@ static void LayoutUnifiedSettingsShell(HWND hWnd, UnifiedSettingsShellCtx* ctx) 
 
     const int childX = pad;
     const int childW = std::max(ScaleY(hWnd, 360), clientW - pad * 2);
-    for (HWND child : { ctx->childBasic, ctx->childNote, ctx->childMarkup, ctx->childAnnot, ctx->childPalette, ctx->childAssets }) {
+    for (HWND child : { ctx->childBasic, ctx->childNote, ctx->childMarkup, ctx->childAnnot, ctx->childPalette }) {
         if (!child) continue;
         SetWindowPos(child, nullptr, childX, childTop, childW, childH, SWP_NOZORDER | SWP_NOACTIVATE);
     }
@@ -1957,7 +1962,7 @@ static void LayoutUnifiedSettingsShell(HWND hWnd, UnifiedSettingsShellCtx* ctx) 
 
 static void ShowUnifiedSettingsPage(HWND hWnd, UnifiedSettingsShellCtx* ctx, int category) {
     if (!hWnd || !ctx) return;
-    ctx->currentCategory = std::clamp(category, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavAssets));
+    ctx->currentCategory = std::clamp(category, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavPalette));
     HWND target = nullptr;
     switch (ctx->currentCategory) {
     case kSettingsNavGeneral:
@@ -1981,14 +1986,11 @@ static void ShowUnifiedSettingsPage(HWND hWnd, UnifiedSettingsShellCtx* ctx, int
     case kSettingsNavPalette:
         target = EnsureUnifiedPalettePage(hWnd, ctx);
         break;
-    case kSettingsNavAssets:
-        target = EnsureUnifiedAssetsPage(hWnd, ctx);
-        break;
     default:
         break;
     }
 
-    for (HWND child : { ctx->childBasic, ctx->childNote, ctx->childMarkup, ctx->childAnnot, ctx->childPalette, ctx->childAssets }) {
+    for (HWND child : { ctx->childBasic, ctx->childNote, ctx->childMarkup, ctx->childAnnot, ctx->childPalette }) {
         if (!child) continue;
         ShowWindow(child, child == target ? SW_SHOW : SW_HIDE);
     }
@@ -2000,15 +2002,28 @@ static void ShowUnifiedSettingsPage(HWND hWnd, UnifiedSettingsShellCtx* ctx, int
     }
 }
 
-static void ApplyUnifiedSettings(UnifiedSettingsShellCtx* ctx) {
-    if (!ctx) return;
-    if (ctx->basicCtx && ctx->childBasic) ApplyGeneralSettings(ctx->basicCtx.get());
-    if (ctx->noteCtx && ctx->childNote) ApplyGeneralSettings(ctx->noteCtx.get());
-    if (ctx->markupCtx && ctx->childMarkup) ApplyMarkupSettings(ctx->markupCtx.get());
-    if (ctx->annotCtx && ctx->childAnnot) ApplyAnnotationSettings(ctx->annotCtx.get());
+static bool ApplyUnifiedSettings(HWND hWnd, UnifiedSettingsShellCtx* ctx) {
+    if (!ctx) return false;
+    const auto saveFailed = [hWnd]() {
+        ShowSoftNotice(hWnd, localization::Text(L"settings.unified.save_failed"), SoftNoticeKind::Warning);
+        return false;
+    };
+    // Validate drafts before any page writes or runtime changes.
     if (ctx->paletteCtx && ctx->childPalette) {
-        SaveUserPaletteColorsForSettings(ctx->paletteCtx->colors,
-                                         std::size(ctx->paletteCtx->colors));
+        COLORREF color{};
+        if (!ReadPaletteEditorColor(ctx->childPalette, &color)) {
+            ShowUnifiedSettingsPage(GetParent(ctx->childPalette), ctx, kSettingsNavPalette);
+            (void)ValidatePaletteSettingsEditor(ctx->childPalette, ctx->paletteCtx.get());
+            return false;
+        }
+    }
+    if (ctx->basicCtx && ctx->childBasic && !ApplyGeneralSettings(ctx->basicCtx.get())) return saveFailed();
+    if (ctx->noteCtx && ctx->childNote && !ApplyGeneralSettings(ctx->noteCtx.get())) return saveFailed();
+    if (ctx->markupCtx && ctx->childMarkup && !ApplyMarkupSettings(ctx->markupCtx.get())) return saveFailed();
+    if (ctx->annotCtx && ctx->childAnnot && !ApplyAnnotationSettings(ctx->annotCtx.get())) return saveFailed();
+    if (ctx->paletteCtx && ctx->childPalette) {
+        if (!SaveUserPaletteColorsForSettings(ctx->paletteCtx->colors,
+                                             std::size(ctx->paletteCtx->colors))) return saveFailed();
         if (ctx->owner && IsWindow(ctx->owner)) {
             UpdateToolbarUI(ctx->owner);
         }
@@ -2019,6 +2034,7 @@ static void ApplyUnifiedSettings(UnifiedSettingsShellCtx* ctx) {
             RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
         }
     }
+    return true;
 }
 
 static void RevertUnifiedSettingsPage(HWND hWnd, UnifiedSettingsShellCtx* ctx) {
@@ -2049,9 +2065,6 @@ static void RevertUnifiedSettingsPage(HWND hWnd, UnifiedSettingsShellCtx* ctx) {
         ctx->childPalette = nullptr;
         ctx->paletteCtx.reset();
         break;
-    case kSettingsNavAssets:
-        RefreshSettingsAssetEntries(ctx->assetsCtx.get());
-        return;
     default:
         return;
     }
@@ -2205,13 +2218,13 @@ static LRESULT CALLBACK UnifiedSettingsShellProc(HWND hWnd, UINT msg, WPARAM wPa
         const int id = LOWORD(wParam);
         if (!ctx) break;
         if (id == IDOK) {
-            ApplyUnifiedSettings(ctx);
+            if (!ApplyUnifiedSettings(hWnd, ctx)) return 0;
             ctx->done = true;
             DestroyWindow(hWnd);
             return 0;
         }
         if (id == IDC_UNIFIED_SETTINGS_APPLY) {
-            ApplyUnifiedSettings(ctx);
+            if (!ApplyUnifiedSettings(hWnd, ctx)) return 0;
             ApplyThemeToDialog(hWnd);
             ShowSoftNotice(hWnd, localization::Text(L"settings.annot.fca7cf56577e").c_str());
             return 0;

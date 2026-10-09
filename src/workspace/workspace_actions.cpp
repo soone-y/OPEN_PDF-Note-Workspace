@@ -26,6 +26,11 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <zlib.h>
+#include "diagnostics/write_checks.h"
+#include "diagnostics/normal_operations.h"
+#include "office/work_paths.h"
+#include "office/handoff_paths.h"
 #include "office/docx_space_protection.h"
 
 // file: main/workspace_actions.cppinc
@@ -322,9 +327,7 @@ std::filesystem::path ExeDirPath() {
             return std::filesystem::path(std::wstring(exePath.data(), len)).parent_path();
         }
         if (len == 0 || exePath.size() >= 32768) {
-            std::error_code ec;
-            auto cur = std::filesystem::current_path(ec);
-            return ec ? std::filesystem::path{} : cur;
+            return {}; // executable location failure cannot authorize the CWD
         }
         exePath.resize(exePath.size() * 2, L'\0');
     }
@@ -460,7 +463,8 @@ void AddTempExternalLectures(HWND owner, const std::vector<std::wstring>& lectur
 std::optional<std::wstring> PickWorkspaceFolder(HWND parent) {
     auto result = PromptExistingLocalPath(parent, DialogWorkspaceSelectionInitialFolder(),
                                           GetUiText().menuOpenWs, /*requireDirectory=*/true,
-                                          std::filesystem::path(g_workspaceRoot));
+                                          std::filesystem::path(g_workspaceRoot),
+                                          localization::Text(L"ui.local_path.3b3a39d56026"));
     if (result) {
         // No-network requirement: block UNC / device prefix paths for workspace root selection.
         if (result->rfind(L"\\\\", 0) == 0) {
@@ -480,14 +484,16 @@ std::optional<std::wstring> PickWorkspaceFolder(HWND parent) {
 
 std::optional<std::wstring> PickFolderWithInitial(HWND parent,
                                                          const std::filesystem::path& initialDir,
-                                                         const std::wstring& title) {
-    return PromptExistingLocalPath(parent, initialDir, title, /*requireDirectory=*/true);
+                                                         const std::wstring& title,
+                                                         const std::wstring& confirmLabel) {
+    return PromptExistingLocalPath(parent, initialDir, title, /*requireDirectory=*/true, {}, confirmLabel);
 }
 
 std::vector<std::wstring> PickFoldersWithInitial(HWND parent,
                                                         const std::filesystem::path& initialDir,
-                                                        const std::wstring& title) {
-    return PromptExistingLocalFolders(parent, initialDir, title, /*allowMultiple=*/true);
+                                                        const std::wstring& title,
+                                                        const std::wstring& confirmLabel) {
+    return PromptExistingLocalFolders(parent, initialDir, title, /*allowMultiple=*/true, confirmLabel);
 }
 
 std::wstring s_newNoteExtension = L".clro";
@@ -990,6 +996,7 @@ bool SaveBlankPdfDocumentAtomically(const std::filesystem::path& dest,
         if (outErr) *outErr = localization::Text(L"workspace.actions.c1917fc7de7f").c_str();
         return false;
     }
+    write_checks::NormalOperation observation(g_workspaceRoot, dest);
     std::error_code ec;
     if (std::filesystem::exists(dest, ec) && !ec) {
         if (outErr) *outErr = localization::Text(L"workspace.actions.98eb9325bc9a").c_str();
@@ -1058,7 +1065,9 @@ bool SaveBlankPdfDocumentAtomically(const std::filesystem::path& dest,
         if (outErr) *outErr = localization::Text(L"workspace.actions.98eb9325bc9a").c_str();
         return false;
     }
-    return atomic_write::AtomicReplaceFile(dest, tmp, dest.parent_path(), outErr);
+    const bool placed = atomic_write::AtomicReplaceFile(dest, tmp, dest.parent_path(), outErr);
+    if (placed) observation.Success();
+    return placed;
 }
 
 void CreateBlankPdfInCurrentSession(HWND hWnd) {
@@ -1330,22 +1339,25 @@ void CleanupImportTempFile(HANDLE* handle, const std::filesystem::path& tmp) {
     }
     if (!tmp.empty()) {
         std::error_code rmEc;
-        std::filesystem::remove(tmp, rmEc);
+        std::filesystem::remove(office::work_paths::IoPath(tmp), rmEc);
     }
 }
 
-bool CopyFileForImportSafely(const std::filesystem::path& src,
+static bool CopyFileForImportSafely(const std::filesystem::path& src,
                                     const std::filesystem::path& dest,
-                                    std::wstring* outErr) {
+                                    std::wstring* outErr,
+                                    const std::filesystem::path& observationRoot) {
     if (outErr) outErr->clear();
     if (src.empty() || dest.empty()) {
         if (outErr) *outErr = localization::Text(L"workspace.actions.70e485841f70").c_str();
         return false;
     }
+    write_checks::NormalOperation observation(observationRoot, dest);
+    if (observationRoot.empty()) observation.Cancel(); // Arbitrary user destinations cannot define a workspace.
 
     if (!dest.parent_path().empty()) {
         std::error_code ec;
-        std::filesystem::create_directories(dest.parent_path(), ec);
+        std::filesystem::create_directories(office::work_paths::IoPath(dest.parent_path()), ec);
         if (ec) {
             if (outErr) *outErr = (localization::Text(L"workspace.actions.af61d0579ff4").c_str()) +
                                   dest.parent_path().wstring();
@@ -1461,7 +1473,14 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
             : replaceErr;
         return false;
     }
+    observation.Success();
     return true;
+}
+
+bool CopyFileForImportSafely(const std::filesystem::path& src,
+                             const std::filesystem::path& dest,
+                             std::wstring* outErr) {
+    return CopyFileForImportSafely(src, dest, outErr, {});
 }
 
 struct DirectoryImportPlan {
@@ -1472,7 +1491,7 @@ struct DirectoryImportPlan {
 };
 
 bool IsWorkspaceReservedImportDirectoryName(const std::filesystem::path& path) {
-    return ToLowerAscii(path.filename().wstring()) == L"__resource__";
+    return ToLowerAscii(path.filename().wstring()) == L"__pdf_note_workspace__";
 }
 
 bool ValidateDirectoryImportSource(HWND owner,
@@ -1735,7 +1754,7 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
         const std::filesystem::path srcFile = plan.sourceRoot / rel;
         const std::filesystem::path destFile = plan.destRoot / rel;
         std::wstring copyErr;
-        if (!CopyFileForImportSafely(srcFile, destFile, &copyErr)) {
+        if (!CopyFileForImportSafely(srcFile, destFile, &copyErr, std::filesystem::path(g_workspaceRoot))) {
             std::wstring err = copyErr.empty()
                 ? (localization::Text(L"workspace.actions.67c8af2a773e").c_str())
                 : copyErr;
@@ -1749,7 +1768,8 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
 std::optional<std::filesystem::path> PickDirectoryImportSource(HWND owner,
                                                                       const std::wstring& title,
                                                                       const std::filesystem::path& initial) {
-    auto picked = PromptExistingLocalPathAppFirst(owner, initial, title, /*requireDirectory=*/true);
+    auto picked = PromptExistingLocalPathAppFirst(owner, initial, title, /*requireDirectory=*/true,
+                                                 localization::Text(L"dialog.action.import"));
     if (!picked) return std::nullopt;
     std::filesystem::path src(*picked);
     if (!ValidateDirectoryImportSource(owner, src, title)) return std::nullopt;
@@ -1985,7 +2005,7 @@ bool BackupImportOverwriteTarget(const std::filesystem::path& dest,
 
     std::filesystem::path backupPath = atomic_write::MakeUniqueDestInDir(backupDir, dest.filename());
     std::wstring copyErr;
-    if (!CopyFileForImportSafely(dest, backupPath, &copyErr)) {
+    if (!CopyFileForImportSafely(dest, backupPath, &copyErr, std::filesystem::path(g_workspaceRoot))) {
         if (outErr) *outErr = copyErr.empty()
             ? (localization::Text(L"workspace.actions.e116d079d96d").c_str())
             : copyErr;
@@ -1998,7 +2018,8 @@ bool BackupImportOverwriteTarget(const std::filesystem::path& dest,
 ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
                                                        const std::filesystem::path& copySource,
                                                        const std::filesystem::path& dest,
-                                                       std::wstring* outFailure) {
+                                                       std::wstring* outFailure,
+                                                       const std::filesystem::path& observationRoot = {}) {
     const auto& ui = GetUiText();
     if (outFailure) outFailure->clear();
 
@@ -2009,6 +2030,7 @@ ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
     if (IsSameImportPath(copySource, dest)) {
         return ImportOneResult::Skipped;
     }
+    write_checks::NormalOperation observation(observationRoot.empty() ? g_workspaceRoot : observationRoot.native(), dest);
 
     std::error_code ec;
     const bool destExists = std::filesystem::exists(dest, ec);
@@ -2030,6 +2052,7 @@ ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
         confirm.defaultResult = SilentDialogResult::No;
         confirm.escapeResult = SilentDialogResult::No;
         if (ShowSilentDialog(hWnd, confirm) != SilentDialogResult::Yes) {
+            observation.Cancel();
             return ImportOneResult::Skipped;
         }
         std::filesystem::path backupPath;
@@ -2049,6 +2072,7 @@ ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
             : copyErr;
         return ImportOneResult::Failed;
     }
+    observation.Success();
     return ImportOneResult::Imported;
 }
 
@@ -2073,6 +2097,19 @@ std::wstring QuoteWindowsCommandLineArg(const std::wstring& arg) {
     out.append(slashCount * 2, L'\\');
     out.push_back(L'"');
     return out;
+}
+
+bool ValidateLibreOfficeCommandLineBudget(const std::wstring& command,
+                                         const std::filesystem::path& soffice,
+                                         std::wstring* outErr) {
+    const size_t length = office::handoff_paths::ConverterCommandLineLength(command, soffice.parent_path());
+    if (length <= office::handoff_paths::kMaximumCommandLineLength) return true;
+    if (outErr) {
+        *outErr = localization::Text(L"workspace.actions.2f67bd1d6fec").c_str();
+        *outErr += L"\ncommand line: length=" + std::to_wstring(length) +
+            L" (limit=" + std::to_wstring(office::handoff_paths::kMaximumCommandLineLength) + L")";
+    }
+    return false;
 }
 
 bool FileUrlFromLocalPath(const std::filesystem::path& path,
@@ -2133,10 +2170,10 @@ bool WriteLibreOfficeProfilePathConfig(const std::filesystem::path& profileDir,
     std::filesystem::path workDir = officeTempDir / L"work";
     std::filesystem::path backupDir = officeTempDir / L"backup";
     std::filesystem::path tempDir = officeTempDir / L"temp";
-    std::filesystem::create_directories(userDir, ec);
-    if (!ec) std::filesystem::create_directories(workDir, ec);
-    if (!ec) std::filesystem::create_directories(backupDir, ec);
-    if (!ec) std::filesystem::create_directories(tempDir, ec);
+    std::filesystem::create_directories(office::work_paths::IoPath(userDir), ec);
+    if (!ec) std::filesystem::create_directories(office::work_paths::IoPath(workDir), ec);
+    if (!ec) std::filesystem::create_directories(office::work_paths::IoPath(backupDir), ec);
+    if (!ec) std::filesystem::create_directories(office::work_paths::IoPath(tempDir), ec);
     if (ec) {
         if (outErr) *outErr = (localization::Text(L"workspace.actions.93a04e4e1379").c_str()) +
                               officeTempDir.wstring();
@@ -2182,7 +2219,7 @@ bool WriteLibreOfficeProfilePathConfig(const std::filesystem::path& profileDir,
 
     std::ostringstream xml;
     xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-        << "<oor:data xmlns:oor=\"http://openoffice.org/2001/registry\" "
+        << "<oor:items xmlns:oor=\"http://openoffice.org/2001/registry\" "
         << "xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" "
         << "xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n";
     appendSinglePath(xml, "Work", workUrl);
@@ -2193,7 +2230,7 @@ bool WriteLibreOfficeProfilePathConfig(const std::filesystem::path& profileDir,
         << "  </item>\n";
     appendCommonPath(xml, "Current", workUrl, backupUrl);
     appendCommonPath(xml, "Default", workUrl, backupUrl);
-    xml << "</oor:data>\n";
+    xml << "</oor:items>\n";
 
     const std::filesystem::path configPath = userDir / L"registrymodifications.xcu";
     const std::string data = xml.str();
@@ -2236,8 +2273,8 @@ bool IsUsableLibreOfficeSofficeCandidate(const std::filesystem::path& cand) {
     bool isReparse = false;
     if (TryIsReparsePointNoFollow(cand, isReparse) && isReparse) return false;
     std::error_code ec;
-    return std::filesystem::exists(cand, ec) && !ec &&
-           std::filesystem::is_regular_file(cand, ec) && !ec;
+    return std::filesystem::exists(office::work_paths::IoPath(cand), ec) && !ec &&
+           std::filesystem::is_regular_file(office::work_paths::IoPath(cand), ec) && !ec;
 }
 
 std::filesystem::path FindLibreOfficeSoffice() {
@@ -2272,10 +2309,10 @@ bool PathIsWithinDirectory(const std::filesystem::path& child,
                                   const std::filesystem::path& parent) {
     if (child.empty() || parent.empty()) return false;
     std::error_code ec;
-    std::filesystem::path canonParent = std::filesystem::weakly_canonical(parent, ec);
+    std::filesystem::path canonParent = office::work_paths::ExistingCanonicalPath(parent, ec);
     if (ec) return false;
     ec.clear();
-    std::filesystem::path canonChild = std::filesystem::weakly_canonical(child, ec);
+    std::filesystem::path canonChild = office::work_paths::ExistingCanonicalPath(child, ec);
     if (ec) return false;
 
     std::wstring parentKey = canonParent.wstring();
@@ -2297,75 +2334,7 @@ void RemoveEmptyDirsDeepestFirstBestEffort(std::vector<std::filesystem::path> di
         bool isReparse = false;
         if (TryIsReparsePointNoFollow(dir, isReparse) && isReparse) continue;
         std::error_code ec;
-        std::filesystem::remove(dir, ec);
-    }
-}
-
-void CleanupGeneratedPycacheDirBestEffort(const std::filesystem::path& dir,
-                                                 const std::filesystem::path& imageRoot) {
-    if (dir.empty() || dir.filename() != L"__pycache__" ||
-        !PathIsWithinDirectory(dir, imageRoot)) {
-        return;
-    }
-    bool rootIsReparse = false;
-    if (TryIsReparsePointNoFollow(dir, rootIsReparse) && rootIsReparse) return;
-
-    std::vector<std::filesystem::path> dirs{dir};
-    std::error_code ec;
-    for (auto it = std::filesystem::recursive_directory_iterator(
-             dir, std::filesystem::directory_options::skip_permission_denied, ec);
-         !ec && it != std::filesystem::recursive_directory_iterator(); ++it) {
-        const auto path = it->path();
-        if (!PathIsWithinDirectory(path, dir)) {
-            it.disable_recursion_pending();
-            continue;
-        }
-        bool isReparse = false;
-        if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) {
-            it.disable_recursion_pending();
-            continue;
-        }
-        std::error_code stEc;
-        if (it->is_directory(stEc) && !stEc) {
-            dirs.push_back(path);
-            continue;
-        }
-        stEc.clear();
-        if (it->is_regular_file(stEc) && !stEc) {
-            std::wstring ext = path.extension().wstring();
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-            if (ext == L".pyc" || ext == L".pyo") {
-                std::error_code rmEc;
-                std::filesystem::remove(path, rmEc);
-            }
-        }
-    }
-    RemoveEmptyDirsDeepestFirstBestEffort(std::move(dirs), imageRoot);
-}
-
-void CleanupLibreOfficePythonCacheBestEffort(const std::filesystem::path& soffice) {
-    if (soffice.empty() || soffice.parent_path().empty()) return;
-    std::filesystem::path imageRoot = soffice.parent_path().parent_path();
-    if (imageRoot.empty()) return;
-
-    std::vector<std::filesystem::path> cacheDirs;
-    std::error_code ec;
-    for (auto it = std::filesystem::recursive_directory_iterator(
-             imageRoot, std::filesystem::directory_options::skip_permission_denied, ec);
-         !ec && it != std::filesystem::recursive_directory_iterator(); ++it) {
-        if (!it->is_directory(ec) || ec) {
-            ec.clear();
-            continue;
-        }
-        if (it->path().filename() == L"__pycache__" &&
-            PathIsWithinDirectory(it->path(), imageRoot)) {
-            cacheDirs.push_back(it->path());
-            it.disable_recursion_pending();
-        }
-    }
-
-    for (const auto& dir : cacheDirs) {
-        CleanupGeneratedPycacheDirBestEffort(dir, imageRoot);
+        std::filesystem::remove(office::work_paths::IoPath(dir), ec);
     }
 }
 
@@ -2389,7 +2358,7 @@ bool CreateOfficeImportTempMarker(const std::filesystem::path& dir) {
     CloseHandle(h);
     if (!ok) {
         std::error_code ec;
-        std::filesystem::remove(marker, ec);
+        std::filesystem::remove(office::work_paths::IoPath(marker), ec);
     }
     return ok;
 }
@@ -2398,8 +2367,8 @@ bool HasOfficeImportTempMarker(const std::filesystem::path& dir) {
     if (dir.empty()) return false;
     const std::filesystem::path marker = dir / kOfficeImportTempMarkerFile;
     std::error_code ec;
-    return std::filesystem::exists(marker, ec) && !ec &&
-           std::filesystem::is_regular_file(marker, ec) && !ec;
+    return std::filesystem::exists(office::work_paths::IoPath(marker), ec) && !ec &&
+           std::filesystem::is_regular_file(office::work_paths::IoPath(marker), ec) && !ec;
 }
 
 void CleanupMarkedOfficeImportTempDirBestEffort(const std::filesystem::path& dir,
@@ -2413,57 +2382,33 @@ void CleanupMarkedOfficeImportTempDirBestEffort(const std::filesystem::path& dir
 
     std::vector<std::filesystem::path> dirs{dir};
     std::error_code ec;
-    for (auto it = std::filesystem::recursive_directory_iterator(
-             dir, std::filesystem::directory_options::skip_permission_denied, ec);
-         !ec && it != std::filesystem::recursive_directory_iterator(); ++it) {
-        const auto path = it->path();
-        if (!PathIsWithinDirectory(path, dir)) {
-            it.disable_recursion_pending();
-            continue;
-        }
-        bool isReparse = false;
-        if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) {
-            it.disable_recursion_pending();
-            continue;
-        }
-        std::error_code stEc;
-        if (it->is_directory(stEc) && !stEc) {
-            dirs.push_back(path);
-            continue;
-        }
-        stEc.clear();
-        if (it->is_regular_file(stEc) && !stEc) {
-            std::error_code rmEc;
-            std::filesystem::remove(path, rmEc);
+    for (size_t index = 0; index < dirs.size(); ++index) {
+        std::vector<office::work_paths::DirectoryEntry> entries;
+        if (!office::work_paths::ReadDirectory(dirs[index], entries, ec)) continue;
+        for (const auto& entry : entries) {
+            const auto& path = entry.path;
+            if ((entry.attributes & FILE_ATTRIBUTE_REPARSE_POINT) || !PathIsWithinDirectory(path, dir)) continue;
+            bool isReparse = false;
+            if (!TryIsReparsePointNoFollow(path, isReparse) || isReparse) continue;
+            if (entry.attributes & FILE_ATTRIBUTE_DIRECTORY) {
+                dirs.push_back(path);
+            } else {
+                std::error_code rmEc;
+                std::filesystem::remove(office::work_paths::IoPath(path), rmEc);
+            }
         }
     }
     RemoveEmptyDirsDeepestFirstBestEffort(std::move(dirs), allowedRoot);
 }
 
-std::filesystem::path OfficeImportTempRootPath() {
-    std::vector<wchar_t> tempPath(512, L'\0');
-    for (;;) {
-        const DWORD length = GetTempPathW(static_cast<DWORD>(tempPath.size()), tempPath.data());
-        if (length > 0 && length < tempPath.size()) {
-            return std::filesystem::path(std::wstring(tempPath.data(), length)) /
-                   L"PDFNoteWorkspace" / L"office_import";
-        }
-        if (length == 0 || tempPath.size() >= 32768) return {};
-        // When the supplied buffer is insufficient, GetTempPathW returns the
-        // required size including the terminator.
-        tempPath.resize(std::min<size_t>(std::max<size_t>(tempPath.size() * 2, length + 1), 32768), L'\0');
-    }
-}
-
-std::filesystem::path MakeOfficeImportTempRoot(std::wstring* outErr) {
+std::filesystem::path MakeOfficeImportTempRoot(const std::filesystem::path& root, std::wstring* outErr) {
     if (outErr) outErr->clear();
-    std::filesystem::path root = OfficeImportTempRootPath();
-    if (root.empty()) {
+    if (root.empty() || !write_checks::IsSafeLocalPath(root)) {
         if (outErr) *outErr = localization::Text(L"workspace.actions.f6429af02b47").c_str();
         return {};
     }
     std::error_code ec;
-    std::filesystem::create_directories(root, ec);
+    std::filesystem::create_directories(office::work_paths::IoPath(root), ec);
     if (ec) {
         if (outErr) *outErr = (localization::Text(L"workspace.actions.4296f2fa17ed").c_str()) +
                               root.wstring();
@@ -2477,37 +2422,38 @@ std::filesystem::path MakeOfficeImportTempRoot(std::wstring* outErr) {
     return root;
 }
 
-std::filesystem::path MakeUniqueOfficeImportTempDir(std::wstring* outErr) {
-    std::filesystem::path root = MakeOfficeImportTempRoot(outErr);
+std::filesystem::path MakeUniqueOfficeImportTempDir(const std::filesystem::path& selectedRoot, std::wstring* outErr) {
+    write_checks::NormalOperation observation({}, selectedRoot, write_checks::Kind::OfficeTempWrite, selectedRoot.parent_path());
+    std::filesystem::path root = MakeOfficeImportTempRoot(selectedRoot, outErr);
     if (root.empty()) return {};
     DWORD pid = GetCurrentProcessId();
     ULONGLONG tick = GetTickCount64();
     std::error_code ec;
     for (int i = 0; i < 64; ++i) {
-        std::filesystem::path dir = root / (NowTimestampString() + L"_" +
-                                            std::to_wstring(pid) + L"_" +
-                                            std::to_wstring(static_cast<unsigned long long>(tick)) + L"_" +
-                                            std::to_wstring(i));
+        // Keep the operation component short; LibreOffice's internal registry
+        // still needs the existing path budget. CREATE_NEW ownership is unchanged.
+        std::wostringstream component;
+        component << std::hex << pid << L"_" << tick << L"_" << i;
+        std::filesystem::path dir = root / component.str();
         ec.clear();
-        if (std::filesystem::create_directory(dir, ec) && !ec) {
-            if (CreateOfficeImportTempMarker(dir)) return dir;
+        if (std::filesystem::create_directory(office::work_paths::IoPath(dir), ec) && !ec) {
+            if (CreateOfficeImportTempMarker(dir)) { observation.Success(); return dir; }
             std::error_code rmEc;
-            std::filesystem::remove(dir, rmEc);
+            std::filesystem::remove(office::work_paths::IoPath(dir), rmEc);
         }
     }
     if (outErr) *outErr = localization::Text(L"workspace.actions.c9a52caf90ee").c_str();
     return {};
 }
 
-void RemoveOfficeImportTempDirBestEffort(const std::filesystem::path& dir) {
+void RemoveOfficeImportTempDirBestEffort(const std::filesystem::path& dir, const std::filesystem::path& root) {
     if (dir.empty()) return;
-    std::filesystem::path root = OfficeImportTempRootPath();
     if (root.empty()) return;
     std::error_code ec;
-    std::filesystem::path canonRoot = std::filesystem::weakly_canonical(root, ec);
+    std::filesystem::path canonRoot = office::work_paths::ExistingCanonicalPath(root, ec);
     if (ec) return;
     ec.clear();
-    std::filesystem::path canonDir = std::filesystem::weakly_canonical(dir, ec);
+    std::filesystem::path canonDir = office::work_paths::ExistingCanonicalPath(dir, ec);
     if (ec) return;
     std::wstring rootKey = canonRoot.wstring();
     std::wstring dirKey = canonDir.wstring();
@@ -2595,38 +2541,23 @@ OfficeConversionWaitResult WaitForLibreOfficeLauncher(HANDLE process, DWORD time
 }
 
 void AppendOfficeConversionDiagnostic(const std::wstring& message) {
-    if (g_workspaceRoot.empty() || message.empty() || !g_config.debugLogs.officeConversion) return;
-    const std::filesystem::path logDir = std::filesystem::path(g_workspaceRoot) /
-                                         L"__resource__" / L"__log__";
-    std::error_code ec;
-    std::filesystem::create_directories(logDir, ec);
-    if (ec) return;
-    bool isReparse = false;
-    if (!TryIsReparsePointNoFollow(logDir, isReparse) || isReparse) return;
-
-    const std::filesystem::path logPath = logDir / L"office_conversion.log";
-    std::ofstream out(logPath, std::ios::binary | std::ios::app);
-    if (!out) return;
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
-    wchar_t timestamp[48]{};
-    swprintf_s(timestamp, L"%04u-%02u-%02u %02u:%02u:%02u.%03u",
-               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-    const std::string utf8 = WideToUTF8(std::wstring(timestamp) + L" " + message + L"\n");
-    out.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+    if (message.empty()) return;
+    AppendAppLogLine(AppLogKind::OfficeConversion, message);
 }
 
 void AppendOfficeConversionOutputSnapshot(const std::filesystem::path& outputDir) {
     std::wstring message = L"output_snapshot";
     std::error_code ec;
     size_t count = 0;
-    for (std::filesystem::directory_iterator it(outputDir, ec), end;
-         !ec && it != end && count < 32; it.increment(ec), ++count) {
-        std::error_code fileEc;
-        const bool regular = it->is_regular_file(fileEc) && !fileEc;
-        if (regular) {
-            const uintmax_t size = std::filesystem::file_size(it->path(), fileEc);
-            if (!fileEc) message += L" | file_size=" + std::to_wstring(size);
+    std::vector<office::work_paths::DirectoryEntry> entries;
+    if (office::work_paths::ReadDirectory(outputDir, entries, ec)) {
+        for (const auto& entry : entries) {
+            if (count++ >= 32) { count = 32; break; }
+            if (!(entry.attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
+                std::error_code fileEc;
+                const uintmax_t size = std::filesystem::file_size(office::work_paths::IoPath(entry.path), fileEc);
+                if (!fileEc) message += L" | file_size=" + std::to_wstring(size);
+            }
         }
     }
     message += L" | entries=" + std::to_wstring(count);
@@ -2650,10 +2581,10 @@ bool WaitForExpectedLibreOfficePdf(const std::filesystem::path& expectedPdf,
         }
 
         std::error_code ec;
-        const bool exists = std::filesystem::exists(expectedPdf, ec) && !ec &&
-                            std::filesystem::is_regular_file(expectedPdf, ec) && !ec;
+        const bool exists = std::filesystem::exists(office::work_paths::IoPath(expectedPdf), ec) && !ec &&
+                            std::filesystem::is_regular_file(office::work_paths::IoPath(expectedPdf), ec) && !ec;
         if (exists) {
-            const uintmax_t size = std::filesystem::file_size(expectedPdf, ec);
+            const uintmax_t size = std::filesystem::file_size(office::work_paths::IoPath(expectedPdf), ec);
             if (!ec && size >= 5) {
                 const ULONGLONG now = GetTickCount64();
                 if (observed && observedSize == size && now - stableSince >= 750) {
@@ -2683,6 +2614,26 @@ bool ValidateLibreOfficeHandoffPathBudget(const std::filesystem::path& soffice,
                                           const std::filesystem::path& profileDir,
                                           std::wstring* outErr);
 
+[[nodiscard]] static bool PrepareOfficeChildEnvironment(const std::filesystem::path& profileDir,
+                                         std::vector<wchar_t>& environment,
+                                         std::wstring* outErr) {
+    const auto local = profileDir.parent_path() / L"local";
+    try {
+        if (!write_checks::IsSafeLocalPath(local)) {
+            if (outErr) *outErr = localization::Text(L"workspace.actions.ee81c0d4841b");
+            return false;
+        }
+        std::error_code ec;
+        for (const wchar_t* name : {L"appdata", L"localappdata", L"temp", L"pycache"}) {
+            std::filesystem::create_directories(office::work_paths::IoPath(local / name), ec);
+            if (ec) { if (outErr) *outErr = atomic_write::Win32ErrorMessage(ec.value()); return false; }
+        }
+        if (office::work_paths::ChildEnvironment(local, environment)) return true;
+        if (outErr) *outErr = atomic_write::Win32ErrorMessage(GetLastError());
+    } catch (...) { if (outErr) *outErr = localization::Text(L"workspace.actions.43223a01deaf"); }
+    return false;
+}
+
 bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
                                         const std::filesystem::path& outDir,
                                         const std::filesystem::path& profileDir,
@@ -2698,16 +2649,15 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     if (!ValidateLibreOfficeHandoffPathBudget(soffice, sourceOfficeCopy, outDir, profileDir, outErr)) {
         return false;
     }
-    CleanupLibreOfficePythonCacheBestEffort(soffice);
 
     std::error_code ec;
-    std::filesystem::create_directories(outDir, ec);
+    std::filesystem::create_directories(office::work_paths::IoPath(outDir), ec);
     if (ec) {
         if (outErr) *outErr = (localization::Text(L"workspace.actions.2b4708c6cff7").c_str()) +
                               outDir.wstring();
         return false;
     }
-    std::filesystem::create_directories(profileDir, ec);
+    std::filesystem::create_directories(office::work_paths::IoPath(profileDir), ec);
     if (ec) {
         if (outErr) *outErr = (localization::Text(L"workspace.actions.021e608ea70b").c_str()) +
                               profileDir.wstring();
@@ -2717,11 +2667,12 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     if (!WriteLibreOfficeProfilePathConfig(profileDir, officeLocalDir, outErr)) {
         return false;
     }
+    std::vector<wchar_t> childEnvironment;
+    if (!PrepareOfficeChildEnvironment(profileDir, childEnvironment, outErr)) return false;
 
     std::wstring profileUrl;
     std::wstring profileUrlErr;
     if (!FileUrlFromLocalPath(profileDir, &profileUrl, &profileUrlErr)) {
-        CleanupLibreOfficePythonCacheBestEffort(soffice);
         if (outErr) {
             *outErr = (localization::Text(L"workspace.actions.021e608ea70b").c_str()) + profileDir.wstring();
             if (!profileUrlErr.empty()) *outErr += L"\n" + profileUrlErr;
@@ -2735,6 +2686,9 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
         L" --convert-to pdf" +
         L" --outdir " + QuoteWindowsCommandLineArg(outDir.wstring()) +
         L" " + QuoteWindowsCommandLineArg(sourceOfficeCopy.wstring());
+    if (!ValidateLibreOfficeCommandLineBudget(cmd, soffice, outErr)) return false;
+    const std::filesystem::path launchDirectory = soffice.parent_path();
+    const std::wstring executablePath = ToExtendedWin32PathIfAbsoluteLocal(soffice);
     AppendOfficeConversionDiagnostic(L"start");
 
     STARTUPINFOW si{};
@@ -2745,19 +2699,18 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
 
-    BOOL created = CreateProcessW(soffice.c_str(),
+    BOOL created = CreateProcessW(executablePath.c_str(),
                                   mutableCmd.data(),
                                   nullptr,
                                   nullptr,
                                   FALSE,
-                                  CREATE_NO_WINDOW,
-                                  nullptr,
-                                  outDir.c_str(),
+                                  CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                                  childEnvironment.data(),
+                                  launchDirectory.c_str(),
                                   &si,
                                   &pi);
     DWORD createErr = created ? 0 : GetLastError();
     if (!created) {
-        CleanupLibreOfficePythonCacheBestEffort(soffice);
         AppendOfficeConversionDiagnostic(L"CreateProcess failed error=" + std::to_wstring(createErr));
         if (outErr) *outErr = (localization::Text(L"workspace.actions.77746f1852f2").c_str()) +
                               soffice.wstring() + L"\n\n" + atomic_write::Win32ErrorMessage(createErr);
@@ -2775,7 +2728,6 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
         WaitForSingleObject(pi.hProcess, 5000);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
-        CleanupLibreOfficePythonCacheBestEffort(soffice);
         AppendOfficeConversionDiagnostic(L"process_wait_failed result=" + std::to_wstring(static_cast<int>(wait)));
         if (wait == OfficeConversionWaitResult::Canceled) {
             if (outCanceled) *outCanceled = true;
@@ -2792,7 +2744,6 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     if (exitCode != 0) {
-        CleanupLibreOfficePythonCacheBestEffort(soffice);
         AppendOfficeConversionDiagnostic(L"process_exit_code=" + std::to_wstring(exitCode));
         if (outErr) *outErr = (localization::Text(L"workspace.actions.d64078e4d8b8").c_str()) +
                               std::to_wstring(exitCode);
@@ -2809,12 +2760,10 @@ bool RunLibreOfficePdfConversion(const std::filesystem::path& sourceOfficeCopy,
                                      L" output_wait_canceled=" + std::to_wstring(outputWaitCanceled ? 1 : 0));
     if (!outputReady) AppendOfficeConversionOutputSnapshot(outDir);
     if (outputWaitCanceled) {
-        CleanupLibreOfficePythonCacheBestEffort(soffice);
         if (outCanceled) *outCanceled = true;
         if (outErr) *outErr = localization::Text(L"workspace.actions.10e2c376855f").c_str();
         return false;
     }
-    CleanupLibreOfficePythonCacheBestEffort(soffice);
     return true;
 }
 
@@ -2826,8 +2775,8 @@ bool FindLibreOfficeGeneratedPdf(const std::filesystem::path& outputDir,
     if (outErr) outErr->clear();
 
     std::error_code ec;
-    if (std::filesystem::exists(expectedPdf, ec) && !ec &&
-        std::filesystem::is_regular_file(expectedPdf, ec) && !ec) {
+    if (std::filesystem::exists(office::work_paths::IoPath(expectedPdf), ec) && !ec &&
+        std::filesystem::is_regular_file(office::work_paths::IoPath(expectedPdf), ec) && !ec) {
         bool isReparse = false;
         if (TryIsReparsePointNoFollow(expectedPdf, isReparse) && !isReparse) {
             if (outPdf) *outPdf = expectedPdf;
@@ -2836,18 +2785,17 @@ bool FindLibreOfficeGeneratedPdf(const std::filesystem::path& outputDir,
     }
 
     std::vector<std::filesystem::path> candidates;
-    for (std::filesystem::directory_iterator it(outputDir, ec), end;
-         !ec && it != end; it.increment(ec)) {
-        const std::filesystem::path candidate = it->path();
-        bool isReparse = false;
-        if (!TryIsReparsePointNoFollow(candidate, isReparse) || isReparse) continue;
-        if (!it->is_regular_file(ec) || ec) {
-            ec.clear();
-            continue;
+    std::vector<office::work_paths::DirectoryEntry> entries;
+    if (office::work_paths::ReadDirectory(outputDir, entries, ec)) {
+        for (const auto& entry : entries) {
+            if (entry.attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+            const auto& candidate = entry.path;
+            bool isReparse = false;
+            if (!TryIsReparsePointNoFollow(candidate, isReparse) || isReparse) continue;
+            std::wstring extension = candidate.extension().wstring();
+            std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
+            if (extension == L".pdf") candidates.push_back(candidate);
         }
-        std::wstring extension = candidate.extension().wstring();
-        std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
-        if (extension == L".pdf") candidates.push_back(candidate);
     }
 
     if (!ec && candidates.size() == 1) {
@@ -2875,12 +2823,11 @@ bool FindLibreOfficeGeneratedPdf(const std::filesystem::path& outputDir,
 bool ValidateLibreOfficeConversionPathBudget(const std::filesystem::path& tempDir,
                                              const std::filesystem::path& source,
                                              std::wstring* outErr) {
-    // LibreOffice still contains components that do not reliably handle long Win32 paths.
-    constexpr size_t kSafePathLength = 220;
+    constexpr size_t kSafePathLength = office::handoff_paths::kMaximumPathLength;
     const std::filesystem::path stagedInput = tempDir / L"input" / source.filename();
     const std::filesystem::path expectedPdf = tempDir / L"output" /
                                               (source.stem().wstring() + L".pdf");
-    const std::filesystem::path profileProbe = tempDir / L"profile" / L"user" /
+    const std::filesystem::path profileProbe = tempDir / office::work_paths::kProfileDirectoryName / L"user" /
         L"uno_packages" / L"cache" / L"registry" /
         L"com.sun.star.comp.deployment.configuration.PackageRegistryBackend" / L"backenddb.xml";
     const std::array<std::filesystem::path, 3> paths = {stagedInput, expectedPdf, profileProbe};
@@ -2901,6 +2848,11 @@ bool ValidateLibreOfficeConversionPathBudget(const std::filesystem::path& tempDi
 // process we happened to create.
 struct OfficeConversionWorkerControl {
     std::atomic_bool cancelRequested{false};
+    const std::atomic_bool* diagnosticCancel = nullptr;
+    [[nodiscard]] bool IsCanceled() const {
+        return cancelRequested.load(std::memory_order_acquire) ||
+               (diagnosticCancel && diagnosticCancel->load(std::memory_order_acquire));
+    }
     std::mutex jobMutex;
     HANDLE job = nullptr;
 };
@@ -2920,7 +2872,7 @@ static bool WaitForOfficeWorkerHandle(HANDLE process, DWORD timeoutMs,
                                       OfficeConversionWorkerControl& control) {
     const ULONGLONG started = GetTickCount64();
     for (;;) {
-        if (control.cancelRequested.load(std::memory_order_acquire)) return false;
+        if (control.IsCanceled()) return false;
         const DWORD wait = WaitForSingleObject(process, 100);
         if (wait == WAIT_OBJECT_0) return true;
         if (wait != WAIT_TIMEOUT) return false;
@@ -2936,11 +2888,11 @@ static bool WaitForOfficeWorkerPdf(const std::filesystem::path& expectedPdf,
     ULONGLONG stableSince = 0;
     bool seen = false;
     for (;;) {
-        if (control.cancelRequested.load(std::memory_order_acquire)) return false;
+        if (control.IsCanceled()) return false;
         std::error_code ec;
-        if (std::filesystem::exists(expectedPdf, ec) && !ec &&
-            std::filesystem::is_regular_file(expectedPdf, ec) && !ec) {
-            const uintmax_t next = std::filesystem::file_size(expectedPdf, ec);
+        if (std::filesystem::exists(office::work_paths::IoPath(expectedPdf), ec) && !ec &&
+            std::filesystem::is_regular_file(office::work_paths::IoPath(expectedPdf), ec) && !ec) {
+            const uintmax_t next = std::filesystem::file_size(office::work_paths::IoPath(expectedPdf), ec);
             const ULONGLONG now = GetTickCount64();
             if (!ec && next >= 5) {
                 if (seen && next == size && now - stableSince >= 750) return true;
@@ -2968,12 +2920,14 @@ static bool RunLibreOfficePdfConversionInWorker(
         return false;
     }
     std::error_code ec;
-    std::filesystem::create_directories(outDir, ec);
-    if (!ec) std::filesystem::create_directories(profileDir, ec);
+    std::filesystem::create_directories(office::work_paths::IoPath(outDir), ec);
+    if (!ec) std::filesystem::create_directories(office::work_paths::IoPath(profileDir), ec);
     if (ec || !WriteLibreOfficeProfilePathConfig(profileDir, profileDir.parent_path() / L"local", outErr)) {
         if (outErr && outErr->empty()) *outErr = localization::Text(L"workspace.actions.2b4708c6cff7").c_str();
         return false;
     }
+    std::vector<wchar_t> childEnvironment;
+    if (!PrepareOfficeChildEnvironment(profileDir, childEnvironment, outErr)) return false;
     std::wstring profileUrl;
     std::wstring profileUrlErr;
     if (!FileUrlFromLocalPath(profileDir, &profileUrl, &profileUrlErr)) {
@@ -2988,6 +2942,9 @@ static bool RunLibreOfficePdfConversionInWorker(
         L" " + QuoteWindowsCommandLineArg(L"-env:UserInstallation=" + profileUrl) +
         L" --convert-to pdf --outdir " + QuoteWindowsCommandLineArg(outDir.wstring()) +
         L" " + QuoteWindowsCommandLineArg(sourceOfficeCopy.wstring());
+    if (!ValidateLibreOfficeCommandLineBudget(cmd, soffice, outErr)) return false;
+    const std::filesystem::path launchDirectory = soffice.parent_path();
+    const std::wstring executablePath = ToExtendedWin32PathIfAbsoluteLocal(soffice);
     HANDLE job = CreateJobObjectW(nullptr, nullptr);
     if (!job) { if (outErr) *outErr = localization::Text(L"workspace.actions.71d5b158f91d").c_str(); return false; }
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -2995,35 +2952,49 @@ static bool RunLibreOfficePdfConversionInWorker(
     if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
         CloseHandle(job); if (outErr) *outErr = localization::Text(L"workspace.actions.71d5b158f91d").c_str(); return false;
     }
+    struct OwnedJob {
+        HANDLE handle; OfficeConversionWorkerControl& control;
+        ~OwnedJob() {
+            std::lock_guard<std::mutex> lock(control.jobMutex);
+            if (control.job == handle) control.job = nullptr;
+            CloseHandle(handle); // kill-on-close also covers exceptions
+        }
+    } ownedJob{job, control};
     { std::lock_guard<std::mutex> lock(control.jobMutex); control.job = job;
-      if (control.cancelRequested.load(std::memory_order_acquire)) TerminateJobObject(job, ERROR_CANCELLED); }
-    if (control.cancelRequested.load(std::memory_order_acquire)) {
-        { std::lock_guard<std::mutex> lock(control.jobMutex); control.job = nullptr; }
-        CloseHandle(job);
+      if (control.IsCanceled()) TerminateJobObject(job, ERROR_CANCELLED); }
+    if (control.IsCanceled()) {
         if (outErr) *outErr = localization::Text(L"workspace.actions.10e2c376855f").c_str();
         return false;
     }
     STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION pi{};
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end()); mutableCmd.push_back(L'\0');
-    const BOOL created = CreateProcessW(soffice.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE,
-                                        CREATE_NO_WINDOW, nullptr, outDir.c_str(), &si, &pi);
+    const BOOL created = CreateProcessW(executablePath.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE,
+                                        CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, childEnvironment.data(), launchDirectory.c_str(), &si, &pi);
+    struct OwnedProcess {
+        PROCESS_INFORMATION& info;
+        ~OwnedProcess() { if (info.hThread) CloseHandle(info.hThread); if (info.hProcess) CloseHandle(info.hProcess); }
+    } ownedProcess{pi};
     if (!created || !AssignProcessToJobObject(job, pi.hProcess)) {
-        if (created) { TerminateProcess(pi.hProcess, ERROR_CANCELLED); CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
-        { std::lock_guard<std::mutex> lock(control.jobMutex); control.job = nullptr; }
-        CloseHandle(job);
+        if (created) TerminateProcess(pi.hProcess, ERROR_CANCELLED);
+        if (outErr) *outErr = localization::Text(L"workspace.actions.77746f1852f2").c_str();
+        return false;
+    }
+    if (ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) {
+        TerminateJobObject(job, ERROR_PROCESS_ABORTED);
         if (outErr) *outErr = localization::Text(L"workspace.actions.77746f1852f2").c_str();
         return false;
     }
     const bool launcherExited = WaitForOfficeWorkerHandle(pi.hProcess, 5 * 60 * 1000, control);
     DWORD exitCode = 1;
     if (launcherExited) GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread); pi.hThread = nullptr;
+    CloseHandle(pi.hProcess); pi.hProcess = nullptr;
     const std::filesystem::path expected = outDir / (sourceOfficeCopy.stem().wstring() + L".pdf");
     const bool outputReady = launcherExited && exitCode == 0 &&
         WaitForOfficeWorkerPdf(expected, 30 * 1000, control);
     if (!outputReady) {
-        const bool canceledByUserOrExit = control.cancelRequested.load(std::memory_order_acquire);
+        const bool canceledByUserOrExit = control.IsCanceled();
         // A timeout still has to kill the complete process tree, but must stay
         // distinguishable from an explicit cancel in the result summary.
         { std::lock_guard<std::mutex> lock(control.jobMutex);
@@ -3039,15 +3010,86 @@ static bool RunLibreOfficePdfConversionInWorker(
             }
         }
     }
-    { std::lock_guard<std::mutex> lock(control.jobMutex); control.job = nullptr; }
-    CloseHandle(job);
     return outputReady;
 }
 
 enum class OfficeBackgroundBatchKind { Standard, OpenMissing };
+// A deterministic, macro-free three-entry DOCX. Fixed XML contains no external
+// links or user data. ZIP stored entries avoid introducing another dependency.
+static std::string OfficeCheckDemoDocx() {
+    const std::array<std::pair<std::string, std::string>, 3> entries = {{
+        {"[Content_Types].xml", "<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>"},
+        {"_rels/.rels", "<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>"},
+        {"word/document.xml", "<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>PDF Note Workspace conversion check</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"}
+    }};
+    std::string bytes, central;
+    auto word = [](std::string& out, unsigned value, unsigned size) { for (unsigned i = 0; i < size; ++i) out.push_back(static_cast<char>((value >> (8 * i)) & 255)); };
+    for (const auto& entry : entries) {
+        const unsigned offset = static_cast<unsigned>(bytes.size());
+        const auto length = static_cast<unsigned>(entry.second.size());
+        const auto crc = static_cast<unsigned>(crc32(0, reinterpret_cast<const Bytef*>(entry.second.data()), length));
+        word(bytes, 0x04034b50, 4); word(bytes, 20, 2); word(bytes, 0, 2); word(bytes, 0, 2); word(bytes, 0, 2); word(bytes, 33, 2);
+        word(bytes, crc, 4); word(bytes, length, 4); word(bytes, length, 4); word(bytes, static_cast<unsigned>(entry.first.size()), 2); word(bytes, 0, 2);
+        bytes += entry.first; bytes += entry.second;
+        word(central, 0x02014b50, 4); word(central, 20, 2); word(central, 20, 2); word(central, 0, 2); word(central, 0, 2); word(central, 0, 2); word(central, 33, 2);
+        word(central, crc, 4); word(central, length, 4); word(central, length, 4); word(central, static_cast<unsigned>(entry.first.size()), 2);
+        word(central, 0, 2); word(central, 0, 2); word(central, 0, 2); word(central, 0, 2); word(central, 0, 4); word(central, offset, 4); central += entry.first;
+    }
+    const unsigned offset = static_cast<unsigned>(bytes.size()); bytes += central;
+    word(bytes, 0x06054b50, 4); word(bytes, 0, 2); word(bytes, 0, 2); word(bytes, 3, 2); word(bytes, 3, 2);
+    word(bytes, static_cast<unsigned>(central.size()), 4); word(bytes, offset, 4); word(bytes, 0, 2); return bytes;
+}
+bool RunOfficeConversionCheck(const std::filesystem::path& workRoot, std::atomic_bool& cancel, std::filesystem::path& retained, DWORD& error, write_checks::Step& step) {
+    retained.clear(); error = 0; step = write_checks::Step::Open;
+    std::wstring detail;
+    const auto& tempParent = workRoot;
+    const auto runtime = FindLibreOfficeSoffice();
+    if (!HasOfficeConversionFeature() || runtime.empty()) { error = ERROR_NOT_SUPPORTED; return false; }
+    if (!write_checks::IsSafeLocalPath(tempParent) || !write_checks::IsSafeLocalPath(runtime)) { error = ERROR_INVALID_NAME; return false; }
+    const auto temp = MakeUniqueOfficeImportTempDir(workRoot, &detail);
+    if (temp.empty()) { error = ERROR_ACCESS_DENIED; return false; }
+    retained = temp; // all failure/exception paths retain recoverable artifacts
+    const auto input = temp / L"input" / L"check.docx";
+    const auto output = temp / L"output";
+    step = write_checks::Step::Write;
+    if (!atomic_write::AtomicWriteUtf8(input, OfficeCheckDemoDocx(), input.parent_path(), &detail)) { error = ERROR_WRITE_FAULT; return false; }
+    OfficeConversionWorkerControl control; control.diagnosticCancel = &cancel;
+    step = write_checks::Step::Convert;
+    if (!RunLibreOfficePdfConversionInWorker(input, output, temp / office::work_paths::kProfileDirectoryName, control, &detail)) { error = cancel.load() ? ERROR_CANCELLED : ERROR_PROCESS_ABORTED; return false; }
+    const auto generated = output / L"check.pdf";
+    step = write_checks::Step::Pdf;
+    if (!ValidateImportPdfFile(generated, &detail)) { error = ERROR_INVALID_DATA; return false; }
+    const auto placed = temp / L"placed" / L"check.pdf";
+    if (cancel.load()) { error = ERROR_CANCELLED; return false; }
+    step = write_checks::Step::Write;
+    if (!CopyFileForImportSafely(generated, placed, &detail)) { error = ERROR_WRITE_FAULT; return false; }
+    step = write_checks::Step::Pdf;
+    if (!ValidateImportPdfFile(placed, &detail)) { error = ERROR_INVALID_DATA; return false; }
+    // Compare from fresh handles after final placement; both live only in this
+    // owned diagnostic area. Preserve output when comparison/read fails.
+    std::ifstream source(office::work_paths::IoPath(generated), std::ios::binary),
+                  destination(office::work_paths::IoPath(placed), std::ios::binary);
+    std::array<char, 4096> a{}, b{};
+    step = write_checks::Step::Reopen;
+    if (!source || !destination) { error = ERROR_READ_FAULT; return false; }
+    step = write_checks::Step::Compare;
+    do {
+        source.read(a.data(), a.size()); destination.read(b.data(), b.size());
+        if (source.bad() || destination.bad() || source.gcount() != destination.gcount() ||
+            !std::equal(a.begin(), a.begin() + source.gcount(), b.begin())) { error = ERROR_CRC; return false; }
+    } while (source.gcount());
+    source.close(); destination.close();
+    if (cancel.load()) { error = ERROR_CANCELLED; return false; }
+    step = write_checks::Step::Delete;
+    RemoveOfficeImportTempDirBestEffort(temp, workRoot);
+    std::error_code ec;
+    if (std::filesystem::exists(office::work_paths::IoPath(temp), ec) || ec) { error = ERROR_ACCESS_DENIED; return false; }
+    retained.clear(); step = write_checks::Step::Complete; return true;
+}
+
 struct OfficeBackgroundJob {
     OfficeConversionWorkerControl control;
-    std::filesystem::path source, sessionRoot, tempDir, generatedPdf;
+    std::filesystem::path source, sessionRoot, tempRoot, tempDir, generatedPdf;
     std::wstring failure;
     bool canceled = false;
 };
@@ -3068,16 +3110,17 @@ static void RunOfficeBackgroundJob(OfficeBackgroundJob* job) {
     if (!job) return;
     try {
         std::wstring tempErr;
-        job->tempDir = MakeUniqueOfficeImportTempDir(&tempErr);
+        job->tempDir = MakeUniqueOfficeImportTempDir(job->tempRoot, &tempErr);
         if (job->tempDir.empty()) job->failure = tempErr;
         if (job->failure.empty() && !ValidateLibreOfficeConversionPathBudget(job->tempDir, job->source, &job->failure)) {}
         const std::filesystem::path input = job->tempDir / L"input";
         const std::filesystem::path output = job->tempDir / L"output";
-        const std::filesystem::path profile = job->tempDir / L"profile";
+        const std::filesystem::path profile = job->tempDir / office::work_paths::kProfileDirectoryName;
         const std::filesystem::path staged = input / job->source.filename();
         std::error_code ec;
-        if (job->failure.empty()) { std::filesystem::create_directories(input, ec); if (ec) job->failure = localization::Text(L"workspace.actions.c529a2026b78").c_str(); }
-        if (job->failure.empty() && !CopyFileForImportSafely(job->source, staged, &job->failure)) {}
+        if (job->failure.empty()) { std::filesystem::create_directories(office::work_paths::IoPath(input), ec); if (ec) job->failure = localization::Text(L"workspace.actions.c529a2026b78").c_str(); }
+        if (job->failure.empty() && !CopyFileForImportSafely(job->source, staged, &job->failure,
+            job->tempRoot.parent_path().parent_path().parent_path())) {}
         if (job->failure.empty() && !office::ValidateOfficePackageForOfflineConversion(staged, &job->failure)) {}
         if (job->failure.empty() && !RunLibreOfficePdfConversionInWorker(staged, output, profile, job->control, &job->failure)) {}
         if (job->failure.empty() && !FindLibreOfficeGeneratedPdf(output, output / (staged.stem().wstring() + L".pdf"), &job->generatedPdf, &job->failure)) {}
@@ -3115,6 +3158,7 @@ static bool StartOfficeBackgroundBatch(HWND hWnd, const std::filesystem::path& s
     batch->owner = hWnd; batch->kind = kind; batch->selectedCount = sources.size();
     for (const auto& source : sources) {
         auto job = std::make_unique<OfficeBackgroundJob>(); job->source = source; job->sessionRoot = sessionRoot;
+        job->tempRoot = office::work_paths::Root(std::filesystem::path(g_workspaceRoot));
         batch->pending.push_back(std::move(job));
     }
     s_officeBackgroundBatch = std::move(batch);
@@ -3136,7 +3180,7 @@ bool ValidateLibreOfficeHandoffPathBudget(const std::filesystem::path& soffice,
     // Check the paths exactly as they will be handed to LibreOffice. This is
     // deliberately repeated after staging so a future entry point cannot
     // bypass the user-visible safety boundary.
-    constexpr size_t kSafePathLength = 220;
+    constexpr size_t kSafePathLength = office::handoff_paths::kMaximumPathLength;
     const std::filesystem::path expectedPdf = outDir /
         (sourceOfficeCopy.stem().wstring() + L".pdf");
     const std::filesystem::path profileRegistry = profileDir / L"user" /
@@ -3163,6 +3207,17 @@ bool ValidateLibreOfficeHandoffPathBudget(const std::filesystem::path& soffice,
         }
         return false;
     }
+    // This is a process-start constraint, not a limit on the workspace paths.
+    const auto launchDirectory = soffice.parent_path();
+    if (launchDirectory.wstring().size() > office::handoff_paths::kMaximumWorkingDirectoryLength) {
+        if (outErr) {
+            *outErr = localization::Text(L"workspace.actions.2f67bd1d6fec").c_str();
+            *outErr += L"\nruntime working directory: " + launchDirectory.wstring() +
+                L"\nlength=" + std::to_wstring(launchDirectory.wstring().size()) +
+                L" (limit=" + std::to_wstring(office::handoff_paths::kMaximumWorkingDirectoryLength) + L")";
+        }
+        return false;
+    }
     return true;
 }
 
@@ -3180,17 +3235,20 @@ void HandleOfficeConversionWorkerCompletion(HWND hWnd, LPARAM payload) {
     auto it = std::find_if(batch.active.begin(), batch.active.end(), [&](const auto& p) { return p.get() == result->job; });
     if (it == batch.active.end()) return;
     OfficeBackgroundJob& job = **it;
+    const auto workspaceRoot = job.tempRoot.parent_path().parent_path().parent_path();
+    write_checks::NormalOperation observation(workspaceRoot, job.source, write_checks::Kind::OfficeConversion, job.tempRoot);
+    if (job.canceled) observation.Cancel();
     if (job.canceled) { batch.stats.canceled = true; ++batch.stats.skipped; }
     else if (!job.failure.empty()) AddImportFailure(batch.stats, job.source, job.failure);
     else {
         std::wstring failure;
         const ImportOneResult imported = ImportPreparedFileToDestination(hWnd, job.generatedPdf,
-            PdfDirectoryForSession(job.sessionRoot) / (job.source.stem().wstring() + L".pdf"), &failure);
-        if (imported == ImportOneResult::Imported) ++batch.stats.imported;
-        else if (imported == ImportOneResult::Skipped) ++batch.stats.skipped;
+            PdfDirectoryForSession(job.sessionRoot) / (job.source.stem().wstring() + L".pdf"), &failure, workspaceRoot);
+        if (imported == ImportOneResult::Imported) { observation.Success(); ++batch.stats.imported; }
+        else if (imported == ImportOneResult::Skipped || imported == ImportOneResult::Canceled) { observation.Cancel(); ++batch.stats.skipped; }
         else AddImportFailure(batch.stats, job.source, failure);
     }
-    RemoveOfficeImportTempDirBestEffort(job.tempDir);
+    RemoveOfficeImportTempDirBestEffort(job.tempDir, job.tempRoot);
     batch.active.erase(it); ++batch.completedCount;
     if (batch.stats.canceled) {
         while (!batch.pending.empty()) {
@@ -3231,24 +3289,27 @@ ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
 
     if (outFailure) outFailure->clear();
     std::wstring tempErr;
-    std::filesystem::path tempDir = MakeUniqueOfficeImportTempDir(&tempErr);
+    const std::filesystem::path workspaceOwner(g_workspaceRoot);
+    const auto tempRoot = office::work_paths::Root(workspaceOwner);
+    write_checks::NormalOperation observation(workspaceOwner, src, write_checks::Kind::OfficeConversion, tempRoot);
+    std::filesystem::path tempDir = MakeUniqueOfficeImportTempDir(tempRoot, &tempErr);
     if (tempDir.empty()) {
         if (outFailure) *outFailure = tempErr;
         return ImportOneResult::Failed;
     }
     if (!ValidateLibreOfficeConversionPathBudget(tempDir, src, outFailure)) {
-        RemoveOfficeImportTempDirBestEffort(tempDir);
+        RemoveOfficeImportTempDirBestEffort(tempDir, tempRoot);
         return ImportOneResult::Failed;
     }
 
     std::filesystem::path inputDir = tempDir / L"input";
     std::filesystem::path outputDir = tempDir / L"output";
-    std::filesystem::path profileDir = tempDir / L"profile";
+    std::filesystem::path profileDir = tempDir / office::work_paths::kProfileDirectoryName;
     std::error_code ec;
-    std::filesystem::create_directories(inputDir, ec);
+    std::filesystem::create_directories(office::work_paths::IoPath(inputDir), ec);
     if (ec) {
         if (outFailure) *outFailure = localization::Text(L"workspace.actions.c529a2026b78").c_str();
-        RemoveOfficeImportTempDirBestEffort(tempDir);
+        RemoveOfficeImportTempDirBestEffort(tempDir, tempRoot);
         return ImportOneResult::Failed;
     }
 
@@ -3257,12 +3318,12 @@ ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
     // Preserve the Office package byte-for-byte for production conversion.
     // Font substitution and WORD JOINER insertion alter DOCX internals and can
     // move Word line breaks, so those transforms remain comparison-test tools only.
-    const bool staged = CopyFileForImportSafely(src, stagedOffice, &copyErr);
+    const bool staged = CopyFileForImportSafely(src, stagedOffice, &copyErr, workspaceOwner);
     if (!staged) {
         if (outFailure) *outFailure = copyErr.empty()
             ? (localization::Text(L"workspace.actions.cea093a731c2").c_str())
             : copyErr;
-        RemoveOfficeImportTempDirBestEffort(tempDir);
+        RemoveOfficeImportTempDirBestEffort(tempDir, tempRoot);
         return ImportOneResult::Failed;
     }
 
@@ -3271,7 +3332,7 @@ ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
         if (outFailure) *outFailure = packageSafetyErr.empty()
             ? (localization::Text(L"workspace.actions.217b4e58bb76").c_str())
             : packageSafetyErr;
-        RemoveOfficeImportTempDirBestEffort(tempDir);
+        RemoveOfficeImportTempDirBestEffort(tempDir, tempRoot);
         return ImportOneResult::Failed;
     }
 
@@ -3282,7 +3343,8 @@ ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
     bool ok = RunLibreOfficePdfConversion(stagedOffice, outputDir, profileDir, &convertErr, &canceled);
     if (!ok) {
         if (outFailure) *outFailure = convertErr;
-        RemoveOfficeImportTempDirBestEffort(tempDir);
+        RemoveOfficeImportTempDirBestEffort(tempDir, tempRoot);
+        if (canceled) observation.Cancel();
         return canceled ? ImportOneResult::Canceled : ImportOneResult::Failed;
     }
 
@@ -3293,20 +3355,22 @@ ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
         AppendOfficeConversionDiagnostic(L"output_identification_failed");
         AppendOfficeConversionOutputSnapshot(outputDir);
         if (outFailure) *outFailure = outputErr;
-        RemoveOfficeImportTempDirBestEffort(tempDir);
+        RemoveOfficeImportTempDirBestEffort(tempDir, tempRoot);
         return ImportOneResult::Failed;
     }
 
     std::wstring validateErr;
     if (!ValidateImportPdfFile(generatedPdf, &validateErr)) {
         if (outFailure) *outFailure = validateErr;
-        RemoveOfficeImportTempDirBestEffort(tempDir);
+        RemoveOfficeImportTempDirBestEffort(tempDir, tempRoot);
         return ImportOneResult::Failed;
     }
 
     std::filesystem::path dest = PdfDirectoryForSession(sessionRoot) / (src.stem().wstring() + L".pdf");
-    ImportOneResult result = ImportPreparedFileToDestination(hWnd, generatedPdf, dest, outFailure);
-    RemoveOfficeImportTempDirBestEffort(tempDir);
+    ImportOneResult result = ImportPreparedFileToDestination(hWnd, generatedPdf, dest, outFailure, workspaceOwner);
+    if (result == ImportOneResult::Imported) observation.Success();
+    else if (result == ImportOneResult::Skipped || result == ImportOneResult::Canceled) observation.Cancel();
+    RemoveOfficeImportTempDirBestEffort(tempDir, tempRoot);
     return result;
 }
 
@@ -3690,7 +3754,8 @@ bool ConvertOfficeFilesToCurrentSession(HWND hWnd) {
         return false;
     }
 
-    auto picked = PickOfficeFilesUnder(hWnd, OfficeConversionInitialDirectory(), ui.menuConvertOfficeToPdf);
+    auto picked = PickOfficeFilesUnder(hWnd, OfficeConversionInitialDirectory(), ui.menuConvertOfficeToPdf,
+                                      localization::Text(L"dialog.action.convert"));
     if (picked.empty()) return false;
 
     std::vector<std::filesystem::path> valid;
@@ -3978,7 +4043,7 @@ bool ImportFileToCurrentSession(HWND hWnd) {
     }
     auto initial = DialogDownloadsInitialFolder();
 
-    auto picked = PickFilesUnder(hWnd, initial, ui.menuImportFile);
+    auto picked = PickFilesUnder(hWnd, initial, ui.menuImportFile, localization::Text(L"dialog.action.import"));
     if (picked.empty()) return false;
 
     std::wstring workspaceLockError;

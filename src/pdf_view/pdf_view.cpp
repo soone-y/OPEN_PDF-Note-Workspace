@@ -15,6 +15,7 @@
 #include "fpdf_ppo.h"
 #include "fpdf_javascript.h"
 #include "core/atomic_write.h"
+#include "diagnostics/normal_operations.h"
 #include "core/preview_trace.h"
 #include "core/secure_memory.h"
 #include "workspace/workspace_write_lock.h"

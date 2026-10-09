@@ -108,6 +108,8 @@ void NoteEditorTextMutationObserved(HWND hEdit);
 bool CanExecuteNoteUndoRedoFromFocus(bool undo);
 bool ExecuteNoteUndoRedoFromFocus(HWND owner, bool undo);
 void InsertSnippetIntoNote(const std::wstring& snippet);
+[[nodiscard]] bool TryInsertSnippetIntoNote(const std::wstring& snippet);
+[[nodiscard]] bool NoteInputAssistSupportsMarkup();
 bool InsertSnippetIntoCurrentNoteAt(size_t pos, const std::wstring& snippet);
 void CommitPendingNoteClickCaret();
 bool ShouldShowBottomNotePane();

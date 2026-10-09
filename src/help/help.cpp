@@ -339,11 +339,11 @@ static std::wstring DefaultHelpTextJa() {
         L"- 必要なら保存メニューの「保存状態を確認」で内容を確認するか、先に Ctrl+S で保存してください。\n"
         L"\n"
         L"■ 保存先の目安\n"
-        L"- 自動作業保護: __resource__/__tmp__/__stage__/\n"
-        L"- バックアップ本体: __resource__/__escape__/backup/.../*.bak\n"
-        L"- バックアップ情報: __resource__/__escape__/backup/.../*.bak.meta.txt\n"
-        L"- ノート保存失敗時の退避: __resource__/__escape__/note_recovery/\n"
-        L"- 原子的保存に失敗した一時ファイルの退避先: __resource__/__escape__/\n"
+        L"- 自動作業保護: __pdf_note_workspace__/__tmp__/__stage__/\n"
+        L"- バックアップ本体: __pdf_note_workspace__/__escape__/backup/.../*.bak\n"
+        L"- バックアップ情報: __pdf_note_workspace__/__escape__/backup/.../*.bak.meta.txt\n"
+        L"- ノート保存失敗時の退避: __pdf_note_workspace__/__escape__/note_recovery/\n"
+        L"- 原子的保存に失敗した一時ファイルの退避先: __pdf_note_workspace__/__escape__/\n"
         L"\n"
         L"■ マークアップ\n"
         L"- font タグを使うと、指定範囲だけフォントを切り替えられます。\n"
@@ -360,12 +360,12 @@ static std::wstring DefaultHelpTextJa() {
         L"- Ctrl+Alt+← / Ctrl+Alt+→ でカテゴリ、Ctrl+Alt+↑ / Ctrl+Alt+↓ で詳細種を切り替えます（固定）。\n"
         L"- Ctrl+↑ / Ctrl+↓ で現在の注釈ツール色を前後のパレット色へ切り替えます。\n"
         L"- Shift+クリックの逆循環は注釈ツール/オプションボタン上だけで使い、PDF面のShift+クリックはテキストボックス選択を優先します。\n"
-        L"- 設定ファイル: __resource__/__settings__/tool_shortcuts.json\n"
+        L"- 設定ファイル: __pdf_note_workspace__/__settings__/tool_shortcuts.json\n"
         L"- 例: { \"key\": \"Ctrl+Alt+7\", \"tool\": \"freehand\" } / { \"key\": \"Numpad7\", \"tool\": \"freehand\" }\n"
         L"- ノート入力中、PDFテキスト編集中、IME変換中は、文字入力を優先します。\n"
         L"\n"
         L"■ 補足\n"
-        L"- 一時フォルダ (__resource__/__tmp__) は、自動保存や中間処理に使います。\n"
+        L"- 一時フォルダ (__pdf_note_workspace__/__tmp__) は、自動保存や中間処理に使います。\n"
         L"- 単位の目安: pt = mm × 72 / 25.4\n";
 }
 
@@ -435,11 +435,11 @@ static std::wstring DefaultHelpTextEn() {
         L"- Review save status from Save, or save with Ctrl+S if that is your intent.\n"
         L"\n"
         L"■ Typical Locations\n"
-        L"- Automatic work protection: __resource__/__tmp__/__stage__/\n"
-        L"- Backup data: __resource__/__escape__/backup/.../*.bak\n"
-        L"- Backup metadata: __resource__/__escape__/backup/.../*.bak.meta.txt\n"
-        L"- Recovery copies for note save failures: __resource__/__escape__/note_recovery/\n"
-        L"- Quarantined temp files from failed atomic writes: __resource__/__escape__/\n"
+        L"- Automatic work protection: __pdf_note_workspace__/__tmp__/__stage__/\n"
+        L"- Backup data: __pdf_note_workspace__/__escape__/backup/.../*.bak\n"
+        L"- Backup metadata: __pdf_note_workspace__/__escape__/backup/.../*.bak.meta.txt\n"
+        L"- Recovery copies for note save failures: __pdf_note_workspace__/__escape__/note_recovery/\n"
+        L"- Quarantined temp files from failed atomic writes: __pdf_note_workspace__/__escape__/\n"
         L"\n"
         L"■ Markup\n"
         L"- Use the font tag to switch fonts only for a selected range.\n"
@@ -456,12 +456,12 @@ static std::wstring DefaultHelpTextEn() {
         L"- Ctrl+Alt+Left / Ctrl+Alt+Right changes category; Ctrl+Alt+Up / Ctrl+Alt+Down changes detail (fixed).\n"
         L"- Ctrl+Up / Ctrl+Down cycles the current annotation tool color through the palette.\n"
         L"- Shift+click reverse cycling applies only on annotation tool/option buttons; Shift+click on the PDF surface keeps text-box selection priority.\n"
-        L"- Config file: __resource__/__settings__/tool_shortcuts.json\n"
+        L"- Config file: __pdf_note_workspace__/__settings__/tool_shortcuts.json\n"
         L"- Example: { \"key\": \"Ctrl+Alt+7\", \"tool\": \"freehand\" } / { \"key\": \"Numpad7\", \"tool\": \"freehand\" }\n"
         L"- Text input takes priority while editing notes, PDF text boxes, or IME composition.\n"
         L"\n"
         L"■ Notes\n"
-        L"- The temporary folder (__resource__/__tmp__) is used for auto-save and intermediate work.\n"
+        L"- The temporary folder (__pdf_note_workspace__/__tmp__) is used for auto-save and intermediate work.\n"
         L"- Unit reference: pt = mm x 72 / 25.4\n";
 }
 
@@ -667,8 +667,8 @@ static std::wstring HelpSectionBody(int section, bool english) {
         return NormalizeNewlines(CustomExtensionHelpText());
     case kHelpSectionSaving:
         return english
-            ? L"■ Safe saving\r\n- Editing does not directly overwrite the original PDF or note.\r\n- Automatic work protection keeps intermediate edits for recovery.\r\n- Ctrl+S, Save > Save Work, normal exit, and pre-output processing create a backup and safely save to the original.\r\n- Document/session switching keeps protected work and does not write originals.\r\n\r\n■ Restore\r\n- Restore > PDF Position and Restore > Last Open Time can delete or restore the corresponding protected state.\r\n- Restore > File Last-Open History can delete or restore each session's last-open PDF and note record. Restore > Backups lists saved backups for restoration or individual deletion.\r\n- Review Save Status before restoring when protected work remains.\r\n\r\n■ Typical locations\r\n- Internal work protection: __resource__/__tmp__/__stage__/\r\n- Backups: __resource__/__escape__/backup/\r\n- Note recovery: __resource__/__escape__/note_recovery/\r\n"
-            : L"■ 安全な保存\r\n- 編集中に元の PDF やノートを直接上書きしません。\r\n- 自動作業保護により、編集途中も復旧できるよう保持します。\r\n- Ctrl+S、「保存 > 作業保存」、通常終了、出力の直前には、バックアップを作成してから安全に原本へ保存します。\r\n- ファイル・回次・授業の切替では、保護中の作業を残し、原本は書き換えません。\r\n\r\n■ 復元\r\n- 「復元 > PDF位置」「復元 > 最終オープン時刻」では、対応する保護状態を削除または復元できます。\r\n- 「復元 > ファイル最終オープン履歴」では、回次ごとの最後に開いたPDF／ノートの記録を削除または復元できます。「復元 > バックアップ」では、保存済みバックアップを一覧から復元または個別に削除できます。\r\n- 保護中の作業があるときは、復元前に「保存状態を確認」を開いてください。\r\n\r\n■ 主な保存先\r\n- 内部作業保護: __resource__/__tmp__/__stage__/\r\n- バックアップ: __resource__/__escape__/backup/\r\n- ノート復旧: __resource__/__escape__/note_recovery/\r\n";
+            ? L"■ Safe saving\r\n- Editing does not directly overwrite the original PDF or note.\r\n- Automatic work protection keeps intermediate edits for recovery.\r\n- Ctrl+S, Save > Save Work, normal exit, and pre-output processing create a backup and safely save to the original.\r\n- Document/session switching keeps protected work and does not write originals.\r\n\r\n■ Restore\r\n- Restore > PDF Position and Restore > Last Open Time can delete or restore the corresponding protected state.\r\n- Restore > File Last-Open History can delete or restore each session's last-open PDF and note record. Restore > Backups lists saved backups for restoration or individual deletion.\r\n- Review Save Status before restoring when protected work remains.\r\n\r\n■ Typical locations\r\n- Internal work protection: __pdf_note_workspace__/__tmp__/__stage__/\r\n- Backups: __pdf_note_workspace__/__escape__/backup/\r\n- Note recovery: __pdf_note_workspace__/__escape__/note_recovery/\r\n"
+            : L"■ 安全な保存\r\n- 編集中に元の PDF やノートを直接上書きしません。\r\n- 自動作業保護により、編集途中も復旧できるよう保持します。\r\n- Ctrl+S、「保存 > 作業保存」、通常終了、出力の直前には、バックアップを作成してから安全に原本へ保存します。\r\n- ファイル・回次・授業の切替では、保護中の作業を残し、原本は書き換えません。\r\n\r\n■ 復元\r\n- 「復元 > PDF位置」「復元 > 最終オープン時刻」では、対応する保護状態を削除または復元できます。\r\n- 「復元 > ファイル最終オープン履歴」では、回次ごとの最後に開いたPDF／ノートの記録を削除または復元できます。「復元 > バックアップ」では、保存済みバックアップを一覧から復元または個別に削除できます。\r\n- 保護中の作業があるときは、復元前に「保存状態を確認」を開いてください。\r\n\r\n■ 主な保存先\r\n- 内部作業保護: __pdf_note_workspace__/__tmp__/__stage__/\r\n- バックアップ: __pdf_note_workspace__/__escape__/backup/\r\n- ノート復旧: __pdf_note_workspace__/__escape__/note_recovery/\r\n";
     case kHelpSectionOutput:
         return english
             ? L"■ Quick output\r\n- Quick PDF exports the current PDF with annotations. Configure its scale and annotation options in Output Dialog > Save as Quick PDF.\r\n- Quick Note exports the current note as TXT; TXT is the default quick-note format. Configure its text options in Output Dialog > Save as Quick Note. View quick output settings opens a compact summary that can be closed immediately.\r\n\r\n■ Output dialog\r\n- Choose annotated PDF, selected-page PDF, PNG, TXT, Markdown, or HTML. Set a destination folder and output file name, then export that one output directly or add multiple settings to the queue and select Export.\r\n- Select a reservation to change its destination or file name, then choose Update reservation. Export selected runs only that reservation. Output safely integrates current edits first; the open original and duplicate queued destinations are rejected.\r\n- The results dialog can reveal output in Explorer. PDFs can open in the read-only viewer; other formats open in their associated application.\r\n\r\n■ Safety\r\n- Output creates a separate result. Existing output files require explicit overwrite confirmation; protected PDFs can restrict copy and export.\r\n"

@@ -10,6 +10,8 @@ if (-not (Test-Path -LiteralPath $uiAutomationScript)) {
 }
 
 Write-Host "Running app-log contract tests..." -ForegroundColor Cyan
+& (Join-Path $PSScriptRoot "run_bounded_log_tests.ps1")
+if (-not $?) { throw "Bounded diagnostic log tests failed." }
 & $uiAutomationScript -LogContractOnly
 if (-not $?) {
     throw "app-log contract tests failed."

@@ -41,15 +41,15 @@ EVIDENCE: docs/en/Using_the_App.md
 <persistence_model>
   <step id="stage" type="temporary_protection">
     <description>Protected area for edits in progress, including protection against crashes and power loss.</description>
-    <path>__resource__/__tmp__/__stage__/</path>
+    <path>__pdf_note_workspace__/__tmp__/__stage__/</path>
   </step>
   <step id="backup" type="recovery_copy">
     <description>Backup created during an integrated Ctrl+S save.</description>
-    <path>__resource__/__escape__/backup/</path>
+    <path>__pdf_note_workspace__/__escape__/backup/</path>
   </step>
   <step id="note_recovery" type="emergency_dump">
     <description>Emergency data retained when saving a note fails.</description>
-    <path>__resource__/__escape__/note_recovery/</path>
+    <path>__pdf_note_workspace__/__escape__/note_recovery/</path>
   </step>
   <step id="consolidated_save" type="explicit_write">
     <description>Integration into the regular file when Ctrl+S or a Save menu command is selected.</description>

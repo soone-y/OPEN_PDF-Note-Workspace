@@ -38,7 +38,7 @@ bool IsPathUnderRoot(const std::filesystem::path& path, const std::filesystem::p
 
 std::filesystem::path EscapeRootPath() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
+    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
 }
 
 EscapeBackupPresence ScanEscapeBackupPresence() {

@@ -249,6 +249,13 @@ function Get-DistributionZipName([string]$Version, [ValidateSet("ja", "en")][str
     return "pdf_note_workspace_${Version}_${Locale}_${Edition}.zip"
 }
 
+function Get-DistributionArchiveRootName([string]$Version) {
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        throw "配布 ZIP 内のルート名に必要な版番号を取得できません。REPO_VERSION.txt を確認してください。"
+    }
+    return "PDF-Note-Workspace-$Version"
+}
+
 function Move-ItemStrict([string]$Source, [string]$Destination) {
     if (-not (Test-Path -LiteralPath $Source)) {
         throw "Missing path to move: $Source"
@@ -299,6 +306,17 @@ function Assert-ReleaseSetManifestComponents([string]$SetRoot, [object]$Componen
     }
 }
 
+function Assert-ReleaseSetZipRoots([object]$ZipRoots) {
+    if ($null -eq $ZipRoots) {
+        throw "Release set manifest ZIP root metadata is missing."
+    }
+    foreach ($property in $ZipRoots.PSObject.Properties) {
+        if ([string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            throw "Release set manifest ZIP root '$($property.Name)' is empty."
+        }
+    }
+}
+
 Push-Location -LiteralPath $repoRoot
 try {
     $folderName = if ([string]::IsNullOrWhiteSpace($ReleaseSetName)) {
@@ -324,6 +342,7 @@ try {
     $releaseLiteComponentName = $null
     $releaseZipComponentName = $null
     $releaseLiteZipComponentName = $null
+    $distributionArchiveRootName = Get-DistributionArchiveRootName -Version (Get-RepoVersionLabel)
     if (-not [string]::IsNullOrWhiteSpace($ReleaseNotesPath)) {
         $resolvedNotes = Resolve-Path -LiteralPath $ReleaseNotesPath -ErrorAction Stop
         $releaseNotesSource = $resolvedNotes.Path
@@ -513,6 +532,10 @@ try {
             release_lite_zip = $releaseLiteZipComponentName
             release_notes = $(if ($releaseNotesTarget) { [System.IO.Path]::GetFileName($releaseNotesTarget) } else { $null })
         }
+        zip_roots = [PSCustomObject]@{
+            release_zip = $distributionArchiveRootName
+            release_lite_zip = $distributionArchiveRootName
+        }
         commands = [PSCustomObject]@{
             pack_release = "./pack_release.ps1"
         }
@@ -520,6 +543,7 @@ try {
     Write-JsonFile -Destination $setManifestPath -Value $manifest
     if (-not $DryRun) {
         Assert-ReleaseSetManifestComponents -SetRoot $setRoot -Components $manifest.components
+        Assert-ReleaseSetZipRoots -ZipRoots $manifest.zip_roots
         $integrityGateScript = Join-Path $repoRoot "tools\release_checks\release_set_integrity_gate.py"
         $allowlistForManifest = if ([string]::IsNullOrWhiteSpace($PublicAllowlist)) { $releasePublicAllowlist } else { $PublicAllowlist }
         $integrityArgs = @(

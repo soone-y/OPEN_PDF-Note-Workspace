@@ -1,0 +1,436 @@
+{
+  "version": 1,
+  "source_version": "26.2.6.3",
+  "sample_count": 25,
+  "purpose": "User-approved expected refusals; all inputs remain in the corpus; conversion failures remain FAIL in scores.",
+  "samples": [
+    {
+      "path": "package/qa/cppunit/data/unicode-path.docx",
+      "sha256": "4d8b0b3dd8ada4eb6bf141e88f8dffc07f993545d9fdd25f505d8ac839918946",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "package/qa/cppunit/test_zippackage.cxx",
+        "sha256": "c423a44549c955c6a63cc0fadda2100a55a2319d5d6357cce303877bcc7de94b",
+        "test": "testUnicodeDOCX",
+        "assertion": "Normal ZIP construction expects ZipIOException; repair mode is separate."
+      }
+    },
+    {
+      "path": "package/qa/cppunit/data/dot-slash.docx",
+      "sha256": "00d33c4f38397a40a0e315a24a39a99f99ffce3f6548db36dc4fbebff0c2e990",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "package/qa/cppunit/test_zippackage.cxx",
+        "sha256": "c423a44549c955c6a63cc0fadda2100a55a2319d5d6357cce303877bcc7de94b",
+        "test": "testDotPathDOCX",
+        "assertion": "Normal ZIP construction expects ZipIOException; repair mode is separate."
+      }
+    },
+    {
+      "path": "package/qa/cppunit/data/two-zips.docx",
+      "sha256": "43b9a53a01aa9667b5c8dde0f917f97c0d0ad180cdd878317ca8b1caa6152707",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "package/qa/cppunit/test_zippackage.cxx",
+        "sha256": "c423a44549c955c6a63cc0fadda2100a55a2319d5d6357cce303877bcc7de94b",
+        "test": "testConcatDOCX",
+        "assertion": "Normal ZIP construction expects ZipIOException; repair mode is separate."
+      }
+    },
+    {
+      "path": "package/qa/cppunit/data/casing.docx",
+      "sha256": "b616af60520ba5acee81d0dd290780cedf0db45b9c40706f4c95574c694976b0",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "package/qa/cppunit/test_zippackage.cxx",
+        "sha256": "c423a44549c955c6a63cc0fadda2100a55a2319d5d6357cce303877bcc7de94b",
+        "test": "testCaseInsensitiveDOCX",
+        "assertion": "Normal ZIP construction expects ZipIOException; repair mode is separate."
+      }
+    },
+    {
+      "path": "package/qa/cppunit/data/overlap.docx",
+      "sha256": "c58f5b46ed632a6df0551a40ac02ca7899420eaf5001743119cf423eaeb4bb03",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "package/qa/cppunit/test_zippackage.cxx",
+        "sha256": "c423a44549c955c6a63cc0fadda2100a55a2319d5d6357cce303877bcc7de94b",
+        "test": "testOverlapDOCX",
+        "assertion": "Normal ZIP construction expects ZipIOException; repair mode is separate."
+      }
+    },
+    {
+      "path": "package/qa/cppunit/data/inner-gap.docx",
+      "sha256": "7cd806987aeb38bd3013786d2ee5988f5074db9af040c3a49da019911c674b86",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "package/qa/cppunit/test_zippackage.cxx",
+        "sha256": "c423a44549c955c6a63cc0fadda2100a55a2319d5d6357cce303877bcc7de94b",
+        "test": "testInnerGapDOCX",
+        "assertion": "Normal ZIP construction expects ZipIOException; repair mode is separate."
+      }
+    },
+    {
+      "path": "package/qa/cppunit/data/dd-deflated.docx",
+      "sha256": "701532bb07094f86361d51e046c3132432ecdba559e9fa4bdf0f5aac6dfb17a4",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "package/qa/cppunit/test_zippackage.cxx",
+        "sha256": "c423a44549c955c6a63cc0fadda2100a55a2319d5d6357cce303877bcc7de94b",
+        "test": "testDataDescriptorDeflatedDOCX",
+        "assertion": "Normal ZIP construction expects ZipIOException; repair mode is separate."
+      }
+    },
+    {
+      "path": "package/qa/cppunit/data/dd-stored.docx",
+      "sha256": "1f73124e0debd3b0df152ffaa1e93b4f57bc829c865ff46d18e1b01d007afeba",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "package/qa/cppunit/test_zippackage.cxx",
+        "sha256": "c423a44549c955c6a63cc0fadda2100a55a2319d5d6357cce303877bcc7de94b",
+        "test": "testDataDescriptorStoredDOCX",
+        "assertion": "Normal ZIP construction expects ZipIOException; repair mode is separate."
+      }
+    },
+    {
+      "path": "package/qa/cppunit/data/zip64-eocd.docx",
+      "sha256": "2db00788861cbdff5913b243daa5285dcc516e597bc68cf6471cce91d2d8acd6",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "package/qa/cppunit/test_zippackage.cxx",
+        "sha256": "c423a44549c955c6a63cc0fadda2100a55a2319d5d6357cce303877bcc7de94b",
+        "test": "testZip64End",
+        "assertion": "Normal ZIP construction expects ZipIOException; repair mode is separate."
+      }
+    },
+    {
+      "path": "sc/qa/unit/data/xlsx/forcepoint107.xlsx",
+      "sha256": "d8d18753dead72c625d6369fb10d15aa820a7d69f453d811da9e3afb43f43708",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sc/qa/unit/subsequent_filters_test4.cxx",
+        "sha256": "92b39e16909b3792cd7237cb5843249847d49692dee8666edc85532199bd2380",
+        "test": "testForcepoint107",
+        "assertion": "Normal createScDoc expects assertion failure; RepairPackage=true loading is separate."
+      }
+    },
+    {
+      "path": "sc/qa/unit/data/xlsx/tdf131575.xlsx",
+      "sha256": "734da58777193e9e4239dbb331c500b2efdfa561e0e05f10fc376910da5b3383",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sc/qa/unit/subsequent_filters_test4.cxx",
+        "sha256": "92b39e16909b3792cd7237cb5843249847d49692dee8666edc85532199bd2380",
+        "test": "testTdf131575",
+        "assertion": "Normal createScDoc expects assertion failure; RepairPackage=true loading is separate."
+      }
+    },
+    {
+      "path": "sc/qa/unit/data/xlsx/tdf76115.xlsx",
+      "sha256": "1428f774dd01d4c5489de8be56c81fe61bf5fffb5e082956763d32d272bba20f",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sc/qa/unit/subsequent_filters_test4.cxx",
+        "sha256": "92b39e16909b3792cd7237cb5843249847d49692dee8666edc85532199bd2380",
+        "test": "testTdf76115",
+        "assertion": "Normal createScDoc expects assertion failure; RepairPackage=true loading is separate."
+      }
+    },
+    {
+      "path": "sw/qa/extras/ooxmlimport/data/math-malformed_xml.docx",
+      "sha256": "30c88782e665853021b628403cebd395634b2f774c9e59a3089eb7971490aa1d",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sw/qa/extras/ooxmlimport/ooxmlimport.cxx",
+        "sha256": "b33f44f1b780a4f5e33778faa779f49e1107d741902259b2c0602a9e9c4d804a",
+        "test": "testMathMalformedXml",
+        "assertion": "loadComponentFromURL with no repair/password expects a null component."
+      }
+    },
+    {
+      "path": "sd/qa/unit/data/pptx/fail/ofz35597-1.pptx",
+      "sha256": "51dc1599b4c08ace9ab2d28b84edfe596122546a283c7af7b026adef0e1bbf77",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sd/qa/unit/filters-test.cxx",
+        "sha256": "db3a11bd05a258b59dd73158e629d88c7511871240776431b2b6010e4a3e8652",
+        "test": "testCVEs",
+        "kind": "directory-refusal",
+        "scope": "sd/qa/unit/data/pptx/fail",
+        "assertion": "testCVEs calls testDir; load returns DoLoad result.",
+        "support": [
+          {
+            "path": "unotest/source/cpp/filters-test.cxx",
+            "sha256": "64626d0c89f710c612f33f7e9781bdfe31e30b8fac980b9eaa983f9f9654d419",
+            "assertion": "testDir calls recursiveScan(test::fail) for fail; recursiveScan asserts load result equals expected failure. RC4 inputs are decoded first."
+          }
+        ]
+      }
+    },
+    {
+      "path": "sd/qa/unit/data/pptx/fail/ofz46160-1.pptx",
+      "sha256": "7504f39613f7c876932fd74d06ffa53739425fc52d588e87c7e57712a2977b91",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sd/qa/unit/filters-test.cxx",
+        "sha256": "db3a11bd05a258b59dd73158e629d88c7511871240776431b2b6010e4a3e8652",
+        "test": "testCVEs",
+        "kind": "directory-refusal",
+        "scope": "sd/qa/unit/data/pptx/fail",
+        "assertion": "testCVEs calls testDir; load returns DoLoad result.",
+        "support": [
+          {
+            "path": "unotest/source/cpp/filters-test.cxx",
+            "sha256": "64626d0c89f710c612f33f7e9781bdfe31e30b8fac980b9eaa983f9f9654d419",
+            "assertion": "testDir calls recursiveScan(test::fail) for fail; recursiveScan asserts load result equals expected failure. RC4 inputs are decoded first."
+          }
+        ]
+      }
+    },
+    {
+      "path": "sw/qa/core/data/ooxml/fail/EDB-36788-1.docx",
+      "sha256": "7c3462eb56516b262b78e719678df8c4bcd0dcc0a513ddbccbd8c84422e06835",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sw/qa/core/filters-test.cxx",
+        "sha256": "64cf6dcbe87e65401a2eddd81e2e741e47e4ec27e1503842acb709f05b609018",
+        "test": "testCVEs",
+        "kind": "directory-refusal",
+        "scope": "sw/qa/core/data/ooxml/fail",
+        "assertion": "testCVEs calls testDir; load returns DoLoad result.",
+        "support": [
+          {
+            "path": "unotest/source/cpp/filters-test.cxx",
+            "sha256": "64626d0c89f710c612f33f7e9781bdfe31e30b8fac980b9eaa983f9f9654d419",
+            "assertion": "testDir calls recursiveScan(test::fail) for fail; recursiveScan asserts load result equals expected failure. RC4 inputs are decoded first."
+          }
+        ]
+      }
+    },
+    {
+      "path": "sw/qa/core/data/ooxml/fail/LIBREOFFICE-DBDAZAEC.docx",
+      "sha256": "a929eb310d55cab712057f0ae858792f8da5a1717cc9c1e2e7c2d338acc38307",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sw/qa/core/filters-test.cxx",
+        "sha256": "64cf6dcbe87e65401a2eddd81e2e741e47e4ec27e1503842acb709f05b609018",
+        "test": "testCVEs",
+        "kind": "directory-refusal",
+        "scope": "sw/qa/core/data/ooxml/fail",
+        "assertion": "testCVEs calls testDir; load returns DoLoad result.",
+        "support": [
+          {
+            "path": "unotest/source/cpp/filters-test.cxx",
+            "sha256": "64626d0c89f710c612f33f7e9781bdfe31e30b8fac980b9eaa983f9f9654d419",
+            "assertion": "testDir calls recursiveScan(test::fail) for fail; recursiveScan asserts load result equals expected failure. RC4 inputs are decoded first."
+          }
+        ]
+      }
+    },
+    {
+      "path": "sw/qa/core/data/ooxml/fail/ofz14422-1.docx",
+      "sha256": "4b0da2c34a5fe0da8030ffc90d72eb72ebd7ae1eacfcba24eb0cdbc3a04f6d2c",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sw/qa/core/filters-test.cxx",
+        "sha256": "64cf6dcbe87e65401a2eddd81e2e741e47e4ec27e1503842acb709f05b609018",
+        "test": "testCVEs",
+        "kind": "directory-refusal",
+        "scope": "sw/qa/core/data/ooxml/fail",
+        "assertion": "testCVEs calls testDir; load returns DoLoad result.",
+        "support": [
+          {
+            "path": "unotest/source/cpp/filters-test.cxx",
+            "sha256": "64626d0c89f710c612f33f7e9781bdfe31e30b8fac980b9eaa983f9f9654d419",
+            "assertion": "testDir calls recursiveScan(test::fail) for fail; recursiveScan asserts load result equals expected failure. RC4 inputs are decoded first."
+          }
+        ]
+      }
+    },
+    {
+      "path": "sw/qa/core/data/ooxml/fail/ofz37458-1.docx",
+      "sha256": "1d77b53db182751b9de81cf49d2325764b5db9e2c867877426f78f26d3e2d179",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sw/qa/core/filters-test.cxx",
+        "sha256": "64cf6dcbe87e65401a2eddd81e2e741e47e4ec27e1503842acb709f05b609018",
+        "test": "testCVEs",
+        "kind": "directory-refusal",
+        "scope": "sw/qa/core/data/ooxml/fail",
+        "assertion": "testCVEs calls testDir; load returns DoLoad result.",
+        "support": [
+          {
+            "path": "unotest/source/cpp/filters-test.cxx",
+            "sha256": "64626d0c89f710c612f33f7e9781bdfe31e30b8fac980b9eaa983f9f9654d419",
+            "assertion": "testDir calls recursiveScan(test::fail) for fail; recursiveScan asserts load result equals expected failure. RC4 inputs are decoded first."
+          }
+        ]
+      }
+    },
+    {
+      "path": "sw/qa/core/data/ooxml/fail/ofz4825-1.docx",
+      "sha256": "2fcd5dc36c5b2c4dfcc615be1aaa33d1d3b2c245d7b5091add8ea7a696645c43",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sw/qa/core/filters-test.cxx",
+        "sha256": "64cf6dcbe87e65401a2eddd81e2e741e47e4ec27e1503842acb709f05b609018",
+        "test": "testCVEs",
+        "kind": "directory-refusal",
+        "scope": "sw/qa/core/data/ooxml/fail",
+        "assertion": "testCVEs calls testDir; load returns DoLoad result.",
+        "support": [
+          {
+            "path": "unotest/source/cpp/filters-test.cxx",
+            "sha256": "64626d0c89f710c612f33f7e9781bdfe31e30b8fac980b9eaa983f9f9654d419",
+            "assertion": "testDir calls recursiveScan(test::fail) for fail; recursiveScan asserts load result equals expected failure. RC4 inputs are decoded first."
+          }
+        ]
+      }
+    },
+    {
+      "path": "sw/qa/core/data/ooxml/fail/ofz9934-1.docx",
+      "sha256": "bf94c1b9b8ca3f52f268d8ec954b77a861e7411416ec074c4e1e9191f90a933d",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sw/qa/core/filters-test.cxx",
+        "sha256": "64cf6dcbe87e65401a2eddd81e2e741e47e4ec27e1503842acb709f05b609018",
+        "test": "testCVEs",
+        "kind": "directory-refusal",
+        "scope": "sw/qa/core/data/ooxml/fail",
+        "assertion": "testCVEs calls testDir; load returns DoLoad result.",
+        "support": [
+          {
+            "path": "unotest/source/cpp/filters-test.cxx",
+            "sha256": "64626d0c89f710c612f33f7e9781bdfe31e30b8fac980b9eaa983f9f9654d419",
+            "assertion": "testDir calls recursiveScan(test::fail) for fail; recursiveScan asserts load result equals expected failure. RC4 inputs are decoded first."
+          }
+        ]
+      }
+    },
+    {
+      "path": "sw/qa/extras/ooxmlimport/data/tdf165348_broken_package.docx",
+      "sha256": "83b81194fee809de43bacf8c54c33bdc1b2bd43fe3261b8c2fc763ed1be55263",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sw/qa/extras/ooxmlimport/ooxmlimport2.cxx",
+        "sha256": "accedc7cbf50a102fdd77359b3d6bdfbe93b8e503ef9c7da43587840df70e52d",
+        "test": "testTdf165348_lockFileOnRepair",
+        "kind": "repair-required",
+        "assertion": "Official QA explicitly approves repair for this broken input; CLI silent conversion has no interaction handler and does not approve repair.",
+        "support": [
+          {
+            "path": "desktop/source/app/dispatchwatcher.cxx",
+            "sha256": "087c159365d098f011214f61bbaa18f4e1ac41d5ec1fe3ddf5e2f510730f17af"
+          },
+          {
+            "path": "filter/source/config/cache/typedetection.cxx",
+            "sha256": "c91f842265636df7f867576a9993f2068e4355c073b73cda25d485badbc164d8"
+          },
+          {
+            "path": "oox/source/helper/zipstorage.cxx",
+            "sha256": "7c1319aadc62a1a28068d51f77f673c1c363e61aead133cfe13bd5b8bab830e9"
+          },
+          {
+            "path": "package/source/zipapi/ZipFile.cxx",
+            "sha256": "f7c22c51e11d902aa74ab5442f304f307953c9c4933e5165863a99e6d53b9ff7"
+          }
+        ]
+      }
+    },
+    {
+      "path": "sw/qa/uitest/data/tdf168070_2.docx",
+      "sha256": "601325588513fd0555f9adec16de31eba21201e9074a45527c3bec1a8effbbc7",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sw/qa/uitest/writer_tests/compareDocuments.py",
+        "sha256": "89ea8ec3182317f4ebbbd345f0c1d544b03319c905fe0fa306a5fc53d1417e29",
+        "test": "test_tdf168070",
+        "kind": "repair-required",
+        "assertion": "Official QA explicitly approves repair for this broken input; CLI silent conversion has no interaction handler and does not approve repair.",
+        "support": [
+          {
+            "path": "desktop/source/app/dispatchwatcher.cxx",
+            "sha256": "087c159365d098f011214f61bbaa18f4e1ac41d5ec1fe3ddf5e2f510730f17af"
+          },
+          {
+            "path": "filter/source/config/cache/typedetection.cxx",
+            "sha256": "c91f842265636df7f867576a9993f2068e4355c073b73cda25d485badbc164d8"
+          },
+          {
+            "path": "oox/source/helper/zipstorage.cxx",
+            "sha256": "7c1319aadc62a1a28068d51f77f673c1c363e61aead133cfe13bd5b8bab830e9"
+          },
+          {
+            "path": "package/source/zipapi/ZipFile.cxx",
+            "sha256": "f7c22c51e11d902aa74ab5442f304f307953c9c4933e5165863a99e6d53b9ff7"
+          }
+        ]
+      }
+    },
+    {
+      "path": "xmlsecurity/qa/unit/signing/data/signature-forgery-cdh-lfh.docx",
+      "sha256": "1b2c307f164cc4775c5571826f4dd7830c29646efa5f9084fb4a2183c460b1db",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "xmlsecurity/qa/unit/signing/signing.cxx",
+        "sha256": "30d05db42772d55b4fc6d69cbe16336a2f67bf8ca48f79e38d676b7c0f839b76",
+        "test": "testInvalidZIP",
+        "kind": "repair-required",
+        "assertion": "Official QA explicitly approves repair for this broken input; CLI silent conversion has no interaction handler and does not approve repair.",
+        "support": [
+          {
+            "path": "desktop/source/app/dispatchwatcher.cxx",
+            "sha256": "087c159365d098f011214f61bbaa18f4e1ac41d5ec1fe3ddf5e2f510730f17af"
+          },
+          {
+            "path": "filter/source/config/cache/typedetection.cxx",
+            "sha256": "c91f842265636df7f867576a9993f2068e4355c073b73cda25d485badbc164d8"
+          },
+          {
+            "path": "oox/source/helper/zipstorage.cxx",
+            "sha256": "7c1319aadc62a1a28068d51f77f673c1c363e61aead133cfe13bd5b8bab830e9"
+          },
+          {
+            "path": "package/source/zipapi/ZipFile.cxx",
+            "sha256": "f7c22c51e11d902aa74ab5442f304f307953c9c4933e5165863a99e6d53b9ff7"
+          }
+        ]
+      }
+    },
+    {
+      "path": "sw/qa/extras/uiwriter/data/ofz18563.docx",
+      "sha256": "2438620a3cb0481b3fe4b6500daf2305d9e75ebd92903195117b0e82b4adbbc7",
+      "expectation": "load-refusal-without-repair-or-password",
+      "evidence": {
+        "path": "sw/qa/extras/uiwriter/uiwriter10.cxx",
+        "sha256": "73455811d09a75f8532d6d15fc3de8daec9bf380b341388e69c46460d99a0845",
+        "test": "testOfz18563",
+        "kind": "zip-integrity-refusal",
+        "assertion": "QA only asserts no crash; expected refusal is independently grounded in pinned official normal-mode CRC verification and the exact invalid ZIP member.",
+        "support": [
+          {
+            "path": "desktop/source/app/dispatchwatcher.cxx",
+            "sha256": "087c159365d098f011214f61bbaa18f4e1ac41d5ec1fe3ddf5e2f510730f17af"
+          },
+          {
+            "path": "filter/source/config/cache/typedetection.cxx",
+            "sha256": "c91f842265636df7f867576a9993f2068e4355c073b73cda25d485badbc164d8"
+          },
+          {
+            "path": "oox/source/helper/zipstorage.cxx",
+            "sha256": "7c1319aadc62a1a28068d51f77f673c1c363e61aead133cfe13bd5b8bab830e9"
+          },
+          {
+            "path": "package/source/zipapi/XUnbufferedStream.cxx",
+            "sha256": "691f0e5c198db248a612053954a83b78f6eec51e05125f54d96c3c0a99237222"
+          },
+          {
+            "path": "package/source/zipapi/ZipFile.cxx",
+            "sha256": "f7c22c51e11d902aa74ab5442f304f307953c9c4933e5165863a99e6d53b9ff7"
+          }
+        ],
+        "invalid_crc_member": "word/header1.xml"
+      }
+    }
+  ]
+}

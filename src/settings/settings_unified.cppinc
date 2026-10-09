@@ -18,7 +18,7 @@ static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initi
 
     UnifiedSettingsShellCtx ctx{};
     ctx.owner = owner;
-    ctx.currentCategory = std::clamp(initialCategory, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavAssets));
+    ctx.currentCategory = std::clamp(initialCategory, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavPalette));
     ctx.initialAnnotSection = initialAnnotSection;
 
     if (owner) EnableWindow(owner, FALSE);
@@ -43,6 +43,12 @@ static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initi
     while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
         if (HandleWorkspaceMemoMessage(msg)) continue;
         if (ShouldSkipImeMessageInModalLoop(msg)) continue;
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE && ctx.paletteCtx &&
+            ctx.paletteCtx->eyedropperActive) {
+            ctx.paletteCtx->eyedropperActive = false;
+            if (GetCapture() == ctx.childPalette) ReleaseCapture();
+            continue; // First Escape cancels sampling, not the settings draft.
+        }
         if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
         if (!IsDialogMessageW(w, &msg)) {
             TranslateMessage(&msg);

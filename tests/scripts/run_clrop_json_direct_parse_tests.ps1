@@ -51,3 +51,6 @@ try {
 finally {
     Pop-Location
 }
+
+# Keep checkpoint numeric precision and journal replay in the same CLROP gate.
+& (Join-Path $PSScriptRoot "run_annot_stage_replay_tests.ps1")

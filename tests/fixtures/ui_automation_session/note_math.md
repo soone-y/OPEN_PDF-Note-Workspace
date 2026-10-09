@@ -6,6 +6,8 @@ Inline paren \(a + b\), tag <math display=inline>x^2</>
 - **Bold marker regression**
 :::
 
+<b><i>Closing tag 日本語</i></b>
+
 $$z$$
 
 \[w + 1\]

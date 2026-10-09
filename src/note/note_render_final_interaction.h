@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -75,6 +76,16 @@ enum class NoteRenderFinalInteractionResult {
     const NoteRenderFinalPublication& publication,
     LineIndex line_index,
     NoteRenderFinalResolvedLine* out) noexcept;
+
+// Shared by structured and hybrid hit testing. Only blank space strictly
+// beyond the last visual row's visible extent may address a hidden inline
+// suffix at the logical line end. Tables keep their cell-based hit contract.
+// No source parsing, allocation or publication mutation is performed.
+[[nodiscard]] std::optional<size_t> ResolveNoteRenderTrailingSyntaxBlankHit(
+    const NoteRenderSourceLinePlan& source,
+    const NoteRenderLinePlacement& placement,
+    int content_x_px,
+    uint64_t relative_y_px) noexcept;
 
 // Resolves content Y to one structured-owned row in O(log n), then finds the
 // closest measured source boundary across that row's runs. A native-owned row

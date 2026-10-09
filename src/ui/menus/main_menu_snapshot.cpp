@@ -15,11 +15,11 @@
 namespace {
 
 bool AreAllDebugLogsEnabled(const AppDebugLogConfig& cfg) {
-    return cfg.previewTrace && cfg.switchTiming && cfg.crash && cfg.startupWatchdog;
+    return cfg.previewTrace && cfg.switchTiming && cfg.crash && cfg.startupWatchdog && cfg.officeConversion;
 }
 
 bool AreAnyDebugLogsEnabled(const AppDebugLogConfig& cfg) {
-    return cfg.previewTrace || cfg.switchTiming || cfg.crash || cfg.startupWatchdog;
+    return cfg.previewTrace || cfg.switchTiming || cfg.crash || cfg.startupWatchdog || cfg.officeConversion;
 }
 
 bool HasExportablePdf() {

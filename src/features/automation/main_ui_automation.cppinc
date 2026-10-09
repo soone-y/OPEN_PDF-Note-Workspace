@@ -2,7 +2,13 @@
 
 #include <cstring>
 #include <uiautomationclient.h>
+#include "fpdf_annot.h"
+#include "file_output/pdf_annotation_export.h"
 #include "pdf_view/keyboard_scroll.h"
+
+static bool BeginOwnedDialogPresenceAutomation(HWND owner, const wchar_t* expectedClass, std::wstring* outError);
+static bool EndOwnedDialogPresenceAutomation(HWND owner, const wchar_t* scenario, std::wstring* outError,
+                                              bool requireDialog = true);
 
 // Disposable UI fixture only: borrow the existing native transport boundary
 // to deliver reentrant IME notifications/queries and selection paints while
@@ -988,6 +994,174 @@ static bool InspectPngRasterWithWic(const std::filesystem::path& path, int expec
     return true;
 }
 
+static bool RunUiAutomationPdfAnnotationExportScenario(HWND owner,
+                                                       const std::filesystem::path& outputDir,
+                                                       std::wstring* outError) {
+    // This runs only in a disposable automation workspace. Borrow the logical
+    // annotation list without changing dirty/history/stage state, then restore it.
+    struct Restore {
+        std::vector<Annotation> saved;
+        Restore() { saved.swap(g_annots); }
+        ~Restore() { saved.swap(g_annots); }
+    } restore;
+    const auto fail = [&](const wchar_t* why) { if (outError) *outError = why; return false; };
+    const Annotation::Type types[] = {Annotation::Type::MarkerText, Annotation::Type::Freehand,
+        Annotation::Type::TextBox, Annotation::Type::Shape, Annotation::Type::Arrow,
+        Annotation::Type::Wave, Annotation::Type::MathBox, Annotation::Type::LinkMarker};
+    for (size_t i = 0; i < std::size(types); ++i) {
+        Annotation a;
+        a.type = types[i]; a.id = L"export-fixture-" + std::to_wstring(i); a.pageIndex = 0;
+        a.x1 = 30; a.y1 = 160; a.x2 = 170; a.y2 = 115;
+        a.width = 3; a.alpha = 0.5; a.color = RGB(20,100,230);
+        a.text = a.type == Annotation::Type::MathBox ? L"x^2+1" : L"PDF export text";
+        a.fontName = L"Arial"; a.fontPt = 14;
+        a.linkId = L"fixture-note-link";
+        a.path = {{30,140},{80,150},{120,130}};
+        a.quads = {30,160,170,160,170,140,30,140};
+        g_annots.push_back(std::move(a));
+    }
+    for (const double scale : {1.0, 2.0}) {
+        const auto path = outputDir / (scale == 1 ? L"annotations.pdf" : L"annotations_scaled.pdf");
+        if (!file_output::ExportPdfPages(owner, {{0,true}}, path.wstring(), true, scale, true)) {
+            const auto fixtures=g_annots;
+            for(size_t i=0;i<fixtures.size();++i) {
+                g_annots={fixtures[i]};
+                const auto trial=outputDir/(L"annotation_trial_"+std::to_wstring(i)+L".pdf");
+                if(!file_output::ExportPdfPages(owner,{{0,true}},trial.wstring(),true,scale,true)) {
+                    if(outError) *outError=L"Standard annotation export failed for fixture "+std::to_wstring(i);
+                    return false;
+                }
+            }
+            return fail(L"Standard annotation export failed through the application API.");
+        }
+        std::string bytes;
+        if (!ReadUiAutomationFileBytes(path, &bytes)) return fail(L"Cannot read annotation output.");
+        std::lock_guard<std::recursive_mutex> lock(g_pdfiumMutex);
+        auto doc = FPDF_LoadMemDocument64(bytes.data(),bytes.size(),nullptr);
+        if (!doc) return fail(L"Cannot reopen annotation output.");
+        auto page = FPDF_LoadPage(doc,0);
+        bool ok = page && FPDF_GetPageCount(doc)==1;
+        size_t found = 0;
+        for (int i=0; page && i<FPDFPage_GetAnnotCount(page); ++i) {
+            auto annot=FPDFPage_GetAnnot(page,i);
+            wchar_t name[64]{};
+            if (annot && FPDFAnnot_GetStringValue(annot,"NM",reinterpret_cast<FPDF_WCHAR*>(name),sizeof(name))>2 &&
+                std::wstring(name).find(L"export-fixture-")==0) {
+                ++found;
+                const int subtype=FPDFAnnot_GetSubtype(annot);
+                const std::wstring id(name);
+                if (id==L"export-fixture-0") {
+                    FS_QUADPOINTSF q{};
+                    ok=ok && subtype==FPDF_ANNOT_HIGHLIGHT && FPDFAnnot_GetAttachmentPoints(annot,0,&q) &&
+                        std::abs(q.x1-30*scale)<0.01 && std::abs(q.y1-160*scale)<0.01 &&
+                        std::abs(q.x3-30*scale)<0.01;
+                } else if(id==L"export-fixture-1" || id==L"export-fixture-4" || id==L"export-fixture-5") {
+                    ok=ok && subtype==FPDF_ANNOT_INK && FPDFAnnot_GetInkListCount(annot)>0;
+                    if(id==L"export-fixture-1") {
+                        FS_POINTF points[3]{};
+                        ok=ok && FPDFAnnot_GetInkListPath(annot,0,points,3)==3 &&
+                            std::abs(points[0].x-30*scale)<0.01 && std::abs(points[0].y-140*scale)<0.01;
+                    }
+                } else if(id==L"export-fixture-2") {
+                    ok=ok && (subtype==FPDF_ANNOT_FREETEXT || subtype==FPDF_ANNOT_STAMP);
+                } else if(id==L"export-fixture-3") ok=ok && subtype==FPDF_ANNOT_SQUARE;
+                else ok=ok && subtype==FPDF_ANNOT_STAMP;
+            }
+            if(annot) FPDFPage_CloseAnnot(annot);
+        }
+        if(page) FPDF_ClosePage(page);
+        FPDF_CloseDocument(doc);
+        if(!ok || found!=std::size(types)) return fail(L"Reopened output lost annotation type, geometry or entries.");
+    }
+    // Text recoloring is rejected before writing, including when the chosen
+    // output already exists. Verify that the previous output remains byte-exact.
+    const auto path=outputDir/L"annotations.pdf";
+    std::string before,after;
+    if(!ReadUiAutomationFileBytes(path,&before)) return false;
+    g_annots.front().type=Annotation::Type::TextColor;
+    if(file_output::ExportPdfPages(owner,{{0,true}},path.wstring(),true,1.0,true) ||
+       !ReadUiAutomationFileBytes(path,&after) || before!=after)
+        return fail(L"Text-color rejection changed an existing output.");
+    return true;
+}
+
+static bool RunUiAutomationNativePdfExportScenario(HWND owner,
+                                                   const std::filesystem::path& outputDir,
+                                                   bool skipPngExport,
+                                                   std::wstring* outError) {
+    // Disposable, blank input with one native annotation. Borrow only the
+    // logical PDF inputs used by export; do not open/switch/save a workspace.
+    std::lock_guard<std::recursive_mutex> lock(g_pdfiumMutex);
+    auto doc=pdf_annotation_export::CreateDocument();
+    if(!doc) return false;
+    struct BorrowPdf {
+        FPDF_DOCUMENT savedDoc=g_pdf.doc;
+        FPDF_DOCUMENT borrowed;
+        std::wstring savedPath;
+        std::vector<PageCache> savedPages;
+        std::vector<Annotation> savedAnnots;
+        BorrowPdf(FPDF_DOCUMENT value,std::wstring path):borrowed(value) {
+            savedPath.swap(g_pdf.path); savedPages.swap(g_pdf.pages); savedAnnots.swap(g_annots);
+            g_pdf.doc=value; g_pdf.path.swap(path);
+        }
+        ~BorrowPdf() {
+            g_pdf.doc=savedDoc; savedPath.swap(g_pdf.path);
+            savedPages.swap(g_pdf.pages); savedAnnots.swap(g_annots);
+            FPDF_CloseDocument(borrowed);
+        }
+    } borrow(doc,(outputDir/L"native-input.pdf").wstring());
+    const auto fail=[&](const wchar_t* reason) { if(outError) *outError=reason; return false; };
+    auto page=FPDFPage_New(doc,0,200,200),scratch=FPDFPage_New(doc,1,200,200);
+    auto rectangle=scratch ? FPDFPageObj_CreateNewRect(30,100,90,40) : nullptr;
+    bool prepared=page && scratch && rectangle && FPDFPageObj_SetFillColor(rectangle,0,100,240,255) &&
+                  FPDFPath_SetDrawMode(rectangle,FPDF_FILLMODE_ALTERNATE,FALSE);
+    if(rectangle && prepared) FPDFPage_InsertObject(scratch,rectangle);
+    else if(rectangle) FPDFPageObj_Destroy(rectangle);
+    Annotation a; a.type=Annotation::Type::Shape; a.id=L"native-png"; a.pageIndex=0; a.color=RGB(0,100,240);
+    a.alpha=1; a.x1=30; a.y1=100; a.x2=120; a.y2=140;
+    prepared=prepared && pdf_annotation_export::Add(doc,page,scratch,a,true) && pdf_annotation_export::Finalize(page);
+    if(scratch) FPDF_ClosePage(scratch);
+    if(page) FPDF_ClosePage(page);
+    if(FPDF_GetPageCount(doc)>1) FPDFPage_Delete(doc,1);
+    if(!prepared) return fail(L"Cannot prepare native PDF annotation fixture.");
+
+    const auto pdf=outputDir/L"native-preserved.pdf";
+    if(!file_output::ExportPdfPages(owner,{{0,true}},pdf.wstring(),true,1,true))
+        return fail(L"Native annotated input must remain exportable at 1x.");
+    std::string before,after;
+    if(!ReadUiAutomationFileBytes(pdf,&before)) return false;
+    for(const double scale:{2.0,0.5}) {
+        // Exercise the real quiet error dialog, and close only that owned
+        // dialog using the existing presence-test timer. Do not suppress UI.
+        if(!BeginOwnedDialogPresenceAutomation(owner,L"SilentDialogClass",outError)) return false;
+        const bool exported=file_output::ExportPdfPages(owner,{{0,true}},pdf.wstring(),true,scale,true);
+        // The existing UI deduplicates identical messages within its short
+        // repeat window. Require the first dialog; safely close any second one.
+        if(!EndOwnedDialogPresenceAutomation(owner,L"rejecting native annotation scaling",outError,
+                                             scale==2.0)) return false;
+        if(exported ||
+           !ReadUiAutomationFileBytes(pdf,&after) || before!=after)
+            return fail(L"Native annotation scale rejection changed an existing output.");
+    }
+    if(skipPngExport) return true; // explicitly omitted, not evidence of PNG acceptance
+    // No separate annotations yet: this raster must contain the native blue
+    // rectangle, which disappears if FPDF_ANNOT is omitted from PNG rendering.
+    const auto png=outputDir/L"native-only.png";
+    bool visible=false;
+    if(!file_output::ExportPdfPagePng(owner,0,png.wstring(),file_output::PdfPngStyle::PdfLike,false,400,400) ||
+       !InspectPngRasterWithWic(png,400,400,&visible) || !visible)
+        return fail(L"PNG export omitted native PDF annotations.");
+    std::string nativePixels,combinedPixels;
+    if(!ReadUiAutomationFileBytes(png,&nativePixels)) return false;
+    a.id=L"app-png"; a.x1=140; a.x2=180; a.color=RGB(0,170,123);
+    g_annots.push_back(a);
+    const auto combined=outputDir/L"native-and-app.png";
+    if(!file_output::ExportPdfPagePng(owner,0,combined.wstring(),file_output::PdfPngStyle::PdfLike,true,400,400) ||
+       !ReadUiAutomationFileBytes(combined,&combinedPixels) || nativePixels==combinedPixels)
+        return fail(L"PNG export omitted the separate app annotation layer.");
+    return true;
+}
+
 static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outError) {
     if (!owner || g_workspaceRoot.empty() || CurrentLogicalPdfPath().empty() ||
         g_currentNotePath.empty() || g_pdf.pages.empty()) {
@@ -1006,7 +1180,7 @@ static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outErr
     }
 
     const std::filesystem::path outputDir = std::filesystem::path(g_workspaceRoot) /
-        L"__resource__" / L"__tmp__" / L"ui_automation_output";
+        L"__pdf_note_workspace__" / L"__tmp__" / L"ui_automation_output";
     std::error_code ec;
     std::filesystem::create_directories(outputDir, ec);
     if (ec) {
@@ -1022,6 +1196,9 @@ static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outErr
     const bool skipPngExport = ReadMainEnvVar(
         L"PDF_NOTE_SMALL_UI_AUTOMATION_SKIP_PNG_EXPORT", &skipPngExportValue) &&
         (skipPngExportValue == L"1" || skipPngExportValue == L"true");
+
+    if (!RunUiAutomationPdfAnnotationExportScenario(owner, outputDir, outError)) return false;
+    if (!RunUiAutomationNativePdfExportScenario(owner, outputDir, skipPngExport, outError)) return false;
 
     const std::vector<file_output::PdfPageSpec> firstPage{{0, false}};
     if (!file_output::ExportPdfPages(owner, firstPage, pdfOut.wstring(),
@@ -3215,7 +3392,195 @@ bool PrepareUiAutomationStagedExitScenario(HWND owner, std::wstring* outError) {
     return true;
 }
 
-static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError) {
+static BOOL CALLBACK FindUiAutomationSoftNoticeProc(HWND window, LPARAM result) {
+    wchar_t className[64]{};
+    if (GetClassNameW(window, className, static_cast<int>(std::size(className))) &&
+        wcscmp(className, L"PdfWorkspaceSoftNotice") == 0) {
+        *reinterpret_cast<HWND*>(result) = window;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HWND FindUiAutomationSoftNoticeWindow() {
+    HWND result = nullptr;
+    // Never inspect the normal application instance's notice during testing.
+    EnumThreadWindows(GetCurrentThreadId(), FindUiAutomationSoftNoticeProc,
+                      reinterpret_cast<LPARAM>(&result));
+    return result;
+}
+
+// Exercises the same commands and keyboard-routing function as the left
+// input palette. Edits stay in the runner's disposable note and are undone.
+[[nodiscard]] static bool RunUiAutomationInputAssistScenario(HWND owner, std::wstring* outError) {
+    const std::wstring original = GetNoteAutomationIndexingText();
+    const std::wstring previousBody = GetShortcutBodyInput();
+    const std::vector<HWND> checks = {g_hChkShortcutHeading1, g_hChkShortcutBack,
+        g_hChkShortcutChar, g_hChkShortcutBold, g_hChkShortcutItalic,
+        g_hChkShortcutStrike, g_hChkShortcutUnderline};
+    std::vector<LRESULT> savedChecks;
+    for (HWND control : checks) {
+        savedChecks.push_back(SendMessageW(control, BM_GETCHECK, 0, 0));
+        SendMessageW(control, BM_SETCHECK, BST_UNCHECKED, 0);
+    }
+    const std::vector<HWND> fields = {g_hShortcutIndentEdit, g_hShortcutMarginEdit, g_hShortcutFontSizeEdit};
+    std::vector<std::wstring> savedFields;
+    for (HWND control : fields) {
+        const int length = GetWindowTextLengthW(control);
+        std::wstring value(static_cast<size_t>(length) + 1, L'\0');
+        value.resize(static_cast<size_t>(GetWindowTextW(control, value.data(), length + 1)));
+        savedFields.push_back(std::move(value));
+        SetWindowTextW(control, L"");
+    }
+    const auto restorePalette = [&]() {
+        for (size_t i = 0; i < checks.size(); ++i) SendMessageW(checks[i], BM_SETCHECK, savedChecks[i], 0);
+        for (size_t i = 0; i < fields.size(); ++i) SetWindowTextW(fields[i], savedFields[i].c_str());
+        SetWindowTextW(g_hShortcutTagEdit, previousBody.c_str());
+    };
+    const auto fail = [&](const wchar_t* message) {
+        restorePalette();
+        if (outError) *outError = message;
+        return false;
+    };
+    const std::wstring body = L"input assist 日本語\x3000text";
+    SetWindowTextW(g_hShortcutTagEdit, body.c_str());
+    if (GetShortcutBodyInput() != body) return fail(L"Input assist removed spaces from the typed body.");
+    SendMessageW(g_hChkShortcutBold, BM_SETCHECK, BST_CHECKED, 0);
+    const DWORD originalEnd = static_cast<DWORD>(original.size());
+    SendMessageW(g_hNoteEdit, EM_SETSEL, originalEnd, originalEnd);
+    SetFocus(g_hShortcutTagEdit);
+    MSG enter{};
+    enter.hwnd = g_hShortcutTagEdit;
+    enter.message = WM_KEYDOWN;
+    enter.wParam = VK_RETURN;
+    SendMessageW(g_hShortcutTagEdit, WM_IME_STARTCOMPOSITION, 0, 0);
+    const bool imeKeptEnter = !HandleNoteAssistShortcutInLoop(owner, enter);
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_SHORTCUT_INPUT, 0), 0);
+    const bool imeKeptBody = GetShortcutBodyInput() == body && GetNoteAutomationIndexingText() == original;
+    SendMessageW(g_hShortcutTagEdit, WM_IME_ENDCOMPOSITION, 0, 0);
+    if (!imeKeptEnter || !imeKeptBody) return fail(L"Input assist consumed an active empty-payload IME composition.");
+    if (!HandleNoteAssistShortcutInLoop(owner, enter)) return fail(L"Input assist Enter route was not handled.");
+    const std::wstring inserted = original + L"**" + body + L"**";
+    if (GetNoteAutomationIndexingText() != inserted || !GetShortcutBodyInput().empty() ||
+        GetFocus() != g_hNoteEdit) return fail(L"Input assist did not apply Markdown or return focus without adding a newline.");
+    if (!SendUiAutomationNoteMenuUndoRedoChangedText(owner, true) || GetNoteAutomationIndexingText() != original ||
+        !SendUiAutomationNoteMenuUndoRedoChangedText(owner, false) || GetNoteAutomationIndexingText() != inserted)
+        return fail(L"Input assist typed insertion did not survive menu undo/redo.");
+
+    // With no typed override, only the selected native range is formatted.
+    SendMessageW(g_hChkShortcutBold, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(g_hChkShortcutItalic, BM_SETCHECK, BST_CHECKED, 0);
+    SendMessageW(g_hNoteEdit, EM_SETSEL, originalEnd + 2, originalEnd + 2 + body.size());
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_SHORTCUT_INPUT, 0), 0);
+    if (GetNoteAutomationIndexingText() != original + L"***" + body + L"***" ||
+        !SendUiAutomationNoteMenuUndoRedoChangedText(owner, true) || GetNoteAutomationIndexingText() != inserted ||
+        !SendUiAutomationNoteMenuUndoRedoChangedText(owner, true) || GetNoteAutomationIndexingText() != original)
+        return fail(L"Input assist selection formatting or undo changed surrounding note text.");
+
+    // No body and no selection must preserve the document rather than inserting
+    // a placeholder. Plain/TeX formatting must preserve the typed body too.
+    SendMessageW(g_hNoteEdit, EM_SETSEL, originalEnd, originalEnd);
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_SHORTCUT_INPUT, 0), 0);
+    HWND emptyInputNotice = FindUiAutomationSoftNoticeWindow();
+    if (GetNoteAutomationIndexingText() != original || !emptyInputNotice || !IsWindowVisible(emptyInputNotice))
+        return fail(L"Empty input assist did not preserve the note or show its guidance.");
+    // A new invalid attempt must still explain what to do, even within the
+    // repeat-suppression interval of the notice just dismissed by the command.
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_SHORTCUT_INPUT, 0), 0);
+    if (!IsWindowVisible(emptyInputNotice)) return fail(L"Repeated empty Apply lost its guidance.");
+    DismissSoftNotice(nullptr, localization::Text(L"note.input_assist.need_body"));
+    if (!IsWindowVisible(emptyInputNotice)) return fail(L"Another owner dismissed input assist guidance.");
+    // Simulate a queued expiry belonging to the previous notice. The timer
+    // ledger in SoftNoticeProc reserves 0x5E10 for this expiry only.
+    SendMessageW(emptyInputNotice, WM_TIMER, 0x5E10, 0);
+    if (!IsWindowVisible(emptyInputNotice)) return fail(L"A stale timer hid fresh input assist guidance.");
+    const ULONGLONG expiryTimeout = GetTickCount64() + 5000;
+    while (IsWindowVisible(emptyInputNotice) && GetTickCount64() < expiryTimeout) {
+        MSG timer{};
+        while (PeekMessageW(&timer, emptyInputNotice, WM_TIMER, WM_TIMER, PM_REMOVE)) {
+            DispatchMessageW(&timer);
+        }
+        Sleep(10);
+    }
+    if (IsWindowVisible(emptyInputNotice)) return fail(L"Input assist guidance did not expire automatically.");
+    // The automatic expiry may retain suppression; an explicit Apply clears
+    // only the matching guidance and makes this fresh attempt visible.
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_SHORTCUT_INPUT, 0), 0);
+    if (!IsWindowVisible(emptyInputNotice)) return fail(L"Apply after expiry lost its guidance.");
+    SetWindowTextW(g_hShortcutTagEdit, body.c_str());
+    if (IsWindowVisible(emptyInputNotice))
+        return fail(L"Input assist guidance remained visible after body input.");
+    const std::wstring unrelatedNotice = L"Input assist test: unrelated warning";
+    ShowSoftNotice(owner, unrelatedNotice, SoftNoticeKind::Warning);
+    SetWindowTextW(g_hShortcutTagEdit, body.c_str());
+    const bool unrelatedPreserved = IsWindowVisible(emptyInputNotice) != FALSE;
+    DismissSoftNotice(owner, unrelatedNotice);
+    if (!unrelatedPreserved) return fail(L"Input assist body input dismissed an unrelated warning.");
+    const std::wstring savedPath = g_currentNotePath;
+    g_currentNotePath = L"input_assist.txt";
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_SHORTCUT_INPUT, 0), 0);
+    const bool plainPreserved = GetNoteAutomationIndexingText() == original && GetShortcutBodyInput() == body;
+    g_currentNotePath = savedPath;
+    if (!plainPreserved) return fail(L"Plain-text input assist generated uninterpreted formatting or discarded the body.");
+    SendMessageW(g_hChkShortcutItalic, BM_SETCHECK, BST_UNCHECKED, 0);
+    const std::wstring savedSession = g_currentSessionPath;
+    g_currentNotePath.clear();
+    g_currentSessionPath.clear();
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_SHORTCUT_INPUT, 0), 0);
+    const bool noNotePreserved = GetNoteAutomationIndexingText() == original && GetShortcutBodyInput() == body;
+    g_currentNotePath = savedPath;
+    g_currentSessionPath = savedSession;
+    if (!noNotePreserved) return fail(L"Input assist discarded the typed body without an open note.");
+    const LRESULT savedLimit = SendMessageW(g_hNoteEdit, EM_GETLIMITTEXT, 0, 0);
+    SendMessageW(g_hNoteEdit, EM_EXLIMITTEXT, 0, originalEnd);
+    SendMessageW(g_hNoteEdit, EM_SETSEL, 1, 3);
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_SHORTCUT_INPUT, 0), 0);
+    DWORD failedStart = 0, failedEnd = 0;
+    SendMessageW(g_hNoteEdit, EM_GETSEL,
+        reinterpret_cast<WPARAM>(&failedStart), reinterpret_cast<LPARAM>(&failedEnd));
+    const bool limitPreserved = GetNoteAutomationIndexingText() == original && GetShortcutBodyInput() == body &&
+        failedStart == 1 && failedEnd == 3;
+    bool blockLimitPreserved = true;
+    for (const int command : {ID_NOTE_ASSIST_BULLET, ID_NOTE_ASSIST_QUOTE}) {
+        SendMessageW(owner, WM_COMMAND, MAKEWPARAM(command, 0), 0);
+        SendMessageW(g_hNoteEdit, EM_GETSEL,
+            reinterpret_cast<WPARAM>(&failedStart), reinterpret_cast<LPARAM>(&failedEnd));
+        blockLimitPreserved = blockLimitPreserved && GetNoteAutomationIndexingText() == original &&
+            GetShortcutBodyInput() == body && failedStart == 1 && failedEnd == 3;
+    }
+    SendMessageW(g_hNoteEdit, EM_EXLIMITTEXT, 0, savedLimit);
+    if (!limitPreserved) return fail(L"Input assist text-limit failure lost input, selection or note text.");
+    if (!blockLimitPreserved) return fail(L"Bullet/quote text-limit failure lost input, selection or note text.");
+
+    SendMessageW(g_hNoteEdit, EM_SETSEL, originalEnd, originalEnd);
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_ASSIST_BULLET, 0), 0);
+    const std::wstring blockBoundary = !original.empty() && original.back() != L'\r' && original.back() != L'\n'
+        ? L"\r" : L"";
+    if (GetNoteAutomationIndexingText() != original + blockBoundary + L"- " + body ||
+        !GetShortcutBodyInput().empty() || !SendUiAutomationNoteMenuUndoRedoChangedText(owner, true) ||
+        GetNoteAutomationIndexingText() != original) return fail(L"Input assist bullet did not use the body field or preserve undo.");
+    SendMessageW(g_hNoteEdit, EM_SETSEL, 0, 0);
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(ID_NOTE_ASSIST_QUOTE, 0), 0);
+    DWORD markerStart = 0, markerEnd = 0;
+    SendMessageW(g_hNoteEdit, EM_GETSEL,
+        reinterpret_cast<WPARAM>(&markerStart), reinterpret_cast<LPARAM>(&markerEnd));
+    if (GetNoteAutomationIndexingText() != L"> \r" + original || markerStart != 2 || markerEnd != 2 ||
+        !SendUiAutomationNoteMenuUndoRedoChangedText(owner, true) || GetNoteAutomationIndexingText() != original)
+        return fail(L"Empty quote assist did not leave the caret after the marker or preserve undo.");
+
+    // Editing/undo defers semantic publication. Finish the same refresh used
+    // by normal UI updates, then verify the restored note is still renderable.
+    RecomputeMathFromNote();
+    const auto restoredNote = CaptureNoteUiSnapshot();
+    if (!restoredNote.markdownRoute || !restoredNote.documentReady || !restoredNote.finalFrameActive)
+        return fail(L"Input assist undo could not publish the restored Markdown note.");
+    restorePalette();
+    AppendUiAutomationTrace(L"input_assist:spaces_markdown_enter_selection_undo_ok");
+    return true;
+}
+
+static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError,
+                                             bool renderedClickOnly) {
     AppendUiAutomationTrace(L"math_render:begin");
     if (!owner) {
         if (outError) *outError = L"Main window is not ready for math render testing.";
@@ -3498,84 +3863,100 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
     // deliberately not an oracle for these pixels (notably after math/table rows).
     const auto verifyRenderedClickInsertion = [&]() -> bool {
         const std::wstring original = GetNoteAutomationIndexingText();
+        struct ClickProbe {
+            std::wstring target;
+            size_t geometryDelta = 0;
+            size_t insertionDelta = 0;
+            int blankOffset = 0;
+        };
+        std::vector<ClickProbe> probes;
         for (const std::wstring& target : {std::wstring(L"Math UI Fixture"),
                                           std::wstring(L"Bold marker regression"),
                                           std::wstring(L"value")}) {
             for (const size_t delta : {size_t{0}, size_t{2}}) {
-                const int start = FindNoteTextSnippetStart(target);
-                if (start < 0) return false;
-                const size_t expected = static_cast<size_t>(start) + delta;
-                // An unfocused note is structured even after an earlier edit.
-                // The real click below must resolve before taking focus/raw ownership.
-                SetFocus(owner);
-                PreserveRenderedNoteOpeningView();
-                SendMessageW(g_hNoteEdit, EM_SETSEL, expected, expected);
-                RECT client{};
-                GetClientRect(g_hNoteEdit, &client);
-                // EM_SETSEL alone is a transport-only test operation. Complete
-                // the existing unfocused layout event before observing its frame.
-                SendMessageW(g_hNoteEdit, WM_SIZE, SIZE_RESTORED,
-                             MAKELPARAM(client.right - client.left, client.bottom - client.top));
-                RefreshBottomPaneView();
+                probes.push_back({target, delta, delta, 0});
+            }
+        }
+        const std::wstring closingTarget = L"Closing tag 日本語";
+        probes.push_back({closingTarget, closingTarget.size(), closingTarget.size(), 0});
+        probes.push_back({closingTarget, closingTarget.size(),
+                          closingTarget.size() + std::wstring_view(L"</i></b>").size(), 12});
+        for (const auto& probe : probes) {
+            const std::wstring& target = probe.target;
+            const int start = FindNoteTextSnippetStart(target);
+            if (start < 0) return false;
+            const size_t expected = static_cast<size_t>(start) + probe.insertionDelta;
+            const size_t geometryOffset = static_cast<size_t>(start) + probe.geometryDelta;
+            // An unfocused note is structured even after an earlier edit.
+            // The real click below must resolve before taking focus/raw ownership.
+            SetFocus(owner);
+            PreserveRenderedNoteOpeningView();
+            SendMessageW(g_hNoteEdit, EM_SETSEL, geometryOffset, geometryOffset);
+            RECT client{};
+            GetClientRect(g_hNoteEdit, &client);
+            // EM_SETSEL alone is a transport-only test operation. Complete
+            // the existing unfocused layout event before observing its frame.
+            SendMessageW(g_hNoteEdit, WM_SIZE, SIZE_RESTORED,
+                         MAKELPARAM(client.right - client.left, client.bottom - client.top));
+            RefreshBottomPaneView();
+            RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            NoteUiSnapshot structured = CaptureNoteUiSnapshot();
+            if (!structured.finalFrameActive || structured.finalRawLineCount != 0 ||
+                !structured.finalCaretGeometryReady) {
+                AppendUiAutomationTrace(L"render_click:invalid_structured target=" + target +
+                    L" " + DescribeNoteUiSnapshot(structured));
+                return false;
+            }
+            // Block wrappers can put a formerly visible fixture target
+            // below the viewport. Scroll the published geometry into view;
+            // transport EM_SETSEL does not scroll an unfocused final frame.
+            if (structured.finalCaretClientRect.top < client.top ||
+                structured.finalCaretClientRect.bottom > client.bottom) {
+                SendMessageW(g_hNoteEdit, WM_VSCROLL,
+                    structured.finalCaretClientRect.top < client.top ? SB_TOP : SB_BOTTOM, 0);
                 RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
-                NoteUiSnapshot structured = CaptureNoteUiSnapshot();
-                if (!structured.finalFrameActive || structured.finalRawLineCount != 0 ||
-                    !structured.finalCaretGeometryReady) {
-                    AppendUiAutomationTrace(L"render_click:invalid_structured target=" + target +
-                        L" " + DescribeNoteUiSnapshot(structured));
-                    return false;
-                }
-                // Block wrappers can put a formerly visible fixture target
-                // below the viewport. Scroll the published geometry into view;
-                // transport EM_SETSEL does not scroll an unfocused final frame.
-                if (structured.finalCaretClientRect.top < client.top ||
-                    structured.finalCaretClientRect.bottom > client.bottom) {
-                    SendMessageW(g_hNoteEdit, WM_VSCROLL,
-                        structured.finalCaretClientRect.top < client.top ? SB_TOP : SB_BOTTOM, 0);
-                    RedrawWindow(g_hNoteEdit, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
-                    structured = CaptureNoteUiSnapshot();
-                    if (!structured.finalFrameActive || !structured.finalCaretGeometryReady) return false;
-                }
-                const RECT caret = structured.finalCaretClientRect;
-                const int x = caret.left;
-                const int y = caret.top + (caret.bottom - caret.top) / 2;
-                if (x < client.left || x >= client.right || y < client.top || y >= client.bottom) {
-                    AppendUiAutomationTrace(L"render_click:outside_viewport target=" + target +
-                        L" point=" + std::to_wstring(x) + L":" + std::to_wstring(y));
-                    return false;
-                }
-                SendMessageW(g_hNoteEdit, EM_SETSEL, 0, 0);
-                SendMessageW(g_hNoteEdit, WM_SIZE, SIZE_RESTORED,
-                             MAKELPARAM(client.right - client.left, client.bottom - client.top));
-                RefreshBottomPaneView();
-                const LPARAM point = MAKELPARAM(x, y);
-                SendMessageW(g_hNoteEdit, WM_LBUTTONDOWN, MK_LBUTTON, point);
-                SendMessageW(g_hNoteEdit, WM_LBUTTONUP, 0, point);
-                DWORD actualStart = 0, actualEnd = 0;
-                SendMessageW(g_hNoteEdit, EM_GETSEL,
-                             reinterpret_cast<WPARAM>(&actualStart),
-                             reinterpret_cast<LPARAM>(&actualEnd));
-                const NoteUiSnapshot clicked = CaptureNoteUiSnapshot();
-                if (actualStart != expected || actualEnd != expected ||
-                    !clicked.finalFrameActive || clicked.finalRawLineCount == 0 ||
-                    clicked.finalStructuredLineCount == 0) {
-                    AppendUiAutomationTrace(L"render_click:expected=" + std::to_wstring(expected) +
-                        L" actual=" + std::to_wstring(actualStart) + L":" + std::to_wstring(actualEnd) +
-                        L" point=" + std::to_wstring(x) + L":" + std::to_wstring(y));
-                    return false;
-                }
-                const bool typed = SendUiAutomationNoteTextInput(L"Q");
-                std::wstring expectedText = original;
-                expectedText.insert(expected, L"Q");
-                const bool insertedAtClick = typed && GetNoteAutomationIndexingText() == expectedText;
-                const bool restored = typed && SendUiAutomationNoteUndoChangedText() &&
-                    GetNoteAutomationIndexingText() == original;
-                if (!insertedAtClick || !restored) {
-                    AppendUiAutomationTrace(L"render_click:input_mismatch target=" + target +
-                        L" inserted=" + std::to_wstring(insertedAtClick) +
-                        L" restored=" + std::to_wstring(restored));
-                    return false;
-                }
+                structured = CaptureNoteUiSnapshot();
+                if (!structured.finalFrameActive || !structured.finalCaretGeometryReady) return false;
+            }
+            const RECT caret = structured.finalCaretClientRect;
+            const int x = caret.left + probe.blankOffset;
+            const int y = caret.top + (caret.bottom - caret.top) / 2;
+            if (x < client.left || x >= client.right || y < client.top || y >= client.bottom) {
+                AppendUiAutomationTrace(L"render_click:outside_viewport target=" + target +
+                    L" point=" + std::to_wstring(x) + L":" + std::to_wstring(y));
+                return false;
+            }
+            SendMessageW(g_hNoteEdit, EM_SETSEL, 0, 0);
+            SendMessageW(g_hNoteEdit, WM_SIZE, SIZE_RESTORED,
+                         MAKELPARAM(client.right - client.left, client.bottom - client.top));
+            RefreshBottomPaneView();
+            const LPARAM point = MAKELPARAM(x, y);
+            SendMessageW(g_hNoteEdit, WM_LBUTTONDOWN, MK_LBUTTON, point);
+            SendMessageW(g_hNoteEdit, WM_LBUTTONUP, 0, point);
+            DWORD actualStart = 0, actualEnd = 0;
+            SendMessageW(g_hNoteEdit, EM_GETSEL,
+                         reinterpret_cast<WPARAM>(&actualStart),
+                         reinterpret_cast<LPARAM>(&actualEnd));
+            const NoteUiSnapshot clicked = CaptureNoteUiSnapshot();
+            if (actualStart != expected || actualEnd != expected ||
+                !clicked.finalFrameActive || clicked.finalRawLineCount == 0 ||
+                clicked.finalStructuredLineCount == 0) {
+                AppendUiAutomationTrace(L"render_click:expected=" + std::to_wstring(expected) +
+                    L" actual=" + std::to_wstring(actualStart) + L":" + std::to_wstring(actualEnd) +
+                    L" point=" + std::to_wstring(x) + L":" + std::to_wstring(y));
+                return false;
+            }
+            const bool typed = SendUiAutomationNoteTextInput(L"Q");
+            std::wstring expectedText = original;
+            expectedText.insert(expected, L"Q");
+            const bool insertedAtClick = typed && GetNoteAutomationIndexingText() == expectedText;
+            const bool restored = typed && SendUiAutomationNoteUndoChangedText() &&
+                GetNoteAutomationIndexingText() == original;
+            if (!insertedAtClick || !restored) {
+                AppendUiAutomationTrace(L"render_click:input_mismatch target=" + target +
+                    L" inserted=" + std::to_wstring(insertedAtClick) +
+                    L" restored=" + std::to_wstring(restored));
+                return false;
             }
         }
         SetFocus(owner);
@@ -3605,6 +3986,20 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
         }
         return true;
     };
+    // An explicitly selected click-only run does not claim the completion
+    // marker of the full math/IME/keyboard regression suite.
+    if (renderedClickOnly) {
+        AppendUiAutomationTrace(L"math_render:rendered_click_only");
+        const bool valid = initial.markdownRoute && initial.documentReady &&
+            initial.finalFrameActive && verifyRenderedClickInsertion();
+        restorePrevious();
+        if (!valid) {
+            if (outError) *outError = L"Rendered click-only insertion/undo probe failed.";
+            return false;
+        }
+        AppendUiAutomationTrace(L"math_render:rendered_click_insertion_ok");
+        return true;
+    }
     // Exercise the actual post-default RichEdit mutation paths that used to
     // leave the entire note native raw after typing or Backspace.  Each
     // assertion observes only the immutable public final frame: a successful
@@ -5581,6 +5976,11 @@ static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError
     }
     AppendUiAutomationTrace(L"math_render:rendered_click_insertion_ok");
 
+    if (!RunUiAutomationInputAssistScenario(owner, outError)) {
+        restorePrevious();
+        return false;
+    }
+
     g_noteRenderEnabled = previousRenderEnabled;
     g_noteRawOnly = previousRawOnly;
     const bool restored =
@@ -5708,6 +6108,12 @@ struct OwnedDialogCloseAutomationState {
     int helpSearchStep = 0;
     bool helpSearchValidated = false;
     std::wstring helpSearchFailure;
+    bool verifySilentChoices = false;
+    bool keepOpenValidated = false;
+    bool verifyColorChoices = false;
+    bool colorChoicesValidated = false;
+    int silentFinishCommand = 0; // 0 = WM_CLOSE; otherwise WM_COMMAND.
+    std::wstring silentChoiceFailure;
 };
 
 static MainWindowPresenceAutomationState g_mainWindowPresenceAutomation;
@@ -5795,6 +6201,58 @@ static void CALLBACK CloseOwnedDialogForPresenceAutomation(HWND, UINT, UINT_PTR 
         return;
     }
     g_ownedDialogCloseAutomation.dialogWasOpened = true;
+    if (g_ownedDialogCloseAutomation.verifyColorChoices) {
+        wchar_t execute[64]{};
+        wchar_t exit[64]{};
+        GetWindowTextW(GetDlgItem(dialog, IDOK), execute, static_cast<int>(std::size(execute)));
+        GetWindowTextW(GetDlgItem(dialog, IDCANCEL), exit, static_cast<int>(std::size(exit)));
+        if (localization::Text(L"common.ok") != execute || localization::Text(L"common.cancel") != exit ||
+            IsWindowEnabled(owner)) {
+            g_ownedDialogCloseAutomation.silentChoiceFailure = L"Color editor action labels or modal owner state are incorrect.";
+        } else {
+            g_ownedDialogCloseAutomation.colorChoicesValidated = true;
+        }
+    }
+    if (g_ownedDialogCloseAutomation.verifySilentChoices) {
+        // Shared dialog IDs: execute / keep-open / exit; reuse the owned-dialog timer.
+        HWND execute = GetDlgItem(dialog, 5102);
+        HWND keep = GetDlgItem(dialog, 5103);
+        HWND exit = GetDlgItem(dialog, 5104);
+        const auto labelMatches = [](HWND button, const wchar_t* textId) {
+            wchar_t text[64]{};
+            return button && GetWindowTextW(button, text, static_cast<int>(std::size(text))) > 0 &&
+                localization::Text(textId) == text;
+        };
+        if (!labelMatches(execute, L"dialog.button.yes") ||
+            !labelMatches(keep, L"dialog.button.keep_open") ||
+            !labelMatches(exit, L"dialog.button.cancel") || IsWindowEnabled(owner)) {
+            g_ownedDialogCloseAutomation.silentChoiceFailure = L"Silent choice labels or modal owner state are incorrect.";
+        } else if (!g_ownedDialogCloseAutomation.keepOpenValidated) {
+            RECT client{};
+            GetClientRect(dialog, &client);
+            int previousRight = 0;
+            for (HWND button : {GetDlgItem(dialog, 5200), execute, keep, exit}) {
+                if (!button) continue;
+                RECT bounds{};
+                GetWindowRect(button, &bounds);
+                MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&bounds), 2);
+                if (bounds.left < previousRight || bounds.right > client.right || bounds.bottom > client.bottom) {
+                    g_ownedDialogCloseAutomation.silentChoiceFailure = L"Silent choice buttons overlap or lie outside the dialog.";
+                }
+                previousRight = bounds.right;
+            }
+            if (GetFocus() != exit) {
+                g_ownedDialogCloseAutomation.silentChoiceFailure = L"The safe default exit button did not receive focus.";
+            }
+            SendMessageW(keep, BM_CLICK, 0, 0);
+            if (!IsWindow(dialog) || !IsWindowVisible(dialog) || IsWindowEnabled(owner)) {
+                g_ownedDialogCloseAutomation.silentChoiceFailure = L"Keep-open closed the dialog or released its modal owner.";
+            } else {
+                g_ownedDialogCloseAutomation.keepOpenValidated = true;
+                return; // Observe the still-open dialog on the next timer tick.
+            }
+        }
+    }
     if (wcscmp(className, L"HelpDialogClass") == 0) {
         HWND search = GetDlgItem(dialog, kUiAutomationHelpSearchControlId);
         HWND find = GetDlgItem(dialog, kUiAutomationHelpFindControlId);
@@ -5839,7 +6297,10 @@ static void CALLBACK CloseOwnedDialogForPresenceAutomation(HWND, UINT, UINT_PTR 
             }
         }
     }
-    g_ownedDialogCloseAutomation.closeWasPosted = PostMessageW(dialog, WM_CLOSE, 0, 0) != FALSE;
+    const int finishCommand = g_ownedDialogCloseAutomation.silentFinishCommand;
+    g_ownedDialogCloseAutomation.closeWasPosted =
+        PostMessageW(dialog, finishCommand ? WM_COMMAND : WM_CLOSE,
+                     static_cast<WPARAM>(finishCommand), 0) != FALSE;
     if (g_ownedDialogCloseAutomation.closeWasPosted) {
         KillTimer(nullptr, timerId);
         g_ownedDialogCloseAutomation.closeTimerId = 0;
@@ -5862,7 +6323,8 @@ static bool BeginOwnedDialogPresenceAutomation(HWND owner, const wchar_t* expect
     return false;
 }
 
-static bool EndOwnedDialogPresenceAutomation(HWND owner, const wchar_t* scenario, std::wstring* outError) {
+static bool EndOwnedDialogPresenceAutomation(HWND owner, const wchar_t* scenario, std::wstring* outError,
+                                              bool requireDialog) {
     if (g_ownedDialogCloseAutomation.closeTimerId != 0) {
         KillTimer(nullptr, g_ownedDialogCloseAutomation.closeTimerId);
     }
@@ -5872,7 +6334,20 @@ static bool EndOwnedDialogPresenceAutomation(HWND owner, const wchar_t* scenario
     const MainWindowPresenceAutomationState monitorResult = g_mainWindowPresenceAutomation;
     g_mainWindowPresenceAutomation = {};
 
-    if (!dialogResult.dialogWasOpened || !dialogResult.closeWasPosted) {
+    if (dialogResult.verifySilentChoices &&
+        (!dialogResult.keepOpenValidated || !dialogResult.silentChoiceFailure.empty())) {
+        if (outError) *outError = dialogResult.silentChoiceFailure.empty()
+            ? L"Silent keep-open choice was not observed." : dialogResult.silentChoiceFailure;
+        return false;
+    }
+    if (dialogResult.verifyColorChoices &&
+        (!dialogResult.colorChoicesValidated || !dialogResult.silentChoiceFailure.empty())) {
+        if (outError) *outError = dialogResult.silentChoiceFailure.empty()
+            ? L"Color editor choices were not observed." : dialogResult.silentChoiceFailure;
+        return false;
+    }
+    if ((requireDialog && !dialogResult.dialogWasOpened) ||
+        (dialogResult.dialogWasOpened && !dialogResult.closeWasPosted)) {
         if (outError) *outError = std::wstring(L"Dialog visibility automation did not open and close ") + scenario + L".";
         return false;
     }
@@ -5922,7 +6397,113 @@ static bool RunUiAutomationDialogOwnerVisibilityScenario(HWND owner, std::wstrin
         if (outError) *outError = L"Dialog visibility automation received an unexpected silent dialog result.";
         return false;
     }
-    return EndOwnedDialogPresenceAutomation(owner, L"closing the silent dialog", outError);
+    if (!EndOwnedDialogPresenceAutomation(owner, L"closing the silent dialog", outError)) return false;
+    for (SilentDialogButtons buttons : {SilentDialogButtons::YesNo, SilentDialogButtons::OkCancel}) {
+        for (int finishCommand : {5102, 5104, IDCANCEL, 0}) {
+            if (!BeginOwnedDialogPresenceAutomation(owner, L"SilentDialogClass", outError)) return false;
+            g_ownedDialogCloseAutomation.verifySilentChoices = true;
+            g_ownedDialogCloseAutomation.silentFinishCommand = finishCommand;
+            options.buttons = buttons;
+            options.defaultResult = buttons == SilentDialogButtons::YesNo
+                ? SilentDialogResult::No : SilentDialogResult::Cancel;
+            options.escapeResult = options.defaultResult;
+            options.paths = {{L"Long path", (std::filesystem::path(g_workspaceRoot) /
+                std::wstring(180, L'x') / L"file.txt").wstring()}};
+            const SilentDialogResult choice = ShowSilentDialog(owner, options);
+            if (!EndOwnedDialogPresenceAutomation(owner, L"checking silent choices", outError)) return false;
+            const SilentDialogResult expected = finishCommand == 5102
+                ? (buttons == SilentDialogButtons::YesNo ? SilentDialogResult::Yes : SilentDialogResult::Ok)
+                : options.escapeResult;
+            if (choice != expected) {
+                if (outError) *outError = L"Silent choice returned an unexpected action or cancellation result.";
+                return false;
+            }
+        }
+    }
+    AppendUiAutomationTrace(L"automation:silent_choices_keep_open_execute_exit_ok");
+    for (int finishCommand : {IDOK, IDCANCEL, 0}) {
+        if (!BeginOwnedDialogPresenceAutomation(owner, L"PaletteColorEditorDlgClass", outError)) return false;
+        g_ownedDialogCloseAutomation.verifyColorChoices = true;
+        g_ownedDialogCloseAutomation.silentFinishCommand = finishCommand;
+        const COLORREF original = RGB(19, 37, 53);
+        const COLORREF initial = RGB(61, 79, 97);
+        COLORREF picked = original;
+        const bool accepted = PickColorDialog(owner, initial, &picked);
+        if (!EndOwnedDialogPresenceAutomation(owner, L"checking color choices", outError)) return false;
+        if (accepted != (finishCommand == IDOK) || picked != (accepted ? initial : original)) {
+            if (outError) *outError = L"Color editor changed the color on cancellation or failed to return the accepted color.";
+            return false;
+        }
+    }
+    AppendUiAutomationTrace(L"automation:color_choices_accept_cancel_ok");
+    return true;
+}
+
+static bool RunUiAutomationOrganizeDirtyAnnotationsScenario(HWND owner, std::wstring* outError) {
+    const std::wstring originalPdf = CurrentLogicalPdfPath();
+    const std::wstring originalSession = g_currentSessionPath;
+    const std::wstring originalLayout = g_config.sessionFileLayout;
+    if (originalPdf.empty() || originalSession.empty() ||
+        !file_output::SaveNoteIfDirty(owner) || !file_output::SaveAnnotationsIfDirty(owner)) {
+        if (outError) *outError = L"Organization regression requires a saved PDF/session.";
+        return false;
+    }
+    std::string pdfBytes;
+    if (!ReadFileBytesWin32(std::filesystem::path(originalPdf), pdfBytes)) return false;
+    // All paths belong to this disposable automation workspace. The isolated
+    // session prevents organization from moving other scenarios' fixtures.
+    const auto session = std::filesystem::path(originalSession) / L"__ui_organize_dirty";
+    const auto source = session / L"dirty.pdf";
+    const auto destination = session / L"pdf" / L"dirty.pdf";
+    std::wstring err;
+    if (!atomic_write::AtomicWriteUtf8(source, pdfBytes, session, &err)) return false;
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    const auto run = [&]() -> bool {
+        g_currentSessionPath = session.wstring();
+        g_config.sessionFileLayout = L"separate_directories";
+        if (!OpenPdfWithAnnotations(owner, source.wstring())) return fail(L"Could not open organization fixture.");
+        Annotation line;
+        line.id = L"organize-unsaved-line";
+        line.type = Annotation::Type::Line;
+        line.pageIndex = 0;
+        line.x1 = 10; line.y1 = 10; line.x2 = 40; line.y2 = 40;
+        line.width = 2;
+        line.color = RGB(24, 48, 72);
+        g_annots.push_back(line);
+        g_annotsDirty = true;
+        g_annotsNeedsIntegrate = false;
+        // Call the real UI entry immediately, before a timer can stage the edit.
+        OrganizeCurrentSessionFiles(owner);
+        std::vector<Annotation> saved;
+        bool mismatch = false;
+        if (CurrentLogicalPdfPath() != destination.wstring() || g_annotsDirty ||
+            !clrop_bridge::LoadAnnotations(clrop_bridge::ClropPathForPdf(destination.wstring()),
+                destination.wstring(), saved, mismatch, nullptr, err) || mismatch ||
+            saved.size() != 1 || saved[0].id != line.id || saved[0].x2 != line.x2 ||
+            g_annots.size() != 1 || g_annots[0].id != line.id) {
+            return fail(L"Organization lost an annotation that had not yet been auto-staged.");
+        }
+        std::string after;
+        if (!ReadFileBytesWin32(destination, after) || after != pdfBytes ||
+            !CanExecuteWorkspaceOperationUndoRedo(true) || !ExecuteWorkspaceOperationUndoRedo(owner, true) ||
+            !CanExecuteWorkspaceOperationUndoRedo(false) || !ExecuteWorkspaceOperationUndoRedo(owner, false) ||
+            CurrentLogicalPdfPath() != destination.wstring() || g_annots.size() != 1 || g_annots[0].id != line.id) {
+            return fail(L"Organization undo/redo did not preserve the original PDF and annotation.");
+        }
+        return true;
+    };
+    const bool passed = run();
+    g_currentSessionPath = originalSession;
+    g_config.sessionFileLayout = originalLayout;
+    const bool restored = OpenPdfWithAnnotations(owner, originalPdf);
+    RefreshCurrentSessionFiles();
+    SyncLeftPaneSelection();
+    RememberCurrentSessionFiles();
+    if (!restored) return fail(L"Could not restore the original document after organization regression.");
+    return passed;
 }
 
 static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
@@ -5940,7 +6521,7 @@ static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
     const COLORREF originalTextColor = ToolColorForMode(ToolMode::TextBox);
 
     auto restore = [&]() {
-        SaveUserPaletteColorsForSettings(originalColors, kCount);
+        const bool paletteSaved = SaveUserPaletteColorsForSettings(originalColors, kCount);
         StoreToolColorForMode(ToolMode::TextBox, originalTextColor);
         g_toolMode = originalMode;
         g_activeColor = originalActive;
@@ -5949,15 +6530,19 @@ static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
             // Restore the application-owned custom palette color.
             g_paletteCustomColor = originalColors[static_cast<size_t>(kLastOkColorSlotIndex)];
         }
-        PersistConfig();
+        const bool configSaved = TryPersistConfig();
         UpdateToolbarUI(owner);
+        return paletteSaved && configSaved;
     };
 
     COLORREF colors[kCount]{};
     std::copy(std::begin(originalColors), std::end(originalColors), std::begin(colors));
     const COLORREF savedColor = RGB(0x0C, 0x22, 0x38);
     colors[2] = savedColor;
-    SaveUserPaletteColorsForSettings(colors, kCount);
+    if (!SaveUserPaletteColorsForSettings(colors, kCount)) {
+        if (outError) *outError = L"Palette automation could not save its test colors.";
+        return false;
+    }
 
     // Check that the saved color appears somewhere in the rebuilt runtime palette
     // (exact slot count is dynamic now; it depends on whether dynamic slots are unique).
@@ -5975,9 +6560,11 @@ static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
     }
 
     const std::filesystem::path palettePath =
-        std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__settings__" / L"user_palette.json";
+        std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__settings__" / L"user_palette.json";
     std::ifstream ifs(palettePath, std::ios::binary);
     std::string persisted((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    // The test's own read handle must not block the checked atomic restore.
+    ifs.close();
     if (persisted.find("#0C2238") == std::string::npos) {
         restore();
         if (outError) *outError = L"Palette settings save did not persist the selected color.";
@@ -6008,7 +6595,10 @@ static bool RunUiAutomationPaletteScenario(HWND owner, std::wstring* outError) {
         return false;
     }
 
-    restore();
+    if (!restore()) {
+        if (outError) *outError = L"Palette automation could not restore its original colors.";
+        return false;
+    }
     return true;
 }
 
@@ -6268,7 +6858,7 @@ static bool CaptureUiAutomationSettingsBytes(std::map<std::wstring, std::optiona
     if (!out || g_workspaceRoot.empty()) return false;
     out->clear();
     const std::filesystem::path root(g_workspaceRoot);
-    const std::filesystem::path settings = root / L"__resource__" / L"__settings__";
+    const std::filesystem::path settings = root / L"__pdf_note_workspace__" / L"__settings__";
     const std::pair<const wchar_t*, std::filesystem::path> paths[] = {
         {L"workspace.json", root / L"workspace.json"},
         {L"user_palette.json", settings / L"user_palette.json"},
@@ -6301,7 +6891,7 @@ static bool UiAutomationSettingsBytesEqual(const std::map<std::wstring, std::opt
 static bool SettingsImportBackupExistsForAutomation() {
     if (g_workspaceRoot.empty()) return false;
     const std::filesystem::path escapeDir =
-        std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
+        std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
     std::error_code ec;
     if (!std::filesystem::is_directory(escapeDir, ec) || ec) return false;
     for (const auto& entry : std::filesystem::directory_iterator(escapeDir, ec)) {
@@ -6332,12 +6922,12 @@ static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outE
     };
 
     const std::filesystem::path root(g_workspaceRoot);
-    const std::filesystem::path settings = root / L"__resource__" / L"__settings__";
-    const std::filesystem::path bundle = root / L"__resource__" / L"__tmp__" / L"settings_bundle_test.pnssettings";
-    const std::filesystem::path malformed = root / L"__resource__" / L"__tmp__" / L"settings_bundle_bad.pnssettings";
-    const std::filesystem::path duplicate = root / L"__resource__" / L"__tmp__" / L"settings_bundle_duplicate.pnssettings";
-    const std::filesystem::path unknown = root / L"__resource__" / L"__tmp__" / L"settings_bundle_unknown.pnssettings";
-    const std::filesystem::path oversized = root / L"__resource__" / L"__tmp__" / L"settings_bundle_oversized.pnssettings";
+    const std::filesystem::path settings = root / L"__pdf_note_workspace__" / L"__settings__";
+    const std::filesystem::path bundle = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_test.pnssettings";
+    const std::filesystem::path malformed = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_bad.pnssettings";
+    const std::filesystem::path duplicate = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_duplicate.pnssettings";
+    const std::filesystem::path unknown = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_unknown.pnssettings";
+    const std::filesystem::path oversized = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_oversized.pnssettings";
 
     g_config.language = L"en";
     g_config.pointerOffsetX = 17;
@@ -6399,7 +6989,7 @@ static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outE
                 mismatch += L" presence:" + kv.first;
             } else if (kv.second && it->second && *kv.second != *it->second) {
                 mismatch += L" bytes:" + kv.first;
-                WriteUiAutomationTextFile(root / L"__resource__" / L"__tmp__" / (kv.first + L".actual_after_import"),
+                WriteUiAutomationTextFile(root / L"__pdf_note_workspace__" / L"__tmp__" / (kv.first + L".actual_after_import"),
                                           *it->second,
                                           nullptr);
             }
@@ -6474,7 +7064,8 @@ static bool RunUiAutomationAppLogContractScenario(std::wstring* outError) {
     if (!IsAppLogEnabled(AppLogKind::PreviewTrace) ||
         IsAppLogEnabled(AppLogKind::SwitchTiming) ||
         !IsAppLogEnabled(AppLogKind::Crash) ||
-        IsAppLogEnabled(AppLogKind::StartupWatchdog)) {
+        IsAppLogEnabled(AppLogKind::StartupWatchdog) ||
+        IsAppLogEnabled(AppLogKind::OfficeConversion)) {
         if (outError) *outError = L"App-log runtime configuration did not match the workspace settings.";
         return false;
     }
@@ -6483,6 +7074,25 @@ static bool RunUiAutomationAppLogContractScenario(std::wstring* outError) {
     AppendAppLogLine(AppLogKind::SwitchTiming, kToken);
     AppendAppLogLine(AppLogKind::Crash, kToken);
     AppendAppLogLine(AppLogKind::StartupWatchdog, kToken);
+    AppendAppLogLine(AppLogKind::OfficeConversion, kToken);
+    // Unconfigured/relative logging has no implicit destination. Restore the
+    // selected workspace even if this boundary check returns early.
+    struct RestoreLogRoot {
+        std::wstring root;
+        ~RestoreLogRoot() { SetAppLogWorkspaceRoot(root); }
+    } restore{g_workspaceRoot};
+    for (const auto& root : {std::wstring{}, std::wstring(L"relative-log-root")}) {
+        SetAppLogWorkspaceRoot(root);
+        for (const auto kind : {AppLogKind::PreviewTrace, AppLogKind::SwitchTiming,
+                               AppLogKind::Crash, AppLogKind::StartupWatchdog,
+                               AppLogKind::OfficeConversion}) {
+            if (!AppLogPath(kind).empty()) {
+                if (outError) *outError = L"Unconfigured logs resolved an implicit write destination.";
+                return false;
+            }
+            AppendAppLogLine(kind, kToken);
+        }
+    }
     return true;
 }
 
@@ -6493,7 +7103,7 @@ static bool RunUiAutomationWorkspaceConfigRecoveryScenario(std::wstring* outErro
     }
     const std::filesystem::path root(g_workspaceRoot);
     const std::filesystem::path configPath = root / L"workspace.json";
-    const std::filesystem::path escapeDir = root / L"__resource__" / L"__escape__";
+    const std::filesystem::path escapeDir = root / L"__pdf_note_workspace__" / L"__escape__";
     std::error_code ec;
     if (std::filesystem::exists(configPath, ec) || ec) {
         if (outError) *outError = L"Corrupt workspace.json was not removed from the active workspace root.";
@@ -6597,11 +7207,15 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
     const bool mathRenderOnly = ReadMainEnvVar(
         L"PDF_NOTE_SMALL_UI_AUTOMATION_MATH_RENDER_ONLY", &mathRenderOnlyValue) &&
         (mathRenderOnlyValue == L"1" || mathRenderOnlyValue == L"true");
+    std::wstring inputAssistOnlyValue;
+    const bool inputAssistOnly = ReadMainEnvVar(
+        L"PDF_NOTE_SMALL_UI_AUTOMATION_INPUT_ASSIST_ONLY", &inputAssistOnlyValue) &&
+        (inputAssistOnlyValue == L"1" || inputAssistOnlyValue == L"true");
     if ((configOnly ? 1 : 0) + (logContractOnly ? 1 : 0) + (configRecoveryOnly ? 1 : 0) +
         (configUnknownFieldOnly ? 1 : 0) + (settingsBundleOnly ? 1 : 0) +
         (helpVisibilityOnly ? 1 : 0) + (dialogOwnerVisibilityOnly ? 1 : 0) +
         (outputExportOnly ? 1 : 0) + (targetSessionOnly ? 1 : 0) + (pdfOnly ? 1 : 0) +
-        (pdfiumRawOnly ? 1 : 0) + (mathRenderOnly ? 1 : 0) > 1) {
+        (pdfiumRawOnly ? 1 : 0) + (mathRenderOnly ? 1 : 0) + (inputAssistOnly ? 1 : 0) > 1) {
         if (outError) *outError = L"Only one focused UI automation mode may be selected.";
         return false;
     }
@@ -6705,6 +7319,25 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
         AppendUiAutomationTrace(L"automation:pdfium_raw_open_ok");
         return true;
     }
+    if (inputAssistOnly) {
+        if (!EnsureUiAutomationTargetSession(owner, outError)) return false;
+        const auto fixture = std::filesystem::path(g_currentSessionPath) / L"note_math.md";
+        std::error_code fixtureError;
+        if (!std::filesystem::exists(fixture, fixtureError) || fixtureError) {
+            if (outError) *outError = L"Input assist Markdown fixture was not found.";
+            return false;
+        }
+        LoadNoteFile(owner, fixture.wstring());
+        SyncBottomPaneAfterNoteLoad(owner);
+        if (NormalizePathKey(g_currentNotePath) != NormalizePathKey(fixture.wstring()) ||
+            !NoteInputAssistSupportsMarkup()) {
+            if (outError) *outError = L"Input assist Markdown fixture could not be opened.";
+            return false;
+        }
+        if (!RunUiAutomationInputAssistScenario(owner, outError)) return false;
+        AppendUiAutomationTrace(L"automation:input_assist_ok");
+        return true;
+    }
     // Keep the rendering responsiveness probe independent from clipboard
     // ownership. Desktop clipboard access is external to this process and
     // cannot decide whether final publication/scroll reentry is sound.
@@ -6714,11 +7347,17 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
             return false;
         }
         AppendUiAutomationTrace(L"automation:ensure_target_ok");
-        if (!RunUiAutomationMathRenderScenario(owner, outError)) {
-            AppendUiAutomationTrace(L"automation:math_render_failed");
+        std::wstring renderedClickOnlyValue;
+        const bool renderedClickOnly = ReadMainEnvVar(
+            L"PDF_NOTE_SMALL_UI_AUTOMATION_RENDERED_CLICK_ONLY", &renderedClickOnlyValue) &&
+            (renderedClickOnlyValue == L"1" || renderedClickOnlyValue == L"true");
+        if (!RunUiAutomationMathRenderScenario(owner, outError, renderedClickOnly)) {
+            AppendUiAutomationTrace(renderedClickOnly ? L"automation:rendered_click_failed"
+                                                     : L"automation:math_render_failed");
             return false;
         }
-        AppendUiAutomationTrace(L"automation:math_render_ok");
+        AppendUiAutomationTrace(renderedClickOnly ? L"automation:rendered_click_ok"
+                                                 : L"automation:math_render_ok");
         return true;
     }
     if (!RunUiAutomationHelpVisibilityScenario(owner, outError)) {
@@ -6861,6 +7500,11 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
         return false;
     }
     AppendUiAutomationTrace(L"automation:startup_restore_ok");
+    if (!RunUiAutomationOrganizeDirtyAnnotationsScenario(owner, outError)) {
+        AppendUiAutomationTrace(L"automation:organize_dirty_annotations_failed");
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:organize_dirty_annotations_ok");
     if (!RunUiAutomationOperationTransactionRecoveryScenario(outError)) {
         AppendUiAutomationTrace(L"automation:operation_tx_recovery_failed");
         return false;

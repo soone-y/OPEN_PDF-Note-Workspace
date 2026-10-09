@@ -1,5 +1,6 @@
 #include "workspace/workspace_memo_store.h"
 #include "core/atomic_write.h"
+#include "diagnostics/normal_operations.h"
 #include <cstddef>
 #include <cstring>
 #include <vector>
@@ -115,7 +116,7 @@ std::filesystem::path Recovery(const std::filesystem::path& path) { return path.
 
 [[nodiscard]] bool Write(const std::filesystem::path& path, const std::string& bytes) {
     std::wstring error;
-    return SafePath(path) && atomic_write::AtomicWriteUtf8(path, bytes, path.parent_path(), path.parent_path() / L"recovery_failed", &error);
+    return SafePath(path) && write_checks::ObservedWriteUtf8(std::filesystem::path{}, path, bytes, path.parent_path(), path.parent_path() / L"recovery_failed", &error);
 }
 
 std::string Record(const std::string& base, bool exists, const std::string& draft) {
@@ -167,7 +168,7 @@ std::string Record(const std::string& base, bool exists, const std::string& draf
 }
 
 std::filesystem::path MemoPath(const std::filesystem::path& root) {
-    return root.empty() ? std::filesystem::path{} : root / L"__resource__" / L"__memo__" / L"workspace_memo.txt";
+    return root.empty() ? std::filesystem::path{} : root / L"__pdf_note_workspace__" / L"__memo__" / L"workspace_memo.txt";
 }
 
 bool ValidateText(std::wstring_view text) { std::string bytes; return Encode(text, bytes); }
@@ -217,6 +218,7 @@ Result Document::Save(const std::wstring& text) {
     if (!ready_) return Result::IoError;
     std::string bytes;
     if (!Encode(text, bytes)) return Result::InvalidText;
+    write_checks::NormalOperation observation({}, path_);
     std::string current; bool present = false;
     if (!Read(path_, kMaxBytes, current, present)) return Result::IoError;
     std::wstring currentText;
@@ -224,6 +226,7 @@ Result Document::Save(const std::wstring& text) {
     if (currentText == text && present) {
         if (!SettleRecovery(path_, current, present, text)) return Result::IoError;
         baseline_ = current; exists_ = present; text_ = text;
+        observation.Cancel(); // A successful no-op is not a write check.
         return Result::Ok;
     }
     if (current != baseline_ || present != exists_) {
@@ -233,6 +236,7 @@ Result Document::Save(const std::wstring& text) {
         if (text == baseText) {
             if (!SettleRecovery(path_, current, present, currentText)) return Result::IoError;
             baseline_ = current; exists_ = present; text_ = currentText;
+            observation.Cancel();
             return Result::Ok;
         }
         const auto checkpoint = Checkpoint(text);
@@ -267,7 +271,9 @@ Result Document::Save(const std::wstring& text) {
     }
     if (WMEMO_FAIL(AfterInstall)) return Result::IoError;
     baseline_ = bytes; exists_ = true; text_ = text;
-    return SettleRecovery(path_, bytes, true, text) ? Result::Ok : Result::IoError;
+    const bool settled = SettleRecovery(path_, bytes, true, text);
+    if (settled) observation.Success();
+    return settled ? Result::Ok : Result::IoError;
 }
 
 Result Document::Reload(const std::wstring& text) {

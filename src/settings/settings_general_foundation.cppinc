@@ -1067,7 +1067,7 @@ static LRESULT CALLBACK ThemeEditDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         int cancelW = ScaleY(hWnd, 90);
         int totalW = okW + ScaleY(hWnd, 12) + cancelW;
         int x = pad + std::max(0, contentW - totalW);
-            HWND ok = CreateWindowExW(0, L"BUTTON", UiOkLabel(),
+            HWND ok = CreateWindowExW(0, L"BUTTON", UiOkLabel().c_str(),
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                  x, y + ScaleY(hWnd, 6), okW, btnH, hWnd,
                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);

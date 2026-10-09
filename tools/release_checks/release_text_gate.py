@@ -81,7 +81,7 @@ def validate_release_directory(release_dir: Path) -> list[str]:
     return errors
 
 
-def validate_release_zip(release_dir: Path, zip_path: Path) -> list[str]:
+def validate_release_zip(release_dir: Path, zip_path: Path, archive_root: str | None = None) -> list[str]:
     if not zip_path.is_file() or zip_path.stat().st_size == 0:
         return [f"release ZIP does not exist or is empty: {zip_path}"]
     errors: list[str] = []
@@ -89,7 +89,7 @@ def validate_release_zip(release_dir: Path, zip_path: Path) -> list[str]:
         with zipfile.ZipFile(zip_path) as archive:
             names = set(archive.namelist())
             for relative_path, path in checked_directory_files(release_dir):
-                member = PurePosixPath(release_dir.name, *PurePosixPath(relative_path).parts).as_posix()
+                member = PurePosixPath(archive_root or release_dir.name, *PurePosixPath(relative_path).parts).as_posix()
                 if member not in names:
                     errors.append(f"release ZIP is missing checked text file: {relative_path}")
                     continue
@@ -119,9 +119,12 @@ def validate_release_set(release_set: Path) -> list[str]:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         components = manifest["components"]
+        zip_roots = manifest.get("zip_roots", {})
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
         return [f"invalid release-set manifest: {manifest_path} ({error})"]
     errors: list[str] = []
+    if not isinstance(zip_roots, dict):
+        return ["release-set manifest has invalid ZIP root metadata"]
     for label, directory_key, zip_key in (("full", "release", "release_zip"), ("Lite", "release_lite", "release_lite_zip")):
         try:
             release_dir = child_path(release_set, components.get(directory_key), label=f"{label} directory")
@@ -130,7 +133,11 @@ def validate_release_set(release_set: Path) -> list[str]:
             errors.append(str(error))
             continue
         errors.extend(f"{label}: {error}" for error in validate_release_directory(release_dir))
-        errors.extend(f"{label}: {error}" for error in validate_release_zip(release_dir, zip_path))
+        archive_root = zip_roots.get(zip_key)
+        if archive_root is not None and not isinstance(archive_root, str):
+            errors.append(f"{label}: release-set manifest has an invalid ZIP root")
+            continue
+        errors.extend(f"{label}: {error}" for error in validate_release_zip(release_dir, zip_path, archive_root))
     return errors
 
 

@@ -333,8 +333,12 @@ static LRESULT CALLBACK ScheduleTimeProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                 }
                 return 0;
             }
+            const auto previousTimes = g_config.scheduleStartTimes;
             g_config.scheduleStartTimes = ctx->times;
-            PersistConfig();
+            if (!TryPersistConfig()) {
+                g_config.scheduleStartTimes = previousTimes;
+                return 0;
+            }
             ctx->ok = true;
             DestroyWindow(hWnd);
             return 0;

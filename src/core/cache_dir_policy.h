@@ -5,7 +5,7 @@
 
 namespace cache_dir_policy {
 
-inline constexpr wchar_t kManagedDefault[] = L"__resource__/__tmp__";
+inline constexpr wchar_t kManagedDefault[] = L"__pdf_note_workspace__/__tmp__";
 
 enum class CacheDirDecision {
     ManagedDefault,

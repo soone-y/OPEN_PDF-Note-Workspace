@@ -10,12 +10,12 @@ static std::optional<PdfViewRestorePoint> g_pendingPdfRestore;
 
 static std::filesystem::path LastPdfViewFilePath() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__tmp__" / L"pdf_view_positions.txt";
+    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__tmp__" / L"pdf_view_positions.txt";
 }
 
 static std::filesystem::path WorkspaceEscapeDir() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__escape__";
+    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
 }
 
 static std::wstring NormalizePathKey(const std::filesystem::path& p) {
@@ -102,7 +102,7 @@ static bool WritePdfViewRecordMap(const std::unordered_map<std::wstring, PdfView
         oss << "\n";
     }
     std::wstring err;
-    return atomic_write::AtomicWriteUtf8(path, oss.str(), path.parent_path(), escapeDir, &err);
+    return write_checks::ObservedWriteUtf8(g_workspaceRoot, path, oss.str(), path.parent_path(), escapeDir, &err);
 }
 
 static bool ReadPdfViewRecordForPath(const std::wstring& path, PdfViewRestorePoint& out) {

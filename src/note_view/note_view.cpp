@@ -3,6 +3,7 @@
 // Keep the include order stable because later fragments depend on earlier shared helpers/state.
 
 #include "core/ui_prompts.h"
+#include "diagnostics/normal_operations.h"
 #include "bridge/view_bridge.h"
 #include "note/note_render_final_win32_adapter.h"
 #include "ui/noop_nav_guard.h"

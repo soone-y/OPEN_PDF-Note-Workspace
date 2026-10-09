@@ -1,8 +1,11 @@
 [CmdletBinding()]
-param([switch]$AppIntegration)
+param([switch]$AppIntegration, [string]$AppExecutable = "")
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if ($AppExecutable -and -not $AppIntegration) { throw "-AppExecutable requires -AppIntegration." }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+& (Join-Path $PSScriptRoot "run_artifact_usage_tests.ps1")
+if (-not $?) { throw "Artifact capacity test runner failed." }
 $outputDir = Join-Path $repoRoot "out/tests"
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 $compiler = (Get-Command g++ -ErrorAction Stop).Source
@@ -35,14 +38,23 @@ try {
         # Build the current JA app first. Copy runtime only to a new fixture;
         # never run against the user's workspace/setup or delete past fixtures.
         $appTests = Join-Path $outputDir "workspace_memo_app_tests.exe"
-        & $compiler -std=c++17 -Wall -Wextra -I (Join-Path $repoRoot "src") `
-            (Join-Path $repoRoot "tests/integration/workspace_memo_app_tests.cpp") $resource -o $appTests
+        # Pin the test driver's C++ runtime. An earlier unrelated DLL on PATH
+        # must not prevent the driver from entering main (0xc0000139).
+        & $compiler -std=c++17 -Wall -Wextra -static-libgcc -static-libstdc++ -I (Join-Path $repoRoot "src") `
+            -I (Join-Path $repoRoot "third_party/pdfium/include") `
+            (Join-Path $repoRoot "tests/integration/workspace_memo_app_tests.cpp") `
+            (Join-Path $repoRoot "src/clrop/json.cpp") $resource -o $appTests
         if ($LASTEXITCODE -ne 0) { throw "Workspace memo actual-app test compilation failed." }
         $fixture = Join-Path $outputDir ("workspace_memo_app_" + [guid]::NewGuid().ToString("N"))
         $appDir = Join-Path $fixture "app"
         New-Item -ItemType Directory -Path $appDir -Force | Out-Null
-        $binaryDir = Join-Path $repoRoot "out/bin"
-        Copy-Item -LiteralPath (Join-Path $binaryDir "pdf_note_workspace.exe") -Destination $appDir
+        # An explicit build may have a different name when the normal exe is
+        # running/locked. Always test a fresh copy with the driver's fixed name.
+        $binarySource = if ($AppExecutable) { (Get-Item -LiteralPath $AppExecutable -ErrorAction Stop).FullName }
+            else { Join-Path $repoRoot "out/bin/pdf_note_workspace.exe" }
+        if (-not (Test-Path -LiteralPath $binarySource -PathType Leaf)) { throw "Application source executable is missing: $binarySource" }
+        $binaryDir = Split-Path -Parent $binarySource
+        Copy-Item -LiteralPath $binarySource -Destination (Join-Path $appDir "pdf_note_workspace.exe")
         Get-ChildItem -LiteralPath $binaryDir -Filter "*.dll" -File | ForEach-Object {
             Copy-Item -LiteralPath $_.FullName -Destination $appDir
         }

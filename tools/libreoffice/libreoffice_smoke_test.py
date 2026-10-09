@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 import zipfile
@@ -409,7 +410,7 @@ def write_profile_path_config(profile_dir: Path) -> None:
     backup_url = url(backup_dir)
     data = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<oor:data xmlns:oor="http://openoffice.org/2001/registry" '
+        '<oor:items xmlns:oor="http://openoffice.org/2001/registry" '
         'xmlns:xs="http://www.w3.org/2001/XMLSchema" '
         'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
         + single_path("Work", work_url)
@@ -420,9 +421,45 @@ def write_profile_path_config(profile_dir: Path) -> None:
         '  </item>\n'
         + common_path("Current", work_url, backup_url)
         + common_path("Default", work_url, backup_url)
-        + '</oor:data>\n'
+        + '</oor:items>\n'
     )
     (user_dir / "registrymodifications.xcu").write_text(data, encoding="utf-8")
+
+
+def run_owned_conversion(cmd: list[str], out_dir: Path, env: dict[str, str], timeout: int):
+    """Own the conversion process/tree and terminate it on timeout or cancellation."""
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    process = subprocess.Popen(cmd, cwd=str(out_dir), env=env, text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options)
+    try:
+        output, _ = process.communicate(timeout=timeout)
+    except BaseException:
+        try:
+            if process.poll() is None:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=10, check=True)
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=10)
+        raise
+    return subprocess.CompletedProcess(cmd, process.returncode, output)
+
+
+class NormalLoadRefusal(RuntimeError):
+    """Observed CLI refusal, not a crash/timeout or a generic missing PDF."""
+    diagnostic = "Error: source file could not be loaded"
+    output_pdf_exists = False
+
+    def __init__(self, source: Path, returncode: int):
+        if type(returncode) is not int or returncode not in (0, 1):
+            raise ValueError("Normal refusal requires a normal CLI return code")
+        self.returncode = returncode
+        super().__init__(f"LibreOffice refused {source.name} exit={returncode}: {self.diagnostic}")
 
 
 def convert_one(
@@ -434,12 +471,23 @@ def convert_one(
     *,
     isolate_home: bool = True,
     configure_profile_paths: bool = True,
+    cleanup_runtime_pycache: bool = True,
+    own_process_tree: bool = False,
+    repeatable_random: bool = False,
+    clock_control: dict | None = None,
+    clock_observations: list | None = None,
 ) -> Path:
+    if clock_control is not None and (not own_process_tree or clock_observations is None or cleanup_runtime_pycache):
+        raise ValueError('Clock control requires owned conversion, retained runtime and explicit observations')
     if configure_profile_paths:
         write_profile_path_config(profile_dir)
     else:
         profile_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
+    if repeatable_random:
+        # Test-only control documented by comphelper/source/misc/random.cxx.
+        # The parent and application runtime keep their ordinary RNG behavior.
+        env["SAL_RAND_REPEATABLE"] = "1"
     local_root = profile_dir.parent / "local"
     appdata = local_root / "appdata"
     localappdata = local_root / "localappdata"
@@ -471,23 +519,32 @@ def convert_one(
         str(out_dir),
         str(source),
     ]
-    completed = subprocess.run(
-        cmd,
-        cwd=str(out_dir),
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-        check=False,
-    )
+    if clock_control is not None:
+        import libreoffice_test_clock
+        completed = libreoffice_test_clock.controlled_conversion(cmd, out_dir, env, timeout, clock_control,
+                                                                 clock_observations, run_owned_conversion)
+    else:
+        completed = run_owned_conversion(cmd, out_dir, env, timeout) if own_process_tree else subprocess.run(
+            cmd,
+            cwd=str(out_dir),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+    output = out_dir / (source.stem + ".pdf")
+    if (completed.returncode in (0, 1) and completed.stdout.strip() == NormalLoadRefusal.diagnostic
+            and not any(path.is_file() and path.suffix.casefold() == ".pdf" for path in out_dir.iterdir())):
+        raise NormalLoadRefusal(source, completed.returncode)
     if completed.returncode != 0:
         raise RuntimeError(f"LibreOffice failed for {source.name} exit={completed.returncode}\n{completed.stdout}")
-    output = out_dir / (source.stem + ".pdf")
     if not output.exists():
         raise RuntimeError(f"LibreOffice did not create expected PDF: {output}\n{completed.stdout}")
     validate_pdf(output)
-    cleanup_image_pycache(soffice)
+    if cleanup_runtime_pycache:
+        cleanup_image_pycache(soffice)
     return output
 
 

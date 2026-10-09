@@ -1,0 +1,49 @@
+{
+  "source_version": "26.2.6.3",
+  "samples": [
+    {
+      "path": "sw/qa/extras/ooxmlexport/data/embedded-xlsx.docx",
+      "sha256": "37af4bb83e2ea1a980630516445a4d0877216d929f3d29ab2fdac2d385dc6dd7"
+    },
+    {
+      "path": "sw/qa/extras/ooxmlexport/data/tdf122594.docx",
+      "sha256": "4044fc13c64e925e75f934967849bb90c40e0d58a38d091c40f8a99bbe8d995f"
+    },
+    {
+      "path": "sw/qa/extras/ooxmlexport/data/tdf99631.docx",
+      "sha256": "a1c56329edff0672f091cb46df08e3677ef4057d00485b352c41aaf68f5ef907"
+    },
+    {
+      "path": "sw/qa/extras/ooxmlexport/data/fdo79969_xlsb.docx",
+      "sha256": "b293b18b4db19a40d50d5be0c0e69a745f8710f932ff0d5b7ce2a6e9a764b99a"
+    },
+    {
+      "path": "sw/qa/extras/ooxmlexport/data/fdo79969_xlsm.docx",
+      "sha256": "5ab9b8eeee6cccdb20b8a5e6df3a3dc1ec9eb19ab731bf90347905813e81309c"
+    },
+    {
+      "path": "sd/qa/unit/data/pptx/tdf143222.pptx",
+      "sha256": "589e7454233dd51fdb055042c0d029df850c2429dbcf41c118f498dad3bca78e"
+    },
+    {
+      "path": "sc/qa/unit/data/xlsx/shared-formula/basic.xlsx",
+      "sha256": "7ec5305479c3ef38868406985f97f9220054ac847892d36f40511f2ceca12105"
+    },
+    {
+      "path": "sc/qa/unit/data/xlsx/condformat_databar.xlsx",
+      "sha256": "1fc73ba3547ddfde691bf7008c23d5c205107b0a44e173ce2e56f2c345ae87ec"
+    },
+    {
+      "path": "sc/qa/unit/data/xlsx/pivottable_rowcolpage_field_filter.xlsx",
+      "sha256": "e0b8ef511ddaf991571cac5ef95322f7e96b4928f0cd88c377675a4c27b6cccb"
+    },
+    {
+      "path": "sc/qa/unit/data/xlsx/hidden_sheets.xlsx",
+      "sha256": "837080e7711525b62104cc8a675d26b5903365ea25c0bb016ce3caa17f13761d"
+    },
+    {
+      "path": "sc/qa/unit/data/xlsx/page_scale.xlsx",
+      "sha256": "d56bb58e86002d3498ecb845231c8306b5f282998d6b559d231805f7aadcb770"
+    }
+  ]
+}

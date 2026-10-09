@@ -8,7 +8,8 @@ enum class AppLogKind {
     PreviewTrace,
     SwitchTiming,
     Crash,
-    StartupWatchdog
+    StartupWatchdog,
+    OfficeConversion
 };
 
 bool IsAppLogEnabled(AppLogKind kind);

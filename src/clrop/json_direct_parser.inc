@@ -149,10 +149,10 @@ private:
             if (pos < s.size() && (s[pos] == '+' || s[pos] == '-')) ++pos;
             while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
         }
-        std::string_view numStr = s.substr(start, pos - start);
-        try {
-            out = std::stod(std::string(numStr));
-        } catch (...) {
+        const std::string_view numStr = s.substr(start, pos - start);
+        const auto parsed = std::from_chars(numStr.data(), numStr.data() + numStr.size(), out);
+        if (parsed.ec != std::errc{} || parsed.ptr != numStr.data() + numStr.size() ||
+            !std::isfinite(out)) {
             err = L"Invalid number";
             return false;
         }

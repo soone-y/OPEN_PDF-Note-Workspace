@@ -19,7 +19,7 @@ STARTUP_WAIT_SECONDS = 4
 
 def assert_not_previously_started(extracted_release_dir: Path) -> None:
     """Reject a smoke-test copy that already has first-startup runtime data."""
-    runtime_roots = ("workspace", "__resource__")
+    runtime_roots = ("workspace", "__pdf_note_workspace__")
     found = [name for name in runtime_roots if (extracted_release_dir / name).exists()]
     if found:
         raise RuntimeError(
@@ -39,9 +39,10 @@ def child_path(root: Path, value: object, *, label: str) -> Path:
     return candidate
 
 
-def safe_extract(archive_path: Path, destination: Path, release_dir: Path) -> None:
+def safe_extract(archive_path: Path, destination: Path, release_dir: Path, archive_root: str | None = None) -> None:
+    root_name = archive_root or release_dir.name
     expected = {
-        PurePosixPath(release_dir.name, *path.relative_to(release_dir).parts).as_posix(): path.stat().st_size
+        PurePosixPath(root_name, *path.relative_to(release_dir).parts).as_posix(): path.stat().st_size
         for path in release_dir.rglob("*")
         if path.is_file()
     }
@@ -54,7 +55,7 @@ def safe_extract(archive_path: Path, destination: Path, release_dir: Path) -> No
         if str(parent) != "."
     }
     allowed_directories.update(
-        PurePosixPath(release_dir.name, *path.relative_to(release_dir).parts).as_posix().rstrip("/") + "/"
+        PurePosixPath(root_name, *path.relative_to(release_dir).parts).as_posix().rstrip("/") + "/"
         for path in release_dir.rglob("*")
         if path.is_dir()
     )
@@ -132,18 +133,24 @@ def validate_release_set(release_set: Path) -> list[str]:
     try:
         manifest = json.loads((release_set / "release_set_manifest.json").read_text(encoding="utf-8-sig"))
         components = manifest["components"]
+        zip_roots = manifest.get("zip_roots", {})
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
         return [f"invalid release-set manifest: {error}"]
     errors: list[str] = []
+    if not isinstance(zip_roots, dict):
+        return ["release-set manifest has invalid ZIP root metadata"]
     with tempfile.TemporaryDirectory(prefix="pdf_note_release_smoke_") as temporary:
         root = Path(temporary)
         for label, directory_key, zip_key in (("full", "release", "release_zip"), ("Lite", "release_lite", "release_lite_zip")):
             try:
                 release_dir = child_path(release_set, components.get(directory_key), label=f"{label} directory")
-                directory_name = release_dir.name
+                archive_root = zip_roots.get(zip_key)
+                if archive_root is not None and not isinstance(archive_root, str):
+                    raise ValueError("release-set manifest has an invalid ZIP root")
+                directory_name = archive_root or release_dir.name
                 archive = child_path(release_set, components.get(zip_key), label=f"{label} ZIP")
                 destination = root / label
-                safe_extract(archive, destination, release_dir)
+                safe_extract(archive, destination, release_dir, archive_root)
                 executable = destination / directory_name / "pdf_note_workspace.exe"
                 if not executable.is_file():
                     raise ValueError(f"extracted application is missing: {executable}")

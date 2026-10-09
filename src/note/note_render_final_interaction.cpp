@@ -162,6 +162,70 @@ NoteRenderFinalInteractionResult ResolveNoteRenderFinalCommittedLine(
     return ResolveLineUnchecked(publication, line_index, out);
 }
 
+std::optional<size_t> ResolveNoteRenderTrailingSyntaxBlankHit(
+    const NoteRenderSourceLinePlan& source,
+    const NoteRenderLinePlacement& placement,
+    int content_x_px,
+    uint64_t relative_y_px) noexcept {
+    if (source.runs.empty() || source.runs.size() != placement.runs.size() ||
+        source.decoration.has(NoteRenderSourceLineDecorationTable)) return std::nullopt;
+
+    size_t suffix_first = source.runs.size();
+    auto suffix_start = source.content_span.end;
+    while (suffix_first > 0) {
+        const auto& run = source.runs[suffix_first - 1];
+        if (run.kind != NoteRenderSourceRunKind::HiddenSyntax) break;
+        if (run.source_span.end != suffix_start ||
+            run.source_span.start >= run.source_span.end) return std::nullopt;
+        suffix_start = run.source_span.start;
+        --suffix_first;
+    }
+    // A syntax-only row (fence, container end, etc.) has no text-end/blank
+    // distinction. A soft-wrapped row must contain the last visible fragment,
+    // not merely some earlier part of the same logical source line.
+    if (suffix_first == 0 || suffix_first == source.runs.size() ||
+        source.runs[suffix_first - 1].source_span.end != suffix_start) return std::nullopt;
+
+    bool last_fragment_on_row = false;
+    int64_t visible_right = std::numeric_limits<int64_t>::min();
+    for (size_t index = 0; index < source.runs.size(); ++index) {
+        const auto& run = source.runs[index];
+        const auto& measured = placement.runs[index];
+        if (run.source_span.start != measured.source_span.start ||
+            run.source_span.end != measured.source_span.end) return std::nullopt;
+        if (run.kind == NoteRenderSourceRunKind::HiddenSyntax) continue;
+        for (const auto& fragment : measured.fragments) {
+            if (!FragmentContainsY(fragment, relative_y_px)) continue;
+            if (fragment.width_px < 0) return std::nullopt;
+            visible_right = std::max(visible_right,
+                static_cast<int64_t>(fragment.x_px) + fragment.width_px);
+            if (index == suffix_first - 1 && fragment.source_span.end == suffix_start) {
+                last_fragment_on_row = true;
+            }
+        }
+    }
+    // Inline code paints padding outside its text fragment. That chip is
+    // still displayed content, not the blank area beyond the closing syntax.
+    for (const auto& decoration : placement.decorations) {
+        if (decoration.kind == NoteRenderVisualDecorationKind::InlineCodeSurface &&
+            relative_y_px >= decoration.top_offset_px &&
+            relative_y_px < decoration.bottom_offset_px) {
+            visible_right = std::max(visible_right, static_cast<int64_t>(decoration.right_px));
+        }
+    }
+    if (!last_fragment_on_row || static_cast<int64_t>(content_x_px) <= visible_right) {
+        return std::nullopt;
+    }
+    const size_t last = source.runs.size() - 1;
+    // Reuse the published source boundary; never fabricate an offset past a
+    // newline or a delimiter which this immutable frame cannot address.
+    for (const auto& boundary : placement.runs[last].boundaries) {
+        if (boundary.source_offset == source.content_span.end &&
+            boundary.fragment_index < placement.runs[last].fragments.size()) return last;
+    }
+    return std::nullopt;
+}
+
 NoteRenderFinalInteractionResult HitTestNoteRenderFinalPublication(
     const NoteRenderFinalPublication& publication,
     int content_x_px,
@@ -194,6 +258,15 @@ NoteRenderFinalInteractionResult HitTestNoteRenderFinalPublication(
     }
 
     const uint64_t relative_y_px = content_y_px - line.layout.top_px;
+    if (const auto suffix = ResolveNoteRenderTrailingSyntaxBlankHit(
+            line.source_line, line.placement_line, content_x_px, relative_y_px)) {
+        *out = {};
+        out->line_index = line.line_index;
+        out->source_offset = line.source_line.content_span.end;
+        out->run_index = *suffix;
+        out->source_span = line.source_line.runs[*suffix].source_span;
+        return NoteRenderFinalInteractionResult::Resolved;
+    }
     size_t best_run = static_cast<size_t>(-1);
     const NoteRenderPlacementBoundary* best_boundary = nullptr;
     int64_t best_distance = std::numeric_limits<int64_t>::max();

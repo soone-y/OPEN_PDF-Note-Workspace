@@ -420,6 +420,8 @@ void SetAnnotInspectorEditable(HWND hWnd, AnnotInspectorCtx* ctx, bool editable)
     ctx->editable = editable && !IsPdfPreviewReadOnlyActive();
     CheckRadioButton(hWnd, kAnnotInspectorView, kAnnotInspectorEdit,
                      ctx->editable ? kAnnotInspectorEdit : kAnnotInspectorView);
+    SetWindowTextW(GetDlgItem(hWnd, kAnnotInspectorClose),
+                   localization::Text(ctx->editable ? L"dialog.action.apply_close" : L"common.close").c_str());
     HWND content = GetDlgItem(hWnd, kAnnotInspectorContent);
     if (content) EnableWindow(content, ctx->editable && InspectorHasContent(ctx->type));
     for (const int id : { kAnnotInspectorX1, kAnnotInspectorY1, kAnnotInspectorX2, kAnnotInspectorY2,
@@ -776,13 +778,13 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         currY = styleGroupY + styleGroupH + 12;
 
         CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-                        20, currY + 4, 250, 22, hWnd,
+                        20, currY + 4, 208, 22, hWnd,
                         reinterpret_cast<HMENU>(kAnnotInspectorValidation), g_hInst, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"適用", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                        288, currY, 96, 28, hWnd,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"dialog.action.apply").c_str(), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                        238, currY, 96, 28, hWnd,
                         reinterpret_cast<HMENU>(kAnnotInspectorApply), g_hInst, nullptr);
-        CreateWindowExW(0, L"BUTTON", L"閉じる", WS_CHILD | WS_VISIBLE,
-                        392, currY, 96, 28, hWnd,
+        CreateWindowExW(0, L"BUTTON", localization::Text(L"dialog.action.apply_close").c_str(), WS_CHILD | WS_VISIBLE,
+                        342, currY, 146, 28, hWnd,
                         reinterpret_cast<HMENU>(kAnnotInspectorClose), g_hInst, nullptr);
 
         EnumChildWindows(hWnd, [](HWND child, LPARAM) -> BOOL {

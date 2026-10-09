@@ -9,6 +9,7 @@ void LoadLectures() {
     g_lectures.clear();
     SendMessageW(g_hLectureList, LB_RESETCONTENT, 0, 0);
     std::error_code ec;
+    const std::filesystem::path workspaceOwner(g_workspaceRoot);
     auto classesPath = WorkspaceClassesPath(g_workspaceRoot, g_config);
     if (!std::filesystem::exists(classesPath, ec) || ec) {
         ec.clear();
@@ -97,8 +98,12 @@ void LoadLectures() {
     }
 
     std::vector<std::pair<std::wstring, std::wstring>> lectures;
+    write_checks::NormalOperation rootRead(workspaceOwner, classesPath, write_checks::Kind::WorkspaceRead, workspaceOwner);
+    rootRead.Failure(ERROR_READ_FAULT);
     auto cacheName = std::filesystem::path(g_config.cacheDir).filename().wstring();
-    for (const auto& entry : std::filesystem::directory_iterator(classesPath, ec)) {
+    std::error_code entryError;
+    for (std::filesystem::directory_iterator it(classesPath, ec), end; !ec && it != end; it.increment(ec)) {
+        const auto& entry = *it;
         bool isReparse = false;
         if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
         std::error_code stEc;
@@ -110,7 +115,12 @@ void LoadLectures() {
             if (!seenCanon.insert(canon).second) continue;
             lectures.emplace_back(std::move(canon), name);
         }
+        if (stEc && !entryError) entryError = stEc;
     }
+    const auto readError = ec ? ec : entryError;
+    if (!readError) rootRead.Success();
+    else rootRead.Failure(readError == std::errc::permission_denied ? ERROR_ACCESS_DENIED :
+        readError == std::errc::no_such_file_or_directory ? ERROR_PATH_NOT_FOUND : ERROR_READ_FAULT);
     LectureSortMode mode = ParseLectureSortMode(g_config.lectureSortMode);
     if (mode == LectureSortMode::Recent) {
         auto openTimes = LoadLectureOpenTimes(LectureLastOpenFilePath());

@@ -21,6 +21,8 @@ void ShowMarkupSettingsDialog(HWND owner);
 void ShowAnnotationSettingsDialog(HWND owner);
 void ShowAnnotationSettingsForTool(HWND owner, ToolMode mode);
 void ShowPaletteSettingsDialog(HWND owner);
+void ShowSettingsAssetsDialog(HWND owner);
+[[nodiscard]] bool HandleSettingsAssetsMessage(const MSG& message);
 // The palette has its own editor so changing an annotation palette color never
 // mutates the Windows common-dialog custom-color history.
 bool ShowPaletteColorEditorDialog(HWND owner, COLORREF initial, COLORREF* outColor);

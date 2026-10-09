@@ -164,7 +164,7 @@ inline constexpr wchar_t kPdfViewClass[] = L"PdfWorkspacePdfView";
 // ワークスペース既定ディレクトリ名
 // ---------------------------------------------------------------------
 inline constexpr wchar_t kDefaultClassesDir[] = L"classes";
-inline constexpr wchar_t kDefaultCacheDir[]        = L"__resource__/__tmp__";
+inline constexpr wchar_t kDefaultCacheDir[]        = L"__pdf_note_workspace__/__tmp__";
 
 // ---------------------------------------------------------------------
 // ツールパレット定数

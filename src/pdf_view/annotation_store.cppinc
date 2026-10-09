@@ -1,7 +1,13 @@
 // file: pdf_view/annotation_store.cpp
 // NOTE: This file is intentionally included by `src/pdf_view/pdf_view.cpp` to keep the build as a
 // single translation unit while physically splitting responsibilities.
-#ifndef PDF_NOTE_ANNOT_HISTORY_PARSER_ONLY
+#include <charconv>
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <unordered_set>
+
+#if !defined(PDF_NOTE_ANNOT_HISTORY_PARSER_ONLY) && !defined(PDF_NOTE_ANNOT_COMMAND_CODEC_ONLY)
 #include "core/fault_injection.h"
 #include "core/preview_trace.h"
 
@@ -140,10 +146,11 @@ private:
             while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
             if (pos == exponentStart) return false;
         }
-        char* endPtr = nullptr;
-        std::string numStr(s.substr(start, pos - start));
-        double val = std::strtod(numStr.c_str(), &endPtr);
-        if (!endPtr || endPtr != numStr.c_str() + numStr.size() || !std::isfinite(val)) return false;
+        const auto number = s.substr(start, pos - start);
+        double val = 0.0;
+        const auto parsed = std::from_chars(number.data(), number.data() + number.size(), val);
+        if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size() ||
+            !std::isfinite(val)) return false;
         out.type = AnnotHistoryJsonValue::Type::Number;
         out.num = val;
         return true;
@@ -270,7 +277,7 @@ private:
     }
 };
 
-#ifndef PDF_NOTE_ANNOT_HISTORY_PARSER_ONLY
+#if !defined(PDF_NOTE_ANNOT_HISTORY_PARSER_ONLY) && !defined(PDF_NOTE_ANNOT_COMMAND_CODEC_ONLY)
 static void WarnAnnotHistoryLoadFailure(const std::wstring& detail) {
     if (g_annotHistoryLoadWarned) return;
     g_annotHistoryLoadWarned = true;
@@ -309,6 +316,9 @@ static std::wstring AnnotHistoryPathForPdf(const std::wstring& pdfPath) {
     return p.wstring();
 }
 
+#endif
+
+#ifndef PDF_NOTE_ANNOT_HISTORY_PARSER_ONLY
 static std::string JsonEscape(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 8);
@@ -383,6 +393,16 @@ static bool TextWritingModeFromString(const std::string& s, TextWritingMode& out
     if (s == "horizontal") { out = TextWritingMode::Horizontal; return true; }
     if (s == "vertical_rl") { out = TextWritingMode::VerticalRl; return true; }
     return false;
+}
+
+static bool AnnotationJsonNumbersFinite(const Annotation& a) {
+    for (double v : {a.x1, a.y1, a.x2, a.y2, a.width, a.alpha, a.fontPt, a.shapeRotation}) {
+        if (!std::isfinite(v)) return false;
+    }
+    for (const auto& p : a.path) if (!std::isfinite(p.x) || !std::isfinite(p.y)) return false;
+    for (double v : a.dash) if (!std::isfinite(v)) return false;
+    for (double v : a.quads) if (!std::isfinite(v)) return false;
+    return true;
 }
 
 static void WriteAnnotationJson(std::ostringstream& oss, const Annotation& a) {
@@ -482,6 +502,8 @@ static void WriteCommandJson(std::ostringstream& oss, const AnnotCommand& cmd) {
     oss << '{';
     oss << "\"kind\":";
     WriteJsonString(oss, kind);
+    oss << ",\"numeric_precision\":" << static_cast<int>(cmd.numericPrecision);
+    oss << std::setprecision(static_cast<int>(cmd.numericPrecision));
     oss << ",\"beforeIndex\":" << cmd.beforeIndex;
     oss << ",\"afterIndex\":" << cmd.afterIndex;
     oss << ",\"before\":";
@@ -537,8 +559,9 @@ static bool GetNumberField(const AnnotHistoryJsonValue& obj, const char* key, do
 
 static bool GetIntField(const AnnotHistoryJsonValue& obj, const char* key, int& out) {
     double v = 0.0;
-    if (!GetNumberField(obj, key, v)) return false;
-    out = static_cast<int>(std::round(v));
+    if (!GetNumberField(obj, key, v) || !std::isfinite(v) || std::trunc(v) != v ||
+        v < std::numeric_limits<int>::min() || v > std::numeric_limits<int>::max()) return false;
+    out = static_cast<int>(v);
     return true;
 }
 
@@ -580,6 +603,26 @@ static bool GetNumberArrayField(const AnnotHistoryJsonValue& obj, const char* ke
 
 static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
     if (v.type != AnnotHistoryJsonValue::Type::Object) return false;
+    // Absence keeps legacy defaults; a present malformed field never does.
+    std::unordered_set<std::string> keys;
+    for (const auto& field : v.obj) if (!keys.insert(field.first).second) return false;
+    for (const char* key : {"id", "text", "font", "shape_kind", "shape_draw_mode",
+                            "arrow_head", "link_id", "note_path", "math_kind",
+                            "writing_mode", "background_assist_mode"}) {
+        const auto* field = FindField(v, key);
+        if (field && field->type != AnnotHistoryJsonValue::Type::String) return false;
+    }
+    for (const char* key : {"readable_bg", "readable_bg_inverted", "readable_bg_configured"}) {
+        const auto* field = FindField(v, key);
+        if (field && field->type != AnnotHistoryJsonValue::Type::Bool) return false;
+    }
+    // Optional legacy fields may be absent, but malformed present numbers
+    // must never turn into default geometry or silently dropped path points.
+    for (const char* key : {"x1", "y1", "x2", "y2", "width", "alpha", "fontPt", "shape_rotation"}) {
+        const auto* number = FindField(v, key);
+        if (number && (number->type != AnnotHistoryJsonValue::Type::Number ||
+                       !std::isfinite(number->num))) return false;
+    }
     std::string typeStr;
     if (!GetStringField(v, "type", typeStr)) return false;
     if (!AnnotTypeFromString(typeStr, out.type)) return false;
@@ -609,8 +652,12 @@ static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
         }
     }
     GetNumberField(v, "fontPt", out.fontPt);
-    int color = 0;
-    if (GetIntField(v, "color", color)) out.color = static_cast<COLORREF>(color);
+    if (const auto* color = FindField(v, "color")) {
+        if (color->type != AnnotHistoryJsonValue::Type::Number ||
+            !std::isfinite(color->num) || std::trunc(color->num) != color->num ||
+            color->num < 0.0 || color->num > std::numeric_limits<COLORREF>::max()) return false;
+        out.color = static_cast<COLORREF>(color->num);
+    }
     std::string text;
     if (GetStringField(v, "text", text)) out.text = UTF8ToWide(text);
     std::string font;
@@ -637,22 +684,19 @@ static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
     std::string notePath;
     if (GetStringField(v, "note_path", notePath)) out.linkNotePath = UTF8ToWide(notePath);
     std::vector<std::wstring> lines;
-    if (GetStringArrayField(v, "lines", lines)) {
-        out.textLines = std::move(lines);
-    } else {
-        out.textLines.clear();
-    }
+    if (FindField(v, "lines") && !GetStringArrayField(v, "lines", lines)) return false;
+    out.textLines = std::move(lines);
     std::string mathKind;
     if (GetStringField(v, "math_kind", mathKind)) {
+        if (mathKind != "markup" && mathKind != "latex") return false;
         out.mathKind = (mathKind == "markup") ? MathKind::Markup : MathKind::Latex;
     }
     out.writingMode = TextWritingMode::Horizontal;
     std::string writingMode;
     if (GetStringField(v, "writing_mode", writingMode)) {
         TextWritingMode parsedWritingMode = TextWritingMode::Horizontal;
-        if (TextWritingModeFromString(writingMode, parsedWritingMode)) {
-            out.writingMode = parsedWritingMode;
-        }
+        if (!TextWritingModeFromString(writingMode, parsedWritingMode)) return false;
+        out.writingMode = parsedWritingMode;
     }
     if (out.type != Annotation::Type::TextBox) {
         out.writingMode = TextWritingMode::Horizontal;
@@ -662,7 +706,8 @@ static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
             if (backgroundAssistMode == "off") out.backgroundAssistMode = TextBackgroundAssistMode::Off;
             else if (backgroundAssistMode == "auto") out.backgroundAssistMode = TextBackgroundAssistMode::Auto;
             else if (backgroundAssistMode == "inverted") out.backgroundAssistMode = TextBackgroundAssistMode::Inverted;
-            else out.backgroundAssistMode = TextBackgroundAssistMode::Inherit;
+            else if (backgroundAssistMode == "inherit") out.backgroundAssistMode = TextBackgroundAssistMode::Inherit;
+            else return false;
         } else {
             bool readableBackground = false;
             const bool hasReadableBackground = GetBoolField(v, "readable_bg", readableBackground);
@@ -684,39 +729,29 @@ static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
 
     out.path.clear();
     if (const auto* pathVal = FindField(v, "path")) {
-        if (pathVal->type == AnnotHistoryJsonValue::Type::Array) {
-            for (const auto& p : pathVal->arr) {
-                if (p.type != AnnotHistoryJsonValue::Type::Array || p.arr.size() < 2) continue;
-                if (p.arr[0].type != AnnotHistoryJsonValue::Type::Number || p.arr[1].type != AnnotHistoryJsonValue::Type::Number) continue;
-                Annotation::Pt pt{ p.arr[0].num, p.arr[1].num };
-                out.path.push_back(pt);
-            }
+        if (pathVal->type != AnnotHistoryJsonValue::Type::Array) return false;
+        for (const auto& p : pathVal->arr) {
+            if (p.type != AnnotHistoryJsonValue::Type::Array || p.arr.size() != 2 ||
+                p.arr[0].type != AnnotHistoryJsonValue::Type::Number ||
+                p.arr[1].type != AnnotHistoryJsonValue::Type::Number) return false;
+            out.path.push_back(Annotation::Pt{p.arr[0].num, p.arr[1].num});
         }
     }
 
     out.dash.clear();
-    std::vector<double> dash;
-    if (GetNumberArrayField(v, "dash", dash)) {
-        for (double part : dash) {
-            if (std::isfinite(part) && part > 0.0) out.dash.push_back(std::clamp(part, 0.25, 240.0));
-        }
-        if (out.dash.size() == 1) out.dash.push_back(out.dash.front());
-    }
+    // Rendering owns dash normalization. Persistence must preserve every entry
+    // and its length, just as the CLROP checkpoint codec does.
+    if (FindField(v, "dash") && !GetNumberArrayField(v, "dash", out.dash)) return false;
 
     out.quads.clear();
-    if (const auto* quadVal = FindField(v, "quads")) {
-        if (quadVal->type == AnnotHistoryJsonValue::Type::Array) {
-            for (const auto& q : quadVal->arr) {
-                if (q.type != AnnotHistoryJsonValue::Type::Number) continue;
-                out.quads.push_back(q.num);
-            }
-        }
-    }
-    return true;
+    if (FindField(v, "quads") && !GetNumberArrayField(v, "quads", out.quads)) return false;
+    return AnnotationJsonNumbersFinite(out);
 }
 
 static bool ParseCommand(const AnnotHistoryJsonValue& v, AnnotCommand& out) {
     if (v.type != AnnotHistoryJsonValue::Type::Object) return false;
+    std::unordered_set<std::string> keys;
+    for (const auto& field : v.obj) if (!keys.insert(field.first).second) return false;
     std::string kind;
     if (!GetStringField(v, "kind", kind)) return false;
     if (kind == "add") out.kind = AnnotCommandKind::Add;
@@ -725,33 +760,51 @@ static bool ParseCommand(const AnnotHistoryJsonValue& v, AnnotCommand& out) {
     else if (kind == "reorder") out.kind = AnnotCommandKind::Reorder;
     else if (kind == "clear") out.kind = AnnotCommandKind::ClearAll;
     else return false;
-    GetIntField(v, "beforeIndex", out.beforeIndex);
-    GetIntField(v, "afterIndex", out.afterIndex);
+    out.numericPrecision = AnnotNumericPrecision::Legacy6;
+    if (std::count_if(v.obj.begin(), v.obj.end(), [](const auto& field) {
+            return field.first == "numeric_precision";
+        }) > 1) return false;
+    if (const auto* precision = FindField(v, "numeric_precision")) {
+        if (precision->type != AnnotHistoryJsonValue::Type::Number ||
+            (precision->num != 6.0 && precision->num != 17.0)) return false;
+        out.numericPrecision = precision->num == 6.0
+            ? AnnotNumericPrecision::Legacy6 : AnnotNumericPrecision::RoundTrip17;
+    }
+    if (FindField(v, "beforeIndex") && !GetIntField(v, "beforeIndex", out.beforeIndex)) return false;
+    if (FindField(v, "afterIndex") && !GetIntField(v, "afterIndex", out.afterIndex)) return false;
     if (const auto* beforeVal = FindField(v, "before")) {
+        if (beforeVal->type != AnnotHistoryJsonValue::Type::Object &&
+            beforeVal->type != AnnotHistoryJsonValue::Type::Null) return false;
         if (beforeVal->type == AnnotHistoryJsonValue::Type::Object) {
-            ParseAnnotation(*beforeVal, out.before);
+            if (!ParseAnnotation(*beforeVal, out.before)) return false;
         }
     }
     if (const auto* afterVal = FindField(v, "after")) {
+        if (afterVal->type != AnnotHistoryJsonValue::Type::Object &&
+            afterVal->type != AnnotHistoryJsonValue::Type::Null) return false;
         if (afterVal->type == AnnotHistoryJsonValue::Type::Object) {
-            ParseAnnotation(*afterVal, out.after);
+            if (!ParseAnnotation(*afterVal, out.after)) return false;
         }
     }
     out.snapshot.clear();
     if (const auto* snapVal = FindField(v, "snapshot")) {
+        if (snapVal->type != AnnotHistoryJsonValue::Type::Array) return false;
         if (snapVal->type == AnnotHistoryJsonValue::Type::Array) {
             for (const auto& a : snapVal->arr) {
                 Annotation ann;
-                if (ParseAnnotation(a, ann)) out.snapshot.push_back(std::move(ann));
+                if (!ParseAnnotation(a, ann)) return false;
+                out.snapshot.push_back(std::move(ann));
             }
         }
     }
     out.afterSnapshot.clear();
     if (const auto* afterSnapVal = FindField(v, "after_snapshot")) {
+        if (afterSnapVal->type != AnnotHistoryJsonValue::Type::Array) return false;
         if (afterSnapVal->type == AnnotHistoryJsonValue::Type::Array) {
             for (const auto& a : afterSnapVal->arr) {
                 Annotation ann;
-                if (ParseAnnotation(a, ann)) out.afterSnapshot.push_back(std::move(ann));
+                if (!ParseAnnotation(a, ann)) return false;
+                out.afterSnapshot.push_back(std::move(ann));
             }
         }
     }
@@ -764,7 +817,16 @@ static bool ParseCommand(const AnnotHistoryJsonValue& v, AnnotCommand& out) {
 
 bool SerializeAnnotCommandsJson(const std::vector<AnnotCommand>& cmds, std::string* outJson) {
     if (!outJson) return false;
+    for (const auto& cmd : cmds) {
+        if (cmd.numericPrecision != AnnotNumericPrecision::Legacy6 &&
+            cmd.numericPrecision != AnnotNumericPrecision::RoundTrip17) return false;
+        if (!AnnotationJsonNumbersFinite(cmd.before) || !AnnotationJsonNumbersFinite(cmd.after) ||
+            !std::all_of(cmd.snapshot.begin(), cmd.snapshot.end(), AnnotationJsonNumbersFinite) ||
+            !std::all_of(cmd.afterSnapshot.begin(), cmd.afterSnapshot.end(), AnnotationJsonNumbersFinite)) return false;
+    }
     std::ostringstream oss;
+    oss.imbue(std::locale::classic());
+    oss << std::setprecision(std::numeric_limits<double>::max_digits10);
     WriteCommandArray(oss, cmds);
     *outJson = oss.str();
     return true;
@@ -785,17 +847,20 @@ bool DeserializeAnnotCommandsJson(std::string_view json,
         if (outErr) *outErr = L"注釈 command JSON の形式が不正です。";
         return false;
     }
+    std::vector<AnnotCommand> parsed;
     for (const auto& value : root.arr) {
         AnnotCommand cmd;
         if (!ParseCommand(value, cmd)) {
             if (outErr) *outErr = L"注釈 command JSON に不正な command が含まれています。";
             return false;
         }
-        outCmds->push_back(std::move(cmd));
+        parsed.push_back(std::move(cmd));
     }
+    *outCmds = std::move(parsed);
     return true;
 }
 
+#ifndef PDF_NOTE_ANNOT_COMMAND_CODEC_ONLY
 static bool SaveAnnotHistoryIfNeeded() {
     const ULONGLONG startTick = preview_trace::TickNow();
     if (!g_annotHistoryDirty) {
@@ -1045,11 +1110,8 @@ static bool TryRecoverStagedAnnotationsForCurrentPdf(HWND owner,
 
     bool apply = true;
     if (promptBeforeApply) {
-        std::wstring msg =
-            L"未統合の注釈差分が見つかりました。\n\n"
-            L"差分ファイル:\n" + stage.wstring() + L"\n\n"
-            L"[はい] 差分を復元 (注釈に適用)\n"
-            L"[いいえ] いまは復元しない（差分は保持）";
+        std::wstring msg = localization::Text(L"dialog.recovery.annotation_prompt");
+        msg += L"\n\n" + stage.wstring();
         apply = ConfirmPdfYesNo(owner, L"clrop recovery", msg, SoftNoticeKind::Warning,
                                 SilentDialogResult::No, SilentDialogResult::No);
     }
@@ -1208,10 +1270,10 @@ bool LoadAnnotationsForCurrentPdf(HWND owner) {
         options.message = msg;
         options.kind = SoftNoticeKind::Warning;
         options.buttons = SilentDialogButtons::OkYesNoCancel;
-        options.okLabel = L"ID更新して読込";
-        options.yesLabel = L"強制読込";
-        options.noLabel = L"無視して新規";
-        options.cancelLabel = L"中止";
+        options.okLabel = localization::Text(L"dialog.action.load_update_id");
+        options.yesLabel = localization::Text(L"dialog.action.load_force");
+        options.noLabel = localization::Text(L"dialog.action.load_new");
+        options.cancelLabel = localization::Text(L"common.cancel");
         options.preferredWidthPx = 680;
         options.defaultResult = SilentDialogResult::Cancel;
         options.escapeResult = SilentDialogResult::Cancel;
@@ -1568,3 +1630,4 @@ bool ExportPdfWithAnnotations(HWND owner) {
     return file_output::ExportPdfWithAnnotations(owner, true, g_config.exportStandardTextAnnots);
 }
 #endif
+#endif // PDF_NOTE_ANNOT_COMMAND_CODEC_ONLY / PDF_NOTE_ANNOT_HISTORY_PARSER_ONLY

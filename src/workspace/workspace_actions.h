@@ -14,6 +14,8 @@ struct ImportBatchStats {
 };
 
 #include <windows.h>
+#include <atomic>
+#include "diagnostics/write_checks.h"
 #include <string>
 #include <vector>
 #include <optional>
@@ -65,12 +67,15 @@ std::wstring FileUrlFromLocalPath(const std::filesystem::path& path);
 bool IsUsableLibreOfficeSofficeCandidate(const std::filesystem::path& cand);
 std::filesystem::path FindLibreOfficeSoffice();
 bool HasOfficeConversionFeature();
-void CleanupLibreOfficePythonCacheBestEffort(const std::filesystem::path& soffice);
+// Dedicated diagnostic: built-in text DOCX only, no user input/output overwrite.
+// On failure keep the generated work area and return it for recovery/details.
+[[nodiscard]] bool RunOfficeConversionCheck(const std::filesystem::path& workRoot, std::atomic_bool& cancel,
+    std::filesystem::path& retained, DWORD& error, write_checks::Step& step);
 bool CreateOfficeImportTempMarker(const std::filesystem::path& dir);
 bool HasOfficeImportTempMarker(const std::filesystem::path& dir);
-std::filesystem::path MakeOfficeImportTempRoot(std::wstring* outErr);
-std::filesystem::path MakeUniqueOfficeImportTempDir(std::wstring* outErr);
-void RemoveOfficeImportTempDirBestEffort(const std::filesystem::path& dir);
+std::filesystem::path MakeOfficeImportTempRoot(const std::filesystem::path& root, std::wstring* outErr);
+std::filesystem::path MakeUniqueOfficeImportTempDir(const std::filesystem::path& root, std::wstring* outErr);
+void RemoveOfficeImportTempDirBestEffort(const std::filesystem::path& dir, const std::filesystem::path& allowedRoot);
 bool IsOfficeConversionWaitDispatchMessage(const MSG& msg);
 void PumpOfficeConversionWaitMessages();
 void ShowImportBatchResult(HWND hWnd, const ImportBatchStats& stats, size_t selectedCount);
@@ -87,5 +92,7 @@ void CancelOfficeConversionJobsForExit();
 bool HasActiveOfficeConversionJobs();
 bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstring>& paths);
 bool ImportFileToCurrentSession(HWND hWnd);
-std::vector<std::wstring> PickFoldersWithInitial(HWND parent, const std::filesystem::path& initialDir, const std::wstring& title);
-std::optional<std::wstring> PickFolderWithInitial(HWND parent, const std::filesystem::path& initialDir, const std::wstring& title);
+std::vector<std::wstring> PickFoldersWithInitial(HWND parent, const std::filesystem::path& initialDir, const std::wstring& title,
+                                               const std::wstring& confirmLabel = {});
+std::optional<std::wstring> PickFolderWithInitial(HWND parent, const std::filesystem::path& initialDir, const std::wstring& title,
+                                                const std::wstring& confirmLabel = {});

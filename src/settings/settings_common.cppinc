@@ -3,6 +3,16 @@
 
 namespace {
 
+// A failed explicit save keeps the editor's controls/draft, but must not leave
+// unsaved runtime values for a later auto-save after the user chooses Exit.
+static void RestoreSettingsRuntimeAfterFailedSave(HWND owner, const WorkspaceConfig& previous,
+                                                 const std::wstring& previousTheme) {
+    g_config = previous;
+    g_themeName = previousTheme;
+    ApplyConfigToUI(owner);
+    RefreshMainMenuBar(owner);
+}
+
 static void RequestLayout(HWND owner) {
     if (!owner) return;
     RECT rc{};
@@ -169,8 +179,8 @@ static std::wstring UiApplyLabel() {
     return localization::Text(L"settings.common.5e0e1efd1bae");
 }
 
-static const wchar_t* UiOkLabel() {
-    return L"OK";
+static std::wstring UiOkLabel() {
+    return localization::Text(L"common.ok");
 }
 
 static std::wstring UiCancelLabel() {
@@ -203,7 +213,7 @@ static int LayoutHeaderSectionButtons(HWND hWnd, const std::array<HWND, N>& butt
     return top + rowH;
 }
 
-constexpr int kSettingsCategoryButtonCount = 6;
+constexpr int kSettingsCategoryButtonCount = 5;
 enum SettingsCategoryNavTarget : int {
     kSettingsNavNone = -1,
     kSettingsNavGeneral = 0,
@@ -211,7 +221,6 @@ enum SettingsCategoryNavTarget : int {
     kSettingsNavMarkup = 2,
     kSettingsNavAnnot = 3,
     kSettingsNavPalette = 4,
-    kSettingsNavAssets = 5,
 };
 
 static std::wstring SettingsCategoryDialogTitle(int target) {
@@ -225,8 +234,6 @@ static std::wstring SettingsCategoryDialogTitle(int target) {
         return ui.menuAnnotSettings;
     case kSettingsNavPalette:
         return ui.menuPaletteSettings;
-    case kSettingsNavAssets:
-        return localization::Text(L"settings.assets.tab");
     case kSettingsNavGeneral:
     default:
         return ui.menuGeneralSettings;
@@ -243,8 +250,6 @@ static std::wstring SettingsCategoryHeaderLabel(int target) {
         return localization::Text(L"settings.common.9aee0c26e8be");
     case kSettingsNavPalette:
         return localization::Text(L"settings.common.0daa4cb8f68a");
-    case kSettingsNavAssets:
-        return localization::Text(L"settings.assets.tab");
     case kSettingsNavGeneral:
     default:
         return localization::Text(L"settings.common.c34e9119321f");
@@ -258,7 +263,6 @@ static std::array<std::wstring, kSettingsCategoryButtonCount> SettingsCategoryBu
         SettingsCategoryHeaderLabel(kSettingsNavMarkup),
         SettingsCategoryHeaderLabel(kSettingsNavAnnot),
         SettingsCategoryHeaderLabel(kSettingsNavPalette),
-        SettingsCategoryHeaderLabel(kSettingsNavAssets),
     };
 }
 

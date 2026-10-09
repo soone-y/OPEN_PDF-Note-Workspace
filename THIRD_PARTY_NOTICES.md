@@ -129,6 +129,7 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 - ファイル取り込み時の docx/pptx 変換は、通信機能を持たないカスタム build runtime が見つかった場合に有効です。
 - `image/Fonts/` 配下から選んだ欧文・記号フォントは、アプリ起動時に `AddFontResourceExW(..., FR_PRIVATE, ...)` でプロセス private font として読み込み、システムへインストールしません。
 - headless 変換専用とし、ユーザー原本ではなくアプリ管理下のコピーを入力にします。
+- custom patch `0051` は、長いlocal pathのURL/native変換、directory列挙、一時ファイルの予約を修正します。改変の再現入力は `third_party/libreoffice/custom_build/patches/` に保持し、通常版のライセンス資料へ同梱します。元のMPL/Apache表示を保持します。
 - release パッケージでは、アプリ側 private font 利用のため選択したフォントファイルを `libreoffice/image/Fonts/` に置き、検証済みカスタム runtime を `libreoffice/custom_runtime/instdir/` 配置で標準同梱し、LibreOffice ライセンス/NOTICE 文書を同梱します。変換機能を含めない軽量配布は `-Lite` を指定します。
 - カスタム Office 変換 runtime を release に含める場合は、`scripts/release/pack_release.ps1` が同梱 runtime 自身の `license.txt`, `LICENSE.html`, `NOTICE` を `licenses/libreoffice/` へコピーし、`third_party/libreoffice/custom_build/communication_free_options.input`、`release_reduction_manifest.json`、`patches/*.patch` も `licenses/libreoffice/custom_build/` へコピーします。
 

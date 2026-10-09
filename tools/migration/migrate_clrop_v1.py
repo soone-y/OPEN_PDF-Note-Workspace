@@ -27,7 +27,7 @@ BACKUP_STEM_RE = re.compile(r"\.legacy_\d{8}_\d{6}(?:_\d+)?$", re.IGNORECASE)
 WORKSPACE_ROOT_RE = re.compile(r'"workspaceRoot"\s*:\s*"([^"]+)"')
 TEMP_EXTERNAL_DIRS_RE = re.compile(r'"tempExternalLectureDirs"\s*:\s*\[(.*?)\]', re.DOTALL)
 QUOTED_STRING_RE = re.compile(r'"([^"]*)"')
-RESOURCE_DIR_NAME = "__resource__"
+RESOURCE_DIR_NAME = "__pdf_note_workspace__"
 SETUP_JSON_NAMES = ("pdf_note_workspace_setup.json", "pdf_workspace_setup.json", "pdf_viewer_setup.json")
 
 RECOGNIZED_TYPES = {

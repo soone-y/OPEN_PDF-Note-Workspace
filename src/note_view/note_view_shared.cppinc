@@ -327,7 +327,7 @@ static bool SaveCurrentNoteEditorCopy(HWND owner, std::wstring* outPath) {
 
     const std::wstring text = GetEditText(g_hNoteEdit);
     std::wstring err;
-    if (!atomic_write::AtomicWriteUtf8(out, WideToUTF8(text), out.parent_path(), &err)) {
+    if (!write_checks::ObservedWriteUtf8(g_workspaceRoot, out, WideToUTF8(text), out.parent_path(), {}, &err)) {
         ShowSoftNotice(owner ? owner : g_hMainWnd,
                        err.empty()
                            ? localization::Text(L"note.copy_save.write_failed")

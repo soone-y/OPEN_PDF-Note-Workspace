@@ -12,6 +12,10 @@
 #include "core/preview_trace.h"
 #include "core/ui_notify.h"
 #include "core/setup_json_policy.h"
+#include "ui/window_corners.h"
+#include "settings/settings.h"
+#include "diagnostics/normal_operations.h"
+#include "diagnostics/bounded_log.h"
 #include "core/localization.h"
 #include "clrop/hash.h"
 #include "theme/built_in_theme.h"
@@ -28,8 +32,6 @@
 #include <set>
 #include <cctype>
 #include <cstdlib>
-#include <commdlg.h>
-#include <colordlg.h>
 
 namespace {
 static std::atomic<long> g_saveOperationCount{0};
@@ -152,7 +154,7 @@ static void WriteThemeObject(std::ostream& os, const std::string& indent, const 
 [[nodiscard]] static std::string EscapeJsonStringValue(const std::string& value);
 static std::filesystem::path UserPaletteFilePath();
 static bool LoadUserPaletteColors(COLORREF* custom, size_t count);
-static void SaveUserPaletteColors(const COLORREF* custom, size_t count);
+static bool SaveUserPaletteColors(const COLORREF* custom, size_t count);
 static std::optional<bool> QuerySystemTouchpadInvertVertical();
 static void UpdateNoteBgColorFromConfig();
 
@@ -529,7 +531,7 @@ static const ThemeColors* FindThemeByName(const std::vector<ThemeColors>& themes
 }
 
 // Theme storage policy:
-// - Unified config: __resource__/__theme__/theme.json (current + catalog)
+// - Unified config: __pdf_note_workspace__/__theme__/theme.json (current + catalog)
 // - Do not manage per-theme directories under __theme__/<name>/theme.json
 static constexpr bool kThemeUseThemeFiles = true;
 static constexpr bool kThemeRequireFormatTag = true;
@@ -700,12 +702,12 @@ static bool UpdateVerifiedMetaLightweight(const std::wstring& workspaceRoot,
 static std::filesystem::path ThemeConfigPath(const std::wstring& root) {
     if (root.empty()) return {};
     // Theme catalog / selection config lives under __theme__.
-    return std::filesystem::path(root) / L"__resource__" / L"__theme__" / L"theme.json";
+    return std::filesystem::path(root) / L"__pdf_note_workspace__" / L"__theme__" / L"theme.json";
 }
 
 static std::filesystem::path ThemeRootPath(const std::wstring& root) {
     if (root.empty()) return {};
-    return std::filesystem::path(root) / L"__resource__" / L"__theme__";
+    return std::filesystem::path(root) / L"__pdf_note_workspace__" / L"__theme__";
 }
 
 static std::filesystem::path ThemeManualPath(const std::wstring& root) {
@@ -739,7 +741,7 @@ static bool EnsureThemeManualFile(const std::wstring& root) {
     oss << "PDF注釈ソフト: テーマの説明 (theme_manual.txt)\n";
     oss << "\n";
     oss << "配置\n";
-    oss << "  - テーマフォルダ: __resource__/__theme__/\n";
+    oss << "  - テーマフォルダ: __pdf_note_workspace__/__theme__/\n";
     oss << "  - テーマファイル: theme_XXXXXX.json (XXXXXX = 基調色の16進6桁)\n";
     oss << "  - カタログ/選択: theme.json\n";
     oss << "\n";
@@ -770,7 +772,7 @@ static bool EnsureThemeManualFile(const std::wstring& root) {
     oss << "      accent\n";
     oss << "\n";
     oss << "新テーマを手編集で作る手順\n";
-    oss << "  1) __resource__/__theme__/ に theme_XXXXXX.json を作成します。\n";
+    oss << "  1) __pdf_note_workspace__/__theme__/ に theme_XXXXXX.json を作成します。\n";
     oss << "  2) tone_id / accent / ファイル名のXXXXXXを同じ値に揃えます。\n";
     oss << "  3) 必要な色だけ変更して保存し、設定画面からテーマを選択します。\n";
     oss << "  4) うまく読み込めない場合はファイル名形式と16進色コードを確認します。\n";
@@ -1054,7 +1056,7 @@ static void WorkspaceSafeDirs(const std::filesystem::path& workspaceRoot,
     if (outPreferredTmp) outPreferredTmp->clear();
     if (outQuarantineDir) outQuarantineDir->clear();
     if (workspaceRoot.empty()) return;
-    std::filesystem::path resource = workspaceRoot / L"__resource__";
+    std::filesystem::path resource = workspaceRoot / L"__pdf_note_workspace__";
     if (outPreferredTmp) *outPreferredTmp = resource / L"__tmp__";
     if (outQuarantineDir) *outQuarantineDir = resource / L"__escape__";
 }
@@ -1067,7 +1069,7 @@ static bool AtomicWriteUtf8WithWorkspaceDirs(const std::filesystem::path& dest,
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
     WorkspaceSafeDirs(workspaceRoot, &preferredTmp, &quarantineDir);
-    return atomic_write::AtomicWriteUtf8(dest, utf8, preferredTmp, quarantineDir, err);
+    return write_checks::ObservedWriteUtf8(workspaceRoot, dest, utf8, preferredTmp, quarantineDir, err);
 }
 
 static void WriteThemeObject(std::ostream& os, const std::string& indent, const ThemeColors& theme) {
@@ -1260,7 +1262,7 @@ static std::vector<std::wstring> ListThemeFileIds(const std::wstring& root) {
 
 static std::filesystem::path UserPaletteFilePath() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__settings__" / L"user_palette.json";
+    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__settings__" / L"user_palette.json";
 }
 
 static void FillDefaultUserPaletteColors(COLORREF* custom, size_t count) {
@@ -1384,8 +1386,8 @@ static bool LoadUserPaletteColors(COLORREF* custom, size_t count) {
     return idx > 0;
 }
 
-static void SaveUserPaletteColors(const COLORREF* custom, size_t count) {
-    if (!custom || count == 0) return;
+static bool SaveUserPaletteColors(const COLORREF* custom, size_t count) {
+    if (!custom || count == 0) return false;
     std::ostringstream oss;
     oss << "{\n  \"colors\": [";
     for (size_t i = 0; i < count; ++i) {
@@ -1397,7 +1399,7 @@ static void SaveUserPaletteColors(const COLORREF* custom, size_t count) {
     std::wstring err;
 
     auto primary = UserPaletteFilePath();
-    if (primary.empty()) return;
+    if (primary.empty()) return false;
 
     std::vector<std::filesystem::path> targets;
     targets.push_back(primary);
@@ -1405,9 +1407,13 @@ static void SaveUserPaletteColors(const COLORREF* custom, size_t count) {
     for (const auto& path : targets) {
         std::error_code ec;
         std::filesystem::create_directories(path.parent_path(), ec);
-        if (ec) continue;
-        AtomicWriteUtf8WithWorkspaceDirs(path, data, std::filesystem::path(g_workspaceRoot), &err);
+        if (ec || !AtomicWriteUtf8WithWorkspaceDirs(path, data, std::filesystem::path(g_workspaceRoot), &err)) {
+            ShowAppCoreSoftNotice(g_hMainWnd, localization::Format(L"core.workspace_settings.save_failed",
+                                  {{L"PATH", path.filename().wstring()}}), SoftNoticeKind::Warning);
+            return false;
+        }
     }
+    return true;
 }
 
 static void UpdateThemeBrushes() {
@@ -1463,15 +1469,9 @@ void SetPaletteCustomColor(COLORREF color) {
 
 bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor) {
     if (!outColor) return false;
-    CHOOSECOLORW cc{};
-    cc.lStructSize = sizeof(cc);
-    cc.hwndOwner = owner;
-    cc.rgbResult = initial;
-
-    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
-    if (!ChooseColorW(&cc)) return false;
-    *outColor = cc.rgbResult;
-    return true;
+    // Reuse the app-owned editor: localized choices, square corners and quiet
+    // validation. On cancellation the caller's color remains unchanged.
+    return ShowPaletteColorEditorDialog(owner, initial, outColor);
 }
 
 void SyncUserPaletteToRuntime() {
@@ -1487,15 +1487,14 @@ void LoadUserPaletteColorsForSettings(COLORREF* custom, size_t count) {
     LoadUserPaletteColors(custom, count);
 }
 
-void SaveUserPaletteColorsForSettings(const COLORREF* custom, size_t count) {
-    SaveUserPaletteColors(custom, count);
-    if (!custom || count == 0) return;
+bool SaveUserPaletteColorsForSettings(const COLORREF* custom, size_t count) {
+    if (!SaveUserPaletteColors(custom, count)) return false;
 
     if (count > static_cast<size_t>(kLastOkColorSlotIndex)) {
         g_paletteCustomColor = custom[kLastOkColorSlotIndex];
     }
     BuildAndApplyRuntimePalette(custom, static_cast<size_t>(kPresetPaletteSlotCount));
-    PersistConfig();
+    return TryPersistConfig();
 }
 
 static int RuntimePaletteIndexForColor(COLORREF color) {
@@ -1704,6 +1703,7 @@ const wchar_t* AppLogFileName(AppLogKind kind) {
     case AppLogKind::SwitchTiming: return L"switch_timing.log";
     case AppLogKind::Crash: return L"crash.log";
     case AppLogKind::StartupWatchdog: return L"startup_watchdog.log";
+    case AppLogKind::OfficeConversion: return L"office_conversion.log";
     default: return L"app.log";
     }
 }
@@ -1714,6 +1714,7 @@ bool RuntimeAppLogEnabledLocked(AppLogKind kind) {
     case AppLogKind::SwitchTiming: return g_runtimeAppLogConfig.switchTiming;
     case AppLogKind::Crash: return g_runtimeAppLogConfig.crash;
     case AppLogKind::StartupWatchdog: return g_runtimeAppLogConfig.startupWatchdog;
+    case AppLogKind::OfficeConversion: return g_runtimeAppLogConfig.officeConversion;
     default: return false;
     }
 }
@@ -1729,38 +1730,27 @@ std::wstring AppLogTimestamp() {
 }
 
 std::filesystem::path AppLogPathLocked(AppLogKind kind) {
-    std::filesystem::path base;
-    if (!g_appLogWorkspaceRoot.empty()) {
-        base = std::filesystem::path(g_appLogWorkspaceRoot);
-    } else {
-        std::error_code ec;
-        base = std::filesystem::current_path(ec);
-        if (ec) base.clear();
-    }
-    if (base.empty()) {
-        return std::filesystem::path(L"__resource__") / L"__log__" / AppLogFileName(kind);
-    }
-    return base / L"__resource__" / L"__log__" / AppLogFileName(kind);
+    // Unconfigured logging must never write into an inherited current directory.
+    const std::filesystem::path root(g_appLogWorkspaceRoot);
+    if (root.empty() || !root.is_absolute()) return {};
+    return root / L"__pdf_note_workspace__" / L"__log__" / AppLogFileName(kind);
 }
 
 void AppendAppLogLineUtf8Locked(AppLogKind kind, const std::string& line) {
     if (!RuntimeAppLogEnabledLocked(kind) || line.empty()) return;
     try {
         fault_injection::MaybeThrow(L"app_log_before_write");
+        const std::filesystem::path path = AppLogPathLocked(kind);
+        if (path.empty()) return;
+        write_checks::NormalOperation observation(g_appLogWorkspaceRoot, path);
+        std::string payload = WideToUTF8(AppLogTimestamp()) + " " + line;
+        if (payload.back() != '\n') payload += "\n";
+        const auto result = diagnostic_log::Append(g_appLogWorkspaceRoot, AppLogFileName(kind), payload);
+        if (result == diagnostic_log::Result::Written) observation.Success();
+        else if (result == diagnostic_log::Result::LimitReached) observation.Cancel();
     } catch (...) {
-        // Diagnostic logging must never interrupt the user's operation.
-        return;
+        // Optional diagnostics, including quota inspection, never interrupt edits.
     }
-    std::filesystem::path path = AppLogPathLocked(kind);
-    std::error_code ec;
-    if (path.has_parent_path()) {
-        std::filesystem::create_directories(path.parent_path(), ec);
-    }
-    std::ofstream os(path, std::ios::binary | std::ios::app);
-    if (!os) return;
-    std::string payload = WideToUTF8(AppLogTimestamp()) + " " + line;
-    if (payload.empty() || payload.back() != '\n') payload += "\n";
-    os.write(payload.data(), static_cast<std::streamsize>(payload.size()));
 }
 } // namespace
 
@@ -1786,13 +1776,17 @@ std::filesystem::path AppLogPath(AppLogKind kind) {
 }
 
 void AppendAppLogLine(AppLogKind kind, const std::wstring& line) {
-    std::lock_guard<std::mutex> lock(g_appLogMutex);
-    AppendAppLogLineUtf8Locked(kind, WideToUTF8(line));
+    try {
+        std::lock_guard<std::mutex> lock(g_appLogMutex);
+        AppendAppLogLineUtf8Locked(kind, WideToUTF8(line));
+    } catch (...) { /* Diagnostic conversion/locking must not interrupt edits. */ }
 }
 
 void AppendAppLogLineUtf8(AppLogKind kind, const std::string& line) {
-    std::lock_guard<std::mutex> lock(g_appLogMutex);
-    AppendAppLogLineUtf8Locked(kind, line);
+    try {
+        std::lock_guard<std::mutex> lock(g_appLogMutex);
+        AppendAppLogLineUtf8Locked(kind, line);
+    } catch (...) { /* Optional diagnostics have no failure propagation. */ }
 }
 
 void AppendCrashLogLine(const char* area, const char* detail) {
@@ -2658,7 +2652,7 @@ static std::filesystem::path QuarantineCorruptWorkspaceJson(const std::filesyste
     if (root.empty() || path.empty()) return {};
     std::error_code ec;
     if (!std::filesystem::exists(path, ec) || ec) return {};
-    std::filesystem::path dir = root / L"__resource__" / L"__escape__";
+    std::filesystem::path dir = root / L"__pdf_note_workspace__" / L"__escape__";
     std::filesystem::create_directories(dir, ec);
     if (ec) return {};
     std::filesystem::path dest = MakeDamagedSettingsPath(dir, path);
@@ -2674,25 +2668,42 @@ static std::filesystem::path QuarantineCorruptWorkspaceJson(const std::filesyste
     return dest;
 }
 
-static std::filesystem::path QuarantineCorruptSetupJson(const std::filesystem::path& exeDir,
-                                                         const std::filesystem::path& setup) {
-    if (exeDir.empty() || setup.empty()) return {};
-    std::error_code ec;
-    if (!std::filesystem::exists(setup, ec) || ec) return {};
-    std::filesystem::path dir = exeDir / L"__resource__" / L"__escape__";
-    std::filesystem::create_directories(dir, ec);
-    if (ec) return {};
-    std::filesystem::path dest = MakeDamagedSettingsPath(dir, setup);
-    std::filesystem::rename(setup, dest, ec);
-    if (ec) {
-        ec.clear();
-        std::filesystem::copy_file(setup, dest, std::filesystem::copy_options::overwrite_existing, ec);
-        if (!ec) {
-            std::filesystem::remove(setup, ec);
+[[nodiscard]] static std::filesystem::path QuarantineCorruptSetupJson(const std::filesystem::path& exeDir,
+                                                                    const std::filesystem::path& setup) {
+    // Startup owns this operation: rename only a local setup beside the exe.
+    // No copy/delete fallback, directory creation, or replacement of old recovery
+    // files. An empty result leaves the source in place for the startup warning.
+    try {
+        if (!exeDir.is_absolute() || !setup.is_absolute() ||
+            IsUncPath(exeDir) || IsUncPath(setup)) return {};
+        const auto dir = exeDir.lexically_normal();
+        const auto source = setup.lexically_normal();
+        if (source.parent_path() != dir || source.filename().empty()) return {};
+        for (auto ancestor = dir; !ancestor.empty(); ancestor = ancestor.parent_path()) {
+            DWORD attrs = INVALID_FILE_ATTRIBUTES;
+            if (!TryGetPathAttributesWin32(ancestor, &attrs) ||
+                (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+                (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return {};
+            if (ancestor == ancestor.parent_path()) break;
         }
-        if (ec) return {};
+        DWORD attrs = INVALID_FILE_ATTRIBUTES;
+        if (!TryGetPathAttributesWin32(source, &attrs) ||
+            (attrs & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) return {};
+        const auto sourceWin32 = ToExtendedWin32PathIfAbsoluteLocal(source);
+        const auto name = source.filename().wstring() + L".unreadable";
+        for (unsigned int index = 0; index <= 999; ++index) {
+            auto dest = dir / (index == 0 ? name : name + L"." + std::to_wstring(index));
+            const auto destWin32 = ToExtendedWin32PathIfAbsoluteLocal(dest);
+            // The rename itself decides collisions, including concurrent creators.
+            // Omitting REPLACE_EXISTING and COPY_ALLOWED preserves both originals.
+            if (MoveFileExW(sourceWin32.c_str(), destWin32.c_str(), MOVEFILE_WRITE_THROUGH)) return dest;
+            const DWORD error = GetLastError();
+            if (error != ERROR_ALREADY_EXISTS && error != ERROR_FILE_EXISTS) return {};
+        }
+    } catch (const std::exception&) {
+        return {};
     }
-    return dest;
+    return {};
 }
 
 
@@ -3313,7 +3324,7 @@ static std::vector<AnnotToolShortcutBinding> DefaultAnnotToolShortcuts() {
 
 static std::filesystem::path UserToolShortcutsFilePath() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__resource__" / L"__settings__" / L"tool_shortcuts.json";
+    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__settings__" / L"tool_shortcuts.json";
 }
 
 static std::string BuildUserToolShortcutsJson(const std::vector<AnnotToolShortcutBinding>& bindings) {
@@ -3521,7 +3532,7 @@ static void EnsureScheduleStartTimesSize(WorkspaceConfig& cfg) {
 }
 
 static std::filesystem::path ScheduleSettingsPath(const std::filesystem::path& root) {
-    return root / L"__resource__" / L"__settings__" / L"schedule.json";
+    return root / L"__pdf_note_workspace__" / L"__settings__" / L"schedule.json";
 }
 
 static bool LoadScheduleStartTimes(const std::filesystem::path& root, WorkspaceConfig& cfg) {
@@ -3561,12 +3572,12 @@ static bool LoadScheduleStartTimes(const std::filesystem::path& root, WorkspaceC
     return loaded;
 }
 
-static void SaveScheduleStartTimes(const std::filesystem::path& root, const WorkspaceConfig& cfg) {
-    if (root.empty()) return;
+static bool SaveScheduleStartTimes(const std::filesystem::path& root, const WorkspaceConfig& cfg) {
+    if (root.empty()) return false;
     std::filesystem::path path = ScheduleSettingsPath(root);
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) return;
+    if (ec) return false;
     size_t scheduleCount = static_cast<size_t>(
         std::max(1, std::clamp(cfg.schedulePeriods, 1, kScheduleMaxPeriods) * kScheduleMaxDays));
     std::ostringstream oss;
@@ -3590,7 +3601,7 @@ static void SaveScheduleStartTimes(const std::filesystem::path& root, const Work
     oss << "}\n";
     std::string data = oss.str();
     std::wstring err;
-    AtomicWriteUtf8WithWorkspaceDirs(path, data, root, &err);
+    return AtomicWriteUtf8WithWorkspaceDirs(path, data, root, &err);
 }
 
 static std::optional<int> ParseJsonIntField(const std::string& json, const std::string& key) {
@@ -4574,37 +4585,10 @@ LRESULT ThemeCtlColorPanel(HWND ctl, HDC hdc) {
     return reinterpret_cast<LRESULT>(br);
 }
 
-namespace {
-
-// DWM corner preferences were introduced after older supported Windows
-// releases. Resolve the API at runtime so unsupported systems retain their
-// native frame unchanged.
-using DwmSetWindowAttributeFn = HRESULT (WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
-constexpr DWORD kDwmWindowCornerPreference = 33;
-constexpr DWORD kDwmDoNotRound = 1;
-
-static DwmSetWindowAttributeFn ResolveDwmSetWindowAttribute() {
-    static const DwmSetWindowAttributeFn fn = []() -> DwmSetWindowAttributeFn {
-        HMODULE module = LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (!module) return nullptr;
-        return reinterpret_cast<DwmSetWindowAttributeFn>(GetProcAddress(module, "DwmSetWindowAttribute"));
-    }();
-    return fn;
-}
-
-static void DisableRoundedTopLevelWindowCorners(HWND hWnd) {
-    if (!hWnd || (GetWindowLongPtrW(hWnd, GWL_STYLE) & WS_CHILD) != 0) return;
-    const auto setAttribute = ResolveDwmSetWindowAttribute();
-    if (!setAttribute) return;
-    const DWORD preference = kDwmDoNotRound;
-    if (FAILED(setAttribute(hWnd, kDwmWindowCornerPreference, &preference, sizeof(preference)))) return;
-}
-
-} // namespace
-
 void ApplyThemeToDialog(HWND hWnd) {
     if (!hWnd) return;
-    DisableRoundedTopLevelWindowCorners(hWnd);
+    const HRESULT cornerResult = ui::ApplyAuxiliaryWindowCorners(hWnd);
+    (void)cornerResult;
     if (g_config.ownerDrawUi) {
         EnableOwnerDrawButtonsRecursive(hWnd);
     } else {
@@ -6921,6 +6905,7 @@ std::optional<WorkspaceConfig> LoadWorkspaceConfigFromFile(const std::filesystem
 }
 
 bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const WorkspaceConfig& cfg) {
+    write_checks::NormalOperation observation(g_workspaceRoot, path);
     std::wstring workspaceLockError;
     WorkspaceOperationLock workspaceLock(path.parent_path(), &workspaceLockError);
     if (!workspaceLock.acquired()) return false;
@@ -7131,7 +7116,10 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "}\n";
     std::string data = ofs.str();
     std::wstring err;
-    return AtomicWriteUtf8WithWorkspaceDirs(path, data, std::filesystem::path(g_workspaceRoot), &err);
+    write_checks::IgnoreNormalOperations ignore;
+    const bool saved = AtomicWriteUtf8WithWorkspaceDirs(path, data, std::filesystem::path(g_workspaceRoot), &err);
+    if (saved) observation.Success();
+    return saved;
 }
 
 void SaveWorkspaceConfig(const std::wstring& root, const WorkspaceConfig& cfg) {
@@ -7140,7 +7128,7 @@ void SaveWorkspaceConfig(const std::wstring& root, const WorkspaceConfig& cfg) {
     SaveWorkspaceConfigToFile(rootPath / L"workspace.json", cfg);
 }
 
-void PersistConfig() {
+bool TryPersistConfig() {
     if (!g_workspaceRoot.empty()) {
         g_config.leftWidth  = g_leftWidth;
         g_config.rightWidth = g_rightWidth;
@@ -7235,19 +7223,31 @@ void PersistConfig() {
         const std::filesystem::path configPath = std::filesystem::path(g_workspaceRoot) / L"workspace.json";
         const bool workspaceConfigPersistBlocked =
             IsWorkspaceConfigAutoPersistBlockedForRoot(std::filesystem::path(g_workspaceRoot));
-        if (!workspaceConfigPersistBlocked && !SaveWorkspaceConfigToFile(configPath, g_config)) {
+        if (workspaceConfigPersistBlocked || !SaveWorkspaceConfigToFile(configPath, g_config)) {
             DWORD now = GetTickCount();
             const std::wstring key = configPath.wstring();
             if (key != s_lastPersistConfigErrorPath || (now - s_lastPersistConfigErrorTick) >= 10000) {
                 s_lastPersistConfigErrorPath = key;
                 s_lastPersistConfigErrorTick = now;
                 std::wstring msg = localization::Format(L"core.workspace_settings.save_failed",
-                                                        {{L"PATH", key}});
+                                                        {{L"PATH", configPath.filename().wstring()}});
                 ShowAppCoreSoftNotice(g_hMainWnd, msg, SoftNoticeKind::Warning);
             }
+            return false;
         }
-        SaveScheduleStartTimes(std::filesystem::path(g_workspaceRoot), g_config);
+        if (!SaveScheduleStartTimes(std::filesystem::path(g_workspaceRoot), g_config)) {
+            ShowAppCoreSoftNotice(g_hMainWnd, localization::Format(L"core.workspace_settings.save_failed",
+                                  {{L"PATH", ScheduleSettingsPath(std::filesystem::path(g_workspaceRoot)).filename().wstring()}}),
+                                  SoftNoticeKind::Warning);
+            return false;
+        }
+        return true;
     }
+    return false;
+}
+
+void PersistConfig() {
+    (void)TryPersistConfig();
 }
 
 std::filesystem::path WorkspaceClassesPath(const std::wstring& root, const WorkspaceConfig& cfg) {
@@ -7476,12 +7476,19 @@ static bool ValidateSetupJsonForWrite(const std::string& json) {
 
 static bool AtomicWriteSetupJsonIfValid(const std::filesystem::path& setup,
                                         const std::string& json,
-                                        std::wstring* outErr = nullptr) {
+                                        std::wstring* outErr = nullptr,
+                                        const std::filesystem::path& workspaceRoot = {}) {
     if (outErr) outErr->clear();
     if (!ValidateSetupJsonForWrite(json)) {
         if (outErr) *outErr = L"setup.json として安全に保存できない内容です。";
         return false;
     }
+    auto observationRoot = workspaceRoot;
+    if (observationRoot.empty()) if (const auto configured = ParseJsonStringField(json, "workspaceRoot")) {
+        observationRoot = UTF8ToWide(*configured);
+        if (observationRoot.is_relative()) observationRoot = setup.parent_path() / observationRoot;
+    }
+    write_checks::NormalOperation observation(observationRoot, setup);
     std::wstring err;
     if (!atomic_write::AtomicWriteUtf8(setup, json, /*preferredTempDir=*/setup.parent_path(), &err)) {
         if (outErr) *outErr = err;
@@ -7497,6 +7504,7 @@ static bool AtomicWriteSetupJsonIfValid(const std::filesystem::path& setup,
         }
         return false;
     }
+    observation.Success();
     return true;
 }
 
@@ -7542,7 +7550,7 @@ static bool WriteSetupJsonFile(const std::filesystem::path& setup,
     std::string json = oss.str();
     SaveOperationGuard guard;
     std::wstring err;
-    return AtomicWriteSetupJsonIfValid(setup, json, &err);
+    return AtomicWriteSetupJsonIfValid(setup, json, &err, workspaceRoot);
 }
 
 static std::wstring ToExtendedWin32PathIfAbsolute(const std::filesystem::path& p) {
@@ -7761,9 +7769,12 @@ std::optional<std::wstring> LoadSetupWorkspaceRoot() {
         QueuePendingStartupNotice(setupErr, SoftNoticeKind::Error);
         return std::nullopt;
     }
+    write_checks::NormalOperation setupRead(defaultRoot, setup, write_checks::Kind::SetupRead, setup);
+    setupRead.Failure(ERROR_INVALID_DATA);
     std::wstring readErr;
     std::string json;
     if (!ReadTextFileUtf8Limited(setup, kMaxSetupJsonBytes, &json, &readErr)) {
+        setupRead.Failure(ERROR_READ_FAULT);
         std::wstring message =
             L"設定JSONファイルの読み込みに失敗しました。\n\npath:\n" + setup.wstring();
         if (!readErr.empty()) {
@@ -7857,6 +7868,9 @@ std::optional<std::wstring> LoadSetupWorkspaceRoot() {
             QueuePendingStartupNotice(message, SoftNoticeKind::Warning);
         }
     }
+
+    setupRead.SetWorkspaceRoot(root);
+    setupRead.Success(); // Parsed setup, not merely a successful fallback startup.
 
     // setup.jsonのworkspaceRootを相対/絶対で自動更新
     std::string desiredPath = WorkspaceRootPathForSetupJson(*exeDir, root);
@@ -8270,7 +8284,6 @@ void CheckAndPromptClassdirMismatch(HWND hWnd, const std::wstring& workspaceRoot
     message += L"setup.json側: " + setupClassdir + L"\n";
     message += L"workspace.json側: " + currentClassdir + L"\n\n";
     message += L"workspace.jsonを更新して合わせますか？\n";
-    message += L"[はい] 更新して合わせる\n[いいえ] そのままにする";
     
     if (ConfirmAppCoreYesNo(hWnd, L"classDirの確認", message, SoftNoticeKind::Warning,
                             SilentDialogResult::No, SilentDialogResult::No)) {
@@ -8290,6 +8303,7 @@ void CheckAndPromptClassdirMismatch(HWND hWnd, const std::wstring& workspaceRoot
 
 namespace {
 static constexpr wchar_t kSoftNoticeClass[] = L"PdfWorkspaceSoftNotice";
+// SoftNoticeProc timer ledger: 0x5E10 expires the current transient notice.
 static constexpr UINT_PTR kSoftNoticeTimerId = 0x5E10;
 static constexpr int kSoftNoticeMarginPx = 16;
 static constexpr int kSoftNoticePaddingX = 12;
@@ -8299,6 +8313,8 @@ static constexpr int kSoftNoticeAnchorGapPx = 18;
 static constexpr ULONGLONG kSoftNoticeRepeatSuppressMs = 4000;
 
 static HWND g_hSoftNotice = nullptr;
+static HWND g_softNoticeOwner = nullptr;
+static ULONGLONG g_softNoticeDeadline = 0;
 static std::wstring g_softNoticeText;
 static SoftNoticeKind g_softNoticeKind = SoftNoticeKind::Info;
 
@@ -8310,6 +8326,19 @@ struct UiMessageRepeatState {
 };
 
 static UiMessageRepeatState g_softNoticeRepeatState;
+
+static std::wstring NormalizeSoftNoticeText(const std::wstring& text) {
+    std::wstring msg = text;
+    msg.erase(std::remove(msg.begin(), msg.end(), L'\r'), msg.end());
+    while (!msg.empty() && (msg.back() == L'\n' || iswspace(msg.back()))) msg.pop_back();
+    return msg;
+}
+
+static HWND SoftNoticeRootOwner(HWND owner) {
+    if (!owner) return nullptr;
+    const HWND root = GetAncestor(owner, GA_ROOT);
+    return root ? root : owner;
+}
 
 // Only track the immediately previous notice to cheaply suppress retry storms.
 static bool ShouldSuppressRepeatedUiMessage(UiMessageRepeatState& state,
@@ -8393,7 +8422,11 @@ static LRESULT CALLBACK SoftNoticeProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
         return 1;
     case WM_TIMER:
         if (wParam == kSoftNoticeTimerId) {
+            // KillTimer does not remove queued WM_TIMER messages. An old
+            // expiration must not hide a newly displayed notice.
+            if (g_softNoticeDeadline && GetTickCount64() < g_softNoticeDeadline) return 0;
             KillTimer(hWnd, kSoftNoticeTimerId);
+            g_softNoticeDeadline = 0;
             ShowWindow(hWnd, SW_HIDE);
             return 0;
         }
@@ -8430,7 +8463,12 @@ static LRESULT CALLBACK SoftNoticeProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
         return 0;
     }
     case WM_DESTROY:
-        if (g_hSoftNotice == hWnd) g_hSoftNotice = nullptr;
+        if (g_hSoftNotice == hWnd) {
+            g_hSoftNotice = nullptr;
+            g_softNoticeOwner = nullptr;
+            g_softNoticeDeadline = 0;
+            g_softNoticeRepeatState = {};
+        }
         break;
     default:
         break;
@@ -8581,24 +8619,24 @@ static void PlaceSoftNoticeBottomRight(const RECT& ownerRc, const RECT& workRc,
 } // namespace
 
 void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
-    std::wstring msg = text;
-    msg.erase(std::remove(msg.begin(), msg.end(), L'\r'), msg.end());
-    while (!msg.empty() && (msg.back() == L'\n' || iswspace(msg.back()))) msg.pop_back();
+    const std::wstring msg = NormalizeSoftNoticeText(text);
     if (msg.empty()) return;
+    HWND anchor = owner ? owner : GetForegroundWindow();
+    if (!anchor) anchor = GetActiveWindow();
+    anchor = SoftNoticeRootOwner(anchor);
+    if (g_softNoticeOwner != anchor) g_softNoticeRepeatState = {};
     if (ShouldSuppressRepeatedUiMessage(g_softNoticeRepeatState, nullptr, msg, kind,
                                         kSoftNoticeRepeatSuppressMs)) {
         return;
     }
 
-    HWND anchor = owner ? owner : GetForegroundWindow();
-    if (!anchor) anchor = GetActiveWindow();
-    if (anchor) {
-        HWND root = GetAncestor(anchor, GA_ROOT);
-        if (root) anchor = root;
-    }
     EnsureSoftNoticeWindow(anchor);
-    if (!g_hSoftNotice) return;
+    if (!g_hSoftNotice) {
+        g_softNoticeRepeatState = {};
+        return;
+    }
 
+    g_softNoticeOwner = anchor;
     g_softNoticeText = msg;
     g_softNoticeKind = kind;
 
@@ -8644,11 +8682,29 @@ void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
     }
 
     KillTimer(g_hSoftNotice, kSoftNoticeTimerId);
+    const UINT duration = SoftNoticeDurationMsForKind(kind);
+    g_softNoticeDeadline = GetTickCount64() + duration;
+    if (!SetTimer(g_hSoftNotice, kSoftNoticeTimerId, duration, nullptr)) {
+        // Never leave an unbounded topmost notice when no expiry can be armed.
+        g_softNoticeDeadline = 0;
+        g_softNoticeRepeatState = {};
+        ShowWindow(g_hSoftNotice, SW_HIDE);
+        return;
+    }
     SetWindowPos(g_hSoftNotice, HWND_TOPMOST, x, y, w, h,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
     InvalidateRect(g_hSoftNotice, nullptr, TRUE);
     UpdateWindow(g_hSoftNotice);
-    SetTimer(g_hSoftNotice, kSoftNoticeTimerId, SoftNoticeDurationMsForKind(kind), nullptr);
+}
+
+void DismissSoftNotice(HWND owner, const std::wstring& expectedText) {
+    if (!g_hSoftNotice || !IsWindow(g_hSoftNotice)) return;
+    if (g_softNoticeOwner != SoftNoticeRootOwner(owner) ||
+        g_softNoticeText != NormalizeSoftNoticeText(expectedText)) return;
+    KillTimer(g_hSoftNotice, kSoftNoticeTimerId);
+    g_softNoticeDeadline = 0;
+    g_softNoticeRepeatState = {};
+    ShowWindow(g_hSoftNotice, SW_HIDE);
 }
 // --- Global Beep Filter ---
 static HHOOK g_hBeepFilterHook = nullptr;

@@ -21,7 +21,8 @@ void LoadNoteFile(HWND hWnd, const std::wstring& notePath);
 void SyncBottomPaneAfterNoteLoad(HWND hWnd);
 std::filesystem::path CanonicalOrSelf(const std::filesystem::path& p);
 bool IsTempExternalLecturePath(const std::wstring& lecturePath);
-std::optional<std::wstring> PickFileUnder(HWND owner, const std::filesystem::path& root, const std::wstring& title);
+std::optional<std::wstring> PickFileUnder(HWND owner, const std::filesystem::path& root, const std::wstring& title,
+                                        const std::wstring& confirmLabel = {});
 void ApplyOwnerDrawUi(HWND hWnd);
 void LayoutChildren(HWND hWnd);
 #include "core/app_core.h" // For ToolMode
@@ -52,8 +53,10 @@ std::filesystem::path DialogDownloadsInitialFolder();
 std::filesystem::path DialogDocumentsInitialFolder();
 bool PersistTempExternalLecturesToSetup(std::wstring* outError = nullptr);
 std::optional<std::wstring> PromptExistingLocalPath(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool requireDirectory,
-                                                     const std::filesystem::path& highlightPath = {});
-std::optional<std::wstring> PromptExistingLocalPathAppFirst(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool requireDirectory);
+                                                     const std::filesystem::path& highlightPath = {},
+                                                     const std::wstring& confirmLabel = {});
+std::optional<std::wstring> PromptExistingLocalPathAppFirst(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool requireDirectory,
+                                                          const std::wstring& confirmLabel = {});
 
 
 enum class SessionNumberingMode { CountPlusOne, MaxNumberPlusOne };
@@ -72,7 +75,8 @@ std::wstring BestMatchByStem(const std::filesystem::path& anchor,
 std::wstring ToLowerAscii(std::wstring s);
 HWND MainDialogOwner(HWND hWnd);
 void ReloadSessionsAndSelect(const std::wstring& lecturePath, const std::wstring& selectSession, bool editNew);
-std::vector<std::wstring> PromptExistingLocalFolders(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool allowMultiple);
+std::vector<std::wstring> PromptExistingLocalFolders(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool allowMultiple,
+                                                  const std::wstring& confirmLabel = {});
 int CurrentSessionIndex();
 bool RefreshCurrentSessionFiles();
 bool OpenPdfIfDifferent(HWND hWnd, const std::wstring& path);
@@ -149,7 +153,9 @@ void BeginOfficeConversionProgress(HWND owner, size_t total, const std::filesyst
 
 bool IsUiAutomationEnabled();
 void UpdateOfficeConversionProgress(HWND owner, size_t current, size_t total, const std::filesystem::path& source);
-std::vector<std::wstring> PickOfficeFilesUnder(HWND owner, const std::filesystem::path& root, const std::wstring& title);
-std::vector<std::wstring> PickFilesUnder(HWND owner, const std::filesystem::path& root, const std::wstring& title);
+std::vector<std::wstring> PickOfficeFilesUnder(HWND owner, const std::filesystem::path& root, const std::wstring& title,
+                                            const std::wstring& confirmLabel = {});
+std::vector<std::wstring> PickFilesUnder(HWND owner, const std::filesystem::path& root, const std::wstring& title,
+                                      const std::wstring& confirmLabel = {});
 
 bool CopyFileForImportSafely(const std::filesystem::path& src, const std::filesystem::path& dest, std::wstring* outErr);

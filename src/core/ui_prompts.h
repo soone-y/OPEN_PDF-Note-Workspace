@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -19,8 +20,12 @@ enum class PromptCreateNameResult {
 
 bool PromptNewLectureName(HWND owner, std::wstring& outName);
 bool PromptNewSessionName(HWND owner, std::wstring& outName);
+// The caller owns validation; a failed check keeps the same dialog and input
+// alive. No accepted value is published until the check succeeds.
+using SimpleTextValidator = std::function<bool(HWND, const std::wstring&)>;
 bool PromptSimpleText(HWND owner, const std::wstring& title,
-                      const std::wstring& initial, std::wstring& out);
+                      const std::wstring& initial, std::wstring& out,
+                      const SimpleTextValidator& validate = {});
 
 struct BlankPdfDialogOptions {
     double widthPt = 595.0;
@@ -39,11 +44,20 @@ enum class SavePathPromptResult {
     OpenSystemDialog,
 };
 
-// Output-only prompt: show the destination folder and file name separately.
-SavePathPromptResult PromptSavePath(HWND owner, const std::wstring& title,
-                                    const std::wstring& directory,
-                                    const std::wstring& defaultName,
-                                    std::wstring& outFileName);
+struct SavePathPromptSelection {
+    SavePathPromptResult action = SavePathPromptResult::Cancel;
+    std::filesystem::path directory;
+    std::wstring fileName;
+};
+
+// Select a destination without creating or overwriting it. The local browser
+// owns folder navigation and name entry; the caller owns the native save dialog
+// and validates the full destination before any write. Native handoff retains
+// the folder/name edited in the local browser. Cancel grants no write permission.
+[[nodiscard]] SavePathPromptSelection PromptSavePath(HWND owner, const std::wstring& title,
+                                                     const std::filesystem::path& directory,
+                                                     const std::wstring& defaultName,
+                                                     const std::wstring& defaultExtension);
 PromptCreateNameResult PromptCreateName(HWND owner,
                                         const std::wstring& title,
                                         const std::wstring& label,

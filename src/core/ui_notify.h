@@ -18,6 +18,10 @@ enum class SoftNoticeKind {
 
 void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind = SoftNoticeKind::Info);
 
+// Hide only the matching owner's notice when its interaction resumes. Allow
+// the next explicit attempt to show the same guidance again immediately.
+void DismissSoftNotice(HWND owner, const std::wstring& expectedText);
+
 enum class SilentDialogButtons {
     Ok,
     OkCancel,
@@ -62,6 +66,9 @@ struct SilentDialogOptions {
     int preferredWidthPx = 0;
     SilentDialogPlacement placement = SilentDialogPlacement::CenterOwner;
     std::vector<SilentDialogPath> paths;
+    // Optional display-only text following the compact paths. Empty keeps the
+    // existing message/path layout for callers that do not need detail sections.
+    std::wstring additionalInformation;
 };
 
 SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& options);

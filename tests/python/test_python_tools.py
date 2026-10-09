@@ -53,6 +53,15 @@ libreoffice_conversion_quality_test = load_module(
 LibreOfficeCustomPatchTests = load_module(
     "libreoffice_custom_patch_tests", "tests/python/test_libreoffice_custom_patches.py"
 ).LibreOfficeCustomPatchTests
+LibreOfficeUpstreamConversionTests = load_module(
+    "libreoffice_upstream_conversion_tests", "tests/python/test_libreoffice_upstream_conversion.py"
+).LibreOfficeUpstreamConversionTests
+LibreOfficeConversionCorpusTests = load_module(
+    "libreoffice_conversion_corpus_tests", "tests/python/test_libreoffice_conversion_corpus.py"
+).LibreOfficeConversionCorpusTests
+LibreOfficeConversionExpectationsTests = load_module(
+    "libreoffice_conversion_expectations_tests", "tests/python/test_libreoffice_conversion_expectations.py"
+).ConversionExpectationsTests
 render_human_docs = load_module("render_human_docs", "site/github/scripts/render_human_docs.py")
 build_public_site = load_module("build_public_site", "site/github/scripts/build_public_site.py")
 validate_public_site = load_module("validate_public_site", "site/github/scripts/validate_public_site.py")
@@ -101,6 +110,9 @@ pe_fixtures = load_module("pe_fixtures", "tests/python/pe_fixtures.py")
 CheckFailureContractTests = load_module(
     "check_failure_contracts", "tests/python/test_check_failure_contracts.py"
 ).CheckFailureContractTests
+BackgroundAppTests = load_module(
+    "background_app_tests", "tests/python/test_background_app.py"
+).BackgroundAppTests
 
 # Run executable JSON persistence regressions in the ordinary repository gate.
 SetupJsonRoundTripTests = load_module(
@@ -135,6 +147,92 @@ def _validate_annotation_shortcuts(entries: list[dict]) -> None:
         if chord in {"ALT+CTRL+LEFT", "ALT+CTRL+RIGHT", "ALT+CTRL+UP", "ALT+CTRL+DOWN"}:
             raise ValueError("fixed annotation navigation shortcut is reserved")
         seen.add(chord)
+
+
+class DialogActionLabelTests(unittest.TestCase):
+    def test_preset_restore_dialog_uses_the_output_dialog_theme_contract(self) -> None:
+        ja = json.loads((REPO_ROOT / "locales/ja.json").read_text(encoding="utf-8"))
+        en = json.loads((REPO_ROOT / "locales/en.json").read_text(encoding="utf-8"))
+        self.assertEqual(ja["settings.workspace_tools.title"], "設定プリセットと復元")
+        self.assertEqual(en["settings.workspace_tools.title"], "Settings Presets and Restore")
+        self.assertEqual(ja["settings.preset.close"], "やめる")
+        source = (REPO_ROOT / "src/workspace/workspace_config_io.cpp").read_text(encoding="utf-8")
+        dialog = source[source.index("static LRESULT CALLBACK SettingsPresetDialogProc"):
+                        source.index("void ShowSettingsPresetDialog")]
+        output = (REPO_ROOT / "src/ui/dialogs/export_dialog.cpp").read_text(encoding="utf-8")
+        for marker in ("case WM_THEMECHANGED:", "case WM_ERASEBKGND:", "case WM_CTLCOLORSTATIC:",
+                       "case WM_DRAWITEM:", "ThemeCtlColorPanel(", "DrawThemeButton(",
+                       "WS_CAPTION | WS_POPUPWINDOW", "RegisterAppExitBlockingDialog("):
+            self.assertIn(marker, dialog)
+            self.assertIn(marker, output)
+        helpers = source[source.index("static void SetPresetDialogFont"):source.index("static void ShowWorkspaceToolsPage")]
+        self.assertNotIn("DEFAULT_GUI_FONT", helpers)
+        self.assertIn("if (LOWORD(wParam) == IDCANCEL)", dialog)
+        self.assertIn("return ctx ? DefWindowProcW(hWnd, message, wParam, lParam) : FALSE;", dialog)
+        self.assertIn("kWorkspaceToolsPresetTab = 7101", source)
+        self.assertIn("kWorkspaceToolsRestoreTab = 7102", source)
+
+    def test_settings_persistence_uses_save_without_mislabeling_color_selection(self) -> None:
+        for locale, label in (("ja", "保存"), ("en", "Save")):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            for text_id in ("settings.unified.save_apply", "settings.common.5e0e1efd1bae",
+                            "settings.schedule.time.ok", "dialog.action.save"):
+                self.assertEqual(catalog[text_id], label)
+            self.assertNotIn("する", catalog["settings.unified.apply_hint"])
+            self.assertNotIn("Do:", catalog["settings.unified.apply_hint"])
+        shortcuts = (REPO_ROOT / "src/settings/settings_shortcut_editor.cppinc").read_text(encoding="utf-8")
+        self.assertIn('localization::Text(L"dialog.action.save").c_str()', shortcuts)
+        palette = (REPO_ROOT / "src/settings/settings_palette.cppinc").read_text(encoding="utf-8")
+        self.assertIn('L"BUTTON", UiOkLabel().c_str()', palette)
+        self.assertNotIn('L"BUTTON", UiApplyLabel().c_str()', palette)
+
+    def test_common_choices_have_distinct_short_labels_in_both_locales(self) -> None:
+        for locale, labels in (("ja", ("する", "しない", "やめる")),
+                               ("en", ("Do", "Don't", "Exit"))):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            self.assertEqual(catalog["dialog.button.yes"], labels[0])
+            self.assertEqual(catalog["dialog.button.ok"], labels[0])
+            self.assertEqual(catalog["dialog.button.keep_open"], labels[1])
+            self.assertEqual(catalog["dialog.button.no"], labels[2])
+            self.assertEqual(catalog["dialog.button.cancel"], labels[2])
+            self.assertFalse(set(catalog.values()) & {"OK", "Cancel", "キャンセル", "Yes", "No", "はい", "いいえ"})
+
+    def test_app_buttons_do_not_bypass_localized_action_labels(self) -> None:
+        opaque_button = re.compile(r'L"BUTTON",\s*L"(?:OK|Cancel|キャンセル|はい|いいえ)"')
+        for path in (REPO_ROOT / "src").rglob("*"):
+            if path.suffix in {".cpp", ".cppinc", ".h"}:
+                self.assertIsNone(opaque_button.search(path.read_text(encoding="utf-8")), str(path))
+        core = (REPO_ROOT / "src/core/app_core.cpp").read_text(encoding="utf-8")
+        self.assertNotIn("ChooseColorW(", core)
+        self.assertIn("return ShowPaletteColorEditorDialog(owner, initial, outColor);", core)
+
+    def test_keep_open_is_not_returned_as_a_closed_dialog_result(self) -> None:
+        source = (REPO_ROOT / "src/ui/dialogs/dialogs.cpp").read_text(encoding="utf-8")
+        self.assertIn("if (ctx->buttonSpecs[i].result == SilentDialogResult::None) return 0;", source)
+        self.assertIn("ctx->options.yesLabel.empty() && ctx->options.noLabel.empty()", source)
+        automation = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(encoding="utf-8")
+        self.assertIn("SendMessageW(keep, BM_CLICK, 0, 0)", automation)
+        self.assertIn("automation:silent_choices_keep_open_execute_exit_ok", automation)
+
+    def test_file_picker_actions_use_operation_labels(self) -> None:
+        ja = json.loads((REPO_ROOT / "locales/ja.json").read_text(encoding="utf-8"))
+        en = json.loads((REPO_ROOT / "locales/en.json").read_text(encoding="utf-8"))
+        self.assertEqual(ja["dialog.action.import"], "取り込む")
+        self.assertEqual(ja["dialog.action.convert"], "変換")
+        self.assertEqual(ja["dialog.action.restore"], "復元")
+        self.assertEqual(ja["dialog.action.delete"], "削除")
+        self.assertEqual(en["dialog.action.import"], "Import")
+        self.assertEqual(en["dialog.action.convert"], "Convert")
+        self.assertEqual(en["dialog.action.restore"], "Restore")
+        self.assertEqual(en["dialog.action.delete"], "Delete")
+        actions = (REPO_ROOT / "src/workspace/workspace_actions.cpp").read_text(encoding="utf-8")
+        dispatch = (REPO_ROOT / "src/app/command_dispatch.cppinc").read_text(encoding="utf-8")
+        browser = (REPO_ROOT / "src/ui/lists/main_local_path_browser.cppinc").read_text(encoding="utf-8")
+        self.assertIn('L"dialog.action.import"', actions)
+        self.assertIn('L"dialog.action.convert"', actions)
+        self.assertIn('L"dialog.action.delete"', dispatch)
+        self.assertIn("SetOkButtonLabel(action.c_str())", browser)
+        self.assertIn("state.confirmLabel", browser)
 
 
 class AnnotationToolPolicyTests(unittest.TestCase):
@@ -400,8 +498,11 @@ class AnnotationToolPolicyTests(unittest.TestCase):
         assets = (REPO_ROOT / "src/settings/settings_assets.cppinc").read_text(encoding="utf-8")
         ids = (REPO_ROOT / "src/core/command_ids.h").read_text(encoding="utf-8")
 
-        self.assertIn("ID_SETTINGS_PRESET_SAVE", menu)
-        self.assertIn("ID_SETTINGS_PRESET_LOAD", menu)
+        self.assertIn('AppendMenuW(settings, MF_STRING, ID_SETTINGS_PRESETS, text(L"menu.settings.presets").c_str());', menu)
+        self.assertNotIn("HMENU presets", menu)
+        self.assertNotIn("ID_SETTINGS_PRESET_SAVE", menu)
+        self.assertNotIn("ID_SETTINGS_PRESET_LOAD", menu)
+        self.assertIn("case ID_SETTINGS_PRESETS:\n        ShowSettingsPresetDialog(hWnd);", dispatch)
         self.assertIn("case ID_SETTINGS_PRESET_SAVE", dispatch)
         self.assertIn("case ID_SETTINGS_PRESET_LOAD", dispatch)
         self.assertIn("PickSettingsPresetSavePath", config_io)
@@ -409,8 +510,8 @@ class AnnotationToolPolicyTests(unittest.TestCase):
         self.assertIn("ExportSettingsPresetToFile", config_io)
         self.assertIn("ImportSettingsPresetFromFile", config_io)
         self.assertIn("workspace.config_io.0d32b1c7e154", config_io)
-        self.assertIn("IDC_SETTINGS_ASSETS_PRESET_SAVE", assets)
-        self.assertIn("IDC_SETTINGS_ASSETS_PRESET_LOAD", assets)
+        self.assertNotIn("IDC_SETTINGS_ASSETS_PRESET_SAVE", assets)
+        self.assertNotIn("IDC_SETTINGS_ASSETS_PRESET_LOAD", assets)
 
         combined = menu + dispatch + config_io + assets + ids
         for obsolete in (
@@ -623,7 +724,7 @@ class MigrateClropV1Tests(unittest.TestCase):
             keep.parent.mkdir(parents=True, exist_ok=True)
             keep.write_text("{}", encoding="utf-8")
 
-            ignored = root / "__resource__" / "__tmp__" / "__stage__" / "clrop" / "staged.clrop"
+            ignored = root / "__pdf_note_workspace__" / "__tmp__" / "__stage__" / "clrop" / "staged.clrop"
             ignored.parent.mkdir(parents=True, exist_ok=True)
             ignored.write_text("{}", encoding="utf-8")
 
@@ -3510,11 +3611,11 @@ class ReleaseLocaleContentGateTests(unittest.TestCase):
 
 class ReleaseSetIntegrityGateTests(unittest.TestCase):
     @staticmethod
-    def write_zip(release_dir: Path, zip_path: Path) -> None:
+    def write_zip(release_dir: Path, zip_path: Path, archive_root: str | None = None) -> None:
         with zipfile.ZipFile(zip_path, "w") as archive:
             for path in release_dir.rglob("*"):
                 if path.is_file():
-                    archive.write(path, Path(release_dir.name) / path.relative_to(release_dir))
+                    archive.write(path, Path(archive_root or release_dir.name) / path.relative_to(release_dir))
 
     def make_release_set(self, root: Path) -> tuple[Path, Path, Path]:
         release_set = root / "release_set"
@@ -3540,8 +3641,9 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
         (full / "lo").mkdir(parents=True)
         full_zip = release_set / "release_full.zip"
         lite_zip = release_set / "release_lite.zip"
-        self.write_zip(full, full_zip)
-        self.write_zip(lite, lite_zip)
+        archive_root = "PDF-Note-Workspace-1.0.0"
+        self.write_zip(full, full_zip, archive_root)
+        self.write_zip(lite, lite_zip, archive_root)
         (release_set / "release_set_manifest.json").write_text(json.dumps({
             "app_version": "1.0.0",
             "locale": "ja",
@@ -3551,7 +3653,11 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
                 "public_snapshot": snapshot.name,
                 "release_zip": full_zip.name,
                 "release_lite_zip": lite_zip.name,
-            }
+            },
+            "zip_roots": {
+                "release_zip": archive_root,
+                "release_lite_zip": archive_root,
+            },
         }), encoding="utf-8")
         allowlist = root / "allowlist.txt"
         allowlist.write_text("README.md\n", encoding="utf-8")
@@ -3574,6 +3680,18 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
             (full / "libreoffice" / "custom_runtime" / "instdir").mkdir(parents=True)
 
             self.assertEqual(release_set_integrity_gate.validate_release_set(release_set), [])
+
+    def test_rejects_archive_root_that_does_not_match_the_version(self) -> None:
+        with repo_tempdir() as root:
+            release_set, _, _ = self.make_release_set(root)
+            manifest_path = release_set / "release_set_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["zip_roots"]["release_zip"] = "PDF-Note-Workspace-9.9.9"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            errors = release_set_integrity_gate.validate_release_set(release_set)
+
+            self.assertTrue(any("ZIP root for release_zip must be" in error for error in errors))
 
     def test_rejects_snapshot_change_after_manifest_creation(self) -> None:
         with repo_tempdir() as root:
@@ -3606,8 +3724,10 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
     def test_rejects_unexpected_zip_file(self) -> None:
         with repo_tempdir() as root:
             release_set, _, full_zip = self.make_release_set(root)
+            manifest = json.loads((release_set / "release_set_manifest.json").read_text(encoding="utf-8"))
+            archive_root = manifest["zip_roots"]["release_zip"]
             with zipfile.ZipFile(full_zip, "a") as archive:
-                archive.writestr("release_full/unexpected.txt", "not in the extracted release")
+                archive.writestr(f"{archive_root}/unexpected.txt", "not in the extracted release")
 
             errors = release_set_integrity_gate.validate_release_set(release_set)
 
@@ -3639,6 +3759,21 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
 
 
 class ReleaseStartupSmokeGateTests(unittest.TestCase):
+    def test_safe_extract_accepts_the_manifest_archive_root(self) -> None:
+        with repo_tempdir() as root:
+            release_dir = root / "release"
+            release_dir.mkdir()
+            (release_dir / "app.exe").write_bytes(b"app")
+            archive = root / "release.zip"
+            archive_root = "PDF-Note-Workspace-1.0.0"
+            with zipfile.ZipFile(archive, "w") as output:
+                output.write(release_dir / "app.exe", f"{archive_root}/app.exe")
+
+            destination = root / "extract"
+            release_startup_smoke_gate.safe_extract(archive, destination, release_dir, archive_root)
+
+            self.assertEqual((destination / archive_root / "app.exe").read_bytes(), b"app")
+
     def test_rejects_zip_path_traversal(self) -> None:
         with repo_tempdir() as root:
             archive = root / "bad.zip"
@@ -3652,11 +3787,13 @@ class ReleaseStartupSmokeGateTests(unittest.TestCase):
                 release_startup_smoke_gate.safe_extract(archive, root / "extract", release_dir)
 
     def test_rejects_previously_started_release_copy(self) -> None:
-        with repo_tempdir() as root:
-            (root / "workspace" / "__resource__").mkdir(parents=True)
-
-            with self.assertRaisesRegex(RuntimeError, "配布ZIPに、初回起動で生成される不要なデータ.*workspace"):
+        for runtime_root in ("workspace", "__pdf_note_workspace__"):
+            with self.subTest(runtime_root=runtime_root), repo_tempdir() as root:
                 release_startup_smoke_gate.assert_not_previously_started(root)
+                (root / runtime_root).mkdir()
+
+                with self.assertRaisesRegex(RuntimeError, "配布ZIPに、初回起動で生成される不要なデータ.*" + runtime_root):
+                    release_startup_smoke_gate.assert_not_previously_started(root)
 
 
 class RepositoryScriptAndTextGateTests(unittest.TestCase):

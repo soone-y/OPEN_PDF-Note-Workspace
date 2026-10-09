@@ -1,6 +1,7 @@
 #include "note/note_identity_store.h"
 
 #include "core/atomic_write.h"
+#include "diagnostics/normal_operations.h"
 #include "core/path_safety.h"
 
 #include <windows.h>
@@ -198,11 +199,11 @@ bool PersistRuntimeStoreLocked(RuntimeStoreState& state, std::wstring* outError)
         return false;
     }
     const std::string bytes = state.catalog.Serialize();
-    const std::filesystem::path resource = state.workspace_root / L"__resource__";
+    const std::filesystem::path resource = state.workspace_root / L"__pdf_note_workspace__";
     const std::filesystem::path preferredTemp = resource / L"__tmp__";
     const std::filesystem::path quarantine = resource / L"__escape__";
     std::wstring err;
-    if (!atomic_write::AtomicWriteBytes(state.store_path,
+    if (!write_checks::ObservedWriteBytes(state.workspace_root, state.store_path,
                                         bytes.data(), bytes.size(),
                                         preferredTemp, quarantine, &err)) {
         state.dirty = true;
@@ -456,7 +457,7 @@ bool ConfigureRuntimeNoteIdentityStore(const std::filesystem::path& workspaceRoo
     state.dirty = false;
     state.workspace_root = std::filesystem::path(
         NormalizePathKey(workspaceRoot.wstring()));
-    state.store_path = state.workspace_root / L"__resource__" / L"__settings__" /
+    state.store_path = state.workspace_root / L"__pdf_note_workspace__" / L"__settings__" /
                        L"note_identity_registry.bin";
 
     PersistentNoteIdentityCatalog catalog;

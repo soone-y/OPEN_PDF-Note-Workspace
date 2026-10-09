@@ -649,7 +649,7 @@ static void CreateChildren(HWND hWnd) {
                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_HEADING2)),
                                              g_hInst, nullptr);
     g_hShortcutHeadingLevelLabel = CreateWindowExW(0, L"STATIC",
-                                                   std::to_wstring(std::clamp(g_noteShortcutHeadingLevel, 1, 9)).c_str(),
+                                                   std::to_wstring(std::clamp(g_noteShortcutHeadingLevel, 1, 6)).c_str(),
                                                    WS_CHILD | WS_VISIBLE | SS_CENTER,
                                                    0, 0, 28, 24, hWnd, nullptr, g_hInst, nullptr);
     g_hBtnShortcutHeadingLevelUp = CreateWindowExW(0, L"BUTTON", L"▲",
@@ -657,22 +657,22 @@ static void CreateChildren(HWND hWnd) {
                                                    0, 0, 28, 24, hWnd,
                                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_HEADING_LEVEL_UP)),
                                                    g_hInst, nullptr);
-    g_hChkShortcutBack = CreateWindowExW(0, L"BUTTON", L"back",
+    g_hChkShortcutBack = CreateWindowExW(0, L"BUTTON", localization::Text(L"note.input_assist.background").c_str(),
                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                          0, 0, 120, 24, hWnd, nullptr, g_hInst, nullptr);
-    g_hChkShortcutChar = CreateWindowExW(0, L"BUTTON", L"char",
+    g_hChkShortcutChar = CreateWindowExW(0, L"BUTTON", localization::Text(L"note.input_assist.text_color").c_str(),
                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                          0, 0, 120, 24, hWnd, nullptr, g_hInst, nullptr);
-    g_hChkShortcutBold = CreateWindowExW(0, L"BUTTON", L"b",
+    g_hChkShortcutBold = CreateWindowExW(0, L"BUTTON", localization::Text(L"note.input_assist.bold").c_str(),
                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                          0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
-    g_hChkShortcutItalic = CreateWindowExW(0, L"BUTTON", L"i",
+    g_hChkShortcutItalic = CreateWindowExW(0, L"BUTTON", localization::Text(L"note.input_assist.italic").c_str(),
                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                            0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
-    g_hChkShortcutStrike = CreateWindowExW(0, L"BUTTON", L"x",
+    g_hChkShortcutStrike = CreateWindowExW(0, L"BUTTON", localization::Text(L"note.input_assist.strike").c_str(),
                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                            0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
-    g_hChkShortcutUnderline = CreateWindowExW(0, L"BUTTON", L"u",
+    g_hChkShortcutUnderline = CreateWindowExW(0, L"BUTTON", localization::Text(L"note.input_assist.underline").c_str(),
                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                               0, 0, 60, 24, hWnd, nullptr, g_hInst, nullptr);
     {
@@ -738,6 +738,7 @@ static void CreateChildren(HWND hWnd) {
                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                            0, 0, 120, 24, hWnd, nullptr, g_hInst, nullptr);
     if (g_hShortcutTagEdit) {
+        SetWindowSubclass(g_hShortcutTagEdit, ShortcutBodySubclassProc, 1, 0);
         const std::wstring cue = localization::Text(L"ui.layout.ebc7e0973ac6").c_str();
         SendMessageW(g_hShortcutTagEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue.c_str()));
     }
@@ -859,98 +860,78 @@ struct SessionOrganizeStats {
     std::vector<std::pair<std::filesystem::path, std::filesystem::path>> movedPaths;
 };
 
-static std::filesystem::path BuildConflictFreePath(const std::filesystem::path& destDir,
-                                                   const std::filesystem::path& fileName) {
-    std::error_code ec;
-    std::filesystem::path base = fileName.stem();
-    std::filesystem::path ext = fileName.extension();
-    std::filesystem::path candidate = destDir / fileName;
-    int suffix = 1;
-    while (std::filesystem::exists(candidate, ec) && !ec) {
-        candidate = destDir / (base.wstring() + L" (" + std::to_wstring(suffix) + L")" + ext.wstring());
-        ++suffix;
-    }
-    return candidate;
-}
-
 static SessionOrganizeStats NormalizeCacheSession(const std::filesystem::path& sessionRoot) {
     SessionOrganizeStats stats;
-    std::error_code ec;
     const bool rootLayout = SessionFilesUseRootDirectory();
     const auto pdfDir = PdfDirectoryForSession(sessionRoot);
     const auto noteDir = NoteDirectoryForSession(sessionRoot);
-    if (!rootLayout) {
-        std::filesystem::create_directories(pdfDir, ec);
-        if (ec) {
+    std::error_code ec;
+    for (const auto& dir : {pdfDir, noteDir}) {
+        bool reparse = false;
+        if (!IsPathUnderRoot(dir, sessionRoot) ||
+            (TryIsReparsePointNoFollow(dir, reparse) && reparse)) {
             stats.failed++;
-            stats.failures.push_back(L"failed to create directory: " + pdfDir.wstring());
+            stats.failures.push_back(dir.wstring());
             return stats;
         }
+        std::filesystem::create_directories(dir, ec);
+        if (ec) { stats.failed++; stats.failures.push_back(dir.wstring()); return stats; }
+    }
+    const std::vector<std::filesystem::path> sourceDirs = rootLayout
+        ? std::vector<std::filesystem::path>{sessionRoot / L"pdf", sessionRoot / L"note"}
+        : std::vector<std::filesystem::path>{sessionRoot};
+    std::vector<std::filesystem::path> files;
+    for (const auto& dir : sourceDirs) {
+        bool reparse = false;
+        if (TryIsReparsePointNoFollow(dir, reparse) && reparse) {
+            stats.failed++; stats.failures.push_back(dir.wstring()); return stats;
+        }
         ec.clear();
-        std::filesystem::create_directories(noteDir, ec);
-        if (ec) {
+        const bool present = std::filesystem::exists(dir, ec);
+        if (ec) { stats.failed++; stats.failures.push_back(dir.wstring()); return stats; }
+        if (!present) continue;
+        std::filesystem::directory_iterator it(dir, ec), last;
+        while (!ec && it != last) {
+            const auto path = it->path();
+            bool fileReparse = false;
+            if (TryIsReparsePointNoFollow(path, fileReparse) && fileReparse) {
+                stats.failed++; stats.failures.push_back(path.wstring()); return stats;
+            }
+            if (it->is_regular_file(ec) && !ec) files.push_back(path);
+            if (!ec) it.increment(ec);
+        }
+        if (ec) { stats.failed++; stats.failures.push_back(dir.wstring()); return stats; }
+    }
+    // Move notes first: rewrite links at the PDFs' original locations before
+    // moving each PDF + clrop + history bundle. Never move a paired clrop twice.
+    std::stable_sort(files.begin(), files.end(), [](const auto& a, const auto& b) {
+        return IsNoteFile(a) && !IsNoteFile(b);
+    });
+    for (const auto& src : files) {
+        const bool bundle = IsPdfFile(src) || IsImageFile(src);
+        const bool note = IsNoteFile(src);
+        const bool clrop = ToLowerAscii(src.extension().wstring()) == L".clrop";
+        if (!bundle && !note && !clrop) continue;
+        if (clrop) {
+            const bool paired = std::any_of(files.begin(), files.end(), [&](const auto& path) {
+                return (IsPdfFile(path) || IsImageFile(path)) &&
+                    CanonicalOrSelf(path.parent_path()) == CanonicalOrSelf(src.parent_path()) &&
+                    ToLowerAscii(path.stem().wstring()) == ToLowerAscii(src.stem().wstring());
+            });
+            if (paired) continue;
+        }
+        const auto destDir = note ? noteDir : pdfDir;
+        if (CanonicalOrSelf(src.parent_path()) == CanonicalOrSelf(destDir)) continue;
+        stats.candidates++;
+        std::filesystem::path dest;
+        if (!OrganizeSessionFile(g_hMainWnd, src, destDir, &dest)) {
             stats.failed++;
-            stats.failures.push_back(L"failed to create directory: " + noteDir.wstring());
-            return stats;
+            stats.failures.push_back(src.wstring());
+            break; // A recovery-required transaction must stop the batch.
         }
-    }
-
-    std::vector<std::filesystem::path> sourceDirs;
-    if (rootLayout) {
-        sourceDirs = { sessionRoot / L"pdf", sessionRoot / L"note" };
-    } else {
-        sourceDirs = { sessionRoot };
-    }
-    for (const auto& sourceDir : sourceDirs) {
-        ec.clear();
-        if (!std::filesystem::exists(sourceDir, ec) || ec ||
-            !std::filesystem::is_directory(sourceDir, ec) || ec) continue;
-        for (const auto& entry : std::filesystem::directory_iterator(sourceDir, ec)) {
-            bool isReparse = false;
-            if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
-            std::error_code stEc;
-            if (!entry.is_regular_file(stEc) || stEc) continue;
-            const auto src = entry.path();
-            auto ext = src.extension().wstring();
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-            const bool isPdf = IsPdfFile(src);
-            const bool isClrop = (ext == L".clrop");
-
-            std::filesystem::path destDir;
-            if (isPdf || IsImageFile(src) || isClrop) destDir = pdfDir;
-            else if (IsNoteFile(src)) destDir = noteDir;
-            else continue;
-
-            std::filesystem::path dest = destDir / src.filename();
-            if (CanonicalOrSelf(src) == CanonicalOrSelf(dest)) continue;
-            stats.candidates++;
-            if (std::filesystem::exists(dest, ec) && !ec) {
-                dest = BuildConflictFreePath(destDir, src.filename());
-                if (dest.filename() != src.filename()) stats.renamedOnConflict++;
-            }
-            ec.clear();
-
-            std::filesystem::rename(src, dest, ec);
-            if (ec) {
-                ec.clear();
-                std::filesystem::copy_file(src, dest, std::filesystem::copy_options::none, ec);
-                if (ec) {
-                    stats.failed++;
-                    stats.failures.push_back(src.wstring() + L" -> " + dest.wstring());
-                    continue;
-                }
-                ec.clear();
-                std::filesystem::remove(src, ec);
-                if (ec) {
-                    stats.failed++;
-                    stats.failures.push_back(L"copied but source remove failed: " + src.wstring());
-                    continue;
-                }
-            }
-            if (isPdf) MovePdfViewInfoPath(src.wstring(), dest.wstring());
-            stats.movedPaths.emplace_back(src, dest);
-            stats.moved++;
-        }
+        stats.moved++;
+        if (dest.filename() != src.filename()) stats.renamedOnConflict++;
+        stats.movedPaths.emplace_back(src, dest);
     }
     return stats;
 }
@@ -970,61 +951,14 @@ static void OrganizeCurrentSessionFiles(HWND hWnd) {
         return;
     }
 
-    if (!SaveNoteIfDirty(hWnd)) return;
-
-    const std::filesystem::path pdfDir = PdfDirectoryForSession(sessionRoot);
-    const std::filesystem::path noteDir = NoteDirectoryForSession(sessionRoot);
-    std::filesystem::path sourcePdfPath;
-    std::filesystem::path sourceNotePath;
-    std::filesystem::path reopenPdfPath;
-    std::filesystem::path reloadNotePath;
-
-    if (g_pdf.kind != DocKind::None && !CurrentLogicalPdfPath().empty()) {
-        std::filesystem::path currentPdf(CurrentLogicalPdfPath());
-        if (CanonicalOrSelf(currentPdf.parent_path()) != CanonicalOrSelf(pdfDir) &&
-            (IsPdfFile(currentPdf) || IsImageFile(currentPdf))) {
-            sourcePdfPath = currentPdf;
-            if (IsPdfFile(currentPdf)) {
-                SaveLastPdfViewInfo();
-            }
-            ClearPdfState();
-            if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
-        }
-    }
-    if (!g_currentNotePath.empty()) {
-        std::filesystem::path currentNote(g_currentNotePath);
-        if (CanonicalOrSelf(currentNote.parent_path()) != CanonicalOrSelf(noteDir) && IsNoteFile(currentNote)) {
-            sourceNotePath = currentNote;
-        }
-    }
-
+    // Flush editing/IME state before any transaction. In particular, do not
+    // ClearPdfState before annotations have been safely staged and integrated.
+    if (!SaveNoteIfDirty(hWnd) || !file_output::SaveAnnotationsIfDirty(hWnd)) return;
     SessionOrganizeStats organizeStats = NormalizeCacheSession(sessionRoot);
-    for (const auto& moved : organizeStats.movedPaths) {
-        if (!sourcePdfPath.empty() && CanonicalOrSelf(moved.first) == CanonicalOrSelf(sourcePdfPath)) {
-            reopenPdfPath = moved.second;
-        }
-        if (!sourceNotePath.empty() && CanonicalOrSelf(moved.first) == CanonicalOrSelf(sourceNotePath)) {
-            reloadNotePath = moved.second;
-        }
-    }
-    // A copy can succeed while removing its source fails.  Keep the already
-    // opened document usable from its original path in that recoverable case.
-    if (reopenPdfPath.empty() && !sourcePdfPath.empty() && std::filesystem::exists(sourcePdfPath, ec)) {
-        reopenPdfPath = sourcePdfPath;
-    }
-    ec.clear();
-    if (reloadNotePath.empty() && !sourceNotePath.empty() && std::filesystem::exists(sourceNotePath, ec)) {
-        reloadNotePath = sourceNotePath;
-    }
     RefreshCurrentSessionFiles();
-
-    if (!reloadNotePath.empty() && std::filesystem::exists(reloadNotePath, ec)) {
-        LoadNoteFile(hWnd, reloadNotePath.wstring());
-    }
-    if (!reopenPdfPath.empty() && std::filesystem::exists(reopenPdfPath, ec)) {
-        EndIntegratedPdfPreviewMode(hWnd, true);
-        OpenPdfWithAnnotations(hWnd, reopenPdfPath.wstring());
-    }
+    SyncLeftPaneSelection();
+    RefreshMainWindowUiState(hWnd);
+    RememberCurrentSessionFiles();
 
     std::wstring msg;
     if (organizeStats.failed > 0) {
@@ -1259,7 +1193,7 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
         return;
     }
 
-    // Preflight: ensure we can create/write __resource__ before switching (avoid starting edits that can't be saved).
+    // Preflight: ensure we can create/write __pdf_note_workspace__ before switching (avoid starting edits that can't be saved).
     {
         std::wstring err;
         if (!EnsureWorkspaceResourceDirsWithErr(root, nullptr, &err)) {
@@ -1276,6 +1210,8 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
     }
     // Save while the old root still owns its write lock.
     if (!PrepareWorkspaceMemoRootChange()) return;
+    const bool previousEvidenceSaved = write_checks::FlushNormalObservations(std::filesystem::path(g_workspaceRoot));
+    (void)previousEvidenceSaved;
     std::wstring workspaceLockError;
     if (!AcquireWorkspaceWriteLock(std::filesystem::path(root), &workspaceLockError)) {
         std::wstring msg = localization::Text(L"ui.layout.888f6f981299").c_str();

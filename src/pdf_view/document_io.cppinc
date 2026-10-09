@@ -169,6 +169,8 @@ static bool LoadImageDocument(HWND pdfWnd, const std::wstring& path) {
 }
 
 bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
+    write_checks::NormalOperation read(g_workspaceRoot, std::filesystem::path(path), write_checks::Kind::PdfRead, std::filesystem::path(path));
+    read.Failure(ERROR_INVALID_DATA);
     const ULONGLONG startTick = preview_trace::TickNow();
     preview_trace::Append(L"LoadPdfDocument", L"begin path=" + path);
     std::optional<std::string> openPasswordUtf8 = ConsumePendingPdfOpenPasswordUtf8();
@@ -189,6 +191,7 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
                                    nullptr);
         if (hFile == INVALID_HANDLE_VALUE) {
             DWORD e = GetLastError();
+            read.Failure(e);
             preview_trace::Append(
                 L"LoadPdfDocument",
                 L"open_failed path=" + path + L" error=" + std::to_wstring(e));
@@ -262,6 +265,7 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
                         L"LoadPdfDocument",
                         L"password_prompt_canceled path=" + path +
                         L" attempts=" + std::to_wstring(passwordPromptCount));
+                    read.Cancel();
                     return false;
                 }
 
@@ -375,6 +379,7 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
         L"end ok path=" + path +
         L" pageCount=" + std::to_wstring(g_pdf.pageCount) +
         L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+    if (g_pdf.pageCount > 0) read.Success();
     return true;
 }
 

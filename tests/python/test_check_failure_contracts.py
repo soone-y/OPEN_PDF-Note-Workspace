@@ -196,6 +196,64 @@ class CheckFailureContractTests(unittest.TestCase):
                     path.write_bytes(pdf)
                     self.assertEqual(self.run_quietly(smask.main, [str(path)]), 1)
 
+    @unittest.skipUnless((shutil.which("powershell.exe") or shutil.which("powershell")) and shutil.which("rg"),
+                         "requires PowerShell and ripgrep")
+    def test_safety_scan_allows_only_exact_md4c_parser_url_fixture(self):
+        with tempfile.TemporaryDirectory(prefix="pdf_note_scan_") as temporary:
+            root = Path(temporary)
+            script = root / "scan_contract.ps1"
+            script.write_text(r'''
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$sourcePath = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/scripts/run_repo_checks.ps1'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Unable to parse repository checks.' }
+foreach ($fn in $ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]}, $true)) {
+    if ($fn.Name -in @('Invoke-RipgrepScan', 'Invoke-SafetyScans')) { Invoke-Expression $fn.Extent.Text }
+}
+function Append-StepLog { param([string]$Line) }
+function Assert-FileOutputSystemDialogPolicy { }
+$safetyScanIgnoreFile = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/config/safety_scan_ignore_globs.txt'
+$scanRoot = Join-Path $PSScriptRoot 'scan_root'
+$fixturePath = Join-Path $scanRoot 'tests/unit/md4c_allocation_failure_tests.c'
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $fixturePath) | Out-Null
+$original = [IO.File]::ReadAllText((Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/unit/md4c_allocation_failure_tests.c'))
+$cases = @{
+    exact_fixture = $original
+    changed_url = $original.Replace('https://example.invalid/', 'https://other.invalid/')
+    extra_url = $original.Replace('test@example.invalid\n"),', 'test@example.invalid\n"), /* https://other.invalid/ */')
+    network_api = $original + "`nvoid forbidden(void) { socket(); }`n"
+    sound_api = $original + "`nvoid forbidden(void) { Beep(1, 1); }`n"
+    other_file = $original
+}
+$results = @{}
+Push-Location -LiteralPath $scanRoot
+try {
+    foreach ($name in $cases.Keys) {
+        [IO.File]::WriteAllText($fixturePath, $cases[$name])
+        $otherPath = Join-Path $scanRoot 'other.c'
+        if ($name -eq 'other_file') { [IO.File]::WriteAllText($otherPath, $original) }
+        $failed = $false
+        try { Invoke-SafetyScans } catch { $failed = $true }
+        $results[$name] = $failed
+        if (Test-Path -LiteralPath $otherPath) { Remove-Item -LiteralPath $otherPath }
+    }
+} finally { Pop-Location }
+Write-Output ('RESULT:' + ($results | ConvertTo-Json -Compress))
+''', encoding="utf-8")
+            environment = os.environ.copy()
+            environment["PDF_NOTE_CONTRACT_REPO_ROOT"] = str(REPO_ROOT)
+            result = subprocess.run([
+                shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
+                "-ExecutionPolicy", "Bypass", "-File", str(script),
+            ], capture_output=True, text=True, env=environment, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
+                                   if line.startswith("RESULT:")))
+            self.assertEqual(data, {"exact_fixture": False, "changed_url": True, "extra_url": True,
+                                    "network_api": True, "sound_api": True, "other_file": True})
+
     @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
     def test_repo_step_contract_preserves_failures_and_rejects_implicit_skip(self):
         with tempfile.TemporaryDirectory(prefix="pdf_note_step_") as temporary:
@@ -250,6 +308,153 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 3 -Compress))
                     expected_failure = name != "success"
                     self.assertEqual(item, {"failed": expected_failure, "fail_log": expected_failure,
                                             "pass_log": not expected_failure})
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_upstream_office_entry_distinguishes_skip_conversion_comparison_and_failure(self):
+        temp_root = REPO_ROOT / ".local/repo_resource/tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="upstream_contract_", dir=temp_root) as temporary:
+            script = Path(temporary) / "upstream_contract.ps1"
+            script.write_text(r'''
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$sourcePath = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/scripts/run_repo_checks.ps1'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Unable to parse repository checks.' }
+$block = @($ast.FindAll({param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+    $node.Clauses[0].Item1.Extent.Text -eq '$IncludeOfficeConversionTests' -and
+    $node.Extent.Text.Contains('$officeUpstreamConversionScript')
+}, $true))
+if ($block.Count -ne 1) { throw 'Missing unique upstream check integration.' }
+$officeConversionFixtureScript = 'fixture.ps1'; $officeUpstreamConversionScript = 'upstream.ps1'
+$OfficeSoffice = ''; $KeepOfficeConversionOutputs = $false; $IncludeOfficeConversionTests = $true
+$OfficeReductionAcceptance = $false; $OfficeUpstreamGroup = ''; $OfficeUpstreamSample = ''
+$OfficeFixedTime = $null
+function Invoke-Step {
+    param([string]$Name, [scriptblock]$Action)
+    $script:steps.Add($Name)
+    $output = @(& $Action)
+    if ($output.Count -ne 0) { throw 'Unexpected step output.' }
+}
+function Invoke-ChildPowerShellScript {
+    param([string]$ScriptPath, [string[]]$Arguments)
+    $script:calls.Add(@{path=$ScriptPath; arguments=$Arguments})
+    if ($script:injectFailure -and $ScriptPath -eq 'upstream.ps1') { throw 'upstream failed' }
+}
+$results = @{}
+foreach ($case in @('skip', 'conversion', 'comparison', 'failure', 'acceptance', 'fixed', 'fixed_failure')) {
+    $script:steps = [Collections.Generic.List[string]]::new()
+    $script:calls = [Collections.Generic.List[object]]::new()
+    $OfficeUpstreamSourceDir = if ($case -eq 'skip') { '' } else { 'local source' }
+    $OfficeBaselineSoffice = if ($case -in @('comparison', 'failure', 'acceptance', 'fixed', 'fixed_failure')) { 'old runtime' } else { '' }
+    $OfficeReductionAcceptance = $case -eq 'acceptance'
+    $OfficeFixedTime = if ($case -in @('fixed', 'fixed_failure')) { 1767323045 } else { $null }
+    $script:injectFailure = $case -in @('failure', 'fixed_failure')
+    $failed = $false; $messages = ''
+    try { $messages = (Invoke-Expression $block[0].Extent.Text 6>&1 | Out-String) } catch { $failed = $true }
+    $results[$case] = @{failed=$failed; steps=@($script:steps); calls=@($script:calls); skip=$messages.Contains('[SKIP]')}
+}
+Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 5 -Compress))
+''', encoding="utf-8")
+            environment = os.environ.copy()
+            environment["PDF_NOTE_CONTRACT_REPO_ROOT"] = str(REPO_ROOT)
+            result = subprocess.run([
+                shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
+                "-ExecutionPolicy", "Bypass", "-File", str(script),
+            ], capture_output=True, text=True, env=environment, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
+                                   if line.startswith("RESULT:")))
+            self.assertTrue(data["skip"]["skip"])
+            self.assertEqual(len(data["skip"]["calls"]), 1)
+            self.assertEqual(data["conversion"]["steps"][-1], "Upstream Office Conversion Only")
+            self.assertEqual(data["comparison"]["steps"][-1], "Upstream Office PDF Regression Comparison")
+            self.assertEqual(data["comparison"]["calls"][-1]["arguments"],
+                             ["-SourceDir", "local source", "-BaselineSoffice", "old runtime"])
+            self.assertTrue(data["failure"]["failed"])
+            self.assertEqual(data["acceptance"]["steps"][-1], "Office Reduction Full Corpus Acceptance")
+            self.assertEqual(data["acceptance"]["calls"][-1]["arguments"][-1], "-Acceptance")
+            self.assertEqual(data['fixed']['calls'][-1]['arguments'][-2:], ['-FixedTime', '1767323045'])
+            self.assertFalse(data['fixed']['failed'])
+            self.assertTrue(data['fixed_failure']['failed'])
+            for case in ("skip", "conversion", "comparison"):
+                self.assertFalse(data[case]["failed"])
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_pdf_annotation_gate_runs_by_default_and_propagates_failure(self):
+        temp_root = REPO_ROOT / ".local/repo_resource/tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="pdf_annotation_gate_", dir=temp_root) as temporary:
+            script = Path(temporary) / "gate_contract.ps1"
+            script.write_text(r'''
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$sourcePath = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/scripts/run_repo_checks.ps1'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Unable to parse repository checks.' }
+$block = @($ast.FindAll({param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+    $node.Clauses[0].Item1.Extent.Text -eq '-not $SkipPdfAnnotationExportTests'
+}, $true))
+if ($block.Count -ne 1) { throw 'Missing unique PDF annotation gate.' }
+function Invoke-Step { param($Name, $Action) $script:steps += $Name; & $Action }
+function Invoke-ChildPowerShellScript {
+    param($ScriptPath)
+    $script:calls += $ScriptPath
+    if ($script:injectFailure) { throw 'independent-engine checker failed' }
+}
+$pdfAnnotationExportScript = 'run_pdf_annotation_export_tests.ps1'
+$results = @{}
+foreach ($case in @('default', 'skip', 'failure')) {
+    $SkipPdfAnnotationExportTests = $case -eq 'skip'
+    $script:injectFailure = $case -eq 'failure'
+    $script:steps = @(); $script:calls = @(); $failed = $false
+    try { Invoke-Expression $block[0].Extent.Text } catch { $failed = $true }
+    $results[$case] = @{failed=$failed; steps=@($script:steps); calls=@($script:calls)}
+}
+Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 4 -Compress))
+''', encoding="utf-8")
+            environment = os.environ.copy()
+            environment["PDF_NOTE_CONTRACT_REPO_ROOT"] = str(REPO_ROOT)
+            result = subprocess.run([
+                shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
+                "-ExecutionPolicy", "Bypass", "-File", str(script),
+            ], capture_output=True, text=True, env=environment, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
+                                   if line.startswith("RESULT:")))
+            self.assertEqual(data["skip"], {"failed": False, "steps": [], "calls": []})
+            for case in ("default", "failure"):
+                self.assertEqual(data[case], {
+                    "failed": case == "failure",
+                    "steps": ["PDF Annotation Export And Interoperability Tests"],
+                    "calls": ["run_pdf_annotation_export_tests.ps1"],
+                })
+
+    def test_pdf_interop_missing_dependency_is_not_silently_skipped(self):
+        interop = load_module("pdf_annotation_interop_check", "tests/python/pdf_annotation_interop_check.py")
+        with mock.patch.dict(sys.modules, {"pypdf": None}), self.assertRaises(ModuleNotFoundError):
+            interop.check(REPO_ROOT / "out/tests/absent_pdf_annotation_fixtures")
+        with self.assertRaises(RuntimeError):
+            interop.require(False, "unverifiable annotation")
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_reduction_acceptance_rejects_missing_inputs_and_subset_before_build(self):
+        shell = shutil.which("powershell.exe") or shutil.which("powershell")
+        script = REPO_ROOT / "tests/scripts/run_repo_checks.ps1"
+        for options in ([], ["-OfficeUpstreamSourceDir", "source"],
+                        ["-OfficeBaselineSoffice", "baseline"],
+                        ["-OfficeUpstreamSourceDir", "source", "-OfficeBaselineSoffice", "baseline",
+                         "-OfficeUpstreamGroup", "calc-related"]):
+            with self.subTest(options=options):
+                result = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                                         str(script), "-OfficeReductionAcceptance", *options],
+                                        capture_output=True, text=True, timeout=30, cwd=REPO_ROOT)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Office reduction acceptance", result.stderr)
 
 
 if __name__ == "__main__":

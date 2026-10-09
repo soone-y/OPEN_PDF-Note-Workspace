@@ -2,6 +2,13 @@
 // NOTE: This file is intentionally included by src/main.cpp to keep the build as a
 // single translation unit while physically splitting responsibilities.
 
+static void DismissNoteInputAssistNotice(HWND owner) {
+    for (const wchar_t* key : {L"note.input_assist.need_body", L"note.input_assist.markdown_only",
+                              L"note.input_assist.finish_ime", L"note.input_assist.insert_failed"}) {
+        DismissSoftNotice(owner, localization::Text(key));
+    }
+}
+
 struct NoteAssistSelection {
     DWORD start = 0;
     DWORD end = 0;
@@ -9,32 +16,16 @@ struct NoteAssistSelection {
     std::wstring text;
 };
 
-static NoteAssistSelection ReadNoteAssistSelection() {
+[[nodiscard]] static NoteAssistSelection ReadNoteAssistSelection() {
     NoteAssistSelection selection{};
     if (!g_hNoteEdit) return selection;
+    CommitPendingNoteClickCaret();
     SendMessageW(g_hNoteEdit, EM_GETSEL,
                  reinterpret_cast<WPARAM>(&selection.start),
                  reinterpret_cast<LPARAM>(&selection.end));
     if (selection.end < selection.start) std::swap(selection.start, selection.end);
     selection.hasRange = selection.end > selection.start;
-    if (!selection.hasRange) return selection;
-
-    const int len = std::max(0, GetWindowTextLengthW(g_hNoteEdit));
-    std::vector<wchar_t> buf(static_cast<size_t>(len) + 1, L'\0');
-    if (IsRichEditControlWindow(g_hNoteEdit)) {
-        LRESULT copied = SendMessageW(g_hNoteEdit, EM_GETSELTEXT, 0, reinterpret_cast<LPARAM>(buf.data()));
-        if (copied > 0) {
-            selection.text.assign(buf.data(), static_cast<size_t>(copied));
-            return selection;
-        }
-    }
-
-    const std::wstring text = GetNoteEditTextForIndexing(g_hNoteEdit);
-    const size_t safeStart = std::min<size_t>(selection.start, text.size());
-    const size_t safeEnd = std::min<size_t>(selection.end, text.size());
-    if (safeEnd > safeStart) {
-        selection.text = text.substr(safeStart, safeEnd - safeStart);
-    }
+    if (selection.hasRange) selection.text = GetNoteAssistRangeText(selection.start, selection.end);
     return selection;
 }
 
@@ -55,16 +46,24 @@ static std::wstring PrefixNoteAssistLines(const std::wstring& text, const std::w
     return out;
 }
 
-static void InsertNoteAssistSnippet(const NoteAssistSelection& selection, const std::wstring& snippet) {
-    if (snippet.empty()) return;
+[[nodiscard]] static bool InsertNoteAssistSnippet(const NoteAssistSelection& selection, const std::wstring& snippet) {
+    if (snippet.empty()) return false;
     CommitPendingNoteClickCaret();
-    if (selection.hasRange && g_hNoteEdit) {
+    DWORD originalStart = 0, originalEnd = 0;
+    if (g_hNoteEdit) {
+        SendMessageW(g_hNoteEdit, EM_GETSEL,
+                     reinterpret_cast<WPARAM>(&originalStart),
+                     reinterpret_cast<LPARAM>(&originalEnd));
         SendMessageW(g_hNoteEdit, EM_SETSEL,
                      static_cast<WPARAM>(selection.start),
                      static_cast<LPARAM>(selection.end));
     }
-    InsertSnippetIntoNote(snippet);
-    if (g_hNoteEdit) SetFocus(g_hNoteEdit);
+    const bool inserted = TryInsertSnippetIntoNote(snippet);
+    if (!inserted && g_hNoteEdit) {
+        SendMessageW(g_hNoteEdit, EM_SETSEL, originalStart, originalEnd);
+    }
+    if (inserted && g_hNoteEdit) SetFocus(g_hNoteEdit);
+    return inserted;
 }
 
 static bool ExecuteFocusedUndoRedo(HWND owner, bool undo) {
@@ -91,16 +90,51 @@ static bool ExecuteFocusedUndoRedo(HWND owner, bool undo) {
     return false;
 }
 
+[[nodiscard]] static bool DeferNoteAssistDuringIme(HWND owner) {
+    if (!IsNoteImeComposing() && !s_shortcutBodyImeComposing &&
+        !IsImeComposingOnWindow(g_hShortcutTagEdit)) return false;
+    ShowSoftNotice(owner, localization::Text(L"note.input_assist.finish_ime"));
+    return true;
+}
+
 static bool HandleNoteAssistCommand(HWND hWnd, int id) {
+    // Other commands must not read the note selection, especially a long one.
+    if (id != ID_NOTE_ASSIST_BULLET && id != ID_NOTE_ASSIST_QUOTE &&
+        id != ID_NOTE_ASSIST_PAGE_REF) return false;
+    // A prior empty-input notice belongs to the previous attempt. Any assist
+    // command is a fresh interaction, so do not leave that notice floating
+    // while the user is applying a selection or block action.
+    DismissNoteInputAssistNotice(hWnd);
+    if (DeferNoteAssistDuringIme(hWnd)) return true;
+    if (id != ID_NOTE_ASSIST_PAGE_REF && !NoteInputAssistSupportsMarkup()) {
+        ShowSoftNotice(hWnd, localization::Text(L"note.input_assist.markdown_only"));
+        return true;
+    }
     NoteAssistSelection selection = ReadNoteAssistSelection();
-    const std::wstring& selected = selection.text;
     switch (id) {
     case ID_NOTE_ASSIST_BULLET:
-        InsertNoteAssistSnippet(selection, selected.empty() ? L"- " : PrefixNoteAssistLines(selected, L"- "));
+    case ID_NOTE_ASSIST_QUOTE: {
+        const std::wstring typedBody = GetShortcutBodyInput();
+        if (!typedBody.empty()) {
+            selection.start = selection.end;
+            selection.text = typedBody;
+        }
+        const std::wstring prefix = id == ID_NOTE_ASSIST_BULLET ? L"- " : L"> ";
+        const auto block = PrefixNoteAssistLines(selection.text, prefix);
+        const auto snippet = FrameNoteAssistBlock(block, selection.start, selection.end);
+        if (InsertNoteAssistSnippet(selection, snippet)) {
+            if (!typedBody.empty()) SetWindowTextW(g_hShortcutTagEdit, L"");
+            if (selection.text.empty() && snippet.size() >= 2 && snippet.substr(snippet.size() - 2) == L"\r\n") {
+                // Continue typing directly after the marker, before its suffix
+                // boundary rather than on the following paragraph's line.
+                DWORD start = 0, end = 0;
+                SendMessageW(g_hNoteEdit, EM_GETSEL,
+                    reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+                if (end > 0) SendMessageW(g_hNoteEdit, EM_SETSEL, end - 1, end - 1);
+            }
+        }
         return true;
-    case ID_NOTE_ASSIST_QUOTE:
-        InsertNoteAssistSnippet(selection, selected.empty() ? L"> " : PrefixNoteAssistLines(selected, L"> "));
-        return true;
+    }
     case ID_NOTE_ASSIST_PAGE_REF: {
         if (g_pdf.kind == DocKind::None || CurrentLogicalPdfPath().empty() || g_pdf.pageCount <= 0) {
             ShowSoftNotice(hWnd,
@@ -115,7 +149,8 @@ static bool HandleNoteAssistCommand(HWND hWnd, int id) {
         if (name.empty()) name = localization::Text(L"app.command.beb82eae76ec");
         std::wstring snippet = localization::Format(L"app.command.note_assist_pdf_ref",
                                                      {{L"PAGE", std::to_wstring(page + 1)}, {L"NAME", name}});
-        InsertNoteAssistSnippet(selection, snippet);
+        const bool inserted = InsertNoteAssistSnippet(selection, snippet);
+        (void)inserted;
         return true;
     }
     default:
@@ -130,6 +165,8 @@ static bool HandleNoteShortcutCommand(HWND hWnd, int id, UINT code) {
 
     switch (id) {
     case ID_NOTE_SHORTCUT_INPUT: {
+        DismissNoteInputAssistNotice(hWnd);
+        if (DeferNoteAssistDuringIme(hWnd)) return true;
         CommitPendingNoteClickCaret();
         const bool pendingLinkToNote = (g_linkPending.active && !g_linkPending.id.empty());
         const bool fromNoteClickRawInsert = (code == kNoteShortcutInputCodeClickRaw);
@@ -152,25 +189,31 @@ static bool HandleNoteShortcutCommand(HWND hWnd, int id, UINT code) {
             const bool hasBodyOverride = !GetShortcutBodyInput().empty();
             std::wstring snippet = BuildNoteShortcutSnippet();
             if (!snippet.empty()) {
+                DWORD selectionStart = 0;
+                DWORD selectionEnd = 0;
                 if (hasBodyOverride && g_hNoteEdit) {
-                    DWORD selectionStart = 0;
-                    DWORD selectionEnd = 0;
                     SendMessageW(g_hNoteEdit, EM_GETSEL,
                                  reinterpret_cast<WPARAM>(&selectionStart),
                                  reinterpret_cast<LPARAM>(&selectionEnd));
                     const DWORD insertPos = std::max(selectionStart, selectionEnd);
                     SendMessageW(g_hNoteEdit, EM_SETSEL, insertPos, insertPos);
                 }
-                InsertSnippetIntoNote(snippet);
+                const bool inserted = TryInsertSnippetIntoNote(snippet);
+                if (!inserted && hasBodyOverride && g_hNoteEdit) {
+                    SendMessageW(g_hNoteEdit, EM_SETSEL, selectionStart, selectionEnd);
+                }
                 // Do not discard typed input when there is no open note: the
                 // insertion routine leaves the note untouched in that case.
-                if (hasBodyOverride &&
-                    (!g_currentNotePath.empty() || !g_currentSessionPath.empty()) &&
-                    g_hShortcutTagEdit) {
+                if (inserted && hasBodyOverride && g_hShortcutTagEdit) {
                     SetWindowTextW(g_hShortcutTagEdit, L"");
                 }
-                if (g_hNoteEdit) SetFocus(g_hNoteEdit);
+                if (inserted && g_hNoteEdit) SetFocus(g_hNoteEdit);
             }
+            return true;
+        }
+
+        if (!NoteInputAssistSupportsMarkup()) {
+            ShowSoftNotice(hWnd, localization::Text(L"note.input_assist.markdown_only"));
             return true;
         }
 
@@ -806,7 +849,8 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     switch (id) {
     case ID_FILE_ADD_TEMP_EXTERNAL_LECTURE: {
         auto initial = DialogDocumentsInitialFolder();
-        auto picked = PickFoldersWithInitial(hWnd, initial, GetUiText().menuAddTempExternalLecture);
+        auto picked = PickFoldersWithInitial(hWnd, initial, GetUiText().menuAddTempExternalLecture,
+                                             localization::Text(L"dialog.action.add"));
         AddTempExternalLectures(hWnd, picked);
         break;
     }
@@ -893,6 +937,9 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         break;
     case ID_FILE_RESTORE_BACKUP:
         ShowRestoreBackupListDialogAndExecute(hWnd);
+        break;
+    case ID_WORKSPACE_RESTORE:
+        ShowWorkspaceRestoreDialog(hWnd);
         break;
     case ID_FILE_DELETE_BACKUP:
         ShowDeleteSavedBackupDialog(hWnd);
@@ -993,6 +1040,12 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         ExecuteUnifiedExports(hWnd, dialogResults);
         break;
     }
+    case ID_WRITE_CHECKS:
+        ShowWriteChecksDialog(hWnd);
+        break;
+    case ID_SETTINGS_ASSETS:
+        ShowSettingsAssetsDialog(hWnd);
+        break;
     case ID_DEBUG_LOG_ARCHIVE:
         if (!g_config.developerMode) break;
         ArchiveWorkspaceLogFiles(hWnd);
@@ -1443,7 +1496,8 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         std::filesystem::path selected;
         std::wstring err;
         bool canceled = false;
-        if (!PickEscapeBackupFile(hWnd, prefix, title, &selected, &err, &canceled)) {
+        if (!PickEscapeBackupFile(hWnd, prefix, title, &selected, &err, &canceled,
+                                   localization::Text(L"dialog.action.delete"))) {
             if (!canceled && !err.empty()) {
                 ShowMainMessageDialog(hWnd, title, err, SoftNoticeKind::Warning);
             }
@@ -1524,6 +1578,9 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         break;
     case ID_SETTINGS_PALETTE:
         ShowPaletteSettingsDialog(hWnd);
+        break;
+    case ID_SETTINGS_PRESETS:
+        ShowSettingsPresetDialog(hWnd);
         break;
     case ID_SETTINGS_PRESET_SAVE:
         SaveSettingsPreset(hWnd);

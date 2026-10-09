@@ -28,6 +28,8 @@ void RememberWritableProbe(const std::filesystem::path& dir);
 // Saving & Presets
 bool SaveNoteIfDirty(HWND hWnd);
 void FinalizeManualSaveUi(HWND hWnd, bool updateWindowTitleAfterSave);
+void ShowSettingsPresetDialog(HWND hWnd);
+void ShowWorkspaceRestoreDialog(HWND hWnd);
 void SaveSettingsPreset(HWND hWnd);
 void LoadSettingsPreset(HWND hWnd);
 bool ExportSettingsPresetToFile(const std::filesystem::path& outputPath, std::wstring* outErr = nullptr);

@@ -1,4 +1,5 @@
 #include "office/docx_space_protection.h"
+#include "office/work_paths.h"
 
 #include "core/atomic_write.h"
 #include "core/localization.h"
@@ -89,12 +90,12 @@ static bool ReadFileBytes(const std::filesystem::path& path,
                           std::wstring* outErr) {
     if (out) out->clear();
     std::error_code ec;
-    const auto size = std::filesystem::file_size(path, ec);
+    const auto size = std::filesystem::file_size(work_paths::IoPath(path), ec);
     if (ec || size > kMaxDocxBytes) {
         if (outErr) *outErr = OfficeErr(L"office.docx.read_staging_source");
         return false;
     }
-    std::ifstream ifs(path, std::ios::binary);
+    std::ifstream ifs(work_paths::IoPath(path), std::ios::binary);
     if (!ifs) {
         if (outErr) *outErr = OfficeErr(L"office.docx.open_staging_source");
         return false;
@@ -114,7 +115,7 @@ static bool WriteFileBytesAtomically(const std::filesystem::path& dest,
                                      const std::vector<uint8_t>& data,
                                      std::wstring* outErr) {
     std::error_code ec;
-    std::filesystem::create_directories(dest.parent_path(), ec);
+    std::filesystem::create_directories(work_paths::IoPath(dest.parent_path()), ec);
     if (ec) {
         if (outErr) *outErr = OfficeErr(L"office.docx.create_staging_folder");
         return false;
@@ -132,7 +133,7 @@ static bool WriteFileBytesAtomically(const std::filesystem::path& dest,
         }
         if (!tmp.empty()) {
             std::error_code rmEc;
-            std::filesystem::remove(tmp, rmEc);
+            std::filesystem::remove(work_paths::IoPath(tmp), rmEc);
         }
     };
 

@@ -2,6 +2,7 @@
 
 #include "clrop/hash.h"
 #include "core/atomic_write.h"
+#include "diagnostics/normal_operations.h"
 #include "core/path_safety.h"
 #include "core/sha256.h"
 
@@ -254,9 +255,9 @@ void AppendU64(std::string& out, std::uint64_t value) {
         return false;
     }
     const std::string bytes = state.catalog.Serialize();
-    const std::filesystem::path resource = state.workspaceRoot / L"__resource__";
+    const std::filesystem::path resource = state.workspaceRoot / L"__pdf_note_workspace__";
     std::wstring error;
-    if (!atomic_write::AtomicWriteBytes(state.storePath, bytes.data(), bytes.size(),
+    if (!write_checks::ObservedWriteBytes(state.workspaceRoot, state.storePath, bytes.data(), bytes.size(),
                                         resource / L"__tmp__", resource / L"__escape__", &error)) {
         state.dirty = true;
         if (outError) *outError = error;
@@ -476,7 +477,7 @@ bool ConfigureRuntimeWorkspaceResourceCatalog(const std::filesystem::path& works
     state.configured = false;
     state.dirty = false;
     state.workspaceRoot = normalizedRoot;
-    state.storePath = state.workspaceRoot / L"__resource__" / L"__settings__" /
+    state.storePath = state.workspaceRoot / L"__pdf_note_workspace__" / L"__settings__" /
                       L"workspace_resource_registry.bin";
     WorkspaceResourceCatalog catalog;
     // The catalog establishes resource identity, so following a reparse point

@@ -9,6 +9,8 @@
 
 enum class AnnotCommandKind { Add, Remove, Update, Reorder, ClearAll };
 
+enum class AnnotNumericPrecision { Unsupported = 0, Legacy6 = 6, Legacy12 = 12, RoundTrip17 = 17 };
+
 struct AnnotCommand {
     AnnotCommandKind kind = AnnotCommandKind::Add;
     int beforeIndex = -1;
@@ -17,6 +19,8 @@ struct AnnotCommand {
     Annotation after;
     std::vector<Annotation> snapshot;
     std::vector<Annotation> afterSnapshot;
+    // Missing precision in an older serialized command means Legacy6.
+    AnnotNumericPrecision numericPrecision = AnnotNumericPrecision::RoundTrip17;
 };
 
 bool SerializeAnnotCommandsJson(const std::vector<AnnotCommand>& cmds, std::string* outJson);

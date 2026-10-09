@@ -16,6 +16,12 @@ bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
 
 namespace file_output {
 
+// Select only; the export execution flow owns original protection and overwrite
+// confirmation. Cancel/failure returns no destination and performs no write.
+[[nodiscard]] std::optional<std::wstring> PickExportDestination(
+    HWND owner, const std::wstring& title, const std::filesystem::path& initialDirectory,
+    const std::wstring& defaultName, const std::wstring& extension);
+
 // 数式の処理モード (Math handling mode)
 enum class MathMode {
     Raw,          // 生: Keep original delimiters ($...$, $$...$$)
@@ -126,7 +132,7 @@ struct StagedNoteSnapshotRef {
 // Save current note file regardless of dirty state (integrates current editor state to the note file).
 bool SaveNoteFile(HWND owner);
 
-// Stage current note and/or annotations into __resource__/__tmp__ if dirty.
+// Stage current note and/or annotations into __pdf_note_workspace__/__tmp__ if dirty.
 // This does NOT overwrite the original note/.clrop; integration is done via IntegrateStaged*.
 [[nodiscard]] bool SaveNoteIfDirty(HWND owner);
 bool EnsureCurrentNotePathForStage(HWND owner);
@@ -176,7 +182,7 @@ bool PromoteStagedDiff(const std::filesystem::path& stagePath);
 bool IntegrateStagedDiff(HWND owner, const std::filesystem::path& stagePath, bool forceSkipBackup = false);
 bool DiscardStagedDiff(const std::filesystem::path& stagePath);
 
-// Paths under __resource__/__tmp__ used for staging.
+// Paths under __pdf_note_workspace__/__tmp__ used for staging.
 std::filesystem::path StagedNotePathFor(const std::wstring& notePath);
 std::filesystem::path StagedClropPathForPdf(const std::wstring& pdfPath);
 std::optional<StagedNoteSnapshotRef> FindLatestStagedNoteSnapshotFor(
@@ -200,7 +206,7 @@ void DiscardOtherStagedClropFilesForPdf(const std::wstring& pdfPath, const std::
 void DiscardRedundantStagedNoteFilesMatchingOriginal(const std::wstring& notePath);
 void DiscardRedundantStagedClropFilesMatchingOriginal(const std::wstring& pdfPath);
 
-// Restore a file from a backup meta file created under __resource__/__escape__/backup.
+// Restore a file from a backup meta file created under __pdf_note_workspace__/__escape__/backup.
 // Returns the destination path via outDest if provided.
 bool RestoreFromBackupMeta(HWND owner, const std::filesystem::path& backupMetaPath, std::filesystem::path* outDest);
 bool DeleteBackupMeta(const std::filesystem::path& backupMetaPath, std::wstring* outErr);

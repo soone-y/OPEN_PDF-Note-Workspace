@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "source_version": "26.2.6.3",
+  "purpose": "Development-only wall-clock control for newly owned Win64 headless comparison processes; no disk or OS clock changes.",
+  "normal_restart_exit": 81,
+  "crash_restart_exit": 79,
+  "max_attempts": 3,
+  "functions": ["GetSystemTimeAsFileTime", "GetSystemTimePreciseAsFileTime"],
+  "source_evidence": [
+    {"path": "tools/source/datetime/systemdatetime.cxx", "sha256": "61301402151f3b2ccde9c209ff718fe34c5dfff04b154002d984b5941e81db52"},
+    {"path": "sal/osl/w32/time.cxx", "sha256": "ac98127a763ab1214b606ea29e0ec842e3529c2e39392c1d7025533a4bbcf851"},
+    {"path": "include/desktop/exithelper.h", "sha256": "5ce49eb15829229754945e74af51455c3203756b0199fe5db10b58d187598b5a"},
+    {"path": "desktop/win32/source/loader.cxx", "sha256": "fc594ca303f10f50f384ac3b5038aead5078e4950f862e8a52a5dcca4314a10a"}
+  ]
+}
