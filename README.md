@@ -168,7 +168,7 @@ Windows system DLLs and the Universal C Runtime (UCRT) are loaded from the OS. T
 | ファイル・フォルダー / File or folder | 使用箇所 / Used by |
 | --- | --- |
 | `lo/` | 通常版のメインソフトがOffice文書をPDFへ変換するときに使うLibreOffice一式。入口は `lo/program/soffice.com`。その1ファイルだけでなく、`lo/` 内のDLL・設定・共有データも必要です。Lite版には含めず、閲覧専用ソフトは使用しません。 / Full-edition Office conversion runtime, entered through `lo/program/soffice.com`. Keep the entire `lo/` tree, including its DLLs, configuration, and shared data. Not included in Lite or used by the read-only viewer. |
-| `libreoffice/image/Fonts/` | メインソフトが読み込む同梱フォント。Lite版にも含まれます。Office変換本体の `lo/` とは別のフォルダーです。 / Bundled fonts loaded by the main app, including Lite. Separate from the `lo/` conversion runtime. |
+| 通常版 / Full: `lo/image/Fonts/`、Lite: `libreoffice/image/Fonts/` | メインソフトが読み込む同梱フォント。通常版は変換runtimeと同じ `lo/` 配下、Lite版はフォント専用の `libreoffice/` 配下に置きます。 / Bundled fonts loaded by the main app. Full keeps them under `lo/` alongside the conversion runtime; Lite uses the font-only `libreoffice/` tree. |
 | `docs/`、`LICENSE.md`、`licenses/` | 操作説明、プロジェクトと依存物のライセンス文書。起動用DLLではありませんが、説明やライセンスの閲覧・再配布のために配布物と一緒に保管します。 / User guides and project/component licenses. Not startup DLLs, but keep them with the package for reading the documentation, checking licenses, and redistribution. |
 
 ### 設定と作業ファイル / Configuration and working files

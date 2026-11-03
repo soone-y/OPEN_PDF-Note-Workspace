@@ -29,7 +29,7 @@
 - 次回は注釈を見直す
 ```
 
-`.clrop` はアプリが管理する注釈データです。原文の手動編集ではなく、[注釈の扱い](CLROP_Annotation_Format.md)を参照してください。JSONの構造例は[データ構造](https://soone-y.github.io/OPEN_PDF-Note-Workspace/introduction/core/data_schemas.html)にあります。
+`.clrop` はアプリが管理する注釈データです。追加・変更・削除はアプリの注釈ツールで行います。JSONの構造例は[データ構造](https://soone-y.github.io/OPEN_PDF-Note-Workspace/introduction/core/data_schemas.html)にあります。
 
 ## PDF と `.clrop` は 1 組です
 
@@ -78,4 +78,4 @@ PDF をコピー、移動、共有するときは、対応する `.clrop` も一
 
 `.clrop` は PDF と対応付けた注釈データです。`.clro` への改名、ノートとしての編集、手作業での書換えは行わないでください。注釈に問題がある場合は、まず [Troubleshooting.md](Troubleshooting.md) を確認してください。
 
-ファイルを別の場所へ移す、名前を変える、共有する必要がある場合は、作業前にワークスペース全体をコピーしておくと安全です。PDFとの対応、JSONの役割、手作業で編集しない理由は [`.clrop` PDF注釈データ](CLROP_Annotation_Format.md) を参照してください。
+ファイルを別の場所へ移す、名前を変える、共有する必要がある場合は、作業前にワークスペース全体をコピーしておくと安全です。[受け取る人に合わせた共有方法](CLROP_Annotation_Format.md#受け取る人に合わせて共有する)では、本ソフトで編集する場合、閲覧専用ソフトで読む場合、他のPDFソフトで読む場合に分けて、渡すファイルと出力方法を説明しています。

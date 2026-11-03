@@ -6,6 +6,8 @@ This directory contains the guides for using the English release. Begin with [Ge
 - Read-only viewer: `readonly_viewer.exe`
 - Documentation and licenses: this `docs/` directory and the release `licenses/` directory
 
+Package folders differ slightly by edition: Full groups LibreOffice components under `lo/`; Lite keeps only the bundled fonts under `libreoffice/`. [Getting Started](Getting_Started.md#full-and-lite-editions) explains how this layout reduces extraction-path length problems and where to extract the package.
+
 [Using the Application](Using_the_App.md) is the everyday starting point: open a PDF, add notes or annotations, then save or export your work. Guides for formats, recovery, and troubleshooting are for the point at which you need them.
 
 ## Choose a guide

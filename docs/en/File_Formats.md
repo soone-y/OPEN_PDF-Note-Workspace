@@ -23,11 +23,11 @@ Register [Temporary Paths](Help_Reference.md#use-an-external-folder-through-temp
 - Review the annotations next time.
 ```
 
-For `.clrop`, use the application's annotation tools rather than a text editor. See [PDF annotation data](CLROP_Annotation_Format.md) for handling and [Data structures (Japanese)](https://soone-y.github.io/OPEN_PDF-Note-Workspace/introduction/core/data_schemas.html) for JSON examples.
+For `.clrop`, use the application's annotation tools rather than a text editor. [Data structures (Japanese)](https://soone-y.github.io/OPEN_PDF-Note-Workspace/introduction/core/data_schemas.html) contains JSON examples.
 
 When annotating a PDF, the application creates a same-named `.clrop` file in the PDF's folder. Both the PDF and its `.clrop` file are required to view or edit annotations again. Move or share them together, and do not edit the `.clrop` manually or change its extension.
 
-For the role and notation of `.clro`, see [`.clro` Note Format](CLRO_Note_Format.md). For the PDF relationship and JSON role of `.clrop`, see [`.clrop` PDF Annotation Data](CLROP_Annotation_Format.md).
+For the role and notation of `.clro`, see [`.clro` Note Format](CLRO_Note_Format.md). [Choose what to share](CLROP_Annotation_Format.md#choose-what-to-share) explains which files to send or export for editing in this application, reading in the companion viewer, or reading in another PDF application.
 
 ## Choose a format
 

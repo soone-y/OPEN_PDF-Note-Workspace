@@ -905,6 +905,7 @@ def language_counterpart(rel_path: Path, site_dir: Path) -> Path | None:
     introduction_counterparts = {
         Path("introduction/index.md"): Path("introduction/en/index.md"),
         Path("introduction/project_overview.md"): Path("introduction/en/project_overview.md"),
+        Path("introduction/development.md"): Path("introduction/en/development.md"),
         Path("introduction/core/features_and_scenarios.md"): Path("introduction/en/features_and_scenarios.md"),
         Path("introduction/core/file_formats.md"): Path("introduction/en/file_formats.md"),
     }

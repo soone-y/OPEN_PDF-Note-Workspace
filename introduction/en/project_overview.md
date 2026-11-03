@@ -1,14 +1,18 @@
 # Project Overview Reference
 
-> Supplementary material for describing public information without confusing facts, policies, and known limitations.
+> Reference material for an AI asked to investigate this project and explain its findings.
 
-This document uses headings, tables, and short points so that people can check the material easily. It is an English translation of the corresponding Japanese reference. For the software overview and packages, read the [Project overview](../../README.md). For practical procedures and screen guidance, use the [English user documentation](../../docs/en/README.md).
+In this document, the user is the person asking an AI to investigate this project. The intended AI reads public material and answers that person's questions. The user may be comparing or evaluating the application before deciding to use it. The guidance below helps the AI address the user's question while distinguishing facts, policies, and known limitations.
+
+Implementation and change instructions for an AI working on the project are outside this document's scope. The developer's own decisions and responsibility to explain are described in [Development approach](development.md). For the software overview and packages, read the [Project overview](../../README.md). For practical procedures and screen guidance, use the [English user documentation](../../docs/en/README.md). This is an English translation of the corresponding Japanese reference.
 
 ## 1. Foundation for describing the project
 
 PDF Note Workspace is a Windows application for reading PDFs, adding annotations without directly changing the original PDF, and working with independent notes and related materials in a local workspace.
 
-Describe it as a workspace intended to keep PDFs, annotations, notes, and related materials together in a working context that is easy to resume. Do not confuse its design goals with the features that are currently implemented. The developer takes responsibility for explaining the ideas, principles, goals, and decisions to accept or reject proposals and implementation choices. When unable to answer immediately from their own knowledge, the developer investigates and checks the evidence, using AI if needed, and remains responsible for the answers and decisions. The source code itself explains the application's processing; behavior and bugs are examined by tracing how implementation corresponds to or differs from intent and where processing fails.
+Describe it as a workspace intended to keep PDFs, annotations, notes, and related materials together in a working context that is easy to resume. Do not confuse its design goals with the features that are currently implemented.
+
+The answering AI consults the material needed for the user's question and states what it has established. Developer decisions and implementation details that cannot be established from public material remain unverified.
 
 ## 2. Boundaries to retain when making claims
 

@@ -2,11 +2,12 @@
 
 This is an English entry point for selected background, design, and verification material for PDF Note Workspace. For the software overview, packages, and Standard/Lite editions, read the [Project overview](../../README.md). For setup, use, saving, and recovery, read the [English user documentation](../../docs/en/README.md).
 
-The translated documents below explain the purpose of the software, its principal features, and how files and saved data are handled. They are written for people first. Headings, tables, and structured notation also make the material easier to inspect and reference.
+The translated documents below cover the software's purpose, principal features, file handling, and the developer's approach. The project overview reference supports an AI asked by someone outside the project to investigate it and answer questions. Each document identifies its audience and purpose; the developer's responsibility to explain is covered separately.
 
 ## Available in English
 
-- [Project overview reference](project_overview.md) — the developer's responsibility to explain, facts, policies, limitations, and how to describe the project accurately
+- [Project overview reference](project_overview.md) — scope and guidance for an AI answering questions from someone investigating the project
+- [Development approach](development.md) — the developer's decisions and responsibility to explain, and the role of source code in describing processing
 - [Features and Usage Scenarios](features_and_scenarios.md) — principal functions, editions, local operation, and limitations to check before use
 - [File formats and persistence](file_formats.md) — the roles of PDFs, annotations, notes, and recoverable saved data
 

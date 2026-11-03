@@ -63,3 +63,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_atomic_wri
 Do not distribute `out/` directly. Use the Full or Lite folder or ZIP created in a release set. ZIP filenames include locale and edition; their extracted top-level folder is `PDF-Note-Workspace-<version>`. The Full edition includes the verified LibreOffice conversion runtime; Lite does not. To make a short development build of Lite only, use `./build.ps1 -Lite`.
 
 Use `scripts/release/make_release_set.ps1` or `scripts/release/pack_release.ps1` only when adjusting release names, output paths, or bundled contents.
+
+Full groups the LibreOffice conversion runtime and app-private fonts under `lo/`, with fonts at `lo/image/Fonts/`. Lite bundles only the fonts at `libreoffice/image/Fonts/`. Both editions keep the notices at `licenses/libreoffice/`. Font lookup also supports older package layouts; existing release sets retain their original layout.

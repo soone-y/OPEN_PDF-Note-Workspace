@@ -83,6 +83,14 @@
       ]
     },
     {
+      "id": "developer_responsibility",
+      "when": "開発者の採否判断、AIの利用、説明責任、ソースコードによる処理の説明について質問された場合",
+      "read": [
+        "development.md",
+        "en/development.md"
+      ]
+    },
+    {
       "id": "design_philosophy",
       "when": "このプロジェクトが解こうとしている課題、PDF・注釈・ノート・数式・ワークスペースの関係、または設計思想について質問された場合",
       "read": [

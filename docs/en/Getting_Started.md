@@ -22,9 +22,15 @@ Use the distributed ZIP by extracting it. Persistent files are kept in the follo
 
 The application does not use AppData, the Windows temporary folder, or the launch working directory as an implicit storage location. If it cannot write to a location you chose, it reports the failure instead of saving automatically somewhere else. This describes persistent file storage, not the memory used while the application is running.
 
+To use an existing external folder without copying it, choose **File > Temporary Paths > Add external folder**. Registration follows an access check and persists after restart; “temporary” does not mean the Windows temporary directory. Saving, renaming and moving affect the actual registered files, while removing the registration leaves originals intact. [Retry unsaved settings](Save_and_Recovery.md#retry-unsaved-settings) explains where to review a failed registration and how to retry it.
+
 ## Full and Lite editions
 
 The Full edition includes local Office-to-PDF conversion through the bundled LibreOffice runtime. The Lite edition omits that runtime, but PDF viewing, annotations, notes, saving, and recovery work the same way.
+
+The folder layout differs slightly: Full keeps the conversion runtime in `lo/` and bundled fonts in `lo/image/Fonts/`; Lite keeps only the fonts in `libreoffice/image/Fonts/`. Keep each edition's supplied folder layout intact.
+
+LibreOffice has deeply nested internal folders, so Full groups its related files under the short `lo/` name to reduce Windows extraction-path length problems. Lite uses `libreoffice/` to identify the source of its bundled fonts, since it has no conversion runtime.
 
 The first LibreOffice conversion can take longer to start while Windows performs a security check. Conversion runs in the background, so the main app remains usable. Canceling a conversion, closing the app, or a Windows end-session request also stops the LibreOffice conversion processes. Originals are not changed.
 
@@ -41,4 +47,4 @@ Keep the previous distribution folder and workspace until you have confirmed tha
 
 ## If something goes wrong
 
-Check `docs/README.md`, `docs/legal/`, and `licenses/` in the distribution.
+Keep the affected originals and the workspace's `__pdf_note_workspace__` folder, and record the message and operation that failed. [Troubleshooting](Troubleshooting.md#first-steps) explains checks for save failures, files that will not open, missing windows and Office-conversion path limits.

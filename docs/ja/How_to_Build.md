@@ -71,3 +71,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_atomic_wri
 配布時は `out/` を直接渡さず、release set 内に作られる通常版と Lite版のフォルダまたは ZIP を使います。`./release.ps1` は通常版・Lite版・閲覧専用ビューアをビルドしてから、配布物、ZIP、チェックサム、公開スナップショットを作ります。ZIP名には言語とeditionを含め、展開後の最上位フォルダは `PDF-Note-Workspace-<version>` です。Lite版だけを開発用にビルド・実機確認したい場合は `./build.ps1 -Lite` を使います。通常版には検証済み LibreOffice conversion runtime を必ず同梱し、Lite版には同梱しません。通常版からruntimeだけを除いた配布物は作れません。通常利用者には、二つの版を混ぜず、用途に応じてどちらか一方を配布してください。
 
 配布名、出力先、同梱物などを個別に調整する場合だけ、`scripts/release/make_release_set.ps1` または `scripts/release/pack_release.ps1` を使います。
+
+通常版はLibreOffice変換runtimeと表示用の私用フォントを `lo/` にまとめ、フォントを `lo/image/Fonts/` に置きます。Lite版はフォントのみを `libreoffice/image/Fonts/` に同梱します。両版のライセンス資料は `licenses/libreoffice/` に置きます。フォント探索は旧配布構成にも対応し、作成済みのrelease setは元の配置を保持します。

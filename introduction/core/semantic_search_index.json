@@ -9,6 +9,12 @@
       "evidence_path": "introduction/index.md"
     },
     {
+      "intent": "開発者の判断、AIの利用、説明責任、ソースコードの役割を知りたい",
+      "keywords": ["開発者", "採否", "AI", "説明責任", "ソースコード"],
+      "target_node": "introduction/development.md",
+      "evidence_path": "introduction/development.md"
+    },
+    {
       "intent": "PDF注釈の保存場所・保存形式を知りたい",
       "keywords": ["注釈", "保存", "clrop", "PDF上書き", "非破壊"],
       "target_node": "introduction/core/data_schemas.md",
