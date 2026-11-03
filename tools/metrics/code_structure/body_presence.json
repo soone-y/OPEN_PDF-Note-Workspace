@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "declaration_only_units": [
+    {
+      "source": "src/readonly_viewer/text_preview_panel.cpp",
+      "source_sha256": "db45f72fad1fce09403d9d02a05152d8a307e9e322988808fc49dc91bea78448",
+      "headers": [
+        {
+          "path": "src/readonly_viewer/text_preview_panel.h",
+          "sha256": "be421d01bd956878b982d402c0dd2dd830dadc0cee998ef46466331fc174a4fd"
+        }
+      ],
+      "declarations": [
+        "readonly_viewer::RegisterTextPreviewPanelClass",
+        "readonly_viewer::CreateTextPreviewPanel",
+        "readonly_viewer::TextPreviewPanel_OpenFile",
+        "readonly_viewer::TextPreviewPanel_GetFilePath",
+        "readonly_viewer::TextPreviewPanel_CloseFile",
+        "readonly_viewer::TextPreviewPanel_SetViewMode"
+      ]
+    }
+  ]
+}

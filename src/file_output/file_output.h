@@ -1,7 +1,9 @@
 // file: file_output.h
 #pragma once
+#include "file_output/pdf_annotation_export.h"
 
 #include "core/app_core.h"
+#include "recovery/recovery_model.h"
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -40,8 +42,8 @@ enum class MarkupMode {
 struct TextExportOptions {
     MathMode mathMode = MathMode::Raw;
     std::string mathPlaceholder = "[math]";
-    // Default is Simplified to preserve historical behavior (export as readable plain text).
-    MarkupMode markupMode = MarkupMode::Simplified;
+    // Preserve markup unless the user explicitly requests its removal.
+    MarkupMode markupMode = MarkupMode::Raw;
     std::string markupPlaceholder = "[mark]";
     bool includeCommentLines = true;
 };
@@ -66,6 +68,8 @@ struct NoteMarkupExportOptions {
     bool includeTitleHeading = false;
     // includeTitleHeading のとき、既存の見出しを1段下げる（+1、最大h6）
     bool shiftHeadingLevels = true;
+    // CLRO -> Markdown only; stored source and literal data remain unchanged.
+    bool normalizeClroSyntax = true;
 };
 
 struct PdfCropRectPt {
@@ -79,6 +83,7 @@ struct PdfPageSpec {
     int pageIndex = -1;     // 0-based
     bool withAnnotations = false;
     std::optional<PdfCropRectPt> cropPt;
+    int rotation = 0; // Additional clockwise quarter turns on the output copy only.
 };
 
 enum class PdfPngStyle {
@@ -149,9 +154,7 @@ void HandleNoteStageSaveTimer(HWND owner);
 void HandleAutoStageSaveTimer(HWND owner);
 void HandleDeferredAutoStageSaveTimer(HWND owner);
 bool ShouldDeferBackgroundSaveForActiveInput();
-bool ShouldAutoIntegrateOnSwitchOrExit();
 bool PrepareStagedDiffsForSwitch(HWND owner);
-bool MaybeAutoIntegrateOnSwitchOrExit(HWND owner);
 void ScheduleIntegrateAfterSwitch(HWND owner);
 void ConfigureAutoIntegrateScheduling(HWND owner);
 void NotifyAutoIntegrateStageSaved(HWND owner);
@@ -169,6 +172,7 @@ struct BackgroundSaveCompletion {
     bool ok = false;
     bool restarted = false;
     std::wstring error;
+    std::filesystem::path failedStage;
     int integratedCount = 0;
 };
 SaveTransactionStartResult StartBackgroundSaveAndIntegrateTransaction(HWND owner);
@@ -177,13 +181,14 @@ bool HasAnyStagedDiffs();
 bool HasPendingOrStagedDiffsUnderPath(const std::filesystem::path& root);
 bool DiscardAllStagedDiffs(HWND owner);
 std::vector<StagedDiffEntry> ListStagedDiffEntries();
+// Diagnostic inspection never activates a candidate or consumes stage files.
+[[nodiscard]] recovery::Inspection InspectStagedDiff(const std::filesystem::path& stagePath);
 std::wstring FormatStagedDiffLocationSummary(size_t maxEntries = 5);
 bool PromoteStagedDiff(const std::filesystem::path& stagePath);
 bool IntegrateStagedDiff(HWND owner, const std::filesystem::path& stagePath, bool forceSkipBackup = false);
 bool DiscardStagedDiff(const std::filesystem::path& stagePath);
 
 // Paths under __pdf_note_workspace__/__tmp__ used for staging.
-std::filesystem::path StagedNotePathFor(const std::wstring& notePath);
 std::filesystem::path StagedClropPathForPdf(const std::wstring& pdfPath);
 std::optional<StagedNoteSnapshotRef> FindLatestStagedNoteSnapshotFor(
     const std::wstring& notePath);
@@ -212,13 +217,23 @@ bool RestoreFromBackupMeta(HWND owner, const std::filesystem::path& backupMetaPa
 bool DeleteBackupMeta(const std::filesystem::path& backupMetaPath, std::wstring* outErr);
 
 // PDF export helpers.
-bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations);
-bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standardTextAnnots);
-bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standardTextAnnots, double exportScale);
+// One ordered segment of the current PDF. Every segment keeps its own output
+// settings; all segments are prepared in memory before one atomic destination save.
+struct PdfExportPart {
+    std::vector<PdfPageSpec> pages;
+    bool standardTextAnnots = true;
+    double exportScale = 1.0;
+    bool matchPdfPaneTextLayout = true;
+    pdf_annotation_export::TextColorOptions textColor;
+};
+[[nodiscard]] bool ExportPdfParts(HWND owner, const std::vector<PdfExportPart>& parts,
+                                  const std::wstring& outPath);
 bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standardTextAnnots, double exportScale,
-                              bool matchPdfPaneTextLayout, std::wstring* outSavedPath = nullptr);
+                              bool matchPdfPaneTextLayout, std::wstring* outSavedPath = nullptr,
+                              const pdf_annotation_export::TextColorOptions& textColor = {});
 bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, const std::wstring& outPath,
-                              bool standardTextAnnots, double exportScale, bool matchPdfPaneTextLayout);
+                              bool standardTextAnnots, double exportScale, bool matchPdfPaneTextLayout,
+                              const pdf_annotation_export::TextColorOptions& textColor = {});
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool standardTextAnnots);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std::wstring& outPath);
@@ -226,10 +241,14 @@ bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool standardTextAnnots, double exportScale);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std::wstring& outPath, bool standardTextAnnots, double exportScale);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool standardTextAnnots, double exportScale,
-                    bool matchPdfPaneTextLayout, std::wstring* outSavedPath = nullptr);
+                    bool matchPdfPaneTextLayout, std::wstring* outSavedPath = nullptr,
+                              const pdf_annotation_export::TextColorOptions& textColor = {});
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std::wstring& outPath,
-                    bool standardTextAnnots, double exportScale, bool matchPdfPaneTextLayout);
-std::vector<PdfPageSpec> ParsePdfPageSpec(const std::wstring& spec, bool defaultAnnot, std::wstring* err);
+                    bool standardTextAnnots, double exportScale, bool matchPdfPaneTextLayout,
+                              const pdf_annotation_export::TextColorOptions& textColor = {});
+// Validate source bounds before expanding a range; failure returns no partial selection.
+[[nodiscard]] std::vector<PdfPageSpec> ParsePdfPageSpec(const std::wstring& spec, int pageCount,
+                                                     bool defaultAnnot, std::wstring* err);
 
 // PNG export (single page).
 bool ExportPdfPagePng(HWND owner, int pageIndex, PdfPngStyle style, bool includeAnnotations);

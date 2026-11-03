@@ -1,7 +1,9 @@
 // file: settings/settings_shortcut_editor.cppinc
-// Editor for annotation category/detail shortcuts.
+// Editable direct bindings and a read-only overview of common fixed shortcuts.
 
 #include "core/localization.h"
+#include "ui/shortcut_help.h"
+#include "settings/shortcut_key_model.h"
 
 namespace {
 
@@ -10,6 +12,21 @@ constexpr int kShortcutEditorKey = 5202;
 constexpr int kShortcutEditorTarget = 5203;
 constexpr int kShortcutEditorAdd = 5204;
 constexpr int kShortcutEditorDelete = 5205;
+constexpr int kShortcutEditorUpdate = 5206;
+constexpr int kShortcutEditorDigits = 5207;
+constexpr int kShortcutEditorHint = 5208;
+constexpr int kShortcutEditorListLabel = 5209;
+constexpr int kShortcutEditorFixedLabel = 5210;
+constexpr int kShortcutEditorFixed = 5211;
+constexpr int kShortcutEditorKeyLabel = 5212;
+constexpr int kShortcutEditorTargetLabel = 5213;
+constexpr int kShortcutEditorSaveHint = 5214;
+constexpr int kShortcutEditorCtrl = 5215;
+constexpr int kShortcutEditorShift = 5216;
+constexpr int kShortcutEditorAlt = 5217;
+constexpr int kShortcutEditorPreview = 5218;
+constexpr int kShortcutEditorStatus = 5219;
+constexpr int kShortcutEditorCapture = 5220;
 
 struct AnnotShortcutEditorCtx {
     HWND owner = nullptr;
@@ -19,6 +36,9 @@ struct AnnotShortcutEditorCtx {
     HWND key = nullptr;
     HWND target = nullptr;
     int currentIndex = -1;
+    bool capturing = false;
+    bool drainingKeys = false;
+    UINT capturedKey = 0;
     std::vector<AnnotToolShortcutBinding> bindings;
 };
 
@@ -61,18 +81,80 @@ static std::wstring ShortcutEditorTargetLabel(AnnotToolShortcutTargetKind kind,
     }
 }
 
-static std::wstring ShortcutEditorText(HWND hWnd) {
-    if (!hWnd) return {};
-    int len = GetWindowTextLengthW(hWnd);
-    if (len <= 0) return {};
-    std::wstring text(static_cast<size_t>(len), L'\0');
-    GetWindowTextW(hWnd, text.data(), len + 1);
-    return text;
+static bool ShortcutEditorChecked(HWND window, int id) {
+    return SendDlgItemMessageW(window, id, BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+static void SetShortcutEditorChord(AnnotShortcutEditorCtx* ctx, UINT vk, bool ctrl, bool alt, bool shift) {
+    HWND window = GetParent(ctx->key);
+    const int count = static_cast<int>(SendMessageW(ctx->key, CB_GETCOUNT, 0, 0));
+    SendMessageW(ctx->key, CB_SETCURSEL, -1, 0);
+    for (int i = 0; i < count; ++i) {
+        if (static_cast<UINT>(SendMessageW(ctx->key, CB_GETITEMDATA, i, 0)) == vk) {
+            SendMessageW(ctx->key, CB_SETCURSEL, i, 0);
+            break;
+        }
+    }
+    SendDlgItemMessageW(window, kShortcutEditorCtrl, BM_SETCHECK, ctrl ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(window, kShortcutEditorAlt, BM_SETCHECK, alt ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(window, kShortcutEditorShift, BM_SETCHECK, shift ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+// This draft belongs to this modal dialog. Only the existing atomic Save path
+// changes disk/runtime bindings; validation, capture and cancellation never do.
+[[nodiscard]] static bool ReadShortcutEditorChord(AnnotShortcutEditorCtx* ctx,
+                                                AnnotToolShortcutBinding& parsed, std::wstring& status) {
+    HWND window = GetParent(ctx->key);
+    const int selected = static_cast<int>(SendMessageW(ctx->key, CB_GETCURSEL, 0, 0));
+    const UINT vk = selected < 0 ? 0 : static_cast<UINT>(SendMessageW(ctx->key, CB_GETITEMDATA, selected, 0));
+    const auto chord = shortcut_key_model::Format(vk, ShortcutEditorChecked(window, kShortcutEditorCtrl),
+        ShortcutEditorChecked(window, kShortcutEditorAlt), ShortcutEditorChecked(window, kShortcutEditorShift));
+    const bool parsedOk = ParseAnnotToolShortcutKeyForUser(chord, parsed);
+    parsed.key = chord;
+    if (!parsedOk) {
+        status = localization::Text(L"settings.shortcut.modifier_required");
+        return false;
+    }
+    if (IsReservedAnnotToolShortcut(parsed)) {
+        status = localization::Text(IsFixedAnnotToolNavigationShortcut(parsed)
+            ? L"settings.shortcut.reserved_navigation" : L"settings.shortcut.reserved");
+        return false;
+    }
+    for (size_t i = 0; i < ctx->bindings.size(); ++i) {
+        const auto& other = ctx->bindings[i];
+        if (static_cast<int>(i) != ctx->currentIndex && other.vk == parsed.vk &&
+            other.ctrl == parsed.ctrl && other.alt == parsed.alt && other.shift == parsed.shift) {
+            status = localization::Text(L"settings.shortcut.duplicate") + L"\r\n" +
+                ShortcutEditorTargetLabel(other.targetKind, other.family, other.mode);
+            return false;
+        }
+    }
+    const auto* common = application_shortcuts::Resolve(parsed.vk, parsed.ctrl, parsed.alt, parsed.shift,
+                                                        application_shortcuts::Surface::Main);
+    status = common ? localization::Text(L"settings.shortcut.overrides_action") + L" " +
+        localization::Text(common->mainLabel) : localization::Text(L"settings.shortcut.available");
+    return true;
+}
+
+static void RefreshShortcutEditorDraft(AnnotShortcutEditorCtx* ctx) {
+    HWND window = GetParent(ctx->key);
+    AnnotToolShortcutBinding parsed;
+    std::wstring status;
+    const bool hasRow = ctx->currentIndex >= 0;
+    const bool valid = hasRow && ReadShortcutEditorChord(ctx, parsed, status);
+    SetWindowTextW(GetDlgItem(window, kShortcutEditorPreview), parsed.key.c_str());
+    SetWindowTextW(GetDlgItem(window, kShortcutEditorStatus),
+        ctx->capturing ? localization::Text(L"settings.shortcut.capture_hint").c_str() : status.c_str());
+    EnableWindow(GetDlgItem(window, IDOK), !ctx->capturing && (!hasRow || valid));
+    EnableWindow(GetDlgItem(window, kShortcutEditorUpdate), !ctx->capturing && valid);
+    SetWindowTextW(GetDlgItem(window, kShortcutEditorCapture), localization::Text(ctx->capturing
+        ? L"settings.shortcut.capture_stop" : L"settings.shortcut.capture").c_str());
 }
 
 static void RefreshShortcutEditorList(AnnotShortcutEditorCtx* ctx, int select = -1) {
     if (!ctx || !ctx->list) return;
     SendMessageW(ctx->list, LB_RESETCONTENT, 0, 0);
+    SetWindowTextW(GetDlgItem(GetParent(ctx->list), kShortcutEditorFixed), shortcut_help::CommonOverview(ctx->bindings).c_str());
     for (const auto& binding : ctx->bindings) {
         std::wstring text = binding.key + L"  →  " +
             ShortcutEditorTargetLabel(binding.targetKind, binding.family, binding.mode);
@@ -85,10 +167,23 @@ static void RefreshShortcutEditorList(AnnotShortcutEditorCtx* ctx, int select = 
 }
 
 static void LoadShortcutEditorRow(AnnotShortcutEditorCtx* ctx, int index) {
-    if (!ctx || index < 0 || index >= static_cast<int>(ctx->bindings.size())) return;
+    if (!ctx) return;
+    const bool valid = index >= 0 && index < static_cast<int>(ctx->bindings.size());
+    EnableWindow(ctx->key, valid);
+    EnableWindow(ctx->target, valid);
+    HWND window = GetParent(ctx->key);
+    for (int id : {kShortcutEditorCtrl, kShortcutEditorShift, kShortcutEditorAlt, kShortcutEditorCapture, kShortcutEditorDelete})
+        EnableWindow(GetDlgItem(window, id), valid);
+    ctx->currentIndex = valid ? index : -1;
+    if (!valid) {
+        SetShortcutEditorChord(ctx, 0, true, false, false);
+        SendMessageW(ctx->target, CB_SETCURSEL, -1, 0);
+        RefreshShortcutEditorDraft(ctx);
+        return;
+    }
     ctx->currentIndex = index;
     const auto& binding = ctx->bindings[static_cast<size_t>(index)];
-    SetWindowTextW(ctx->key, binding.key.c_str());
+    SetShortcutEditorChord(ctx, binding.vk, binding.ctrl, binding.alt, binding.shift);
     DWORD_PTR target = (binding.targetKind == AnnotToolShortcutTargetKind::Category)
         ? (0x100000u + static_cast<DWORD_PTR>(binding.family))
         : (0x200000u + static_cast<DWORD_PTR>(binding.mode));
@@ -99,29 +194,23 @@ static void LoadShortcutEditorRow(AnnotShortcutEditorCtx* ctx, int index) {
             break;
         }
     }
+    RefreshShortcutEditorDraft(ctx);
 }
 
-static bool StoreShortcutEditorRow(AnnotShortcutEditorCtx* ctx, int index) {
+[[nodiscard]] static bool StoreShortcutEditorRow(AnnotShortcutEditorCtx* ctx, int index) {
     if (!ctx || index < 0 || index >= static_cast<int>(ctx->bindings.size())) return false;
     AnnotToolShortcutBinding parsed;
-    const std::wstring key = ShortcutEditorText(ctx->key);
-    if (!ParseAnnotToolShortcutKeyForUser(key, parsed)) {
-        ShowSoftNotice(ctx->owner, L"ショートカット形式が正しくありません。例: Ctrl+Alt+1 または Numpad1",
-                       SoftNoticeKind::Warning);
-        SetFocus(ctx->key);
-        return false;
-    }
-    if (IsFixedAnnotToolNavigationShortcut(parsed)) {
-        ShowSoftNotice(ctx->owner, L"Ctrl+Alt+矢印キーはカテゴリ・詳細種の固定循環に予約されています。",
-                       SoftNoticeKind::Warning);
+    std::wstring status;
+    if (!ReadShortcutEditorChord(ctx, parsed, status)) {
+        RefreshShortcutEditorDraft(ctx);
         SetFocus(ctx->key);
         return false;
     }
     int targetIndex = static_cast<int>(SendMessageW(ctx->target, CB_GETCURSEL, 0, 0));
     if (targetIndex < 0) return false;
     DWORD_PTR data = static_cast<DWORD_PTR>(SendMessageW(ctx->target, CB_GETITEMDATA, targetIndex, 0));
-    auto& binding = ctx->bindings[static_cast<size_t>(index)];
-    binding.key = key;
+    auto binding = ctx->bindings[static_cast<size_t>(index)];
+    binding.key = parsed.key;
     binding.vk = parsed.vk;
     binding.ctrl = parsed.ctrl;
     binding.alt = parsed.alt;
@@ -137,7 +226,58 @@ static bool StoreShortcutEditorRow(AnnotShortcutEditorCtx* ctx, int index) {
     } else {
         return false;
     }
+    ctx->bindings[static_cast<size_t>(index)] = std::move(binding);
     return true;
+}
+
+static void LayoutShortcutEditor(HWND window) {
+    RECT rc{};
+    GetClientRect(window, &rc);
+    const int pad = ScaleY(window, 12);
+    const int row = std::max(ScaleY(window, 26), FontLineHeightPx(window, g_hUIFont) + ScaleY(window, 8));
+    const int width = std::max(1L, rc.right - pad * 2);
+    const int left = (width - pad) * 3 / 5;
+    const int right = width - left - pad;
+    const int listY = pad + row * 3;
+    const int listH = std::max(row * 3, static_cast<int>(rc.bottom) - listY - row * 10 - pad * 6);
+    auto place = [&](int id, int x, int y, int w, int h) {
+        MoveWindow(GetDlgItem(window, id), x, y, w, h, TRUE);
+    };
+    place(kShortcutEditorHint, pad, pad, width, row * 2);
+    place(kShortcutEditorListLabel, pad, pad + row * 2, left, row);
+    place(kShortcutEditorFixedLabel, pad * 2 + left, pad + row * 2, right, row);
+    place(kShortcutEditorList, pad, listY, left, listH);
+    place(kShortcutEditorFixed, pad * 2 + left, listY, right, listH + row * 7 + pad * 3);
+    int y = listY + listH + pad;
+    const int label = ScaleY(window, 56);
+    place(kShortcutEditorKeyLabel, pad, y, label, row);
+    const int captureW = ScaleY(window, 150);
+    place(kShortcutEditorKey, pad + label, y, left - label - captureW - pad / 2, row * 14);
+    place(kShortcutEditorCapture, pad + left - captureW, y, captureW, row);
+    y += row + pad / 2;
+    const int modifierW = ScaleY(window, 90);
+    place(kShortcutEditorCtrl, pad + label, y, modifierW, row);
+    place(kShortcutEditorShift, pad + label + modifierW, y, modifierW, row);
+    place(kShortcutEditorAlt, pad + label + modifierW * 2, y, modifierW, row);
+    y += row + pad / 2;
+    place(kShortcutEditorTargetLabel, pad, y, label, row);
+    place(kShortcutEditorTarget, pad + label, y, left - label, row * 12);
+    y += row + pad / 2;
+    place(kShortcutEditorPreview, pad + label, y, left - label, row);
+    y += row;
+    place(kShortcutEditorStatus, pad, y, left, row * 2);
+    y += row * 2 + pad / 2;
+    const int small = ScaleY(window, 70);
+    place(kShortcutEditorAdd, pad, y, small, row);
+    place(kShortcutEditorDelete, pad * 2 + small, y, small, row);
+    place(kShortcutEditorUpdate, pad * 3 + small * 2, y, left - pad * 2 - small * 2, row);
+    y += row + pad / 2;
+    place(kShortcutEditorSaveHint, pad, y, width, row * 2);
+    const int buttonW = ScaleY(window, 110);
+    y = rc.bottom - pad - row;
+    place(kShortcutEditorDigits, pad, y, ScaleY(window, 220), row);
+    place(IDOK, rc.right - pad * 2 - buttonW * 2, y, buttonW, row);
+    place(IDCANCEL, rc.right - pad - buttonW, y, buttonW, row);
 }
 
 static LRESULT CALLBACK AnnotShortcutEditorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -147,76 +287,133 @@ static LRESULT CALLBACK AnnotShortcutEditorProc(HWND hWnd, UINT msg, WPARAM wPar
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
         ctx = reinterpret_cast<AnnotShortcutEditorCtx*>(cs->lpCreateParams);
         SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
-        const int pad = ScaleY(hWnd, 12);
-        const int rowH = std::max(ScaleY(hWnd, 24), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 8));
-        const int labelW = ScaleY(hWnd, 86);
-        const int fieldX = pad + labelW;
-        const int fieldW = ScaleY(hWnd, 300);
-        HWND label = CreateWindowExW(0, L"STATIC", L"割り当て一覧", WS_CHILD | WS_VISIBLE,
-                                     pad, pad, fieldW, rowH, hWnd, nullptr, g_hInst, nullptr);
-        ctx->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY,
-                                    pad, pad + rowH, ScaleY(hWnd, 440), ScaleY(hWnd, 190), hWnd,
-                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorList)), g_hInst, nullptr);
-        HWND keyLabel = CreateWindowExW(0, L"STATIC", L"キー", WS_CHILD | WS_VISIBLE,
-                                        pad, pad + rowH + ScaleY(hWnd, 205), labelW, rowH, hWnd, nullptr, g_hInst, nullptr);
-        ctx->key = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                                   fieldX, pad + rowH + ScaleY(hWnd, 202), fieldW, rowH, hWnd,
-                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorKey)), g_hInst, nullptr);
-        HWND targetLabel = CreateWindowExW(0, L"STATIC", L"対象", WS_CHILD | WS_VISIBLE,
-                                           pad, pad + rowH + ScaleY(hWnd, 245), labelW, rowH, hWnd, nullptr, g_hInst, nullptr);
-        ctx->target = CreateWindowExW(0, L"COMBOBOX", L"",
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-                                      fieldX, pad + rowH + ScaleY(hWnd, 242), fieldW, ScaleY(hWnd, 300), hWnd,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorTarget)), g_hInst, nullptr);
-        for (AnnotToolFamily family : AnnotToolFamilyUiOrder()) {
-            int item = static_cast<int>(SendMessageW(ctx->target, CB_ADDSTRING, 0,
-                reinterpret_cast<LPARAM>(ShortcutEditorTargetLabel(AnnotToolShortcutTargetKind::Category, family, ToolMode::Select).c_str())));
-            SendMessageW(ctx->target, CB_SETITEMDATA, item, 0x100000u + static_cast<DWORD_PTR>(family));
+        auto control = [&](DWORD ex, const wchar_t* type, const std::wstring& text, DWORD style, int id) {
+            HWND child = CreateWindowExW(ex, type, text.c_str(), WS_CHILD | WS_VISIBLE | style,
+                0, 0, 1, 1, hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+            SetUIFont(child);
+            return child;
+        };
+        control(0, L"STATIC", localization::Text(L"settings.shortcut.hint"), 0, kShortcutEditorHint);
+        control(0, L"STATIC", localization::Text(L"settings.shortcut.assignments"), 0, kShortcutEditorListLabel);
+        ctx->list = control(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_NOTIFY, kShortcutEditorList);
+        control(0, L"STATIC", localization::Text(L"settings.shortcut.fixed_title"), 0, kShortcutEditorFixedLabel);
+        control(WS_EX_CLIENTEDGE, L"EDIT", shortcut_help::CommonOverview(ctx->bindings),
+                WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_READONLY, kShortcutEditorFixed);
+        control(0, L"STATIC", localization::Text(L"settings.shortcut.key_label"), 0, kShortcutEditorKeyLabel);
+        ctx->key = control(0, L"COMBOBOX", L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, kShortcutEditorKey);
+        for (const auto& key : shortcut_key_model::Keys()) {
+            const auto text = localization::Text(key.group) + L"  " + key.token;
+            const auto item = SendMessageW(ctx->key, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+            SendMessageW(ctx->key, CB_SETITEMDATA, item, key.vk);
         }
-        for (ToolMode mode : AnnotToolModeUiOrder()) {
+        control(0, L"BUTTON", localization::Text(L"settings.shortcut.capture"), WS_TABSTOP, kShortcutEditorCapture);
+        control(0, L"BUTTON", localization::Text(L"settings.shortcut.ctrl"), WS_TABSTOP | BS_AUTOCHECKBOX, kShortcutEditorCtrl);
+        control(0, L"BUTTON", localization::Text(L"settings.shortcut.shift"), WS_TABSTOP | BS_AUTOCHECKBOX, kShortcutEditorShift);
+        control(0, L"BUTTON", localization::Text(L"settings.shortcut.alt"), WS_TABSTOP | BS_AUTOCHECKBOX, kShortcutEditorAlt);
+        control(0, L"STATIC", L"", SS_NOPREFIX, kShortcutEditorPreview);
+        control(0, L"STATIC", L"", SS_NOPREFIX, kShortcutEditorStatus);
+        control(0, L"STATIC", localization::Text(L"settings.shortcut.target_label"), 0, kShortcutEditorTargetLabel);
+        ctx->target = control(0, L"COMBOBOX", L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, kShortcutEditorTarget);
+        // Stable tool identity, not the user-controlled bar order or visibility.
+        for (int value = 0; value < kToolModeCount; ++value) {
+            const auto mode = static_cast<ToolMode>(value);
             int item = static_cast<int>(SendMessageW(ctx->target, CB_ADDSTRING, 0,
                 reinterpret_cast<LPARAM>(ShortcutEditorTargetLabel(AnnotToolShortcutTargetKind::Detail, AnnotToolFamilyForMode(mode), mode).c_str())));
             SendMessageW(ctx->target, CB_SETITEMDATA, item, 0x200000u + static_cast<DWORD_PTR>(mode));
         }
-        HWND add = CreateWindowExW(0, L"BUTTON", L"追加", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                   pad, pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 80), rowH, hWnd,
-                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorAdd)), g_hInst, nullptr);
-        HWND del = CreateWindowExW(0, L"BUTTON", L"削除", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                   pad + ScaleY(hWnd, 90), pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 80), rowH, hWnd,
-                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kShortcutEditorDelete)), g_hInst, nullptr);
-        HWND ok = CreateWindowExW(0, L"BUTTON", localization::Text(L"dialog.action.save").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                                  ScaleY(hWnd, 355), pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 80), rowH, hWnd,
-                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
-        HWND cancel = CreateWindowExW(0, L"BUTTON", localization::Text(L"common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                      ScaleY(hWnd, 445), pad + rowH + ScaleY(hWnd, 285), ScaleY(hWnd, 100), rowH, hWnd,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
-        for (HWND control : { label, ctx->list, keyLabel, ctx->key, targetLabel, ctx->target, add, del, ok, cancel }) SetUIFont(control);
+        // Keep old category bindings readable/editable as an explicit alternative.
+        for (int value = 0; value < kAnnotToolFamilyCount; ++value) {
+            const auto family = static_cast<AnnotToolFamily>(value);
+            int item = static_cast<int>(SendMessageW(ctx->target, CB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(ShortcutEditorTargetLabel(AnnotToolShortcutTargetKind::Category, family, ToolMode::Select).c_str())));
+            SendMessageW(ctx->target, CB_SETITEMDATA, item, 0x100000u + static_cast<DWORD_PTR>(family));
+        }
+        control(0, L"BUTTON", localization::Text(L"settings.shortcut.add"), WS_TABSTOP, kShortcutEditorAdd);
+        control(0, L"BUTTON", localization::Text(L"settings.shortcut.delete"), WS_TABSTOP, kShortcutEditorDelete);
+        control(0, L"BUTTON", localization::Text(L"settings.shortcut.update"), WS_TABSTOP, kShortcutEditorUpdate);
+        control(0, L"BUTTON", localization::Text(L"settings.shortcut.add_digits"), WS_TABSTOP, kShortcutEditorDigits);
+        control(0, L"STATIC", localization::Text(L"settings.shortcut.save_hint"), 0, kShortcutEditorSaveHint);
+        control(0, L"BUTTON", localization::Text(L"dialog.action.save"), WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK);
+        control(0, L"BUTTON", localization::Text(L"common.cancel"), WS_TABSTOP, IDCANCEL);
         RefreshShortcutEditorList(ctx);
         LoadShortcutEditorRow(ctx, 0);
         ApplyThemeToDialog(hWnd);
+        LayoutShortcutEditor(hWnd);
+        return 0;
+    }
+    case WM_SIZE:
+        if (ctx) LayoutShortcutEditor(hWnd);
+        return 0;
+    case WM_GETMINMAXINFO: {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+        const int row = std::max(ScaleY(hWnd, 26), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 8));
+        limits->ptMinTrackSize = {ScaleY(hWnd, 880), std::max(ScaleY(hWnd, 680), row * 16 + ScaleY(hWnd, 140))};
         return 0;
     }
     case WM_COMMAND: {
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
         if (!ctx) break;
+        if (id == kShortcutEditorCapture) {
+            ctx->capturing = !ctx->capturing;
+            ctx->drainingKeys = false;
+            ctx->capturedKey = 0;
+            RefreshShortcutEditorDraft(ctx);
+            SetFocus(GetDlgItem(hWnd, kShortcutEditorCapture));
+            return 0;
+        }
+        if (((id == kShortcutEditorKey || id == kShortcutEditorTarget) && code == CBN_SELCHANGE) ||
+            ((id == kShortcutEditorCtrl || id == kShortcutEditorShift || id == kShortcutEditorAlt) && code == BN_CLICKED)) {
+            RefreshShortcutEditorDraft(ctx);
+            return 0;
+        }
         if (id == kShortcutEditorList && code == LBN_SELCHANGE) {
             int nextIndex = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
             if (ctx->currentIndex >= 0 && !StoreShortcutEditorRow(ctx, ctx->currentIndex)) {
                 SendMessageW(ctx->list, LB_SETCURSEL, ctx->currentIndex, 0);
                 return 0;
             }
+            RefreshShortcutEditorList(ctx, nextIndex);
             LoadShortcutEditorRow(ctx, nextIndex);
+            return 0;
+        }
+        if (id == kShortcutEditorUpdate) {
+            if (ctx->currentIndex >= 0 && StoreShortcutEditorRow(ctx, ctx->currentIndex)) {
+                RefreshShortcutEditorList(ctx, ctx->currentIndex);
+                RefreshShortcutEditorDraft(ctx);
+            }
+            return 0;
+        }
+        if (id == kShortcutEditorDigits) {
+            if (ctx->currentIndex >= 0 && !StoreShortcutEditorRow(ctx, ctx->currentIndex)) return 0;
+            for (const auto& binding : DefaultAnnotToolShortcuts()) {
+                if (!binding.ctrl || binding.alt || binding.shift || binding.vk < '1' || binding.vk > '9') continue;
+                const bool taken = std::any_of(ctx->bindings.begin(), ctx->bindings.end(), [&](const auto& other) {
+                    return other.vk == binding.vk && other.ctrl && !other.alt && !other.shift;
+                });
+                if (!taken) ctx->bindings.push_back(binding);
+            }
+            RefreshShortcutEditorList(ctx, ctx->currentIndex);
+            LoadShortcutEditorRow(ctx, std::max(0, ctx->currentIndex));
             return 0;
         }
         if (id == kShortcutEditorAdd) {
             if (ctx->currentIndex >= 0 && !StoreShortcutEditorRow(ctx, ctx->currentIndex)) return 0;
             AnnotToolShortcutBinding binding;
-            if (!ParseAnnotToolShortcutKeyForUser(L"Ctrl+Alt+F1", binding)) return 0;
-            binding.targetKind = AnnotToolShortcutTargetKind::Category;
-            binding.family = AnnotToolFamily::Select;
+            bool found = false;
+            // Prefer a single modifier; retain every existing assignment.
+            for (const auto& key : shortcut_key_model::Keys()) {
+                if (!((key.vk >= '1' && key.vk <= '9') || (key.vk >= VK_F1 && key.vk <= VK_F24))) continue;
+                if (!ParseAnnotToolShortcutKeyForUser(shortcut_key_model::Format(key.vk, true, false, false), binding)) continue;
+                if (std::none_of(ctx->bindings.begin(), ctx->bindings.end(), [&](const auto& other) {
+                    return other.vk == binding.vk && other.ctrl && !other.alt && !other.shift;
+                })) { found = true; break; }
+            }
+            if (!found) {
+                ShowSoftNotice(hWnd, localization::Text(L"settings.shortcut.no_free_key"), SoftNoticeKind::Warning);
+                return 0;
+            }
+            binding.targetKind = AnnotToolShortcutTargetKind::Detail;
             ctx->bindings.push_back(binding);
             RefreshShortcutEditorList(ctx, static_cast<int>(ctx->bindings.size()) - 1);
             LoadShortcutEditorRow(ctx, static_cast<int>(ctx->bindings.size()) - 1);
@@ -225,7 +422,6 @@ static LRESULT CALLBACK AnnotShortcutEditorProc(HWND hWnd, UINT msg, WPARAM wPar
         if (id == kShortcutEditorDelete) {
             int index = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
             if (index >= 0 && index < static_cast<int>(ctx->bindings.size())) {
-                if (!StoreShortcutEditorRow(ctx, index)) return 0;
                 ctx->bindings.erase(ctx->bindings.begin() + index);
                 RefreshShortcutEditorList(ctx, std::max(0, index - 1));
                 LoadShortcutEditorRow(ctx, std::max(0, index - 1));
@@ -233,13 +429,15 @@ static LRESULT CALLBACK AnnotShortcutEditorProc(HWND hWnd, UINT msg, WPARAM wPar
             return 0;
         }
         if (id == IDOK) {
+            if (ctx->capturing) return 0;
             int index = static_cast<int>(SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
             if (index >= 0 && !StoreShortcutEditorRow(ctx, index)) return 0;
             if (!ReplaceAnnotToolShortcutBindings(ctx->bindings)) {
-                ShowSoftNotice(ctx->owner, L"ショートカットの保存に失敗しました。キーの重複や形式を確認してください。",
+                ShowSoftNotice(hWnd, localization::Text(L"settings.shortcut.save_failed"),
                                SoftNoticeKind::Warning);
                 return 0;
             }
+            if (g_hMainWnd) RefreshMainMenuBar(g_hMainWnd);
             ctx->ok = true;
             DestroyWindow(hWnd);
             return 0;
@@ -253,6 +451,13 @@ static LRESULT CALLBACK AnnotShortcutEditorProc(HWND hWnd, UINT msg, WPARAM wPar
     case WM_CLOSE:
         DestroyWindow(hWnd);
         return 0;
+    case WM_ACTIVATE:
+        if (ctx && LOWORD(wParam) == WA_INACTIVE) {
+            ctx->capturing = false;
+            ctx->drainingKeys = false;
+            RefreshShortcutEditorDraft(ctx);
+        }
+        break;
     case WM_DESTROY:
         if (ctx) { ctx->done = true; RestoreOwnerAfterModal(ctx->owner); }
         return 0;
@@ -284,6 +489,52 @@ static void EnsureAnnotShortcutEditorClass() {
     registered = true;
 }
 
+// Intercept before dialog navigation or application shortcut routing. Recording
+// changes only the selector draft. Drain repeats and releases so Enter/Space/Alt
+// cannot subsequently activate a button/menu. No global hooks are installed.
+[[nodiscard]] static bool FilterShortcutEditorCapture(HWND window, AnnotShortcutEditorCtx& ctx, const MSG& msg) {
+    if (!ctx.capturing && !ctx.drainingKeys) return false;
+    if (msg.hwnd != window && !IsChild(window, msg.hwnd)) return false;
+    const bool down = msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN;
+    const bool up = msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP;
+    const UINT vk = static_cast<UINT>(msg.wParam);
+    if (ctx.drainingKeys) {
+        if (up && !(GetKeyState(ctx.capturedKey) & 0x8000) &&
+            !(GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_SHIFT) & 0x8000) &&
+            !(GetKeyState(VK_MENU) & 0x8000)) ctx.drainingKeys = false;
+        return down || up || msg.message == WM_CHAR || msg.message == WM_SYSCHAR ||
+               msg.message == WM_DEADCHAR || msg.message == WM_SYSDEADCHAR;
+    }
+    if (down) {
+        if (shortcut_key_model::IsModifier(vk)) return true;
+        if (msg.lParam & (1LL << 30)) return true;
+        if (vk == VK_ESCAPE) {
+            ctx.capturing = false;
+        } else if ((GetKeyState(VK_LWIN) & 0x8000) || (GetKeyState(VK_RWIN) & 0x8000) ||
+                   (GetKeyState(VK_RMENU) & 0x8000) || !shortcut_key_model::Find(vk)) {
+            SetWindowTextW(GetDlgItem(window, kShortcutEditorStatus),
+                           localization::Text(L"settings.shortcut.capture_unsupported").c_str());
+            return true;
+        } else {
+            SetShortcutEditorChord(&ctx, vk, (GetKeyState(VK_CONTROL) & 0x8000) != 0,
+                (GetKeyState(VK_MENU) & 0x8000) != 0, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+            ctx.capturing = false;
+        }
+        ctx.capturedKey = vk;
+        ctx.drainingKeys = true;
+        RefreshShortcutEditorDraft(&ctx);
+        return true;
+    }
+    if (msg.message == WM_LBUTTONDOWN || msg.message == WM_RBUTTONDOWN || msg.message == WM_NCLBUTTONDOWN) {
+        if (msg.hwnd != GetDlgItem(window, kShortcutEditorCapture)) {
+            ctx.capturing = false;
+            RefreshShortcutEditorDraft(&ctx);
+        }
+    }
+    return up || msg.message == WM_CHAR || msg.message == WM_SYSCHAR ||
+           msg.message == WM_DEADCHAR || msg.message == WM_SYSDEADCHAR;
+}
+
 static void ShowAnnotToolShortcutEditor(HWND owner) {
     EnsureAnnotShortcutEditorClass();
     AnnotShortcutEditorCtx ctx;
@@ -292,15 +543,22 @@ static void ShowAnnotToolShortcutEditor(HWND owner) {
     const std::wstring title = localization::Text(L"settings.annotation_shortcuts_title");
     if (owner) EnableWindow(owner, FALSE);
     int dpi = GetDpiY(owner);
+    const int row = std::max(ScaleY(owner, 26), FontLineHeightPx(owner, g_hUIFont) + ScaleY(owner, 8));
     HWND hWnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"AnnotShortcutEditorDlgClass", title.c_str(),
-                                WS_CAPTION | WS_POPUPWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                                MulDiv(570, dpi, 96), MulDiv(390, dpi, 96), owner, nullptr, g_hInst, &ctx);
+                                WS_CAPTION | WS_POPUPWINDOW | WS_THICKFRAME, CW_USEDEFAULT, CW_USEDEFAULT,
+                                MulDiv(960, dpi, 96), std::max(MulDiv(740, dpi, 96), row * 16 + ScaleY(owner, 140)), owner, nullptr, g_hInst, &ctx);
     if (!hWnd) { if (owner) EnableWindow(owner, TRUE); return; }
     PlaceOwnedPopupAtAppTopLeft(hWnd, owner);
     ShowWindow(hWnd, SW_SHOW);
     UpdateWindow(hWnd);
-    MSG msg;
-    while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
+    MSG msg{};
+    while (!ctx.done) {
+        const BOOL result = GetMessageW(&msg, nullptr, 0, 0);
+        if (result <= 0) {
+            if (result == 0) PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+        if (FilterShortcutEditorCapture(hWnd, ctx, msg)) continue;
         if (HandleWorkspaceMemoMessage(msg)) continue;
         if (ShouldSkipImeMessageInModalLoop(msg)) continue;
         if (!IsDialogMessageW(hWnd, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }

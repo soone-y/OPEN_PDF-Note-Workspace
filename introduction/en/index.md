@@ -6,8 +6,8 @@ The translated documents below explain the purpose of the software, its principa
 
 ## Available in English
 
-- [Project overview reference](project_overview.md) — facts, policies, limitations, and how to describe the project accurately
-- [Features FAQ](features_faq.md) — principal functions, editions, local operation, and known limitations
+- [Project overview reference](project_overview.md) — the developer's responsibility to explain, facts, policies, limitations, and how to describe the project accurately
+- [Features and Usage Scenarios](features_and_scenarios.md) — principal functions, editions, local operation, and limitations to check before use
 - [File formats and persistence](file_formats.md) — the roles of PDFs, annotations, notes, and recoverable saved data
 
 ## Japanese reference material

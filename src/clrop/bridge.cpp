@@ -1,4 +1,5 @@
 #include "bridge.h"
+#include "core/annotation_rotation.h"
 
 #include <algorithm>
 #include <array>
@@ -155,9 +156,32 @@ TextWritingMode TextWritingModeFromClrop(const std::string& mode) {
     return TextWritingMode::Horizontal;
 }
 
+std::string TextBackgroundAssistModeToClrop(TextBackgroundAssistMode mode) {
+    switch (mode) {
+    case TextBackgroundAssistMode::Inherit: return "inherit";
+    case TextBackgroundAssistMode::Off: return "off";
+    case TextBackgroundAssistMode::Auto: return "auto";
+    case TextBackgroundAssistMode::Inverted: return "inverted";
+    }
+    return "inherit";
+}
+
+bool TextBackgroundAssistModeFromClrop(const std::string& mode,
+                                       TextBackgroundAssistMode* out) {
+    if (!out) return false;
+    if (mode.empty() || mode == "inherit") *out = TextBackgroundAssistMode::Inherit;
+    else if (mode == "off") *out = TextBackgroundAssistMode::Off;
+    else if (mode == "auto") *out = TextBackgroundAssistMode::Auto;
+    else if (mode == "inverted") *out = TextBackgroundAssistMode::Inverted;
+    else return false;
+    return true;
+}
+
 clrop::Item MakeMarkerFromAnnot(const Annotation& a) {
     clrop::Item item;
     item.kind = clrop::Item::Kind::MarkerText;
+    if (a.type == Annotation::Type::MarkerText && a.markerDisplayMode == MarkerDisplayMode::Legacy)
+        item.markerDisplayMode = MarkerDisplayModeName(a.markerDisplayMode);
     item.id = a.id;
     item.color = ColorToHex(a.color);
     item.alpha = a.alpha > 0 ? a.alpha : 0.3;
@@ -219,10 +243,13 @@ clrop::Item MakeTextFromAnnot(const Annotation& a) {
     double minY = std::min(a.y1, a.y2);
     double maxY = std::max(a.y1, a.y2);
     item.bbox = std::array<double,4>{ minX, maxY, maxX - minX, maxY - minY };
+    item.bboxEndpoints = std::array<double,4>{ a.x1, a.y1, a.x2, a.y2 };
     item.border = "none";
     item.pt = (a.fontPt > 0) ? a.fontPt : 12.0;
     item.font = a.fontName;
     item.writingMode = TextWritingModeToClrop(a.writingMode);
+    item.contentRotation = a.contentRotation * 90;
+    item.backgroundAssistMode = TextBackgroundAssistModeToClrop(a.backgroundAssistMode);
     item.content = a.text;
     item.lines = a.textLines;
     item.created = IsoNow();
@@ -240,6 +267,7 @@ clrop::Item MakeMathFromAnnot(const Annotation& a) {
 
 clrop::Item MakeMarkerFreeFromAnnot(const Annotation& a) {
     clrop::Item item;
+    if (a.blendMode != AnnotationBlendMode::Normal) item.blendMode = AnnotationBlendModeName(a.blendMode);
     item.kind = clrop::Item::Kind::MarkerFree;
     item.id = a.id;
     item.color = ColorToHex(a.color);
@@ -286,7 +314,10 @@ clrop::Item MakeLinkMarkerFromAnnot(const Annotation& a) {
 
 clrop::Item MakeShapeFromAnnot(const Annotation& a) {
     clrop::Item item;
+    if (a.shapeBoundary != ShapeBoundary::None) item.shapeBoundary = ShapeBoundaryName(a.shapeBoundary);
+    if (a.blendMode != AnnotationBlendMode::Normal) item.blendMode = AnnotationBlendModeName(a.blendMode);
     item.kind = clrop::Item::Kind::Shape;
+    item.contentRotation = a.contentRotation * 90;
     item.id = a.id;
     item.color = ColorToHex(a.color);
     item.alpha = a.alpha > 0 ? a.alpha : 0.35;
@@ -296,8 +327,11 @@ clrop::Item MakeShapeFromAnnot(const Annotation& a) {
     double minY = std::min(a.y1, a.y2);
     double maxY = std::max(a.y1, a.y2);
     item.bbox = std::array<double, 4>{ minX, maxY, maxX - minX, maxY - minY };
+    item.bboxEndpoints = std::array<double, 4>{ a.x1, a.y1, a.x2, a.y2 };
+    item.shapeAngle = a.shapeAngle;
     item.shapeKind = WideToUTF8(ShapeKindToString(a.shapeKind));
-    item.shapeDrawMode = WideToUTF8(ShapeDrawModeToString(a.shapeDrawMode));
+    if(ShapeKindIsOpen(a.shapeKind))item.dash=a.dash;
+    item.shapeDrawMode = WideToUTF8(ShapeDrawModeToString(ShapeDrawModeForKind(a.shapeKind,a.shapeDrawMode)));
     if (a.shapeKind == ShapeKind::RotatedEllipse) item.shapeRotation = std::isfinite(a.shapeRotation) ? a.shapeRotation : kDefaultRotatedEllipseAngleRad;
     item.created = IsoNow();
     item.updated = item.created;
@@ -309,6 +343,7 @@ Annotation MarkerFromItem(const clrop::Item& item, int page) {
     a.id = item.id;
     a.pageIndex = page;
     a.type = Annotation::Type::MarkerText;
+    (void)ParseMarkerDisplayMode(item.markerDisplayMode, a.markerDisplayMode); // Validated by the load sink.
     a.color = HexToColor(item.color);
     a.alpha = (item.alpha > 0) ? item.alpha : 0.3;
     a.quads = item.quads;
@@ -370,6 +405,25 @@ Annotation WaveFromItem(const clrop::Item& item, int page) {
     return a;
 }
 
+void ApplyBboxCoordinates(const clrop::Item& item, Annotation* annotation) {
+    if (!annotation) return;
+    if (item.bboxEndpoints) {
+        annotation->x1 = (*item.bboxEndpoints)[0];
+        annotation->y1 = (*item.bboxEndpoints)[1];
+        annotation->x2 = (*item.bboxEndpoints)[2];
+        annotation->y2 = (*item.bboxEndpoints)[3];
+        return;
+    }
+    if (!item.bbox) return;
+    annotation->x1 = (*item.bbox)[0];
+    const double top = (*item.bbox)[1];
+    const double width = (*item.bbox)[2];
+    const double height = (*item.bbox)[3];
+    annotation->x2 = annotation->x1 + width;
+    annotation->y1 = top;
+    annotation->y2 = top - height;
+}
+
 Annotation TextFromItem(const clrop::Item& item, int page) {
     Annotation a;
     a.id = item.id;
@@ -378,18 +432,12 @@ Annotation TextFromItem(const clrop::Item& item, int page) {
     a.color = HexToColor(item.color);
     a.fontPt = item.pt > 0 ? item.pt : 12.0;
     a.fontName = item.font;
-    if (item.bbox) {
-        a.x1 = (*item.bbox)[0];
-        double top = (*item.bbox)[1];
-        double w = (*item.bbox)[2];
-        double h = (*item.bbox)[3];
-        a.x2 = a.x1 + w;
-        a.y1 = top;
-        a.y2 = top - h;
-    }
+    ApplyBboxCoordinates(item, &a);
     a.text = item.content;
     a.textLines = item.lines;
     a.writingMode = TextWritingModeFromClrop(item.writingMode);
+    a.contentRotation = item.contentRotation / 90;
+    TextBackgroundAssistModeFromClrop(item.backgroundAssistMode, &a.backgroundAssistMode);
     return a;
 }
 
@@ -403,6 +451,7 @@ Annotation MathFromItem(const clrop::Item& item, int page) {
 
 Annotation MarkerFreeFromItem(const clrop::Item& item, int page) {
     Annotation a;
+    if (!item.blendMode.empty()) (void)ParseAnnotationBlendMode(item.blendMode,a.blendMode); // validated by sink
     a.id = item.id;
     a.pageIndex = page;
     a.type = Annotation::Type::MarkerFree;
@@ -451,28 +500,26 @@ Annotation LinkMarkerFromItem(const clrop::Item& item, int page) {
 
 Annotation ShapeFromItem(const clrop::Item& item, int page) {
     Annotation a;
+    if (!item.shapeBoundary.empty()) (void)ParseShapeBoundary(item.shapeBoundary,a.shapeBoundary); // codec validated
+    if (!item.blendMode.empty()) (void)ParseAnnotationBlendMode(item.blendMode,a.blendMode); // validated by sink
     a.id = item.id;
     a.pageIndex = page;
     a.type = Annotation::Type::Shape;
+    a.contentRotation = item.contentRotation / 90;
     a.color = HexToColor(item.color, RGB(255, 220, 128));
     a.alpha = item.alpha > 0 ? item.alpha : 0.35;
     a.width = item.width;
+    a.shapeAngle = item.shapeAngle;
     a.shapeKind = ParseShapeKind(UTF8ToWide(item.shapeKind));
+    if(ShapeKindIsOpen(a.shapeKind))a.dash=item.dash;
     a.shapeDrawMode = ParseShapeDrawMode(UTF8ToWide(item.shapeDrawMode));
+    NormalizeOpenShapeStyle(a);
     if (item.shapeRotation && std::isfinite(*item.shapeRotation)) {
         a.shapeRotation = *item.shapeRotation;
     } else if (a.shapeKind == ShapeKind::RotatedEllipse) {
         a.shapeRotation = kDefaultRotatedEllipseAngleRad;
     }
-    if (item.bbox) {
-        a.x1 = (*item.bbox)[0];
-        double top = (*item.bbox)[1];
-        double w = (*item.bbox)[2];
-        double h = (*item.bbox)[3];
-        a.x2 = a.x1 + w;
-        a.y1 = top;
-        a.y2 = top - h;
-    }
+    ApplyBboxCoordinates(item, &a);
     return a;
 }
 
@@ -535,8 +582,30 @@ class AnnotationLoadSink final : public clrop::ItemLoadSink {
 public:
     explicit AnnotationLoadSink(std::vector<Annotation>& target) : out(target) {}
 
+    bool OnClropDocumentVersion(int version, std::wstring&) override {
+        for (auto& annotation : out)
+            if (annotation.type == Annotation::Type::MarkerText && annotation.markerDisplayMode == MarkerDisplayMode::Inherit)
+                annotation.markerDisplayMode = version == 1 ? MarkerDisplayMode::Legacy : MarkerDisplayMode::Multiply;
+        return true;
+    }
+
     bool OnClropItem(int page, clrop::Item&& item, std::wstring& err) override {
-        (void)err;
+        AnnotationBlendMode blendMode;
+        if (!item.blendMode.empty() && !ParseAnnotationBlendMode(item.blendMode,blendMode)) {
+            err = L"Unsupported annotation blend_mode";return false;
+        }
+        MarkerDisplayMode displayMode;
+        if (!ParseMarkerDisplayMode(item.markerDisplayMode, displayMode)) {
+            err = L"Unsupported marker_display_mode";
+            return false;
+        }
+        if (item.kind == clrop::Item::Kind::Text || item.kind == clrop::Item::Kind::Math) {
+            TextBackgroundAssistMode parsedMode;
+            if (!TextBackgroundAssistModeFromClrop(item.backgroundAssistMode, &parsedMode)) {
+                err = L"Unsupported background_assist_mode";
+                return false;
+            }
+        }
         AppendAnnotationFromItem(item, page, out);
         return true;
     }
@@ -594,7 +663,10 @@ bool LoadAnnotations(const std::wstring& clropPath,
     }
 
     clrop::PdfId filePdfId;
-    AnnotationLoadSink sink(out);
+    // Sink callbacks may run before the parser detects a later error. Keep
+    // their results private until the complete file has been accepted.
+    std::vector<Annotation> loadedAnnots;
+    AnnotationLoadSink sink(loadedAnnots);
     clrop::LoadFileFailureKind failureKind = clrop::LoadFileFailureKind::None;
     if (!clrop::LoadClropFileToSink(clropPath, &filePdfId, sink, err, &failureKind)) {
         // Only quarantine parse-corrupt files. A transient read/open failure must not move user data.
@@ -614,6 +686,7 @@ bool LoadAnnotations(const std::wstring& clropPath,
     }
     if (loadedId) *loadedId = filePdfId;
     ComputeLoadMismatch(filePdfId, pdfPath, validation, expectedPdfId, mismatch);
+    out = std::move(loadedAnnots);
     if (TryGetFileMeta(clropPath, &cacheFileSize, &cacheMtimeMs)) {
         StoreCachedAnnotationLoad(cacheKey, cacheFileSize, cacheMtimeMs, filePdfId, out);
     }
@@ -627,16 +700,20 @@ bool SaveAnnotations(const std::wstring& clropPath,
     auto buildDocument = [&](clrop::Document* outDoc) -> bool {
         if (!outDoc) return false;
         clrop::Document doc;
-        doc.version = 1;
+        doc.version = 2;
         doc.pdfId = clrop::ComputePdfId(pdfPath);
         std::map<int, std::vector<clrop::Item>> perPage;
-        for (const auto& a : annots) {
+        for (const auto& input : annots) {
+            const auto canonical = annotation_rotation::Canonical(input);
+            if (!canonical) { err = L"Invalid annotation coordinate basis."; return false; }
+            const auto& a = *canonical;
             if (a.pageIndex < 0) continue;
             clrop::Item item;
             switch (a.type) {
             case Annotation::Type::MarkerText:
                 if (!a.quads.empty()) {
                     item.kind = clrop::Item::Kind::MarkerText;
+                    if (a.markerDisplayMode == MarkerDisplayMode::Legacy) item.markerDisplayMode = "legacy";
                     item.id = a.id;
                     item.color = ColorToHex(a.color);
                     item.alpha = a.alpha > 0 ? a.alpha : 0.3;
@@ -724,15 +801,19 @@ bool SerializeAnnotations(const std::wstring& pdfPath,
                           std::wstring& err) {
     clrop::Document doc;
     std::map<int, std::vector<clrop::Item>> perPage;
-    doc.version = 1;
+    doc.version = 2;
     doc.pdfId = clrop::ComputePdfFastId(pdfPath);
-    for (const auto& a : annots) {
+    for (const auto& input : annots) {
+        const auto canonical = annotation_rotation::Canonical(input);
+        if (!canonical) { err = L"Invalid annotation coordinate basis."; return false; }
+        const auto& a = *canonical;
         if (a.pageIndex < 0) continue;
         clrop::Item item;
         switch (a.type) {
         case Annotation::Type::MarkerText:
             if (!a.quads.empty()) {
                 item.kind = clrop::Item::Kind::MarkerText;
+                if (a.markerDisplayMode == MarkerDisplayMode::Legacy) item.markerDisplayMode = "legacy";
                 item.id = a.id;
                 item.color = ColorToHex(a.color);
                 item.alpha = a.alpha > 0 ? a.alpha : 0.3;

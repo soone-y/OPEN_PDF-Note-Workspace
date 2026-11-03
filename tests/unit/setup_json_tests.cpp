@@ -34,10 +34,28 @@ int main(int argc, char** argv) {
         Expect(ReplaceOrInsertJsonArrayFieldAfter(json, "tempExternalLectureDirs", array, "workspaceRoot"), "insert failed");
         Expect(AtomicWriteSetupJsonIfValid(setup, json), "save failed");
         Expect(ParseJsonStringArrayField(json, "tempExternalLectureDirs").size() == dirs.size(), "array invalid");
+        Expect(ValidateSetupJsonForWrite(R"({"workspaceRoot":"workspace","tempExternalLecturePriorities":[{"path":"x","priority":5000}]})"),
+            "temporary priorities must remain a known setup field");
     } else if (mode == "read") {
         // Separate process: exercises the app's actual setup loader after restart.
         const auto loaded = LoadSetupTempExternalLectureDirs();
         Expect(loaded == dirs, "saved paths changed after restart");
+        const auto priorities = LoadSetupTempExternalLecturePriorities();
+        Expect(priorities.size() == dirs.size(), "legacy path priorities missing");
+        Expect(priorities.at(lecture_priority::PathKey(dirs.front())) == 5000, "legacy first priority");
+        const auto priorityBytes = R"({"tempExternalLecturePriorities":[{"path":"../external/notes","priority":5017}]})";
+        const auto parsed = ReadTempPriorities(priorityBytes, *exeDir);
+        Expect(parsed && parsed->size() == 1 && parsed->begin()->second == 5017, "explicit priority parse");
+        Expect(!ReadTempPriorities(R"({"tempExternalLecturePriorities":[{"path":"x","priority":10000}]})", *exeDir),
+            "out of range priority accepted");
+        Expect(!ReadTempPriorities(R"({"tempExternalLecturePriorities":"invalid"})", *exeDir),
+            "wrong priority container accepted");
+        Expect(!ReadTempPriorities(R"({"tempExternalLecturePriorities":[{"path":"x","priority":1},{"path":"X","priority":2}]})", *exeDir),
+            "duplicate path priority accepted");
+    } else if (mode == "read-edited") {
+        const std::vector<std::wstring> edited = {dirs.back(), dirs.front()};
+        Expect(LoadSetupTempExternalLectureDirs() == edited,
+               "manually reordered/removed paths changed after restart");
     } else if (mode == "update") {
         std::string json = ReadTextFileUtf8(setup);
         const std::string newRoot = WideToUTF8((exeDir->parent_path() / L"workspace ] $&" / L"授業").wstring());
@@ -101,6 +119,19 @@ int main(int argc, char** argv) {
             Expect(!IsSyntacticallyValidJsonLite(std::string("{\"workspaceRoot\":") + invalid + "}"), "invalid string accepted as JSON");
             Expect(!IsSettingsJsonObjectSyntaxValid(std::string("{\"classesDir\":") + invalid + "}"), "invalid settings string accepted");
         }
+        for (const char* number : {"0", "-0", "9", "-12.5", "6.02e23", "1E-2"}) {
+            const std::string json = std::string("{\"number\":") + number + "}";
+            Expect(IsSyntacticallyValidJsonLite(json) && IsSettingsJsonObjectSyntaxValid(json),
+                   "valid JSON number rejected by setup or settings syntax");
+        }
+        for (const char* number : {"-", "+1", "01", "1.", "1e", "1e+", "-.1"}) {
+            const std::string json = std::string("{\"number\":") + number + "}";
+            Expect(!IsSyntacticallyValidJsonLite(json) && !IsSettingsJsonObjectSyntaxValid(json),
+                   "invalid JSON number accepted by setup or settings syntax");
+        }
+        size_t numberPos = 0;
+        Expect(!json_number_token::Skip("1e+", &numberPos) && numberPos == 0,
+               "failed JSON number token changed the caller cursor");
         ThemeColors theme;
         theme.name = L"name \"quoted\" \\ { } ] 😀";
         theme.nameJp = L"日本語 \n\tテーマ";
@@ -118,20 +149,24 @@ int main(int argc, char** argv) {
         g_themeVerified = verified;
         g_themeVerified[0].sha256 = "edited \" cache value";
         const auto themeFile = *exeDir / L"theme_fixture.json";
-        WriteThemeConfig(themeFile, exeDir->wstring(), verified[0].file, {});
+        Expect(WriteThemeConfig(themeFile, exeDir->wstring(), verified[0].file, g_themeVerified),
+               "theme configuration save failed");
         const auto cached = ParseVerifiedThemes(ReadTextFileUtf8(themeFile));
         Expect(cached.size() == 1 && cached[0].displayName == theme.name &&
                cached[0].sha256 == g_themeVerified[0].sha256, "theme metadata writer lost data");
-        WorkspaceConfig schedule;
-        schedule.schedulePeriods = 2;
-        schedule.scheduleCells = {L"日本語 \"引用\" \\ ] } $&\n改行 😀"};
-        schedule.scheduleStartTimes = {L"09:00", L"text \" \\ \t end"};
-        SaveScheduleStartTimes(*exeDir, schedule);
-        WorkspaceConfig restored;
-        restored.schedulePeriods = schedule.schedulePeriods;
-        Expect(LoadScheduleStartTimes(*exeDir, restored), "schedule reload failed");
-        Expect(restored.scheduleCells[0] == schedule.scheduleCells[0] &&
-               restored.scheduleStartTimes[1] == schedule.scheduleStartTimes[1], "schedule strings lost data");
+        const auto originalThemeJson = ReadTextFileUtf8(themeFile);
+        HANDLE themeLock = CreateFileW(themeFile.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Expect(themeLock != INVALID_HANDLE_VALUE, "theme lock fixture failed");
+        std::string attemptedThemeJson;
+        std::wstring themeError;
+        const bool themeSaved = WriteThemeConfig(themeFile, exeDir->wstring(), L"default",
+                                                 g_themeVerified, &themeError, &attemptedThemeJson);
+        CloseHandle(themeLock);
+        Expect(!themeSaved && !attemptedThemeJson.empty(),
+               "failed theme write did not return the attempted content");
+        Expect(ReadTextFileUtf8(themeFile) == originalThemeJson,
+               "failed theme write damaged the original configuration");
     } else if (mode == "reject") {
         const auto before = ReadTextFileUtf8(setup);
         Expect(!AtomicWriteSetupJsonIfValid(setup, R"({"workspaceRoot":"C:\invalid\path"})"), "invalid JSON accepted");

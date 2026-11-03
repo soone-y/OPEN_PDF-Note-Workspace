@@ -1,18 +1,25 @@
 #include <richedit.h>
 // file: core/app_core.cpp
 #include "core/app_core.h"
+#include "ui/listbox_presentation.h"
+#include "ui/themed_push_buttons.h"
 #include "core/localization.h"
 #include "workspace/workspace_write_lock.h"
 #include "core/text_encoding.h"
+#include "note/note_file_policy.h"
 #include "core/json_string.h"
+#include "core/json_number_token.h"
 #include "app/startup_instance.h"
 #include "core/font_list.h"
 #include "core/atomic_write.h"
 #include "core/fault_injection.h"
 #include "core/preview_trace.h"
 #include "core/ui_notify.h"
+#include "ui/dialogs/pending_write_retry.h"
 #include "core/setup_json_policy.h"
+#include "lecture_order/priority_policy.h"
 #include "ui/window_corners.h"
+#include "ui/transient_display.h"
 #include "settings/settings.h"
 #include "diagnostics/normal_operations.h"
 #include "diagnostics/bounded_log.h"
@@ -257,6 +264,8 @@ HWND g_hComboMarkerAlpha = nullptr;
 HWND g_hComboAnnotMethod = nullptr;
 HWND g_hComboFreehandCorrection = nullptr;
 HWND g_hComboMarkerTextStyle = nullptr;
+HWND g_hRadioBlendNormal = nullptr;
+HWND g_hRadioBlendMultiply = nullptr;
 HWND g_hComboLineDashStyle = nullptr;
 HWND g_hComboShapeKind = nullptr;
 HWND g_hComboShapeGeometry = nullptr;
@@ -301,6 +310,7 @@ HWND g_hShortcutFontSizeLabel = nullptr;
 HWND g_hShortcutFontSizeEdit = nullptr;
 HWND g_hShortcutTagEdit = nullptr;
 HWND g_hBtnShortcutInput = nullptr;
+HWND g_hBtnNoteWritingGuide = nullptr;
 HWND g_hBtnShortcutPdfLink = nullptr;
 HWND g_hBtnNoteAssistBullet = nullptr;
 HWND g_hBtnNoteAssistQuote = nullptr;
@@ -326,7 +336,6 @@ bool g_annotsNeedsIntegrate = false;
 bool g_annotsRequireStrongValidation = false;
 bool g_annotsLoadedPdfIdValid = false;
 clrop::PdfId g_annotsLoadedPdfId;
-std::vector<MathEntry> g_mathEntries;
 std::vector<HighlightRange> g_highlightRanges;
 COLORREF g_highlightMarkColor = RGB(255, 245, 200);
 COLORREF g_highlightHeadingColor = RGB(220, 240, 255);
@@ -344,10 +353,6 @@ BottomPanePin g_bottomPanePin = BottomPanePin::Note;
 BottomNoteMode g_bottomNoteMode = BottomNoteMode::Legacy;
 NotePlacement g_notePlacement = NotePlacement::Bottom;
 
-void SetHighlightColors(COLORREF mark, COLORREF heading) {
-    g_highlightMarkColor = mark;
-    g_highlightHeadingColor = heading;
-}
 std::vector<std::unique_ptr<NodeData>> g_nodeStore;
 std::vector<ShortcutItem> g_shortcuts;
 std::vector<Annotation> g_annots;
@@ -746,9 +751,10 @@ static bool EnsureThemeManualFile(const std::wstring& root) {
     oss << "  - カタログ/選択: theme.json\n";
     oss << "\n";
     oss << "テーマの基本思想\n";
-    oss << "  - 基調色(00AA7B/FFBD85/1D50DDなど)を選び、カラー傾向を上乗せします。\n";
+    oss << "  - 基調色(00AA7B/FFBD85/1D50DDなど)または色覚特性向けテーマを選び、必要に応じてカラー傾向を上乗せします。\n";
     oss << "  - カラー傾向は workspace.json の toneVariant で指定します:\n";
-    oss << "      pure / guard / emphasis / white / black / cvd_red_green / cvd_blue_yellow / cvd_monochrome\n";
+    oss << "      pure / guard / emphasis / white / black\n";
+    oss << "  - 色覚特性向けテーマ(cvd_red_green / cvd_blue_yellow / cvd_monochrome)では、カラー傾向を指定しません。\n";
     oss << "  - toneVariant は見た目の変換であり、テーマファイル(json)自体は書き換えません。\n";
     oss << "\n";
     oss << "theme.json (キャッシュ)\n";
@@ -1302,9 +1308,6 @@ static void FillDefaultUserPaletteColors(COLORREF* custom, size_t count) {
 // custom color. Legacy Windows picker slots remain in JSON only so they can be
 // preserved without appearing as a second, confusing palette setting.
 static void BuildAndApplyRuntimePalette(const COLORREF* presets, size_t presetCount) {
-    const std::vector<COLORREF> prevPalette = g_palette;
-    const COLORREF prevActive = g_activeColor;
-
     std::vector<COLORREF> result;
     result.reserve(presetCount + 1);
 
@@ -1323,22 +1326,6 @@ static void BuildAndApplyRuntimePalette(const COLORREF* presets, size_t presetCo
 
     // Preserve the active color if it is still present; otherwise keep it as-is
     // (the color may still be used even if not displayed as a button).
-    (void)prevPalette;
-    (void)prevActive;
-}
-
-static void ResetRuntimePaletteToDefault() {
-    COLORREF presets[] = {
-        RGB(255, 140,   0), // orange
-        RGB(255, 255,   0), // yellow
-        RGB(255,   0,   0), // red
-        RGB(  0, 160, 255), // blue
-        RGB(  0, 200,   0), // green
-        RGB(200,  80, 200), // magenta
-        RGB(128, 128, 128), // gray (7th preset)
-    };
-    static_assert(std::size(presets) == kPresetPaletteSlotCount, "preset count mismatch");
-    BuildAndApplyRuntimePalette(presets, std::size(presets));
 }
 
 static bool ParseHexColorToken(const std::string& value, COLORREF& out) {
@@ -1429,22 +1416,24 @@ static void UpdateThemeBrushes() {
     g_hThemeMenuBrush = CreateSolidBrush(g_theme.menuBg);
 }
 
-static void WriteThemeConfig(const std::filesystem::path& path,
+[[nodiscard]] static bool WriteThemeConfig(const std::filesystem::path& path,
                              const std::wstring& workspaceRoot,
                              const std::wstring& current,
-                             const std::vector<ThemeColors>& themes) {
-    (void)themes;
-    if (path.empty()) return;
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) return;
+                             const std::vector<VerifiedThemeMeta>& verified,
+                             std::wstring* outError = nullptr,
+                             std::string* outData = nullptr) {
+    if (outError) outError->clear();
+    if (path.empty()) {
+        if (outError) *outError = L"Theme configuration path is empty.";
+        return false;
+    }
     std::ostringstream oss;
     oss << "{\n";
     oss << "  \"format\": \"pdf_note_theme_config_v2\",\n";
     oss << "  \"current_file\": \"" << EscapeJsonStringValue(WideToUTF8(current)) << "\",\n";
     oss << "  \"verified\": [\n";
-    for (size_t i = 0; i < g_themeVerified.size(); ++i) {
-        const auto& v = g_themeVerified[i];
+    for (size_t i = 0; i < verified.size(); ++i) {
+        const auto& v = verified[i];
         oss << "    {\n";
         oss << "      \"file\": \"" << EscapeJsonStringValue(WideToUTF8(v.file)) << "\",\n";
         oss << "      \"size\": " << static_cast<unsigned long long>(v.size) << ",\n";
@@ -1454,13 +1443,19 @@ static void WriteThemeConfig(const std::filesystem::path& path,
         oss << "      \"display_jp\": \"" << EscapeJsonStringValue(WideToUTF8(v.displayNameJp)) << "\",\n";
         oss << "      \"accent\": \"" << ColorToHex(v.accent) << "\",\n";
         oss << "      \"noteBg\": \"" << ColorToHex(v.noteBg) << "\"\n";
-        oss << "    }" << (i + 1 < g_themeVerified.size() ? "," : "") << "\n";
+        oss << "    }" << (i + 1 < verified.size() ? "," : "") << "\n";
     }
     oss << "  ]\n";
     oss << "}\n";
     std::string data = oss.str();
-    std::wstring err;
-    AtomicWriteUtf8WithWorkspaceDirs(path, data, std::filesystem::path(workspaceRoot), &err);
+    if (outData) *outData = data;
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) {
+        if (outError) *outError = UTF8ToWide(ec.message());
+        return false;
+    }
+    return AtomicWriteUtf8WithWorkspaceDirs(path, data, std::filesystem::path(workspaceRoot), outError);
 }
 
 void SetPaletteCustomColor(COLORREF color) {
@@ -1469,9 +1464,9 @@ void SetPaletteCustomColor(COLORREF color) {
 
 bool PickColorDialog(HWND owner, COLORREF initial, COLORREF* outColor) {
     if (!outColor) return false;
-    // Reuse the app-owned editor: localized choices, square corners and quiet
-    // validation. On cancellation the caller's color remains unchanged.
-    return ShowPaletteColorEditorDialog(owner, initial, outColor);
+    // Color creation is centralized in Settings > Color palette. Independent
+    // note/theme colors do not overwrite the annotation palette.
+    return SelectColorInPaletteSettings(owner, initial, outColor);
 }
 
 void SyncUserPaletteToRuntime() {
@@ -1933,25 +1928,12 @@ HFONT CreateUIFont() {
     return CreateFontIndirectW(&lf);
 }
 
-HFONT CreateUIFontVariant(double pt) {
-    LOGFONTW lf{};
-    if (g_hUIFont && GetObjectW(g_hUIFont, sizeof(lf), &lf)) {
-        // reuse UI font face/weight
-    } else {
-        lf.lfWeight = FW_NORMAL;
-        const auto face = GetDefaultFontFaceName();
-        wcscpy_s(lf.lfFaceName, face.c_str());
-    }
-    HDC screen = GetDC(nullptr);
-    lf.lfHeight = -MulDiv(static_cast<int>(std::lround(pt)), GetDeviceCaps(screen, LOGPIXELSY), 72);
-    ReleaseDC(nullptr, screen);
-    return CreateFontIndirectW(&lf);
-}
-
 HFONT CreateFontFromFaceName(const std::wstring& faceName, double pt) {
     LOGFONTW lf{};
     lf.lfWeight = FW_NORMAL;
-    const auto face = faceName.empty() ? GetDefaultFontFaceName() : faceName;
+    // LOGFONTW has a fixed face buffer. An overlong name can come from setup JSON.
+    const auto face = (faceName.empty() || faceName.size() >= LF_FACESIZE)
+        ? GetDefaultFontFaceName() : faceName;
     wcscpy_s(lf.lfFaceName, face.c_str());
     HDC screen = GetDC(nullptr);
     lf.lfHeight = -MulDiv(static_cast<int>(std::lround(pt)), GetDeviceCaps(screen, LOGPIXELSY), 72);
@@ -2193,10 +2175,8 @@ bool IsPdfOrImageFile(const std::filesystem::path& p) {
 }
 
 bool IsNoteFile(const std::filesystem::path& p) {
-    auto ext = p.extension().wstring();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-    return ext == L".txt" || ext == L".csv" || ext == L".md" || ext == L".markdown" ||
-           ext == L".note" || ext == L".tex" || ext == L".icr" || ext == L".clro";
+    if (note::IsStandardNotePath(p)) return true;
+    return note::IsAdditionalNotePath(p, g_config.additionalNoteExtensions);
 }
 
 static bool ListSelectionNeedsReconcile(HWND hList) {
@@ -2205,13 +2185,6 @@ static bool ListSelectionNeedsReconcile(HWND hList) {
     if (count <= 0) return false;
     const int curSel = static_cast<int>(SendMessageW(hList, LB_GETCURSEL, 0, 0));
     return curSel < 0 || curSel >= count;
-}
-
-static void RefreshLeftPaneOpenStateNow() {
-    if (g_hLectureList) InvalidateRect(g_hLectureList, nullptr, FALSE);
-    if (g_hSessionList) InvalidateRect(g_hSessionList, nullptr, FALSE);
-    if (g_hPdfList) InvalidateRect(g_hPdfList, nullptr, FALSE);
-    if (g_hNoteList) InvalidateRect(g_hNoteList, nullptr, FALSE);
 }
 
 static void SyncLeftPaneSelectionNow() {
@@ -2244,10 +2217,23 @@ static void SyncLeftPaneSelectionNow() {
         std::transform(key.begin(), key.end(), key.begin(), ::towlower);
         return key;
     };
+    auto findOpenIndex = [&](const auto& entries, const std::wstring& current, auto pathOf) -> int {
+        if (current.empty()) return -1;
+        // Enumerated/open paths normally match directly. Resolve aliases only
+        // when that in-memory match fails, outside the drawing path.
+        for (size_t i = 0; i < entries.size(); ++i)
+            if (pathOf(entries[i]) == current) return static_cast<int>(i);
+        const auto key = normalizePathKey(current);
+        if (key.empty()) return -1;
+        for (size_t i = 0; i < entries.size(); ++i)
+            if (normalizePathKey(pathOf(entries[i])) == key) return static_cast<int>(i);
+        return -1;
+    };
     auto ensureSel = [](HWND hList, int idx) {
         if (!hList) return;
         int count = static_cast<int>(SendMessageW(hList, LB_GETCOUNT, 0, 0));
         int targetSel = (idx >= 0 && idx < count) ? idx : -1;
+        ui::RememberOpenListIndex(hList, targetSel);
         int curSel = static_cast<int>(SendMessageW(hList, LB_GETCURSEL, 0, 0));
         if (curSel != targetSel) {
             SendMessageW(hList, LB_SETCURSEL, static_cast<WPARAM>(targetSel), 0);
@@ -2260,14 +2246,8 @@ static void SyncLeftPaneSelectionNow() {
     int lectureIdx = -1;
     const int lectureNormalizeStart = normalizeCallCount;
     if (!g_currentLecturePath.empty()) {
-        std::wstring curKey = normalizePathKey(g_currentLecturePath);
-        for (size_t i = 0; i < g_lectures.size(); ++i) {
-            std::wstring entryKey = normalizePathKey(g_lectures[i]);
-            if (!curKey.empty() && entryKey == curKey) {
-                lectureIdx = static_cast<int>(i);
-                break;
-            }
-        }
+        lectureIdx = findOpenIndex(g_lectures, g_currentLecturePath,
+            [](const std::wstring& path) -> const std::wstring& { return path; });
     }
     preview_trace::Append(
         L"SyncLeftPaneSelection",
@@ -2283,15 +2263,8 @@ static void SyncLeftPaneSelectionNow() {
     int sessionIdx = -1;
     const int sessionNormalizeStart = normalizeCallCount;
     if (!g_currentSessionPath.empty()) {
-        std::wstring curKey = normalizePathKey(g_currentSessionPath);
-        for (size_t i = 0; i < g_sessions.size(); ++i) {
-            const auto& s = g_sessions[i];
-            std::wstring entryKey = normalizePathKey(s.path);
-            if (!curKey.empty() && entryKey == curKey) {
-                sessionIdx = static_cast<int>(i);
-                break;
-            }
-        }
+        sessionIdx = findOpenIndex(g_sessions, g_currentSessionPath,
+            [](const SessionEntry& entry) -> const std::wstring& { return entry.path; });
     }
     preview_trace::Append(
         L"SyncLeftPaneSelection",
@@ -2308,14 +2281,8 @@ static void SyncLeftPaneSelectionNow() {
     const std::wstring& logicalPdfPath = CurrentLogicalPdfPath();
     const int pdfNormalizeStart = normalizeCallCount;
     if (!logicalPdfPath.empty()) {
-        std::wstring curKey = normalizePathKey(logicalPdfPath);
-        for (size_t i = 0; i < g_pdfFiles.size(); ++i) {
-            std::wstring entryKey = normalizePathKey(g_pdfFiles[i].path);
-            if (!curKey.empty() && entryKey == curKey) {
-                pdfIdx = static_cast<int>(i);
-                break;
-            }
-        }
+        pdfIdx = findOpenIndex(g_pdfFiles, logicalPdfPath,
+            [](const FileEntry& entry) -> const std::wstring& { return entry.path; });
     }
     preview_trace::Append(
         L"SyncLeftPaneSelection",
@@ -2331,14 +2298,8 @@ static void SyncLeftPaneSelectionNow() {
     int noteIdx = -1;
     const int noteNormalizeStart = normalizeCallCount;
     if (!g_currentNotePath.empty()) {
-        std::wstring curKey = normalizePathKey(g_currentNotePath);
-        for (size_t i = 0; i < g_noteFiles.size(); ++i) {
-            std::wstring entryKey = normalizePathKey(g_noteFiles[i].path);
-            if (!curKey.empty() && entryKey == curKey) {
-                noteIdx = static_cast<int>(i);
-                break;
-            }
-        }
+        noteIdx = findOpenIndex(g_noteFiles, g_currentNotePath,
+            [](const FileEntry& entry) -> const std::wstring& { return entry.path; });
     }
     preview_trace::Append(
         L"SyncLeftPaneSelection",
@@ -2351,10 +2312,6 @@ static void SyncLeftPaneSelectionNow() {
         L"end noteIdx=" + std::to_wstring(noteIdx) +
         L" total_normalize_calls=" + std::to_wstring(normalizeCallCount) +
         L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-}
-
-void RefreshLeftPaneOpenState() {
-    RefreshLeftPaneOpenStateNow();
 }
 
 void SyncLeftPaneSelection() {
@@ -2398,7 +2355,9 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.pdfSinglePageMode = false;
     cfg.showPdfPageOverlay = true;
     cfg.showPdfZoomOverlay = true;
+    cfg.emptyViewGuideMode = 0;
     cfg.panMouseWheelZoom = false;
+    cfg.touchpadScrollStabilization = true;
     cfg.mouseWheelInvertVertical = false;
     cfg.mouseWheelInvertHorizontal = false;
     if (auto sys = QuerySystemTouchpadInvertVertical()) {
@@ -2446,7 +2405,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.noteRenderFontName = g_noteRenderFontName.empty() ? cfg.noteFontName : g_noteRenderFontName;
     cfg.noteRenderJpFontName = g_noteRenderJpFontName.empty() ? cfg.noteRenderFontName : g_noteRenderJpFontName;
     cfg.noteSystem = L"legacy";
-    cfg.lectureSortMode = L"recent";
+    cfg.lectureSortMode = L"manual";
     cfg.sessionSortMode = L"numeric_asc";
     cfg.sessionNumberingMode = L"count";
     cfg.sessionFileLayout = L"separate_directories";
@@ -2538,13 +2497,9 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.annotLastShapePresentation = L"stroke";
     cfg.annotLastShapeGeometry = L"line";
     cfg.annotLastShapeDetail = L"line";
-    cfg.freehandCorrection = L"off";
+    cfg.freehandCorrection = L"auto";
     cfg.freehandCorrectionStyle = L"auto";
     cfg.freehandCorrectionFill = L"off";
-    cfg.scheduleDayMask = 0x1F;
-    cfg.schedulePeriods = 6;
-    cfg.scheduleCells.assign(static_cast<size_t>(7 * cfg.schedulePeriods), L"");
-    cfg.scheduleStartTimes.assign(static_cast<size_t>(7 * 13), L"");
     cfg.shortcuts.clear();
     cfg.markFontPx = 0;
     cfg.headingFontPx = 0;
@@ -2626,7 +2581,7 @@ static bool LooksLikeWorkspaceJson(const std::string& rawJson) {
     if (json.front() != '{' || json.back() != '}') return false;
     if (!IsSyntacticallyValidJsonLite(json)) return false;
     // NOTE: shortcuts are no longer persisted in workspace.json.
-static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfBitmapBudgetMiB|pdfSinglePageMode|showPdfPageOverlay|showPdfZoomOverlay|panMouseWheelZoom|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|quickPdfScalePercent|quickPdfStandardTextAnnots|quickPdfMatchPdfPaneTextLayout|quickNoteStripMarkup|quickNoteIncludeComments|quickNoteMathPlaceholder|quickNoteMathPlaceholderText|sessionSortMode|sessionNumberingMode|sessionFileLayout|sessionAutoOpenMode|sessionAutoOpenPairLinked|startupSelectFirstSession|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
+static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfOpenViewMode|pdfBitmapBudgetMiB|pdfSinglePageMode|showPdfPageOverlay|showPdfZoomOverlay|emptyViewGuideMode|panMouseWheelZoom|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|touchpadScrollStabilization|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|quickPdfScalePercent|quickPdfStandardTextAnnots|quickPdfMatchPdfPaneTextLayout|quickPdfKeepPageRotation|quickPdfTextColorMode|quickPdfTextColorBackground|quickNoteStripMarkup|quickNoteIncludeComments|quickNoteMathPlaceholder|quickNoteMathPlaceholderText|additionalNoteExtensions|newNoteExtension|restoreLastSession|exportNormalizeClroSyntax|sessionSortMode|sessionNumberingMode|sessionFileLayout|sessionAutoOpenMode|sessionAutoOpenPairLinked|startupSelectFirstSession|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
     return std::regex_search(json, keyRe);
 }
 
@@ -2737,11 +2692,11 @@ static bool IsWorkspaceConfigAutoPersistBlockedForRoot(const std::filesystem::pa
 static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
     static const std::set<std::string> known{
         "classesDir", "cacheDir", "showAnnots", "pdfFlowMode", "pdfBitmapBudgetMiB",
-        "pdfSinglePageMode", "showPdfPageOverlay", "showPdfZoomOverlay", "panMouseWheelZoom", "mouseWheelInvertVertical",
-        "mouseWheelInvertHorizontal", "touchpadInvertVertical", "touchpadInvertHorizontal",
+        "pdfSinglePageMode", "showPdfPageOverlay", "showPdfZoomOverlay", "emptyViewGuideMode", "panMouseWheelZoom", "mouseWheelInvertVertical",
+        "mouseWheelInvertHorizontal", "touchpadInvertVertical", "touchpadInvertHorizontal", "touchpadScrollStabilization",
         "ownerDrawUi", "useNativeFileDialogs", "developerMode", "studentMode",
         "exportStandardTextAnnots", "quickPdfScalePercent", "quickPdfStandardTextAnnots",
-        "quickPdfMatchPdfPaneTextLayout", "quickNoteStripMarkup", "quickNoteIncludeComments",
+        "quickPdfKeepPageRotation", "quickPdfMatchPdfPaneTextLayout", "quickPdfTextColorMode", "quickPdfTextColorBackground", "quickNoteStripMarkup", "quickNoteIncludeComments",
         "quickNoteMathPlaceholder", "quickNoteMathPlaceholderText", "debugLogPreviewTrace", "debugLogSwitchTiming",
         "debugLogCrash", "debugLogStartupWatchdog", "debugLogOfficeConversion",
         "leftWidth", "rightWidth", "topHeight",
@@ -2751,25 +2706,30 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "language", "markFontPx", "headingFontPx", "markColor", "headingColor",
         "headingBold", "headingUnderline", "headingLeftBar", "bottomPanePin", "bottomNoteMode", "notePlacement",
         "colorTone", "toneVariant", "quickAnnotPopupPlacement",
-        "lectureSortMode", "sessionSortMode", "sessionNumberingMode", "sessionFileLayout", "sessionAutoOpenMode", "sessionAutoOpenPairLinked", "startupSelectFirstSession", "selectionStyle", "pointerOffsetX", "pointerOffsetY",
+        "lectureSortMode", "lecturePriorities", "sessionSortMode", "sessionNumberingMode", "sessionFileLayout", "sessionAutoOpenMode", "sessionAutoOpenPairLinked", "startupSelectFirstSession", "selectionStyle", "pointerOffsetX", "pointerOffsetY",
         "showMathList", "downKeyLastLineAction", "downKeyLastLineInsertNewline",
         "leftRightLineMoveAction", "autoPairBrackets", "fullWidthParenCaretInside", "fullWidthParenCancelNextLeft",
         "noteFontName", "noteFontPt", "noteRenderFontName", "noteRenderJpFontName",
-        "noteRenderFontPt", "noteSystem", "noteRenderEnabled", "noteRawOnly", "noteRenderMath",
+        "noteRenderFontPt", "noteSystem", "noteRenderEnabled", "noteRawOnly", "noteRenderMath", "clroAsciiOnly",
         "noteWrapEnabled", "noteVimModeEnabled", "noteVimCaretLineRawTextVisible",
         "noteVimClickEntersInsertMode", "noteOverlayRefreshDelayMs", "noteFullReparseDelayMs",
         "noteMathMarginTopPercent",
+        "noteBottomSpaceMode", "noteBottomSpaceFixedDip",
+        "noteBottomSpaceFontPercent", "noteBottomSpaceViewportPercent",
         "noteMathSupSubGapSupPercent", "noteInlineMathVerticalAlignment", "noteGridEnabled", "noteGridPitch", "noteBgColor",
         "noteFgColor", "noteBgSource", "noteBgThemeName", "noteShortcutBackColor",
         "noteShortcutTextColor", "noteShortcutTextTagKey", "noteShortcutHeadingArrowInvert",
         "noteCustomTagKey", "noteCustomTagBold", "noteCustomTagItalic", "noteCustomTagUnderline",
         "noteCustomTagStrike", "noteCustomTagBackColor", "noteCustomTagTextColor",
         "noteFontCustomization", "noteFontDigitTarget", "autoSaveSeconds", "autoIntegrateSeconds",
-        "autoIntegrateCustomMinutes", "clroNamePattern", "textFontName", "textFontPt",
+        "autoIntegrateCustomMinutes", "clroNamePattern", "additionalNoteExtensions",
+        "newNoteExtension", "pdfOpenViewMode", "restoreLastSession", "exportNormalizeClroSyntax", "textFontName", "textFontPt",
         "textFontUseA4Scale", "textFontActiveSizeSlot", "textFontPtSlotA", "textFontPtSlotB",
         "textFontUseA4ScaleSlotA", "textFontUseA4ScaleSlotB", "textBoxReadableBackground", "textBoxReadableBackgroundInverted", "textBoxAutoWrap",
         "lineToolsShareStyle", "lineWidthPt", "arrowWidthPt", "arrowHead", "waveWidthPt", "lineDashStyle", "freehandWidthPt",
         "markerFreeWidthPt", "markerTextWidthPt", "markerTextUnderline", "eraserWidthPt",
+        "newMarkerDisplayMode",
+        "newShapeBlendMode", "newShapeBoundary",
         "markerAlpha", "lineAlpha", "arrowAlpha", "waveAlpha", "freehandAlpha", "shapeAlpha",
         "textColor", "lineColor", "arrowColor", "waveColor", "freehandColor", "markerFreeColor",
         "markerTextColor", "shapeColor", "paletteCustomColor", "magnifierShape", "magnifierZoom", "magnifierSizeDip", "magnifierPosition", "shapeDetail", "shapeKind",
@@ -2778,6 +2738,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         // Accepted only for one-time migration from the earlier numeric representation.
         "annotLastMarkerMode", "annotLastPenMode", "annotLastShapeMode",
         "freehandCorrection", "freehandCorrectionStyle", "freehandCorrectionFill",
+        // Recognized only so an existing workspace can save after the timetable UI is removed.
         "scheduleDayMask", "schedulePeriods"
     };
     if (known.find(key) != known.end()) return true;
@@ -2813,33 +2774,6 @@ static bool ParseJsonLiteralLite(const std::string& json, size_t* pos, const cha
     if (json.size() - *pos < len) return false;
     if (json.compare(*pos, len, literal) != 0) return false;
     *pos += len;
-    return true;
-}
-
-static bool ParseJsonNumberLite(const std::string& json, size_t* pos) {
-    if (!pos || *pos >= json.size()) return false;
-    size_t i = *pos;
-    if (json[i] == '-') ++i;
-    if (i >= json.size()) return false;
-    if (json[i] == '0') {
-        ++i;
-    } else if (std::isdigit(static_cast<unsigned char>(json[i]))) {
-        while (i < json.size() && std::isdigit(static_cast<unsigned char>(json[i]))) ++i;
-    } else {
-        return false;
-    }
-    if (i < json.size() && json[i] == '.') {
-        ++i;
-        if (i >= json.size() || !std::isdigit(static_cast<unsigned char>(json[i]))) return false;
-        while (i < json.size() && std::isdigit(static_cast<unsigned char>(json[i]))) ++i;
-    }
-    if (i < json.size() && (json[i] == 'e' || json[i] == 'E')) {
-        ++i;
-        if (i < json.size() && (json[i] == '+' || json[i] == '-')) ++i;
-        if (i >= json.size() || !std::isdigit(static_cast<unsigned char>(json[i]))) return false;
-        while (i < json.size() && std::isdigit(static_cast<unsigned char>(json[i]))) ++i;
-    }
-    *pos = i;
     return true;
 }
 
@@ -2915,7 +2849,7 @@ static bool ParseJsonValueLite(const std::string& json, size_t* pos, int depth) 
     if (ch == 'f') return ParseJsonLiteralLite(json, pos, "false");
     if (ch == 'n') return ParseJsonLiteralLite(json, pos, "null");
     if (ch == '-' || std::isdigit(static_cast<unsigned char>(ch))) {
-        return ParseJsonNumberLite(json, pos);
+        return json_number_token::Skip(json, pos);
     }
     return false;
 }
@@ -2961,7 +2895,29 @@ static bool WorkspaceJsonHasUnknownTopLevelFields(const std::string& json,
     if (outUnknown) outUnknown->clear();
     bool found = false;
     for (const auto& key : CollectTopLevelJsonObjectKeys(json)) {
-        if (IsWorkspaceConfigKnownTopLevelField(key)) continue;
+        if (IsWorkspaceConfigKnownTopLevelField(key)) {
+            if (key == "newShapeBoundary") {
+                const auto value = ParseJsonStringField(json,key.c_str());
+                ShapeBoundary boundary;
+                if (value && ParseShapeBoundary(*value,boundary)) continue;
+                found = true;
+                if (outUnknown) outUnknown->push_back(key);
+                continue;
+            }
+            if (key == "newShapeBlendMode") {
+                const auto value = ParseJsonStringField(json, key.c_str());
+                AnnotationBlendMode mode;
+                if (value && ParseAnnotationBlendMode(*value, mode)) continue;
+                found = true;
+                if (outUnknown) outUnknown->push_back(key);
+                continue;
+            }
+            if (key != "newMarkerDisplayMode") continue;
+            const auto value = ParseJsonStringField(json, key.c_str());
+            MarkerDisplayMode mode;
+            if (value && ParseMarkerDisplayMode(*value, mode) &&
+                mode != MarkerDisplayMode::Inherit) continue;
+        }
         found = true;
         if (outUnknown) outUnknown->push_back(key);
     }
@@ -3193,7 +3149,11 @@ static bool ParseShortcutKeyToken(const std::string& token, UINT& outVk) {
             }
         }
         if (digits) {
-            int n = std::atoi(token.c_str() + 1);
+            int n = 0;
+            for (size_t i = 1; i < token.size(); ++i) {
+                n = n * 10 + (token[i] - '0');
+                if (n > 24) return false;
+            }
             if (n >= 1 && n <= 24) {
                 outVk = static_cast<UINT>(VK_F1 + (n - 1));
                 return true;
@@ -3276,7 +3236,22 @@ bool IsFixedAnnotToolNavigationShortcut(const AnnotToolShortcutBinding& binding)
            binding.vk == VK_UP || binding.vk == VK_DOWN;
 }
 
-static std::vector<AnnotToolShortcutBinding> DefaultAnnotToolShortcuts() {
+bool IsReservedAnnotToolShortcut(const AnnotToolShortcutBinding& binding) {
+    if (IsFixedAnnotToolNavigationShortcut(binding)) return true;
+    if (binding.ctrl && !binding.alt) {
+        switch (binding.vk) {
+        case 'S': case 'F': case 'Z': case 'Y': case 'R':
+        case 'H': case 'J': case 'K': case 'L':
+        case 'A': case 'C': case 'X': case 'V': case '0':
+        case VK_UP: case VK_DOWN: case VK_OEM_PLUS: case VK_OEM_MINUS:
+            return true;
+        }
+    }
+    return binding.alt && !binding.ctrl &&
+           (binding.vk == VK_F4 || binding.vk == 'S');
+}
+
+std::vector<AnnotToolShortcutBinding> DefaultAnnotToolShortcuts() {
     struct DefaultBinding {
         const char* key;
         AnnotToolShortcutTargetKind kind;
@@ -3284,6 +3259,15 @@ static std::vector<AnnotToolShortcutBinding> DefaultAnnotToolShortcuts() {
         ToolMode mode;
     };
     static const DefaultBinding defaults[] = {
+        { "Ctrl+1", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Select, ToolMode::Select },
+        { "Ctrl+2", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Pan, ToolMode::Pan },
+        { "Ctrl+3", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Magnifier, ToolMode::Magnifier },
+        { "Ctrl+4", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Text, ToolMode::TextBox },
+        { "Ctrl+5", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Marker, ToolMode::MarkerText },
+        { "Ctrl+6", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Marker, ToolMode::MarkerFree },
+        { "Ctrl+7", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Pen, ToolMode::Freehand },
+        { "Ctrl+8", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Shape, ToolMode::Line },
+        { "Ctrl+9", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Shape, ToolMode::Shape },
         { "Ctrl+Alt+1", AnnotToolShortcutTargetKind::Category, AnnotToolFamily::Select, ToolMode::Select },
         { "Ctrl+Alt+2", AnnotToolShortcutTargetKind::Category, AnnotToolFamily::Pan, ToolMode::Pan },
         { "Ctrl+Alt+3", AnnotToolShortcutTargetKind::Category, AnnotToolFamily::Magnifier, ToolMode::Magnifier },
@@ -3377,8 +3361,12 @@ static bool LoadUserToolShortcuts(std::vector<AnnotToolShortcutBinding>& out) {
         return false;
     }
 
+    size_t arrayStart = 0, arrayEnd = 0;
+    if (!IsSyntacticallyValidJsonLite(json) ||
+        !FindJsonFieldValueRange(json, "shortcuts", &arrayStart, &arrayEnd) || json[arrayStart] != '[') return false;
+    const auto entries = ParseJsonArrayElements(json, "shortcuts");
     std::set<UINT> chordSeen;
-    for (const auto& body : ParseJsonArrayElements(json, "shortcuts")) {
+    for (const auto& body : entries) {
         const auto key = ParseJsonStringField(body, "key");
         const auto tool = ParseJsonStringField(body, "tool");
         const auto category = ParseJsonStringField(body, "category");
@@ -3415,7 +3403,8 @@ static bool LoadUserToolShortcuts(std::vector<AnnotToolShortcutBinding>& out) {
         chordSeen.insert(chordKey);
         out.push_back(std::move(binding));
     }
-    return !out.empty();
+    // An explicitly empty list disables individual bindings; do not resurrect defaults.
+    return entries.empty() || !out.empty();
 }
 
 const std::vector<AnnotToolShortcutBinding>& AnnotToolShortcutBindings() {
@@ -3443,23 +3432,6 @@ void SyncUserToolShortcutsToRuntime() {
     SaveDefaultUserToolShortcutsIfMissing(defaults);
     std::vector<AnnotToolShortcutBinding> loaded;
     if (LoadUserToolShortcuts(loaded)) {
-        std::set<UINT> chordSeen;
-        for (const auto& binding : loaded) {
-            const UINT chordKey = binding.vk |
-                (binding.ctrl ? 0x010000u : 0u) |
-                (binding.alt ? 0x020000u : 0u) |
-                (binding.shift ? 0x040000u : 0u);
-            chordSeen.insert(chordKey);
-        }
-        for (const auto& binding : defaults) {
-            if (binding.ctrl || binding.alt || binding.shift || !ShortcutKeyAllowsNoModifier(binding.vk)) {
-                continue;
-            }
-            const UINT chordKey = binding.vk;
-            if (chordSeen.count(chordKey)) continue;
-            loaded.push_back(binding);
-            chordSeen.insert(chordKey);
-        }
         g_annotToolShortcuts = std::move(loaded);
     } else {
         g_annotToolShortcuts = std::move(defaults);
@@ -3517,91 +3489,6 @@ void LoadAnnotToolUiConfigFromSetupJson(const std::string& setupJson) {
     }
 
     ApplyAnnotToolModeUiConfig(expandedOrder, expandedStateVec, false);
-}
-
-constexpr int kScheduleMaxDays = 7;
-constexpr int kScheduleMaxPeriods = 13;
-constexpr size_t kScheduleStartTimesMax = static_cast<size_t>(kScheduleMaxDays * kScheduleMaxPeriods);
-
-static void EnsureScheduleStartTimesSize(WorkspaceConfig& cfg) {
-    if (cfg.scheduleStartTimes.size() < kScheduleStartTimesMax) {
-        cfg.scheduleStartTimes.resize(kScheduleStartTimesMax);
-    } else if (cfg.scheduleStartTimes.size() > kScheduleStartTimesMax) {
-        cfg.scheduleStartTimes.resize(kScheduleStartTimesMax);
-    }
-}
-
-static std::filesystem::path ScheduleSettingsPath(const std::filesystem::path& root) {
-    return root / L"__pdf_note_workspace__" / L"__settings__" / L"schedule.json";
-}
-
-static bool LoadScheduleStartTimes(const std::filesystem::path& root, WorkspaceConfig& cfg) {
-    if (root.empty()) return false;
-    std::filesystem::path path = ScheduleSettingsPath(root);
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec) || ec) return false;
-    std::string json = ReadTextFileUtf8(path);
-    if (json.empty()) return false;
-    bool loaded = false;
-    auto times = ParseJsonStringArrayField(json, "scheduleStartTimes");
-    if (!times.empty()) {
-        cfg.scheduleStartTimes.clear();
-        cfg.scheduleStartTimes.reserve(times.size());
-        for (const auto& t : times) {
-            cfg.scheduleStartTimes.push_back(UTF8ToWide(t));
-        }
-        loaded = true;
-    }
-    auto cells = ParseJsonStringArrayField(json, "scheduleCells");
-    if (!cells.empty()) {
-        cfg.scheduleCells.clear();
-        cfg.scheduleCells.reserve(cells.size());
-        for (const auto& cell : cells) {
-            cfg.scheduleCells.push_back(UTF8ToWide(cell));
-        }
-        loaded = true;
-    }
-    size_t scheduleCount = static_cast<size_t>(
-        std::max(1, std::clamp(cfg.schedulePeriods, 1, kScheduleMaxPeriods) * kScheduleMaxDays));
-    if (cfg.scheduleCells.size() < scheduleCount) {
-        cfg.scheduleCells.resize(scheduleCount);
-    } else if (cfg.scheduleCells.size() > scheduleCount) {
-        cfg.scheduleCells.resize(scheduleCount);
-    }
-    EnsureScheduleStartTimesSize(cfg);
-    return loaded;
-}
-
-static bool SaveScheduleStartTimes(const std::filesystem::path& root, const WorkspaceConfig& cfg) {
-    if (root.empty()) return false;
-    std::filesystem::path path = ScheduleSettingsPath(root);
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) return false;
-    size_t scheduleCount = static_cast<size_t>(
-        std::max(1, std::clamp(cfg.schedulePeriods, 1, kScheduleMaxPeriods) * kScheduleMaxDays));
-    std::ostringstream oss;
-    oss << "{\n";
-    oss << "  \"scheduleStartTimes\": [\n";
-    for (size_t i = 0; i < kScheduleStartTimesMax; ++i) {
-        const std::wstring& t = (i < cfg.scheduleStartTimes.size()) ? cfg.scheduleStartTimes[i] : L"";
-        oss << "    \"" << EscapeJsonStringValue(WideToUTF8(t)) << "\"";
-        if (i + 1 < kScheduleStartTimesMax) oss << ",";
-        oss << "\n";
-    }
-    oss << "  ],\n";
-    oss << "  \"scheduleCells\": [\n";
-    for (size_t i = 0; i < scheduleCount; ++i) {
-        const std::wstring& cell = (i < cfg.scheduleCells.size()) ? cfg.scheduleCells[i] : L"";
-        oss << "    \"" << EscapeJsonStringValue(WideToUTF8(cell)) << "\"";
-        if (i + 1 < scheduleCount) oss << ",";
-        oss << "\n";
-    }
-    oss << "  ]\n";
-    oss << "}\n";
-    std::string data = oss.str();
-    std::wstring err;
-    return AtomicWriteUtf8WithWorkspaceDirs(path, data, root, &err);
 }
 
 static std::optional<int> ParseJsonIntField(const std::string& json, const std::string& key) {
@@ -3912,18 +3799,7 @@ bool LoadThemeConfig(const std::wstring& root) {
     }
 
     if (needWrite) {
-        WriteThemeConfig(desired, root, g_themeCurrentFile, g_themeCatalog);
-    }
-    return true;
-}
-
-bool PersistThemeSelection(const std::wstring& name) {
-    if (g_themeCatalog.empty()) return false;
-    if (!FindThemeByName(g_themeCatalog, name)) return false;
-    g_themeName = name;
-    g_themeCurrentFile = name;
-    if (!g_workspaceRoot.empty()) {
-        WriteThemeConfig(ThemeConfigPath(g_workspaceRoot), g_workspaceRoot, g_themeCurrentFile, g_themeCatalog);
+        (void)WriteThemeConfig(desired, root, g_themeCurrentFile, g_themeVerified);
     }
     return true;
 }
@@ -3944,16 +3820,21 @@ bool ReplaceAnnotToolShortcutBindings(const std::vector<AnnotToolShortcutBinding
     normalized.reserve(bindings.size());
     for (const auto& source : bindings) {
         AnnotToolShortcutBinding binding = source;
-        if (binding.key.empty() || binding.vk == 0) return false;
-        if (IsFixedAnnotToolNavigationShortcut(binding)) return false;
+        AnnotToolShortcutBinding parsed;
+        if (!ParseAnnotToolShortcutKeyForUser(binding.key, parsed)) return false;
+        binding.vk = parsed.vk;
+        binding.ctrl = parsed.ctrl;
+        binding.alt = parsed.alt;
+        binding.shift = parsed.shift;
+        if (IsReservedAnnotToolShortcut(binding)) return false;
         if (binding.targetKind == AnnotToolShortcutTargetKind::Category) {
             if (!AnnotToolFamilyKey(binding.family) || !*AnnotToolFamilyKey(binding.family)) return false;
-        } else {
+        } else if (binding.targetKind == AnnotToolShortcutTargetKind::Detail) {
             const char* key = ToolModeKey(binding.mode);
             if (!key || !*key || static_cast<int>(binding.mode) < 0 ||
                 static_cast<int>(binding.mode) >= kToolModeCount) return false;
             binding.family = AnnotToolFamilyForMode(binding.mode);
-        }
+        } else return false;
         UINT chord = binding.vk |
             (binding.ctrl ? 0x010000u : 0u) |
             (binding.alt ? 0x020000u : 0u) |
@@ -3961,15 +3842,18 @@ bool ReplaceAnnotToolShortcutBindings(const std::vector<AnnotToolShortcutBinding
         if (!seen.insert(chord).second) return false;
         normalized.push_back(std::move(binding));
     }
-    if (normalized.empty()) return false;
     auto path = UserToolShortcutsFilePath();
     if (path.empty()) return false;
+    const std::string json = BuildUserToolShortcutsJson(normalized);
+    if (json.size() > kMaxUserToolShortcutBytes) return false;
     std::wstring err;
-    if (!AtomicWriteUtf8WithWorkspaceDirs(path, BuildUserToolShortcutsJson(normalized),
+    if (!AtomicWriteUtf8WithWorkspaceDirs(path, json,
                                           std::filesystem::path(g_workspaceRoot), &err)) {
         return false;
     }
     g_annotToolShortcuts = std::move(normalized);
+    // The empty-view guide reads accepted runtime bindings on its next paint.
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
     return true;
 }
 
@@ -4024,28 +3908,6 @@ static COLORREF ThemeVariantTextForBg(COLORREF bg) {
     return ThemeContrastRatio(bg, light) >= ThemeContrastRatio(bg, dark) ? light : dark;
 }
 
-static COLORREF ThemeVariantNeutralize(COLORREF color) {
-    // Preserve perceived brightness while removing a hue that may be confused
-    // with another UI state. PDF page pixels are never processed here.
-    const int gray = static_cast<int>(std::lround(
-        0.2126 * GetRValue(color) + 0.7152 * GetGValue(color) + 0.0722 * GetBValue(color)));
-    const BYTE value = static_cast<BYTE>(std::clamp(gray, 0, 255));
-    return RGB(value, value, value);
-}
-
-static void ThemeVariantNeutralizeSurfaces(ThemeColors& theme) {
-    theme.windowBg = ThemeVariantNeutralize(theme.windowBg);
-    theme.panelBg = ThemeVariantNeutralize(theme.panelBg);
-    theme.menuBg = ThemeVariantNeutralize(theme.menuBg);
-    theme.toolbarBg = ThemeVariantNeutralize(theme.toolbarBg);
-    theme.buttonBg = ThemeVariantNeutralize(theme.buttonBg);
-    theme.buttonBorder = ThemeVariantNeutralize(theme.buttonBorder);
-    theme.splitterBg = ThemeVariantNeutralize(theme.splitterBg);
-    theme.splitterLine = ThemeVariantNeutralize(theme.splitterLine);
-    theme.pdfBg = ThemeVariantNeutralize(theme.pdfBg);
-    theme.noteBg = ThemeVariantNeutralize(theme.noteBg);
-}
-
 static std::wstring NormalizeToneVariantLocal(const std::wstring& value) {
     std::wstring v = value;
     std::transform(v.begin(), v.end(), v.begin(), ::towlower);
@@ -4054,9 +3916,6 @@ static std::wstring NormalizeToneVariantLocal(const std::wstring& value) {
     if (v == L"emphasis" || v == L"accent" || v == L"tone_emphasis" || v == L"toneemphasis") return L"emphasis";
     if (v == L"white") return L"white";
     if (v == L"black") return L"black";
-    if (v == L"cvd_red_green" || v == L"red_green" || v == L"protan_deutan") return L"cvd_red_green";
-    if (v == L"cvd_blue_yellow" || v == L"blue_yellow" || v == L"tritan") return L"cvd_blue_yellow";
-    if (v == L"cvd_monochrome" || v == L"monochrome" || v == L"achromatopsia") return L"cvd_monochrome";
     return L"pure";
 }
 
@@ -4080,26 +3939,6 @@ static ThemeColors ApplyToneVariantToTheme(const ThemeColors& base, const std::w
         t.noteText = ThemeVariantTextForBg(t.noteBg);
         t.selectionText = ThemeVariantTextForBg(t.selectionBg);
         return t;
-    } else if (toneVariant == L"cvd_red_green" || toneVariant == L"cvd_blue_yellow" ||
-               toneVariant == L"cvd_monochrome") {
-        // Presentation profiles, not color-vision simulators: neutralize
-        // surfaces and reserve a high-contrast interaction color. Existing
-        // PDFs, annotations, and saved palette colors are left unchanged.
-        ThemeVariantNeutralizeSurfaces(t);
-        const bool redGreen = toneVariant == L"cvd_red_green";
-        const bool blueYellow = toneVariant == L"cvd_blue_yellow";
-        accent = redGreen ? RGB(0, 114, 178)       // Okabe-Ito blue
-               : blueYellow ? RGB(204, 121, 167)  // Okabe-Ito reddish purple
-               : RGB(48, 48, 48);
-        t.accent = accent;
-        t.menuSelBg = redGreen ? RGB(0, 79, 122)
-                    : blueYellow ? RGB(122, 52, 93)
-                    : RGB(64, 64, 64);
-        t.buttonHot = ThemeVariantLerp(t.buttonBg, accent, 0.16);
-        t.buttonPressed = ThemeVariantLerp(t.buttonBg, accent, 0.32);
-        t.selectionBg = t.menuSelBg;
-        t.buttonBorder = ThemeVariantLerp(t.buttonBorder, accent, 0.55);
-        t.splitterLine = ThemeVariantLerp(t.splitterLine, accent, 0.45);
     } else if (toneVariant == L"emphasis") {
         // Reuse the theme accent across interaction surfaces without recoloring the whole UI.
         t.toolbarBg = ThemeVariantLerp(t.toolbarBg, accent, 0.06);
@@ -4175,6 +4014,71 @@ static ThemeColors ApplyToneVariantToTheme(const ThemeColors& base, const std::w
     return t;
 }
 
+struct ThemeRetryFingerprint {
+    bool exists = false;
+    std::string sha256;
+};
+
+static std::optional<ThemeRetryFingerprint> CaptureThemeRetryFingerprint(
+    const std::filesystem::path& path) {
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) return std::nullopt;
+    if (!exists) return ThemeRetryFingerprint{};
+    if (!std::filesystem::is_regular_file(path, ec) || ec) return std::nullopt;
+    const auto id = clrop::ComputePdfId(path.wstring());
+    if (id.sha256.empty()) return std::nullopt;
+    return ThemeRetryFingerprint{true, id.sha256};
+}
+
+static void RememberFailedThemeApply(const std::wstring& name,
+                                     const std::filesystem::path& configPath,
+                                     const std::filesystem::path& themePath,
+                                     const std::string& configData,
+                                     const std::vector<VerifiedThemeMeta>& verified,
+                                     const std::wstring& previousName,
+                                     const std::wstring& error,
+                                     HWND owner) {
+    const auto configBefore = CaptureThemeRetryFingerprint(configPath);
+    const auto themeBefore = themePath.empty()
+        ? std::optional<ThemeRetryFingerprint>(ThemeRetryFingerprint{})
+        : CaptureThemeRetryFingerprint(themePath);
+    const std::wstring workspace = g_workspaceRoot;
+    pending_write_retry::Attempt attempt;
+    attempt.key = L"theme:" + workspace + L":" + name;
+    attempt.operation = localization::Text(L"write_retry.theme");
+    attempt.targetPath = configPath.wstring();
+    attempt.content = UTF8ToWide(configData);
+    attempt.error = error;
+    attempt.retry = [name, configPath, themePath, configData, verified,
+                     previousName, workspace, configBefore, themeBefore](std::wstring& retryError) {
+        const auto configNow = CaptureThemeRetryFingerprint(configPath);
+        const auto themeNow = themePath.empty()
+            ? std::optional<ThemeRetryFingerprint>(ThemeRetryFingerprint{})
+            : CaptureThemeRetryFingerprint(themePath);
+        if (g_workspaceRoot != workspace || g_themeName != previousName ||
+            !configBefore || !configNow || !themeBefore || !themeNow ||
+            configBefore->exists != configNow->exists ||
+            configBefore->sha256 != configNow->sha256 ||
+            themeBefore->exists != themeNow->exists ||
+            themeBefore->sha256 != themeNow->sha256) {
+            retryError = localization::Text(L"write_retry.target_changed");
+            return pending_write_retry::Result::Conflict;
+        }
+        if (!AtomicWriteUtf8WithWorkspaceDirs(configPath, configData,
+                                               std::filesystem::path(workspace), &retryError)) {
+            return pending_write_retry::Result::Failed;
+        }
+        g_themeVerified = verified;
+        if (!ApplyThemeByName(name, g_hMainWnd, false)) {
+            retryError = localization::Text(L"write_retry.theme_apply_failed");
+            return pending_write_retry::Result::Failed;
+        }
+        return pending_write_retry::Result::Saved;
+    };
+    pending_write_retry::Remember(owner, std::move(attempt));
+}
+
 static bool ApplyThemeByNameImpl(const std::wstring& name, HWND owner, bool persist, bool applyUi) {
     // File-based theme: name is a file id like theme_00AA7B.json
     if (!g_workspaceRoot.empty()) {
@@ -4200,8 +4104,9 @@ static bool ApplyThemeByNameImpl(const std::wstring& name, HWND owner, bool pers
 
                 RemoveVerifiedMetaByFile(name);
                 if (!g_workspaceRoot.empty()) {
-                    WriteThemeConfig(ThemeConfigPath(g_workspaceRoot), g_workspaceRoot,
-                                     g_themeCurrentFile.empty() ? g_themeName : g_themeCurrentFile, g_themeCatalog);
+                    (void)WriteThemeConfig(ThemeConfigPath(g_workspaceRoot), g_workspaceRoot,
+                                           g_themeCurrentFile.empty() ? g_themeName : g_themeCurrentFile,
+                                           g_themeVerified);
                 }
                 return false;
             }
@@ -4211,21 +4116,9 @@ static bool ApplyThemeByNameImpl(const std::wstring& name, HWND owner, bool pers
 
             const std::wstring displayEn = baseTheme.name;
             const std::wstring displayJp = baseTheme.nameJp;
-            g_themeLastDisplayEn = displayEn;
-            g_themeLastDisplayJp = displayJp;
             // Keep stable id as ThemeColors.name (file id), and keep a display label in nameJp.
             appliedTheme.name = name;
             appliedTheme.nameJp = displayJp.empty() ? displayEn : displayJp;
-            g_theme = appliedTheme;
-            g_themeName = name;
-            g_themeCurrentFile = name;
-            g_config.ownerDrawUi = (g_themeName != L"default");
-            UpdateNoteBgColorFromConfig();
-            UpdateThemeBrushes();
-            if (applyUi) {
-                ApplyThemeToUI(owner);
-            }
-
             // Update verified meta only when the user explicitly applies/persists (or when we need to evict bad entries).
             if (persist) {
                 VerifiedThemeMeta v;
@@ -4254,13 +4147,34 @@ static bool ApplyThemeByNameImpl(const std::wstring& name, HWND owner, bool pers
                     if (!id.sha256.empty()) v.sha256 = id.sha256;
                 }
 
-                if (auto* existing = FindVerifiedMetaByFile(name)) {
-                    *existing = v;
+                auto candidateVerified = g_themeVerified;
+                auto existingCandidate = std::find_if(candidateVerified.begin(), candidateVerified.end(),
+                    [&](const VerifiedThemeMeta& item) { return item.file == name; });
+                if (existingCandidate != candidateVerified.end()) {
+                    *existingCandidate = v;
                 } else {
-                    g_themeVerified.push_back(std::move(v));
+                    candidateVerified.push_back(std::move(v));
                 }
-                WriteThemeConfig(ThemeConfigPath(g_workspaceRoot), g_workspaceRoot, g_themeCurrentFile, g_themeCatalog);
+                const auto configPath = ThemeConfigPath(g_workspaceRoot);
+                std::wstring saveError;
+                std::string saveData;
+                if (!WriteThemeConfig(configPath, g_workspaceRoot, name, candidateVerified,
+                                      &saveError, &saveData)) {
+                    RememberFailedThemeApply(name, configPath, path, saveData,
+                                             candidateVerified, g_themeName, saveError, owner);
+                    return false;
+                }
+                g_themeVerified = std::move(candidateVerified);
             }
+            g_themeLastDisplayEn = displayEn;
+            g_themeLastDisplayJp = displayJp;
+            g_theme = appliedTheme;
+            g_themeName = name;
+            g_themeCurrentFile = name;
+            g_config.ownerDrawUi = (g_themeName != L"default");
+            UpdateNoteBgColorFromConfig();
+            UpdateThemeBrushes();
+            if (applyUi) ApplyThemeToUI(owner);
             return true;
         }
     }
@@ -4274,8 +4188,22 @@ static bool ApplyThemeByNameImpl(const std::wstring& name, HWND owner, bool pers
     {
         const ThemeColors baseTheme = *picked;
         ThemeColors appliedTheme = baseTheme;
-        if (baseTheme.name != L"default") {
+        const bool isColorVisionTheme = baseTheme.name == L"cvd_red_green" ||
+                                        baseTheme.name == L"cvd_blue_yellow" ||
+                                        baseTheme.name == L"cvd_monochrome";
+        if (baseTheme.name != L"default" && !isColorVisionTheme) {
             appliedTheme = ApplyToneVariantToTheme(baseTheme, g_config.toneVariant);
+        }
+        if (persist && !g_workspaceRoot.empty()) {
+            const auto configPath = ThemeConfigPath(g_workspaceRoot);
+            std::wstring saveError;
+            std::string saveData;
+            if (!WriteThemeConfig(configPath, g_workspaceRoot, name, g_themeVerified,
+                                  &saveError, &saveData)) {
+                RememberFailedThemeApply(name, configPath, {}, saveData,
+                                         g_themeVerified, g_themeName, saveError, owner);
+                return false;
+            }
         }
         g_theme = appliedTheme;
     }
@@ -4284,9 +4212,6 @@ static bool ApplyThemeByNameImpl(const std::wstring& name, HWND owner, bool pers
     g_themeCurrentFile = name;
     UpdateNoteBgColorFromConfig();
     UpdateThemeBrushes();
-    if (persist && !g_workspaceRoot.empty()) {
-        WriteThemeConfig(ThemeConfigPath(g_workspaceRoot), g_workspaceRoot, g_themeCurrentFile, g_themeCatalog);
-    }
     if (applyUi) {
         ApplyThemeToUI(owner);
     }
@@ -4455,8 +4380,6 @@ static bool ClassNameEquals(HWND hWnd, const wchar_t* target) {
     return _wcsicmp(name, target) == 0;
 }
 
-static constexpr const wchar_t* kThemeOriginalButtonTypeProp = L"PdfNoteThemeOriginalButtonType";
-
 static bool ShouldThemeControlChrome(HWND hWnd) {
     if (!hWnd) return false;
 
@@ -4485,50 +4408,6 @@ static void ApplyThemedChromeRecursive(HWND root) {
     EnumChildWindows(root, EnumChildApplyChrome, 0);
 }
 
-static BOOL CALLBACK EnumChildOwnerDrawButtons(HWND hWnd, LPARAM) {
-    if (!hWnd) return TRUE;
-    if (!ClassNameEquals(hWnd, L"Button")) return TRUE;
-    LONG_PTR style = GetWindowLongPtrW(hWnd, GWL_STYLE);
-    const LONG_PTR type = (style & BS_TYPEMASK);
-    if (type == BS_GROUPBOX) return TRUE;
-    if ((style & BS_OWNERDRAW) != 0) return TRUE;
-    SetPropW(hWnd, kThemeOriginalButtonTypeProp, reinterpret_cast<HANDLE>(type + 1));
-    style &= ~BS_TYPEMASK;
-    style |= BS_OWNERDRAW;
-    SetWindowLongPtrW(hWnd, GWL_STYLE, style);
-    SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    InvalidateRect(hWnd, nullptr, TRUE);
-    return TRUE;
-}
-
-static void EnableOwnerDrawButtonsRecursive(HWND root) {
-    if (!root) return;
-    EnumChildWindows(root, EnumChildOwnerDrawButtons, 0);
-}
-
-static BOOL CALLBACK EnumChildRestoreOwnerDrawButtons(HWND hWnd, LPARAM) {
-    if (!hWnd) return TRUE;
-    if (!ClassNameEquals(hWnd, L"Button")) return TRUE;
-    HANDLE prop = GetPropW(hWnd, kThemeOriginalButtonTypeProp);
-    if (!prop) return TRUE;
-
-    LONG_PTR style = GetWindowLongPtrW(hWnd, GWL_STYLE);
-    style &= ~BS_TYPEMASK;
-    style |= ((reinterpret_cast<LONG_PTR>(prop) - 1) & BS_TYPEMASK);
-    SetWindowLongPtrW(hWnd, GWL_STYLE, style);
-    RemovePropW(hWnd, kThemeOriginalButtonTypeProp);
-    SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    InvalidateRect(hWnd, nullptr, TRUE);
-    return TRUE;
-}
-
-static void RestoreOwnerDrawButtonsRecursive(HWND root) {
-    if (!root) return;
-    EnumChildWindows(root, EnumChildRestoreOwnerDrawButtons, 0);
-}
-
 static BOOL CALLBACK EnumThreadThemeChanged(HWND hWnd, LPARAM lParam) {
     HWND exclude = reinterpret_cast<HWND>(lParam);
     if (hWnd && hWnd != exclude) {
@@ -4547,7 +4426,7 @@ void ApplyThemeToUI(HWND owner) {
         SendMessageW(g_hNoteEdit, EM_SETBKGNDCOLOR, 0, g_noteBgColor);
         InvalidateRect(g_hNoteEdit, nullptr, FALSE);
     }
-    if (g_hPdfToolbar) InvalidateRect(g_hPdfToolbar, nullptr, TRUE);
+    if (g_hPdfToolbar) InvalidateRect(g_hPdfToolbar, nullptr, FALSE);
     if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
     if (g_hBottomMath) InvalidateRect(g_hBottomMath, nullptr, FALSE);
     if (g_hAnnotList) InvalidateRect(g_hAnnotList, nullptr, TRUE);
@@ -4572,6 +4451,12 @@ void ApplyThemeToUI(HWND owner) {
         ApplyThemedWindowChrome(g_hNoteList);
         ApplyThemedWindowChrome(g_hAnnotList);
     }
+    // Chrome and owner-draw changes are now complete. Flush the composited
+    // toolbar subtree together instead of leaving its controls to later paints.
+    if (g_hPdfToolbar) {
+        RedrawWindow(g_hPdfToolbar, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_NOERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
 }
 
 LRESULT ThemeCtlColorPanel(HWND ctl, HDC hdc) {
@@ -4585,31 +4470,25 @@ LRESULT ThemeCtlColorPanel(HWND ctl, HDC hdc) {
     return reinterpret_cast<LRESULT>(br);
 }
 
+void ApplyThemeToButtons(HWND root) {
+    if (!root) return;
+    if (!ui::themed_push_buttons::Apply(root, g_config.ownerDrawUi, DrawThemeButton)) {
+        preview_trace::Append(L"ThemeButtons", L"push-button theme registration failed");
+    }
+}
+
 void ApplyThemeToDialog(HWND hWnd) {
     if (!hWnd) return;
     const HRESULT cornerResult = ui::ApplyAuxiliaryWindowCorners(hWnd);
     (void)cornerResult;
-    if (g_config.ownerDrawUi) {
-        EnableOwnerDrawButtonsRecursive(hWnd);
-    } else {
-        RestoreOwnerDrawButtonsRecursive(hWnd);
-    }
+    ApplyThemeToButtons(hWnd);
     ApplyThemedChromeRecursive(hWnd);
     RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
 }
 
 namespace {
-static COLORREF BlendColor(COLORREF a, COLORREF b, double t) {
-    int ar = GetRValue(a), ag = GetGValue(a), ab = GetBValue(a);
-    int br = GetRValue(b), bg = GetGValue(b), bb = GetBValue(b);
-    int r = static_cast<int>(std::lround(ar + (br - ar) * t));
-    int g = static_cast<int>(std::lround(ag + (bg - ag) * t));
-    int b2 = static_cast<int>(std::lround(ab + (bb - ab) * t));
-    return RGB(std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b2, 0, 255));
-}
-
 static COLORREF DisabledTextColor(COLORREF text, COLORREF back) {
-    return BlendColor(text, back, 0.5);
+    return ThemeVariantLerp(text, back, 0.5);
 }
 
 static bool ButtonIsRadio(LONG_PTR style) {
@@ -5119,9 +4998,9 @@ static void AddQuickAnnotContextOptions(std::vector<QuickAnnotPopupItem>& items)
             L"core.annotation.opacity.light", L"core.annotation.opacity.standard",
             L"core.annotation.opacity.dark", L"core.annotation.opacity.maximum" };
         const double current = ToolAlphaForMode(g_toolMode);
-        const int count = ToolAlphaOptionCountForMode(g_toolMode);
+        const int count = ToolAlphaOptionCountForMode(g_toolMode,g_shapeKind);
         for (int i = 0; i < count; ++i) {
-            const double alpha = ToolAlphaOptionValueForMode(g_toolMode, i);
+            const double alpha = ToolAlphaOptionValueForMode(g_toolMode, i,g_shapeKind);
             const std::wstring label = localization::Text(labelIds[i]);
             addItem(ID_ANNOT_CONTEXT_ALPHA_BASE + i,
                     QuickAnnotAlphaLabel(label.c_str(), alpha),
@@ -5441,13 +5320,13 @@ static LRESULT CALLBACK QuickAnnotPopupProc(HWND hWnd, UINT msg, WPARAM wParam, 
             bool active = item.active;
 
             COLORREF fill = g_theme.toolbarBg;
-            if (hot) fill = BlendColor(g_theme.accent, g_theme.toolbarBg, 0.22);
-            else if (active) fill = BlendColor(g_theme.accent, g_theme.toolbarBg, 0.12);
+            if (hot) fill = ThemeVariantLerp(g_theme.accent, g_theme.toolbarBg, 0.22);
+            else if (active) fill = ThemeVariantLerp(g_theme.accent, g_theme.toolbarBg, 0.12);
             HBRUSH itemBrush = CreateSolidBrush(fill);
             FillRect(hdc, &itemRc, itemBrush);
             DeleteObject(itemBrush);
 
-            COLORREF textColor = item.enabled ? g_theme.toolbarText : BlendColor(g_theme.toolbarText, g_theme.toolbarBg, 0.55);
+            COLORREF textColor = item.enabled ? g_theme.toolbarText : ThemeVariantLerp(g_theme.toolbarText, g_theme.toolbarBg, 0.55);
             SetTextColor(hdc, textColor);
 
             RECT textRc = itemRc;
@@ -5501,29 +5380,6 @@ bool HandleQuickAnnotContextMenu(HWND host, const POINT* screenPt, bool allowWit
     POINT clientPt = pt;
     ScreenToClient(host, &clientPt);
     return ShowQuickAnnotToolMenu(host, &clientPt, false);
-}
-
-HWND ToolModeButtonHwnd(ToolMode mode) {
-    switch (mode) {
-    case ToolMode::Select:     return g_hBtnModeSelect;
-    case ToolMode::Pan:        return g_hBtnModePan;
-    case ToolMode::Magnifier:  return g_hBtnModeMagnifier;
-    case ToolMode::MarkerText: return g_hBtnModeMarker;
-    case ToolMode::MarkerTextUnderline:
-    case ToolMode::MarkerTextColor: return nullptr;
-    case ToolMode::MarkerFree: return g_hBtnModeMarkerFree;
-    case ToolMode::MarkerLine: return g_hBtnModeMarkerLine;
-    case ToolMode::MarkerArrow:return g_hBtnModeMarkerArrow;
-    case ToolMode::MarkerWave: return g_hBtnModeMarkerWave;
-    case ToolMode::TextBox:    return g_hBtnModeText;
-    case ToolMode::Line:       return g_hBtnModeLine;
-    case ToolMode::Arrow:      return g_hBtnModeArrow;
-    case ToolMode::Wave:       return g_hBtnModeWave;
-    case ToolMode::Freehand:   return g_hBtnModeFreehand;
-    case ToolMode::Shape:      return g_hBtnModeShape;
-    case ToolMode::Eraser:     return g_hBtnModeEraser;
-    default:                   return nullptr;
-    }
 }
 
 const std::vector<AnnotToolFamily>& AnnotToolFamilyUiOrder() {
@@ -5681,6 +5537,14 @@ bool DrawThemeButton(const DRAWITEMSTRUCT* dis) {
     bool checked = (checkState == BST_CHECKED || checkState == BST_INDETERMINATE);
     bool isToggle = isRadio || isCheckbox || checked;
     int id = GetDlgCtrlID(hWnd);
+    if (id == ID_TOOL_FONT_SIZE_SLOT_A || id == ID_TOOL_FONT_SIZE_SLOT_B) {
+        // BS_OWNERDRAW has no native radio check state. Theme drawing must
+        // follow the same preset model as size application and live previews.
+        isRadio = true;
+        checked = (id == ID_TOOL_FONT_SIZE_SLOT_B ? 1 : 0) ==
+                  std::clamp(g_textFontActiveSizeSlot, 0, 1);
+        isToggle = true;
+    }
     bool isModeToggle = (id == ID_TOOL_MODE_SELECT ||
                          id == ID_TOOL_MODE_PAN ||
                          id == ID_TOOL_MODE_MAGNIFIER ||
@@ -5720,17 +5584,17 @@ bool DrawThemeButton(const DRAWITEMSTRUCT* dis) {
     } else if (isActiveMode) {
         if (ToolModeUsesPaletteColor(g_toolMode)) {
             COLORREF sel = ToolColorForMode(g_toolMode);
-            bg = BlendColor(sel, g_theme.buttonBg, 0.45);
+            bg = ThemeVariantLerp(sel, g_theme.buttonBg, 0.45);
             text = ColorIsDark(bg) ? RGB(255, 255, 255) : RGB(0, 0, 0);
         } else {
-            bg = BlendColor(g_theme.buttonHot, g_theme.buttonBg, 0.35);
+            bg = ThemeVariantLerp(g_theme.buttonHot, g_theme.buttonBg, 0.35);
             text = g_theme.buttonText;
         }
     } else if (!isModeToggle && checked) {
         bg = g_theme.selectionBg;
         text = g_theme.selectionText;
     } else if (id == ID_TOOL_COLOR_CUSTOM && g_activeColor == g_paletteCustomColor) {
-        bg = BlendColor(g_activeColor, g_theme.buttonBg, 0.45);
+        bg = ThemeVariantLerp(g_activeColor, g_theme.buttonBg, 0.45);
         text = ColorIsDark(bg) ? RGB(255, 255, 255) : RGB(0, 0, 0);
     }
     if (disabled) {
@@ -5831,8 +5695,8 @@ bool DrawThemeButton(const DRAWITEMSTRUCT* dis) {
 static std::wstring NormalizeLectureSortMode(const std::wstring& mode) {
     std::wstring m = mode;
     std::transform(m.begin(), m.end(), m.begin(), ::towlower);
-    if (m == L"name" || m == L"schedule" || m == L"recent") return m;
-    return L"recent";
+    if (m == L"name" || m == L"manual" || m == L"recent") return m;
+    return L"manual";
 }
 
 static std::wstring NormalizeSessionSortMode(const std::wstring& mode) {
@@ -5931,18 +5795,13 @@ static std::wstring NormalizePdfFlowMode(const std::wstring& mode) {
     return L"v_ttb";
 }
 
-static std::wstring NormalizeToneVariant(const std::wstring& value) {
+static std::wstring ColorVisionThemeFromLegacyToneVariant(const std::wstring& value) {
     std::wstring v = value;
     std::transform(v.begin(), v.end(), v.begin(), ::towlower);
-    if (v == L"pure") return L"pure";
-    if (v == L"guard" || v == L"tone_guard" || v == L"toneguard") return L"guard";
-    if (v == L"emphasis" || v == L"accent" || v == L"tone_emphasis" || v == L"toneemphasis") return L"emphasis";
-    if (v == L"white") return L"white";
-    if (v == L"black") return L"black";
     if (v == L"cvd_red_green" || v == L"red_green" || v == L"protan_deutan") return L"cvd_red_green";
     if (v == L"cvd_blue_yellow" || v == L"blue_yellow" || v == L"tritan") return L"cvd_blue_yellow";
     if (v == L"cvd_monochrome" || v == L"monochrome" || v == L"achromatopsia") return L"cvd_monochrome";
-    return L"pure";
+    return L"";
 }
 
 static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig& cfg) {
@@ -5970,6 +5829,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     if (auto b = ParseJsonBoolField(json, "showPdfZoomOverlay")) {
         cfg.showPdfZoomOverlay = *b;
     }
+    if (auto v = ParseJsonIntField(json, "emptyViewGuideMode")) {
+        cfg.emptyViewGuideMode = *v >= 0 && *v <= 2 ? *v : 0;
+    }
     if (auto b = ParseJsonBoolField(json, "panMouseWheelZoom")) {
         cfg.panMouseWheelZoom = *b;
     }
@@ -5984,6 +5846,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto b = ParseJsonBoolField(json, "touchpadInvertHorizontal")) {
         cfg.touchpadInvertHorizontal = *b;
+    }
+    if (auto b = ParseJsonBoolField(json, "touchpadScrollStabilization")) {
+        cfg.touchpadScrollStabilization = *b;
     }
     if (auto b = ParseJsonBoolField(json, "ownerDrawUi")) {
         cfg.ownerDrawUi = *b;
@@ -6008,6 +5873,15 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto b = ParseJsonBoolField(json, "quickPdfMatchPdfPaneTextLayout")) {
         cfg.quickPdfMatchPdfPaneTextLayout = *b;
+    }
+    if (auto b = ParseJsonBoolField(json, "quickPdfKeepPageRotation")) {
+        cfg.quickPdfKeepPageRotation = *b;
+    }
+    if (auto v = ParseJsonIntField(json, "quickPdfTextColorMode")) {
+        cfg.quickPdfTextColorMode = *v >= 0 && *v <= 3 ? *v : 0;
+    }
+    if (auto v = ParseJsonIntField(json, "quickPdfTextColorBackground")) {
+        if (*v >= 0 && *v <= 0xffffff) cfg.quickPdfTextColorBackground = static_cast<COLORREF>(*v);
     }
     if (auto b = ParseJsonBoolField(json, "quickNoteStripMarkup")) {
         cfg.quickNoteStripMarkup = *b;
@@ -6084,13 +5958,28 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
         cfg.colorTone = UTF8ToWide(*s);
     }
     if (auto s = ParseJsonStringField(json, "toneVariant")) {
-        cfg.toneVariant = NormalizeToneVariant(UTF8ToWide(*s));
+        const std::wstring rawToneVariant = UTF8ToWide(*s);
+        if (const std::wstring colorVisionTheme = ColorVisionThemeFromLegacyToneVariant(rawToneVariant);
+            !colorVisionTheme.empty()) {
+            cfg.colorTone = colorVisionTheme;
+            cfg.toneVariant = L"pure";
+        } else {
+            cfg.toneVariant = NormalizeToneVariantLocal(rawToneVariant);
+        }
     }
     if (auto s = ParseJsonStringField(json, "quickAnnotPopupPlacement")) {
         cfg.quickAnnotPopupPlacement = UTF8ToWide(*s);
     }
     if (auto s = ParseJsonStringField(json, "lectureSortMode")) {
         cfg.lectureSortMode = NormalizeLectureSortMode(UTF8ToWide(*s));
+    }
+    cfg.lecturePriorities.clear();
+    for (const auto& item : ParseJsonArrayElements(json, "lecturePriorities")) {
+        const auto name = ParseJsonStringField(item, "name");
+        const auto priority = ParseJsonIntField(item, "priority");
+        if (name && !name->empty() && priority && *priority >= 0 && *priority <= 9999) {
+            cfg.lecturePriorities[UTF8ToWide(*name)] = *priority;
+        }
     }
     if (auto s = ParseJsonStringField(json, "sessionSortMode")) {
         cfg.sessionSortMode = NormalizeSessionSortMode(UTF8ToWide(*s));
@@ -6107,6 +5996,12 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     if (auto b = ParseJsonBoolField(json, "sessionAutoOpenPairLinked")) {
         cfg.sessionAutoOpenPairLinked = *b;
     }
+    if (auto b = ParseJsonBoolField(json, "restoreLastSession")) cfg.restoreLastSession = *b;
+    if (auto b = ParseJsonBoolField(json, "exportNormalizeClroSyntax")) cfg.exportNormalizeClroSyntax = *b;
+    if (auto value = ParseJsonStringField(json, "newNoteExtension"))
+        cfg.newNoteExtension = open_preferences::NewNoteExtension(UTF8ToWide(*value));
+    if (auto value = ParseJsonStringField(json, "pdfOpenViewMode"))
+        cfg.pdfOpenViewMode = open_preferences::PdfViewMode(UTF8ToWide(*value));
     if (auto b = ParseJsonBoolField(json, "startupSelectFirstSession")) {
         cfg.startupSelectFirstSession = *b;
     }
@@ -6173,6 +6068,7 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     if (auto b = ParseJsonBoolField(json, "noteRenderMath")) {
         cfg.noteRenderMath = *b;
     }
+    if (auto b = ParseJsonBoolField(json, "clroAsciiOnly")) cfg.clroAsciiOnly = *b;
     if (auto b = ParseJsonBoolField(json, "noteWrapEnabled")) {
         cfg.noteWrapEnabled = *b;
     }
@@ -6193,6 +6089,18 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto v = ParseJsonIntField(json, "noteMathMarginTopPercent")) {
         cfg.noteMathMarginTopPercent = std::clamp(*v, 5, 95);
+    }
+    if (auto v = ParseJsonIntField(json, "noteBottomSpaceMode")) {
+        cfg.noteBottomSpaceMode = std::clamp(*v, 0, 2);
+    }
+    if (auto v = ParseJsonIntField(json, "noteBottomSpaceFixedDip")) {
+        cfg.noteBottomSpaceFixedDip = std::clamp(*v, 0, 2000);
+    }
+    if (auto v = ParseJsonIntField(json, "noteBottomSpaceFontPercent")) {
+        cfg.noteBottomSpaceFontPercent = std::clamp(*v, 0, 2000);
+    }
+    if (auto v = ParseJsonIntField(json, "noteBottomSpaceViewportPercent")) {
+        cfg.noteBottomSpaceViewportPercent = std::clamp(*v, 0, 90);
     }
     if (auto v = ParseJsonIntField(json, "noteMathSupSubGapSupPercent")) {
         cfg.noteMathSupSubGapSupPercent = (*v <= 0) ? 0 : std::clamp(*v, 5, 95);
@@ -6268,6 +6176,10 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     if (auto s = ParseJsonStringField(json, "clroNamePattern")) {
         cfg.clroNamePattern = UTF8ToWide(*s);
     }
+    cfg.additionalNoteExtensions.clear();
+    for (const auto& extension : ParseJsonStringArrayField(json, "additionalNoteExtensions")) {
+        cfg.additionalNoteExtensions.push_back(UTF8ToWide(extension));
+    }
     if (auto s = ParseJsonStringField(json, "textFontName")) {
         cfg.textFontName = UTF8ToWide(*s);
     }
@@ -6339,6 +6251,21 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto b = ParseJsonBoolField(json, "markerTextUnderline")) {
         cfg.markerTextUnderline = *b;
+    }
+    if (const auto value = ParseJsonStringField(json,"newShapeBoundary")) {
+        ShapeBoundary boundary;
+        if (ParseShapeBoundary(*value,boundary)) cfg.newShapeBoundary = boundary;
+    }
+    if (const auto value = ParseJsonStringField(json, "newShapeBlendMode")) {
+        AnnotationBlendMode mode;
+        if (ParseAnnotationBlendMode(*value, mode)) cfg.newShapeBlendMode = mode;
+    }
+    for (const auto& field : {std::pair<const char*, MarkerDisplayMode*>{"newMarkerDisplayMode", &cfg.newMarkerDisplayMode}}) {
+        if (const auto value = ParseJsonStringField(json, field.first)) {
+            MarkerDisplayMode mode;
+            if (ParseMarkerDisplayMode(*value, mode) && mode != MarkerDisplayMode::Inherit)
+                *field.second = mode;
+        }
     }
     if (auto v = ParseJsonDoubleField(json, "eraserWidthPt")) {
         cfg.eraserWidthPt = std::clamp(*v, 1.0, 80.0);
@@ -6461,15 +6388,6 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto s = ParseJsonStringField(json, "freehandCorrectionFill")) {
         cfg.freehandCorrectionFill = NormalizeFreehandCorrectionFill(UTF8ToWide(*s));
-    }
-    auto scheduleMask = ParseJsonIntField(json, "scheduleDayMask");
-    if (scheduleMask) {
-        cfg.scheduleDayMask = *scheduleMask;
-    }
-    cfg.scheduleDayMask &= 0x7F;
-    if (cfg.scheduleDayMask == 0) cfg.scheduleDayMask = 0x1F;
-    if (auto v = ParseJsonIntField(json, "schedulePeriods")) {
-        cfg.schedulePeriods = std::clamp(*v, 1, 13);
     }
     // NOTE: shortcuts are no longer loaded from workspace.json.
 
@@ -6620,16 +6538,6 @@ bool ShapeToolGeometryFromKey(const std::string& raw, AnnotToolGeometry& out) {
     return false;
 }
 
-std::vector<AnnotToolGeometry> OrderedShapeToolGeometries() {
-    std::vector<AnnotToolGeometry> out;
-    for (ToolMode mode : AnnotToolModeUiOrder()) {
-        const AnnotToolGeometry geometry = AnnotToolGeometryForMode(mode);
-        if (geometry == AnnotToolGeometry::None) continue;
-        if (std::find(out.begin(), out.end(), geometry) == out.end()) out.push_back(geometry);
-    }
-    return out;
-}
-
 const char* ShapeDetailKey(ShapeDetail detail) {
     switch (detail) {
     case ShapeDetail::Line: return "line";
@@ -6639,6 +6547,7 @@ const char* ShapeDetailKey(ShapeDetail detail) {
     case ShapeDetail::Ellipse: return "ellipse";
     case ShapeDetail::Triangle: return "triangle";
     case ShapeDetail::Diamond: return "diamond";
+    case ShapeDetail::Arc: return "arc";
     default: return "line";
     }
 }
@@ -6664,6 +6573,7 @@ bool ShapeDetailFromKey(const std::string& raw, ShapeDetail& out) {
         return true;
     }
     if (key == "diamond") { out = ShapeDetail::Diamond; return true; }
+    if (key == "arc") { out = ShapeDetail::Arc; return true; }
     return false;
 }
 
@@ -6676,6 +6586,7 @@ std::vector<ShapeDetail> OrderedShapeDetails() {
         ShapeDetail::Ellipse,
         ShapeDetail::Triangle,
         ShapeDetail::Diamond,
+        ShapeDetail::Arc,
     };
 }
 
@@ -6685,7 +6596,7 @@ bool ShapeDetailIsLinear(ShapeDetail detail) {
            detail == ShapeDetail::Wave;
 }
 
-bool ShapeDetailIsClosed(ShapeDetail detail) {
+bool ShapeDetailUsesBox(ShapeDetail detail) {
     return !ShapeDetailIsLinear(detail);
 }
 
@@ -6698,6 +6609,7 @@ ToolMode ToolModeForShapeDetail(ShapeDetail detail) {
     case ShapeDetail::Ellipse:
     case ShapeDetail::Triangle:
     case ShapeDetail::Diamond:
+    case ShapeDetail::Arc:
         return ToolMode::Shape;
     default:
         return ToolMode::Line;
@@ -6709,6 +6621,7 @@ ShapeKind ShapeKindForShapeDetail(ShapeDetail detail) {
     case ShapeDetail::Ellipse: return ShapeKind::Ellipse;
     case ShapeDetail::Triangle: return ShapeKind::Triangle;
     case ShapeDetail::Diamond: return ShapeKind::Diamond;
+    case ShapeDetail::Arc: return ShapeKind::Arc;
     case ShapeDetail::Rectangle:
     default:
         return ShapeKind::Rectangle;
@@ -6737,6 +6650,8 @@ ShapeDetail ShapeDetailForLegacyState(ToolMode mode, ShapeKind kind) {
             return ShapeDetail::Triangle;
         case ShapeKind::Diamond:
             return ShapeDetail::Diamond;
+        case ShapeKind::Arc:
+            return ShapeDetail::Arc;
         case ShapeKind::Rectangle:
         case ShapeKind::Square:
         default:
@@ -6748,7 +6663,7 @@ ShapeDetail ShapeDetailForLegacyState(ToolMode mode, ShapeKind kind) {
 }
 
 void SyncLegacyShapeStateFromDetail() {
-    if (ShapeDetailIsClosed(g_shapeDetail)) {
+    if (ShapeDetailUsesBox(g_shapeDetail)) {
         g_shapeKind = ShapeKindForShapeDetail(g_shapeDetail);
     }
     g_shapeGroupMode = ToolModeForShapeDetail(g_shapeDetail);
@@ -6829,8 +6744,6 @@ WorkspaceConfig LoadWorkspaceConfig(const std::wstring& root) {
                 }
             }
         }
-        LoadScheduleStartTimes(std::filesystem::path(root), cfg);
-        EnsureScheduleStartTimesSize(cfg);
         NormalizeCacheDir(std::filesystem::path(root), cfg);
         return cfg;
     }
@@ -6842,8 +6755,6 @@ WorkspaceConfig LoadWorkspaceConfig(const std::wstring& root) {
         const std::filesystem::path rootPath(root);
         std::filesystem::path quarantined = QuarantineCorruptWorkspaceJson(rootPath, p);
         BlockWorkspaceConfigAutoPersistForRoot(rootPath);
-        LoadScheduleStartTimes(rootPath, cfg);
-        EnsureScheduleStartTimesSize(cfg);
         std::wstring msg = localization::Text(L"workspace.config.read_failed");
         if (!readOk && !readErr.empty()) {
             msg += localization::Format(L"workspace.config.read_error", {{L"ERROR", readErr}});
@@ -6872,8 +6783,6 @@ WorkspaceConfig LoadWorkspaceConfig(const std::wstring& root) {
         ShowAppCoreMessageDialog(nullptr, localization::Text(L"app_core.settings_title"), msg, SoftNoticeKind::Warning);
     }
     ApplyJsonToWorkspaceConfig(json, cfg);
-    LoadScheduleStartTimes(rootPath, cfg);
-    EnsureScheduleStartTimesSize(cfg);
     NormalizeCacheDir(rootPath, cfg);
     return cfg;
 }
@@ -6924,11 +6833,13 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"pdfSinglePageMode\": " << (cfg.pdfSinglePageMode ? "true" : "false") << ",\n";
     ofs << "  \"showPdfPageOverlay\": " << (cfg.showPdfPageOverlay ? "true" : "false") << ",\n";
     ofs << "  \"showPdfZoomOverlay\": " << (cfg.showPdfZoomOverlay ? "true" : "false") << ",\n";
+    ofs << "  \"emptyViewGuideMode\": " << (cfg.emptyViewGuideMode >= 0 && cfg.emptyViewGuideMode <= 2 ? cfg.emptyViewGuideMode : 0) << ",\n";
     ofs << "  \"panMouseWheelZoom\": " << (cfg.panMouseWheelZoom ? "true" : "false") << ",\n";
     ofs << "  \"mouseWheelInvertVertical\": " << (cfg.mouseWheelInvertVertical ? "true" : "false") << ",\n";
     ofs << "  \"mouseWheelInvertHorizontal\": " << (cfg.mouseWheelInvertHorizontal ? "true" : "false") << ",\n";
     ofs << "  \"touchpadInvertVertical\": " << (cfg.touchpadInvertVertical ? "true" : "false") << ",\n";
     ofs << "  \"touchpadInvertHorizontal\": " << (cfg.touchpadInvertHorizontal ? "true" : "false") << ",\n";
+    ofs << "  \"touchpadScrollStabilization\": " << (cfg.touchpadScrollStabilization ? "true" : "false") << ",\n";
     ofs << "  \"ownerDrawUi\": "  << (cfg.ownerDrawUi ? "true" : "false") << ",\n";
     ofs << "  \"useNativeFileDialogs\": " << (cfg.useNativeFileDialogs ? "true" : "false") << ",\n";
     ofs << "  \"developerMode\": " << (cfg.developerMode ? "true" : "false") << ",\n";
@@ -6937,6 +6848,9 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"quickPdfScalePercent\": " << std::clamp(cfg.quickPdfScalePercent, 13, 800) << ",\n";
     ofs << "  \"quickPdfStandardTextAnnots\": " << (cfg.quickPdfStandardTextAnnots ? "true" : "false") << ",\n";
     ofs << "  \"quickPdfMatchPdfPaneTextLayout\": " << (cfg.quickPdfMatchPdfPaneTextLayout ? "true" : "false") << ",\n";
+    ofs << "  \"quickPdfKeepPageRotation\": " << (cfg.quickPdfKeepPageRotation ? "true" : "false") << ",\n";
+    ofs << "  \"quickPdfTextColorMode\": " << cfg.quickPdfTextColorMode << ",\n";
+    ofs << "  \"quickPdfTextColorBackground\": " << cfg.quickPdfTextColorBackground << ",\n";
     ofs << "  \"quickNoteStripMarkup\": " << (cfg.quickNoteStripMarkup ? "true" : "false") << ",\n";
     ofs << "  \"quickNoteIncludeComments\": " << (cfg.quickNoteIncludeComments ? "true" : "false") << ",\n";
     ofs << "  \"quickNoteMathPlaceholder\": " << (cfg.quickNoteMathPlaceholder ? "true" : "false") << ",\n";
@@ -6986,14 +6900,28 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"bottomNoteMode\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.bottomNoteMode.empty() ? L"legacy" : cfg.bottomNoteMode)) << "\",\n";
     ofs << "  \"notePlacement\": \"" << EscapeJsonStringValue(WideToUTF8(NotePlacementToString(ParseNotePlacement(cfg.notePlacement)))) << "\",\n";
     ofs << "  \"colorTone\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.colorTone.empty() ? L"default" : cfg.colorTone)) << "\",\n";
-    ofs << "  \"toneVariant\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeToneVariant(cfg.toneVariant))) << "\",\n";
+    ofs << "  \"toneVariant\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeToneVariantLocal(cfg.toneVariant))) << "\",\n";
     ofs << "  \"quickAnnotPopupPlacement\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.quickAnnotPopupPlacement.empty() ? L"auto" : cfg.quickAnnotPopupPlacement)) << "\",\n";
     ofs << "  \"lectureSortMode\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeLectureSortMode(cfg.lectureSortMode))) << "\",\n";
+    ofs << "  \"lecturePriorities\": [";
+    bool firstPriority = true;
+    for (const auto& [name, priority] : cfg.lecturePriorities) {
+        if (name.empty() || priority < 0 || priority > 9999) continue;
+        if (!firstPriority) ofs << ",";
+        ofs << "{\"name\":\"" << EscapeJsonStringValue(WideToUTF8(name))
+            << "\",\"priority\":" << priority << "}";
+        firstPriority = false;
+    }
+    ofs << "],\n";
     ofs << "  \"sessionSortMode\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeSessionSortMode(cfg.sessionSortMode))) << "\",\n";
     ofs << "  \"sessionNumberingMode\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeSessionNumberingMode(cfg.sessionNumberingMode))) << "\",\n";
     ofs << "  \"sessionFileLayout\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeSessionFileLayout(cfg.sessionFileLayout))) << "\",\n";
     ofs << "  \"sessionAutoOpenMode\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeSessionAutoOpenMode(cfg.sessionAutoOpenMode))) << "\",\n";
     ofs << "  \"sessionAutoOpenPairLinked\": " << (cfg.sessionAutoOpenPairLinked ? "true" : "false") << ",\n";
+    ofs << "  \"restoreLastSession\": " << (cfg.restoreLastSession ? "true" : "false") << ",\n";
+    ofs << "  \"exportNormalizeClroSyntax\": " << (cfg.exportNormalizeClroSyntax ? "true" : "false") << ",\n";
+    ofs << "  \"newNoteExtension\": \"" << WideToUTF8(open_preferences::NewNoteExtension(cfg.newNoteExtension)) << "\",\n";
+    ofs << "  \"pdfOpenViewMode\": \"" << WideToUTF8(open_preferences::PdfViewMode(cfg.pdfOpenViewMode)) << "\",\n";
     ofs << "  \"startupSelectFirstSession\": " << (cfg.startupSelectFirstSession ? "true" : "false") << ",\n";
     ofs << "  \"selectionStyle\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeSelectionStyle(cfg.selectionStyle))) << "\",\n";
     ofs << "  \"pointerOffsetX\": " << std::clamp(cfg.pointerOffsetX, -20, 20) << ",\n";
@@ -7015,6 +6943,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"noteRenderEnabled\": " << (cfg.noteRenderEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteRawOnly\": " << (cfg.noteRawOnly ? "true" : "false") << ",\n";
     ofs << "  \"noteRenderMath\": " << (cfg.noteRenderMath ? "true" : "false") << ",\n";
+    ofs << "  \"clroAsciiOnly\": " << (cfg.clroAsciiOnly ? "true" : "false") << ",\n";
     ofs << "  \"noteWrapEnabled\": " << (cfg.noteWrapEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteVimModeEnabled\": " << (cfg.noteVimModeEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteVimCaretLineRawTextVisible\": " << (cfg.noteVimCaretLineRawTextVisible ? "true" : "false") << ",\n";
@@ -7022,6 +6951,10 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"noteOverlayRefreshDelayMs\": " << std::clamp(cfg.noteOverlayRefreshDelayMs, 100, 2000) << ",\n";
     ofs << "  \"noteFullReparseDelayMs\": " << std::clamp(cfg.noteFullReparseDelayMs, 250, 5000) << ",\n";
     ofs << "  \"noteMathMarginTopPercent\": " << std::clamp(cfg.noteMathMarginTopPercent, 5, 95) << ",\n";
+    ofs << "  \"noteBottomSpaceMode\": " << std::clamp(cfg.noteBottomSpaceMode, 0, 2) << ",\n";
+    ofs << "  \"noteBottomSpaceFixedDip\": " << std::clamp(cfg.noteBottomSpaceFixedDip, 0, 2000) << ",\n";
+    ofs << "  \"noteBottomSpaceFontPercent\": " << std::clamp(cfg.noteBottomSpaceFontPercent, 0, 2000) << ",\n";
+    ofs << "  \"noteBottomSpaceViewportPercent\": " << std::clamp(cfg.noteBottomSpaceViewportPercent, 0, 90) << ",\n";
     ofs << "  \"noteMathSupSubGapSupPercent\": "
         << ((cfg.noteMathSupSubGapSupPercent <= 0) ? 0 : std::clamp(cfg.noteMathSupSubGapSupPercent, 5, 95)) << ",\n";
     ofs << "  \"noteInlineMathVerticalAlignment\": "
@@ -7055,6 +6988,12 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     if (!cfg.clroNamePattern.empty()) {
         ofs << "  \"clroNamePattern\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.clroNamePattern)) << "\",\n";
     }
+    ofs << "  \"additionalNoteExtensions\": [";
+    for (size_t i = 0; i < cfg.additionalNoteExtensions.size(); ++i) {
+        if (i != 0) ofs << ", ";
+        ofs << "\"" << EscapeJsonStringValue(WideToUTF8(cfg.additionalNoteExtensions[i])) << "\"";
+    }
+    ofs << "],\n";
     ofs << "  \"textFontName\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.textFontName.empty() ? GetDefaultFontFaceName() : cfg.textFontName)) << "\",\n";
     ofs << "  \"textFontPt\": " << cfg.textFontPt << ",\n";
     ofs << "  \"textFontUseA4Scale\": " << (cfg.textFontUseA4Scale ? "true" : "false") << ",\n";
@@ -7076,6 +7015,9 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"markerFreeWidthPt\": " << cfg.markerFreeWidthPt << ",\n";
     ofs << "  \"markerTextWidthPt\": " << cfg.markerTextWidthPt << ",\n";
     ofs << "  \"markerTextUnderline\": " << (cfg.markerTextUnderline ? "true" : "false") << ",\n";
+    ofs << "  \"newMarkerDisplayMode\": \"" << MarkerDisplayModeName(cfg.newMarkerDisplayMode) << "\",\n";
+    ofs << "  \"newShapeBlendMode\": \"" << AnnotationBlendModeName(cfg.newShapeBlendMode) << "\",\n";
+    ofs << "  \"newShapeBoundary\": \"" << ShapeBoundaryName(cfg.newShapeBoundary) << "\",\n";
     ofs << "  \"eraserWidthPt\": " << cfg.eraserWidthPt << ",\n";
     ofs << "  \"markerAlpha\": " << cfg.markerAlpha << ",\n";
     ofs << "  \"lineAlpha\": " << std::clamp(cfg.lineAlpha, 0.05, 1.0) << ",\n";
@@ -7106,12 +7048,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"annotLastShapeDetail\": \"" << EscapeJsonStringValue(WideToUTF8(cfg.annotLastShapeDetail)) << "\",\n";
     ofs << "  \"freehandCorrection\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeFreehandCorrection(cfg.freehandCorrection))) << "\",\n";
     ofs << "  \"freehandCorrectionStyle\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeFreehandCorrectionStyle(cfg.freehandCorrectionStyle))) << "\",\n";
-    ofs << "  \"freehandCorrectionFill\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeFreehandCorrectionFill(cfg.freehandCorrectionFill))) << "\",\n";
-    int scheduleDayMask = cfg.scheduleDayMask & 0x7F;
-    if (scheduleDayMask == 0) scheduleDayMask = 0x1F;
-    int schedulePeriods = std::clamp(cfg.schedulePeriods, 1, 13);
-    ofs << "  \"scheduleDayMask\": " << scheduleDayMask << ",\n";
-    ofs << "  \"schedulePeriods\": " << schedulePeriods << "\n";
+    ofs << "  \"freehandCorrectionFill\": \"" << EscapeJsonStringValue(WideToUTF8(NormalizeFreehandCorrectionFill(cfg.freehandCorrectionFill))) << "\"\n";
     // NOTE: shortcuts are no longer persisted in workspace.json.
     ofs << "}\n";
     std::string data = ofs.str();
@@ -7217,7 +7154,6 @@ bool TryPersistConfig() {
         g_config.annotLastShapeGeometry = UTF8ToWide(ShapeToolGeometryKey(g_shapeToolSelection.geometry));
         g_config.annotLastShapeDetail = UTF8ToWide(AnnotToolModeKey(g_shapeGroupMode));
         g_config.showMathList = g_showMathList;
-        EnsureScheduleStartTimesSize(g_config);
         static std::wstring s_lastPersistConfigErrorPath;
         static DWORD s_lastPersistConfigErrorTick = 0;
         const std::filesystem::path configPath = std::filesystem::path(g_workspaceRoot) / L"workspace.json";
@@ -7235,12 +7171,7 @@ bool TryPersistConfig() {
             }
             return false;
         }
-        if (!SaveScheduleStartTimes(std::filesystem::path(g_workspaceRoot), g_config)) {
-            ShowAppCoreSoftNotice(g_hMainWnd, localization::Format(L"core.workspace_settings.save_failed",
-                                  {{L"PATH", ScheduleSettingsPath(std::filesystem::path(g_workspaceRoot)).filename().wstring()}}),
-                                  SoftNoticeKind::Warning);
-            return false;
-        }
+        fault_injection::MaybePauseForCrashTest(L"settings_after_workspace_write");
         return true;
     }
     return false;
@@ -7286,7 +7217,7 @@ const UiText& GetUiText() {
             genericEn.errSessionCreate = localization::Text(L"ui.generic.err_session_create");
             genericEn.errSessionExists = localization::Text(L"ui.generic.err_session_exists");
             genericEn.errSessionNoLecture = localization::Text(L"ui.generic.err_session_no_lecture");
-            genericEn.menuLectureSchedule = localization::Text(L"ui.generic.menu_lecture_schedule");
+            genericEn.menuLectureOrder = localization::Text(L"lecture_order.title");
             genericEn.menuAddTempExternalLecture = localization::Text(L"ui.generic.menu_add_temp_external_lecture");
             genericEn.menuRemoveTempExternalLecture = localization::Text(L"ui.generic.menu_remove_temp_external_lecture");
             genericEn.menuResetLectureLastOpen = localization::Text(L"ui.generic.menu_reset_lecture_last_open");
@@ -7318,7 +7249,7 @@ const UiText& GetUiText() {
         genericJa.errSessionCreate = localization::Text(L"ui.generic.err_session_create");
         genericJa.errSessionExists = localization::Text(L"ui.generic.err_session_exists");
         genericJa.errSessionNoLecture = localization::Text(L"ui.generic.err_session_no_lecture");
-        genericJa.menuLectureSchedule = localization::Text(L"ui.generic.menu_lecture_schedule");
+            genericJa.menuLectureOrder = localization::Text(L"lecture_order.title");
         genericJa.menuAddTempExternalLecture = localization::Text(L"ui.generic.menu_add_temp_external_lecture");
         genericJa.menuRemoveTempExternalLecture = localization::Text(L"ui.generic.menu_remove_temp_external_lecture");
         genericJa.menuResetLectureLastOpen = localization::Text(L"ui.generic.menu_reset_lecture_last_open");
@@ -8016,16 +7947,64 @@ static std::string BuildSetupPathArrayJson(const std::filesystem::path& exeDir,
         bool isReparse = false;
         if (TryIsReparsePointNoFollow(p, isReparse) && isReparse) continue;
         std::string s = WorkspaceRootPathForSetupJson(exeDir, p);
-        if (!first) oss << ", ";
+        if (!first) oss << ",";
+        oss << "\n    "; // One path per line for direct editing in setup JSON.
         first = false;
         oss << "\"" << EscapeJsonStringValue(s) << "\"";
     }
+    if (!first) oss << "\n  ";
     oss << "]";
     return oss.str();
 }
 
+// The registration list and its priorities are one atomic setup-file update.
+// Invalid metadata and capacity exhaustion leave both disk and runtime intact.
+[[nodiscard]] static std::optional<lecture_priority::Priorities> ReadTempPriorities(
+    const std::string& json, const std::filesystem::path& exeDir) {
+    lecture_priority::Priorities result;
+    size_t start = 0, end = 0;
+    if (FindJsonFieldValueRange(json, "tempExternalLecturePriorities", &start, &end)) {
+        if (json[start] != '[') return std::nullopt;
+        for (const auto& item : ParseJsonArrayElements(json, "tempExternalLecturePriorities")) {
+            const auto path = ParseJsonStringField(item, "path");
+            const auto priority = ParseJsonIntField(item, "priority");
+            if (!path || path->empty() || !priority || *priority < 0 || *priority > lecture_priority::maximum)
+                return std::nullopt;
+            auto full = std::filesystem::path(UTF8ToWide(*path));
+            if (full.is_relative()) full = exeDir / full;
+            if (!result.emplace(lecture_priority::PathKey(full.lexically_normal().wstring()), *priority).second)
+                return std::nullopt;
+        }
+    } else {
+        // Legacy registrations receive stable defaults in their stored order.
+        for (const auto& path : ParseJsonStringArrayField(json, "tempExternalLectureDirs")) {
+            auto full = std::filesystem::path(UTF8ToWide(path));
+            if (full.is_relative()) full = exeDir / full;
+            const auto key = lecture_priority::PathKey(full.lexically_normal().wstring());
+            if (result.count(key)) continue;
+            const auto next = lecture_priority::Next(g_config.lecturePriorities, result);
+            // Keep legacy rows editable even if their count exceeds the new
+            // default range; only new registrations require a free value.
+            if (!next) continue;
+            result.emplace(key, *next);
+        }
+    }
+    return result;
+}
+
+std::map<std::wstring, int> LoadSetupTempExternalLecturePriorities() {
+    const auto exeDir = CurrentExecutableDirectoryForSetup();
+    if (!exeDir) return {};
+    auto path = ResolveSetupJsonPath(*exeDir);
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) && !ec) path = LegacySetupJsonPath(*exeDir);
+    const auto parsed = ReadTempPriorities(ReadTextFileUtf8(path), *exeDir);
+    return parsed.value_or(lecture_priority::Priorities{});
+}
+
 bool PersistSetupTempExternalLectureDirs(const std::vector<std::wstring>& dirs,
-                                         std::wstring* outError) {
+                                         std::wstring* outError,
+                                         const std::map<std::wstring, int>* priorities) {
     if (outError) outError->clear();
     const auto exeDir = CurrentExecutableDirectoryForSetup();
     if (!exeDir) {
@@ -8060,10 +8039,70 @@ bool PersistSetupTempExternalLectureDirs(const std::vector<std::wstring>& dirs,
         }
     }
 
+    auto storedPriorities = ReadTempPriorities(json, *exeDir);
+    if (!storedPriorities) {
+        if (outError) *outError = localization::Text(L"lecture_order.invalid_stored_priorities");
+        return false;
+    }
+    lecture_priority::Priorities retained;
+    const auto& sourcePriorities = priorities ? *priorities : *storedPriorities;
+    const auto keyForPath = [&](const std::wstring& value) {
+        auto full = std::filesystem::path(value);
+        if (full.is_relative()) full = *exeDir / full;
+        return lecture_priority::PathKey(full.lexically_normal().wstring());
+    };
+    std::set<std::wstring> before;
+    for (const auto& path : ParseJsonStringArrayField(json, "tempExternalLectureDirs")) {
+        auto full = std::filesystem::path(UTF8ToWide(path));
+        if (full.is_relative()) full = *exeDir / full;
+        before.insert(lecture_priority::PathKey(full.lexically_normal().wstring()));
+    }
+    // Retain all assigned values before allocating, including paths later in
+    // the input. Existing registrations and explicit manual ties are preserved.
+    for (const auto& path : dirs) {
+        const auto key = keyForPath(path);
+        if (!before.count(key)) continue; // A re-added path receives a fresh default.
+        if (const auto it = sourcePriorities.find(key); it != sourcePriorities.end()) {
+            if (it->second < 0 || it->second > lecture_priority::maximum) {
+                if (outError) *outError = localization::Text(L"lecture_order.invalid_priority");
+                return false;
+            }
+            retained[key] = it->second;
+        }
+    }
+    for (const auto& path : dirs) {
+        const auto key = keyForPath(path);
+        if (before.count(key) || retained.count(key)) continue;
+        const auto next = lecture_priority::Next(g_config.lecturePriorities, retained);
+        if (!next) {
+            if (outError) *outError = localization::Text(L"lecture_order.no_free_priority");
+            return false;
+        }
+        retained[key] = *next;
+    }
+    std::ostringstream priorityJson;
+    priorityJson << "[";
+    bool firstPriority = true;
+    std::set<std::wstring> written;
+    for (const auto& path : dirs) {
+        const auto key = keyForPath(path);
+        if (!written.insert(key).second) continue;
+        const auto it = retained.find(key);
+        if (it == retained.end()) continue;
+        if (!firstPriority) priorityJson << ",";
+        firstPriority = false;
+        priorityJson << "\n    {\"path\":\"" << EscapeJsonStringValue(
+            WorkspaceRootPathForSetupJson(*exeDir, std::filesystem::path(path)))
+            << "\",\"priority\":" << it->second << "}";
+    }
+    if (!firstPriority) priorityJson << "\n  ";
+    priorityJson << "]";
+    const bool prioritiesChanged = ReplaceOrInsertJsonArrayFieldAfter(json,
+        "tempExternalLecturePriorities", priorityJson.str(), "tempExternalLectureDirs");
     std::string arrayJson = BuildSetupPathArrayJson(*exeDir, dirs);
     bool changed = ReplaceOrInsertJsonArrayFieldAfter(
         json, "tempExternalLectureDirs", arrayJson, "workspaceRoot");
-    if (!changed) return true;
+    if (!changed && !prioritiesChanged) return true;
     SaveOperationGuard guard;
     std::wstring werr;
     const bool saved = AtomicWriteSetupJsonIfValid(setup, json, &werr);
@@ -8317,6 +8356,7 @@ static HWND g_softNoticeOwner = nullptr;
 static ULONGLONG g_softNoticeDeadline = 0;
 static std::wstring g_softNoticeText;
 static SoftNoticeKind g_softNoticeKind = SoftNoticeKind::Info;
+static bool g_softNoticePressed = false;
 
 struct UiMessageRepeatState {
     std::wstring title;
@@ -8384,40 +8424,54 @@ static void DrawSoftNoticeBackground(HDC hdc, const RECT& rc, COLORREF bg, COLOR
     DeleteObject(pen);
 }
 
-static UINT SoftNoticeDurationMsForKind(SoftNoticeKind kind) {
-    switch (kind) {
-    case SoftNoticeKind::Warning:
-        return 2600;
-    case SoftNoticeKind::Error:
-        return 3400;
-    case SoftNoticeKind::Info:
-    default:
-        return 1800;
-    }
+static void HideSoftNotice(bool resetRepeat) {
+    if (!g_hSoftNotice) return;
+    g_softNoticePressed = false;
+    if (GetCapture() == g_hSoftNotice) ReleaseCapture();
+    KillTimer(g_hSoftNotice, kSoftNoticeTimerId);
+    g_softNoticeDeadline = 0;
+    if (resetRepeat) g_softNoticeRepeatState = {};
+    ShowWindow(g_hSoftNotice, SW_HIDE);
 }
 
 static void GetSoftNoticeColors(SoftNoticeKind kind, COLORREF& outBg, COLORREF& outBorder, COLORREF& outText) {
     COLORREF accent = g_theme.accent;
     switch (kind) {
     case SoftNoticeKind::Warning:
-        accent = BlendColor(g_theme.accent, RGB(214, 144, 24), 0.75);
+        accent = ThemeVariantLerp(g_theme.accent, RGB(214, 144, 24), 0.75);
         break;
     case SoftNoticeKind::Error:
-        accent = BlendColor(g_theme.accent, RGB(196, 64, 64), 0.85);
+        accent = ThemeVariantLerp(g_theme.accent, RGB(196, 64, 64), 0.85);
         break;
     case SoftNoticeKind::Info:
     default:
         break;
     }
-    outBg = BlendColor(g_theme.panelBg, accent, (kind == SoftNoticeKind::Info) ? 0.08 : 0.14);
-    outBorder = BlendColor(g_theme.buttonBorder, accent, (kind == SoftNoticeKind::Info) ? 0.20 : 0.42);
+    outBg = ThemeVariantLerp(g_theme.panelBg, accent, (kind == SoftNoticeKind::Info) ? 0.08 : 0.14);
+    outBorder = ThemeVariantLerp(g_theme.buttonBorder, accent, (kind == SoftNoticeKind::Info) ? 0.20 : 0.42);
     outText = g_theme.panelText;
 }
 
 static LRESULT CALLBACK SoftNoticeProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_NCHITTEST:
-        return HTTRANSPARENT; // do not steal clicks
+        return HTCLIENT; // A click dismisses the notice, never the control beneath it.
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+        g_softNoticePressed = true;
+        SetCapture(hWnd);
+        return 0;
+    case WM_LBUTTONUP:
+    case WM_RBUTTONUP:
+    case WM_MBUTTONUP:
+        if (g_softNoticePressed) HideSoftNotice(true);
+        return 0;
+    case WM_CAPTURECHANGED:
+        g_softNoticePressed = false;
+        return 0;
     case WM_ERASEBKGND:
         return 1;
     case WM_TIMER:
@@ -8425,9 +8479,7 @@ static LRESULT CALLBACK SoftNoticeProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
             // KillTimer does not remove queued WM_TIMER messages. An old
             // expiration must not hide a newly displayed notice.
             if (g_softNoticeDeadline && GetTickCount64() < g_softNoticeDeadline) return 0;
-            KillTimer(hWnd, kSoftNoticeTimerId);
-            g_softNoticeDeadline = 0;
-            ShowWindow(hWnd, SW_HIDE);
+            HideSoftNotice(false);
             return 0;
         }
         break;
@@ -8467,6 +8519,7 @@ static LRESULT CALLBACK SoftNoticeProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
             g_hSoftNotice = nullptr;
             g_softNoticeOwner = nullptr;
             g_softNoticeDeadline = 0;
+            g_softNoticePressed = false;
             g_softNoticeRepeatState = {};
         }
         break;
@@ -8501,6 +8554,10 @@ static void EnsureSoftNoticeWindow(HWND ownerForZOrder) {
         nullptr,
         GetModuleHandleW(nullptr),
         nullptr);
+    if (g_hSoftNotice) {
+        const HRESULT corners = ui::ApplyAuxiliaryWindowCorners(g_hSoftNotice);
+        (void)corners;
+    }
 }
 
 static RECT SoftNoticeFallbackWorkRect() {
@@ -8636,6 +8693,8 @@ void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
         return;
     }
 
+    g_softNoticePressed = false;
+    if (GetCapture() == g_hSoftNotice) ReleaseCapture();
     g_softNoticeOwner = anchor;
     g_softNoticeText = msg;
     g_softNoticeKind = kind;
@@ -8682,13 +8741,15 @@ void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
     }
 
     KillTimer(g_hSoftNotice, kSoftNoticeTimerId);
-    const UINT duration = SoftNoticeDurationMsForKind(kind);
+    const UINT duration = ui::TransientDisplayDurationMs(msg);
     g_softNoticeDeadline = GetTickCount64() + duration;
-    if (!SetTimer(g_hSoftNotice, kSoftNoticeTimerId, duration, nullptr)) {
+    // Only the owned UI-test instance may emulate an OS timer allocation
+    // failure. Use the real failure cleanup, never throw through a WindowProc.
+    const bool failTimerForTest = IsUiAutomationEnabled() &&
+        fault_injection::ShouldThrow(L"SoftNotice:SetTimer");
+    if (failTimerForTest || !SetTimer(g_hSoftNotice, kSoftNoticeTimerId, duration, nullptr)) {
         // Never leave an unbounded topmost notice when no expiry can be armed.
-        g_softNoticeDeadline = 0;
-        g_softNoticeRepeatState = {};
-        ShowWindow(g_hSoftNotice, SW_HIDE);
+        HideSoftNotice(true);
         return;
     }
     SetWindowPos(g_hSoftNotice, HWND_TOPMOST, x, y, w, h,
@@ -8701,10 +8762,7 @@ void DismissSoftNotice(HWND owner, const std::wstring& expectedText) {
     if (!g_hSoftNotice || !IsWindow(g_hSoftNotice)) return;
     if (g_softNoticeOwner != SoftNoticeRootOwner(owner) ||
         g_softNoticeText != NormalizeSoftNoticeText(expectedText)) return;
-    KillTimer(g_hSoftNotice, kSoftNoticeTimerId);
-    g_softNoticeDeadline = 0;
-    g_softNoticeRepeatState = {};
-    ShowWindow(g_hSoftNotice, SW_HIDE);
+    HideSoftNotice(true);
 }
 // --- Global Beep Filter ---
 static HHOOK g_hBeepFilterHook = nullptr;

@@ -37,6 +37,113 @@ pe_fixtures = load_module("pe_fixtures", "tests/python/pe_fixtures.py")
 
 
 class CheckFailureContractTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_pdf_textbox_reedit_gate_rejects_missing_cases(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        command = r'''
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $env:PDF_NOTE_REEDIT_GATE_REPO 'tests/scripts/run_ui_automation_fault_tests.ps1'),
+    [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Runner parse failure' }
+$functions = @($ast.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Assert-PdfTextboxReeditFontTrace'
+}, $true))
+if ($functions.Count -ne 1) { throw 'Missing textbox reedit gate' }
+Invoke-Expression $functions[0].Extent.Text
+$lines = @('pdf_textbox:presets_theme_ok cases=4', 'pdf_textbox:geometry_ok cases=192', 'pdf_textbox:reedit_hover_ok cases=432',
+    'pdf_textbox:reedit_font_ok cases=6 cycles=48') +
+    @(1..6 | ForEach-Object { 'pdf_textbox:reedit_font_case_ok' }) +
+    @(1..48 | ForEach-Object { 'pdf_textbox:reedit_font_observation scale=2 adaptive=1 valid=1' })
+if (@(Assert-PdfTextboxReeditFontTrace ($lines -join "`n")).Count -ne 0) {
+    throw 'Successful gate returned unexpected output'
+}
+foreach ($index in @(0, 1, 2, 3, 4, 10)) {
+    $partial = @(for ($j = 0; $j -lt $lines.Count; ++$j) { if ($j -ne $index) { $lines[$j] } })
+    $rejected = $false
+    try { Assert-PdfTextboxReeditFontTrace ($partial -join "`n") } catch { $rejected = $true }
+    if (-not $rejected) { throw "Incomplete reedit evidence accepted at $index" }
+}
+foreach ($count in @(431, 433)) {
+    $partial = ($lines -join "`n").Replace('reedit_hover_ok cases=432', "reedit_hover_ok cases=$count")
+    $rejected = $false
+    try { Assert-PdfTextboxReeditFontTrace $partial } catch { $rejected = $true }
+    if (-not $rejected) { throw "Incorrect hover case count accepted: $count" }
+}
+foreach ($count in @(3, 5)) {
+    $partial = ($lines -join "`n").Replace('presets_theme_ok cases=4', "presets_theme_ok cases=$count")
+    $rejected = $false
+    try { Assert-PdfTextboxReeditFontTrace $partial } catch { $rejected = $true }
+    if (-not $rejected) { throw "Incorrect preset/theme case count accepted: $count" }
+}
+'''
+        env = dict(os.environ, PDF_NOTE_REEDIT_GATE_REPO=str(REPO_ROOT))
+        result = subprocess.run([powershell, "-NoProfile", "-Command", command],
+                                capture_output=True, text=True, timeout=30, env=env, cwd=REPO_ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_ime_geometry_gate_rejects_missing_observations(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        command = r'''
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $env:PDF_NOTE_IME_GATE_REPO 'tests/scripts/run_ui_automation_fault_tests.ps1'),
+    [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Runner parse failure' }
+$functions = @($ast.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Assert-ImeGeometryTrace'
+}, $true))
+if ($functions.Count -ne 1) { throw 'Missing IME gate' }
+Invoke-Expression $functions[0].Extent.Text
+$lines = @(
+    'math_render:ime_candidate_requests_valid=1',
+    'math_render:ime_candidate_requests_valid=1',
+    'math_render:ime_candidate_requests_valid=1',
+    'math_render:ime_character_query valid=1 answered=1',
+    'math_render:ime_character_query valid=1 answered=1',
+    'math_render:ime_offscreen_candidate_unchanged=1 caret=-35:0',
+    'math_render:ime_visible_prerequisite_recovery=1',
+    'math_render:ime_heading_band_valid=1 caret_bottom=17 row_bottom=35',
+    'math_render:ime_geometry_only',
+    'automation:ime_geometry_ok'
+)
+foreach ($focused in @($false, $true)) {
+    $output = @(Assert-ImeGeometryTrace -TraceText ($lines -join "`n") -Focused:$focused)
+    if ($output.Count -ne 0) { throw 'Successful gate returned unexpected output' }
+}
+foreach ($index in 0..($lines.Count - 1)) {
+    $partial = @(for ($j = 0; $j -lt $lines.Count; ++$j) {
+        if ($j -ne $index) { $lines[$j] }
+    })
+    $rejected = $false
+    try { Assert-ImeGeometryTrace -TraceText ($partial -join "`n") -Focused }
+    catch { $rejected = $true }
+    if (-not $rejected) { throw "Incomplete IME evidence accepted at $index" }
+}
+'''
+        env = dict(os.environ, PDF_NOTE_IME_GATE_REPO=str(REPO_ROOT))
+        result = subprocess.run([powershell, "-NoProfile", "-Command", command],
+                                capture_output=True, text=True, timeout=30, env=env, cwd=REPO_ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_ime_geometry_mode_rejects_conflicting_selection(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        script = REPO_ROOT / "tests/scripts/run_ui_automation_fault_tests.ps1"
+        for options in (["-ImeGeometryOnly"],
+                        ["-MathRenderOnly", "-RenderedClickOnly", "-ImeGeometryOnly"]):
+            with self.subTest(options=options):
+                result = subprocess.run([powershell, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                                         "-File", str(script), *options],
+                                        capture_output=True, text=True, timeout=30, cwd=REPO_ROOT)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("-ImeGeometryOnly requires -MathRenderOnly", result.stderr)
+
     def run_quietly(self, function, arguments):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return function(arguments)
@@ -198,13 +305,14 @@ class CheckFailureContractTests(unittest.TestCase):
 
     @unittest.skipUnless((shutil.which("powershell.exe") or shutil.which("powershell")) and shutil.which("rg"),
                          "requires PowerShell and ripgrep")
-    def test_safety_scan_allows_only_exact_md4c_parser_url_fixture(self):
+    def test_safety_scan_allows_only_exact_parser_url_fixtures(self):
         with tempfile.TemporaryDirectory(prefix="pdf_note_scan_") as temporary:
             root = Path(temporary)
             script = root / "scan_contract.ps1"
             script.write_text(r'''
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $tokens = $null; $errors = $null
 $sourcePath = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/scripts/run_repo_checks.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
@@ -216,28 +324,124 @@ function Append-StepLog { param([string]$Line) }
 function Assert-FileOutputSystemDialogPolicy { }
 $safetyScanIgnoreFile = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/config/safety_scan_ignore_globs.txt'
 $scanRoot = Join-Path $PSScriptRoot 'scan_root'
-$fixturePath = Join-Path $scanRoot 'tests/unit/md4c_allocation_failure_tests.c'
+$results = @{}
+New-Item -ItemType Directory -Force -Path $scanRoot | Out-Null
+Push-Location -LiteralPath $scanRoot
+try {
+foreach ($relativeFixture in @('tests/unit/md4c_allocation_failure_tests.c')) {
+$fixturePath = Join-Path $scanRoot $relativeFixture
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $fixturePath) | Out-Null
-$original = [IO.File]::ReadAllText((Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/unit/md4c_allocation_failure_tests.c'))
+$original = [IO.File]::ReadAllText((Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT $relativeFixture))
+if (-not $original.Contains('https://example.invalid/')) { throw 'Parser URL fixture no longer contains its expected input.' }
 $cases = @{
     exact_fixture = $original
     changed_url = $original.Replace('https://example.invalid/', 'https://other.invalid/')
-    extra_url = $original.Replace('test@example.invalid\n"),', 'test@example.invalid\n"), /* https://other.invalid/ */')
+    extra_url = [regex]::Replace($original, '(?m)^(.*https://example\.invalid/.*)$', '$1 /* https://other.invalid/ */')
+    extra_line = $original + "`n// https://other.invalid/`n"
     network_api = $original + "`nvoid forbidden(void) { socket(); }`n"
     sound_api = $original + "`nvoid forbidden(void) { Beep(1, 1); }`n"
     other_file = $original
+    retired_fixture = $original
 }
-$results = @{}
-Push-Location -LiteralPath $scanRoot
-try {
+    $fixtureResults = @{}
     foreach ($name in $cases.Keys) {
         [IO.File]::WriteAllText($fixturePath, $cases[$name])
         $otherPath = Join-Path $scanRoot 'other.c'
         if ($name -eq 'other_file') { [IO.File]::WriteAllText($otherPath, $original) }
+        $retiredPath = Join-Path $scanRoot 'tests/unit/note_clro_fullwidth_regression.h'
+        if ($name -eq 'retired_fixture') {
+            # This former parser input has been removed; its exact old line must
+            # no longer grant a URL exception at the old path.
+            $retiredLine = '    {L"' + [char]0xff1c + 'https://example.invalid/a' + [char]0xff0a + 'b' + [char]0xff1e + '", "href=\"https://example.invalid/a"},'
+            [IO.File]::WriteAllText($retiredPath, $retiredLine)
+        }
+        if ($name -in @('changed_url', 'extra_url') -and $cases[$name] -ceq $original) {
+            throw "Fixture mutation did not change its input: $relativeFixture/$name"
+        }
         $failed = $false
-        try { Invoke-SafetyScans } catch { $failed = $true }
-        $results[$name] = $failed
+        $failure = ''
+        try { Invoke-SafetyScans } catch { $failed = $true; $failure = $_.Exception.Message }
+        $fixtureResults[$name] = @{ failed = $failed; error = $failure }
         if (Test-Path -LiteralPath $otherPath) { Remove-Item -LiteralPath $otherPath }
+        if (Test-Path -LiteralPath $retiredPath) { Remove-Item -LiteralPath $retiredPath }
+    }
+    $results[$relativeFixture] = $fixtureResults
+    Remove-Item -LiteralPath $fixturePath
+}
+} finally { Pop-Location }
+Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 4 -Compress))
+''', encoding="utf-8")
+            environment = os.environ.copy()
+            environment["PDF_NOTE_CONTRACT_REPO_ROOT"] = str(REPO_ROOT)
+            result = subprocess.run([
+                shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
+                "-ExecutionPolicy", "Bypass", "-File", str(script),
+            ], capture_output=True, text=True, encoding="utf-8", env=environment, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
+                                   if line.startswith("RESULT:")))
+            expected = {"exact_fixture": False, "changed_url": True, "extra_url": True,
+                        "extra_line": True, "network_api": True, "sound_api": True,
+                        "other_file": True, "retired_fixture": True}
+            self.assertEqual(set(data), {"tests/unit/md4c_allocation_failure_tests.c"})
+            for fixture, observations in data.items():
+                self.assertEqual(set(observations), set(expected))
+                for case, failed in expected.items():
+                    with self.subTest(fixture=fixture, case=case):
+                        self.assertEqual(observations[case]["failed"], failed, observations[case])
+
+    @unittest.skipUnless((shutil.which("powershell.exe") or shutil.which("powershell")) and shutil.which("rg"),
+                         "requires PowerShell and ripgrep")
+    def test_safety_scan_limits_reviewed_dialog_calls_and_network_denial_mock(self):
+        with tempfile.TemporaryDirectory(prefix="pdf_note_dialog_scan_") as temporary:
+            script = Path(temporary) / "dialog_scan_contract.ps1"
+            script.write_text(r'''
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$tokens = $null; $errors = $null
+$sourcePath = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/scripts/run_repo_checks.ps1'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Unable to parse repository checks.' }
+foreach ($fn in $ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]}, $true)) {
+    if ($fn.Name -in @('Invoke-RipgrepScan', 'Invoke-SafetyScans')) { Invoke-Expression $fn.Extent.Text }
+}
+function Append-StepLog { param([string]$Line) }
+function Assert-FileOutputSystemDialogPolicy { }
+$safetyScanIgnoreFile = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/config/safety_scan_ignore_globs.txt'
+$scanRoot = Join-Path $PSScriptRoot 'scan_root'
+New-Item -ItemType Directory -Force -Path $scanRoot | Out-Null
+$results = @{}
+Push-Location -LiteralPath $scanRoot
+try {
+    foreach ($relative in @('src/recovery/stage_recovery_window.cpp', 'tools/recovery_demo/demo_ui.cpp', 'tests/python/test_site_validation.py')) {
+        $path = Join-Path $scanRoot $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+        $original = [IO.File]::ReadAllText((Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT $relative))
+        $cases = @{
+            exact_calls = $original
+            changed_api = $original.Replace('GetOpenFileNameW(', 'SHBrowseForFolderW(')
+            extra_call = $original + "`nvoid forbidden() { GetOpenFileNameW(nullptr); }`n"
+            extra_same_line = [regex]::Replace($original, '(?m)^(.*GetOpenFileNameW.*)$', '$1 GetSaveFileNameW(nullptr);')
+            other_file = $original
+        }
+        if ($relative.EndsWith('.py')) {
+            $cases.changed_api = $original.Replace('AssertionError("network forbidden")', 'None')
+            $cases.extra_call = $original + "`nsocket.socket()`n"
+            $cases.extra_same_line = [regex]::Replace($original, '(?m)^(.*mock\.patch\("socket\.socket".*)$', ('$1 # socket.' + 'socket()'))
+        }
+        $observations = @{}
+        foreach ($name in $cases.Keys) {
+            [IO.File]::WriteAllText($path, $cases[$name])
+            $other = Join-Path $scanRoot ('other' + [IO.Path]::GetExtension($relative))
+            if ($name -eq 'other_file') { [IO.File]::WriteAllText($other, $original) }
+            $failed = $false
+            try { Invoke-SafetyScans } catch { $failed = $true }
+            $observations[$name] = $failed
+            if (Test-Path -LiteralPath $other) { Remove-Item -LiteralPath $other }
+        }
+        $results[$relative] = $observations
+        Remove-Item -LiteralPath $path
     }
 } finally { Pop-Location }
 Write-Output ('RESULT:' + ($results | ConvertTo-Json -Compress))
@@ -247,12 +451,31 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Compress))
             result = subprocess.run([
                 shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
                 "-ExecutionPolicy", "Bypass", "-File", str(script),
-            ], capture_output=True, text=True, env=environment, timeout=30)
+            ], capture_output=True, text=True, encoding="utf-8", env=environment, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
                                    if line.startswith("RESULT:")))
-            self.assertEqual(data, {"exact_fixture": False, "changed_url": True, "extra_url": True,
-                                    "network_api": True, "sound_api": True, "other_file": True})
+            expected = {"exact_calls": False, "changed_api": True, "extra_call": True,
+                        "extra_same_line": True, "other_file": True}
+            self.assertEqual(data, {name: expected for name in (
+                "src/recovery/stage_recovery_window.cpp", "tools/recovery_demo/demo_ui.cpp",
+                "tests/python/test_site_validation.py")})
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_repo_step_selection_rejects_unknown_and_skipped_steps(self):
+        runner = REPO_ROOT / "tests/scripts/run_repo_checks.ps1"
+        command = [shutil.which("powershell.exe") or shutil.which("powershell"),
+                   "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(runner)]
+        listing = subprocess.run(command + ["-ListSteps"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertIn("Atomic Write Tests", listing.stdout.splitlines())
+        unknown = subprocess.run(command + ["-OnlyStep", "not a step"], capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertIn("Unknown step", unknown.stderr)
+        skipped = subprocess.run(command + ["-OnlyStep", "Atomic Write Tests", "-SkipAtomicWrite"],
+                                 capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(skipped.returncode, 0)
+        self.assertIn("not executed", skipped.stdout)
 
     @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
     def test_repo_step_contract_preserves_failures_and_rejects_implicit_skip(self):
@@ -273,6 +496,7 @@ foreach ($fn in $ast.FindAll({param($node) $node -is [System.Management.Automati
 $repoCheckLogRoot = $PSScriptRoot
 $script:CurrentStepLogPath = ''; $script:CurrentStepName = ''
 $VerboseOutput = $false; $FailureTailLines = 1; $SkipBuild = $true
+$OnlyStep = @(); $script:CompletedSelectedSteps = [System.Collections.Generic.List[string]]::new()
 $binaryOutputDir = Join-Path $PSScriptRoot 'absent_full'
 $liteBinaryOutputDir = Join-Path $PSScriptRoot 'absent_lite'
 $shellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
@@ -293,6 +517,10 @@ foreach ($name in $cases.Keys) {
     $log = Get-Content -LiteralPath (Join-Path $PSScriptRoot (Get-SafeLogFileName $name)) -Raw
     $results[$name] = @{ failed = $failed; fail_log = $log.Contains('status: FAIL'); pass_log = $log.Contains('status: PASS') }
 }
+$OnlyStep = @('chosen')
+Invoke-Step -Name 'excluded' -Action { throw 'excluded action ran' }
+Invoke-Step -Name 'chosen' -Action { Write-Host 'selected' }
+$results['selection'] = @{ failed = (Test-Path (Join-Path $PSScriptRoot 'excluded.log')); fail_log = $false; pass_log = ($script:CompletedSelectedSteps -contains 'chosen') }
 Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 3 -Compress))
 ''', encoding="utf-8")
             environment = os.environ.copy()
@@ -305,7 +533,7 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 3 -Compress))
             data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines() if line.startswith("RESULT:")))
             for name, item in data.items():
                 with self.subTest(name=name):
-                    expected_failure = name != "success"
+                    expected_failure = name not in ("success", "selection")
                     self.assertEqual(item, {"failed": expected_failure, "fail_log": expected_failure,
                                             "pass_log": not expected_failure})
 

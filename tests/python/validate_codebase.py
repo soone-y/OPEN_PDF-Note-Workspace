@@ -370,7 +370,7 @@ def find_rotated_ellipse_rotation_regressions() -> list[str]:
             'key == "shape_rotation"': "CLROP parser must read rotated ellipse angle",
         },
         "src/file_output/file_output.cpp": {
-            "BuildRotatedEllipseOutlinePointsPx(const RECT& rc, double angleRad)": "bitmap export must render stored rotated ellipse angle",
+            "rect.bottom, ann.shapeRotation, ann.contentRotation, ann.shapeAngle)": "bitmap export must render the stored local ellipse angle, content orientation and whole-shape angle",
             "pdfAngle = rotated ? -visualAngle : 0.0": "PDF export must account for PDF/client Y-axis direction",
         },
         "src/readonly_viewer/pdf_preview_panel.cpp": {
@@ -572,10 +572,20 @@ def find_palette_regressions() -> list[str]:
         "src/settings/settings_palette.cppinc": {
             "DrawPaletteSlotButton": "settings dialog must draw visible palette slots",
             "SetPaletteSettingsColor": "settings dialog must allow directly editing a palette slot color",
-            "ShowPaletteColorEditorDialog": "palette editing must use the application-owned dialog",
+            "UpdatePaletteSettingsFromHex": "color creation must remain inline in the settings palette page",
+            "palette_active::Save(ctx->active, colors)": "valid palette changes must be committed through the protected snapshot store",
+            "if (ctx->colorPickerPurpose) return true": "single-color selection must never auto-save the annotation palette",
+            "ReadPaletteEditorColor": "auto-save must reject incomplete or inconsistent input",
+            "kPaletteAutoSaveTimer": "numeric palette changes must have an owned debounce timer",
+            "ui::color_gradient::Create": "gradient color creation must be embedded in the palette page",
         },
-        "src/settings/settings_annot.cppinc": {
-            "SaveUserPaletteColorsForSettings": "settings dialog must save changed palette colors",
+        "src/settings/settings_shell.cppinc": {
+            "FlushPaletteAutoSave": "settings dialog must finish pending palette saves without saving other tab drafts",
+            "PublishUnifiedPalette": "saved palette changes must refresh application state",
+            "IsUnifiedColorSelection": "independent color selection must not implicitly save the annotation palette",
+        },
+        "src/settings/settings_unified.cppinc": {
+            "SelectColorInPaletteSettings": "all color editors must reuse the unified settings palette",
         },
         "src/features/automation/main_ui_automation.cppinc": {
             "RunUiAutomationPaletteScenario": "UI automation must cover palette display, selection, persistence, and cycling",
@@ -584,6 +594,7 @@ def find_palette_regressions() -> list[str]:
             "automation:palette_ok": "UI automation trace must record successful palette coverage",
         },
         "src/app/command_dispatch.cppinc": {
+            "ShowAnnotationPaletteSettingsDialog(hWnd)": "annotation custom color must open the settings palette",
             "ID_TOOL_COLOR_BASE": "toolbar palette command dispatch must remain wired",
             "StoreToolColorForMode(g_toolMode, g_activeColor)": "toolbar palette selection must store the color for the active tool",
             "PersistConfig()": "toolbar palette selection must persist config",
@@ -649,10 +660,17 @@ def find_textbox_font_sync_regressions() -> list[str]:
     errors: list[str] = []
     required_by_file = {
         "src/ui/dialogs/annot_math_panel.cpp": {
-            "SyncTextBoxToolFontFromAnnotationIndex": "selected TextBox annotation may sync font family but must not overwrite font-size slots",
-            "Selecting a TextBox must not overwrite the annotation toolbar A/B size slots": "TextBox selection must not treat the annotation font size as the source of truth",
-            "SyncToolbarFontSizeCombo()": "TextBox selection must still refresh toolbar display after allowed font-family changes",
-            "PersistConfig()": "TextBox selection must persist only allowed text-tool setting changes",
+            "SyncTextBoxToolFontFromAnnotationIndex": "selected TextBox must synchronize the font controls without changing creation defaults",
+            "SyncToolbarFontSizeCombo()": "TextBox selection must refresh the temporary font display",
+        },
+        "src/main.cpp": {
+            "actualPt = g_pdf.editFontPt": "inline font-size changes must display the actual editing size",
+            "actualPt = box.fontPt": "selected TextBox font size must be the source of its temporary size display",
+            "if ((itemData & kToolbarTextFontPreviewFlag) != 0) return false;": "reselecting the live-size display must not apply or overwrite a saved preset",
+            "pointText << pt": "live-size labels must preserve fractional sizes rather than rounding to preset precision",
+        },
+        "src/pdf_view/navigation.cppinc": {
+            "SyncToolbarFontSizeCombo(true)": "inline edit invalidation must refresh only the active font-size display after Ctrl+/- and undo/redo",
         },
         "src/ui/core/main_window_proc.cppinc": {
             "SyncTextBoxToolFontFromAnnotationIndex(sel)": "annotation-list selection must sync TextBox font settings",
@@ -660,7 +678,10 @@ def find_textbox_font_sync_regressions() -> list[str]:
         "src/pdf_view/input.cppinc": {
             "GetSelectedTextBoxAnnotationIndex": "Ctrl+/- must target the selected TextBox annotation outside inline editing",
             "ApplyActiveTextToolFontToSelectedTextBox": "toolbar font-size changes must update the selected TextBox, not the toolbar slots",
-            "after.fontPt = ResolveAdaptiveTextFontPtForPage(after.pageIndex, g_textFontPt);": "selected TextBox must receive the active tool font size with page scaling",
+            "ResolveAdaptiveTextFontPtForPage(current.pageIndex, g_textFontPt)": "explicit size changes must receive the active tool font size with page scaling",
+            "field == kTextBoxFontSizeOnly ? current.fontName : g_textFontName": "size changes must retain the selected TextBox font family",
+            "field == kTextBoxFontFamilyOnly ? current.fontPt": "font-family changes must retain the selected TextBox size",
+            "if (requestedName == g_pdf.editFontName && std::abs(nextPt - g_pdf.editFontPt) <= 0.05) return 0;": "same-value font changes must skip edit history and reflow",
             "ChangeSelectedTextBoxFont": "selected TextBox font size must be adjustable without entering edit mode",
             "RecordAnnotUpdate(idx, idx, before, after)": "selected TextBox font changes must be undoable as annotation updates",
             "ReflowMovedTextBox(after)": "selected TextBox font changes must remeasure the box geometry",
@@ -669,7 +690,7 @@ def find_textbox_font_sync_regressions() -> list[str]:
             "ChangeSelectedTextBoxFont(hwnd, false)": "Ctrl+Minus must adjust a selected TextBox before falling back to PDF zoom",
         },
         "src/pdf_view/interaction_overlay.cppinc": {
-            "const double editFontPt = ResolveAdaptiveTextFontPtForPage(ann.pageIndex, g_textFontPt);": "editing an existing TextBox must update it from the active tool font size instead of changing toolbar options",
+            "const double editFontPt = (ann.fontPt > 0.0) ? ann.fontPt": "editing an existing TextBox must preserve its stored PDF point size without applying page scaling again",
             "BeginTextEdit(hwnd, ann.pageIndex": "existing TextBox edit start must still enter the normal edit path",
         },
     }
@@ -679,6 +700,13 @@ def find_textbox_font_sync_regressions() -> list[str]:
         for needle, message in needles.items():
             if needle not in text:
                 errors.append(f"{rel}: {message}")
+    panel_path = "src/ui/dialogs/annot_math_panel.cpp"
+    panel = (REPO_ROOT / panel_path).read_text(encoding="utf-8", errors="ignore")
+    selection = re.search(r"bool SyncTextBoxToolFontFromAnnotationIndex\(int index\)\s*\{(.*?)\n\}", panel, re.S)
+    if not selection:
+        errors.append(f"{panel_path}: TextBox selection sync body is missing")
+    elif re.search(r"\bg_textFont\w*\s*=|\b(?:PersistConfig|TryPersistConfig|SendMessageW|PostMessageW)\s*\(", selection.group(1)):
+        errors.append(f"{panel_path}: TextBox selection must not mutate/persist defaults or apply a font update")
     return errors
 
 
@@ -762,11 +790,22 @@ def find_runtime_safety_regressions() -> list[str]:
         "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
         "AssignProcessToJobObject",
         "kMaxParallelOfficeConversions = 2",
-        "std::thread(RunOfficeBackgroundJob, raw).detach()",
-        "kMsgOfficeConversionWorkerComplete",
+        "std::thread worker;",
+        "~OfficeBackgroundJob() { if (worker.joinable()) worker.join(); }",
+        "s_officeBackgroundBatch->active.size() < kMaxParallelOfficeConversions",
+        "raw->worker = std::thread(RunOfficeBackgroundJob, raw);",
+        "raw->workerFailed = true;",
+        "raw->done.store(true, std::memory_order_release)",
+        "job.done.load(std::memory_order_acquire)",
+        "job.worker.join();",
+        "SetTimer(hWnd, kOfficeWorkerPollTimerId,",
     )
+    # The current UI polls owned jobs and joins before consuming completion;
+    # requiring the former detached thread/message route would reject it.
     if any(needle not in office_text for needle in background_conversion_contract):
         errors.append("src/workspace/workspace_actions.cpp: Office conversion must use bounded background workers and a kill-on-close Job Object")
+    if ".detach()" in office_text:
+        errors.append("src/workspace/workspace_actions.cpp: Office conversion threads must retain an owner and be joined")
     for forbidden in ("Word.Application", "PowerPoint.Application", "Excel.Application", "Workbooks.Open",
                       '$ext -match "xls"', '$ext -eq ".xlsx"', '$ext -eq ".xls"'):
         if forbidden in office_text:
@@ -790,13 +829,14 @@ def find_runtime_safety_regressions() -> list[str]:
     )
     readonly_atomic_contract = {
         '#include "core/atomic_write.h"': "read-only viewer writes must use the shared atomic-write implementation",
-        "atomic_write::AtomicWriteBytes(": "read-only viewer settings must use collision-safe atomic writes",
         "atomic_write::CreateUniqueTempFile(": "read-only viewer PDF export must reserve a unique temp file",
         "atomic_write::AtomicReplaceFile(": "read-only viewer PDF export must use the shared replacement policy",
     }
     for needle, message in readonly_atomic_contract.items():
         if needle not in readonly_text:
             errors.append(f"src/readonly_viewer/pdf_preview_panel.cpp: {message}")
+    if 'SaveReadonlyViewerSettings(' in readonly_text or '"showGrayscale"' in readonly_text:
+        errors.append("src/readonly_viewer/pdf_preview_panel.cpp: PDF grayscale must not be persisted")
     for forbidden in ('temp += L".tmp";', 'temp += std::to_wstring(GetCurrentProcessId())'):
         if forbidden in readonly_text:
             errors.append("src/readonly_viewer/pdf_preview_panel.cpp: predictable CREATE_ALWAYS temp paths are forbidden")
@@ -917,12 +957,15 @@ def find_annotation_text_quality_regressions() -> list[str]:
             "P3-6: annotation TextBox glyphs are rendered in their own high-DPI raster cache": "TextBox quality intent must stay documented next to the DPI constants",
             "kTextBoxStableRasterDpi = 576.0": "TextBox annotation glyphs must keep a high-DPI raster baseline independent of page cache resolution",
             "kTextBoxLayoutDpi = kTextBoxStableRasterDpi": "TextBox layout must use the same stable DPI as the quality raster cache",
+            "TextBoxFontHeightPx(double fontPt)": "TextBox font height conversion must be shared by measurement and raster keys",
+            "fontPt * kTextBoxLayoutDpi / 72.0": "TextBox font pixels must use the stable layout DPI, independent of page cache scale",
             "kPdfRenderMinScale = 0.75": "PDF page rendering may use its own low-resolution cache policy without lowering annotation text DPI",
         },
         "src/pdf_view/pdf_view.cpp": {
             "BuildTextBoxRaster": "TextBox annotations must have an annotation-owned raster path",
             "CreateDIBSection": "TextBox annotation text must render into a separate 32bpp bitmap before compositing",
-            "fontPt * kTextBoxStableRasterDpi / 72.0": "TextBox font pixels must be derived from the stable annotation DPI, not the current PDF page cache scale",
+            "k.fontPx = TextBoxFontHeightPx(fontPt);": "TextBox cache keys must preserve the measured font height without rounding points twice",
+            "lf.lfHeight = -key.fontPx;": "TextBox rasterization must use the measured font height from its cache key",
             "lf.lfQuality = ANTIALIASED_QUALITY": "TextBox glyph rasterization must keep antialiased quality in the high-DPI cache",
             "AlphaBlend(hdc, r.left, r.top, w, h, scratchDc": "TextBox glyphs must composite as an overlay instead of being baked into the PDF page bitmap",
             "TextBoxLowZoomBoostAlpha": "Low zoom TextBox rendering must preserve legibility rather than relying only on downscaled page pixels",
@@ -957,10 +1000,10 @@ def find_annotation_layer_regressions() -> list[str]:
             "TintRectTextPixels(hdc, qr, ann.color": "TextColor selection quads must recolor text pixels instead of filling an opaque rectangle",
             "TintRectTextPixels(hdc, r, ann.color": "TextColor fallback rectangles must still use text-pixel tinting",
             "} else if (ann.type == Annotation::Type::MarkerText)": "MarkerText annotations must have a distinct viewer drawing branch",
-            "FillRectAlphaMaskedByText(hdc, qr, dark": "MarkerText selection quads must be masked by PDF text pixels",
-            "kMarkerTextAlphaScaleOnText": "MarkerText must keep reduced alpha on glyph pixels so text remains readable",
+            "FillTextMarker(hdc, qr, ann.color, aUse, displayMode)": "MarkerText quads must use the saved display choice without classifying background pixels",
+            "FillTextMarker(hdc, r, ann.color, aUse, displayMode)": "MarkerText fallback rectangles must use the same display choice",
             "ann.type == Annotation::Type::MarkerFree || ann.type == Annotation::Type::Freehand": "free marker drawing must stay separate from text marker drawing",
-            "DarkenColor(ann.color, 0.85)": "free/text markers must keep the darkened viewer color policy",
+            "DarkenColor(ann.color, 0.85)": "free markers must keep their existing darkened viewer color policy",
             "DrawDashedArrowLinePx": "arrow annotations must preserve dash-aware antialiased viewer drawing",
             "DrawDashedLinePx": "line annotations must preserve dash-aware antialiased viewer drawing",
             "if (std::isfinite(partPt) && partPt > 0.0)": "viewer dash normalization must reject nonfinite/nonpositive render segments",
@@ -968,14 +1011,14 @@ def find_annotation_layer_regressions() -> list[str]:
         },
         "src/file_output/file_output.cpp": {
             "enum class AnnotationRenderMode": "export rendering must keep viewer-like and PDF-like annotation render modes explicit",
-            "static void DrawAnnotationsToBuffer": "PNG export must draw annotations through the shared raster export path",
+            "static bool DrawAnnotationsToBuffer": "PNG export must draw annotations through the shared raster path and propagate failures",
             "case Annotation::Type::TextColor:": "export raster path must handle TextColor annotations explicitly",
             "TintRectTextPixels(hdc, rc, ann.color": "PNG TextColor export must tint text pixels, not opaque rectangles",
             "case Annotation::Type::MarkerText:": "export raster path must handle MarkerText annotations explicitly",
             "FillRectAlphaMaskedByText(hdc, rc, col": "PNG MarkerText export must preserve text-masked alpha fill",
             "AppendDashedPdfSegment": "PDF export for line/arrow annotations must preserve dash segments",
-            'localization::Text(L"file_output.text_color_export_unsupported")': "PDF export must use the localized TextColor rejection notice",
-            "static bool RejectUnsupportedTextColorPdfExport": "PDF export must centralize its unsupported TextColor preflight",
+            "pdf_annotation_export::AddTextColorOverlay": "PDF export must propagate explicit color-overlay failures",
+            "ann.type = Annotation::Type::MarkerText;": "PDF text-color output must default to a highlight annotation",
         },
         "src/pdf_view/annotation_store.cppinc": {
             "case Annotation::Type::MarkerText: return \"marker_text\";": "MarkerText must remain serializable to .clrop",
@@ -1001,13 +1044,8 @@ def find_annotation_layer_regressions() -> list[str]:
                 errors.append(f"{rel}: {message}")
 
     file_output = (REPO_ROOT / "src/file_output/file_output.cpp").read_text(encoding="utf-8", errors="ignore")
-    export_impl_pos = file_output.find("static bool ExportPdfPagesImpl")
-    reject_pos = file_output.find("if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;", export_impl_pos)
-    write_pos = file_output.find("ExportPdfDocumentWithSpecs(doc", export_impl_pos)
-    if export_impl_pos < 0 or reject_pos < 0 or write_pos < 0 or not (reject_pos < write_pos):
-        errors.append("src/file_output/file_output.cpp: TextColor PDF export must be rejected before destination PDF writing starts")
-    if file_output.count("if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;") < 3:
-        errors.append("src/file_output/file_output.cpp: TextColor PDF export must be rejected before selecting a destination and in the write path")
+    if "return ExportPdfParts(owner, {{pages, standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor}}, outPath);" not in file_output:
+        errors.append("src/file_output/file_output.cpp: Single PDF exports must use the same guarded segment writer")
     return errors
 
 def find_pdf_textbox_visibility_regressions() -> list[str]:
@@ -1677,7 +1715,7 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
         'function Get-LatestReleaseSetPair',
         'function Get-AllowlistDiffLines',
         'Allowlist diff placeholder was repaired in the existing unconfirmed checklist:',
-        '$(foreach ($line in $allowlistDiffSection) { $line })',
+        '$checklistPrefix + $allowlistDiffSection + $checklistSuffix',
         '公開snapshot allowlist 差分（コメント・空行を除いた有効エントリ）:',
         '--- ALLOWLIST DIFF BEGIN ---',
         'Confirmed checklist has no allowlist diff section; it is retained unchanged:',
@@ -1768,9 +1806,9 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
     if any(needle not in release_set_text for needle in release_set_logging_contract):
         errors.append("make_release_set.ps1: failed release gates must retain and display a dedicated detail log")
     primary_run_log_contracts = {
-        "build.ps1": ('out\\logs\\build\\build_{0}.log', 'Start-Transcript -LiteralPath $script:runLogPath', 'Stop-RunLog'),
-        "release.ps1": ('out\\logs\\release\\release_{0}.log', 'Start-Transcript -LiteralPath $script:runLogPath', 'Stop-RunLog'),
-        "publish.ps1": ('out\\logs\\publish\\publish_{0}.log', 'Start-Transcript -LiteralPath $script:runLogPath', 'Stop-RunLog'),
+        "build.ps1": ('out\\logs\\build\\build_{0}_{1}_{2}.log', 'Start-Transcript -LiteralPath $script:runLogPath', 'Stop-RunLog'),
+        "release.ps1": ('out\\logs\\release\\release_{0}_{1}_{2}.log', 'Start-Transcript -LiteralPath $script:runLogPath', 'Stop-RunLog'),
+        "publish.ps1": ('out\\logs\\publish\\publish_{0}_{1}_{2}.log', 'Start-Transcript -LiteralPath $script:runLogPath', 'Stop-RunLog'),
     }
     for relative_path, contract in primary_run_log_contracts.items():
         entry_text = (REPO_ROOT / relative_path).read_text(encoding="utf-8", errors="ignore")
@@ -1779,8 +1817,8 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
     package_text = (REPO_ROOT / "scripts/release/pack_release.ps1").read_text(encoding="utf-8", errors="ignore")
     package_link_rewrite_contract = (
         '$content.Replace("](DOCUMENTATION.md)", "](docs/README.md)")',
-        '$content.Replace("](docs/ja/README.md)", "](docs/README.md)")',
-        '$content.Replace("](docs/en/README.md)", "](docs/README.md)")',
+        '$content.Replace("](docs/ja/", "](docs/")',
+        '$content.Replace("](docs/en/", "](docs/")',
     )
     if any(needle not in package_text for needle in package_link_rewrite_contract):
         errors.append("pack_release.ps1: top-level README documentation links must resolve inside a locale package")
@@ -1848,6 +1886,16 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
     if 'if ($DeferPostCreationValidation) { $releaseSetArgs += "-DeferPostCreationValidation" }' not in release_text:
         errors.append("release.ps1: deferred validation must be passed explicitly to release-set creation")
     build_text = (REPO_ROOT / "build.ps1").read_text(encoding="utf-8", errors="ignore")
+    if "REPO_VERSION.txt" in publish_text or "Update-RepoVersion" in publish_text:
+        errors.append("publish.ps1: version selection belongs to release preparation, never publication")
+    version_selection = "$script:releaseVersionLease = Enter-ReleaseVersion -RepositoryRoot $PSScriptRoot"
+    if version_selection not in release_text or not (
+        release_text.index("if ($Test) {") < release_text.index(version_selection)
+        < release_text.index("$pairDirectory = Get-ReleasePairDirectory")
+    ):
+        errors.append("release.ps1: fix the version after Test/Clean exits and before builds and release-set names")
+    if "Exit-ReleaseVersion -Lease $script:releaseVersionLease" not in release_text:
+        errors.append("release.ps1: release version lease must be closed on completion and failure")
     release_entrypoint_contract = (
         'release.ps1 は通常版と Lite版を一組で作成するため、-Lite は指定できません。',
         'release set は作成せず、ビルド成果物だけを削除します',
@@ -1957,7 +2005,8 @@ def find_note_tex_route_regressions() -> list[str]:
         encoding="utf-8", errors="ignore"
     )
     required_route_contract = {
-        'if (ext == L".tex") return NoteContentRoute::TeX;': ".tex must remain openable as TeX source",
+        'if (kind == note::NoteContentKind::TeXSource) return NoteContentRoute::TeX;': ".tex must remain openable as TeX source",
+        'const note::NoteContentKind kind = note::ContentKindForNotePath(notePath);': "note routes must use the shared extension policy",
         "return note::NoteContentKind::TeXSource;": ".tex must keep a dedicated math-only source kind",
         "return CurrentNoteContentRoute() != NoteContentRoute::PlainText;": ".tex must support the render overlay",
         "BuildTeXMathRenderCacheLine": ".tex must render only its TeX math spans",
@@ -1968,6 +2017,9 @@ def find_note_tex_route_regressions() -> list[str]:
     for needle, description in required_route_contract.items():
         if needle not in route_text:
             errors.append(f"src/note_view/note_view_shared.cppinc: {description}")
+    policy_text = (REPO_ROOT / "src/note/note_file_policy.h").read_text(encoding="utf-8")
+    if 'if (extension == L".tex") return NoteContentKind::TeXSource;' not in policy_text:
+        errors.append("src/note/note_file_policy.h: .tex must retain the dedicated TeX source route")
     parser_text = (REPO_ROOT / "src/note/note_parser.cpp").read_text(
         encoding="utf-8", errors="ignore"
     )
@@ -2058,6 +2110,28 @@ def find_final_render_publication_boundary_regressions() -> list[str]:
             errors.append(
                 f"src/note_view/note_view_final_render.cppinc: final runtime bridge must retain {needle}"
             )
+
+    # A published final frame has a current editor binding, or a source-bound
+    # event-owned IME session. Painting consumes that proof; it cannot repair
+    # the binding by copying the complete document as the retired path did.
+    ready_pos = note_view_final.find("bool FinalFrameCanUseCustomPaint(")
+    ready_end = note_view_final.find("bool FinalRenderRouteEnabled(", ready_pos)
+    if ready_pos < 0 or ready_end < ready_pos:
+        errors.append("src/note_view/note_view_final_render.cppinc: final paint readiness must remain an isolated proof")
+    else:
+        readiness = note_view_final[ready_pos:ready_end]
+        for needle, message in (
+            ("if (!context.finalRenderState.has_frame()) return false;", "require a published frame"),
+            ("return IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd);", "require the current editor binding outside IME"),
+            ("if (g_noteImeComposing)", "use the event-owned IME phase"),
+            ("context.finalImePreedit.active()", "require an active IME session"),
+            ("context.finalImePreedit.source_identity() ==", "compare the IME source identity"),
+            ("note::NoteDerivedSnapshotIdentity{core->note_id(), core->content_revision()}", "bind IME paint to the canonical revision"),
+        ):
+            if needle not in readiness:
+                errors.append(f"src/note_view/note_view_final_render.cppinc: final paint readiness must {message}")
+        if "GetEditTextForIndexing(" in readiness or "core->model()" in readiness:
+            errors.append("src/note_view/note_view_final_render.cppinc: final paint readiness must not materialize complete editor text")
 
     # Input and hit-testing are on the interactive path.  They may use the
     # immutable source-line aggregates, but must not materialize the entire
@@ -2169,8 +2243,8 @@ def find_final_render_publication_boundary_regressions() -> list[str]:
     input_proc = (REPO_ROOT / "src/note_view/note_view_input_proc.cppinc").read_text(
         encoding="utf-8", errors="ignore"
     )
-    paint_pos = input_proc.find("case WM_PAINT")
-    final_paint_pos = input_proc.find("TryPaintFinalNoteRenderFrame", paint_pos)
+    final_paint_pos = input_proc.find("TryPaintFinalNoteRenderFrame")
+    paint_pos = input_proc.rfind("case WM_PAINT", 0, final_paint_pos)
     native_paint_pos = input_proc.find("PaintNativeNoteClient", final_paint_pos)
     if paint_pos < 0 or final_paint_pos < paint_pos or native_paint_pos < final_paint_pos:
         errors.append(
@@ -2185,6 +2259,15 @@ def find_final_render_publication_boundary_regressions() -> list[str]:
             errors.append(
                 "src/note_view/note_view_input_proc.cppinc: native fallback after final paint failure must erase partial final pixels first"
             )
+    paint_end = input_proc.find("case WM_IME_REQUEST", paint_pos)
+    if paint_end < paint_pos:
+        errors.append("src/note_view/note_view_input_proc.cppinc: final/native paint branch must remain bounded")
+    else:
+        paint_text = input_proc[paint_pos:paint_end]
+        if any(call in paint_text for call in (
+            "RefreshFinalNoteRenderFrame(", "RecomputeMathFromNote(", "GetEditTextForIndexing(",
+        )):
+            errors.append("src/note_view/note_view_input_proc.cppinc: paint must consume a publication without rebuilding or copying the document")
     if "DrawHighlightOverlay(" in input_proc[paint_pos:]:
         errors.append(
             "src/note_view/note_view_input_proc.cppinc: final paint must not reintroduce the retired clipped overlay"
@@ -2383,7 +2466,10 @@ def find_final_render_publication_boundary_regressions() -> list[str]:
     wheel_end = input_proc.find("case WM_RBUTTONDOWN:", wheel_pos)
     hscroll_pos = input_proc.find("case WM_HSCROLL:")
     hscroll_end = input_proc.find("case WM_TIMER:", hscroll_pos)
-    final_input_guard = "if (FinalRenderRouteEnabled(hWnd)) break;"
+    final_input_guard = ("if (FinalRenderRouteEnabled(hWnd)) {\n"
+                         "                        wheelContext.horizontalWheelPixels.Reset();\n"
+                         "                        break;\n"
+                         "                    }")
     legacy_hscroll_guard = "if (IsNoteRenderActive() && !FinalRenderRouteEnabled(hWnd))"
     if (wheel_pos < 0 or wheel_end < wheel_pos or
             final_input_guard not in input_proc[wheel_pos:wheel_end] or
@@ -2475,7 +2561,7 @@ def find_final_render_publication_boundary_regressions() -> list[str]:
                 "src/note_view/note_view_shared.cppinc: render toggle must not rebuild the retired LineCache or line-spacing route before final publication"
             )
 
-    load_pos = note_ops.find("void LoadNoteFile(")
+    load_pos = note_ops.find("bool LoadNoteFile(")
     clear_pos = note_ops.find("void ClearNoteEditorSilently(")
     save_pos = note_ops.find("bool SaveNoteFile(", clear_pos)
     if load_pos < 0 or clear_pos < load_pos or save_pos < clear_pos:
@@ -2764,32 +2850,19 @@ def find_note_render_incremental_regressions() -> list[str]:
         },
         "src/note_view/note_view_note_ops.cppinc": {
             "IsNoteLineRawHelper(hWnd, line)": "note render overlay must identify raw helper lines",
-            "isStaleEditingLine": "note render overlay must isolate stale editing lines",
-            "drawStaleRawLine": "note render overlay must draw current raw text only for stale/raw lines",
-            "NotePresentationLineSurface::NativeRaw": "caret raw line must use native RichEdit drawing instead of stale overlay drawing",
             "const note::NoteTextCore* core = CurrentNoteTextCore();": "pending render-canvas expansion and local geometry must use the synchronized TextCore",
-            "currentLogicalStartsForStale": "stale paint must reuse its frame-local logical-line mapping",
             "QueryEditorLogicalLineRange(hWnd, line, lineCount, &lineStart": "stable link lookup must use the current editor-line range",
-            "lineForRawIndex(*nativeHitRaw)": "stable hit testing must map its selected offset through the local editor-line adapter",
-            "editorLineLayout.HitTest(clientX, clientY)": "structured hit testing must share EditorLineLayout geometry",
-            "selectionSegmentRangeRect(": "structured selection must share EditorLineLayout geometry",
-            "selectionSegmentBoundaryScratch.push_back({segStart, segmentX})": "anchored selection must begin at its own rendered run position",
-            "note::EditorLineLayout segmentLayout": "anchored selection must use a local shared-layout view",
             "BuildRenderedSegmentPlacements(hWnd, hdc, line,": "structured horizontal extent must share run placement geometry",
-            "PaintNativeNoteClient(hWnd, hdc, nativeRawRegion);": "structured paint must clip native RichEdit text to NativeRaw lines",
-            "ResolveNoteNativePaintScope(frameAction)": "native paint scope must come from the presentation policy",
             "CanReuseCommittedLayoutForImeComposition(hWnd)": "hybrid IME painting must require an explicit local-layout proof",
             "g_noteRenderStaleLines.first != g_noteRenderStaleLines.last": "IME hybrid reuse must reject multi-line stale ranges",
-            "bindingCurrentForPresentation": "a proven IME anchor must be the only alternate to a current TextCore binding",
-            "TryGetNoteImeCompositionAnchorLine(hWnd, &imeAnchorLine)": "IME native ownership must remain on the anchored logical row",
-            "const bool imeComposing = IsNoteImeComposing();": "frame presentation must use the event-owned IME phase rather than a second IMM poll",
+        },
+        "src/note/note_presentation_owner_plan.cpp": {
+            "if (!IsExactOwnerPartition(candidate->owner_ranges_, input.visible_lines))": "published line owners must form an exact visible partition",
+            "NotePresentationOwnerPlanBuildResult::InvariantViolation": "an inconsistent owner partition must reject publication",
+            "!input.editor_text_core_current": "owner planning must reject an unbound editor",
+            "input.ime_preedit && !input.ime_preedit_can_reuse_committed_layout": "owner planning must reject an unproven preedit layout",
         },
         "src/note/note_presentation.cpp": {
-            "NoteNativePaintScope ResolveNoteNativePaintScope": "native text paint scope must be a pure presentation policy",
-            "NotePresentationPlan ResolveNotePresentationPlan": "frame ownership must be resolved by the pure presentation plan",
-            "EditorLineLayout::TextRangeRect": "shared editor-line geometry must provide source-range rectangles",
-            "EditorLineLayout::HitTest": "shared editor-line geometry must provide hit testing",
-            "state.ime_composition_can_reuse_committed_layout": "stale IME composition must not reuse committed lines without adapter proof",
             "NoteImePresentationPhase::ResultCommittedAwaitingEnd": "a pure IME phase machine must preserve acknowledged results until WM_IME_END",
         },
         "src/ui/core/main_window_proc.cppinc": {
@@ -2851,58 +2924,18 @@ def find_note_render_incremental_regressions() -> list[str]:
             errors.append("src/note_view/note_view_input_helpers.cppinc: IME caret resolution must not materialize the canonical model")
         if "GetWindowTextLengthW(hWnd)" in ime_text:
             errors.append("src/note_view/note_view_input_helpers.cppinc: IME caret resolution must not use text length as a TextCore identity proof")
-    overlay_pos = ops_text.find("static void DrawHighlightOverlay")
-    next_measure_pos = ops_text.find("static int MeasureRenderedLineVisualWidth", overlay_pos)
-    if overlay_pos < 0 or next_measure_pos < 0:
-        errors.append("src/note_view/note_view_note_ops.cppinc: highlight overlay must remain an isolated paint helper")
-    else:
-        overlay_text = ops_text[overlay_pos:next_measure_pos]
-        if "GetNoteLogicalLineStarts(hWnd" in overlay_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: current highlight paint must reuse TextCore/frame line indices")
-        if "CurrentNoteTextCoreModel()" in overlay_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: highlight paint must not materialize the canonical model for line geometry")
-        if "GetEditTextForIndexing(hWnd)" in overlay_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: highlight paint must not copy the complete editor for a stale row")
-        if "QueryEditorLogicalLineBand(hWnd" not in overlay_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: highlight paint must query current line geometry through the local editor-line adapter")
-        if "BuildNoteRawLineSurfaceResolver(hWnd)" not in overlay_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: visible line surfaces must share one raw-line resolver per paint")
-        if "IsNoteLineRawHelper(hWnd, line)" in overlay_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: visible line surfaces must not reread selection state per line")
+    # The final frame owns custom paint and pointer geometry. The retired
+    # overlay/hit-test bodies must not be kept alive by stale presence checks.
+    for retired_helper in ("DrawHighlightOverlay", "HitTestMarkupPosition", "TryGetRenderedCaretRect", "TryGetRawCaretRect"):
+        if retired_helper in ops_text or retired_helper in shared_text:
+            errors.append(f"src/note_view: retired {retired_helper} must not reintroduce a legacy presentation route")
     link_pos = ops_text.find("static std::optional<std::wstring> LinkIdAtCharIndex")
-    rendered_caret_pos = ops_text.find("static bool TryGetRenderedCaretRect")
-    raw_caret_pos = ops_text.find("static bool TryGetRawCaretRect", rendered_caret_pos)
-    if rendered_caret_pos < 0 or raw_caret_pos < 0 or link_pos < 0:
-        errors.append("src/note_view/note_view_note_ops.cppinc: rendered and raw caret geometry must remain isolated helpers")
-    else:
-        rendered_caret_text = ops_text[rendered_caret_pos:raw_caret_pos]
-        raw_caret_text = ops_text[raw_caret_pos:link_pos]
-        if ("GetNoteLogicalLineStarts(hWnd" in rendered_caret_text or
-                "CurrentNoteTextCoreModel()" in rendered_caret_text or
-                "RefreshMarkdownRenderCache(" in rendered_caret_text):
-            errors.append("src/note_view/note_view_note_ops.cppinc: rendered caret geometry must use the local editor-line adapter")
-        if ("GetNoteLogicalLineStarts(hWnd" in raw_caret_text or
-                "CurrentNoteTextCoreModel()" in raw_caret_text):
-            errors.append("src/note_view/note_view_note_ops.cppinc: raw caret geometry must use the local editor-line adapter")
     native_hit_pos = ops_text.find("static std::optional<size_t> HitTestNativeNoteRawPosition", link_pos)
     if link_pos < 0 or native_hit_pos < 0:
         errors.append("src/note_view/note_view_note_ops.cppinc: link lookup must remain an isolated helper")
     elif ("GetNoteLogicalLineStarts(hWnd" in ops_text[link_pos:native_hit_pos] or
             "CurrentNoteTextCoreModel()" in ops_text[link_pos:native_hit_pos]):
         errors.append("src/note_view/note_view_note_ops.cppinc: stable link lookup must use the local editor-line adapter")
-    hit_pos = ops_text.find("static std::optional<size_t> HitTestMarkupPosition")
-    next_math_pos = ops_text.find("static mathrender::Layout MeasureMathLineLayout", hit_pos)
-    if hit_pos < 0 or next_math_pos < 0:
-        errors.append("src/note_view/note_view_note_ops.cppinc: markup hit testing must remain an isolated helper")
-    else:
-        hit_text = ops_text[hit_pos:next_math_pos]
-        if ("GetNoteLogicalLineStarts(hWnd" in hit_text or
-                "CurrentNoteTextCoreModel()" in hit_text or
-                "GetEditTextForIndexing(hWnd)" in hit_text):
-            errors.append("src/note_view/note_view_note_ops.cppinc: stable markup hit testing must not materialize the complete note")
-        if ("QueryEditorLogicalLineBand(hWnd" not in hit_text or
-                "QueryEditorLogicalLineRange(hWnd" not in hit_text):
-            errors.append("src/note_view/note_view_note_ops.cppinc: stable markup hit testing must use the local editor-line adapter")
     boundary_pos = shared_text.find("static bool BuildRenderedBoundariesForLineWithScratch")
     boundary_end = shared_text.find("static int FindLineForRaw", boundary_pos)
     if boundary_pos < 0 or boundary_end < 0:
@@ -2966,25 +2999,6 @@ def find_note_render_incremental_regressions() -> list[str]:
             errors.append("src/note_view/note_view_shared.cppinc: raw line ownership must prefer the synchronized TextCore")
         if "SendMessageW(hWnd, EM_GETSEL" not in resolver_text:
             errors.append("src/note_view/note_view_shared.cppinc: raw line ownership must capture selection once per resolver")
-    frame_pos = ops_text.find("static NoteRenderPresentationFrame BuildNoteRenderPresentationFrame")
-    frame_end = ops_text.find("static void RefreshNoteRenderPresentationFrameAfterCommit", frame_pos)
-    if frame_pos < 0 or frame_end < 0:
-        errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame resolution must remain isolated")
-    else:
-        frame_text = ops_text[frame_pos:frame_end]
-        if "const bool textCoreEditorCurrent = IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd);" not in frame_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame resolution must capture the TextCore/editor binding once")
-        if "bool bindingCurrentForFrame = textCoreEditorCurrent;" not in frame_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame binding recovery must retain the initial binding proof")
-        if ("captureStaleText &&\n"
-                "            TryRepairNoteTextCoreEditorBindingForPaint(hWnd, &frame.currentTextForStale)" not in frame_text):
-            errors.append("src/note_view/note_view_note_ops.cppinc: binding recovery must be paint-only and reuse its one text snapshot")
-        if "GetEditTextForIndexing(hWnd)" in frame_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame line-count selection must not read the complete editor")
-        if "core->logical_line_count() != g_lineCache.size()" not in frame_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: presentation-frame stale line count must use the current TextCore scalar")
-        if "NotePresentationFrameState{renderActive, false, false, false, false, false," not in frame_text:
-            errors.append("src/note_view/note_view_note_ops.cppinc: unbound TextCore/editor state must select whole-view native fallback")
     editor_line_pos = shared_text.find("static bool QueryEditorLogicalLineRange")
     editor_line_end = shared_text.find("static bool InvalidateNoteRenderDirtyLines", editor_line_pos)
     if editor_line_pos < 0 or editor_line_end < 0:
@@ -3040,7 +3054,6 @@ def find_note_ime_layout_coordinate_regressions() -> list[str]:
             "frame.rawLeftPx = margins.desiredLeft - frame.scrollX;": "render-mode raw text X must include the render horizontal scroll offset",
             "frame.overlayLeftPx = margins.desiredLeft - frame.scrollX;": "render overlay X must use the same margin/scroll basis as raw text",
             "NoteLayoutFrameLineBaseXForRenderState": "render overlay line base X must come from the shared layout frame",
-            "NoteLayoutFrameClientXFromNativeLineX": "native RichEdit X must be translated through the shared layout frame",
             "NoteLayoutFrameAnchorScrollX": "scroll anchoring must use render scroll in render mode and native scroll otherwise",
             "UpdateNoteVisualAssistMargins(hWnd, false);": "format rect updates must apply visual-assist margins before building the layout frame",
             "g_noteRenderScrollX = layoutFrame.scrollX;": "format rect updates must commit the clamped render horizontal scroll",
@@ -3119,11 +3132,9 @@ def find_note_ime_layout_coordinate_regressions() -> list[str]:
     flush_pos = focus_text.find("MaybeFlushNoteStageOnCaretOrFocusChange")
     if min(focus_pos, focus_end, settle_pos, reset_pos, flush_pos) < 0 or not (settle_pos < reset_pos < flush_pos) or "return result;" not in focus_text:
         errors.append("src/note_view/note_view_input_proc.cppinc: focus loss must settle native input once, close the preedit session, then flush canonical stage")
-    ops_text = (REPO_ROOT / "src/note_view/note_view_note_ops.cppinc").read_text(encoding="utf-8", errors="ignore")
-    rendered_pos = ops_text.find("static bool TryGetRenderedCaretRect")
-    raw_pos = ops_text.find("static bool TryGetRawCaretRect")
-    if rendered_pos < 0 or raw_pos < 0 or rendered_pos > raw_pos:
-        errors.append("src/note_view/note_view_note_ops.cppinc: rendered caret rect should remain the primary geometry path before raw fallback")
+    if ("TryGetFinalNoteRenderCaretRect" not in helper_text or
+            "TryGetNativeNoteCaretRect" not in helper_text):
+        errors.append("src/note_view: caret geometry must retain the final-frame route and native fallback")
     return errors
 
 def find_layout_flicker_regressions() -> list[str]:
@@ -3140,7 +3151,10 @@ def find_layout_flicker_regressions() -> list[str]:
             "BeginDeferWindowPos(static_cast<int>(batch.ops.size()))": "layout must batch child moves by parent",
             "DeferWindowPos(hdwp, op.hwnd, nullptr, op.x, op.y, op.w, op.h, op.flags)": "layout must use DeferWindowPos for batched child moves",
             "EndDeferWindowPos(hdwp)": "layout must commit child move batches atomically",
-            "RedrawLayoutRegion(hWnd, &result.rootDirtyRect)": "layout must redraw only the union of changed old/new bounds when possible",
+            "RedrawChangedLayout(hWnd, result, changedControls)": "layout must repaint changed controls and the union of changed old/new root bounds",
+            "RDW_INVALIDATE | RDW_NOCHILDREN | RDW_UPDATENOW": "layout background repaint must preserve child pixels",
+            "RDW_INVALIDATE | RDW_NOERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW": "changed controls must paint without broad background erasure",
+            "if (!boundsChanged && !visibilityChanged) continue;": "unchanged controls must not be repositioned or repainted",
             "result.bottomPaneBoundsChanged && pass == LayoutPass::Commit": "bottom pane refresh must be tied to committed bounds changes",
             "RefreshCurrentNoteBottomPane();": "bottom pane refresh must occur after committed layout changes",
         },
@@ -3181,9 +3195,9 @@ def find_layout_flicker_regressions() -> list[str]:
     layout_text = (REPO_ROOT / "src/ui/layout.cpp").read_text(encoding="utf-8", errors="ignore")
     no_redraw_pos = layout_text.find("SWP_NOREDRAW")
     defer_pos = layout_text.find("BeginDeferWindowPos")
-    redraw_pos = layout_text.find("RedrawLayoutRegion(hWnd, &result.rootDirtyRect)")
+    redraw_pos = layout_text.find("RedrawChangedLayout(hWnd, result, changedControls)")
     if no_redraw_pos < 0 or defer_pos < 0 or redraw_pos < 0 or not (no_redraw_pos < defer_pos < redraw_pos):
-        errors.append("src/ui/layout.cpp: child moves must be batched with no-redraw before a single dirty-region redraw")
+        errors.append("src/ui/layout.cpp: child moves must be batched with no-redraw before repainting the changed controls and root region")
 
     zoom_text = (REPO_ROOT / "src/pdf_view/zoom_flow.cppinc").read_text(encoding="utf-8", errors="ignore")
     anchor_pos = zoom_text.find("g_zoomAnchor.valid = true;")

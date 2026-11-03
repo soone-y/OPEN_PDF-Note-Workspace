@@ -15,6 +15,8 @@
 #include "core/localization.h"
 #include "core/ui_notify.h"
 #include "core/ui_prompts.h"
+#include "core/preview_trace.h"
+#include "ui/listbox_scroll.h"
 #include "ui/noop_nav_guard.h"
 
 HINSTANCE g_hInst = GetModuleHandleW(nullptr);
@@ -28,6 +30,9 @@ static bool CopyPathToClipboard(HWND, const std::wstring& path) { copiedPath = p
 void ShowSoftNotice(HWND, const std::wstring&, SoftNoticeKind) { ++notices; }
 void SaveWorkspaceConfig(const std::wstring&, const BrowserConfig&) { ++configSaves; }
 void ApplyThemeToDialog(HWND) {}
+bool DrawThemeButton(const DRAWITEMSTRUCT*) { return false; }
+bool IsAppLogEnabled(AppLogKind) { return false; }
+void AppendAppLogLine(AppLogKind, const std::wstring&) {}
 LRESULT ThemeCtlColorPanel(HWND, HDC) { return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW)); }
 void PlaceOwnedPopupAtAppTopLeft(HWND, HWND) {}
 bool ShouldSkipImeMessageInLoop(const MSG&) { return false; }
@@ -42,6 +47,12 @@ std::wstring TrimWhitespace(const std::wstring& text) {
     return text.substr(first, text.find_last_not_of(L" \t\r\n") - first + 1);
 }
 std::filesystem::path ResolveDialogInitialFolder(const std::filesystem::path& path) { return path; }
+static std::filesystem::path testDownloads;
+static std::filesystem::path testDocuments;
+static std::filesystem::path DialogKnownFolderInitialFolder(REFKNOWNFOLDERID id) {
+    assert(IsEqualGUID(id, FOLDERID_Downloads) || IsEqualGUID(id, FOLDERID_Documents));
+    return IsEqualGUID(id, FOLDERID_Downloads) ? testDownloads : testDocuments;
+}
 namespace localization {
 std::wstring Text(std::wstring_view id) { return std::wstring(id); }
 std::wstring Format(std::wstring_view id, const std::vector<std::pair<std::wstring_view, std::wstring>>&) {
@@ -161,7 +172,75 @@ static void CALLBACK Operate(HWND, UINT, UINT_PTR, DWORD) {
     auto* state = reinterpret_cast<LocalPathBrowserState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     assert(state);
     CheckBrowserLists(state);
+    assert((GetDlgItem(window, 207) != nullptr) == state->importFileTools);
+    assert((GetDlgItem(window, 208) != nullptr) == state->importFileTools);
     const auto suggestedFolder = state->currentDir / L"授業_候補";
+    if (scenario >= 18) {
+        const auto initial = state->currentDir;
+        assert(state->importFileTools && !state->pdfOnly);
+        assert(SendMessageW(GetDlgItem(window, 208), BM_GETCHECK, 0, 0) == BST_UNCHECKED);
+        if (scenario == 20) {
+            assert(!IsWindowEnabled(GetDlgItem(window, 207)));
+            // A destination that disappears must fail quietly and retain location.
+            state->downloadsDir = initial / L"missing_downloads";
+            const int before = notices;
+            SendMessageW(window, WM_COMMAND, 207, 0);
+            assert(state->currentDir == initial && notices == before + 1);
+            state->downloadsDir = initial;
+            state->documentsDir.clear();
+            RefreshLocalPathBrowserList(state);
+            assert(!IsWindowEnabled(GetDlgItem(window, 207)));
+            state->documentsDir = initial / L"missing_documents";
+            SendMessageW(window, WM_COMMAND, 207, 0);
+            assert(state->currentDir == initial && notices == before + 2);
+            SendMessageW(window, WM_COMMAND, IDCANCEL, 0);
+            return;
+        }
+        assert(state->downloadsDir == testDownloads && state->currentDir != testDownloads);
+        assert(ReadText(GetDlgItem(window, 207)) == L"ui.local_path.downloads");
+        const auto highlighted = initial / (scenario == 18 ? L"授業.txt" : L"existing.pdf");
+        SelectEntry(state, highlighted, false, true);
+        SelectEntry(state, initial / L"UPPER.PDF", false);
+        SelectEntry(state, initial / L"授業.txt", false);
+        SelectEntry(state, initial / L"Course", false, true);
+        SendMessageW(GetDlgItem(window, 208), BM_CLICK, 0, 0);
+        assert(state->pdfOnly && state->currentDir == initial);
+        CheckBrowserLists(state);
+        for (const auto& entry : state->entries) {
+            assert(entry.kind == LocalPathBrowserEntryKind::File && ToLowerAscii(entry.path.extension().wstring()) == L".pdf");
+        }
+        assert(SelectedLocalBrowserEntries(state).size() == (scenario == 18 ? 1 : 2));
+        if (scenario == 18) assert(SendMessageW(state->suggestionList, LB_GETSELCOUNT, 0, 0) == 0);
+        else assert(SendMessageW(state->suggestionList, LB_GETSELCOUNT, 0, 0) == 1);
+        SendMessageW(GetDlgItem(window, 208), BM_CLICK, 0, 0);
+        assert(!state->pdfOnly && SelectedLocalBrowserEntries(state).size() == (scenario == 18 ? 1 : 2));
+        assert(std::any_of(state->entries.begin(), state->entries.end(), [](const auto& entry) {
+            return entry.path.filename() == L"授業.txt";
+        }));
+        SelectEntry(state, suggestedFolder, true, true);
+        SendMessageW(GetDlgItem(window, 208), BM_CLICK, 0, 0);
+        assert(state->pdfOnly && state->currentDir == suggestedFolder);
+        CheckBrowserLists(state);
+        assert(state->suggestedEntries.empty());
+        for (const auto& entry : state->entries) assert(entry.path.extension() == L".pdf");
+        SendMessageW(window, WM_COMMAND, 202, 0);
+        assert(state->showDriveRoots && state->pdfOnly);
+        assert(state->entries.empty());
+        SendMessageW(GetDlgItem(window, 207), BM_CLICK, 0, 0);
+        assert(!state->showDriveRoots && state->currentDir == testDownloads && state->pdfOnly);
+        assert(ReadText(GetDlgItem(window, 207)) == L"ui.local_path.documents");
+        CheckBrowserLists(state);
+        assert(SelectedLocalBrowserEntries(state).empty());
+        SendMessageW(GetDlgItem(window, 207), BM_CLICK, 0, 0);
+        assert(state->currentDir == testDocuments && state->pdfOnly);
+        assert(ReadText(GetDlgItem(window, 207)) == L"ui.local_path.downloads");
+        CheckBrowserLists(state);
+        SendMessageW(GetDlgItem(window, 207), BM_CLICK, 0, 0);
+        assert(state->currentDir == testDownloads && state->pdfOnly);
+        SelectEntry(state, testDownloads / L"download.pdf", false);
+        SendMessageW(window, WM_COMMAND, IDOK, 0);
+        return;
+    }
     if (scenario >= 11) {
         if (scenario == 17) {
             assert(ReadText(state->edit).find(L"…") != std::wstring::npos);
@@ -305,12 +384,18 @@ int wmain() {
     assert(!ec && !std::filesystem::exists(root, ec) && !ec);
     destination = root / L"日本語 destination";
     assert(std::filesystem::create_directories(destination, ec) && !ec);
-    for (const auto* name : {L"A_ordinary", L"Course", L"Lecture", L"授業_候補", L"課題"}) {
+    for (const auto* name : {L"A_ordinary", L"Course", L"Lecture", L"授業_候補", L"課題", L"fake.pdf"}) {
         assert(std::filesystem::create_directory(root / name, ec) && !ec);
     }
     { std::ofstream file(root / L"existing.pdf", std::ios::binary); file << "original bytes"; }
     { std::ofstream file(root / L"授業.txt", std::ios::binary); file << "not a directory suggestion"; }
+    { std::ofstream file(root / L"UPPER.PDF", std::ios::binary); file << "upper case extension"; }
     { std::ofstream file(root / L"授業_候補/existing.pdf", std::ios::binary); file << "suggested folder source"; }
+    { std::ofstream file(root / L"授業_候補/hidden.txt", std::ios::binary); file << "hidden source"; }
+    testDownloads = root / L"Downloads fixture";
+    testDocuments = root;
+    assert(std::filesystem::create_directory(testDownloads, ec) && !ec);
+    { std::ofstream file(testDownloads / L"download.pdf", std::ios::binary); file << "download original"; }
     HWND owner = CreateWindowW(L"STATIC", L"Browser test owner", WS_POPUP, 0, 0, 800, 600, nullptr, nullptr, g_hInst, nullptr);
     assert(owner);
     auto result = Run(1, owner, root);
@@ -378,8 +463,23 @@ int wmain() {
         KillTimer(nullptr, timer);
         assert(operated && IsWindowEnabled(owner));
     }
+    for (const int id : {18, 19, 20}) {
+        scenario = id; operated = false;
+        const auto downloads = testDownloads;
+        if (id == 20) testDownloads.clear();
+        const UINT_PTR timer = SetTimer(nullptr, kBrowserAutomationTimer, 10, Operate); assert(timer);
+        const auto picked = PromptLocalPathBrowser(owner, root, L"Import tools test", false, true, false,
+            root / (id == 18 ? L"授業.txt" : L"existing.pdf"), nullptr, {}, L"Import", true);
+        KillTimer(nullptr, timer);
+        assert(operated && IsWindowEnabled(owner));
+        if (id == 20) assert(picked.empty());
+        else assert(picked.size() == 1 && picked.front() == (downloads / L"download.pdf").wstring());
+        testDownloads = downloads;
+    }
+    std::ifstream downloadOriginal(testDownloads / L"download.pdf", std::ios::binary);
+    assert(std::string(std::istreambuf_iterator<char>(downloadOriginal), {}) == "download original");
     DestroyWindow(owner); CoUninitialize();
     // Fixtures are retained inside the test output directory for inspection.
-    std::cout << "Local browser tests passed (suggestions/all entries, duplicate selection, navigation, save names, cancellation, native handoff, no writes).\n";
+    std::cout << "Local browser tests passed (suggestions/all entries, PDF filtering/selection, Downloads shortcut/failure, duplicate selection, navigation, save names, cancellation, native handoff, no writes).\n";
     return 0;
 }

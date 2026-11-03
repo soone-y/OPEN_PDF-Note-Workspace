@@ -1,79 +1,32 @@
 // file: main/main_pdf_list_context.cppinc
 
-enum class EmptyClroDeleteResult {
-    Deleted,
-    NotEligible,
-    Failed,
-};
+#include "core/empty_note_file.h"
+#include "note/note_file_policy.h"
+
+enum class EmptyClroDeleteResult { Deleted, NeedsSave, NotEligible, Failed };
 
 static bool IsEmptyClroNoteEligibleForDeletion(const std::filesystem::path& path) {
-    if (path.empty()) return false;
-
-    std::wstring extension = path.extension().wstring();
-    std::transform(extension.begin(), extension.end(), extension.begin(),
-                   [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
-    if (extension != L".clro") return false;
-
-    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(path);
-    const DWORD attributes = GetFileAttributesW(openPath.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES ||
-        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
-        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return false;
-    }
-
-    std::error_code ec;
-    return std::filesystem::is_regular_file(path, ec) && !ec &&
-           std::filesystem::file_size(path, ec) == 0 && !ec &&
-           !file_output::HasPendingOrStagedDiffsUnderPath(path);
+    return !path.empty() && note::NoteFileExtension(path) == L".clro" &&
+        empty_note_file::IsSavedEmpty(path);
 }
 
 static EmptyClroDeleteResult DeleteEmptyClroNoteFile(const std::filesystem::path& path,
-                                                     DWORD* outError) {
+                                                   DWORD* outError) {
     if (outError) *outError = ERROR_SUCCESS;
-    if (!IsEmptyClroNoteEligibleForDeletion(path)) {
-        return EmptyClroDeleteResult::NotEligible;
+    if (IsSaveTransactionRunning() || file_output::HasPendingOrStagedDiffsUnderPath(path) ||
+        (NormalizePathKeyForList(path.wstring()) == NormalizePathKeyForList(g_currentNotePath) &&
+         (g_noteDirty || g_noteNeedsIntegrate || (g_hNoteEdit && SendMessageW(g_hNoteEdit, EM_GETMODIFY, 0, 0)))))
+        return EmptyClroDeleteResult::NeedsSave;
+    if (!IsEmptyClroNoteEligibleForDeletion(path)) return EmptyClroDeleteResult::NotEligible;
+    DWORD error = ERROR_SUCCESS;
+    const auto result = empty_note_file::Remove(path, &error);
+    if (outError) *outError = error;
+    if (result == empty_note_file::Result::Deleted) {
+        ReleaseDocumentOpenLock(path);
+        return EmptyClroDeleteResult::Deleted;
     }
-
-    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(path);
-    HANDLE file = CreateFileW(openPath.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ,
-                              nullptr, OPEN_EXISTING,
-                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        if (outError) *outError = GetLastError();
-        return EmptyClroDeleteResult::Failed;
-    }
-
-    const auto closeFile = [&]() { CloseHandle(file); };
-    OVERLAPPED lock{};
-    if (!LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                    0, MAXDWORD, MAXDWORD, &lock)) {
-        if (outError) *outError = GetLastError();
-        closeFile();
-        return EmptyClroDeleteResult::Failed;
-    }
-
-    FILE_BASIC_INFO basicInfo{};
-    FILE_STANDARD_INFO standardInfo{};
-    if (!GetFileInformationByHandleEx(file, FileBasicInfo, &basicInfo, sizeof(basicInfo)) ||
-        !GetFileInformationByHandleEx(file, FileStandardInfo, &standardInfo, sizeof(standardInfo)) ||
-        (basicInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
-        (basicInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-        standardInfo.EndOfFile.QuadPart != 0) {
-        if (outError) *outError = GetLastError();
-        closeFile();
-        return EmptyClroDeleteResult::NotEligible;
-    }
-
-    FILE_DISPOSITION_INFO disposition{};
-    disposition.DeleteFile = TRUE;
-    if (!SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition))) {
-        if (outError) *outError = GetLastError();
-        closeFile();
-        return EmptyClroDeleteResult::Failed;
-    }
-    closeFile();
-    return EmptyClroDeleteResult::Deleted;
+    return result == empty_note_file::Result::NotEmpty
+        ? EmptyClroDeleteResult::NotEligible : EmptyClroDeleteResult::Failed;
 }
 
 static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
@@ -87,7 +40,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     const auto target = ui::context_menu::ResolveListBoxContextTarget(
         list, lParam, files.size(), keyboardInvocation,
         ui::context_menu::ListBoxContextOptions{false, -1, true, false, true});
-    if (!target) return false;
+    if (!target) return ShowEmptyWorkspaceListContextMenu(list, lParam);
     const int index = target->index;
     const POINT screenPt = target->screenPoint;
 
@@ -127,6 +80,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdRemoveTemporaryPath = 24;
     constexpr UINT kCmdCloseFile = 27;
     constexpr UINT kCmdReload = 28;
+    constexpr UINT kCmdCopyName = 29;
     const bool imageFile = !isNoteList && IsImageFile(selectedPath);
 
     AppendMenuW(menu.get(), MF_STRING, kCmdOpenInApp,
@@ -142,14 +96,13 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
                     localization::Text(L"ui.pdf_list.4d1ad08173d8").c_str());
     }
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu.get(), MF_STRING, kCmdCopyName,
+                localization::Text(L"workspace.context.copy_name").c_str());
     AppendMenuW(menu.get(), MF_STRING, kCmdReload,
-                localization::Text(L"ui.pdf_list.018a2719c366").c_str());
+                localization::Text(L"workspace.context.reload_list").c_str());
 
     HMENU fileMenu = CreatePopupMenu();
     if (fileMenu) {
-        AppendMenuW(fileMenu, MF_STRING, kCmdReload,
-                    localization::Text(L"ui.pdf_list.018a2719c366").c_str());
-        AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
         ui::context_menu::AppendPathContextMenuItems(fileMenu, {
             {kCmdOpenExplorer, localization::Text(L"ui.pdf_list.9208055ca154").c_str()},
             {kCmdShowHierarchy, localization::Text(L"ui.pdf_list.752b401aff9a").c_str(), canShowHierarchy},
@@ -203,18 +156,9 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         return LaunchReadOnlyViewerForPdf(owner, file.path);
     }
     if (cmd == kCmdReload) {
-        if (!RefreshCurrentSessionFiles()) {
-            ShowSoftNotice(owner,
-                           localization::Text(L"ui.pdf_list.d918d5126836").c_str(),
-                           SoftNoticeKind::Warning);
-            return true;
-        }
-        SyncLeftPaneSelection();
-        RefreshMainWindowUiState(owner);
-        ShowSoftNotice(owner, localization::Text(L"ui.pdf_list.c5a835a713a3").c_str(),
-                       SoftNoticeKind::Info);
-        return true;
+        return ReloadWorkspaceListFromContext(list);
     }
+    if (cmd == kCmdCopyName) return CopyItemNameToClipboard(owner, selectedPath);
     if (cmd == kCmdCloseFile && canCloseFile) {
         return CloseFileDisplayFromContext(owner, isNoteList, file.path);
     }
@@ -277,7 +221,9 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         DWORD deleteError = ERROR_SUCCESS;
         const EmptyClroDeleteResult result = DeleteEmptyClroNoteFile(selectedPath, &deleteError);
         if (result != EmptyClroDeleteResult::Deleted) {
-            const std::wstring message = result == EmptyClroDeleteResult::NotEligible
+            const std::wstring message = result == EmptyClroDeleteResult::NeedsSave
+                ? localization::Text(L"ui.pdf_list.empty_clro_save_before_delete")
+                : result == EmptyClroDeleteResult::NotEligible
                 ? (localization::Text(L"ui.pdf_list.f4913f151e35").c_str())
                 : (localization::Text(L"ui.pdf_list.a03da752aa1e").c_str());
             ShowSoftNotice(owner, message, SoftNoticeKind::Warning);
@@ -296,7 +242,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     return cmd != 0;
 }
 
-static void HandlePdfNoteListDrop(HWND hWnd, HDROP drop) {
+static void HandleWorkspaceListDrop(HWND hWnd, HDROP drop) {
     struct DropFinishGuard {
         HDROP handle = nullptr;
         ~DropFinishGuard() {
@@ -305,24 +251,42 @@ static void HandlePdfNoteListDrop(HWND hWnd, HDROP drop) {
     } guard{drop};
 
     if (!drop) return;
-    const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
-    if (count == 0) return;
-
-    std::vector<std::wstring> paths;
-    paths.reserve(count);
-    for (UINT i = 0; i < count; ++i) {
-        const UINT len = DragQueryFileW(drop, i, nullptr, 0);
-        if (len == 0) continue;
-        std::wstring path(static_cast<size_t>(len) + 1, L'\0');
-        const UINT copied = DragQueryFileW(drop, i, path.data(), static_cast<UINT>(path.size()));
-        if (copied == 0) continue;
-        path.resize(copied);
-        paths.push_back(std::move(path));
+    HWND owner = GetAncestor(hWnd, GA_ROOT);
+    if (!owner) owner = hWnd;
+    const bool directories = hWnd == g_hLectureList || hWnd == g_hSessionList;
+    const bool files = hWnd == g_hPdfList || hWnd == g_hNoteList;
+    if (!directories && !files) {
+        ShowSoftNotice(owner, localization::Text(L"workspace.drop.wrong_target"), SoftNoticeKind::Warning);
+        return;
     }
-    guard.handle = nullptr;
-    DragFinish(drop);
-
-    if (paths.empty()) return;
-    HWND owner = GetParent(hWnd);
-    ImportDroppedFilesToCurrentSession(owner ? owner : hWnd, paths);
+    try {
+        const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+        if (!count) return;
+        std::vector<std::wstring> paths;
+        paths.reserve(count);
+        for (UINT i = 0; i < count; ++i) {
+            const UINT length = DragQueryFileW(drop, i, nullptr, 0);
+            if (!length || length > 32760) {
+                ShowSoftNotice(owner, localization::Text(L"workspace.drop.invalid_source"), SoftNoticeKind::Warning);
+                return;
+            }
+            std::wstring path(static_cast<size_t>(length) + 1, L'\0');
+            const UINT copied = DragQueryFileW(drop, i, path.data(), static_cast<UINT>(path.size()));
+            if (copied != length) {
+                ShowSoftNotice(owner, localization::Text(L"workspace.drop.invalid_source"), SoftNoticeKind::Warning);
+                return;
+            }
+            path.resize(copied);
+            paths.push_back(std::move(path));
+        }
+        guard.handle = nullptr;
+        DragFinish(drop);
+        if (directories) {
+            const bool imported = ImportDroppedDirectories(owner, paths, hWnd == g_hLectureList);
+            (void)imported; // The importer owns completion/failure notification.
+        } else ImportDroppedFilesToCurrentSession(owner, paths);
+    } catch (...) {
+        // Never propagate an allocation/path exception through a WindowProc.
+        ShowSoftNotice(owner, localization::Text(L"workspace.drop.invalid_source"), SoftNoticeKind::Error);
+    }
 }

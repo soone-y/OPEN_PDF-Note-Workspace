@@ -7,6 +7,9 @@
 #include <memory>
 #include <sstream>
 #include <type_traits>
+#include <array>
+#include <algorithm>
+#include <vector>
 
 namespace pdf_annotation_export {
 namespace {
@@ -194,10 +197,14 @@ template<class GetSegment>
     if (a.type == Annotation::Type::MarkerText) subtype = FPDF_ANNOT_HIGHLIGHT;
     else if (a.type == Annotation::Type::Freehand || a.type == Annotation::Type::MarkerFree ||
              a.type == Annotation::Type::Line || a.type == Annotation::Type::Arrow ||
-             a.type == Annotation::Type::Wave) subtype = FPDF_ANNOT_INK;
+             a.type == Annotation::Type::Wave ||
+             (a.type == Annotation::Type::Shape && (ShapeKindIsOpen(a.shapeKind) || (a.shapeDrawMode == ShapeDrawMode::Outline && !a.dash.empty()))))
+        // Store actual dash runs as Ink strokes so external editors preserve gaps.
+        subtype = FPDF_ANNOT_INK;
     else if (a.type == Annotation::Type::TextBox && preferFreeText && allText && VectorAppearance(scratch, true, ap))
         subtype = FPDF_ANNOT_FREETEXT;
-    else if (a.type == Annotation::Type::Shape &&
+    else if (a.type == Annotation::Type::Shape && a.shapeAngle == 0.0 &&
+             !(a.shapeBoundary != ShapeBoundary::None && !a.dash.empty()) &&
              (a.shapeKind == ShapeKind::Rectangle || a.shapeKind == ShapeKind::Square ||
               a.shapeKind == ShapeKind::Ellipse || a.shapeKind == ShapeKind::Circle) && VectorAppearance(scratch, false, ap))
         subtype = (a.shapeKind == ShapeKind::Rectangle || a.shapeKind == ShapeKind::Square) ? FPDF_ANNOT_SQUARE : FPDF_ANNOT_CIRCLE;
@@ -217,10 +224,12 @@ template<class GetSegment>
         const bool filledShape=(subtype==FPDF_ANNOT_SQUARE || subtype==FPDF_ANNOT_CIRCLE) && a.shapeDrawMode==ShapeDrawMode::Fill;
         // For FreeText /C is the BACKGROUND, not the text color. Keep it absent
         // for transparent text boxes; text color belongs in /DA and the AP.
+        const bool shapeBoundary = a.type == Annotation::Type::Shape && a.shapeBoundary != ShapeBoundary::None;
+        const COLORREF strokeColor = shapeBoundary ? ShapeBoundaryColor(a.shapeBoundary) : a.color;
         if (subtype != FPDF_ANNOT_FREETEXT &&
-            !FPDFAnnot_SetColor(annot.get(), FPDFANNOT_COLORTYPE_Color, GetRValue(a.color), GetGValue(a.color), GetBValue(a.color),
+            !FPDFAnnot_SetColor(annot.get(), FPDFANNOT_COLORTYPE_Color, GetRValue(strokeColor), GetGValue(strokeColor), GetBValue(strokeColor),
                                static_cast<unsigned>(std::round(alpha * 255)))) return false;
-        if (!FPDFAnnot_SetBorder(annot.get(), 0, 0, subtype == FPDF_ANNOT_FREETEXT || filledShape ? 0.0f : static_cast<float>(std::max(0.0, a.width)))) return false;
+        if (!FPDFAnnot_SetBorder(annot.get(), 0, 0, subtype == FPDF_ANNOT_FREETEXT || (filledShape && !shapeBoundary) ? 0.0f : static_cast<float>(std::max(0.0, a.width)))) return false;
         if (filledShape && !FPDFAnnot_SetColor(annot.get(), FPDFANNOT_COLORTYPE_InteriorColor,
             GetRValue(a.color),GetGValue(a.color),GetBValue(a.color),static_cast<unsigned>(std::round(alpha*255)))) return false;
         if (subtype == FPDF_ANNOT_HIGHLIGHT) {
@@ -270,6 +279,151 @@ template<class GetSegment>
 bool Add(FPDF_DOCUMENT output, FPDF_PAGE destination, FPDF_PAGE scratch, const Annotation& a, bool preferFreeText) {
     try { return AddImpl(output, destination, scratch, a, preferFreeText); }
     catch (...) { return false; } // Caller discards the output copy, with no write.
+}
+
+namespace {
+using ColorQuad = std::array<double, 8>;
+
+bool Contains(const ColorQuad& q, double x, double y) {
+    bool positive = false, negative = false;
+    for (int i = 0; i < 4; ++i) {
+        const int j = (i + 1) % 4;
+        const double cross = (q[2*j] - q[2*i]) * (y - q[2*i+1]) -
+                             (q[2*j+1] - q[2*i+1]) * (x - q[2*i]);
+        positive |= cross > 1e-6; negative |= cross < -1e-6;
+    }
+    return !(positive && negative);
+}
+
+[[nodiscard]] bool SampleBackground(FPDF_PAGE page, const ColorQuad& q, COLORREF& color) {
+    double left=q[0], right=q[0], bottom=q[1], top=q[1];
+    for (int i=1; i<4; ++i) {
+        left=std::min(left,q[2*i]); right=std::max(right,q[2*i]);
+        bottom=std::min(bottom,q[2*i+1]); top=std::max(top,q[2*i+1]);
+    }
+    left-=2; right+=2; bottom-=2; top+=2;
+    const double scale=std::min(2.0,512.0/std::max(right-left,top-bottom));
+    const int width=std::max(1,static_cast<int>(std::ceil((right-left)*scale)));
+    const int height=std::max(1,static_cast<int>(std::ceil((top-bottom)*scale)));
+    struct Bin { unsigned count=0,r=0,g=0,b=0; };
+    std::vector<Bin> bins(32768);
+    FPDF_BITMAP bitmap=FPDFBitmap_Create(width,height,0);
+    if (!bitmap) return false;
+    FPDFBitmap_FillRect(bitmap,0,0,width,height,0xffffffff);
+    FS_MATRIX matrix{static_cast<float>(scale),0,0,static_cast<float>(-scale),
+                     static_cast<float>(-left*scale),static_cast<float>(top*scale)};
+    FS_RECTF clip{0,0,static_cast<float>(width),static_cast<float>(height)};
+    // Page content only: previously exported app annotations must not affect
+    // the automatic color. Sampling is bounded to 512 x 512 pixels per quad.
+    FPDF_RenderPageBitmapWithMatrix(bitmap,page,&matrix,&clip,0);
+    const auto* bytes=static_cast<const unsigned char*>(FPDFBitmap_GetBuffer(bitmap));
+    const int stride=FPDFBitmap_GetStride(bitmap);
+    if (!bytes || stride<width*4) { FPDFBitmap_Destroy(bitmap); return false; }
+    unsigned best=0;
+    for (int y=0;y<height;++y) for (int x=0;x<width;++x) {
+        if (x>=2 && y>=2 && x<width-2 && y<height-2) continue;
+        const auto* pixel=bytes+y*stride+x*4;
+        const unsigned key=((pixel[2]>>3)<<10)|((pixel[1]>>3)<<5)|(pixel[0]>>3);
+        auto& bin=bins[key]; ++bin.count; bin.r+=pixel[2]; bin.g+=pixel[1]; bin.b+=pixel[0];
+        if (bin.count>bins[best].count) best=key;
+    }
+    FPDFBitmap_Destroy(bitmap);
+    const auto& bin=bins[best];
+    if (!bin.count) return false;
+    color=RGB(bin.r/bin.count,bin.g/bin.count,bin.b/bin.count);
+    return true;
+}
+} // namespace
+
+bool AddTextColorOverlay(FPDF_PAGE destination, const Annotation& a, const TextColorOptions& options) {
+    if (!destination || a.type!=Annotation::Type::TextColor || options.mode==TextColorMode::Marker ||
+        static_cast<unsigned>(options.mode)>static_cast<unsigned>(TextColorMode::SpecifiedBackground)) return false;
+    const int index=FPDFPage_GetAnnotCount(destination);
+    bool created=false;
+    try {
+        std::vector<ColorQuad> quads;
+        if (a.quads.empty()) quads.push_back({std::min(a.x1,a.x2),std::max(a.y1,a.y2),
+            std::max(a.x1,a.x2),std::max(a.y1,a.y2),std::max(a.x1,a.x2),std::min(a.y1,a.y2),
+            std::min(a.x1,a.x2),std::min(a.y1,a.y2)});
+        else {
+            if (a.quads.size()%8 || a.quads.size()>80000) return false;
+            for (size_t i=0;i<a.quads.size();i+=8) {
+                ColorQuad q{}; std::copy_n(a.quads.data()+i,8,q.data()); quads.push_back(q);
+            }
+        }
+        FS_RECTF bounds{std::numeric_limits<float>::max(),-std::numeric_limits<float>::max(),
+                        -std::numeric_limits<float>::max(),std::numeric_limits<float>::max()};
+        for (const auto& q:quads) {
+            double area=0;
+            for (int i=0;i<4;++i) {
+                if (!Finite(q[2*i]) || !Finite(q[2*i+1])) return false;
+                const int j=(i+1)%4; area+=q[2*i]*q[2*j+1]-q[2*j]*q[2*i+1];
+                bounds.left=std::min(bounds.left,static_cast<float>(q[2*i]));
+                bounds.right=std::max(bounds.right,static_cast<float>(q[2*i]));
+                bounds.bottom=std::min(bounds.bottom,static_cast<float>(q[2*i+1]));
+                bounds.top=std::max(bounds.top,static_cast<float>(q[2*i+1]));
+            }
+            if (std::abs(area)<1e-6) return false;
+        }
+        std::ostringstream out; out.imbue(std::locale::classic()); out.precision(9);
+        if (options.mode!=TextColorMode::Transparent) for (const auto& q:quads) {
+            COLORREF background=options.background;
+            if (options.mode==TextColorMode::AutomaticBackground && !SampleBackground(destination,q,background)) return false;
+            out<<"q\n"<<GetRValue(background)/255.0<<' '<<GetGValue(background)/255.0<<' '<<GetBValue(background)/255.0<<" rg\n";
+            for (int i=0;i<4;++i) out<<q[2*i]<<' '<<q[2*i+1]<<(i?" l\n":" m\n");
+            out<<"h f\nQ\n";
+        }
+        TextHandle text(FPDFText_LoadPage(destination),FPDFText_ClosePage);
+        if (!text) return false;
+        const int count=FPDFText_CountChars(text.get());
+        if (count<0 || count>1000000) return false;
+        int glyphs=0;
+        for (int i=0;i<count;++i) {
+            const unsigned unicode=FPDFText_GetUnicode(text.get(),i);
+            const int generated=FPDFText_IsGenerated(text.get(),i);
+            if (generated<0) return false;
+            if (generated==1) continue;
+            double l=0,r=0,b=0,t=0;
+            if (!FPDFText_GetCharBox(text.get(),i,&l,&r,&b,&t)) return false;
+            const double cx=(l+r)/2,cy=(b+t)/2;
+            if (cx<bounds.left || cx>bounds.right || cy<bounds.bottom || cy>bounds.top ||
+                !std::any_of(quads.begin(),quads.end(),[&](const auto& q){return Contains(q,cx,cy);})) continue;
+            if (!unicode) return false; // Never silently omit an unmapped selected glyph.
+            if (unicode<=32 || unicode==0xa0 || unicode==0x3000 || (unicode>=0x2000 && unicode<=0x200a)) continue;
+            const auto obj=FPDFText_GetTextObject(text.get(),i);
+            const auto font=FPDFTextObj_GetFont(obj);
+            const double size=FPDFText_GetFontSize(text.get(),i);
+            double x=0,y=0; FS_MATRIX m{};
+            if (!font || !Finite(size) || size<=0 || !FPDFText_GetCharOrigin(text.get(),i,&x,&y) ||
+                !FPDFText_GetMatrix(text.get(),i,&m) || !Finite(x) || !Finite(y) ||
+                !Finite(m.a) || !Finite(m.b) || !Finite(m.c) || !Finite(m.d)) return false;
+            const auto glyph=FPDFFont_GetGlyphPath(font,unicode,static_cast<float>(size));
+            if (!glyph) return false;
+            out<<"q\n"<<size*m.a<<' '<<size*m.b<<' '<<size*m.c<<' '<<size*m.d<<' '<<x<<' '<<y<<" cm\n"
+               <<GetRValue(a.color)/255.0<<' '<<GetGValue(a.color)/255.0<<' '<<GetBValue(a.color)/255.0<<" rg\n";
+            if (!WritePath(out,FPDFGlyphPath_CountGlyphSegments(glyph),
+                           [glyph](int j){return FPDFGlyphPath_GetGlyphPathSegment(glyph,j);})) return false;
+            out<<"f\nQ\n"; ++glyphs;
+            if (out.tellp()>16*1024*1024) return false;
+            bounds.left=std::min(bounds.left,static_cast<float>(l)); bounds.right=std::max(bounds.right,static_cast<float>(r));
+            bounds.bottom=std::min(bounds.bottom,static_cast<float>(b)); bounds.top=std::max(bounds.top,static_cast<float>(t));
+        }
+        if (!glyphs) return false;
+        const auto ascii=out.str(); const std::wstring appearance(ascii.begin(),ascii.end());
+        AnnotHandle annot(FPDFPage_CreateAnnot(destination,FPDF_ANNOT_STAMP),FPDFPage_CloseAnnot);
+        if (!annot) return false;
+        created=true;
+        const bool ok=FPDFAnnot_SetRect(annot.get(),&bounds) && FPDFAnnot_SetFlags(annot.get(),FPDF_ANNOT_FLAG_PRINT) &&
+            SetString(annot.get(),"NM",a.id) && SetString(annot.get(),"T",L"PDF Note Workspace") &&
+            FPDFAnnot_SetAP(annot.get(),FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                           reinterpret_cast<FPDF_WIDESTRING>(appearance.c_str()));
+        annot.reset();
+        if (!ok) { const bool removed=!!FPDFPage_RemoveAnnot(destination,index); (void)removed; }
+        return ok;
+    } catch (...) {
+        if (created) { const bool removed=!!FPDFPage_RemoveAnnot(destination,index); (void)removed; }
+        return false;
+    }
 }
 
 FPDF_DOCUMENT CreateDocument() {

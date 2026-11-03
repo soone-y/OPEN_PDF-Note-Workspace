@@ -242,11 +242,6 @@ bool NoteDocumentMatchesTextModel(const NoteDocument& doc, const NoteTextModel& 
     return NoteDocumentMatchesSourceRevision(doc, model.revision);
 }
 
-void SetNoteLayoutSourceRevision(NoteLayout* layout, uint64_t sourceRevision) {
-    if (!layout) return;
-    layout->source_identity.source_revision = sourceRevision;
-}
-
 void SetNoteLayoutSourceIdentity(NoteLayout* layout,
                                  NoteDerivedSnapshotIdentity sourceIdentity) {
     if (!layout) return;

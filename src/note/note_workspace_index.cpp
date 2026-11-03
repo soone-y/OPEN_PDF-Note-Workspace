@@ -81,6 +81,10 @@ WorkspaceNoteIndexSnapshot BuildWorkspaceNoteIndex(
                  snapshotIdentity.persistence_revision,
                  contentKind);
     (void)kernel.RefreshDerived();
+    if (contentKind != NoteContentKind::PlainText &&
+        (!kernel.CanReadSyntax() || !kernel.CanReadSemantic())) {
+        return index;
+    }
 
     index.text_model = kernel.text_core().model();
     index.document = kernel.document();
@@ -162,10 +166,12 @@ NoteQueryMatch MatchNoteText(std::wstring_view text,
 std::vector<WorkspaceNoteLineMatch> SearchWorkspaceNoteIndex(
     const WorkspaceNoteIndexSnapshot& index,
     const NoteQueryGroups& queryGroups,
-    SemanticSearchOptions options) {
+    SemanticSearchOptions options,
+    const std::atomic<bool>* canceled) {
     std::vector<WorkspaceNoteLineMatch> matches;
     if (!index.valid || queryGroups.empty()) return matches;
     for (const WorkspaceNoteLine& line : index.lines) {
+        if (canceled && canceled->load(std::memory_order_relaxed)) return {};
         NoteQueryMatch match = (options.normalizeWidthKana && options.ignoreCase && options.ignoreSeparators)
             ? MatchNoteNormalizedText(line.normalized_text, queryGroups)
             : MatchNoteText(line.text, queryGroups, options);

@@ -19,28 +19,15 @@ constexpr int IDC_GENERAL_SECTION_LIST = 4188;
 static std::wstring DefaultNameRule() {
     return localization::Text(L"workspace.default_note_pattern");
 }
-constexpr int kScheduleDayCount = 7;
-constexpr int kScheduleMaxPeriods = 13;
-constexpr int kDefaultScheduleMask = 0x1F;
 
 enum GeneralSectionIndex : int {
     kGeneralSectionDisplay = 0,
     kGeneralSectionNote = 1,
     kGeneralSectionSave = 2,
-    kGeneralSectionSchedule = 3,
+    kGeneralSectionLectureOrder = 3,
     kGeneralSectionDebug = 4,
 };
 
-static void EnsureScheduleStartTimesCapacity(std::vector<std::wstring>& times) {
-    size_t total = static_cast<size_t>(kScheduleDayCount * kScheduleMaxPeriods);
-    if (times.size() < total) {
-        times.resize(total);
-    } else if (times.size() > total) {
-        times.resize(total);
-    }
-}
-
-static void ShowScheduleTimeDialog(HWND owner);
 static void ShowAnnotToolShortcutEditor(HWND owner);
 
 // General settings child control IDs are scoped to GeneralSettingsProc.
@@ -79,10 +66,7 @@ enum : int {
     IDC_PDF_ZOOM_OVERLAY = 4141,
     IDC_PDF_PAGE_OVERLAY = 4142,
     IDC_PDF_FLOW_MODE = 4184,
-    IDC_SCHEDULE_PERIODS = 4160,
-    IDC_SCHEDULE_TIME_EDIT,
-    IDC_SCHEDULE_EDIT,
-    IDC_SCHEDULE_DAY_BASE = 4170,
+    IDC_LECTURE_ORDER_EDIT = 4162,
     IDC_NOTE_FONT_CUSTOMIZATION = 4122,
     IDC_NOTE_RENDER_JP_FONT_FACE,
     IDC_NOTE_FONT_DIGIT_TARGET,
@@ -118,12 +102,39 @@ enum : int {
     IDC_POINTER_OFFSET_Y = 4213,
     IDC_SESSION_FILE_LAYOUT = 4214,
     // Keep the legacy sequential IDs above stable; this is a new control.
-    IDC_TONE_VARIANT = 4220
+    IDC_TONE_VARIANT = 4220,
+    IDC_TOUCHPAD_SCROLL_STABILIZATION = 4221,
+    IDC_ADDITIONAL_NOTE_EXTENSIONS = 4222,
+    IDC_RESTORE_LAST_SESSION = 4223,
+    IDC_PDF_OPEN_VIEW_MODE = 4224,
+    IDC_NEW_NOTE_EXTENSION = 4225,
+    IDC_EMPTY_VIEW_GUIDE = 4226,
+    IDC_CLRO_ASCII_ONLY = 4227,
+    IDC_NOTE_BOTTOM_SPACE_MODE = 4250,
+    IDC_NOTE_BOTTOM_SPACE_FIXED,
+    IDC_NOTE_BOTTOM_SPACE_FONT,
+    IDC_NOTE_BOTTOM_SPACE_VIEWPORT,
+    IDC_QUICK_PDF_SCALE = 4230,
+    IDC_QUICK_PDF_STANDARD_TEXT,
+    IDC_QUICK_PDF_MATCH_LAYOUT,
+    IDC_QUICK_PDF_KEEP_ROTATION,
+    IDC_QUICK_PDF_COLOR_MODE,
+    IDC_QUICK_PDF_BACKGROUND,
+    IDC_QUICK_NOTE_STRIP_MARKUP,
+    IDC_QUICK_NOTE_COMMENTS,
+    IDC_QUICK_NOTE_MATH_PLACEHOLDER,
+    IDC_QUICK_NOTE_PLACEHOLDER_TEXT,
+    IDC_SETTINGS_PRESETS_LINK,
+    IDC_SETTINGS_RECOVERY_LINK,
+    IDC_SETTINGS_PALETTE_LINK,
+    IDC_SETTINGS_LOG_LOCATION
 };
 
 enum class GeneralSettingsPageMode {
     Basic,
-    Note
+    Note,
+    Pdf, Save, QuickPdf, Files, Diagnostics, NoteFiles, NoteInput,
+    AnnotationInput, Recovery, QuickNote, BottomPane
 };
 
 struct BottomPaneOption {
@@ -135,6 +146,22 @@ struct BottomPaneOption {
 struct ShortcutLayoutOption {
     const wchar_t* label;
     const wchar_t* value;
+};
+
+static const ShortcutLayoutOption kPdfOpenViewOptions[] = {
+    { L"settings.pdf.open_auto", L"auto" },
+    { L"settings.pdf.open_previous", L"previous" },
+    { L"settings.pdf.open_width", L"width" },
+    { L"settings.pdf.open_page", L"page" }
+};
+static const wchar_t* kEmptyViewGuideOptions[] = {
+    L"settings.guide.usage_shortcuts", L"settings.guide.shortcuts", L"settings.guide.none"
+};
+static const ShortcutLayoutOption kNewNoteExtensionOptions[] = {
+    { L"settings.note.format_clro", L".clro" },
+    { L"settings.note.format_md", L".md" },
+    { L"settings.note.format_txt", L".txt" },
+    { L"settings.note.format_csv", L".csv" }
 };
 
 struct LectureSortOption {
@@ -201,7 +228,7 @@ static const ShortcutLayoutOption kShortcutTextTagKeyOptions[] = {
 };
 
 static const LectureSortOption kLectureSortOptions[] = {
-    { L"settings.general.lecture_sort_schedule", L"schedule" },
+    { L"settings.general.lecture_sort_manual", L"manual" },
     { L"settings.general.sort_name", L"name" },
     { L"settings.general.sort_recent", L"recent" }
 };
@@ -218,9 +245,6 @@ static const ShortcutLayoutOption kSessionNumberingOptions[] = {
     { L"settings.general.session_number_max", L"max_number" }
 };
 static std::wstring LectureSortOptionLabel(size_t index) {
-    if (index == 0 && !g_config.studentMode) {
-        return localization::Text(L"settings.general_foundation.86743a3989ef");
-    }
     return localization::Text(kLectureSortOptions[index].label);
 }
 
@@ -364,6 +388,8 @@ static const wchar_t* kNoteFontDigitTargetLabels[] = {
 };
 
 struct GeneralSettingsCtx {
+    int navigationPage = kSettingsNavGeneral;
+    HWND invalidControl = nullptr;
     HWND owner = nullptr;
     bool done = false;
     bool ok = false;
@@ -386,6 +412,20 @@ struct GeneralSettingsCtx {
     HWND btnToneCreate = nullptr;
     HWND btnToneEdit = nullptr;
     HWND cbBottomPane = nullptr;
+    HWND chkRestoreLastSession = nullptr;
+    HWND cbEmptyViewGuide = nullptr;
+    HWND cbPdfOpenViewMode = nullptr;
+    HWND cbNewNoteExtension = nullptr;
+    HWND cbQuickPdfScale = nullptr;
+    HWND chkQuickPdfStandardText = nullptr;
+    HWND chkQuickPdfMatchLayout = nullptr;
+    HWND chkQuickPdfKeepRotation = nullptr;
+    HWND cbQuickPdfColorMode = nullptr;
+    HWND editQuickPdfBackground = nullptr;
+    HWND chkQuickNoteStripMarkup = nullptr;
+    HWND chkQuickNoteComments = nullptr;
+    HWND chkQuickNoteMathPlaceholder = nullptr;
+    HWND editQuickNotePlaceholder = nullptr;
     HWND cbPdfFlowMode = nullptr;
     HWND cbSelectionStyle = nullptr;
     HWND cbPointerOffsetX = nullptr;
@@ -395,6 +435,7 @@ struct GeneralSettingsCtx {
     HWND chkWheelInvertHorizontal = nullptr;
     HWND chkTouchpadInvertVertical = nullptr;
     HWND chkTouchpadInvertHorizontal = nullptr;
+    HWND chkTouchpadScrollStabilization = nullptr;
     HWND chkPdfSinglePageMode = nullptr;
     HWND chkPdfPageOverlay = nullptr;
     HWND chkPdfZoomOverlay = nullptr;
@@ -423,6 +464,11 @@ struct GeneralSettingsCtx {
     HWND cbNoteFontDigitTarget = nullptr;
     HWND cbNoteRenderMode = nullptr;
     HWND chkNoteWrapEnabled = nullptr;
+    HWND chkClroAsciiOnly = nullptr;
+    HWND cbNoteBottomSpaceMode = nullptr;
+    HWND editNoteBottomSpaceFixed = nullptr;
+    HWND editNoteBottomSpaceFont = nullptr;
+    HWND editNoteBottomSpaceViewport = nullptr;
     HWND chkNoteVimMode = nullptr;
     HWND chkNoteVimCaretLineRawText = nullptr;
     HWND chkNoteVimClickInsert = nullptr;
@@ -442,6 +488,7 @@ struct GeneralSettingsCtx {
     HWND cbAutoSave = nullptr;
     HWND cbAutoIntegrate = nullptr;
     HWND editNameRule = nullptr;
+    HWND editAdditionalNoteExtensions = nullptr;
     HWND chkUseNativeFileDialogs = nullptr;
     HWND chkDeveloperMode = nullptr;
     HWND chkStudentMode = nullptr;
@@ -449,10 +496,7 @@ struct GeneralSettingsCtx {
     HWND chkDebugLogSwitchTiming = nullptr;
     HWND chkDebugLogCrash = nullptr;
     HWND chkDebugLogStartupWatchdog = nullptr;
-    HWND cbSchedulePeriods = nullptr;
-    HWND btnScheduleTimeEdit = nullptr;
-    HWND btnScheduleEdit = nullptr;
-    std::vector<HWND> scheduleDayChecks;
+    HWND btnLectureOrderEdit = nullptr;
     std::vector<NoteBackgroundChoice> noteBgChoices;
     COLORREF noteBgCustomColor = RGB(255, 255, 255);
     HWND lblLayoutDefaults = nullptr;
@@ -885,11 +929,11 @@ static void LayoutGeneralSettingsChrome(HWND hWnd, GeneralSettingsCtx* ctx) {
     }
     int panelTop = pad + headerH;
     int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
-    int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
+    int panelH = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
     int contentPaneX = pad;
-    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - pad * 2);
+    int contentPaneW = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 320), clientW - pad * 2);
     int contentPanelTop = panelTop + sectionNavH + sectionNavGap;
-    int contentPanelH = std::max(ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
+    int contentPanelH = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
 
     if (!ctx->embedded && ctx->headerTitle) {
         SetWindowPos(ctx->headerTitle, nullptr, pad, pad, clientW - pad * 2, titleH,
@@ -1012,7 +1056,6 @@ static LRESULT CALLBACK ThemeEditDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
         ctx = reinterpret_cast<ThemeEditCtx*>(cs->lpCreateParams);
         SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
-        ApplyThemeToDialog(hWnd);
 
         int pad = ScaleY(hWnd, 12);
         int gapY = ScaleY(hWnd, 8);
@@ -1088,6 +1131,7 @@ static LRESULT CALLBACK ThemeEditDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             UpdateDialogScroll(hWnd, ctx->contentHeight, ctx->clientHeight,
                                &ctx->scrollPos, &ctx->scrollMax);
         }
+        ApplyThemeToDialog(hWnd);
         return 0;
     }
     case WM_THEMECHANGED:
@@ -1157,6 +1201,7 @@ static LRESULT CALLBACK ThemeEditDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                 return TRUE;
             }
         }
+        if (DrawThemeButton(dis)) return TRUE;
         break;
     }
     case WM_COMMAND: {

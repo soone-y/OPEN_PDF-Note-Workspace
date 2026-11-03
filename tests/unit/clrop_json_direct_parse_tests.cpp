@@ -6,9 +6,12 @@
 
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -38,12 +41,30 @@ struct SinkRecord {
 
 class CollectSink final : public clrop::ItemLoadSink {
 public:
+    bool OnClropDocumentVersion(int version, std::wstring&) override { documentVersion = version; return true; }
     bool OnClropItem(int page, clrop::Item&& item, std::wstring& err) override {
         (void)err;
         records.push_back(SinkRecord{ page, std::move(item) });
         return true;
     }
 
+    std::vector<SinkRecord> records;
+    int documentVersion = 0;
+};
+
+class RejectSecondSink final : public clrop::ItemLoadSink {
+public:
+    bool OnClropItem(int page, clrop::Item&& item, std::wstring& err) override {
+        ++calls;
+        if (calls == 2) {
+            err = L"sink refused item";
+            return false;
+        }
+        records.push_back(SinkRecord{ page, std::move(item) });
+        return true;
+    }
+
+    int calls = 0;
     std::vector<SinkRecord> records;
 };
 
@@ -117,16 +138,20 @@ clrop::Item MakeFullRoundTripItem(clrop::Item::Kind kind, const wchar_t* id, dou
     switch (kind) {
     case clrop::Item::Kind::Text:
         item.content = L"text body";
+        item.backgroundAssistMode = "auto";
         item.lines = {L"line 1", L"line 2"};
         item.bbox = std::array<double, 4>{1.25 + offset, 2.5, 30.75, 40.125};
+        item.bboxEndpoints = std::array<double, 4>{1.25 + offset, 2.5, 32.0 + offset, -37.625};
         item.pt = 11.5;
         item.font = L"Yu Gothic";
         item.border = "rect";
         break;
     case clrop::Item::Kind::Math:
         item.content = L"x^2 + y^2";
+        item.backgroundAssistMode = "inverted";
         item.mathKind = "latex";
         item.bbox = std::array<double, 4>{3.25 + offset, 4.5, 50.75, 60.125};
+        item.bboxEndpoints = std::array<double, 4>{3.25 + offset, 4.5, 54.0 + offset, -55.625};
         item.pt = 13.0;
         item.font = L"Cambria Math";
         item.border = "none";
@@ -161,6 +186,7 @@ clrop::Item MakeFullRoundTripItem(clrop::Item::Kind kind, const wchar_t* id, dou
         break;
     case clrop::Item::Kind::Shape:
         item.bbox = std::array<double, 4>{7.0 + offset, 8.0, 90.0, 100.0};
+        item.bboxEndpoints = std::array<double, 4>{7.0 + offset, 8.0, 97.0 + offset, -92.0};
         item.shapeKind = "rotated_ellipse";
         item.shapeDrawMode = "outline";
         item.shapeRotation = 0.37;
@@ -182,6 +208,7 @@ bool SameRoundTripItem(const clrop::Item& expected, const clrop::Item& actual) {
            expected.border == actual.border &&
            expected.content == actual.content &&
            expected.lines == actual.lines &&
+           expected.backgroundAssistMode == actual.backgroundAssistMode &&
            expected.linkId == actual.linkId &&
            expected.notePath == actual.notePath &&
            expected.mathKind == actual.mathKind &&
@@ -190,11 +217,98 @@ bool SameRoundTripItem(const clrop::Item& expected, const clrop::Item& actual) {
            expected.arrowHead == actual.arrowHead &&
            SameOptionalDouble(expected.shapeRotation, actual.shapeRotation) &&
            SameArray4(expected.bbox, actual.bbox) &&
+           SameArray4(expected.bboxEndpoints, actual.bboxEndpoints) &&
            SameArray2(expected.p1, actual.p1) &&
            SameArray2(expected.p2, actual.p2) &&
            SameDoubleVector(expected.quads, actual.quads) &&
            SameDoubleVector(expected.path, actual.path) &&
            SameDoubleVector(expected.dash, actual.dash);
+}
+
+void RunReadableSerializationTests() {
+    clrop::Document doc;
+    doc.pdfId.path = L"\u8cc7\u6599.pdf";
+    doc.pdfId.size = 123;
+    doc.pdfId.pageCount = 1;
+    doc.pdfId.pageSizesPt = {{595.35, 842.1}};
+    clrop::Page page;
+    auto text = MakeFullRoundTripItem(clrop::Item::Kind::Text, L"readable", 0);
+    text.alpha = 1;
+    text.writingMode = "horizontal";
+    text.backgroundAssistMode = "inherit";
+    text.content = L"\u65e5\u672c\u8a9e \"quote\"\\path\r\nnext line";
+    text.lines = {L"first", L"second"};
+    page.items.push_back(text);
+    auto arrow = MakeFullRoundTripItem(clrop::Item::Kind::Arrow, L"arrow", 0);
+    arrow.arrowHead = "single";
+    arrow.alpha = 0.35;
+    page.items.push_back(arrow);
+    doc.pages.push_back(page);
+    std::string json; std::wstring error;
+    const bool serialized = clrop::SerializeClrop(doc, json, error);
+    Expect(serialized && json.find("\r\n  \"pages\":[\r\n") != std::string::npos &&
+        json.find("\r\n        \"content\":") != std::string::npos &&
+        json.size() >= 2 && json.substr(json.size()-2) == "\r\n",
+        "readable JSON separates pages, annotations and content with CRLF");
+    Expect(json.find("writing_mode") == std::string::npos &&
+        json.find("background_assist_mode") == std::string::npos &&
+        json.find("arrow_head") == std::string::npos &&
+        json.find("\"alpha\":1") == std::string::npos &&
+        json.find("\"alpha\":0.35") != std::string::npos &&
+        json.find("0.34999999999999998") == std::string::npos,
+        "fixed defaults are omitted and ordinary decimals use short lossless text");
+    bool crlfOnly = true;
+    for (size_t i = 0; i < json.size(); ++i)
+        if (json[i] == '\n' && (i == 0 || json[i-1] != '\r')) crlfOnly = false;
+    clrop::Document loaded;
+    const bool parsed = clrop::ParseClropFromJson(json, loaded, error);
+    Expect(crlfOnly && parsed && loaded.pages.size() == 1 && loaded.pages[0].items.size() == 2 &&
+        loaded.pages[0].items[0].content == text.content &&
+        loaded.pages[0].items[0].lines == text.lines && loaded.pages[0].items[0].alpha == 1 &&
+        loaded.pages[0].items[0].created == text.created && loaded.pages[0].items[0].updated == text.updated &&
+        loaded.pages[0].items[1].alpha == 0.35,
+        "readable serialization preserves Unicode, escapes, line layout, timestamps and opacity");
+    std::string savedAgain;
+    Expect(parsed && clrop::SerializeClrop(loaded, savedAgain, error) && savedAgain == json,
+        "save/reopen/resave has stable representation");
+    CollectSink sink;
+    Expect(clrop::ParseClropFromJsonToSink(json, nullptr, sink, error) && sink.records.size() == 2 &&
+        sink.records[0].item.content == text.content && sink.records[1].item.alpha == 0.35,
+        "streaming reader accepts readable JSON with omitted fixed defaults");
+
+    doc.pages[0].items[0].writingMode = "vertical_rl";
+    doc.pages[0].items[0].backgroundAssistMode = "off";
+    doc.pages[0].items[0].alpha = 0;
+    doc.pages[0].items[1].arrowHead = "double";
+    Expect(clrop::SerializeClrop(doc, json, error) && clrop::ParseClropFromJson(json, loaded, error) &&
+        loaded.pages.size() == 1 && loaded.pages[0].items.size() == 2 &&
+        loaded.pages[0].items[0].writingMode == "vertical_rl" &&
+        loaded.pages[0].items[0].backgroundAssistMode == "off" &&
+        loaded.pages[0].items[0].alpha == 0 && loaded.pages[0].items[1].arrowHead == "double",
+        "non-default modes, transparent opacity and arrow heads remain explicit");
+
+    auto stroke = MakeFullRoundTripItem(clrop::Item::Kind::Freehand, L"exact", 0);
+    stroke.path = {0, -0.0, 0.35, std::nextafter(0.35, 1.0),
+        std::numeric_limits<double>::denorm_min(), std::numeric_limits<double>::min(),
+        std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest(),
+        1000.12345678912, 1e-10, 16777217, std::nextafter(1.0, 2.0)};
+    std::uint64_t bits = 0x132f7e3b49a025d1ULL;
+    while (stroke.path.size() < 8192) {
+        bits ^= bits << 13; bits ^= bits >> 7; bits ^= bits << 17;
+        double value;
+        std::memcpy(&value, &bits, sizeof(value));
+        if (std::isfinite(value)) stroke.path.push_back(value);
+    }
+    doc.pages[0].items = {stroke};
+    bool exact = clrop::SerializeClrop(doc, json, error) &&
+        clrop::ParseClropFromJson(json, loaded, error) && loaded.pages.size() == 1 &&
+        loaded.pages[0].items.size() == 1 && loaded.pages[0].items[0].path.size() == stroke.path.size();
+    if (exact) for (size_t i = 0; i < stroke.path.size(); ++i) {
+        const double actual = loaded.pages[0].items[0].path[i];
+        if (std::memcmp(&stroke.path[i], &actual, sizeof(actual)) != 0) { exact = false; break; }
+    }
+    Expect(exact && json.find(",\r\n            [") != std::string::npos,
+        "8192 boundary/random doubles survive wrapped point arrays bit-for-bit, including signed zero");
 }
 
 } // namespace
@@ -229,6 +343,7 @@ int main() {
                             "\"content\":\"hello\","
                             "\"lines\":[\"a\",\"b\"],"
                             "\"bbox\":[1,2,3,4],"
+                            "\"bbox_endpoints\":[1,2,4,-2],"
                             "\"pt\":10,"
                             "\"font\":\"Yu Gothic\","
                             "\"color\":\"#112233\""
@@ -297,6 +412,8 @@ int main() {
                     Expect(text.content == L"hello", "text content is preserved");
                     Expect(text.lines.size() == 2, "string arrays are preserved");
                     Expect(text.bbox.has_value(), "bbox is parsed");
+                    Expect(text.bboxEndpoints == std::optional<std::array<double, 4>>{std::array<double, 4>{1, 2, 4, -2}},
+                           "exact bbox endpoints are parsed");
                 }
                 if (doc.pages[0].items.size() >= 2) {
                     const auto& marker = doc.pages[0].items[1];
@@ -355,6 +472,29 @@ int main() {
                        "sink path preserves later item kind");
             }
         }
+
+        clrop::Document retained = doc;
+        err.clear();
+        ok = clrop::ParseClropFromJson(json + "!", retained, err);
+        Expect(!ok && retained.pdfId.path == doc.pdfId.path &&
+                   retained.pages.size() == doc.pages.size(),
+               "document output remains unchanged after trailing invalid input");
+
+        CollectSink partialSink;
+        clrop::PdfId retainedPdfId;
+        retainedPdfId.path = L"unchanged.pdf";
+        err.clear();
+        ok = clrop::ParseClropFromJsonToSink(json + "!", &retainedPdfId, partialSink, err);
+        Expect(!ok && err == L"Trailing characters after JSON value" &&
+                   retainedPdfId.path == L"unchanged.pdf" && partialSink.records.size() == 4,
+               "trailing invalid input leaves sink items staged but does not publish pdf_id");
+
+        RejectSecondSink rejectingSink;
+        err.clear();
+        ok = clrop::ParseClropFromJsonToSink(json, &retainedPdfId, rejectingSink, err);
+        Expect(!ok && err == L"sink refused item" && rejectingSink.calls == 2 &&
+                   rejectingSink.records.size() == 1 && retainedPdfId.path == L"unchanged.pdf",
+               "sink rejection propagates without publishing pdf_id or later items");
     }
 
     {
@@ -767,6 +907,28 @@ int main() {
             "\"version\":1,"
             "\"pdf_id\":{\"path\":\"strict.pdf\",\"size\":1,\"sha256\":\"s\"},"
             "\"pages\":[{\"page\":0,\"items\":[{"
+                "\"type\":\"text\",\"id\":\"bad-endpoints\","
+                "\"created\":\"2026-04-27T21:30:00Z\","
+                "\"updated\":\"2026-04-27T21:31:00Z\","
+                "\"content\":\"bad\",\"bbox\":[1,2,3,4],"
+                "\"bbox_endpoints\":[1,2,3]"
+            "}]}]"
+            "}";
+        clrop::Document doc;
+        std::wstring err;
+        const bool ok = clrop::ParseClropFromJson(json, doc, err);
+        Expect(ok, "malformed optional exact bbox endpoints keep the item readable");
+        Expect(doc.pages.size() == 1 && doc.pages[0].items.size() == 1 &&
+               doc.pages[0].items[0].bbox.has_value() && !doc.pages[0].items[0].bboxEndpoints,
+               "malformed exact bbox endpoints fall back to bbox");
+    }
+
+    {
+        const std::string json =
+            "{"
+            "\"version\":1,"
+            "\"pdf_id\":{\"path\":\"strict.pdf\",\"size\":1,\"sha256\":\"s\"},"
+            "\"pages\":[{\"page\":0,\"items\":[{"
                 "\"type\":\"unknown\","
                 "\"id\":\"bad\","
                 "\"created\":\"2026-04-27T21:30:00Z\","
@@ -960,6 +1122,139 @@ int main() {
         }
     }
 
+    {
+        const std::string prefix = R"({"version":1,"pdf_id":{"size":1},"pages":[{"page":0,"items":[{"type":"text","id":"oriented","created":"now","updated":"now","bbox":[10,200,100,40],"content_rotation":)";
+        for (int degrees : {0,90,180,270}) {
+            clrop::Document doc;std::wstring error;
+            const bool parsed=clrop::ParseClropFromJson(prefix+std::to_string(degrees)+"}]}]}",doc,error);
+            Expect(parsed && doc.pages.size()==1 && doc.pages[0].items.size()==1 &&
+                   doc.pages[0].items[0].contentRotation==degrees,"quarter-turn content orientation loads without dropping item");
+            std::string serialized;
+            Expect(parsed && clrop::SerializeClrop(doc,serialized,error),"oriented document serializes");
+            clrop::Document reopened;
+            Expect(clrop::ParseClropFromJson(serialized,reopened,error) && reopened.pages[0].items[0].contentRotation==degrees,
+                   "content orientation survives reopen");
+        }
+        for (const auto* value : {"45","-90","360","90.5","null","true","\"90\""}) {
+            clrop::Document doc;doc.pdfId.path=L"retain me";std::wstring error;
+            Expect(!clrop::ParseClropFromJson(prefix+value+"}]}]}",doc,error) && doc.pdfId.path==L"retain me",
+                   "invalid orientation rejects document and preserves caller state");
+        }
+    }
+
+    {
+        const std::string marker = R"({"type":"marker-text","id":"mode","created":"now","updated":"now","quads":[[0,10,20,10,20,0,0,0]])";
+        for (int version : {1,2}) for (const char* mode : {"", "legacy", "multiply"}) {
+            const std::string field = *mode ? std::string(",\"marker_display_mode\":\"") + mode + "\"" : "";
+            // Metadata deliberately follows the annotations: JSON field order is irrelevant.
+            const std::string json = "{\"pdf_id\":{\"size\":1},\"pages\":[{\"page\":0,\"items\":[" +
+                marker + field + "}]}],\"version\":" + std::to_string(version) + "}";
+            clrop::Document doc; std::wstring error;
+            Expect(clrop::ParseClropFromJson(json,doc,error), "v1/v2 marker mode input accepted");
+            const bool legacy = std::string(mode) == "legacy" || (!*mode && version == 1);
+            Expect(doc.pages.size()==1 && doc.pages[0].items.size()==1 &&
+                (doc.pages[0].items[0].markerDisplayMode == "legacy") == legacy, "version-aware marker default");
+            CollectSink sink;
+            Expect(clrop::ParseClropFromJsonToSink(json,nullptr,sink,error) && sink.documentVersion==version &&
+                sink.records.size()==1, "stream sink receives document version after complete validation");
+            std::string saved;
+            Expect(clrop::SerializeClrop(doc,saved,error) && saved.find("\"version\":2")!=std::string::npos &&
+                (saved.find("marker_display_mode")!=std::string::npos)==legacy,
+                "saving v2 omits Multiply and explicitly retains Legacy");
+            clrop::Document reopened;
+            Expect(clrop::ParseClropFromJson(saved,reopened,error) && reopened.version==2 &&
+                reopened.pages.size()==1 && reopened.pages[0].items.size()==1 &&
+                (reopened.pages[0].items[0].markerDisplayMode=="legacy")==legacy,
+                "upgraded marker default survives reopen");
+        }
+        for (const char* mode : {"null", "7", "\"unknown\"", "\"\"", "\"inherit\""}) {
+            const std::string json = "{\"version\":2,\"pdf_id\":{\"size\":1},\"pages\":[{\"page\":0,\"items\":[" +
+                marker + ",\"marker_display_mode\":" + mode + "}]}]}";
+            clrop::Document retained; retained.pdfId.path=L"retained"; std::wstring error;
+            Expect(!clrop::ParseClropFromJson(json,retained,error) && retained.pdfId.path==L"retained",
+                "invalid marker mode rejects the whole document without dropping an annotation");
+        }
+        clrop::Document retained; retained.pdfId.path=L"retained"; std::wstring error;
+        Expect(!clrop::ParseClropFromJson(R"({"version":3,"pdf_id":{"size":1},"pages":[]})",retained,error) &&
+            retained.pdfId.path==L"retained", "unsupported future version preserves caller data");
+    }
+    {
+        for(const char* type:{"shape","marker-free"}) {
+            const std::string item=std::string("{\"type\":\"")+type+"\",\"id\":\"blend\",\"created\":\"now\",\"updated\":\"now\",\"bbox\":[0,20,20,20],\"path\":[[0,0],[20,20]]";
+            const auto input=[&](const std::string& field){return "{\"version\":2,\"pdf_id\":{\"size\":1},\"pages\":[{\"page\":0,\"items\":["+item+field+"}]}]}";};
+            for(const char* mode:{"normal","multiply"}) {
+                clrop::Document doc;std::wstring error;std::string saved;
+                Expect(clrop::ParseClropFromJson(input(std::string(",\"blend_mode\":\"")+mode+"\""),doc,error) &&
+                    doc.pages.size()==1 && doc.pages[0].items.size()==1 && doc.pages[0].items[0].blendMode==mode,"v2 blend input retained");
+                Expect(clrop::SerializeClrop(doc,saved,error),"v2 blend saves");
+                clrop::Document reopened;
+                Expect(clrop::ParseClropFromJson(saved,reopened,error) && reopened.pages.size()==1 && reopened.pages[0].items.size()==1 &&
+                    (reopened.pages[0].items[0].blendMode=="multiply")== (std::string(mode)=="multiply"),"v2 blend round trip");
+            }
+            for(const std::string field:{",\"blend_mode\":null",",\"blend_mode\":7",",\"blend_mode\":\"unknown\"",",\"blend_mode\":\"\"",
+                    ",\"blend_mode\":\"normal\",\"blend_mode\":\"multiply\""}) {
+                clrop::Document retained;retained.pdfId.path=L"keep";std::wstring error;
+                Expect(!clrop::ParseClropFromJson(input(field),retained,error) && retained.pdfId.path==L"keep","invalid blend rejects document without losing input state");
+            }
+        }
+    }
+    {
+        const auto input=[](const std::string& field){return std::string(R"({"version":2,"pdf_id":{"size":1},"pages":[{"page":0,"items":[{"type":"shape","id":"border","created":"now","updated":"now","bbox":[0,20,20,20])")+field+"}]}]}";};
+        bool valid=true;
+        for(const std::string color:{"none","black","white"}) {
+            clrop::Document doc,reopened;std::wstring error;std::string saved;
+            valid = clrop::ParseClropFromJson(input(",\"shape_boundary\":\""+color+"\""),doc,error) &&
+                doc.pages.size()==1 && doc.pages[0].items.size()==1 && doc.pages[0].items[0].shapeBoundary==color && valid;
+            valid = clrop::SerializeClrop(doc,saved,error) && clrop::ParseClropFromJson(saved,reopened,error) &&
+                reopened.pages.size()==1 && reopened.pages[0].items.size()==1 &&
+                reopened.pages[0].items[0].shapeBoundary==(color=="none" ? "" : color) && valid;
+        }
+        Expect(valid,"v2 shape boundary retains black/white and omits the unchanged default");
+        bool rejects=true;
+        for(const std::string field:{",\"shape_boundary\":null",",\"shape_boundary\":3",",\"shape_boundary\":\"red\"",
+            ",\"shape_boundary\":\"\"",",\"shape_boundary\":\"black\",\"shape_boundary\":\"white\""}) {
+            clrop::Document retained;retained.pdfId.path=L"retained";std::wstring error;
+            rejects = !clrop::ParseClropFromJson(input(field),retained,error) && retained.pdfId.path==L"retained" && rejects;
+        }
+        Expect(rejects,"invalid shape boundary rejects the whole document and retains caller data");
+    }
+    {
+        const auto input=[](const std::string& field){return std::string(R"({"version":2,"pdf_id":{"size":1},"pages":[{"page":0,"items":[{"type":"shape","id":"angle","created":"now","updated":"now","bbox":[0,20,20,20])")+field+"}]}]}";};
+        clrop::Document doc,reopened;std::wstring error;std::string saved;
+        Expect(clrop::ParseClropFromJson(input(",\"shape_angle\":0.7"),doc,error) && clrop::SerializeClrop(doc,saved,error) &&
+            clrop::ParseClropFromJson(saved,reopened,error) && reopened.pages.size()==1 && reopened.pages[0].items.size()==1 &&
+            reopened.pages[0].items[0].shapeAngle==0.7,"v2 whole-shape angle round trip");
+        clrop::Document old;
+        Expect(clrop::ParseClropFromJson(input(""),old,error) && old.pages[0].items[0].shapeAngle==0.0,"old shape has no whole-shape rotation");
+        bool rejected=true;
+        for(const std::string field:{",\"shape_angle\":null",",\"shape_angle\":\"x\"",",\"shape_angle\":1e999",
+            ",\"shape_angle\":1,\"shape_angle\":2"}) {
+            clrop::Document retained;retained.pdfId.path=L"keep";
+            rejected=!clrop::ParseClropFromJson(input(field),retained,error) && retained.pdfId.path==L"keep" && rejected;
+        }
+        Expect(rejected,"invalid/duplicate angle rejects the document without losing input");
+    }
+    {
+        const auto input=[](const std::string& style){return std::string(R"({"version":2,"pdf_id":{"size":1},"pages":[{"page":0,"items":[{"type":"shape","shape_kind":"arc","id":"arc","created":"now","updated":"now","bbox":[10,150,30,120])")+style+"}]}]}";};
+        clrop::Document doc,reopened;std::wstring error;std::string saved;
+        Expect(clrop::ParseClropFromJson(input(",\"shape_draw_mode\":\"outline\""),doc,error) &&
+            clrop::SerializeClrop(doc,saved,error) && clrop::ParseClropFromJson(saved,reopened,error) &&
+            reopened.pages.size()==1 && reopened.pages[0].items.size()==1 && reopened.pages[0].items[0].shapeKind=="arc" &&
+            reopened.pages[0].items[0].bbox==doc.pages[0].items[0].bbox,"v2 arc keeps its type and drag dimensions");
+        auto v1=doc;v1.version=1;saved="keep";
+        Expect(!clrop::SerializeClrop(v1,saved,error) && saved=="keep","arc extension is written only as v2");
+        bool rejected=true;
+        for(const std::string style:{",\"shape_draw_mode\":\"fill\""}) {
+            clrop::Document retained;retained.pdfId.path=L"keep";
+            rejected=!clrop::ParseClropFromJson(input(style),retained,error) && retained.pdfId.path==L"keep" && rejected;
+        }
+        Expect(rejected,"arc rejects a filled interpretation without losing caller data");
+        Expect(clrop::ParseClropFromJson(input(",\"dash\":[8,4],\"shape_angle\":3.141592653589793"),doc,error) &&
+            clrop::SerializeClrop(doc,saved,error) && clrop::ParseClropFromJson(saved,reopened,error) &&
+            reopened.pages[0].items[0].dash==std::vector<double>({8,4}) && reopened.pages[0].items[0].shapeAngle>3.14,
+            "arc keeps dashed line style and reversed direction after save/reload");
+    }
+    RunReadableSerializationTests();
     std::cout << "\nFinal Summary: " << (g_failed == 0 ? "ALL PASSED" : "SOME FAILED") << "\n";
     {
         std::error_code ec;

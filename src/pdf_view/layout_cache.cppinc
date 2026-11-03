@@ -23,7 +23,7 @@ static void ClampPdfScroll(int viewH, int viewW) {
             si.nPage = static_cast<UINT>(std::max(0, viewW));
             SetScrollInfo(g_hPdfView, SB_HORZ, &si, TRUE);
         }
-        SyncToolbarFontSizeCombo();
+        SyncToolbarFontSizeCombo(g_pdf.editingText);
         return;
     }
 
@@ -78,7 +78,7 @@ static void ClampPdfScroll(int viewH, int viewW) {
         }
         SetScrollInfo(g_hPdfView, SB_HORZ, &si, TRUE);
     }
-    SyncToolbarFontSizeCombo();
+    SyncToolbarFontSizeCombo(g_pdf.editingText);
 }
 
 static void UpdatePageLayout(HWND pdfWnd) {
@@ -212,7 +212,8 @@ static bool RenderPdfPageBitmap(int pageIndex, int targetW, int targetH, std::ve
         return false;
     }
     FPDFBitmap_FillRect(bmp, 0, 0, targetW, targetH, 0xFFFFFFFF);
-    FPDF_RenderPageBitmap(bmp, page, 0, 0, targetW, targetH, 0, FPDF_ANNOT | FPDF_LCD_TEXT);
+    const int rotation = g_pdf.pages[static_cast<size_t>(pageIndex)].viewRotation;
+    FPDF_RenderPageBitmap(bmp, page, 0, 0, targetW, targetH, rotation, FPDF_ANNOT | FPDF_LCD_TEXT);
     FPDFBitmap_Destroy(bmp);
     FPDF_ClosePage(page);
     outStride = stride;
@@ -259,6 +260,7 @@ struct PdfVirtualRenderCandidate {
 };
 
 struct PdfVirtualRenderJob {
+    uint64_t cancelEpoch = 0;
     HWND hwnd = nullptr;
     std::wstring path;
     std::string passwordUtf8;
@@ -266,7 +268,14 @@ struct PdfVirtualRenderJob {
     int pageIndex = -1;
     int targetW = 0;
     int targetH = 0;
+    int rotation = 0;
     bool coarse = false;
+    bool textCoverage = false;
+
+    // Scheduling metadata only; never part of bitmap identity. Updated on
+    // the UI thread under the same mutex used by worker dispatch.
+    bool visible = false;
+    double distance = 0.0;
 
     PdfVirtualRenderJob() = default;
     PdfVirtualRenderJob(const PdfVirtualRenderJob&) = default;
@@ -283,7 +292,9 @@ struct PdfVirtualRenderResult {
     int targetH = 0;
     int stride = 0;
     bool coarse = false;
+    bool textCoverage = false;
     bool success = false;
+    bool workerException = false;
     std::vector<uint8_t> pixels;
 };
 
@@ -291,11 +302,65 @@ static std::mutex g_pdfVirtualWorkerMutex;
 static std::condition_variable g_pdfVirtualWorkerCv;
 static std::deque<PdfVirtualRenderJob> g_pdfVirtualJobs;
 static std::deque<PdfVirtualRenderResult> g_pdfVirtualResults;
+static std::optional<PdfVirtualRenderResult> g_pdfVirtualEmergencyResult;
+static std::atomic<uint64_t> g_pdfVirtualCancelEpoch{1};
+static std::atomic_bool g_pdfVirtualWorkerFailed{false};
 static std::thread g_pdfVirtualWorkerThread;
 static bool g_pdfVirtualWorkerStarted = false;
 static bool g_pdfVirtualWorkerStop = false;
 static bool g_pdfVirtualWorkerHasActiveJob = false;
 static PdfVirtualRenderJob g_pdfVirtualWorkerActiveJob;
+static unsigned g_pdfVirtualVisibleBurst = 0; // queue mutex protected
+
+// Isolated automation only. All state is protected by the existing queue
+// mutex; no normal-operation logging, text capture or additional worker locks.
+struct PdfVirtualWorkerProbe {
+    struct Dispatch { int page = -1; int width = 0; bool visible = false; };
+    bool enabled = false;
+    bool holdBefore = false, holdAfter = false;
+    bool beforeEntered = false, afterEntered = false;
+    bool timedOut = false, overflow = false;
+    int gatePage = 7;
+    std::array<Dispatch, 32> dispatches{};
+    size_t dispatchCount = 0, rendered = 0, nonWhite = 0;
+    size_t staleRejected = 0, stoppedResults = 0;
+    bool throwRenderOnce = false, throwPublishOnce = false;
+    size_t exceptions = 0, emergencyResults = 0;
+};
+static PdfVirtualWorkerProbe g_pdfVirtualWorkerProbe;
+
+static void ObservePdfWorkerProbeLocked(std::unique_lock<std::mutex>& lock,
+                                       const PdfVirtualRenderJob& job,
+                                       const PdfVirtualRenderResult* result = nullptr) {
+    auto& probe = g_pdfVirtualWorkerProbe;
+    if (!probe.enabled) return;
+    if (result) {
+        if (result->success && !result->pixels.empty()) {
+            ++probe.rendered;
+            for (size_t i = 0; i + 3 < result->pixels.size(); i += 4) {
+                if (result->pixels[i] != 255 || result->pixels[i + 1] != 255 || result->pixels[i + 2] != 255) {
+                    ++probe.nonWhite;
+                    break;
+                }
+            }
+        }
+    } else if (probe.dispatchCount < probe.dispatches.size()) {
+        probe.dispatches[probe.dispatchCount++] = {job.pageIndex, job.targetW, job.visible};
+    } else {
+        probe.overflow = true;
+    }
+    const bool hold = result ? probe.holdAfter : probe.holdBefore;
+    if (!hold || job.pageIndex != probe.gatePage) return;
+    (result ? probe.afterEntered : probe.beforeEntered) = true;
+    // Never hold PDFium's lock while gated. Shutdown/failed tests always
+    // release this wait, and an absent UI release becomes an explicit FAIL.
+    if (!g_pdfVirtualWorkerCv.wait_for(lock, std::chrono::seconds(5), [&] {
+        return g_pdfVirtualWorkerStop || !probe.enabled || !(result ? probe.holdAfter : probe.holdBefore);
+    })) {
+        probe.timedOut = true;
+        probe.holdBefore = probe.holdAfter = false;
+    }
+}
 
 static void InvalidatePdfVirtualPageRect(HWND hwnd, int pageIndex) {
     if (!hwnd || pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return;
@@ -389,24 +454,34 @@ static bool OpenWorkerPdfDocument(const PdfVirtualRenderJob& job,
     return true;
 }
 
-static bool RenderPdfPageBitmapOnWorker(FPDF_DOCUMENT doc, int pageIndex, int targetW, int targetH,
+static bool PdfWorkerCanceled(const PdfVirtualRenderJob& job) {
+    return job.cancelEpoch != g_pdfVirtualCancelEpoch.load();
+}
+static void YieldPdfWorker(const PdfVirtualRenderJob& job) {
+    std::unique_lock<std::mutex> lock(g_pdfVirtualWorkerMutex);
+    // Leave a scheduling opportunity for interactive engine users. Stop and
+    // generation changes wake this wait without taking the PDFium lock.
+    g_pdfVirtualWorkerCv.wait_for(lock, std::chrono::milliseconds(1), [&] {
+        return g_pdfVirtualWorkerStop || PdfWorkerCanceled(job);
+    });
+}
+static bool RenderPdfPageBitmapOnWorker(FPDF_DOCUMENT doc, const PdfVirtualRenderJob& job,
                                         std::vector<uint8_t>& outPixels, int& outStride) {
-    if (!doc || pageIndex < 0 || targetW <= 0 || targetH <= 0) return false;
-    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
-    FPDF_PAGE page = FPDF_LoadPage(doc, pageIndex);
-    if (!page) return false;
-    int stride = targetW * 4;
-    std::vector<uint8_t> pixels;
-    pixels.assign(static_cast<size_t>(stride) * targetH, 255);
-    FPDF_BITMAP bmp = FPDFBitmap_CreateEx(targetW, targetH, FPDFBitmap_BGRA, pixels.data(), stride);
-    if (!bmp) {
-        FPDF_ClosePage(page);
-        return false;
-    }
-    FPDFBitmap_FillRect(bmp, 0, 0, targetW, targetH, 0xFFFFFFFF);
-    FPDF_RenderPageBitmap(bmp, page, 0, 0, targetW, targetH, 0, FPDF_ANNOT | FPDF_LCD_TEXT);
-    FPDFBitmap_Destroy(bmp);
-    FPDF_ClosePage(page);
+    if (!doc || job.pageIndex < 0 || job.targetW <= 0 || job.targetH <= 0 ||
+        job.targetW > std::numeric_limits<int>::max() / 4) return false;
+    const int stride = job.targetW * 4;
+    if (static_cast<size_t>(job.targetH) > std::numeric_limits<size_t>::max() / stride) return false;
+    std::vector<uint8_t> pixels(static_cast<size_t>(stride) * job.targetH, 255);
+    std::unique_lock<std::recursive_mutex> engine(g_pdfiumMutex);
+    struct Page { FPDF_PAGE value; ~Page() { if (value) FPDF_ClosePage(value); } } page{FPDF_LoadPage(doc, job.pageIndex)};
+    if (!page.value) return false;
+    struct Bitmap { FPDF_BITMAP value; ~Bitmap() { if (value) FPDFBitmap_Destroy(value); } } bitmap{
+        FPDFBitmap_CreateEx(job.targetW, job.targetH, FPDFBitmap_BGRA, pixels.data(), stride)};
+    if (!bitmap.value) return false;
+    FPDFBitmap_FillRect(bitmap.value, 0, 0, job.targetW, job.targetH, 0xFFFFFFFF);
+    if (!pdf_worker_render::Render(engine, bitmap.value, page.value, job.targetW, job.targetH,
+            job.rotation, FPDF_ANNOT | FPDF_LCD_TEXT, [&] { return PdfWorkerCanceled(job); },
+            [&] { YieldPdfWorker(job); })) return false;
     outStride = stride;
     outPixels = std::move(pixels);
     return true;
@@ -415,78 +490,124 @@ static bool RenderPdfPageBitmapOnWorker(FPDF_DOCUMENT doc, int pageIndex, int ta
 static bool IsSamePdfVirtualJob(const PdfVirtualRenderJob& a, const PdfVirtualRenderJob& b) {
     return a.generation == b.generation &&
            a.pageIndex == b.pageIndex &&
+           a.rotation == b.rotation &&
            a.targetW == b.targetW &&
            a.targetH == b.targetH &&
+           a.textCoverage == b.textCoverage &&
            a.coarse == b.coarse;
 }
 
-static void PdfVirtualRenderWorkerMain() {
+static void PdfVirtualRenderWorkerMain() noexcept {
     FPDF_DOCUMENT workerDoc = nullptr;
     HANDLE workerFile = INVALID_HANDLE_VALUE;
+    struct DocumentOwner {
+        FPDF_DOCUMENT& document; HANDLE& file;
+        ~DocumentOwner() {
+            if (document) { std::lock_guard<std::recursive_mutex> engine(g_pdfiumMutex); FPDF_CloseDocument(document); }
+            if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        }
+    } documentOwner{workerDoc, workerFile};
     std::wstring loadedPath;
     std::string loadedPassword;
     SecureStringScope loadedPasswordScope(&loadedPassword);
-
-    for (;;) {
-        PdfVirtualRenderJob job;
-        {
-            std::unique_lock<std::mutex> lock(g_pdfVirtualWorkerMutex);
-            g_pdfVirtualWorkerCv.wait(lock, [] {
-                return g_pdfVirtualWorkerStop || !g_pdfVirtualJobs.empty();
-            });
-            if (g_pdfVirtualWorkerStop) break;
-            job = std::move(g_pdfVirtualJobs.front());
-            g_pdfVirtualJobs.pop_front();
-            SecureClearString(g_pdfVirtualWorkerActiveJob.passwordUtf8);
-            g_pdfVirtualWorkerActiveJob = job;
-            g_pdfVirtualWorkerHasActiveJob = true;
-        }
-
-        PdfVirtualRenderResult result;
-        result.generation = job.generation;
-        result.pageIndex = job.pageIndex;
-        result.targetW = job.targetW;
-        result.targetH = job.targetH;
-        result.coarse = job.coarse;
-        if (OpenWorkerPdfDocument(job, workerDoc, workerFile, loadedPath, loadedPassword)) {
-            result.success = RenderPdfPageBitmapOnWorker(workerDoc, job.pageIndex, job.targetW, job.targetH,
-                                                         result.pixels, result.stride);
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
-            g_pdfVirtualWorkerHasActiveJob = false;
-            if (!g_pdfVirtualWorkerStop) {
-                g_pdfVirtualResults.push_back(std::move(result));
+    (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    HWND notifyWindow = nullptr;
+    try {
+        for (;;) {
+            PdfVirtualRenderJob job;
+            PdfVirtualRenderResult result;
+            bool throwRender = false;
+            try {
+                {
+                    std::unique_lock<std::mutex> lock(g_pdfVirtualWorkerMutex);
+                    g_pdfVirtualWorkerCv.wait(lock, [] {
+                        return g_pdfVirtualWorkerStop || (!g_pdfVirtualEmergencyResult && !g_pdfVirtualJobs.empty());
+                    });
+                    if (g_pdfVirtualWorkerStop) break;
+                    const auto next = pdf_render_queue::ChooseNext(g_pdfVirtualJobs, g_pdfVirtualVisibleBurst);
+                    if (!next) continue;
+                    auto chosen = g_pdfVirtualJobs.begin() + static_cast<std::ptrdiff_t>(*next);
+                    job = std::move(*chosen);
+                    g_pdfVirtualJobs.erase(chosen);
+                    g_pdfVirtualVisibleBurst = pdf_render_queue::AfterDispatch(g_pdfVirtualVisibleBurst, job.visible);
+                    notifyWindow = job.hwnd;
+                    g_pdfVirtualWorkerHasActiveJob = true;
+                    g_pdfVirtualWorkerActiveJob = job;
+                    if (g_pdfVirtualWorkerProbe.enabled) {
+                        throwRender = g_pdfVirtualWorkerProbe.throwRenderOnce;
+                        g_pdfVirtualWorkerProbe.throwRenderOnce = false;
+                    }
+                    ObservePdfWorkerProbeLocked(lock, job);
+                }
+                if (throwRender) throw std::bad_alloc();
+                if (!PdfWorkerCanceled(job) && OpenWorkerPdfDocument(job, workerDoc, workerFile, loadedPath, loadedPassword)) {
+                    if (job.textCoverage) {
+                        std::unique_lock<std::recursive_mutex> engine(g_pdfiumMutex);
+                        result.success = pdf_text_coverage::RenderWith(workerDoc, job.pageIndex, job.targetW, job.targetH,
+                            job.rotation, result.pixels, [&](FPDF_BITMAP bitmap, FPDF_PAGE page, int w, int h, int rotation) {
+                                return pdf_worker_render::Render(engine, bitmap, page, w, h, rotation, 0,
+                                    [&] { return PdfWorkerCanceled(job); }, [&] { YieldPdfWorker(job); });
+                            });
+                    } else result.success = RenderPdfPageBitmapOnWorker(workerDoc, job, result.pixels, result.stride);
+                }
+            } catch (...) {
+                result.success = false;
+                result.workerException = true;
+                std::vector<uint8_t>().swap(result.pixels);
             }
+            result.generation = job.generation;
+            result.pageIndex = job.pageIndex;
+            result.targetW = job.targetW; result.targetH = job.targetH;
+            result.coarse = job.coarse; result.textCoverage = job.textCoverage;
+            {
+                std::unique_lock<std::mutex> lock(g_pdfVirtualWorkerMutex);
+                if (result.workerException && g_pdfVirtualWorkerProbe.enabled) ++g_pdfVirtualWorkerProbe.exceptions;
+                ObservePdfWorkerProbeLocked(lock, job, &result);
+                g_pdfVirtualWorkerHasActiveJob = false;
+                if (!g_pdfVirtualWorkerStop) {
+                    try {
+                        if (g_pdfVirtualWorkerProbe.enabled && g_pdfVirtualWorkerProbe.throwPublishOnce) {
+                            g_pdfVirtualWorkerProbe.throwPublishOnce = false;
+                            throw std::bad_alloc();
+                        }
+                        g_pdfVirtualResults.push_back(std::move(result));
+                    } catch (...) {
+                        // Allocation-free completion slot. Stop taking jobs until
+                        // the UI drains it; no requested page can be stranded.
+                        result.success = false; result.workerException = true;
+                        std::vector<uint8_t>().swap(result.pixels);
+                        g_pdfVirtualEmergencyResult.emplace(std::move(result));
+                        if (g_pdfVirtualWorkerProbe.enabled) ++g_pdfVirtualWorkerProbe.emergencyResults;
+                    }
+                } else if (g_pdfVirtualWorkerProbe.enabled) ++g_pdfVirtualWorkerProbe.stoppedResults;
+            }
+            if (job.hwnd) PostMessageW(job.hwnd, kMsgPdfVirtualRenderComplete, 0, 0);
         }
-        if (job.hwnd) {
-            PostMessageW(job.hwnd, kMsgPdfVirtualRenderComplete, 0, 0);
-        }
-    }
-
-    if (workerDoc) {
-        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
-        FPDF_CloseDocument(workerDoc);
-    }
-    if (workerFile && workerFile != INVALID_HANDLE_VALUE) {
-        CloseHandle(workerFile);
+    } catch (...) {
+        g_pdfVirtualWorkerFailed.store(true);
+        if (notifyWindow) PostMessageW(notifyWindow, kMsgPdfVirtualRenderComplete, 0, 0);
     }
 }
 
-static void EnsurePdfVirtualRenderWorker() {
+static bool EnsurePdfVirtualRenderWorker() {
     std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
-    if (g_pdfVirtualWorkerStarted) return;
+    if (g_pdfVirtualWorkerStarted) return !g_pdfVirtualWorkerFailed.load();
     g_pdfVirtualWorkerStop = false;
-    g_pdfVirtualWorkerThread = std::thread(PdfVirtualRenderWorkerMain);
+    try { g_pdfVirtualWorkerThread = std::thread(PdfVirtualRenderWorkerMain); }
+    catch (...) { return false; }
+    g_pdfVirtualWorkerFailed.store(false);
     g_pdfVirtualWorkerStarted = true;
+    return true;
 }
 
 static void ShutdownPdfVirtualRenderWorker() {
+    ++g_pdfVirtualCancelEpoch;
     {
         std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
         g_pdfVirtualJobs.clear();
         g_pdfVirtualResults.clear();
+        g_pdfVirtualEmergencyResult.reset();
+        g_pdfVirtualVisibleBurst = 0;
         if (!g_pdfVirtualWorkerStarted) return;
         g_pdfVirtualWorkerStop = true;
     }
@@ -501,25 +622,30 @@ static void ShutdownPdfVirtualRenderWorker() {
         g_pdfVirtualWorkerHasActiveJob = false;
         g_pdfVirtualJobs.clear();
         g_pdfVirtualResults.clear();
+        g_pdfVirtualVisibleBurst = 0;
     }
 }
 
 static void CancelPdfVirtualRenderJobs() {
+    ++g_pdfVirtualCancelEpoch;
     std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
     g_pdfVirtualJobs.clear();
     g_pdfVirtualResults.clear();
+    g_pdfVirtualEmergencyResult.reset();
+    g_pdfVirtualVisibleBurst = 0;
 }
 
 static bool HasPdfVirtualRenderWork() {
     std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
     return g_pdfVirtualWorkerHasActiveJob ||
            !g_pdfVirtualJobs.empty() ||
+           g_pdfVirtualEmergencyResult.has_value() ||
            !g_pdfVirtualResults.empty();
 }
 
-static bool QueuePdfVirtualRenderJob(HWND hwnd, const PdfVirtualRenderCandidate& candidate) {
+static bool QueuePdfVirtualRenderJob(HWND hwnd, const PdfVirtualRenderCandidate& candidate, bool textCoverage = false) {
     if (g_pdf.kind != DocKind::Pdf || g_pdf.path.empty()) return false;
-    EnsurePdfVirtualRenderWorker();
+    if (!EnsurePdfVirtualRenderWorker()) return false;
     PdfVirtualRenderJob job;
     job.hwnd = hwnd;
     job.path = g_pdf.path;
@@ -527,10 +653,15 @@ static bool QueuePdfVirtualRenderJob(HWND hwnd, const PdfVirtualRenderCandidate&
     job.generation = g_pdf.renderGeneration;
     job.pageIndex = static_cast<int>(candidate.index);
     job.targetW = candidate.targetW;
+    job.rotation = g_pdf.pages[candidate.index].viewRotation;
     job.targetH = candidate.targetH;
     job.coarse = candidate.coarse;
+    job.textCoverage = textCoverage;
+    job.visible = candidate.visible;
+    job.distance = candidate.distance;
     {
         std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        job.cancelEpoch = g_pdfVirtualCancelEpoch.load();
         if (g_pdfVirtualWorkerHasActiveJob && IsSamePdfVirtualJob(g_pdfVirtualWorkerActiveJob, job)) {
             return true;
         }
@@ -538,6 +669,7 @@ static bool QueuePdfVirtualRenderJob(HWND hwnd, const PdfVirtualRenderCandidate&
             for (auto it = g_pdfVirtualJobs.begin(); it != g_pdfVirtualJobs.end(); ) {
                 if (it->generation == job.generation &&
                     it->pageIndex == job.pageIndex &&
+                    it->textCoverage == job.textCoverage &&
                     it->coarse) {
                     it = g_pdfVirtualJobs.erase(it);
                 } else {
@@ -549,30 +681,89 @@ static bool QueuePdfVirtualRenderJob(HWND hwnd, const PdfVirtualRenderCandidate&
             if (IsSamePdfVirtualJob(queued, job)) return true;
         }
         g_pdfVirtualJobs.push_back(std::move(job));
+        if (!textCoverage) open_work::Record(open_work::Kind::PdfBitmapQueued);
     }
     g_pdfVirtualWorkerCv.notify_one();
     return true;
 }
 
+// UI requests are lazy and deduplicated before entering the queue. Scroll-only
+// paints reuse the plane; zoom/rotation/document generations request a new one.
+// Worker input is a value snapshot and never references mutable page caches.
+static bool EnsurePdfPageTextCoverage(int pageIndex) {
+    if (g_pdf.kind != DocKind::Pdf || pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
+    auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    // Use display geometry, not the coarse/full page bitmap dimensions. This
+    // avoids rebuilding coverage when the ordinary bitmap quality settles.
+    int width = page.w, height = page.h;
+    if (width <= 0 || height <= 0) return false;
+    pdf_text_coverage::LimitSize(width, height);
+    if (page.textCoverageGeneration == g_pdf.renderGeneration &&
+        page.textCoverageW == width && page.textCoverageH == height && !page.textCoverage.empty()) return true;
+    if (page.textCoverageRequestedGeneration == g_pdf.renderGeneration &&
+        page.textCoverageRequestedW == width && page.textCoverageRequestedH == height) return false;
+    PdfVirtualRenderCandidate candidate;
+    candidate.index = static_cast<size_t>(pageIndex);
+    candidate.targetW = width; candidate.targetH = height;
+    candidate.visible = true;
+    if (QueuePdfVirtualRenderJob(g_hPdfView, candidate, true)) {
+        page.textCoverageRequestedGeneration = g_pdf.renderGeneration;
+        page.textCoverageRequestedW = width; page.textCoverageRequestedH = height;
+    }
+    return false;
+}
+
 static PdfVirtualUpdateResult ApplyPdfVirtualRenderResults(HWND hwnd) {
     PdfVirtualUpdateResult result;
+    if (g_pdfVirtualWorkerFailed.exchange(false)) {
+        ShutdownPdfVirtualRenderWorker();
+        ShowSoftNotice(hwnd, localization::Text(L"pdf.render.background_failed"), SoftNoticeKind::Warning);
+        return result; // Preserve existing page pixels and all document edits.
+    }
     std::deque<PdfVirtualRenderResult> results;
+    std::optional<PdfVirtualRenderResult> emergency;
     {
         std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
         results.swap(g_pdfVirtualResults);
+        emergency.swap(g_pdfVirtualEmergencyResult);
     }
-    for (auto& item : results) {
-        if (item.generation != g_pdf.renderGeneration) continue;
+    if (emergency) g_pdfVirtualWorkerCv.notify_one();
+    const size_t count = results.size();
+    for (size_t i = 0; i < count + (emergency ? 1 : 0); ++i) {
+        auto& item = i < count ? results[i] : *emergency;
+        if (item.generation != g_pdf.renderGeneration) {
+            std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+            if (g_pdfVirtualWorkerProbe.enabled) ++g_pdfVirtualWorkerProbe.staleRejected;
+            continue;
+        }
         if (item.pageIndex < 0 || item.pageIndex >= static_cast<int>(g_pdf.pages.size())) continue;
         if (item.targetW <= 0 || item.targetH <= 0) continue;
         PageCache& page = g_pdf.pages[static_cast<size_t>(item.pageIndex)];
+        if (item.textCoverage) {
+            // A superseded coarse/zoom request may finish in the same generation.
+            // Failure is terminal for this request; never fall back to color
+            // thresholds, repeat work on every paint or disturb the page bitmap.
+            if (page.textCoverageRequestedGeneration != item.generation ||
+                page.textCoverageRequestedW != item.targetW || page.textCoverageRequestedH != item.targetH) continue;
+            std::vector<uint8_t>().swap(page.textCoverage);
+            page.textCoverageGeneration = item.generation;
+            page.textCoverageW = item.targetW; page.textCoverageH = item.targetH;
+            if (item.success && item.pixels.size() == static_cast<size_t>(item.targetW) * item.targetH) {
+                page.textCoverage = std::move(item.pixels);
+            } else {
+                ShowSoftNotice(hwnd, localization::Text(L"pdf.text_color.display_failed"), SoftNoticeKind::Warning);
+            }
+            result.changed = true;
+            if (hwnd) { InvalidatePdfVirtualPageRect(hwnd, item.pageIndex); result.invalidated = true; }
+            continue;
+        }
         if (!item.success || item.pixels.empty() || item.stride <= 0) {
             // A worker document can fail transiently even though the primary
             // document remains open. Retry once through the primary document
             // before leaving a page on its empty background.
             std::vector<uint8_t> fallbackPixels;
             int fallbackStride = 0;
-            if (RenderPdfPageBitmap(item.pageIndex, item.targetW, item.targetH,
+            if (!item.workerException && RenderPdfPageBitmap(item.pageIndex, item.targetW, item.targetH,
                                     fallbackPixels, fallbackStride)) {
                 page.bmpW = item.targetW;
                 page.bmpH = item.targetH;
@@ -625,27 +816,64 @@ static PdfVirtualUpdateResult ApplyPdfVirtualRenderResults(HWND hwnd) {
     return result;
 }
 
+static void FillPdfPageCoordinates(PageCache& cache, FPDF_PAGE page) {
+    cache.intrinsicRotation = std::max(0, FPDFPage_GetRotation(page));
+    FS_RECTF box{};
+    if (FPDF_GetPageBoundingBox(page, &box)) {
+        cache.pdfOriginX = box.left;
+        cache.pdfOriginY = box.bottom;
+        cache.pdfWidthPt = box.right - box.left;
+        cache.pdfHeightPt = box.top - box.bottom;
+    } else {
+        const auto original = page_rotation::Extent(cache.canonicalWidthPt, cache.canonicalHeightPt, cache.intrinsicRotation);
+        cache.pdfWidthPt = original.width;
+        cache.pdfHeightPt = original.height;
+    }
+    cache.geometryReady = cache.pdfWidthPt > 0 && cache.pdfHeightPt > 0;
+}
+
+static bool EnsurePdfPageCoordinates(int pageIndex) {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
+    auto& cache = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    if (cache.geometryReady) return true;
+    // Metadata is lazy: initial layout must not parse every page's contents.
+    if (!g_pdf.doc) return cache.pdfWidthPt > 0 && cache.pdfHeightPt > 0;
+    std::lock_guard<std::recursive_mutex> lock(g_pdfiumMutex);
+    FPDF_PAGE page = FPDF_LoadPage(g_pdf.doc, pageIndex);
+    if (!page) return false;
+    FillPdfPageCoordinates(cache, page);
+    FPDF_ClosePage(page);
+    return cache.geometryReady;
+}
+
+static page_rotation::Point PdfPointForView(const PageCache& page, double x, double y) {
+    return page_rotation::FromCanonical({x - page.pdfOriginX, y - page.pdfOriginY},
+        page.pdfWidthPt, page.pdfHeightPt, page.intrinsicRotation + page.viewRotation);
+}
+
+static void PdfBoxForView(const PageCache& page, double& left, double& right, double& bottom, double& top) {
+    const auto a = PdfPointForView(page, left, bottom);
+    const auto b = PdfPointForView(page, right, top);
+    left = std::min(a.x, b.x); right = std::max(a.x, b.x);
+    bottom = std::min(a.y, b.y); top = std::max(a.y, b.y);
+}
+
 static bool LoadPdfPageCharBoxes(int pageIndex, std::vector<PageCache::CharBox>& out) {
     if (!g_pdf.doc || pageIndex < 0 || pageIndex >= g_pdf.pageCount) return false;
     std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
     FPDF_PAGE page = FPDF_LoadPage(g_pdf.doc, pageIndex);
     if (!page) return false;
+    auto& geometry = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    FillPdfPageCoordinates(geometry, page);
     FPDF_TEXTPAGE textPage = FPDFText_LoadPage(page);
     bool ok = false;
     if (textPage) {
-        int nChars = FPDFText_CountChars(textPage);
-        out.clear();
-        out.reserve(static_cast<size_t>(nChars));
-        for (int c = 0; c < nChars; ++c) {
-            double left = 0, right = 0, bottom = 0, top = 0;
-            if (FPDFText_GetCharBox(textPage, c, &left, &right, &bottom, &top)) {
-                out.push_back({
-                    static_cast<float>(left),
-                    static_cast<float>(right),
-                    static_cast<float>(top),
-                    static_cast<float>(bottom),
-                });
-            }
+        out = text_selection::ReadPdf(textPage);
+        for (auto& box : out) {
+            if (!text_selection::Valid(box)) continue;
+            double left=box.left,right=box.right,bottom=box.bottom,top=box.top;
+            PdfBoxForView(geometry,left,right,bottom,top);
+            box.left=float(left);box.right=float(right);box.bottom=float(bottom);box.top=float(top);
         }
         FPDFText_ClosePage(textPage);
         ok = true;
@@ -685,6 +913,8 @@ static bool LoadPdfPageReadableGlyphs(int pageIndex, std::vector<PageCache::Read
     std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
     FPDF_PAGE page = FPDF_LoadPage(g_pdf.doc, pageIndex);
     if (!page) return false;
+    auto& geometry = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    FillPdfPageCoordinates(geometry, page);
     FPDF_TEXTPAGE textPage = FPDFText_LoadPage(page);
     bool ok = false;
     if (textPage) {
@@ -706,6 +936,9 @@ static bool LoadPdfPageReadableGlyphs(int pageIndex, std::vector<PageCache::Read
             double originX = 0.0;
             double originY = 0.0;
             const bool haveOrigin = FPDFText_GetCharOrigin(textPage, c, &originX, &originY);
+            PdfBoxForView(geometry, left, right, bottom, top);
+            const auto origin = PdfPointForView(geometry, originX, originY);
+            originX = origin.x; originY = origin.y;
 
             unsigned int r = 0;
             unsigned int g = 0;
@@ -731,6 +964,7 @@ static bool LoadPdfPageReadableGlyphs(int pageIndex, std::vector<PageCache::Read
                 fill,
                 haveFill,
                 haveOrigin,
+                page_rotation::Normalize(geometry.intrinsicRotation + geometry.viewRotation),
             });
         }
         FPDFText_ClosePage(textPage);
@@ -757,6 +991,8 @@ static bool LoadPdfPageReadablePaths(int pageIndex, std::vector<PageCache::Reada
     std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
     FPDF_PAGE page = FPDF_LoadPage(g_pdf.doc, pageIndex);
     if (!page) return false;
+    auto& geometry = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    FillPdfPageCoordinates(geometry, page);
 
     out.clear();
     const int objectCount = FPDFPage_CountObjects(page);
@@ -832,7 +1068,19 @@ static bool LoadPdfPageReadablePaths(int pageIndex, std::vector<PageCache::Reada
                 current = subpathStart;
             }
         }
-        if (!path.segments.empty()) out.push_back(std::move(path));
+        if (!path.segments.empty()) {
+            double l = path.left, r = path.right, b = path.bottom, t = path.top;
+            PdfBoxForView(geometry, l, r, b, t);
+            path.left = static_cast<float>(l); path.right = static_cast<float>(r);
+            path.bottom = static_cast<float>(b); path.top = static_cast<float>(t);
+            for (auto& segment : path.segments) {
+                const auto a = PdfPointForView(geometry, segment.x1, segment.y1);
+                const auto z = PdfPointForView(geometry, segment.x2, segment.y2);
+                segment.x1 = static_cast<float>(a.x); segment.y1 = static_cast<float>(a.y);
+                segment.x2 = static_cast<float>(z.x); segment.y2 = static_cast<float>(z.y);
+            }
+            out.push_back(std::move(path));
+        }
     }
 
     FPDF_ClosePage(page);
@@ -840,6 +1088,10 @@ static bool LoadPdfPageReadablePaths(int pageIndex, std::vector<PageCache::Reada
 }
 
 static void EvictPageBitmap(PageCache& page) {
+    std::vector<uint8_t>().swap(page.textCoverage);
+    page.textCoverageW = page.textCoverageH = 0;
+    page.textCoverageGeneration = page.textCoverageRequestedGeneration = 0;
+    page.textCoverageRequestedW = page.textCoverageRequestedH = 0;
     if (!page.pixels.empty()) {
         std::vector<uint8_t>().swap(page.pixels);
     }
@@ -907,8 +1159,9 @@ static bool g_pdfVirtualRenderTimerArmed = false;
 static HWND g_pdfVirtualRenderTimerHwnd = nullptr;
 
 static uint64_t PageBitmapBytes(const PageCache& page) {
-    if (page.pixels.empty() || page.bmpW <= 0 || page.bmpH <= 0 || page.stride <= 0) return 0;
-    return static_cast<uint64_t>(page.stride) * static_cast<uint64_t>(page.bmpH);
+    const uint64_t bitmap = page.pixels.empty() || page.bmpW <= 0 || page.bmpH <= 0 || page.stride <= 0
+        ? 0 : static_cast<uint64_t>(page.stride) * static_cast<uint64_t>(page.bmpH);
+    return bitmap + page.textCoverage.size();
 }
 
 static void InvalidatePdfRenderGeneration() {
@@ -1173,13 +1426,41 @@ static void TracePdfVirtualCacheUpdate(const PdfVirtualViewport& viewport,
         L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
 }
 
+static void RefreshPdfVirtualJobPriorities(std::deque<PdfVirtualRenderJob>& jobs,
+                                         const PdfVirtualViewport& viewport,
+                                         uint64_t generation,
+                                         const std::vector<PdfViewState::RectD>& pageRects) {
+    // Only pending work is touched. Active jobs and their result/generation
+    // validation stay unchanged; the worker never reads mutable UI geometry.
+    // The caller owns jobs exclusively (queue mutex for the production queue).
+    for (auto& job : jobs) {
+        job.visible = false;
+        job.distance = std::numeric_limits<double>::infinity();
+        if (job.generation != generation || job.pageIndex < 0 ||
+            static_cast<size_t>(job.pageIndex) >= pageRects.size()) continue;
+        const auto& rect = pageRects[static_cast<size_t>(job.pageIndex)];
+        const double start = PagePrimaryStart(viewport, rect);
+        const double end = PagePrimaryEnd(viewport, rect);
+        job.visible = RangesOverlap(start, end, viewport.visibleStart, viewport.visibleEnd);
+        job.distance = DistanceFromRangeCenter(start, end, viewport.visibleStart, viewport.visibleEnd);
+    }
+}
+
 static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
                                                            PdfVirtualUpdateMode mode = PdfVirtualUpdateMode::Immediate) {
     PdfVirtualUpdateResult result;
     const ULONGLONG startTick = preview_trace::TickNow();
     if (!pdfWnd || g_pdf.pages.empty()) return result;
+    if (g_pendingInitialFitWidth || g_pendingInitialFitHeight ||
+        g_pdfInitialViewportUpdateDepth != 0) return result;
+    open_work::Record(open_work::Kind::PdfViewportCacheUpdate);
+    if (g_pendingPdfRestore) open_work::Record(open_work::Kind::PdfCacheBeforeRestore);
     PdfVirtualViewport viewport = ComputePdfVirtualViewport(pdfWnd);
     if (!viewport.valid) return result;
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        RefreshPdfVirtualJobPriorities(g_pdfVirtualJobs, viewport, g_pdf.renderGeneration, g_pdf.pageRects);
+    }
 
     // Avoid caching huge offscreen bitmaps at high zoom. Visible pages still render at full target size.
     constexpr uint64_t kPrefetchMaxPixels = 8ull * 1024ull * 1024ull; // ~32MB @ BGRA
@@ -1395,6 +1676,9 @@ void BuildPageCaches(HWND pdfWnd) {
         double dpiY = (g_pdf.imageDpiY > 0.0) ? g_pdf.imageDpiY : kDpi;
         cache.widthPt = g_pdf.imageWidth * 72.0 / dpiX;
         cache.heightPt = g_pdf.imageHeight * 72.0 / dpiY;
+        cache.canonicalWidthPt = cache.pdfWidthPt = cache.widthPt;
+        cache.canonicalHeightPt = cache.pdfHeightPt = cache.heightPt;
+        cache.geometryReady = true;
         cache.w = static_cast<int>(std::round(cache.widthPt * kDpi / 72.0 * g_pdf.scale));
         cache.h = static_cast<int>(std::round(cache.heightPt * kDpi / 72.0 * g_pdf.scale));
         if (cache.w <= 0 || cache.h <= 0) return;
@@ -1435,8 +1719,15 @@ void BuildPageCaches(HWND pdfWnd) {
         
         PageCache cache;
         cache.index = i;
-        cache.widthPt = widthPt;
-        cache.heightPt = heightPt;
+        cache.canonicalWidthPt = widthPt;
+        cache.canonicalHeightPt = heightPt;
+        cache.pdfWidthPt = widthPt;
+        cache.pdfHeightPt = heightPt;
+        g_pdf.pageViewRotations.resize(static_cast<size_t>(g_pdf.pageCount), 0);
+        cache.viewRotation = g_pdf.pageViewRotations[static_cast<size_t>(i)];
+        const auto extent = page_rotation::Extent(widthPt, heightPt, cache.viewRotation);
+        cache.widthPt = extent.width;
+        cache.heightPt = extent.height;
 
         cache.w = static_cast<int>(std::round(cache.widthPt * kDpi / 72.0 * g_pdf.scale));
         cache.h = static_cast<int>(std::round(cache.heightPt * kDpi / 72.0 * g_pdf.scale));

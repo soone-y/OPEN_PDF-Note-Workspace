@@ -8,6 +8,31 @@
 
 static int g_noteStageObservedCaretLine = -1;
 
+// The existing selection handlers own the anchor and source coordinates.
+// This timer moves only their viewport, then routes the pointer through the
+// same hit test. Capture loss/button release always ends the owned timer.
+static void UpdateNoteSelectionHorizontalScroll(HWND hWnd, POINT pt, WPARAM buttons) {
+    RECT client{};
+    GetClientRect(hWnd, &client);
+    const bool selecting = g_noteRenderSelecting || g_noteNormalMouseDragActive;
+    const int edge = 0;
+    const bool outside = pt.x < client.left + edge || pt.x >= client.right - edge;
+    if (!selecting || !(buttons & MK_LBUTTON) || GetCapture() != hWnd || !outside) {
+        KillTimer(hWnd, kNoteSelectionScrollTimerId);
+        return;
+    }
+    const int step = std::max(1, ScaleY(hWnd, 16));
+    const int direction = pt.x < client.left + edge ? -1 : 1;
+    if (SetNoteRenderScrollPosX(hWnd, g_noteRenderScrollX + direction * step)) {
+        RefreshFinalNoteRenderFrame(hWnd);
+    } else {
+        KillTimer(hWnd, kNoteSelectionScrollTimerId);
+        return;
+    }
+    // A failed timer leaves pointer-move scrolling usable, without a retry loop.
+    SetTimer(hWnd, kNoteSelectionScrollTimerId, 40, nullptr);
+}
+
 static bool IsPotentialNoteTextMutationMessage(UINT msg, WPARAM wParam) {
     switch (msg) {
     case WM_CHAR:
@@ -16,6 +41,7 @@ static bool IsPotentialNoteTextMutationMessage(UINT msg, WPARAM wParam) {
     case WM_CLEAR:
     case WM_UNDO:
     case EM_REDO:
+    case WM_IME_STARTCOMPOSITION:
         return true;
     case WM_KEYDOWN:
         return wParam == VK_BACK || wParam == VK_DELETE ||
@@ -27,6 +53,11 @@ static bool IsPotentialNoteTextMutationMessage(UINT msg, WPARAM wParam) {
 
 static bool EnsureDeferredNoteTargetForInputMessage(HWND hWnd, UINT msg, WPARAM wParam) {
     if (!g_currentNotePath.empty() || g_currentSessionPath.empty()) return true;
+    // Selecting an empty session can follow clearing the old editor while no
+    // session was selected. Re-evaluate native input availability on interaction.
+    if (msg == WM_SETFOCUS || msg == WM_LBUTTONDOWN || msg == WM_KEYDOWN) {
+        UpdateNoteEditAvailability();
+    }
     if (!IsPotentialNoteTextMutationMessage(msg, wParam)) return true;
     HWND owner = GetParent(hWnd);
     if (!owner) owner = g_hMainWnd;

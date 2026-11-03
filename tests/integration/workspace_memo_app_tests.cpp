@@ -4,6 +4,12 @@
 #include "core/atomic_write.h"
 #include "core/sha256.h"
 #include "core/json_string.h"
+#include "settings/palette_stock_store.h"
+#include "settings/palette_presets_store.h"
+#include "settings/palette_active_store.h"
+#include "settings/palette_color_math.h"
+#include "settings/settings_navigation.h"
+#include "palette_presets_test_support.h"
 #include "clrop/json.h"
 #include <commctrl.h>
 #include <sddl.h>
@@ -15,7 +21,8 @@
 namespace fs = std::filesystem;
 static int checks = 0;
 static DWORD childPid = 0;
-static void Require(bool ok, const char* label) { ++checks; if (!ok) throw std::runtime_error(label); }
+static const char* lastCheck = "test startup";
+static void Require(bool ok, const char* label) { ++checks; if (!ok) throw std::runtime_error(label); lastCheck = label; }
 static void CheckWindowCorners(HWND window, const wchar_t* className) {
     using GetAttribute = HRESULT(WINAPI*)(HWND, DWORD, PVOID, DWORD);
     static const auto getAttribute = []() -> GetAttribute {
@@ -67,7 +74,8 @@ static HWND WaitWindow(const wchar_t* name) {
     });
     if (!appeared) {
         const std::wstring label(name);
-        std::cerr << "Missing child window: " << std::string(label.begin(), label.end()) << " checks=" << checks << '\n';
+        std::cerr << "Missing child window: " << std::string(label.begin(), label.end()) << " checks=" << checks
+                  << " after=" << lastCheck << '\n';
     }
     Require(appeared, "child window appeared");
     CheckWindowCorners(window, name);
@@ -90,6 +98,30 @@ static std::wstring WindowText(HWND window) {
     std::wstring text(length + 1, L'\0');
     text.resize(Send(window, WM_GETTEXT, text.size(), reinterpret_cast<LPARAM>(text.data())));
     return text;
+}
+static void CheckSettingsSidebar(HWND settings, int selectedPage) {
+    const HWND tree = GetDlgItem(settings, 7100);
+    Require(tree && IsWindowVisible(tree) && IsWindowEnabled(tree), "actual settings sidebar is available");
+    Require(settings_navigation::GroupCount == 6 && settings_navigation::Count == 16 &&
+            Send(tree, TVM_GETCOUNT) == settings_navigation::GroupCount + settings_navigation::Count,
+            "six settings groups contain all current pages without an extra assets category");
+    auto group = Send(tree, TVM_GETNEXTITEM, TVGN_ROOT);
+    DWORD_PTR selectedItem = 0;
+    for (int index = 0; index < settings_navigation::GroupCount; ++index) {
+        Require(group != 0, "required settings group exists");
+        auto leaf = Send(tree, TVM_GETNEXTITEM, TVGN_CHILD, static_cast<LPARAM>(group));
+        for (const auto page : settings_navigation::sidebarOrder) {
+            if (settings_navigation::entries[page].group != index) continue;
+            Require(leaf != 0, "required settings page exists");
+            if (page == selectedPage) selectedItem = leaf;
+            leaf = Send(tree, TVM_GETNEXTITEM, TVGN_NEXT, static_cast<LPARAM>(leaf));
+        }
+        Require(leaf == 0, "settings group has no extra page");
+        group = Send(tree, TVM_GETNEXTITEM, TVGN_NEXT, static_cast<LPARAM>(group));
+    }
+    Require(group == 0 && selectedItem != 0 && Send(tree, TVM_GETNEXTITEM, TVGN_CARET) == selectedItem &&
+            !WindowText(GetDlgItem(settings, 7103)).empty(),
+            "settings entry selects the requested existing page without navigating it in the test");
 }
 static std::wstring AssetCheckTime(HWND assets) {
     const HWND header = FindWindowExW(assets, nullptr, L"STATIC", nullptr);
@@ -143,11 +175,17 @@ public:
     ~DenyFixtureDirectoryRead() { Restore(); }
 };
 static void Type(HWND editor, const wchar_t* text) {
-    Send(editor, EM_SETSEL, 0, -1);
     // Exercise native typing/EN_CHANGE; no cross-process string pointers or
     // synthetic EN_CHANGE notifications and no user's physical keyboard.
-    if (!*text) Send(editor, WM_CLEAR);
-    for (const wchar_t* character = text; *character; ++character) Send(editor, WM_CHAR, *character);
+    // Queue selection and typing together. Synchronous cross-thread sends can
+    // reenter modal teardown before its focus restoration has completed and
+    // turn a replacement into an append. Observe the actual resulting text
+    // before any save/close operation, without retrying the input itself.
+    Require(PostMessageW(editor, EM_SETSEL, 0, -1), "queue owned editor selection");
+    if (!*text) Require(PostMessageW(editor, WM_CLEAR, 0, 0), "queue owned editor clearing");
+    for (const wchar_t* character = text; *character; ++character)
+        Require(PostMessageW(editor, WM_CHAR, *character, 0), "queue owned editor character");
+    Require(Until([&] { return WindowText(editor) == text; }), "native typing replaces the owned editor selection");
 }
 static bool Equals(const fs::path& path, const std::string& expected) {
     std::string bytes; return ReadFileBytesWin32(path, bytes) && bytes == expected;
@@ -161,6 +199,110 @@ static HWND Descendant(HWND parent, const wchar_t* name) {
         return TRUE;
     }, reinterpret_cast<LPARAM>(&search));
     return search.found;
+}
+static void SelectAssetRow(HWND list, const std::wstring& label) {
+    DWORD owner = 0; GetWindowThreadProcessId(list, &owner);
+    Require(owner == childPid && label.size() < 1024, "asset lookup targets only the bounded owned child control");
+    // Common-control messages above WM_USER are not pointer-marshalled. Own a
+    // tiny buffer in this disposable child, release it on every exit, and use
+    // native exact label lookup rather than stale row offsets.
+    HANDLE process = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_WRITE, FALSE, childPid);
+    Require(process != nullptr, "open exact owned child for asset label lookup");
+    struct ProcessOwner { HANDLE value; ~ProcessOwner() { CloseHandle(value); } } processOwner{process};
+    const size_t textBytes = (label.size() + 1) * sizeof(wchar_t);
+    void* memory = VirtualAllocEx(process, nullptr, sizeof(LVFINDINFOW) + textBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    Require(memory != nullptr, "allocate owned cross-process list lookup buffer");
+    struct BufferOwner { HANDLE process; void* memory; ~BufferOwner() { VirtualFreeEx(process, memory, 0, MEM_RELEASE); } } bufferOwner{process, memory};
+    LVFINDINFOW find{}; find.flags = LVFI_STRING;
+    find.psz = reinterpret_cast<wchar_t*>(static_cast<unsigned char*>(memory) + sizeof(find));
+    SIZE_T written = 0;
+    Require(WriteProcessMemory(process, memory, &find, sizeof(find), &written) && written == sizeof(find) &&
+        WriteProcessMemory(process, const_cast<wchar_t*>(find.psz), label.c_str(), textBytes, &written) && written == textBytes,
+        "copy bounded exact asset label into owned child buffer");
+    const auto row = Send(list, LVM_FINDITEMW, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(memory));
+    Require(row != static_cast<DWORD_PTR>(-1) && row < Send(list, LVM_GETITEMCOUNT), "expected asset label exists in real inventory");
+    Send(list, WM_KEYDOWN, VK_HOME);
+    for (DWORD_PTR index = 0; index < row; ++index) Send(list, WM_KEYDOWN, VK_DOWN);
+    Require(Send(list, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED) == row, "normal navigation selects the exact asset row");
+}
+static std::wstring PresetColorText(COLORREF color) {
+    wchar_t hex[8]{};
+    swprintf(hex, std::size(hex), L"#%02X%02X%02X", GetRValue(color), GetGValue(color), GetBValue(color));
+    return hex;
+}
+[[nodiscard]] static bool SavedPaletteTokens(const std::string& bytes, std::vector<std::string>& out) {
+    size_t pos = 0;
+    const auto skip = [&]() { while (pos < bytes.size() && (bytes[pos] == ' ' || bytes[pos] == '\n' || bytes[pos] == '\r' || bytes[pos] == '\t')) ++pos; };
+    const auto take = [&](char ch) { skip(); if (pos == bytes.size() || bytes[pos] != ch) return false; ++pos; return true; };
+    std::string key;
+    if (!take('{')) return false;
+    skip();
+    if (!json_string::DecodeToken(bytes, &pos, &key) || key != "colors" || !take(':') || !take('[')) return false;
+    std::vector<std::string> colors;
+    for (;;) {
+        skip();
+        std::string hex;
+        if (!json_string::DecodeToken(bytes, &pos, &hex) || hex.size() != 7 || hex[0] != '#') return false;
+        for (size_t i = 1; i < hex.size(); ++i) {
+            char& ch = hex[i];
+            if (ch >= 'a' && ch <= 'f') ch = static_cast<char>(ch - 'a' + 'A');
+            if (!((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F'))) return false;
+        }
+        colors.push_back(hex);
+        skip();
+        if (pos < bytes.size() && bytes[pos] == ']') break;
+        if (!take(',')) return false;
+    }
+    if (!take(']') || !take('}')) return false;
+    skip();
+    if (pos != bytes.size()) return false;
+    out = std::move(colors); return true;
+}
+static void SelectPaletteSet(HWND page, int index) {
+    const HWND combo = GetDlgItem(page, 5262);
+    Require(Send(combo, CB_SETCURSEL, index) == static_cast<DWORD_PTR>(index), "select a fixed palette preset slot");
+    Send(page, WM_COMMAND, MAKEWPARAM(5262, CBN_SELCHANGE), reinterpret_cast<LPARAM>(combo));
+}
+template<class Completed> static void ConfirmPaletteAction(HWND page, int action, bool yes, Completed completed) {
+    Require(PostMessageW(page, WM_COMMAND, action, 0), "post explicit palette action without blocking its modal confirmation");
+    const HWND confirm = WaitWindow(L"SilentDialogClass");
+    Send(confirm, WM_COMMAND, yes ? 5102 : IDCANCEL);
+    Require(Until([&] { return !IsWindow(confirm) && completed(); }), "palette confirmation returns and parent action completes");
+}
+static void CheckPaletteLayout(HWND page) {
+    RECT client{};
+    Require(GetClientRect(page, &client), "measure actual palette page");
+    std::vector<RECT> bounds;
+    // Combo-box rectangle is the closed selector; its drop-down has a separate window.
+    for (const int id : {5260, 5261, 5262, 5263, 5264, 5265, 5266, 5267, 5250, 5251, 5252, 5253, 5254, 5255, 5256,
+        5270, 5271, 5272, 5273, 5217, 5218, 5280, 5282, 5283}) {
+        const HWND control = GetDlgItem(page, id);
+        RECT rect{};
+        Require(control && GetWindowRect(control, &rect), "palette preset and stock controls all exist");
+        MapWindowPoints(nullptr, page, reinterpret_cast<POINT*>(&rect), 2);
+        Require(rect.left >= 0 && rect.right <= client.right && rect.right > rect.left && rect.bottom > rect.top,
+            "palette management controls fit the actual page width");
+        for (const auto& previous : bounds) {
+            RECT overlap{};
+            Require(!IntersectRect(&overlap, &rect, &previous), "palette preset and stock controls do not overlap");
+        }
+        bounds.push_back(rect);
+    }
+    Send(page, WM_VSCROLL, SB_BOTTOM);
+    RECT last{};
+    Require(GetWindowRect(GetDlgItem(page, 5256), &last), "measure last stock operation");
+    MapWindowPoints(nullptr, page, reinterpret_cast<POINT*>(&last), 2);
+    // On narrow screens the color editor follows stock. This checks content
+    // coverage only; physical focus scrolling remains a separate manual check.
+    SCROLLINFO scroll{sizeof(scroll), SIF_ALL};
+    Require(GetScrollInfo(page, SB_VERT, &scroll) && last.top + scroll.nPos >= 0 &&
+        last.bottom + scroll.nPos <= scroll.nMax + 1, "palette scrollbar covers every management action");
+    Send(page, WM_VSCROLL, SB_TOP);
+}
+static void WaitAutoPalette(HWND page, const fs::path& path, std::string& bytes) {
+    Require(Until([&] {
+        return WindowText(GetDlgItem(page, 5280)).find(L"保存済み") == 0 && ReadFileBytesWin32(path, bytes);
+    }), "numeric palette changes auto-save without a save button");
 }
 static HWND DescendantId(HWND parent, int id) {
     struct Search { int id; HWND found = nullptr; } search{id};
@@ -224,7 +366,7 @@ static void CtrlS(HWND editor, const fs::path& path, const std::string& text) {
     Require(SetKeyboardState(ctrl) && PostMessageW(editor, WM_KEYDOWN, L'S', 0), "post child Ctrl+S");
     Require(Until([&] { return Equals(path, text); }), "actual application message loop saves memo Ctrl+S");
 }
-int main() {
+int main(int argc, char** argv) {
     PROCESS_INFORMATION process{};
     try {
         // The runner gives an absolute fixture path through this private child environment.
@@ -233,11 +375,210 @@ int main() {
         std::wstring fixture(count, L'\0');
         const DWORD length = GetEnvironmentVariableW(L"WORKSPACE_MEMO_APP_TEST_ROOT", fixture.data(), count);
         Require(length > 0 && length < count, "test root captured"); fixture.resize(length);
-        const fs::path root(fixture), executable = root / L"app" / L"pdf_note_workspace.exe";
+        const fs::path root(fixture);
+        const auto executable = root / L"app" / (L"pdf_note_memo_" + root.filename().wstring() + L".exe");
         const auto prefix = (fs::current_path() / L"out" / L"tests").wstring() + L"\\";
         Require(fixture.compare(0, prefix.size(), prefix) == 0, "scope restricted to out/tests");
+        if (argc == 3 && std::strcmp(argv[1], "--palette-lock-helper") == 0) {
+            const std::string token(argv[2]);
+            Require(!token.empty() && token.size() < 64 && token.find_first_not_of("0123456789_") == std::string::npos,
+                "bounded owned lock worker identity");
+            return palette_test::RunLockWorker(root, std::wstring(token.begin(), token.end())) ? 0 : 1;
+        }
+        const bool lectureOrderOnly = argc == 2 && std::strcmp(argv[1], "--lecture-order-only") == 0;
+        Require(argc == 1 || lectureOrderOnly, "test driver accepts only its explicit modes");
         const auto workspace = root / L"workspace";
         std::wstring error;
+        {
+            for (const COLORREF rgb : {RGB(255,0,0), RGB(0,255,0), RGB(0,0,255), RGB(255,255,255), RGB(0,0,0), RGB(18,52,86)}) {
+                const auto result = palette_color::ToRgb(palette_color::FromRgb(rgb, 2100));
+                Require(std::abs(int(GetRValue(result)) - int(GetRValue(rgb))) <= 1 &&
+                    std::abs(int(GetGValue(result)) - int(GetGValue(rgb))) <= 1 &&
+                    std::abs(int(GetBValue(result)) - int(GetBValue(rgb))) <= 1, "HSV RGB round trip within one channel step");
+            }
+            Require(palette_color::FromRgb(RGB(40,40,40), 2100).h == 2100 &&
+                palette_color::Position(-10, 100, 1000) == 0 && palette_color::Position(200, 100, 1000) == 1000 &&
+                palette_color::Position(5, 1, 1000) == 0, "gray hue and degenerate gradient coordinates are stable");
+            const auto activeRoot = root / L"active_palette_fixture";
+            palette_active::Snapshot state;
+            Require(palette_active::Load(activeRoot, state) && !state.exists, "missing active palette is safely editable");
+            std::vector<COLORREF> colors(24, RGB(255,255,255));
+            Require(palette_active::Save(state, colors), "active palette permits duplicate legacy slots");
+            const auto path = palette_stock::FilePath(activeRoot, L"user_palette.json");
+            const auto first = state.bytes;
+            const auto stale = state;
+            colors[0] = RGB(1,2,3);
+            Require(palette_active::Save(state, colors), "active palette saves with recovery backup");
+            auto staleAttempt = stale;
+            Require(!palette_active::Save(staleAttempt, stale.colors) && Equals(path, state.bytes), "stale active palette cannot overwrite newer colors");
+            bool backup = false;
+            for (const auto& entry : fs::directory_iterator(activeRoot / L"__pdf_note_workspace__" / L"__escape__")) backup |= Equals(entry.path(), first);
+            Require(backup, "active auto-save retains previous palette bytes");
+            auto parsed = colors;
+            for (const auto& bad : {std::string("{}"), std::string("{\"colors\":[]}"),
+                std::string("{\"colors\":[\"#12345Z\"]}"), state.bytes + "x", std::string(65537, ' ')})
+                Require(!palette_active::Parse(bad, parsed) && parsed == colors, "invalid active palette preserves parsed output");
+            Require(palette_active::Parse("{\"colors\":[\"112233\"]}", parsed) && parsed == std::vector<COLORREF>{RGB(17,34,51)}, "active palette accepts legacy hex spelling");
+            const auto before = state.bytes;
+            HANDLE lock = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+            Require(lock != INVALID_HANDLE_VALUE, "lock owned active palette replacement");
+            colors[0] = RGB(4,5,6);
+            const bool saved = palette_active::Save(state, colors);
+            CloseHandle(lock);
+            Require(!saved && state.bytes == before && Equals(path, before), "active palette write failure preserves file and snapshot");
+            Require(atomic_write::AtomicWriteUtf8(path, "broken", path.parent_path(), &error), "prepare corrupt active palette");
+            palette_active::Snapshot unreadable;
+            Require(!palette_active::Load(activeRoot, unreadable) && !unreadable.ready &&
+                !palette_active::Save(unreadable, colors) && Equals(path, "broken"), "corrupt active palette cannot be auto-overwritten");
+        }
+        {
+            std::vector<COLORREF> colors{RGB(1, 2, 3), RGB(171, 205, 239)};
+            std::string json;
+            Require(palette_stock::Serialize(colors, json), "serialize color stock");
+            std::vector<COLORREF> parsed;
+            Require(palette_stock::Parse(json, parsed) && parsed == colors, "stock RGB/HEX round trip");
+            for (const auto& bad : {std::string("{}"), std::string("{\"colors\":[\"#112233\",]}"),
+                std::string("{\"colors\":[\"#112233\",\"#112233\"]}"),
+                std::string("{\"colors\":[\"#12345Z\"]}"),
+                std::string("{\"colors\":[],\"future\":true}"), json + "x", std::string(65537, ' ')}) {
+                Require(!palette_stock::Parse(bad, parsed) && parsed == colors, "invalid stock keeps parsed output unchanged");
+            }
+            std::vector<COLORREF> capacity;
+            for (size_t i = 0; i < palette_stock::kMaxColors; ++i) capacity.push_back(RGB(i, 0, 0));
+            Require(palette_stock::Serialize(capacity, json) && palette_stock::Parse(json, parsed) && parsed == capacity,
+                    "stock accepts all 128 colors");
+            capacity.push_back(RGB(128, 0, 0));
+            const auto savedJson = json;
+            Require(!palette_stock::Serialize(capacity, json) && json == savedJson, "stock rejects overflow without partial output");
+            palette_stock::Snapshot state;
+            const auto stockRoot = root / L"stock_store_fixture";
+            Require(palette_stock::Load(stockRoot, state) && !state.exists && state.colors.empty(), "missing stock starts empty");
+            Require(palette_stock::Save(state, colors), "explicit stock save");
+            const auto firstBytes = state.bytes;
+            palette_stock::Snapshot stale = state;
+            colors.push_back(RGB(19, 87, 155));
+            Require(palette_stock::Save(state, colors), "append stock with a recovery backup");
+            const auto stockPath = palette_stock::FilePath(stockRoot);
+            Require(!palette_stock::Save(stale, {RGB(9, 9, 9)}) && Equals(stockPath, state.bytes), "stale stock cannot overwrite newer colors");
+            const auto escape = stockRoot / L"__pdf_note_workspace__" / L"__escape__";
+            bool backedUp = false;
+            for (const auto& entry : fs::directory_iterator(escape)) backedUp = backedUp || Equals(entry.path(), firstBytes);
+            Require(backedUp, "stock update retains the previous file in workspace recovery data");
+            HANDLE locked = CreateFileW(stockPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            Require(locked != INVALID_HANDLE_VALUE, "lock owned color stock against replacement");
+            const auto beforeFailure = state.bytes;
+            const bool replaced = palette_stock::Save(state, {RGB(3, 4, 5)});
+            CloseHandle(locked);
+            Require(!replaced && state.bytes == beforeFailure && Equals(stockPath, beforeFailure), "failed stock save retains file and snapshot");
+            Require(atomic_write::AtomicWriteUtf8(stockPath, "{\"colors\":[\"broken\"]}",
+                    stockPath.parent_path(), escape, &error), "prepare corrupt owned stock");
+            Require(!palette_stock::Load(stockRoot, state) && state.bytes == beforeFailure &&
+                    !palette_stock::Save(state, colors) && Equals(stockPath, "{\"colors\":[\"broken\"]}"),
+                    "corrupt stock is never overwritten with an empty default");
+        }
+        {
+            palette_presets::Document doc;
+            for (size_t i = 0; i < palette_presets::kUserCount; ++i) {
+                palette_presets::Colors colors{};
+                colors.fill(RGB(i + 1, 34, 56)); // Repeated colors within a set are intentional and valid.
+                doc.users[i] = colors;
+            }
+            std::string json;
+            Require(palette_presets::Serialize(doc, json), "serialize five user palette sets and immutable initial set");
+            palette_presets::Document parsed;
+            Require(palette_presets::Parse(json, parsed) && parsed.users == doc.users,
+                "six palette sets round trip with repeated colors");
+            auto alteredInitial = json;
+            alteredInitial.replace(alteredInitial.find("#FF8C00"), 7, "#FF8C01");
+            auto sixthUser = json;
+            sixthUser.insert(sixthUser.rfind("\n  ]"), ", null");
+            auto shortSet = json;
+            shortSet.erase(shortSet.find(", \"#012238\""), 11);
+            auto unknown = json;
+            unknown.insert(unknown.rfind('}'), ", \"future\": true");
+            auto duplicate = json;
+            duplicate.insert(duplicate.rfind('}'), ", \"version\": 1");
+            auto unsupported = json;
+            unsupported.replace(unsupported.find("\"version\": 1"), 12, "\"version\": 2");
+            for (const auto& bad : {alteredInitial, sixthUser, shortSet, unknown, duplicate, unsupported,
+                    json + "x", std::string(65537, ' ')}) {
+                Require(!palette_presets::Parse(bad, parsed) && parsed.users == doc.users,
+                    "invalid palette collection preserves parsed users and immutable initial set");
+            }
+            auto invalid = doc;
+            (*invalid.users[0])[0] = CLR_INVALID;
+            const auto beforeSerialize = json;
+            Require(!palette_presets::Serialize(invalid, json) && json == beforeSerialize,
+                "invalid preset RGB cannot partially serialize");
+            palette_presets::Snapshot state;
+            const auto presetRoot = root / L"palette_presets_fixture";
+            Require(palette_presets::Load(presetRoot, state) && !state.exists &&
+                    state.colors.users == palette_presets::Document{}.users,
+                "missing palette collection starts with five empty user slots");
+            Require(palette_presets::Save(state, doc), "save all five palette user slots in one file");
+            auto stale = state;
+            const auto firstBytes = state.bytes;
+            doc.users[4].reset();
+            Require(palette_presets::Save(state, doc), "clear one user slot without changing the initial set");
+            const auto path = palette_presets::FilePath(presetRoot);
+            Require(!palette_presets::Save(stale, stale.colors) && Equals(path, state.bytes),
+                "stale palette collection cannot overwrite newer presets");
+            const auto escape = presetRoot / L"__pdf_note_workspace__" / L"__escape__";
+            bool backup = false;
+            for (const auto& entry : fs::directory_iterator(escape)) backup = backup || Equals(entry.path(), firstBytes);
+            Require(backup, "palette preset update keeps previous file in workspace backup");
+            const auto beforeBackupFailure = state;
+            {
+                palette_test::DenyDirectoryWrite deny(escape);
+                Require(deny.applied(), "deny writes only to the owned preset backup directory");
+                const auto probe = escape / L"denied_palette_backup_probe";
+                HANDLE denied = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+                const DWORD deniedError = GetLastError();
+                if (denied != INVALID_HANDLE_VALUE) CloseHandle(denied);
+                const bool saved = palette_presets::Save(state, palette_presets::Document{});
+                Require(deny.Restore(), "restore exact fixture backup ACL");
+                Require(denied == INVALID_HANDLE_VALUE && deniedError == ERROR_ACCESS_DENIED,
+                    "native write probe confirms backup denial is active");
+                Require(!saved && state.bytes == beforeBackupFailure.bytes && state.colors.users == beforeBackupFailure.colors.users &&
+                    Equals(path, beforeBackupFailure.bytes), "backup creation failure preserves preset file and all five user slots");
+            }
+            // Use the exact running driver, not a stale executable guessed from PATH.
+            std::wstring driver(512, L'\0');
+            for (;;) {
+                const DWORD size = GetModuleFileNameW(nullptr, driver.data(), static_cast<DWORD>(driver.size()));
+                Require(size != 0, "capture current lock test driver");
+                if (size < driver.size()) { driver.resize(size); break; }
+                Require(driver.size() < 32768, "lock test driver path stays within Win32 limits");
+                driver.resize(std::min<size_t>(32768, driver.size() * 2));
+            }
+            {
+                palette_test::OwnedLockWorker worker(root, fs::path(driver));
+                Require(worker.ready(), "independent process holds the palette workspace writer lock");
+                const auto beforeBusy = state;
+                const bool busySave = palette_presets::Save(state, palette_presets::Document{});
+                palette_stock::Snapshot stockState;
+                Require(palette_stock::Load(presetRoot, stockState), "read stock while preset writer is busy");
+                const bool busyStock = palette_stock::Save(stockState, {RGB(1, 2, 3)});
+                Require(worker.ReleaseAndJoin(), "release and join the exact palette lock worker");
+                Require(!busySave && !busyStock && state.bytes == beforeBusy.bytes && state.colors.users == beforeBusy.colors.users &&
+                    Equals(path, beforeBusy.bytes) && !fs::exists(palette_stock::FilePath(presetRoot)),
+                    "cross-process lock refuses both palette writers without changing files or snapshots");
+                Require(palette_presets::Save(state, doc), "preset saving resumes after the competing process releases its lock");
+            }
+            const auto beforeFailure = state.bytes;
+            HANDLE locked = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            Require(locked != INVALID_HANDLE_VALUE, "lock owned palette preset file against replacement");
+            const bool saved = palette_presets::Save(state, palette_presets::Document{});
+            CloseHandle(locked);
+            Require(!saved && state.bytes == beforeFailure && Equals(path, beforeFailure),
+                "failed palette preset save retains file and snapshot");
+            Require(atomic_write::AtomicWriteUtf8(path, alteredInitial, path.parent_path(), escape, &error),
+                "prepare tampered initial set in owned fixture");
+            Require(!palette_presets::Load(presetRoot, state) && state.bytes == beforeFailure &&
+                    !palette_presets::Save(state, doc) && Equals(path, alteredInitial),
+                "tampered initial set is never overwritten with empty user presets");
+            Require(palette_stock::FilePath(presetRoot, L"../escape.json").empty(), "palette store rejects arbitrary relative destinations");
+        }
         // One owned, blank PDF page exercises the real startup PDF reader.
         std::string pdf = "%PDF-1.4\n";
         const char* objects[] = {"<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -249,8 +590,13 @@ int main() {
         pdf += "trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
         const auto pdfPath = workspace / L"01_lecture" / L"01_session" / L"read.pdf";
         Require(atomic_write::AtomicWriteUtf8(pdfPath, pdf, pdfPath.parent_path(), &error), "owned PDF read fixture");
+        std::error_code lectureError;
+        fs::create_directories(workspace / L"00_lecture", lectureError);
+        Require(!lectureError, "owned unassigned lecture fixture");
+        fs::create_directories(workspace / L"02_lecture", lectureError);
+        Require(!lectureError, "owned tied lecture fixture");
         Require(atomic_write::AtomicWriteUtf8(workspace / L"workspace.json",
-            "{\"classesDir\":\".\",\"startupSelectFirstSession\":false,\"scheduleDayMask\":65}", workspace, &error), "isolated workspace config");
+            "{\"classesDir\":\".\",\"startupSelectFirstSession\":false,\"lectureSortMode\":\"manual\",\"lecturePriorities\":[{\"name\":\"01_lecture\",\"priority\":7},{\"name\":\"02_lecture\",\"priority\":7}]}", workspace, &error), "isolated workspace config");
         Require(atomic_write::AtomicWriteUtf8(executable.parent_path() / L"pdf_note_workspace_setup.json",
             "{\"workspaceRootMode\":\"absolute\",\"workspaceRoot\":\"" + workspace.generic_u8string() + "\"}", executable.parent_path(), &error), "owned normal startup setup");
         Require(SetEnvironmentVariableW(L"PDF_NOTE_SMALL_AUTOMATION_WORKSPACE_ROOT", nullptr), "exercise actual setup reading without a workspace override");
@@ -269,7 +615,99 @@ int main() {
         HWND lectureList = FindWindowExW(main, nullptr, WC_LISTBOXW, nullptr);
         HWND sessionList = FindWindowExW(main, lectureList, WC_LISTBOXW, nullptr);
         HWND pdfList = FindWindowExW(main, sessionList, WC_LISTBOXW, nullptr);
-        Require(lectureList && sessionList && pdfList && Send(lectureList, LB_GETCOUNT) > 0, "owned workspace navigation controls");
+        Require(lectureList && sessionList && pdfList && Send(lectureList, LB_GETCOUNT) == 3, "owned workspace navigation controls");
+        wchar_t lectureLabel[260]{};
+        Send(lectureList, LB_GETTEXT, 0, reinterpret_cast<LPARAM>(lectureLabel));
+        Require(std::wstring(lectureLabel).find(L"01_lecture") != std::wstring::npos,
+                "priority overrides name order in the actual lecture list");
+        Send(lectureList, LB_GETTEXT, 1, reinterpret_cast<LPARAM>(lectureLabel));
+        Require(std::wstring(lectureLabel).find(L"02_lecture") != std::wstring::npos,
+                "equal priorities use lecture name order");
+        Send(lectureList, LB_GETTEXT, 2, reinterpret_cast<LPARAM>(lectureLabel));
+        Require(std::wstring(lectureLabel).find(L"00_lecture") != std::wstring::npos,
+                "unassigned lectures follow assigned priorities");
+        Require(PostMessageW(main, WM_COMMAND, ID_LECTURE_ORDER, 0), "open lecture priority editor");
+        HWND orderWindow = WaitWindow(L"LectureOrderWindow");
+        Require(GetWindow(orderWindow, GW_OWNER) == main, "priority editor belongs to the isolated app");
+        HWND priorityEdit = GetDlgItem(orderWindow, 6101);
+        HWND orderList = GetDlgItem(orderWindow, 6100);
+        Require(priorityEdit && orderList, "lecture priority editor controls");
+        Require(Send(orderList, LB_GETCOUNT) == 3, "lecture priority editor enumerates managed lectures");
+        Send(orderList, LB_SETCURSEL, 2);
+        Require(Send(orderList, LB_GETCURSEL) == 2, "select unassigned lecture in priority editor");
+        Send(orderWindow, WM_COMMAND, MAKEWPARAM(6100, LBN_SELCHANGE), reinterpret_cast<LPARAM>(orderList));
+        Send(priorityEdit, WM_CHAR, L'1');
+        Send(orderWindow, WM_COMMAND, MAKEWPARAM(6102, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(orderWindow, 6102)));
+        wchar_t orderMessage[260]{};
+        GetWindowTextW(GetDlgItem(orderWindow, 6105), orderMessage, 260);
+        Require(orderMessage[0] == L'\0', "priority editor accepts and saves the entered number");
+        Send(lectureList, LB_GETTEXT, 0, reinterpret_cast<LPARAM>(lectureLabel));
+        Require(std::wstring(lectureLabel).find(L"00_lecture") != std::wstring::npos,
+                "setting priority immediately reorders the main lecture list");
+        const auto orderConfigPath = workspace / L"workspace.json";
+        std::string orderConfig;
+        Require(ReadFileBytesWin32(orderConfigPath, orderConfig) &&
+                orderConfig.find("\"name\":\"00_lecture\",\"priority\":1") != std::string::npos,
+                "lecture priority is saved to the workspace");
+        Send(priorityEdit, WM_CHAR, VK_BACK);
+        for (const wchar_t digit : L"10000") {
+            if (digit) Send(priorityEdit, WM_CHAR, digit);
+        }
+        Send(orderWindow, WM_COMMAND, MAKEWPARAM(6102, BN_CLICKED),
+             reinterpret_cast<LPARAM>(GetDlgItem(orderWindow, 6102)));
+        GetWindowTextW(GetDlgItem(orderWindow, 6105), orderMessage, 260);
+        Require(orderMessage[0] && Equals(orderConfigPath, orderConfig),
+                "out-of-range priority is rejected without changing saved settings");
+        HANDLE lockedOrderConfig = CreateFileW(orderConfigPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Require(lockedOrderConfig != INVALID_HANDLE_VALUE, "lock owned priority settings for failure test");
+        for (int i = 0; i < 5; ++i) Send(priorityEdit, WM_CHAR, VK_BACK);
+        Send(priorityEdit, WM_CHAR, L'4');
+        Send(orderWindow, WM_COMMAND, MAKEWPARAM(6102, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(orderWindow, 6102)));
+        CloseHandle(lockedOrderConfig);
+        Require(Equals(orderConfigPath, orderConfig), "failed priority save keeps workspace settings unchanged");
+        Send(lectureList, LB_GETTEXT, 0, reinterpret_cast<LPARAM>(lectureLabel));
+        Require(std::wstring(lectureLabel).find(L"00_lecture") != std::wstring::npos,
+                "failed priority save keeps the previous list order");
+        Send(orderWindow, WM_COMMAND, MAKEWPARAM(6103, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(orderWindow, 6103)));
+        Send(lectureList, LB_GETTEXT, 0, reinterpret_cast<LPARAM>(lectureLabel));
+        Require(std::wstring(lectureLabel).find(L"01_lecture") != std::wstring::npos,
+                "clearing priority returns unassigned lectures to the end");
+        Send(orderWindow, WM_CLOSE);
+        if (lectureOrderOnly) {
+            Require(PostMessageW(main, WM_CLOSE, 0, 0), "close lecture order test app");
+            Require(WaitForSingleObject(process.hProcess, 10000) == WAIT_OBJECT_0,
+                    "lecture order test app exits");
+            DWORD code = 0;
+            Require(GetExitCodeProcess(process.hProcess, &code) && code == 0,
+                    "lecture order test app exit code");
+            CloseHandle(process.hThread); CloseHandle(process.hProcess); process = {};
+            command = L"\"" + executable.wstring() + L"\"";
+            Require(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0,
+                                   nullptr, executable.parent_path().c_str(), &startup, &process),
+                    "restart lecture order test app");
+            childPid = process.dwProcessId;
+            main = WaitWindow(L"PdfWorkspaceMainWnd");
+            Require(Until([&] { return IsWindowEnabled(main) && IsWindowVisible(main); }),
+                    "restarted lecture order app ready");
+            lectureList = FindWindowExW(main, nullptr, WC_LISTBOXW, nullptr);
+            Require(lectureList && Send(lectureList, LB_GETCOUNT) == 3,
+                    "restarted lecture list has all managed lectures");
+            Send(lectureList, LB_GETTEXT, 0, reinterpret_cast<LPARAM>(lectureLabel));
+            Require(std::wstring(lectureLabel).find(L"01_lecture") != std::wstring::npos,
+                    "saved priority order survives restart");
+            Send(lectureList, LB_GETTEXT, 2, reinterpret_cast<LPARAM>(lectureLabel));
+            Require(std::wstring(lectureLabel).find(L"00_lecture") != std::wstring::npos,
+                    "cleared priority remains unassigned after restart");
+            Require(PostMessageW(main, WM_CLOSE, 0, 0), "close restarted lecture order app");
+            Require(WaitForSingleObject(process.hProcess, 10000) == WAIT_OBJECT_0,
+                    "restarted lecture order app exits");
+            Require(GetExitCodeProcess(process.hProcess, &code) && code == 0,
+                    "restarted lecture order app exit code");
+            CloseHandle(process.hThread); CloseHandle(process.hProcess); process = {};
+            std::cout << "Lecture order actual application: " << checks << " checks passed.\n";
+            return 0;
+        }
         Send(lectureList, LB_SETCURSEL, 0);
         Send(main, WM_COMMAND, MAKEWPARAM(0, LBN_SELCHANGE), reinterpret_cast<LPARAM>(lectureList));
         Require(Send(sessionList, LB_GETCOUNT) > 0, "owned session was enumerated");
@@ -291,18 +729,17 @@ int main() {
 
         Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_GENERAL, 0), "open actual settings");
         HWND settings = WaitWindow(L"UnifiedSettingsShellClass");
-        HWND tab = Descendant(settings, WC_TABCONTROLW);
-        Require(tab && Send(tab, TCM_GETITEMCOUNT) == 5, "assets category removed from settings");
+        CheckSettingsSidebar(settings, settings_navigation::Environment);
         Require(PostMessageW(settings, WM_CLOSE, 0, 0) && Until([&] { return !IsWindow(settings); }), "close actual settings");
-        // A page with no weekday controls must not reset another page's value.
+        // Saving a different settings page must preserve lecture priorities.
         Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_NOTE, 0), "open note-only settings");
         settings = WaitWindow(L"UnifiedSettingsShellClass");
         Send(settings, WM_COMMAND, IDOK);
         Require(Until([&] { return !IsWindow(settings); }), "save note-only settings");
         std::string config;
         Require(ReadFileBytesWin32(workspace / L"workspace.json", config) &&
-                config.find("\"scheduleDayMask\": 65") != std::string::npos,
-                "note-only save preserves the configured Monday/Sunday mask");
+                config.find("\"name\":\"01_lecture\",\"priority\":7") != std::string::npos,
+                "note-only save preserves the configured lecture priority");
 
         Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_PALETTE, 0), "open integrated color creation page");
         settings = WaitWindow(L"UnifiedSettingsShellClass");
@@ -325,42 +762,389 @@ int main() {
         Send(palette, WM_COMMAND, 5201);
         Require(WindowText(GetDlgItem(palette, 5224)) == L"#A1", "slot switch cannot discard invalid color input");
         Type(GetDlgItem(palette, 5224), L"123456");
-        Require(WindowText(GetDlgItem(palette, 5220)) == L"18" &&
-                WindowText(GetDlgItem(palette, 5224)) == L"123456",
+        const bool inlineHexReady = Until([&] { return WindowText(GetDlgItem(palette, 5220)) == L"18" &&
+                WindowText(GetDlgItem(palette, 5221)) == L"52" && WindowText(GetDlgItem(palette, 5222)) == L"86" &&
+                WindowText(GetDlgItem(palette, 5224)) == L"123456"; });
+        if (!inlineHexReady) std::wcerr << L"Inline HEX state: red=" << WindowText(GetDlgItem(palette, 5220))
+            << L" hex=" << WindowText(GetDlgItem(palette, 5224)) << L'\n';
+        Require(inlineHexReady,
                 "HEX typing creates a color inline without rewriting the active field");
         Send(settings, WM_COMMAND, IDOK);
-        Require(Until([&] { return !IsWindow(settings); }), "valid inline color saves and closes");
+        const bool inlineSaved = Until([&] { return !IsWindow(settings); });
+        if (!inlineSaved) {
+            std::wcerr << L"Inline Save state: R=" << WindowText(GetDlgItem(palette, 5220))
+                << L" G=" << WindowText(GetDlgItem(palette, 5221)) << L" B=" << WindowText(GetDlgItem(palette, 5222))
+                << L" HEX=" << WindowText(GetDlgItem(palette, 5224)) << L'\n';
+        }
+        Require(inlineSaved, "valid inline color saves and closes");
 
         const auto palettePath = workspace / L"__pdf_note_workspace__" / L"__settings__" / L"user_palette.json";
         std::string paletteBytes;
         Require(ReadFileBytesWin32(palettePath, paletteBytes), "capture independently saved palette");
+        Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_PALETTE, 0), "open gradient regression");
+        settings = WaitWindow(L"UnifiedSettingsShellClass");
+        palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        Require(!IsWindowVisible(GetDlgItem(settings, IDOK)) && !IsWindowVisible(GetDlgItem(settings, 7101)) &&
+            !IsWindowVisible(GetDlgItem(settings, 7102)) && WindowText(GetDlgItem(settings, IDCANCEL)) == L"閉じる",
+            "palette footer contains the current exit action only");
+        HWND paletteFooter = FindWindowExW(settings, nullptr, L"STATIC", nullptr);
+        while (paletteFooter && WindowText(paletteFooter).find(L"パレットの変更は自動保存されます。") != 0)
+            paletteFooter = FindWindowExW(settings, paletteFooter, L"STATIC", nullptr);
+        Require(paletteFooter && IsWindowVisible(paletteFooter) &&
+            WindowText(paletteFooter).find(L"保存状態") != std::wstring::npos &&
+            WindowText(paletteFooter).find(L"破棄") == std::wstring::npos,
+            "normal palette footer explains automatic saving without a discard claim");
+        Require((GetWindowLongPtrW(palette, GWL_STYLE) & WS_CLIPCHILDREN) != 0,
+            "palette background repaint excludes its child controls");
+        HWND gradient = GetDlgItem(palette, 5271);
+        RECT gradientRect{}; Require(gradient && GetClientRect(gradient, &gradientRect), "saturation brightness gradient exists inline");
+        Type(GetDlgItem(palette, 5224), L"#FF0000"); WaitAutoPalette(palette, palettePath, paletteBytes);
+        const auto beforeDrag = paletteBytes;
+        const auto beforeDragHex = WindowText(GetDlgItem(palette, 5224));
+        Send(gradient, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(gradientRect.right / 2, gradientRect.bottom / 2));
+        Require(WindowText(GetDlgItem(palette, 5224)) != beforeDragHex && Equals(palettePath, beforeDrag),
+            "gradient drag updates numeric preview without writing each sample");
+        Send(gradient, WM_KEYDOWN, VK_ESCAPE);
+        Require(WindowText(GetDlgItem(palette, 5224)) == beforeDragHex && Equals(palettePath, beforeDrag),
+            "gradient Escape restores exact color without saving");
+        Send(gradient, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(gradientRect.right / 2, gradientRect.bottom / 2));
+        Send(gradient, WM_LBUTTONUP, 0, MAKELPARAM(gradientRect.right / 2, gradientRect.bottom / 2));
+        WaitAutoPalette(palette, palettePath, paletteBytes);
+        Require(paletteBytes != beforeDrag, "gradient release auto-saves the chosen color");
+        const auto beforeArrow = paletteBytes;
+        Send(gradient, WM_KEYDOWN, VK_RIGHT); WaitAutoPalette(palette, palettePath, paletteBytes);
+        Require(paletteBytes != beforeArrow, "gradient arrows select and save colors");
+        Type(GetDlgItem(palette, 5224), L"#A1");
+        Send(palette, WM_TIMER, 1);
+        Require(Equals(palettePath, paletteBytes), "incomplete numeric input never auto-saves");
+        Type(GetDlgItem(palette, 5224), L"#123456"); WaitAutoPalette(palette, palettePath, paletteBytes);
+        Send(settings, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(settings); }) && Equals(palettePath, paletteBytes), "Close keeps automatically saved colors");
+        Require(PostMessageW(main, WM_COMMAND, ID_TOOL_COLOR_CUSTOM, 0), "open annotation palette through full settings");
+        settings = WaitWindow(L"UnifiedSettingsShellClass");
+        palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        CheckSettingsSidebar(settings, settings_navigation::Palette);
+        Require(palette && !IsWindowEnabled(main),
+                "annotation color uses the same full settings dialog and modal owner");
+        const std::wstring originalCustomHex = WindowText(GetDlgItem(palette, 5224));
+        Send(palette, WM_COMMAND, 5200);
+        Send(palette, WM_COMMAND, 5207);
+        Require(WindowText(GetDlgItem(palette, 5224)) == originalCustomHex,
+                "annotation entry initially selects custom palette slot eight");
+        Type(GetDlgItem(palette, 5224), L"#2468AC");
+        WaitAutoPalette(palette, palettePath, paletteBytes);
+        Send(settings, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(settings); }) && Equals(palettePath, paletteBytes),
+                "annotation palette Close preserves immediately saved colors");
+
+        Require(PostMessageW(main, WM_COMMAND, ID_TOOL_COLOR_CUSTOM, 0), "reopen annotation palette for explicit save");
+        settings = WaitWindow(L"UnifiedSettingsShellClass");
+        palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        Require(palette && WindowText(GetDlgItem(palette, 5224)) == L"#2468AC",
+                "automatic custom color persists on reopen");
+        Type(GetDlgItem(palette, 5224), L"#13579B");
+        WaitAutoPalette(palette, palettePath, paletteBytes);
+        Require(IsWindow(settings) && !IsWindowEnabled(main) && ReadFileBytesWin32(palettePath, paletteBytes) &&
+                paletteBytes.find("#13579B") != std::string::npos,
+                "annotation palette automatic save keeps settings open and writes the custom color");
+        Type(GetDlgItem(palette, 5224), L"#AB");
+        Require(PostMessageW(palette, WM_COMMAND, 5283, 0), "reload incomplete input asynchronously");
+        HWND reloadConfirm = WaitWindow(L"SilentDialogClass");
+        Send(reloadConfirm, WM_COMMAND, 5102);
+        Require(Until([&] { return !IsWindow(reloadConfirm) && WindowText(GetDlgItem(palette, 5224)) == L"#13579B"; }), "reload discards only incomplete input");
+        Require(palette && !IsWindowEnabled(main) && WindowText(GetDlgItem(palette, 5224)) == L"#13579B",
+                "reverting the palette reloads the saved color without enabling the modal owner");
+        Send(settings, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(settings); }) && Equals(palettePath, paletteBytes),
+                "saved annotation palette survives Exit");
+        Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_PALETTE, 0), "open palette preset UI");
+        settings = WaitWindow(L"UnifiedSettingsShellClass");
+        palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        HWND setsList = GetDlgItem(palette, 5262);
+        const auto setsPath = palette_presets::FilePath(workspace);
+        Require(setsList && Send(setsList, CB_GETCOUNT) == 6 && !IsWindowEnabled(GetDlgItem(palette, 5265)) &&
+                !IsWindowEnabled(GetDlgItem(palette, 5266)), "initial palette set is read only alongside five user slots");
+        Send(palette, WM_COMMAND, 5265); // Bypass disabled button: backend must still refuse the initial set.
+        Require(!fs::exists(setsPath), "initial palette set cannot be overwritten through a direct command");
+        Send(setsList, CB_SETCURSEL, 1);
+        Send(palette, WM_COMMAND, MAKEWPARAM(5262, CBN_SELCHANGE), reinterpret_cast<LPARAM>(setsList));
+        Type(GetDlgItem(palette, 5224), L"#224466");
+        WaitAutoPalette(palette, palettePath, paletteBytes);
+        Send(palette, WM_COMMAND, 5265);
+        std::string setsBytes;
+        Require(ReadFileBytesWin32(setsPath, setsBytes) && setsBytes.find("#224466") != std::string::npos &&
+                Equals(palettePath, paletteBytes), "saving a palette set is immediate and does not commit the active palette");
+        Send(palette, WM_COMMAND, 5207);
+        Type(GetDlgItem(palette, 5224), L"#010203");
+        Send(palette, WM_COMMAND, 5200);
+        Type(GetDlgItem(palette, 5224), L"#6688AA");
+        WaitAutoPalette(palette, palettePath, paletteBytes);
+        Require(PostMessageW(palette, WM_COMMAND, 5265, 0), "request preset overwrite asynchronously");
+        HWND setConfirm = WaitWindow(L"SilentDialogClass");
+        Send(setConfirm, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(setConfirm); }) && Equals(setsPath, setsBytes),
+                "cancelling preset overwrite preserves saved sets and editor colors");
+        Require(WindowText(GetDlgItem(palette, 5224)) == L"#6688AA", "overwrite cancellation retains draft color");
+        Require(PostMessageW(palette, WM_COMMAND, 5264, 0), "cancel preset application asynchronously");
+        setConfirm = WaitWindow(L"SilentDialogClass");
+        Send(setConfirm, WM_COMMAND, IDOK); // Default action is No, not Apply.
+        Require(Until([&] { return !IsWindow(setConfirm); }) && WindowText(GetDlgItem(palette, 5224)) == L"#6688AA" &&
+                Equals(palettePath, paletteBytes), "default confirmation preserves automatically saved palette edits");
+        Require(PostMessageW(palette, WM_COMMAND, 5264, 0), "apply saved palette set asynchronously");
+        setConfirm = WaitWindow(L"SilentDialogClass");
+        Send(setConfirm, WM_COMMAND, 5102); // Explicit Yes action; Enter defaults to No.
+        // Destroying the confirmation HWND precedes returning to the parent
+        // palette handler. Observe completed application, not merely closure.
+        Require(Until([&] { return !IsWindow(setConfirm) &&
+                WindowText(GetDlgItem(palette, 5224)) == L"#224466" &&
+                WindowText(GetDlgItem(palette, 5280)).find(L"保存済み") == 0; }),
+                "palette preset applies and immediately saves eight slots");
+        WaitAutoPalette(palette, palettePath, paletteBytes);
+        Send(palette, WM_COMMAND, 5207);
+        Require(WindowText(GetDlgItem(palette, 5224)) == L"#13579B", "applying a palette preset also restores the eighth draft slot");
+        Send(palette, WM_COMMAND, 5200);
+        HANDLE lockedSets = CreateFileW(setsPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Require(lockedSets != INVALID_HANDLE_VALUE, "lock palette collection for UI save failure");
+        Send(setsList, CB_SETCURSEL, 2);
+        Send(palette, WM_COMMAND, MAKEWPARAM(5262, CBN_SELCHANGE), reinterpret_cast<LPARAM>(setsList));
+        Send(palette, WM_COMMAND, 5265);
+        CloseHandle(lockedSets);
+        Require(Equals(setsPath, setsBytes) && !IsWindowEnabled(GetDlgItem(palette, 5264)),
+                "failed UI preset save keeps the original file and empty user slot");
+        Send(settings, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(settings); }) && Equals(setsPath, setsBytes) && Equals(palettePath, paletteBytes),
+                "palette preset and active application survive Close");
+        Require(PostMessageW(main, WM_COMMAND, ID_TOOL_COLOR_CUSTOM, 0), "annotation entry shares palette presets");
+        settings = WaitWindow(L"UnifiedSettingsShellClass");
+        palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        setsList = GetDlgItem(palette, 5262);
+        Send(setsList, CB_SETCURSEL, 1);
+        Send(palette, WM_COMMAND, MAKEWPARAM(5262, CBN_SELCHANGE), reinterpret_cast<LPARAM>(setsList));
+        Require(IsWindowEnabled(GetDlgItem(palette, 5264)), "palette preset is available through the annotation color entry");
+        Require(PostMessageW(palette, WM_COMMAND, 5266, 0), "clear saved preset asynchronously");
+        setConfirm = WaitWindow(L"SilentDialogClass");
+        Send(setConfirm, WM_COMMAND, 5102);
+        Require(Until([&] { return !IsWindow(setConfirm) && !IsWindowEnabled(GetDlgItem(palette, 5264)); }) &&
+                Equals(palettePath, paletteBytes), "clearing a user preset leaves the active palette unchanged");
+        Require(ReadFileBytesWin32(setsPath, setsBytes), "capture cleared palette collection");
+        Require(atomic_write::AtomicWriteUtf8(setsPath, "{}", setsPath.parent_path(),
+            workspace / L"__pdf_note_workspace__" / L"__escape__", &error), "prepare invalid palette collection for UI reload");
+        Send(palette, WM_COMMAND, 5267);
+        Require(!IsWindowEnabled(GetDlgItem(palette, 5265)) && Equals(setsPath, "{}"),
+                "invalid palette collection disables user writes without replacing the file");
+        Send(setsList, CB_SETCURSEL, 0);
+        Send(palette, WM_COMMAND, MAKEWPARAM(5262, CBN_SELCHANGE), reinterpret_cast<LPARAM>(setsList));
+        Require(IsWindowEnabled(GetDlgItem(palette, 5264)), "initial palette set remains usable when the user file is invalid");
+        Require(atomic_write::AtomicWriteUtf8(setsPath, setsBytes, setsPath.parent_path(),
+            workspace / L"__pdf_note_workspace__" / L"__escape__", &error), "restore owned palette collection after reload test");
+        Send(palette, WM_COMMAND, 5267);
+        Send(setsList, CB_SETCURSEL, 5);
+        Send(palette, WM_COMMAND, MAKEWPARAM(5262, CBN_SELCHANGE), reinterpret_cast<LPARAM>(setsList));
+        Require(IsWindowEnabled(GetDlgItem(palette, 5265)), "explicit preset reload restores fifth user slot access");
+        palette_presets::Document expectedUserSets;
+        // Save through the real buttons, including every editable slot in every user set.
+        for (size_t user = 0; user < palette_presets::kUserCount; ++user) {
+            SelectPaletteSet(palette, static_cast<int>(user + 1));
+            palette_presets::Colors colors{};
+            for (size_t slot = 0; slot < colors.size(); ++slot) {
+                colors[slot] = RGB(30 + user * 20 + slot, 20 + slot * 15, 180 - user * 20);
+                Send(palette, WM_COMMAND, 5200 + slot);
+                Type(GetDlgItem(palette, 5224), PresetColorText(colors[slot]).c_str());
+            }
+            WaitAutoPalette(palette, palettePath, paletteBytes);
+            Send(palette, WM_COMMAND, 5265);
+            expectedUserSets.users[user] = colors;
+            palette_presets::Snapshot persisted;
+            Require(palette_presets::Load(workspace, persisted) && persisted.colors.users == expectedUserSets.users &&
+                Equals(palettePath, paletteBytes), "UI saves each user set without altering other sets or rewriting the saved active palette");
+        }
+        SelectPaletteSet(palette, 2);
+        Send(palette, WM_COMMAND, 5200);
+        Type(GetDlgItem(palette, 5224), L"#CC8844");
+        // The editor still contains user set 5 here. An overwrite intentionally
+        // captures all eight draft slots, not just the currently selected color.
+        auto overwritten = *expectedUserSets.users[4];
+        overwritten[0] = RGB(204, 136, 68);
+        expectedUserSets.users[1] = overwritten;
+        ConfirmPaletteAction(palette, 5265, true, [&] {
+            palette_presets::Snapshot state;
+            return palette_presets::Load(workspace, state) && state.colors.users == expectedUserSets.users;
+        });
+        palette_presets::Snapshot overwrittenState;
+        Require(palette_presets::Load(workspace, overwrittenState) && overwrittenState.colors.users == expectedUserSets.users,
+            "confirmed UI overwrite replaces all eight colors in only the chosen user set");
+        Require(ReadFileBytesWin32(setsPath, setsBytes), "capture five populated user sets");
+        for (size_t user = 0; user < palette_presets::kUserCount; ++user) {
+            const auto draftBeforeSelection = WindowText(GetDlgItem(palette, 5224));
+            SelectPaletteSet(palette, static_cast<int>(user + 1));
+            Require(WindowText(GetDlgItem(palette, 5224)) == draftBeforeSelection, "selecting a set previews without changing draft colors");
+            Send(palette, WM_COMMAND, 5200);
+            ConfirmPaletteAction(palette, 5264, true, [&] {
+                return WindowText(GetDlgItem(palette, 5224)) == PresetColorText((*expectedUserSets.users[user])[0]);
+            });
+            for (size_t slot = 0; slot < palette_presets::kSlotCount; ++slot) {
+                Send(palette, WM_COMMAND, 5200 + slot);
+                Require(WindowText(GetDlgItem(palette, 5224)) == PresetColorText((*expectedUserSets.users[user])[slot]),
+                    "UI applies every color from all five user sets");
+            }
+            WaitAutoPalette(palette, palettePath, paletteBytes);
+            std::vector<COLORREF> activeColors;
+            Require(palette_active::Parse(paletteBytes, activeColors) && activeColors.size() == 24 &&
+                std::equal(expectedUserSets.users[user]->begin(), expectedUserSets.users[user]->end(), activeColors.begin()) &&
+                Equals(setsPath, setsBytes), "applying a set saves all eight active colors without changing stored sets");
+        }
+        RECT paletteFrame{};
+        Require(GetWindowRect(settings, &paletteFrame), "capture palette settings dimensions");
+        for (const int width : {900, 640}) {
+            Require(SetWindowPos(settings, nullptr, 0, 0, width, 540, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE),
+                "resize palette settings through wide and narrow layouts");
+            CheckPaletteLayout(palette);
+        }
+        Require(SetWindowPos(settings, nullptr, 0, 0, paletteFrame.right - paletteFrame.left,
+            paletteFrame.bottom - paletteFrame.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE), "restore palette settings dimensions");
+        const auto beforeKeyboardSelection = WindowText(GetDlgItem(palette, 5224));
+        Send(setsList, CB_SHOWDROPDOWN, TRUE);
+        Send(setsList, WM_KEYDOWN, VK_HOME);
+        Send(setsList, WM_KEYDOWN, VK_DOWN);
+        Send(setsList, WM_KEYDOWN, VK_RETURN);
+        Require(Send(setsList, CB_GETCURSEL) == 1 && WindowText(GetDlgItem(palette, 5224)) == beforeKeyboardSelection,
+            "keyboard preset selection changes preview only");
+        Send(settings, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(settings); }), "exit preset checks without changing active palette");
+        Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_PALETTE, 0), "open saved color stock UI");
+        settings = WaitWindow(L"UnifiedSettingsShellClass");
+        palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        HWND stockList = GetDlgItem(palette, 5252);
+        Require(stockList && Send(stockList, LB_GETCOUNT) == 0, "new workspace has empty color stock");
+        Type(GetDlgItem(palette, 5224), L"#556677");
+        Send(palette, WM_COMMAND, 5253);
+        const auto stockPath = workspace / L"__pdf_note_workspace__" / L"__settings__" / L"color_stock.json";
+        std::string stockBytes;
+        Require(Send(stockList, LB_GETCOUNT) == 1 && ReadFileBytesWin32(stockPath, stockBytes) &&
+                stockBytes.find("#556677") != std::string::npos, "stock add saves immediately");
+        Send(palette, WM_COMMAND, 5253);
+        Require(Send(stockList, LB_GETCOUNT) == 1 && Equals(stockPath, stockBytes), "stock duplicate is selected without a second entry");
+        Type(GetDlgItem(palette, 5224), L"#778899");
+        Send(palette, WM_COMMAND, 5253);
+        Require(Send(stockList, LB_GETCOUNT) == 2, "multiple stock colors coexist with eight palette slots");
+        Send(palette, WM_COMMAND, 5202);
+        Send(stockList, LB_SETCURSEL, 0);
+        Type(GetDlgItem(palette, 5224), L"#A1");
+        Send(palette, WM_COMMAND, 5254);
+        Require(WindowText(GetDlgItem(palette, 5224)) == L"#A1", "stock loading cannot discard incomplete color input");
+        Type(GetDlgItem(palette, 5224), L"#000000");
+        Send(palette, WM_COMMAND, 5254);
+        WaitAutoPalette(palette, palettePath, paletteBytes);
+        Require(WindowText(GetDlgItem(palette, 5224)) == L"#556677" && paletteBytes.find("#556677") != std::string::npos,
+                "stock color immediately saves the selected palette slot");
+        Send(settings, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(settings); }) && Equals(palettePath, paletteBytes), "stock usage survives Close");
+
+        Require(PostMessageW(main, WM_COMMAND, ID_TOOL_COLOR_CUSTOM, 0), "annotation entry shares saved color stock");
+        settings = WaitWindow(L"UnifiedSettingsShellClass");
+        palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        stockList = GetDlgItem(palette, 5252);
+        Require(Send(stockList, LB_GETCOUNT) == 2, "color stock survives Exit and is shared by palette entry points");
+        Send(stockList, LB_SETCURSEL, 0);
+        Send(palette, WM_COMMAND, 5255);
+        Require(Send(stockList, LB_GETCOUNT) == 1 && ReadFileBytesWin32(stockPath, stockBytes) &&
+                stockBytes.find("#556677") == std::string::npos && Equals(palettePath, paletteBytes),
+                "stock removal leaves palette slots unchanged");
+        HANDLE lockedStock = CreateFileW(stockPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Require(lockedStock != INVALID_HANDLE_VALUE, "lock UI stock against replacement");
+        Type(GetDlgItem(palette, 5224), L"#ABCDEF");
+        Send(palette, WM_COMMAND, 5253);
+        CloseHandle(lockedStock);
+        Require(Send(stockList, LB_GETCOUNT) == 1 && Equals(stockPath, stockBytes) &&
+                WindowText(GetDlgItem(palette, 5224)) == L"#ABCDEF", "stock write failure retains saved list and editable draft");
+        Send(settings, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(settings); }), "close stock failure editor");
+        Require(ReadFileBytesWin32(palettePath, paletteBytes), "capture auto-saved palette independent of stock failure");
+        Require(atomic_write::AtomicWriteUtf8(stockPath, "broken", stockPath.parent_path(), &error), "prepare corrupt UI stock fixture");
+        Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_PALETTE, 0), "open palette with corrupt color stock");
+        settings = WaitWindow(L"UnifiedSettingsShellClass");
+        palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        Require(!IsWindowEnabled(GetDlgItem(palette, 5253)) && Equals(stockPath, "broken"),
+                "corrupt color stock disables mutation without overwriting the file");
+        Require(atomic_write::AtomicWriteUtf8(stockPath, stockBytes, stockPath.parent_path(), &error), "restore owned UI stock fixture");
+        Send(palette, WM_COMMAND, 5256);
+        Require(IsWindowEnabled(GetDlgItem(palette, 5253)) && Send(GetDlgItem(palette, 5252), LB_GETCOUNT) == 1,
+                "explicit stock reload recovers without recreating the dialog");
+        Send(settings, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(settings); }), "close color stock regression");
         Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_PALETTE, 0), "open palette write failure regression");
         settings = WaitWindow(L"UnifiedSettingsShellClass");
         palette = Descendant(settings, L"PaletteSettingsDlgClass");
-        const std::wstring savedHex = WindowText(GetDlgItem(palette, 5224));
-        Type(GetDlgItem(palette, 5224), L"#ABCDEF");
         HANDLE lockedPalette = CreateFileW(palettePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         Require(lockedPalette != INVALID_HANDLE_VALUE, "lock only owned palette against replacement");
+        Type(GetDlgItem(palette, 5224), L"#ABCDEF");
         Send(settings, WM_COMMAND, IDOK);
         const bool paletteHeldOpen = IsWindow(settings);
         CloseHandle(lockedPalette);
         Require(paletteHeldOpen && Equals(palettePath, paletteBytes) &&
                 WindowText(GetDlgItem(palette, 5224)) == L"#ABCDEF",
                 "palette write failure preserves the file and editable color draft");
+        Send(palette, WM_COMMAND, 5282);
+        WaitAutoPalette(palette, palettePath, paletteBytes);
+        Require(paletteBytes.find("#ABCDEF") != std::string::npos, "failed auto-save retries without losing the edited color");
         Send(settings, WM_COMMAND, IDCANCEL);
-        Require(Until([&] { return !IsWindow(settings); }), "exit after failed palette save");
+        Require(Until([&] { return !IsWindow(settings); }), "close after retrying failed palette save");
         Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_PALETTE, 0), "reopen palette after failed save exit");
         settings = WaitWindow(L"UnifiedSettingsShellClass");
         palette = Descendant(settings, L"PaletteSettingsDlgClass");
-        Require(WindowText(GetDlgItem(palette, 5224)) == savedHex, "failed palette save does not replace the saved color");
+        Require(WindowText(GetDlgItem(palette, 5224)) == L"#ABCDEF", "retried palette save survives reopening");
+        palette_active::Snapshot competing;
+        Require(palette_active::Load(workspace, competing), "capture external active-palette update");
+        auto competingColors = competing.colors; competingColors[0] = RGB(152,118,84);
+        Require(palette_active::Save(competing, competingColors), "save competing palette update outside the dialog");
+        Type(GetDlgItem(palette, 5224), L"#654321");
+        Send(palette, WM_TIMER, 1);
+        Require(Equals(palettePath, competing.bytes) && WindowText(GetDlgItem(palette, 5224)) == L"#654321",
+            "stale UI auto-save preserves competing bytes and edited color");
+        Require(PostMessageW(palette, WM_COMMAND, 5283, 0), "reload competing palette asynchronously");
+        reloadConfirm = WaitWindow(L"SilentDialogClass"); Send(reloadConfirm, WM_COMMAND, 5102);
+        Require(Until([&] { return !IsWindow(reloadConfirm) && WindowText(GetDlgItem(palette, 5224)) == L"#987654"; }),
+            "explicit reload accepts competing palette without overwriting it");
+        WaitAutoPalette(palette, palettePath, paletteBytes);
+        const auto relatedConfigPath = workspace / L"workspace.json";
+        std::string relatedConfig;
+        Require(ReadFileBytesWin32(relatedConfigPath, relatedConfig), "capture related config before partial save failure");
+        HANDLE relatedLock = CreateFileW(relatedConfigPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        Require(relatedLock != INVALID_HANDLE_VALUE, "lock related palette config only");
+        Type(GetDlgItem(palette, 5224), L"#456789");
+        Send(palette, WM_TIMER, 1);
+        Require(ReadFileBytesWin32(palettePath, paletteBytes) && paletteBytes.find("#456789") != std::string::npos &&
+            Equals(relatedConfigPath, relatedConfig) && WindowText(GetDlgItem(palette, 5280)).find(L"関連設定") != std::wstring::npos,
+            "palette file success and related config failure are reported separately");
+        CloseHandle(relatedLock);
+        const auto alreadySavedPalette = paletteBytes;
+        Send(palette, WM_COMMAND, 5282); WaitAutoPalette(palette, palettePath, paletteBytes);
+        Require(paletteBytes == alreadySavedPalette, "runtime retry does not rewrite the already saved palette");
         Send(settings, WM_COMMAND, IDCANCEL);
         Require(Until([&] { return !IsWindow(settings); }), "close unchanged palette");
+        Require(atomic_write::AtomicWriteUtf8(palettePath, "broken", palettePath.parent_path(), &error), "prepare owned corrupt palette for UI safety");
+        Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_PALETTE, 0), "open corrupt active palette");
+        settings = WaitWindow(L"UnifiedSettingsShellClass"); palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        Type(GetDlgItem(palette, 5224), L"#050607"); Send(palette, WM_TIMER, 1);
+        Require(Equals(palettePath, "broken"), "corrupt UI palette cannot be silently replaced by edited defaults");
+        Require(PostMessageW(settings, WM_COMMAND, IDCANCEL, 0), "request Close with unsaved color");
+        HWND closeConfirm = WaitWindow(L"SilentDialogClass"); Send(closeConfirm, WM_COMMAND, IDOK);
+        Require(Until([&] { return !IsWindow(closeConfirm); }) && IsWindow(settings) &&
+            WindowText(GetDlgItem(palette, 5224)) == L"#050607", "default Close confirmation retains unsaved edit");
+        Require(PostMessageW(settings, WM_COMMAND, IDCANCEL, 0), "explicitly discard unsaved color on Close");
+        closeConfirm = WaitWindow(L"SilentDialogClass"); Send(closeConfirm, WM_COMMAND, 5102);
+        Require(Until([&] { return !IsWindow(settings); }) && Equals(palettePath, "broken"),
+            "explicit discard closes without overwriting corrupt original");
+        Require(atomic_write::AtomicWriteUtf8(palettePath, paletteBytes, palettePath.parent_path(), &error), "restore owned palette bytes after corrupt UI test");
 
         // Hold only the disposable config against replacement, as a real write
         // sharing failure. The editor must stay open and keep the original.
         Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_GENERAL, 0), "open save failure regression");
         settings = WaitWindow(L"UnifiedSettingsShellClass");
+        Send(settings, WM_APP + 140, settings_navigation::Files);
+        CheckSettingsSidebar(settings, settings_navigation::Files);
         const auto configPath = workspace / L"workspace.json";
         HWND pendingLayout = DescendantId(settings, 4214);
         Require(pendingLayout && Send(pendingLayout, CB_GETCURSEL) == 0, "capture original layout before failed save");
@@ -374,30 +1158,31 @@ int main() {
         CloseHandle(lockedConfig);
         Require(heldOpen && Equals(configPath, config) && Send(pendingLayout, CB_GETCURSEL) == 1,
                 "failed save retains editor, pending choice and original config");
-        Send(settings, WM_COMMAND, IDCANCEL);
-        Require(Until([&] { return !IsWindow(settings); }), "exit after failed save discards only the unsaved draft");
+        Require(PostMessageW(settings, WM_COMMAND, IDCANCEL, 0), "request closing after failed save");
+        HWND discardSettings = WaitWindow(L"SilentDialogClass");
+        Require(GetWindow(discardSettings, GW_OWNER) == settings, "discard choice belongs to the failed settings editor");
+        Send(discardSettings, WM_COMMAND, 5103); // Explicit Discard; default remains Continue editing.
+        Require(Until([&] { return !IsWindow(settings); }) && Equals(configPath, config),
+                "exit after failed save discards only the unsaved draft");
         Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_GENERAL, 0), "reopen after cancelled failed save");
         settings = WaitWindow(L"UnifiedSettingsShellClass");
+        Send(settings, WM_APP + 140, settings_navigation::Files);
+        CheckSettingsSidebar(settings, settings_navigation::Files);
         Require(Send(DescendantId(settings, 4214), CB_GETCURSEL) == 0,
                 "unsaved layout is not left in runtime for a later auto-save");
+        Send(DescendantId(settings, 4214), CB_SETCURSEL, 1);
         Send(settings, WM_COMMAND, IDOK);
-        Require(Until([&] { return !IsWindow(settings); }), "retry after write failure succeeds");
-
-        const auto schedulePath = workspace / L"__pdf_note_workspace__" / L"__settings__" / L"schedule.json";
-        std::string scheduleBytes;
-        Require(ReadFileBytesWin32(schedulePath, scheduleBytes), "capture separately persisted timetable");
-        Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_GENERAL, 0), "open schedule write failure regression");
+        Require(Until([&] { return !IsWindow(settings); }) && ReadFileBytesWin32(configPath, config) &&
+                config.find("\"sessionFileLayout\": \"session_root\"") != std::string::npos,
+                "retry after write failure persists the formerly rejected choice");
+        Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_GENERAL, 0), "restore the separate-layout fixture");
         settings = WaitWindow(L"UnifiedSettingsShellClass");
-        HANDLE lockedSchedule = CreateFileW(schedulePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        Require(lockedSchedule != INVALID_HANDLE_VALUE, "lock only owned timetable against replacement");
-        Send(settings, WM_COMMAND, IDOK);
-        const bool scheduleHeldOpen = IsWindow(settings);
-        CloseHandle(lockedSchedule);
-        Require(scheduleHeldOpen && Equals(schedulePath, scheduleBytes),
-                "timetable save failure propagates instead of closing settings with false success");
-        Send(settings, WM_COMMAND, IDOK);
-        Require(Until([&] { return !IsWindow(settings); }), "retry after timetable write failure succeeds");
+        Send(settings, WM_APP + 140, settings_navigation::Files);
+        CheckSettingsSidebar(settings, settings_navigation::Files);
+        Send(DescendantId(settings, 4214), CB_SETCURSEL, 0); Send(settings, WM_COMMAND, IDOK);
+        Require(Until([&] { return !IsWindow(settings); }) && ReadFileBytesWin32(configPath, config) &&
+                config.find("\"sessionFileLayout\": \"separate_directories\"") != std::string::npos,
+                "restore the original layout before independent organization checks");
 
         // Both layout directions use real PDF/annotation files and collisions.
         // A separate, unopened PDF also verifies organization does not switch
@@ -448,6 +1233,8 @@ int main() {
             Equals(session / L"pdf" / L"bundle (1).clrop", orphanClrop), "organization never overwrites conflicts");
         Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_GENERAL, 0), "select native flat layout");
         settings = WaitWindow(L"UnifiedSettingsShellClass");
+        Send(settings, WM_APP + 140, settings_navigation::Files);
+        CheckSettingsSidebar(settings, settings_navigation::Files);
         HWND layout = DescendantId(settings, 4214);
         Require(layout && Send(layout, CB_GETCOUNT) == 2, "both layout choices are available");
         Send(layout, CB_SETCURSEL, 1); Send(settings, WM_COMMAND, IDOK);
@@ -517,6 +1304,30 @@ int main() {
         };
         checkPresetPage();
         RECT presetBounds{}; Require(GetWindowRect(presets, &presetBounds), "capture responsive preset frame");
+        const auto clientControlRect = [&](int id) {
+            RECT bounds{}; Require(GetWindowRect(GetDlgItem(presets, id), &bounds), "measure preset/restore action geometry");
+            MapWindowPoints(nullptr, presets, reinterpret_cast<POINT*>(&bounds), 2);
+            return bounds;
+        };
+        const auto noScroll = [&] {
+            SCROLLINFO info{}; info.cbSize = sizeof(info); info.fMask = SIF_ALL;
+            Require(GetScrollInfo(presets, SB_VERT, &info) && info.nPos == 0 && info.nMax < static_cast<int>(info.nPage) &&
+                    !(GetWindowLongPtrW(presets, GWL_STYLE) & WS_VSCROLL),
+                    "fitting active tab has no scrollbar or scrollable range");
+            const auto before = clientControlRect(30);
+            Send(presets, WM_MOUSEWHEEL, MAKEWPARAM(0, -WHEEL_DELTA));
+            Send(presets, WM_VSCROLL, SB_BOTTOM);
+            const auto after = clientControlRect(30);
+            Require(EqualRect(&before, &after), "wheel and scrollbar commands cannot move fitting content");
+        };
+        noScroll(); // The longer hidden Restore tab must not enlarge Presets.
+        Send(presets, WM_COMMAND, 7102);
+        SCROLLINFO restoreScroll{}; restoreScroll.cbSize = sizeof(restoreScroll); restoreScroll.fMask = SIF_ALL;
+        Require(GetScrollInfo(presets, SB_VERT, &restoreScroll) && restoreScroll.nMax >= static_cast<int>(restoreScroll.nPage),
+                "same viewport needs scrolling only for the longer active Restore tab");
+        Send(presets, WM_VSCROLL, SB_BOTTOM);
+        Send(presets, WM_COMMAND, 7101);
+        noScroll(); checkPresetPage(); // Tab change discards the former tab's offset/range.
         // Exercise the application's DPI handler without changing the user's OS
         // scale. Larger margins/actions plus a constrained viewport require scroll.
         Send(presets, WM_DPICHANGED, MAKEWPARAM(192, 192), reinterpret_cast<LPARAM>(&presetBounds));
@@ -525,24 +1336,39 @@ int main() {
         SCROLLINFO presetScroll{}; presetScroll.cbSize = sizeof(presetScroll); presetScroll.fMask = SIF_ALL;
         Require(GetScrollInfo(presets, SB_VERT, &presetScroll) && presetScroll.nMax >= static_cast<int>(presetScroll.nPage),
                 "long preset/restore content remains accessible by scrolling");
+        const auto beforeWheel = clientControlRect(10);
+        Send(presets, WM_MOUSEWHEEL, MAKEWPARAM(0, -WHEEL_DELTA));
+        const auto afterWheel = clientControlRect(10);
+        Require(afterWheel.top < beforeWheel.top && afterWheel.right - afterWheel.left == beforeWheel.right - beforeWheel.left &&
+                afterWheel.bottom - afterWheel.top == beforeWheel.bottom - beforeWheel.top,
+                "overflow scroll moves existing controls without resizing/reflowing them");
         Send(presets, WM_VSCROLL, SB_BOTTOM);
         RECT closeBounds{}, presetClient{};
         Require(GetWindowRect(GetDlgItem(presets, 30), &closeBounds) && GetClientRect(presets, &presetClient),
                 "measure scrolled exit action");
         MapWindowPoints(nullptr, presets, reinterpret_cast<POINT*>(&closeBounds), 2);
         Require(closeBounds.top >= 0 && closeBounds.bottom <= presetClient.bottom, "scroll reveals the complete exit action");
+        Send(presets, WM_COMMAND, 7102);
+        Require(GetScrollInfo(presets, SB_VERT, &presetScroll) && presetScroll.nPos == 0 && IsWindowVisible(GetDlgItem(presets, 20)),
+                "constrained Restore tab opens at the top, retaining its restore actions");
+        Send(presets, WM_VSCROLL, SB_BOTTOM);
+        Send(presets, WM_COMMAND, 7101);
+        Require(GetScrollInfo(presets, SB_VERT, &presetScroll) && presetScroll.nPos == 0,
+                "constrained Presets tab also opens at the top after a scrolled Restore tab");
         Send(presets, WM_DPICHANGED, MAKEWPARAM(96, 96), reinterpret_cast<LPARAM>(&presetBounds));
         Require(SetWindowPos(presets, nullptr, 0, 0, presetBounds.right - presetBounds.left,
-            presetBounds.bottom - presetBounds.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE), "restore preset frame");
+            900, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE), "give both tabs sufficient room after constrained layout");
         Send(presets, WM_VSCROLL, SB_TOP);
         Send(presets, WM_COMMAND, 7102);
         Require(!IsWindowVisible(GetDlgItem(presets, 10)) && IsWindowVisible(GetDlgItem(presets, 20)),
                 "restore tab shows restore actions without closing the modal dialog");
         checkPresetPage();
+        noScroll();
         Send(presets, WM_THEMECHANGED);
         Send(presets, WM_COMMAND, 7101);
         Require(IsWindowVisible(GetDlgItem(presets, 10)) && !IsWindowVisible(GetDlgItem(presets, 20)),
                 "preset tab restores save and load actions");
+        noScroll();
         // IsDialogMessage maps Escape to this command. It must exit, not select
         // the restore tab (whose former ID collided with IDCANCEL).
         Send(presets, WM_COMMAND, IDCANCEL);
@@ -578,8 +1404,7 @@ int main() {
         Require(GetTickCount64() - assetsRequestedAt >= 10000, "presence refresh waits ten seconds");
         Send(assets, WM_COMMAND, 7131);
         Require(!IsWindowEnabled(GetDlgItem(assets, 7131)), "manual refresh starts another cooldown");
-        Send(list, WM_KEYDOWN, VK_HOME);
-        for (int i = 0; i < 10; ++i) Send(list, WM_KEYDOWN, VK_DOWN);
+        SelectAssetRow(list, L"テーマフォルダー (__theme__)");
         Require(PostMessageW(assets, WM_COMMAND, 7136, 0), "open presence failure details");
         HWND presenceDetails = WaitWindow(L"SilentDialogClass");
         CheckDetails(presenceDetails, L"検査自体の失敗", L"有無を確定できません");
@@ -595,8 +1420,7 @@ int main() {
         Require(Send(list, LVM_GETITEMCOUNT) == initialRows + 1, "allowed refresh discovers the new asset");
         const auto discoveredAt = AssetCheckTime(assets);
         Require(discoveredAt != firstAssetCheck, "completed refresh advances the check time");
-        Send(list, WM_KEYDOWN, VK_HOME);
-        for (int i = 0; i < 12; ++i) Send(list, WM_KEYDOWN, VK_DOWN);
+        SelectAssetRow(list, L"テーマ: theme_cooldown_test.json");
         Require(PostMessageW(assets, WM_COMMAND, 7136, 0), "open newly observed theme details");
         HWND newThemeDetails = WaitWindow(L"SilentDialogClass");
         CheckDetails(newThemeDetails, L"あり", L"前回からの変化: 新しく確認");
@@ -624,8 +1448,7 @@ int main() {
         Send(assets, WM_COMMAND, 7131);
         Require(Send(list, LVM_GETITEMCOUNT) == initialRows + 1, "deleted theme remains in the report");
         const auto missingAt = AssetCheckTime(assets);
-        Send(list, WM_KEYDOWN, VK_HOME);
-        for (int i = 0; i < 12; ++i) Send(list, WM_KEYDOWN, VK_DOWN);
+        SelectAssetRow(list, L"テーマ: theme_cooldown_test.json");
         Require(PostMessageW(assets, WM_COMMAND, 7136, 0), "open disappeared theme details");
         HWND missingDetails = WaitWindow(L"SilentDialogClass");
         CheckDetails(missingDetails, L"なし", L"前回からの変化: あり → なし");
@@ -643,8 +1466,7 @@ int main() {
         Require(Until([&] { return IsWindowEnabled(GetDlgItem(assets, 7131)); }, 12000), "repeat missing-theme check becomes available");
         Send(assets, WM_COMMAND, 7131);
         Require(Send(list, LVM_GETITEMCOUNT) == initialRows + 1, "repeated missing result retains the known theme");
-        Send(list, WM_KEYDOWN, VK_HOME);
-        for (int i = 0; i < 12; ++i) Send(list, WM_KEYDOWN, VK_DOWN);
+        SelectAssetRow(list, L"テーマ: theme_cooldown_test.json");
         Require(PostMessageW(assets, WM_COMMAND, 7136, 0), "open repeated missing-theme details");
         missingDetails = WaitWindow(L"SilentDialogClass");
         CheckDetails(missingDetails, L"なし", L"前回からの変化: 変化なし");
@@ -654,15 +1476,13 @@ int main() {
         Require(Until([&] { return IsWindowEnabled(GetDlgItem(assets, 7131)); }, 12000), "recovered-theme check becomes available");
         Send(assets, WM_COMMAND, 7131);
         Require(Send(list, LVM_GETITEMCOUNT) == initialRows + 1, "restored theme does not create a duplicate row");
-        Send(list, WM_KEYDOWN, VK_HOME);
-        for (int i = 0; i < 12; ++i) Send(list, WM_KEYDOWN, VK_DOWN);
+        SelectAssetRow(list, L"テーマ: theme_cooldown_test.json");
         Require(PostMessageW(assets, WM_COMMAND, 7136, 0), "open recovered theme details");
         HWND recoveredDetails = WaitWindow(L"SilentDialogClass");
         CheckDetails(recoveredDetails, L"あり", L"前回からの変化: なし → あり");
         Send(recoveredDetails, WM_COMMAND, IDOK);
         Require(Until([&] { return !IsWindow(recoveredDetails); }), "close recovered theme details");
-        Send(list, WM_KEYDOWN, VK_HOME);
-        for (int i = 0; i < 7; ++i) Send(list, WM_KEYDOWN, VK_DOWN);
+        SelectAssetRow(list, L"メモ (workspace_memo.txt)");
         Send(assets, WM_COMMAND, 7138);
         Require(preview && IsWindowVisible(preview) && (GetWindowLongPtrW(preview, GWL_STYLE) & ES_READONLY) &&
                 Send(preview, WM_GETTEXTLENGTH) == 15, "saved memo preview remains visible and read-only");
@@ -796,19 +1616,76 @@ int main() {
         HWND notice = WaitWindow(L"SilentDialogClass");
         Send(notice, WM_COMMAND, IDOK);
         Require(Until([&] { return !IsWindow(notice) && IsWindowEnabled(memo); }) && IsWindow(memo), "actual save failure keeps memo open");
-        // The shared notice service suppresses the same message for 10 seconds.
-        // A synchronous close now must return failure, not open a second dialog.
-        Send(main, WM_CLOSE);
+        // App exit retries the dirty memo save and presents its own modal failure.
+        // Post the close request so the driver can dismiss that dialog.
+        Require(PostMessageW(main, WM_CLOSE, 0, 0), "actual failed-save app exit request");
+        notice = WaitWindow(L"SilentDialogClass");
+        Send(notice, WM_COMMAND, IDOK);
+        Require(Until([&] { return !IsWindow(notice); }), "close actual failed-save exit notice");
         Require(IsWindow(main) && WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT &&
                 Equals(original, "nested settings shortcut"), "actual save failure blocks app exit and preserves original");
         Require(SetFileAttributesW(original.c_str(), FILE_ATTRIBUTE_NORMAL), "restore actual fixture attributes");
         Type(editor, L"actual application exit");
+        // Commit a complete preset only after the earlier cancellation/failure checks.
+        Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_PALETTE, 0), "open palette for persistence across app restart");
+        settings = WaitWindow(L"UnifiedSettingsShellClass");
+        palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        SelectPaletteSet(palette, 5);
+        Send(palette, WM_COMMAND, 5200);
+        ConfirmPaletteAction(palette, 5264, true, [&] {
+            return WindowText(GetDlgItem(palette, 5224)) == PresetColorText((*expectedUserSets.users[4])[0]);
+        });
+        std::vector<std::string> previousTokens;
+        Require(SavedPaletteTokens(paletteBytes, previousTokens), "capture legacy palette slots before committing a preset");
+        const auto expectedAppliedPalette = *expectedUserSets.users[4];
+        std::vector<std::string> appliedColors;
+        Require(ReadFileBytesWin32(palettePath, paletteBytes) && SavedPaletteTokens(paletteBytes, appliedColors),
+            "read the palette saved after preset application");
+        Require(appliedColors.size() >= expectedAppliedPalette.size(), "committed palette contains all eight editable slots");
+        for (size_t slot = 0; slot < expectedAppliedPalette.size(); ++slot) {
+            const auto expected = PresetColorText(expectedAppliedPalette[slot]);
+            Require(appliedColors[slot] == std::string(expected.begin(), expected.end()),
+                "automatic save persists all eight colors of the applied preset");
+        }
+        Require(previousTokens.size() == appliedColors.size() && std::equal(previousTokens.begin() + 8, previousTokens.end(),
+            appliedColors.begin() + 8), "applying a preset preserves every hidden legacy palette slot");
+        Send(settings, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(settings); }), "close committed palette before restart");
         Require(PostMessageW(main, WM_CLOSE, 0, 0), "normal app exit request");
+        // Earlier failed theme writes leave a retry copy in memory. Confirm its
+        // explicitly announced disposal on exit; the saved memo and palette remain.
+        HWND exitConfirm = WaitWindow(L"SilentDialogClass");
+        Require(WindowText(exitConfirm) == L"保存できなかった内容" &&
+                WindowText(GetDlgItem(exitConfirm, 5101)).find(L"再試行用のコピー") != std::wstring::npos,
+            "exit warns about retained failed-write content");
+        Send(exitConfirm, WM_COMMAND, 5102);
         Require(WaitForSingleObject(process.hProcess, 10000) == WAIT_OBJECT_0, "actual app exit completes");
         Require(Equals(original, "actual application exit"), "normal app exit saves memo without separate close");
         DWORD code = 1; Require(GetExitCodeProcess(process.hProcess, &code) && code == 0, "normal app exit code");
         CloseHandle(process.hThread); CloseHandle(process.hProcess);
         process = {};
+        command = L"\"" + executable.wstring() + L"\"";
+        Require(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr,
+            executable.parent_path().c_str(), &startup, &process), "restart isolated app with its original valid workspace setup");
+        childPid = process.dwProcessId; main = WaitWindow(L"PdfWorkspaceMainWnd");
+        Require(Until([&] { return IsWindowEnabled(main) && IsWindowVisible(main); }), "restarted application ready");
+        Require(PostMessageW(main, WM_COMMAND, ID_SETTINGS_PALETTE, 0), "inspect palette after actual app restart");
+        settings = WaitWindow(L"UnifiedSettingsShellClass");
+        palette = Descendant(settings, L"PaletteSettingsDlgClass");
+        for (size_t slot = 0; slot < expectedAppliedPalette.size(); ++slot) {
+            Send(palette, WM_COMMAND, 5200 + slot);
+            Require(WindowText(GetDlgItem(palette, 5224)) == PresetColorText(expectedAppliedPalette[slot]),
+                "applied preset colors survive actual process restart in all eight slots");
+        }
+        palette_presets::Snapshot reloadedSets;
+        Require(palette_presets::Load(workspace, reloadedSets) && reloadedSets.colors.users == expectedUserSets.users &&
+            Equals(setsPath, setsBytes) && Equals(palettePath, paletteBytes), "all five user presets and committed palette survive restart unchanged");
+        Send(settings, WM_COMMAND, IDCANCEL);
+        Require(Until([&] { return !IsWindow(settings); }), "close restarted palette checks");
+        Require(PostMessageW(main, WM_CLOSE, 0, 0) && WaitForSingleObject(process.hProcess, 10000) == WAIT_OBJECT_0,
+            "close exact restarted palette test process");
+        Require(GetExitCodeProcess(process.hProcess, &code) && code == 0, "palette restart test app exit code");
+        CloseHandle(process.hThread); CloseHandle(process.hProcess); process = {};
         // A fallback startup must preserve the failed setup-read result, even
         // when the application itself starts successfully in its default root.
         Require(atomic_write::AtomicWriteUtf8(executable.parent_path() / L"pdf_note_workspace_setup.json",

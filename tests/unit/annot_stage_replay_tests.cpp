@@ -48,6 +48,7 @@ Annotation Text(std::wstring id = L"text") {
     a.x2 = a.x1 + 51.125;
     a.y2 = a.y1 - 28.375;
     a.fontPt = 14.0023794622;
+    a.contentRotation = 3;
     a.text = L"test \u30c6\u30ad\u30b9\u30c8";
     a.textLines = {a.text};
     a.fontName = L"Segoe UI";
@@ -102,10 +103,12 @@ void RunFollowupCases() {
           "decimal bound preserves a subnormal rounding quantum");
     // The journal codec must preserve the same dash data as the checkpoint,
     // even where rendering chooses a normalized display pattern.
+    for (const auto type : {Annotation::Type::Line, Annotation::Type::Shape})
     for (const auto& pattern : {std::vector<double>{0.125, 300.0},
                                 std::vector<double>{2.0},
                                 std::vector<double>{0.0, -1.0, 2.0}}) {
-        auto a = Text(); a.type = Annotation::Type::Line; a.dash = pattern;
+        auto a = Text(); a.type = type; a.dash = pattern;
+        a.shapeDrawMode = ShapeDrawMode::Outline;
         auto decoded = RoundTrip(Update(a));
         Check(decoded.before.dash == pattern && decoded.after.dash == pattern,
               "dash entries and length survive journal round trip");
@@ -124,6 +127,21 @@ void RunFollowupCases() {
         annot_stage_replay::State empty(0, AnnotNumericPrecision::RoundTrip17);
         Check(empty.Apply(&annots, add) && annots.front().dash == pattern,
               "adding a dashed annotation preserves saved data");
+        if (type == Annotation::Type::Shape) {
+            clrop::Document checkpoint; checkpoint.version = 1;
+            clrop::Page page; page.page = 0;
+            clrop::Item item; item.kind = clrop::Item::Kind::Shape; item.dash = pattern;
+            item.id = L"shape-dash"; item.created = item.updated = L"2026-10-17T00:00:00Z";
+            item.shapeKind = "ellipse"; item.shapeDrawMode = "outline";
+            item.bbox = std::array<double,4>{10,100,50,40};
+            page.items.push_back(item); checkpoint.pages.push_back(page);
+            std::string json; std::wstring error; clrop::Document loaded;
+            Check(clrop::SerializeClrop(checkpoint, json, error) &&
+                  clrop::ParseClropFromJson(json, loaded, error) && loaded.pages.size() == 1 &&
+                  loaded.pages[0].items.size() == 1 && loaded.pages[0].items[0].dash == pattern &&
+                  loaded.pages[0].items[0].shapeDrawMode == "outline",
+                  "shape checkpoint reload preserves dash data and outline mode");
+        }
     }
 
     std::vector<AnnotCommand> parsed;
@@ -389,6 +407,85 @@ void Run() {
 
 int main() {
     Run();
+    Annotation marker;
+    marker.type=Annotation::Type::MarkerText; marker.id=L"mode"; marker.pageIndex=0;
+    marker.markerDisplayMode=MarkerDisplayMode::Legacy;
+    auto change=Update(marker); change.after.markerDisplayMode=MarkerDisplayMode::Multiply;
+    const auto command=RoundTrip(change);
+    Check(command.before.markerDisplayMode==MarkerDisplayMode::Legacy &&
+          command.after.markerDisplayMode==MarkerDisplayMode::Multiply, "marker display choice survives journal codec");
+    std::vector<Annotation> annotations{marker};
+    Check(TryApplyAnnotCommandForward(&annotations,command) &&
+          annotations[0].markerDisplayMode==MarkerDisplayMode::Multiply, "marker display change redo");
+    Check(TryApplyAnnotCommandReverse(&annotations,command) &&
+          annotations[0].markerDisplayMode==MarkerDisplayMode::Legacy, "marker display change undo");
+    for(auto type:{Annotation::Type::Shape,Annotation::Type::MarkerFree}) {
+        Annotation original;original.type=type;original.id=L"blend";original.pageIndex=0;
+        auto update=Update(original);update.after.blendMode=AnnotationBlendMode::Multiply;
+        const auto blendCommand=RoundTrip(update);
+        std::vector<Annotation> values{original};
+        Check(TryApplyAnnotCommandForward(&values,blendCommand) && values[0].blendMode==AnnotationBlendMode::Multiply,
+            "v2 blend update survives journal and redo");
+        Check(TryApplyAnnotCommandReverse(&values,blendCommand) && values[0].blendMode==AnnotationBlendMode::Normal,
+            "v2 blend update undo restores normal");
+    }
+    {
+        Annotation imported;imported.type=Annotation::Type::Shape;imported.id=L"line-style";imported.pageIndex=0;
+        imported.shapeBoundary=ShapeBoundary::Black;imported.dash={7,3,2,3};imported.width=2;
+        auto retained=imported;retained.color=RGB(12,34,56);
+        ApplyShapeLineStyle(retained,ShapeLineStyle::BlackBoundary);
+        Check(retained.dash==imported.dash,"unrelated style edit preserves old dashed boundary pattern");
+        for(auto style:{ShapeLineStyle::Solid,ShapeLineStyle::Dashed,ShapeLineStyle::BlackBoundary,ShapeLineStyle::WhiteBoundary}) {
+            Annotation source;source.type=Annotation::Type::Shape;source.id=L"line-style";source.pageIndex=0;
+            source.shapeDrawMode=ShapeDrawMode::Fill;source.width=3;source.color=RGB(40,60,80);
+            auto change=Update(source);ApplyShapeLineStyle(change.after,style);
+            Check(AnnotationShapeLineStyle(change.after)==style && change.after.shapeDrawMode==source.shapeDrawMode &&
+                change.after.width==source.width && change.after.color==source.color,"combined line style preserves fill/width/color");
+            Check((!change.after.dash.empty())==(style==ShapeLineStyle::Dashed),"boundary choices use solid strokes");
+            const auto command=RoundTrip(change);std::vector<Annotation> values{source};
+            Check(TryApplyAnnotCommandForward(&values,command) && AnnotationShapeLineStyle(values[0])==style,"combined style survives journal/redo");
+            Check(TryApplyAnnotCommandReverse(&values,command) && AnnotationEquals(values[0],source),"combined style undo restores original");
+        }
+        ApplyShapeLineStyle(imported,ShapeLineStyle::WhiteBoundary);
+        Check(imported.shapeBoundary==ShapeBoundary::White && imported.dash.empty(),"new boundary choice clears old dash");
+        ApplyShapeLineStyle(imported,ShapeLineStyle::Dashed);
+        Check(imported.shapeBoundary==ShapeBoundary::None && !imported.dash.empty(),"dashed choice restores same-color outline");
+    }
+    for(auto color:{ShapeBoundary::Black,ShapeBoundary::White}) {
+        Annotation shape;shape.type=Annotation::Type::Shape;shape.id=L"boundary";shape.pageIndex=0;
+        auto change=Update(shape);change.after.shapeBoundary=color;
+        const auto command=RoundTrip(change);std::vector<Annotation> values{shape};
+        Check(TryApplyAnnotCommandForward(&values,command) && values[0].shapeBoundary==color,"shape boundary stage/redo");
+        Check(TryApplyAnnotCommandReverse(&values,command) && values[0].shapeBoundary==ShapeBoundary::None,"shape boundary undo keeps old rendering");
+    }
+    {
+        Annotation shape;shape.type=Annotation::Type::Shape;shape.id=L"rotation";shape.pageIndex=0;
+        auto change=Update(shape);change.after.shapeAngle=0.7;
+        const auto command=RoundTrip(change);std::vector<Annotation> values{shape};
+        Check(TryApplyAnnotCommandForward(&values,command) && values[0].shapeAngle==0.7,"shape angle stage/redo");
+        Check(TryApplyAnnotCommandReverse(&values,command) && values[0].shapeAngle==0.0,"shape angle undo");
+        auto oriented=annotation_rotation::InBasis(change.after,1,600,800,20,30,false);
+        const auto canonical=oriented ? annotation_rotation::Canonical(*oriented) : std::nullopt;
+        Check(canonical && canonical->shapeAngle==0.7,"whole-shape angle survives page projection and crop origin");
+    }
+    {
+        Annotation arc;arc.type=Annotation::Type::Shape;arc.shapeKind=ShapeKind::Arc;arc.id=L"arc";arc.pageIndex=0;
+        arc.x2=30;arc.y1=100;arc.dash={8,4};arc.shapeAngle=shape_rotation::kPi;NormalizeOpenShapeStyle(arc);
+        auto change=Update(arc);change.after.x2=50;change.after.shapeAngle=0.4;
+        const auto command=RoundTrip(change);std::vector<Annotation> values{arc};
+        Check(TryApplyAnnotCommandForward(&values,command) && values[0].shapeKind==ShapeKind::Arc &&
+            values[0].x2==50 && values[0].shapeAngle==0.4 && values[0].dash==arc.dash,"arc dimensions, dash and rotation survive stage/redo");
+        Check(TryApplyAnnotCommandReverse(&values,command) && AnnotationEquals(values[0],arc),"arc undo restores the original curve");
+    }
+    std::string oldJournal;
+    auto oldChange=Update(marker);
+    Check(SerializeAnnotCommandsJson({oldChange},&oldJournal),"legacy marker journal fixture");
+    for(const std::string field:{",\"marker_display_version\":1",",\"marker_display_mode\":\"legacy\""})
+        for(auto at=oldJournal.find(field);at!=std::string::npos;at=oldJournal.find(field))oldJournal.erase(at,field.size());
+    std::vector<AnnotCommand> oldCommands;
+    Check(DeserializeAnnotCommandsJson(oldJournal,&oldCommands) && oldCommands.size()==1 &&
+          oldCommands[0].before.markerDisplayMode==MarkerDisplayMode::Legacy &&
+          oldCommands[0].after.markerDisplayMode==MarkerDisplayMode::Legacy,"old marker journal omission retains Legacy");
     std::cout << "Annotation stage replay: " << checked << " checks, " << failed << " failures\n";
     return failed ? 1 : 0;
 }

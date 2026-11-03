@@ -281,6 +281,15 @@ void AppendEscaped(std::ostringstream& oss, const std::string& utf8) {
 }
 
 void AppendDouble(std::ostringstream& oss, double v) {
+    // Use only the digits needed to recover the same double. Drawing may use
+    // floats, but checkpoint/journal preconditions still compare exact doubles.
+    char buffer[128];
+    const auto result = std::to_chars(std::begin(buffer), std::end(buffer), v);
+    if (result.ec == std::errc{}) {
+        oss.write(buffer, result.ptr - buffer);
+        return;
+    }
+    // Preserve the existing lossless representation if conversion fails.
     oss << std::setprecision(std::numeric_limits<double>::max_digits10)
         << std::noshowpoint << std::defaultfloat << v;
 }
@@ -405,17 +414,29 @@ void AppendDoubleArray(std::ostringstream& oss, const std::vector<double>& vals,
     } else {
         size_t idx = 0;
         size_t groupIdx = 0;
+        size_t lineBytes = 0;
         while (idx < vals.size()) {
-            if (groupIdx) oss << ",";
-            oss << "[";
+            std::ostringstream entry;
+            entry.imbue(std::locale::classic());
+            entry << "[";
             for (int j = 0; j < group; ++j) {
-                if (j) oss << ",";
+                if (j) entry << ",";
                 if (idx < vals.size()) {
-                    AppendDouble(oss, vals[idx]);
+                    AppendDouble(entry, vals[idx]);
                     ++idx;
                 }
             }
-            oss << "]";
+            entry << "]";
+            const auto text = entry.str();
+            if (groupIdx) {
+                oss << ",";
+                if (lineBytes + 1 + text.size() > 100) {
+                    oss << "\r\n            ";
+                    lineBytes = 0;
+                } else ++lineBytes;
+            }
+            oss << text;
+            lineBytes += text.size();
             ++groupIdx;
         }
     }
@@ -471,6 +492,33 @@ bool LoadClropFileToSink(const std::wstring& path,
 
 #ifndef CLROP_READ_ONLY_BUILD
 bool SerializeClrop(const clrop::Document& doc, std::string& out, std::wstring& err) {
+    for (const auto& page : doc.pages) for (const auto& item : page.items) {
+        if(item.kind == clrop::Item::Kind::Shape && item.shapeKind == "arc" &&
+           (doc.version != 2 || (!item.shapeDrawMode.empty() && item.shapeDrawMode != "outline"))) {
+            err=L"Arc requires v2 and an open outline";return false;
+        }
+        if (!std::isfinite(item.shapeAngle) || (item.shapeAngle != 0.0 && (doc.version != 2 || item.kind != clrop::Item::Kind::Shape))) {
+            err = L"Invalid v2 shape angle";return false;
+        }
+        if (!item.shapeBoundary.empty() && (doc.version != 2 || item.kind != clrop::Item::Kind::Shape ||
+            (item.shapeBoundary != "none" && item.shapeBoundary != "black" && item.shapeBoundary != "white"))) {
+            err = L"Shape boundary requires v2 shape metadata";return false;
+        }
+        if (!item.blendMode.empty() && (doc.version != 2 ||
+            (item.blendMode != "normal" && item.blendMode != "multiply"))) {
+            err = L"Annotation blend mode requires v2 and a supported value";
+            return false;
+        }
+    }
+    if (doc.version != 1 && doc.version != 2) {
+        err = L"Unsupported clrop version";
+        return false;
+    }
+    for (const auto& page : doc.pages) for (const auto& item : page.items)
+        if (!item.markerDisplayMode.empty() && item.markerDisplayMode != "legacy" && item.markerDisplayMode != "multiply") {
+            err = L"Unsupported marker display mode";
+            return false;
+        }
     const auto finiteValues = [](const auto& values) {
         return std::all_of(values.begin(), values.end(), [](double v) { return std::isfinite(v); });
     };
@@ -482,9 +530,15 @@ bool SerializeClrop(const clrop::Document& doc, std::string& out, std::wstring& 
     }
     for (const auto& page : doc.pages) {
         for (const auto& item : page.items) {
+            if (item.contentRotation != 0 && item.contentRotation != 90 &&
+                item.contentRotation != 180 && item.contentRotation != 270) {
+                err = L"Invalid annotation content rotation";
+                return false;
+            }
             if (!std::isfinite(item.alpha) || !std::isfinite(item.width) || !std::isfinite(item.pt) ||
                 (item.shapeRotation && !std::isfinite(*item.shapeRotation)) ||
                 (item.bbox && !finiteValues(*item.bbox)) ||
+                (item.bboxEndpoints && !finiteValues(*item.bboxEndpoints)) ||
                 (item.p1 && !finiteValues(*item.p1)) || (item.p2 && !finiteValues(*item.p2)) ||
                 !finiteValues(item.path) || !finiteValues(item.dash) || !finiteValues(item.quads)) {
                 err = L"Non-finite annotation value in clrop data.";
@@ -494,34 +548,34 @@ bool SerializeClrop(const clrop::Document& doc, std::string& out, std::wstring& 
     }
     std::ostringstream oss;
     oss.imbue(std::locale::classic());
-    oss << "{";
-    oss << "\"version\":1,";
-    oss << "\"pdf_id\":{";
-    oss << "\"path\":";
+    // Formatting changes only the serialized representation. Publish out only
+    // after validation/serialization; the existing atomic writer owns file I/O.
+    oss << "{\r\n  \"version\":2,\r\n  \"pdf_id\":{\r\n    \"path\":";
     AppendEscaped(oss, WideToUtf8(doc.pdfId.path));
-    oss << ",\"size\":" << doc.pdfId.size << ",";
+    oss << ",\r\n    \"size\":" << doc.pdfId.size << ",\r\n    ";
     if (doc.pdfId.pageCount > 0) {
-        oss << "\"page_count\":" << doc.pdfId.pageCount << ",";
+        oss << "\"page_count\":" << doc.pdfId.pageCount << ",\r\n    ";
     }
     const std::string pageSizeField = SerializePreferredPageSizeField(doc.pdfId);
     if (!pageSizeField.empty()) {
-        oss << pageSizeField << ",";
+        oss << pageSizeField << ",\r\n    ";
     }
     oss << "\"sha256\":";
     AppendEscaped(oss, doc.pdfId.sha256);
-    oss << "},";
-    oss << "\"pages\":[";
+    oss << "\r\n  },\r\n  \"pages\":[";
     for (size_t pi = 0; pi < doc.pages.size(); ++pi) {
         if (pi) oss << ",";
         const auto& p = doc.pages[pi];
-        oss << "{";
-        oss << "\"page\":" << p.page << ",";
-        oss << "\"items\":[";
+        oss << "\r\n    {\"page\":" << p.page << ",\"items\":[";
         for (size_t ii = 0; ii < p.items.size(); ++ii) {
             if (ii) oss << ",";
             const auto& it = p.items[ii];
-            oss << "{";
-            oss << "\"type\":";
+            oss << "\r\n      {\"type\":";
+            // Keep short related fields together; give content and geometry
+            // their own lines rather than indenting every scalar separately.
+            const auto field = [&](const char* name, bool newLine = false) {
+                oss << (newLine ? ",\r\n        \"" : ",\"") << name << "\":";
+            };
             switch (it.kind) {
             case clrop::Item::Kind::Text: AppendEscaped(oss, "text"); break;
             case clrop::Item::Kind::Math: AppendEscaped(oss, "math"); break;
@@ -535,80 +589,100 @@ bool SerializeClrop(const clrop::Document& doc, std::string& out, std::wstring& 
             case clrop::Item::Kind::LinkMarker: AppendEscaped(oss, "link-marker"); break;
             case clrop::Item::Kind::Shape: AppendEscaped(oss, "shape"); break;
             }
-            if (!it.id.empty())      { oss << ",\"id\":";      AppendEscaped(oss, WideToUtf8(it.id)); }
-            if (!it.created.empty()) { oss << ",\"created\":"; AppendEscaped(oss, WideToUtf8(it.created)); }
-            if (!it.updated.empty()) { oss << ",\"updated\":"; AppendEscaped(oss, WideToUtf8(it.updated)); }
-            if (!it.color.empty())   { oss << ",\"color\":";   AppendEscaped(oss, it.color); }
-            if (it.alpha != 0.0)     { oss << ",\"alpha\":";   AppendDouble(oss, it.alpha); }
-            if (it.width != 0.0)     { oss << ",\"width\":";   AppendDouble(oss, it.width); }
-            if (it.pt != 0.0)        { oss << ",\"pt\":";      AppendDouble(oss, it.pt); }
-            if (!it.font.empty())    { oss << ",\"font\":";    AppendEscaped(oss, WideToUtf8(it.font)); }
-            if (!it.writingMode.empty()) { oss << ",\"writing_mode\":"; AppendEscaped(oss, it.writingMode); }
-            if (!it.border.empty())  { oss << ",\"border\":";  AppendEscaped(oss, it.border); }
-            if (!it.content.empty()) { oss << ",\"content\":"; AppendEscaped(oss, WideToUtf8(it.content)); }
-            if (!it.linkId.empty())  { oss << ",\"link_id\":"; AppendEscaped(oss, WideToUtf8(it.linkId)); }
-            if (!it.notePath.empty()) { oss << ",\"note_path\":"; AppendEscaped(oss, WideToUtf8(it.notePath)); }
+            if (!it.id.empty())      { field("id");      AppendEscaped(oss, WideToUtf8(it.id)); }
+            if (!it.created.empty()) { field("created", true); AppendEscaped(oss, WideToUtf8(it.created)); }
+            if (!it.updated.empty()) { field("updated"); AppendEscaped(oss, WideToUtf8(it.updated)); }
+            if (!it.color.empty())   { field("color", it.kind == clrop::Item::Kind::Text || it.kind == clrop::Item::Kind::Math); AppendEscaped(oss, it.color); }
+            if (it.alpha != 1.0)     { field("alpha");   AppendDouble(oss, it.alpha); }
+            if (it.width != 0.0)     { field("width");   AppendDouble(oss, it.width); }
+            if (it.pt != 0.0)        { field("pt");      AppendDouble(oss, it.pt); }
+            if (!it.font.empty())    { field("font");    AppendEscaped(oss, WideToUtf8(it.font)); }
+            if (!it.writingMode.empty() && it.writingMode != "horizontal") { field("writing_mode"); AppendEscaped(oss, it.writingMode); }
+            if (it.contentRotation != 0) { field("content_rotation"); oss << it.contentRotation; }
+            if (!it.backgroundAssistMode.empty() && it.backgroundAssistMode != "inherit") { field("background_assist_mode"); AppendEscaped(oss, it.backgroundAssistMode); }
+            if (it.kind == clrop::Item::Kind::MarkerText && (it.markerDisplayMode == "legacy" ||
+                (doc.version == 1 && it.markerDisplayMode.empty())))
+                { field("marker_display_mode"); oss << "\"legacy\""; }
+            if (!it.border.empty())  { field("border"); AppendEscaped(oss, it.border); }
+            if (it.shapeAngle != 0.0) { field("shape_angle"); AppendDouble(oss,it.shapeAngle); }
+            if (!it.shapeBoundary.empty() && it.shapeBoundary != "none") { field("shape_boundary"); AppendEscaped(oss,it.shapeBoundary); }
+            if (!it.blendMode.empty() && it.blendMode != "normal") { field("blend_mode"); AppendEscaped(oss,it.blendMode); }
+            if (!it.content.empty()) { field("content", true); AppendEscaped(oss, WideToUtf8(it.content)); }
+            if (!it.linkId.empty())  { field("link_id", true); AppendEscaped(oss, WideToUtf8(it.linkId)); }
+            if (!it.notePath.empty()) { field("note_path"); AppendEscaped(oss, WideToUtf8(it.notePath)); }
             if (!it.lines.empty()) {
-                oss << ",\"lines\":[";
+                field("lines", true); oss << "[";
                 for (size_t li = 0; li < it.lines.size(); ++li) {
-                    if (li) oss << ",";
+                    if (li) oss << ",\r\n          ";
                     AppendEscaped(oss, WideToUtf8(it.lines[li]));
                 }
                 oss << "]";
             }
             if (!it.mathKind.empty()) {
-                oss << ",\"math_kind\":";
+                field("math_kind");
                 AppendEscaped(oss, it.mathKind);
             }
             if (!it.shapeKind.empty()) {
-                oss << ",\"shape_kind\":";
+                field("shape_kind");
                 AppendEscaped(oss, it.shapeKind);
             }
             if (!it.shapeDrawMode.empty()) {
-                oss << ",\"shape_draw_mode\":";
+                field("shape_draw_mode");
                 AppendEscaped(oss, it.shapeDrawMode);
             }
-            if (!it.arrowHead.empty()) {
-                oss << ",\"arrow_head\":";
+            if (!it.arrowHead.empty() && it.arrowHead != "single") {
+                field("arrow_head");
                 AppendEscaped(oss, it.arrowHead);
             }
             if (it.shapeRotation && std::isfinite(*it.shapeRotation)) {
-                oss << ",\"shape_rotation\":" << *it.shapeRotation;
+                field("shape_rotation"); AppendDouble(oss, *it.shapeRotation);
             }
             if (it.bbox) {
-                oss << ",\"bbox\":";
+                field("bbox", true);
                 std::vector<double> v{(*it.bbox)[0], (*it.bbox)[1], (*it.bbox)[2], (*it.bbox)[3]};
                 AppendDoubleArray(oss, v);
             }
+            if (it.bboxEndpoints) {
+                field("bbox_endpoints", true);
+                std::vector<double> v{(*it.bboxEndpoints)[0], (*it.bboxEndpoints)[1],
+                                      (*it.bboxEndpoints)[2], (*it.bboxEndpoints)[3]};
+                AppendDoubleArray(oss, v);
+            }
             if (it.p1) {
-                oss << ",\"p1\":";
+                field("p1", true);
                 std::vector<double> v{(*it.p1)[0], (*it.p1)[1]};
                 AppendDoubleArray(oss, v);
             }
             if (it.p2) {
-                oss << ",\"p2\":";
+                field("p2");
                 std::vector<double> v{(*it.p2)[0], (*it.p2)[1]};
                 AppendDoubleArray(oss, v);
             }
             if (!it.dash.empty()) {
-                oss << ",\"dash\":";
+                field("dash");
                 AppendDoubleArray(oss, it.dash);
             }
             if (!it.path.empty()) {
-                oss << ",\"path\":";
+                field("path", true);
                 AppendDoubleArray(oss, it.path, 2);
             }
             if (!it.quads.empty()) {
-                oss << ",\"quads\":";
+                field("quads", true);
                 AppendDoubleArray(oss, it.quads, 8);
             }
             oss << "}";
         }
-        oss << "]";
-        oss << "}";
+        if (!p.items.empty()) oss << "\r\n    ";
+        oss << "]}";
     }
-    oss << "]";
-    oss << "}";
+    if (!doc.pages.empty()) oss << "\r\n  ";
+    oss << "]\r\n}\r\n";
+    // Added whitespace must not produce a file that our reader cannot reopen.
+    const auto bytes = oss.tellp();
+    if (bytes < 0 || static_cast<std::uint64_t>(bytes) > kMaxClropFileBytes) {
+        err = L"Serialized clrop exceeds the readable size limit";
+        return false;
+    }
     out = oss.str();
     return true;
 }

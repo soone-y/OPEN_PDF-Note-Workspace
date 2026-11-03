@@ -70,23 +70,29 @@ static bool ExecuteFocusedUndoRedo(HWND owner, bool undo) {
     // A menu command can arrive before RichEdit's EN_CHANGE. Bring the shared
     // document kernel current before asking either history whether it can run.
     if (!SynchronizeActiveNoteEditorToKernel(owner)) {
+        preview_trace::Append(L"FocusedUndoRedo", L"blocked=note_sync");
         return false;
     }
     if (CanExecuteNoteUndoRedoFromFocus(undo)) {
+        preview_trace::Append(L"FocusedUndoRedo", L"route=note");
         return ExecuteNoteUndoRedoFromFocus(owner, undo);
     }
     if (CanExecutePdfUndoRedoFromFocus(undo)) {
+        preview_trace::Append(L"FocusedUndoRedo", L"route=pdf");
         return ExecutePdfUndoRedoFromFocus(owner, undo);
     }
     // An active textbox is an uncommitted document boundary.  Do not let a
     // failed or exhausted textbox history fall through to a workspace file
     // operation while that boundary is still live.
     if (g_pdf.editingText) {
+        preview_trace::Append(L"FocusedUndoRedo", L"blocked=editing_text");
         return false;
     }
     if (CanExecuteWorkspaceOperationUndoRedo(undo)) {
+        preview_trace::Append(L"FocusedUndoRedo", L"route=workspace");
         return ExecuteWorkspaceOperationUndoRedo(owner, undo);
     }
+    preview_trace::Append(L"FocusedUndoRedo", L"blocked=no_history");
     return false;
 }
 
@@ -164,6 +170,11 @@ static bool HandleNoteShortcutCommand(HWND hWnd, int id, UINT code) {
     }
 
     switch (id) {
+    case ID_NOTE_ASSIST_GUIDE: {
+        const bool opened = OpenBundledNoteWritingGuide(hWnd);
+        (void)opened; // The help boundary displays a quiet failure notice.
+        return true;
+    }
     case ID_NOTE_SHORTCUT_INPUT: {
         DismissNoteInputAssistNotice(hWnd);
         if (DeferNoteAssistDuringIme(hWnd)) return true;
@@ -369,12 +380,7 @@ static bool CyclePrimaryAnnotOptionForMode(HWND hWnd, ToolMode mode, bool revers
 
     if (ToolbarHasFontOptions(mode)) {
         SetActiveToolbarFontSizeSlot(std::clamp(g_textFontActiveSizeSlot, 0, 1) == 0 ? 1 : 0);
-        if (g_hPdfView) {
-            const bool continueTextEditing = g_pdf.editingText;
-            PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
-            if (continueTextEditing) SetFocus(g_hPdfView);
-            else SetFocus(g_hPdfView);
-        }
+        if (g_hPdfView) SetFocus(g_hPdfView);
         return true;
     }
 
@@ -626,10 +632,11 @@ static bool SelectAnnotToolFamily(HWND hWnd, AnnotToolFamily family, bool cycleO
     return true;
 }
 
-static bool SelectAnnotToolMode(HWND hWnd, ToolMode mode, bool cycleOption, bool reverse) {
-    if (!ToolModeEnabledForCurrentPdfView(mode)) return false;
-    if (AnnotToolFamilyForMode(mode) == AnnotToolFamily::Shape) {
-        ShapeDetail detail = (mode == ToolMode::Shape && !ShapeDetailIsClosed(g_shapeDetail))
+static bool SelectAnnotToolMode(HWND hWnd, ToolMode mode, bool cycleOption, bool reverse,
+                                bool direct = false) {
+    if (!(direct ? ToolModeAvailableForCurrentPdfView(mode) : ToolModeEnabledForCurrentPdfView(mode))) return false;
+    if (!direct && AnnotToolFamilyForMode(mode) == AnnotToolFamily::Shape) {
+        ShapeDetail detail = (mode == ToolMode::Shape && !ShapeDetailUsesBox(g_shapeDetail))
             ? ShapeDetail::Rectangle
             : ShapeDetailForLegacyState(mode, g_shapeKind);
         return ApplyShapeDetailSelection(hWnd, detail);
@@ -655,6 +662,11 @@ static bool SelectAnnotToolMode(HWND hWnd, ToolMode mode, bool cycleOption, bool
         g_config.annotLastPenDetail = UTF8ToWide(AnnotToolModeKey(mode));
     }
     if (family == AnnotToolFamily::Shape) {
+        // Direct shortcuts retain emphasis/stroke identity as well as geometry.
+        g_shapeDetail = (mode == ToolMode::Shape && !ShapeDetailUsesBox(g_shapeDetail))
+            ? ShapeDetail::Rectangle : ShapeDetailForLegacyState(mode, g_shapeKind);
+        if (ShapeDetailUsesBox(g_shapeDetail)) g_shapeKind = ShapeKindForShapeDetail(g_shapeDetail);
+        g_config.shapeDetail = UTF8ToWide(ShapeDetailKey(g_shapeDetail));
         g_shapeGroupMode = mode;
         g_config.annotLastShapeDetail = UTF8ToWide(AnnotToolModeKey(mode));
         g_shapeToolSelection = ShapeToolSelectionForMode(mode, g_shapeDrawMode);
@@ -719,6 +731,7 @@ static bool CycleShapeToolFamilyOption(HWND hWnd, bool reverse) {
 static bool IsMenuCommandAllowedDuringSave(int id) {
     switch (id) {
     case ID_FILE_SAVE_ALL:
+    case ID_VIEW_FIT_PAGE:
     case ID_VIEW_RESET_ZOOM:
     case ID_VIEW_SET_ZOOM:
     case ID_VIEW_FIRST_PAGE:
@@ -748,6 +761,7 @@ static bool IsMenuCommandAllowedDuringSave(int id) {
 }
 
 static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
+    if (recovery::HasActiveStageRecovery()) return;
     if (IsSaveTransactionRunning()) {
         if (id == ID_FILE_SAVE_ALL) {
             SaveAllManual(hWnd);
@@ -790,7 +804,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         SyncToolbarFontSizeCombo();
         PersistConfig();
         if (g_hPdfView) {
-            PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+            SendMessageW(g_hPdfView, kMsgTextBoxFontUpdate, kTextBoxFontSizeOnly, 0);
             SetFocus(g_hPdfView);
         }
         return;
@@ -829,11 +843,11 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         return;
     }
 
-    const int alphaOptionCount = ToolAlphaOptionCountForMode(g_toolMode);
+    const int alphaOptionCount = ToolAlphaOptionCountForMode(g_toolMode,g_shapeKind);
     if (id >= ID_ANNOT_CONTEXT_ALPHA_BASE &&
         id < ID_ANNOT_CONTEXT_ALPHA_BASE + alphaOptionCount) {
         const int index = id - ID_ANNOT_CONTEXT_ALPHA_BASE;
-        StoreToolAlphaForMode(g_toolMode, ToolAlphaOptionValueForMode(g_toolMode, index));
+        StoreToolAlphaForMode(g_toolMode, ToolAlphaOptionValueForMode(g_toolMode, index,g_shapeKind));
         PersistConfig();
         if (g_hComboMarkerAlpha) SyncAlphaComboToMode(g_toolMode);
         if (g_hPdfView) {
@@ -847,6 +861,12 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     const bool reverseToolOptionCycle = ToolOptionCycleReverseRequested();
 
     switch (id) {
+    case ID_FILE_PENDING_WRITES:
+        pending_write_retry::Show(hWnd);
+        break;
+    case ID_FILE_RETRY_TEMP_EXTERNAL:
+        pending_write_retry::RetryTemporaryPaths(hWnd);
+        break;
     case ID_FILE_ADD_TEMP_EXTERNAL_LECTURE: {
         auto initial = DialogDocumentsInitialFolder();
         auto picked = PickFoldersWithInitial(hWnd, initial, GetUiText().menuAddTempExternalLecture,
@@ -954,8 +974,16 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         if (!CanStartExportCommand(hWnd, id)) break;
         ExportDialogResult result{};
         result.kind = ExportDialogKind::PdfAll;
+        // Snapshot only the live document's temporary angles, never persist them in settings.
+        for (size_t page = 0; page < g_pdf.pages.size(); ++page) {
+            file_output::PdfPageSpec spec{static_cast<int>(page), true};
+            spec.rotation = g_config.quickPdfKeepPageRotation ? g_pdf.pages[page].viewRotation : 0;
+            result.pages.push_back(spec);
+        }
         result.standardTextAnnots = g_config.quickPdfStandardTextAnnots;
         result.matchPdfPaneTextLayout = g_config.quickPdfMatchPdfPaneTextLayout;
+        result.textColor.mode = static_cast<pdf_annotation_export::TextColorMode>(g_config.quickPdfTextColorMode);
+        result.textColor.background = g_config.quickPdfTextColorBackground;
         result.pdfScale = static_cast<double>(std::clamp(g_config.quickPdfScalePercent, 13, 800)) / 100.0;
         ExecuteUnifiedExports(hWnd, {result});
         break;
@@ -1220,6 +1248,21 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         break;
     case ID_FILE_EXIT:
         PostMessageW(hWnd, WM_CLOSE, 0, 0);
+        break;
+    case ID_VIEW_ROTATE_PAGE_LEFT:
+    case ID_VIEW_ROTATE_PAGE_RIGHT:
+    case ID_VIEW_ROTATE_PAGE_RESET:
+        (void)RotateCurrentPdfPageView(g_hPdfView, id == ID_VIEW_ROTATE_PAGE_LEFT ? -1 : 1,
+                                      id == ID_VIEW_ROTATE_PAGE_RESET);
+        break;
+    case ID_VIEW_ROTATE_ALL_LEFT:
+    case ID_VIEW_ROTATE_ALL_RIGHT:
+    case ID_VIEW_ROTATE_ALL_RESET:
+        (void)RotateAllPdfPagesView(g_hPdfView, id == ID_VIEW_ROTATE_ALL_LEFT ? -1 : 1,
+                                   id == ID_VIEW_ROTATE_ALL_RESET);
+        break;
+    case ID_VIEW_FIT_PAGE:
+        (void)FitCurrentPdfPageToView(g_hPdfView);
         break;
     case ID_VIEW_RESET_ZOOM:
         if (g_pdf.kind != DocKind::None) {
@@ -1535,11 +1578,23 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         if (!PromptSimpleText(hWnd, title, initial, input)) break;
         input = TrimWhitespace(input);
         if (input.empty()) break;
-        wchar_t* end = nullptr;
-        long val = std::wcstol(input.c_str(), &end, 10);
-        if (end == input.c_str()) break;
-        int page = static_cast<int>(std::clamp<long>(val, 1, g_pdf.pageCount));
+        int page = 0;
+        if (!ui::ParsePageNumber(input, g_pdf.pageCount, page)) {
+            ShowMainSoftNotice(hWnd, localization::Text(L"readonly.pdf.jump.invalid"), SoftNoticeKind::Warning);
+            break;
+        }
         JumpToPage(g_hPdfView, page - 1);
+        break;
+    }
+    case ID_FILE_CLOSE:
+        (void)CloseCurrentFileDisplays(hWnd);
+        break;
+    case ID_FILE_CLOSE_FOCUSED: {
+        const HWND focus = GetFocus();
+        const bool noteFocused = focus && ((g_hNoteEdit && (focus == g_hNoteEdit || IsChild(g_hNoteEdit, focus))) ||
+            focus == g_hNoteList || (g_hBottomNote && (focus == g_hBottomNote || IsChild(g_hBottomNote, focus))));
+        const bool isNote = noteFocused || (CurrentLogicalPdfPath().empty() && !g_currentNotePath.empty());
+        (void)CloseFileDisplayFromContext(hWnd, isNote, isNote ? g_currentNotePath : CurrentLogicalPdfPath());
         break;
     }
     case ID_VIEW_CLOSE_PDF:
@@ -1567,6 +1622,9 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_SETTINGS_GENERAL:
         ShowGeneralSettingsDialog(hWnd);
         break;
+    case ID_SETTINGS_BOTTOM_PANE:
+        ShowBottomPaneSettingsDialog(hWnd);
+        break;
     case ID_SETTINGS_NOTE:
         ShowNoteSettingsDialog(hWnd);
         break;
@@ -1588,8 +1646,8 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_SETTINGS_PRESET_LOAD:
         LoadSettingsPreset(hWnd);
         break;
-    case ID_LECTURE_SCHEDULE:
-        ShowScheduleWindow(hWnd);
+    case ID_LECTURE_ORDER:
+        ShowLectureOrderWindow(hWnd);
         break;
     case ID_WORKSPACE_MEMO:
         ShowWorkspaceMemoWindow(g_hMainWnd);
@@ -1633,6 +1691,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         RefreshAnnotPanel();
         InvalidateThemeButton(g_hBtnToggleAnn);
         InvalidateThemeButton(g_hAnnotShow);
+        RefreshMainMenuBar(hWnd);
         break;
     case ID_ANNOT_PANEL_SHOW:
         g_showAnnots = (SendMessageW(g_hAnnotShow, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -1642,6 +1701,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         RefreshAnnotPanel();
         InvalidateThemeButton(g_hAnnotShow);
         InvalidateThemeButton(g_hBtnToggleAnn);
+        RefreshMainMenuBar(hWnd);
         break;
     case ID_ANNOT_PANEL_SETTINGS:
         ShowAnnotationSettingsForTool(hWnd, g_toolMode);
@@ -1701,31 +1761,34 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         SelectAnnotToolFamily(hWnd, AnnotToolFamily::Eraser, cycleToolOption, reverseToolOptionCycle);
         break;
     case ID_TOOL_COLOR_CUSTOM: {
-        COLORREF picked = g_paletteCustomColor;
-        if (ShowPaletteColorEditorDialog(hWnd, picked, &picked)) {
-            ApplyPaletteCustomColor(hWnd, picked);
-            if (g_hPdfView) {
-                ApplyActiveColorToSelectedAnnotation(g_hPdfView);
-            }
-        } else {
-            if (g_hPdfToolbar) {
-                RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
-            }
+        ShowAnnotationPaletteSettingsDialog(hWnd);
+        if (g_hPdfToolbar) {
+            RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
         }
         break;
     }
     default:
         if (id >= ID_TOOL_COLOR_BASE &&
             id < ID_TOOL_COLOR_BASE + static_cast<int>(g_palette.size())) {
-            g_activeColor = g_palette[static_cast<size_t>(id - ID_TOOL_COLOR_BASE)];
-            StoreToolColorForMode(g_toolMode, g_activeColor);
-            PersistConfig();
+            const COLORREF nextColor = g_palette[static_cast<size_t>(id - ID_TOOL_COLOR_BASE)];
+            const bool changed = g_activeColor != nextColor;
+            if (changed) {
+                g_activeColor = nextColor;
+                StoreToolColorForMode(g_toolMode, g_activeColor);
+                PersistConfig();
+            }
             if (g_hPdfToolbar) {
                 RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
             }
-            if (g_hPdfView) {
+            if (g_hPdfView && (changed || !g_pdf.editingText)) {
                 ApplyActiveColorToSelectedAnnotation(g_hPdfView);
             }
+            if (g_hPdfView && g_pdf.editingText) SetFocus(g_hPdfView);
+        } else if ((id == ID_TOOL_FONT || id == ID_TOOL_FONT_SIZE || id == ID_TOOL_FONT_SIZE_ALT) &&
+                   code == CBN_CLOSEUP) {
+            // Refresh after native selection notifications finish; this request
+            // cannot apply a stale preset to another annotation.
+            if (g_hPdfView) PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, kTextBoxFontDisplayOnly, 0);
         } else if (id == ID_TOOL_FONT && code == CBN_SELCHANGE) {
             int sel = static_cast<int>(SendMessageW(g_hComboFont, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {
@@ -1735,7 +1798,8 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
                     buf[std::min<int>(len, 127)] = L'\0';
                     g_textFontName = ResolveFontFaceName(buf);
                     PersistConfig();
-                    if (g_hPdfView) PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+                    if (g_hPdfView) SendMessageW(g_hPdfView, kMsgTextBoxFontUpdate, kTextBoxFontFamilyOnly, 0);
+                    if (g_hPdfView && g_pdf.editingText) SetFocus(g_hPdfView);
                 }
             }
         } else if (id == ID_TOOL_FONT_SIZE && code == CBN_SELCHANGE) {
@@ -1743,23 +1807,25 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
                 PersistConfig();
                 if (g_hPdfView && g_textFontActiveSizeSlot == 0) {
                     const bool continueTextEditing = g_pdf.editingText;
-                    PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+                    SendMessageW(g_hPdfView, kMsgTextBoxFontUpdate, kTextBoxFontSizeOnly, 0);
                     if (continueTextEditing) {
                         SetFocus(g_hPdfView);
                     }
                 }
             }
+            if (g_hPdfView && g_pdf.editingText) SetFocus(g_hPdfView);
         } else if (id == ID_TOOL_FONT_SIZE_ALT && code == CBN_SELCHANGE) {
             if (ApplyToolbarFontSizeComboSelection(g_hComboFontSizeAlt)) {
                 PersistConfig();
                 if (g_hPdfView && g_textFontActiveSizeSlot == 1) {
                     const bool continueTextEditing = g_pdf.editingText;
-                    PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+                    SendMessageW(g_hPdfView, kMsgTextBoxFontUpdate, kTextBoxFontSizeOnly, 0);
                     if (continueTextEditing) {
                         SetFocus(g_hPdfView);
                     }
                 }
             }
+            if (g_hPdfView && g_pdf.editingText) SetFocus(g_hPdfView);
         } else if (id == ID_TOOL_FONT_SIZE_SLOT_A && code == BN_CLICKED) {
             SetActiveToolbarFontSizeSlot(0);
             if (g_hPdfView) SetFocus(g_hPdfView);
@@ -1802,6 +1868,14 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
                     PersistConfig();
                 }
             }
+        } else if ((id == ID_TOOL_BLEND_NORMAL || id == ID_TOOL_BLEND_MULTIPLY) && code == BN_CLICKED) {
+            if (!ToolbarHasBlendModeOptions(g_toolMode) || IsSaveTransactionRunning() || IsPdfPreviewReadOnlyActive()) return;
+            const bool multiply = id == ID_TOOL_BLEND_MULTIPLY;
+            if (g_toolMode == ToolMode::Shape)
+                g_config.newShapeBlendMode = multiply ? AnnotationBlendMode::Multiply : AnnotationBlendMode::Normal;
+            else g_config.newMarkerDisplayMode = multiply ? MarkerDisplayMode::Multiply : MarkerDisplayMode::Legacy;
+            PersistConfig();UpdateToolbarUI(hWnd);
+            if(g_hPdfView){InvalidateRect(g_hPdfView,nullptr,FALSE);SetFocus(g_hPdfView);}
         } else if (id == ID_TOOL_MARKER_ALPHA && code == CBN_SELCHANGE) {
             int sel = static_cast<int>(SendMessageW(g_hComboMarkerAlpha, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {
@@ -1863,12 +1937,18 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
                 }
             }
         } else if (id == ID_TOOL_LINE_DASH_STYLE && code == CBN_SELCHANGE) {
+            if (IsSaveTransactionRunning() || IsPdfPreviewReadOnlyActive()) return;
             int sel = static_cast<int>(SendMessageW(g_hComboLineDashStyle, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {
                 LRESULT data = SendMessageW(g_hComboLineDashStyle, CB_GETITEMDATA, sel, 0);
-                if (data != CB_ERR) {
-                    g_lineDashStyle = (static_cast<int>(data) != 0) ? L"dash" : L"solid";
+                const bool shape=g_toolMode==ToolMode::Shape;
+                if (data >= 0 && data <= static_cast<LPARAM>(ShapeLineStyle::WhiteBoundary) &&
+                    ((shape && !ShapeKindIsOpen(g_shapeKind)) || data<=static_cast<LPARAM>(ShapeLineStyle::Dashed))) {
+                    const auto style=static_cast<ShapeLineStyle>(data);
+                    if(shape && !ShapeKindIsOpen(g_shapeKind))g_config.newShapeBoundary=BoundaryForLineStyle(style);
+                    g_lineDashStyle = style==ShapeLineStyle::Dashed ? L"dash" : L"solid";
                     PersistConfig();
+                    UpdateToolbarUI(hWnd);
                     if (g_hPdfView) {
                         InvalidateRect(g_hPdfView, nullptr, FALSE);
                         SetFocus(g_hPdfView);

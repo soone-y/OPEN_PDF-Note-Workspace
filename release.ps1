@@ -14,8 +14,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:runLogPath = Join-Path $PSScriptRoot ("out\logs\release\release_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+$script:runLogPath = Join-Path $PSScriptRoot ("out\logs\release\release_{0}_{1}_{2}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"), $PID, [guid]::NewGuid().ToString("N"))
 $script:runTranscriptStarted = $false
+$script:releaseVersionLease = $null
 
 function Stop-RunLog {
     if ($script:runTranscriptStarted) {
@@ -25,9 +26,11 @@ function Stop-RunLog {
 }
 
 trap {
+    if ($null -ne $script:releaseVersionLease) { Exit-ReleaseVersion -Lease $script:releaseVersionLease }
+    Write-Error -ErrorRecord $_ -ErrorAction Continue
     Write-Host "release に失敗しました。実行ログ: $script:runLogPath" -ForegroundColor Yellow
     Stop-RunLog
-    throw $_
+    exit 1
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:runLogPath) | Out-Null
@@ -54,9 +57,18 @@ function Invoke-RequiredScript {
     if ([string]::IsNullOrWhiteSpace($powerShellExe)) {
         throw "現在実行中の PowerShell を特定できません。PowerShell からもう一度実行してください。"
     }
-    & $powerShellExe -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Description に失敗しました（終了コード: $LASTEXITCODE、言語: $Locale）。出力されたエラーと out\\logs を確認してください。"
+    # Relay both child streams through the host so Windows PowerShell 5.1
+    # records native output in the primary transcript too.
+    $previousErrorAction = $ErrorActionPreference
+    $global:LASTEXITCODE = $null
+    try {
+        $ErrorActionPreference = "Continue"
+        & $powerShellExe -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+        $childExitCode = $global:LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previousErrorAction }
+    if ($null -eq $childExitCode -or $childExitCode -ne 0) {
+        throw "$Description に失敗しました（終了コード: $childExitCode、言語: $Locale）。出力されたエラーと out\\logs を確認してください。"
     }
 }
 
@@ -148,6 +160,11 @@ if ($Test) {
     exit 0
 }
 
+# Version selection belongs to release preparation, before directory names,
+# builds, packages, statistics and snapshots consume it. Test/Clean exit above.
+. (Join-Path $PSScriptRoot 'scripts/release/release_version.ps1')
+$script:releaseVersionLease = Enter-ReleaseVersion -RepositoryRoot $PSScriptRoot
+
 # Keep this an array even for the default single locale.  A conditional
 # expression unwraps a one-item array during assignment; StrictMode would then
 # reject the .Count checks below on the resulting string.
@@ -170,22 +187,40 @@ foreach ($targetLocale in $targetLocales) {
     $releaseSetArgs = @("-Locale", $targetLocale)
     if ($DeferPostCreationValidation) { $releaseSetArgs += "-DeferPostCreationValidation" }
     if ($targetLocales.Count -eq 2) {
-        $releaseSetArgs += @("-OutBaseDir", $pairDirectory, "-ReleaseSetName", $targetLocale)
-        if (-not [string]::IsNullOrWhiteSpace($frozenPublicSnapshot)) {
-            $releaseSetArgs += @("-PublicSnapshotSource", $frozenPublicSnapshot)
-        }
+        $releaseSetArgs += @("-OutBaseDir", $pairDirectory, "-ReleaseSetName", "prepared_$targetLocale", "-PrepareOnly")
     }
     Invoke-RequiredScript -ScriptPath $buildScript -Arguments $buildArgs -Description "配布用アプリケーションのビルド"
     Invoke-RequiredScript -ScriptPath $releaseSetScript -Arguments $releaseSetArgs -Description "release set の作成"
-    if ($targetLocales.Count -eq 2 -and [string]::IsNullOrWhiteSpace($frozenPublicSnapshot)) {
-        $frozenPublicSnapshot = Join-Path (Join-Path $pairDirectory $targetLocale) "public_snapshot"
-        if (-not (Test-Path -LiteralPath $frozenPublicSnapshot -PathType Container)) {
-            throw "最初の release set の固定 public_snapshot が見つかりません: $frozenPublicSnapshot"
-        }
-    }
 }
 
-if ($targetLocales.Count -eq 2) { Write-Output "RELEASE_PAIR_PATH=$pairDirectory" }
+if ($targetLocales.Count -eq 2) {
+    # Four ZIPs must exist before the common statistics and snapshot freeze.
+    # Prepared directories have no release-set manifest and are not candidates.
+    foreach ($targetLocale in $targetLocales) {
+        $finalizeArgs = @("-Locale", $targetLocale, "-OutBaseDir", $pairDirectory, "-ReleaseSetName", $targetLocale,
+            "-PreparedPackagesPath", (Join-Path $pairDirectory "prepared_$targetLocale"))
+        if ($DeferPostCreationValidation) { $finalizeArgs += "-DeferPostCreationValidation" }
+        if ($targetLocale -eq "ja") {
+            $finalizeArgs += @("-StatisticsPeerPackagesPath", (Join-Path $pairDirectory "prepared_en"))
+        }
+        else {
+            $finalizeArgs += @("-PublicSnapshotSource", $frozenPublicSnapshot)
+        }
+        Invoke-RequiredScript -ScriptPath $releaseSetScript -Arguments $finalizeArgs -Description "release set の確定"
+        if ($targetLocale -eq "ja") {
+            $frozenPublicSnapshot = Join-Path (Join-Path $pairDirectory $targetLocale) "public_snapshot"
+            if (-not (Test-Path -LiteralPath $frozenPublicSnapshot -PathType Container)) {
+                throw "固定 public_snapshot が見つかりません: $frozenPublicSnapshot"
+            }
+        }
+    }
+    $statisticsGate = Join-Path $PSScriptRoot "tools\release_checks\public_statistics_gate.py"
+    & python -B $statisticsGate --japanese-set (Join-Path $pairDirectory "ja") --english-set (Join-Path $pairDirectory "en")
+    if ($LASTEXITCODE -ne 0) { throw "JA/EN public statistics validation failed." }
+    Write-Output "RELEASE_PAIR_PATH=$pairDirectory"
+}
 
+Exit-ReleaseVersion -Lease $script:releaseVersionLease
+$script:releaseVersionLease = $null
 Stop-RunLog
 exit 0

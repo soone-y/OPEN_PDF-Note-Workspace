@@ -64,16 +64,11 @@ function Get-Sha256([string]$Path) {
     }
 }
 
-function Get-InputItems([string[]]$Paths, [string[]]$ExcludePaths = @()) {
-    $excludeRoots = @(
-        $ExcludePaths |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-            ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') }
-    )
+function Get-InputItems([string[]]$Paths) {
     $items = @()
     foreach ($path in $Paths) {
         if (-not (Test-Path -LiteralPath $path)) {
-            continue
+            throw "Missing build input: $path"
         }
         $entry = Get-Item -LiteralPath $path
         if ($entry.PSIsContainer) {
@@ -83,30 +78,54 @@ function Get-InputItems([string[]]$Paths, [string[]]$ExcludePaths = @()) {
             $items += $entry
         }
     }
-    return @($items | Where-Object {
-        $itemFullPath = [System.IO.Path]::GetFullPath($_.FullName)
-        foreach ($excludeRoot in $excludeRoots) {
-            if ($itemFullPath.Equals($excludeRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
-                $itemFullPath.StartsWith($excludeRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
-                return $false
-            }
-        }
-        return $true
-    })
+    return @($items)
 }
 
-function Assert-ArtifactFresh([string]$ArtifactPath, [string[]]$InputPaths, [string[]]$ExcludePaths = @()) {
+function Get-CompilerInputPaths([string]$BuildSourcesPath, [string]$SourceProperty, [string]$ObjectDirectory) {
+    $manifest = Get-Content -LiteralPath $BuildSourcesPath -Raw | ConvertFrom-Json
+    $sources = @($manifest.$SourceProperty)
+    if ($sources.Count -eq 0) {
+        throw "Build source list is empty: $SourceProperty"
+    }
+    $inputs = @()
+    foreach ($source in $sources) {
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Missing build source: $source"
+        }
+        $flatName = $source -replace "[\\/]", "_" -replace "\.(cpp|c)$", ".o"
+        $dependencyFile = Join-Path $ObjectDirectory ("$flatName.d")
+        if (-not (Test-Path -LiteralPath $dependencyFile -PathType Leaf)) {
+            throw "Missing compiler dependency file: $dependencyFile"
+        }
+        $raw = Get-Content -LiteralPath $dependencyFile -Raw
+        $singleLine = $raw -replace "\\\r?\n", " "
+        $separator = [regex]::Match($singleLine, ':\s')
+        if (-not $separator.Success) {
+            throw "Invalid compiler dependency file: $dependencyFile"
+        }
+        $dependencies = @($singleLine.Substring($separator.Index + 1).Trim() -split '\s+' |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($dependencies.Count -eq 0 -or $source -notin $dependencies) {
+            throw "Compiler dependency file does not name its source: $dependencyFile"
+        }
+        $inputs += $dependencyFile
+        $inputs += $dependencies
+    }
+    return @($inputs | Select-Object -Unique)
+}
+
+function Assert-ArtifactFresh([string]$ArtifactPath, [string[]]$InputPaths) {
     if (-not (Test-Path -LiteralPath $ArtifactPath)) {
         throw "Missing build artifact: $ArtifactPath"
     }
 
     $artifactTime = (Get-Item -LiteralPath $ArtifactPath).LastWriteTimeUtc
-    foreach ($item in (Get-InputItems -Paths $InputPaths -ExcludePaths $ExcludePaths)) {
+    foreach ($item in (Get-InputItems -Paths $InputPaths)) {
         if ($item.FullName -eq $ArtifactPath) {
             continue
         }
         if ($item.LastWriteTimeUtc -gt $artifactTime) {
-            throw ("Build artifact is stale. Re-run build.ps1 (or scripts\build\build_workspace.ps1) before packaging. Newer input: {0}" -f $item.FullName)
+            throw ("Build artifact is stale. Re-run build.ps1 before packaging. Newer input: {0}" -f $item.FullName)
         }
     }
 }
@@ -284,12 +303,15 @@ function Copy-ReleaseTopDocuments([string]$ReleaseRoot, [string]$RepositoryRoot,
         $utf8 = New-Object System.Text.UTF8Encoding($false)
         $content = [System.IO.File]::ReadAllText($destination, [System.Text.Encoding]::UTF8)
         # A package contains one selected docs tree as docs/. The common root
-        # README links to the public documentation map and both source trees;
-        # all three targets resolve to the selected documentation entry here.
+        # Preserve each document path and fragment while mapping both source
+        # locale trees to the selected package's docs/. New deep links must
+        # receive the same mapping as the documentation entry.
         $content = $content.Replace("](DOCUMENTATION.md)", "](docs/README.md)")
-        $content = $content.Replace("](docs/ja/README.md)", "](docs/README.md)")
-        $content = $content.Replace("](docs/en/README.md)", "](docs/README.md)")
+        $content = $content.Replace("](docs/ja/", "](docs/")
+        $content = $content.Replace("](docs/en/", "](docs/")
         $content = $content.Replace("](THIRD_PARTY_NOTICES.md)", "](docs/legal/THIRD_PARTY_NOTICES.md)")
+        # Statistics belong to the public portal, outside the distribution ZIP.
+        $content = $content.Replace("](STATISTICS.md)", "](https://soone-y.github.io/OPEN_PDF-Note-Workspace/STATISTICS.html)")
         [System.IO.File]::WriteAllText($destination, $content, $utf8)
     }
 }
@@ -499,22 +521,37 @@ try {
     Assert-BuildInfoLocale -BuildInfoPath $exeBuildInfoPath -ExpectedLocale $Locale
     Assert-BuildInfoLocale -BuildInfoPath $readOnlyViewerBuildInfoPath -ExpectedLocale $Locale
     if (-not $SkipFreshnessCheck) {
-        Assert-ArtifactFresh -ArtifactPath $exePath -InputPaths @(
-            (Join-Path $repoRoot "src"),
+        $buildSourcesPath = Join-Path $repoRoot "scripts\build\build_sources.json"
+        $localeObjectSuffix = if ($Locale -eq "en") { "_en" } else { "" }
+        $appObjectDirectory = Join-Path $repoRoot ("out\obj" + $(if ($Lite) { "_lite" } else { "" }) + $localeObjectSuffix)
+        $viewerObjectDirectory = Join-Path $repoRoot ("out\obj_readonly_viewer" + $localeObjectSuffix)
+        $appInputs = @(Get-CompilerInputPaths -BuildSourcesPath $buildSourcesPath -SourceProperty "BuildSourceFiles" -ObjectDirectory $appObjectDirectory)
+        $appInputs += @(
             (Join-Path $repoRoot "scripts\build\build_workspace.ps1"),
-            (Join-Path $repoRoot "scripts\build\build_sources.json"),
-            (Join-Path $repoRoot "locales")
-        ) -ExcludePaths @(
-            (Join-Path $repoRoot "src\readonly_viewer")
+            $buildSourcesPath,
+            (Join-Path $repoRoot "scripts/build/build_version.ps1"),
+            (Join-Path $repoRoot "REPO_VERSION.txt"),
+            (Join-Path $repoRoot "locales"),
+            (Join-Path $repoRoot "src\resources\app.rc"),
+            (Join-Path $repoRoot "src\resources\app_resource.h"),
+            (Join-Path $repoRoot "src\resources\app.manifest"),
+            (Join-Path $repoRoot "src\resources\icons\app_icon.ico"),
+            (Join-Path $repoRoot "src\resources\icons\readonly_viewer_icon.ico")
         )
-        Assert-ArtifactFresh -ArtifactPath $readOnlyViewerExePath -InputPaths @(
-            (Join-Path $repoRoot "src\readonly_viewer"),
-            (Join-Path $repoRoot "src\theme"),
-            (Join-Path $repoRoot "src\clrop"),
-            (Join-Path $repoRoot "src\resources"),
+        $viewerInputs = @(Get-CompilerInputPaths -BuildSourcesPath $buildSourcesPath -SourceProperty "ReadOnlyViewerSourceFiles" -ObjectDirectory $viewerObjectDirectory)
+        $viewerInputs += @(
             (Join-Path $repoRoot "scripts\build\build_readonly_viewer.ps1"),
-            (Join-Path $repoRoot "scripts\build\build_sources.json")
+            $buildSourcesPath,
+            (Join-Path $repoRoot "scripts/build/build_version.ps1"),
+            (Join-Path $repoRoot "REPO_VERSION.txt"),
+            (Join-Path $repoRoot "locales"),
+            (Join-Path $repoRoot "src\resources\app.rc"),
+            (Join-Path $repoRoot "src\resources\app_resource.h"),
+            (Join-Path $repoRoot "src\resources\app.manifest"),
+            (Join-Path $repoRoot "src\resources\icons\readonly_viewer_icon.ico")
         )
+        Assert-ArtifactFresh -ArtifactPath $exePath -InputPaths $appInputs
+        Assert-ArtifactFresh -ArtifactPath $readOnlyViewerExePath -InputPaths $viewerInputs
     }
 
     if ([System.IO.Path]::IsPathRooted($OutBaseDir)) {

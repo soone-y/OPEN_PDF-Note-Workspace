@@ -4,6 +4,29 @@
 
 namespace note {
 
+bool FindNoteMarkupTagEndingAt(std::wstring_view source, Utf16CodeUnitOffset end, Span* out, bool fullwidth) noexcept {
+    const auto open = [fullwidth](wchar_t ch) { return ch == L'<' || (fullwidth && ch == L'\uFF1C'); };
+    if (!out || end.value == 0 || end.value > source.size() ||
+        (source[end.value - 1] != L'>' && !(fullwidth && source[end.value - 1] == L'\uFF1E'))) return false;
+    size_t cursor = end.value - 1;
+    while (cursor > 0 && !open(source[cursor - 1]) && source[cursor - 1] != L'\r' &&
+           source[cursor - 1] != L'\n') --cursor;
+    if (cursor == 0 || !open(source[cursor - 1])) return false;
+    *out = {{cursor - 1}, end};
+    return true;
+}
+
+bool FindNoteMarkupTagStartingAt(std::wstring_view source, Utf16CodeUnitOffset start, Span* out, bool fullwidth) noexcept {
+    const auto close = [fullwidth](wchar_t ch) { return ch == L'>' || (fullwidth && ch == L'\uFF1E'); };
+    if (!out || start.value >= source.size() ||
+        (source[start.value] != L'<' && !(fullwidth && source[start.value] == L'\uFF1C'))) return false;
+    size_t end = start.value + 1;
+    while (end < source.size() && !close(source[end]) && source[end] != L'\r' && source[end] != L'\n') ++end;
+    if (end >= source.size() || !close(source[end])) return false;
+    *out = {start, {end + 1}};
+    return true;
+}
+
 namespace {
 [[nodiscard]] bool MathTokenEquals(std::wstring_view text, std::wstring_view token) noexcept {
     if (text.size() != token.size()) return false;
@@ -117,6 +140,55 @@ bool TryParseNoteContainerFenceRun(std::wstring_view line,
     while (infoEnd > end && (line[infoEnd - 1] == L' ' || line[infoEnd - 1] == L'\t')) --infoEnd;
     *out = {count, {{end}, {infoEnd}}};
     return true;
+}
+
+Span NoteFenceTitleSpan(std::wstring_view line, bool container) noexcept {
+    size_t start = 0;
+    size_t end = line.size();
+    if (container) {
+        NoteContainerFenceRun fence;
+        if (!TryParseNoteContainerFenceRun(line, &fence)) return {};
+        start = fence.info_span.start.value;
+        end = fence.info_span.end.value;
+    } else {
+        // Standalone fences only; quoted/list prefixes are not rediscovered
+        // here. The caller must already own a parser-proven code block.
+        while (start < line.size() && line[start] == L' ') ++start;
+        if (start > 3 || start == line.size() || (line[start] != L'`' && line[start] != L'~')) return {};
+        const wchar_t marker = line[start];
+        const size_t first = start;
+        while (start < line.size() && line[start] == marker) ++start;
+        if (start - first < 3) return {};
+        while (start < end && (line[start] == L' ' || line[start] == L'\t')) ++start;
+        while (end > start && (line[end - 1] == L' ' || line[end - 1] == L'\t')) --end;
+    }
+    if (line.substr(start, end - start).find_first_of(L"\r\n") != std::wstring_view::npos) return {};
+    Span title{};
+    bool explicitTitle = false;
+    for (size_t cursor = start; cursor < end;) {
+        while (cursor < end && (line[cursor] == L' ' || line[cursor] == L'\t')) ++cursor;
+        if (cursor == end) break;
+        const bool attribute = line.substr(cursor, 6) == L"title=";
+        if (attribute) {
+            if (explicitTitle) return {};
+            explicitTitle = true;
+            cursor += 6;
+        }
+        const size_t valueStart = cursor;
+        if (cursor < end && (line[cursor] == L'\"' || line[cursor] == L'\'')) {
+            const wchar_t quote = line[cursor++];
+            const size_t body = cursor;
+            while (cursor < end && line[cursor] != quote) ++cursor;
+            if (cursor == end) return {};
+            if (attribute) title = {{body}, {cursor}};
+            ++cursor;
+            if (cursor < end && line[cursor] != L' ' && line[cursor] != L'\t') return {};
+        } else {
+            while (cursor < end && line[cursor] != L' ' && line[cursor] != L'\t') ++cursor;
+            if (attribute) title = {{valueStart}, {cursor}};
+        }
+    }
+    return explicitTitle ? title : container ? Span{{start}, {end}} : Span{};
 }
 
 bool TryParseNoteCodeFenceRun(std::wstring_view raw,

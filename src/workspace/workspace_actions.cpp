@@ -4,6 +4,7 @@
 #include "core/localization.h"
 #include "core/ui_prompts.h"
 #include "core/ui_notify.h"
+#include "ui/dialogs/pending_write_retry.h"
 #include "core/atomic_write.h"
 #include "bridge/view_bridge.h"
 #include <fpdfview.h>
@@ -11,7 +12,12 @@
 #include <fpdf_edit.h>
 #include "app/main_escape_backup.h"
 #include "workspace/workspace_actions.h"
+#include "workspace/workspace_tree.h"
+#include "workspace/temp_path_worker.h"
 #include "workspace/workspace_write_lock.h"
+#include "workspace/import_new_file.h"
+#include "workspace/drop_import_policy.h"
+#include "workspace/import_size.h"
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -333,131 +339,197 @@ std::filesystem::path ExeDirPath() {
     }
 }
 
-bool AddTempExternalLecture(HWND owner,
-                                   const std::wstring& lectureDir,
-                                   bool persistAndRefresh = true) {
-    const auto& ui = GetUiText();
-    std::filesystem::path p = std::filesystem::path(lectureDir);
-    if (lectureDir.rfind(L"\\\\", 0) == 0) {
-        const std::wstring msg = localization::Text(L"workspace.actions.fdb3da0b190c").c_str();
-        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
-        return false;
-    }
-    std::error_code ec;
-    if (!std::filesystem::exists(p, ec) || !std::filesystem::is_directory(p, ec)) {
-        ShowSilentMessageDialog(owner, ui.menuFile, L"フォルダが見つかりません。",
-                                SoftNoticeKind::Warning, {{L"", p.wstring()}});
-        return false;
-    }
-    if (!VerifyWorkspaceWritableForEditing(owner)) return false;
-    if (!VerifyDirReadableWritableForEditing(
-            owner, p, g_config.studentMode ? L"workspace.directory.external.student"
-                                           : L"workspace.directory.external.parent")) {
-        return false;
-    }
+static std::vector<std::wstring> TempExternalPaths(const std::vector<TempExternalLecture>& entries) {
+    std::vector<std::wstring> paths;
+    paths.reserve(entries.size());
+    for (const auto& entry : entries) paths.push_back(entry.path);
+    return paths;
+}
 
-    std::wstring canon = CanonicalOrSelf(p).wstring();
-    if (canon.empty()) canon = p.wstring();
-    std::wstring workspaceCanon;
-    if (!g_workspaceRoot.empty()) {
-        workspaceCanon = CanonicalOrSelf(std::filesystem::path(g_workspaceRoot)).wstring();
-        if (workspaceCanon.empty()) workspaceCanon = g_workspaceRoot;
-    }
-    std::wstring classesCanon;
-    if (!g_workspaceRoot.empty()) {
-        auto classesPath = WorkspaceClassesPath(g_workspaceRoot, g_config);
-        classesCanon = CanonicalOrSelf(classesPath).wstring();
-        if (classesCanon.empty()) classesCanon = classesPath.wstring();
-    }
+namespace {
+using TempPathCompletion = std::function<void(pending_write_retry::Result, std::wstring)>;
+struct TempPathAddition {
+    HWND owner = nullptr;
+    std::wstring workspace, classes;
+    std::vector<TempExternalLecture> before;
+    std::vector<std::wstring> savedBefore;
+    std::unique_ptr<temp_paths::Worker> worker;
+    TempPathCompletion completion;
+    bool closeAfter = false, canceled = false;
+};
+// UI-thread owner; at most one worker, no queued additions or detached threads.
+std::unique_ptr<TempPathAddition> s_tempPathAddition;
 
-    if ((!workspaceCanon.empty() && canon == workspaceCanon) ||
-        (!classesCanon.empty() && canon == classesCanon)) {
-        const std::wstring msg = localization::Text(L"workspace.actions.b1780cc78837").c_str();
-        ShowSoftNotice(owner, msg, SoftNoticeKind::Info);
+[[nodiscard]] bool StartTempPathAddition(HWND owner, temp_paths::Input input,
+    std::vector<std::wstring> savedBefore, TempPathCompletion completion = {}) {
+    if (s_tempPathAddition) return false;
+    // Install completion polling before launching; timer failure starts no I/O.
+    if (!owner || !SetTimer(owner, kTempPathWorkerTimerId, 50, nullptr)) return false;
+    try {
+        auto job = std::make_unique<TempPathAddition>();
+        job->owner = owner;
+        job->workspace = input.workspace;
+        job->classes = input.classes;
+        job->before = g_tempExternalLectures;
+        job->savedBefore = std::move(savedBefore);
+        job->completion = std::move(completion);
+        job->worker = std::make_unique<temp_paths::Worker>(std::move(input),
+            [](const std::filesystem::path& root, std::wstring& error) {
+                if (EnsureWorkspaceResourceDirsWithErr(root.wstring(), nullptr, &error)) return true;
+                error = localization::Format(L"workspace.config.not_writable", {{L"ROOT", root.wstring()}}) +
+                    L"\n\n" + error;
+                return false;
+            }, [](const std::filesystem::path& path, std::wstring& error) {
+                if (ProbeDirectoryEditingAccess(path, &error)) return true;
+                error = localization::Format(L"workspace.temp_paths.access_failed",
+                    {{L"DETAIL", error}});
+                return false;
+            });
+        s_tempPathAddition = std::move(job);
+        return true;
+    } catch (...) {
+        KillTimer(owner, kTempPathWorkerTimerId);
         return false;
     }
+}
+}
 
-    for (const auto& item : g_tempExternalLectures) {
-        if (item.path == canon) {
-            const std::wstring msg = localization::Text(
-                g_config.studentMode ? L"workspace.actions.external.already_added.student"
-                                    : L"workspace.actions.external.already_added.parent");
-            ShowSoftNotice(owner, msg, SoftNoticeKind::Info);
-            return false;
+static void RememberTempExternalSaveFailure(
+    HWND owner, const std::wstring& workspace,
+    const std::vector<TempExternalLecture>& before,
+    const std::vector<TempExternalLecture>& desired,
+    const std::vector<std::wstring>& savedBefore, const std::wstring& failure, bool retryable = true) {
+    const auto beforePaths = TempExternalPaths(before);
+    const auto desiredPaths = TempExternalPaths(desired);
+    std::wstring content;
+    for (const auto& path : desiredPaths) content += path + L"\r\n";
+    std::wstring preview;
+    for (const auto& path : desiredPaths) {
+        const auto folder = std::filesystem::path(path);
+        preview += folder.parent_path().filename().wstring() + L" / " +
+                   folder.filename().wstring() + L"\r\n";
+    }
+    pending_write_retry::Attempt attempt;
+    attempt.key = L"temp_external:" + workspace;
+    attempt.category = pending_write_retry::Category::TemporaryPaths;
+    attempt.operation = localization::Text(L"write_retry.temp_external");
+    attempt.targetPath = (ExeDirPath() / L"pdf_note_workspace_setup.json").wstring();
+    attempt.content = std::move(content);
+    attempt.preview = std::move(preview);
+    attempt.error = failure;
+    attempt.retryable = retryable;
+    attempt.retryAsync = [workspace, beforePaths, desiredPaths, savedBefore](TempPathCompletion complete) {
+        if (g_workspaceRoot != workspace ||
+            TempExternalPaths(g_tempExternalLectures) != beforePaths ||
+            LoadSetupTempExternalLectureDirs() != savedBefore) {
+            complete(pending_write_retry::Result::Conflict, localization::Text(L"write_retry.target_changed"));
+            return;
         }
-    }
-    for (const auto& item : g_lectures) {
-        if (item == canon) {
-            const std::wstring msg = localization::Text(
-                g_config.studentMode ? L"workspace.actions.external.already_listed.student"
-                                    : L"workspace.actions.external.already_listed.parent");
-            ShowSoftNotice(owner, msg, SoftNoticeKind::Info);
-            return false;
-        }
-    }
+        temp_paths::Input input;
+        input.workspace = workspace;
+        input.classes = WorkspaceClassesPath(workspace, g_config).wstring();
+        input.before = beforePaths;
+        input.requested = desiredPaths;
+        input.retry = true;
+        if (!StartTempPathAddition(g_hMainWnd, std::move(input), savedBefore, complete))
+            complete(pending_write_retry::Result::Failed, localization::Text(L"workspace.temp_paths.busy"));
+    };
+    pending_write_retry::Remember(owner, std::move(attempt));
+}
 
-    g_tempExternalLectures.push_back({canon});
-    if (!persistAndRefresh) return true;
+bool HasActiveTempPathAddition() { return static_cast<bool>(s_tempPathAddition); }
 
-    std::wstring persistError;
-    if (!PersistTempExternalLecturesToSetup(&persistError)) {
-        if (owner) {
-            std::wstring msg = localization::Text(
-                g_config.studentMode ? L"workspace.actions.external.save_failed.one.student"
-                                    : L"workspace.actions.external.save_failed.one.parent");
-            if (!persistError.empty() && persistError.find(L":\\") == std::wstring::npos &&
-                persistError.find(L"\\\\") == std::wstring::npos) {
-                msg += L"\n\n" + persistError;
+void CancelTempPathAddition(bool closeAfter) {
+    if (!s_tempPathAddition) return;
+    s_tempPathAddition->closeAfter = s_tempPathAddition->closeAfter || closeAfter;
+    s_tempPathAddition->canceled = true;
+    s_tempPathAddition->worker->Cancel();
+}
+
+void ShutdownTempPathAdditions() {
+    CancelTempPathAddition();
+    // Forced teardown cannot publish results. Join before cache destruction and
+    // before bootstrap releases the captured workspace's write ownership.
+    s_tempPathAddition.reset();
+}
+
+void PollTempPathAddition(HWND owner) {
+    if (!s_tempPathAddition) { KillTimer(owner, kTempPathWorkerTimerId); return; }
+    auto& active = *s_tempPathAddition;
+    const bool changed = active.workspace != g_workspaceRoot ||
+        active.classes != WorkspaceClassesPath(g_workspaceRoot, g_config).wstring() ||
+        TempExternalPaths(active.before) != TempExternalPaths(g_tempExternalLectures);
+    if (changed) active.worker->Cancel();
+    if (!active.worker->ready()) return;
+    auto job = std::move(s_tempPathAddition);
+    KillTimer(job->owner, kTempPathWorkerTimerId);
+    auto result = job->worker->Take();
+    result.canceled = result.canceled || job->canceled;
+    const bool conflict = changed || LoadSetupTempExternalLectureDirs() != job->savedBefore;
+    using RetryResult = pending_write_retry::Result;
+    RetryResult status = RetryResult::Failed;
+    try {
+    if (conflict) {
+        result.error = localization::Text(L"write_retry.target_changed");
+        status = RetryResult::Conflict;
+    } else if (result.canceled) {
+        result.error = localization::Text(L"workspace.temp_paths.canceled");
+    } else if (!result.failed) {
+        if (result.desired == TempExternalPaths(job->before)) status = RetryResult::Saved;
+        else {
+            std::vector<TempExternalLecture> entries;
+            entries.reserve(result.desired.size());
+            for (const auto& path : result.desired) entries.push_back({path});
+            if (PersistSetupTempExternalLectureDirs(result.desired, &result.error)) {
+                g_tempExternalLectures = std::move(entries);
+                // A completion only updates the folder rows. It must not rescan all
+                // roots or reset the active PDF, note, annotation list or selection.
+                struct RestoreSelectionNotifications {
+                    bool previous = s_ignoreLectureSelChange;
+                    ~RestoreSelectionNotifications() { s_ignoreLectureSelChange = previous; }
+                } restoreSelectionNotifications;
+                s_ignoreLectureSelChange = true;
+                RefreshRegisteredExternalLectures(TempExternalPaths(job->before));
+                RefreshStatusDisplay(owner);
+                status = RetryResult::Saved;
             }
-            ShowSilentMessageDialog(owner, GetUiText().menuAddTempExternalLecture, msg, SoftNoticeKind::Warning);
         }
     }
-    s_ignoreLectureSelChange = true;
-    LoadLectures();
-    s_ignoreLectureSelChange = false;
-    if (owner) RefreshStatusDisplay(owner);
-    return true;
+    } catch (...) {
+        // Complete asynchronous retry ownership even if UI publication fails.
+        // A committed setup file remains intact; the next retry rechecks it.
+        status = RetryResult::Failed;
+        result.error = localization::Text(L"write_retry.failed");
+    }
+    if (result.error.empty() && status != RetryResult::Saved)
+        result.error = localization::Text(L"write_retry.failed");
+    if (job->completion) job->completion(status, result.error);
+    else if (status != RetryResult::Saved && !result.canceled) {
+        std::vector<TempExternalLecture> desired;
+        for (const auto& path : result.desired) desired.push_back({path});
+        RememberTempExternalSaveFailure(owner, job->workspace, job->before, desired,
+            job->savedBefore, result.error, status != RetryResult::Conflict);
+    } else if (status == RetryResult::Saved && !result.canceled) {
+        const auto added = result.desired.size() - job->before.size();
+        ShowSoftNotice(owner, added ? localization::Format(g_config.studentMode
+            ? L"workspace.actions.external.added.student" : L"workspace.actions.external.added.parent",
+            {{L"COUNT", std::to_wstring(added)}}) : localization::Text(g_config.studentMode
+            ? L"workspace.actions.external.already_added.student" : L"workspace.actions.external.already_added.parent"),
+            SoftNoticeKind::Info);
+    }
+    if (job->closeAfter) PostMessageW(owner, WM_CLOSE, 0, 0);
 }
 
 void AddTempExternalLectures(HWND owner, const std::vector<std::wstring>& lectureDirs) {
     if (lectureDirs.empty()) return;
-    if (lectureDirs.size() == 1) {
-        AddTempExternalLecture(owner, lectureDirs.front());
-        return;
-    }
-
-    size_t added = 0;
-    for (const auto& lectureDir : lectureDirs) {
-        if (AddTempExternalLecture(owner, lectureDir, false)) {
-            ++added;
-        }
-    }
-    if (added == 0) return;
-
-    std::wstring persistError;
-    if (!PersistTempExternalLecturesToSetup(&persistError)) {
-        if (owner) {
-            std::wstring msg = localization::Text(
-                g_config.studentMode ? L"workspace.actions.external.save_failed.multiple.student"
-                                    : L"workspace.actions.external.save_failed.multiple.parent");
-            if (!persistError.empty() && persistError.find(L":\\") == std::wstring::npos &&
-                persistError.find(L"\\\\") == std::wstring::npos) {
-                msg += L"\n\n" + persistError;
-            }
-            ShowSilentMessageDialog(owner, GetUiText().menuAddTempExternalLecture, msg, SoftNoticeKind::Warning);
-        }
-    }
-    s_ignoreLectureSelChange = true;
-    LoadLectures();
-    s_ignoreLectureSelChange = false;
-    if (owner) {
-        RefreshStatusDisplay(owner);
-        std::wstring msg = localization::Format(
-            g_config.studentMode ? L"workspace.actions.external.added.student"
-                                : L"workspace.actions.external.added.parent",
-            {{L"COUNT", std::to_wstring(added)}});
-        ShowSoftNotice(owner, msg, SoftNoticeKind::Info);
-    }
+    temp_paths::Input input;
+    input.workspace = g_workspaceRoot;
+    input.classes = WorkspaceClassesPath(g_workspaceRoot, g_config).wstring();
+    input.before = TempExternalPaths(g_tempExternalLectures);
+    input.listed = g_lectures;
+    input.requested = lectureDirs;
+    if (!StartTempPathAddition(owner, std::move(input), LoadSetupTempExternalLectureDirs()))
+        ShowSoftNotice(owner, localization::Text(L"workspace.temp_paths.busy"), SoftNoticeKind::Info);
 }
 
 std::optional<std::wstring> PickWorkspaceFolder(HWND parent) {
@@ -496,7 +568,6 @@ std::vector<std::wstring> PickFoldersWithInitial(HWND parent,
     return PromptExistingLocalFolders(parent, initialDir, title, /*allowMultiple=*/true, confirmLabel);
 }
 
-std::wstring s_newNoteExtension = L".clro";
 
 bool IsSupportedNewNoteExtension(const std::wstring& ext) {
     std::wstring lower = ToLowerAscii(ext);
@@ -656,7 +727,7 @@ void CreateNewNoteInSession(HWND hWnd,
     }
 
     RefreshCurrentSessionFiles();
-    LoadNoteFile(hWnd, target.wstring());
+    if (!LoadNoteFile(hWnd, target.wstring())) return;
     SyncBottomPaneAfterNoteLoad(hWnd);
     RefreshStatusDisplay(hWnd);
     ShowSoftNotice(hWnd,
@@ -664,7 +735,7 @@ void CreateNewNoteInSession(HWND hWnd,
 }
 
 void CreateNewClroInSession(HWND hWnd) {
-    CreateNewNoteInSession(hWnd, s_newNoteExtension, nullptr);
+    CreateNewNoteInSession(hWnd, g_config.newNoteExtension, nullptr);
 }
 
 void CreateNewNoteWithExtensionInSession(HWND hWnd, const std::wstring& extension) {
@@ -698,150 +769,6 @@ std::filesystem::path NoteDirectoryForSession(const std::filesystem::path& sessi
 
 std::filesystem::path PdfDirectoryForSession(const std::filesystem::path& sessionRoot) {
     return SessionFilesUseRootDirectory() ? sessionRoot : sessionRoot / L"pdf";
-}
-
-bool TryParsePositiveDoubleToken(const std::wstring& token, double* out) {
-    if (out) *out = 0.0;
-    if (token.empty()) return false;
-    wchar_t* end = nullptr;
-    const double v = std::wcstod(token.c_str(), &end);
-    if (end == token.c_str() || !std::isfinite(v) || v <= 0.0) return false;
-    while (end && *end) {
-        if (!iswspace(*end)) return false;
-        ++end;
-    }
-    if (out) *out = v;
-    return true;
-}
-
-bool TryParsePositiveIntToken(const std::wstring& token, int minValue, int maxValue, int* out) {
-    if (out) *out = 0;
-    if (token.empty()) return false;
-    wchar_t* end = nullptr;
-    const long v = std::wcstol(token.c_str(), &end, 10);
-    if (end == token.c_str()) return false;
-    while (end && *end) {
-        if (!iswspace(*end)) return false;
-        ++end;
-    }
-    if (v < minValue || v > maxValue) return false;
-    if (out) *out = static_cast<int>(v);
-    return true;
-}
-
-bool TryResolveBlankPdfPreset(const std::wstring& token, double* outWPt, double* outHPt) {
-    std::wstring key = ToLowerAscii(TrimWhitespace(token));
-    std::replace(key.begin(), key.end(), L'_', L'-');
-    bool landscape = false;
-    auto stripSuffix = [&](const std::wstring& suffix) {
-        if (key.size() >= suffix.size() &&
-            key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0) {
-            key.resize(key.size() - suffix.size());
-            landscape = true;
-        }
-    };
-    stripSuffix(L"-landscape");
-    stripSuffix(L"-l");
-    if (!key.empty() && key.back() == L'l') {
-        key.pop_back();
-        landscape = true;
-    }
-
-    double w = 0.0;
-    double h = 0.0;
-    if (key == L"a4") {
-        w = 595.0;
-        h = 842.0;
-    } else if (key == L"a5") {
-        w = 420.0;
-        h = 595.0;
-    } else if (key == L"b5") {
-        w = 516.0;
-        h = 729.0;
-    } else if (key == L"letter") {
-        w = 612.0;
-        h = 792.0;
-    } else {
-        return false;
-    }
-    if (landscape) std::swap(w, h);
-    if (outWPt) *outWPt = w;
-    if (outHPt) *outHPt = h;
-    return true;
-}
-
-bool TryParseBlankPdfSizeToken(std::wstring token, double* outWPt, double* outHPt) {
-    token = ToLowerAscii(TrimWhitespace(token));
-    std::replace(token.begin(), token.end(), L'*', L'x');
-    const size_t x = token.find(L'x');
-    if (x == std::wstring::npos) return TryResolveBlankPdfPreset(token, outWPt, outHPt);
-
-    std::wstring unit = L"mm";
-    auto stripUnit = [&](const std::wstring& suffix, const std::wstring& parsedUnit) {
-        if (token.size() >= suffix.size() &&
-            token.compare(token.size() - suffix.size(), suffix.size(), suffix) == 0) {
-            token.resize(token.size() - suffix.size());
-            unit = parsedUnit;
-            return true;
-        }
-        return false;
-    };
-    stripUnit(L"mm", L"mm") || stripUnit(L"pt", L"pt") || stripUnit(L"in", L"in");
-
-    std::wstring wToken = token.substr(0, x);
-    std::wstring hToken = token.substr(x + 1);
-    double w = 0.0;
-    double h = 0.0;
-    if (!TryParsePositiveDoubleToken(wToken, &w) || !TryParsePositiveDoubleToken(hToken, &h)) {
-        return false;
-    }
-    if (unit == L"mm") {
-        w = w * 72.0 / 25.4;
-        h = h * 72.0 / 25.4;
-    } else if (unit == L"in") {
-        w *= 72.0;
-        h *= 72.0;
-    }
-    if (outWPt) *outWPt = w;
-    if (outHPt) *outHPt = h;
-    return true;
-}
-
-bool TryParseBlankPdfSpec(const std::wstring& input, BlankPdfSpec* out) {
-    if (out) *out = {};
-    std::wstring normalized = TrimWhitespace(input);
-    for (wchar_t& ch : normalized) {
-        if (ch == L',' || ch == L';' || ch == L'\t') ch = L' ';
-    }
-    std::wstringstream ss(normalized);
-    std::vector<std::wstring> tokens;
-    for (std::wstring token; ss >> token;) tokens.push_back(token);
-    if (tokens.empty() || tokens.size() > 3) return false;
-
-    BlankPdfSpec spec{};
-    if (tokens.size() == 3) {
-        double wMm = 0.0;
-        double hMm = 0.0;
-        if (!TryParsePositiveDoubleToken(tokens[0], &wMm) ||
-            !TryParsePositiveDoubleToken(tokens[1], &hMm) ||
-            !TryParsePositiveIntToken(tokens[2], 1, 500, &spec.pageCount)) {
-            return false;
-        }
-        spec.widthPt = wMm * 72.0 / 25.4;
-        spec.heightPt = hMm * 72.0 / 25.4;
-    } else {
-        if (!TryParseBlankPdfSizeToken(tokens[0], &spec.widthPt, &spec.heightPt)) return false;
-        if (tokens.size() == 2 &&
-            !TryParsePositiveIntToken(tokens[1], 1, 500, &spec.pageCount)) {
-            return false;
-        }
-    }
-    if (spec.widthPt < 72.0 || spec.heightPt < 72.0 ||
-        spec.widthPt > 2880.0 || spec.heightPt > 2880.0) {
-        return false;
-    }
-    if (out) *out = spec;
-    return true;
 }
 
 std::optional<std::filesystem::path> PromptBlankPdfPath(HWND owner,
@@ -1217,7 +1144,7 @@ bool ShowNewNoteButtonContextMenu(HWND hWnd, LPARAM lParam) {
     };
     for (const auto& item : kExtItems) {
         UINT flags = MF_STRING;
-        if (ToLowerAscii(s_newNoteExtension) == item.ext) flags |= MF_CHECKED;
+        if (ToLowerAscii(g_config.newNoteExtension) == item.ext) flags |= MF_CHECKED;
         AppendMenuW(extMenu, flags, item.id, item.ext + 1);
     }
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(extMenu),
@@ -1240,18 +1167,24 @@ bool ShowNewNoteButtonContextMenu(HWND hWnd, LPARAM lParam) {
 
     for (const auto& item : kExtItems) {
         if (cmd == item.id) {
-            s_newNoteExtension = item.ext;
+            const std::wstring previous = g_config.newNoteExtension;
+            g_config.newNoteExtension = item.ext;
+            if (!TryPersistConfig()) {
+                g_config.newNoteExtension = previous;
+                ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.note.extension_save_failed"), SoftNoticeKind::Warning);
+                return true;
+            }
             ShowSoftNotice(hWnd,
                            localization::Format(L"workspace.actions.note.extension",
-                                                {{L"EXT", s_newNoteExtension}}),
+                                                {{L"EXT", g_config.newNoteExtension}}),
                            SoftNoticeKind::Info);
             return true;
         }
     }
     if (cmd == 10) {
         if (!SaveNoteIfDirty(hWnd)) return true;
-        std::vector<std::wstring> suggestions = NewNoteNameSuggestions(s_newNoteExtension);
-        std::wstring input = suggestions.empty() ? (DefaultNewNoteStem() + s_newNoteExtension) : suggestions.front();
+        std::vector<std::wstring> suggestions = NewNoteNameSuggestions(g_config.newNoteExtension);
+        std::wstring input = suggestions.empty() ? (DefaultNewNoteStem() + g_config.newNoteExtension) : suggestions.front();
         std::wstring name;
         PromptCreateNameResult prompt = PromptCreateName(
             hWnd,
@@ -1262,16 +1195,16 @@ bool ShowNewNoteButtonContextMenu(HWND hWnd, LPARAM lParam) {
             true,
             name);
         if (prompt == PromptCreateNameResult::Explorer) {
-            auto pickedName = PromptCurrentNoteFileNameWithSaveDialog(hWnd, input, s_newNoteExtension);
+            auto pickedName = PromptCurrentNoteFileNameWithSaveDialog(hWnd, input, g_config.newNoteExtension);
             if (pickedName) {
-                CreateNewNoteInSession(hWnd, s_newNoteExtension, &*pickedName);
+                CreateNewNoteInSession(hWnd, g_config.newNoteExtension, &*pickedName);
             }
             return true;
         }
         if (prompt != PromptCreateNameResult::Create) {
             return true;
         }
-        CreateNewNoteInSession(hWnd, s_newNoteExtension, &name);
+        CreateNewNoteInSession(hWnd, g_config.newNoteExtension, &name);
         return true;
     }
     return cmd != 0;
@@ -1320,12 +1253,6 @@ bool IsOfficeImportSourcePath(const std::filesystem::path& path) {
     return ext == L".docx" || ext == L".pptx";
 }
 
-bool IsDocxImportSourcePath(const std::filesystem::path& path) {
-    auto ext = path.extension().wstring();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-    return ext == L".docx";
-}
-
 // Office conversion is reachable only through a runtime that has passed
 // tools/libreoffice_runtime_gate.py. The retained third_party administrative
 // image is intentionally not searched here because it is kept for comparison
@@ -1346,7 +1273,8 @@ void CleanupImportTempFile(HANDLE* handle, const std::filesystem::path& tmp) {
 static bool CopyFileForImportSafely(const std::filesystem::path& src,
                                     const std::filesystem::path& dest,
                                     std::wstring* outErr,
-                                    const std::filesystem::path& observationRoot) {
+                                    const std::filesystem::path& observationRoot,
+                                    bool noReplace = false) {
     if (outErr) outErr->clear();
     if (src.empty() || dest.empty()) {
         if (outErr) *outErr = localization::Text(L"workspace.actions.70e485841f70").c_str();
@@ -1466,6 +1394,16 @@ static bool CopyFileForImportSafely(const std::filesystem::path& src,
     }
     tmpHandle = INVALID_HANDLE_VALUE;
 
+    if (noReplace) {
+        DWORD commitError = ERROR_SUCCESS;
+        if (!workspace_import::CommitNewFile(tmp, dest, &commitError)) {
+            if (outErr) *outErr = atomic_write::Win32ErrorMessage(commitError);
+            return false;
+        }
+        observation.Success();
+        return true;
+    }
+
     std::wstring replaceErr;
     if (!atomic_write::AtomicReplaceFile(dest, tmp, dest.parent_path(), &replaceErr)) {
         if (outErr) *outErr = replaceErr.empty()
@@ -1484,6 +1422,7 @@ bool CopyFileForImportSafely(const std::filesystem::path& src,
 }
 
 struct DirectoryImportPlan {
+    workspace_import::ImportSize size;
     std::filesystem::path sourceRoot;
     std::filesystem::path destRoot;
     std::vector<std::filesystem::path> directories;
@@ -1548,67 +1487,39 @@ bool BuildDirectoryImportPlan(const std::filesystem::path& src,
     plan.sourceRoot = src;
     plan.destRoot = dest;
 
-    std::error_code ec;
-    std::filesystem::recursive_directory_iterator it(
-        src, std::filesystem::directory_options::none, ec);
-    if (ec) {
-        if (outErr) *outErr = src.wstring() + L"\n\n" + UTF8ToWide(ec.message());
-        return false;
-    }
-
-    std::filesystem::recursive_directory_iterator end;
-    for (; it != end; it.increment(ec)) {
-        if (ec) {
-            if (outErr) *outErr = UTF8ToWide(ec.message());
+    // The existing Unicode Win32 enumerator supports extended local paths.
+    // MinGW's directory iterator can enumerate CWD for long paths. Keep each
+    // relative path from the parent's known components, without canonical I/O.
+    std::vector<std::filesystem::path> pending{std::filesystem::path{}};
+    for (size_t index = 0; index < pending.size(); ++index) {
+        const auto relativeParent = pending[index];
+        std::vector<office::work_paths::DirectoryEntry> entries;
+        std::error_code error;
+        if (!office::work_paths::ReadDirectory(src / relativeParent, entries, error)) {
+            if (outErr) *outErr = localization::Format(L"workspace.drop.directory_read_failed",
+                {{L"CODE", std::to_wstring(error.value())}}) + L"\n" + (src / relativeParent).wstring();
             return false;
         }
-
-        const std::filesystem::path p = it->path();
-        bool isReparse = false;
-        if (TryIsReparsePointNoFollow(p, isReparse) && isReparse) {
-            if (outErr) {
-                *outErr = localization::Text(L"workspace.actions.ffa85e221b63").c_str();
-                *outErr += p.wstring();
-            }
-            return false;
-        }
-
-        std::error_code relEc;
-        std::filesystem::path rel = std::filesystem::relative(p, src, relEc);
-        const bool relEscapesRoot = !rel.empty() && rel.begin()->wstring() == L"..";
-        if (relEc || rel.empty() || relEscapesRoot) {
-            if (outErr) {
-                *outErr = localization::Text(L"workspace.actions.115f58824162").c_str();
-                *outErr += p.wstring();
-            }
-            return false;
-        }
-
-        std::error_code stEc;
-        if (it->is_directory(stEc) && !stEc) {
-            if (IsWorkspaceReservedImportDirectoryName(p)) {
-                if (outErr) {
-                    *outErr = localization::Text(L"workspace.actions.3a663010fdc5").c_str();
-                    *outErr += p.wstring();
-                }
+        for (const auto& entry : entries) {
+            const auto rel = relativeParent / entry.path.filename();
+            if (entry.attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)) {
+                if (outErr) *outErr = localization::Text(L"workspace.actions.ffa85e221b63") + entry.path.wstring();
                 return false;
             }
-            plan.directories.push_back(rel);
-            continue;
-        }
-        if (stEc) {
-            if (outErr) *outErr = p.wstring() + L"\n\n" + UTF8ToWide(stEc.message());
-            return false;
-        }
-
-        stEc.clear();
-        if (it->is_regular_file(stEc) && !stEc) {
-            plan.files.push_back(rel);
-            continue;
-        }
-        if (stEc) {
-            if (outErr) *outErr = p.wstring() + L"\n\n" + UTF8ToWide(stEc.message());
-            return false;
+            if (entry.attributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (IsWorkspaceReservedImportDirectoryName(entry.path)) {
+                    if (outErr) *outErr = localization::Text(L"workspace.actions.3a663010fdc5") + entry.path.wstring();
+                    return false;
+                }
+                plan.directories.push_back(rel);
+                pending.push_back(rel);
+            } else {
+                if (!plan.size.AddFile(entry.path)) {
+                    if (outErr) *outErr = localization::Text(L"workspace.import_size.measure_failed");
+                    return false;
+                }
+                plan.files.push_back(rel);
+            }
         }
     }
 
@@ -1654,7 +1565,7 @@ bool RollbackCreatedDirectoryImportEntries(
             continue;
         }
         std::error_code ec;
-        const bool removed = std::filesystem::remove(file, ec);
+        const bool removed = std::filesystem::remove(office::work_paths::IoPath(file), ec);
         if (ec) appendError(file, ec);
         (void)removed;
     }
@@ -1673,7 +1584,7 @@ bool RollbackCreatedDirectoryImportEntries(
             continue;
         }
         std::error_code ec;
-        const bool removed = std::filesystem::remove(dir, ec);
+        const bool removed = std::filesystem::remove(office::work_paths::IoPath(dir), ec);
         if (ec) appendError(dir, ec);
         (void)removed;
     }
@@ -1701,7 +1612,7 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
     }
 
     std::error_code ec;
-    if (std::filesystem::exists(plan.destRoot, ec) && !ec) {
+    if (std::filesystem::exists(office::work_paths::IoPath(plan.destRoot), ec) && !ec) {
         if (outErr) {
             *outErr = (localization::Text(L"workspace.actions.3cf2beeadd3f").c_str()) +
                       plan.destRoot.wstring();
@@ -1713,8 +1624,8 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
         return false;
     }
 
-    std::filesystem::create_directories(plan.destRoot, ec);
-    if (ec) {
+    const bool createdRoot = std::filesystem::create_directory(office::work_paths::IoPath(plan.destRoot), ec);
+    if (ec || !createdRoot) {
         if (outErr) {
             *outErr = (localization::Text(L"workspace.actions.af61d0579ff4").c_str()) +
                       plan.destRoot.wstring();
@@ -1741,8 +1652,8 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
 
     for (const auto& rel : plan.directories) {
         const std::filesystem::path createdDir = plan.destRoot / rel;
-        std::filesystem::create_directories(createdDir, ec);
-        if (ec) {
+        const bool created = std::filesystem::create_directory(office::work_paths::IoPath(createdDir), ec);
+        if (ec || !created) {
             std::wstring err = (localization::Text(L"workspace.actions.f5f02a8a236a").c_str()) +
                                createdDir.wstring();
             return rollback(err);
@@ -1754,7 +1665,7 @@ bool ExecuteDirectoryImportPlan(const DirectoryImportPlan& plan,
         const std::filesystem::path srcFile = plan.sourceRoot / rel;
         const std::filesystem::path destFile = plan.destRoot / rel;
         std::wstring copyErr;
-        if (!CopyFileForImportSafely(srcFile, destFile, &copyErr, std::filesystem::path(g_workspaceRoot))) {
+        if (!CopyFileForImportSafely(srcFile, destFile, &copyErr, std::filesystem::path(g_workspaceRoot), /*noReplace=*/true)) {
             std::wstring err = copyErr.empty()
                 ? (localization::Text(L"workspace.actions.67c8af2a773e").c_str())
                 : copyErr;
@@ -1776,108 +1687,157 @@ std::optional<std::filesystem::path> PickDirectoryImportSource(HWND owner,
     return CanonicalOrSelf(src);
 }
 
-bool ImportDirectoryAsLecture(HWND hWnd) {
-    const auto& ui = GetUiText();
-    if (g_workspaceRoot.empty() || !VerifyWorkspaceWritableForEditing(hWnd)) {
-        return false;
-    }
-    const std::wstring title = ui.menuImportDirAsLecture;
-    std::filesystem::path classesPath = WorkspaceClassesPath(g_workspaceRoot, g_config);
-    std::error_code ec;
-    std::filesystem::create_directories(classesPath, ec);
-    if (ec) {
-        ShowSilentMessageDialog(hWnd, title,
-                                localization::Format(
-                                    g_config.studentMode
-                                        ? L"workspace.actions.import.destination_folder_failed.student"
-                                        : L"workspace.actions.import.destination_folder_failed.parent",
-                                    {{L"PATH", classesPath.wstring()}}),
-                                SoftNoticeKind::Error);
-        return false;
-    }
-    if (!VerifyDirReadableWritableForEditing(hWnd, classesPath,
-                                             g_config.studentMode ? L"workspace.directory.lecture_import.student"
-                                                                  : L"workspace.directory.lecture_import.parent")) {
-        return false;
-    }
-    auto src = PickDirectoryImportSource(hWnd, title, DialogDownloadsInitialFolder());
-    if (!src) return false;
-
-    std::wstring workspaceLockError;
-    WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
-    if (!workspaceLock.acquired()) {
-        ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.4618bb4d74d4").c_str(),
-            SoftNoticeKind::Warning);
-        return false;
-    }
-
-    std::filesystem::path dest = classesPath / src->filename();
-    DirectoryImportPlan plan;
-    std::wstring err;
-    if (!BuildDirectoryImportPlan(*src, dest, &plan, &err) ||
-        !ExecuteDirectoryImportPlan(plan, classesPath, &err)) {
-        ShowSilentMessageDialog(hWnd, title,
-                                err.empty() ? ui.errImportFile : err,
-                                SoftNoticeKind::Error);
-        return false;
-    }
-
-    g_currentLecturePath = dest.wstring();
-    UpdateLectureOpenTime(g_currentLecturePath);
-    ResetSessionAndFiles();
-    LoadLectures();
-    SyncLeftPaneSelection();
-    RefreshMainWindowUiState(hWnd);
-    ShowSoftNotice(hWnd, localization::Text(
-                       g_config.studentMode ? L"workspace.actions.import.directory_as_lecture.student"
-                                           : L"workspace.actions.import.directory_as_lecture.parent"),
-                   SoftNoticeKind::Info);
-    return true;
+namespace {
+[[nodiscard]] bool ConfirmImportSize(HWND owner, const workspace_import::ImportSize& size) {
+    using workspace_import::ImportSizeLevel;
+    const auto level = workspace_import::ImportLevel(size.bytes);
+    if (level == ImportSizeLevel::Small) return true;
+    const wchar_t* guidance = level == ImportSizeLevel::Over1GB ? L"workspace.import_size.over_1gb"
+        : level == ImportSizeLevel::Over500MB ? L"workspace.import_size.over_500mb" : L"workspace.import_size.over_100mb";
+    const auto amount = workspace_import::ImportSizeNumber(size.bytes) +
+        (size.bytes >= workspace_import::kImportGigabyte ? L" GB" : L" MB");
+    SilentDialogOptions options;
+    options.title = localization::Text(L"workspace.import_size.title");
+    options.message = localization::Format(L"workspace.import_size.confirm",
+        {{L"COUNT", std::to_wstring(size.files)}, {L"SIZE", amount}, {L"BYTES", std::to_wstring(size.bytes)},
+         {L"GUIDANCE", localization::Text(guidance)}});
+    options.kind = SoftNoticeKind::Warning;
+    options.buttons = SilentDialogButtons::OkCancel;
+    options.okLabel = localization::Text(L"workspace.import_size.continue");
+    options.cancelLabel = localization::Text(L"workspace.import_size.stop");
+    options.defaultResult = SilentDialogResult::Cancel;
+    options.escapeResult = SilentDialogResult::Cancel;
+    return ShowSilentDialog(owner, options) == SilentDialogResult::Ok;
 }
 
-bool ImportDirectoryAsSession(HWND hWnd) {
+[[nodiscard]] bool ConfirmImportFilesSize(HWND owner, const std::vector<std::wstring>& paths) {
+    workspace_import::ImportSize size;
+    if (!workspace_import::MeasureImportFiles(paths, size)) {
+        ShowSoftNotice(owner, localization::Text(L"workspace.import_size.measure_failed"), SoftNoticeKind::Warning);
+        return false;
+    }
+    return ConfirmImportSize(owner, size);
+}
+} // namespace
+
+namespace {
+[[nodiscard]] bool ReportDropIssue(HWND owner, workspace_import::DropIssue issue, bool directories) {
+    if (issue == workspace_import::DropIssue::None) return false;
+    const wchar_t* key = L"workspace.drop.invalid_source";
+    if (issue == workspace_import::DropIssue::WrongKind)
+        key = directories ? L"workspace.drop.directories_only" : L"workspace.drop.files_only";
+    else if (issue == workspace_import::DropIssue::InvalidDestination) key = L"workspace.drop.invalid_destination";
+    else if (issue == workspace_import::DropIssue::Collision) key = L"workspace.drop.collision";
+    else if (issue == workspace_import::DropIssue::Overlap) key = L"workspace.drop.overlap";
+    ShowSoftNotice(owner, localization::Text(key), SoftNoticeKind::Warning);
+    return true;
+}
+} // namespace
+
+bool ImportDroppedDirectories(HWND hWnd, const std::vector<std::wstring>& paths, bool asLecture) {
+    if (paths.empty()) return false;
+    if (ReportDropIssue(hWnd, workspace_import::CheckDropSources(paths, true), true)) return false;
     const auto& ui = GetUiText();
-    if (g_currentLecturePath.empty()) {
+    const std::wstring workspace = g_workspaceRoot;
+    const std::filesystem::path parent = asLecture ? WorkspaceClassesPath(workspace, g_config)
+        : std::filesystem::path(g_currentLecturePath);
+    if (!asLecture && parent.empty()) {
         ShowSoftNotice(hWnd, ui.errSessionNoLecture, SoftNoticeKind::Warning);
         return false;
     }
-    if (!VerifyWorkspaceWritableForEditing(hWnd)) return false;
-    const std::wstring title = ui.menuImportDirAsSession;
-    std::filesystem::path lectureDir(g_currentLecturePath);
-    if (!VerifyDirReadableWritableForEditing(hWnd, lectureDir,
-                                             g_config.studentMode ? L"workspace.directory.session_import.student"
-                                                                  : L"workspace.directory.session_import.parent")) {
+    if (workspace.empty() || !VerifyWorkspaceWritableForEditing(hWnd)) return false;
+    const std::wstring title = asLecture ? ui.menuImportDirAsLecture : ui.menuImportDirAsSession;
+    std::vector<std::filesystem::path> destinations;
+    for (const auto& name : paths) {
+        auto source = std::filesystem::path(name).lexically_normal();
+        if (source.filename().empty()) source = source.parent_path();
+        if (!ValidateDirectoryImportSource(hWnd, source, title)) return false;
+        if (source.filename().empty()) {
+            ShowSoftNotice(hWnd, localization::Text(L"workspace.drop.invalid_source"), SoftNoticeKind::Warning);
+            return false;
+        }
+        destinations.push_back(parent / source.filename());
+    }
+    std::wstring lockError;
+    WorkspaceOperationLock lock(std::filesystem::path(workspace), &lockError);
+    if (!lock.acquired()) {
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.4618bb4d74d4"), SoftNoticeKind::Warning);
         return false;
     }
-    auto src = PickDirectoryImportSource(hWnd, title, DialogDownloadsInitialFolder());
-    if (!src) return false;
-
-    std::wstring workspaceLockError;
-    WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
-    if (!workspaceLock.acquired()) {
-        ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.4618bb4d74d4").c_str(),
-            SoftNoticeKind::Warning);
+    if (ReportDropIssue(hWnd, workspace_import::CheckDropCopyPlan(paths, destinations, true), true)) return false;
+    // Build all recursive plans before creating anything. A bad member rejects
+    // the entire drop; source trees remain untouched even on later copy failure.
+    std::vector<DirectoryImportPlan> plans;
+    for (size_t index = 0; index < paths.size(); ++index) {
+        DirectoryImportPlan plan;
+        std::wstring error;
+        if (!BuildDirectoryImportPlan(paths[index], destinations[index], &plan, &error)) {
+            ShowSilentMessageDialog(hWnd, title, error.empty() ? ui.errImportFile : error, SoftNoticeKind::Error);
+            return false;
+        }
+        plans.push_back(std::move(plan));
+    }
+    workspace_import::ImportSize size;
+    for (const auto& plan : plans) {
+        if (!size.Add(plan.size)) {
+            ShowSoftNotice(hWnd, localization::Text(L"workspace.import_size.measure_failed"), SoftNoticeKind::Warning);
+            return false;
+        }
+    }
+    if (!ConfirmImportSize(hWnd, size)) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    if (ec || !VerifyDirReadableWritableForEditing(hWnd, parent,
+        asLecture ? (g_config.studentMode ? L"workspace.directory.lecture_import.student" : L"workspace.directory.lecture_import.parent")
+                  : (g_config.studentMode ? L"workspace.directory.session_import.student" : L"workspace.directory.session_import.parent"))) {
+        if (ec) ShowSoftNotice(hWnd, ui.errImportFile, SoftNoticeKind::Error);
         return false;
     }
-
-    std::filesystem::path dest = lectureDir / src->filename();
-    DirectoryImportPlan plan;
-    std::wstring err;
-    if (!BuildDirectoryImportPlan(*src, dest, &plan, &err) ||
-        !ExecuteDirectoryImportPlan(plan, lectureDir, &err)) {
+    size_t imported = 0;
+    std::wstring failure;
+    for (const auto& plan : plans) {
+        if (!ExecuteDirectoryImportPlan(plan, parent, &failure)) break;
+        ++imported;
+    }
+    if (imported) {
+        const auto& last = plans[imported - 1].destRoot;
+        if (asLecture) {
+            g_currentLecturePath = last.wstring();
+            UpdateLectureOpenTime(g_currentLecturePath);
+            ResetSessionAndFiles();
+            LoadLectures();
+            LoadSessions(g_currentLecturePath);
+            SyncLeftPaneSelection();
+            RefreshMainWindowUiState(hWnd);
+        } else ReloadSessionsAndSelect(parent.wstring(), last.filename().wstring(), true);
+    }
+    if (imported != plans.size()) {
+        // Completed directories are retained and explicitly reported. The failed
+        // directory uses the existing owned-entry rollback; never delete sources.
         ShowSilentMessageDialog(hWnd, title,
-                                err.empty() ? ui.errImportFile : err,
-                                SoftNoticeKind::Error);
+            localization::Format(L"workspace.drop.directory_failed", {{L"COUNT", std::to_wstring(imported)}}) +
+                (failure.empty() ? L"" : L"\n\n" + failure), SoftNoticeKind::Error);
         return false;
     }
-
-    ReloadSessionsAndSelect(g_currentLecturePath, dest.filename().wstring(), true);
-    ShowSoftNotice(hWnd,
-                   localization::Text(g_config.studentMode
-                                          ? L"workspace.actions.import.directory_as_session.student"
-                                          : L"workspace.actions.import.directory_as_session.parent").c_str(),
-                   SoftNoticeKind::Info);
+    ShowSoftNotice(hWnd, localization::Format(L"workspace.drop.directories_completed",
+        {{L"COUNT", std::to_wstring(imported)}}), SoftNoticeKind::Info);
     return true;
+}
+
+bool ImportDirectoryAsLecture(HWND hWnd) {
+    if (g_workspaceRoot.empty() || !VerifyWorkspaceWritableForEditing(hWnd)) return false;
+    auto src = PickDirectoryImportSource(hWnd, GetUiText().menuImportDirAsLecture, DialogDownloadsInitialFolder());
+    return src && ImportDroppedDirectories(hWnd, {src->wstring()}, true);
+}
+
+bool ImportDirectoryAsSession(HWND hWnd) {
+    if (g_currentLecturePath.empty()) {
+        ShowSoftNotice(hWnd, GetUiText().errSessionNoLecture, SoftNoticeKind::Warning);
+        return false;
+    }
+    if (!VerifyWorkspaceWritableForEditing(hWnd)) return false;
+    auto src = PickDirectoryImportSource(hWnd, GetUiText().menuImportDirAsSession, DialogDownloadsInitialFolder());
+    return src && ImportDroppedDirectories(hWnd, {src->wstring()}, false);
 }
 
 int ImportPdfGetBlockFromHandle(void* param,
@@ -2017,11 +1977,14 @@ bool BackupImportOverwriteTarget(const std::filesystem::path& dest,
 
 ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
                                                        const std::filesystem::path& copySource,
-                                                       const std::filesystem::path& dest,
+                                                       const std::filesystem::path& requestedDest,
                                                        std::wstring* outFailure,
-                                                       const std::filesystem::path& observationRoot = {}) {
+                                                       const std::filesystem::path& observationRoot = {},
+                                                       bool newFilesOnly = false,
+                                                       std::filesystem::path* importedDestination = nullptr) {
     const auto& ui = GetUiText();
     if (outFailure) outFailure->clear();
+    std::filesystem::path dest = requestedDest;
 
     if (copySource.empty() || dest.empty()) {
         if (outFailure) *outFailure = localization::Text(L"workspace.actions.70e485841f70").c_str();
@@ -2036,6 +1999,10 @@ ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
     const bool destExists = std::filesystem::exists(dest, ec);
     if (ec) {
         if (outFailure) *outFailure = localization::Text(L"workspace.actions.9959cd2c9201").c_str();
+        return ImportOneResult::Failed;
+    }
+    if (destExists && newFilesOnly) {
+        if (outFailure) *outFailure = localization::Text(L"workspace.drop.collision");
         return ImportOneResult::Failed;
     }
     if (destExists) {
@@ -2066,13 +2033,14 @@ ImportOneResult ImportPreparedFileToDestination(HWND hWnd,
     }
 
     std::wstring copyErr;
-    if (!CopyFileForImportSafely(copySource, dest, &copyErr)) {
+    if (!CopyFileForImportSafely(copySource, dest, &copyErr, {}, /*noReplace=*/newFilesOnly)) {
         if (outFailure) *outFailure = copyErr.empty()
             ? (localization::Text(L"workspace.actions.9f4d1364d7ec").c_str())
             : copyErr;
         return ImportOneResult::Failed;
     }
     observation.Success();
+    if (importedDestination) *importedDestination = dest;
     return ImportOneResult::Imported;
 }
 
@@ -3091,9 +3059,11 @@ struct OfficeBackgroundJob {
     OfficeConversionWorkerControl control;
     std::filesystem::path source, sessionRoot, tempRoot, tempDir, generatedPdf;
     std::wstring failure;
-    bool canceled = false;
+    bool canceled = false, workerFailed = false, injectFailure = false;
+    std::atomic_bool done{false};
+    std::thread worker;
+    ~OfficeBackgroundJob() { if (worker.joinable()) worker.join(); }
 };
-struct OfficeBackgroundResult { OfficeBackgroundJob* job = nullptr; };
 struct OfficeBackgroundBatch {
     HWND owner = nullptr;
     OfficeBackgroundBatchKind kind = OfficeBackgroundBatchKind::Standard;
@@ -3105,10 +3075,20 @@ struct OfficeBackgroundBatch {
 static std::unique_ptr<OfficeBackgroundBatch> s_officeBackgroundBatch;
 constexpr size_t kMaxParallelOfficeConversions = 2;
 static bool s_officeSecurityCheckNoticeShown = false;
+static bool s_officeCompletionInProgress = false; // UI reentrancy guard across import dialogs
+// Opt-in isolated automation only; worker input is captured in each job.
+struct OfficeWorkerProbe { bool enabled = false, failLaunch = false, failWork = false; ImportBatchStats result; size_t completed = 0; };
+static OfficeWorkerProbe s_officeWorkerProbe;
 
-static void RunOfficeBackgroundJob(OfficeBackgroundJob* job) {
+static void RunOfficeBackgroundJob(OfficeBackgroundJob* job) noexcept {
     if (!job) return;
     try {
+        if (job->injectFailure) throw std::bad_alloc();
+        if (job->control.cancelRequested.load()) {
+            job->canceled = true;
+            job->done.store(true, std::memory_order_release);
+            return;
+        }
         std::wstring tempErr;
         job->tempDir = MakeUniqueOfficeImportTempDir(job->tempRoot, &tempErr);
         if (job->tempDir.empty()) job->failure = tempErr;
@@ -3126,11 +3106,10 @@ static void RunOfficeBackgroundJob(OfficeBackgroundJob* job) {
         if (job->failure.empty() && !FindLibreOfficeGeneratedPdf(output, output / (staged.stem().wstring() + L".pdf"), &job->generatedPdf, &job->failure)) {}
         if (job->failure.empty() && !ValidateImportPdfFile(job->generatedPdf, &job->failure)) {}
     } catch (...) {
-        job->failure = localization::Text(L"workspace.actions.43223a01deaf").c_str();
+        job->workerFailed = true; // No allocation or exception can escape this entry.
     }
     job->canceled = job->control.cancelRequested.load(std::memory_order_acquire);
-    auto* result = new OfficeBackgroundResult{job};
-    if (!PostMessageW(g_hMainWnd, kMsgOfficeConversionWorkerComplete, 0, reinterpret_cast<LPARAM>(result))) delete result;
+    job->done.store(true, std::memory_order_release);
 }
 
 static void StartMoreOfficeBackgroundJobs() {
@@ -3141,7 +3120,14 @@ static void StartMoreOfficeBackgroundJobs() {
         s_officeBackgroundBatch->pending.pop_front();
         OfficeBackgroundJob* raw = job.get();
         s_officeBackgroundBatch->active.push_back(std::move(job));
-        std::thread(RunOfficeBackgroundJob, raw).detach();
+        try {
+            if (s_officeWorkerProbe.enabled && s_officeWorkerProbe.failLaunch) throw std::bad_alloc();
+            raw->worker = std::thread(RunOfficeBackgroundJob, raw);
+        } catch (...) {
+            raw->workerFailed = true;
+            raw->canceled = raw->control.cancelRequested.load();
+            raw->done.store(true, std::memory_order_release);
+        }
     }
 }
 
@@ -3155,15 +3141,20 @@ static bool StartOfficeBackgroundBatch(HWND hWnd, const std::filesystem::path& s
         return false;
     }
     auto batch = std::make_unique<OfficeBackgroundBatch>();
+    batch->active.reserve(kMaxParallelOfficeConversions);
     batch->owner = hWnd; batch->kind = kind; batch->selectedCount = sources.size();
     for (const auto& source : sources) {
         auto job = std::make_unique<OfficeBackgroundJob>(); job->source = source; job->sessionRoot = sessionRoot;
         job->tempRoot = office::work_paths::Root(std::filesystem::path(g_workspaceRoot));
+        job->injectFailure = s_officeWorkerProbe.enabled && s_officeWorkerProbe.failWork;
         batch->pending.push_back(std::move(job));
     }
+    // Install completion polling before launching. No pointer payload, lost
+    // message, or allocation at completion can strand an active job.
+    if (!hWnd || !SetTimer(hWnd, kOfficeWorkerPollTimerId, 50, nullptr)) return false;
     s_officeBackgroundBatch = std::move(batch);
-    BeginOfficeConversionProgress(hWnd, sources.size(), sources.front());
-    if (!s_officeSecurityCheckNoticeShown) {
+    if (!s_officeWorkerProbe.enabled) BeginOfficeConversionProgress(hWnd, sources.size(), sources.front());
+    if (!s_officeWorkerProbe.enabled && !s_officeSecurityCheckNoticeShown) {
         s_officeSecurityCheckNoticeShown = true;
         ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.office_first_security_check").c_str(),
                        SoftNoticeKind::Info);
@@ -3229,22 +3220,34 @@ void CancelOfficeConversionJobsForExit() {
 }
 
 void HandleOfficeConversionWorkerCompletion(HWND hWnd, LPARAM payload) {
-    std::unique_ptr<OfficeBackgroundResult> result(reinterpret_cast<OfficeBackgroundResult*>(payload));
-    if (!result || !s_officeBackgroundBatch || !result->job) return;
+    if (!payload || !s_officeBackgroundBatch || s_officeCompletionInProgress) return;
+    struct CompletionScope {
+        CompletionScope() { s_officeCompletionInProgress = true; }
+        ~CompletionScope() { s_officeCompletionInProgress = false; }
+    } completionScope;
     auto& batch = *s_officeBackgroundBatch;
-    auto it = std::find_if(batch.active.begin(), batch.active.end(), [&](const auto& p) { return p.get() == result->job; });
+    auto it = std::find_if(batch.active.begin(), batch.active.end(), [&](const auto& p) { return p.get() == reinterpret_cast<OfficeBackgroundJob*>(payload); });
     if (it == batch.active.end()) return;
     OfficeBackgroundJob& job = **it;
+    if (!job.done.load(std::memory_order_acquire)) return;
+    if (job.worker.joinable()) job.worker.join();
+    // Cancellation can arrive after worker completion but before UI consumption.
+    job.canceled = job.canceled || job.control.cancelRequested.load(std::memory_order_acquire);
+    const auto completedSession = job.sessionRoot;
+    bool refreshCompletedSession = false;
     const auto workspaceRoot = job.tempRoot.parent_path().parent_path().parent_path();
     write_checks::NormalOperation observation(workspaceRoot, job.source, write_checks::Kind::OfficeConversion, job.tempRoot);
     if (job.canceled) observation.Cancel();
     if (job.canceled) { batch.stats.canceled = true; ++batch.stats.skipped; }
-    else if (!job.failure.empty()) AddImportFailure(batch.stats, job.source, job.failure);
+    else if (job.workerFailed || !job.failure.empty()) AddImportFailure(batch.stats, job.source,
+        job.failure.empty() ? localization::Text(L"workspace.actions.43223a01deaf") : job.failure);
     else {
         std::wstring failure;
         const ImportOneResult imported = ImportPreparedFileToDestination(hWnd, job.generatedPdf,
             PdfDirectoryForSession(job.sessionRoot) / (job.source.stem().wstring() + L".pdf"), &failure, workspaceRoot);
-        if (imported == ImportOneResult::Imported) { observation.Success(); ++batch.stats.imported; }
+        if (imported == ImportOneResult::Imported) {
+            observation.Success(); ++batch.stats.imported; refreshCompletedSession = true;
+        }
         else if (imported == ImportOneResult::Skipped || imported == ImportOneResult::Canceled) { observation.Cancel(); ++batch.stats.skipped; }
         else AddImportFailure(batch.stats, job.source, failure);
     }
@@ -3258,15 +3261,110 @@ void HandleOfficeConversionWorkerCompletion(HWND hWnd, LPARAM payload) {
         }
     } else StartMoreOfficeBackgroundJobs();
     if (batch.completedCount < batch.selectedCount) {
-        UpdateOfficeConversionProgress(hWnd, batch.completedCount + 1, batch.selectedCount,
+        if (!s_officeWorkerProbe.enabled) UpdateOfficeConversionProgress(hWnd, batch.completedCount + 1, batch.selectedCount,
             !batch.active.empty() ? batch.active.front()->source : std::filesystem::path{});
+        // Publish each completed import instead of waiting for the slowest
+        // conversion. Do not retain batch references across the UI refresh.
+        if (refreshCompletedSession && IsSameImportPath(completedSession, std::filesystem::path(g_currentSessionPath)))
+            RefreshCurrentSessionFiles();
         return;
     }
     const auto kind = batch.kind; const auto stats = batch.stats; const size_t total = batch.selectedCount;
-    s_officeBackgroundBatch.reset(); EndOfficeConversionProgress(hWnd);
-    if (stats.imported > 0) RefreshCurrentSessionFiles();
+    KillTimer(hWnd, kOfficeWorkerPollTimerId);
+    s_officeBackgroundBatch.reset();
+    if (s_officeWorkerProbe.enabled) {
+        s_officeWorkerProbe.result = stats; s_officeWorkerProbe.completed = total;
+        return;
+    }
+    EndOfficeConversionProgress(hWnd);
+    if (stats.imported > 0 || stats.skipped > 0) RefreshCurrentSessionFiles();
     if (kind == OfficeBackgroundBatchKind::OpenMissing) ShowOfficeOpenConversionResult(hWnd, stats, total);
     else ShowOfficeConversionBatchResult(hWnd, stats, total);
+}
+
+void PollOfficeConversionJobs(HWND owner) {
+    if (s_officeCompletionInProgress) return;
+    // Bound UI work even if every launch fails immediately.
+    for (size_t i = 0; i < kMaxParallelOfficeConversions && s_officeBackgroundBatch; ++i) {
+        const auto& active = s_officeBackgroundBatch->active;
+        const auto it = std::find_if(active.begin(), active.end(), [](const auto& job) {
+            return job->done.load(std::memory_order_acquire);
+        });
+        if (it == active.end()) break;
+        HandleOfficeConversionWorkerCompletion(owner, reinterpret_cast<LPARAM>(it->get()));
+    }
+}
+
+void ShutdownOfficeConversionJobs() {
+    CancelOfficeConversionJobsForExit();
+    // Forced teardown never imports a late result. Owned threads stop before
+    // their controls, private paths, workspace lock or PDFium are destroyed.
+    if (s_officeBackgroundBatch) KillTimer(s_officeBackgroundBatch->owner, kOfficeWorkerPollTimerId);
+    s_officeBackgroundBatch.reset();
+}
+
+bool RunOfficeWorkerFaultTests(HWND owner, std::wstring* error) {
+    if (!IsUiAutomationEnabled() || !owner || s_officeBackgroundBatch) return false;
+    struct Scope {
+        ~Scope() { ShutdownOfficeConversionJobs(); s_officeWorkerProbe = {}; }
+    } scope;
+    const auto root = std::filesystem::path(g_workspaceRoot);
+    const std::vector<std::filesystem::path> sources{root / L"fault_a.docx", root / L"fault_b.docx", root / L"fault_c.docx"};
+    for (int mode = 0; mode < 3; ++mode) {
+        s_officeWorkerProbe = {};
+        s_officeWorkerProbe.enabled = true;
+        s_officeWorkerProbe.failLaunch = mode == 0;
+        s_officeWorkerProbe.failWork = mode != 0;
+        if (!StartOfficeBackgroundBatch(owner, root, sources, OfficeBackgroundBatchKind::Standard)) return false;
+        if (s_officeBackgroundBatch->active.size() > kMaxParallelOfficeConversions) return false;
+        if (mode == 2) CancelOfficeConversionJobsForExit();
+        const auto deadline = GetTickCount64() + 5000;
+        while (s_officeBackgroundBatch && GetTickCount64() < deadline) {
+            PollOfficeConversionJobs(owner); // No completion message is sent by any worker.
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 1, QS_ALLINPUT);
+        }
+        const auto& result = s_officeWorkerProbe.result;
+        if (s_officeBackgroundBatch || s_officeWorkerProbe.completed != sources.size() ||
+            result.imported != 0 || (mode != 2 && result.failed != sources.size()) ||
+            (mode == 2 && !result.canceled)) {
+            if (error) *error = L"Office worker failure/cancellation left an incomplete batch.";
+            return false;
+        }
+    }
+    if (HasOfficeConversionFeature()) {
+        const auto fixture = root / L"__pdf_note_workspace__" / L"__tmp__" /
+            (L"office_owned_worker_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()));
+        std::error_code ec;
+        if (!std::filesystem::create_directory(fixture, ec) || ec) return false;
+        const auto bytes = OfficeCheckDemoDocx();
+        std::vector<std::filesystem::path> documents;
+        for (int i = 0; i < 3; ++i) {
+            const auto source = fixture / (L"original_" + std::to_wstring(i) + L".docx");
+            std::ofstream file(source, std::ios::binary); file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            file.close(); if (!file) return false;
+            documents.push_back(source);
+        }
+        s_officeWorkerProbe = {}; s_officeWorkerProbe.enabled = true;
+        if (!StartOfficeBackgroundBatch(owner, fixture, documents, OfficeBackgroundBatchKind::Standard)) return false;
+        const auto deadline = GetTickCount64() + 90000;
+        while (s_officeBackgroundBatch && GetTickCount64() < deadline) {
+            PollOfficeConversionJobs(owner);
+            Sleep(10); // Isolated automation only; no UI messages are required for completion.
+        }
+        if (s_officeBackgroundBatch || s_officeWorkerProbe.result.imported != 3 || s_officeWorkerProbe.result.failed != 0) {
+            if (error) *error = L"Owned Office workers did not complete the real three-document batch.";
+            return false;
+        }
+        for (const auto& source : documents) {
+            std::ifstream file(source, std::ios::binary);
+            const std::string original{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+            std::wstring detail;
+            if (original != bytes || !ValidateImportPdfFile(PdfDirectoryForSession(fixture) / (source.stem().wstring() + L".pdf"), &detail))
+                return false;
+        }
+        AppendUiAutomationTrace(L"automation:office_worker_success_ok converted=3 originals_unchanged=1");
+    }
+    return true;
 }
 
 ImportOneResult ImportOfficeFileAsPdfToCurrentSession(HWND hWnd,
@@ -3390,7 +3488,10 @@ ImportOneResult ImportOneFileToCurrentSession(HWND hWnd,
                                                      const std::filesystem::path& sessionRoot,
                                                      const std::filesystem::path& src,
                                                      std::wstring* outFailure,
-                                                     bool convertOffice = true) {
+                                                     bool convertOffice = true,
+                                                     bool newFilesOnly = false,
+                                                     std::filesystem::path* importedDestination = nullptr,
+                                                     const std::filesystem::path& destinationName = {}) {
     if (outFailure) outFailure->clear();
 
     if (IsUnsupportedImportSourcePath(src)) {
@@ -3423,8 +3524,8 @@ ImportOneResult ImportOneFileToCurrentSession(HWND hWnd,
     }
 
     std::filesystem::path destDir = ImportDestinationDirForSource(sessionRoot, src);
-    std::filesystem::path dest = destDir / src.filename();
-    return ImportPreparedFileToDestination(hWnd, src, dest, outFailure);
+    std::filesystem::path dest = destDir / (destinationName.empty() ? src.filename() : destinationName.filename());
+    return ImportPreparedFileToDestination(hWnd, src, dest, outFailure, {}, newFilesOnly, importedDestination);
 }
 
 void ShowImportBatchResult(HWND hWnd, const ImportBatchStats& stats, size_t selectedCount) {
@@ -3470,17 +3571,6 @@ void ShowImportBatchResult(HWND hWnd, const ImportBatchStats& stats, size_t sele
 
 std::wstring OfficeOpenConversionTitle() {
     return localization::Text(L"workspace.actions.ed397541e841").c_str();
-}
-
-std::wstring OfficeOpenRelativePath(const std::filesystem::path& sessionRoot,
-                                           const std::filesystem::path& path) {
-    std::filesystem::path rel = path.lexically_relative(sessionRoot);
-    std::wstring relText = rel.wstring();
-    if (rel.empty() || relText == L".." ||
-        relText.rfind(L"..\\", 0) == 0 || relText.rfind(L"../", 0) == 0) {
-        return path.filename().wstring();
-    }
-    return relText;
 }
 
 static std::wstring OfficeOpenPathKey(std::filesystem::path path) {
@@ -3858,80 +3948,11 @@ bool ConvertOfficeFileToCurrentSession(HWND hWnd, const std::filesystem::path& s
     return StartOfficeBackgroundBatch(hWnd, sessionRoot, {src}, OfficeBackgroundBatchKind::Standard);
 }
 
-enum class DroppedOfficeImportChoice {
-    Convert,
-    ImportOriginal,
-    Cancel,
-};
-
-DroppedOfficeImportChoice ConfirmDroppedOfficeConversion(
-    HWND hWnd,
-    const std::filesystem::path& sessionRoot,
-    const std::vector<std::filesystem::path>& officeFiles,
-    bool canConvert) {
-    if (officeFiles.empty()) return DroppedOfficeImportChoice::Cancel;
-
-    std::wstring msg;
-    if (canConvert) {
-        msg = localization::Text(L"workspace.actions.office_drop.convert_prompt");
-    } else {
-        msg = localization::Text(L"workspace.actions.office_drop.copy_prompt");
-    }
-    msg += localization::Text(L"workspace.actions.file_list_header");
-    const size_t limit = std::min<size_t>(officeFiles.size(), 8);
-    for (size_t i = 0; i < limit; ++i) {
-        msg += L" - " + OfficeOpenRelativePath(sessionRoot, officeFiles[i]) + L"\n";
-    }
-    if (officeFiles.size() > limit) {
-        msg += L" - ...\n";
-    }
-
-    SilentDialogOptions confirm;
-    confirm.title = OfficeOpenConversionTitle();
-    confirm.message = msg;
-    confirm.kind = SoftNoticeKind::Info;
-    confirm.buttons = canConvert ? SilentDialogButtons::YesNoCancel : SilentDialogButtons::YesNo;
-    confirm.yesLabel = localization::Text(canConvert ? L"workspace.actions.office_drop.convert"
-                                                      : L"workspace.actions.office_drop.import_original");
-    confirm.noLabel = localization::Text(canConvert ? L"workspace.actions.office_drop.import_original"
-                                                     : L"workspace.actions.common.cancel");
-    confirm.cancelLabel = localization::Text(L"workspace.actions.common.cancel");
-    confirm.defaultResult = SilentDialogResult::No;
-    confirm.escapeResult = SilentDialogResult::Cancel;
-    const SilentDialogResult result = ShowSilentDialog(hWnd, confirm);
-    if (canConvert && result == SilentDialogResult::Yes) return DroppedOfficeImportChoice::Convert;
-    if ((canConvert && result == SilentDialogResult::No) ||
-        (!canConvert && result == SilentDialogResult::Yes)) {
-        return DroppedOfficeImportChoice::ImportOriginal;
-    }
-    return DroppedOfficeImportChoice::Cancel;
-}
-
-static bool ConfirmDroppedFileImport(HWND hWnd, const std::vector<std::wstring>& paths) {
-    if (paths.empty()) return false;
-
-    std::wstring message = localization::Text(L"workspace.actions.drop_files.prompt");
-    message += localization::Text(L"workspace.actions.file_list_header");
-    const size_t limit = std::min<size_t>(paths.size(), 8);
-    for (size_t i = 0; i < limit; ++i) {
-        message += L" - " + std::filesystem::path(paths[i]).filename().wstring() + L"\n";
-    }
-    if (paths.size() > limit) message += L" - ...\n";
-    message += localization::Text(L"workspace.actions.drop_files.original_unchanged");
-
-    SilentDialogOptions confirm;
-    confirm.title = localization::Text(L"workspace.actions.drop_files.title");
-    confirm.message = message;
-    confirm.kind = SoftNoticeKind::Info;
-    confirm.buttons = SilentDialogButtons::YesNo;
-    confirm.yesLabel = localization::Text(L"workspace.actions.drop_files.copy_and_import");
-    confirm.noLabel = localization::Text(L"workspace.actions.common.cancel");
-    confirm.defaultResult = SilentDialogResult::No;
-    confirm.escapeResult = SilentDialogResult::No;
-    return ShowSilentDialog(hWnd, confirm) == SilentDialogResult::Yes;
-}
-
+// Dropping authorizes a copy into the selected session, never conversion or
+// replacement. The session is fixed before copying; imported Office originals
+// remain available for the existing explicit directory-wide conversion action.
 bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstring>& paths) {
+    if (ReportDropIssue(hWnd, workspace_import::CheckDropSources(paths, false), false)) return false;
     const auto& ui = GetUiText();
     if (paths.empty()) return false;
     if (g_currentSessionPath.empty()) {
@@ -3939,91 +3960,56 @@ bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstrin
         return false;
     }
 
-    std::filesystem::path sessionRoot(g_currentSessionPath);
+    const std::filesystem::path sessionRoot(g_currentSessionPath);
     std::error_code ec;
-    if (!std::filesystem::exists(sessionRoot, ec) || !std::filesystem::is_directory(sessionRoot, ec)) {
+    if (!std::filesystem::exists(sessionRoot, ec) || ec ||
+        !std::filesystem::is_directory(sessionRoot, ec) || ec) {
         ShowSilentMessageDialog(hWnd, ui.menuImportFile, ui.errImportFile, SoftNoticeKind::Error,
                                 {{L"", sessionRoot.wstring()}});
         return false;
     }
-    if (!ConfirmDroppedFileImport(hWnd, paths)) return false;
     std::wstring workspaceLockError;
     WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
     if (!workspaceLock.acquired()) {
         ShowSoftNotice(hWnd, localization::Text(L"workspace.actions.4618bb4d74d4").c_str(),
-            SoftNoticeKind::Warning);
+                       SoftNoticeKind::Warning);
         return false;
     }
 
-    std::vector<std::filesystem::path> regularFiles;
-    std::vector<std::filesystem::path> officeFiles;
-    regularFiles.reserve(paths.size());
-    officeFiles.reserve(paths.size());
+    std::vector<std::filesystem::path> destinations;
     for (const auto& path : paths) {
-        std::filesystem::path src(path);
-        if (IsOfficeImportSourcePath(src)) {
-            officeFiles.push_back(std::move(src));
-        } else {
-            regularFiles.push_back(std::move(src));
-        }
+        const std::filesystem::path source(path);
+        destinations.push_back(ImportDestinationDirForSource(sessionRoot, source) / source.filename());
     }
-
+    if (ReportDropIssue(hWnd, workspace_import::CheckDropCopyPlan(paths, destinations, false), false)) return false;
+    if (!ConfirmImportFilesSize(hWnd, paths)) return false;
     ImportBatchStats stats;
-    auto recordImportResult = [&](const std::filesystem::path& src,
-                                  ImportOneResult result,
-                                  const std::wstring& failure) {
-        switch (result) {
-        case ImportOneResult::Imported:
-            ++stats.imported;
-            break;
-        case ImportOneResult::Skipped:
-            ++stats.skipped;
-            break;
-        case ImportOneResult::Canceled:
-            stats.canceled = true;
-            break;
-        case ImportOneResult::Failed:
-            AddImportFailure(stats, src, failure);
-            break;
-        }
-    };
-    auto importOne = [&](const std::filesystem::path& src, bool convertOffice = true) {
+    size_t importedOfficeCount = 0;
+    for (const auto& path : paths) {
+        const std::filesystem::path source(path);
         std::wstring failure;
-        const ImportOneResult result =
-            ImportOneFileToCurrentSession(hWnd, sessionRoot, src, &failure, convertOffice);
-        recordImportResult(src, result, failure);
-        return result;
-    };
-
-    for (const auto& src : regularFiles) {
-        importOne(src);
-    }
-
-    if (!officeFiles.empty()) {
-        const bool canConvert = HasOfficeConversionFeature() && kOfficePdfConversionApprovedForUse;
-        const DroppedOfficeImportChoice officeChoice =
-            ConfirmDroppedOfficeConversion(hWnd, sessionRoot, officeFiles, canConvert);
-        if (officeChoice == DroppedOfficeImportChoice::ImportOriginal) {
-            for (const auto& src : officeFiles) importOne(src, /*convertOffice=*/false);
-        } else if (officeChoice == DroppedOfficeImportChoice::Convert) {
-            // The regular-file portion has already been imported on the UI
-            // thread.  Start Office files separately so drag and drop never
-            // reintroduces the old synchronous LibreOffice wait loop.
-            StartOfficeBackgroundBatch(hWnd, sessionRoot, officeFiles, OfficeBackgroundBatchKind::Standard);
+        const auto result = ImportOneFileToCurrentSession(hWnd, sessionRoot, source, &failure,
+            /*convertOffice=*/false, /*newFilesOnly=*/true);
+        if (result == ImportOneResult::Imported) {
+            ++stats.imported;
+            if (IsOfficeImportSourcePath(source)) ++importedOfficeCount;
         } else {
-            stats.skipped += static_cast<int>(officeFiles.size());
+            AddImportFailure(stats, source, failure.empty() ? ui.errImportFile : failure);
+            stats.skipped = static_cast<int>(paths.size()) - stats.imported - stats.failed;
+            break;
         }
     }
-
-    if (stats.imported > 0) {
-        RefreshCurrentSessionFiles();
-    }
-    if (stats.imported == 0 && stats.failed == 0 && stats.skipped > 0 && paths.size() == 1) {
-        ShowSoftNotice(hWnd,
-                       localization::Text(L"workspace.actions.a2757ce1ac82").c_str(),
-                       SoftNoticeKind::Info);
-    } else {
+    if (stats.imported > 0 || stats.skipped > 0) RefreshCurrentSessionFiles();
+    if (stats.failed > 0 || stats.canceled) {
         ShowImportBatchResult(hWnd, stats, paths.size());
+    } else {
+        std::wstring message = localization::Format(L"workspace.actions.drop_files.completed",
+            {{L"COUNT", std::to_wstring(stats.imported)}, {L"SKIPPED", std::to_wstring(stats.skipped)}});
+        if (importedOfficeCount > 0) {
+            message += L"\n" + localization::Text(HasOfficeConversionFeature()
+                ? L"workspace.actions.drop_files.office_pending" : L"workspace.actions.drop_files.office_lite");
+        }
+        ShowSoftNotice(hWnd, message, SoftNoticeKind::Info);
     }
     return stats.imported > 0;
 }
@@ -4043,7 +4029,8 @@ bool ImportFileToCurrentSession(HWND hWnd) {
     }
     auto initial = DialogDownloadsInitialFolder();
 
-    auto picked = PickFilesUnder(hWnd, initial, ui.menuImportFile, localization::Text(L"dialog.action.import"));
+    auto picked = PickFilesUnder(hWnd, initial, ui.menuImportFile, localization::Text(L"dialog.action.import"),
+                                 /*importFileTools=*/true);
     if (picked.empty()) return false;
 
     std::wstring workspaceLockError;
@@ -4054,6 +4041,7 @@ bool ImportFileToCurrentSession(HWND hWnd) {
         return false;
     }
 
+    if (!ConfirmImportFilesSize(hWnd, picked)) return false;
     ImportBatchStats stats;
     std::vector<std::filesystem::path> officeFiles;
     for (const auto& path : picked) {
@@ -4084,7 +4072,7 @@ bool ImportFileToCurrentSession(HWND hWnd) {
         kOfficePdfConversionApprovedForUse &&
         StartOfficeBackgroundBatch(hWnd, sessionRoot, officeFiles, OfficeBackgroundBatchKind::Standard);
 
-    if (stats.imported > 0) {
+    if (stats.imported > 0 || stats.skipped > 0) {
         RefreshCurrentSessionFiles();
     }
     ShowImportBatchResult(hWnd, stats, picked.size());

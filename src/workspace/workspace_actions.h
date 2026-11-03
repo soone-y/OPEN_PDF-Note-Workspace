@@ -31,6 +31,10 @@ std::vector<std::wstring> NewSessionNameSuggestions();
 void ShowNewSessionDialog(HWND owner);
 std::filesystem::path ExeDirPath();
 void AddTempExternalLectures(HWND owner, const std::vector<std::wstring>& lectureDirs);
+[[nodiscard]] bool HasActiveTempPathAddition();
+void PollTempPathAddition(HWND owner);
+void CancelTempPathAddition(bool closeAfter = false);
+void ShutdownTempPathAdditions(); // bootstrap only, before releasing workspace ownership
 std::optional<std::wstring> PickWorkspaceFolder(HWND parent);
 bool IsSupportedNewNoteExtension(const std::wstring& ext);
 std::wstring DefaultNewNoteStem();
@@ -44,19 +48,14 @@ std::filesystem::path CurrentPdfDirectory();
 bool SessionFilesUseRootDirectory();
 std::filesystem::path NoteDirectoryForSession(const std::filesystem::path& sessionRoot);
 std::filesystem::path PdfDirectoryForSession(const std::filesystem::path& sessionRoot);
-bool TryParsePositiveDoubleToken(const std::wstring& token, double* out);
-bool TryParsePositiveIntToken(const std::wstring& token, int minValue, int maxValue, int* out);
-bool TryResolveBlankPdfPreset(const std::wstring& token, double* outWPt, double* outHPt);
-bool TryParseBlankPdfSizeToken(std::wstring token, double* outWPt, double* outHPt);
-bool TryParseBlankPdfSpec(const std::wstring& input, BlankPdfSpec* out);
 void CreateBlankPdfInCurrentSession(HWND hWnd);
 std::vector<std::wstring> NewNoteNameSuggestions(const std::wstring& ext);
 bool ShowNewNoteButtonContextMenu(HWND hWnd, LPARAM lParam);
 bool IsUnsupportedImportSourcePath(const std::filesystem::path& path);
 bool IsOfficeImportSourcePath(const std::filesystem::path& path);
-bool IsDocxImportSourcePath(const std::filesystem::path& path);
 void CleanupImportTempFile(HANDLE* handle, const std::filesystem::path& tmp);
 bool IsWorkspaceReservedImportDirectoryName(const std::filesystem::path& path);
+[[nodiscard]] bool ImportDroppedDirectories(HWND hWnd, const std::vector<std::wstring>& paths, bool asLecture);
 bool ImportDirectoryAsLecture(HWND hWnd);
 bool ImportDirectoryAsSession(HWND hWnd);
 bool ValidateImportPdfFile(const std::filesystem::path& pdfPath, std::wstring* outErr);
@@ -84,11 +83,14 @@ bool ConvertOfficeFilesToCurrentSession(HWND hWnd);
 bool ConvertOfficeFileToCurrentSession(HWND hWnd, const std::filesystem::path& src);
 bool ConvertMissingOfficeFilesUnderDirectory(HWND hWnd, const std::filesystem::path& directoryRoot);
 // Called only by the UI thread.  Conversion work is performed by background
-// workers and this consumes their posted completion records.
+// owned workers and this consumes only their completed, joined results.
 void HandleOfficeConversionWorkerCompletion(HWND hWnd, LPARAM result);
 // Cancellation is safe during a normal close and WM_ENDSESSION.  It terminates
 // the Job Object, which includes LibreOffice children as well as soffice.com.
 void CancelOfficeConversionJobsForExit();
+void PollOfficeConversionJobs(HWND owner);
+void ShutdownOfficeConversionJobs();
+[[nodiscard]] bool RunOfficeWorkerFaultTests(HWND owner, std::wstring* error);
 bool HasActiveOfficeConversionJobs();
 bool ImportDroppedFilesToCurrentSession(HWND hWnd, const std::vector<std::wstring>& paths);
 bool ImportFileToCurrentSession(HWND hWnd);

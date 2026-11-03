@@ -1,0 +1,134 @@
+// Transient handle state belongs to this PDF view. Dragging changes only the
+// paint projection; one canonical Update command is recorded on button-up.
+namespace {
+struct ShapeRotationInteraction {
+    std::wstring id,path;
+    uint64_t generation=0;
+    bool dragging=false;
+    Annotation before;
+    double angle=0,startX=0,startY=0,dip=1;
+} s_shapeRotation;
+bool s_shapeRotationAltConsumed=false;
+
+int ShapeRotationIndex() {
+    if (s_shapeRotation.id.empty() || g_pdf.path!=s_shapeRotation.path ||
+        g_pdf.renderGeneration!=s_shapeRotation.generation || !g_showAnnots ||
+        IsPdfPreviewReadOnlyActive() || IsSaveTransactionRunning()) return -1;
+    for(size_t i=0;i<g_annots.size();++i)
+        if(g_annots[i].type==Annotation::Type::Shape && g_annots[i].id==s_shapeRotation.id) return static_cast<int>(i);
+    return -1;
+}
+bool ShapeRotationHandleGeometry(int index,POINT& center,POINT& handle) {
+    const auto ann=ProjectAnnotationForView(g_annots[static_cast<size_t>(index)]);
+    RECT r{};
+    if(!PtRectToClientRect(ann.pageIndex,ann.x1,ann.y1,ann.x2,ann.y2,r) || r.right<=r.left || r.bottom<=r.top) return false;
+    center={(r.left+r.right)/2,(r.top+r.bottom)/2};
+    const double dip=s_shapeRotation.dip;
+    const double halfHeight=(ann.contentRotation%2 ? r.right-r.left : r.bottom-r.top)*0.5;
+    const double angle=(s_shapeRotation.dragging ? s_shapeRotation.angle : ann.shapeAngle)+ann.contentRotation*shape_rotation::kPi/2;
+    const auto p=shape_rotation::Rotate(center.x,center.y-halfHeight-28*dip,center.x,center.y,angle);
+    handle={static_cast<LONG>(std::lround(p.x)),static_cast<LONG>(std::lround(p.y))};
+    return true;
+}
+}
+
+static void ResetShapeRotation(HWND hwnd) {
+    if(s_shapeRotation.id.empty() && !s_shapeRotation.dragging)return;
+    const bool captured=s_shapeRotation.dragging && GetCapture()==hwnd;
+    s_shapeRotation={};
+    if(captured)ReleaseCapture();
+    if(hwnd)InvalidateRect(hwnd,nullptr,FALSE);
+}
+static void BindShapeRotation(HWND hwnd,int index) {
+    ResetShapeRotation(hwnd);
+    if(index<0 || index>=static_cast<int>(g_annots.size()) || g_annots[index].type!=Annotation::Type::Shape) return;
+    s_shapeRotation.id=g_annots[index].id;s_shapeRotation.path=g_pdf.path;
+    s_shapeRotation.generation=g_pdf.renderGeneration;
+    if(HDC dc=GetDC(hwnd)){s_shapeRotation.dip=std::max(96,GetDeviceCaps(dc,LOGPIXELSX))/96.0;ReleaseDC(hwnd,dc);}
+}
+static const Annotation& ShapeRotationForPaint(const Annotation& view,Annotation& preview) {
+    const int index=s_shapeRotation.dragging && view.id==s_shapeRotation.id ? ShapeRotationIndex() : -1;
+    if(index>=0 && AnnotationEquals(s_shapeRotation.before,g_annots[index])) {
+        if(&preview!=&view)preview=view;
+        preview.shapeAngle=s_shapeRotation.angle;return preview;
+    }
+    return view;
+}
+static bool IsShapeRotationHandle(HWND hwnd,const POINT& pt) {
+    (void)hwnd;
+    const int index=ShapeRotationIndex();POINT center{},handle{};
+    if(index<0 || !ShapeRotationHandleGeometry(index,center,handle))return false;
+    const double radius=10*s_shapeRotation.dip;
+    return std::hypot(double(pt.x-handle.x),double(pt.y-handle.y))<=radius;
+}
+static bool ShapeRotationPointerDown(HWND hwnd,const POINT& pt,bool ctrlDown) {
+    if(ctrlDown){ResetShapeRotation(hwnd);return false;}
+    if(IsPdfPreviewReadOnlyActive() || IsSaveTransactionRunning() || g_pdf.kind!=DocKind::Pdf || !g_showAnnots ||
+        g_pdf.editingText || g_pdf.drawingAnnot || g_pdf.movingAnnot || g_pdf.panning || g_linkPending.active) {
+        ResetShapeRotation(hwnd);return false;
+    }
+    const int index=ShapeRotationIndex();
+    if(index>=0 && IsShapeRotationHandle(hwnd,pt)) {
+        POINT center{},handle{};if(!ShapeRotationHandleGeometry(index,center,handle))return false;
+        s_shapeRotation.before=g_annots[index];s_shapeRotation.angle=g_annots[index].shapeAngle;
+        s_shapeRotation.startX=pt.x-center.x;s_shapeRotation.startY=pt.y-center.y;
+        if(GetKeyState(VK_MENU)&0x8000)s_shapeRotationAltConsumed=true;
+        s_shapeRotation.dragging=true;SetCapture(hwnd);
+        if(GetCapture()!=hwnd){ResetShapeRotation(hwnd);return true;}
+        return true;
+    }
+    if(GetKeyState(VK_MENU)&0x8000) {
+        int index=-1;
+        if(HitTestAnnotationForMove(pt,Annotation::Type::Shape,index) && g_annots[index].type==Annotation::Type::Shape) {
+            BindShapeRotation(hwnd,index);s_shapeRotationAltConsumed=true;return true;
+        }
+    }
+    ResetShapeRotation(hwnd);return false; // same click continues its ordinary action
+}
+static bool ShapeRotationPointerMove(HWND hwnd,const POINT& pt) {
+    if(!s_shapeRotation.dragging)return false;
+    const int index=ShapeRotationIndex();POINT center{},handle{};
+    if(index<0 || !AnnotationEquals(s_shapeRotation.before,g_annots[index]) || !ShapeRotationHandleGeometry(index,center,handle)) {
+        ResetShapeRotation(hwnd);return true;
+    }
+    s_shapeRotation.angle=shape_rotation::Drag(s_shapeRotation.before.shapeAngle,s_shapeRotation.startX,s_shapeRotation.startY,
+        pt.x-center.x,pt.y-center.y);
+    InvalidateRect(hwnd,nullptr,FALSE);return true;
+}
+static bool ShapeRotationPointerUp(HWND hwnd,const POINT& pt) {
+    if(!s_shapeRotation.dragging)return false;
+    (void)ShapeRotationPointerMove(hwnd,pt);
+    const int index=ShapeRotationIndex();
+    if(s_shapeRotation.dragging && index>=0 && AnnotationEquals(s_shapeRotation.before,g_annots[index])) {
+        auto after=s_shapeRotation.before;after.shapeAngle=s_shapeRotation.angle;
+        s_shapeRotation.dragging=false;
+        (void)UpdateAnnotationAtIndex(GetParent(hwnd),index,after);
+    }
+    s_shapeRotation.dragging=false;
+    if(GetCapture()==hwnd)ReleaseCapture();
+    InvalidateRect(hwnd,nullptr,FALSE);return true;
+}
+static bool ShapeRotationMessage(HWND hwnd,UINT msg,WPARAM key,LPARAM value) {
+    if(!s_shapeRotation.id.empty() && ShapeRotationIndex()<0) ResetShapeRotation(hwnd);
+    if(msg==WM_SYSKEYDOWN && key==VK_MENU && !(value&(1LL<<30)))s_shapeRotationAltConsumed=false;
+    if(msg==WM_SYSKEYUP && key==VK_MENU && s_shapeRotationAltConsumed){s_shapeRotationAltConsumed=false;return true;}
+    if(msg==WM_KEYDOWN && key==VK_ESCAPE && !s_shapeRotation.id.empty()){ResetShapeRotation(hwnd);return true;}
+    if((msg==WM_CAPTURECHANGED && reinterpret_cast<HWND>(value)!=hwnd && s_shapeRotation.dragging) ||
+        msg==WM_CANCELMODE || msg==WM_KILLFOCUS || msg==WM_DESTROY ||
+        (s_shapeRotation.dragging && (msg==WM_MOUSEWHEEL || msg==WM_MOUSEHWHEEL || msg==WM_VSCROLL || msg==WM_HSCROLL)))
+        ResetShapeRotation(hwnd);
+    return false;
+}
+static void DrawShapeRotationHandles(HDC dc) {
+    const int index=ShapeRotationIndex();POINT center{},handle{};
+    if(index<0 || !ShapeRotationHandleGeometry(index,center,handle))return;
+    const int radius=std::max(5,static_cast<int>(std::lround(6*s_shapeRotation.dip)));
+    HPEN pen=CreatePen(PS_SOLID,2,GetSysColor(COLOR_HIGHLIGHT));
+    if(!pen)return;
+    const auto oldPen=SelectObject(dc,pen),oldBrush=SelectObject(dc,GetStockObject(WHITE_BRUSH));
+    MoveToEx(dc,center.x,center.y,nullptr);LineTo(dc,handle.x,handle.y);
+    Ellipse(dc,handle.x-radius,handle.y-radius,handle.x+radius+1,handle.y+radius+1);
+    MoveToEx(dc,center.x-4,center.y,nullptr);LineTo(dc,center.x+5,center.y);
+    MoveToEx(dc,center.x,center.y-4,nullptr);LineTo(dc,center.x,center.y+5);
+    SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(pen);
+}

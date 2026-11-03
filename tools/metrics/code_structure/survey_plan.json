@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "roles": "tools/metrics/code_structure/note_view_roles.json",
+  "locals": [
+    {"id": "note-view", "translation_units": ["src/note_view/note_view.cpp", "src/note_view/bottom_math_panel.cpp"], "scopes": ["src/note_view"]},
+    {"id": "note-coordinates", "translation_units": ["src/note/note_source_coordinate_transform.cpp", "src/note/note_source_line_map.cpp"], "scopes": ["src/note/note_source_coordinate_transform.cpp", "src/note/note_source_coordinate_transform.h", "src/note/note_source_line_map.cpp", "src/note/note_source_line_map.h"]},
+    {"id": "workspace-lock", "translation_units": ["src/workspace/workspace_write_lock.cpp"], "scopes": ["src/workspace/workspace_write_lock.cpp", "src/workspace/workspace_write_lock.h"]}
+  ],
+  "source_groups": [
+    {"id": "application", "path": "src", "purpose": "application implementation and resources"},
+    {"id": "viewer-comparison-entry", "path": "src/readonly_viewer_next", "purpose": "comparison entry using the canonical readonly viewer"},
+    {"id": "developer-tools", "path": "tools", "purpose": "local developer tools"},
+    {"id": "automation", "path": "scripts", "purpose": "build/check/release automation"},
+    {"id": "tests", "path": "tests", "purpose": "verification and fixtures"},
+    {"id": "third-party", "path": "third_party", "purpose": "vendored source and dependency configuration; not authorship inference"},
+    {"id": "site", "path": "site", "purpose": "public site implementation"},
+    {"id": "localization", "path": "locales", "purpose": "localization catalogs"}
+  ]
+}

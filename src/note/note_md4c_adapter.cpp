@@ -519,6 +519,9 @@ void BeginBlock(ParseContext* ctx, MD_BLOCKTYPE type, void* detail) {
         } else if (code && code->info.text && code->info.size > 0) {
             node.info_string = AttributeToWString(&code->info);
         }
+        // An explicit title without a language must not become a language
+        // class in HTML export. The literal title itself belongs to the opener.
+        if (node.info_string.compare(0, 6, L"title=") == 0) node.info_string.clear();
         break;
     }
     case MD_BLOCK_TABLE: {
@@ -755,7 +758,7 @@ void NormalizeDashThematicBreaks(NoteDocument* out, const NoteTextModel& model) 
 
 } // namespace
 
-NoteDocument ParseNoteDocumentWithMd4c(const NoteTextModel& model) {
+NoteDocument ParseNoteDocumentWithMd4c(const NoteTextModel& model, bool permissiveHeadings) {
     NoteDocument out;
     out.meta = model.meta;
     SetNoteDocumentSourceRevision(&out, model.revision);
@@ -776,6 +779,7 @@ NoteDocument ParseNoteDocumentWithMd4c(const NoteTextModel& model) {
                    MD_FLAG_STRIKETHROUGH |
                    MD_FLAG_TABLES |
                    MD_FLAG_TASKLISTS;
+    if (permissiveHeadings) parser.flags |= MD_FLAG_PERMISSIVEATXHEADERS;
     parser.enter_block = EnterBlock;
     parser.leave_block = LeaveBlock;
     parser.enter_span = EnterSpan;
@@ -790,11 +794,17 @@ NoteDocument ParseNoteDocumentWithMd4c(const NoteTextModel& model) {
                             &ctx);
 
     if (rc != 0) {
-        PushDiagnostic(&out,
+        // MD4C may have emitted a prefix before failing. Never expose that
+        // prefix as a complete document to a caller that only reads nodes.
+        NoteDocument failed;
+        failed.meta = model.meta;
+        SetNoteDocumentSourceRevision(&failed, model.revision);
+        PushDiagnostic(&failed,
                        L"NOTE-E-MD4C-PARSE",
                        L"MD4C parsing did not complete successfully.",
                        Span{0, 0},
                        DiagnosticSeverity::Error);
+        return failed;
     }
 
     NormalizeDashThematicBreaks(&out, model);

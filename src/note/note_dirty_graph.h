@@ -63,7 +63,6 @@ bool ContainsNoteStructuralText(std::wstring_view text);
 bool HasNoteDirtySyntaxFeature(NoteDirtySyntaxFeature features,
                                NoteDirtySyntaxFeature feature);
 bool IsOnlyNoteLineBreakText(std::wstring_view text);
-bool TextEditsEqual(const TextEdit& lhs, const TextEdit& rhs);
 
 NoteDirtyGraph BuildNoteDirtyGraph(std::wstring_view beforeText,
                                    const std::vector<size_t>& beforeLineStarts,

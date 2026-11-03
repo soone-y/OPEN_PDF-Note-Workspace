@@ -1,6 +1,7 @@
 #include "note/note_kernel.h"
 
 #include "note/note_parser.h"
+#include "diagnostics/open_work_counters.h"
 
 #include <algorithm>
 #include <limits>
@@ -398,9 +399,7 @@ NoteKernelApplyResult LocalNoteKernel::ApplyUserEdit(
 std::optional<NoteKernelHistoryResult> LocalNoteKernel::Undo(bool renderActive) {
     const auto replay = history_.PeekUndo();
     if (!replay.has_value()) return std::nullopt;
-    const bool currentMatches = replay->expected_snapshot.valid()
-        ? text_core_.MatchesSnapshot(replay->expected_snapshot)
-        : NoteHistoryReplayMatchesCurrentText(*replay, text_core_.model().raw);
+    const bool currentMatches = text_core_.MatchesSnapshot(replay->expected_snapshot);
     if (!currentMatches || replay->edit.deleted_len != replay->expected_deleted_text.size() ||
         !text_core_.RangeMatches(replay->edit.start, replay->expected_deleted_text)) {
         return std::nullopt;
@@ -416,9 +415,7 @@ std::optional<NoteKernelHistoryResult> LocalNoteKernel::Undo(bool renderActive) 
 std::optional<NoteKernelHistoryResult> LocalNoteKernel::Redo(bool renderActive) {
     const auto replay = history_.PeekRedo();
     if (!replay.has_value()) return std::nullopt;
-    const bool currentMatches = replay->expected_snapshot.valid()
-        ? text_core_.MatchesSnapshot(replay->expected_snapshot)
-        : NoteHistoryReplayMatchesCurrentText(*replay, text_core_.model().raw);
+    const bool currentMatches = text_core_.MatchesSnapshot(replay->expected_snapshot);
     if (!currentMatches || replay->edit.deleted_len != replay->expected_deleted_text.size() ||
         !text_core_.RangeMatches(replay->edit.start, replay->expected_deleted_text)) {
         return std::nullopt;
@@ -526,6 +523,12 @@ void LocalNoteKernel::ClearDerived() {
     ResetDerivedState(true);
 }
 
+bool LocalNoteKernel::SetClroAsciiOnly(bool value) {
+    if (!text_core_.SetClroAsciiOnly(value)) return false;
+    ResetDerivedState(true);
+    return true;
+}
+
 bool LocalNoteKernel::CanReadSyntax() const {
     return text_core_.valid() && syntax_ready_ &&
            !pending_transaction_.active() && !deferred_full_refresh_ &&
@@ -548,6 +551,7 @@ bool LocalNoteKernel::CanReadSemantic() const {
 
 bool LocalNoteKernel::TryApplyIncrementalSyntax(const TextEdit& edit,
                                                  const NoteInfluenceScope* influence) {
+    if (document_.uses_clro_fullwidth_markdown) return false;
     if (!syntax_ready_ ||
         document_.source_identity.note_id != text_core_.note_id() ||
         !NoteDocumentMatchesTextModel(document_, syntax_source_)) {
@@ -722,10 +726,21 @@ bool LocalNoteKernel::TryApplyIncrementalSyntax(const TextEdit& edit,
 
 NoteKernelRefreshResult LocalNoteKernel::RebuildAll(
     std::optional<NoteDirtyGraph> consumedDirtyGraph) {
-    syntax_source_ = text_core_.model();
-    document_ = content_kind_ == NoteContentKind::TeXSource
-        ? ParseTeXMathDocument(syntax_source_)
-        : ParseNoteDocument(syntax_source_);
+    open_work::Record(open_work::Kind::NoteFullParse);
+    NoteTextModel nextSource = text_core_.model();
+    NoteDocument nextDocument = content_kind_ == NoteContentKind::TeXSource
+        ? ParseTeXMathDocument(nextSource)
+        : ParseNoteDocument(nextSource);
+    if (NoteDocumentHasFatalParseFailure(nextDocument)) {
+        // Canonical text and history remain owned by text_core_. Withdraw
+        // derived syntax so UI/semantic consumers take their raw fallback.
+        ResetDerivedState(true);
+        NoteKernelRefreshResult failed;
+        failed.consumed_dirty_graph = std::move(consumedDirtyGraph);
+        return failed;
+    }
+    syntax_source_ = std::move(nextSource);
+    document_ = std::move(nextDocument);
     SetNoteDocumentSourceIdentity(
         &document_,
         NoteDerivedSnapshotIdentity{
@@ -799,24 +814,25 @@ LocalNoteKernel* LocalNoteKernelRegistry::Find(NoteId noteId) {
     return it != kernels_.end() ? &it->second : nullptr;
 }
 
-const LocalNoteKernel* LocalNoteKernelRegistry::Find(NoteId noteId) const {
-    if (!noteId.valid()) return nullptr;
-    const auto it = kernels_.find(noteId.value);
-    return it != kernels_.end() ? &it->second : nullptr;
+LocalNoteKernel* LocalNoteKernelRegistry::Rekey(
+    NoteId from, NoteId to, NoteMetadata metadata, NoteContentKind contentKind) {
+    if (!from.valid() || !to.valid() || from == to || Find(to)) return nullptr;
+    LocalNoteKernel* kernel = Find(from);
+    if (!kernel || !kernel->valid()) return nullptr;
+    if (!kernel->text_core().RebindOwner(to, std::move(metadata))) return nullptr;
+    // No canonical edit occurs here: the immutable roots held by history and
+    // the source-line map stay identical. Only derived owners become stale.
+    kernel->ClearDerived();
+    // The caller chooses the route from the final filename before promotion.
+    kernel->content_kind_ = contentKind;
+    auto node = kernels_.extract(from.value);
+    node.key() = to.value;
+    return &kernels_.insert(std::move(node)).position->second;
 }
 
 LocalNoteKernel* LocalNoteKernelRegistry::FindForView(
     const ViewIdentity& viewIdentity) {
     return viewIdentity.valid() ? Find(viewIdentity.note_id) : nullptr;
-}
-
-const LocalNoteKernel* LocalNoteKernelRegistry::FindForView(
-    const ViewIdentity& viewIdentity) const {
-    return viewIdentity.valid() ? Find(viewIdentity.note_id) : nullptr;
-}
-
-bool LocalNoteKernelRegistry::Forget(NoteId noteId) {
-    return noteId.valid() && kernels_.erase(noteId.value) != 0;
 }
 
 } // namespace note

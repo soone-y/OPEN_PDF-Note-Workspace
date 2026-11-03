@@ -3,6 +3,7 @@
 #include "core/atomic_write.h"
 #include "diagnostics/normal_operations.h"
 #include "core/path_safety.h"
+#include "core/identity_path_scope.h"
 
 #include <windows.h>
 
@@ -110,16 +111,6 @@ std::optional<std::wstring> Utf8ToWideStrict(std::string_view text) {
     return out;
 }
 
-std::wstring NormalizeRelativePathKey(std::filesystem::path path) {
-    path = path.lexically_normal();
-    std::wstring key = path.wstring();
-    std::replace(key.begin(), key.end(), L'/', L'\\');
-    std::transform(key.begin(), key.end(), key.begin(), [](wchar_t ch) {
-        return static_cast<wchar_t>(towlower(ch));
-    });
-    return key;
-}
-
 bool IsSafeRelativePath(const std::filesystem::path& path) {
     if (path.empty() || path.is_absolute() || path.has_root_path()) return false;
     for (const auto& part : path) {
@@ -140,6 +131,7 @@ struct RuntimeStoreState {
     bool dirty = false;
     std::filesystem::path workspace_root;
     std::filesystem::path store_path;
+    std::vector<std::filesystem::path> registered_external_roots;
     PersistentNoteIdentityCatalog catalog;
 };
 
@@ -163,22 +155,10 @@ std::optional<std::string> RelativeKeyForPath(const RuntimeStoreState& state,
     if (!state.configured || state.workspace_root.empty() || absolutePath.empty()) {
         return std::nullopt;
     }
-    const std::filesystem::path absolute =
-        std::filesystem::path(NormalizePathKey(absolutePath)).lexically_normal();
-    const std::filesystem::path root =
-        std::filesystem::path(NormalizePathKey(state.workspace_root.wstring())).lexically_normal();
-    const std::wstring absoluteKey = NormalizePathKey(absolute.wstring());
-    std::wstring rootKey = NormalizePathKey(root.wstring());
-    if (rootKey.empty()) return std::nullopt;
-    if (rootKey.back() != L'\\') rootKey.push_back(L'\\');
-    if (absoluteKey.size() <= rootKey.size() ||
-        absoluteKey.compare(0, rootKey.size(), rootKey) != 0) {
-        return std::nullopt;
-    }
-    const std::filesystem::path relative = absolute.lexically_relative(root);
-    if (!IsSafeRelativePath(relative)) return std::nullopt;
-    const std::wstring key = NormalizeRelativePathKey(relative);
-    const std::string utf8 = WideToUtf8Strict(key);
+    const auto key = identity_path_scope::KeyForPath(state.workspace_root,
+        state.registered_external_roots, absolutePath);
+    if (!key) return std::nullopt;
+    const std::string utf8 = WideToUtf8Strict(*key);
     if (utf8.empty() || utf8.size() > kMaxRelativePathBytes) return std::nullopt;
     return utf8;
 }
@@ -187,9 +167,14 @@ std::wstring AbsoluteKeyForRecord(const RuntimeStoreState& state,
                                   std::string_view relativeKey) {
     const auto relativeWide = Utf8ToWideStrict(relativeKey);
     if (!relativeWide.has_value()) return {};
+    if (identity_path_scope::IsExternal(*relativeWide)) {
+        return identity_path_scope::ValidExternalKey(*relativeWide)
+            ? relativeWide->substr(identity_path_scope::kExternalPrefix.size()) : std::wstring{};
+    }
     const std::filesystem::path relative(*relativeWide);
     if (!IsSafeRelativePath(relative)) return {};
-    return NormalizePathKey((state.workspace_root / relative).wstring());
+    const auto absolute = identity_path_scope::LocalPath((state.workspace_root / relative).wstring());
+    return absolute ? absolute->wstring() : std::wstring{};
 }
 
 bool PersistRuntimeStoreLocked(RuntimeStoreState& state, std::wstring* outError) {
@@ -199,6 +184,10 @@ bool PersistRuntimeStoreLocked(RuntimeStoreState& state, std::wstring* outError)
         return false;
     }
     const std::string bytes = state.catalog.Serialize();
+    if (bytes.size() > kMaxCatalogBytes) {
+        if (outError) *outError = L"note identity catalog exceeds the readable size limit";
+        return false;
+    }
     const std::filesystem::path resource = state.workspace_root / L"__pdf_note_workspace__";
     const std::filesystem::path preferredTemp = resource / L"__tmp__";
     const std::filesystem::path quarantine = resource / L"__escape__";
@@ -253,7 +242,7 @@ bool PersistentNoteIdentityCatalog::Parse(std::string_view bytes, std::wstring* 
         !ReadU64(bytes, &offset, &nonce) ||
         !ReadU64(bytes, &offset, &nextSequence) ||
         !ReadU64(bytes, &offset, &count) ||
-        (version != 1 && version != kCatalogVersion) || reserved != 0 || nonce == 0 ||
+        (version != 1 && version != kCatalogVersion && version != 3) || reserved != 0 || nonce == 0 ||
         nextSequence == 0 || count > kMaxCatalogRecords) {
         if (outError) *outError = L"note identity catalog header is invalid";
         return false;
@@ -282,7 +271,9 @@ bool PersistentNoteIdentityCatalog::Parse(std::string_view bytes, std::wstring* 
         const auto pathWide = Utf8ToWideStrict(path);
         const std::string pathKey = path;
         if (!pathWide.has_value() ||
-            !IsSafeRelativePath(std::filesystem::path(*pathWide)) ||
+            !(identity_path_scope::IsExternal(*pathWide)
+                ? version >= 3 && identity_path_scope::ValidExternalKey(*pathWide)
+                : IsSafeRelativePath(std::filesystem::path(*pathWide))) ||
             !parsed.BindPath(NoteId{noteIdValue}, std::move(path))) {
             if (outError) *outError = L"note identity catalog contains duplicate or invalid records";
             return false;
@@ -307,7 +298,10 @@ std::string PersistentNoteIdentityCatalog::Serialize() const {
     std::string out;
     out.reserve(48 + records_by_path_.size() * 80);
     out.append(kCatalogMagic.data(), kCatalogMagic.size());
-    AppendU32(out, kCatalogVersion);
+    const bool external = std::any_of(records_by_path_.begin(), records_by_path_.end(), [](const auto& record) {
+        return record.first.rfind("@external:", 0) == 0;
+    });
+    AppendU32(out, external ? 3 : kCatalogVersion);
     AppendU32(out, 0);
     AppendU64(out, workspace_nonce_ != 0 ? workspace_nonce_ : 1);
     AppendU64(out, next_sequence_ != 0 ? next_sequence_ : 1);
@@ -366,7 +360,7 @@ bool PersistentNoteIdentityCatalog::BindPath(NoteId noteId,
     }
     const auto pathWide = Utf8ToWideStrict(relativePathKeyUtf8);
     if (!pathWide.has_value() ||
-        !IsSafeRelativePath(std::filesystem::path(*pathWide))) {
+        !(identity_path_scope::ValidExternalKey(*pathWide) || IsSafeRelativePath(std::filesystem::path(*pathWide)))) {
         return false;
     }
     const auto pathIt = records_by_path_.find(relativePathKeyUtf8);
@@ -387,7 +381,7 @@ bool PersistentNoteIdentityCatalog::RebindPath(NoteId noteId,
     if (!noteId.valid() || relativePathKeyUtf8.empty()) return false;
     const auto pathWide = Utf8ToWideStrict(relativePathKeyUtf8);
     if (!pathWide.has_value() ||
-        !IsSafeRelativePath(std::filesystem::path(*pathWide))) {
+        !(identity_path_scope::ValidExternalKey(*pathWide) || IsSafeRelativePath(std::filesystem::path(*pathWide)))) {
         return false;
     }
     const auto targetIt = records_by_path_.find(relativePathKeyUtf8);
@@ -447,7 +441,8 @@ bool PersistentNoteIdentityCatalog::CommitPersistence(
 bool ConfigureRuntimeNoteIdentityStore(const std::filesystem::path& workspaceRoot,
                                        std::wstring* outError) {
     if (outError) outError->clear();
-    if (workspaceRoot.empty()) {
+    const auto normalizedRoot = identity_path_scope::LocalPath(workspaceRoot.wstring());
+    if (!normalizedRoot) {
         if (outError) *outError = L"workspace root is empty";
         return false;
     }
@@ -455,10 +450,14 @@ bool ConfigureRuntimeNoteIdentityStore(const std::filesystem::path& workspaceRoo
     const std::lock_guard<std::mutex> lock(state.mutex);
     state.configured = false;
     state.dirty = false;
-    state.workspace_root = std::filesystem::path(
-        NormalizePathKey(workspaceRoot.wstring()));
+    if (state.workspace_root != *normalizedRoot) state.registered_external_roots.clear();
+    state.workspace_root = *normalizedRoot;
     state.store_path = state.workspace_root / L"__pdf_note_workspace__" / L"__settings__" /
                        L"note_identity_registry.bin";
+    if (!identity_path_scope::NoReparseAncestors(state.store_path)) {
+        if (outError) *outError = L"note identity catalog has an unsafe ancestor";
+        return false;
+    }
 
     PersistentNoteIdentityCatalog catalog;
     if (RegularFileExistsWin32(state.store_path)) {
@@ -500,10 +499,17 @@ bool ConfigureRuntimeNoteIdentityStore(const std::filesystem::path& workspaceRoo
     return true;
 }
 
+void SetRuntimeNoteIdentityExternalRoots(const std::vector<std::filesystem::path>& roots) {
+    RuntimeStoreState& state = RuntimeStore();
+    const std::lock_guard<std::mutex> lock(state.mutex);
+    state.registered_external_roots = roots;
+}
+
 NoteIdentity ResolveRuntimeNoteIdentityPath(const std::wstring& absolutePath,
                                             std::wstring* outError) {
     if (outError) outError->clear();
-    const std::wstring absoluteKey = NormalizePathKey(absolutePath);
+    const auto local = identity_path_scope::LocalPath(absolutePath);
+    const std::wstring absoluteKey = local ? local->wstring() : std::wstring{};
     if (absoluteKey.empty()) return {};
     RuntimeStoreState& state = RuntimeStore();
     const std::lock_guard<std::mutex> lock(state.mutex);
@@ -521,9 +527,17 @@ NoteIdentity ResolveRuntimeNoteIdentityPath(const std::wstring& absolutePath,
     }
 
     NoteId noteId;
-    do {
-        noteId = state.catalog.AllocateNoteId();
-    } while (registry.FindNote(noteId).has_value());
+    const auto current = registry.FindPath(absoluteKey);
+    const auto keyWide = Utf8ToWideStrict(*relativeKey);
+    if (keyWide && identity_path_scope::IsExternal(*keyWide) && current) {
+        // Registering a folder may follow opening its note. Preserve the live
+        // document's identity when making that alias durable.
+        noteId = current->note_id;
+    } else {
+        do {
+            noteId = state.catalog.AllocateNoteId();
+        } while (registry.FindNote(noteId).has_value());
+    }
     if (!state.catalog.BindPath(noteId, *relativeKey) ||
         !registry.ImportPath(noteId, absoluteKey)) {
         if (outError) *outError = L"failed to allocate persistent note identity";
@@ -536,7 +550,8 @@ NoteIdentity ResolveRuntimeNoteIdentityPath(const std::wstring& absolutePath,
 std::optional<NoteId> FindRuntimeNoteIdentityPath(const std::wstring& absolutePath,
                                                    std::wstring* outError) {
     if (outError) outError->clear();
-    const std::wstring absoluteKey = NormalizePathKey(absolutePath);
+    const auto local = identity_path_scope::LocalPath(absolutePath);
+    const std::wstring absoluteKey = local ? local->wstring() : std::wstring{};
     if (absoluteKey.empty()) {
         if (outError) *outError = L"note identity lookup path is invalid";
         return std::nullopt;
@@ -585,7 +600,8 @@ bool RebindRuntimeNoteIdentityPath(NoteId noteId,
         state.catalog = std::move(previous);
         return false;
     }
-    const std::wstring newKey = NormalizePathKey(newAbsolutePath);
+    const auto local = identity_path_scope::LocalPath(newAbsolutePath);
+    const std::wstring newKey = local ? local->wstring() : std::wstring{};
     if (!RuntimeNoteIdentityRegistry().BindPath(noteId, newKey)) {
         state.catalog = std::move(previous);
         PersistRuntimeStoreLocked(state, nullptr);

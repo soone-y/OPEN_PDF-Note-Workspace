@@ -16,6 +16,8 @@ $compilerDir = Split-Path -Parent $compiler.Source
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 Push-Location -LiteralPath $repoRoot
 try {
+    & (Join-Path $PSScriptRoot "run_page_rotation_tests.ps1")
+    & (Join-Path $PSScriptRoot "run_scroll_input_policy_tests.ps1")
     & (Join-Path $PSScriptRoot "run_md4c_allocation_failure_tests.ps1")
     & $compiler.Source -x c -std=c99 -O2 -Wall -DMD4C_USE_UTF16 -Ithird_party/md4c/src `
         -c third_party/md4c/src/md4c.c -o $md4cObject

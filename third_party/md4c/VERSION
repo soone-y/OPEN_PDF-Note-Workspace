@@ -1,13 +1,13 @@
-0.6.0+git.7fc1815a5eeba2af7d6120a76202bf59f3b6e6e4
+0.6.0+git.f9e5eb232b95b737373ae706648cb75bd259ed1a
 
 Upstream: https://github.com/mity/md4c
-Commit: 7fc1815a5eeba2af7d6120a76202bf59f3b6e6e4
-Commit date: 2026-09-17
-Release baseline: v0.6.0 (tagged 2026-09-20)
-Source archive: https://github.com/mity/md4c/archive/7fc1815a5eeba2af7d6120a76202bf59f3b6e6e4.tar.gz
-Source archive SHA256: 924d9a5443b7fa44a341feb027ae7bfd5db7696278920b17474799dce06ed959
+Commit: f9e5eb232b95b737373ae706648cb75bd259ed1a
+Commit date: 2026-10-19
+Release baseline: v0.6.0
+Source archive: https://github.com/mity/md4c/archive/f9e5eb232b95b737373ae706648cb75bd259ed1a.tar.gz
+Source archive SHA256: 61a3fe09f1c325d738777fb08cf959162bacda5888de0f7578e82a39df473780
 Local changes: patches/0001-japanese-whitespace-and-punctuation.patch
-Security status: OSV-2022-126 omits its fixed event; introduced by 62b60979f6a281b2b3cf883abc84299431fe2f76 and corrected upstream by descendant commit f7c8db7588573f3b0de166166a6f6756baf222dc
-Ancestry evidence: v0.6.0 is 42 commits ahead of the previous c4be8625eb11725d604232b028df10c2ddf9b577 pin, which already contained f7c8db7588573f3b0de166166a6f6756baf222dc
-Allocation-failure fixes: b630227edeb72c696398c25d1e3b84a16c701558, fa0efb890c692d6403fb9aba9e6c8fe20567040d, 47f8f4c2dac829bfbcd88295947b1867faebecde
-Patch comparison: upstream ASCII blank/punctuation macros unchanged; Japanese patch applies without conflict. No new extension flags enabled.
+Security fixes: ff1cd9f95e5d62688090818575d3e18e21b401a1 and be8a0fec7ec0aacb1bfb365da2813e5b693d24f0 avoid quadratic implicit-list parent scans (GHSA-582f-rcwc-x4mp referenced by upstream commits).
+Patch comparison: existing two Japanese macro changes retained; only context rebased for the added ISCNTRLORWHITESPACE_ macro. No extension flags enabled.
+Old vendor md4c.c used CRLF; official source and the new candidate use LF. Old source reproduces after explicit newline normalization; no other unexplained difference.
+Allocation/callback-failure regressions remain required. Source archive hash is an input identity, not signature verification.

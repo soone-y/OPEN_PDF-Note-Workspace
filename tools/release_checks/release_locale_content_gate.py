@@ -111,6 +111,24 @@ STARTER_SESSION = {
 NOTE_SUFFIXES = {".txt", ".csv", ".md", ".markdown", ".note", ".tex", ".icr", ".clro"}
 
 
+def markdown_prose(text: str) -> str:
+    """Return prose for link checks; fenced examples are literal source."""
+    marker = ""
+    length = 0
+    lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+        if marker:
+            if fence and fence[1][0] == marker and len(fence[1]) >= length and not fence[2].strip():
+                marker = ""
+            continue
+        if fence and not (fence[1][0] == "`" and "`" in fence[2]):
+            marker, length = fence[1][0], len(fence[1])
+            continue
+        lines.append(line)
+    return "".join(lines)
+
+
 def validate_markdown_links(root: Path, release_dir: Path) -> list[str]:
     """Reject broken or escaping local links in released user content."""
     errors: list[str] = []
@@ -121,7 +139,7 @@ def validate_markdown_links(root: Path, release_dir: Path) -> list[str]:
         except (OSError, UnicodeDecodeError) as error:
             errors.append(f"Markdown is unreadable: {path.relative_to(release_dir).as_posix()} ({error})")
             continue
-        for match in MARKDOWN_LINK.finditer(text):
+        for match in MARKDOWN_LINK.finditer(markdown_prose(text)):
             target = match.group(1).split("#", 1)[0]
             if not target or "://" in target or target.startswith("mailto:"):
                 continue

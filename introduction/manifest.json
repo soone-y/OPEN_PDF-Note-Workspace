@@ -20,7 +20,7 @@
       "id": "user_guidance",
       "when": "アプリの用途、導入、基本操作、画面構成、困ったときについて質問された場合",
       "read": [
-        "core/features_faq.md",
+        "core/features_and_scenarios.md",
         "core/user_guidance_reference.md",
         "core/use_cases.md",
         "core/ui_concepts.md",
@@ -75,7 +75,7 @@
       "id": "project_overview_and_oss",
       "when": "OSS、このソフトの目的、利用できること、利用資源、ライセンス、第三者コンポーネントについて質問された場合",
       "read": [
-        "core/features_faq.md",
+        "core/features_and_scenarios.md",
         "../README.md",
         "../LICENSE.md",
         "../LICENSES_INDEX.md",
@@ -104,7 +104,7 @@
         "core/safety_and_nonnegotiables.md",
         "core/troubleshooting_quick.md",
         "project_context.xml",
-        "core/features_faq.md",
+        "core/features_and_scenarios.md",
         "core/file_formats.md",
         "../README.md",
         "../LICENSES_INDEX.md",
@@ -124,7 +124,7 @@
         "core/repository_reference_map.md",
         "core/safety_and_nonnegotiables.md",
         "project_context.xml",
-        "core/features_faq.md",
+        "core/features_and_scenarios.md",
         "core/user_guidance_reference.md",
         "../README.md",
         "../docs/ja/Getting_Started.md",
@@ -138,7 +138,7 @@
       "id": "sound_behavior",
       "when": "通知音、Windowsの一般警告音、静音性について質問された場合",
       "read": [
-        "core/features_faq.md",
+        "core/features_and_scenarios.md",
         "core/troubleshooting_quick.md",
         "../docs/ja/Troubleshooting.md"
       ],

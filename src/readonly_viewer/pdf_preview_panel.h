@@ -17,6 +17,14 @@ HWND CreatePdfPreviewPanel(HWND hParent, HINSTANCE hInstance, int id);
 // owner-draw controls use this accessor so they follow the active theme.
 ThemeColors PdfPreviewPanel_GetTheme();
 
+// Grayscale affects rendered PDF pixels for this process only.
+bool PdfPreviewPanel_IsGrayscaleEnabled(HWND hwnd);
+[[nodiscard]] bool PdfPreviewPanel_AreAnnotationsVisible(HWND hwnd);
+
+// Clockwise quarter turns, owned by the current tab's transient view state.
+[[nodiscard]] int PdfPreviewPanel_GetRotation(HWND hwnd);
+void PdfPreviewPanel_SetRotation(HWND hwnd, int turns);
+
 // Open a PDF (and optionally a CLROP) in the given PDF preview panel
 void PdfPreviewPanel_OpenPdf(HWND hwnd, const std::wstring& pdfPath, const std::wstring& clropPath = L"");
 
@@ -27,6 +35,7 @@ void PdfPreviewPanel_JumpToPdfLocation(HWND hwnd, int pageIndex, double yPt, boo
 // Let the reader choose the contiguous PDF page range that is kept in the
 // continuous view.  This reduces layout and render-cache work for large PDFs.
 void PdfPreviewPanel_ChoosePageRange(HWND hwnd);
+void PdfPreviewPanel_PromptJumpPage(HWND hwnd);
 
 // Get the currently loaded PDF path (if any)
 std::wstring PdfPreviewPanel_GetPdfPath(HWND hwnd);
@@ -42,5 +51,10 @@ constexpr UINT kCmdPdfToggleGrayscale = 1106;
 constexpr UINT kCmdPdfZoomIn = 1111;
 constexpr UINT kCmdPdfZoomOut = 1112;
 constexpr UINT kCmdPdfZoomReset = 1113;
+constexpr UINT kCmdPdfRotateLeft = 1114;
+constexpr UINT kCmdPdfRotateRight = 1115;
+constexpr UINT kCmdPdfRotateReset = 1116;
+constexpr UINT kCmdPdfJumpPage = 1117;
+constexpr UINT kCmdPdfFitPage = 1118;
 
 } // namespace readonly_viewer

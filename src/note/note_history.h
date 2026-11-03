@@ -1,11 +1,9 @@
 #pragma once
 
-#include "core/sha256.h"
 #include "note/note_model.h"
 #include "note/note_text_piece_sequence.h"
 #include "note/note_text_boundaries.h"
 
-#include <array>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -35,20 +33,10 @@ struct NoteHistoryReplay {
     // best-effort hint: replaying against different text would make an undo
     // entry mutate unrelated user content.
     std::wstring expected_deleted_text;
-    core_hash::Sha256Digest expected_content_fingerprint{};
-    size_t expected_content_length = 0;
-    // In-process entries use an immutable canonical snapshot.  It is stronger
-    // than a full-text hash and lets replay reject unrelated edits without
-    // materializing the current document.
+    // Replay requires its immutable canonical snapshot, so stale edits are
+    // rejected without materializing the current document.
     NoteTextPieceSequence::Snapshot expected_snapshot;
 };
-
-// Uses the same canonical UTF-16LE representation as TextEdit. SHA-256 makes
-// a stale in-process entry computationally infeasible to confuse with the
-// current full text; it is not an authorization or persistence mechanism.
-[[nodiscard]] bool NoteHistoryReplayMatchesCurrentText(
-    const NoteHistoryReplay& replay,
-    std::wstring_view currentText);
 
 // Per-NoteId, UI-independent undo/redo history. The caller applies the
 // returned replay through the canonical text core and commits it only on
@@ -59,12 +47,6 @@ public:
     [[nodiscard]] bool CanUndo() const { return !undo_.empty(); }
     [[nodiscard]] bool CanRedo() const { return !redo_.empty(); }
 
-    bool Record(std::wstring_view textBefore,
-                const TextEdit& forward,
-                NoteTextSelection selectionBefore,
-                NoteTextSelection selectionAfter,
-                NoteHistoryOperationKind kind,
-                uint64_t tick);
     bool Record(const NoteTextPieceSequence::Snapshot& before,
                 const NoteTextPieceSequence::Snapshot& after,
                 std::wstring removedText,
@@ -92,10 +74,6 @@ private:
         NoteHistoryOperationKind kind = NoteHistoryOperationKind::Other;
         std::optional<TextUnitClass> unit_class;
         uint64_t tick = 0;
-        core_hash::Sha256Digest before_content_fingerprint{};
-        size_t before_content_length = 0;
-        core_hash::Sha256Digest after_content_fingerprint{};
-        size_t after_content_length = 0;
         NoteTextPieceSequence::Snapshot before_snapshot;
         NoteTextPieceSequence::Snapshot after_snapshot;
     };

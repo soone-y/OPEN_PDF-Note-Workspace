@@ -6,7 +6,6 @@
 #include "note/note_text_piece_sequence.h"
 
 #include <string_view>
-#include <map>
 
 namespace note {
 
@@ -72,8 +71,13 @@ public:
         return materialization_count_;
     }
     const NoteTextModel& model() const;
+    bool clro_ascii_only() const noexcept { return metadata_.clro_ascii_only; }
+    [[nodiscard]] bool SetClroAsciiOnly(bool value) noexcept;
 
 private:
+    friend class LocalNoteKernelRegistry;
+    // Retain canonical roots, revisions and undo snapshot coordinates.
+    [[nodiscard]] bool RebindOwner(NoteId noteId, NoteMetadata metadata);
     void MaterializeModel() const;
 
     NoteId note_id_{};
@@ -85,25 +89,6 @@ private:
     mutable uint64_t materialization_count_ = 0;
     uint64_t content_revision_ = 0;
     uint64_t persistence_revision_ = 0;
-};
-
-// UI-thread registry. Multiple views of one NoteId share the same core instance.
-class NoteTextCoreRegistry {
-public:
-    NoteTextCore* Reset(NoteId noteId,
-                        NoteMetadata metadata,
-                        std::wstring raw,
-                        uint64_t contentRevision,
-                        uint64_t persistenceRevision);
-    NoteTextCore* Find(NoteId noteId);
-    const NoteTextCore* Find(NoteId noteId) const;
-    NoteTextCore* FindForView(const ViewIdentity& viewIdentity);
-    const NoteTextCore* FindForView(const ViewIdentity& viewIdentity) const;
-    bool Forget(NoteId noteId);
-    size_t size() const { return cores_.size(); }
-
-private:
-    std::map<uint64_t, NoteTextCore> cores_;
 };
 
 } // namespace note

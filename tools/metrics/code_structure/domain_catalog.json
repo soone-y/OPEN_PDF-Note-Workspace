@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "status": "provisional-inspection-taxonomy",
+  "scope": "own application C++ build translation units; developer tooling and dependencies are separate inventory layers",
+  "source_manifest": "scripts/build/build_sources.json",
+  "count_contract": "one primary inspection area per physical TU; configuration pairs counted independently; secondary responsibility tags may overlap",
+  "categories": [
+    {"id": "application-control", "label": "起動・アプリ全体制御", "paths": ["src/main.cpp", "src/app/"]},
+    {"id": "workspace", "label": "ワークスペース・ファイル操作", "paths": ["src/workspace/"]},
+    {"id": "ui", "label": "UI・レイアウト・メニュー・ダイアログ", "paths": ["src/ui/"]},
+    {"id": "diagnostics", "label": "診断・操作記録・書込み検査", "paths": ["src/diagnostics/"]},
+    {"id": "help", "label": "ヘルプ", "paths": ["src/help/"]},
+    {"id": "search", "label": "検索", "paths": ["src/search/"]},
+    {"id": "schedule", "label": "予定・スケジュール", "paths": ["src/schedule/"]},
+    {"id": "office", "label": "Office文書変換のアプリ側接続", "paths": ["src/office/"]},
+    {"id": "settings", "label": "設定・設定適用", "paths": ["src/settings/"]},
+    {"id": "core", "label": "共通基盤・文言・フォント", "paths": ["src/core/"]},
+    {"id": "theme", "label": "テーマ", "paths": ["src/theme/"]},
+    {"id": "pdf-view", "label": "PDF表示・注釈操作", "paths": ["src/pdf_view/"]},
+    {"id": "note-view", "label": "ノートUI・入力・数式ペイン", "paths": ["src/note_view/"]},
+    {
+      "id": "note-engine",
+      "label": "ノート内部処理",
+      "paths": ["src/note/"],
+      "areas": [
+        {"id": "note-text", "label": "文字列・モデル・行とpiece管理", "files": ["note_model.cpp", "note_text_core.cpp", "note_text_piece_sequence.cpp", "note_line_sequence.cpp", "note_text_boundaries.cpp", "note_source_line_map.cpp"]},
+        {"id": "note-syntax", "label": "構文・パーサ・構文snapshot", "files": ["note_syntax_lexical.cpp", "note_syntax_document.cpp", "note_syntax_snapshot.cpp", "note_parser.cpp", "note_parser_checkpoint.cpp", "note_md4c_adapter.cpp"]},
+        {"id": "note-edit-history", "label": "編集transaction・履歴", "files": ["note_history.cpp", "note_transaction.cpp", "note_pending_edit_transaction.cpp"]},
+        {"id": "note-identity-service", "label": "識別・kernel調停・保存状態・workspaceサービス", "files": ["note_identity.cpp", "note_identity_store.cpp", "note_kernel.cpp", "note_persistence.cpp", "note_workspace_index.cpp", "note_workspace_service.cpp"]},
+        {"id": "note-invalidation", "label": "変更影響・座標変換・revision・意味index", "files": ["note_dirty_graph.cpp", "note_influence.cpp", "note_source_coordinate_transform.cpp", "note_revision_gate.cpp", "note_semantic_index.cpp"]},
+        {"id": "note-presentation", "label": "描画計画・配置・frame公開・表示adapter", "files": ["note_layout.cpp", "note_presentation.cpp", "note_presentation_owner_plan.cpp", "note_render_index_request.cpp", "note_render_layout_snapshot.cpp", "note_render_source_plan.cpp", "note_render_placement_snapshot.cpp", "note_render_final_display_run.cpp", "note_render_final_gdi_measurement_provider.cpp", "note_render_final_gdi_painter.cpp", "note_render_final_ime_preedit_presentation.cpp", "note_render_final_interaction.cpp", "note_render_final_presentation_interaction.cpp", "note_render_final_presentation_snapshot.cpp", "note_render_final_publication.cpp", "note_render_final_style.cpp", "note_render_final_transaction.cpp", "note_render_final_win32_adapter.cpp"]},
+        {"id": "note-math", "label": "ノート数式解析", "files": ["note_math.cpp"]},
+        {"id": "note-highlight", "label": "ノート強調範囲", "files": ["note_highlight.cpp"]},
+        {"id": "note-export", "label": "ノート出力変換", "files": ["note_export.cpp"]}
+      ]
+    },
+    {"id": "math-render", "label": "数式描画", "paths": ["src/math/"]},
+    {"id": "project-format", "label": "保存形式・JSON・hash・形式bridge", "paths": ["src/clrop/"]},
+    {"id": "file-output", "label": "保存・stage・復旧・PDF出力", "paths": ["src/file_output/"]},
+    {"id": "readonly-viewer", "label": "読み取り専用ビューア", "paths": ["src/readonly_viewer/"]}
+  ],
+  "non_tu_boundary_scopes": ["src/bridge/", "src/features/", "src/resources/"],
+  "comparison_entry": "src/readonly_viewer_next/",
+  "limits": [
+    "Directory or TU membership is not proof of a single responsibility.",
+    "Included headers/fragments must be observed through their real TUs with src scope; their origin can cross the primary TU area.",
+    "Shared TUs are not duplicated in physical counts, but all selected build configuration pairs remain required.",
+    "New or unmatched TUs require explicit classification; do not hide them in an existing category.",
+    "Catalog validates planning coverage only; it neither executes nor completes an analysis."
+  ]
+}

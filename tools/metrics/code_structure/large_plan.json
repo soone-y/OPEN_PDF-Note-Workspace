@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "roles": "tools/metrics/code_structure/large_roles.json",
+  "scopes": [
+    "src"
+  ],
+  "profiles": [
+    {
+      "id": "app-ja-full",
+      "signature": "out/obj/build_signature.json",
+      "kind": "workspace",
+      "locale": "ja",
+      "edition": "Full",
+      "configuration": "Release"
+    },
+    {
+      "id": "app-en-full",
+      "signature": "out/obj_en/build_signature.json",
+      "kind": "workspace",
+      "locale": "en",
+      "edition": "Full",
+      "configuration": "Release"
+    },
+    {
+      "id": "app-ja-lite",
+      "signature": "out/obj_lite/build_signature.json",
+      "kind": "workspace",
+      "locale": "ja",
+      "edition": "Lite",
+      "configuration": "Release"
+    },
+    {
+      "id": "app-en-lite",
+      "signature": "out/obj_lite_en/build_signature.json",
+      "kind": "workspace",
+      "locale": "en",
+      "edition": "Lite",
+      "configuration": "Release"
+    },
+    {
+      "id": "viewer-ja",
+      "signature": "out/obj_readonly_viewer/build_signature.json",
+      "kind": "readonly-viewer",
+      "locale": "ja",
+      "edition": null,
+      "configuration": "Release"
+    },
+    {
+      "id": "viewer-en",
+      "signature": "out/obj_readonly_viewer_en/build_signature.json",
+      "kind": "readonly-viewer",
+      "locale": "en",
+      "edition": null,
+      "configuration": "Release"
+    }
+  ],
+  "source_groups": [
+    {
+      "id": "application",
+      "path": "src",
+      "purpose": "application implementation and resources"
+    },
+    {
+      "id": "viewer-comparison-entry",
+      "path": "src/readonly_viewer_next",
+      "purpose": "comparison entry using the canonical readonly viewer"
+    },
+    {
+      "id": "developer-tools",
+      "path": "tools",
+      "purpose": "local developer tools"
+    },
+    {
+      "id": "automation",
+      "path": "scripts",
+      "purpose": "build/check/release automation"
+    },
+    {
+      "id": "tests",
+      "path": "tests",
+      "purpose": "verification and fixtures"
+    },
+    {
+      "id": "third-party",
+      "path": "third_party",
+      "purpose": "vendored source and dependency configuration; not authorship inference"
+    },
+    {
+      "id": "site",
+      "path": "site",
+      "purpose": "public site implementation"
+    },
+    {
+      "id": "localization",
+      "path": "locales",
+      "purpose": "localization catalogs"
+    }
+  ]
+}

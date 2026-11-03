@@ -1,9 +1,13 @@
+#include "settings/settings.h"
 #include "ui/dialogs/export_dialog.h"
 #include "ui/dialogs/dialogs.h"
 #include "ui/noop_nav_guard.h"
+#include "ui/window_corners.h"
+#include "ui/transient_display.h"
 #include "core/localization.h"
 #include "workspace/workspace_config_io.h"
 #include "workspace/workspace_actions.h"
+#include "note/note_clro_markdown.h"
 
 static std::wstring ExperimentalExportDialogTitle(const std::wstring& base) {
     if (base.find(L"試験的") != std::wstring::npos ||
@@ -19,6 +23,7 @@ static bool ParsePositiveInt(const std::wstring& text, int& out) {
     int value = 0;
     for (wchar_t c : t) {
         if (c < L'0' || c > L'9') return false;
+        if (value > (std::numeric_limits<int>::max() - (c - L'0')) / 10) return false;
         value = value * 10 + (c - L'0');
     }
     if (value <= 0) return false;
@@ -32,13 +37,19 @@ static double s_lastExportCustomPdfHPt = 0.0;
 static int s_lastExportCustomPngWPx = 0;
 static int s_lastExportCustomPngHPx = 0;
 static std::vector<ExportDialogResult> s_pendingExportsAfterSave;
+// UI thread only. The modal reservation window stays alive and disabled until
+// integration/export completes; failure keeps its unexecuted reservation.
+static HWND s_activeReservationExportDialog{};
 static int s_lastExportCustomAxis = 0; // 0=width, 1=height
 static int s_lastExportPaperPresetId = 0;
-static bool s_lastNoteStripMarkup = true;
+static bool s_lastNoteStripMarkup = false;
+static pdf_annotation_export::TextColorOptions s_lastTextColor;
 static bool s_lastNoteTitleHeading = false;
 static bool s_lastNoteShiftHeadings = true;
 static bool s_lastNoteIncludeComments = true;
 static int s_lastNoteMarkupFormat = 0; // 0=md, 1=html
+static std::optional<bool> s_lastNormalizeClroSyntax;
+static std::wstring s_lastNormalizeWorkspace;
 static bool s_lastNoteMarkupMathPlaceholder = false;
 static std::wstring s_lastNoteMarkupMathPlaceholderText = L"[math]";
 
@@ -71,7 +82,6 @@ constexpr int kExportResultsOpenId = 4902;
 constexpr int kExportResultsFolderId = 4903;
 constexpr int kExportResultsCloseId = 4904;
 constexpr ULONGLONG kExportResultsOutsideDismissDelayMs = 1800;
-constexpr int kQuickExportSettingsCloseId = 4911;
 
 struct ExportResultsDialogState {
     HWND hwnd{};
@@ -290,124 +300,19 @@ static void ShowExportResultsDialog(HWND owner, const std::vector<std::wstring>&
     }
 }
 
-struct QuickExportSettingsDialogState {
-    HWND hwnd{};
-    std::wstring summary;
-    bool done = false;
-};
-
-static std::wstring QuickExportEnabledLabel(bool value) {
-    return localization::Text(value ? L"export.quick_settings.enabled" : L"export.quick_settings.disabled");
-}
-
-static std::wstring BuildQuickExportSettingsSummary() {
-    const int percent = std::clamp(g_config.quickPdfScalePercent, 13, 800);
-    std::wstring summary = localization::Text(L"export.quick_settings_pdf_heading");
-    summary += L"\r\n" + localization::Format(L"export.quick_settings_pdf_scale", {{L"PERCENT", std::to_wstring(percent)}});
-    summary += L"\r\n" + localization::Format(L"export.quick_settings_pdf_standard_text",
-                                                   {{L"VALUE", QuickExportEnabledLabel(g_config.quickPdfStandardTextAnnots)}});
-    summary += L"\r\n" + localization::Format(L"export.quick_settings_pdf_match_layout",
-                                                   {{L"VALUE", QuickExportEnabledLabel(g_config.quickPdfMatchPdfPaneTextLayout)}});
-    summary += L"\r\n\r\n" + localization::Text(L"export.quick_settings_note_heading");
-    summary += L"\r\n" + localization::Text(L"export.quick_settings_note_format");
-    summary += L"\r\n" + localization::Format(L"export.quick_settings_note_strip_markup",
-                                                   {{L"VALUE", QuickExportEnabledLabel(g_config.quickNoteStripMarkup)}});
-    summary += L"\r\n" + localization::Format(L"export.quick_settings_note_comments",
-                                                   {{L"VALUE", QuickExportEnabledLabel(g_config.quickNoteIncludeComments)}});
-    if (g_config.quickNoteMathPlaceholder) {
-        std::wstring placeholder = TrimWhitespace(g_config.quickNoteMathPlaceholderText);
-        if (placeholder.empty()) placeholder = L"[math]";
-        summary += L"\r\n" + localization::Format(L"export.quick_settings_note_math_placeholder",
-                                                       {{L"VALUE", placeholder}});
-    } else {
-        summary += L"\r\n" + localization::Text(L"export.quick_settings_note_math_keep");
-    }
-    return summary;
-}
-
-static LRESULT CALLBACK QuickExportSettingsDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    auto* ctx = reinterpret_cast<QuickExportSettingsDialogState*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
-    switch (msg) {
-    case WM_CREATE: {
-        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        ctx = reinterpret_cast<QuickExportSettingsDialogState*>(cs->lpCreateParams);
-        SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
-        ctx->hwnd = hWnd;
-        HWND summary = CreateWindowExW(0, L"STATIC", ctx->summary.c_str(), WS_CHILD | WS_VISIBLE,
-                                       12, 12, 430, 198, hWnd, nullptr, cs->hInstance, nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", localization::Text(L"common.close").c_str(),
-                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                                     350, 220, 92, 26, hWnd,
-                                     reinterpret_cast<HMENU>(kQuickExportSettingsCloseId), cs->hInstance, nullptr);
-        if (g_hUIFont) {
-            SendMessageW(summary, WM_SETFONT, reinterpret_cast<WPARAM>(g_hUIFont), TRUE);
-            SendMessageW(close, WM_SETFONT, reinterpret_cast<WPARAM>(g_hUIFont), TRUE);
-        }
-        ApplyThemeToDialog(hWnd);
-        return 0;
-    }
-    case WM_THEMECHANGED:
-        ApplyThemeToDialog(hWnd);
-        return 0;
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLORBTN:
-        return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
-    case WM_DRAWITEM:
-        if (DrawThemeButton(reinterpret_cast<LPDRAWITEMSTRUCT>(lParam))) return TRUE;
-        break;
-    case WM_COMMAND:
-        if (LOWORD(wParam) == kQuickExportSettingsCloseId || LOWORD(wParam) == IDCANCEL) {
-            if (ctx) ctx->done = true;
-            DestroyWindow(hWnd);
-            return 0;
-        }
-        break;
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) {
-            if (ctx) ctx->done = true;
-            DestroyWindow(hWnd);
-            return 0;
-        }
-        break;
-    case WM_CLOSE:
-        if (ctx) ctx->done = true;
-        DestroyWindow(hWnd);
-        return 0;
-    }
-    return DefWindowProcW(hWnd, msg, wParam, lParam);
-}
-
-static void ShowQuickExportSettingsDialog(HWND owner) {
-    QuickExportSettingsDialogState ctx{};
-    ctx.summary = BuildQuickExportSettingsSummary();
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = QuickExportSettingsDialogProc;
-    wc.hInstance = g_hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = g_hThemePanelBrush ? g_hThemePanelBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    wc.lpszClassName = L"QuickExportSettingsDialog";
-    RegisterClassW(&wc);
-    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, wc.lpszClassName,
-                                  localization::Text(L"export.quick_settings_title").c_str(),
-                                  WS_CAPTION | WS_POPUPWINDOW,
-                                  CW_USEDEFAULT, CW_USEDEFAULT, 465, 290, owner, nullptr, g_hInst, &ctx);
-    if (!dialog) return;
-    PlaceOwnedPopupAtAppTopLeft(dialog, owner);
-    ShowWindow(dialog, SW_SHOW);
-    UpdateWindow(dialog);
-    MSG msg{};
-    while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
-        if (ShouldSkipImeMessageInLoop(msg)) continue;
-        if (!IsDialogMessageW(dialog, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    if (owner && IsWindow(owner)) SetActiveWindow(owner);
-}
-
 static std::optional<std::wstring> ExecuteUnifiedExportAndGetPath(HWND hWnd, const ExportDialogResult& result) {
     const bool hasChosenOutputPath = !result.outputPath.empty();
+    if (!hasChosenOutputPath && result.kind == ExportDialogKind::PdfAll && !result.pages.empty()) {
+        // Full-document snapshots keep the Quick PDF filename convention.
+        const std::filesystem::path source(CurrentLogicalPdfPath());
+        if (source.empty()) return std::nullopt;
+        auto target = file_output::PickExportDestination(hWnd, ExperimentalExportDialogTitle(GetUiText().menuExportPdf),
+            source.parent_path(), source.stem().wstring() + L"_annotated.pdf", L"pdf");
+        if (!target) return std::nullopt;
+        auto chosen = result;
+        chosen.outputPath = *target;
+        return ExecuteUnifiedExportAndGetPath(hWnd, chosen);
+    }
 
     std::error_code existsError;
     if (hasChosenOutputPath && std::filesystem::exists(std::filesystem::path(result.outputPath), existsError) && !existsError) {
@@ -426,22 +331,43 @@ static std::optional<std::wstring> ExecuteUnifiedExportAndGetPath(HWND hWnd, con
 
     std::wstring path;
     bool ok = false;
+    if (hasChosenOutputPath && (result.kind == ExportDialogKind::PdfAll || result.kind == ExportDialogKind::PdfPages)) {
+        auto parts = result.pdfParts;
+        if (parts.empty()) {
+            auto pages = result.pages;
+            if (pages.empty()) {
+                for (int i = 0; i < static_cast<int>(g_pdf.pages.size()); ++i) pages.push_back({i, true});
+            }
+            parts.push_back({pages, result.standardTextAnnots, result.pdfScale,
+                             result.matchPdfPaneTextLayout, result.textColor});
+        }
+        return file_output::ExportPdfParts(hWnd, parts, result.outputPath)
+                   ? std::optional<std::wstring>(result.outputPath) : std::nullopt;
+    }
     switch (result.kind) {
     case ExportDialogKind::PdfAll:
-        ok = hasChosenOutputPath
+        ok = !result.pdfParts.empty()
+                 ? file_output::ExportPdfParts(hWnd, result.pdfParts, result.outputPath)
+                 : !result.pages.empty()
+                 ? (hasChosenOutputPath
+                    ? file_output::ExportPdfPages(hWnd, result.pages, result.outputPath, result.standardTextAnnots,
+                                                  result.pdfScale, result.matchPdfPaneTextLayout, result.textColor)
+                    : file_output::ExportPdfPages(hWnd, result.pages, result.standardTextAnnots, result.pdfScale,
+                                                  result.matchPdfPaneTextLayout, &path, result.textColor))
+                 : hasChosenOutputPath
                  ? file_output::ExportPdfWithAnnotations(hWnd, true, result.outputPath,
                                                          result.standardTextAnnots, result.pdfScale,
-                                                         result.matchPdfPaneTextLayout)
+                                                         result.matchPdfPaneTextLayout, result.textColor)
                  : file_output::ExportPdfWithAnnotations(hWnd, true, result.standardTextAnnots, result.pdfScale,
-                                                         result.matchPdfPaneTextLayout, &path);
+                                                         result.matchPdfPaneTextLayout, &path, result.textColor);
         break;
     case ExportDialogKind::PdfPages:
         ok = hasChosenOutputPath
                  ? file_output::ExportPdfPages(hWnd, result.pages, result.outputPath,
                                                result.standardTextAnnots, result.pdfScale,
-                                               result.matchPdfPaneTextLayout)
+                                               result.matchPdfPaneTextLayout, result.textColor)
                  : file_output::ExportPdfPages(hWnd, result.pages, result.standardTextAnnots, result.pdfScale,
-                                               result.matchPdfPaneTextLayout, &path);
+                                               result.matchPdfPaneTextLayout, &path, result.textColor);
         break;
     case ExportDialogKind::PdfPng:
         ok = hasChosenOutputPath
@@ -477,9 +403,14 @@ struct ExportDialogState {
     bool hasNote = false;
     bool updatingSize = false;
     bool outputTargetInitialized = false;
+    bool exportingReservation = false;
+    int exportingReservationIndex = -1;
+    std::wstring exportingMergedPath;
     ExportDialogKind preset = ExportDialogKind::PdfAll;
     ExportDialogKind outputTargetKind = ExportDialogKind::PdfAll;
     std::wstring suggestedOutputName;
+    HWND outputFolderTooltip{};
+    std::wstring outputFolderTooltipText;
     std::vector<ExportDialogResult> reservedResults;
     std::vector<ExportDialogResult> committedResults;
 
@@ -507,6 +438,7 @@ struct ExportDialogState {
     HWND labelPngStyle{};
     HWND radioPngStylePdf{};
     HWND radioPngStyleViewer{};
+    HWND checkKeepPageRotation{};
     HWND labelOutSize{};
     HWND radioOutSizeHalf{};
     HWND radioOutSizeOne{};
@@ -521,6 +453,9 @@ struct ExportDialogState {
     HWND comboPaper{};
     HWND checkStandardText{};
     HWND checkMatchPdfPaneTextLayout{};
+    HWND labelTextColor{};
+    HWND comboTextColor{};
+    HWND editTextColorBackground{};
     HWND labelMath{};
     HWND radioMathKeep{};
     HWND radioMathReplace{};
@@ -533,6 +468,8 @@ struct ExportDialogState {
     HWND radioMarkupHtml{};
     HWND checkTitleHeading{};
     HWND checkShiftHeadings{};
+    HWND checkNormalizeClroSyntax{};
+    HWND btnSaveClroNormalizationDefault{};
     HWND btnSet{};
     HWND btnUpdateReservation{};
     HWND btnSaveQuickPdf{};
@@ -540,6 +477,7 @@ struct ExportDialogState {
     HWND btnShowQuickSettings{};
     HWND btnClearReservations{};
     HWND btnExecuteReservation{};
+    HWND btnMergeReservations{};
     HWND btnMoveReservationUp{};
     HWND btnMoveReservationDown{};
     HWND btnRemoveReservation{};
@@ -549,6 +487,7 @@ struct ExportDialogState {
     HWND inlineErrorTarget{};
 };
 
+constexpr int kExportDlgIdKeepPageRotation = 4099;
 constexpr int kExportDlgIdTopPdf = 4001;
 constexpr int kExportDlgIdTopNote = 4002;
 constexpr int kExportDlgIdPdfAll = 4011;
@@ -569,6 +508,8 @@ constexpr int kExportDlgIdMarkupHtml = 4056;
 constexpr int kExportDlgIdTitleHeading = 4057;
 constexpr int kExportDlgIdShiftHeadings = 4058;
 constexpr int kExportDlgIdIncludeComments = 4059;
+constexpr int kExportDlgIdNormalizeClroSyntax = 4060;
+constexpr int kExportDlgIdSaveClroNormalizationDefault = 4061;
 constexpr int kExportDlgIdPngStyleLabel = 4061;
 constexpr int kExportDlgIdPngStylePdf = 4062;
 constexpr int kExportDlgIdPngStyleViewer = 4063;
@@ -584,6 +525,8 @@ constexpr int kExportDlgIdPaperCombo = 4101;
 constexpr int kExportDlgIdOutputFolder = 4111;
 constexpr int kExportDlgIdBrowseOutputFolder = 4112;
 constexpr int kExportDlgIdOutputName = 4113;
+constexpr int kExportDlgIdTextColor = 4120;
+constexpr int kExportDlgIdTextColorBackground = 4121;
 constexpr int kExportDlgIdSet = 4201;
 constexpr int kExportDlgIdSaveQuickPdf = 4202;
 constexpr int kExportDlgIdSaveQuickNote = 4203;
@@ -595,6 +538,7 @@ constexpr int kExportDlgIdUpdateReservation = 4208;
 constexpr int kExportDlgIdExecuteReservation = 4209;
 constexpr int kExportDlgIdReservationList = 4210;
 constexpr int kExportDlgIdShowQuickSettings = 4211;
+constexpr int kExportDlgIdMergeReservations = 4212;
 
 static bool IsExportDlgChecked(HWND hWnd) {
     return hWnd && SendMessageW(hWnd, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -615,6 +559,26 @@ static ExportDialogKind GetExportDialogKind(ExportDialogState* ctx);
 static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& outResult);
 static void UpdateReservationSummaryUi(ExportDialogState* ctx);
 static void UpdateReservationButtonsUi(ExportDialogState* ctx);
+static void LoadSelectedReservationOutputTarget(ExportDialogState* ctx);
+static bool SameOutputPath(const std::wstring& lhs, const std::wstring& rhs);
+
+static void UpdateOutputFolderTooltip(ExportDialogState* ctx) {
+    if (!ctx || !ctx->outputFolderTooltip || !ctx->editOutputFolder) return;
+    // Cache on text changes only. Hover performs no path resolution or I/O.
+    ctx->outputFolderTooltipText = ReadDialogText(ctx->editOutputFolder);
+    if (!ui::ConfigureTransientTooltip(ctx->outputFolderTooltip, ctx->outputFolderTooltipText)) {
+        DestroyWindow(ctx->outputFolderTooltip);
+        ctx->outputFolderTooltip = nullptr;
+        return;
+    }
+    TOOLINFOW tool{};
+    tool.cbSize = TTTOOLINFOW_V2_SIZE;
+    tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    tool.hwnd = ctx->hwnd;
+    tool.uId = reinterpret_cast<UINT_PTR>(ctx->editOutputFolder);
+    tool.lpszText = ctx->outputFolderTooltipText.data();
+    SendMessageW(ctx->outputFolderTooltip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&tool));
+}
 
 static COLORREF BlendExportDialogColor(COLORREF a, COLORREF b, double t) {
     int ar = GetRValue(a), ag = GetGValue(a), ab = GetBValue(a);
@@ -825,21 +789,30 @@ static void PopulatePaperPresetCombo(ExportDialogState* ctx, double pageRatio) {
     s_lastExportPaperPresetId = GetComboItemData(ctx->comboPaper);
 }
 
-static bool TryGetPageSizePt(int pageIndex, double& outWPt, double& outHPt) {
+static int ExportPageRotation(ExportDialogState* ctx, int pageIndex) {
+    if (IsExportDlgChecked(ctx->checkKeepPageRotation) &&
+        pageIndex >= 0 && pageIndex < static_cast<int>(g_pdf.pages.size()))
+        return g_pdf.pages[static_cast<size_t>(pageIndex)].viewRotation;
+    return 0;
+}
+
+static bool TryGetPageSizePt(int pageIndex, double& outWPt, double& outHPt, int rotation = 0) {
     outWPt = 0.0;
     outHPt = 0.0;
     if (!g_pdf.doc) return false;
     if (pageIndex >= 0 && pageIndex < static_cast<int>(g_pdf.pages.size())) {
         const auto& p = g_pdf.pages[static_cast<size_t>(pageIndex)];
-        if (p.widthPt > 0.0 && p.heightPt > 0.0) {
-            outWPt = p.widthPt;
-            outHPt = p.heightPt;
+        if (p.canonicalWidthPt > 0.0 && p.canonicalHeightPt > 0.0) {
+            outWPt = p.canonicalWidthPt;
+            outHPt = p.canonicalHeightPt;
+            if (rotation % 2) std::swap(outWPt, outHPt);
             return true;
         }
     }
     {
         std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
         if (FPDF_GetPageSizeByIndex(g_pdf.doc, pageIndex, &outWPt, &outHPt)) {
+            if (rotation % 2) std::swap(outWPt, outHPt);
             return outWPt > 0.0 && outHPt > 0.0;
         }
     }
@@ -864,7 +837,7 @@ static int ReferencePageIndexForSizePreview(ExportDialogState* ctx, ExportDialog
         std::wstring spec = TrimWhitespace(ReadDialogText(ctx->editPageSpec));
         std::wstring err;
         bool defaultAnnot = IsExportDlgChecked(ctx->radioAnnotYes);
-        auto pages = file_output::ParsePdfPageSpec(spec, defaultAnnot, &err);
+        auto pages = file_output::ParsePdfPageSpec(spec, static_cast<int>(g_pdf.pages.size()), defaultAnnot, &err);
         if (!pages.empty()) return clampIndex(pages.front().pageIndex);
         return 0;
     }
@@ -887,7 +860,7 @@ static void UpdateExportDialogSizeUi(ExportDialogState* ctx, int changedId) {
 
     int refPage = ReferencePageIndexForSizePreview(ctx, kind);
     double wPt = 0.0, hPt = 0.0;
-    if (!TryGetPageSizePt(refPage, wPt, hPt)) return;
+    if (!TryGetPageSizePt(refPage, wPt, hPt, kind == ExportDialogKind::PdfPng ? 0 : ExportPageRotation(ctx, refPage))) return;
 
     const bool isPdfOut = (kind == ExportDialogKind::PdfAll || kind == ExportDialogKind::PdfPages);
     const bool isPngOut = (kind == ExportDialogKind::PdfPng);
@@ -1105,6 +1078,14 @@ static std::wstring ReservationLabelForResult(const ExportDialogResult& result) 
         label = localization::Text(L"export.reservation_kind.unknown");
         break;
     }
+    if ((result.kind == ExportDialogKind::PdfAll || result.kind == ExportDialogKind::PdfPages) && !result.pages.empty()) {
+        const int angle = result.pages.front().rotation;
+        const bool uniform = std::all_of(result.pages.begin(), result.pages.end(),
+                                         [angle](const auto& page) { return page.rotation == angle; });
+        const auto* key = !uniform ? L"export.rotation.current" : angle == 1 ? L"export.rotation.right" :
+                          angle == 2 ? L"export.rotation.half" : angle == 3 ? L"export.rotation.left" : L"export.rotation.original";
+        label += L" [" + localization::Text(L"export.rotation.label") + L" " + localization::Text(key) + L"]";
+    }
     if (!result.outputPath.empty()) {
         label += L" \u2192 " + std::filesystem::path(result.outputPath).filename().wstring();
     }
@@ -1231,14 +1212,18 @@ static bool BuildExportOutputTarget(ExportDialogState* ctx, ExportDialogResult& 
     }
     result.outputPath = (folder / name).lexically_normal().wstring();
     const std::filesystem::path source = OutputSourcePathForKind(result.kind);
-    if (!source.empty()) {
-        const auto normalizedSource = source.lexically_normal().wstring();
-        if (CompareStringOrdinal(result.outputPath.c_str(), -1, normalizedSource.c_str(), -1, TRUE) == CSTR_EQUAL) {
-            return RejectExportDialogInput(ctx, localization::Text(L"export.output_original_forbidden"),
-                                           ctx->editOutputName, true);
-        }
+    if (!source.empty() && SameOutputPath(result.outputPath, source.wstring())) {
+        return RejectExportDialogInput(ctx, localization::Text(L"export.output_original_forbidden"),
+                                       ctx->editOutputName, true);
     }
     return !result.outputPath.empty();
+}
+
+static bool CanMergePdfReservations(const ExportDialogState* ctx) {
+    return ctx && ctx->reservedResults.size() >= 2 &&
+        std::all_of(ctx->reservedResults.begin(), ctx->reservedResults.end(), [](const auto& result) {
+            return result.kind == ExportDialogKind::PdfAll || result.kind == ExportDialogKind::PdfPages;
+        });
 }
 
 static void UpdateReservationButtonsUi(ExportDialogState* ctx) {
@@ -1253,6 +1238,47 @@ static void UpdateReservationButtonsUi(ExportDialogState* ctx) {
     EnableWindow(ctx->btnUpdateReservation, selected >= 0 && selected < count);
     EnableWindow(ctx->btnExecuteReservation, selected >= 0 && selected < count);
     EnableWindow(ctx->btnClearReservations, count > 0);
+    EnableWindow(ctx->btnMergeReservations, CanMergePdfReservations(ctx));
+    SetWindowTextW(GetDlgItem(ctx->hwnd, IDOK), localization::Text(
+        count > 0 ? L"export.execute_all" : L"export.execute").c_str());
+}
+
+static HWND FinishSelectedReservationExport(const std::vector<std::wstring>& savedPaths) {
+    const HWND dialog = s_activeReservationExportDialog;
+    s_activeReservationExportDialog = nullptr;
+    if (!dialog || !IsWindow(dialog)) return nullptr;
+    auto* ctx = reinterpret_cast<ExportDialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
+    if (!ctx || !ctx->exportingReservation) return nullptr;
+    const int selected = ctx->exportingReservationIndex;
+    bool removedReservation = false;
+    if (!ctx->exportingMergedPath.empty() &&
+        std::find(savedPaths.begin(), savedPaths.end(), ctx->exportingMergedPath) != savedPaths.end()) {
+        ctx->reservedResults.clear();
+    } else if (selected >= 0 && selected < static_cast<int>(ctx->reservedResults.size()) &&
+        std::find(savedPaths.begin(), savedPaths.end(), ctx->reservedResults[static_cast<size_t>(selected)].outputPath)
+            != savedPaths.end()) {
+        ctx->reservedResults.erase(ctx->reservedResults.begin() + selected);
+        removedReservation = true;
+    }
+    ctx->exportingReservation = false;
+    ctx->exportingReservationIndex = -1;
+    ctx->exportingMergedPath.clear();
+    UpdateReservationSummaryUi(ctx);
+    // A successful individual export selects the next job. Keep its displayed
+    // target in sync; failed/cancelled exports retain the user's target edits.
+    if (removedReservation) LoadSelectedReservationOutputTarget(ctx);
+    EnableWindow(dialog, TRUE);
+    SetActiveWindow(dialog);
+    return dialog;
+}
+
+static void ReportUnifiedExportResults(HWND owner, const std::vector<std::wstring>& savedPaths) {
+    if (HWND dialog = FinishSelectedReservationExport(savedPaths)) {
+        ScopedExportDialogOwner modalOwner(dialog);
+        ShowExportResultsDialog(dialog, savedPaths);
+    } else {
+        ShowExportResultsDialog(owner, savedPaths);
+    }
 }
 
 static void LoadSelectedReservationOutputTarget(ExportDialogState* ctx) {
@@ -1260,6 +1286,11 @@ static void LoadSelectedReservationOutputTarget(ExportDialogState* ctx) {
     const int selected = static_cast<int>(SendMessageW(ctx->labelReservationList, LB_GETCURSEL, 0, 0));
     if (selected < 0 || selected >= static_cast<int>(ctx->reservedResults.size())) return;
     const std::filesystem::path output(ctx->reservedResults[static_cast<size_t>(selected)].outputPath);
+    const auto& reservation = ctx->reservedResults[static_cast<size_t>(selected)];
+    if (reservation.kind == ExportDialogKind::NoteMarkup) {
+        SendMessageW(ctx->checkNormalizeClroSyntax, BM_SETCHECK,
+                     reservation.noteMarkupOptions.normalizeClroSyntax ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
     SetWindowTextW(ctx->editOutputFolder, output.parent_path().wstring().c_str());
     SetWindowTextW(ctx->editOutputName, output.filename().wstring().c_str());
     ctx->outputTargetInitialized = true;
@@ -1340,6 +1371,8 @@ static void UpdateExportDialogUi(ExportDialogState* ctx) {
     ShowWindow(ctx->radioPngStylePdf, showPngStyle ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->radioPngStyleViewer, showPngStyle ? SW_SHOW : SW_HIDE);
 
+    const bool showRotation = kind == ExportDialogKind::PdfAll || kind == ExportDialogKind::PdfPages;
+    ShowWindow(ctx->checkKeepPageRotation, showRotation ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->labelOutSize, showOutSize ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->radioOutSizeHalf, showOutSize ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->radioOutSizeOne, showOutSize ? SW_SHOW : SW_HIDE);
@@ -1355,6 +1388,11 @@ static void UpdateExportDialogUi(ExportDialogState* ctx) {
 
     ShowWindow(ctx->checkStandardText, showStandardText ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->checkMatchPdfPaneTextLayout, showStandardText ? SW_SHOW : SW_HIDE);
+    ShowWindow(ctx->labelTextColor, showStandardText ? SW_SHOW : SW_HIDE);
+    ShowWindow(ctx->comboTextColor, showStandardText ? SW_SHOW : SW_HIDE);
+    ShowWindow(ctx->editTextColorBackground, showStandardText ? SW_SHOW : SW_HIDE);
+    EnableWindow(ctx->editTextColorBackground,
+                 SendMessageW(ctx->comboTextColor, CB_GETCURSEL, 0, 0) == 3);
 
     ShowWindow(ctx->labelMath, showMath ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->radioMathKeep, showMath ? SW_SHOW : SW_HIDE);
@@ -1369,6 +1407,12 @@ static void UpdateExportDialogUi(ExportDialogState* ctx) {
     ShowWindow(ctx->radioMarkupHtml, showFormat ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->checkTitleHeading, showTitle ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->checkShiftHeadings, showShiftHeadings ? SW_SHOW : SW_HIDE);
+    ShowWindow(ctx->checkNormalizeClroSyntax,
+               showFormat && IsExportDlgChecked(ctx->radioMarkupMd) ? SW_SHOW : SW_HIDE);
+    EnableWindow(ctx->checkNormalizeClroSyntax, note::IsClroMarkdownFile(g_currentNotePath));
+    ShowWindow(ctx->btnSaveClroNormalizationDefault,
+               showFormat && IsExportDlgChecked(ctx->radioMarkupMd) ? SW_SHOW : SW_HIDE);
+    EnableWindow(ctx->btnSaveClroNormalizationDefault, note::IsClroMarkdownFile(g_currentNotePath));
 
     if (ctx->radioMathKeep) {
         SetWindowTextW(ctx->radioMathKeep, (kind == ExportDialogKind::NoteMarkup) ? L"形式に当てはめる" : L"そのまま");
@@ -1402,13 +1446,35 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
     result.kind = kind;
     result.standardTextAnnots = IsExportDlgChecked(ctx->checkStandardText);
     result.matchPdfPaneTextLayout = IsExportDlgChecked(ctx->checkMatchPdfPaneTextLayout);
+    result.textColor = s_lastTextColor;
+    if (kind == ExportDialogKind::PdfAll || kind == ExportDialogKind::PdfPages) {
+        const int mode = static_cast<int>(SendMessageW(ctx->comboTextColor, CB_GETCURSEL, 0, 0));
+        if (mode < 0 || mode > 3) return RejectExportDialogInput(ctx, localization::Text(L"export.text_color_invalid"));
+        result.textColor.mode = static_cast<pdf_annotation_export::TextColorMode>(mode);
+        if (mode == 3) {
+            const auto hex = TrimWhitespace(ReadDialogText(ctx->editTextColorBackground));
+            unsigned rgb = 0;
+            bool valid = hex.size() == 7 && hex[0] == L'#';
+            for (size_t i = 1; valid && i < hex.size(); ++i) {
+                const wchar_t c = hex[i];
+                const int digit = c >= L'0' && c <= L'9' ? c - L'0' :
+                                  c >= L'a' && c <= L'f' ? c - L'a' + 10 :
+                                  c >= L'A' && c <= L'F' ? c - L'A' + 10 : -1;
+                if (digit < 0) valid = false;
+                else rgb = (rgb << 4) | static_cast<unsigned>(digit);
+            }
+            if (!valid) return RejectExportDialogInput(ctx, localization::Text(L"export.text_color_invalid"), ctx->editTextColorBackground, true);
+            result.textColor.background = RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+        }
+        s_lastTextColor = result.textColor;
+    }
     result.pdfScale = 1.0;
     result.pngWidthPx = 0;
     result.pngHeightPx = 0;
     if (kind == ExportDialogKind::PdfAll || kind == ExportDialogKind::PdfPages) {
         int refPage = ReferencePageIndexForSizePreview(ctx, kind);
         double baseWPt = 0.0, baseHPt = 0.0;
-        if (!TryGetPageSizePt(refPage, baseWPt, baseHPt)) {
+        if (!TryGetPageSizePt(refPage, baseWPt, baseHPt, ExportPageRotation(ctx, refPage))) {
             return RejectExportDialogInput(ctx, localization::Text(L"export.output_size_calculation_failed"));
         }
         ExportSizeMode mode = GetExportSizeMode(ctx);
@@ -1501,7 +1567,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
         }
         bool defaultAnnot = IsExportDlgChecked(ctx->radioAnnotYes);
         std::wstring err;
-        auto pages = file_output::ParsePdfPageSpec(spec, defaultAnnot, &err);
+        auto pages = file_output::ParsePdfPageSpec(spec, static_cast<int>(g_pdf.pages.size()), defaultAnnot, &err);
         if (pages.empty()) {
             std::wstring msg = err.empty() ? localization::Text(L"export.page_spec_invalid") : err;
             return RejectExportDialogInput(ctx, msg, ctx->editPageSpec, true);
@@ -1565,11 +1631,20 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
         options.includeCommentLines = IsExportDlgChecked(ctx->checkIncludeComments);
         options.includeTitleHeading = IsExportDlgChecked(ctx->checkTitleHeading);
         options.shiftHeadingLevels = IsExportDlgChecked(ctx->checkShiftHeadings);
+        options.normalizeClroSyntax = IsExportDlgChecked(ctx->checkNormalizeClroSyntax);
+        s_lastNormalizeClroSyntax = options.normalizeClroSyntax;
         s_lastNoteIncludeComments = options.includeCommentLines;
         s_lastNoteTitleHeading = options.includeTitleHeading;
         s_lastNoteShiftHeadings = options.shiftHeadingLevels;
         result.noteMarkupOptions = options;
     } else if (kind == ExportDialogKind::PdfAll) {
+    }
+    if (kind == ExportDialogKind::PdfAll || kind == ExportDialogKind::PdfPages) {
+        if (kind == ExportDialogKind::PdfAll) {
+            for (int page = 0; page < static_cast<int>(g_pdf.pages.size()); ++page)
+                result.pages.push_back(file_output::PdfPageSpec{page, true});
+        }
+        for (auto& page : result.pages) page.rotation = ExportPageRotation(ctx, page.pageIndex);
     }
     outResult = std::move(result);
     return true;
@@ -1581,9 +1656,12 @@ static bool SaveQuickPdfSettings(ExportDialogState* ctx) {
     if (result.kind != ExportDialogKind::PdfAll) {
         return RejectExportDialogInput(ctx, localization::Text(L"export.quick_pdf_requires"));
     }
+    g_config.quickPdfKeepPageRotation = IsExportDlgChecked(ctx->checkKeepPageRotation);
     g_config.quickPdfScalePercent = std::clamp(static_cast<int>(std::lround(result.pdfScale * 100.0)), 13, 800);
     g_config.quickPdfStandardTextAnnots = result.standardTextAnnots;
     g_config.quickPdfMatchPdfPaneTextLayout = result.matchPdfPaneTextLayout;
+    g_config.quickPdfTextColorMode = static_cast<int>(result.textColor.mode);
+    g_config.quickPdfTextColorBackground = result.textColor.background;
     if (!g_workspaceRoot.empty()) SaveWorkspaceConfig(g_workspaceRoot, g_config);
     ShowSoftNotice(ctx->hwnd, localization::Text(L"export.quick_settings_saved"), SoftNoticeKind::Info);
     return true;
@@ -1611,8 +1689,24 @@ static bool SaveQuickNoteSettings(ExportDialogState* ctx) {
 
 static bool SameOutputPath(const std::wstring& lhs, const std::wstring& rhs) {
     if (lhs.empty() || rhs.empty()) return false;
-    const std::wstring normalizedLhs = std::filesystem::path(lhs).lexically_normal().wstring();
-    const std::wstring normalizedRhs = std::filesystem::path(rhs).lexically_normal().wstring();
+    const std::filesystem::path lhsPath(lhs), rhsPath(rhs);
+    std::error_code identityError;
+    if (std::filesystem::equivalent(lhsPath, rhsPath, identityError) && !identityError) return true;
+    // New outputs do not have a file identity yet. Compare their existing
+    // parent directories as well, so junction aliases cannot duplicate them.
+    if (CompareStringOrdinal(lhsPath.filename().c_str(), -1, rhsPath.filename().c_str(), -1, TRUE) == CSTR_EQUAL) {
+        identityError.clear();
+        if (std::filesystem::equivalent(lhsPath.parent_path(), rhsPath.parent_path(), identityError) && !identityError) {
+            return true;
+        }
+    }
+    std::error_code lhsError, rhsError;
+    const auto canonicalLhs = std::filesystem::weakly_canonical(lhs, lhsError);
+    const auto canonicalRhs = std::filesystem::weakly_canonical(rhs, rhsError);
+    const std::wstring normalizedLhs = lhsError ? std::filesystem::path(lhs).lexically_normal().wstring()
+                                               : canonicalLhs.wstring();
+    const std::wstring normalizedRhs = rhsError ? std::filesystem::path(rhs).lexically_normal().wstring()
+                                               : canonicalRhs.wstring();
     return CompareStringOrdinal(normalizedLhs.c_str(), -1, normalizedRhs.c_str(), -1, TRUE) == CSTR_EQUAL;
 }
 
@@ -1675,7 +1769,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         const int paperY = outSizeY + 74;
         const int pngStyleY = outSizeY + 102;
         const int stdTextY = outSizeY + 130;
-        const int buttonsY = outSizeY + 192;
+        const int buttonsY = outSizeY + 222;
         const int quickButtonsY = buttonsY + 36;
         const int reservationTitleY = quickButtonsY + 34;
         const int reservationListY = reservationTitleY + 20;
@@ -1721,12 +1815,37 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                  cs->hInstance, nullptr);
         ctx->editOutputFolder = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                                                margin + 95, outputFolderY - 2, 290, 22, hWnd,
+                                                margin + 95, outputFolderY - 2, 360, 22, hWnd,
                                                 reinterpret_cast<HMENU>(kExportDlgIdOutputFolder),
                                                 cs->hInstance, nullptr);
+        // This is an editable path: keep the complete value for selection/copy,
+        // and expose it on hover without changing the actual output target.
+        SendMessageW(ctx->editOutputFolder, EM_SETLIMITTEXT, 32767, 0);
+        ctx->outputFolderTooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+            WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+            hWnd, nullptr, cs->hInstance, nullptr);
+        if (ctx->outputFolderTooltip) {
+            ctx->outputFolderTooltipText = ReadDialogText(ctx->editOutputFolder);
+            if (!ui::ConfigureTransientTooltip(ctx->outputFolderTooltip, ctx->outputFolderTooltipText)) {
+                DestroyWindow(ctx->outputFolderTooltip);
+                ctx->outputFolderTooltip = nullptr;
+            }
+        }
+        if (ctx->outputFolderTooltip) {
+            TOOLINFOW tool{};
+            tool.cbSize = TTTOOLINFOW_V2_SIZE;
+            tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+            tool.hwnd = hWnd;
+            tool.uId = reinterpret_cast<UINT_PTR>(ctx->editOutputFolder);
+            tool.lpszText = ctx->outputFolderTooltipText.data();
+            SendMessageW(ctx->outputFolderTooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+            SendMessageW(ctx->outputFolderTooltip, TTM_SETMAXTIPWIDTH, 0, 640);
+            (void)ui::ApplyAuxiliaryWindowCorners(ctx->outputFolderTooltip);
+        }
         ctx->btnBrowseOutputFolder = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.browse").c_str(),
                                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                                     margin + 392, outputFolderY - 2, 76, 22, hWnd,
+                                                     margin + 462, outputFolderY - 2, 76, 22, hWnd,
                                                      reinterpret_cast<HMENU>(kExportDlgIdBrowseOutputFolder),
                                                      cs->hInstance, nullptr);
         ctx->labelOutputName = CreateWindowExW(0, L"STATIC", localization::Text(L"export.output_name_label").c_str(),
@@ -1788,6 +1907,11 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                                     margin + 200, styleY, 100, 22, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPngStyleViewer),
                                                     cs->hInstance, nullptr);
+
+        ctx->checkKeepPageRotation = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.rotation.preserve").c_str(),
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, margin + 220, paperY - 2, 250, 22,
+            hWnd, reinterpret_cast<HMENU>(kExportDlgIdKeepPageRotation), cs->hInstance, nullptr);
+        SendMessageW(ctx->checkKeepPageRotation, BM_SETCHECK, BST_CHECKED, 0);
 
         ctx->labelOutSize = CreateWindowExW(0, L"STATIC", localization::Text(L"export.output_size_label").c_str(),
                                             WS_CHILD | WS_VISIBLE,
@@ -1852,6 +1976,26 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                             reinterpret_cast<HMENU>(kExportDlgIdMatchPdfPaneTextLayout),
                                                             cs->hInstance, nullptr);
 
+        ctx->labelTextColor = CreateWindowExW(0, L"STATIC", localization::Text(L"export.text_color_label").c_str(),
+            WS_CHILD | WS_VISIBLE, margin, stdTextY + 52, 110, 22, hWnd, nullptr, cs->hInstance, nullptr);
+        ctx->comboTextColor = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            margin + 115, stdTextY + 48, 310, 140, hWnd,
+            reinterpret_cast<HMENU>(kExportDlgIdTextColor), cs->hInstance, nullptr);
+        for (const auto* id : {L"export.text_color_marker", L"export.text_color_transparent",
+                              L"export.text_color_auto", L"export.text_color_specified"}) {
+            SendMessageW(ctx->comboTextColor, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(id).c_str()));
+        }
+        SendMessageW(ctx->comboTextColor, CB_SETCURSEL, static_cast<int>(s_lastTextColor.mode), 0);
+        wchar_t backgroundHex[8]{};
+        swprintf_s(backgroundHex, L"#%02X%02X%02X", GetRValue(s_lastTextColor.background),
+                   GetGValue(s_lastTextColor.background), GetBValue(s_lastTextColor.background));
+        ctx->editTextColorBackground = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", backgroundHex,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            margin + 435, stdTextY + 48, 100, 22, hWnd,
+            reinterpret_cast<HMENU>(kExportDlgIdTextColorBackground), cs->hInstance, nullptr);
+        SendMessageW(ctx->editTextColorBackground, EM_SETLIMITTEXT, 7, 0);
+
         ctx->labelMath = CreateWindowExW(0, L"STATIC", localization::Text(L"export.math_label").c_str(),
                                          WS_CHILD | WS_VISIBLE,
                                          margin, optY, 80, 20, hWnd, nullptr,
@@ -1910,6 +2054,15 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                   margin, optY + 132, 260, 22, hWnd,
                                                   reinterpret_cast<HMENU>(kExportDlgIdShiftHeadings),
                                                   cs->hInstance, nullptr);
+
+        ctx->checkNormalizeClroSyntax = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.normalize_clro_syntax").c_str(),
+                                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                                       margin, optY + 160, 540, 22, hWnd,
+                                                       reinterpret_cast<HMENU>(kExportDlgIdNormalizeClroSyntax), cs->hInstance, nullptr);
+        ctx->btnSaveClroNormalizationDefault = CreateWindowExW(0, L"BUTTON",
+            localization::Text(L"export.save_clro_normalization_default").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            margin, optY + 188, 400, 26, hWnd,
+            reinterpret_cast<HMENU>(kExportDlgIdSaveClroNormalizationDefault), cs->hInstance, nullptr);
 
         ctx->btnSet = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.add_to_list").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                       170, buttonsY, 100, 26, hWnd, reinterpret_cast<HMENU>(kExportDlgIdSet),
@@ -1971,6 +2124,13 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                                      margin + 400, reservationActionsY, 120, 24, hWnd,
                                                      reinterpret_cast<HMENU>(kExportDlgIdClearReservations), cs->hInstance, nullptr);
+        ctx->btnMergeReservations = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.merge_pdf_queue").c_str(),
+                                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                                     margin, reservationActionsY + 30, 180, 26, hWnd,
+                                                     reinterpret_cast<HMENU>(kExportDlgIdMergeReservations), cs->hInstance, nullptr);
+        HWND orderHint = CreateWindowExW(0, L"STATIC", localization::Text(L"export.reservation_order_hint").c_str(),
+                                         WS_CHILD | WS_VISIBLE, margin + 190, reservationActionsY + 30,
+                                         350, 34, hWnd, nullptr, cs->hInstance, nullptr);
 
         auto applyFont = [&](HWND h) {
             if (h && g_hUIFont) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_hUIFont), TRUE);
@@ -1999,6 +2159,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         applyFont(ctx->labelPngStyle);
         applyFont(ctx->radioPngStylePdf);
         applyFont(ctx->radioPngStyleViewer);
+        applyFont(ctx->checkKeepPageRotation);
         applyFont(ctx->labelOutSize);
         applyFont(ctx->radioOutSizeHalf);
         applyFont(ctx->radioOutSizeOne);
@@ -2013,6 +2174,9 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         applyFont(ctx->comboPaper);
         applyFont(ctx->checkStandardText);
         applyFont(ctx->checkMatchPdfPaneTextLayout);
+        applyFont(ctx->labelTextColor);
+        applyFont(ctx->comboTextColor);
+        applyFont(ctx->editTextColorBackground);
         applyFont(ctx->labelMath);
         applyFont(ctx->radioMathKeep);
         applyFont(ctx->radioMathReplace);
@@ -2025,6 +2189,8 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         applyFont(ctx->radioMarkupHtml);
         applyFont(ctx->checkTitleHeading);
         applyFont(ctx->checkShiftHeadings);
+        applyFont(ctx->checkNormalizeClroSyntax);
+        applyFont(ctx->btnSaveClroNormalizationDefault);
         applyFont(ctx->btnSet);
         applyFont(ctx->btnUpdateReservation);
         applyFont(ctx->btnSaveQuickPdf);
@@ -2033,6 +2199,8 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         applyFont(ctx->btnClearReservations);
         applyFont(ctx->btnExecuteReservation);
         applyFont(ctx->btnMoveReservationUp);
+        applyFont(ctx->btnMergeReservations);
+        applyFont(orderHint);
         applyFont(ctx->btnMoveReservationDown);
         applyFont(ctx->btnRemoveReservation);
         applyFont(ctx->labelInlineError);
@@ -2094,6 +2262,8 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         if (ctx->checkShiftHeadings) {
             SendMessageW(ctx->checkShiftHeadings, BM_SETCHECK, s_lastNoteShiftHeadings ? BST_CHECKED : BST_UNCHECKED, 0);
         }
+        SendMessageW(ctx->checkNormalizeClroSyntax, BM_SETCHECK,
+            s_lastNormalizeClroSyntax.value_or(g_config.exportNormalizeClroSyntax) ? BST_CHECKED : BST_UNCHECKED, 0);
         if (s_lastNoteMarkupMathPlaceholder) {
             CheckRadioButton(hWnd, kExportDlgIdMathKeep, kExportDlgIdMathReplace, kExportDlgIdMathReplace);
             if (ctx->editMathPlaceholder) {
@@ -2152,6 +2322,24 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
     }
     case WM_COMMAND: {
         int id = LOWORD(wParam);
+        if (ctx && ctx->exportingReservation) return 0;
+        if (ctx && id == kExportDlgIdSaveClroNormalizationDefault) {
+            if (!IsWindowVisible(ctx->btnSaveClroNormalizationDefault) ||
+                !IsWindowEnabled(ctx->btnSaveClroNormalizationDefault)) return 0;
+            const bool previous = g_config.exportNormalizeClroSyntax;
+            g_config.exportNormalizeClroSyntax = IsExportDlgChecked(ctx->checkNormalizeClroSyntax);
+            if (!TryPersistConfig()) {
+                g_config.exportNormalizeClroSyntax = previous;
+                ShowSoftNotice(hWnd, localization::Text(L"export.preference_save_failed"), SoftNoticeKind::Warning);
+            } else {
+                s_lastNormalizeClroSyntax = g_config.exportNormalizeClroSyntax;
+                ShowSoftNotice(hWnd, localization::Text(L"export.preference_saved"));
+            }
+            return 0;
+        }
+        if (id == kExportDlgIdOutputFolder && HIWORD(wParam) == EN_CHANGE) {
+            UpdateOutputFolderTooltip(ctx);
+        }
         if (id == IDOK) {
             if (ctx && !ctx->reservedResults.empty()) {
                 ctx->committedResults = ctx->reservedResults;
@@ -2182,11 +2370,55 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             if (!ctx || !ctx->labelReservationList) return 0;
             const int selected = static_cast<int>(SendMessageW(ctx->labelReservationList, LB_GETCURSEL, 0, 0));
             if (selected < 0 || selected >= static_cast<int>(ctx->reservedResults.size())) return 0;
-            ctx->committedResults.clear();
-            ctx->committedResults.push_back(ctx->reservedResults[static_cast<size_t>(selected)]);
-            ctx->ok = true;
-            ctx->done = true;
-            DestroyWindow(hWnd);
+            const std::vector<ExportDialogResult> selectedResults{
+                ctx->reservedResults[static_cast<size_t>(selected)]};
+            ctx->exportingReservation = true;
+            ctx->exportingReservationIndex = selected;
+            s_activeReservationExportDialog = hWnd;
+            EnableWindow(hWnd, FALSE);
+            // Use the main owner so the existing background-save completion
+            // message reaches its handler. Both owners stay modal while busy.
+            ExecuteUnifiedExports(GetWindow(hWnd, GW_OWNER), selectedResults);
+            return 0;
+        }
+        if (id == kExportDlgIdMergeReservations) {
+            if (!CanMergePdfReservations(ctx)) return 0;
+            // UI owns the ordered queue and one chosen destination. file_output
+            // owns PDF construction and atomic save; failure retains the queue.
+            const std::filesystem::path source(CurrentLogicalPdfPath());
+            auto target = file_output::PickExportDestination(hWnd,
+                localization::Text(L"export.merge_pdf_queue"),
+                std::filesystem::path(ReadDialogText(ctx->editOutputFolder)),
+                source.stem().wstring() + L"_merged.pdf", L"pdf");
+            if (!target) return 0;
+            if (SameOutputPath(*target, source.wstring())) {
+                RejectExportDialogInput(ctx, localization::Text(L"export.output_original_forbidden"),
+                                        ctx->editOutputName, false);
+                return 0;
+            }
+            ExportDialogResult merged{};
+            merged.outputPath = *target;
+            for (const auto& reservation : ctx->reservedResults) {
+                file_output::PdfExportPart part{};
+                if (reservation.kind == ExportDialogKind::PdfAll && reservation.pages.empty()) {
+                    for (int page = 0; page < static_cast<int>(g_pdf.pages.size()); ++page) {
+                        part.pages.push_back(file_output::PdfPageSpec{page, true});
+                    }
+                } else {
+                    part.pages = reservation.pages;
+                }
+                part.standardTextAnnots = reservation.standardTextAnnots;
+                part.exportScale = reservation.pdfScale;
+                part.matchPdfPaneTextLayout = reservation.matchPdfPaneTextLayout;
+                part.textColor = reservation.textColor;
+                merged.pdfParts.push_back(std::move(part));
+            }
+            ctx->exportingReservation = true;
+            ctx->exportingReservationIndex = -1;
+            ctx->exportingMergedPath = merged.outputPath;
+            s_activeReservationExportDialog = hWnd;
+            EnableWindow(hWnd, FALSE);
+            ExecuteUnifiedExports(GetWindow(hWnd, GW_OWNER), {merged});
             return 0;
         }
         if (id == kExportDlgIdUpdateReservation) {
@@ -2231,7 +2463,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             return 0;
         }
         if (id == kExportDlgIdShowQuickSettings) {
-            ShowQuickExportSettingsDialog(hWnd);
+            ShowOutputSettingsDialog(hWnd, GetExportDialogKind(ctx) == ExportDialogKind::NoteText || GetExportDialogKind(ctx) == ExportDialogKind::NoteMarkup);
             return 0;
         }
         if (id == kExportDlgIdClearReservations) {
@@ -2259,6 +2491,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             } else if (id == kExportDlgIdRemoveReservation) {
                 ctx->reservedResults.erase(ctx->reservedResults.begin() + selected);
                 UpdateReservationSummaryUi(ctx);
+                LoadSelectedReservationOutputTarget(ctx);
             }
             UpdateReservationButtonsUi(ctx);
             return 0;
@@ -2271,6 +2504,10 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         }
         if (HIWORD(wParam) == CBN_SELCHANGE) {
             ClearExportDialogInlineError(ctx);
+            if (id == kExportDlgIdTextColor) {
+                UpdateExportDialogUi(ctx);
+                return 0;
+            }
             if (id == kExportDlgIdPaperCombo) {
                 s_lastExportPaperPresetId = GetComboItemData(ctx->comboPaper);
                 if (s_lastExportPaperPresetId != 0) {
@@ -2329,11 +2566,17 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         break;
     }
     case WM_CLOSE:
+        if (ctx->exportingReservation) return 0;
         ctx->ok = false;
         ctx->done = true;
         DestroyWindow(hWnd);
         return 0;
     case WM_DESTROY:
+        if (s_activeReservationExportDialog == hWnd) s_activeReservationExportDialog = nullptr;
+        if (ctx && ctx->outputFolderTooltip) {
+            DestroyWindow(ctx->outputFolderTooltip);
+            ctx->outputFolderTooltip = nullptr;
+        }
         UnregisterAppExitDialog(hWnd);
         return 0;
     }
@@ -2341,6 +2584,10 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
 }
 
 bool ShowUnifiedExportDialog(HWND owner, ExportDialogKind preset, std::vector<ExportDialogResult>& out) {
+    if (s_lastNormalizeWorkspace != g_workspaceRoot) {
+        s_lastNormalizeWorkspace = g_workspaceRoot;
+        s_lastNormalizeClroSyntax.reset();
+    }
     ExportDialogState ctx;
     ctx.preset = preset;
     ctx.hasPdf = (g_pdf.doc != nullptr);
@@ -2357,7 +2604,7 @@ bool ShowUnifiedExportDialog(HWND owner, ExportDialogKind preset, std::vector<Ex
     ScopedExportDialogOwner modalOwner(owner);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, dialogTitle.c_str(),
                              WS_CAPTION | WS_POPUPWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 580, 670,
+                             CW_USEDEFAULT, CW_USEDEFAULT, 580, 740,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return false;
     RegisterAppExitBlockingDialog(w);
@@ -2380,13 +2627,10 @@ bool ShowUnifiedExportDialog(HWND owner, ExportDialogKind preset, std::vector<Ex
     return false;
 }
 
-void ExecuteUnifiedExport(HWND hWnd, const ExportDialogResult& result) {
-    (void)ExecuteUnifiedExportAndGetPath(hWnd, result);
-}
-
 void ExecuteUnifiedExports(HWND hWnd, const std::vector<ExportDialogResult>& results) {
     if (results.empty()) return;
     if (!s_pendingExportsAfterSave.empty()) {
+        (void)FinishSelectedReservationExport({});
         ShowSoftNotice(hWnd,
                        localization::Text(L"dialog.export.641e268761e7").c_str(),
                        SoftNoticeKind::Info);
@@ -2395,7 +2639,10 @@ void ExecuteUnifiedExports(HWND hWnd, const std::vector<ExportDialogResult>& res
 
     const file_output::SaveTransactionStartResult start =
         file_output::StartBackgroundSaveAndIntegrateTransaction(hWnd);
-    if (start == file_output::SaveTransactionStartResult::Failed) return;
+    if (start == file_output::SaveTransactionStartResult::Failed) {
+        (void)FinishSelectedReservationExport({});
+        return;
+    }
     if (start == file_output::SaveTransactionStartResult::Started) {
         s_pendingExportsAfterSave = results;
         ShowSoftNotice(hWnd,
@@ -2409,13 +2656,14 @@ void ExecuteUnifiedExports(HWND hWnd, const std::vector<ExportDialogResult>& res
     for (const auto& result : results) {
         if (auto path = ExecuteUnifiedExportAndGetPath(hWnd, result)) savedPaths.push_back(std::move(*path));
     }
-    ShowExportResultsDialog(hWnd, savedPaths);
+    ReportUnifiedExportResults(hWnd, savedPaths);
 }
 
 void CompleteUnifiedExportsAfterSave(HWND hWnd, bool saveSucceeded, bool saveRestarted) {
     if (s_pendingExportsAfterSave.empty()) return;
     if (!saveSucceeded) {
         s_pendingExportsAfterSave.clear();
+        (void)FinishSelectedReservationExport({});
         ShowSoftNotice(hWnd,
                        localization::Text(L"dialog.export.e434d92fc856").c_str(),
                        SoftNoticeKind::Warning);
@@ -2431,7 +2679,7 @@ void CompleteUnifiedExportsAfterSave(HWND hWnd, bool saveSucceeded, bool saveRes
     for (const auto& result : results) {
         if (auto path = ExecuteUnifiedExportAndGetPath(hWnd, result)) savedPaths.push_back(std::move(*path));
     }
-    ShowExportResultsDialog(hWnd, savedPaths);
+    ReportUnifiedExportResults(hWnd, savedPaths);
 }
 
 

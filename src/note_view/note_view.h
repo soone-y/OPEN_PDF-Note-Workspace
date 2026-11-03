@@ -67,7 +67,7 @@ struct NoteRenderRuntimeObservation {
 // layout. Returns false when its render control is not visible.
 [[nodiscard]] bool GetNoteStatusAssistRenderControlRect(RECT* outRect);
 enum class NoteStatusAssistControl {
-    Rendering, Vim, NormalCaretRaw, ClickInsert, CurrentDisplay, InlineMathVerticalAlignment
+    Rendering, Vim, NormalCaretRaw, ClickInsert, CurrentDisplay, InlineMathVerticalAlignment, BottomSpace
 };
 [[nodiscard]] bool GetNoteStatusAssistControlRect(NoteStatusAssistControl control, RECT* outRect);
 
@@ -76,7 +76,7 @@ enum class NoteStatusAssistControl {
 void RefreshNoteRenderForPreferenceChange();
 
 void RecomputeMathFromNote();
-void LoadNoteFile(HWND hWnd, const std::wstring& path);
+bool LoadNoteFile(HWND hWnd, const std::wstring& path);
 // Keep the rendered note visible after an open/focus command until a text
 // editing input begins.
 void PreserveRenderedNoteOpeningView();
@@ -144,7 +144,6 @@ void ReleaseNoteChangeSuppressionForUserEdit();
 // Render-mode switch support (avoid flicker during mode change).
 bool BeginNoteRenderSwitch();
 bool IsNoteRenderSwitchInProgress();
-bool CommitNoteRenderStateBeforePaintIfNeeded(HWND hWnd);
 void EndNoteRenderSwitch();
 bool CommitNoteImeCompositionNow();
 void OnEnterNoteNormalMode();

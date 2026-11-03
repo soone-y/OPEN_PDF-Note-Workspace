@@ -11,6 +11,11 @@
 #include "fpdfview.h"
 #include "fpdf_text.h"
 #include "core/constants.h"
+#include "core/marker_display_mode.h"
+#include "core/annotation_blend_mode.h"
+#include "core/shape_boundary.h"
+#include "core/shape_rotation.h"
+#include "core/text_selection_geometry.h"
 
 enum class NodeType { Root, Folder, Pdf, Note };
 
@@ -44,7 +49,8 @@ enum class ShapeKind {
     Triangle,
     Ellipse,
     Circle,
-    RotatedEllipse
+    RotatedEllipse,
+    Arc // open parenthesis-like curve, v2
 };
 
 inline std::wstring ShapeKindToString(ShapeKind kind) {
@@ -57,6 +63,7 @@ inline std::wstring ShapeKindToString(ShapeKind kind) {
     case ShapeKind::Ellipse: return L"ellipse";
     case ShapeKind::Circle: return L"circle";
     case ShapeKind::RotatedEllipse: return L"rotated_ellipse";
+    case ShapeKind::Arc: return L"arc";
     default: return L"rectangle";
     }
 }
@@ -71,6 +78,7 @@ inline ShapeKind ParseShapeKind(const std::wstring& s) {
     if (t == L"triangle") return ShapeKind::Triangle;
     if (t == L"ellipse" || t == L"oval") return ShapeKind::Ellipse;
     if (t == L"circle") return ShapeKind::Circle;
+    if (t == L"arc") return ShapeKind::Arc;
     if (t == L"rotated_ellipse" || t == L"rotatedellipse" || t == L"slanted_ellipse" || t == L"tilted_ellipse")
         return ShapeKind::RotatedEllipse;
     return ShapeKind::Rectangle;
@@ -87,6 +95,11 @@ enum class ArrowHead {
     Single,
     Double
 };
+
+[[nodiscard]] inline bool ShapeKindIsOpen(ShapeKind kind) noexcept { return kind == ShapeKind::Arc; }
+[[nodiscard]] inline ShapeDrawMode ShapeDrawModeForKind(ShapeKind kind,ShapeDrawMode mode) noexcept {
+    return ShapeKindIsOpen(kind) ? ShapeDrawMode::Outline : mode;
+}
 
 inline std::wstring ShapeDrawModeToString(ShapeDrawMode mode) {
     switch (mode) {
@@ -187,13 +200,19 @@ struct HighlightRange {
     size_t end = 0;
     Kind kind = Kind::Mark;
 };
-inline COLORREF ColorForHighlight(HighlightRange::Kind k, COLORREF markCol = RGB(255,245,200), COLORREF headingCol = RGB(220,240,255)) {
-    return (k == HighlightRange::Kind::Heading) ? headingCol : markCol;
-}
 
 
 struct PageCache {
     int index = 0;
+    double canonicalWidthPt = 0.0;
+    double canonicalHeightPt = 0.0;
+    int viewRotation = 0; // additional clockwise quarter turns; restored from per-PDF view records
+    int intrinsicRotation = 0;
+    double pdfWidthPt = 0.0;
+    double pdfHeightPt = 0.0;
+    double pdfOriginX = 0.0;
+    double pdfOriginY = 0.0;
+    bool geometryReady = false;
     double widthPt = 0.0;
     double heightPt = 0.0;
     int w = 0;
@@ -210,12 +229,14 @@ struct PageCache {
     uint32_t bitmapFailureCount = 0;
     ULONGLONG bitmapRetryAfterTick = 0;
     std::vector<uint8_t> pixels;
-    struct CharBox {
-        float left = 0.0f;
-        float right = 0.0f;
-        float top = 0.0f;
-        float bottom = 0.0f;
-    };
+    // Lazy display-only text coverage; shares the bitmap's eviction budget.
+    // A request is made once per geometry/generation, including failures.
+    std::vector<uint8_t> textCoverage;
+    int textCoverageW = 0, textCoverageH = 0;
+    uint64_t textCoverageGeneration = 0;
+    int textCoverageRequestedW = 0, textCoverageRequestedH = 0;
+    uint64_t textCoverageRequestedGeneration = 0;
+    using CharBox = text_selection::CharBox;
     std::vector<CharBox> charBoxes;
     struct ReadableGlyph {
         std::wstring text;
@@ -230,6 +251,7 @@ struct PageCache {
         COLORREF fillColor = RGB(0, 0, 0);
         bool haveFillColor = false;
         bool haveOrigin = false;
+        int rotation = 0;
     };
     std::vector<ReadableGlyph> readableGlyphs;
     struct ReadablePath {
@@ -283,14 +305,47 @@ struct Annotation {
     TextWritingMode writingMode = TextWritingMode::Horizontal; // TextBox only for now
     ShapeKind shapeKind = ShapeKind::Rectangle;
     ShapeDrawMode shapeDrawMode = ShapeDrawMode::Fill;
+    ShapeBoundary shapeBoundary = ShapeBoundary::None;
     ArrowHead arrowHead = ArrowHead::Single;
+    double shapeAngle = 0.0; // radians, clockwise rotation of the whole shape (v2)
     double shapeRotation = kDefaultRotatedEllipseAngleRad; // radians; used by RotatedEllipse
+    int contentRotation = 0; // clockwise quarter turns of text/math/shape within its bounding box
+    // Transient input/projection basis. Persistent annotations and history use
+    // canonical basis zero; the page's temporary view angle is never saved.
+    int coordinateRotation = 0;
+    bool projectedCoordinates = false;
+    double basisWidthPt = 0.0;
+    double basisHeightPt = 0.0;
+    double basisOriginX = 0.0;
+    double basisOriginY = 0.0;
     struct Pt { double x = 0.0; double y = 0.0; };
     std::vector<Pt> path; // for marker-free / freehand
     std::vector<double> dash; // line dash pattern in PDF points (on/off lengths)
     std::vector<double> quads; // for marker-text / text-color (flattened 8N)
     TextBackgroundAssistMode backgroundAssistMode = TextBackgroundAssistMode::Inherit;
+    MarkerDisplayMode markerDisplayMode = MarkerDisplayMode::Multiply;
+    AnnotationBlendMode blendMode = AnnotationBlendMode::Normal; // Shape / MarkerFree, v2
 };
+
+[[nodiscard]] inline ShapeLineStyle AnnotationShapeLineStyle(const Annotation& ann) noexcept {
+    return ShapeLineStyleFor(ShapeKindIsOpen(ann.shapeKind)?ShapeBoundary::None:ann.shapeBoundary,!ann.dash.empty());
+}
+inline void ApplyShapeLineStyle(Annotation& ann,ShapeLineStyle style,bool widthChanged=false) {
+    if(ShapeKindIsOpen(ann.shapeKind)) {
+        ann.shapeBoundary=ShapeBoundary::None;
+        if(style>=ShapeLineStyle::BlackBoundary)style=ShapeLineStyle::Solid;
+    }
+    // Preserve imported patterns on unrelated edits, including old dashed boundaries.
+    if(AnnotationShapeLineStyle(ann)==style && (!widthChanged || style!=ShapeLineStyle::Dashed))return;
+    ann.shapeBoundary=BoundaryForLineStyle(style);
+    ann.dash=style==ShapeLineStyle::Dashed ? std::vector<double>{std::max(1.0,ann.width*4.0),std::max(1.0,ann.width*2.0)} : std::vector<double>{};
+}
+
+inline void NormalizeOpenShapeStyle(Annotation& ann) {
+    if(ann.type == Annotation::Type::Shape && ShapeKindIsOpen(ann.shapeKind)) {
+        ann.shapeDrawMode=ShapeDrawMode::Outline;
+    }
+}
 
 struct LinkPending {
     bool active = false;
@@ -315,6 +370,7 @@ struct PdfViewState {
     std::wstring path;
     std::string openPasswordUtf8; // memory-only; never persisted
     int pageCount = 0;
+    std::vector<int> pageViewRotations; // per-page clockwise quarter turns, persisted with the PDF view record
     double scale = 1.0;
     double renderScale = 1.0;
     double scrollY = 0.0;
@@ -367,6 +423,7 @@ struct PdfViewState {
 
     // inline text editing (TextBox)
     bool editingText = false;
+    int editContentRotation = 0;
     int editPage = -1;
     double editX1 = 0.0, editY1 = 0.0, editX2 = 0.0, editY2 = 0.0; // pt
     std::wstring editText;

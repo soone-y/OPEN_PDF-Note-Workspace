@@ -1,0 +1,2 @@
+// Root prototype and include-fragment definition must have one symbol identity.
+static void FragmentCallback() {}

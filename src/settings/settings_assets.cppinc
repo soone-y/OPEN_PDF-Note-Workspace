@@ -369,7 +369,6 @@ static void InspectSettingsAssetEntries(SettingsAssetsCtx* ctx, const std::files
     const std::filesystem::path themes = resource.empty() ? std::filesystem::path{} : resource / L"__theme__";
     const std::filesystem::path palette = settings.empty() ? std::filesystem::path{} : settings / L"user_palette.json";
     const std::filesystem::path shortcuts = settings.empty() ? std::filesystem::path{} : settings / L"tool_shortcuts.json";
-    const std::filesystem::path schedule = settings.empty() ? std::filesystem::path{} : settings / L"schedule.json";
     const auto workspaceMemo = WorkspaceMemoPath(root);
     const auto memoRecovery = root.empty() ? std::filesystem::path{} : workspaceMemo.parent_path() / L"workspace_memo.recovery";
     const std::filesystem::path themeCatalog = themes.empty() ? std::filesystem::path{} : themes / L"theme.json";
@@ -379,8 +378,9 @@ static void InspectSettingsAssetEntries(SettingsAssetsCtx* ctx, const std::files
         { localization::Text(L"settings.assets.resource_directory"), resource, false, false, true },
         { localization::Text(L"settings.assets.settings_directory"), settings, false, false, true },
         { localization::Text(L"settings.assets.palette"), palette },
+        { localization::Text(L"settings.assets.color_stock"), palette_stock::FilePath(root) },
+        { localization::Text(L"settings.assets.palette_presets"), palette_presets::FilePath(root) },
         { localization::Text(L"settings.assets.shortcuts"), shortcuts },
-        { localization::Text(L"settings.assets.schedule"), schedule },
         { localization::Text(L"settings.assets.workspace_memo"), workspaceMemo, false, false, false, true, {} },
         { localization::Text(L"settings.assets.workspace_memo_recovery"), memoRecovery, false, false, false, true, {} },
         { localization::Text(L"settings.assets.workspace_memo_backups"),

@@ -21,23 +21,19 @@ LocalNoteKernel* NoteWorkspaceService::FindKernel(NoteId noteId) {
     return kernels_.Find(noteId);
 }
 
-const LocalNoteKernel* NoteWorkspaceService::FindKernel(NoteId noteId) const {
-    return kernels_.Find(noteId);
-}
-
 LocalNoteKernel* NoteWorkspaceService::FindKernelForView(
     const ViewIdentity& viewIdentity) {
     return kernels_.FindForView(viewIdentity);
 }
 
-const LocalNoteKernel* NoteWorkspaceService::FindKernelForView(
-    const ViewIdentity& viewIdentity) const {
-    return kernels_.FindForView(viewIdentity);
-}
-
-bool NoteWorkspaceService::ForgetKernel(NoteId noteId) {
-    InvalidateIndexes(noteId);
-    return kernels_.Forget(noteId);
+LocalNoteKernel* NoteWorkspaceService::RekeyDraftKernel(
+    NoteId from, NoteId to, NoteMetadata metadata, NoteContentKind contentKind) {
+    LocalNoteKernel* kernel = kernels_.Rekey(from, to, std::move(metadata), contentKind);
+    if (kernel) {
+        InvalidateIndexes(from);
+        InvalidateIndexes(to);
+    }
+    return kernel;
 }
 
 std::shared_ptr<const WorkspaceNoteIndexSnapshot>
@@ -48,10 +44,11 @@ NoteWorkspaceService::ResolveIndex(
     std::wstring raw,
     NoteContentKind contentKind) {
     if (!snapshotIdentity.valid()) return nullptr;
+    const bool asciiOnly = metadata.clro_ascii_only;
     {
         std::lock_guard<std::mutex> lock(index_mutex_);
         if (auto cached = FindCachedIndexLocked(
-                snapshotIdentity, targetPath, contentKind)) {
+                snapshotIdentity, targetPath, contentKind, asciiOnly)) {
             return cached;
         }
     }
@@ -64,7 +61,7 @@ NoteWorkspaceService::ResolveIndex(
 
     std::lock_guard<std::mutex> lock(index_mutex_);
     if (auto cached = FindCachedIndexLocked(
-            snapshotIdentity, targetPath, contentKind)) {
+            snapshotIdentity, targetPath, contentKind, asciiOnly)) {
         return cached;
     }
     InsertCachedIndexLocked(snapshotIdentity, std::move(targetPath),
@@ -86,7 +83,7 @@ NoteWorkspaceService::ResolveIndexFromKernel(
     {
         std::lock_guard<std::mutex> lock(index_mutex_);
         if (auto cached = FindCachedIndexLocked(
-                snapshotIdentity, targetPath, contentKind)) {
+                snapshotIdentity, targetPath, contentKind, kernel.text_core().clro_ascii_only())) {
             return cached;
         }
     }
@@ -98,7 +95,7 @@ NoteWorkspaceService::ResolveIndexFromKernel(
 
     std::lock_guard<std::mutex> lock(index_mutex_);
     if (auto cached = FindCachedIndexLocked(
-            snapshotIdentity, targetPath, contentKind)) {
+            snapshotIdentity, targetPath, contentKind, kernel.text_core().clro_ascii_only())) {
         return cached;
     }
     InsertCachedIndexLocked(snapshotIdentity, std::move(targetPath),
@@ -117,11 +114,6 @@ void NoteWorkspaceService::InvalidateIndexes(NoteId noteId) {
         index_cache_.end());
 }
 
-void NoteWorkspaceService::ClearIndexes() {
-    std::lock_guard<std::mutex> lock(index_mutex_);
-    index_cache_.clear();
-}
-
 size_t NoteWorkspaceService::index_cache_size() const {
     std::lock_guard<std::mutex> lock(index_mutex_);
     return index_cache_.size();
@@ -131,10 +123,11 @@ std::shared_ptr<const WorkspaceNoteIndexSnapshot>
 NoteWorkspaceService::FindCachedIndexLocked(
     const SnapshotIdentity& identity,
     const std::wstring& targetPath,
-    NoteContentKind contentKind) {
+    NoteContentKind contentKind, bool clroAsciiOnly) {
     for (CachedIndex& entry : index_cache_) {
         if (entry.target_path != targetPath ||
             entry.content_kind != contentKind ||
+            entry.snapshot->text_model.meta.clro_ascii_only != clroAsciiOnly ||
             !SameSnapshotIdentity(entry.identity, identity)) {
             continue;
         }

@@ -31,11 +31,25 @@ class WorkspaceMemoIntegration(unittest.TestCase):
     def test_shortcut_precedes_main_and_modal_routing(self):
         text = source("src/app/bootstrap.cppinc")
         self.assertLess(text.index("HandleWorkspaceMemoMessage(msg)"), text.index("TranslateAcceleratorW(hWnd"))
-        for name in ("settings_unified", "settings_palette", "settings_general_foundation",
-                     "settings_general_schedule", "settings_shortcut_editor"):
-            text = source(f"src/settings/{name}.cppinc")
-            start = text.index("while (!ctx.done && GetMessageW")
-            self.assertLess(text.index("HandleWorkspaceMemoMessage(msg)", start), text.index("IsDialogMessageW", start))
+        for name in ("settings_unified", "settings_general_foundation",
+                     "settings_shortcut_editor"):
+            with self.subTest(modal=name):
+                text = source(f"src/settings/{name}.cppinc")
+                # GetMessageW may be in the condition or in the body so its
+                # error/WM_QUIT result can be handled before routing messages.
+                self.assertIn("while (!ctx.done", text)
+                loop = text[text.index("while (!ctx.done"):]
+                calls = ("GetMessageW", "HandleWorkspaceMemoMessage(msg)", "IsDialogMessageW")
+                for call in calls:
+                    self.assertIn(call, loop)
+                self.assertLess(loop.index(calls[0]), loop.index(calls[1]))
+                self.assertLess(loop.index(calls[1]), loop.index(calls[2]))
+        # Palette no longer owns a second modal loop: both menu/annotation
+        # entries navigate to the unified shell checked above.
+        palette = source("src/settings/settings_palette.cppinc")
+        entry = re.search(r"void ShowPaletteSettingsDialog\(HWND owner\)\s*\{([^{}]*)\}", palette)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.group(1).strip(), "ShowUnifiedSettingsDialog(owner, kSettingsNavPalette);")
 
     def test_user_facing_name_and_tools_menu_exception(self):
         for language, name, menu_name, saved, opening, old_name in (

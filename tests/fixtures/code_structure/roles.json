@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "contracts": [
+    {"id": "storage", "component": "note", "level": "contract", "owner": "persistence", "output": "persisted data"},
+    {"id": "presentation", "component": "note", "level": "contract", "owner": "frame", "output": "geometry"},
+    {"id": "editing", "component": "note", "level": "contract", "owner": "text", "output": "edited source"}
+  ],
+  "anchors": [
+    {"kind": "callee", "symbol": "Persist", "contract": "storage"},
+    {"kind": "callee", "symbol": "Paint", "contract": "presentation"},
+    {"kind": "callee", "symbol": "Edit", "contract": "editing"}
+  ],
+  "utilities": []
+}

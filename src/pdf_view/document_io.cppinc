@@ -4,6 +4,7 @@
 
 #include "core/preview_trace.h"
 #include "core/localization.h"
+#include "pdf_view/pdf_script_notice_text.h"
 
 static std::wstring ToExtendedPathIfAbsolute(const std::wstring& path) {
     if (path.rfind(L"\\\\?\\", 0) == 0) return path;
@@ -41,69 +42,48 @@ static int GetPdfBlockFromHandle(void* param,
     return 0;
 }
 
-static std::wstring TrimForNotice(const std::wstring& s, size_t maxChars) {
-    if (s.size() <= maxChars) return s;
-    if (maxChars <= 1) return L"…";
-    return s.substr(0, maxChars - 1) + L"…";
-}
-
+// Display user-accessible document information as passive text only. Keep it
+// out of diagnostics and never pass it to an action dispatcher or a shell.
 static std::wstring GetPdfJavaScriptNoticeText(FPDF_DOCUMENT doc, const std::wstring& pdfPath) {
     if (!doc) return L"";
     std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
-    int n = FPDFDoc_GetJavaScriptActionCount(doc);
+    const int n = FPDFDoc_GetJavaScriptActionCount(doc);
     if (n <= 0) return L"";
-
-    std::wstring msg;
-    msg += localization::Text(L"pdf.javascript_notice.intro");
-
+    std::wstring msg = localization::Text(L"pdf.javascript_notice.intro");
     msg += localization::Text(L"pdf.javascript_notice.location");
-
+    msg += localization::Text(L"pdf.javascript_notice.pdf_label");
     try {
-        std::filesystem::path p(pdfPath);
-        msg += localization::Text(L"pdf.javascript_notice.pdf_label");
-        msg += p.filename().empty() ? pdfPath : p.filename().wstring();
-        msg += L"\n";
+        const auto name = std::filesystem::path(pdfPath).filename().wstring();
+        msg += pdf_script_notice::Preview(name.empty() ? pdfPath : name, pdfPath.size());
     } catch (...) {
-        msg += localization::Text(L"pdf.javascript_notice.pdf_label");
-        msg += pdfPath;
-        msg += L"\n";
+        msg += pdf_script_notice::Preview(pdfPath, pdfPath.size());
     }
-
-    const int showMax = 3;
+    msg += L"\n";
     msg += localization::Text(L"pdf.javascript_notice.actions_label");
-    for (int i = 0; i < n && i < showMax; ++i) {
-        FPDF_JAVASCRIPT_ACTION js = FPDFDoc_GetJavaScriptAction(doc, i);
-        std::wstring name;
-        std::wstring script;
-        if (js) {
-            unsigned long nameLen = FPDFJavaScriptAction_GetName(js, nullptr, 0);
-            if (nameLen > 0 && nameLen < 1024 * 1024) {
-                name.resize(static_cast<size_t>(nameLen));
-                unsigned long got = FPDFJavaScriptAction_GetName(
-                    js, reinterpret_cast<FPDF_WCHAR*>(name.data()), nameLen);
-                if (got > 0 && !name.empty() && name.back() == L'\0') name.pop_back();
-            }
-            unsigned long scriptLen = FPDFJavaScriptAction_GetScript(js, nullptr, 0);
-            if (scriptLen > 0 && scriptLen < 1024 * 1024) {
-                script.resize(static_cast<size_t>(scriptLen));
-                unsigned long got = FPDFJavaScriptAction_GetScript(
-                    js, reinterpret_cast<FPDF_WCHAR*>(script.data()), scriptLen);
-                if (got > 0 && !script.empty() && script.back() == L'\0') script.pop_back();
-            }
-            FPDFDoc_CloseJavaScriptAction(js);
+    msg += std::to_wstring(n) + L"\n";
+    for (int i = 0; i < n && i < 3; ++i) {
+        struct ActionScope {
+            FPDF_JAVASCRIPT_ACTION handle;
+            ~ActionScope() { if (handle) FPDFDoc_CloseJavaScriptAction(handle); }
+        } action{FPDFDoc_GetJavaScriptAction(doc, i)};
+        std::wstring name, script;
+        if (action.handle) {
+            name = pdf_script_notice::Read([&](FPDF_WCHAR* buffer, unsigned long bytes) {
+                return FPDFJavaScriptAction_GetName(action.handle, buffer, bytes);
+            });
+            script = pdf_script_notice::Read([&](FPDF_WCHAR* buffer, unsigned long bytes) {
+                return FPDFJavaScriptAction_GetScript(action.handle, buffer, bytes);
+            });
         }
         if (name.empty()) name = localization::Text(L"pdf.javascript_notice.no_name");
-        msg += L"  [" + std::to_wstring(i + 1) + L"] " + TrimForNotice(name, 48);
+        msg += L"  [" + std::to_wstring(i + 1) + L"] " + pdf_script_notice::Preview(name, 48);
         if (!script.empty()) {
             msg += localization::Text(L"pdf.javascript_notice.script_label");
-            msg += TrimForNotice(script, 64);
+            msg += pdf_script_notice::Preview(script, 64);
         }
         msg += L"\n";
     }
-    if (n > showMax) {
-        msg += localization::Text(L"pdf.javascript_notice.more_omitted");
-    }
-
+    if (n > 3) msg += localization::Text(L"pdf.javascript_notice.more_omitted");
     msg += L"\n";
     msg += localization::Text(L"pdf.javascript_notice.alternative");
     msg += localization::Text(L"pdf.javascript_notice.other_viewer_caution");
@@ -322,6 +302,7 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
         g_pdf.pageCount = FPDF_GetPageCount(g_pdf.doc);
     }
     g_pdf.path = path;
+    RestorePendingPdfPageRotations();
     g_pdf.scale = 1.0;
     g_pdf.scrollY = 0.0;
     g_pdf.scrollX = 0.0;
@@ -332,6 +313,14 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
     }
 
     // Defer initial "fit" scale until the view is actually displayed/sized.
+    // Choose fit orientation from this document's saved flow, not the previous
+    // PDF's flow. The anchor itself remains pending until layout is final.
+    if (g_restorePdfOpeningAnchor && g_pendingPdfRestore &&
+        NormalizePathKey(std::filesystem::path(g_pendingPdfRestore->path)) ==
+            NormalizePathKey(std::filesystem::path(g_pdf.path))) {
+        g_config.pdfFlowMode = NormalizeFlowModeString(g_pendingPdfRestore->flowMode);
+        UpdateScrollDirectionMenuChecks();
+    }
     g_pendingInitialFitWidth = false;
     g_pendingInitialFitWidthPt = 0.0;
     g_pendingInitialFitHeight = false;
@@ -362,7 +351,15 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
     // This can briefly show the horizontal scrollbar, and we intentionally keep it
     // as a lightweight "loading in progress" visual cue during PDF switching.
     const ULONGLONG buildStartTick = preview_trace::TickNow();
-    BuildPageCaches(pdfWnd);
+    {
+        // Scrollbar changes can synchronously send WM_SIZE. Keep initial fit
+        // and restoration pending until the complete page layout is available.
+        PdfInitialViewportUpdateGuard viewportGuard;
+        BuildPageCaches(pdfWnd);
+    }
+    if (!g_pendingInitialFitWidth && !g_pendingInitialFitHeight) {
+        UpdatePdfVirtualScrollCaches(pdfWnd);
+    }
     preview_trace::Append(
         L"LoadPdfDocument",
         L"build_page_caches_elapsed_ms=" + preview_trace::ElapsedMs(buildStartTick) +

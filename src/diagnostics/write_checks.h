@@ -22,7 +22,7 @@ struct Result {
     std::uint64_t time = 0; // UTC FILETIME; display conversion happens only in the UI.
     std::wstring remaining;
     Source source = Source::Manual;
-    std::wstring operationPath; // Evidence from normal use, never a disposable probe.
+    std::wstring operationPath; // Normal-use file, or the parent used by a manual destination probe.
 };
 struct Record { Kind kind{}; std::wstring target; Result result; };
 
@@ -45,6 +45,13 @@ private:
 };
 [[nodiscard]] bool IsSafeLocalPath(const std::filesystem::path& path);
 [[nodiscard]] Result ProbeDirectory(const std::filesystem::path& target, bool write);
+// Only a missing immediate pdf/note child of the captured session may fall back.
+// Never creates directories or masks permission/reparse failures. The original
+// target remains the record key; operationPath records the actual parent probe.
+[[nodiscard]] Result ProbeSessionDestination(Kind kind, const std::filesystem::path& target,
+    const std::filesystem::path& session, const std::atomic_bool& cancel);
+// Pure evidence classification: no filesystem access from list/detail rendering.
+[[nodiscard]] bool IsParentDestinationProbe(const Record& record);
 [[nodiscard]] Result ProbeFile(const std::filesystem::path& target);
 // Opens the original for read/write access without modifying it; reads bytes
 // in bounded chunks, then tests a new disposable sibling. Never saves edits.
@@ -64,7 +71,14 @@ void Upsert(std::vector<Record>& records, Record record);
 // erase newer evidence. Failure preserves the caller's in-memory observations.
 [[nodiscard]] bool SaveLatest(const std::filesystem::path& path, std::vector<Record>& records,
                               std::string& baseline, DWORD& error);
+// Ordinary operation completion only records/schedules bounded memory state;
+// a single process-owned worker persists it. Startup false forbids ledger I/O.
 void EnableNormalObservations(bool persist = true) noexcept;
+// Bootstrap joins the single ledger writer before releasing workspace ownership.
+void ShutdownNormalObservations() noexcept;
+#if defined(PDF_NOTE_WRITE_CHECKS_TESTING)
+void SetBeforeNormalPersistForTesting(void (*hook)());
+#endif
 // Flush only the captured workspace's pending evidence at explicit lifecycle
 // boundaries. Never called by a display timer; failure preserves pending data.
 [[nodiscard]] bool FlushNormalObservations(const std::filesystem::path& workspace) noexcept;

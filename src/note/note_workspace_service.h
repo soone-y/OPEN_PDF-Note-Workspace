@@ -19,12 +19,10 @@ public:
                                  uint64_t persistenceRevision,
                                  NoteContentKind contentKind);
     LocalNoteKernel* FindKernel(NoteId noteId);
-    const LocalNoteKernel* FindKernel(NoteId noteId) const;
     LocalNoteKernel* FindKernelForView(const ViewIdentity& viewIdentity);
-    const LocalNoteKernel* FindKernelForView(
-        const ViewIdentity& viewIdentity) const;
-    bool ForgetKernel(NoteId noteId);
-    size_t kernel_count() const { return kernels_.size(); }
+    [[nodiscard]] LocalNoteKernel* RekeyDraftKernel(NoteId from, NoteId to,
+                                                   NoteMetadata metadata,
+                                                   NoteContentKind contentKind);
 
     std::shared_ptr<const WorkspaceNoteIndexSnapshot> ResolveIndex(
         SnapshotIdentity snapshotIdentity,
@@ -38,7 +36,6 @@ public:
         const LocalNoteKernel& kernel);
 
     void InvalidateIndexes(NoteId noteId);
-    void ClearIndexes();
     size_t index_cache_size() const;
 
 private:
@@ -53,7 +50,7 @@ private:
     std::shared_ptr<const WorkspaceNoteIndexSnapshot> FindCachedIndexLocked(
         const SnapshotIdentity& identity,
         const std::wstring& targetPath,
-        NoteContentKind contentKind);
+        NoteContentKind contentKind, bool clroAsciiOnly);
     void InsertCachedIndexLocked(
         SnapshotIdentity identity,
         std::wstring targetPath,

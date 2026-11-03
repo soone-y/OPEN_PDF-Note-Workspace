@@ -1,5 +1,6 @@
 #include "note/note_dirty_graph.h"
 #include "note/note_syntax_lexical.h"
+#include "note/note_clro_markdown.h"
 
 #include <algorithm>
 #include <string>
@@ -262,6 +263,8 @@ size_t FindNextFeatureLine(std::wstring_view text,
 
 bool ContainsNoteStructuralText(std::wstring_view text) {
     for (const wchar_t ch : text) {
+        if (ClroMarkdownCharacter(ch) != ch || (ch >= L'\uFF10' && ch <= L'\uFF19') ||
+            ch == L'\uFF58' || ch == L'\uFF38') return true;
         switch (ch) {
         case L'\r':
         case L'\n':
@@ -299,12 +302,6 @@ bool IsOnlyNoteLineBreakText(std::wstring_view text) {
         if (ch != L'\r' && ch != L'\n') return false;
     }
     return true;
-}
-
-bool TextEditsEqual(const TextEdit& lhs, const TextEdit& rhs) {
-    return lhs.start == rhs.start &&
-           lhs.deleted_len == rhs.deleted_len &&
-           lhs.inserted_text == rhs.inserted_text;
 }
 
 NoteDirtyGraph BuildNoteDirtyGraph(std::wstring_view beforeText,

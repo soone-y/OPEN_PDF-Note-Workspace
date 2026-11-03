@@ -1,5 +1,7 @@
 // file: main/main_toolbar_ui.cppinc
 
+#include "ui/shape_boundary_options.h"
+
 void UpdateToolbarUI(HWND hWnd) {
     SetModeButtons();
 
@@ -12,9 +14,8 @@ void UpdateToolbarUI(HWND hWnd) {
         s_lastExpandedOrder = toolOrder;
     }
 
-    // Tool switches should not force a full relayout of the entire window (PDF repaint = flicker).
-    // Only update visibility of toolbar options and repaint the toolbar area once.
-    if (g_hPdfToolbar) SendMessageW(g_hPdfToolbar, WM_SETREDRAW, FALSE, 0);
+    // The composited host buffers its child controls. Do not disable host redraw:
+    // DefWindowProc removes WS_VISIBLE, allowing ancestor paints over the bar.
     SyncToolbarFontSizeCombo();
 
     bool anyChange = false;
@@ -40,8 +41,9 @@ void UpdateToolbarUI(HWND hWnd) {
         visibilityChanged = true;
     }
 
-    // If the selected tool becomes non-selectable, fall back to the first enabled tool.
-    if (!ToolModeEnabledForCurrentPdfView(g_toolMode)) {
+    // Hidden bar buttons must not undo a tool selected directly by a shortcut.
+    // Actual document/save restrictions still require a safe fallback.
+    if (!ToolModeAvailableForCurrentPdfView(g_toolMode)) {
         ToolMode fallback = g_toolMode;
         for (AnnotToolFamily family : AnnotToolFamilyUiOrder()) {
             ToolMode mode{};
@@ -60,7 +62,11 @@ void UpdateToolbarUI(HWND hWnd) {
 
     if (IsMarkerGroupMode(g_toolMode)) g_markerGroupMode = g_toolMode;
     if (IsPenGroupMode(g_toolMode)) g_penGroupMode = g_toolMode;
-    if (IsShapeGroupMode(g_toolMode)) SyncLegacyShapeStateFromDetail();
+    if (IsShapeGroupMode(g_toolMode)) {
+        SyncLegacyShapeStateFromDetail();
+        g_shapeGroupMode = g_toolMode;
+        g_shapeToolSelection = ShapeToolSelectionForMode(g_toolMode, g_shapeDrawMode);
+    }
     if (MarkerTextModeStoresUnderlineOption(g_toolMode)) {
         g_markerTextUnderline = MarkerTextModeUsesUnderline(g_toolMode);
     }
@@ -71,13 +77,19 @@ void UpdateToolbarUI(HWND hWnd) {
     bool showPanOptions = g_toolMode == ToolMode::Pan;
     bool showWidth = ToolbarHasWidthOptions(g_toolMode);
     bool showMarkerAlpha = ToolbarHasMarkerAlphaOptions(g_toolMode);
+    const bool showBlend = ToolbarHasBlendModeOptions(g_toolMode,g_shapeKind);
+    const bool multiplyBlend = g_toolMode == ToolMode::Shape
+        ? g_config.newShapeBlendMode == AnnotationBlendMode::Multiply
+        : g_config.newMarkerDisplayMode == MarkerDisplayMode::Multiply;
+    SendMessageW(g_hRadioBlendNormal,BM_SETCHECK,multiplyBlend ? BST_UNCHECKED : BST_CHECKED,0);
+    SendMessageW(g_hRadioBlendMultiply,BM_SETCHECK,multiplyBlend ? BST_CHECKED : BST_UNCHECKED,0);
     bool showAnnotMethod = ToolbarHasAnnotMethodOptions(g_toolMode);
     bool showFreehandCorrection =
         g_toolMode == ToolMode::Freehand && FreehandCorrectionPenActive(g_config.freehandCorrection);
     bool showMarkerTextStyle = ToolbarHasMarkerTextStyleOptions(g_toolMode);
-    bool showLineDash = ToolbarHasLineDashOptions(g_toolMode);
+    bool showLineDash = ToolbarHasLineDashOptions(g_toolMode,g_shapeKind);
     bool showShape = ToolbarHasShapeOptions(g_toolMode);
-    bool showShapeDrawMode = ToolbarHasShapeDrawModeOptions(g_toolMode);
+    bool showShapeDrawMode = ToolbarHasShapeDrawModeOptions(g_toolMode,g_shapeKind);
     bool showColor = ToolbarHasColorOptions(g_toolMode);
     bool showMagnifierShape = ToolbarHasMagnifierShapeOptions(g_toolMode);
     const bool saveBusy = IsSaveTransactionRunning();
@@ -132,6 +144,8 @@ void UpdateToolbarUI(HWND hWnd) {
     if (g_hChkPanMouseWheelZoom) EnableWindow(g_hChkPanMouseWheelZoom, showPanOptions && !saveBusy);
     if (g_hComboWidth) EnableWindow(g_hComboWidth, showWidth && !saveBusy);
     if (g_hComboMarkerAlpha) EnableWindow(g_hComboMarkerAlpha, showMarkerAlpha && !saveBusy);
+    EnableWindow(g_hRadioBlendNormal,showBlend && !saveBusy);
+    EnableWindow(g_hRadioBlendMultiply,showBlend && !saveBusy);
     if (g_hComboAnnotMethod) EnableWindow(g_hComboAnnotMethod, showAnnotMethod && !saveBusy);
     if (g_hComboShapeGeometry) EnableWindow(g_hComboShapeGeometry, FALSE);
     if (g_hComboFreehandCorrection) EnableWindow(g_hComboFreehandCorrection, showFreehandCorrection && !saveBusy);
@@ -157,6 +171,8 @@ void UpdateToolbarUI(HWND hWnd) {
     setVisibleIfChanged(g_hChkPanMouseWheelZoom, showPanOptions);
     setVisibleIfChanged(g_hComboWidth, showWidth);
     setVisibleIfChanged(g_hComboMarkerAlpha, showMarkerAlpha);
+    setVisibleIfChanged(g_hRadioBlendNormal,showBlend);
+    setVisibleIfChanged(g_hRadioBlendMultiply,showBlend);
     setVisibleIfChanged(g_hComboAnnotMethod, showAnnotMethod);
     setVisibleIfChanged(g_hComboShapeGeometry, false);
     setVisibleIfChanged(g_hComboFreehandCorrection, showFreehandCorrection);
@@ -197,10 +213,6 @@ void UpdateToolbarUI(HWND hWnd) {
         if (SyncMagnifierShapeCombo(g_magnifierShape)) anyChange = true;
     }
 
-    if (g_hPdfToolbar) SendMessageW(g_hPdfToolbar, WM_SETREDRAW, TRUE, 0);
-    if (g_hPdfToolbar && anyChange) {
-        RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
-    }
     if (visibilityChanged) {
         HWND mainWnd = hWnd;
         if (g_hPdfToolbar) {
@@ -208,8 +220,15 @@ void UpdateToolbarUI(HWND hWnd) {
             if (parent) mainWnd = parent;
         }
         if (mainWnd && IsWindow(mainWnd)) {
+            // Layout already repaints changed regions. A second whole-window
+            // erase here would unnecessarily blank unrelated controls and PDF.
             LayoutChildren(mainWnd);
-            RedrawWorkspaceLayout(mainWnd);
         }
+    }
+    if (g_hPdfToolbar && anyChange) {
+        // Publish the final options and positions together, before returning
+        // to a potentially busy input queue.
+        RedrawWindow(g_hPdfToolbar, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_NOERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
 }

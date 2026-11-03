@@ -45,7 +45,6 @@ public:
 
     NoteTransactionSnapshot Snapshot() const;
     bool ShouldSuppressChange() const;
-    bool ProgramMutationActive() const { return !frames_.empty(); }
 
 private:
     struct Frame {

@@ -7,6 +7,8 @@ This page is the common entry point to the public documentation for PDF Note Wor
 | 文書 / Documents | 役割 / Mission | パス / Path | リンク / Link |
 | --- | --- | --- | --- |
 | プロジェクト概要 / Project overview | 入手方法、Full・Lite、基本方針 / Downloads, Full and Lite editions, and core policies | `README.md` | [開く / Open](README.md) |
+| 公開統計 / Project statistics | 固定入力による規模・配布容量・検証範囲と履歴 / Fixed-input source scale, distribution sizes, verification scope and history | `STATISTICS.md` | [開く / Open](STATISTICS.md) |
+| 統計履歴 / Statistics history | 開発規模の推移、公開版の集計値と測定条件 / Development scale over time, release aggregates and measurement conditions | `docs/statistics/HISTORY.md` | [開く / Open](docs/statistics/HISTORY.md) |
 | ライセンス / License | 日英併記のプロジェクトライセンス。英語原文が法的正本 / Bilingual project license; the English text controls | `LICENSE.md` | [開く / Open](LICENSE.md) |
 | セキュリティ / Security policy | 非公開の脆弱性報告経路と対応方針 / Private vulnerability reporting and handling policy | `.github/SECURITY.md` | [開く / Open](.github/SECURITY.md) |
 | 文書構成方針 / Documentation structure | 正本の配置、言語、更新の優先順位 / Canonical locations, languages, and update priorities | `docs/案内ドキュメントの構成.md` | [開く / Open](docs/案内ドキュメントの構成.md) |
@@ -14,10 +16,12 @@ This page is the common entry point to the public documentation for PDF Note Wor
 | 日本語文書入口 / Japanese documentation index | 日本語版：利用者・開発者向け文書一覧 / Japanese version: user and developer documentation index | `docs/ja/README.md` | [開く / Open](docs/ja/README.md) |
 | 日本語：導入 / Japanese: getting started | 日本語版：ZIP展開、更新、削除、ワークスペースの準備 / Japanese version: setup, updates, removal, and workspace preparation | `docs/ja/Getting_Started.md` | [開く / Open](docs/ja/Getting_Started.md) |
 | 日本語：基本操作 / Japanese: using the app | 日本語版：PDF、注釈、ノート、出力の基本操作 / Japanese version: core PDF, annotation, note, and export operations | `docs/ja/Using_the_App.md` | [開く / Open](docs/ja/Using_the_App.md) |
+| 日本語：閲覧専用ソフト / Japanese: read-only viewer | 日本語版：複数タブとCLROP付きPDFの閲覧 / Japanese version: multiple tabs and PDFs with CLROP annotations | `docs/ja/Read_Only_Viewer.md` | [開く / Open](docs/ja/Read_Only_Viewer.md) |
 | 日本語：ヘルプ / Japanese: help reference | 日本語版：メニュー、設定、ショートカットの参照 / Japanese version: menus, settings, and shortcuts | `docs/ja/Help_Reference.md` | [開く / Open](docs/ja/Help_Reference.md) |
 | 日本語：保存と復元 / Japanese: saving and recovery | 日本語版：stage、統合保存、バックアップ、復元 / Japanese version: stage data, integration, backups, and recovery | `docs/ja/Save_and_Recovery.md` | [開く / Open](docs/ja/Save_and_Recovery.md) |
 | 日本語：ファイル形式 / Japanese: file formats | 日本語版：ノート、PDF注釈、対応形式 / Japanese version: notes, PDF annotations, and supported formats | `docs/ja/File_Formats.md` | [開く / Open](docs/ja/File_Formats.md) |
 | 日本語：`.clro` ノート形式 / Japanese: `.clro` note format | 日本語版：標準ノートの役割、記法、他ソフトとの扱い / Japanese version: standard-note role, notation, and use with other software | `docs/ja/CLRO_Note_Format.md` | [開く / Open](docs/ja/CLRO_Note_Format.md) |
+| 日本語：ノートの書き方 / Japanese: note writing guide | 日本語版：入力アシストと対応する記法の記述例 / Japanese version: input assist and examples of supported notation | `docs/ja/Note_Writing_Guide.md` | [開く / Open](docs/ja/Note_Writing_Guide.md) |
 | 日本語：`.clrop` 注釈データ / Japanese: `.clrop` annotation data | 日本語版：PDFとの対応、JSONの役割、安全な扱い / Japanese version: PDF relationship, JSON role, and safe handling | `docs/ja/CLROP_Annotation_Format.md` | [開く / Open](docs/ja/CLROP_Annotation_Format.md) |
 | 日本語：問題解決 / Japanese: troubleshooting | 日本語版：安全な一次対応と報告に必要な情報 / Japanese version: safe first steps and useful report information | `docs/ja/Troubleshooting.md` | [開く / Open](docs/ja/Troubleshooting.md) |
 | 日本語：ビルドと検証 / Japanese: build and verification | 日本語版：ソースからのビルド、テスト、release set作成 / Japanese version: building, testing, and release sets | `docs/ja/How_to_Build.md` | [開く / Open](docs/ja/How_to_Build.md) |
@@ -26,10 +30,12 @@ This page is the common entry point to the public documentation for PDF Note Wor
 | 英語文書入口 / English documentation index | 英語版：利用者・開発者向け文書一覧 / English version: user and developer documentation index | `docs/en/README.md` | [Open](docs/en/README.md) |
 | 英語：導入 / English: getting started | 英語版：ZIP展開、更新、削除、ワークスペースの準備 / English version: setup, updates, removal, and workspace preparation | `docs/en/Getting_Started.md` | [Open](docs/en/Getting_Started.md) |
 | 英語：基本操作 / English: using the app | 英語版：PDF、注釈、ノート、出力の基本操作 / English version: core PDF, annotation, note, and export operations | `docs/en/Using_the_App.md` | [Open](docs/en/Using_the_App.md) |
+| 英語：閲覧専用ソフト / English: read-only viewer | 英語版：複数タブとCLROP付きPDFの閲覧 / English version: multiple tabs and PDFs with CLROP annotations | `docs/en/Read_Only_Viewer.md` | [Open](docs/en/Read_Only_Viewer.md) |
 | 英語：ヘルプ / English: help reference | 英語版：メニュー、設定、ショートカットの参照 / English version: menus, settings, and shortcuts | `docs/en/Help_Reference.md` | [Open](docs/en/Help_Reference.md) |
 | 英語：保存と復元 / English: saving and recovery | 英語版：stage、統合保存、バックアップ、復元 / English version: stage data, integration, backups, and recovery | `docs/en/Save_and_Recovery.md` | [Open](docs/en/Save_and_Recovery.md) |
 | 英語：ファイル形式 / English: file formats | 英語版：ノート、PDF注釈、対応形式 / English version: notes, PDF annotations, and supported formats | `docs/en/File_Formats.md` | [Open](docs/en/File_Formats.md) |
 | 英語：`.clro` ノート形式 / English: `.clro` note format | 英語版：標準ノートの役割、記法、他ソフトとの扱い / English version: standard-note role, notation, and use with other software | `docs/en/CLRO_Note_Format.md` | [Open](docs/en/CLRO_Note_Format.md) |
+| 英語：ノートの書き方 / English: note writing guide | 英語版：入力アシストと対応する記法の記述例 / English version: input assist and examples of supported notation | `docs/en/Note_Writing_Guide.md` | [Open](docs/en/Note_Writing_Guide.md) |
 | 英語：`.clrop` 注釈データ / English: `.clrop` annotation data | 英語版：PDFとの対応、JSONの役割、安全な扱い / English version: PDF relationship, JSON role, and safe handling | `docs/en/CLROP_Annotation_Format.md` | [Open](docs/en/CLROP_Annotation_Format.md) |
 | 英語：問題解決 / English: troubleshooting | 英語版：安全な一次対応と報告に必要な情報 / English version: safe first steps and useful report information | `docs/en/Troubleshooting.md` | [Open](docs/en/Troubleshooting.md) |
 | 英語：ビルドと検証 / English: build and verification | 英語版：ソースからのビルド、テスト、release set作成 / English version: building, testing, and release sets | `docs/en/How_to_Build.md` | [Open](docs/en/How_to_Build.md) |
@@ -39,7 +45,7 @@ This page is the common entry point to the public documentation for PDF Note Wor
 | 背景・設計・確認資料の入口 / Background, design, and verification index | 日本語版：背景・設計・確認資料の入口 / Japanese version: entry point for background, design, and verification material | `introduction/index.md` | [開く / Open](introduction/index.md) |
 | 英語：背景・設計・確認資料の入口 / English background, design, and verification index | 英語版：選択した背景・設計・確認資料。未翻訳の詳細資料は日本語版を参照 / English: selected background, design, and verification material; see Japanese material for untranslated details | `introduction/en/index.md` | [Open](introduction/en/index.md) |
 | 英語：概要資料 / English project overview reference | 英語版：事実、方針、既知の制約を分けて説明するための資料 / English: facts, policies, and known limitations | `introduction/en/project_overview.md` | [Open](introduction/en/project_overview.md) |
-| 英語：機能FAQ / English features FAQ | 英語版：主な機能、ローカル処理、既知の制約 / English: core features, local operation, and known limitations | `introduction/en/features_faq.md` | [Open](introduction/en/features_faq.md) |
+| 英語：機能と想定ケース / English features and usage scenarios | 英語版：主な機能、ローカル処理、利用前に確認する制約 / English: core features, local operation, and limitations to check before use | `introduction/en/features_and_scenarios.md` | [Open](introduction/en/features_and_scenarios.md) |
 | 英語：ファイル形式と保存 / English file formats and persistence | 英語版：PDF、注釈、ノート、保存データの役割 / English: the roles of PDFs, annotations, notes, and saved data | `introduction/en/file_formats.md` | [Open](introduction/en/file_formats.md) |
 | プロジェクト概要資料 / Project overview reference | 日本語版：目的、範囲、配布形態の背景資料 / Japanese version: background on purpose, scope, and distribution | `introduction/project_overview.md` | [開く / Open](introduction/project_overview.md) |
 | プロジェクトの理念 / Project principles | 日本語版：利用者の資料と情報利用に対する原理原則 / Japanese version: principles for users' files and information use | `introduction/core/principles.md` | [開く / Open](introduction/core/principles.md) |
@@ -50,7 +56,7 @@ This page is the common entry point to the public documentation for PDF Note Wor
 | データスキーマ / Data schemas | 日本語版：主要なデータ構造と形式 / Japanese version: principal data structures and formats | `introduction/core/data_schemas.md` | [開く / Open](introduction/core/data_schemas.md) |
 | 判断支援 / Decision support | 日本語版：用途判断と選択時の補助 / Japanese version: guidance for use and decisions | `introduction/core/decision_support.md` | [開く / Open](introduction/core/decision_support.md) |
 | 文書契約 / Documentation contract | 日本語版：公開資料の役割と参照契約 / Japanese version: roles and reference contract for public material | `introduction/core/documentation_contract.md` | [開く / Open](introduction/core/documentation_contract.md) |
-| 機能FAQ / Features FAQ | 日本語版：主な機能の質問と回答 / Japanese version: questions and answers about core features | `introduction/core/features_faq.md` | [開く / Open](introduction/core/features_faq.md) |
+| 機能と想定ケース / Features and usage scenarios | 日本語版：主な機能、利用時の前提、確認が必要な制約 / Japanese version: core features, usage assumptions, and limitations to check | `introduction/core/features_and_scenarios.md` | [開く / Open](introduction/core/features_and_scenarios.md) |
 | ファイル形式資料 / File formats reference | 日本語版：対応形式とデータ形式の補足 / Japanese version: supported and data format reference | `introduction/core/file_formats.md` | [開く / Open](introduction/core/file_formats.md) |
 | リポジトリ参照地図 / Repository reference map | 日本語版：公開リポジトリ内の参照地図 / Japanese version: reference map of the public repository | `introduction/core/repository_reference_map.md` | [開く / Open](introduction/core/repository_reference_map.md) |
 | 安全要件 / Safety and non-negotiables | 日本語版：データ保護、無通信、無音の要件 / Japanese version: data protection, offline, and silent-operation requirements | `introduction/core/safety_and_nonnegotiables.md` | [開く / Open](introduction/core/safety_and_nonnegotiables.md) |

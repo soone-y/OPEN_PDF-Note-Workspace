@@ -3,6 +3,7 @@
 #include "core/localization.h"
 #include "core/app_core.h"
 #include "core/json_string.h"
+#include "core/json_number_token.h"
 #include "ui/core/main_window_api.h"
 #include "ui/dialogs/dialogs.h"
 #include "clrop/bridge.h"
@@ -12,15 +13,19 @@
 #include "core/atomic_write.h"
 #include "diagnostics/normal_operations.h"
 #include "settings/settings.h"
+#include "settings/palette_stock_store.h"
+#include "settings/palette_presets.h"
 #include "bridge/view_bridge.h"
 #include "core/font_list.h"
 #include "math/math_render.h"
 #include "core/fault_injection.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <regex>
 #include <set>
 #include <shlobj.h>
@@ -422,20 +427,24 @@ static std::wstring WritableProbeCacheKey(const std::filesystem::path& dir) {
 }
 
 static std::unordered_set<std::wstring> s_writableProbeCache;
+static std::mutex s_writableProbeMutex;
 static std::unordered_set<std::wstring> s_tempExternalAccessWarned;
 
 static bool IsWritableProbeCached(const std::filesystem::path& dir) {
     std::wstring key = WritableProbeCacheKey(dir);
+    const std::lock_guard<std::mutex> lock(s_writableProbeMutex);
     return !key.empty() && s_writableProbeCache.find(key) != s_writableProbeCache.end();
 }
 
 void RememberWritableProbe(const std::filesystem::path& dir) {
     std::wstring key = WritableProbeCacheKey(dir);
+    const std::lock_guard<std::mutex> lock(s_writableProbeMutex);
     if (!key.empty()) s_writableProbeCache.insert(std::move(key));
 }
 
 void ForgetWritableProbe(const std::filesystem::path& dir) {
     std::wstring key = WritableProbeCacheKey(dir);
+    const std::lock_guard<std::mutex> lock(s_writableProbeMutex);
     if (!key.empty()) s_writableProbeCache.erase(key);
 }
 
@@ -495,6 +504,10 @@ static bool TryWriteTempDeleteOnCloseFile(const std::filesystem::path& dir, std:
     }
     if (outErr) *outErr = L"failed to create temp file (name collision)";
     return false;
+}
+
+bool ProbeDirectoryEditingAccess(const std::filesystem::path& dir, std::wstring* error) {
+    return TryOpenDirForList(dir, error) && TryWriteTempDeleteOnCloseFile(dir, error);
 }
 
 bool EnsureWorkspaceResourceDirsWithErr(const std::wstring& root,
@@ -585,16 +598,28 @@ bool EnsureWorkspaceResourceDirs(std::filesystem::path* settingsDir) {
 }
 
 bool VerifyWorkspaceWritableForEditing(HWND owner) {
+    return VerifyWorkspaceWritableForEditing(owner, nullptr);
+}
+
+bool VerifyWorkspaceWritableForEditing(HWND owner, std::wstring* outError) {
+    if (outError) outError->clear();
     std::wstring err;
     if (EnsureWorkspaceResourceDirsWithErr(g_workspaceRoot, nullptr, &err)) return true;
     std::wstring msg = localization::Format(L"workspace.config.not_writable", {{L"ROOT", g_workspaceRoot}});
     msg += localization::Text(L"workspace.config_io.f9e597c9cfc2").c_str();
     if (!err.empty()) msg += L"\n\n" + err;
-    ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+    if (outError) *outError = msg;
+    else ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
     return false;
 }
 
 bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path& dir, const wchar_t* labelId) {
+    return VerifyDirReadableWritableForEditing(owner, dir, labelId, nullptr);
+}
+
+bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path& dir,
+                                        const wchar_t* labelId, std::wstring* outError) {
+    if (outError) outError->clear();
     const std::wstring label = localization::Text(labelId ? labelId : L"workspace.directory.folder");
     std::wstring readErr;
     if (!TryOpenDirForList(dir, &readErr)) {
@@ -608,7 +633,8 @@ bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path
                 ? L"workspace.config.temp_external.registration_kept.student"
                 : L"workspace.config.temp_external.registration_kept.parent");
         }
-        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        if (outError) *outError = msg;
+        else ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     std::wstring writeErr;
@@ -623,7 +649,8 @@ bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path
                 ? L"workspace.config.temp_external.registration_kept.student"
                 : L"workspace.config.temp_external.registration_kept.parent");
         }
-        ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
+        if (outError) *outError = msg;
+        else ShowSoftNotice(owner, msg, SoftNoticeKind::Warning);
         return false;
     }
     RememberWritableProbe(dir);
@@ -658,6 +685,11 @@ private:
     bool wasEnabled_ = false;
 };
 
+struct WorkspaceToolsPlacement {
+    HWND control = nullptr;
+    RECT bounds{}; // Unscrolled client coordinates, owned by this dialog only.
+};
+
 struct SettingsPresetDialogCtx {
     HWND dialog = nullptr;
     bool done = false;
@@ -670,6 +702,7 @@ struct SettingsPresetDialogCtx {
     int scrollY = 0;
     int contentHeight = 0;
     bool layingOut = false;
+    std::vector<WorkspaceToolsPlacement> placements;
 };
 
 constexpr wchar_t kSettingsPresetDialogClass[] = L"PdfNoteSettingsPresetDialog";
@@ -744,6 +777,54 @@ static UINT WorkspaceToolsDpi(HWND window) {
     return static_cast<UINT>(std::max(96, dpi));
 }
 
+// Keep visibility and geometry updates out of intermediate paints. In
+// WM_CREATE the dialog is still hidden: WM_SETREDRAW(TRUE) must not show it.
+class ScopedWorkspaceToolsRedraw {
+public:
+    ScopedWorkspaceToolsRedraw(const ScopedWorkspaceToolsRedraw&) = delete;
+    ScopedWorkspaceToolsRedraw& operator=(const ScopedWorkspaceToolsRedraw&) = delete;
+    explicit ScopedWorkspaceToolsRedraw(HWND window) : window_(window), visible_(IsWindowVisible(window) != FALSE) {
+        if (visible_) SendMessageW(window_, WM_SETREDRAW, FALSE, 0);
+    }
+    ~ScopedWorkspaceToolsRedraw() {
+        if (visible_) {
+            SendMessageW(window_, WM_SETREDRAW, TRUE, 0);
+            RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+        }
+    }
+private:
+    HWND window_;
+    bool visible_;
+};
+
+static void PositionWorkspaceTools(SettingsPresetDialogCtx* ctx, bool moveOnly = false) {
+    HDWP batch = BeginDeferWindowPos(static_cast<int>(ctx->placements.size()));
+    const UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | (moveOnly ? SWP_NOSIZE : 0);
+    for (const auto& placement : ctx->placements) {
+        const auto& bounds = placement.bounds;
+        if (batch) batch = DeferWindowPos(batch, placement.control, nullptr, bounds.left, bounds.top - ctx->scrollY,
+            bounds.right - bounds.left, bounds.bottom - bounds.top, flags);
+    }
+    if (batch && EndDeferWindowPos(batch)) return;
+    // Allocation/commit failure must still leave every action accessible.
+    for (const auto& placement : ctx->placements) {
+        const auto& bounds = placement.bounds;
+        SetWindowPos(placement.control, nullptr, bounds.left, bounds.top - ctx->scrollY,
+            bounds.right - bounds.left, bounds.bottom - bounds.top, flags);
+    }
+}
+
+static void ScrollWorkspaceToolsTo(SettingsPresetDialogCtx* ctx, int requested) {
+    RECT client{};
+    if (!ctx || !GetClientRect(ctx->dialog, &client)) return;
+    const int position = std::clamp(requested, 0, std::max(0, ctx->contentHeight - static_cast<int>(client.bottom)));
+    if (position == ctx->scrollY) return; // No erase, reflow or movement at a boundary/when everything fits.
+    ScopedWorkspaceToolsRedraw redraw(ctx->dialog);
+    ctx->scrollY = position;
+    SetScrollPos(ctx->dialog, SB_VERT, position, TRUE);
+    PositionWorkspaceTools(ctx, true); // Cached geometry: do not measure/re-layout while scrolling.
+}
+
 // Text is measured using the same UI font as the output dialog. Scaling only
 // fixed pixels is insufficient for translations, larger fonts and narrow screens.
 static void LayoutWorkspaceTools(SettingsPresetDialogCtx* ctx) {
@@ -751,10 +832,20 @@ static void LayoutWorkspaceTools(SettingsPresetDialogCtx* ctx) {
         ctx->restoreControls.size() != 21) return;
     ctx->layingOut = true;
     HWND window = ctx->dialog;
+    ScopedWorkspaceToolsRedraw redraw(window);
     const auto scale = [ctx](int value) { return MulDiv(value, ctx->dpi, 96); };
     RECT client{}; GetClientRect(window, &client);
     const int pad = scale(12), gap = scale(8);
-    const int width = std::max(1, static_cast<int>(client.right) - pad * 2);
+    // Decide overflow at the width WITHOUT a scrollbar, otherwise hiding it
+    // widens the text, triggers WM_SIZE, and can oscillate at wrap thresholds.
+    using MetricsForDpi = int (WINAPI*)(int, UINT);
+    const FARPROC metricsAddress = GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetSystemMetricsForDpi");
+    MetricsForDpi metrics = nullptr;
+    static_assert(sizeof(metrics) == sizeof(metricsAddress));
+    std::memcpy(&metrics, &metricsAddress, sizeof(metrics));
+    const int scrollbarWidth = metrics ? metrics(SM_CXVSCROLL, WorkspaceToolsDpi(window)) : GetSystemMetrics(SM_CXVSCROLL);
+    const int fullClientWidth = static_cast<int>(client.right) +
+        ((GetWindowLongPtrW(window, GWL_STYLE) & WS_VSCROLL) ? scrollbarWidth : 0);
     const auto textSize = [window](HWND control, int width, bool singleLine) {
         const int length = GetWindowTextLengthW(control);
         std::wstring text(static_cast<size_t>(std::max(0, length)) + 1, L'\0');
@@ -768,83 +859,105 @@ static void LayoutWorkspaceTools(SettingsPresetDialogCtx* ctx) {
         SelectObject(dc, old); ReleaseDC(window, dc);
         return SIZE{measured.right, std::max(1L, measured.bottom)};
     };
-    const int rowH = std::max(scale(28), static_cast<int>(textSize(GetDlgItem(window, 30), width, true).cy) + gap);
-    const auto buttonW = [&](HWND button, int minimum) {
-        return std::min(width, std::max(scale(minimum), static_cast<int>(textSize(button, width, true).cx) + pad * 2));
+    const auto measurePage = [&](int clientWidth) {
+        ctx->placements.clear();
+        const int width = std::max(1, clientWidth - pad * 2);
+        const int rowH = std::max(scale(28), static_cast<int>(textSize(GetDlgItem(window, 30), width, true).cy) + gap);
+        const auto buttonW = [&](HWND button, int minimum) {
+            return std::min(width, std::max(scale(minimum), static_cast<int>(textSize(button, width, true).cx) + pad * 2));
+        };
+        const auto place = [&](HWND control, int x, int y, int w, int h) {
+            ctx->placements.push_back({control, RECT{x, y, x + w, y + h}});
+        };
+        const auto text = [&](HWND control, int& y, int w) {
+            const int h = static_cast<int>(textSize(control, w, false).cy) + scale(2);
+            place(control, pad, y, w, h); y += h + gap;
+        };
+        const auto separator = [&](HWND control, int& y) {
+            place(control, pad, y, width, scale(2)); y += scale(2) + gap;
+        };
+        int y = pad;
+        text(ctx->subtitle, y, width);
+        HWND presetTab = GetDlgItem(window, kWorkspaceToolsPresetTab);
+        HWND restoreTab = GetDlgItem(window, kWorkspaceToolsRestoreTab);
+        const int tabW = std::max(buttonW(presetTab, 160), buttonW(restoreTab, 160));
+        place(presetTab, pad, y, std::min(tabW, (width - gap) / 2), rowH);
+        place(restoreTab, pad + (width + gap) / 2, y, std::min(tabW, (width - gap) / 2), rowH);
+        y += rowH + pad;
+        if (ctx->page == WorkspaceToolsPage::Presets) {
+            auto& presets = ctx->presetControls;
+            for (size_t i = 0; i < 11; ++i) {
+                if (i == 1 || i == 4 || i == 7 || i == 10) separator(presets[i], y);
+                else text(presets[i], y, width);
+            }
+            const int saveW = buttonW(presets[11], 154), loadW = buttonW(presets[12], 154);
+            place(presets[11], pad, y, saveW, rowH);
+            if (saveW + gap + loadW > width) {
+                y += rowH + gap; place(presets[12], pad, y, loadW, rowH);
+            } else place(presets[12], pad + saveW + gap, y, loadW, rowH);
+            y += rowH + pad;
+        } else {
+            auto& restore = ctx->restoreControls;
+            text(restore[0], y, width);
+            for (size_t row = 0; row < 4; ++row) {
+                const size_t first = 1 + row * 5;
+                HWND action = restore[first + 2], remove = restore[first + 3];
+                const int actionW = std::max(buttonW(action, 130), buttonW(remove, 130));
+                const bool stacked = width < scale(500);
+                const int descriptionW = stacked ? width : std::max(1, width - actionW - pad);
+                const int top = y;
+                text(restore[first], y, descriptionW);
+                text(restore[first + 1], y, descriptionW);
+                const int actionTop = stacked ? y : top;
+                place(action, pad + width - actionW, actionTop, actionW, rowH);
+                place(remove, pad + width - actionW, actionTop + rowH + gap, actionW, rowH);
+                y = std::max(y, actionTop + rowH * 2 + gap) + gap;
+                if (row < 3) separator(restore[first + 4], y);
+            }
+            text(restore[20], y, width);
+        }
+        HWND close = GetDlgItem(window, kSettingsPresetCloseButton);
+        const int closeW = buttonW(close, 100);
+        place(close, pad + width - closeW, y, closeW, rowH);
+        ctx->contentHeight = y + rowH + pad;
     };
-    const auto place = [&](HWND control, int x, int y, int w, int h) {
-        SetWindowPos(control, nullptr, x, y - ctx->scrollY, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-    };
-    const auto text = [&](HWND control, int& y, int w) {
-        const int h = static_cast<int>(textSize(control, w, false).cy) + scale(2);
-        place(control, pad, y, w, h); y += h + gap;
-    };
-    const auto separator = [&](HWND control, int& y) {
-        place(control, pad, y, width, scale(2)); y += scale(2) + gap;
-    };
-    int y = pad;
-    text(ctx->subtitle, y, width);
-    HWND presetTab = GetDlgItem(window, kWorkspaceToolsPresetTab);
-    HWND restoreTab = GetDlgItem(window, kWorkspaceToolsRestoreTab);
-    const int tabW = std::max(buttonW(presetTab, 160), buttonW(restoreTab, 160));
-    place(presetTab, pad, y, std::min(tabW, (width - gap) / 2), rowH);
-    place(restoreTab, pad + (width + gap) / 2, y, std::min(tabW, (width - gap) / 2), rowH);
-    y += rowH + pad;
-    const int pageTop = y;
-    auto& presets = ctx->presetControls;
-    for (size_t i = 0; i < 11; ++i) {
-        if (i == 1 || i == 4 || i == 7 || i == 10) separator(presets[i], y);
-        else text(presets[i], y, width);
+    measurePage(fullClientWidth);
+    const bool needsScroll = ctx->contentHeight > client.bottom;
+    if (needsScroll) measurePage(fullClientWidth - scrollbarWidth);
+    if (((GetWindowLongPtrW(window, GWL_STYLE) & WS_VSCROLL) != 0) != needsScroll)
+        ShowScrollBar(window, SB_VERT, needsScroll ? TRUE : FALSE);
+    RECT actualClient{};
+    if (GetClientRect(window, &actualClient) && actualClient.right != (needsScroll ? fullClientWidth - scrollbarWidth : fullClientWidth)) {
+        measurePage(static_cast<int>(actualClient.right));
     }
-    const int saveW = buttonW(presets[11], 154), loadW = buttonW(presets[12], 154);
-    place(presets[11], pad, y, saveW, rowH);
-    if (saveW + gap + loadW > width) {
-        y += rowH + gap; place(presets[12], pad, y, loadW, rowH);
-    } else place(presets[12], pad + saveW + gap, y, loadW, rowH);
-    const int presetEnd = y + rowH + pad;
-    y = pageTop;
-    auto& restore = ctx->restoreControls;
-    text(restore[0], y, width);
-    for (size_t row = 0; row < 4; ++row) {
-        const size_t first = 1 + row * 5;
-        HWND action = restore[first + 2], remove = restore[first + 3];
-        const int actionW = std::max(buttonW(action, 130), buttonW(remove, 130));
-        const bool stacked = width < scale(500);
-        const int descriptionW = stacked ? width : std::max(1, width - actionW - pad);
-        const int top = y;
-        text(restore[first], y, descriptionW);
-        text(restore[first + 1], y, descriptionW);
-        const int actionTop = stacked ? y : top;
-        place(action, pad + width - actionW, actionTop, actionW, rowH);
-        place(remove, pad + width - actionW, actionTop + rowH + gap, actionW, rowH);
-        y = std::max(y, actionTop + rowH * 2 + gap) + gap;
-        if (row < 3) separator(restore[first + 4], y);
-    }
-    text(restore[20], y, width);
-    y = std::max(presetEnd, y);
-    HWND close = GetDlgItem(window, kSettingsPresetCloseButton);
-    const int closeW = buttonW(close, 100);
-    place(close, pad + width - closeW, y, closeW, rowH);
-    ctx->contentHeight = y + rowH + pad;
-    const int boundedScroll = std::clamp(ctx->scrollY, 0, std::max(0, ctx->contentHeight - static_cast<int>(client.bottom)));
+    ctx->scrollY = std::clamp(ctx->scrollY, 0, std::max(0, ctx->contentHeight - static_cast<int>(client.bottom)));
     SCROLLINFO scroll{sizeof(scroll), SIF_RANGE | SIF_PAGE | SIF_POS, 0, ctx->contentHeight - 1,
-                      static_cast<UINT>(std::max(0L, client.bottom)), boundedScroll, 0};
+                      static_cast<UINT>(std::max(0L, client.bottom)), ctx->scrollY, 0};
     SetScrollInfo(window, SB_VERT, &scroll, TRUE);
+    const auto showGroup = [](const std::vector<HWND>& controls, bool visible) {
+        for (HWND control : controls) {
+            if (((GetWindowLongPtrW(control, GWL_STYLE) & WS_VISIBLE) != 0) != visible)
+                ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
+        }
+    };
+    showGroup(ctx->presetControls, ctx->page == WorkspaceToolsPage::Presets);
+    showGroup(ctx->restoreControls, ctx->page == WorkspaceToolsPage::Restore);
+    PositionWorkspaceTools(ctx);
     ctx->layingOut = false;
-    if (boundedScroll != ctx->scrollY) { ctx->scrollY = boundedScroll; LayoutWorkspaceTools(ctx); }
 }
 
 static void ShowWorkspaceToolsPage(SettingsPresetDialogCtx* ctx, WorkspaceToolsPage page) {
     if (!ctx) return;
+    if (ctx->page == page && !ctx->placements.empty()) return;
+    ScopedWorkspaceToolsRedraw redraw(ctx->dialog);
     ctx->page = page;
+    ctx->scrollY = 0;
     if (HWND presetsTab = GetDlgItem(ctx->dialog, kWorkspaceToolsPresetTab)) {
         SendMessageW(presetsTab, BM_SETCHECK, page == WorkspaceToolsPage::Presets ? BST_CHECKED : BST_UNCHECKED, 0);
     }
     if (HWND restoreTab = GetDlgItem(ctx->dialog, kWorkspaceToolsRestoreTab)) {
         SendMessageW(restoreTab, BM_SETCHECK, page == WorkspaceToolsPage::Restore ? BST_CHECKED : BST_UNCHECKED, 0);
     }
-    for (HWND control : ctx->presetControls) ShowWindow(control, page == WorkspaceToolsPage::Presets ? SW_SHOW : SW_HIDE);
-    for (HWND control : ctx->restoreControls) ShowWindow(control, page == WorkspaceToolsPage::Restore ? SW_SHOW : SW_HIDE);
     LayoutWorkspaceTools(ctx);
 }
 
@@ -963,6 +1076,8 @@ static LRESULT CALLBACK SettingsPresetDialogProc(HWND hWnd, UINT message, WPARAM
     case WM_MOUSEWHEEL:
     case WM_VSCROLL: {
         if (!ctx) break;
+        RECT client{};
+        if (!GetClientRect(hWnd, &client) || ctx->contentHeight <= client.bottom) return 0;
         SCROLLINFO info{}; info.cbSize = sizeof(info); info.fMask = SIF_ALL;
         GetScrollInfo(hWnd, SB_VERT, &info);
         int position = ctx->scrollY;
@@ -978,8 +1093,7 @@ static LRESULT CALLBACK SettingsPresetDialogProc(HWND hWnd, UINT message, WPARAM
             case SB_BOTTOM: position = info.nMax; break;
             default: break;
         }
-        ctx->scrollY = std::clamp(position, 0, std::max(0, info.nMax + 1 - static_cast<int>(info.nPage)));
-        LayoutWorkspaceTools(ctx); InvalidateRect(hWnd, nullptr, TRUE);
+        ScrollWorkspaceToolsTo(ctx, position);
         return 0;
     }
     case WM_ERASEBKGND: {
@@ -1053,7 +1167,7 @@ static void ShowWorkspaceToolsDialog(HWND owner, WorkspaceToolsPage initialPage)
     ScopedWorkspaceToolsDialogOwner modalOwner(owner);
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
         kSettingsPresetDialogClass, localization::Text(L"settings.workspace_tools.title").c_str(),
-        WS_CAPTION | WS_POPUPWINDOW | WS_THICKFRAME | WS_VSCROLL, CW_USEDEFAULT, CW_USEDEFAULT, width, height,
+        WS_CAPTION | WS_POPUPWINDOW | WS_THICKFRAME | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, width, height,
         owner, nullptr, g_hInst, &ctx);
     if (!dialog) return;
     RECT bounds{}, client{}; GetWindowRect(dialog, &bounds); GetClientRect(dialog, &client);
@@ -1082,8 +1196,7 @@ static void ShowWorkspaceToolsDialog(HWND owner, WorkspaceToolsPage initialPage)
             RECT focused{}, viewport{}; GetWindowRect(focus, &focused); GetClientRect(dialog, &viewport);
             MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&focused), 2);
             if (focused.top < 0 || focused.bottom > viewport.bottom) {
-                ctx.scrollY += focused.top < 0 ? focused.top : focused.bottom - viewport.bottom;
-                LayoutWorkspaceTools(&ctx);
+                ScrollWorkspaceToolsTo(&ctx, ctx.scrollY + (focused.top < 0 ? focused.top : focused.bottom - viewport.bottom));
             }
         }
         previousFocus = focus;
@@ -1211,8 +1324,9 @@ static std::vector<SettingsBundleEntry> CurrentSettingsBundleEntries() {
     std::vector<SettingsBundleEntry> entries = {
         {L"workspace.json", root / L"workspace.json"},
         {L"user_palette.json", settings / L"user_palette.json"},
+        {L"color_stock.json", settings / L"color_stock.json"},
+        {L"palette_presets.json", settings / L"palette_presets.json"},
         {L"tool_shortcuts.json", settings / L"tool_shortcuts.json"},
-        {L"schedule.json", settings / L"schedule.json"},
         {L"theme/theme.json", themes / L"theme.json"},
     };
     std::error_code ec;
@@ -1241,8 +1355,9 @@ static std::filesystem::path SettingsBundleEntryPath(const std::wstring& name) {
     const std::filesystem::path settings = root / L"__pdf_note_workspace__" / L"__settings__";
     if (name == L"workspace.json") return root / L"workspace.json";
     if (name == L"user_palette.json") return settings / L"user_palette.json";
+    if (name == L"color_stock.json") return settings / L"color_stock.json";
+    if (name == L"palette_presets.json") return settings / L"palette_presets.json";
     if (name == L"tool_shortcuts.json") return settings / L"tool_shortcuts.json";
-    if (name == L"schedule.json") return settings / L"schedule.json";
     if (IsThemeBundleEntryName(name)) return root / L"__pdf_note_workspace__" / L"__theme__" / name.substr(6);
     return {};
 }
@@ -1285,33 +1400,6 @@ static bool ParseSettingsJsonLiteral(const std::string& json, size_t* pos, const
     const size_t len = std::char_traits<char>::length(literal);
     if (json.size() - *pos < len || json.compare(*pos, len, literal) != 0) return false;
     *pos += len;
-    return true;
-}
-
-static bool ParseSettingsJsonNumber(const std::string& json, size_t* pos) {
-    if (!pos || *pos >= json.size()) return false;
-    size_t i = *pos;
-    if (json[i] == '-') ++i;
-    if (i >= json.size()) return false;
-    if (json[i] == '0') {
-        ++i;
-    } else if (std::isdigit(static_cast<unsigned char>(json[i]))) {
-        while (i < json.size() && std::isdigit(static_cast<unsigned char>(json[i]))) ++i;
-    } else {
-        return false;
-    }
-    if (i < json.size() && json[i] == '.') {
-        ++i;
-        if (i >= json.size() || !std::isdigit(static_cast<unsigned char>(json[i]))) return false;
-        while (i < json.size() && std::isdigit(static_cast<unsigned char>(json[i]))) ++i;
-    }
-    if (i < json.size() && (json[i] == 'e' || json[i] == 'E')) {
-        ++i;
-        if (i < json.size() && (json[i] == '+' || json[i] == '-')) ++i;
-        if (i >= json.size() || !std::isdigit(static_cast<unsigned char>(json[i]))) return false;
-        while (i < json.size() && std::isdigit(static_cast<unsigned char>(json[i]))) ++i;
-    }
-    *pos = i;
     return true;
 }
 
@@ -1382,7 +1470,7 @@ static bool ParseSettingsJsonValue(const std::string& json, size_t* pos, int dep
     if (ch == 't') return ParseSettingsJsonLiteral(json, pos, "true");
     if (ch == 'f') return ParseSettingsJsonLiteral(json, pos, "false");
     if (ch == 'n') return ParseSettingsJsonLiteral(json, pos, "null");
-    if (ch == '-' || std::isdigit(static_cast<unsigned char>(ch))) return ParseSettingsJsonNumber(json, pos);
+    if (ch == '-' || std::isdigit(static_cast<unsigned char>(ch))) return json_number_token::Skip(json, pos);
     return false;
 }
 
@@ -1470,7 +1558,38 @@ static bool BuildCurrentSettingsBundle(std::string* out, std::wstring* outErr) {
     bool hasWorkspace = false;
     for (const auto& entry : CurrentSettingsBundleEntries()) {
         std::string bytes;
-        if (!ReadBundleBytes(entry.path, &bytes)) continue;
+        const bool read = entry.name == L"palette_presets.json" || entry.name == L"color_stock.json"
+            ? ReadFileBytesNoFollowLimitedWin32(entry.path, palette_presets::kMaxBytes, bytes)
+            : ReadBundleBytes(entry.path, &bytes);
+        if (!read) {
+            if (entry.name == L"color_stock.json" || entry.name == L"palette_presets.json") {
+                DWORD attrs = 0;
+                const bool exists = TryGetPathAttributesWin32(entry.path, &attrs);
+                const DWORD error = exists ? ERROR_SUCCESS : GetLastError();
+                if (exists || (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)) {
+                    if (outErr) *outErr = entry.name + L" could not be read; the preset was not exported";
+                    out->clear();
+                    return false;
+                }
+            }
+            continue;
+        }
+        if (entry.name == L"color_stock.json") {
+            std::vector<COLORREF> colors;
+            if (!palette_stock::Parse(bytes, colors)) {
+                if (outErr) *outErr = L"color_stock.json is invalid; the preset was not exported";
+                out->clear();
+                return false;
+            }
+        }
+        if (entry.name == L"palette_presets.json") {
+            palette_presets::Document doc;
+            if (!palette_presets::Parse(bytes, doc)) {
+                if (outErr) *outErr = L"palette_presets.json is invalid; the preset was not exported";
+                out->clear();
+                return false;
+            }
+        }
         if (entry.name == L"workspace.json") hasWorkspace = true;
         *out += WideToUTF8(entry.name) + "\t" + std::to_string(bytes.size()) + "\n" + bytes + "\n";
     }
@@ -1632,6 +1751,20 @@ static bool ValidateSettingsBundleForImport(const std::map<std::wstring, std::st
             if (outErr) *outErr = kv.first + L" is not valid JSON";
             return false;
         }
+        if (kv.first == L"color_stock.json") {
+            std::vector<COLORREF> colors;
+            if (!palette_stock::Parse(kv.second, colors)) {
+                if (outErr) *outErr = L"color_stock.json is not a supported color stock";
+                return false;
+            }
+        }
+        if (kv.first == L"palette_presets.json") {
+            palette_presets::Document doc;
+            if (!palette_presets::Parse(kv.second, doc)) {
+                if (outErr) *outErr = L"palette_presets.json is not a supported palette preset collection";
+                return false;
+            }
+        }
     }
     const auto rawClassesDir = ExtractSettingsJsonStringField(ws->second, "classesDir");
     const auto rawCacheDir = ExtractSettingsJsonStringField(ws->second, "cacheDir");
@@ -1647,30 +1780,52 @@ static bool ValidateSettingsBundleForImport(const std::map<std::wstring, std::st
     return true;
 }
 
-static std::vector<SettingsFileSnapshot> CaptureSettingsFileSnapshot(const std::map<std::wstring, std::string>& incoming) {
+// Capture is read-only and publishes only a complete snapshot. Only confirmed
+// absence may become nullopt (and hence removal during rollback); any unreadable
+// existing file stops the import before backup/apply/rollback can run.
+[[nodiscard]] static bool CaptureSettingsFileSnapshot(const std::map<std::wstring, std::string>& incoming,
+                                                       std::vector<SettingsFileSnapshot>* out,
+                                                       std::wstring* outErr) {
+    if (!out) return false;
+    constexpr std::uint64_t kMaxSnapshotFileBytes = 512 * 1024; // Same per-file bound as settings bundles.
     std::vector<SettingsFileSnapshot> snapshot;
+    const auto capture = [&](const std::wstring& name, const std::filesystem::path& path) {
+        if (path.empty()) {
+            if (outErr) *outErr = L"could not resolve existing settings file: " + name;
+            return false;
+        }
+        SettingsFileSnapshot s{name, path, std::nullopt};
+        DWORD attrs = 0;
+        if (!TryGetPathAttributesWin32(path, &attrs)) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+                if (outErr) *outErr = L"could not inspect existing settings file: " + name;
+                return false;
+            }
+        } else {
+            std::string bytes;
+            if ((attrs & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+                !ReadFileBytesNoFollowLimitedWin32(path, kMaxSnapshotFileBytes, bytes)) {
+                if (outErr) *outErr = L"could not capture existing settings file: " + name;
+                return false;
+            }
+            s.bytes = std::move(bytes); // Empty files are present, not missing.
+        }
+        snapshot.push_back(std::move(s));
+        return true;
+    };
     std::set<std::wstring> seen;
     for (const auto& entry : CurrentSettingsBundleEntries()) {
-        SettingsFileSnapshot s;
-        s.name = entry.name;
-        s.path = entry.path;
-        std::string bytes;
-        if (ReadBundleBytes(entry.path, &bytes)) s.bytes = std::move(bytes);
-        snapshot.push_back(std::move(s));
+        if (!capture(entry.name, entry.path)) return false;
         seen.insert(entry.name);
     }
     for (const auto& kv : incoming) {
         if (!seen.insert(kv.first).second) continue;
         const std::filesystem::path path = SettingsBundleEntryPath(kv.first);
-        if (path.empty()) continue;
-        SettingsFileSnapshot s;
-        s.name = kv.first;
-        s.path = path;
-        std::string bytes;
-        if (ReadBundleBytes(path, &bytes)) s.bytes = std::move(bytes);
-        snapshot.push_back(std::move(s));
+        if (!capture(kv.first, path)) return false;
     }
-    return snapshot;
+    *out = std::move(snapshot);
+    return true;
 }
 
 static std::filesystem::path CreateSettingsImportBackupDir(const std::vector<SettingsFileSnapshot>& snapshot,
@@ -1685,15 +1840,21 @@ static std::filesystem::path CreateSettingsImportBackupDir(const std::vector<Set
         return {};
     }
     std::filesystem::path backupDir;
+    bool created = false;
     for (int attempt = 0; attempt < 100; ++attempt) {
         backupDir = escapeRoot / (L"settings_import_" +
             std::to_wstring(static_cast<unsigned long long>(GetTickCount64())) +
             L"_" + std::to_wstring(attempt));
-        std::filesystem::create_directory(backupDir, ec);
-        if (!ec) break;
+        // Existing directories return false without an error. Never reuse them
+        // or overwrite a previous import's recovery files on a tick collision.
+        if (std::filesystem::create_directory(backupDir, ec)) { created = true; break; }
+        if (ec && ec != std::errc::file_exists) {
+            if (outErr) *outErr = L"could not create settings import backup directory";
+            return {};
+        }
         ec.clear();
     }
-    if (backupDir.empty() || !std::filesystem::is_directory(backupDir, ec) || ec) {
+    if (!created || backupDir.empty() || !std::filesystem::is_directory(backupDir, ec) || ec) {
         if (outErr) *outErr = L"could not create settings import backup directory";
         return {};
     }
@@ -1749,6 +1910,12 @@ static bool RestoreSettingsFileSnapshot(const std::vector<SettingsFileSnapshot>&
 } // namespace
 
 bool ExportSettingsPresetToFile(const std::filesystem::path& outputPath, std::wstring* outErr) {
+    // Coordinate palette collections with their explicit dialog writes; never wait in the UI thread.
+    palette_stock::WriteLock paletteLock{std::filesystem::path(g_workspaceRoot)};
+    if (!paletteLock.held()) {
+        if (outErr) *outErr = L"workspace palette settings are busy; retry the export";
+        return false;
+    }
     std::string bundle;
     if (!BuildCurrentSettingsBundle(&bundle, outErr)) return false;
     return WriteAtomicSettingsBytes(outputPath, bundle, outErr);
@@ -1771,7 +1938,14 @@ bool ImportSettingsPresetFromFile(const std::filesystem::path& inputPath, std::w
     bool canUseRawWorkspaceJson = false;
     if (!ValidateSettingsBundleForImport(entries, &imported, &canUseRawWorkspaceJson, outErr)) return false;
 
-    const auto snapshot = CaptureSettingsFileSnapshot(entries);
+    palette_stock::WriteLock paletteLock{std::filesystem::path(g_workspaceRoot)};
+    if (!paletteLock.held()) {
+        if (outErr) *outErr = L"workspace palette settings are busy; retry the import";
+        return false;
+    }
+
+    std::vector<SettingsFileSnapshot> snapshot;
+    if (!CaptureSettingsFileSnapshot(entries, &snapshot, outErr)) return false;
     const std::filesystem::path backupDir = CreateSettingsImportBackupDir(snapshot, outErr);
     if (backupDir.empty()) return false;
     if (outRecoveryBackup) *outRecoveryBackup = backupDir;
@@ -1786,6 +1960,9 @@ bool ImportSettingsPresetFromFile(const std::filesystem::path& inputPath, std::w
             // different preset does not reference it would lose user data.
             if (name == L"workspace.json" || IsThemeBundleEntryName(name)) continue;
             const auto importedEntry = entries.find(name);
+            // Older workspace presets predate this collection. Absence is not an
+            // instruction to erase five user sets; an explicit empty document clears them.
+            if (name == L"palette_presets.json" && importedEntry == entries.end()) continue;
             fault_injection::MaybeThrow(L"settings_import_before_aux_write");
             if (importedEntry == entries.end()) {
                 std::error_code ec;
@@ -1799,6 +1976,7 @@ bool ImportSettingsPresetFromFile(const std::filesystem::path& inputPath, std::w
                 break;
             }
             ++auxWrites;
+            if (name == L"palette_presets.json") fault_injection::MaybeThrow(L"settings_import_after_palette_presets_write");
             if (auxWrites == 1) fault_injection::MaybeThrow(L"settings_import_after_first_aux_write");
         }
         if (applyErr.empty()) {
@@ -1994,8 +2172,9 @@ void ShowRecoveryDialog(HWND hWnd) {
         }
         std::wstring destKey = NormalizePathKey(restoredDest.wstring());
         if (!g_currentNotePath.empty() && destKey == NormalizePathKey(g_currentNotePath)) {
-            LoadNoteFile(hWnd, restoredDest.wstring());
-            SyncBottomPaneAfterNoteLoad(hWnd);
+            if (LoadNoteFile(hWnd, restoredDest.wstring())) {
+                SyncBottomPaneAfterNoteLoad(hWnd);
+            }
         } else if (g_pdf.kind == DocKind::Pdf && !CurrentLogicalPdfPath().empty()) {
             std::wstring curClropKey = NormalizePathKey(clrop_bridge::ClropPathForPdf(CurrentLogicalPdfPath()));
             if (destKey == curClropKey) {
@@ -2046,8 +2225,9 @@ void ShowRestoreBackupListDialogAndExecute(HWND hWnd) {
             }
             std::wstring destKey = NormalizePathKey(restoredDest.wstring());
             if (!g_currentNotePath.empty() && destKey == NormalizePathKey(g_currentNotePath)) {
-                LoadNoteFile(hWnd, restoredDest.wstring());
-                SyncBottomPaneAfterNoteLoad(hWnd);
+                if (LoadNoteFile(hWnd, restoredDest.wstring())) {
+                    SyncBottomPaneAfterNoteLoad(hWnd);
+                }
             } else if (g_pdf.kind == DocKind::Pdf && !CurrentLogicalPdfPath().empty()) {
                 std::wstring curClropKey = NormalizePathKey(clrop_bridge::ClropPathForPdf(CurrentLogicalPdfPath()));
                 if (destKey == curClropKey) {

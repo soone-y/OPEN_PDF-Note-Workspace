@@ -4,6 +4,6 @@
 
 namespace note {
 
-NoteDocument ParseNoteDocumentWithMd4c(const NoteTextModel& model);
+NoteDocument ParseNoteDocumentWithMd4c(const NoteTextModel& model, bool permissiveHeadings = false);
 
 } // namespace note

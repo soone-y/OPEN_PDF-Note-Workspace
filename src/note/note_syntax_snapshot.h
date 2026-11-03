@@ -21,6 +21,7 @@ enum class NoteSyntaxSnapshotBuildResult {
     Built,
     InvalidOutput,
     InvalidSource,
+    ParseFailure,
     InconsistentSourceCoordinates,
     AllocationFailure,
 };
@@ -83,6 +84,9 @@ public:
     [[nodiscard]] bool has_structured_syntax() const noexcept {
         return has_structured_syntax_;
     }
+    [[nodiscard]] bool uses_clro_fullwidth_markdown() const noexcept {
+        return uses_clro_fullwidth_markdown_;
+    }
     [[nodiscard]] NoteContentKind content_kind() const noexcept {
         return content_kind_;
     }
@@ -130,6 +134,7 @@ private:
     NoteSourceLineMap::Snapshot source_line_map_{};
     std::shared_ptr<const NoteSyntaxDocument> syntax_document_;
     bool has_structured_syntax_ = false;
+    bool uses_clro_fullwidth_markdown_ = false;
     bool valid_ = false;
 };
 

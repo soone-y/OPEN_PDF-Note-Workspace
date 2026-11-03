@@ -27,7 +27,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path);
 bool AddMathAnnotationFromTextAtPoint(HWND pdfWnd, const std::wstring& rawText, MathKind kind, const POINT& screenPt);
 bool AddMathAnnotationFromText(HWND pdfWnd, const std::wstring& rawText, MathKind kind);
 
-void LoadNoteFile(HWND hWnd, const std::wstring& path);
+bool LoadNoteFile(HWND hWnd, const std::wstring& path);
 void ClearNoteEditorSilently(HWND hWnd, const std::wstring& nextNotePath = L"");
 void RefreshCurrentNoteBottomPane(bool synchronousPaint = true);
 [[nodiscard]] bool ShouldShowBottomNotePane();
@@ -40,9 +40,6 @@ void SetCurrentNoteSearchMarker(size_t start, size_t end);
 [[nodiscard]] bool SelectCurrentNoteLine(int oneBasedLine);
 void RefreshCurrentNoteFileSnapshot();
 void RefreshCurrentNotePersistenceIdentity(const std::wstring& path);
-bool CaptureCurrentNoteTextCoreUtf8(const std::wstring& expectedPath,
-                                    std::string* outBytes,
-                                    note::SnapshotIdentity* outIdentity = nullptr);
 bool CaptureCurrentNoteTextCoreForStorage(const std::wstring& expectedPath,
                                           std::string* outBytes,
                                           note::SnapshotIdentity* outIdentity = nullptr,
@@ -58,6 +55,10 @@ std::optional<NoteEditorPersistenceState> CaptureCurrentNoteEditorPersistenceSta
 void MarkCurrentNoteEditorPersisted(const std::wstring& expectedPath);
 void ClearCurrentNoteUndoHistory();
 [[nodiscard]] bool SynchronizeActiveNoteEditorToKernel(HWND owner);
+// UI-thread boundary before the first draft mutation/save. On success path,
+// view and kernel share the durable owner; text, selection and history remain.
+[[nodiscard]] bool BindDeferredNoteEditorToPath(const std::wstring& path,
+                                               std::wstring* outError);
 [[nodiscard]] bool CommitActiveNoteEditBoundary(HWND owner);
 bool CanExecuteNoteUndoRedoFromFocus(bool undo);
 bool CheckCurrentNoteFileExternalChange(HWND owner);

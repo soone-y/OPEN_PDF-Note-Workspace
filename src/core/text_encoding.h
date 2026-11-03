@@ -21,6 +21,41 @@ enum class Encoding {
     Cp932,
 };
 
+enum class ErrorCode {
+    None,
+    InvalidUtf16Le,
+    InvalidUtf16Be,
+    TextTooLarge,
+    UnrecognizedEncoding,
+    Cp932DecodeFailed,
+    InvalidUtf16Input,
+    Cp932Unrepresentable,
+    Utf8EncodeFailed,
+    EncodeFailed,
+};
+
+inline const wchar_t* ErrorTextId(ErrorCode code) {
+    switch (code) {
+    case ErrorCode::InvalidUtf16Le: return L"text_encoding.invalid_utf16_le";
+    case ErrorCode::InvalidUtf16Be: return L"text_encoding.invalid_utf16_be";
+    case ErrorCode::TextTooLarge: return L"text_encoding.text_too_large";
+    case ErrorCode::UnrecognizedEncoding: return L"text_encoding.unrecognized";
+    case ErrorCode::Cp932DecodeFailed: return L"text_encoding.cp932_decode_failed";
+    case ErrorCode::InvalidUtf16Input: return L"text_encoding.invalid_utf16_input";
+    case ErrorCode::Cp932Unrepresentable: return L"text_encoding.cp932_unrepresentable";
+    case ErrorCode::Utf8EncodeFailed: return L"text_encoding.utf8_encode_failed";
+    case ErrorCode::EncodeFailed: return L"text_encoding.encode_failed";
+    case ErrorCode::None: return L"text_encoding.unrecognized";
+    }
+    return L"text_encoding.unrecognized";
+}
+
+inline void SetError(std::wstring* error, ErrorCode* code, ErrorCode value,
+                     const wchar_t* diagnostic) {
+    if (error) *error = diagnostic;
+    if (code) *code = value;
+}
+
 struct DecodedText {
     std::wstring text;
     Encoding encoding = Encoding::Utf8;
@@ -79,15 +114,17 @@ inline bool DecodeUtf16(std::string_view bytes, bool littleEndian, std::wstring*
     return IsWellFormedUtf16(*out);
 }
 
-inline bool DecodeExternalText(std::string_view bytes, DecodedText* out, std::wstring* error = nullptr) {
+inline bool DecodeExternalText(std::string_view bytes, DecodedText* out, std::wstring* error = nullptr,
+                               ErrorCode* code = nullptr) {
     if (out) *out = {};
     if (error) error->clear();
+    if (code) *code = ErrorCode::None;
     if (!out) return false;
 
     if (bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFF &&
         static_cast<unsigned char>(bytes[1]) == 0xFE) {
         if (!DecodeUtf16(bytes.substr(2), true, &out->text)) {
-            if (error) *error = L"UTF-16 LE の本文が不正です。";
+            SetError(error, code, ErrorCode::InvalidUtf16Le, L"UTF-16 LE の本文が不正です。");
             return false;
         }
         out->encoding = Encoding::Utf16Le;
@@ -96,7 +133,7 @@ inline bool DecodeExternalText(std::string_view bytes, DecodedText* out, std::ws
     if (bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFE &&
         static_cast<unsigned char>(bytes[1]) == 0xFF) {
         if (!DecodeUtf16(bytes.substr(2), false, &out->text)) {
-            if (error) *error = L"UTF-16 BE の本文が不正です。";
+            SetError(error, code, ErrorCode::InvalidUtf16Be, L"UTF-16 BE の本文が不正です。");
             return false;
         }
         out->encoding = Encoding::Utf16Be;
@@ -114,19 +151,19 @@ inline bool DecodeExternalText(std::string_view bytes, DecodedText* out, std::ws
     }
 
     if (bytes.size() > static_cast<size_t>(INT_MAX)) {
-        if (error) *error = L"テキストが大きすぎます。";
+        SetError(error, code, ErrorCode::TextTooLarge, L"テキストが大きすぎます。");
         return false;
     }
     const int required = MultiByteToWideChar(932, 0, bytes.data(),
                                              static_cast<int>(bytes.size()), nullptr, 0);
     if (required <= 0) {
-        if (error) *error = L"UTF-8 または CP932 として解釈できません。";
+        SetError(error, code, ErrorCode::UnrecognizedEncoding, L"UTF-8 または CP932 として解釈できません。");
         return false;
     }
     out->text.assign(static_cast<size_t>(required), L'\0');
     if (MultiByteToWideChar(932, 0, bytes.data(), static_cast<int>(bytes.size()),
                             out->text.data(), required) != required) {
-        if (error) *error = L"CP932 の変換に失敗しました。";
+        SetError(error, code, ErrorCode::Cp932DecodeFailed, L"CP932 の変換に失敗しました。");
         return false;
     }
     out->encoding = Encoding::Cp932;
@@ -134,11 +171,13 @@ inline bool DecodeExternalText(std::string_view bytes, DecodedText* out, std::ws
 }
 
 inline bool EncodeText(std::wstring_view text, Encoding encoding,
-                       std::string* out, std::wstring* error = nullptr) {
+                       std::string* out, std::wstring* error = nullptr,
+                       ErrorCode* code = nullptr) {
     if (out) out->clear();
     if (error) error->clear();
+    if (code) *code = ErrorCode::None;
     if (!out || !IsWellFormedUtf16(text) || text.size() > static_cast<size_t>(INT_MAX)) {
-        if (error) *error = L"本文に不正な UTF-16 文字があります。";
+        SetError(error, code, ErrorCode::InvalidUtf16Input, L"本文に不正な UTF-16 文字があります。");
         return false;
     }
     if (encoding == Encoding::Utf16Le || encoding == Encoding::Utf16Be) {
@@ -155,6 +194,12 @@ inline bool EncodeText(std::wstring_view text, Encoding encoding,
         }
         return true;
     }
+    // WideCharToMultiByte rejects a zero-length input. An empty note is valid,
+    // including when prepared for stage/recovery during a protected exit.
+    if (text.empty()) {
+        if (encoding == Encoding::Utf8Bom) out->assign("\xEF\xBB\xBF");
+        return true;
+    }
     const UINT codePage = encoding == Encoding::Cp932 ? 932 : CP_UTF8;
     const DWORD flags = encoding == Encoding::Cp932 ? WC_NO_BEST_FIT_CHARS : WC_ERR_INVALID_CHARS;
     BOOL usedDefault = FALSE;
@@ -164,9 +209,12 @@ inline bool EncodeText(std::wstring_view text, Encoding encoding,
                                              encoding == Encoding::Cp932 ? &defaultChar : nullptr,
                                              encoding == Encoding::Cp932 ? &usedDefault : nullptr);
     if (required <= 0 || usedDefault) {
-        if (error) *error = encoding == Encoding::Cp932
-            ? L"CP932 で表現できない文字が含まれています。UTF-8 への明示的な変換が必要です。"
-            : L"UTF-8 への変換に失敗しました。";
+        if (encoding == Encoding::Cp932) {
+            SetError(error, code, ErrorCode::Cp932Unrepresentable,
+                     L"CP932 で表現できない文字が含まれています。UTF-8 への明示的な変換が必要です。");
+        } else {
+            SetError(error, code, ErrorCode::Utf8EncodeFailed, L"UTF-8 への変換に失敗しました。");
+        }
         return false;
     }
     out->assign(encoding == Encoding::Utf8Bom ? "\xEF\xBB\xBF" : "");
@@ -177,7 +225,7 @@ inline bool EncodeText(std::wstring_view text, Encoding encoding,
                             encoding == Encoding::Cp932 ? &defaultChar : nullptr,
                             encoding == Encoding::Cp932 ? &usedDefault : nullptr) != required || usedDefault) {
         out->clear();
-        if (error) *error = L"文字コード変換に失敗しました。";
+        SetError(error, code, ErrorCode::EncodeFailed, L"文字コード変換に失敗しました。");
         return false;
     }
     return true;

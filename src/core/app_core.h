@@ -120,7 +120,7 @@ enum class AnnotToolUiState { Enabled, Disabled, Hidden };
 enum class AnnotToolShortcutTargetKind { Category, Detail };
 enum class AnnotToolGeometry { None, Shape, Line, Wave, Arrow };
 enum class AnnotToolPresentation { None, Stroke, Emphasis };
-enum class ShapeDetail { Line, Arrow, Wave, Rectangle, Ellipse, Triangle, Diamond };
+enum class ShapeDetail { Line, Arrow, Wave, Rectangle, Ellipse, Triangle, Diamond, Arc };
 struct ShapeToolSelection {
     AnnotToolPresentation presentation = AnnotToolPresentation::Stroke;
     AnnotToolGeometry geometry = AnnotToolGeometry::Line;
@@ -170,12 +170,11 @@ const char* ShapeToolPresentationKey(AnnotToolPresentation presentation);
 bool ShapeToolPresentationFromKey(const std::string& key, AnnotToolPresentation& out);
 const char* ShapeToolGeometryKey(AnnotToolGeometry geometry);
 bool ShapeToolGeometryFromKey(const std::string& key, AnnotToolGeometry& out);
-std::vector<AnnotToolGeometry> OrderedShapeToolGeometries();
 const char* ShapeDetailKey(ShapeDetail detail);
 bool ShapeDetailFromKey(const std::string& key, ShapeDetail& out);
 std::vector<ShapeDetail> OrderedShapeDetails();
 bool ShapeDetailIsLinear(ShapeDetail detail);
-bool ShapeDetailIsClosed(ShapeDetail detail);
+bool ShapeDetailUsesBox(ShapeDetail detail);
 ToolMode ToolModeForShapeDetail(ShapeDetail detail);
 ShapeKind ShapeKindForShapeDetail(ShapeDetail detail);
 ShapeDetail ShapeDetailForLegacyState(ToolMode mode, ShapeKind kind);
@@ -191,6 +190,8 @@ const char* AnnotToolModeKey(ToolMode mode);
 bool AnnotToolModeFromKey(const std::string& key, ToolMode& out);
 bool ParseAnnotToolShortcutKeyForUser(const std::wstring& text, AnnotToolShortcutBinding& out);
 bool IsFixedAnnotToolNavigationShortcut(const AnnotToolShortcutBinding& binding);
+[[nodiscard]] bool IsReservedAnnotToolShortcut(const AnnotToolShortcutBinding& binding);
+[[nodiscard]] std::vector<AnnotToolShortcutBinding> DefaultAnnotToolShortcuts();
 AnnotToolFamily AnnotToolFamilyForMode(ToolMode mode);
 HWND AnnotToolFamilyButtonHwnd(AnnotToolFamily family);
 int AnnotToolFamilyCommand(AnnotToolFamily family);
@@ -204,7 +205,6 @@ void ApplyAnnotToolModeUiConfig(const std::vector<ToolMode>& order,
                                 bool persistSetupJson);
 void LoadAnnotToolUiConfigFromSetupJson(const std::string& setupJson);
 bool PersistAnnotToolUiConfigToSetupJson();
-HWND ToolModeButtonHwnd(ToolMode mode);
 void RecordRecentMouseMove(HWND host, const POINT* clientPt);
 bool HandleQuickAnnotRightButtonDown(HWND host, const POINT* clientPt, bool allowWithoutCtrl = false);
 bool HandleQuickAnnotContextMenu(HWND host, const POINT* screenPt, bool allowWithoutCtrl);
@@ -247,12 +247,17 @@ inline bool ToolbarHasMarkerAlphaOptions(ToolMode mode) {
         return false;
     }
 }
-inline int ToolAlphaOptionCountForMode(ToolMode mode) {
-    if (!ToolbarHasMarkerAlphaOptions(mode)) return 0;
-    return mode == ToolMode::Shape ? 4 : 3;
+inline bool ToolbarHasBlendModeOptions(ToolMode mode,ShapeKind kind=ShapeKind::Rectangle) {
+    return (mode == ToolMode::Shape && !ShapeKindIsOpen(kind)) || mode == ToolMode::MarkerText ||
+           mode == ToolMode::MarkerTextUnderline || mode == ToolMode::MarkerFree;
 }
-inline double ToolAlphaOptionValueForMode(ToolMode mode, int index) {
+inline int ToolAlphaOptionCountForMode(ToolMode mode,ShapeKind kind=ShapeKind::Rectangle) {
+    if (!ToolbarHasMarkerAlphaOptions(mode)) return 0;
+    return mode == ToolMode::Shape && !ShapeKindIsOpen(kind) ? 4 : 3;
+}
+inline double ToolAlphaOptionValueForMode(ToolMode mode, int index,ShapeKind kind=ShapeKind::Rectangle) {
     if (index < 0) return 0.0;
+    if(mode==ToolMode::Shape && ShapeKindIsOpen(kind))mode=ToolMode::Line;
     if (AnnotToolUsesGeometry(mode, AnnotToolGeometry::Line) ||
         AnnotToolUsesGeometry(mode, AnnotToolGeometry::Arrow) ||
         AnnotToolUsesGeometry(mode, AnnotToolGeometry::Wave) ||
@@ -291,11 +296,12 @@ inline bool ToolbarHasShapeOptions(ToolMode mode) {
     (void)mode;
     return false;
 }
-inline bool ToolbarHasShapeDrawModeOptions(ToolMode mode) {
-    return mode == ToolMode::Shape;
+inline bool ToolbarHasShapeDrawModeOptions(ToolMode mode,ShapeKind kind = ShapeKind::Rectangle) {
+    return mode == ToolMode::Shape && !ShapeKindIsOpen(kind);
 }
-inline bool ToolbarHasLineDashOptions(ToolMode mode) {
-    return mode == ToolMode::MarkerLine ||
+inline bool ToolbarHasLineDashOptions(ToolMode mode,ShapeKind = ShapeKind::Rectangle) {
+    return mode == ToolMode::Shape ||
+           mode == ToolMode::MarkerLine ||
            mode == ToolMode::MarkerArrow ||
            mode == ToolMode::Line ||
            mode == ToolMode::Arrow ||
@@ -541,6 +547,8 @@ extern HWND g_hComboMarkerAlpha;
 extern HWND g_hComboAnnotMethod;
 extern HWND g_hComboFreehandCorrection;
 extern HWND g_hComboMarkerTextStyle;
+extern HWND g_hRadioBlendNormal;
+extern HWND g_hRadioBlendMultiply;
 extern HWND g_hComboLineDashStyle;
 extern HWND g_hComboShapeKind;
 extern HWND g_hComboShapeGeometry;
@@ -587,6 +595,7 @@ extern HWND g_hShortcutFontSizeLabel;
 extern HWND g_hShortcutFontSizeEdit;
 extern HWND g_hShortcutTagEdit;
 extern HWND g_hBtnShortcutInput;
+extern HWND g_hBtnNoteWritingGuide;
 extern HWND g_hBtnShortcutPdfLink;
 extern HWND g_hBtnNoteAssistBullet;
 extern HWND g_hBtnNoteAssistQuote;
@@ -621,14 +630,12 @@ extern bool g_annotsNeedsIntegrate;
 extern bool g_annotsRequireStrongValidation;
 extern bool g_annotsLoadedPdfIdValid;
 extern clrop::PdfId g_annotsLoadedPdfId;
-extern std::vector<MathEntry> g_mathEntries;
 extern std::vector<HighlightRange> g_highlightRanges;
 extern COLORREF g_highlightMarkColor;
 extern COLORREF g_highlightHeadingColor;
 extern int g_markFontPx;
 extern int g_headingFontPx;
 
-void SetHighlightColors(COLORREF mark, COLORREF heading);
 
 // bottom-right status assist
 extern std::wstring g_previewNote;
@@ -770,7 +777,6 @@ inline bool IsDefaultCacheDir(const std::wstring& cacheDir) {
 
 void SetUIFont(HWND hWnd);
 HFONT CreateUIFont();
-HFONT CreateUIFontVariant(double pt);
 HFONT CreateFontFromFaceName(const std::wstring& faceName, double pt);
 std::wstring GetDefaultFontFaceName();
 bool IsJapaneseRenderCharForNoteFont(wchar_t ch);
@@ -787,10 +793,10 @@ bool ResolveAnnotToolShortcut(const MSG& msg, AnnotToolShortcutBinding* outBindi
 bool ReplaceAnnotToolShortcutBindings(const std::vector<AnnotToolShortcutBinding>& bindings);
 void SyncUserToolShortcutsToRuntime();
 bool LoadThemeConfig(const std::wstring& root);
-bool PersistThemeSelection(const std::wstring& name);
 bool ApplyThemeByName(const std::wstring& name, HWND owner, bool persist);
 bool ApplyThemeByNameForSettingsBatch(const std::wstring& name, HWND owner, bool persist);
 void ApplyThemeToUI(HWND owner);
+void ApplyThemeToButtons(HWND root);
 bool DrawThemeButton(const DRAWITEMSTRUCT* dis);
 LRESULT ThemeCtlColorPanel(HWND ctl, HDC hdc);
 void ApplyThemeToDialog(HWND hWnd);
@@ -841,17 +847,6 @@ std::optional<int> ParseRomanNumber(const std::wstring& s);
 std::optional<int> ParseKanjiNumber(const std::wstring& s);
 std::optional<int> ExtractNumericKey(const std::wstring& name);
 
-template <typename Vec, typename Getter>
-void SortByNumericThenName(Vec& vec, Getter getter) {
-    std::sort(vec.begin(), vec.end(), [&](const auto& a, const auto& b) {
-        auto na = ExtractNumericKey(getter(a));
-        auto nb = ExtractNumericKey(getter(b));
-        if (na && nb && na.value() != nb.value()) return na.value() < nb.value();
-        if (na && !nb) return true;
-        if (!na && nb) return false;
-        return getter(a) < getter(b);
-    });
-}
 
 void SetListWide(HWND hList);
 bool IsPdfFile(const std::filesystem::path& p);
@@ -866,7 +861,6 @@ bool LaunchReadOnlyViewerForPdfAt(HWND owner,
                                   bool hasY);
 bool LaunchReadOnlyViewerForFile(HWND owner, const std::wstring& filePath);
 void SyncLeftPaneSelection();
-void RefreshLeftPaneOpenState();
 void BeginDeferredLeftPaneSelection();
 void FlushDeferredLeftPaneSelection();
 void EndDeferredLeftPaneSelection();
@@ -880,7 +874,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
 void PersistConfig();
 // Explicit settings saves must not report success or close the editor on failure.
 [[nodiscard]] bool TryPersistConfig();
-void SyncToolbarFontSizeCombo();
+void SyncToolbarFontSizeCombo(bool activeSizeOnly = false);
 std::filesystem::path WorkspaceClassesPath(const std::wstring& root, const WorkspaceConfig& cfg);
 std::filesystem::path WorkspaceCachePath(const std::wstring& root, const WorkspaceConfig& cfg);
 const UiText& GetUiText();
@@ -893,8 +887,10 @@ std::optional<std::wstring> ConsumePendingSetupJsonExistenceCheckPath();
 bool VerifySetupJsonStillExistsReadable(const std::filesystem::path& setupPath, std::wstring* outErr = nullptr);
 void UpdateSetupJsonWorkspaceRoot(const std::wstring& newRoot);
 std::vector<std::wstring> LoadSetupTempExternalLectureDirs();
+[[nodiscard]] std::map<std::wstring, int> LoadSetupTempExternalLecturePriorities();
 bool PersistSetupTempExternalLectureDirs(const std::vector<std::wstring>& dirs,
-                                         std::wstring* outError = nullptr);
+                                         std::wstring* outError = nullptr,
+                                         const std::map<std::wstring, int>* priorities = nullptr);
 void CheckAndPromptClassdirMismatch(HWND hWnd, const std::wstring& workspaceRoot);
 
 // ---------------------------------------------------------------------

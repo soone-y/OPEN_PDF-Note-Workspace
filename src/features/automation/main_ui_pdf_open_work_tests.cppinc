@@ -1,0 +1,293 @@
+static bool RunUiAutomationPairedAutoOpenScenario(HWND owner, const std::filesystem::path& directory,
+                                                 std::wstring* outError) {
+    const std::wstring previousPdf = CurrentLogicalPdfPath();
+    const std::wstring previousNote = g_currentNotePath;
+    const std::wstring previousText = GetNoteAutomationIndexingText();
+    const SessionEntry previousSession{L"open_work_restore", g_currentSessionPath};
+    const std::wstring previousMode = g_config.sessionAutoOpenMode;
+    const BottomPanePin previousPin = g_bottomPanePin;
+    const auto notePath = directory / L"paired.md";
+    std::string noteBytes = "# Paired open\n\n";
+    for (int line = 0; line < 512; ++line)
+        noteBytes += "Paragraph " + std::to_string(line) +
+            " with **emphasis**, `code` and a [link](#anchor).\n\n";
+    const std::wstring expectedNote = UTF8ToWide(noteBytes);
+    std::wstring error;
+    std::error_code ec;
+    if (std::filesystem::exists(notePath, ec) || ec ||
+        !atomic_write::AtomicWriteUtf8(notePath, noteBytes, directory, &error)) {
+        if (outError) *outError = L"Cannot create a new paired open fixture.";
+        return false;
+    }
+    const auto run = [&]() {
+        std::wstring pdf, note;
+        LoadFiles({L"open_work_pair", directory.wstring()}, pdf, note);
+        if (g_pdfFiles.size() != 1 || g_noteFiles.size() != 1) return false;
+        g_config.sessionAutoOpenMode = L"off";
+        {
+            open_work::Observation observation;
+            AutoOpenSingleSessionFiles(owner);
+            if (CurrentLogicalPdfPath() != previousPdf || g_currentNotePath != previousNote ||
+                open_work::Get(observation.Read(), open_work::Kind::PdfViewportCacheUpdate) != 0)
+                return false;
+        }
+        // Fail the real PDF open while keeping the note eligible. The existing
+        // timer closes only this process's expected error dialog; no nested
+        // custom message pump or second application instance is introduced.
+        g_config.sessionAutoOpenMode = L"view";
+        if (!SetFaultInjectionPointForAutomation(L"OpenPdfWithAnnotations:start")) return false;
+        if (!BeginOwnedDialogPresenceAutomation(owner, L"SilentDialogClass", outError)) {
+            ClearFaultInjectionPointForAutomation();
+            return false;
+        }
+        AutoOpenSingleSessionFiles(owner);
+        ClearFaultInjectionPointForAutomation();
+        const bool closed = EndOwnedDialogPresenceAutomation(owner, L"paired PDF open failure", outError);
+        if (!closed || CurrentLogicalPdfPath() != previousPdf ||
+            std::filesystem::path(g_currentNotePath) != notePath ||
+            CaptureNoteUiSnapshot().canonicalText != expectedNote) return false;
+        AppendUiAutomationTrace(L"open_work:paired_pdf_failure_ok");
+        // Fail an actual disk read after PDF startup, rather than throwing
+        // before the open. Keep the previously displayed note intact.
+        LoadNoteFile(owner, previousNote);
+        pdf.clear(); note.clear();
+        LoadFiles({L"open_work_pair", directory.wstring()}, pdf, note);
+        struct DenyRead {
+            HANDLE value = INVALID_HANDLE_VALUE;
+            ~DenyRead() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+        } denyRead;
+        denyRead.value = CreateFileW(notePath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (denyRead.value == INVALID_HANDLE_VALUE) return false;
+        g_bottomPanePin = BottomPanePin::Note;
+        LayoutChildren(owner);
+        if (!BeginOwnedDialogPresenceAutomation(owner, L"SilentDialogClass", outError)) return false;
+        AutoOpenSingleSessionFiles(owner);
+        const bool noteFailureClosed = EndOwnedDialogPresenceAutomation(owner, L"paired note read failure", outError);
+        if (!noteFailureClosed || std::filesystem::path(CurrentLogicalPdfPath()) != directory / L"pages.pdf" ||
+            g_currentNotePath != previousNote || GetNoteAutomationIndexingText() != previousText)
+            return false;
+        CloseHandle(denyRead.value);
+        denyRead.value = INVALID_HANDLE_VALUE;
+        AppendUiAutomationTrace(L"open_work:paired_note_failure_ok");
+        for (BottomPanePin pin : {BottomPanePin::Note, BottomPanePin::Math}) {
+            g_bottomPanePin = pin;
+            LayoutChildren(owner);
+            for (const wchar_t* mode : {L"view", L"edit"}) {
+                g_config.sessionAutoOpenMode = mode;
+                AutoOpenSingleSessionFiles(owner);
+                // Geometry-changing panes must finish through the existing
+                // posted fit, not through a test-only forced completion.
+                if (!PumpOpenWorkMessages()) return false;
+                const auto snapshot = CaptureNoteUiSnapshot();
+                if (std::filesystem::path(CurrentLogicalPdfPath()) != directory / L"pages.pdf" ||
+                    std::filesystem::path(g_currentNotePath) != notePath ||
+                    !snapshot.finalFrameActive || snapshot.finalRawLineCount != 0 ||
+                    snapshot.canonicalText != expectedNote ||
+                    (IsWindowVisible(g_hNoteEdit) && GetFocus() != g_hNoteEdit) ||
+                    StartPendingPdfInitialRender(g_hPdfView)) return false;
+            }
+        }
+        std::string actualBytes;
+        if (!ReadUiAutomationFileBytes(notePath, &actualBytes) || actualBytes != noteBytes) return false;
+        AppendUiAutomationTrace(L"open_work:paired_long_complex_ok");
+        return true;
+    };
+    const bool valid = run();
+    g_config.sessionAutoOpenMode = previousMode;
+    g_bottomPanePin = previousPin;
+    std::wstring pdf, note;
+    LoadFiles(previousSession, pdf, note);
+    const bool restoredPdf = OpenPdfWithAnnotations(owner, previousPdf);
+    LoadNoteFile(owner, previousNote);
+    SyncBottomPaneAfterNoteLoad(owner);
+    const bool pumped = PumpOpenWorkMessages();
+    if (!valid || !restoredPdf || !pumped || g_currentNotePath != previousNote ||
+        GetNoteAutomationIndexingText() != previousText) {
+        if (outError && outError->empty())
+            *outError = L"Paired auto-open lost content, opening state, focus, or restore state.";
+        return false;
+    }
+    AppendUiAutomationTrace(L"open_work:paired_auto_open_ok");
+    return true;
+}
+
+static bool RunUiAutomationPdfReopenHistoryFailureScenario(HWND owner,
+                                                           const std::filesystem::path& path,
+                                                           std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    const std::filesystem::path clropPath(clrop_bridge::ClropPathForPdf(path.wstring()));
+    if (CurrentLogicalPdfPath() != path.wstring() || !g_annots.empty() ||
+        PathExistsWin32(clropPath) || !file_output::FindLatestStagedClropPathForPdf(path.wstring()).empty()) {
+        return fail(L"Same-PDF reopen probe requires a clean disposable PDF fixture.");
+    }
+    const int originalAutoSave = g_config.autoSaveSeconds;
+    struct RestoreFixture {
+        std::filesystem::path clrop;
+        int autoSave;
+        ~RestoreFixture() {
+            std::error_code ec;
+            std::filesystem::remove(clrop, ec);
+            g_annots.clear();
+            g_annotsDirty = false;
+            g_annotsNeedsIntegrate = false;
+            ClearPdfAnnotationHistory();
+            g_config.autoSaveSeconds = autoSave;
+            RefreshAnnotPanel();
+        }
+    } restore{clropPath, originalAutoSave};
+    g_config.autoSaveSeconds = kAutoSaveModeOff;
+    Annotation original;
+    original.id = L"ui-automation-reopen-history";
+    original.type = Annotation::Type::TextBox;
+    original.pageIndex = 0;
+    original.x1 = 36.0; original.x2 = 160.0;
+    original.y1 = 140.0; original.y2 = 110.0;
+    original.text = L"reopen history";
+    InsertAnnotAt(original, 0);
+    if (!DuplicateAnnotationAtIndex(owner, 0) || g_annots.size() != 2) {
+        return fail(L"Same-PDF reopen probe could not prepare annotation undo history.");
+    }
+    const std::wstring firstDuplicateId = g_annots[1].id;
+    if (!DuplicateAnnotationAtIndex(owner, 1) || g_annots.size() != 3) {
+        return fail(L"Same-PDF reopen probe could not prepare annotation redo history.");
+    }
+    const std::wstring secondDuplicateId = g_annots[2].id;
+    SetFocus(g_hPdfView);
+    if (!ExecutePdfUndoRedoFromFocus(owner, true) || g_annots.size() != 2) {
+        return fail(L"Same-PDF reopen probe could not prepare an existing redo command.");
+    }
+    // Model a completed checkpoint while retaining this session's undo stack.
+    // The malformed file below represents a later external change to .clrop.
+    g_annotsDirty = false;
+    std::wstring error;
+    if (!atomic_write::AtomicWriteUtf8(clropPath, "{", path.parent_path(), &error)) {
+        return fail(L"Same-PDF reopen probe could not create its malformed .clrop fixture.");
+    }
+    if (!BeginOwnedDialogPresenceAutomation(owner, L"SilentDialogClass", outError)) return false;
+    const bool reopened = OpenPdfWithAnnotations(owner, path.wstring());
+    const bool dialogClosed = EndOwnedDialogPresenceAutomation(owner, L"same-PDF annotation load failure", outError);
+    if (reopened || !dialogClosed || CurrentLogicalPdfPath() != path.wstring() ||
+        g_annots.size() != 2 || g_annots[1].id != firstDuplicateId) {
+        return fail(L"Failed same-PDF reopen did not retain the displayed annotations.");
+    }
+    SetFocus(g_hPdfView);
+    if (!ExecutePdfUndoRedoFromFocus(owner, true) || g_annots.size() != 1 ||
+        !ExecutePdfUndoRedoFromFocus(owner, false) || g_annots.size() != 2 ||
+        g_annots[1].id != firstDuplicateId ||
+        !ExecutePdfUndoRedoFromFocus(owner, false) || g_annots.size() != 3 ||
+        g_annots[2].id != secondDuplicateId) {
+        return fail(L"Failed same-PDF reopen lost annotation undo/redo history.");
+    }
+    AppendUiAutomationTrace(L"open_work:pdf_reopen_history_failure_ok");
+    return true;
+}
+
+static bool RunUiAutomationPdfInitialViewportScenario(HWND owner, std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    std::wstring root;
+    if (!TryGetUiAutomationWorkspaceRoot(&root))
+        return fail(L"PDF open work probe requires its isolated workspace.");
+    const std::filesystem::path directory = std::filesystem::path(root) /
+        L"__pdf_note_workspace__" / L"__tmp__" / L"open_work";
+    const auto path = directory / L"pages.pdf";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec || std::filesystem::exists(path, ec) || ec)
+        return fail(L"Cannot create a new PDF open work fixture.");
+    struct Writer : FPDF_FILEWRITE {
+        std::string bytes;
+        Writer() {
+            version = 1;
+            WriteBlock = [](FPDF_FILEWRITE* writer, const void* data, unsigned long size) -> int {
+                auto& bytes = static_cast<Writer*>(writer)->bytes;
+                if (size == 0) return 1;
+                if (!data || size > 1024 * 1024 - bytes.size()) return 0;
+                try { bytes.append(static_cast<const char*>(data), size); }
+                catch (...) { return 0; }
+                return 1;
+            };
+        }
+    } writer;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_pdfiumMutex);
+        struct Document {
+            FPDF_DOCUMENT value = pdf_annotation_export::CreateDocument();
+            ~Document() { if (value) FPDF_CloseDocument(value); }
+        } document;
+        if (!document.value) return fail(L"Cannot create PDF open work document.");
+        for (int i = 0; i < 24; ++i) {
+            FPDF_PAGE page = FPDFPage_New(document.value, i, 600, 800);
+            if (!page) return fail(L"Cannot create PDF open work page.");
+            // Vector content exercises actual nonblank raster work. This is
+            // a generated disposable fixture, not a distributed visual asset.
+            for (int shape = 0; shape < 192; ++shape) {
+                FPDF_PAGEOBJECT object = FPDFPageObj_CreateNewRect(
+                    10 + (shape % 12) * 48, 10 + (shape / 12) * 48, 30, 30);
+                if (!object || !FPDFPageObj_SetFillColor(object, 20 + i * 8, 80, 180, 255) ||
+                    !FPDFPath_SetDrawMode(object, FPDF_FILLMODE_ALTERNATE, FALSE)) {
+                    if (object) FPDFPageObj_Destroy(object);
+                    FPDF_ClosePage(page);
+                    return fail(L"Cannot construct complex PDF vector fixture.");
+                }
+                FPDFPage_InsertObject(page, object);
+            }
+            const bool generated = FPDFPage_GenerateContent(page) != 0;
+            FPDF_ClosePage(page);
+            if (!generated) return fail(L"Cannot finalize PDF open work page.");
+        }
+        if (!FPDF_SaveAsCopy(document.value, &writer, FPDF_NO_INCREMENTAL))
+            return fail(L"Cannot serialize PDF open work fixture.");
+    }
+    std::wstring error;
+    if (!atomic_write::AtomicWriteUtf8(path, writer.bytes, directory, &error))
+        return fail(L"Cannot write PDF open work fixture.");
+    const auto alternateDirectory = directory / L"alternate";
+    std::filesystem::create_directory(alternateDirectory, ec);
+    if (ec) return fail(L"Cannot create owned alternate PDF directory.");
+    const auto alternatePath = alternateDirectory / L"other.pdf";
+    Writer alternateWriter;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_pdfiumMutex);
+        FPDF_DOCUMENT document = pdf_annotation_export::CreateDocument();
+        if (!document) return fail(L"Cannot create alternate PDF fixture.");
+        FPDF_PAGE page = FPDFPage_New(document, 0, 600, 800);
+        const bool generated = page && FPDFPage_GenerateContent(page);
+        if (page) FPDF_ClosePage(page);
+        const bool saved = generated && FPDF_SaveAsCopy(document, &alternateWriter, FPDF_NO_INCREMENTAL);
+        FPDF_CloseDocument(document);
+        if (!saved) return fail(L"Cannot serialize alternate PDF fixture.");
+    }
+    if (!atomic_write::AtomicWriteUtf8(alternatePath, alternateWriter.bytes, alternateDirectory, &error))
+        return fail(L"Cannot write alternate PDF fixture.");
+    const std::wstring previous = CurrentLogicalPdfPath();
+    if (!OpenPdfWithAnnotations(owner, path.wstring())) return fail(L"Cannot open PDF work fixture.");
+    if (!RunUiAutomationPdfReopenHistoryFailureScenario(owner, path, outError)) return false;
+    const bool valid = RunPdfInitialViewportWorkProbe(g_hPdfView, outError) &&
+        RunPdfWorkerConcurrencyProbe(g_hPdfView, alternatePath.wstring(), outError);
+    const bool restored = OpenPdfWithAnnotations(owner, previous);
+    if (!restored) return fail(L"Cannot restore original PDF after open work probe.");
+    if (!valid) return false;
+    AppendUiAutomationTrace(L"open_work:pdf_worker_concurrency_ok");
+    if (!RunUiAutomationPairedAutoOpenScenario(owner, directory, outError)) return false;
+    const std::wstring previousNote = g_currentNotePath;
+    const bool startupValid = RunUiAutomationStartupLastOpenScenario(owner, outError);
+    const bool startupPdfRestored = OpenPdfWithAnnotations(owner, previous);
+    LoadNoteFile(owner, previousNote);
+    SyncBottomPaneAfterNoteLoad(owner);
+    if (!startupValid || !startupPdfRestored || g_currentNotePath != previousNote ||
+        !PumpOpenWorkMessages()) return false;
+    AppendUiAutomationTrace(L"open_work:startup_restore_ok");
+    std::string primaryAfter, alternateAfter;
+    if (!ReadUiAutomationFileBytes(path, &primaryAfter) || primaryAfter != writer.bytes ||
+        !ReadUiAutomationFileBytes(alternatePath, &alternateAfter) || alternateAfter != alternateWriter.bytes)
+        return fail(L"Worker/paired/startup probes changed original PDF bytes.");
+    AppendUiAutomationTrace(L"open_work:pdf_initial_viewport_ok");
+    return true;
+}

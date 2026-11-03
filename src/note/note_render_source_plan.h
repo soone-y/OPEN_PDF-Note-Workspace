@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace note {
@@ -86,6 +87,13 @@ struct NoteRenderSourceRun {
     NoteRenderSourceRunKind kind = NoteRenderSourceRunKind::Text;
     std::wstring link_target;
     std::vector<NoteRenderSourceStyleAttribute> styles;
+    // All consumers (structured hit testing and raw/keyboard activation)
+    // share the same innermost-wins rule for ordered style attributes.
+    [[nodiscard]] std::wstring_view effective_link_id() const noexcept {
+        for (auto it = styles.rbegin(); it != styles.rend(); ++it)
+            if (it->kind == StyleKind::LinkId && !it->value.empty()) return it->value;
+        return {};
+    }
     bool decodes_markdown_escapes = false;
     // Table placement is not reconstructed from a view cache.  Text runs
     // carry their parser-derived cell identity so measurement, painting,

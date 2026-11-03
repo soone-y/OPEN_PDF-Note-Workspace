@@ -135,7 +135,7 @@ struct UiText {
     std::wstring menuAnnotSettings;
     std::wstring menuSettingsPresetSave;
     std::wstring menuSettingsPresetLoad;
-    std::wstring menuLectureSchedule;
+    std::wstring menuLectureOrder;
     std::wstring menuAddTempExternalLecture;
     std::wstring menuRemoveTempExternalLecture;
     std::wstring menuTempOperation;

@@ -1,7 +1,9 @@
 // file: ui/layout.cpp
 #include "ui/layout.h"
+#include "ui/toolbar_scroll.h"
 
 #include "core/app_core.h"
+#include "core/preview_trace.h"
 #include "bridge/view_bridge.h"
 
 #include <algorithm>
@@ -13,6 +15,12 @@ namespace ui {
 namespace {
 
 constexpr int kCollapsedLeftPaneWidth = 32;
+// Shared by toolbar height reservation and actual annotation-list placement.
+const int panelPad = 8;
+const int panelRowH = 24;
+const int panelGap = 6;
+const int panelSummaryH = 20;
+const int panelListMinH = 48;
 
 static bool RectEquals(const RECT& a, const RECT& b) {
     return a.left == b.left && a.top == b.top &&
@@ -77,6 +85,7 @@ static bool IsShortcutControl(HWND hwnd) {
            hwnd == g_hShortcutFontSizeEdit ||
            hwnd == g_hShortcutTagEdit ||
            hwnd == g_hBtnShortcutInput ||
+           hwnd == g_hBtnNoteWritingGuide ||
            hwnd == g_hBtnShortcutPdfLink ||
            hwnd == g_hBtnNoteAssistBullet ||
            hwnd == g_hBtnNoteAssistQuote ||
@@ -111,6 +120,27 @@ static void RedrawLayoutRegion(HWND hWnd, const RECT* dirtyRect) {
     RedrawWindow(hWnd, dirtyRect, nullptr,
                  RDW_INVALIDATE | RDW_ERASE | RDW_FRAME |
                  RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
+static void RedrawChangedLayout(HWND hWnd, const LayoutApplyResult& result,
+                                const std::vector<HWND>& changedControls) {
+    // Keep existing child pixels until their new contents are painted. Broad
+    // child-tree erasure makes text disappear between erase and child paint.
+    RedrawWindow(hWnd, result.hasRootDirtyRect ? &result.rootDirtyRect : nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_NOCHILDREN | RDW_UPDATENOW);
+    const bool redrawToolbar = result.pdfToolbarBoundsChanged && g_hPdfToolbar;
+    if (redrawToolbar) {
+        // Moving children with SWP_NOREDRAW leaves their old pixels in the
+        // host. Paint the host's vacated areas and all children as one tree;
+        // repainting only the moved controls produces overlapping old text.
+        RedrawWindow(g_hPdfToolbar, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_NOERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
+    for (const HWND control : changedControls) {
+        if (redrawToolbar && (control == g_hPdfToolbar || GetParent(control) == g_hPdfToolbar)) continue;
+        RedrawWindow(control, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_NOERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
 }
 
 } // namespace
@@ -321,13 +351,13 @@ static int LayoutAnnotToolbar(int baseX, int baseY, int areaW, PlaceFn place) {
         placeFull(g_hComboMarkerTextStyle, comboH);
     }
 
-    bool showLineDash = ToolbarHasLineDashOptions(g_toolMode);
+    bool showLineDash = ToolbarHasLineDashOptions(g_toolMode,g_shapeKind);
     if (showLineDash) {
         placeFull(g_hComboLineDashStyle, comboH);
     }
 
     bool showShape = ToolbarHasShapeOptions(g_toolMode);
-    bool showShapeDrawMode = ToolbarHasShapeDrawModeOptions(g_toolMode);
+    bool showShapeDrawMode = ToolbarHasShapeDrawModeOptions(g_toolMode,g_shapeKind);
     if (showShape) {
         placeFull(g_hComboShapeKind, comboH);
     }
@@ -335,6 +365,27 @@ static int LayoutAnnotToolbar(int baseX, int baseY, int areaW, PlaceFn place) {
         placeFull(g_hComboShapeDrawMode, comboH);
     }
 
+    if (ToolbarHasBlendModeOptions(g_toolMode,g_shapeKind)) {
+        const auto radioWidth = [](HWND control) {
+            wchar_t label[64]{};GetWindowTextW(control,label,64);
+            HDC dc=GetDC(control);SIZE extent{128,0};
+            if(dc){
+                auto old=SelectObject(dc,reinterpret_cast<HFONT>(SendMessageW(control,WM_GETFONT,0,0)));
+                GetTextExtentPoint32W(dc,label,static_cast<int>(wcslen(label)),&extent);
+                if(old)SelectObject(dc,old);
+                ReleaseDC(control,dc);
+            }
+            return static_cast<int>(extent.cx)+GetSystemMetrics(SM_CXMENUCHECK)+12;
+        };
+        const int normalWidth=radioWidth(g_hRadioBlendNormal),multiplyWidth=radioWidth(g_hRadioBlendMultiply);
+        if(w < normalWidth+multiplyWidth) {
+            placeFull(g_hRadioBlendNormal,comboH);placeFull(g_hRadioBlendMultiply,comboH);
+        } else {
+            placeCtl(g_hRadioBlendNormal,x,y,normalWidth,comboH);
+            placeCtl(g_hRadioBlendMultiply,x+normalWidth,y,w-normalWidth,comboH);
+            y += comboH + rowGap;
+        }
+    }
     bool showWidth = ToolbarHasWidthOptions(g_toolMode);
     if (showWidth) {
         placeFull(g_hComboWidth, comboH);
@@ -368,6 +419,7 @@ struct LayoutCalc {
     int rightX{};
 
     int toolbarH{};
+    int toolbarContentH{}, toolbarContentW{};
     int listTopOffset{};
 
     SplitBands bands{};
@@ -452,10 +504,19 @@ static LayoutCalc ComputeLayout(HWND hWnd, LayoutState inState, bool forApply) {
     // The annotation list is the recovery surface for existing work. Reserve
     // enough room for its status and at least two visible rows before allowing
     // optional toolbar controls to consume the complete top pane.
-    constexpr int kMinAnnotPanelHeight = 16 + 20 + 4 + 48;
-    const int maxToolbarH = std::max(32, c.topH - kMinAnnotPanelHeight);
+    constexpr int kMinAnnotPanelHeight = panelPad * 2 + panelSummaryH + panelGap + panelListMinH;
+    const int reservedPanelH = g_showMathList ? kMinAnnotPanelHeight : 0;
+    const int maxToolbarH = std::max(32, c.topH - reservedPanelH);
     c.toolbarH = std::max(32, toolbarH);
     c.toolbarH = std::min(c.toolbarH, maxToolbarH);
+    c.toolbarContentW = c.rightW;
+    if (toolbarH > c.toolbarH) {
+        // Account for the scrollbar before wrapping rows, including palettes
+        // and the shape blend options which grow taller in a narrow pane.
+        c.toolbarContentW = std::max(0, c.rightW - GetSystemMetrics(SM_CXVSCROLL));
+        toolbarH = LayoutAnnotToolbar(0, 0, c.toolbarContentW, [](HWND, int, int, int, int) {});
+    }
+    c.toolbarContentH = toolbarH;
 
     if (forApply) {
         // Apply only the current user-selected state. A layout refresh must not
@@ -535,6 +596,7 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
              g_hShortcutFontSizeEdit,
              g_hShortcutTagEdit,
              g_hBtnShortcutInput,
+             g_hBtnNoteWritingGuide,
              g_hBtnShortcutPdfLink,
              g_hBtnNoteAssistBullet,
              g_hBtnNoteAssistQuote,
@@ -547,7 +609,19 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
             return;
         }
         const int padding = 6;
-        const int rowH = 26;
+        HDC dc = GetDC(hWnd);
+        struct FontMeasureGuard {
+            HWND owner;
+            HDC dc;
+            HGDIOBJ previous;
+            ~FontMeasureGuard() {
+                if (dc && previous) SelectObject(dc, previous);
+                if (dc) ReleaseDC(owner, dc);
+            }
+        } measureGuard{hWnd, dc, dc && g_hUIFont ? SelectObject(dc, g_hUIFont) : nullptr};
+        TEXTMETRICW metrics{};
+        const int fontHeight = dc && GetTextMetricsW(dc, &metrics) ? metrics.tmHeight : 16;
+        const int rowH = std::max(26, fontHeight + 8);
         const int gap = 6;
         const int previewSize = 20;
         const int paletteW = 30;
@@ -562,103 +636,128 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
         }
 
         auto place = [&](HWND h, int px, int py, int pw, int ph) {
-            addPos(h, px, py, pw, ph, true, true);
+            // Short panes must not expose partial controls outside the palette.
+            // Keep the input row first; expanding the pane reveals later rows.
+            const bool fits = pw > 0 && ph > 0 && px >= areaX && py >= areaY &&
+                px + pw <= areaX + areaW && py + ph <= areaY + areaH;
+            addPos(h, fits ? px : areaX, fits ? py : areaY,
+                   fits ? pw : 0, fits ? ph : 0, fits, true);
         };
 
-        auto layoutPaletteRow = [&](std::initializer_list<HWND> buttons) {
-            const int count = static_cast<int>(buttons.size());
-            if (count <= 0) return;
-            int buttonW = std::max(0, (innerW - gap * (count - 1)) / count);
-            int curX = x;
-            for (HWND h : buttons) {
-                place(h, curX, y, buttonW, rowH);
-                curX += buttonW + gap;
+        const auto textWidth = [&](HWND control, bool checkbox = false) {
+            const int length = GetWindowTextLengthW(control);
+            std::wstring label(static_cast<size_t>(length) + 1, L'\0');
+            label.resize(static_cast<size_t>(GetWindowTextW(control, label.data(), length + 1)));
+            SIZE size{};
+            if (!dc || !GetTextExtentPoint32W(dc, label.c_str(), static_cast<int>(label.size()), &size)) size.cx = 32;
+            return static_cast<int>(size.cx) + (checkbox ? fontHeight + 8 : 8);
+        };
+        auto layoutPaletteRow = [&](std::initializer_list<HWND> buttons, bool checkbox = false) {
+            std::vector<HWND> items(buttons);
+            std::vector<int> widths;
+            for (HWND control : items) widths.push_back(std::max(30, textWidth(control, checkbox)));
+            for (size_t first = 0; first < items.size();) {
+                size_t last = first + 1;
+                int used = widths[first];
+                while (last < items.size() && used + gap + widths[last] <= innerW) {
+                    used += gap + widths[last++];
+                }
+                const int extra = std::max(0, innerW - used) / static_cast<int>(last - first);
+                int curX = x;
+                for (size_t index = first; index < last; ++index) {
+                    const int width = widths[index] + extra;
+                    place(items[index], curX, y, width, rowH);
+                    curX += width + gap;
+                }
+                y += rowH + gap;
+                first = last;
             }
-            y += rowH + gap;
         };
 
-        int inputRowW = std::max(0, innerW);
-        int inputBtnW = std::min(inputRowW, std::min(96, std::max(60, inputRowW / 4)));
-        int inputEditW = std::max(0, inputRowW - inputBtnW - gap);
-        place(g_hBtnShortcutInput, x, y, inputBtnW, rowH);
-        place(g_hShortcutTagEdit, x + inputBtnW + gap, y, inputEditW, rowH);
+        // Keep the reference reachable even with no note or a short pane.
+        place(g_hBtnNoteWritingGuide, x, y, innerW, rowH);
         y += rowH + gap;
 
-        int linkW = std::max(0, innerW);
-        int linkDecorW = 88;
-        if (linkDecorW > linkW) linkDecorW = linkW;
+        int inputRowW = std::max(0, innerW);
+        int inputBtnW = std::max(textWidth(g_hBtnShortcutInput), std::min(96, std::max(60, inputRowW / 4)));
+        if (inputBtnW + gap + 48 > inputRowW) {
+            place(g_hBtnShortcutInput, x, y, inputRowW, rowH);
+            y += rowH + gap;
+            inputBtnW = 0;
+        } else {
+            place(g_hBtnShortcutInput, x, y, inputBtnW, rowH);
+        }
+        int inputEditW = std::max(0, inputRowW - inputBtnW - gap);
+        place(g_hShortcutTagEdit, inputBtnW ? x + inputBtnW + gap : x, y,
+              inputBtnW ? inputEditW : innerW, rowH);
+        y += rowH + gap;
+
+        const int linkDecorW = textWidth(g_hChkShortcutLinkDecor, true);
+        const int linkBtnW = std::max(90, textWidth(g_hBtnShortcutPdfLink));
         place(g_hChkShortcutLinkDecor, x, y, linkDecorW, rowH);
-        int linkBtnX = x + linkDecorW + gap;
-        int linkBtnW = std::max(0, linkW - linkDecorW - gap);
-        linkBtnW = std::min(linkBtnW, 90);
-        place(g_hBtnShortcutPdfLink, linkBtnX, y, linkBtnW, rowH);
+        if (linkDecorW + gap + linkBtnW > innerW) {
+            y += rowH + gap;
+            place(g_hBtnShortcutPdfLink, x, y, innerW, rowH);
+        } else {
+            place(g_hBtnShortcutPdfLink, x + linkDecorW + gap, y, linkBtnW, rowH);
+        }
         y += rowH + gap;
 
         layoutPaletteRow({ g_hBtnNoteAssistBullet, g_hBtnNoteAssistQuote, g_hBtnNoteAssistPageRef });
 
-        int arrowW = std::min(28, std::max(22, innerW / 6));
-        int levelW = std::min(38, std::max(24, innerW / 6));
-        int headingW = std::max(0, innerW - (arrowW + levelW + gap * 2));
-        place(g_hChkShortcutHeading1, x, y, headingW, rowH);
-        int headingX = x + headingW + gap;
-        int upH = std::max(10, (rowH - 1) / 2);
-        int downY = y + upH + 1;
-        int downH = std::max(10, rowH - upH - 1);
-        place(g_hBtnShortcutHeadingLevelUp, headingX, y, arrowW, upH);
-        place(g_hChkShortcutHeading2, headingX, downY, arrowW, downH);
+        const int arrowW = std::max({22, textWidth(g_hBtnShortcutHeadingLevelUp), textWidth(g_hChkShortcutHeading2)});
+        const int levelW = std::max(38, textWidth(g_hShortcutHeadingLevelLabel));
+        const int headingMinW = textWidth(g_hChkShortcutHeading1, true);
+        const int headingW = innerW - (arrowW * 2 + levelW + gap * 3);
+        const bool headingFits = headingW >= headingMinW;
+        place(g_hChkShortcutHeading1, x, y, headingFits ? headingW : std::max(innerW, headingMinW), rowH);
+        if (!headingFits) y += rowH + gap;
+        int headingX = headingFits ? x + headingW + gap : x;
+        place(g_hBtnShortcutHeadingLevelUp, headingX, y, arrowW, rowH);
+        headingX += arrowW + gap;
+        place(g_hChkShortcutHeading2, headingX, y, arrowW, rowH);
         headingX += arrowW + gap;
         place(g_hShortcutHeadingLevelLabel, headingX, y, levelW, rowH);
         y += rowH + gap;
 
         auto layoutColorRow = [&](HWND checkbox, HWND preview, HWND palette) {
-            int controlW = innerW - (previewSize + gap + paletteW + gap);
-            if (controlW < 0) controlW = 0;
+            const int pickerW = std::max(paletteW, textWidth(palette));
+            const int minimumCheckW = textWidth(checkbox, true);
+            int controlW = innerW - (previewSize + gap + pickerW + gap);
+            const bool together = controlW >= minimumCheckW;
+            if (!together) controlW = std::max(innerW, minimumCheckW);
             place(checkbox, x, y, controlW, rowH);
-            int previewX = x + controlW + gap;
+            if (!together) y += rowH + gap;
+            int previewX = together ? x + controlW + gap : x;
             int previewY = y + (rowH - previewSize) / 2;
             place(preview, previewX, previewY, previewSize, previewSize);
             int paletteX = previewX + previewSize + gap;
-            place(palette, paletteX, y, paletteW, rowH);
+            place(palette, paletteX, y, pickerW, rowH);
             y += rowH + gap;
         };
 
         layoutColorRow(g_hChkShortcutBack, g_hBtnShortcutBackPreview, g_hBtnShortcutBackPalette);
         layoutColorRow(g_hChkShortcutChar, g_hBtnShortcutCharPreview, g_hBtnShortcutCharPalette);
 
-        int styleWidth = std::max(0, (innerW - gap * 3) / 4);
-        int styleX = x;
-        place(g_hChkShortcutBold, styleX, y, styleWidth, rowH);
-        styleX += styleWidth + gap;
-        place(g_hChkShortcutItalic, styleX, y, styleWidth, rowH);
-        styleX += styleWidth + gap;
-        place(g_hChkShortcutStrike, styleX, y, styleWidth, rowH);
-        styleX += styleWidth + gap;
-        place(g_hChkShortcutUnderline, styleX, y, styleWidth, rowH);
-        y += rowH + gap;
+        layoutPaletteRow({g_hChkShortcutBold, g_hChkShortcutItalic, g_hChkShortcutStrike, g_hChkShortcutUnderline}, true);
 
         {
             constexpr int kNumFields = 3; // d, m, s
-            int labelW = 26;
+            const int labelW = std::max({26, textWidth(g_hShortcutIndentLabel),
+                textWidth(g_hShortcutMarginLabel), textWidth(g_hShortcutFontSizeLabel)});
             int labelGap = 2;
             int editMinW = 28;
-            int fixed = kNumFields * labelW + kNumFields * labelGap + (kNumFields - 1) * gap;
-            int remaining = std::max(0, innerW - fixed);
-            int editW = std::max(editMinW, remaining / kNumFields);
-            int total = fixed + editW * kNumFields;
-            if (total > innerW && editW > 0) {
-                editW = std::max(0, editW - (total - innerW + kNumFields - 1) / kNumFields);
+            const int columns = std::clamp((innerW + gap) / (labelW + labelGap + editMinW + gap), 1, kNumFields);
+            const int columnW = (innerW - gap * (columns - 1)) / columns;
+            const int editW = std::max(0, columnW - labelW - labelGap);
+            const HWND labels[] = {g_hShortcutIndentLabel, g_hShortcutMarginLabel, g_hShortcutFontSizeLabel};
+            const HWND edits[] = {g_hShortcutIndentEdit, g_hShortcutMarginEdit, g_hShortcutFontSizeEdit};
+            for (int i = 0; i < kNumFields; ++i) {
+                const int curX = x + (i % columns) * (columnW + gap);
+                place(labels[i], curX, y, labelW, rowH);
+                place(edits[i], curX + labelW + labelGap, y, editW, rowH);
+                if ((i + 1) % columns == 0 || i + 1 == kNumFields) y += rowH + gap;
             }
-            int curX = x;
-            int rowY = y;
-            place(g_hShortcutIndentLabel, curX, rowY, labelW, rowH);
-            place(g_hShortcutIndentEdit, curX + labelW + labelGap, rowY, editW, rowH);
-            curX += labelW + labelGap + editW + gap;
-            place(g_hShortcutMarginLabel, curX, rowY, labelW, rowH);
-            place(g_hShortcutMarginEdit, curX + labelW + labelGap, rowY, editW, rowH);
-            curX += labelW + labelGap + editW + gap;
-            place(g_hShortcutFontSizeLabel, curX, rowY, labelW, rowH);
-            place(g_hShortcutFontSizeEdit, curX + labelW + labelGap, rowY, editW, rowH);
-            y += rowH + gap;
         }
 
     };
@@ -718,13 +817,15 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
     addPos(g_hPdfToolbar, c.rightX, 0, c.rightW, c.toolbarH);
     std::vector<HWND> placedToolbarControls;
     placedToolbarControls.reserve(32 + g_colorButtons.size());
-    LayoutAnnotToolbar(0, 0, c.rightW, [&](HWND w, int x, int y, int ww, int hh) {
-        if (y + hh <= c.toolbarH) {
-            if (w) placedToolbarControls.push_back(w);
-            addPos(w, x, y, ww, hh, true, true);
-        } else {
-            addPos(w, 0, 0, 0, 0, false, true);
-        }
+    const int toolbarOffset = toolbar_scroll::Offset(g_hPdfToolbar, c.toolbarContentH,
+        c.toolbarH, static_cast<int>(g_toolMode));
+    LayoutAnnotToolbar(0, 0, c.toolbarContentW, [&](HWND w, int x, int y, int ww, int hh) {
+        if (w) placedToolbarControls.push_back(w);
+        if (!toolbar_scroll::InstallChild(w, g_hPdfToolbar))
+            preview_trace::Append(L"ToolbarScroll", L"control scroll/focus installation failed");
+        // Keep every applicable control reachable. The host clips only the
+        // current viewport, rather than removing options below its lower edge.
+        addPos(w, x, y - toolbarOffset, ww, hh, true, true);
     });
 
     bool mergeNote = (!noteAtTop &&
@@ -737,11 +838,6 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
     // Top/right: annotation panel (extend down when pinned)
     int panelY = c.toolbarH;
     int panelTopH = std::max(0, c.topH - c.toolbarH);
-    const int panelPad = 8;
-    const int panelRowH = 24;
-    const int panelGap = 6;
-    const int panelSummaryH = 20;
-    const int panelListMinH = 48;
     int panelX = c.rightX;
     int panelW = c.rightW;
     auto hidePos = [&](HWND w) {
@@ -778,6 +874,8 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
     hideToolbarOptionIfUnused(g_hChkPanMouseWheelZoom);
     hideToolbarOptionIfUnused(g_hComboWidth);
     hideToolbarOptionIfUnused(g_hComboMarkerAlpha);
+    hideToolbarOptionIfUnused(g_hRadioBlendNormal);
+    hideToolbarOptionIfUnused(g_hRadioBlendMultiply);
     hideToolbarOptionIfUnused(g_hComboMagnifierShape);
 
     // Never allow annotation controls to overlap split bands. If there's not enough
@@ -857,6 +955,8 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
 
     std::vector<ParentBatch> batches;
     batches.reserve(4);
+    std::vector<HWND> changedControls;
+    changedControls.reserve(positions.size());
     auto batchForParent = [&](HWND parent) -> ParentBatch& {
         for (auto& batch : batches) {
             if (batch.parent == parent) return batch;
@@ -870,11 +970,13 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
         RECT current = GetWindowRectInParentCoords(p.hwnd);
         const bool boundsChanged = !RectEquals(current, desired);
         const bool visibilityChanged =
-            p.manageVisibility && (IsWindowVisible(p.hwnd) != (p.visible ? TRUE : FALSE));
+            p.manageVisibility && (((GetWindowLongPtrW(p.hwnd, GWL_STYLE) & WS_VISIBLE) != 0) != p.visible);
         
         if (boundsChanged) result.anyBoundsChanged = true;
         if (visibilityChanged) result.anyVisibilityChanged = true;
+        if (!boundsChanged && !visibilityChanged) continue;
         if (boundsChanged || visibilityChanged) {
+            changedControls.push_back(p.hwnd);
             MarkChanged(result, p.hwnd);
             RECT currentInRoot = current;
             RECT desiredInRoot = desired;
@@ -889,7 +991,7 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
 
         UINT flags = baseFlags;
         if (!boundsChanged) flags |= SWP_NOMOVE | SWP_NOSIZE;
-        if (p.manageVisibility) {
+        if (visibilityChanged) {
             flags |= p.visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
         }
 
@@ -917,14 +1019,11 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
         }
     }
 
+    toolbar_scroll::SetRange(g_hPdfToolbar, c.toolbarContentH, c.toolbarH, static_cast<int>(g_toolMode));
     EnsureInactiveCachedNoteEditWindowsParked();
     UpdateLayoutDependentViews(result, pass);
     if (result.anyBoundsChanged || result.anyVisibilityChanged) {
-        if (result.hasRootDirtyRect) {
-            RedrawLayoutRegion(hWnd, &result.rootDirtyRect);
-        } else {
-            RedrawLayoutTree(hWnd);
-        }
+        RedrawChangedLayout(hWnd, result, changedControls);
     }
 
     // Bottom-left area currently contains only shortcut buttons, so we don't need a container window.

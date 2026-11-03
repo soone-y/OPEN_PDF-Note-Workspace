@@ -1,0 +1,88 @@
+// Opt-in isolated app fixture. Exercise actual toolbar messages, inspector
+// editing, painter and bridge; caller owns/restores annotation history.
+static bool RunAnnotationBlendSwitchProbe(HDC dc,const RECT& client,uint32_t* pixels,size_t count,
+                                         std::wstring* trace,std::wstring* error) {
+    const auto fail=[&](const wchar_t* text){if(error)*error=text;return false;};
+    const HWND owner=GetParent(g_hPdfView);
+    struct Restore {
+        ToolMode tool=g_toolMode;MarkerDisplayMode marker=g_config.newMarkerDisplayMode;
+        AnnotationBlendMode shape=g_config.newShapeBlendMode;
+        decltype(g_annotUndo) undo=g_annotUndo,redo=g_annotRedo;
+        decltype(g_pendingAnnotStageCommands) pending=g_pendingAnnotStageCommands;
+        std::wstring pendingTarget=g_pendingAnnotStageTargetPath;
+        bool pendingValid=g_pendingAnnotStageCommandsValid,dirty=g_annotsDirty,integrate=g_annotsNeedsIntegrate;
+        bool historyDirty=g_annotHistoryDirty;
+        ~Restore(){g_toolMode=tool;g_config.newMarkerDisplayMode=marker;g_config.newShapeBlendMode=shape;
+            g_annotUndo=std::move(undo);g_annotRedo=std::move(redo);g_pendingAnnotStageCommands=std::move(pending);
+            g_pendingAnnotStageTargetPath=pendingTarget;g_pendingAnnotStageCommandsValid=pendingValid;
+            g_annotsDirty=dirty;g_annotsNeedsIntegrate=integrate;g_annotHistoryDirty=historyDirty;
+            PersistConfig();UpdateToolbarUI(g_hMainWnd);}
+    } restore;
+    const WorkspaceConfig defaults;
+    if(defaults.newShapeBlendMode!=AnnotationBlendMode::Normal || defaults.newMarkerDisplayMode!=MarkerDisplayMode::Multiply)
+        return fail(L"Annotation blend defaults differ from the requested defaults.");
+    for(auto tool:{ToolMode::Shape,ToolMode::MarkerText,ToolMode::MarkerFree}){
+        g_toolMode=tool;UpdateToolbarUI(owner);
+        for(bool multiply:{false,true}){
+            HWND button=multiply ? g_hRadioBlendMultiply : g_hRadioBlendNormal;
+            if(!button || !IsWindowEnabled(button))return fail(L"Blend toolbar controls are unavailable.");
+            SendMessageW(button,BM_CLICK,0,0);
+            if(SendMessageW(button,BM_GETCHECK,0,0)!=BST_CHECKED)return fail(L"Blend radio selection did not update.");
+            const bool actual=tool==ToolMode::Shape ? g_config.newShapeBlendMode==AnnotationBlendMode::Multiply
+                : g_config.newMarkerDisplayMode==MarkerDisplayMode::Multiply;
+            if(actual!=multiply)return fail(L"Blend toolbar click did not update the corresponding tool default.");
+        }
+    }
+    for(auto type:{Annotation::Type::Shape,Annotation::Type::MarkerFree,Annotation::Type::MarkerText}){
+        Annotation ann;ann.id=L"blend-switch";ann.pageIndex=0;ann.type=type;ann.color=RGB(240,80,20);
+        ann.x1=100;ann.x2=200;ann.y1=200;ann.y2=100;ann.width=4;ann.alpha=0.5;
+        ann.path={{100,200},{200,100}};
+        g_annots={ann};g_annotUndo.clear();g_annotRedo.clear();
+        ShowAnnotationInspector(owner,0,true);
+        struct Find { HWND owner=nullptr,window=nullptr; } find{owner,nullptr};
+        EnumThreadWindows(GetCurrentThreadId(),[](HWND window,LPARAM value)->BOOL {
+            auto& result=*reinterpret_cast<Find*>(value);wchar_t name[64]{};
+            if(GetWindow(window,GW_OWNER)==result.owner && GetClassNameW(window,name,64) && wcscmp(name,L"PdfNoteAnnotInspector")==0){
+                result.window=window;return FALSE;}
+            return TRUE;
+        },reinterpret_cast<LPARAM>(&find));
+        if(!find.window)return fail(L"Blend inspector did not open.");
+        // Inspector control 122 is its existing display-mode selector.
+        HWND combo=GetDlgItem(find.window,122);
+        if(!combo){DestroyWindow(find.window);return fail(L"Inspector lacks the blend selector.");}
+        for(bool multiply:{false,true}){
+            const auto desired=multiply ? MarkerDisplayMode::Multiply : MarkerDisplayMode::Legacy;
+            int selection=-1;
+            for(int i=0;i<SendMessageW(combo,CB_GETCOUNT,0,0);++i)
+                if(SendMessageW(combo,CB_GETITEMDATA,i,0)==static_cast<LPARAM>(desired))selection=i;
+            if(selection<0){DestroyWindow(find.window);return fail(L"Inspector blend options are incomplete.");}
+            SendMessageW(combo,CB_SETCURSEL,selection,0);
+            SendMessageW(find.window,WM_COMMAND,MAKEWPARAM(122,CBN_SELCHANGE),reinterpret_cast<LPARAM>(combo));
+            const bool actual=type==Annotation::Type::MarkerText ? g_annots[0].markerDisplayMode==MarkerDisplayMode::Multiply
+                : g_annots[0].blendMode==AnnotationBlendMode::Multiply;
+            if(actual!=multiply){DestroyWindow(find.window);return fail(L"Inspector blend change was not applied.");}
+            std::fill(pixels,pixels+count,0x00a0c8f0u);DrawAnnotations(dc,client);GdiFlush();
+            if(!std::any_of(pixels,pixels+count,[](uint32_t p){return (p&0xffffff)!=0x00a0c8f0u;})){
+                DestroyWindow(find.window);return fail(L"Selected blend mode did not paint the annotation.");}
+            if(multiply){
+                std::fill(pixels,pixels+count,0);DrawAnnotations(dc,client);GdiFlush();
+                if(std::any_of(pixels,pixels+count,[](uint32_t p){return (p&0xffffff)!=0;})){
+                    DestroyWindow(find.window);return fail(L"Multiply did not preserve a black backdrop.");}
+            }
+        }
+        DestroyWindow(find.window);
+        const auto applied=g_annots;
+        if(!UndoAnnotCommand(owner) || !RedoAnnotCommand(owner) || !AnnotationEquals(g_annots[0],applied[0]))
+            return fail(L"Inspector blend change did not survive undo/redo.");
+        const auto path=std::filesystem::path(g_currentSessionPath)/(L"blend_v2_"+std::to_wstring(static_cast<int>(type))+L".clrop");
+        std::wstring loadError;std::vector<Annotation> loaded;bool mismatch=false;
+        if(!clrop_bridge::SaveAnnotations(path.wstring(),g_pdf.path,g_annots,loadError) ||
+           !clrop_bridge::LoadAnnotations(path.wstring(),g_pdf.path,loaded,mismatch,nullptr,loadError,
+                clrop_bridge::LoadAnnotationsValidation::None) || loaded.size()!=1 ||
+           (type==Annotation::Type::MarkerText ? loaded[0].markerDisplayMode!=MarkerDisplayMode::Multiply
+                : loaded[0].blendMode!=AnnotationBlendMode::Multiply))
+            return fail(L"v2 blend selection was lost during save/reopen.");
+    }
+    if(trace)*trace+=L"annotation_blend_switch:app_ok toolbar=1 inspector=1 v2=1 undo=1 render=1\n";
+    return true;
+}

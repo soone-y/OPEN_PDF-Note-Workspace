@@ -35,6 +35,7 @@ struct TextStorageSnapshot {
     note::NoteIdentity noteIdentity{};
     bool diskOk = false;
     uint64_t diskPersistenceRevision = 0;
+    uint64_t diskContentFingerprint = 0;
     std::string diskBytes;
     std::filesystem::path stagePath;
     bool hasStage = false;
@@ -86,10 +87,12 @@ inline TextStorageSnapshot LoadTextStorageSnapshot(const std::wstring& path,
     TextStorageSnapshot snapshot;
     snapshot.noteIdentity = note::ResolveRuntimeNoteIdentityPath(path);
     const auto observeDisk = [&snapshot]() {
-        if (!snapshot.diskOk || !snapshot.noteIdentity.note_id.valid()) return;
+        if (!snapshot.diskOk) return;
+        snapshot.diskContentFingerprint = note::FingerprintSnapshotBytes(snapshot.diskBytes);
+        if (!snapshot.noteIdentity.note_id.valid()) return;
         snapshot.diskPersistenceRevision = note::ObserveRuntimeNoteDiskSnapshot(
             snapshot.noteIdentity.note_id,
-            note::FingerprintSnapshotBytes(snapshot.diskBytes));
+            snapshot.diskContentFingerprint);
     };
     if (policy == TextSnapshotReadPolicy::DiskAndStage) {
         snapshot.diskOk = ReadFileBytesWin32(std::filesystem::path(path), snapshot.diskBytes);
@@ -152,8 +155,10 @@ inline LatestTextSnapshot ResolveLatestTextSnapshot(const std::wstring& path,
     result.ok = true;
     result.source = TextSnapshotSource::Disk;
     result.bytes = std::move(snapshot.diskBytes);
-    result.identity = note::BuildSnapshotIdentity(
-        snapshot.noteIdentity.note_id, 0, snapshot.diskPersistenceRevision, result.bytes);
+    result.identity = note::SnapshotIdentity{
+        snapshot.noteIdentity.note_id, 0, snapshot.diskPersistenceRevision,
+        snapshot.diskContentFingerprint != 0 ? snapshot.diskContentFingerprint
+            : note::FingerprintSnapshotBytes(result.bytes)};
     return result;
 }
 

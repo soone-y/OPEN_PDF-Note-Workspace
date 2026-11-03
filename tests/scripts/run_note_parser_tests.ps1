@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ArtifactName = "note_parser_tests_alias"
+    [string]$ArtifactName = "note_parser_tests_alias",
+    [switch]$Md4cFatalFaults
 )
 
 Set-StrictMode -Version Latest
@@ -14,6 +15,11 @@ if ($ArtifactName -notmatch '^[A-Za-z0-9._-]+$') {
 }
 $exe = Join-Path $outDir "$ArtifactName.exe"
 $md4cObj = Join-Path $outDir "${ArtifactName}_md4c.obj"
+$md4cSource = if ($Md4cFatalFaults) {
+    "tests/unit/note_md4c_fault_backend.c"
+} else {
+    "third_party/md4c/src/md4c.c"
+}
 
 $compiler = Get-Command g++ -ErrorAction SilentlyContinue
 if (-not $compiler) {
@@ -32,7 +38,7 @@ $cArgs = @(
     "-DMD4C_USE_UTF16",
     "-Ithird_party/md4c/src",
     "-c",
-    "third_party/md4c/src/md4c.c",
+    $md4cSource,
     "-o",
     $md4cObj
 )
@@ -97,6 +103,10 @@ $cppArgs = @(
     "-o",
     $exe
 )
+
+if ($Md4cFatalFaults) {
+    $cppArgs = @("-DNOTE_MD4C_FATAL_FAULT_TEST") + $cppArgs
+}
 
 Push-Location -LiteralPath $repoRoot
 try {

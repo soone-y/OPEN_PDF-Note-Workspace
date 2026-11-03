@@ -1,0 +1,7 @@
+void SaveAndMeasure(int n) {
+    g_typing = n;
+    if (n) Persist(n);
+    Paint(n + 1);
+}
+void EditText() { ++g_typing; Edit(g_typing); }
+void ChangeReference() { int& alias = Typing(); alias += 2; }

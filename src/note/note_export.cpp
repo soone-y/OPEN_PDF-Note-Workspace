@@ -5,9 +5,13 @@
 #include <windows.h>
 
 #include "note/note_export.h"
+#include "note/note_clro_markdown.h"
+#include "note/note_markup_color.h"
 
 #include "note/note_markdown_escape.h"
 #include "note/note_parser.h"
+#include "note/note_syntax_lexical.h"
+#include "note/note_render_final_style.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -31,18 +35,6 @@ struct Segment {
     Span span{};
     const MathSpan* math = nullptr;
 };
-
-std::wstring TrimWhitespace(std::wstring_view text) {
-    size_t start = 0;
-    size_t end = text.size();
-    while (start < end && iswspace(text[start])) {
-        ++start;
-    }
-    while (end > start && iswspace(text[end - 1])) {
-        --end;
-    }
-    return std::wstring(text.substr(start, end - start));
-}
 
 std::string WideToUtf8(std::wstring_view text) {
     if (text.empty()) return {};
@@ -86,179 +78,44 @@ std::string EscapeHtml(std::string_view text) {
     return out;
 }
 
-std::wstring ToLowerAscii(std::wstring_view text) {
-    std::wstring out;
-    out.reserve(text.size());
-    for (wchar_t ch : text) {
-        if (ch >= L'A' && ch <= L'Z') {
-            out.push_back(static_cast<wchar_t>(ch - L'A' + L'a'));
-        } else {
-            out.push_back(ch);
+// One immutable parser-proven token index per export, shared by all slices.
+// Unknown/orphan tags and literal code are never reinterpreted or discarded.
+struct ExportSource {
+    const NoteTextModel& model;
+    std::vector<Span> style_syntax;
+    ExportSource(const NoteTextModel& text, const NoteDocument& doc) : model(text) {
+        style_syntax.reserve(doc.style_spans.size() * 2);
+        for (const auto& style : doc.style_spans) {
+            Span token;
+            if (FindNoteMarkupTagEndingAt(model.raw, style.span.start, &token, doc.uses_clro_fullwidth_markdown)) style_syntax.push_back(token);
+            if (FindNoteMarkupTagStartingAt(model.raw, style.span.end, &token, doc.uses_clro_fullwidth_markdown)) style_syntax.push_back(token);
         }
+        std::sort(style_syntax.begin(), style_syntax.end(), [](Span a, Span b) {
+            return a.start != b.start ? a.start < b.start : a.end < b.end;
+        });
+        style_syntax.erase(std::unique(style_syntax.begin(), style_syntax.end(), [](Span a, Span b) {
+            return a.start == b.start && a.end == b.end;
+        }), style_syntax.end());
     }
-    return out;
-}
-
-bool ParseMarkupBool(std::wstring_view value) {
-    const std::wstring lowered = ToLowerAscii(value);
-    return lowered.empty() ||
-           lowered == L"1" ||
-           lowered == L"true" ||
-           lowered == L"on" ||
-           lowered == L"yes";
-}
-
-bool TryParseMarkupTag(std::wstring_view raw,
-                       size_t openPos,
-                       size_t* outTagEnd,
-                       std::wstring* outContent) {
-    if (!outTagEnd || !outContent) return false;
-    if (openPos >= raw.size() || raw[openPos] != L'<') return false;
-
-    size_t cursor = openPos + 1;
-    while (cursor < raw.size() && raw[cursor] != L'>') {
-        ++cursor;
+    [[nodiscard]] std::wstring Slice(Span span, bool literal = false) const {
+        if (span.end <= span.start || span.start.value >= model.raw.size()) return {};
+        const size_t end = std::min(span.end.value, model.raw.size());
+        size_t cursor = span.start.value;
+        if (literal) return model.raw.substr(cursor, end - cursor);
+        std::wstring out;
+        const auto first = std::lower_bound(style_syntax.begin(), style_syntax.end(), span.start,
+            [](Span token, Utf16CodeUnitOffset start) { return token.end <= start; });
+        for (auto it = first; it != style_syntax.end() && it->start.value < end; ++it) {
+            if (it->start.value > cursor) out.append(model.raw, cursor, it->start.value - cursor);
+            cursor = std::max(cursor, std::min(end, it->end.value));
+        }
+        out.append(model.raw, cursor, end - cursor);
+        return out;
     }
-    if (cursor >= raw.size() || raw[cursor] != L'>') return false;
+};
 
-    *outTagEnd = cursor + 1;
-    *outContent = TrimWhitespace(raw.substr(openPos + 1, cursor - (openPos + 1)));
-    return !outContent->empty();
-}
-
-bool IsNumericValue(std::wstring_view value) {
-    if (value.empty()) return false;
-    bool hasDigit = false;
-    for (size_t i = 0; i < value.size(); ++i) {
-        const wchar_t ch = value[i];
-        if (ch >= L'0' && ch <= L'9') {
-            hasDigit = true;
-            continue;
-        }
-        if (ch == L'+' || ch == L'-') {
-            if (i != 0) return false;
-            continue;
-        }
-        if (ch == L'.') continue;
-        return false;
-    }
-    return hasDigit;
-}
-
-bool IsRecognizedStyleOpenTag(std::wstring_view content) {
-    if (content.empty() || content[0] == L'/') return false;
-
-    size_t i = 0;
-    bool recognized = false;
-    while (i < content.size()) {
-        while (i < content.size() && (iswspace(content[i]) || content[i] == L',')) ++i;
-        if (i >= content.size()) break;
-
-        size_t keyStart = i;
-        while (i < content.size() && !iswspace(content[i]) && content[i] != L'=' && content[i] != L',') ++i;
-        std::wstring key = std::wstring(content.substr(keyStart, i - keyStart));
-        if (key.empty()) {
-            ++i;
-            continue;
-        }
-
-        std::optional<std::wstring> value;
-        if (i < content.size() && content[i] == L'=') {
-            ++i;
-            while (i < content.size() && iswspace(content[i])) ++i;
-            if (i < content.size() && (content[i] == L'"' || content[i] == L'\'')) {
-                const wchar_t quote = content[i++];
-                const size_t valueStart = i;
-                while (i < content.size() && content[i] != quote) ++i;
-                value = std::wstring(content.substr(valueStart, i - valueStart));
-                if (i < content.size() && content[i] == quote) ++i;
-            } else {
-                const size_t valueStart = i;
-                while (i < content.size() && !iswspace(content[i]) && content[i] != L',') ++i;
-                value = std::wstring(content.substr(valueStart, i - valueStart));
-            }
-        }
-
-        if (!value && key.size() >= 2 && (key[1] == L'+' || key[1] == L'-')) {
-            const wchar_t head = towlower(key[0]);
-            if (head == L'm' || head == L's') {
-                value = key.substr(1);
-                key = key.substr(0, 1);
-            }
-        }
-
-        const std::wstring lowered = ToLowerAscii(key);
-        if (!value) {
-            if (lowered == L"u" || lowered == L"b" || lowered == L"bold" || lowered == L"strong" ||
-                lowered == L"i" || lowered == L"italic" || lowered == L"em" ||
-                lowered == L"x" || lowered == L"s" || lowered == L"strike" || lowered == L"del" ||
-                lowered == L"la" || lowered == L"linkaccent" ||
-                lowered == L"lu" || lowered == L"linkunderline" || lowered == L"m") {
-                recognized = true;
-            }
-            continue;
-        }
-
-        const std::wstring trimmedValue = TrimWhitespace(*value);
-        if (trimmedValue.empty()) continue;
-        if (lowered == L"char" || lowered == L"c" ||
-            lowered == L"back" ||
-            lowered == L"font" || lowered == L"f" ||
-            lowered == L"s" ||
-            lowered == L"m" ||
-            lowered == L"l" || lowered == L"link" ||
-            lowered == L"la" || lowered == L"linkaccent" ||
-            lowered == L"lu" || lowered == L"linkunderline") {
-            recognized = true;
-        } else if (lowered == L"d") {
-            recognized = IsNumericValue(trimmedValue) || !trimmedValue.empty();
-        } else if (lowered == L"u" || lowered == L"b" || lowered == L"bold" || lowered == L"strong" ||
-                   lowered == L"i" || lowered == L"italic" || lowered == L"em" ||
-                   lowered == L"x" || lowered == L"s" || lowered == L"strike" || lowered == L"del") {
-            recognized = ParseMarkupBool(trimmedValue);
-        }
-    }
-
-    return recognized;
-}
-
-bool IsLegacyStyleTag(std::wstring_view raw, size_t pos, size_t* outTagEnd) {
-    size_t tagEnd = 0;
-    std::wstring content;
-    if (!TryParseMarkupTag(raw, pos, &tagEnd, &content)) {
-        return false;
-    }
-    if (content == L"/" || (!content.empty() && content[0] == L'/') || IsRecognizedStyleOpenTag(content)) {
-        if (outTagEnd) *outTagEnd = tagEnd;
-        return true;
-    }
-    return false;
-}
-
-std::wstring StripLegacyStyleTags(std::wstring_view raw) {
-    std::wstring out;
-    out.reserve(raw.size());
-    size_t pos = 0;
-    while (pos < raw.size()) {
-        size_t tagEnd = 0;
-        if (raw[pos] == L'<' && IsLegacyStyleTag(raw, pos, &tagEnd)) {
-            pos = tagEnd;
-            continue;
-        }
-        out.push_back(raw[pos]);
-        ++pos;
-    }
-    return out;
-}
-
-std::wstring SliceWithoutLegacyStyleTags(const NoteTextModel& model, Span span) {
-    if (span.end.value <= span.start.value || span.start.value >= model.raw.size()) return L"";
-    const size_t end = std::min(span.end.value, model.raw.size());
-    return StripLegacyStyleTags(std::wstring_view(model.raw).substr(span.start.value, end - span.start.value));
-}
-
-std::wstring SliceRenderedMarkdownText(const NoteTextModel& model, Span span) {
-    return DecodeMarkdownBackslashEscapes(SliceWithoutLegacyStyleTags(model, span));
+std::wstring SliceRenderedMarkdownText(const ExportSource& source, Span span) {
+    return DecodeMarkdownBackslashEscapes(source.Slice(span));
 }
 
 std::wstring MathRawText(const NoteTextModel& model, const MathSpan& math) {
@@ -305,67 +162,52 @@ std::vector<Segment> BuildVisibleSegments(const NoteTextModel& model,
                                           const BlockNode& block,
                                           size_t blockIndex) {
     (void)model;
-    std::vector<Segment> base;
+    std::vector<Segment> text;
+    std::vector<Segment> overlays;
     for (size_t i = 0; i < block.inline_count; ++i) {
-        const size_t inlineIndex = block.first_inline + i;
-        if (inlineIndex >= doc.inlines.size()) break;
-        const InlineNode& node = doc.inlines[inlineIndex];
+        const size_t index = block.first_inline + i;
+        if (index >= doc.inlines.size()) break;
+        const auto& node = doc.inlines[index];
         if (node.parent_block != blockIndex) continue;
-        if (node.kind == InlineKind::Text || node.kind == InlineKind::Code) {
-            Segment seg;
-            seg.kind = (node.kind == InlineKind::Code) ? Segment::Kind::Code : Segment::Kind::Text;
-            seg.span = node.span;
-            base.push_back(seg);
-        }
+        if (node.kind == InlineKind::Text) text.push_back({Segment::Kind::Text, node.span, nullptr});
+        if (node.kind == InlineKind::Code) overlays.push_back({Segment::Kind::Code, node.span, nullptr});
     }
-    std::sort(base.begin(), base.end(), [](const Segment& lhs, const Segment& rhs) {
-        if (lhs.span.start != rhs.span.start) return lhs.span.start < rhs.span.start;
-        return lhs.span.end < rhs.span.end;
-    });
-
-    std::vector<const MathSpan*> mathSpans;
     for (const auto& math : doc.math_spans) {
-        if (math.span.start < block.span.end && math.span.end > block.span.start) {
-            mathSpans.push_back(&math);
-        }
+        if (math.span.start < block.span.end && math.span.end > block.span.start)
+            overlays.push_back({Segment::Kind::Math, math.span, &math});
     }
-    std::sort(mathSpans.begin(), mathSpans.end(), [](const MathSpan* lhs, const MathSpan* rhs) {
-        if (lhs->span.start != rhs->span.start) return lhs->span.start < rhs->span.start;
-        return lhs->span.end < rhs->span.end;
-    });
-
-    std::vector<Segment> out;
-    for (const auto& seg : base) {
-        if (seg.kind != Segment::Kind::Text) {
-            out.push_back(seg);
-            continue;
-        }
-        size_t cursor = seg.span.start.value;
-        for (const MathSpan* math : mathSpans) {
-            if (!math) continue;
-            if (math->span.end.value <= seg.span.start.value) continue;
-            if (math->span.start.value >= seg.span.end.value) break;
-            if (cursor < math->span.start.value) {
-                out.push_back(Segment{Segment::Kind::Text, Span{{cursor}, math->span.start}, nullptr});
-            }
-            out.push_back(Segment{Segment::Kind::Math, math->span, math});
-            cursor = std::max(cursor, math->span.end.value);
-        }
-        if (cursor < seg.span.end.value) {
-            out.push_back(Segment{Segment::Kind::Text, Span{{cursor}, seg.span.end}, nullptr});
-        }
-    }
-
-    std::sort(out.begin(), out.end(), [](const Segment& lhs, const Segment& rhs) {
+    const auto order = [](const Segment& lhs, const Segment& rhs) {
         if (lhs.span.start != rhs.span.start) return lhs.span.start < rhs.span.start;
         return lhs.span.end < rhs.span.end;
-    });
+    };
+    std::sort(overlays.begin(), overlays.end(), order);
+    // Code and math are parser-owned, disjoint literal regions. Text callbacks
+    // also cover their contents; subtract those regions rather than outputting
+    // the callback text and overlay twice.
+    std::vector<Segment> out;
+    for (const auto& segment : text) {
+        auto overlay = std::lower_bound(overlays.begin(), overlays.end(), segment.span.start,
+            [](const Segment& candidate, Utf16CodeUnitOffset start) { return candidate.span.end <= start; });
+        size_t cursor = segment.span.start.value;
+        for (; overlay != overlays.end() && overlay->span.start < segment.span.end; ++overlay) {
+            if (cursor < overlay->span.start.value)
+                out.push_back({Segment::Kind::Text, {{cursor}, overlay->span.start}, nullptr});
+            out.push_back(*overlay);
+            cursor = std::max(cursor, overlay->span.end.value);
+        }
+        if (cursor < segment.span.end.value)
+            out.push_back({Segment::Kind::Text, {{cursor}, segment.span.end}, nullptr});
+    }
+    std::sort(out.begin(), out.end(), order);
+    out.erase(std::unique(out.begin(), out.end(), [](const Segment& lhs, const Segment& rhs) {
+        return lhs.kind == rhs.kind && lhs.span.start == rhs.span.start && lhs.span.end == rhs.span.end;
+    }), out.end());
     return out;
 }
-
-std::wstring RenderPlainSegment(const NoteTextModel& model,
+std::wstring RenderPlainSegment(const ExportSource& source,
                                 const Segment& segment,
                                 const TextExportConfig& config) {
+    const auto& model = source.model;
     switch (segment.kind) {
     case Segment::Kind::Code:
         if (segment.span.end.value <= segment.span.start.value || segment.span.start.value >= model.raw.size()) return L"";
@@ -384,19 +226,20 @@ std::wstring RenderPlainSegment(const NoteTextModel& model,
         }
     case Segment::Kind::Text:
     default:
-        return SliceRenderedMarkdownText(model, segment.span);
+        return SliceRenderedMarkdownText(source, segment.span);
     }
 }
 
-std::wstring RenderPlainBlockInlineContent(const NoteTextModel& model,
+std::wstring RenderPlainBlockInlineContent(const ExportSource& source,
                                            const NoteDocument& doc,
                                            const BlockNode& block,
                                            size_t blockIndex,
                                            const TextExportConfig& config) {
+    const auto& model = source.model;
     std::wstring out;
     const std::vector<Segment> segments = BuildVisibleSegments(model, doc, block, blockIndex);
     for (const auto& segment : segments) {
-        out += RenderPlainSegment(model, segment, config);
+        out += RenderPlainSegment(source, segment, config);
     }
     if (!out.empty() && out.back() != L'\n') out.push_back(L'\n');
     return out;
@@ -410,7 +253,7 @@ std::wstring BuildMarkdownHeadingPrefix(int level) {
 std::string DefaultHtmlCss() {
     return R"CSS(
 :root{--fg:#1c1d22;--muted:#5f6472;--bg:#fbfaf7;--paper:#ffffff;--line:#e7e0d6;}
-body{font-family:"Segoe UI Variable Text","Yu Gothic UI","Hiragino Sans",sans-serif;line-height:1.65;margin:28px;color:var(--fg);background:
+body{font-family:"Segoe UI Variable Text","Yu Gothic UI","Hiragino Sans",sans-serif;font-size:16px;line-height:1.65;margin:28px;color:var(--fg);background:
 radial-gradient(circle at top left,rgba(31,107,91,.08),transparent 28rem),
 linear-gradient(180deg,#fcfbf8,#f6f1e8 55%,#fbfaf7);}
 pre{background:#f6f8fa;padding:12px;overflow:auto;border-radius:10px;border:1px solid #e4e7eb;}
@@ -428,33 +271,62 @@ th{background:#f3f5f7;font-weight:600;}
 )CSS";
 }
 
-std::string StyleSpanToCss(StyleKind kind, std::wstring_view value) {
-    const std::string v = EscapeHtml(WideToUtf8(value));
-    switch (kind) {
-    case StyleKind::Bold:
-        return "font-weight:bold;";
-    case StyleKind::Italic:
-        return "font-style:italic;";
-    case StyleKind::Underline:
-        return "text-decoration:underline;";
-    case StyleKind::Strike:
-        return "text-decoration:line-through;";
-    case StyleKind::TextColor:
-        return "color:" + v + ";";
-    case StyleKind::BackgroundColor:
-        return "background:" + v + ";";
-    case StyleKind::FontFamily:
-        return "font-family:" + v + ";";
-    case StyleKind::FontSize:
-        return "font-size:" + v + ";";
-    case StyleKind::LinkAccent:
-        return "color:#0b57d0;";
-    case StyleKind::LinkUnderline:
-        return "text-decoration:underline;";
-    default:
-        break;
+[[nodiscard]] std::string CssColor(std::wstring_view value, bool background) {
+    const auto parsed = ResolveNoteMarkupColor(value);
+    if (parsed.kind == NoteMarkupColorKind::HighContrast)
+        return background ? "Canvas" : "CanvasText";
+    if (parsed.kind != NoteMarkupColorKind::Explicit) return {};
+    constexpr char digits[] = "0123456789abcdef";
+    std::string css(7, '#');
+    for (int i = 0; i < 6; ++i) css[1 + i] = digits[(parsed.rgb >> (20 - 4 * i)) & 0xf];
+    return css;
+}
+
+[[nodiscard]] std::string HtmlStyleCss(const std::vector<const StyleSpan*>& styles) {
+    NoteRenderSourceRun run;
+    bool underline = false, strike = false, accent = false;
+    std::string colour, background;
+    for (const auto* style : styles) {
+        run.styles.push_back({style->kind, style->value});
+        if (style->kind == StyleKind::TextColor) {
+            const auto parsed = CssColor(style->value, false);
+            if (!parsed.empty()) colour = parsed;
+        } else if (style->kind == StyleKind::BackgroundColor) {
+            const auto parsed = CssColor(style->value, true);
+            if (!parsed.empty()) background = parsed;
+        }
+        underline = underline || style->kind == StyleKind::Underline || style->kind == StyleKind::LinkUnderline;
+        strike = strike || style->kind == StyleKind::Strike;
+        accent = accent || style->kind == StyleKind::LinkAccent;
     }
-    return {};
+    // The HTML body has a fixed logical 16px base. Resolve the same bounded,
+    // outer-to-inner arithmetic as GDI; never concatenate user CSS values.
+    NoteRenderFinalRunFontStyle resolved;
+    if (!ResolveNoteRenderFinalRunFontStyle({}, run, 16, &resolved)) return {};
+    std::string css;
+    if (resolved.bold) css += "font-weight:bold;";
+    if (resolved.italic) css += "font-style:italic;";
+    if (underline || strike) css += std::string("text-decoration:") +
+        (underline ? "underline" : "") + (underline && strike ? " " : "") + (strike ? "line-through" : "") + ";";
+    if (accent) colour = "#0b57d0";
+    if (!colour.empty()) css += "color:" + colour + ";";
+    if (!background.empty()) css += "background-color:" + background + ";";
+    if (!resolved.font_family.empty()) {
+        std::string face;
+        for (const auto ch : WideToUtf8(resolved.font_family)) {
+            if (ch == '\\' || ch == '"') face.push_back('\\');
+            if (static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f) face.push_back(' ');
+            else face.push_back(ch);
+        }
+        css += "font-family:\"" + face + "\";";
+    }
+    if (resolved.font_size_specified) css += "font-size:" + std::to_string(resolved.font_height_px) + "px;";
+    if (resolved.line_height_permille != 1000) {
+        const uint64_t units = uint64_t{165} * resolved.line_height_permille;
+        css += "line-height:" + std::to_string(units / 100000) + "." +
+            std::to_string(100000 + units % 100000).substr(1) + ";";
+    }
+    return css;
 }
 
 std::string TableCellAlignCss(TableCellAlign align) {
@@ -471,11 +343,32 @@ std::string TableCellAlignCss(TableCellAlign align) {
     }
 }
 
-std::wstring RenderPlainBlock(const NoteTextModel& model,
+// Both export and the immutable source plan use the lexical title rule.
+// MD4C's nonempty code span starts at the body, so its opener is one row above.
+[[nodiscard]] std::wstring FenceTitle(const NoteTextModel& model, const BlockNode& block) {
+    const bool container = block.kind == BlockKind::FencedContainer;
+    if ((!container && block.kind != BlockKind::CodeBlock) || block.span.end <= block.span.start ||
+        block.loc.line <= (container ? 0 : 1)) return {};
+    const size_t line = static_cast<size_t>(block.loc.line - (container ? 1 : 2));
+    if (line >= model.line_starts.size()) return {};
+    const size_t start = model.line_starts[line];
+    const size_t foundEnd = model.raw.find_first_of(L"\r\n", start);
+    const size_t end = foundEnd == std::wstring::npos ? model.raw.size() : foundEnd;
+    const std::wstring_view raw(model.raw.data() + start, end - start);
+    std::wstring syntax(raw);
+    if (IsClroMarkdownFile(model.meta.file_name)) {
+        std::transform(syntax.begin(), syntax.end(), syntax.begin(), ClroMarkdownCharacter);
+    }
+    const Span title = NoteFenceTitleSpan(syntax, container);
+    return std::wstring(raw.substr(title.start.value, title.end - title.start));
+}
+
+std::wstring RenderPlainBlock(const ExportSource& source,
                               const NoteDocument& doc,
                               const std::vector<std::vector<size_t>>& children,
                               size_t blockIndex,
                               const TextExportConfig& config) {
+    const auto& model = source.model;
     if (blockIndex >= doc.blocks.size()) return L"";
     const BlockNode& block = doc.blocks[blockIndex];
     std::wstring out;
@@ -484,27 +377,31 @@ std::wstring RenderPlainBlock(const NoteTextModel& model,
     case BlockKind::HorizontalRule:
         return L"\n";
     case BlockKind::CodeBlock:
-        out += SliceWithoutLegacyStyleTags(model, block.span);
+        out = FenceTitle(model, block);
+        if (!out.empty()) out.push_back(L'\n');
+        out += source.Slice(block.span, true);
         if (!out.empty() && out.back() != L'\n') out.push_back(L'\n');
         return out;
     case BlockKind::Paragraph:
     case BlockKind::Heading:
-        return RenderPlainBlockInlineContent(model, doc, block, blockIndex, config);
+        return RenderPlainBlockInlineContent(source, doc, block, blockIndex, config);
     case BlockKind::List:
     case BlockKind::ListItem:
     case BlockKind::Quote: {
         // MD4C may attach text directly to a list item or quote. Preserve it
         // before walking child blocks so text export removes only syntax.
-        out += RenderPlainBlockInlineContent(model, doc, block, blockIndex, config);
+        out += RenderPlainBlockInlineContent(source, doc, block, blockIndex, config);
         const size_t bucket = (blockIndex < children.size()) ? blockIndex : children.size() - 1;
         for (size_t child : children[bucket]) {
-            out += RenderPlainBlock(model, doc, children, child, config);
+            out += RenderPlainBlock(source, doc, children, child, config);
         }
         return out;
     }
     case BlockKind::FencedContainer: {
+        out = FenceTitle(model, block);
+        if (!out.empty()) out.push_back(L'\n');
         for (size_t child : children[blockIndex]) {
-            out += RenderPlainBlock(model, doc, children, child, config);
+            out += RenderPlainBlock(source, doc, children, child, config);
         }
         return out;
     }
@@ -514,10 +411,10 @@ std::wstring RenderPlainBlock(const NoteTextModel& model,
     case BlockKind::TableRow:
     case BlockKind::TableHeaderCell:
     case BlockKind::TableCell: {
-        out += RenderPlainBlockInlineContent(model, doc, block, blockIndex, config);
+        out += RenderPlainBlockInlineContent(source, doc, block, blockIndex, config);
         const size_t bucket = (blockIndex < children.size()) ? blockIndex : children.size() - 1;
         for (size_t child : children[bucket]) {
-            out += RenderPlainBlock(model, doc, children, child, config);
+            out += RenderPlainBlock(source, doc, children, child, config);
         }
         return out;
     }
@@ -528,14 +425,15 @@ std::wstring RenderPlainBlock(const NoteTextModel& model,
     return out;
 }
 
-std::wstring RewriteMarkdownHeadings(std::wstring text,
-                                     const std::wstring& title,
-                                     bool includeTitleHeading,
-                                     bool shiftHeadingLevels) {
+std::optional<std::wstring> RewriteMarkdownHeadings(std::wstring text,
+                                                     const std::wstring& title,
+                                                     bool includeTitleHeading,
+                                                     bool shiftHeadingLevels) {
     NoteMetadata meta;
     meta.file_name = L"export.md";
     NoteTextModel model = MakeNoteTextModel(std::move(meta), text, 1);
     NoteDocument doc = ParseNoteDocument(model);
+    if (NoteDocumentHasFatalParseFailure(doc)) return std::nullopt;
 
     std::unordered_map<size_t, const BlockNode*> headingByLine;
     for (const auto& block : doc.blocks) {
@@ -586,10 +484,11 @@ std::wstring RewriteMarkdownHeadings(std::wstring text,
     return out;
 }
 
-std::string RenderHtmlInlineRange(const NoteTextModel& model,
+std::string RenderHtmlInlineRange(const ExportSource& source,
                                   const NoteDocument& doc,
                                   size_t blockIndex,
                                   const MarkupExportConfig& config) {
+    const auto& model = source.model;
     if (blockIndex >= doc.blocks.size()) return {};
     const BlockNode& block = doc.blocks[blockIndex];
     std::vector<Segment> segments = BuildVisibleSegments(model, doc, block, blockIndex);
@@ -614,6 +513,9 @@ std::string RenderHtmlInlineRange(const NoteTextModel& model,
             styles.push_back(style);
         }
     }
+    std::stable_sort(styles.begin(), styles.end(), [](const StyleSpan& a, const StyleSpan& b) {
+        return a.span.start != b.span.start ? a.span.start < b.span.start : a.span.end > b.span.end;
+    });
 
     std::vector<Segment> finalSegments;
     for (const auto& seg : segments) {
@@ -661,9 +563,7 @@ std::string RenderHtmlInlineRange(const NoteTextModel& model,
                 inner = "<span class=\"math inline\">" + EscapeHtml(WideToUtf8(math->normalized_tex)) + "</span>";
             }
         } else {
-            std::wstring text = (seg.kind == Segment::Kind::Code)
-                ? SliceWithoutLegacyStyleTags(model, seg.span)
-                : SliceRenderedMarkdownText(model, seg.span);
+            std::wstring text = SliceRenderedMarkdownText(source, seg.span);
             if (text.empty()) continue;
             inner = EscapeHtml(WideToUtf8(text));
         }
@@ -692,13 +592,14 @@ std::string RenderHtmlInlineRange(const NoteTextModel& model,
             }
         }
 
-        std::string css;
+        std::vector<const StyleSpan*> activeStyles;
         for (const auto& style : styles) {
             if (seg.span.start < style.span.start || seg.span.end > style.span.end) continue;
-            css += StyleSpanToCss(style.kind, style.value);
+            activeStyles.push_back(&style);
         }
+        const auto css = HtmlStyleCss(activeStyles);
         if (!css.empty()) {
-            inner = "<span style=\"" + css + "\">" + inner + "</span>";
+            inner = "<span style=\"" + EscapeHtml(css) + "\">" + inner + "</span>";
         }
 
         out += inner;
@@ -706,13 +607,13 @@ std::string RenderHtmlInlineRange(const NoteTextModel& model,
     return out;
 }
 
-std::string RenderHtmlBlock(const NoteTextModel& model,
+std::string RenderHtmlBlock(const ExportSource& source,
                             const NoteDocument& doc,
                             const std::vector<std::vector<size_t>>& children,
                             size_t blockIndex,
                             const MarkupExportConfig& config);
 
-std::string RenderHtmlChildren(const NoteTextModel& model,
+std::string RenderHtmlChildren(const ExportSource& source,
                                const NoteDocument& doc,
                                const std::vector<std::vector<size_t>>& children,
                                size_t parentIndex,
@@ -721,16 +622,17 @@ std::string RenderHtmlChildren(const NoteTextModel& model,
     std::string out;
     if (bucket >= children.size()) return out;
     for (size_t child : children[bucket]) {
-        out += RenderHtmlBlock(model, doc, children, child, config);
+        out += RenderHtmlBlock(source, doc, children, child, config);
     }
     return out;
 }
 
-std::string RenderHtmlBlock(const NoteTextModel& model,
+std::string RenderHtmlBlock(const ExportSource& source,
                             const NoteDocument& doc,
                             const std::vector<std::vector<size_t>>& children,
                             size_t blockIndex,
                             const MarkupExportConfig& config) {
+    const auto& model = source.model;
     if (blockIndex >= doc.blocks.size()) return {};
     const BlockNode& block = doc.blocks[blockIndex];
 
@@ -746,21 +648,24 @@ std::string RenderHtmlBlock(const NoteTextModel& model,
             }
             return "<div class=\"math block\">" + EscapeHtml(WideToUtf8(segments[0].math->normalized_tex)) + "</div>\n";
         }
-        return "<p>" + RenderHtmlInlineRange(model, doc, blockIndex, config) + "</p>\n";
+        return "<p>" + RenderHtmlInlineRange(source, doc, blockIndex, config) + "</p>\n";
     }
     case BlockKind::Heading: {
         const bool shiftHeadings = config.includeTitleHeading && config.shiftHeadingLevels;
         const int level = std::clamp(shiftHeadings ? block.level + 1 : block.level, 1, 6);
         return "<h" + std::to_string(level) + ">" +
-               RenderHtmlInlineRange(model, doc, blockIndex, config) +
+               RenderHtmlInlineRange(source, doc, blockIndex, config) +
                "</h" + std::to_string(level) + ">\n";
     }
     case BlockKind::CodeBlock: {
-        std::string out = "<pre><code";
+        const std::wstring title = FenceTitle(model, block);
+        std::string out = title.empty() ? "" :
+            "<div class=\"note-block-title\"><strong>" + EscapeHtml(WideToUtf8(title)) + "</strong></div>\n";
+        out += "<pre><code";
         if (!block.info_string.empty()) {
             out += " class=\"language-" + EscapeHtml(WideToUtf8(block.info_string)) + "\"";
         }
-        out += ">" + EscapeHtml(WideToUtf8(SliceWithoutLegacyStyleTags(model, block.span))) + "</code></pre>\n";
+        out += ">" + EscapeHtml(WideToUtf8(source.Slice(block.span, true))) + "</code></pre>\n";
         return out;
     }
     case BlockKind::List: {
@@ -770,7 +675,7 @@ std::string RenderHtmlBlock(const NoteTextModel& model,
             out += " start=\"" + std::to_string(block.start_number) + "\"";
         }
         out += ">\n";
-        out += RenderHtmlChildren(model, doc, children, blockIndex, config);
+        out += RenderHtmlChildren(source, doc, children, blockIndex, config);
         out += std::string("</") + tag + ">\n";
         return out;
     }
@@ -784,33 +689,37 @@ std::string RenderHtmlBlock(const NoteTextModel& model,
         if (block.task_item) {
             out += block.task_checked ? "[x] " : "[ ] ";
         }
-        out += RenderHtmlChildren(model, doc, children, blockIndex, config);
+        out += RenderHtmlChildren(source, doc, children, blockIndex, config);
         while (!out.empty() && out.back() == '\n') out.pop_back();
         out += "</li>\n";
         return out;
     }
     case BlockKind::Quote:
-        return "<blockquote>\n" + RenderHtmlChildren(model, doc, children, blockIndex, config) + "</blockquote>\n";
-    case BlockKind::FencedContainer:
+        return "<blockquote>\n" + RenderHtmlChildren(source, doc, children, blockIndex, config) + "</blockquote>\n";
+    case BlockKind::FencedContainer: {
+        const std::wstring title = FenceTitle(model, block);
+        const std::string header = title.empty() ? "" :
+            "<div class=\"note-block-title\"><strong>" + EscapeHtml(WideToUtf8(title)) + "</strong></div>\n";
         return "<div class=\"note-container\" style=\"background:#f7f6f2;border:1px solid #b0aea6;padding:0.5em;\">\n" +
-               RenderHtmlChildren(model, doc, children, blockIndex, config) + "</div>\n";
+               header + RenderHtmlChildren(source, doc, children, blockIndex, config) + "</div>\n";
+    }
     case BlockKind::Table:
-        return "<table>\n" + RenderHtmlChildren(model, doc, children, blockIndex, config) + "</table>\n";
+        return "<table>\n" + RenderHtmlChildren(source, doc, children, blockIndex, config) + "</table>\n";
     case BlockKind::TableHead:
-        return "<thead>\n" + RenderHtmlChildren(model, doc, children, blockIndex, config) + "</thead>\n";
+        return "<thead>\n" + RenderHtmlChildren(source, doc, children, blockIndex, config) + "</thead>\n";
     case BlockKind::TableBody:
-        return "<tbody>\n" + RenderHtmlChildren(model, doc, children, blockIndex, config) + "</tbody>\n";
+        return "<tbody>\n" + RenderHtmlChildren(source, doc, children, blockIndex, config) + "</tbody>\n";
     case BlockKind::TableRow:
-        return "<tr>" + RenderHtmlChildren(model, doc, children, blockIndex, config) + "</tr>\n";
+        return "<tr>" + RenderHtmlChildren(source, doc, children, blockIndex, config) + "</tr>\n";
     case BlockKind::TableHeaderCell: {
         const std::string css = TableCellAlignCss(block.table_cell_align);
         return std::string("<th") + (css.empty() ? "" : (" style=\"" + css + "\"")) + ">" +
-               RenderHtmlInlineRange(model, doc, blockIndex, config) + "</th>";
+               RenderHtmlInlineRange(source, doc, blockIndex, config) + "</th>";
     }
     case BlockKind::TableCell: {
         const std::string css = TableCellAlignCss(block.table_cell_align);
         return std::string("<td") + (css.empty() ? "" : (" style=\"" + css + "\"")) + ">" +
-               RenderHtmlInlineRange(model, doc, blockIndex, config) + "</td>";
+               RenderHtmlInlineRange(source, doc, blockIndex, config) + "</td>";
     }
     case BlockKind::Blank:
         return "\n";
@@ -832,26 +741,44 @@ std::string ExportPlainText(const NoteTextModel& model,
         return WideToUtf8(raw);
     }
 
+    const ExportSource source(model, doc);
     const std::vector<std::vector<size_t>> children = BuildChildBlockLists(doc);
     std::wstring out;
     for (size_t rootChild : children[doc.blocks.size()]) {
-        out += RenderPlainBlock(model, doc, children, rootChild, config);
+        out += RenderPlainBlock(source, doc, children, rootChild, config);
     }
     return WideToUtf8(out);
 }
 
-std::string ExportMarkdown(const NoteTextModel& model,
-                           const NoteDocument& doc,
-                           const MarkupExportConfig& config) {
+std::optional<std::string> ExportMarkdown(const NoteTextModel& model,
+                                          const NoteDocument& doc,
+                                          const MarkupExportConfig& config) {
+    if (NoteDocumentHasFatalParseFailure(doc)) return std::nullopt;
     std::wstring raw = model.raw;
+    const bool normalized = config.normalizeClroSyntax && IsClroMarkdownFile(model.meta.file_name) &&
+                            doc.uses_clro_fullwidth_markdown;
+    if (normalized) {
+        auto converted = BuildClroMarkdownExportSource(model);
+        if (!converted) return std::nullopt;
+        raw = std::move(*converted);
+    }
     if (config.mathMode == ExportMarkupMathMode::Placeholder) {
-        raw = ReplaceMathSpansWithPlaceholder(model, doc, std::move(raw), Utf8ToWide(config.mathPlaceholder));
+        if (normalized) {
+            const auto outputModel = MakeNoteTextModel({L"export.md", L""}, raw, model.revision);
+            const auto outputDoc = ParseNoteDocument(outputModel);
+            if (NoteDocumentHasFatalParseFailure(outputDoc)) return std::nullopt;
+            raw = ReplaceMathSpansWithPlaceholder(outputModel, outputDoc, std::move(raw), Utf8ToWide(config.mathPlaceholder));
+        } else {
+            raw = ReplaceMathSpansWithPlaceholder(model, doc, std::move(raw), Utf8ToWide(config.mathPlaceholder));
+        }
     }
     if (config.includeTitleHeading) {
-        raw = RewriteMarkdownHeadings(std::move(raw),
-                                      config.title,
-                                      config.includeTitleHeading,
-                                      config.includeTitleHeading && config.shiftHeadingLevels);
+        auto rewritten = RewriteMarkdownHeadings(std::move(raw),
+                                                 config.title,
+                                                 config.includeTitleHeading,
+                                                 config.includeTitleHeading && config.shiftHeadingLevels);
+        if (!rewritten) return std::nullopt;
+        raw = std::move(*rewritten);
     }
     return WideToUtf8(raw);
 }
@@ -859,6 +786,7 @@ std::string ExportMarkdown(const NoteTextModel& model,
 std::string ExportHtml(const NoteTextModel& model,
                        const NoteDocument& doc,
                        const MarkupExportConfig& config) {
+    const ExportSource source(model, doc);
     const std::vector<std::vector<size_t>> children = BuildChildBlockLists(doc);
     const std::string title = EscapeHtml(WideToUtf8(config.title));
     std::string out;
@@ -870,13 +798,14 @@ std::string ExportHtml(const NoteTextModel& model,
     if (config.includeTitleHeading && !config.title.empty()) {
         out += "<h1>" + title + "</h1>\n";
     }
-    out += RenderHtmlChildren(model, doc, children, kInvalidIndex, config);
+    out += RenderHtmlChildren(source, doc, children, kInvalidIndex, config);
     out += "</body>\n</html>\n";
     return out;
 }
 
 bool WorkspaceNoteIndexCanExport(const WorkspaceNoteIndexSnapshot& index) {
-    if (!index.valid || !index.snapshot_identity.valid()) return false;
+    if (!index.valid || !index.snapshot_identity.valid() ||
+        NoteDocumentHasFatalParseFailure(index.document)) return false;
     if (index.snapshot_identity.content_revision != 0 &&
         index.text_model.revision != index.snapshot_identity.content_revision) {
         return false;
@@ -906,10 +835,12 @@ WorkspaceNoteExportResult ExportWorkspaceMarkdown(
     const WorkspaceNoteIndexSnapshot& index,
     const MarkupExportConfig& config) {
     if (!WorkspaceNoteIndexCanExport(index)) return {};
+    auto bytes = ExportMarkdown(index.text_model, index.document, config);
+    if (!bytes) return {};
     return WorkspaceNoteExportResult{
         true,
         index.snapshot_identity,
-        ExportMarkdown(index.text_model, index.document, config),
+        std::move(*bytes),
     };
 }
 

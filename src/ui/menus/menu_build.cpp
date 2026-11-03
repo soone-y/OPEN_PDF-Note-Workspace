@@ -7,9 +7,11 @@
 #include "ui/menus/main_debug_menu.h"
 #include "ui/menus/main_menu_owner_draw.h"
 #include "ui/menus/main_status_display.h"
+#include "ui/shortcut_help.h"
 #include "pdf_view/pdf_view.h"
 #include "bridge/view_bridge.h"
 #include "settings/settings.h"
+#include "ui/dialogs/pending_write_retry.h"
 #include "workspace/file_ops.h"
 
 #include <windows.h>
@@ -30,6 +32,10 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     HMENU bar = CreateMenu();
     const auto& ui = GetUiText();
     auto text = [](const wchar_t* key) { return localization::Text(key); };
+    auto shortcutText = [&](const wchar_t* key, application_shortcuts::Action action) {
+        return shortcut_help::MainMenuLabel(text(key), action);
+    };
+    using ShortcutAction = application_shortcuts::Action;
 
     HMENU file = CreatePopupMenu();
     HMENU create = CreatePopupMenu();
@@ -40,7 +46,7 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(create), text(L"menu.file.create").c_str());
 
     HMENU import = CreatePopupMenu();
-    AppendMenuW(import, MF_STRING, ID_FILE_IMPORT_FILE, text(L"menu.file.import_file").c_str());
+    AppendMenuW(import, MF_STRING, ID_FILE_IMPORT_FILE, shortcutText(L"menu.file.import_file", ShortcutAction::OpenFile).c_str());
     AppendMenuW(import, MenuStringState(!g_currentLecturePath.empty()), ID_FILE_IMPORT_DIR_AS_SESSION,
                 text(L"menu.file.import_session").c_str());
     AppendMenuW(import, MF_STRING, ID_FILE_IMPORT_DIR_AS_LECTURE,
@@ -60,10 +66,17 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(temp, MF_STRING, ID_FILE_ADD_TEMP_EXTERNAL_LECTURE,
                 text(L"menu.file.add_external_folder").c_str());
     AppendMenuW(temp, MF_STRING, ID_FILE_REMOVE_TEMP_EXTERNAL_LECTURE, text(L"menu.common.delete").c_str());
+    AppendMenuW(temp, MenuStringState(pending_write_retry::HasPendingTemporaryPaths()), ID_FILE_RETRY_TEMP_EXTERNAL,
+                text(L"write_retry.retry").c_str());
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(temp), text(L"menu.file.temporary_paths").c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, ID_FILE_ORGANIZE_SESSION_FILES, text(L"menu.file.organize").c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MenuStringState(menuState.hasCurrentPdf || menuState.hasCurrentImage || menuState.hasCurrentNote),
+        ID_FILE_CLOSE_FOCUSED, shortcutText(L"shortcut.action.close", ShortcutAction::CloseFile).c_str());
+    AppendMenuW(file, MenuStringState(menuState.hasCurrentPdf || menuState.hasCurrentImage ||
+        menuState.hasCurrentNote || menuState.noteEditorDirty || menuState.noteDirty),
+        ID_FILE_CLOSE, shortcutText(L"menu.file.close", ShortcutAction::CloseAll).c_str());
     AppendMenuW(file, MF_STRING, ID_FILE_EXIT, ui.menuExit.c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), text(L"menu.bar.file").c_str());
 
@@ -96,12 +109,24 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(page, pdfViewFlags, ID_VIEW_PREV_PAGE, text(L"menu.page.previous").c_str());
     AppendMenuW(page, pdfViewFlags, ID_VIEW_NEXT_PAGE, text(L"menu.page.next").c_str());
     AppendMenuW(page, pdfViewFlags, ID_VIEW_LAST_PAGE, text(L"menu.page.last").c_str());
-    AppendMenuW(page, pdfViewFlags, ID_VIEW_JUMP_PAGE, text(L"menu.page.jump").c_str());
+    AppendMenuW(page, pdfViewFlags, ID_VIEW_JUMP_PAGE, shortcutText(L"menu.page.jump", ShortcutAction::JumpPage).c_str());
     AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(page), text(L"menu.view.page").c_str());
     HMENU zoom = CreatePopupMenu();
+    AppendMenuW(zoom, pdfViewFlags, ID_VIEW_FIT_PAGE, shortcutText(L"shortcut.action.fit_page", ShortcutAction::FitPage).c_str());
     AppendMenuW(zoom, pdfViewFlags, ID_VIEW_RESET_ZOOM, text(L"menu.zoom.reset").c_str());
     AppendMenuW(zoom, pdfViewFlags, ID_VIEW_SET_ZOOM, text(L"menu.zoom.set").c_str());
     AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(zoom), text(L"menu.view.zoom").c_str());
+    HMENU rotation = CreatePopupMenu();
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_PAGE_LEFT, shortcutText(L"menu.rotate.left", ShortcutAction::RotateLeft).c_str());
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_PAGE_RIGHT, shortcutText(L"menu.rotate.right", ShortcutAction::RotateRight).c_str());
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_PAGE_RESET, shortcutText(L"menu.rotate.reset", ShortcutAction::ResetRotation).c_str());
+    AppendMenuW(rotation, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_ALL_LEFT, text(L"menu.rotate.all_left").c_str());
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_ALL_RIGHT, text(L"menu.rotate.all_right").c_str());
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_ALL_RESET, text(L"menu.rotate.all_reset").c_str());
+    AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(rotation), text(L"menu.view.rotation").c_str());
+    AppendMenuW(view, pdfViewFlags | (g_showAnnots ? MF_CHECKED : 0), ID_TOOL_TOGGLE_ANNOTS,
+                shortcutText(L"shortcut.action.annotations", ShortcutAction::ToggleAnnotations).c_str());
     HMENU scroll = CreatePopupMenu();
     HMENU scrollDir = CreatePopupMenu();
     g_hScrollDirectionMenu = scrollDir;
@@ -140,6 +165,8 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(save, saveAllFlags, ID_FILE_SAVE_ALL, text(L"menu.save.work").c_str());
     AppendMenuW(save, hasStagedDiffs ? MF_STRING : (MF_STRING | MF_GRAYED), ID_OP_STAGE_MANAGE,
                 text(L"menu.save.review_diffs").c_str());
+    AppendMenuW(save, MenuStringState(pending_write_retry::HasPending()), ID_FILE_PENDING_WRITES,
+                text(L"write_retry.menu").c_str());
     HMENU savedFileBackups = CreatePopupMenu();
     AppendMenuW(savedFileBackups, MF_STRING, ID_FILE_RESTORE_BACKUP, text(L"menu.common.restore").c_str());
     AppendMenuW(savedFileBackups, MF_STRING, ID_FILE_DELETE_BACKUP, text(L"menu.common.delete").c_str());
@@ -150,14 +177,14 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     HMENU exportMenu = CreatePopupMenu();
     const UINT exportPdfFlags = MenuStringState(CurrentLogicalPdfDocument() != nullptr);
     const UINT exportNoteFlags = MenuStringState(!g_currentNotePath.empty());
-    AppendMenuW(exportMenu, exportPdfFlags, ID_FILE_EXPORT_PDF_QUICK, text(L"menu.export.quick_pdf").c_str());
-    AppendMenuW(exportMenu, exportNoteFlags, ID_FILE_EXPORT_NOTE_TEXT_QUICK, text(L"menu.export.quick_note").c_str());
+    AppendMenuW(exportMenu, exportPdfFlags, ID_FILE_EXPORT_PDF_QUICK, shortcutText(L"menu.export.quick_pdf", ShortcutAction::QuickPdf).c_str());
+    AppendMenuW(exportMenu, exportNoteFlags, ID_FILE_EXPORT_NOTE_TEXT_QUICK, shortcutText(L"menu.export.quick_note", ShortcutAction::QuickNote).c_str());
     const UINT exportDialogFlags = MenuStringState(CurrentLogicalPdfDocument() != nullptr || !g_currentNotePath.empty());
-    AppendMenuW(exportMenu, exportDialogFlags, ID_FILE_EXPORT_COMBINED, text(L"menu.export.dialog").c_str());
+    AppendMenuW(exportMenu, exportDialogFlags, ID_FILE_EXPORT_COMBINED, shortcutText(L"menu.export.dialog", ShortcutAction::Export).c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(exportMenu), ui.menuExport.c_str());
 
     HMENU tools = CreatePopupMenu();
-    AppendMenuW(tools, MF_STRING, ID_WORKSPACE_MEMO, text(L"menu.tools.workspace_memo").c_str());
+    AppendMenuW(tools, MF_STRING, ID_WORKSPACE_MEMO, shortcutText(L"menu.tools.workspace_memo", ShortcutAction::Memo).c_str());
     HMENU viewer = CreatePopupMenu();
     AppendMenuW(viewer, MF_STRING, ID_OP_LAUNCH_READONLY_VIEWER, text(L"menu.viewer.launch").c_str());
     AppendMenuW(viewer, MF_STRING, ID_OP_OPEN_READONLY_VIEWER_FILE, text(L"menu.viewer.open_file").c_str());
@@ -177,18 +204,22 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
 
     HMENU settings = CreatePopupMenu();
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_GENERAL, text(L"menu.settings.dialog").c_str());
-    AppendMenuW(settings, MF_STRING, ID_SETTINGS_PALETTE, text(L"menu.settings.palette").c_str());
+    AppendMenuW(settings, MF_STRING, ID_SETTINGS_BOTTOM_PANE, text(L"menu.settings.bottom_pane").c_str());
+    AppendMenuW(settings, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(settings, MF_STRING, ID_SETTINGS_PRESETS, text(L"menu.settings.presets").c_str());
     AppendMenuW(settings, MF_STRING, ID_WORKSPACE_RESTORE, text(L"menu.bar.restore").c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), ui.menuSettings.c_str());
 
     HMENU help = CreatePopupMenu();
     AppendMenuW(help, MF_STRING, ID_HELP_GUIDE, text(L"menu.help.dialog").c_str());
-    AppendMenuW(help, MF_STRING, ID_HELP_PDF_INFO, text(L"menu.help.pdf_info").c_str());
-    AppendMenuW(help, MF_STRING, ID_HELP_NOTE_INFO, text(L"menu.help.note_info").c_str());
+    HMENU checks = CreatePopupMenu();
+    AppendMenuW(checks, MF_STRING, ID_WRITE_CHECKS, text(L"checks.title").c_str());
+    AppendMenuW(checks, MF_STRING, ID_SETTINGS_ASSETS, text(L"settings.assets.tab").c_str());
+    AppendMenuW(checks, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(checks, MF_STRING, ID_HELP_PDF_INFO, text(L"menu.help.pdf_info").c_str());
+    AppendMenuW(checks, MF_STRING, ID_HELP_NOTE_INFO, text(L"menu.help.note_info").c_str());
+    AppendMenuW(help, MF_POPUP, reinterpret_cast<UINT_PTR>(checks), text(L"menu.help.checks").c_str());
     AppendMenuW(help, MF_STRING, ID_HELP_SHOW_LOG_PATH, text(L"menu.help.log_path").c_str());
-    AppendMenuW(help, MF_STRING, ID_WRITE_CHECKS, text(L"checks.title").c_str());
-    AppendMenuW(help, MF_STRING, ID_SETTINGS_ASSETS, text(L"settings.assets.tab").c_str());
     if (menuState.developerMode) {
         HMENU debug = CreatePopupMenu();
         UINT debugToggleFlags = MF_STRING;

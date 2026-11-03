@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param (
     [switch]$Rebuild,
     [switch]$Clean,
@@ -114,6 +114,8 @@ $logDir = Join-Path $outRoot "logs"
 $endTimeLogPath = Join-Path $logDir "build_end_time.log"
 $buildDetailLogPath = Join-Path $logDir ("build_detail_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
 $versionFilePath = Join-Path $repoRoot "REPO_VERSION.txt"
+$versionSupportPath = Join-Path $repoRoot "scripts/build/build_version.ps1"
+. $versionSupportPath
 
 function Append-BuildDetailLog {
     param([AllowNull()]$Line)
@@ -545,6 +547,8 @@ try {
         "third_party/zlib/lib/libz.dll.a",
         "-lgdi32",
         "-lole32",
+        "-loleacc",
+        "-loleaut32",
         "-lcomdlg32",
         "-lcomctl32",
         "-luuid",
@@ -658,6 +662,7 @@ try {
         TranslationUnitDesign = $TranslationUnitDesign
         OutputExe             = $outputExe
         BuildDriverHash       = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+        VersionSupportHash = (Get-FileHash -LiteralPath $versionSupportPath -Algorithm SHA256).Hash
     }
 
     $signatureJson = $signature | ConvertTo-Json -Depth 10 -Compress
@@ -683,26 +688,13 @@ try {
         }
     }
 
-    $versionChanged = $false
-    if (Test-Path -LiteralPath $buildInfoManifestPath) {
-        $manifestContent = Get-Content -LiteralPath $buildInfoManifestPath -Raw -ErrorAction SilentlyContinue
-        $manifestMatch = [regex]::Match($manifestContent, '(?m)^version`t(?<ver>.+)`r?$')
-        if ($manifestMatch.Success -and $manifestMatch.Groups["ver"].Value.Trim() -ne $appVersion) {
-            $versionChanged = $true
-        }
+    $versionChanged = Test-BuildVersionNeedsRefresh -VersionPath $versionFilePath -Version $appVersion `
+        -ExecutablePath $outputExe -BuildInfoPath $buildInfoManifestPath
+    if ($versionChanged -and $sourceFiles -notcontains "src/core/app_core.cpp") {
+        throw "Required version source is missing from the build manifest: src/core/app_core.cpp"
     }
-    elseif (Test-Path -LiteralPath $versionFilePath) {
-        if (-not (Test-Path -LiteralPath $outputExe) -or (Get-Item -LiteralPath $versionFilePath).LastWriteTimeUtc -gt (Get-Item -LiteralPath $outputExe).LastWriteTimeUtc) {
-            $versionChanged = $true
-        }
-    }
-
     if ($versionChanged) {
-        Write-Host "Repo version changed ($appVersion); selectively recompiling version component (app_core.cpp) and relinking..." -ForegroundColor Yellow
-        $appCoreObj = Join-Path $objDir "app_core.o"
-        if (Test-Path -LiteralPath $appCoreObj) {
-            Remove-Item -Force -LiteralPath $appCoreObj -ErrorAction SilentlyContinue
-        }
+        Write-Host "Version inputs changed ($appVersion); recompiling the version source and relinking..." -ForegroundColor Yellow
         $forceLink = $true
     }
 
@@ -774,7 +766,11 @@ try {
             return $true
         }
 
-        foreach ($dep in (Get-DependencyPaths -DependencyFile $DependencyFile)) {
+        $dependencies = @(Get-DependencyPaths -DependencyFile $DependencyFile)
+        if ($dependencies.Count -eq 0 -or $Source -notin $dependencies) {
+            return $true
+        }
+        foreach ($dep in $dependencies) {
             if (-not (Test-Path -LiteralPath $dep)) {
                 return $true
             }
@@ -820,7 +816,6 @@ try {
     $compileCount = 0
     $skippedCount = 0
     $resourceCompiled = $false
-    $linkDeferred = $false
 
     foreach ($src in $sourceFiles) {
         $flatName = $src -replace "[\\/]", "_" -replace "\.(cpp|c)$", ".o"
@@ -839,6 +834,12 @@ try {
                     break
                 }
             }
+        }
+
+        # Version evidence applies even to a user-selected subset of sources.
+        if ($versionChanged -and $src -eq "src/core/app_core.cpp") {
+            $isTargetFile = $true
+            $forceCompileThis = $true
         }
 
         if ($isTargetFile -and ($forceRecompile -or $forceCompileThis -or (Should-Compile -Source $src -Object $objPath -DependencyFile $depPath))) {
@@ -972,26 +973,12 @@ try {
         }
 
         if ($firstLinkExitCode -ne 0) {
-            if (Test-Path -LiteralPath $outputExe) {
-                Write-Host ("Link failed. Existing executable was kept; skipping forced relink: {0}" -f $outputExe) -ForegroundColor Yellow
-                Write-BuildFailureTail
-                $linkDeferred = $true
-            }
-            else {
-                Write-Host "Linking Failed" -ForegroundColor Red
-                Write-BuildFailureTail
-                exit 1
-            }
+            Write-Host "Linking Failed; build-info and the successful signature were not updated." -ForegroundColor Red
+            Write-BuildFailureTail
+            exit 1
         }
-
-        if (-not $linkDeferred) {
-            Write-Host ("Build Successful! ({0} files compiled, {1} skipped)" -f $compileCount, $skippedCount) -ForegroundColor Green
-            Write-BuildOutputSummary -ExePath $outputExe -BinDir $binDir -LogDir $logDir
-        }
-        else {
-            Write-Host ("Compile completed without relinking. ({0} files compiled, {1} skipped)" -f $compileCount, $skippedCount) -ForegroundColor Yellow
-            Write-BuildOutputSummary -ExePath $outputExe -BinDir $binDir -LogDir $logDir
-        }
+        Write-Host ("Build Successful! ({0} files compiled, {1} skipped)" -f $compileCount, $skippedCount) -ForegroundColor Green
+        Write-BuildOutputSummary -ExePath $outputExe -BinDir $binDir -LogDir $logDir
     }
     else {
         Write-Host ("Up to date. ({0} files skipped)" -f $skippedCount) -ForegroundColor Green

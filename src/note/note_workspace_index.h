@@ -3,6 +3,7 @@
 #include "note/note_kernel.h"
 
 #include <optional>
+#include <atomic>
 
 namespace note {
 
@@ -65,7 +66,8 @@ NoteQueryMatch MatchNoteText(std::wstring_view text,
 std::vector<WorkspaceNoteLineMatch> SearchWorkspaceNoteIndex(
     const WorkspaceNoteIndexSnapshot& index,
     const NoteQueryGroups& queryGroups,
-    SemanticSearchOptions options = {});
+    SemanticSearchOptions options = {},
+    const std::atomic<bool>* canceled = nullptr);
 
 std::optional<size_t> FindWorkspaceLinkIdAnchor(
     const WorkspaceNoteIndexSnapshot& index,

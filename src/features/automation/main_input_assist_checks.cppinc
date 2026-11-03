@@ -1,0 +1,305 @@
+// Included after the common notice finder in main_ui_automation.cppinc.
+// These checks own only the runner's disposable instance. No OS DPI, input
+// method, user file or audio setting is changed. Scoped guards restore palette
+// text, native fonts, layout and fault state on every return path.
+
+#include "ui/window_corners.h"
+#include "ui/transient_display.h"
+
+[[nodiscard]] static bool RunInputAssistNoticeFailureChecks(HWND owner, std::wstring* error) {
+    const std::wstring originalNote = GetNoteAutomationIndexingText();
+    const std::wstring originalInput = GetShortcutBodyInput();
+    DWORD originalStart = 0, originalEnd = 0;
+    SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&originalStart),
+                 reinterpret_cast<LPARAM>(&originalEnd));
+    const HWND originalFocus = GetFocus();
+    const std::wstring guidance = localization::Text(L"note.input_assist.need_body");
+    const std::wstring priorNotice = L"Input assist timer failure fixture";
+    struct Cleanup {
+        HWND owner;
+        const std::wstring& input;
+        const std::wstring& guidance;
+        const std::wstring& prior;
+        ~Cleanup() {
+            ClearFaultInjectionPointForAutomation();
+            DismissSoftNotice(owner, guidance);
+            DismissSoftNotice(owner, prior);
+            SetWindowTextW(g_hShortcutTagEdit, input.c_str());
+        }
+    } cleanup{owner, originalInput, guidance, priorNotice};
+    const auto fail = [&](const wchar_t* message) {
+        if (error) *error = message;
+        return false;
+    };
+    SetWindowTextW(g_hShortcutTagEdit, L"timer failure 日本語 input");
+    const auto preserved = [&]() {
+        DWORD start = 0, end = 0;
+        SendMessageW(g_hNoteEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+        return GetNoteAutomationIndexingText() == originalNote &&
+            GetShortcutBodyInput() == L"timer failure 日本語 input" &&
+            start == originalStart && end == originalEnd && GetFocus() == originalFocus;
+    };
+    for (const bool replaceVisible : {false, true}) {
+        if (replaceVisible) {
+            ShowSoftNotice(owner, priorNotice, SoftNoticeKind::Warning);
+            const HWND before = FindUiAutomationSoftNoticeWindow();
+            if (!before || !IsWindowVisible(before)) return fail(L"Timer-failure fixture notice was not visible.");
+        }
+        if (!SetFaultInjectionPointForAutomation(L"SoftNotice:SetTimer"))
+            return fail(L"Timer-failure injection could not be armed.");
+        ShowSoftNotice(owner, guidance);
+        ClearFaultInjectionPointForAutomation();
+        const HWND notice = FindUiAutomationSoftNoticeWindow();
+        if (!notice || IsWindowVisible(notice) || !preserved())
+            return fail(L"Timer allocation failure left a notice visible or changed input, focus, selection or note.");
+        // The same text must recover immediately; a failed attempt must not
+        // consume the repeat-suppression interval or leave stale timer state.
+        ShowSoftNotice(owner, guidance);
+        if (!IsWindowVisible(notice) || !preserved()) return fail(L"Notice did not recover immediately after timer failure.");
+        DismissSoftNotice(owner, guidance);
+    }
+    AppendUiAutomationTrace(L"input_assist:notice_timer_failure_recovery_ok");
+
+    // A dismissal consumes the notice's click and preserves the editing state.
+    // The old expiry queued before replacement cannot dismiss a newer notice.
+    for (const auto& button : {std::pair<UINT, UINT>{WM_LBUTTONDOWN, WM_LBUTTONUP},
+                              {WM_RBUTTONDOWN, WM_RBUTTONUP}, {WM_MBUTTONDOWN, WM_MBUTTONUP}}) {
+        ShowSoftNotice(owner, guidance);
+        const HWND notice = FindUiAutomationSoftNoticeWindow();
+        if (!notice || !IsWindowVisible(notice)) return fail(L"Clickable notice fixture was not visible.");
+        if (SendMessageW(notice, WM_MOUSEACTIVATE, 0, 0) != MA_NOACTIVATE ||
+            SendMessageW(notice, WM_NCHITTEST, 0, 0) != HTCLIENT)
+            return fail(L"Notice dismissal could activate a window or pass clicks through.");
+        SendMessageW(notice, button.first, 0, 0);
+        SendMessageW(notice, button.second, 0, 0);
+        if (IsWindowVisible(notice) || GetCapture() == notice || !preserved())
+            return fail(L"Click dismissal changed editing state or retained capture.");
+        ShowSoftNotice(owner, guidance);
+        if (!IsWindowVisible(notice)) return fail(L"A dismissed notice could not be shown again immediately.");
+        DismissSoftNotice(owner, guidance);
+    }
+    ShowSoftNotice(owner, priorNotice);
+    const HWND replacementNotice = FindUiAutomationSoftNoticeWindow();
+    SendMessageW(replacementNotice, WM_LBUTTONDOWN, 0, 0);
+    ShowSoftNotice(owner, guidance);
+    SendMessageW(replacementNotice, WM_LBUTTONUP, 0, 0);
+    constexpr UINT_PTR kNoticeExpiryTimerForChecks = 0x5E10;
+    SendMessageW(replacementNotice, WM_TIMER, kNoticeExpiryTimerForChecks, 0);
+    if (!IsWindowVisible(replacementNotice) || GetCapture() == replacementNotice || !preserved())
+        return fail(L"An old click/expiry dismissed a replacement notice or changed editing state.");
+    DismissSoftNotice(owner, guidance);
+    AppendUiAutomationTrace(L"input_assist:notice_click_dismissal_ok");
+
+    for (const wchar_t* key : {L"note.input_assist.need_body", L"note.input_assist.markdown_only",
+                              L"note.input_assist.finish_ime", L"note.input_assist.insert_failed"}) {
+        SetWindowTextW(g_hShortcutTagEdit, L"before editing");
+        const std::wstring message = localization::Text(key);
+        ShowSoftNotice(owner, message);
+        const HWND notice = FindUiAutomationSoftNoticeWindow();
+        if (!notice || !IsWindowVisible(notice)) return fail(L"An input assist guidance fixture was not visible.");
+        SetWindowTextW(g_hShortcutTagEdit, L"after editing");
+        if (IsWindowVisible(notice)) return fail(L"Editing did not dismiss a matching input assist notice.");
+    }
+    AppendUiAutomationTrace(L"input_assist:all_guidance_dismissal_ok");
+    const HWND otherOwner = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"", WS_POPUP,
+        0, 0, 20, 20, owner, nullptr, g_hInst, nullptr);
+    if (!otherOwner) return fail(L"A second notice owner could not be created.");
+    struct OwnerCleanup {
+        HWND owner;
+        const std::wstring& text;
+        ~OwnerCleanup() { DismissSoftNotice(owner, text); DestroyWindow(owner); }
+    } ownerCleanup{otherOwner, guidance};
+    const HRESULT corners = ui::ApplyAuxiliaryWindowCorners(otherOwner);
+    (void)corners; // Preserve the native frame on OS versions without the API.
+    ShowSoftNotice(owner, guidance);
+    ShowSoftNotice(otherOwner, guidance);
+    const HWND notice = FindUiAutomationSoftNoticeWindow();
+    if (!notice || !IsWindowVisible(notice)) return fail(L"A second owner lost same-text guidance.");
+    DismissSoftNotice(owner, guidance);
+    if (!IsWindowVisible(notice)) return fail(L"One owner dismissed another owner's notice.");
+    DismissSoftNotice(otherOwner, guidance);
+    if (IsWindowVisible(notice)) return fail(L"The matching owner could not dismiss its notice.");
+    AppendUiAutomationTrace(L"input_assist:notice_owner_isolation_ok");
+    return true;
+}
+
+[[nodiscard]] static bool RunInputAssistLayoutChecks(HWND owner, std::wstring* error) {
+    const std::wstring originalInput = GetShortcutBodyInput();
+    const std::wstring originalNote = GetNoteAutomationIndexingText();
+    const std::vector<HWND> controls = {g_hBtnShortcutInput, g_hBtnNoteWritingGuide, g_hShortcutTagEdit,
+        g_hChkShortcutLinkDecor, g_hBtnShortcutPdfLink, g_hBtnNoteAssistBullet,
+        g_hBtnNoteAssistQuote, g_hBtnNoteAssistPageRef, g_hChkShortcutHeading1,
+        g_hChkShortcutHeading2, g_hShortcutHeadingLevelLabel, g_hBtnShortcutHeadingLevelUp,
+        g_hChkShortcutBack, g_hChkShortcutChar, g_hChkShortcutBold, g_hChkShortcutItalic,
+        g_hChkShortcutStrike, g_hChkShortcutUnderline, g_hBtnShortcutBackPreview,
+        g_hBtnShortcutCharPreview, g_hBtnShortcutBackPalette, g_hBtnShortcutCharPalette,
+        g_hShortcutIndentLabel, g_hShortcutIndentEdit, g_hShortcutMarginLabel,
+        g_hShortcutMarginEdit, g_hShortcutFontSizeLabel, g_hShortcutFontSizeEdit};
+    std::vector<HFONT> originalFonts;
+    for (HWND control : controls) {
+        if (!control || !IsWindow(control)) {
+            if (error) *error = L"A required input assist layout control is missing.";
+            return false;
+        }
+        originalFonts.push_back(reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0)));
+    }
+    LOGFONTW baseFont{};
+    if (!g_hUIFont || !GetObjectW(g_hUIFont, sizeof(baseFont), &baseFont)) {
+        if (error) *error = L"Input assist font metrics could not be obtained.";
+        return false;
+    }
+    struct Restore {
+        HWND owner;
+        const std::vector<HWND>& controls;
+        const std::vector<HFONT>& fonts;
+        const std::wstring& input;
+        ui::LayoutState layout = ui::GetLayoutState();
+        bool collapsed = g_leftPaneCollapsed;
+        HFONT originalUiFont = g_hUIFont;
+        HFONT scaledFont = nullptr;
+        ~Restore() {
+            DismissNoteInputAssistNotice(owner);
+            for (size_t i = 0; i < controls.size(); ++i)
+                SendMessageW(controls[i], WM_SETFONT, reinterpret_cast<WPARAM>(fonts[i]), FALSE);
+            g_hUIFont = originalUiFont;
+            g_leftPaneCollapsed = collapsed;
+            ui::SetLayoutState(layout);
+            ui::ApplyLayout(owner, ui::LayoutPass::Commit);
+            if (scaledFont) DeleteObject(scaledFont);
+            SetWindowTextW(g_hShortcutTagEdit, input.c_str());
+        }
+    } restore{owner, controls, originalFonts, originalInput};
+    const auto fail = [&](const std::wstring& message) {
+        if (error) *error = message;
+        return false;
+    };
+    RECT client{};
+    if (!GetClientRect(owner, &client)) return fail(L"Root client geometry could not be obtained.");
+    g_leftPaneCollapsed = false;
+    const HWND priorFocus = GetFocus();
+    const std::wstring longInput = L"  長文 input 日本語\x3000" + std::wstring(512, L'x') + L" e\x0301 \U0001F642  ";
+    SetWindowTextW(g_hShortcutTagEdit, longInput.c_str());
+    SendMessageW(g_hShortcutTagEdit, EM_SETSEL, longInput.size() - 20, longInput.size());
+    DWORD inputStart = 0, inputEnd = 0;
+    SendMessageW(g_hShortcutTagEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&inputStart), reinterpret_cast<LPARAM>(&inputEnd));
+    for (const int percent : {100, 150, 200}) {
+        for (HWND control : controls)
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(restore.originalUiFont), FALSE);
+        g_hUIFont = restore.originalUiFont;
+        if (restore.scaledFont) { DeleteObject(restore.scaledFont); restore.scaledFont = nullptr; }
+        LOGFONTW scaled = baseFont;
+        scaled.lfHeight = MulDiv(baseFont.lfHeight, percent, 100);
+        restore.scaledFont = CreateFontIndirectW(&scaled);
+        if (!restore.scaledFont) return fail(L"Scaled input assist test font could not be created.");
+        g_hUIFont = restore.scaledFont;
+        for (HWND control : controls)
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(restore.scaledFont), FALSE);
+        const std::wstring importResult = localization::Format(L"workspace.actions.drop_files.completed",
+            {{L"COUNT", L"12"}, {L"SKIPPED", L"1"}}) + L"\n" +
+            localization::Text(L"workspace.actions.drop_files.office_pending");
+        int observedDpi = 0;
+        for (const std::wstring& guidance : {localization::Text(L"note.input_assist.need_body"), importResult}) {
+            ShowSoftNotice(owner, guidance);
+            const HWND notice = FindUiAutomationSoftNoticeWindow();
+            RECT noticeBounds{}, noticeClient{};
+            MONITORINFO monitor{sizeof(MONITORINFO)};
+            if (!notice || !IsWindowVisible(notice) || !GetWindowRect(notice, &noticeBounds) ||
+                !GetClientRect(notice, &noticeClient) ||
+                !GetMonitorInfoW(MonitorFromWindow(notice, MONITOR_DEFAULTTONEAREST), &monitor))
+                return fail(L"Scaled guidance visibility or monitor bounds could not be obtained.");
+            HDC noticeDc = GetDC(notice);
+            if (!noticeDc) return fail(L"Scaled guidance font could not be measured.");
+            const auto oldNoticeFont = SelectObject(noticeDc, restore.scaledFont);
+            const int dpi = GetDeviceCaps(noticeDc, LOGPIXELSY);
+            observedDpi = dpi;
+            const int padX = MulDiv(12, dpi > 0 ? dpi : 96, 96);
+            const int padY = MulDiv(8, dpi > 0 ? dpi : 96, 96);
+            RECT measured{0, 0, noticeClient.right - 2 * padX, 0};
+            const int textHeight = DrawTextW(noticeDc, guidance.c_str(), -1, &measured,
+                DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT);
+            SelectObject(noticeDc, oldNoticeFont);
+            ReleaseDC(notice, noticeDc);
+            const bool fits = textHeight > 0 && measured.right <= noticeClient.right - 2 * padX &&
+                measured.bottom <= noticeClient.bottom - 2 * padY && noticeBounds.left >= monitor.rcWork.left &&
+                noticeBounds.top >= monitor.rcWork.top && noticeBounds.right <= monitor.rcWork.right &&
+                noticeBounds.bottom <= monitor.rcWork.bottom && GetFocus() == priorFocus &&
+                SendMessageW(notice, WM_NCHITTEST, 0, 0) == HTCLIENT &&
+                SendMessageW(notice, WM_MOUSEACTIVATE, 0, 0) == MA_NOACTIVATE;
+            DismissSoftNotice(owner, guidance);
+            if (!fits) return fail(L"Scaled input guidance clips text, escapes the monitor or activates input.");
+        }
+        AppendUiAutomationTrace(L"input_assist:notice_font_fit_ok scale=" + std::to_wstring(percent) +
+            L" observed_os_dpi=" + std::to_wstring(observedDpi));
+        for (const int width : {220, 320, 480}) {
+            // 160 is the native minimum pane size. Exercise that boundary;
+            // an unreachable 120-pixel request would only test clamping.
+            for (const int height : {160, 280, 480}) {
+                auto layout = restore.layout;
+                layout.leftWidth = width;
+                layout.topHeight = client.bottom - height - ui::SplitBandThickness();
+                ui::SetLayoutState(layout);
+                ui::ApplyLayout(owner, ui::LayoutPass::Commit);
+                const auto actual = ui::GetLayoutState();
+                const int top = actual.topHeight + ui::SplitBandThickness();
+                const RECT area{0, top, actual.leftWidth, client.bottom};
+                const std::wstring condition = L" scale=" + std::to_wstring(percent) + L" width=" +
+                    std::to_wstring(actual.leftWidth) + L" height=" + std::to_wstring(client.bottom - top);
+                if (actual.leftWidth != width || client.bottom - top != height)
+                    return fail(L"Requested input assist geometry was clamped; this matrix case was not exercised:" + condition);
+                if (GetFocus() != priorFocus) return fail(L"Input assist relayout stole keyboard focus:" + condition);
+                DWORD afterStart = 0, afterEnd = 0;
+                SendMessageW(g_hShortcutTagEdit, EM_GETSEL,
+                    reinterpret_cast<WPARAM>(&afterStart), reinterpret_cast<LPARAM>(&afterEnd));
+                if (GetShortcutBodyInput() != longInput || afterStart != inputStart || afterEnd != inputEnd)
+                    return fail(L"Input assist relayout lost long input or its selection:" + condition);
+                if (!IsWindowVisible(g_hBtnShortcutInput) || !IsWindowVisible(g_hShortcutTagEdit) ||
+                    !IsWindowVisible(g_hBtnNoteWritingGuide))
+                    return fail(L"Input and Apply became inaccessible in a short pane:" + condition);
+                for (HWND control : controls) {
+                    if (reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0)) != restore.scaledFont)
+                        return fail(L"Input assist did not retain the measured test font:" + condition);
+                    if (width == 480 && height == 480 && !IsWindowVisible(control))
+                        return fail(L"An input assist control remained hidden after enlarging the pane:" + condition);
+                    if (!IsWindowVisible(control)) continue;
+                    RECT bounds{}, content{};
+                    if (!GetWindowRect(control, &bounds) || !GetClientRect(control, &content))
+                        return fail(L"Input assist geometry query failed:" + condition);
+                    MapWindowPoints(nullptr, owner, reinterpret_cast<POINT*>(&bounds), 2);
+                    if (bounds.left < area.left || bounds.top < area.top || bounds.right > area.right ||
+                        bounds.bottom > area.bottom || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
+                        return fail(L"Visible input assist control escapes its pane, id=" +
+                            std::to_wstring(GetDlgCtrlID(control)) + condition);
+                    const int length = GetWindowTextLengthW(control);
+                    std::wstring label(static_cast<size_t>(length) + 1, L'\0');
+                    label.resize(static_cast<size_t>(GetWindowTextW(control, label.data(), length + 1)));
+                    HDC dc = GetDC(control);
+                    if (!dc) return fail(L"Input assist text measurement could not acquire a DC:" + condition);
+                    const auto oldFont = SelectObject(dc, restore.scaledFont);
+                    TEXTMETRICW metrics{};
+                    SIZE extent{};
+                    const bool measured = GetTextMetricsW(dc, &metrics) &&
+                        GetTextExtentPoint32W(dc, label.c_str(), static_cast<int>(label.size()), &extent);
+                    SelectObject(dc, oldFont);
+                    ReleaseDC(control, dc);
+                    if (!measured) return fail(L"Input assist text metrics could not be measured:" + condition);
+                    const bool editable = control == g_hShortcutTagEdit || control == g_hShortcutIndentEdit ||
+                        control == g_hShortcutMarginEdit || control == g_hShortcutFontSizeEdit;
+                    if ((!label.empty() || editable) && content.bottom < metrics.tmHeight + 2)
+                        return fail(L"Input assist text is vertically clipped, label=" + label + condition);
+                    const auto type = GetWindowLongPtrW(control, GWL_STYLE) & BS_TYPEMASK;
+                    const bool checkbox = type == BS_AUTOCHECKBOX && !editable && control != g_hShortcutHeadingLevelLabel;
+                    const int minimumWidth = extent.cx + (checkbox ? metrics.tmHeight + 8 : 8);
+                    if (!editable && !label.empty() && content.right < minimumWidth)
+                        return fail(L"Input assist label is horizontally clipped, label=" + label + condition);
+                }
+                AppendUiAutomationTrace(L"input_assist:font_geometry_case_ok" + condition);
+            }
+        }
+    }
+    if (GetNoteAutomationIndexingText() != originalNote)
+        return fail(L"Input assist font/geometry changes modified the note text.");
+    AppendUiAutomationTrace(L"input_assist:font_geometry_matrix_ok");
+    // Font scaling is deliberately not represented as an OS DPI/IME/audio test.
+    AppendUiAutomationTrace(L"input_assist:real_ime_audio_os_dpi_not_observed");
+    return true;
+}

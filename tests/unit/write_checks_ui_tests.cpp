@@ -115,11 +115,22 @@ int wmain() {
     assert(Cell(hwnd, 8) == L"checks.no_record" && Cell(hwnd, 9) == L"checks.no_record");
     assert(!std::filesystem::exists(session / L"pdf", ec) && !ec);
     assert(!std::filesystem::exists(session / L"note", ec) && !ec);
-    Select(hwnd, 8); Trial(hwnd); assert(Cell(hwnd, 8) == L"checks.check_failure");
+    Select(hwnd, 8); Trial(hwnd); assert(Cell(hwnd, 8) == L"checks.parent_result checks.success");
     SendMessageW(hwnd, WM_COMMAND, 4704, 0);
-    assert(lastDetails.additionalInformation.find(L"checks.reason.missing_directory") != std::wstring::npos);
-    assert(lastDetails.additionalInformation.find(L"checks.description.destination") != std::wstring::npos);
-    Select(hwnd, 9); Trial(hwnd); assert(Cell(hwnd, 9) == L"checks.check_failure");
+    assert(lastDetails.additionalInformation.find(L"checks.description.parent_probe") != std::wstring::npos);
+    assert(lastDetails.additionalInformation.find(L"checks.description.destination") == std::wstring::npos);
+    assert(lastDetails.message.find(L"checks.parent_result checks.success") != std::wstring::npos);
+    assert(lastDetails.paths.size() == 3 && lastDetails.paths[0].value == (session / L"pdf").wstring() &&
+           lastDetails.paths[1].label == L"checks.operation_path" && lastDetails.paths[1].value == session.wstring());
+    Select(hwnd, 9); Trial(hwnd); assert(Cell(hwnd, 9) == L"checks.parent_result checks.success");
+    assert(!std::filesystem::exists(session / L"pdf", ec) && !ec && !std::filesystem::exists(session / L"note", ec) && !ec);
+    SendMessageW(hwnd, WM_COMMAND, 4705, 0); // Reload retains the distinction without another probe.
+    assert(Cell(hwnd, 8) == L"checks.parent_result checks.success" && Cell(hwnd, 9) == L"checks.parent_result checks.success");
+    flatLayout = true; SendMessageW(hwnd, WM_TIMER, 4701, 0);
+    assert(!IsWindowEnabled(GetDlgItem(hwnd, 4703))); // Layout change also invalidates the captured targets.
+    SendMessageW(hwnd, WM_COMMAND, 4703, 0); Pump();
+    assert(Cell(hwnd, 9) == L"checks.parent_result checks.success");
+    flatLayout = false; SendMessageW(hwnd, WM_TIMER, 4701, 0);
     Select(hwnd, 14); Trial(hwnd); assert(Cell(hwnd, 14) == L"checks.success");
     SendMessageW(hwnd, WM_COMMAND, 4704, 0);
     assert(lastDetails.title == L"checks.note_read_write" && lastDetails.paths.front().value == currentNote.wstring());
@@ -168,6 +179,7 @@ int wmain() {
     assert(!IsWindowEnabled(GetDlgItem(hwnd, 4703)));
     SendMessageW(hwnd, WM_CLOSE, 0, 0); Pump(); assert(!Window());
     ShowWriteChecksDialog(nullptr); hwnd = Window(); assert(hwnd);
+    assert(Cell(hwnd, 8) == L"checks.parent_result checks.success" && Cell(hwnd, 9) == L"checks.parent_result checks.success");
     Select(hwnd, 3); assert(Cell(hwnd, 3) == L"checks.success"); assert(!IsWindowEnabled(GetDlgItem(hwnd, 4703))); // reopen cannot reset cooldown
     assert(std::filesystem::create_directory(settings, ec) && !ec);
     assert(SetFileAttributesW(currentNote.c_str(), FILE_ATTRIBUTE_NORMAL));
@@ -218,7 +230,7 @@ int wmain() {
     { std::ifstream original(directNote, std::ios::binary); std::string contents;
       std::getline(original, contents); assert(contents == "original"); }
     SendMessageW(hwnd, WM_TIMER, 4701, 0);
-    assert(Cell(hwnd, 11) == L"checks.failure" && Cell(hwnd, 9) == L"checks.check_failure");
+    assert(Cell(hwnd, 11) == L"checks.failure" && Cell(hwnd, 9) == L"checks.parent_result checks.success");
     Select(hwnd, 11); SendMessageW(hwnd, WM_COMMAND, 4704, 0);
     assert(lastDetails.additionalInformation.find(L"checks.source.normal") != std::wstring::npos);
     assert(lastDetails.paths[1].value == directNote.wstring());
@@ -231,6 +243,7 @@ int wmain() {
     assert(Cell(hwnd, 8) == L"checks.success" && Cell(hwnd, 9) == L"checks.success");
     SendMessageW(hwnd, WM_CLOSE, 0, 0); Pump();
     std::vector<write_checks::Record> records; std::string baseline; DWORD error = 0;
+    assert(write_checks::FlushNormalObservations(root));
     assert(write_checks::Load(root / L"__pdf_note_workspace__" / L"__log__" / L"write_checks.log", records, baseline, error));
     assert(records.size() == 10 && write_checks::Find(records, write_checks::Kind::NoteReadWrite, currentNote.wstring())->result.outcome == write_checks::Outcome::Passed);
     assert(write_checks::Find(records, write_checks::Kind::PdfWrite, session.wstring()));
@@ -248,6 +261,7 @@ int wmain() {
     assert(lastDetails.paths.back().value == ledger.wstring());
     { std::ifstream in(ledger, std::ios::binary); std::string bytes; std::getline(in, bytes); assert(bytes == "broken fixture ledger"); }
     SendMessageW(hwnd, WM_CLOSE, 0, 0); Pump(); assert(!Window());
+    write_checks::ShutdownNormalObservations();
     assert(DeleteFileW((root / L"__pdf_note_workspace__" / L"__log__" / L"write_checks.log").c_str()));
     assert(DeleteFileW(config.c_str()));
     assert(DeleteFileW(currentNote.c_str()));

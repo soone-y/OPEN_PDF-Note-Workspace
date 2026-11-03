@@ -70,6 +70,7 @@ public:
             err = L"Trailing characters after JSON value";
             return false;
         }
+        if (!sink.OnClropDocumentVersion(documentVersion, err)) return false;
         if (outPdfId) *outPdfId = std::move(parsedPdfId);
         return true;
     }
@@ -78,6 +79,9 @@ private:
     static constexpr size_t kMaxJsonNestingDepth = 64;
     std::string_view s;
     size_t pos = 0;
+    bool fatalOrientationError = false;
+    bool fatalMarkerDisplayError = false;
+    int documentVersion = 0;
 
     static bool IsHex(char c) {
         return (c >= '0' && c <= '9') ||
@@ -955,6 +959,10 @@ private:
         SkipWs();
         clrop::Item item;
         bool haveType = false;
+        bool haveMarkerDisplayMode = false;
+        bool haveBlendMode = false;
+        bool haveShapeBoundary = false;
+        bool haveShapeAngle = false;
         if (pos < s.size() && s[pos] == '}') {
             err = L"empty item object";
             return false;
@@ -1023,6 +1031,62 @@ private:
                 bool got = false;
                 if (!ParseMaybeUtf8String(value, got, err)) return false;
                 if (got) item.writingMode = std::move(value);
+            } else if (key == "content_rotation") {
+                fatalOrientationError = true;
+                double value = 0.0;
+                bool got = false;
+                if (!ParseMaybeDouble(value, got, err)) return false;
+                if (!got || (value != 0.0 && value != 90.0 && value != 180.0 && value != 270.0)) {
+                    err = L"Invalid annotation content rotation";
+                    return false;
+                }
+                item.contentRotation = static_cast<int>(value);
+                fatalOrientationError = false;
+            } else if (key == "marker_display_mode") {
+                fatalMarkerDisplayError = true;
+                std::string value;
+                bool got = false;
+                if (haveMarkerDisplayMode || !ParseMaybeUtf8String(value, got, err) || !got ||
+                    (value != "legacy" && value != "multiply")) {
+                    err = L"Invalid marker display mode";
+                    return false;
+                }
+                haveMarkerDisplayMode = true;
+                item.markerDisplayMode = std::move(value);
+                fatalMarkerDisplayError = false;
+            } else if (key == "shape_angle") {
+                fatalMarkerDisplayError = true;
+                double value=0;bool got=false;
+                if (haveShapeAngle || !ParseMaybeDouble(value,got,err) || !got || !std::isfinite(value)) {
+                    err=L"Invalid shape angle";return false;
+                }
+                item.shapeAngle=value;haveShapeAngle=true;fatalMarkerDisplayError=false;
+            } else if (key == "shape_boundary") {
+                fatalMarkerDisplayError = true;
+                std::string value;bool got=false;
+                if (haveShapeBoundary || !ParseMaybeUtf8String(value,got,err) || !got ||
+                    (value != "none" && value != "black" && value != "white")) {
+                    err = L"Invalid shape boundary";return false;
+                }
+                haveShapeBoundary = true;item.shapeBoundary = std::move(value);
+                fatalMarkerDisplayError = false;
+            } else if (key == "blend_mode") {
+                fatalMarkerDisplayError = true;
+                std::string value;
+                bool got = false;
+                if (haveBlendMode || !ParseMaybeUtf8String(value,got,err) || !got ||
+                    (value != "normal" && value != "multiply")) {
+                    err = L"Invalid annotation blend mode";
+                    return false;
+                }
+                haveBlendMode = true;
+                item.blendMode = std::move(value);
+                fatalMarkerDisplayError = false;
+            } else if (key == "background_assist_mode") {
+                std::string value;
+                bool got = false;
+                if (!ParseMaybeUtf8String(value, got, err)) return false;
+                if (got) item.backgroundAssistMode = std::move(value);
             } else if (key == "content") {
                 std::wstring value;
                 bool got = false;
@@ -1075,6 +1139,15 @@ private:
                 if (got && value.size() == 4) {
                     item.bbox = std::array<double, 4>{ value[0], value[1], value[2], value[3] };
                 }
+            } else if (key == "bbox_endpoints") {
+                std::vector<double> value;
+                bool got = false;
+                if (!ParseMaybeDoubleArray(value, got, err)) return false;
+                // Keep an otherwise valid v1 item readable when an optional
+                // extension is malformed; bbox supplies the legacy fallback.
+                if (got && value.size() == 4) {
+                    item.bboxEndpoints = std::array<double, 4>{ value[0], value[1], value[2], value[3] };
+                }
             } else if (key == "p1") {
                 std::vector<double> value;
                 bool got = false;
@@ -1120,6 +1193,13 @@ private:
             }
             SkipWs();
         }
+        if ((haveShapeBoundary || haveShapeAngle) && item.kind != clrop::Item::Kind::Shape) {
+            fatalMarkerDisplayError = true;err = L"Shape boundary on a non-shape item";return false;
+        }
+        if(item.kind == clrop::Item::Kind::Shape && item.shapeKind == "arc" &&
+           (!item.shapeDrawMode.empty() && item.shapeDrawMode != "outline")) {
+            fatalMarkerDisplayError=true;err=L"Arc must be an open outline";return false;
+        }
         if (!ValidateItemObject(item, haveType, err)) return false;
         out = std::move(item);
         return true;
@@ -1153,6 +1233,8 @@ private:
                 size_t startPos = pos;
                 std::wstring itemErr;
                 if (!ParseItemObject(item, itemErr)) {
+                    // A recognized orientation must never be lost by dropping the annotation.
+                    if (fatalOrientationError || fatalMarkerDisplayError) { err = itemErr; return false; }
                     // Skip invalid item but continue parsing other items
                     pos = startPos;
                     if (!SkipValue(itemErr)) return false; // Catastrophic JSON error
@@ -1368,17 +1450,14 @@ private:
                 }
                 ++pos;
                 if (key == "version") {
-                    int value = 0;
+                    double value = 0;
                     bool got = false;
-                    if (!ParseMaybeInt(value, got, err)) return false;
-                    if (got) {
-                        out.version = value;
-                        haveVersion = true;
-                        if (value != 1) {
-                            err = L"unsupported version";
-                            return false;
-                        }
+                    if (haveVersion || !ParseMaybeDouble(value, got, err) || !got || (value != 1 && value != 2)) {
+                        err = L"unsupported or duplicate version";
+                        return false;
                     }
+                    out.version = static_cast<int>(value);
+                    haveVersion = true;
                 } else if (key == "pdf_id") {
                     clrop::PdfId pdfId;
                     bool got = false;
@@ -1424,6 +1503,10 @@ private:
             err = L"pages missing";
             return false;
         }
+        if (out.version == 1)
+            for (auto& page : out.pages) for (auto& item : page.items)
+                if (item.kind == clrop::Item::Kind::MarkerText && item.markerDisplayMode.empty())
+                    item.markerDisplayMode = "legacy";
         return true;
     }
 
@@ -1450,16 +1533,14 @@ private:
                 }
                 ++pos;
                 if (key == "version") {
-                    int value = 0;
+                    double value = 0;
                     bool got = false;
-                    if (!ParseMaybeInt(value, got, err)) return false;
-                    if (got) {
-                        haveVersion = true;
-                        if (value != 1) {
-                            err = L"unsupported version";
-                            return false;
-                        }
+                    if (haveVersion || !ParseMaybeDouble(value, got, err) || !got || (value != 1 && value != 2)) {
+                        err = L"unsupported or duplicate version";
+                        return false;
                     }
+                    documentVersion = static_cast<int>(value);
+                    haveVersion = true;
                 } else if (key == "pdf_id") {
                     clrop::PdfId pdfId;
                     bool got = false;

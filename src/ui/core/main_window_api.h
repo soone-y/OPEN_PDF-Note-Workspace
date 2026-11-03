@@ -17,7 +17,7 @@ bool CanRequestManagedAbnormalExitFromDialog(HWND owner, SoftNoticeKind kind);
 void RequestManagedAbnormalExitFromDialog(HWND owner, const std::wstring& title, const std::wstring& message);
 void ShowManagedAbnormalExitReportIfPending();
 int OverrideExitCodeForManagedAbnormalExit(int defaultCode);
-void LoadNoteFile(HWND hWnd, const std::wstring& notePath);
+bool LoadNoteFile(HWND hWnd, const std::wstring& notePath);
 void SyncBottomPaneAfterNoteLoad(HWND hWnd);
 std::filesystem::path CanonicalOrSelf(const std::filesystem::path& p);
 bool IsTempExternalLecturePath(const std::wstring& lecturePath);
@@ -156,6 +156,6 @@ void UpdateOfficeConversionProgress(HWND owner, size_t current, size_t total, co
 std::vector<std::wstring> PickOfficeFilesUnder(HWND owner, const std::filesystem::path& root, const std::wstring& title,
                                             const std::wstring& confirmLabel = {});
 std::vector<std::wstring> PickFilesUnder(HWND owner, const std::filesystem::path& root, const std::wstring& title,
-                                      const std::wstring& confirmLabel = {});
+                                      const std::wstring& confirmLabel = {}, bool importFileTools = false);
 
 bool CopyFileForImportSafely(const std::filesystem::path& src, const std::filesystem::path& dest, std::wstring* outErr);

@@ -69,6 +69,9 @@ static void PrepareStartupWatchdogForShutdown() {
 
 static void ShutdownBootstrapResources(bool coInitialized, bool pdfiumInitialized) {
     PrepareStartupWatchdogForShutdown();
+    ShutdownTempPathAdditions();
+    ShutdownOfficeConversionJobs();
+    write_checks::ShutdownNormalObservations();
     if (g_hAccel) {
         DestroyAcceleratorTable(g_hAccel);
         g_hAccel = nullptr;
@@ -351,6 +354,8 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
     try {
     g_hInst = hInstance;
+    int recoveryExitCode = 0;
+    if (recovery::TryRunStageRecoveryProcess(&recoveryExitCode)) return recoveryExitCode;
     SetUnhandledExceptionFilter(CrashLogFilter);
     g_mainThreadId = GetCurrentThreadId();
     {
@@ -652,6 +657,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                     }
                 }
             }
+        }
+        if (HandleMainApplicationShortcutInLoop(hWnd, msg)) {
+            continue;
         }
         if (HandleMainPdfZoomShortcutInLoop(hWnd, msg)) {
             continue;

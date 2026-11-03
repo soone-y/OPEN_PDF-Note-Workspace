@@ -1,5 +1,6 @@
 // file: main.cpp
 #include "core/app_core.h"
+#include "ui/shape_boundary_options.h"
 #include "core/localization.h"
 #include "core/fault_injection.h"
 #include "core/preview_trace.h"
@@ -7,22 +8,30 @@
 #include "core/private_fonts.h"
 #include "help/help.h"
 #include "pdf_view/pdf_view.h"
+#include "pdf_view/textbox_font_update.h"
 #include "note_view/note_view.h"
 #include "note/note_identity_store.h"
 #include "note/note_input_assist.h"
 #include "file_output/file_output.h"
+#include "recovery/stage_recovery.h"
 #include "search/search.h"
-#include "schedule/schedule.h"
+#include "lecture_order/lecture_order.h"
 #include "workspace/workspace_memo.h"
 #include "settings/settings.h"
 #include "resources/app_resource.h"
 #include "ui/toolbar.h"
 #include "ui/combobox_guard.h"
+#include "ui/listbox_presentation.h"
+#include "ui/listbox_scroll.h"
+#include "workspace/list_label_batch.h"
+#include "ui/application_shortcuts.h"
+#include "ui/page_number.h"
 #include "ui/noop_nav_guard.h"
 #include "clrop/bridge.h"
 #include "ui/splitter.h"
 #include "core/atomic_write.h"
 #include "diagnostics/normal_operations.h"
+#include "diagnostics/open_work_counters.h"
 #include "workspace/workspace_config_io.h"
 #include "ui/core/main_window_api.h"
 #include "workspace/workspace_actions.h"
@@ -34,11 +43,13 @@
 #include "app/main_close_policy.h"
 #include "ui/menus/main_debug_menu.h"
 #include "ui/dialogs/write_checks_dialog.h"
+#include "ui/dialogs/pending_write_retry.h"
 #include "diagnostics/write_checks.h"
 #include "ui/menus/context_menu_helpers.h"
 #include "app/main_escape_backup.h"
 
 bool HandleAnnotToolShortcutInLoop(HWND owner, const MSG& msg);
+[[nodiscard]] bool HandleMainApplicationShortcutInLoop(HWND owner, const MSG& msg);
 bool HandleFixedAnnotToolNavigationShortcutInLoop(HWND owner, const MSG& msg);
 bool HandleAnnotColorCycleShortcutInLoop(HWND owner, const MSG& msg);
 bool HandleMainPdfZoomShortcutInLoop(HWND owner, const MSG& msg);
@@ -78,6 +89,7 @@ bool HandleMainPdfZoomShortcutInLoop(HWND owner, const MSG& msg);
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -198,7 +210,8 @@ std::optional<std::wstring> PickFileUnder(HWND owner,
 std::vector<std::wstring> PickFilesUnder(HWND owner,
                                                 const std::filesystem::path& initial,
                                                 const std::wstring& title,
-                                                const std::wstring& confirmLabel);
+                                                const std::wstring& confirmLabel,
+                                                bool importFileTools);
 std::vector<std::wstring> PickOfficeFilesUnder(HWND owner,
                                                       const std::filesystem::path& initial,
                                                       const std::wstring& title,
@@ -216,6 +229,7 @@ static std::wstring SessionKeyFromPath(const std::wstring& sessionPath);
 static bool SetListboxSelAndNotify(HWND list, int newSel);
 static bool IsPotentialNetworkPath(const std::filesystem::path& path);
 static bool OpenNoteIfDifferent(HWND hWnd, const std::wstring& path);
+static void StartAutoOpenedPdfBeforeNote();
 bool OpenPdfIfDifferent(HWND hWnd, const std::wstring& path);
 void LoadSessions(const std::wstring& lecturePath);
 void LoadFiles(const SessionEntry& session, std::wstring& preferredPdf, std::wstring& preferredNote);
@@ -254,6 +268,7 @@ namespace {
 static bool PromptStayOrOpenDiffManager(HWND hWnd,
                                         const std::wstring& blockedAction,
                                         const std::wstring& failureDetail) {
+    if (recovery::HasPendingStageRecovery()) return false;
     // A blocked switch can be the last action before the user restarts the app.
     // Keep the PDF restore point current even though the document itself stays open.
     SaveLastPdfViewInfo();
@@ -301,9 +316,6 @@ std::wstring g_lastStartupLecturePathSaved;
 std::wstring g_lastStartupSessionPathSaved;
 const wchar_t kLectureSettingsDirName[] = L"__pdf_note_workspace__";
 static constexpr wchar_t kLectureLastOpenFileName[] = L"lecture_last_open.txt";
-static bool g_scheduleSortTimeSet = false;
-int g_scheduleSortDayIndex = 0;
-int g_scheduleSortMinutes = 0;
 static HBRUSH s_hShortcutTagBrush = nullptr;
 static COLORREF s_shortcutTagBrushColor = CLR_INVALID;
 
@@ -382,7 +394,8 @@ static void RestorePreviousNoteAfterException(HWND owner, const std::wstring& pr
 static void RestorePreviousPdfAfterException(HWND owner, const std::wstring& previousPdfPath);
 static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError);
 static bool RunUiAutomationMathRenderScenario(HWND owner, std::wstring* outError,
-                                             bool renderedClickOnly = false);
+                                             bool renderedClickOnly = false,
+                                             bool imeGeometryOnly = false);
 static void RestoreLectureSessionStateAfterException(HWND owner,
                                                      const std::wstring& previousLecturePath,
                                                      const std::wstring& previousSessionPath,
@@ -832,6 +845,45 @@ std::wstring SessionDisplayLabelForEntry(const SessionEntry& session,
     return base + L" [" + parent + L"]";
 }
 
+std::vector<std::wstring> LectureDisplayLabelsForPaths(const std::vector<std::wstring>& paths) {
+    std::unordered_set<std::wstring> externalPaths;
+    for (const auto& item : g_tempExternalLectures) externalPaths.insert(item.path);
+    const workspace_display::LabelBatch labels(paths, [&](const std::wstring& path) {
+        // External roots have already been canonicalized by LoadLectures.
+        const bool external = externalPaths.count(path) != 0;
+        return external ? TempExternalLectureLabel(path) : FilenameOrPath(std::filesystem::path(path));
+    });
+    std::vector<std::wstring> result;
+    result.reserve(paths.size());
+    for (size_t index = 0; index < paths.size(); ++index) {
+        const auto& base = labels.Base(index);
+        const auto parent = labels.Duplicated(base) ? std::filesystem::path(paths[index]).parent_path().wstring() : L"";
+        result.push_back(parent.empty() ? base : base + L" [" + parent + L"]");
+    }
+    return result;
+}
+
+std::vector<std::wstring> SessionDisplayLabelsForEntries(const std::vector<SessionEntry>& sessions,
+                                                       const std::wstring& lecturePath) {
+    const workspace_display::LabelBatch labels(sessions, [](const SessionEntry& session) {
+        return session.displayName.empty() ? FilenameOrPath(std::filesystem::path(session.path)) : session.displayName;
+    });
+    const auto lectureKey = SessionKeyFromPath(lecturePath);
+    std::vector<std::wstring> result;
+    result.reserve(sessions.size());
+    for (size_t index = 0; index < sessions.size(); ++index) {
+        const auto& session = sessions[index];
+        if (!session.path.empty() && !lectureKey.empty() && SessionKeyFromPath(session.path) == lectureKey) {
+            result.push_back(DirectFilesSessionLabel());
+            continue;
+        }
+        const auto& base = labels.Base(index);
+        const auto parent = labels.Duplicated(base) ? std::filesystem::path(session.path).parent_path().wstring() : L"";
+        result.push_back(parent.empty() ? base : base + L" [" + parent + L"]");
+    }
+    return result;
+}
+
 
 static std::wstring SessionKeyFromPath(const std::wstring& sessionPath) {
     if (sessionPath.empty()) return L"";
@@ -896,15 +948,6 @@ static MenuItemData* RegisterMenuItemData(const std::wstring& text, bool separat
     MenuItemData* raw = data.get();
     g_menuItemData.push_back(std::move(data));
     return raw;
-}
-
-static void ReleaseMenuItemData(MenuItemData* data) {
-    if (!data) return;
-    auto it = std::find_if(g_menuItemData.begin(), g_menuItemData.end(),
-                           [&](const std::unique_ptr<MenuItemData>& p) { return p.get() == data; });
-    if (it != g_menuItemData.end()) {
-        g_menuItemData.erase(it);
-    }
 }
 
 static std::wstring GetMenuItemTextByPos(HMENU menu, int pos) {
@@ -1113,41 +1156,6 @@ static SessionAutoOpenMode ParseSessionAutoOpenMode(const std::wstring& mode) {
     if (m == L"edit") return SessionAutoOpenMode::Edit;
     if (m == L"view") return SessionAutoOpenMode::View;
     return SessionAutoOpenMode::Off;
-}
-
-static bool TryParseScheduleTimeMinutes(const std::wstring& input, int& outMinutes) {
-    std::wstring s = TrimWhitespace(input);
-    if (s.empty()) return false;
-    int hour = -1;
-    int minute = -1;
-    size_t colon = s.find(L':');
-    if (colon != std::wstring::npos) {
-        std::wstring hStr = s.substr(0, colon);
-        std::wstring mStr = s.substr(colon + 1);
-        if (hStr.empty() || mStr.size() != 2) return false;
-        for (wchar_t ch : hStr) if (!iswdigit(ch)) return false;
-        for (wchar_t ch : mStr) if (!iswdigit(ch)) return false;
-        hour = std::stoi(hStr);
-        minute = std::stoi(mStr);
-    } else {
-        if (s.size() != 3 && s.size() != 4) return false;
-        for (wchar_t ch : s) if (!iswdigit(ch)) return false;
-        if (s.size() == 3) {
-            hour = s[0] - L'0';
-            minute = (s[1] - L'0') * 10 + (s[2] - L'0');
-        } else {
-            hour = (s[0] - L'0') * 10 + (s[1] - L'0');
-            minute = (s[2] - L'0') * 10 + (s[3] - L'0');
-        }
-    }
-    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
-    outMinutes = hour * 60 + minute;
-    return true;
-}
-
-static int ScheduleDayIndexFromSystem(int wday) {
-    // SYSTEMTIME: Sunday=0, Monday=1 -> schedule: Monday=0 ... Sunday=6.
-    return (wday + 6) % 7;
 }
 
 
@@ -1927,10 +1935,16 @@ std::filesystem::path DialogWorkspaceSelectionInitialFolder() {
 
 static std::filesystem::path DialogKnownFolderInitialFolder(REFKNOWNFOLDERID folderId) {
     PWSTR rawPath = nullptr;
-    if (SUCCEEDED(SHGetKnownFolderPath(folderId, KF_FLAG_DEFAULT, nullptr, &rawPath)) && rawPath) {
-        std::filesystem::path result = ExistingDialogDirectoryOrEmpty(std::filesystem::path(rawPath));
+    // Resolve the registered location without shell verification/creation.
+    // Reject network locations before any filesystem query.
+    if (SUCCEEDED(SHGetKnownFolderPath(folderId, KF_FLAG_DONT_VERIFY, nullptr, &rawPath)) && rawPath) {
+        const std::filesystem::path candidate(rawPath);
         CoTaskMemFree(rawPath);
-        return result;
+        if (IsUncPath(candidate) || candidate.root_path().empty() ||
+            GetDriveTypeW(candidate.root_path().c_str()) == DRIVE_REMOTE) return {};
+        bool isReparse = false;
+        if (!TryIsReparsePointNoFollow(candidate, isReparse) || isReparse) return {};
+        return ExistingDialogDirectoryOrEmpty(candidate);
     }
     if (rawPath) CoTaskMemFree(rawPath);
     return {};
@@ -1983,8 +1997,9 @@ std::optional<std::wstring> PickFileUnder(HWND owner,
 std::vector<std::wstring> PickFilesUnder(HWND owner,
                                                 const std::filesystem::path& initial,
                                                 const std::wstring& title,
-                                                const std::wstring& confirmLabel) {
-    return PromptExistingLocalFilesAppFirst(owner, initial, title, /*allowMultiple=*/true, confirmLabel);
+                                                const std::wstring& confirmLabel,
+                                                bool importFileTools) {
+    return PromptExistingLocalFilesAppFirst(owner, initial, title, /*allowMultiple=*/true, confirmLabel, importFileTools);
 }
 
 std::vector<std::wstring> PickOfficeFilesUnder(HWND owner,
@@ -2332,6 +2347,51 @@ static bool CopyPathToClipboard(HWND owner, const std::wstring& path) {
     return true;
 }
 
+[[nodiscard]] static bool CopyItemNameToClipboard(HWND owner, const std::filesystem::path& path) {
+    const auto name = FilenameOrPath(path);
+    if (name.empty()) return false;
+    const bool copied = SetMainClipboardUnicodeText(owner, name);
+    ShowSoftNotice(owner, localization::Text(copied ? L"workspace.context.name_copied"
+                                                   : L"workspace.context.name_copy_failed"),
+                   copied ? SoftNoticeKind::Info : SoftNoticeKind::Warning);
+    return copied;
+}
+
+[[nodiscard]] static bool ReloadWorkspaceListFromContext(HWND list) {
+    HWND owner = GetParent(list);
+    const bool reloaded = RefreshWorkspaceList(list);
+    if (reloaded) RefreshMainWindowUiState(owner);
+    ShowSoftNotice(owner, localization::Text(reloaded ? L"workspace.context.list_reloaded"
+                                                     : L"workspace.context.list_reload_failed"),
+                   reloaded ? SoftNoticeKind::Info : SoftNoticeKind::Warning);
+    return true;
+}
+
+[[nodiscard]] static bool ShowEmptyWorkspaceListContextMenu(HWND list, LPARAM lParam) {
+    HWND owner = GetParent(list);
+    if (!owner) return false;
+    POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    if (lParam == -1) { point = {12, 12}; ClientToScreen(list, &point); }
+    else {
+        POINT clientPoint = point;
+        RECT client{};
+        ScreenToClient(list, &clientPoint);
+        if (!GetClientRect(list, &client) || !PtInRect(&client, clientPoint)) return false;
+    }
+    const bool canReload = list == g_hLectureList ? !g_workspaceRoot.empty()
+        : list == g_hSessionList ? !g_currentLecturePath.empty() : !g_currentSessionPath.empty();
+    ui::context_menu::PopupMenu menu;
+    if (!menu) return false;
+    constexpr UINT kReload = 1;
+    AppendMenuW(menu.get(), MF_STRING | (canReload ? 0 : MF_GRAYED), kReload,
+                localization::Text(L"workspace.context.reload_list").c_str());
+    SetForegroundWindow(owner);
+    const UINT command = menu.TrackCommand(owner, point, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
+    menu.Close();
+    if (command == kReload && canReload) return ReloadWorkspaceListFromContext(list);
+    return true;
+}
+
 static bool ShowPathInExplorer(HWND owner, const std::wstring& pathText) {
     if (pathText.empty()) return false;
 
@@ -2616,7 +2676,7 @@ static bool MoveDirectoryToDeletedItemsEscape(const std::filesystem::path& sourc
     if (baseName.empty()) baseName = prefix;
     baseName = std::filesystem::path(std::wstring(prefix) + baseName.wstring());
     std::filesystem::path dest = atomic_write::MakeUniqueDestInDir(deletedRoot, baseName);
-    std::filesystem::rename(source, dest, ec);
+    ec = document_source_protection::Rename(source, dest).operationError;
     if (ec) {
         if (outErr) {
             *outErr = (localization::Text(L"main.ui.8c61872a9e0c").c_str()) +
@@ -2718,7 +2778,7 @@ static bool RenameLectureDirectoryFromContext(HWND owner,
     const std::wstring remappedPdf = RemapChildPathAfterDirectoryMove(lecturePath, dest, CurrentLogicalPdfPath());
     const std::wstring remappedNote = RemapChildPathAfterDirectoryMove(lecturePath, dest, g_currentNotePath);
 
-    std::filesystem::rename(lecturePath, dest, ec);
+    ec = document_source_protection::Rename(lecturePath, dest).operationError;
     if (ec) {
         ShowMainMessageDialog(owner,
                               LectureUiText(L"main.lecture.rename", L"main.parent.rename"),
@@ -2728,6 +2788,19 @@ static bool RenameLectureDirectoryFromContext(HWND owner,
                               {{localization::Text(L"dialog.path.source"), lecturePath.wstring()},
                                {localization::Text(L"dialog.path.destination"), dest.wstring()}});
         return false;
+    }
+
+    bool prioritySaveFailed = false;
+    if (auto priority = g_config.lecturePriorities.find(lecturePath.filename().wstring());
+        priority != g_config.lecturePriorities.end()) {
+        const auto previousPriorities = g_config.lecturePriorities;
+        const int value = priority->second;
+        g_config.lecturePriorities.erase(priority);
+        g_config.lecturePriorities[newName] = value;
+        if (!TryPersistConfig()) {
+            g_config.lecturePriorities = previousPriorities;
+            prioritySaveFailed = true;
+        }
     }
 
     s_ignoreLectureSelChange = true;
@@ -2754,9 +2827,13 @@ static bool RenameLectureDirectoryFromContext(HWND owner,
         SyncLeftPaneSelection();
         RefreshMainWindowUiState(owner);
     }
-    ShowSoftNotice(owner,
-                   (localization::Text(L"main.ui.07a636c539f8").c_str()) + label,
-                   SoftNoticeKind::Info);
+    if (prioritySaveFailed) {
+        ShowSoftNotice(owner, localization::Text(L"lecture_order.save_failed"), SoftNoticeKind::Warning);
+    } else {
+        ShowSoftNotice(owner,
+                       (localization::Text(L"main.ui.07a636c539f8").c_str()) + label,
+                       SoftNoticeKind::Info);
+    }
     return true;
 }
 
@@ -2810,7 +2887,7 @@ static bool RenameSessionDirectoryFromContext(HWND owner,
     const std::wstring remappedPdf = RemapChildPathAfterDirectoryMove(sessionPath, dest, CurrentLogicalPdfPath());
     const std::wstring remappedNote = RemapChildPathAfterDirectoryMove(sessionPath, dest, g_currentNotePath);
 
-    std::filesystem::rename(sessionPath, dest, ec);
+    ec = document_source_protection::Rename(sessionPath, dest).operationError;
     if (ec) {
         ShowMainMessageDialog(owner,
                               localization::Text(L"main.ui.1e4cced51092").c_str(),
@@ -3421,6 +3498,8 @@ static void ShowStartupLastOpenPartialNotice(HWND hWnd, const std::vector<std::w
 }
 
 static bool RestoreStartupLastOpenSelection(HWND hWnd) {
+    // A workspace-only launch leaves saved targets intact for a later restart.
+    if (!g_config.restoreLastSession) return false;
     ScopedDocumentOpenLockNoticeSuppression suppressDocumentOpenLockNotice;
     const ULONGLONG startTick = preview_trace::TickNow();
     StartupLastOpenTarget target;
@@ -3537,6 +3616,7 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
     if (hasPreferredPdf) {
         if (CanOpenPdfListPathInApp(preferredPdf)) {
             pdfRestored = OpenPdfIfDifferent(hWnd, preferredPdf);
+            if (pdfRestored) StartAutoOpenedPdfBeforeNote();
         } else {
             pdfRestored = IsStartupLastOpenFileInList(g_pdfFiles, preferredPdf);
         }
@@ -3558,7 +3638,6 @@ static int ListboxItemCount(HWND list) {
 }
 
 static void FocusHierarchyPrevFromList(HWND list);
-static void FocusHierarchyNextFromList(HWND list);
 static bool OpenSelectionForList(HWND list);
 bool HandlePaneDirectionalNavigation(HWND owner, PaneNavContext context, HWND source, WPARAM vkey);
 
@@ -3675,43 +3754,6 @@ static void FocusHierarchyPrevFromList(HWND list) {
     }
 }
 
-[[maybe_unused]] static void FocusHierarchyNextFromList(HWND list) {
-    HWND owner = list ? GetParent(list) : nullptr;
-    if (list == g_hLectureList && g_hSessionList) {
-        bool changed = EnsureListboxSelection(g_hLectureList);
-        if (!changed && ListboxItemCount(g_hSessionList) <= 0) {
-            int curSel = static_cast<int>(SendMessageW(g_hLectureList, LB_GETCURSEL, 0, 0));
-            if (curSel >= 0 && curSel < static_cast<int>(g_lectures.size())) {
-                const std::wstring& selectedLecture = g_lectures[static_cast<size_t>(curSel)];
-                if (g_currentLecturePath.empty() || selectedLecture != g_currentLecturePath) {
-                    NotifyListboxSelChange(g_hLectureList);
-                }
-            }
-        }
-        SetFocus(g_hSessionList);
-        EnsureListboxSelection(g_hSessionList); // may trigger session load
-        return;
-    }
-    if (list == g_hSessionList && g_hPdfList) {
-        bool changed = EnsureListboxSelection(g_hSessionList);
-        if (!changed && ListboxItemCount(g_hPdfList) <= 0 && ListboxItemCount(g_hNoteList) <= 0) {
-            int curSel = static_cast<int>(SendMessageW(g_hSessionList, LB_GETCURSEL, 0, 0));
-            if (curSel >= 0) NotifyListboxSelChange(g_hSessionList);
-        }
-        SetFocus(g_hPdfList);
-        EnsureListboxSelection(g_hPdfList);
-        return;
-    }
-    if (list == g_hPdfList && g_hNoteList) {
-        SetFocus(g_hNoteList);
-        EnsureListboxSelection(g_hNoteList);
-        return;
-    }
-    if (list == g_hNoteList) {
-        OpenOrFocusSelectedNoteAtFileStart(owner);
-        return;
-    }
-}
 
 static bool OpenSelectedLecture(HWND owner) {
     if (!g_hLectureList) return false;
@@ -3923,6 +3965,18 @@ static bool CloseFileDisplayFromContext(HWND owner, bool isNote, const std::wstr
     return true;
 }
 
+[[nodiscard]] static bool CloseCurrentFileDisplays(HWND owner) {
+    // Checkpoint both displays before clearing either one. A failure leaves
+    // the current documents, their recovery data, and their locks in place.
+    const auto operation = localization::Text(L"menu.file.close");
+    if (!PrepareContextDisplayClose(owner, operation.c_str(), operation.c_str())) return false;
+    ClearPdfAndNoteSelection();
+    FinishContextDisplayClose(owner);
+    ShowSoftNotice(owner, localization::Text(L"main.ui.ec3b7ea7321a").c_str(),
+                   SoftNoticeKind::Info);
+    return true;
+}
+
 static bool CloseSessionDisplayFromContext(HWND owner, const std::wstring& path) {
     if (path.empty() || SessionKeyFromPath(path) != SessionKeyFromPath(g_currentSessionPath)) return false;
     if (!PrepareContextDisplayClose(owner, L"回次を閉じる", L"Closing session")) return false;
@@ -3966,8 +4020,21 @@ static LRESULT CALLBACK PdfNoteListProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
                                         UINT_PTR, DWORD_PTR refData) {
     auto* state = reinterpret_cast<ListClickState*>(refData);
     switch (msg) {
+    case WM_SIZE: {
+        const auto result = DefSubclassProc(hWnd, msg, wParam, lParam);
+        ui::ClampFittingListBoxScroll(hWnd);
+        return result;
+    }
+    case WM_ERASEBKGND:
+        return 1; // The buffered paint includes the empty list area.
+    case WM_PRINTCLIENT:
+        ui::EraseListBoxPrintBackground(hWnd, reinterpret_cast<HDC>(wParam), lParam, g_theme.panelBg);
+        break;
+    case WM_PAINT:
+        if (ui::PaintBufferedListBox(hWnd, g_theme.panelBg)) return 0;
+        break;
     case WM_DROPFILES:
-        HandlePdfNoteListDrop(hWnd, reinterpret_cast<HDROP>(wParam));
+        HandleWorkspaceListDrop(hWnd, reinterpret_cast<HDROP>(wParam));
         return 0;
     case WM_SETFOCUS:
         EnforceImePolicyForWindow(hWnd);
@@ -4344,6 +4411,22 @@ static std::vector<DirectoryHierarchyItem> BuildDirectoryHierarchyItems(const st
     return items;
 }
 
+static int FindFileListIndexByPath(const std::vector<FileEntry>& files, const std::wstring& path);
+
+static void PopulateFileListBox(HWND list, const std::vector<FileEntry>& files,
+                                const std::filesystem::path& displayRoot) {
+    if (!list) return;
+    const ui::ListBoxUpdate update(list);
+    ui::RememberOpenListIndex(list, -1);
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    for (const auto& label : FileDisplayLabelsForPaths(files, displayRoot)) {
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+    }
+    ui::RememberOpenListIndex(list, FindFileListIndexByPath(files,
+        list == g_hNoteList ? g_currentNotePath : CurrentLogicalPdfPath()));
+    SetListWide(list);
+}
+
 static void AddTemporaryOpenedFileToFileList(const std::wstring& path,
                                              DirectoryHierarchyItemKind kind,
                                              bool markSearchResult) {
@@ -4381,16 +4464,11 @@ static void AddTemporaryOpenedFileToFileList(const std::wstring& path,
         s_hierarchyTempOriginLectureKey = NormalizePathKeyForList(g_currentLecturePath);
     }
 
-    SendMessageW(list, LB_RESETCONTENT, 0, 0);
     std::filesystem::path displayRoot = !g_currentSessionPath.empty()
         ? std::filesystem::path(g_currentSessionPath)
         : std::filesystem::path(path).parent_path();
-    for (const auto& file : files) {
-        std::wstring label = FileDisplayLabelForPath(file.path, files, displayRoot);
-        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
-    }
+    PopulateFileListBox(list, files, displayRoot);
     SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(targetIndex), 0);
-    SetListWide(list);
     InvalidateRect(list, nullptr, TRUE);
 }
 
@@ -4472,15 +4550,10 @@ bool RemoveTemporaryFilePathFromCurrentList(const std::wstring& path, bool isNot
     }), files.end());
     HWND list = isNote ? g_hNoteList : g_hPdfList;
     if (list) {
-        SendMessageW(list, LB_RESETCONTENT, 0, 0);
         const std::filesystem::path displayRoot = !g_currentSessionPath.empty()
             ? std::filesystem::path(g_currentSessionPath)
             : std::filesystem::path(g_currentLecturePath);
-        for (const auto& entry : files) {
-            const std::wstring label = FileDisplayLabelForPath(entry.path, files, displayRoot);
-            SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
-        }
-        SetListWide(list);
+        PopulateFileListBox(list, files, displayRoot);
         InvalidateRect(list, nullptr, TRUE);
     }
     return true;
@@ -4516,15 +4589,10 @@ bool OpenSearchResultFileInCurrentFileList(HWND owner, const std::wstring& path)
 
 static void RebuildFileListBox(HWND list, const std::vector<FileEntry>& files) {
     if (!list) return;
-    SendMessageW(list, LB_RESETCONTENT, 0, 0);
     std::filesystem::path displayRoot = !g_currentSessionPath.empty()
         ? std::filesystem::path(g_currentSessionPath)
         : std::filesystem::path(g_currentLecturePath);
-    for (const auto& file : files) {
-        std::wstring label = FileDisplayLabelForPath(file.path, files, displayRoot);
-        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
-    }
-    SetListWide(list);
+    PopulateFileListBox(list, files, displayRoot);
 }
 
 void RefreshTemporaryFileListDisplay(bool isNote) {
@@ -4633,6 +4701,14 @@ static LRESULT CALLBACK DirectoryListProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                                           UINT_PTR, DWORD_PTR refData) {
     auto* dblClick = reinterpret_cast<DirectoryListDblClickState*>(refData);
     switch (msg) {
+    case WM_SIZE: {
+        const auto result = DefSubclassProc(hWnd, msg, wParam, lParam);
+        ui::ClampFittingListBoxScroll(hWnd);
+        return result;
+    }
+    case WM_DROPFILES:
+        HandleWorkspaceListDrop(hWnd, reinterpret_cast<HDROP>(wParam));
+        return 0;
     case WM_SETFOCUS:
         EnforceImePolicyForWindow(hWnd);
         InvalidateDirectoryListFocusFrame(hWnd);
@@ -4650,14 +4726,12 @@ static LRESULT CALLBACK DirectoryListProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         EnforceImePolicyForWindow(hWnd);
         return 0;
     case WM_ERASEBKGND: {
-        HDC hdc = reinterpret_cast<HDC>(wParam);
-        RECT rc{};
-        GetClientRect(hWnd, &rc);
-        HBRUSH bg = g_hThemePanelBrush ? g_hThemePanelBrush : CreateSolidBrush(g_theme.panelBg);
-        FillRect(hdc, &rc, bg);
-        if (!g_hThemePanelBrush) DeleteObject(bg);
+        // Paint rows and their empty background together in WM_PAINT.
         return 1;
     }
+    case WM_PRINTCLIENT:
+        ui::EraseListBoxPrintBackground(hWnd, reinterpret_cast<HDC>(wParam), lParam, g_theme.panelBg);
+        break;
     case WM_KEYDOWN:
         if (wParam == VK_TAB) {
             if (g_hPdfView) SetFocus(g_hPdfView);
@@ -4732,7 +4806,8 @@ static LRESULT CALLBACK DirectoryListProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         }
         break;
     case WM_PAINT: {
-        LRESULT res = DefSubclassProc(hWnd, msg, wParam, lParam);
+        LRESULT res = ui::PaintBufferedListBox(hWnd, g_theme.panelBg)
+            ? 0 : DefSubclassProc(hWnd, msg, wParam, lParam);
         DrawDirectoryListFocusFrame(hWnd);
         return res;
     }
@@ -4754,6 +4829,7 @@ static LRESULT CALLBACK DirectoryListProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 namespace {
 constexpr std::array<int, 9> kToolbarTextFontPt10Values = {100, 120, 140, 160, 180, 200, 240, 280, 320};
 constexpr DWORD_PTR kToolbarTextFontFixedFlag = 0x10000;
+constexpr DWORD_PTR kToolbarTextFontPreviewFlag = 0x20000;
 constexpr double kToolbarTextFontRatioBasePt = 14.0;
 constexpr double kA4WidthPt = 595.0;
 constexpr double kA4HeightPt = 842.0;
@@ -4771,7 +4847,7 @@ static bool ToolbarTextFontComboUsesA4Scale(DWORD_PTR data) {
 }
 
 static int ToolbarTextFontComboPt10(DWORD_PTR data) {
-    return static_cast<int>(data & ~kToolbarTextFontFixedFlag);
+    return static_cast<int>(data & ~(kToolbarTextFontFixedFlag | kToolbarTextFontPreviewFlag));
 }
 
 static bool IsA4LikePageSizePt(double widthPt, double heightPt) {
@@ -4866,13 +4942,21 @@ static void LoadActiveToolbarFontSizeSlot() {
 
 static void SetActiveToolbarFontSizeSlot(int slot) {
     slot = std::clamp(slot, 0, 1);
-    if (slot == std::clamp(g_textFontActiveSizeSlot, 0, 1)) return;
-    SaveActiveToolbarFontSizeSlot();
-    g_textFontActiveSizeSlot = slot;
+    const bool slotChanged = slot != std::clamp(g_textFontActiveSizeSlot, 0, 1);
+    if (slotChanged) {
+        SaveActiveToolbarFontSizeSlot();
+        g_textFontActiveSizeSlot = slot;
+    }
+    // A/B are presets: clicking the already active button also reapplies it
+    // after an annotation-specific size change. The PDF edit path skips no-ops.
     LoadActiveToolbarFontSizeSlot();
+    if (slotChanged) PersistConfig();
+    if (g_hPdfView) SendMessageW(g_hPdfView, kMsgTextBoxFontUpdate, kTextBoxFontSizeOnly, 0);
     SyncToolbarFontSizeCombo();
-    PersistConfig();
-    if (g_hPdfView) PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
+    if (slotChanged) {
+        if (g_hRadioFontSizeSlotA) InvalidateRect(g_hRadioFontSizeSlotA, nullptr, FALSE);
+        if (g_hRadioFontSizeSlotB) InvalidateRect(g_hRadioFontSizeSlotB, nullptr, FALSE);
+    }
 }
 
 static bool ReadToolbarFontSizeComboValue(HWND combo, double* outPt, bool* outUseA4Scale) {
@@ -4882,6 +4966,9 @@ static bool ReadToolbarFontSizeComboValue(HWND combo, double* outPt, bool* outUs
     LRESULT data = SendMessageW(combo, CB_GETITEMDATA, sel, 0);
     if (data == CB_ERR) return false;
     DWORD_PTR itemData = static_cast<DWORD_PTR>(data);
+    // The live-size row is display-only. Selecting it must not round the size
+    // or replace the saved A/B preset with the temporary annotation value.
+    if ((itemData & kToolbarTextFontPreviewFlag) != 0) return false;
     if (outUseA4Scale) *outUseA4Scale = ToolbarTextFontComboUsesA4Scale(itemData);
     if (outPt) *outPt = static_cast<double>(ToolbarTextFontComboPt10(itemData)) / 10.0;
     return true;
@@ -4906,21 +4993,23 @@ static bool ApplyToolbarFontSizeComboSelection(HWND combo) {
     return true;
 }
 
-static void SyncToolbarFontSizeComboForSlot(HWND combo, double pt, bool useA4Scale) {
+static void SyncToolbarFontSizeComboForSlot(HWND combo, double pt, bool useA4Scale, bool preview = false) {
     if (!combo || !IsWindow(combo)) return;
     if (SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0) != 0) return;
 
     const int pageIndex = CurrentToolbarTextFontPageIndex();
     const bool showFixed = ShouldShowFixedToolbarTextFontChoices(pageIndex);
-    const int pt10 = static_cast<int>(std::llround(std::clamp(pt, 6.0, 96.0) * 10.0));
-    const DWORD_PTR wantData = EncodeToolbarTextFontComboData(useA4Scale, pt10);
-    const int expectedCount = static_cast<int>(kToolbarTextFontPt10Values.size()) * (showFixed ? 2 : 1);
+    const int pt10 = static_cast<int>(std::llround(std::clamp(pt, 4.0, 200.0) * 10.0));
+    const DWORD_PTR wantData = preview
+        ? EncodeToolbarTextFontComboData(false, pt10) | kToolbarTextFontPreviewFlag
+        : EncodeToolbarTextFontComboData(useA4Scale, pt10);
+    const int expectedCount = static_cast<int>(kToolbarTextFontPt10Values.size()) * (showFixed ? 2 : 1) + (preview ? 1 : 0);
 
     struct FontSizeComboCache {
         HWND combo = nullptr;
         int pageIndex = std::numeric_limits<int>::min();
         bool showFixed = false;
-        DWORD_PTR wantData = std::numeric_limits<DWORD_PTR>::max();
+        double previewPt = 0.0;
     };
     static FontSizeComboCache s_cache[2];
     FontSizeComboCache& cache = (combo == g_hComboFontSizeAlt) ? s_cache[1] : s_cache[0];
@@ -4929,8 +5018,12 @@ static void SyncToolbarFontSizeComboForSlot(HWND combo, double pt, bool useA4Sca
     bool needRebuild = (combo != cache.combo) ||
                        (pageIndex != cache.pageIndex) ||
                        (showFixed != cache.showFixed) ||
-                       (currentCount != expectedCount);
-    bool needReselect = needRebuild || (wantData != cache.wantData);
+                       (currentCount != expectedCount) ||
+                       (preview && cache.previewPt != pt);
+    const LRESULT selected = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    const LRESULT selectedData = selected == CB_ERR ? CB_ERR : SendMessageW(combo, CB_GETITEMDATA, selected, 0);
+    const bool needReselect = needRebuild || selectedData == CB_ERR ||
+        static_cast<DWORD_PTR>(selectedData) != wantData;
 
     if (needRebuild) {
         SendMessageW(combo, WM_SETREDRAW, FALSE, 0);
@@ -4953,6 +5046,14 @@ static void SyncToolbarFontSizeComboForSlot(HWND combo, double pt, bool useA4Sca
                 }
             }
         }
+        if (preview) {
+            std::wostringstream pointText;
+            pointText.precision(10);
+            pointText << pt;
+            const auto label = localization::Format(L"main.toolbar.font_current", {{L"PT", pointText.str()}});
+            const int item = static_cast<int>(SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
+            if (item >= 0) SendMessageW(combo, CB_SETITEMDATA, item, static_cast<LPARAM>(wantData));
+        }
         SendMessageW(combo, CB_SETDROPPEDWIDTH, 240, 0);
         SendMessageW(combo, WM_SETREDRAW, TRUE, 0);
     }
@@ -4964,13 +5065,48 @@ static void SyncToolbarFontSizeComboForSlot(HWND combo, double pt, bool useA4Sca
     cache.combo = combo;
     cache.pageIndex = pageIndex;
     cache.showFixed = showFixed;
-    cache.wantData = wantData;
+    cache.previewPt = preview ? pt : 0.0;
 }
 
-void SyncToolbarFontSizeCombo() {
+void SyncToolbarFontSizeCombo(bool activeSizeOnly) {
     g_textFontActiveSizeSlot = std::clamp(g_textFontActiveSizeSlot, 0, 1);
-    SyncToolbarFontSizeComboForSlot(g_hComboFontSize, g_textFontPtSlotA, g_textFontUseA4ScaleSlotA);
-    SyncToolbarFontSizeComboForSlot(g_hComboFontSizeAlt, g_textFontPtSlotB, g_textFontUseA4ScaleSlotB);
+    double actualPt = 0.0;
+    std::wstring actualFont = g_textFontName;
+    if (g_pdf.editingText) {
+        actualPt = g_pdf.editFontPt;
+        if (!g_pdf.editFontName.empty()) actualFont = g_pdf.editFontName;
+    } else {
+        const int selected = GetActiveSelectedAnnotationIndex();
+        if (selected >= 0 && selected < static_cast<int>(g_annots.size()) &&
+            g_annots[static_cast<size_t>(selected)].type == Annotation::Type::TextBox) {
+            const auto& box = g_annots[static_cast<size_t>(selected)];
+            actualPt = box.fontPt;
+            if (!box.fontName.empty()) actualFont = box.fontName;
+        }
+    }
+    const bool preview = std::isfinite(actualPt) && actualPt > 0.0;
+    if (!activeSizeOnly || g_textFontActiveSizeSlot == 0) {
+        SyncToolbarFontSizeComboForSlot(g_hComboFontSize,
+            preview && g_textFontActiveSizeSlot == 0 ? actualPt : g_textFontPtSlotA,
+            g_textFontUseA4ScaleSlotA, preview && g_textFontActiveSizeSlot == 0);
+    }
+    if (!activeSizeOnly || g_textFontActiveSizeSlot == 1) {
+        SyncToolbarFontSizeComboForSlot(g_hComboFontSizeAlt,
+            preview && g_textFontActiveSizeSlot == 1 ? actualPt : g_textFontPtSlotB,
+            g_textFontUseA4ScaleSlotB, preview && g_textFontActiveSizeSlot == 1);
+    }
+    if (g_hComboFont && !actualFont.empty() && SendMessageW(g_hComboFont, CB_GETDROPPEDSTATE, 0, 0) == 0) {
+        const auto label = ResolveFontDisplayName(actualFont);
+        int item = static_cast<int>(SendMessageW(g_hComboFont, CB_FINDSTRINGEXACT, -1,
+                                               reinterpret_cast<LPARAM>(label.c_str())));
+        if (item == CB_ERR) item = static_cast<int>(SendMessageW(g_hComboFont, CB_ADDSTRING, 0,
+                                               reinterpret_cast<LPARAM>(label.c_str())));
+        if (item >= 0 && SendMessageW(g_hComboFont, CB_GETCURSEL, 0, 0) != item)
+            SendMessageW(g_hComboFont, CB_SETCURSEL, item, 0);
+    }
+    // Keep family display updates (including Undo), but Ctrl+/- must not
+    // rebuild/select the inactive size preset or repaint its button.
+    if (activeSizeOnly) return;
     if (g_hRadioFontSizeSlotA) {
         SendMessageW(g_hRadioFontSizeSlotA, BM_SETCHECK,
                      g_textFontActiveSizeSlot == 0 ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -5012,6 +5148,18 @@ static void InvalidateThemeButton(HWND hWnd) {
     RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
 }
 
+static LRESULT CALLBACK TextBoxPaletteFocusProc(HWND button, UINT message, WPARAM wParam,
+                                              LPARAM lParam, UINT_PTR subclass, DWORD_PTR) {
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(button, TextBoxPaletteFocusProc, subclass);
+    const bool keepEditor = (message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK) &&
+        g_pdf.editingText && GetFocus() == g_hPdfView;
+    const LRESULT result = DefSubclassProc(button, message, wParam, lParam);
+    // Let the native button retain capture/click behavior, then return keyboard
+    // input to the existing editor without committing or changing its selection.
+    if (keepEditor && g_pdf.editingText && IsWindow(g_hPdfView)) SetFocus(g_hPdfView);
+    return result;
+}
+
 static bool EnsureToolbarPaletteButtons() {
     if (!g_hPdfToolbar) return false;
     bool changed = false;
@@ -5031,6 +5179,10 @@ static bool EnsureToolbarPaletteButtons() {
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_COLOR_BASE + static_cast<int>(i))),
                                    g_hInst, nullptr);
         if (!btn) break;
+        if (!SetWindowSubclass(btn, TextBoxPaletteFocusProc, 1, 0)) {
+            DestroyWindow(btn);
+            break;
+        }
         SetUIFont(btn);
         g_colorButtons.push_back(btn);
         changed = true;
@@ -5038,43 +5190,7 @@ static bool EnsureToolbarPaletteButtons() {
     return changed;
 }
 
-static void ResetMenuBackgroundToSystem(HMENU menu) {
-    if (!menu) return;
-    MENUINFO mi{};
-    mi.cbSize = sizeof(mi);
-    mi.fMask = MIM_BACKGROUND;
-    mi.hbrBack = GetSysColorBrush(COLOR_MENU);
-    SetMenuInfo(menu, &mi);
-}
-
-static void RemoveMenuOwnerDraw(HMENU menu) {
-    if (!menu) return;
-    ResetMenuBackgroundToSystem(menu);
-
-    int count = GetMenuItemCount(menu);
-    for (int i = 0; i < count; ++i) {
-        MENUITEMINFOW mii{};
-        mii.cbSize = sizeof(mii);
-        mii.fMask = MIIM_FTYPE | MIIM_DATA | MIIM_SUBMENU;
-        if (!GetMenuItemInfoW(menu, i, TRUE, &mii)) continue;
-
-        if (mii.fType & MFT_OWNERDRAW) {
-            auto* data = reinterpret_cast<MenuItemData*>(mii.dwItemData);
-            ReleaseMenuItemData(data);
-            mii.fType &= ~MFT_OWNERDRAW;
-            mii.dwItemData = 0;
-            SetMenuItemInfoW(menu, i, TRUE, &mii);
-        }
-        if (mii.hSubMenu) {
-            RemoveMenuOwnerDraw(mii.hSubMenu);
-        }
-    }
-}
-
 static void RemoveOwnerDrawButtonsOnly(HWND hWnd) {
-    RestoreButtonType(g_hBtnNewSession, BS_PUSHBUTTON);
-    RestoreButtonType(g_hBtnNewNote, BS_PUSHBUTTON);
-    RestoreButtonType(g_hBtnToggleAnn, BS_PUSHBUTTON);
     RestoreButtonType(g_hAnnotShow, BS_AUTOCHECKBOX);
 
     RestoreButtonType(g_hBtnModeSelect, BS_AUTORADIOBUTTON);
@@ -5093,7 +5209,6 @@ static void RemoveOwnerDrawButtonsOnly(HWND hWnd) {
     RestoreButtonType(g_hBtnModeShape, BS_AUTORADIOBUTTON);
     RestoreButtonType(g_hBtnModeEraser, BS_AUTORADIOBUTTON);
 
-    RestoreButtonType(g_hBtnPaletteCustom, BS_PUSHBUTTON);
     RestoreButtonType(g_hRadioFontSizeSlotA, BS_AUTORADIOBUTTON);
     RestoreButtonType(g_hRadioFontSizeSlotB, BS_AUTORADIOBUTTON);
     RestoreButtonType(g_hChkTextReadableBackground, BS_AUTOCHECKBOX);
@@ -5101,11 +5216,7 @@ static void RemoveOwnerDrawButtonsOnly(HWND hWnd) {
     RestoreButtonType(g_hRadioTextReadableBackgroundInverted, BS_AUTORADIOBUTTON);
     RestoreButtonType(g_hChkTextAutoWrap, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hChkPanMouseWheelZoom, BS_AUTOCHECKBOX);
-    RestoreButtonType(g_hAnnotSettings, BS_PUSHBUTTON);
-    RestoreButtonType(g_hAnnotClear, BS_PUSHBUTTON);
     RestoreButtonType(g_hChkShortcutHeading1, BS_AUTOCHECKBOX);
-    RestoreButtonType(g_hChkShortcutHeading2, BS_PUSHBUTTON);
-    RestoreButtonType(g_hBtnShortcutHeadingLevelUp, BS_PUSHBUTTON);
     RestoreButtonType(g_hChkShortcutBack, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hChkShortcutChar, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hChkShortcutBold, BS_AUTOCHECKBOX);
@@ -5113,16 +5224,13 @@ static void RemoveOwnerDrawButtonsOnly(HWND hWnd) {
     RestoreButtonType(g_hChkShortcutStrike, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hChkShortcutUnderline, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hChkShortcutLinkDecor, BS_AUTOCHECKBOX);
-    RestoreButtonType(g_hBtnShortcutBackPalette, BS_PUSHBUTTON);
-    RestoreButtonType(g_hBtnShortcutCharPalette, BS_PUSHBUTTON);
-    RestoreButtonType(g_hBtnShortcutInput, BS_PUSHBUTTON);
-    RestoreButtonType(g_hBtnShortcutPdfLink, BS_PUSHBUTTON);
     if (hWnd) RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
 void ApplyOwnerDrawUi(HWND hWnd) {
     static bool s_lastOwnerDraw = false;
     const bool wantOwnerDraw = g_config.ownerDrawUi;
+    ApplyThemeToButtons(hWnd);
 
     auto rebuildMenuBar = [&](bool prevOwnerDraw) {
         if (!hWnd) return;
@@ -5166,9 +5274,6 @@ void ApplyOwnerDrawUi(HWND hWnd) {
         RemoveOwnerDrawButtonsOnly(hWnd);
         return;
     }
-    EnableOwnerDrawButton(g_hBtnNewSession);
-    EnableOwnerDrawButton(g_hBtnNewNote);
-    EnableOwnerDrawButton(g_hBtnToggleAnn);
     EnableOwnerDrawButton(g_hAnnotShow);
     EnableOwnerDrawButton(g_hBtnModeSelect);
     EnableOwnerDrawButton(g_hBtnModePan);
@@ -5185,14 +5290,9 @@ void ApplyOwnerDrawUi(HWND hWnd) {
     EnableOwnerDrawButton(g_hBtnModeFreehand);
     EnableOwnerDrawButton(g_hBtnModeShape);
     EnableOwnerDrawButton(g_hBtnModeEraser);
-    EnableOwnerDrawButton(g_hBtnPaletteCustom);
     EnableOwnerDrawButton(g_hRadioFontSizeSlotA);
     EnableOwnerDrawButton(g_hRadioFontSizeSlotB);
-    EnableOwnerDrawButton(g_hAnnotSettings);
-    EnableOwnerDrawButton(g_hAnnotClear);
     EnableOwnerDrawButton(g_hChkShortcutHeading1);
-    EnableOwnerDrawButton(g_hChkShortcutHeading2);
-    EnableOwnerDrawButton(g_hBtnShortcutHeadingLevelUp);
     EnableOwnerDrawButton(g_hChkShortcutBack);
     EnableOwnerDrawButton(g_hChkShortcutChar);
     EnableOwnerDrawButton(g_hChkShortcutBold);
@@ -5200,15 +5300,14 @@ void ApplyOwnerDrawUi(HWND hWnd) {
     EnableOwnerDrawButton(g_hChkShortcutStrike);
     EnableOwnerDrawButton(g_hChkShortcutUnderline);
     EnableOwnerDrawButton(g_hChkShortcutLinkDecor);
-    EnableOwnerDrawButton(g_hBtnShortcutBackPalette);
-    EnableOwnerDrawButton(g_hBtnShortcutCharPalette);
-    EnableOwnerDrawButton(g_hBtnShortcutInput);
-    EnableOwnerDrawButton(g_hBtnShortcutPdfLink);
     if (hWnd) RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
 void EnsureOwnerDrawUi(HWND hWnd) {
     ApplyOwnerDrawUi(hWnd);
+    // Restoring native radio styles can discard the previous check state.
+    // Reapply it from the preset model after either theme rendering mode.
+    SyncToolbarFontSizeCombo();
 }
 
 
@@ -5473,7 +5572,10 @@ static bool OpenNoteIfDifferent(HWND hWnd, const std::wstring& path) {
         return PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.a68e8bfa5e55").c_str(),
                                            localization::Text(L"main.ui.4628424dc46e").c_str());
     }
-    LoadNoteFile(hWnd, path);
+    if (!LoadNoteFile(hWnd, path)) {
+        SyncLeftPaneSelection();
+        return false;
+    }
     SyncBottomPaneAfterNoteLoad(hWnd);
     SyncLeftPaneSelection();
     RefreshMainWindowUiState(hWnd);
@@ -5526,15 +5628,30 @@ void SyncBottomPaneAfterNoteLoad(HWND hWnd) {
         L"end elapsed_ms=" + preview_trace::ElapsedMs(startTick));
 }
 
+static void StartAutoOpenedPdfBeforeNote() {
+    // Loading a note while the math pane is pinned can change PDF client size.
+    // Keep the existing posted fit in that case; never fit guessed geometry.
+    if (g_bottomPanePin != BottomPanePin::Math) {
+        (void)StartPendingPdfInitialRender(g_hPdfView);
+    }
+}
+
 void AutoOpenSingleSessionFiles(HWND hWnd) {
     if (ParseSessionAutoOpenMode(g_config.sessionAutoOpenMode) == SessionAutoOpenMode::Off) {
         return;
     }
     const std::wstring autoOpenPdfPath = FirstOpenablePdfListPath();
-    if (g_noteFiles.size() == 1 && !g_noteFiles.front().path.empty()) {
-        LoadNoteFile(hWnd, g_noteFiles.front().path);
-        SyncBottomPaneAfterNoteLoad(hWnd);
-    }
+    const std::wstring autoOpenNotePath = g_noteFiles.size() == 1 ? g_noteFiles.front().path : L"";
+    const auto openNote = [&]() {
+        if (!autoOpenNotePath.empty()) {
+            if (LoadNoteFile(hWnd, autoOpenNotePath)) {
+                SyncBottomPaneAfterNoteLoad(hWnd);
+            }
+        }
+    };
+    // Preserve the original order if note loading can change PDF geometry.
+    const bool noteFirst = g_bottomPanePin == BottomPanePin::Math;
+    if (noteFirst) openNote();
     if (g_pdfFiles.size() == 1 && !autoOpenPdfPath.empty()) {
         if (g_pdfPreviewActive) {
             DisableIntegratedPdfPreview(hWnd, true);
@@ -5542,8 +5659,11 @@ void AutoOpenSingleSessionFiles(HWND hWnd) {
         HighlightPdfListPathForPendingOpen(hWnd, autoOpenPdfPath);
         if (!OpenPdfWithAnnotations(hWnd, autoOpenPdfPath)) {
             RestorePdfListSelectionToCurrent();
+        } else {
+            StartAutoOpenedPdfBeforeNote();
         }
     }
+    if (!noteFirst) openNote();
     (void)FocusAutoOpenedSoleNoteForEditing();
 }
 
@@ -5638,22 +5758,9 @@ static void OnNoteSelChange(HWND hWnd) {
     if (!g_currentNotePath.empty() && f.path == g_currentNotePath) return;
     SwitchTimingScope timing(L"note_switch", f.path);
     timing.Mark(L"selected");
-    if (!SaveNoteIfDirty(hWnd)) {
-        timing.SetOutcome(L"cancelled_save_note");
-        SyncLeftPaneSelection();
-        PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.a68e8bfa5e55").c_str(),
-                                    localization::Text(L"main.ui.4628424dc46e").c_str());
-        return;
-    }
-    timing.Mark(L"SaveNoteIfDirty");
-    if (!VerifyWorkspaceWritableForEditing(hWnd) ||
-        !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(f.path).parent_path(),
-                                             L"workspace.directory.note")) {
-        timing.SetOutcome(L"cancelled_verify_dir");
-        SyncLeftPaneSelection();
-        return;
-    }
-    timing.Mark(L"VerifyWritable");
+    // One recovery boundary per selection. Both note and annotation checkpoints
+    // precede permission probes; failure leaves the active documents unchanged.
+    // Do not repeat SaveNoteIfDirty later: even a clean note needs a full sync.
     if (!file_output::PrepareStagedDiffsForSwitch(hWnd)) {
         timing.SetOutcome(L"cancelled_stage_before_switch");
         SyncLeftPaneSelection();
@@ -5662,6 +5769,14 @@ static void OnNoteSelChange(HWND hWnd) {
         return;
     }
     timing.Mark(L"PrepareStagedDiffsForSwitch");
+    if (!VerifyWorkspaceWritableForEditing(hWnd) ||
+        !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(f.path).parent_path(),
+                                             L"workspace.directory.note")) {
+        timing.SetOutcome(L"cancelled_verify_dir");
+        SyncLeftPaneSelection();
+        return;
+    }
+    timing.Mark(L"VerifyWritable");
     {
         ScopedDeferredMainWindowUiRefresh deferredUi(hWnd);
         ScopedDeferredLeftPaneSelection deferredLeftPaneSelection;
@@ -5669,7 +5784,11 @@ static void OnNoteSelChange(HWND hWnd) {
         blankGuard.AddWindow(g_hNoteEdit);
         blankGuard.AddWindow(g_hNoteRender);
         blankGuard.Activate();
-        LoadNoteFile(hWnd, f.path);
+        if (!LoadNoteFile(hWnd, f.path)) {
+            timing.SetOutcome(L"note_load_failed");
+            SyncLeftPaneSelection();
+            return;
+        }
         SyncBottomPaneAfterNoteLoad(hWnd);
         timing.Mark(L"LoadNoteFile");
         SyncLeftPaneSelection();
@@ -5716,22 +5835,7 @@ static void OnPdfSelChange(HWND hWnd) {
     }
     SwitchTimingScope timing(L"pdf_switch", f.path);
     timing.Mark(L"selected");
-    if (!SaveNoteIfDirty(hWnd)) {
-        timing.SetOutcome(L"cancelled_save_note");
-        SyncLeftPaneSelection();
-        PromptStayOrOpenDiffManager(hWnd, localization::Text(L"main.ui.325089e3c2a9").c_str(),
-                                    localization::Text(L"main.ui.4628424dc46e").c_str());
-        return;
-    }
-    timing.Mark(L"SaveNoteIfDirty");
-    if (!VerifyWorkspaceWritableForEditing(hWnd) ||
-        !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(f.path).parent_path(),
-                                             L"workspace.directory.pdf")) {
-        timing.SetOutcome(L"cancelled_verify_dir");
-        SyncLeftPaneSelection();
-        return;
-    }
-    timing.Mark(L"VerifyWritable");
+    // Same single checkpoint boundary as note selection, including IME sync.
     if (!file_output::PrepareStagedDiffsForSwitch(hWnd)) {
         timing.SetOutcome(L"cancelled_stage_before_switch");
         SyncLeftPaneSelection();
@@ -5740,6 +5844,14 @@ static void OnPdfSelChange(HWND hWnd) {
         return;
     }
     timing.Mark(L"PrepareStagedDiffsForSwitch");
+    if (!VerifyWorkspaceWritableForEditing(hWnd) ||
+        !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(f.path).parent_path(),
+                                             L"workspace.directory.pdf")) {
+        timing.SetOutcome(L"cancelled_verify_dir");
+        SyncLeftPaneSelection();
+        return;
+    }
+    timing.Mark(L"VerifyWritable");
     bool openedPdf = false;
     {
         ScopedDeferredMainWindowUiRefresh deferredUi(hWnd);
@@ -5845,26 +5957,6 @@ void ApplyActiveColorForMode(HWND hWnd, ToolMode mode) {
     }
 }
 
-void ApplyPaletteCustomColor(HWND hWnd, COLORREF color) {
-    const COLORREF prev = g_paletteCustomColor;
-
-    // Palette slot 8 is the single application-owned custom color.
-    COLORREF custom[kToolPaletteCommandSlotCapacity]{};
-    LoadUserPaletteColorsForSettings(custom, std::size(custom));
-    custom[static_cast<size_t>(kLastOkColorSlotIndex)] = color;
-    if (!SaveUserPaletteColorsForSettings(custom, std::size(custom))) return;
-    // ^ rebuilds g_palette and calls PersistConfig()
-
-    if (g_activeColor == prev && prev != color) {
-        g_activeColor = color;
-        StoreToolColorForMode(g_toolMode, color);
-    }
-    if (g_hPdfToolbar) {
-        RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
-    }
-    if (hWnd) UpdateToolbarUI(hWnd);
-}
-
 enum class WidthProfile { None, LineLike, Arrow, MarkerFree, MarkerText, Eraser };
 enum class AlphaProfile { None, Marker, LineLike, ShapeTransparency };
 
@@ -5915,7 +6007,7 @@ static AlphaProfile AlphaProfileForMode(ToolMode mode) {
     case ToolMode::Freehand:
         return AlphaProfile::LineLike;
     case ToolMode::Shape:
-        return AlphaProfile::ShapeTransparency;
+        return ShapeKindIsOpen(g_shapeKind)?AlphaProfile::LineLike:AlphaProfile::ShapeTransparency;
     default:
         return AlphaProfile::None;
     }
@@ -6030,9 +6122,9 @@ static bool SyncAlphaComboToMode(ToolMode mode) {
         };
         if (profile != AlphaProfile::None) {
             const wchar_t* labels[] = { L"薄", L"標準", L"濃", L"最大" };
-            const int count = ToolAlphaOptionCountForMode(mode);
+            const int count = ToolAlphaOptionCountForMode(mode,g_shapeKind);
             for (int i = 0; i < count; ++i) {
-                add(labels[std::min(i, 3)], ToolAlphaOptionValueForMode(mode, i));
+                add(labels[std::min(i, 3)], ToolAlphaOptionValueForMode(mode, i,g_shapeKind));
             }
         }
         s_profile = profile;
@@ -6151,6 +6243,7 @@ static std::wstring ShapeDetailLabel(ShapeDetail detail) {
     case ShapeDetail::Ellipse: return localization::Text(L"main.ui.59239acb2316").c_str();
     case ShapeDetail::Triangle: return localization::Text(L"main.ui.b6ccd52bc893").c_str();
     case ShapeDetail::Diamond: return localization::Text(L"main.ui.55914cda2140").c_str();
+    case ShapeDetail::Arc: return localization::Text(L"shape.arc.label");
     default: return localization::Text(L"main.ui.692c81aaf8cd").c_str();
     }
 }
@@ -6275,23 +6368,11 @@ static bool SyncMarkerTextStyleCombo() {
 
 static bool SyncLineDashStyleCombo() {
     if (!g_hComboLineDashStyle) return false;
-    int before = SelectedComboData(g_hComboLineDashStyle);
-    int want = (g_lineDashStyle == L"dash") ? 1 : 0;
-    int count = static_cast<int>(SendMessageW(g_hComboLineDashStyle, CB_GETCOUNT, 0, 0));
-    int matchIdx = -1;
-    for (int i = 0; i < count; ++i) {
-        int data = static_cast<int>(SendMessageW(g_hComboLineDashStyle, CB_GETITEMDATA, i, 0));
-        if (data == want) {
-            matchIdx = i;
-            break;
-        }
-    }
-    if (matchIdx < 0 && count > 0) matchIdx = 0;
-    if (matchIdx >= 0) {
-        SendMessageW(g_hComboLineDashStyle, CB_SETCURSEL, matchIdx, 0);
-    }
-    int after = SelectedComboData(g_hComboLineDashStyle);
-    return after != before;
+    const bool shape=g_toolMode==ToolMode::Shape && !ShapeKindIsOpen(g_shapeKind);
+    const bool allowDash=true;
+    const auto value=ShapeLineStyleFor(shape ? g_config.newShapeBoundary : ShapeBoundary::None,
+        allowDash && g_lineDashStyle==L"dash");
+    return ui::SyncLineStyleOption(g_hComboLineDashStyle,value,shape,allowDash);
 }
 static bool SyncShapeDrawModeCombo(ShapeDrawMode mode) {
     if (!g_hComboShapeDrawMode) return false;
@@ -6318,12 +6399,18 @@ static bool PreviewAllowsPdfTool(ToolMode mode) {
     return mode == ToolMode::Select || mode == ToolMode::Pan || mode == ToolMode::Magnifier;
 }
 
-static bool ToolModeEnabledForCurrentPdfView(ToolMode mode) {
-    if (AnnotToolModeUiStateFor(mode) != AnnotToolUiState::Enabled) return false;
+// Document/save safety is independent of the annotation bar's visibility policy.
+static bool ToolModeAvailableForCurrentPdfView(ToolMode mode) {
+    if (!FindAnnotToolDetailDescriptor(mode)) return false;
     if (g_pdf.kind == DocKind::Image && !PreviewAllowsPdfTool(mode)) return false;
     if (IsSaveTransactionRunning()) return false;
     if (IsPdfPreviewReadOnlyActive() && !PreviewAllowsPdfTool(mode)) return false;
     return true;
+}
+
+static bool ToolModeEnabledForCurrentPdfView(ToolMode mode) {
+    return AnnotToolModeUiStateFor(mode) == AnnotToolUiState::Enabled &&
+           ToolModeAvailableForCurrentPdfView(mode);
 }
 
 static AnnotToolUiState EffectiveToolUiStateForCurrentPdfView(ToolMode mode);
@@ -7348,17 +7435,9 @@ LectureSortMode ParseLectureSortMode(const std::wstring& mode) {
     std::wstring m = mode;
     std::transform(m.begin(), m.end(), m.begin(), ::towlower);
     if (m == L"name") return LectureSortMode::Name;
-    if (m == L"schedule") return LectureSortMode::Schedule;
-    return LectureSortMode::Recent;
-}
-
-void InitScheduleSortBaseTime() {
-    if (g_scheduleSortTimeSet) return;
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
-    g_scheduleSortDayIndex = ScheduleDayIndexFromSystem(st.wDayOfWeek);
-    g_scheduleSortMinutes = static_cast<int>(st.wHour) * 60 + static_cast<int>(st.wMinute);
-    g_scheduleSortTimeSet = true;
+    if (m == L"manual") return LectureSortMode::Manual;
+    if (m == L"recent") return LectureSortMode::Recent;
+    return LectureSortMode::Manual;
 }
 
 SessionSortMode ParseSessionSortMode(const std::wstring& mode) {
@@ -7369,44 +7448,17 @@ SessionSortMode ParseSessionSortMode(const std::wstring& mode) {
     return SessionSortMode::NumericAsc;
 }
 
-ScheduleRank NextScheduleRank(const std::wstring& lectureName,
-                                     int todayIndex,
-                                     int nowMinutes,
-                                     int dayMask,
-                                     int periods,
-                                     const std::vector<std::wstring>& cells,
-                                     const std::vector<std::wstring>& times) {
-    ScheduleRank result{};
-    if (lectureName.empty()) return result;
-    const long long kWeekMinutes = 7LL * 24 * 60;
-    for (int p = 0; p < periods; ++p) {
-        for (int d = 0; d < 7; ++d) {
-            if ((dayMask & (1 << d)) == 0) continue;
-            size_t idx = static_cast<size_t>(d + p * 7);
-            if (idx >= cells.size() || idx >= times.size()) continue;
-            if (cells[idx] != lectureName) continue;
-            int minutes = 0;
-            if (!TryParseScheduleTimeMinutes(times[idx], minutes)) continue;
-            int dayDiff = (d - todayIndex + 7) % 7;
-            long long delta = static_cast<long long>(dayDiff) * 24 * 60 + (minutes - nowMinutes);
-            if (delta < 0) delta += kWeekMinutes;
-            if (delta < result.delta || (delta == result.delta && dayDiff < result.dayOffset)) {
-                result.delta = delta;
-                result.dayOffset = dayDiff;
-                result.hasSchedule = true;
-            }
-        }
-    }
-    return result;
-}
-
-std::wstring FileDisplayLabelForPath(const std::wstring& filePath,
+static std::wstring FileDisplayLabelWithBatch(const std::wstring& filePath,
                                             const std::vector<FileEntry>& files,
-                                            const std::filesystem::path& root) {
+                                            const std::filesystem::path& root,
+                                            const workspace_display::LabelBatch* labels) {
     if (filePath.empty()) return L"-";
 
     std::filesystem::path path(filePath);
-    const std::wstring pathKey = NormalizePathKeyForList(filePath);
+    const bool hasTemporaryFiles = !s_searchTempPdfKeys.empty() || !s_searchTempNoteKeys.empty() ||
+        !s_hierarchyTempPdfKeys.empty() || !s_hierarchyTempNoteKeys.empty() ||
+        !s_pinnedTempPdfKeys.empty() || !s_pinnedTempNoteKeys.empty();
+    const std::wstring pathKey = hasTemporaryFiles ? NormalizePathKeyForList(filePath) : L"";
     const bool searchTemp =
         (!pathKey.empty() &&
          (s_searchTempPdfKeys.find(pathKey) != s_searchTempPdfKeys.end() ||
@@ -7428,15 +7480,16 @@ std::wstring FileDisplayLabelForPath(const std::wstring& filePath,
         prefix = localization::Text(L"main.ui.441dd4e29aa1").c_str();
     }
     std::wstring base = FilenameOrPath(path);
-    size_t duplicates = 0;
-    std::wstring baseKey = ToLowerAscii(base);
-    for (const auto& item : files) {
-        std::wstring other = FilenameOrPath(std::filesystem::path(item.path));
-        if (ToLowerAscii(other) == baseKey) {
-            ++duplicates;
+    bool duplicated = labels && labels->Duplicated(base);
+    if (!labels) {
+        size_t duplicates = 0;
+        const std::wstring baseKey = ToLowerAscii(base);
+        for (const auto& item : files) {
+            if (ToLowerAscii(FilenameOrPath(std::filesystem::path(item.path))) == baseKey) ++duplicates;
         }
+        duplicated = duplicates > 1;
     }
-    if (duplicates <= 1) return prefix + base;
+    if (!duplicated) return prefix + base;
 
     std::wstring rel = RelativeOrPathForDisplay(path, root);
     if (!rel.empty() && rel != base) return prefix + rel;
@@ -7447,6 +7500,22 @@ std::wstring FileDisplayLabelForPath(const std::wstring& filePath,
     return prefix + base + L" [" + parent + L"]";
 }
 
+std::wstring FileDisplayLabelForPath(const std::wstring& filePath,
+                                   const std::vector<FileEntry>& files,
+                                   const std::filesystem::path& root) {
+    return FileDisplayLabelWithBatch(filePath, files, root, nullptr);
+}
+
+std::vector<std::wstring> FileDisplayLabelsForPaths(const std::vector<FileEntry>& files,
+                                                  const std::filesystem::path& root) {
+    const workspace_display::LabelBatch labels(files, [](const FileEntry& file) {
+        return FilenameOrPath(std::filesystem::path(file.path));
+    });
+    std::vector<std::wstring> result;
+    result.reserve(files.size());
+    for (const auto& file : files) result.push_back(FileDisplayLabelWithBatch(file.path, files, root, &labels));
+    return result;
+}
 
 #include "app/command_dispatch.cppinc"
 
@@ -7573,6 +7642,11 @@ std::wstring BuildStatusDisplayText() {
     }
     if (std::wstring saveState = BuildSaveStateStatusText(); !saveState.empty()) {
         text += L" | " + saveState;
+    }
+    if (document_source_protection::HasRecoveryFailure()) {
+        text = localization::Text(L"workspace.source_recovery_failed_status") + L" | " + text;
+    } else if (document_source_protection::HasPendingProtection()) {
+        text = localization::Text(L"workspace.source_protection_pending_status") + L" | " + text;
     }
     return text;
 }
@@ -7999,8 +8073,9 @@ void ReportMainOperationException(HWND owner, const wchar_t* operation) {
 static void RestorePreviousNoteAfterException(HWND owner, const std::wstring& previousNotePath) {
     try {
         if (!previousNotePath.empty()) {
-            LoadNoteFile(owner, previousNotePath);
-            SyncBottomPaneAfterNoteLoad(owner);
+            if (LoadNoteFile(owner, previousNotePath)) {
+                SyncBottomPaneAfterNoteLoad(owner);
+            }
         } else {
             ClearNoteEditorSilently(owner, L"");
             g_previewNote.clear();
@@ -8067,8 +8142,9 @@ static void RestoreLectureSessionStateAfterException(HWND owner,
             OpenPdfWithAnnotations(owner, previousPdfPath);
         }
         if (!previousNotePath.empty()) {
-            LoadNoteFile(owner, previousNotePath);
-            SyncBottomPaneAfterNoteLoad(owner);
+            if (LoadNoteFile(owner, previousNotePath)) {
+                SyncBottomPaneAfterNoteLoad(owner);
+            }
         } else {
             ClearNoteEditorSilently(owner, L"");
             g_previewNote.clear();
@@ -8116,11 +8192,11 @@ static bool CanStartExportCommand(HWND hWnd, UINT id) {
          id == ID_FILE_EXPORT_NOTE_HTML_QUICK || id == ID_FILE_EXPORT_NOTE_TEXT || id == ID_FILE_EXPORT_NOTE_MARKUP ||
          id == ID_FILE_EXPORT_NOTE_HTML);
     if (needPdf && !HasExportablePdf()) {
-        ShowSoftNotice(hWnd, L"PDFが開かれていません。", SoftNoticeKind::Warning);
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.file_ops.no_pdf"), SoftNoticeKind::Warning);
         return false;
     }
     if (needNote && !HasExportableNote()) {
-        ShowSoftNotice(hWnd, L"ノートが開かれていません。", SoftNoticeKind::Warning);
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.file_ops.no_note"), SoftNoticeKind::Warning);
         return false;
     }
     return true;
@@ -8361,6 +8437,9 @@ static LRESULT CALLBACK OfficeConversionProgressProc(HWND hWnd, UINT msg,
     case WM_CTLCOLORBTN:
         return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam),
                                   reinterpret_cast<HDC>(wParam));
+    case WM_DRAWITEM:
+        if (DrawThemeButton(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam))) return TRUE;
+        break;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDCANCEL) {
             RequestOfficeConversionCancel();
@@ -8617,32 +8696,7 @@ static std::wstring NormalizePathKeyForList(const std::wstring& path) {
 }
 
 static bool IsOpenItemInList(HWND list, int index) {
-    if (!list || index < 0) return false;
-    if (list == g_hLectureList) {
-        if (index >= static_cast<int>(g_lectures.size())) return false;
-        std::wstring selKey = NormalizePathKeyForList(g_lectures[static_cast<size_t>(index)]);
-        std::wstring curKey = NormalizePathKeyForList(g_currentLecturePath);
-        return !selKey.empty() && selKey == curKey;
-    }
-    if (list == g_hSessionList) {
-        if (index >= static_cast<int>(g_sessions.size())) return false;
-        std::wstring selKey = NormalizePathKeyForList(g_sessions[static_cast<size_t>(index)].path);
-        std::wstring curKey = NormalizePathKeyForList(g_currentSessionPath);
-        return !selKey.empty() && selKey == curKey;
-    }
-    if (list == g_hPdfList) {
-        if (index >= static_cast<int>(g_pdfFiles.size())) return false;
-        std::wstring selKey = NormalizePathKeyForList(g_pdfFiles[static_cast<size_t>(index)].path);
-        std::wstring curKey = NormalizePathKeyForList(CurrentLogicalPdfPath());
-        return !selKey.empty() && selKey == curKey;
-    }
-    if (list == g_hNoteList) {
-        if (index >= static_cast<int>(g_noteFiles.size())) return false;
-        std::wstring selKey = NormalizePathKeyForList(g_noteFiles[static_cast<size_t>(index)].path);
-        std::wstring curKey = NormalizePathKeyForList(g_currentNotePath);
-        return !selKey.empty() && selKey == curKey;
-    }
-    return false;
+    return list && index >= 0 && index == ui::OpenListIndex(list);
 }
 
 static bool DrawLeftPaneListItem(const DRAWITEMSTRUCT* dis) {
@@ -8688,15 +8742,13 @@ static bool DrawLeftPaneListItem(const DRAWITEMSTRUCT* dis) {
     DeleteObject(bgBrush);
 
     if (idx >= 0) {
-        wchar_t textBuf[512]{};
-        LRESULT len = SendMessageW(list, LB_GETTEXT, static_cast<WPARAM>(idx),
-                                   reinterpret_cast<LPARAM>(textBuf));
-        if (len != LB_ERR) {
+        const auto label = ui::ListBoxText(list, idx);
+        if (!label.empty()) {
             SetBkMode(dis->hDC, TRANSPARENT);
             SetTextColor(dis->hDC, text);
             RECT textRc = rc;
             textRc.left += 6;
-            DrawTextW(dis->hDC, textBuf, -1, &textRc,
+            DrawTextW(dis->hDC, label.c_str(), static_cast<int>(label.size()), &textRc,
                       DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
         }
     }
@@ -8773,7 +8825,7 @@ bool HandleAnnotToolShortcutInLoop(HWND owner, const MSG& msg) {
     if (binding.targetKind == AnnotToolShortcutTargetKind::Category) {
         SelectAnnotToolFamily(owner, binding.family, false, false);
     } else {
-        SelectAnnotToolMode(owner, binding.mode, false, false);
+        SelectAnnotToolMode(owner, binding.mode, false, false, true);
     }
     return true;
 }
@@ -8796,6 +8848,7 @@ bool HandleMainPdfZoomShortcutInLoop(HWND owner, const MSG& msg) {
     if (msg.message != WM_KEYDOWN) return false;
     if ((GetKeyState(VK_CONTROL) & 0x8000) == 0) return false;
     if ((GetKeyState(VK_MENU) & 0x8000) != 0) return false;
+    if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) return false;
     if (!g_hPdfView || !IsWindow(g_hPdfView) || g_pdf.kind == DocKind::None) return false;
     if (g_pdf.editingText || IsNoteCmdlineActive() || IsNoteImeComposing()) return false;
 
@@ -8820,6 +8873,62 @@ bool HandleMainPdfZoomShortcutInLoop(HWND owner, const MSG& msg) {
         const double base = (std::isfinite(g_pdf.scale) && g_pdf.scale > 0.0) ? g_pdf.scale : 1.0;
         SetPdfScale(g_hPdfView, base * factor, focusPt);
     }
+    return true;
+}
+
+[[nodiscard]] bool HandleMainApplicationShortcutInLoop(HWND owner, const MSG& msg) {
+    using namespace application_shortcuts;
+    if ((msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN) || !owner || !IsWindowEnabled(owner) ||
+        !MainLoopShortcutMessageBelongsToOwner(owner, msg)) return false;
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    // AltGr produces Ctrl+Alt as text input on several layouts.
+    if (ctrl && alt && (GetKeyState(VK_RMENU) & 0x8000)) return false;
+    if ((GetKeyState(VK_LWIN) & 0x8000) || (GetKeyState(VK_RWIN) & 0x8000)) return false;
+    const auto* binding = Resolve(static_cast<UINT>(msg.wParam), ctrl, alt, shift, Surface::Main);
+    if (!binding) return false;
+    AnnotToolShortcutBinding custom;
+    // User assignments predate these defaults. Keep them authoritative rather
+    // than silently stealing a chord or rewriting their settings file.
+    if (ResolveAnnotToolShortcut(msg, &custom)) return false;
+    const HWND focus = GetFocus();
+    bool ime = IsNoteImeComposing() || g_pdf.imeComposing;
+    if (!ime && focus) {
+        if (const HIMC context = ImmGetContext(focus)) {
+            const LONG bytes = ImmGetCompositionStringW(context, GCS_COMPSTR, nullptr, 0);
+            ime = bytes > 0 || bytes == IMM_ERROR_GENERAL;
+            ImmReleaseContext(focus, context);
+        }
+    }
+    const bool input = g_pdf.editingText || IsNoteCmdlineActive() || IsExplicitImeTargetWindow(focus) ||
+        IsExplicitImeTargetWindow(msg.hwnd) || (focus && g_hNoteEdit && (focus == g_hNoteEdit || IsChild(g_hNoteEdit, focus)));
+    if (!MayRun(*binding, input, ime, false)) return false;
+    // Consume repeats only for an eligible application command. Native word
+    // selection in text fields must keep receiving every repeated arrow key.
+    if ((msg.lParam & 0x40000000) != 0) return true;
+    if (binding->pdfOnly && g_pdf.kind != DocKind::Pdf) return true;
+    int command = 0;
+    switch (binding->action) {
+    case Action::JumpPage: command = ID_VIEW_JUMP_PAGE; break;
+    case Action::FitPage: command = ID_VIEW_FIT_PAGE; break;
+    case Action::OpenFile: command = ID_FILE_IMPORT_FILE; break;
+    case Action::CloseFile: command = ID_FILE_CLOSE_FOCUSED; break;
+    case Action::CloseAll: command = ID_FILE_CLOSE; break;
+    case Action::ToggleAnnotations: command = ID_TOOL_TOGGLE_ANNOTS; break;
+    case Action::RotateLeft: command = ID_VIEW_ROTATE_PAGE_LEFT; break;
+    case Action::RotateRight: command = ID_VIEW_ROTATE_PAGE_RIGHT; break;
+    case Action::ResetRotation: command = ID_VIEW_ROTATE_PAGE_RESET; break;
+    case Action::Memo: command = ID_WORKSPACE_MEMO; break;
+    case Action::Export: command = ID_FILE_EXPORT_COMBINED; break;
+    case Action::QuickPdf: command = ID_FILE_EXPORT_PDF_QUICK; break;
+    case Action::QuickNote: command = ID_FILE_EXPORT_NOTE_TEXT_QUICK; break;
+    default: return false;
+    }
+    const UINT state = GetMenuState(GetMenu(owner), command, MF_BYCOMMAND);
+    if (state != static_cast<UINT>(-1) && (state & (MF_DISABLED | MF_GRAYED))) return true;
+    // Reuse the menu's save/recovery guards and ordinary cancel/failure paths.
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(command, 0), 0);
     return true;
 }
 

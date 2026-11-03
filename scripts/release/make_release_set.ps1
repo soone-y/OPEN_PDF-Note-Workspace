@@ -15,6 +15,9 @@ param(
     [string]$PublicAllowlist = "",
     [string]$PublicGitignoreTemplate = "",
     [string]$PublicSnapshotSource = "",
+    [switch]$PrepareOnly,
+    [string]$PreparedPackagesPath = "",
+    [string]$StatisticsPeerPackagesPath = "",
     [switch]$SnapshotOnly,
     [switch]$DryRun,
     [switch]$Lite,
@@ -28,6 +31,12 @@ $ErrorActionPreference = "Stop"
 
 if ($Lite) {
     throw "release set は通常版と Lite版を一組で作成するため、-Lite は指定できません。Lite版だけの開発用梱包は scripts\\release\\pack_release.ps1 -Lite を使用してください。"
+}
+if ($PrepareOnly -and ($SnapshotOnly -or $PreparedPackagesPath -or $PublicSnapshotSource -or $SkipFreshnessCheck -or -not $Zip -or -not $Checksums)) {
+    throw "Package preparation requires fresh Full/Lite ZIPs and no snapshot or prepared input."
+}
+if ($PreparedPackagesPath -and ($SnapshotOnly -or $SkipFreshnessCheck -or $DryRun)) {
+    throw "Prepared package finalization cannot skip freshness, select SnapshotOnly or use DryRun."
 }
 
 $scriptRoot = $PSScriptRoot
@@ -88,6 +97,7 @@ function Write-ReleaseFailureLogTail {
     Write-Host "---- release set failure log tail ($tailCount lines) ----" -ForegroundColor Yellow
     Get-Content -LiteralPath $script:releaseDetailLogPath -Tail $tailCount | ForEach-Object { Write-Host $_ }
     Write-Host "---- end release set failure log tail ----" -ForegroundColor Yellow
+    Write-Host "release set の詳細ログ: $script:releaseDetailLogPath" -ForegroundColor Yellow
 }
 
 function Invoke-ReleasePythonGate {
@@ -317,6 +327,21 @@ function Assert-ReleaseSetZipRoots([object]$ZipRoots) {
     }
 }
 
+function Get-StatisticsPackageArguments([string]$PackagesRoot, [string]$TargetLocale) {
+    $receipt = Get-Content -LiteralPath (Join-Path $PackagesRoot "release_packages_receipt.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($receipt.phase -ne "PREPARED_ONLY" -or $receipt.version -ne (Get-RepoVersionLabel) -or $receipt.locale -ne $TargetLocale) {
+        throw "Statistics peer preparation has a different version, locale or phase."
+    }
+    $arguments = @()
+    foreach ($edition in @("full", "lite")) {
+        $key = if ($edition -eq "full") { "release_zip" } else { "release_lite_zip" }
+        $expectedName = Get-DistributionZipName -Version (Get-RepoVersionLabel) -Locale $TargetLocale -Edition $edition
+        if ([string]$receipt.components.$key -ne $expectedName) { throw "Unexpected statistics package name." }
+        $arguments += @("--package", "${TargetLocale}:${edition}=$(Join-Path $PackagesRoot $expectedName)")
+    }
+    return $arguments
+}
+
 Push-Location -LiteralPath $repoRoot
 try {
     $folderName = if ([string]::IsNullOrWhiteSpace($ReleaseSetName)) {
@@ -357,7 +382,22 @@ try {
     Ensure-Directory $setRoot
     Initialize-ReleaseDetailLog -SetRoot $setRoot
 
-    if (-not $SnapshotOnly) {
+    $preparationTool = Join-Path $repoRoot "tools\release_checks\prepared_release_packages.py"
+    if (-not $SnapshotOnly -and -not $PreparedPackagesPath -and -not $DryRun) {
+        Invoke-ReleasePythonGate -Name "release source input capture" -ScriptPath $preparationTool -Arguments @("begin", "--repository", $repoRoot, "--root", $setRoot)
+    }
+    if ($PreparedPackagesPath) {
+        Invoke-ReleasePythonGate -Name "prepared release package adoption" -ScriptPath $preparationTool -Arguments @(
+            "adopt", "--repository", $repoRoot, "--root", $PreparedPackagesPath, "--destination", $setRoot,
+            "--locale", $Locale, "--version", (Get-RepoVersionLabel))
+        $prepared = Get-Content -LiteralPath (Join-Path $setRoot "release_packages_receipt.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+        $releaseComponentName = [string]$prepared.components.release
+        $releaseLiteComponentName = [string]$prepared.components.release_lite
+        $releaseZipComponentName = [string]$prepared.components.release_zip
+        $releaseLiteZipComponentName = [string]$prepared.components.release_lite_zip
+    }
+
+    if (-not $SnapshotOnly -and -not $PreparedPackagesPath) {
         $packScript = Join-Path $scriptRoot "pack_release.ps1"
         if (-not (Test-Path -LiteralPath $packScript)) {
             throw "Missing pack script: $packScript"
@@ -457,9 +497,31 @@ try {
         }
     }
 
+    if ($PrepareOnly) {
+        if (-not $DryRun) {
+            Invoke-ReleasePythonGate -Name "release package preparation receipt" -ScriptPath $preparationTool -Arguments @(
+                "seal", "--repository", $repoRoot, "--root", $setRoot, "--locale", $Locale, "--version", (Get-RepoVersionLabel),
+                "--release", $releaseComponentName, "--release-lite", $releaseLiteComponentName,
+                "--release-zip", $releaseZipComponentName, "--release-lite-zip", $releaseLiteZipComponentName)
+            Write-Output "PREPARED_PACKAGE_PATH=$setRoot"
+        }
+        Write-Info "Packages prepared only. No release-set manifest, snapshot or publish candidate was created."
+        return
+    }
+
+    # A standalone locale also has a receipt so statistics bind to its exact
+    # two ZIPs. Paired releases prepare both locales before entering here.
+    if (-not $DryRun -and -not $SnapshotOnly -and -not $PreparedPackagesPath) {
+        $sourceReceipt = Join-Path $setRoot "release_source_inputs.json"
+        Invoke-ReleasePythonGate -Name "standalone package preparation receipt" -ScriptPath $preparationTool -Arguments @(
+            "seal", "--repository", $repoRoot, "--root", $setRoot, "--locale", $Locale, "--version", (Get-RepoVersionLabel),
+            "--release", $releaseComponentName, "--release-lite", $releaseLiteComponentName,
+            "--release-zip", $releaseZipComponentName, "--release-lite-zip", $releaseLiteZipComponentName)
+    }
+
     $snapshotScript = Join-Path $scriptRoot "export_public_snapshot.ps1"
     if (-not (Test-Path -LiteralPath $snapshotScript)) { throw "Missing public snapshot entry script: $snapshotScript" }
-    $snapshotArgs = @("--dest", $publicSnapshotDir)
+    $snapshotArgs = @("--summary", "--dest", $publicSnapshotDir)
     $releasePublicAllowlist = Join-Path $repoRoot "docs\internal\public_repo_release_allowlist_2026-08-24.txt"
     $releaseArtifactManifest = Join-Path $repoRoot "docs\internal\public_repo_release_artifact_manifest_2026-08-12.tsv"
     if ([string]::IsNullOrWhiteSpace($PublicAllowlist)) {
@@ -477,6 +539,7 @@ try {
     $snapshotArgs += @("--artifact-manifest", $releaseArtifactManifest)
     if (-not [string]::IsNullOrWhiteSpace($PublicGitignoreTemplate)) { $snapshotArgs += @("--gitignore-template", $PublicGitignoreTemplate) }
     if ([string]::IsNullOrWhiteSpace($PublicSnapshotSource)) {
+        if (-not $SnapshotOnly) { $snapshotArgs += @("--inventory-output", (Join-Path $setRoot "public_statistics_input_inventory.json")) }
         if ($DryRun) { $snapshotArgs += "--dry-run" }
         & $snapshotScript @snapshotArgs
         if (-not $?) { throw "export_public_snapshot.ps1 failed with exit code $LASTEXITCODE" }
@@ -503,6 +566,21 @@ try {
         # Pages after that copy would duplicate work and could make the two sets
         # differ; validate the copied output instead.
         if ([string]::IsNullOrWhiteSpace($PublicSnapshotSource)) {
+            if (-not $SnapshotOnly) {
+                $statisticsTool = Join-Path $repoRoot "tools\metrics\generate_public_statistics.py"
+                $statisticsArgs = @("generate", "--snapshot", $publicSnapshotDir,
+                    "--inventory", (Join-Path $setRoot "public_statistics_input_inventory.json"),
+                    "--history", (Join-Path $publicSnapshotDir "docs\statistics\metrics.json"))
+                $statisticsArgs += @(Get-StatisticsPackageArguments -PackagesRoot $setRoot -TargetLocale $Locale)
+                $statisticsLocales = @($Locale)
+                if ($StatisticsPeerPackagesPath) {
+                    $peerLocale = if ($Locale -eq "ja") { "en" } else { "ja" }
+                    $statisticsArgs += @(Get-StatisticsPackageArguments -PackagesRoot $StatisticsPeerPackagesPath -TargetLocale $peerLocale)
+                    $statisticsLocales = @("ja", "en")
+                }
+                $statisticsArgs += @("--required-locales") + $statisticsLocales
+                Invoke-ReleasePythonGate -Name "public aggregate statistics generation" -ScriptPath $statisticsTool -Arguments $statisticsArgs
+            }
             & python -B $pagesBuildScript --replace --documentation-portal
             if ($LASTEXITCODE -ne 0) { throw "GitHub Pages snapshot build failed." }
         }
@@ -523,6 +601,7 @@ try {
         created_at = (Get-Date).ToString("o")
         app_version = (Get-RepoVersionLabel)
         locale = $Locale
+        statistics_schema_version = $(if ($SnapshotOnly) { $null } else { 1 })
         name = $folderName
         components = [PSCustomObject]@{
             release = $releaseComponentName
@@ -573,8 +652,9 @@ try {
 }
 catch {
     Append-ReleaseDetailLog ("error: {0}" -f $_.Exception.Message)
+    Write-Error -ErrorRecord $_ -ErrorAction Continue
     Write-ReleaseFailureLogTail
-    throw
+    exit 1
 }
 finally {
     Pop-Location

@@ -14,10 +14,14 @@ enum class ExportDialogKind {
 struct ExportDialogResult {
     ExportDialogKind kind = ExportDialogKind::PdfAll;
     std::vector<file_output::PdfPageSpec> pages;
+    // Populated only by PDF-only queue merge; the execution flow treats it as
+    // one output and keeps the originating queue until that output succeeds.
+    std::vector<file_output::PdfExportPart> pdfParts;
     int pageIndex = 0; // 0-based for PNG export
     bool includeAnnots = true;
     bool standardTextAnnots = true;
     bool matchPdfPaneTextLayout = true;
+    pdf_annotation_export::TextColorOptions textColor;
     double pdfScale = 1.0;
     int pngWidthPx = 0;
     int pngHeightPx = 0;
@@ -30,7 +34,6 @@ struct ExportDialogResult {
 };
 
 bool ShowUnifiedExportDialog(HWND owner, ExportDialogKind preset, std::vector<ExportDialogResult>& out);
-void ExecuteUnifiedExport(HWND hWnd, const ExportDialogResult& result);
 void ExecuteUnifiedExports(HWND hWnd, const std::vector<ExportDialogResult>& results);
 // Called by the main window only after a requested pre-export integration transaction ends.
 void CompleteUnifiedExportsAfterSave(HWND hWnd, bool saveSucceeded, bool saveRestarted);

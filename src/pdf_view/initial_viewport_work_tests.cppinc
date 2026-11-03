@@ -1,0 +1,237 @@
+// Invoked only by the isolated UI automation fixture. Kept in this translation
+// unit to exercise the real private fit/restore/cache boundaries, not a replica.
+bool RunPdfInitialViewportWorkProbe(HWND pdfWnd, std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    if (!pdfWnd || g_pdf.kind != DocKind::Pdf || g_pdf.pages.size() < 5)
+        return fail(L"Initial viewport probe requires its multi-page PDF fixture.");
+    struct RestorePreferences {
+        std::wstring flow = g_config.pdfFlowMode;
+        bool single = g_config.pdfSinglePageMode;
+        std::wstring openMode = g_config.pdfOpenViewMode;
+        bool openingPreference = g_usePdfOpeningPreference;
+        bool openingAnchor = g_restorePdfOpeningAnchor;
+        ~RestorePreferences() {
+            g_config.pdfFlowMode = flow;
+            g_config.pdfSinglePageMode = single;
+            g_config.pdfOpenViewMode = openMode;
+            g_usePdfOpeningPreference = openingPreference;
+            g_restorePdfOpeningAnchor = openingAnchor;
+            g_pendingInitialFitWidth = g_pendingInitialFitHeight = false;
+            g_pendingInitialFitWidthPt = g_pendingInitialFitHeightPt = 0.0;
+            g_pendingPdfRestore.reset();
+        }
+    } restorePreferences;
+    g_config.pdfOpenViewMode = L"auto";
+    g_usePdfOpeningPreference = true;
+    g_restorePdfOpeningAnchor = true;
+    constexpr int targetPage = 3;
+    size_t cases = 0;
+    for (const wchar_t* flow : {L"v_ttb", L"v_btu", L"h_ltr", L"h_rtl"}) {
+        for (bool single : {false, true}) {
+            for (bool changedScale : {false, true}) {
+                for (bool restore : {false, true}) {
+                    g_pendingInitialFitWidth = g_pendingInitialFitHeight = false;
+                    g_pendingPdfRestore.reset();
+                    g_config.pdfFlowMode = flow;
+                    g_config.pdfSinglePageMode = single;
+                    const bool vertical = FlowIsVertical(CurrentFlowMode());
+                    const auto fit = [&]() {
+                        return vertical ? CalcFitWidthScale(pdfWnd, g_pdf.pages[0].widthPt)
+                            : CalcFitHeightScale(pdfWnd, g_pdf.pages[0].heightPt);
+                    };
+                    // Stabilize client scrollbar geometry outside measurement.
+                    {
+                        PdfInitialViewportUpdateGuard setupGuard;
+                        UpdatePageLayout(pdfWnd);
+                        for (int pass = 0; pass < 4; ++pass) {
+                            const auto value = fit();
+                            if (!value) return fail(L"Cannot compute fixture fit scale.");
+                            g_pdf.scale = *value;
+                            UpdatePageLayout(pdfWnd);
+                        }
+                        if (changedScale) {
+                            g_pdf.scale = std::min(kMaxScale, g_pdf.scale * 1.25);
+                            UpdatePageLayout(pdfWnd);
+                        }
+                    }
+                    const auto expectedScale = fit();
+                    if (!expectedScale || (!changedScale && std::abs(*expectedScale - g_pdf.scale) >= 1e-6))
+                        return fail(L"Fixture client geometry did not stabilize.");
+                    g_pendingInitialFitWidth = vertical;
+                    g_pendingInitialFitHeight = !vertical;
+                    g_pendingInitialFitWidthPt = g_pdf.pages[0].widthPt;
+                    g_pendingInitialFitHeightPt = g_pdf.pages[0].heightPt;
+                    if (restore) {
+                        g_pendingPdfRestore = PdfViewRestorePoint{
+                            g_pdf.path, targetPage, 0.0, g_pdf.pages[targetPage].heightPt * 0.8, flow, 0.0, {}};
+                    }
+                    open_work::Counts counts{};
+                    bool applied = false;
+                    {
+                        open_work::Observation observation;
+                        // A premature WM_PAINT/timer must not start page work.
+                        UpdatePdfVirtualScrollCaches(pdfWnd, PdfVirtualUpdateMode::Paint);
+                        if (open_work::Get(observation.Read(), open_work::Kind::PdfViewportCacheUpdate) != 0)
+                            return fail(L"Pending initial fit started premature viewport work.");
+                        if (StartPendingPdfInitialRender(nullptr))
+                            return fail(L"Missing PDF window must defer initial dispatch.");
+                        applied = StartPendingPdfInitialRender(pdfWnd);
+                        if (StartPendingPdfInitialRender(pdfWnd))
+                            return fail(L"Repeated initial PDF dispatch was not idempotent.");
+                        counts = observation.Read();
+                    }
+                    const auto updates = open_work::Get(counts, open_work::Kind::PdfViewportCacheUpdate);
+                    const auto premature = open_work::Get(counts, open_work::Kind::PdfCacheBeforeRestore);
+                    const auto queued = open_work::Get(counts, open_work::Kind::PdfBitmapQueued);
+                    preview_trace::Append(L"PdfInitialViewportWork",
+                        std::wstring(L"flow=") + flow + L" single=" + std::to_wstring(single) +
+                        L" changed=" + std::to_wstring(changedScale) + L" restore=" + std::to_wstring(restore) +
+                        L" updates=" + std::to_wstring(updates) + L" premature=" + std::to_wstring(premature) +
+                        L" queued=" + std::to_wstring(queued));
+                    if (!applied || updates != 1 || premature != 0 || queued > 4 ||
+                        g_pendingInitialFitWidth || g_pendingInitialFitHeight || g_pendingPdfRestore ||
+                        g_pdfInitialViewportUpdateDepth != 0 || std::abs(g_pdf.scale - *expectedScale) >= 1e-6)
+                        return fail(L"Initial PDF viewport repeated work or retained unfinished geometry.");
+                    const int expectedPage = restore ? targetPage : 0;
+                    PdfViewRestorePoint actual;
+                    if (single ? g_pdf.singlePageIndex != expectedPage
+                               : (!BuildCurrentPdfViewRecord(actual) || actual.pageIndex != expectedPage))
+                        return fail(L"Initial PDF fit lost the saved page/default page.");
+                    // Exercise the production refresh/chooser on owned local
+                    // jobs: no real worker queue mutation or timing dependence.
+                    const auto viewport = ComputePdfVirtualViewport(pdfWnd);
+                    std::deque<PdfVirtualRenderJob> jobs;
+                    for (size_t i = 0; i < g_pdf.pageRects.size(); ++i) {
+                        PdfVirtualRenderJob job;
+                        job.generation = g_pdf.renderGeneration;
+                        job.pageIndex = static_cast<int>(i);
+                        jobs.push_back(std::move(job));
+                    }
+                    RefreshPdfVirtualJobPriorities(jobs, viewport, g_pdf.renderGeneration, g_pdf.pageRects);
+                    const auto chosen = pdf_render_queue::ChooseNext(jobs, 0);
+                    if (!viewport.valid || !chosen || !jobs[*chosen].visible)
+                        return fail(L"Pending PDF dispatch did not prioritize the actual viewport.");
+                    const PdfVirtualRenderJob identity = jobs[*chosen];
+                    auto movedViewport = viewport;
+                    const int nextPage = single ? expectedPage : 1;
+                    movedViewport.visibleStart = PagePrimaryStart(viewport, g_pdf.pageRects[nextPage]);
+                    movedViewport.visibleEnd = PagePrimaryEnd(viewport, g_pdf.pageRects[nextPage]);
+                    RefreshPdfVirtualJobPriorities(jobs, movedViewport, g_pdf.renderGeneration, g_pdf.pageRects);
+                    const auto moved = pdf_render_queue::ChooseNext(jobs, 0);
+                    if (!moved || jobs[*moved].pageIndex != nextPage ||
+                        !IsSamePdfVirtualJob(identity, jobs[*chosen]))
+                        return fail(L"Viewport reprioritization changed PDF identity or lost the new visible page.");
+                    jobs[*moved].generation ^= 1;
+                    RefreshPdfVirtualJobPriorities(jobs, movedViewport, g_pdf.renderGeneration, g_pdf.pageRects);
+                    if (jobs[*moved].visible || std::isfinite(jobs[*moved].distance))
+                        return fail(L"Stale-generation PDF job kept visible priority.");
+                    // Manual fit must also repair position at an unchanged
+                    // scale, in every flow and single/continuous combination.
+                    const int fitPage = PageAtCurrentView();
+                    if (!FitCurrentPdfPageToView(pdfWnd)) return fail(L"Manual PDF fit was rejected.");
+                    const double fittedScale = g_pdf.scale;
+                    g_pdf.scrollX += 11.0;
+                    g_pdf.scrollY += 7.0;
+                    if (!FitCurrentPdfPageToView(pdfWnd)) return fail(L"Repeated manual PDF fit was rejected.");
+                    RECT client{};
+                    GetClientRect(pdfWnd, &client);
+                    const auto& fitted = g_pdf.pageRects[static_cast<size_t>(fitPage)];
+                    const auto flowMode = CurrentFlowMode();
+                    const double left = fitted.left + FlowCrossPaddingX(flowMode) - g_pdf.scrollX;
+                    const double top = fitted.top + FlowCrossPaddingY(flowMode) - g_pdf.scrollY;
+                    if (std::abs(g_pdf.scale - fittedScale) >= 1e-6 ||
+                        left < -1.0 || top < -1.0 || left + fitted.right - fitted.left > client.right + 1.0 ||
+                        top + fitted.bottom - fitted.top > client.bottom + 1.0)
+                        return fail(L"Manual PDF fit did not contain the current page after repositioning.");
+                    if (FitCurrentPdfPageToView(nullptr) || std::abs(g_pdf.scale - fittedScale) >= 1e-6)
+                        return fail(L"Invalid manual PDF fit changed the view.");
+                    ++cases;
+                    // Each observation is atomic; between cases service the
+                    // actual UI queue instead of starving Windows for the suite.
+                    MSG message{};
+                    for (int count = 0; count < 64 && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE); ++count) {
+                        if (message.message == WM_QUIT) {
+                            PostQuitMessage(static_cast<int>(message.wParam));
+                            return fail(L"Initial viewport probe received a quit request.");
+                        }
+                        TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                }
+            }
+        }
+    }
+    // Exercise each new opening mode through the actual final fit transaction.
+    for (const wchar_t* mode : {L"previous", L"width", L"page"}) {
+        for (const wchar_t* flow : {L"v_ttb", L"v_btu", L"h_ltr", L"h_rtl"}) {
+            g_config.pdfOpenViewMode = mode;
+            g_config.pdfFlowMode = flow;
+            g_config.pdfSinglePageMode = false;
+            g_pdf.scale = 1.0;
+            UpdatePageLayout(pdfWnd);
+            const bool previous = g_config.pdfOpenViewMode == L"previous";
+            g_pendingPdfRestore.reset();
+            if (previous) g_pendingPdfRestore = PdfViewRestorePoint{
+                g_pdf.path, targetPage, 0.0, g_pdf.pages[targetPage].heightPt * 0.8, flow, 1.75, {}};
+            const auto width = CalcFitWidthScale(pdfWnd, g_pdf.pages.front().widthPt);
+            const auto height = CalcFitHeightScale(pdfWnd, g_pdf.pages.front().heightPt);
+            if (!width || !height) return fail(L"Cannot measure preferred initial PDF scale.");
+            const double expected = previous ? 1.75 : (g_config.pdfOpenViewMode == L"width" ? *width : std::min(*width, *height));
+            const bool vertical = FlowIsVertical(CurrentFlowMode());
+            g_pendingInitialFitWidth = vertical;
+            g_pendingInitialFitHeight = !vertical;
+            g_pendingInitialFitWidthPt = g_pdf.pages.front().widthPt;
+            g_pendingInitialFitHeightPt = g_pdf.pages.front().heightPt;
+            open_work::Observation observation;
+            if (!StartPendingPdfInitialRender(pdfWnd) || std::abs(g_pdf.scale - expected) >= 1e-6)
+                return fail(L"PDF opening preference selected the wrong scale.");
+            const auto counts = observation.Read();
+            if (open_work::Get(counts, open_work::Kind::PdfViewportCacheUpdate) != 1 ||
+                open_work::Get(counts, open_work::Kind::PdfCacheBeforeRestore) != 0)
+                return fail(L"PDF opening preference scheduled intermediate viewport work.");
+            PdfViewRestorePoint actual;
+            if (!BuildCurrentPdfViewRecord(actual) || actual.pageIndex != (previous ? targetPage : 0))
+                return fail(L"PDF opening preference selected the wrong page.");
+            ++cases;
+        }
+    }
+    g_config.pdfOpenViewMode = L"auto";
+    // Persist and reload an actual saved position with a different preceding
+    // flow. Loading must choose the saved orientation before computing fit.
+    g_config.pdfSinglePageMode = false;
+    g_config.pdfFlowMode = L"h_rtl";
+    UpdatePageLayout(pdfWnd);
+    if (!ApplyPdfViewAnchor(pdfWnd, targetPage, 0.0, g_pdf.pages[targetPage].heightPt * 0.8))
+        return fail(L"Cannot prepare persisted PDF view anchor.");
+    const std::wstring path = g_pdf.path;
+    SaveLastPdfViewInfo();
+    QueuePendingPdfRestoreForPath(path);
+    if (!g_pendingPdfRestore || std::abs(g_pendingPdfRestore->scale - g_pdf.scale) >= 1e-6)
+        return fail(L"Persisted PDF view did not round-trip its zoom.");
+    g_config.pdfFlowMode = L"v_ttb";
+    open_work::Counts reloadCounts{};
+    {
+        open_work::Observation observation;
+        const bool loaded = LoadPdfDocument(pdfWnd, path);
+        const bool savedFlow = CurrentFlowMode() == PdfFlowMode::H_RTL;
+        const bool pendingHeight = g_pendingInitialFitHeight;
+        const bool started = loaded && StartPendingPdfInitialRender(pdfWnd);
+        if (!loaded || !savedFlow || !pendingHeight || !started) {
+            if (outError) *outError = L"PDF reload did not fit using its saved flow: loaded=" + std::to_wstring(loaded) +
+                L" flow=" + g_config.pdfFlowMode + L" pending_height=" + std::to_wstring(pendingHeight) +
+                L" started=" + std::to_wstring(started);
+            return false;
+        }
+        reloadCounts = observation.Read();
+    }
+    PdfViewRestorePoint reloaded;
+    if (open_work::Get(reloadCounts, open_work::Kind::PdfViewportCacheUpdate) != 1 ||
+        open_work::Get(reloadCounts, open_work::Kind::PdfCacheBeforeRestore) != 0 ||
+        !BuildCurrentPdfViewRecord(reloaded) || reloaded.pageIndex != targetPage)
+        return fail(L"Persisted PDF reload repeated work or lost its saved page.");
+    preview_trace::Append(L"PdfInitialViewportWork", L"cases=" + std::to_wstring(cases) + L" reload=true passed=true");
+    return cases == 44;
+}

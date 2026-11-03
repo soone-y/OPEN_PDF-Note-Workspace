@@ -25,11 +25,4 @@ NoteDerivedReadDecision ResolveNoteDerivedRead(
     return NoteDerivedReadDecision::Current;
 }
 
-bool CanReadCurrentNoteDerivedSnapshot(
-    const NoteDerivedSnapshotState& derived,
-    const NoteDerivedReadContext& context) {
-    return ResolveNoteDerivedRead(derived, context) ==
-           NoteDerivedReadDecision::Current;
-}
-
 } // namespace note

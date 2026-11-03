@@ -1,7 +1,6 @@
 #include "note/note_render_final_interaction.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <exception>
 #include <limits>
 #include <new>
@@ -10,6 +9,13 @@
 
 namespace note {
 namespace {
+
+struct NoteRenderFinalResolvedLine {
+    LineIndex line_index{};
+    NoteRenderLineLayoutLocation layout{};
+    NoteRenderSourceLinePlan source_line{};
+    NoteRenderLinePlacement placement_line{};
+};
 
 [[nodiscard]] bool IsStructuredPublishedLine(const NoteRenderFinalPublication& publication,
                                               LineIndex line_index,
@@ -155,13 +161,6 @@ namespace {
 
 } // namespace
 
-NoteRenderFinalInteractionResult ResolveNoteRenderFinalCommittedLine(
-    const NoteRenderFinalPublication& publication,
-    LineIndex line_index,
-    NoteRenderFinalResolvedLine* out) noexcept {
-    return ResolveLineUnchecked(publication, line_index, out);
-}
-
 std::optional<size_t> ResolveNoteRenderTrailingSyntaxBlankHit(
     const NoteRenderSourceLinePlan& source,
     const NoteRenderLinePlacement& placement,
@@ -224,110 +223,6 @@ std::optional<size_t> ResolveNoteRenderTrailingSyntaxBlankHit(
             boundary.fragment_index < placement.runs[last].fragments.size()) return last;
     }
     return std::nullopt;
-}
-
-NoteRenderFinalInteractionResult HitTestNoteRenderFinalPublication(
-    const NoteRenderFinalPublication& publication,
-    int content_x_px,
-    uint64_t content_y_px,
-    NoteRenderFinalHit* out) noexcept {
-    if (!out) return NoteRenderFinalInteractionResult::InvalidOutput;
-    if (!publication.valid() || !publication.layout()) {
-        return NoteRenderFinalInteractionResult::InvalidPublication;
-    }
-    const std::optional<NoteRenderLineLayoutLocation> layout =
-        NoteRenderLineLayoutMap::LineContainingY(
-            publication.layout()->line_layouts(), content_y_px);
-    if (!layout.has_value()) return NoteRenderFinalInteractionResult::OutsideContent;
-
-    NoteRenderFinalResolvedLine line;
-    const NoteRenderFinalInteractionResult line_result =
-        ResolveLineUnchecked(publication, layout->line_index, &line);
-    if (line_result != NoteRenderFinalInteractionResult::Resolved) return line_result;
-
-    // Empty source rows still own a measured line box, but have no glyph run.
-    // Use that same box for hit and caret instead of falling back to native
-    // coordinates (or inventing a source character).
-    if (line.source_line.content_span.start == line.source_line.content_span.end &&
-        line.placement_line.runs.empty()) {
-        *out = {};
-        out->line_index = line.line_index;
-        out->source_offset = line.source_line.content_span.start;
-        out->source_span = line.source_line.content_span;
-        return NoteRenderFinalInteractionResult::Resolved;
-    }
-
-    const uint64_t relative_y_px = content_y_px - line.layout.top_px;
-    if (const auto suffix = ResolveNoteRenderTrailingSyntaxBlankHit(
-            line.source_line, line.placement_line, content_x_px, relative_y_px)) {
-        *out = {};
-        out->line_index = line.line_index;
-        out->source_offset = line.source_line.content_span.end;
-        out->run_index = *suffix;
-        out->source_span = line.source_line.runs[*suffix].source_span;
-        return NoteRenderFinalInteractionResult::Resolved;
-    }
-    size_t best_run = static_cast<size_t>(-1);
-    const NoteRenderPlacementBoundary* best_boundary = nullptr;
-    int64_t best_distance = std::numeric_limits<int64_t>::max();
-    bool best_hidden = true;
-    for (size_t index = 0; index < line.placement_line.runs.size(); ++index) {
-        const NoteRenderRunPlacement& placement = line.placement_line.runs[index];
-        const bool hidden = line.source_line.runs[index].kind == NoteRenderSourceRunKind::HiddenSyntax;
-        if (placement.boundaries.empty()) return NoteRenderFinalInteractionResult::InconsistentPublication;
-        for (const NoteRenderPlacementBoundary& boundary : placement.boundaries) {
-            const NoteRenderRunPlacementFragment* fragment =
-                FragmentForBoundary(placement, boundary);
-            if (!fragment) return NoteRenderFinalInteractionResult::InconsistentPublication;
-            if (!FragmentContainsY(*fragment, relative_y_px)) continue;
-            const int64_t distance = std::llabs(
-                static_cast<int64_t>(boundary.x_px) - static_cast<int64_t>(content_x_px));
-            // Match presentation hit testing: hidden delimiters have no
-            // clickable text when a displayed run owns this visual row.
-            if (!best_boundary || (best_hidden && !hidden) ||
-                (best_hidden == hidden && distance < best_distance)) {
-                best_run = index;
-                best_boundary = &boundary;
-                best_distance = distance;
-                best_hidden = hidden;
-            }
-        }
-    }
-    if (!best_boundary || best_run >= line.source_line.runs.size()) {
-        return NoteRenderFinalInteractionResult::OutsideContent;
-    }
-    try {
-        const NoteRenderSourceRun& source_run = line.source_line.runs[best_run];
-        const NoteRenderRunPlacement& placement_run = line.placement_line.runs[best_run];
-        if (source_run.source_span.start != placement_run.source_span.start ||
-            source_run.source_span.end != placement_run.source_span.end ||
-            best_boundary->source_offset < source_run.source_span.start ||
-            best_boundary->source_offset > source_run.source_span.end) {
-            return NoteRenderFinalInteractionResult::InconsistentPublication;
-        }
-        NoteRenderFinalHit candidate;
-        candidate.line_index = line.line_index;
-        candidate.source_offset = best_boundary->source_offset;
-        candidate.run_index = best_run;
-        candidate.source_span = source_run.source_span;
-        candidate.is_link = source_run.kind == NoteRenderSourceRunKind::LinkText &&
-                            !source_run.link_target.empty();
-        if (candidate.is_link) candidate.link_target = source_run.link_target;
-        for (const NoteRenderSourceStyleAttribute& style : source_run.styles) {
-            if (style.kind == StyleKind::LinkId && !style.value.empty()) {
-                candidate.is_link = true;
-                candidate.is_legacy_link_id = true;
-                candidate.link_target = style.value;
-                break;
-            }
-        }
-        *out = std::move(candidate);
-        return NoteRenderFinalInteractionResult::Resolved;
-    } catch (const std::bad_alloc&) {
-        return NoteRenderFinalInteractionResult::AllocationFailure;
-    } catch (const std::exception&) {
-        return NoteRenderFinalInteractionResult::InconsistentPublication;
-    }
 }
 
 NoteRenderFinalInteractionResult ResolveNoteRenderFinalCaret(
@@ -441,22 +336,6 @@ NoteRenderFinalInteractionResult ResolveNoteRenderFinalSelection(
     } catch (const std::exception&) {
         return NoteRenderFinalInteractionResult::InconsistentPublication;
     }
-}
-
-NoteRenderFinalInteractionResult ResolveNoteRenderFinalHorizontalExtent(
-    const NoteRenderFinalPublication& publication,
-    uint64_t* out_extent_px) noexcept {
-    if (!out_extent_px) return NoteRenderFinalInteractionResult::InvalidOutput;
-    if (!publication.valid() || !publication.layout()) {
-        return NoteRenderFinalInteractionResult::InvalidPublication;
-    }
-    const uint64_t extent = publication.layout()->line_layouts().max_inline_extent_px();
-    const uint64_t padding = publication.layout()->layout_key().horizontal_padding_px;
-    if (padding > std::numeric_limits<uint64_t>::max() - extent) {
-        return NoteRenderFinalInteractionResult::InconsistentPublication;
-    }
-    *out_extent_px = extent + padding;
-    return NoteRenderFinalInteractionResult::Resolved;
 }
 
 } // namespace note

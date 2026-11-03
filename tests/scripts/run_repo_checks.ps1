@@ -1,5 +1,7 @@
 [CmdletBinding()]
 param(
+    [string[]]$OnlyStep = @(),
+    [switch]$ListSteps,
     [switch]$SkipBuild,
     [switch]$SkipReadOnlyViewerBuild,
     [switch]$SkipAtomicWrite,
@@ -24,6 +26,7 @@ param(
     [switch]$SkipAppLogContractTests,
     [switch]$SkipUiAutomation,
     [switch]$SkipPythonToolTests,
+    [switch]$SkipScriptResistanceTests,
     [switch]$SkipSiteValidation,
     [switch]$SkipCodebaseValidation,
     [switch]$SkipScriptAndTextGate,
@@ -31,6 +34,7 @@ param(
     [switch]$SkipLibreOfficeRuntimeGate,
     [switch]$SkipBinaryArtifactScan,
     [switch]$IncludeMemoryDiagnostics,
+    [switch]$IncludeCodeStructureTests,
     [switch]$IncludeOfficeConversionTests,
     [string]$OfficeSoffice = "",
     [string]$OfficeUpstreamSourceDir = $env:LO_TEST_SOURCE_DIR,
@@ -46,6 +50,21 @@ param(
     [int]$FailureTailLines = 80,
     [string]$LogDir = ""
 )
+
+# The literal Invoke-Step names are the runner's catalog; Office has three
+# mutually exclusive names determined by its comparison options.
+$stepSource = [System.IO.File]::ReadAllText($PSCommandPath)
+$knownSteps = @([regex]::Matches($stepSource, '(?m)^\s*Invoke-Step -Name "([^"]+)" -Action') | ForEach-Object { $_.Groups[1].Value })
+$knownSteps += @("Upstream Office Conversion Only", "Upstream Office PDF Regression Comparison", "Office Reduction Full Corpus Acceptance")
+if ($ListSteps) {
+    $knownSteps | ForEach-Object { Write-Output $_ }
+    return
+}
+foreach ($step in $OnlyStep) {
+    if ($step -notin $knownSteps) { throw "Unknown step: $step. Use -ListSteps for available names." }
+}
+if (@($OnlyStep | Select-Object -Unique).Count -ne $OnlyStep.Count) { throw "Duplicate step in -OnlyStep." }
+$script:CompletedSelectedSteps = [System.Collections.Generic.List[string]]::new()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -97,6 +116,7 @@ $officeUpstreamConversionScript = Join-Path $PSScriptRoot "run_office_upstream_c
 $uiAutomationScript = Join-Path $PSScriptRoot "run_ui_automation_fault_tests.ps1"
 $memoryDiagnosticsScript = Join-Path $PSScriptRoot "run_memory_diagnostics.ps1"
 $pythonToolTestScript = Join-Path $repoRoot "tests\python\test_python_tools.py"
+$codeStructureTestScript = Join-Path $PSScriptRoot "run_code_structure_tests.ps1"
 $dependencySecurityTestScript = Join-Path $repoRoot "tests\python\test_dependency_security_gate.py"
 $cloudflareSiteValidationScript = Join-Path $repoRoot "site\cloudflare\scripts\validate_introduction_site.py"
 $githubSiteBuildScript = Join-Path $repoRoot "site\github\scripts\build_public_site.py"
@@ -218,6 +238,7 @@ function Invoke-Step {
         [Parameter(Mandatory)][scriptblock]$Action
     )
 
+    if ($OnlyStep.Count -gt 0 -and $Name -notin $OnlyStep) { return }
     New-Item -ItemType Directory -Force -Path $repoCheckLogRoot | Out-Null
     $script:CurrentStepName = $Name
     $script:CurrentStepLogPath = Join-Path $repoCheckLogRoot (Get-SafeLogFileName $Name)
@@ -239,6 +260,7 @@ function Invoke-Step {
             throw "Check action returned unexpected output: $Name. Use throw for failure and Write-Host or step logs for diagnostics."
         }
         $sw.Stop()
+        if ($OnlyStep.Count -gt 0) { $script:CompletedSelectedSteps.Add($Name) }
         Write-StepLogFooter -Status "PASS" -Elapsed $sw.Elapsed
         Write-Host ("[PASS] {0} ({1}s)" -f $Name, [Math]::Round($sw.Elapsed.TotalSeconds, 1)) -ForegroundColor Green
     }
@@ -489,6 +511,7 @@ function Invoke-SafetyScans {
         'https?://www\.w3\.org/',
         'https?://schemas\.openxmlformats\.org/',
         'https?://purl\.org/',
+        '\\scripts\\release\\pack_release\.ps1:\d+:.*https://soone-y\.github\.io/OPEN_PDF-Note-Workspace/STATISTICS\.html',
         '\\third_party\\zlib\\include\\zlib\.h:\d+:.*https://datatracker\.ietf\.org/doc/html/rfc1950\b',
         # MD4C test input only: callbacks consume parser data and never open links.
         # Match the complete fixture line; other URLs/APIs in this file still fail.
@@ -499,6 +522,12 @@ function Invoke-SafetyScans {
     # AGENTS.md permits OS standard file dialogs only for explicit user file operations.
     # Keep this allow-list narrow so accidental shell dialog additions still fail the scan.
     $shellFileDialogAllowList = @(
+        # Reviewed recovery actions: explicit PDF selection / save-as only.
+        # Keep the complete call lines fixed; additional calls still fail.
+        '^\.[\\/]src[\\/]recovery[\\/]stage_recovery_window\.cpp:\d+:\s*if \(!GetOpenFileNameW\(&dialog\)\)\s*$',
+        '^\.[\\/]src[\\/]recovery[\\/]stage_recovery_window\.cpp:\d+:\s*if \(GetSaveFileNameW\(&dialog\)\)\s*$',
+        '^\.[\\/]tools[\\/]recovery_demo[\\/]demo_ui\.cpp:\d+:\s*if \(!GetOpenFileNameW\(&dialog\)\) \{ if \(CommDlgExtendedError\(\)\) Status\(L"open_failed"\); return; \}\s*$',
+        '^\.[\\/]tools[\\/]recovery_demo[\\/]demo_ui\.cpp:\d+:\s*if \(!GetSaveFileNameW\(&dialog\)\) \{ if \(CommDlgExtendedError\(\)\) Status\(L"rescue_failed"\); return; \}\s*$',
         '\\src\\readonly_viewer\\main\.cpp:\d+:.*\b(?:IFileOpenDialog|CLSID_FileOpenDialog)\b',
         '\\src\\readonly_viewer\\pdf_preview_panel\.cpp:\d+:.*\b(?:IFileOpenDialog|CLSID_FileOpenDialog)\b',
         '\\src\\readonly_viewer\\pdf_preview_panel\.cpp:\d+:.*\b(?:IFileSaveDialog|CLSID_FileSaveDialog)\b',
@@ -563,7 +592,9 @@ function Invoke-SafetyScans {
             Label = "Python network API scan"
             IncludeGlobs = @("*.py")
             Pattern = '^\s*(?:from\s+(?:urllib\.request|urllib3|requests|httpx|aiohttp|http\.client|socket|websocket|webbrowser|ftplib|smtplib|imaplib|poplib|telnetlib|xmlrpc\.client)\s+import\b|from\s+urllib\s+import\s+[^#\r\n]*\brequest\b|import\s+(?:urllib\.request|urllib3|requests|httpx|aiohttp|http\.client|socket|websocket|webbrowser|ftplib|smtplib|imaplib|poplib|telnetlib|xmlrpc\.client)\b|from\s+http\s+import\s+client\b)|\b(?:urllib\.request|urllib3\.|requests\.(?:get|post|put|patch|delete|request)|httpx\.|aiohttp\.|http\.client|socket\.(?:socket|create_connection)|asyncio\.(?:open_connection|start_server)|websocket\.|webbrowser\.|ftplib\.|smtplib\.|imaplib\.|poplib\.|telnetlib\.|xmlrpc\.client)'
-            AllowLinePatterns = @()
+            # These tests replace socket creation with a mandatory exception.
+            # The complete mock line is allowed, never an actual socket call.
+            AllowLinePatterns = @('^\.[\\/]tests[\\/]python[\\/]test_site_validation\.py:\d+:\s*with mock\.patch\("socket\.socket", side_effect=AssertionError\("network forbidden"\)\):\s*$')
         }
     )
 
@@ -614,41 +645,44 @@ function Invoke-LibreOfficeRuntimeGate {
 $repoCheckExitCode = 0
 Push-Location -LiteralPath $repoRoot
 try {
-    Assert-ScriptExists -Path $atomicWriteScript
-    Assert-ScriptExists -Path $workspaceMemoTestScript
-    Assert-ScriptExists -Path $pathSafetyScript
-    Assert-ScriptExists -Path $faultInjectionScript
-    Assert-ScriptExists -Path $noteParserScript
-    Assert-ScriptExists -Path $mermaidSubsetParserScript
-    Assert-ScriptExists -Path $clropJsonDirectParseScript
-    Assert-ScriptExists -Path $clropFileSafetyScript
-    Assert-ScriptExists -Path $docxSpaceProtectionScript
-    Assert-ScriptExists -Path $textEncodingScript
-    Assert-ScriptExists -Path $runtimeDependencyScript
-    Assert-ScriptExists -Path $themeSwitchingScript
-    Assert-ScriptExists -Path $workspaceConfigTestScript
-    Assert-ScriptExists -Path $workspaceConfigRecoveryTestScript
-    Assert-ScriptExists -Path $workspaceConfigUnknownFieldTestScript
-    Assert-ScriptExists -Path $appLogContractTestScript
-    Assert-ScriptExists -Path $publishVersionHistoryTestScript
-    Assert-ScriptExists -Path $officeConversionFixtureScript
-    Assert-ScriptExists -Path $officeUpstreamConversionScript
-    Assert-ScriptExists -Path $uiAutomationScript
-    Assert-ScriptExists -Path $pythonToolTestScript
-    Assert-ScriptExists -Path $cloudflareSiteValidationScript
-    Assert-ScriptExists -Path $githubSiteBuildScript
-    Assert-ScriptExists -Path $githubSiteValidationScript
-    Assert-ScriptExists -Path $codebaseValidationScript
-    Assert-ScriptExists -Path $scriptAndTextGateScript
-    Assert-ScriptExists -Path $safetyScanIgnoreFile
-    Assert-ScriptExists -Path $binaryScanScript
-    Assert-ScriptExists -Path $libreOfficeRuntimeGateScript
+    if ($OnlyStep.Count -gt 0) { Write-Host ("Partial run; requested steps: " + ($OnlyStep -join ", ")) }
+    if ($OnlyStep.Count -eq 0) {
+        Assert-ScriptExists -Path $atomicWriteScript
+        Assert-ScriptExists -Path $workspaceMemoTestScript
+        Assert-ScriptExists -Path $pathSafetyScript
+        Assert-ScriptExists -Path $faultInjectionScript
+        Assert-ScriptExists -Path $noteParserScript
+        Assert-ScriptExists -Path $mermaidSubsetParserScript
+        Assert-ScriptExists -Path $clropJsonDirectParseScript
+        Assert-ScriptExists -Path $clropFileSafetyScript
+        Assert-ScriptExists -Path $docxSpaceProtectionScript
+        Assert-ScriptExists -Path $textEncodingScript
+        Assert-ScriptExists -Path $runtimeDependencyScript
+        Assert-ScriptExists -Path $themeSwitchingScript
+        Assert-ScriptExists -Path $workspaceConfigTestScript
+        Assert-ScriptExists -Path $workspaceConfigRecoveryTestScript
+        Assert-ScriptExists -Path $workspaceConfigUnknownFieldTestScript
+        Assert-ScriptExists -Path $appLogContractTestScript
+        Assert-ScriptExists -Path $publishVersionHistoryTestScript
+        Assert-ScriptExists -Path $officeConversionFixtureScript
+        Assert-ScriptExists -Path $officeUpstreamConversionScript
+        Assert-ScriptExists -Path $uiAutomationScript
+        Assert-ScriptExists -Path $pythonToolTestScript
+        Assert-ScriptExists -Path $cloudflareSiteValidationScript
+        Assert-ScriptExists -Path $githubSiteBuildScript
+        Assert-ScriptExists -Path $githubSiteValidationScript
+        Assert-ScriptExists -Path $codebaseValidationScript
+        Assert-ScriptExists -Path $scriptAndTextGateScript
+        Assert-ScriptExists -Path $safetyScanIgnoreFile
+        Assert-ScriptExists -Path $binaryScanScript
+        Assert-ScriptExists -Path $libreOfficeRuntimeGateScript
+    }
 
     if (-not $SkipBuild) {
-        Assert-ScriptExists -Path $buildScript
-        Assert-ScriptExists -Path $releaseScript
-        Assert-ScriptExists -Path $workspaceBuildScript
         Invoke-Step -Name "Build" -Action {
+            Assert-ScriptExists -Path $buildScript
+            Assert-ScriptExists -Path $releaseScript
+            Assert-ScriptExists -Path $workspaceBuildScript
             if ($Release) {
                 if ($SkipReadOnlyViewerBuild) {
                     throw "-Release cannot be combined with -SkipReadOnlyViewerBuild because a full release always includes every application."
@@ -862,10 +896,23 @@ try {
         }
     }
 
+    if (-not $SkipScriptResistanceTests) {
+        Invoke-Step -Name "Script Resistance Tests" -Action {
+            Invoke-PythonUnittestFile -TestFile (Join-Path $repoRoot "tests/python/test_script_resistance.py")
+        }
+    }
+
     if (-not $SkipPythonToolTests) {
         Invoke-Step -Name "Python Tool Tests" -Action {
             Invoke-PythonUnittestFile -TestFile $pythonToolTestScript
             Invoke-PythonUnittestFile -TestFile $dependencySecurityTestScript
+        }
+    }
+
+    if ($IncludeCodeStructureTests) {
+        Invoke-Step -Name "C++ Code Structure Fixture Tests" -Action {
+            Assert-ScriptExists -Path $codeStructureTestScript
+            Invoke-ChildPowerShellScript -ScriptPath $codeStructureTestScript
         }
     }
 
@@ -914,7 +961,13 @@ try {
     }
 
     Write-Host ""
-    Write-Host "All selected checks passed." -ForegroundColor Green
+    if ($OnlyStep.Count -gt 0) {
+        $missing = @($OnlyStep | Where-Object { $_ -notin $script:CompletedSelectedSteps })
+        if ($missing.Count -gt 0) { throw ("Requested steps were not executed (check Skip/Include and Office options): " + ($missing -join ", ")) }
+        Write-Host "Selected steps passed; this is a partial run." -ForegroundColor Green
+    } else {
+        Write-Host "All selected checks passed." -ForegroundColor Green
+    }
 }
 catch {
     $repoCheckExitCode = 1

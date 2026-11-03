@@ -1,7 +1,12 @@
 ﻿// file: main/workspace_tree.cppinc
 // NOTE: Included by workspace_controller.cppinc. This fragment owns lecture/session/file
 // enumeration and selection reload flows.
+#include "note/note_identity_store.h"
+#include "core/localization.h"
+
 void LoadLectures() {
+    const ui::ListBoxUpdate update(g_hLectureList);
+    ui::RememberOpenListIndex(g_hLectureList, -1);
     const ULONGLONG startTick = preview_trace::TickNow();
     preview_trace::Append(
         L"LoadLectures",
@@ -97,6 +102,10 @@ void LoadLectures() {
         }
     }
 
+    std::vector<std::filesystem::path> identityRoots;
+    for (const auto& lecture : g_tempExternalLectures) identityRoots.emplace_back(lecture.path);
+    note::SetRuntimeNoteIdentityExternalRoots(identityRoots);
+
     std::vector<std::pair<std::wstring, std::wstring>> lectures;
     write_checks::NormalOperation rootRead(workspaceOwner, classesPath, write_checks::Kind::WorkspaceRead, workspaceOwner);
     rootRead.Failure(ERROR_READ_FAULT);
@@ -135,40 +144,15 @@ void LoadLectures() {
                       if (aTime != bTime) return aTime > bTime;
                       return a.second < b.second;
         });
-    } else if (mode == LectureSortMode::Schedule) {
-        InitScheduleSortBaseTime();
-        int todayIndex = g_scheduleSortDayIndex;
-        int nowMinutes = g_scheduleSortMinutes;
-        int dayMask = g_config.scheduleDayMask & 0x7F;
-        if (dayMask == 0) dayMask = 0x1F;
-        int periods = std::clamp(g_config.schedulePeriods, 1, 13);
-        std::unordered_map<std::wstring, ScheduleRank> scheduleRank;
-        scheduleRank.reserve(lectures.size());
-        for (const auto& item : lectures) {
-            scheduleRank[item.second] = NextScheduleRank(
-                item.second, todayIndex, nowMinutes, dayMask, periods,
-                g_config.scheduleCells, g_config.scheduleStartTimes);
-        }
+    } else if (mode == LectureSortMode::Manual) {
         std::sort(lectures.begin(), lectures.end(),
                   [&](const auto& a, const auto& b) {
-                      ScheduleRank rankA{};
-                      ScheduleRank rankB{};
-                      auto itA = scheduleRank.find(a.second);
-                      auto itB = scheduleRank.find(b.second);
-                      if (itA != scheduleRank.end()) rankA = itA->second;
-                      if (itB != scheduleRank.end()) rankB = itB->second;
-                      bool schedA = rankA.hasSchedule;
-                      bool schedB = rankB.hasSchedule;
-                      if (schedA != schedB) return schedA;
-                      if (schedA && schedB) {
-                          bool aToday = rankA.dayOffset == 0;
-                          bool bToday = rankB.dayOffset == 0;
-                          bool aPrev = rankA.dayOffset == 6;
-                          bool bPrev = rankB.dayOffset == 6;
-                          if (aToday && bPrev) return true;
-                          if (aPrev && bToday) return false;
-                      }
-                      if (rankA.delta != rankB.delta) return rankA.delta < rankB.delta;
+                      auto itA = g_config.lecturePriorities.find(a.second);
+                      auto itB = g_config.lecturePriorities.find(b.second);
+                      const bool assignedA = itA != g_config.lecturePriorities.end();
+                      const bool assignedB = itB != g_config.lecturePriorities.end();
+                      if (assignedA != assignedB) return assignedA;
+                      if (assignedA && itA->second != itB->second) return itA->second < itB->second;
                       return a.second < b.second;
         });
     } else {
@@ -177,6 +161,8 @@ void LoadLectures() {
     }
 
     std::vector<std::wstring> orderedLecturePaths;
+    ReloadExternalLecturePriorities();
+    SortLecturePathsByPriority(externalLecturePaths);
     orderedLecturePaths.reserve(externalLecturePaths.size() + lectures.size());
     for (const auto& path : externalLecturePaths) {
         orderedLecturePaths.push_back(path);
@@ -184,20 +170,55 @@ void LoadLectures() {
     for (const auto& item : lectures) {
         orderedLecturePaths.push_back(item.first);
     }
-    for (const auto& path : orderedLecturePaths) {
-        addLectureItem(path, LectureDisplayLabelForPath(path, orderedLecturePaths));
+    if (mode == LectureSortMode::Manual) SortLecturePathsByPriority(orderedLecturePaths);
+    const auto labels = LectureDisplayLabelsForPaths(orderedLecturePaths);
+    for (size_t index = 0; index < orderedLecturePaths.size(); ++index) {
+        addLectureItem(orderedLecturePaths[index], labels[index]);
     }
     SetListWide(g_hLectureList);
     int curIdx = CurrentLectureIndex();
+    ui::RememberOpenListIndex(g_hLectureList, curIdx);
     if (curIdx >= 0) SendMessageW(g_hLectureList, LB_SETCURSEL, curIdx, 0);
-    RefreshScheduleWindowLectureNames();
+    RefreshLectureOrderWindow();
     preview_trace::Append(
         L"LoadLectures",
         L"end lectureCount=" + std::to_wstring(g_lectures.size()) +
         L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
 }
 
+void RefreshRegisteredExternalLectures(const std::vector<std::wstring>& previousPaths) {
+    ReloadExternalLecturePriorities();
+    const std::unordered_set<std::wstring> previous(previousPaths.begin(), previousPaths.end());
+    std::vector<std::wstring> paths;
+    std::unordered_set<std::wstring> seen;
+    std::vector<std::filesystem::path> roots;
+    for (const auto& item : g_tempExternalLectures) {
+        roots.emplace_back(item.path);
+        if (seen.insert(item.path).second) paths.push_back(item.path);
+    }
+    SortLecturePathsByPriority(paths);
+    for (const auto& path : g_lectures) {
+        if (!previous.count(path) && seen.insert(path).second) paths.push_back(path);
+    }
+    if (ParseLectureSortMode(g_config.lectureSortMode) == LectureSortMode::Manual)
+        SortLecturePathsByPriority(paths);
+    const auto labels = LectureDisplayLabelsForPaths(paths);
+    const ui::ListBoxUpdate update(g_hLectureList);
+    g_lectures = std::move(paths);
+    SendMessageW(g_hLectureList, LB_RESETCONTENT, 0, 0);
+    for (const auto& label : labels)
+        SendMessageW(g_hLectureList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+    const int selected = CurrentLectureIndex();
+    ui::RememberOpenListIndex(g_hLectureList, selected);
+    if (selected >= 0) SendMessageW(g_hLectureList, LB_SETCURSEL, selected, 0);
+    note::SetRuntimeNoteIdentityExternalRoots(roots);
+    SetListWide(g_hLectureList);
+    RefreshLectureOrderWindow();
+}
+
 void LoadSessions(const std::wstring& lecturePath) {
+    const ui::ListBoxUpdate update(g_hSessionList);
+    ui::RememberOpenListIndex(g_hSessionList, -1);
     const ULONGLONG startTick = preview_trace::TickNow();
     preview_trace::Append(L"LoadSessions", L"begin lecturePath=" + lecturePath);
     g_sessions.clear();
@@ -285,13 +306,14 @@ void LoadSessions(const std::wstring& lecturePath) {
         g_sessions.push_back(std::move(direct));
     }
 
-    for (const auto& s : g_sessions) {
-        auto name = SessionDisplayLabelForEntry(s, g_sessions, lecturePath);
+    const auto labels = SessionDisplayLabelsForEntries(g_sessions, lecturePath);
+    for (const auto& name : labels) {
         SendMessageW(g_hSessionList, LB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(name.c_str()));
     }
     SetListWide(g_hSessionList);
     int curIdx = CurrentSessionIndex();
+    ui::RememberOpenListIndex(g_hSessionList, curIdx);
     if (curIdx >= 0) SendMessageW(g_hSessionList, LB_SETCURSEL, curIdx, 0);
     preview_trace::Append(
         L"LoadSessions",
@@ -300,6 +322,10 @@ void LoadSessions(const std::wstring& lecturePath) {
 }
 
 void LoadFiles(const SessionEntry& session, std::wstring& preferredPdf, std::wstring& preferredNote) {
+    const ui::ListBoxUpdate pdfUpdate(g_hPdfList);
+    const ui::ListBoxUpdate noteUpdate(g_hNoteList);
+    ui::RememberOpenListIndex(g_hPdfList, -1);
+    ui::RememberOpenListIndex(g_hNoteList, -1);
     const ULONGLONG startTick = preview_trace::TickNow();
     preview_trace::Append(
         L"LoadFiles",
@@ -437,21 +463,21 @@ void LoadFiles(const SessionEntry& session, std::wstring& preferredPdf, std::wst
         [](const FileEntry& a, const FileEntry& b) {
             return std::filesystem::path(a.path).filename().wstring() < std::filesystem::path(b.path).filename().wstring();
         });
-    for (const auto& f : g_pdfFiles) {
-        std::wstring name = FileDisplayLabelForPath(f.path, g_pdfFiles, sessionRoot);
+    for (const auto& name : FileDisplayLabelsForPaths(g_pdfFiles, sessionRoot)) {
         SendMessageW(g_hPdfList, LB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(name.c_str()));
     }
-    for (const auto& f : g_noteFiles) {
-        std::wstring name = FileDisplayLabelForPath(f.path, g_noteFiles, sessionRoot);
+    for (const auto& name : FileDisplayLabelsForPaths(g_noteFiles, sessionRoot)) {
         SendMessageW(g_hNoteList, LB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(name.c_str()));
     }
     SetListWide(g_hPdfList);
     SetListWide(g_hNoteList);
     int pdfIdx = CurrentPdfIndex();
+    ui::RememberOpenListIndex(g_hPdfList, pdfIdx);
     if (pdfIdx >= 0) SendMessageW(g_hPdfList, LB_SETCURSEL, pdfIdx, 0);
     int noteIdx = CurrentNoteIndex();
+    ui::RememberOpenListIndex(g_hNoteList, noteIdx);
     if (noteIdx >= 0) SendMessageW(g_hNoteList, LB_SETCURSEL, noteIdx, 0);
     SaveStartupLastOpenTarget();
     preview_trace::Append(
@@ -482,6 +508,33 @@ bool RefreshCurrentSessionFiles() {
     LoadFiles(direct, pdf, note);
     return true;
 }
+bool RefreshWorkspaceList(HWND list) {
+    if (!list) return false;
+    const HWND lists[]{g_hLectureList, g_hSessionList, g_hPdfList, g_hNoteList};
+    int top[4]{};
+    for (size_t i = 0; i < 4; ++i)
+        top[i] = static_cast<int>(SendMessageW(lists[i], LB_GETTOPINDEX, 0, 0));
+
+    if (list == g_hLectureList && !g_workspaceRoot.empty()) {
+        LoadLectures();
+    } else if (list == g_hSessionList && !g_currentLecturePath.empty()) {
+        const auto sessionPath = g_currentSessionPath;
+        LoadSessions(g_currentLecturePath);
+        g_currentSessionPath = sessionPath;
+    } else if (list == g_hPdfList || list == g_hNoteList) {
+        if (!RefreshCurrentSessionFiles()) return false;
+    } else {
+        return false;
+    }
+    SyncLeftPaneSelection();
+    for (size_t i = 0; i < 4; ++i) {
+        const auto count = SendMessageW(lists[i], LB_GETCOUNT, 0, 0);
+        if (top[i] >= 0 && count > 0)
+            SendMessageW(lists[i], LB_SETTOPINDEX, std::min<LRESULT>(top[i], count - 1), 0);
+    }
+    return true;
+}
+
 void ReloadSessionsAndSelect(const std::wstring& lecturePath,
                                     const std::wstring& desiredName,
                                     bool reopenFiles) {
@@ -538,6 +591,11 @@ void ReloadSessionsAndSelect(const std::wstring& lecturePath,
 }
 
 void OnWorkspaceLoaded(HWND hWnd) {
+    // Initialize durable note IDs before navigation can open the first note.
+    // File operations also recheck the catalog before preparing a transaction.
+    std::wstring identityError;
+    if (!note::ConfigureRuntimeNoteIdentityStore(std::filesystem::path(g_workspaceRoot), &identityError))
+        ShowSoftNotice(hWnd, localization::Text(L"ui.layout.a1495b07a2ac"), SoftNoticeKind::Warning);
     g_lastNoteBySession.clear();
     g_lastPdfBySession.clear();
     g_lastStartupLecturePathSaved.clear();

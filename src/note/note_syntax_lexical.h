@@ -7,6 +7,13 @@
 
 namespace note {
 
+// Recover a token only at a parser-accepted style boundary. These helpers
+// do not decide whether arbitrary angle-bracket text is valid markup.
+[[nodiscard]] bool FindNoteMarkupTagEndingAt(std::wstring_view source,
+    Utf16CodeUnitOffset end, Span* out, bool fullwidth = false) noexcept;
+[[nodiscard]] bool FindNoteMarkupTagStartingAt(std::wstring_view source,
+    Utf16CodeUnitOffset start, Span* out, bool fullwidth = false) noexcept;
+
 enum class NoteMathTagDisplay { Automatic, Inline, Block };
 struct NoteMathOpenTag {
     Utf16CodeUnitOffset end{};
@@ -54,5 +61,11 @@ struct NoteContainerFenceRun {
 };
 [[nodiscard]] bool TryParseNoteContainerFenceRun(
     std::wstring_view line, NoteContainerFenceRun* out) noexcept;
+
+// Literal title coordinates within a standalone opening fence. Containers
+// use the whole info string unless title= is specified; code requires title=.
+// Quotes/attributes are source-only. Empty, duplicate or malformed explicit
+// titles produce no title, never a partially interpreted attribute.
+[[nodiscard]] Span NoteFenceTitleSpan(std::wstring_view line, bool container) noexcept;
 
 } // namespace note

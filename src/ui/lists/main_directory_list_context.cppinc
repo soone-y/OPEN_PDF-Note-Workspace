@@ -151,6 +151,8 @@ static LRESULT CALLBACK DirectoryHierarchyPopupProc(HWND hWnd, UINT msg, WPARAM 
         SetUIFont(data->hTitle);
         SetUIFont(data->hList);
         SetWindowSubclass(data->hList, DirectoryHierarchyListProc, 9, 0);
+        if (!ui::InstallListBoxScroll(data->hList))
+            preview_trace::Append(L"ListBoxScroll", L"hierarchy subclass installation failed");
         for (const auto& item : data->items) {
             SendMessageW(data->hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.text.c_str()));
         }
@@ -336,8 +338,8 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     const std::size_t itemCount = isLectureList ? g_lectures.size() : g_sessions.size();
     const auto target = ui::context_menu::ResolveListBoxContextTarget(
         list, lParam, itemCount, keyboardInvocation,
-        ui::context_menu::ListBoxContextOptions{true, logicalIndex, true, true, true});
-    if (!target) return false;
+        ui::context_menu::ListBoxContextOptions{false, -1, true, true, true});
+    if (!target) return ShowEmptyWorkspaceListContextMenu(list, lParam);
     const int index = target->index;
     const POINT screenPt = target->screenPoint;
 
@@ -390,11 +392,16 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdCloseLecture = 17;
     constexpr UINT kCmdCloseSession = 18;
     constexpr UINT kCmdReload = 20;
+    constexpr UINT kCmdCopyName = 21;
+    constexpr UINT kCmdPriority = 22;
 
     AppendMenuW(menu.get(), MF_STRING, kCmdOpenInApp,
                 localization::Text(L"ui.directory_list.de691a7bc023").c_str());
     AppendMenuW(menu.get(), MF_STRING, kCmdOpenReadOnly,
                 localization::Text(L"ui.directory_list.154ade32c630").c_str());
+    if (isLectureList) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdPriority, localization::Text(L"lecture_order.context_edit").c_str());
+    }
     if (isLectureList && canCreateSession) {
         AppendMenuW(menu.get(), MF_STRING, kCmdNewSession,
                     localization::Text(L"ui.directory_list.5e4fd1449672").c_str());
@@ -408,8 +415,10 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
                     localization::Text(L"ui.directory_list.f1b464c0e53e").c_str());
     }
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu.get(), MF_STRING, kCmdCopyName,
+                localization::Text(L"workspace.context.copy_name").c_str());
     AppendMenuW(menu.get(), MF_STRING, kCmdReload,
-                localization::Text(L"ui.directory_list.018a2719c366").c_str());
+                localization::Text(L"workspace.context.reload_list").c_str());
     HMENU fileMenu = CreatePopupMenu();
     if (fileMenu) {
         ui::context_menu::AppendPathContextMenuItems(fileMenu, {
@@ -442,6 +451,10 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     const UINT cmd = menu.TrackCommand(owner, screenPt,
                                        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
     menu.Close();
+    if (cmd == kCmdPriority && isLectureList) {
+        ShowLectureOrderWindow(owner, root.wstring());
+        return true;
+    }
     if (cmd == kCmdNewSession && canCreateSession) {
         if (isLectureList) {
             const bool lectureChanged = SetListboxSelAndNotify(g_hLectureList, index);
@@ -475,22 +488,9 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
         return OpenSelectionForList(list);
     }
     if (cmd == kCmdReload) {
-        if (isLectureList) {
-            LoadLectures();
-            const int reselected = FindLectureIndexByPath(root.wstring());
-            if (reselected >= 0) {
-                SendMessageW(g_hLectureList, LB_SETCURSEL, static_cast<WPARAM>(reselected), 0);
-            }
-        } else {
-            const bool reopenFiles =
-                NormalizePathKeyForList(root.wstring()) == NormalizePathKeyForList(g_currentSessionPath);
-            ReloadSessionsAndSelect(g_currentLecturePath, root.filename().wstring(), reopenFiles);
-        }
-        RefreshMainWindowUiState(owner);
-        ShowSoftNotice(owner, localization::Text(L"ui.directory_list.21c906348eb0").c_str(),
-                       SoftNoticeKind::Info);
-        return true;
+        return ReloadWorkspaceListFromContext(list);
     }
+    if (cmd == kCmdCopyName) return CopyItemNameToClipboard(owner, root);
     if (cmd == kCmdOpenReadOnly) {
         return LaunchReadOnlyViewerForFolder(owner, root.wstring());
     }

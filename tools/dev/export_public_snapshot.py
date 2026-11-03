@@ -25,6 +25,8 @@ DEFAULT_ALLOWLIST = REPO_ROOT / "docs" / "internal" / "public_repo_demo許可リ
 DEFAULT_GITIGNORE_TEMPLATE = (
     REPO_ROOT / "docs" / "internal" / "public_repo_gitignoreテンプレート_2026-07-02.gitignore"
 )
+sys.path.insert(0, str(REPO_ROOT))
+from tools.release_checks.public_snapshot_inventory import file_records, tree_sha256, write_new_json
 EXCLUDED_DIR_NAMES = {"__pycache__", ".pytest_cache"}
 EXCLUDED_FILE_SUFFIXES = {".pyc", ".pyo", ".orig", ".rej", ".bak"}
 EXCLUDED_FILE_NAMES = {"Thumbs.db", "Desktop.ini"}
@@ -46,6 +48,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Copy an allowlisted working-tree snapshot into a clean public-repository directory."
     )
     parser.add_argument("--root", type=Path, default=REPO_ROOT, help="Repository root to snapshot.")
+    parser.add_argument("--inventory-output", type=Path, help="New private inventory receipt outside the snapshot.")
     parser.add_argument(
         "--dest",
         type=Path,
@@ -74,6 +77,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="SHA-256 manifest for reviewed Git-ignored vendor artifacts. Unlisted untracked files are rejected.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Validate and print the copy plan without writing files.")
+    parser.add_argument(
+        "--summary", action="store_true",
+        help="Omit copied-file listings after export. Dry-run still prints the full copy plan.",
+    )
     return parser.parse_args(argv)
 
 
@@ -407,15 +414,17 @@ def copy_snapshot(
     shutil.copy2(gitignore_template, dest / ".gitignore")
 
 
-def render_plan(dest: Path, plan: SnapshotPlan, dry_run: bool) -> str:
+def render_plan(dest: Path, plan: SnapshotPlan, dry_run: bool, *, summary: bool = False) -> str:
     lines = [
         f"mode: {'dry-run' if dry_run else 'write'}",
         f"destination: {dest}",
         f"directories: {len(plan.directories)}",
         f"files: {len(plan.files)}",
-        "generated:",
-        "  - .gitignore",
     ]
+    if summary and not dry_run:
+        lines.append("generated: .gitignore")
+        return "\n".join(lines)
+    lines.extend(["generated:", "  - .gitignore"])
     if plan.files:
         lines.append("copy:")
         lines.extend(f"  - {rel_path.as_posix()}" for _, rel_path in plan.files)
@@ -440,6 +449,10 @@ def main(argv: list[str] | None = None) -> int:
         plan = build_snapshot_plan(root, allowlist_entries, git_tracked_files(root), reviewed_artifacts)
         selected_dest = resolve_destination_argument(args.dest, args.select_dest)
         dest = validate_destination(root, selected_dest)
+        if args.inventory_output is not None:
+            inventory_output = args.inventory_output.resolve()
+            if inventory_output == dest or dest in inventory_output.parents or inventory_output.exists():
+                raise ValueError("inventory output must be new and outside the snapshot")
         copy_snapshot(
             dest,
             plan,
@@ -447,11 +460,17 @@ def main(argv: list[str] | None = None) -> int:
             read_repo_version(root),
             args.dry_run,
         )
+        if args.inventory_output is not None and not args.dry_run:
+            records = file_records(dest)
+            write_new_json(inventory_output, {"schema_version": 1, "allowlist_sha256": sha256_file(args.allowlist.resolve()),
+                                             "tree_sha256": tree_sha256(records), "files": records})
     except (FileNotFoundError, ValueError, OSError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    print(render_plan(dest, plan, args.dry_run))
+    print(render_plan(dest, plan, args.dry_run, summary=args.summary))
+    if args.summary and not args.dry_run:
+        print("Public snapshot export: PASS")
     return 0
 
 

@@ -320,6 +320,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             acceptedText.clear(); pendingHighSurrogate = 0;
             return 0;
         case WM_THEMECHANGED: ApplyThemeToDialog(hwnd); return 0;
+        case WM_DRAWITEM:
+            if (DrawThemeButton(reinterpret_cast<const DRAWITEMSTRUCT*>(lp))) return TRUE;
+            break;
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN: return ThemeCtlColorPanel(reinterpret_cast<HWND>(lp), reinterpret_cast<HDC>(wp));
         case WM_CTLCOLOREDIT: return ThemeCtlColorPanel(reinterpret_cast<HWND>(lp), reinterpret_cast<HDC>(wp));

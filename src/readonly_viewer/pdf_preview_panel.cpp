@@ -1,9 +1,19 @@
 ﻿#include "pdf_preview_panel.h"
+#include "pdf_view_position.h"
+#include "pdf_region_selection.h"
 #include "theme/built_in_theme.h"
 #include "clrop/json.h"
+#include "clrop/rotation.h"
+#include "ui/quarter_turn_bitmap.h"
+#include "ui/alpha_polygon.h"
 #include "core/atomic_write.h"
 #include "core/localization.h"
 #include "core/secure_memory.h"
+#include "ui/dashed_shape_outline.h"
+#include "ui/window_corners.h"
+#include "ui/page_number.h"
+#include "ui/application_shortcuts.h"
+#include "file_output/shape_outline_pdf.h"
 #include "resources/app_resource.h"
 #include "fpdfview.h"
 #include "fpdf_text.h"
@@ -48,7 +58,6 @@ constexpr double kMagnifierZoom = 2.0;
 constexpr int kContinuousPageGapPx = 24;
 constexpr int kWheelScrollStepPx = 96;
 constexpr int kKeyScrollStepPx = 72;
-constexpr unsigned long long kMaxInputFileBytes = 1024ull * 1024ull * 1024ull;
 constexpr unsigned long long kMaxSetupJsonBytes = 256ull * 1024ull;
 constexpr unsigned long long kMaxReadonlySettingsJsonBytes = 64ull * 1024ull;
 // ReadOnlyViewerWndProc timers:
@@ -125,6 +134,8 @@ struct LoadedClrop {
 };
 
 struct RenderedPage {
+    double rawWidth = 0, rawHeight = 0, originX = 0, originY = 0;
+    int displayRotation = 0;
     int pageIndex = -1;
     int width = 0;
     int height = 0;
@@ -181,21 +192,6 @@ struct TempStroke {
     std::vector<double> path;
 };
 
-struct CommandLineOptions {
-    std::wstring pdfPath;
-    std::wstring clropPath;
-    std::wstring themeId = theme::kDefaultBuiltInThemeId;
-    std::wstring inlineThemeSpec;
-    int initialPage = 0;
-    double initialZoom = 1.0;
-    double initialPanX = 0.0;
-    double initialPanY = 0.0;
-    double initialPdfYPt = 0.0;
-    bool hasInitialPdfY = false;
-    bool showAnnotations = true;
-    bool showMagnifier = false;
-};
-
 struct FileMetadata {
     ULONGLONG size = 0;
     FILETIME lastWriteTime{};
@@ -209,12 +205,13 @@ struct FileMetadata {
 struct ViewerState {
     ThemeColors theme = theme::BuiltInThemeOrDefault(theme::kDefaultBuiltInThemeId);
     std::vector<ThemeColors> themeCatalog = theme::MakeBuiltInThemeCatalog();
-    std::wstring status = L"PDF / CLROP read-only viewer";
+    std::wstring status = localization::Text(L"readonly.pdf.status.ready");
     std::unique_ptr<LoadedPdf> pdf;
     std::unique_ptr<LoadedClrop> clrop;
     RenderedPage rendered;
     std::vector<RenderedPage> renderedPages;
     int currentPage = 0;
+    int viewRotation = 0;
     // Zero-based, inclusive range currently participating in continuous view.
     // pageRangeLast < 0 means the complete document.
     int pageRangeFirst = 0;
@@ -237,6 +234,10 @@ struct ViewerState {
     double panX = 0.0;
     double panY = 0.0;
     double scrollY = 0.0;
+    PdfViewportAnchor resizeAnchor;
+    // Identity only, never dereferenced: binds the synchronous resize snapshot
+    // to the loaded document and prevents applying it to a replacement PDF.
+    const LoadedPdf* resizeDocument = nullptr;
     bool panning = false;
     UINT32 touchPanPointerId = 0;
     POINT touchPanCurrent{};
@@ -267,10 +268,16 @@ struct ViewerState {
     double selectionRightPt = 0.0;
     double selectionBottomPt = 0.0;
     std::wstring selectedText;
+    PdfRegionSelection regionText;
 };
 
 ViewerState g_state;
 bool g_useNativeFileDialogs = false;
+
+void ClearPendingPdfResizeAnchor() {
+    g_state.resizeAnchor = {};
+    g_state.resizeDocument = nullptr;
+}
 
 std::wstring CurrentExePath();
 std::optional<std::wstring> PromptNativeOpenPath(HWND owner);
@@ -283,6 +290,7 @@ void ClearRenderCaches() {
 void ClearTextSelection() {
     g_state.selectingRect = false;
     g_state.hasRectSelection = false;
+    g_state.regionText = {};
     g_state.selectionPage = -1;
     g_state.selectionLeftPt = 0.0;
     g_state.selectionTopPt = 0.0;
@@ -324,115 +332,6 @@ std::wstring ToAbsolutePath(const std::wstring& path) {
     if (written == 0 || written >= needed) return path;
     out.resize(written);
     return out;
-}
-
-bool IsOptionName(const std::wstring& value) {
-    return value.rfind(L"--", 0) == 0 || value.rfind(L"/", 0) == 0;
-}
-
-bool TryParsePositiveInt(const std::wstring& value, int& out) {
-    if (value.empty()) return false;
-    int result = 0;
-    for (wchar_t ch : value) {
-        if (ch < L'0' || ch > L'9') return false;
-        const int digit = ch - L'0';
-        if (result > (INT_MAX - digit) / 10) return false;
-        result = result * 10 + digit;
-    }
-    out = result;
-    return true;
-}
-
-bool TryParseDouble(const std::wstring& value, double& out) {
-    if (value.empty()) return false;
-    try {
-        size_t parsed = 0;
-        double result = std::stod(value, &parsed);
-        if (parsed != value.size() || !std::isfinite(result)) return false;
-        out = result;
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-bool TryParseOnOff(const std::wstring& value, bool& out) {
-    std::wstring v = value;
-    std::transform(v.begin(), v.end(), v.begin(), [](wchar_t ch) {
-        return static_cast<wchar_t>(std::towlower(ch));
-    });
-    if (v == L"1" || v == L"true" || v == L"on" || v == L"yes") {
-        out = true;
-        return true;
-    }
-    if (v == L"0" || v == L"false" || v == L"off" || v == L"no") {
-        out = false;
-        return true;
-    }
-    return false;
-}
-
-CommandLineOptions ParseCommandLine() {
-    CommandLineOptions options;
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) return options;
-
-    for (int i = 1; i < argc; ++i) {
-        std::wstring arg = argv[i] ? argv[i] : L"";
-        if (arg == L"--pdf" && i + 1 < argc) {
-            options.pdfPath = argv[++i] ? argv[i] : L"";
-        } else if (arg == L"--clrop" && i + 1 < argc) {
-            options.clropPath = argv[++i] ? argv[i] : L"";
-        } else if ((arg == L"--theme" || arg == L"--theme-id") && i + 1 < argc) {
-            options.themeId = argv[++i] ? argv[i] : L"";
-        } else if (arg == L"--theme-inline" && i + 1 < argc) {
-            options.inlineThemeSpec = argv[++i] ? argv[i] : L"";
-        } else if (arg == L"--page" && i + 1 < argc) {
-            int pageOneBased = 0;
-            if (TryParsePositiveInt(argv[++i] ? argv[i] : L"", pageOneBased) && pageOneBased > 0) {
-                options.initialPage = pageOneBased - 1;
-            }
-        } else if (arg == L"--zoom" && i + 1 < argc) {
-            double zoom = 1.0;
-            if (TryParseDouble(argv[++i] ? argv[i] : L"", zoom)) {
-                options.initialZoom = std::clamp(zoom, 0.25, 4.0);
-            }
-        } else if (arg == L"--pan-x" && i + 1 < argc) {
-            double pan = 0.0;
-            if (TryParseDouble(argv[++i] ? argv[i] : L"", pan)) {
-                options.initialPanX = std::clamp(pan, -50000.0, 50000.0);
-            }
-        } else if (arg == L"--pan-y" && i + 1 < argc) {
-            double pan = 0.0;
-            if (TryParseDouble(argv[++i] ? argv[i] : L"", pan)) {
-                options.initialPanY = std::clamp(pan, -50000.0, 50000.0);
-            }
-        } else if ((arg == L"--pdf-y-pt" || arg == L"--pdf-y") && i + 1 < argc) {
-            double yPt = 0.0;
-            if (TryParseDouble(argv[++i] ? argv[i] : L"", yPt)) {
-                options.initialPdfYPt = std::clamp(yPt, -50000.0, 50000.0);
-                options.hasInitialPdfY = true;
-            }
-        } else if ((arg == L"--annotations" || arg == L"--annots") && i + 1 < argc) {
-            bool show = true;
-            if (TryParseOnOff(argv[++i] ? argv[i] : L"", show)) {
-                options.showAnnotations = show;
-            }
-        } else if (arg == L"--magnifier" && i + 1 < argc) {
-            bool show = false;
-            if (TryParseOnOff(argv[++i] ? argv[i] : L"", show)) {
-                options.showMagnifier = show;
-            }
-        } else if (!IsOptionName(arg) && options.pdfPath.empty()) {
-            options.pdfPath = arg;
-        }
-    }
-
-    LocalFree(argv);
-    options.pdfPath = ToAbsolutePath(options.pdfPath);
-    options.clropPath = ToAbsolutePath(options.clropPath);
-    return options;
 }
 
 bool ReadFileMetadataShared(const std::wstring& path, FileMetadata& out) {
@@ -662,70 +561,22 @@ std::wstring QuoteArg(const std::wstring& value) {
 std::wstring PdfiumErrorText(unsigned long err) {
     switch (err) {
     case FPDF_ERR_SUCCESS:
-        return L"no error";
+        return localization::Text(L"readonly.pdfium.no_error");
     case FPDF_ERR_UNKNOWN:
-        return L"unknown PDF error";
+        return localization::Text(L"readonly.pdfium.unknown");
     case FPDF_ERR_FILE:
-        return L"file cannot be opened";
+        return localization::Text(L"readonly.pdfium.file");
     case FPDF_ERR_FORMAT:
-        return L"invalid PDF format";
+        return localization::Text(L"readonly.pdfium.format");
     case FPDF_ERR_PASSWORD:
-        return L"password-protected PDF";
+        return localization::Text(L"readonly.pdfium.password");
     case FPDF_ERR_SECURITY:
-        return L"PDF security restriction";
+        return localization::Text(L"readonly.pdfium.security");
     case FPDF_ERR_PAGE:
-        return L"page load error";
+        return localization::Text(L"readonly.pdfium.page");
     default:
-        return L"PDF error";
+        return localization::Text(L"readonly.pdfium.error");
     }
-}
-
-bool ReadFileBytesShared(const std::wstring& path, std::vector<unsigned char>& out) {
-    out.clear();
-    if (path.empty()) return false;
-
-    const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(std::filesystem::path(path));
-    HANDLE file = CreateFileW(openPath.c_str(),
-                              GENERIC_READ,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              nullptr,
-                              OPEN_EXISTING,
-                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-                              nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0) {
-        CloseHandle(file);
-        return false;
-    }
-
-    const auto maxSize = std::min<unsigned long long>(
-        static_cast<unsigned long long>(SIZE_MAX),
-        kMaxInputFileBytes);
-    if (static_cast<unsigned long long>(size.QuadPart) > maxSize) {
-        CloseHandle(file);
-        return false;
-    }
-
-    out.resize(static_cast<size_t>(size.QuadPart));
-    size_t total = 0;
-    while (total < out.size()) {
-        const size_t remaining = out.size() - total;
-        const DWORD chunk = static_cast<DWORD>(std::min<size_t>(remaining, 1u << 20));
-        DWORD read = 0;
-        if (!ReadFile(file, out.data() + total, chunk, &read, nullptr) || read == 0) {
-            CloseHandle(file);
-            out.clear();
-            return false;
-        }
-        total += read;
-    }
-
-    CloseHandle(file);
-    return true;
 }
 
 bool ReadFileBytesSharedLimited(const std::wstring& path,
@@ -829,18 +680,6 @@ std::filesystem::path ReadonlyViewerSettingsPath() {
     return exeDir / L"readonly_viewer_settings.json";
 }
 
-[[nodiscard]] bool WriteUtf8FileAtomicLocal(const std::filesystem::path& path, const std::string& data) {
-    if (path.empty() || path.parent_path().empty()) return false;
-    std::wstring error;
-    return atomic_write::AtomicWriteBytes(
-        path,
-        data.data(),
-        data.size(),
-        path.parent_path(),
-        path.parent_path(),
-        &error);
-}
-
 void LoadReadonlyViewerSettings() {
     const std::filesystem::path path = ReadonlyViewerSettingsPath();
     if (path.empty() || !FileExistsRegular(path.wstring())) {
@@ -860,24 +699,6 @@ void LoadReadonlyViewerSettings() {
     if (auto enabled = ParseJsonBoolFieldLocal(json, "useNativeFileDialogs")) {
         g_useNativeFileDialogs = *enabled;
     }
-    if (auto enabled = ParseJsonBoolFieldLocal(json, "showGrayscale")) {
-        g_state.showGrayscale = *enabled;
-    }
-}
-
-[[nodiscard]] bool SaveReadonlyViewerSettings() {
-    const std::filesystem::path path = ReadonlyViewerSettingsPath();
-    if (path.empty()) return false;
-    std::string json;
-    json += "{\n";
-    json += "  \"format\": \"pdf_clrop_viewer_settings_v1\",\n";
-    json += "  \"useNativeFileDialogs\": ";
-    json += g_useNativeFileDialogs ? "true" : "false";
-    json += ",\n";
-    json += "  \"showGrayscale\": ";
-    json += g_state.showGrayscale ? "true" : "false";
-    json += "\n}\n";
-    return WriteUtf8FileAtomicLocal(path, json);
 }
 
 std::optional<std::filesystem::path> ReadSetupWorkspaceRootForOpenDialog(
@@ -1047,14 +868,14 @@ std::optional<std::wstring> PromptLocalOpenPath(HWND owner) {
     }
     if (state.result.empty()) return std::nullopt;
     if (state.result.rfind(L"\\\\", 0) == 0) {
-        g_state.status = L"Network/device paths are not supported.";
+        g_state.status = localization::Text(L"readonly.pdf.path.network_device");
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
     std::filesystem::path selectedPath(state.result);
     std::filesystem::path root = selectedPath.root_path();
     if (!root.empty() && GetDriveTypeW(root.c_str()) == DRIVE_REMOTE) {
-        g_state.status = L"Network drive paths are not supported.";
+        g_state.status = localization::Text(L"readonly.pdf.path.network_drive");
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
@@ -1062,7 +883,7 @@ std::optional<std::wstring> PromptLocalOpenPath(HWND owner) {
     const DWORD attributes = GetFileAttributesW(openPath.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES &&
         (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        g_state.status = L"Reparse point paths are not supported.";
+        g_state.status = localization::Text(L"readonly.pdf.path.reparse");
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
@@ -1074,7 +895,7 @@ std::optional<std::wstring> PromptNativeOpenPath(HWND owner) {
     HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&dialog));
     if (FAILED(hr) || !dialog) {
-        g_state.status = L"Windows file picker is not available.";
+        g_state.status = localization::Text(L"readonly.picker.unavailable");
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
@@ -1085,11 +906,15 @@ std::optional<std::wstring> PromptNativeOpenPath(HWND owner) {
         dialog->SetOptions(options);
     }
     dialog->SetTitle(localization::Text(L"readonly.pdf.open_path.title").c_str());
+    const std::wstring filterCombined = localization::Text(L"readonly.pdf.picker.filter_combined");
+    const std::wstring filterPdf = localization::Text(L"readonly.picker.filter_pdf");
+    const std::wstring filterClrop = localization::Text(L"readonly.pdf.picker.filter_clrop");
+    const std::wstring filterAll = localization::Text(L"readonly.picker.filter_all");
     COMDLG_FILTERSPEC filters[] = {
-        { L"PDF / CLROP", L"*.pdf;*.clrop" },
-        { L"PDF", L"*.pdf" },
-        { L"CLROP", L"*.clrop" },
-        { L"All files", L"*.*" },
+        { filterCombined.c_str(), L"*.pdf;*.clrop" },
+        { filterPdf.c_str(), L"*.pdf" },
+        { filterClrop.c_str(), L"*.clrop" },
+        { filterAll.c_str(), L"*.*" },
     };
     dialog->SetFileTypes(static_cast<UINT>(sizeof(filters) / sizeof(filters[0])), filters);
     dialog->SetFileTypeIndex(1);
@@ -1110,7 +935,7 @@ std::optional<std::wstring> PromptNativeOpenPath(HWND owner) {
     }
     if (FAILED(hr)) {
         dialog->Release();
-        g_state.status = L"Windows file picker failed.";
+        g_state.status = localization::Text(L"readonly.picker.failed");
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
@@ -1129,31 +954,31 @@ std::optional<std::wstring> PromptNativeOpenPath(HWND owner) {
     if (!result || result->empty()) return std::nullopt;
 
     if (result->rfind(L"\\\\", 0) == 0) {
-        g_state.status = L"Network/device paths are not supported.";
+        g_state.status = localization::Text(L"readonly.pdf.path.network_device");
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
     std::filesystem::path selectedPath(*result);
     std::filesystem::path root = selectedPath.root_path();
     if (!root.empty() && GetDriveTypeW(root.c_str()) == DRIVE_REMOTE) {
-        g_state.status = L"Network drive paths are not supported.";
+        g_state.status = localization::Text(L"readonly.pdf.path.network_drive");
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
     const std::wstring openPath = ToExtendedWin32PathIfAbsoluteLocal(std::filesystem::path(*result));
     const DWORD attributes = GetFileAttributesW(openPath.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
-        g_state.status = L"Selected file was not found.";
+        g_state.status = localization::Text(L"readonly.pdf.path.not_found");
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        g_state.status = L"Reparse point paths are not supported.";
+        g_state.status = localization::Text(L"readonly.pdf.path.reparse");
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
     if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-        g_state.status = L"Select a PDF or CLROP file.";
+        g_state.status = localization::Text(L"readonly.pdf.path.select_pdf_clrop");
         if (owner) InvalidateRect(owner, nullptr, FALSE);
         return std::nullopt;
     }
@@ -1167,23 +992,39 @@ struct PageRangePromptState {
     HWND summary = nullptr;
     bool accepted = false;
     bool done = false;
+    bool singlePage = false;
 };
 
 void UpdateStatusFromPdf();
+
+[[nodiscard]] UINT ReadSingleJumpPage(HWND window, int maximum, BOOL* valid) {
+    const HWND field = GetDlgItem(window, 201);
+    const int length = GetWindowTextLengthW(field);
+    *valid = FALSE;
+    if (length < 1 || length > 10) return 0;
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    const int copied = GetWindowTextW(field, text.data(), length + 1);
+    if (copied != length) return 0;
+    text.resize(static_cast<size_t>(copied));
+    int page = 0;
+    *valid = ui::ParsePageNumber(text, maximum, page) ? TRUE : FALSE;
+    return static_cast<UINT>(page);
+}
 
 void UpdatePageRangePrompt(HWND hwnd, PageRangePromptState* state, bool showError = false) {
     if (!state || !state->summary) return;
     BOOL startOk = FALSE;
     BOOL endOk = FALSE;
-    const UINT start = GetDlgItemInt(hwnd, 201, &startOk, FALSE);
-    const UINT end = GetDlgItemInt(hwnd, 202, &endOk, FALSE);
+    const UINT start = state->singlePage ? ReadSingleJumpPage(hwnd, state->pageCount, &startOk) : GetDlgItemInt(hwnd, 201, &startOk, FALSE);
+    const UINT end = state->singlePage ? (endOk = startOk, start) : GetDlgItemInt(hwnd, 202, &endOk, FALSE);
     if (!startOk || !endOk || start == 0 || end == 0 || start > end || end > static_cast<UINT>(state->pageCount)) {
-        SetWindowTextW(state->summary, localization::Text(showError ? L"readonly.pdf.page_range.invalid" : L"readonly.pdf.page_range.prompt").c_str());
+        SetWindowTextW(state->summary, localization::Text(state->singlePage ? L"readonly.pdf.jump.invalid" :
+            (showError ? L"readonly.pdf.page_range.invalid" : L"readonly.pdf.page_range.prompt")).c_str());
         return;
     }
     const UINT count = end - start + 1;
     SetWindowTextW(state->summary,
-                   localization::Format(L"readonly.pdf.page_range.summary", {{L"TOTAL", std::to_wstring(state->pageCount)}, {L"START", std::to_wstring(start)}, {L"END", std::to_wstring(end)}, {L"COUNT", std::to_wstring(count)}}).c_str());
+                   localization::Format(state->singlePage ? L"readonly.pdf.jump.summary" : L"readonly.pdf.page_range.summary", {{L"TOTAL", std::to_wstring(state->pageCount)}, {L"START", std::to_wstring(start)}, {L"END", std::to_wstring(end)}, {L"COUNT", std::to_wstring(count)}}).c_str());
 }
 
 LRESULT CALLBACK PageRangePromptWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1193,21 +1034,23 @@ LRESULT CALLBACK PageRangePromptWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
         state = reinterpret_cast<PageRangePromptState*>(create->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.pdf.page_range.label").c_str(), WS_CHILD | WS_VISIBLE,
+        (void)ui::ApplyAuxiliaryWindowCorners(hwnd);
+        CreateWindowExW(0, L"STATIC", localization::Text(state->singlePage ? L"readonly.pdf.jump.label" : L"readonly.pdf.page_range.label").c_str(), WS_CHILD | WS_VISIBLE,
                         14, 12, 390, 20, hwnd, nullptr, create->hInstance, nullptr);
-        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.pdf.page_range.start").c_str(), WS_CHILD | WS_VISIBLE,
+        CreateWindowExW(0, L"STATIC", localization::Text(state->singlePage ? L"readonly.pdf.jump.page" : L"readonly.pdf.page_range.start").c_str(), WS_CHILD | WS_VISIBLE,
                         14, 44, 42, 22, hwnd, nullptr, create->hInstance, nullptr);
         HWND start = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", std::to_wstring(state->firstPage).c_str(),
-                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | (state->singlePage ? 0 : ES_NUMBER),
                                      58, 40, 86, 26, hwnd, reinterpret_cast<HMENU>(201), create->hInstance, nullptr);
-        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.pdf.page_range.end").c_str(), WS_CHILD | WS_VISIBLE,
+        if (state->singlePage) SendMessageW(start, EM_SETSEL, 0, -1);
+        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.pdf.page_range.end").c_str(), WS_CHILD | (state->singlePage ? 0 : WS_VISIBLE),
                         162, 44, 42, 22, hwnd, nullptr, create->hInstance, nullptr);
         CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", std::to_wstring(state->lastPage).c_str(),
-                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                        WS_CHILD | (state->singlePage ? 0 : (WS_VISIBLE | WS_TABSTOP)) | ES_AUTOHSCROLL | ES_NUMBER,
                         206, 40, 86, 26, hwnd, reinterpret_cast<HMENU>(202), create->hInstance, nullptr);
         state->summary = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
                                          14, 82, 500, 44, hwnd, nullptr, create->hInstance, nullptr);
-        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.pdf.page_range.show").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        CreateWindowExW(0, L"BUTTON", localization::Text(state->singlePage ? L"readonly.pdf.jump.go" : L"readonly.pdf.page_range.show").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                         296, 138, 118, 28, hwnd, reinterpret_cast<HMENU>(IDOK), create->hInstance, nullptr);
         CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                         426, 138, 90, 28, hwnd, reinterpret_cast<HMENU>(IDCANCEL), create->hInstance, nullptr);
@@ -1223,8 +1066,8 @@ LRESULT CALLBACK PageRangePromptWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         if (LOWORD(wParam) == IDOK && state) {
             BOOL startOk = FALSE;
             BOOL endOk = FALSE;
-            const UINT start = GetDlgItemInt(hwnd, 201, &startOk, FALSE);
-            const UINT end = GetDlgItemInt(hwnd, 202, &endOk, FALSE);
+            const UINT start = state->singlePage ? ReadSingleJumpPage(hwnd, state->pageCount, &startOk) : GetDlgItemInt(hwnd, 201, &startOk, FALSE);
+            const UINT end = state->singlePage ? (endOk = startOk, start) : GetDlgItemInt(hwnd, 202, &endOk, FALSE);
             if (!startOk || !endOk || start == 0 || end == 0 || start > end || end > static_cast<UINT>(state->pageCount)) {
                 UpdatePageRangePrompt(hwnd, state, true);
                 return 0;
@@ -1246,14 +1089,20 @@ LRESULT CALLBACK PageRangePromptWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         if (state) state->done = true;
         DestroyWindow(hwnd);
         return 0;
+    case WM_DESTROY:
+        if (state) state->done = true;
+        return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-bool PromptPageRange(HWND owner, int pageCount, int& firstPage, int& lastPage) {
+bool PromptPageRange(HWND owner, int pageCount, int& firstPage, int& lastPage, bool singlePage = false) {
     if (!owner || pageCount <= 0) return false;
+    if (const HWND root = GetAncestor(owner, GA_ROOT)) owner = root;
+    const HWND previousFocus = GetFocus();
     PageRangePromptState state;
     state.pageCount = pageCount;
+    state.singlePage = singlePage;
     state.firstPage = std::clamp(firstPage, 1, pageCount);
     state.lastPage = std::clamp(lastPage, state.firstPage, pageCount);
     const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -1265,7 +1114,7 @@ bool PromptPageRange(HWND owner, int pageCount, int& firstPage, int& lastPage) {
     wc.lpszClassName = L"PdfReadonlyViewerPageRangePrompt";
     RegisterClassW(&wc);
     EnableWindow(owner, FALSE);
-    HWND prompt = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, localization::Text(L"readonly.pdf.page_range.title").c_str(),
+    HWND prompt = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, localization::Text(singlePage ? L"shortcut.action.jump" : L"readonly.pdf.page_range.title").c_str(),
                                   WS_CAPTION | WS_POPUPWINDOW | WS_VISIBLE,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 540, 210,
                                   owner, nullptr, instance, &state);
@@ -1286,8 +1135,10 @@ bool PromptPageRange(HWND owner, int pageCount, int& firstPage, int& lastPage) {
             DispatchMessageW(&msg);
         }
     }
+    if (IsWindow(prompt)) DestroyWindow(prompt);
     EnableWindow(owner, TRUE);
     SetActiveWindow(owner);
+    if (IsWindow(previousFocus)) SetFocus(previousFocus);
     if (!state.accepted) return false;
     firstPage = state.firstPage;
     lastPage = state.lastPage;
@@ -1727,7 +1578,7 @@ bool PromptPdfPasswordReadOnly(HWND owner,
 bool LoadPdfReadOnly(HWND owner, const std::wstring& path, std::unique_ptr<LoadedPdf>& out, std::wstring& status) {
     out.reset();
     if (path.empty()) {
-        status = L"PDF / CLROP read-only viewer";
+        status = localization::Text(L"readonly.pdf.status.ready");
         return false;
     }
 
@@ -1735,7 +1586,7 @@ bool LoadPdfReadOnly(HWND owner, const std::wstring& path, std::unique_ptr<Loade
     pdf->path = path;
     const int utf8_size = WideCharToMultiByte(CP_UTF8, 0, path.c_str(), static_cast<int>(path.size()), nullptr, 0, nullptr, nullptr);
     if (utf8_size <= 0) {
-        status = L"Could not encode PDF path: " + FileNameFromPath(path);
+        status = localization::Text(L"readonly.pdf.path.encode_failed_prefix") + FileNameFromPath(path);
         return false;
     }
     std::string utf8_path(static_cast<size_t>(utf8_size), '\0');
@@ -1758,13 +1609,13 @@ bool LoadPdfReadOnly(HWND owner, const std::wstring& path, std::unique_ptr<Loade
                 std::wstring password;
                 SecureWideStringScope passwordScope(&password);
                 if (!PromptPdfPasswordReadOnly(owner, path, !passwordUtf8.empty(), password)) {
-                    status = L"Password entry canceled: " + FileNameFromPath(path);
+                    status = localization::Text(L"readonly.pdf.password_canceled_prefix") + FileNameFromPath(path);
                     return false;
                 }
                 std::string nextPasswordUtf8 = WideToUtf8Local(password);
                 SecureStringScope nextPasswordScope(&nextPasswordUtf8);
                 if (nextPasswordUtf8.empty()) {
-                    status = L"Could not encode PDF password: " + FileNameFromPath(path);
+                    status = localization::Text(L"readonly.pdf.password_encode_failed_prefix") + FileNameFromPath(path);
                     return false;
                 }
                 SecureClearString(passwordUtf8);
@@ -1776,14 +1627,15 @@ bool LoadPdfReadOnly(HWND owner, const std::wstring& path, std::unique_ptr<Loade
             return false;
         }
 
-        status = L"Could not open PDF (" + PdfiumErrorText(err) + L"): " +
+        status = localization::Text(L"readonly.pdf.open_failed_prefix") + PdfiumErrorText(err) +
+                 localization::Text(L"readonly.pdf.open_failed_suffix") +
                  FileNameFromPath(path);
         return false;
     }
 
     pdf->pageCount = FPDF_GetPageCount(pdf->document);
     if (pdf->pageCount <= 0) {
-        status = L"PDF has no pages: " + FileNameFromPath(path);
+        status = localization::Text(L"readonly.pdf.no_pages_prefix") + FileNameFromPath(path);
         return false;
     }
 
@@ -1858,7 +1710,7 @@ void LoadAdjacentClropForPdf(HWND hwnd, const std::wstring& explicitClropPath = 
     g_state.selectedItem = -1;
     ClearTextSelection();
     if (!clropPath.empty() && FileExistsRegular(clropPath) && !err.empty()) {
-        g_state.status = L"Could not read CLROP; showing PDF only";
+        g_state.status = localization::Text(L"readonly.pdf.clrop_read_failed");
     } else {
         UpdateStatusFromPdf();
     }
@@ -1879,6 +1731,51 @@ void SetCurrentPage(HWND hwnd, int pageIndex) {
 
 bool PageLayoutAtPoint(HWND hwnd, POINT pt, PageLayout& out);
 
+POINT PdfViewportCenter(HWND hwnd) {
+    const RECT available = ViewerAvailableRect(hwnd);
+    return {(available.left + available.right) / 2, (available.top + available.bottom) / 2};
+}
+
+[[nodiscard]] PdfViewportAnchor CapturePdfViewportAnchor(HWND hwnd) {
+    const RECT available = ViewerAvailableRect(hwnd);
+    if (available.right <= available.left || available.bottom <= available.top) return {};
+    const POINT focus = PdfViewportCenter(hwnd);
+    PageLayout page{};
+    if (!PageLayoutAtPoint(hwnd, focus, page) &&
+        !PageLayoutForIndex(hwnd, g_state.currentPage, page)) return {};
+    if (page.width <= 0 || page.height <= 0) return {};
+    const double base = std::min(static_cast<double>(available.right - available.left) / page.pageWidthPt,
+                                 static_cast<double>(available.bottom - available.top) / page.pageHeightPt);
+    return {page.pageIndex, static_cast<double>(focus.x - page.rect.left) / page.width,
+            static_cast<double>(focus.y - page.rect.top) / page.height, base * g_state.zoomFactor, true};
+}
+
+[[nodiscard]] bool RestorePdfViewportAnchor(HWND hwnd, const PdfViewportAnchor& anchor) {
+    if (!anchor.captured || !std::isfinite(anchor.x_ratio) || !std::isfinite(anchor.y_ratio) ||
+        !std::isfinite(anchor.pixels_per_point) || anchor.pixels_per_point <= 0.0) return false;
+    const RECT available = ViewerAvailableRect(hwnd);
+    if (available.right <= available.left || available.bottom <= available.top) return false;
+    PageLayout page{};
+    if (!PageLayoutForIndex(hwnd, anchor.page, page)) return false;
+    const double base = std::min(static_cast<double>(available.right - available.left) / page.pageWidthPt,
+                                 static_cast<double>(available.bottom - available.top) / page.pageHeightPt);
+    if (base <= 0.0) return false;
+    const double previousZoom = g_state.zoomFactor;
+    g_state.zoomFactor = std::clamp(anchor.pixels_per_point / base, 0.25, 4.0);
+    if (!PageLayoutForIndex(hwnd, anchor.page, page) || page.width <= 0 || page.height <= 0) {
+        g_state.zoomFactor = previousZoom;
+        return false;
+    }
+    const POINT focus = PdfViewportCenter(hwnd);
+    g_state.panX += focus.x - (page.rect.left + anchor.x_ratio * page.width);
+    g_state.scrollY = page.docTop + anchor.y_ratio * page.height - (focus.y - available.top);
+    ClearRenderCaches();
+    ClampContinuousScroll(hwnd);
+    SyncCurrentPageFromScroll(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
 void AdjustZoom(HWND hwnd, double factor) {
     const double next = std::clamp(g_state.zoomFactor * factor, 0.25, 4.0);
     if (std::abs(next - g_state.zoomFactor) < 0.0001) return;
@@ -1893,14 +1790,13 @@ void AdjustZoom(HWND hwnd, double factor) {
 
 void AdjustZoomAroundPoint(HWND hwnd, double scale, POINT focus) {
     PageLayout before{};
-    if (!PageLayoutAtPoint(hwnd, focus, before) || before.width <= 0 || before.height <= 0) {
-        AdjustZoom(hwnd, scale / std::max(0.001, g_state.zoomFactor));
-        return;
-    }
-    const double xRatio = std::clamp(
-        static_cast<double>(focus.x - before.rect.left) / static_cast<double>(before.width), 0.0, 1.0);
-    const double yRatio = std::clamp(
-        static_cast<double>(focus.y - before.rect.top) / static_cast<double>(before.height), 0.0, 1.0);
+    // On the blank canvas, extend the current page's coordinate plane instead
+    // of resetting its top. Ratios outside [0, 1] preserve that virtual anchor.
+    if (!PageLayoutAtPoint(hwnd, focus, before) &&
+        !PageLayoutForIndex(hwnd, g_state.currentPage, before)) return;
+    if (before.width <= 0 || before.height <= 0) return;
+    const double xRatio = static_cast<double>(focus.x - before.rect.left) / before.width;
+    const double yRatio = static_cast<double>(focus.y - before.rect.top) / before.height;
     const double next = std::clamp(scale, 0.25, 4.0);
     if (std::abs(next - g_state.zoomFactor) < 0.0001) return;
 
@@ -1930,10 +1826,52 @@ void ResetZoom(HWND hwnd) {
     ScrollToPageTop(hwnd, g_state.currentPage, 0.0);
 }
 
+// View-only manual fit, including when the scale already equals the fit scale.
+// Leave an active drag/selection intact; validate before changing tab state.
+void FitPageToViewport(HWND hwnd) {
+    if (!g_state.pdf || g_state.panning || g_state.selectingRect || g_state.drawingTempStroke) return;
+    const RECT available = ViewerAvailableRect(hwnd);
+    if (available.right <= available.left || available.bottom <= available.top) return;
+    const int index = g_state.currentPage;
+    PageLayout page{};
+    const double previousZoom = g_state.zoomFactor;
+    g_state.zoomFactor = 1.0; // Reader scale 1 is a full-page fit, not 100%.
+    if (!PageLayoutForIndex(hwnd, index, page)) {
+        g_state.zoomFactor = previousZoom;
+        return;
+    }
+    ClearPendingPdfResizeAnchor();
+    g_state.panX = g_state.panY = 0.0;
+    ClearRenderCaches();
+    ScrollToPageTop(hwnd, index, std::max(0L, available.bottom - available.top - page.height) * 0.5);
+}
+
+void RotateView(HWND hwnd, int rotation) {
+    if (!g_state.pdf) return;
+    const int next = page_rotation::Normalize(rotation);
+    if (next == g_state.viewRotation) return;
+    auto anchor = CapturePdfViewportAnchor(hwnd);
+    const auto point = page_rotation::FromCanonical(
+        {anchor.x_ratio, 1.0 - anchor.y_ratio}, 1.0, 1.0, next - g_state.viewRotation);
+    anchor.x_ratio = point.x;
+    anchor.y_ratio = 1.0 - point.y;
+    g_state.viewRotation = next;
+    ClearPendingPdfResizeAnchor();
+    ClearTextSelection();
+    if (GetCapture() == hwnd) ReleaseCapture();
+    g_state.panning = false;
+    g_state.drawingTempStroke = false;
+    g_state.activeTempStroke = {};
+    ClearRenderCaches();
+    if (!RestorePdfViewportAnchor(hwnd, anchor))
+        ScrollToPageTop(hwnd, g_state.currentPage, 0.0);
+}
+
 void ReplaceLoadedPdf(HWND hwnd, std::unique_ptr<LoadedPdf> next, const FileMetadata& metadata) {
     if (!next || !next->document) return;
     const int previousPage = g_state.currentPage;
     g_state.pdf = std::move(next);
+    ClearPendingPdfResizeAnchor();
     g_state.pageRangeFirst = std::clamp(g_state.pageRangeFirst, 0, g_state.pdf->pageCount - 1);
     if (g_state.pageRangeLast >= 0) {
         g_state.pageRangeLast = std::clamp(g_state.pageRangeLast, g_state.pageRangeFirst, g_state.pdf->pageCount - 1);
@@ -1972,7 +1910,7 @@ void TryReloadChangedPdf(HWND hwnd) {
     if (LoadPdfReadOnly(hwnd, g_state.pdf->path, next, status)) {
         ReplaceLoadedPdf(hwnd, std::move(next), latest);
     } else {
-        g_state.status = L"Could not reload updated PDF; keeping current view";
+        g_state.status = localization::Text(L"readonly.pdf.reload_failed_keep_view");
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 }
@@ -2006,7 +1944,7 @@ void TryReloadChangedClrop(HWND hwnd) {
         g_state.selectedItem = -1;
         InvalidateRect(hwnd, nullptr, FALSE);
     } else {
-        g_state.status = L"Could not reload updated CLROP; keeping current annotations";
+        g_state.status = localization::Text(L"readonly.pdf.clrop_reload_failed_keep");
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 }
@@ -2086,6 +2024,11 @@ bool RenderPageToCache(FPDF_DOCUMENT document, int pageIndex, int width, int hei
     FPDF_PAGE page = FPDF_LoadPage(document, pageIndex);
     if (!page) return false;
 
+    FS_RECTF crop{};
+    if (!FPDF_GetPageBoundingBox(page, &crop)) { FPDF_ClosePage(page); return false; }
+    out.rawWidth = crop.right - crop.left; out.rawHeight = crop.top - crop.bottom;
+    out.originX = crop.left; out.originY = crop.bottom;
+    out.displayRotation = page_rotation::Normalize(std::max(0, FPDFPage_GetRotation(page)) + g_state.viewRotation);
     std::vector<unsigned char> pixels(pixel_count * 4u);
     const int stride = width * 4;
     FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(width, height, FPDFBitmap_BGRA, pixels.data(), stride);
@@ -2095,7 +2038,7 @@ bool RenderPageToCache(FPDF_DOCUMENT document, int pageIndex, int width, int hei
     }
 
     FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFFu);
-    FPDF_RenderPageBitmap(bitmap, page, 0, 0, width, height, 0, FPDF_ANNOT | FPDF_LCD_TEXT);
+    FPDF_RenderPageBitmap(bitmap, page, 0, 0, width, height, g_state.viewRotation, FPDF_ANNOT | FPDF_LCD_TEXT);
     FPDFBitmap_Destroy(bitmap);
     FPDF_ClosePage(page);
 
@@ -2135,8 +2078,9 @@ bool PageSizePt(int pageIndex, double& pageW, double& pageH) {
         w <= 0.0 || h <= 0.0) {
         return false;
     }
-    pageW = std::max(1.0, w);
-    pageH = std::max(1.0, h);
+    const auto size = page_rotation::Extent(w, h, g_state.viewRotation);
+    pageW = std::max(1.0, size.width);
+    pageH = std::max(1.0, size.height);
     return true;
 }
 
@@ -2310,16 +2254,40 @@ void ScrollToPageTop(HWND hwnd, int pageIndex, double pageOffsetY) {
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
-void ScrollToPdfY(HWND hwnd, int pageIndex, double yPt) {
+// PDFium maps native PDF coordinates, including CropBox origin and intrinsic
+// rotation. Only the additional view angle is passed to its device transform.
+struct ScopedPdfPage {
+    FPDF_PAGE page = nullptr;
+    explicit ScopedPdfPage(int index) : page(g_state.pdf && g_state.pdf->document
+        ? FPDF_LoadPage(g_state.pdf->document, index) : nullptr) {}
+    ~ScopedPdfPage() { if (page) FPDF_ClosePage(page); }
+    ScopedPdfPage(const ScopedPdfPage&) = delete;
+    ScopedPdfPage& operator=(const ScopedPdfPage&) = delete;
+};
+
+[[nodiscard]] bool PdfNativePointToClient(FPDF_PAGE page, const PageLayout& layout, double x, double y, POINT& point) {
+    if (!page) return false;
+    int deviceX = 0, deviceY = 0;
+    const bool ok = FPDF_PageToDevice(page, layout.rect.left, layout.rect.top,
+        layout.width, layout.height, g_state.viewRotation, x, y, &deviceX, &deviceY) != 0;
+    if (ok) point = {deviceX, deviceY};
+    return ok;
+}
+
+void ScrollToPdfPoint(HWND hwnd, int pageIndex, double xPt, double yPt) {
     PageLayout layout{};
     if (!PageLayoutForIndex(hwnd, pageIndex, layout)) return;
+    ScopedPdfPage page(pageIndex);
+    POINT point{};
+    if (!PdfNativePointToClient(page.page, layout, xPt, yPt, point)) return;
 
     RECT avail = ViewerAvailableRect(hwnd);
     const double viewHeight = static_cast<double>(std::max<LONG>(1, avail.bottom - avail.top));
-    const double pageHeightPt = std::max(1.0, layout.pageHeightPt);
-    const double pageHeightPx = std::max(1.0, static_cast<double>(layout.rect.bottom - layout.rect.top));
-    const double yFromTopPt = std::clamp(pageHeightPt - yPt, 0.0, pageHeightPt);
-    const double yFromTopPx = yFromTopPt * pageHeightPx / pageHeightPt;
+    const double yFromTopPx = point.y - layout.rect.top;
+    // Preserve the established horizontal reading position on upright pages.
+    // Rotated search coordinates also need their native X brought into view.
+    if (page_rotation::Normalize(FPDFPage_GetRotation(page.page) + g_state.viewRotation) != 0)
+        g_state.panX += (avail.left + avail.right) / 2.0 - point.x;
 
     g_state.currentPage = std::clamp(pageIndex, FirstDisplayedPage(), LastDisplayedPage());
     g_state.scrollY = layout.docTop + yFromTopPx - (viewHeight * 0.35);
@@ -2506,13 +2474,14 @@ POINT PdfPointToClient(const RECT& pageRect, double pageWidthPt, double pageHeig
 
 bool ClientPointToPdfPoint(const PageLayout& layout, POINT clientPt, double& outXPt, double& outYPt) {
     if (layout.rect.right <= layout.rect.left || layout.rect.bottom <= layout.rect.top) return false;
-    const double relX = static_cast<double>(clientPt.x - layout.rect.left) /
-                        static_cast<double>(layout.rect.right - layout.rect.left);
-    const double relY = static_cast<double>(clientPt.y - layout.rect.top) /
-                        static_cast<double>(layout.rect.bottom - layout.rect.top);
-    outXPt = std::clamp(relX, 0.0, 1.0) * std::max(1.0, layout.pageWidthPt);
-    outYPt = (1.0 - std::clamp(relY, 0.0, 1.0)) * std::max(1.0, layout.pageHeightPt);
-    return true;
+    if (!g_state.pdf || !g_state.pdf->document) return false;
+    FPDF_PAGE page = FPDF_LoadPage(g_state.pdf->document, layout.pageIndex);
+    if (!page) return false;
+    const bool ok = FPDF_DeviceToPage(page, layout.rect.left, layout.rect.top, layout.width, layout.height,
+        g_state.viewRotation, std::clamp(clientPt.x, layout.rect.left, layout.rect.right),
+        std::clamp(clientPt.y, layout.rect.top, layout.rect.bottom), &outXPt, &outYPt) != 0;
+    FPDF_ClosePage(page);
+    return ok;
 }
 
 RECT NormalizeClientRect(POINT a, POINT b) {
@@ -2652,28 +2621,26 @@ std::wstring CurrentSelectedAnnotationText() {
 }
 
 void ShowReadonlyCopySuccessStatus(HWND hwnd) {
-    g_state.status = L"Copied text.";
+    g_state.status = localization::Text(L"note.copy_success");
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 bool CopyUnicodeTextToClipboard(HWND hwnd, const std::wstring& text) {
     if (text.empty()) return false;
-    if (!OpenClipboard(hwnd)) return false;
-    EmptyClipboard();
     const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
     HGLOBAL hmem = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (!hmem) {
-        CloseClipboard();
-        return false;
-    }
+    if (!hmem) return false;
     void* data = GlobalLock(hmem);
     if (!data) {
         GlobalFree(hmem);
-        CloseClipboard();
         return false;
     }
     memcpy(data, text.c_str(), bytes);
     GlobalUnlock(hmem);
+    // Prepare the payload before touching the clipboard. A busy clipboard or
+    // allocation failure must retain the user's existing clipboard contents.
+    if (!OpenClipboard(hwnd)) { GlobalFree(hmem); return false; }
+    if (!EmptyClipboard()) { GlobalFree(hmem); CloseClipboard(); return false; }
     if (!SetClipboardData(CF_UNICODETEXT, hmem)) {
         GlobalFree(hmem);
         CloseClipboard();
@@ -2685,9 +2652,11 @@ bool CopyUnicodeTextToClipboard(HWND hwnd, const std::wstring& text) {
 }
 
 bool CopyCurrentSelection(HWND hwnd) {
-    std::wstring text = g_state.selectedText;
-    if (text.empty()) text = CurrentSelectedAnnotationText();
-    return CopyUnicodeTextToClipboard(hwnd, text);
+    try {
+        std::wstring text = g_state.regionText.HasText() ? g_state.regionText.SelectedText() : g_state.selectedText;
+        if (text.empty()) text = CurrentSelectedAnnotationText();
+        return CopyUnicodeTextToClipboard(hwnd, text);
+    } catch (const std::bad_alloc&) { return false; }
 }
 
 struct PdfFileWriter {
@@ -2721,9 +2690,11 @@ std::optional<std::filesystem::path> PromptAnnotatedPdfSavePath(HWND owner) {
                                   IID_PPV_ARGS(&dialog));
     if (FAILED(hr) || !dialog) return std::nullopt;
 
+    const std::wstring filterPdf = localization::Text(L"readonly.pdf.picker.filter_pdf_pattern");
+    const std::wstring filterAll = localization::Text(L"readonly.pdf.picker.filter_all_pattern");
     const COMDLG_FILTERSPEC filters[] = {
-        {L"PDF files (*.pdf)", L"*.pdf"},
-        {L"All files (*.*)", L"*.*"},
+        {filterPdf.c_str(), L"*.pdf"},
+        {filterAll.c_str(), L"*.*"},
     };
     dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
     dialog->SetFileTypeIndex(1);
@@ -2876,6 +2847,23 @@ void AddPdfTextObject(FPDF_DOCUMENT doc, FPDF_PAGE page, const clrop::Item& item
 
 void AddClropItemToPdfPage(FPDF_DOCUMENT doc, FPDF_PAGE page, const clrop::Item& item, FPDF_FONT font) {
     COLORREF color = ClropColor(item);
+    if (item.bbox && item.contentRotation && (item.kind == clrop::Item::Kind::Text ||
+        item.kind == clrop::Item::Kind::Math || item.kind == clrop::Item::Kind::Shape)) {
+        const auto b = *item.bbox;
+        const int turn = item.contentRotation / 90;
+        const double w = turn % 2 ? b[3] : b[2], h = turn % 2 ? b[2] : b[3];
+        clrop::Item local = item;
+        local.contentRotation = 0; local.bbox = std::array<double,4>{0,h,w,h}; local.bboxEndpoints.reset();
+        const int first = FPDFPage_CountObjects(page);
+        AddClropItemToPdfPage(doc, page, local, font);
+        double a=1, c=0, d=1, bb=0, x=b[0], y=b[1];
+        if (turn==1) { a=0;bb=-1;c=1;d=0;x+=b[2]; }
+        if (turn==2) { a=-1;d=-1;x+=b[2];y-=b[3]; }
+        if (turn==3) { a=0;bb=1;c=-1;d=0;y-=b[3]; }
+        for (int i=first;i<FPDFPage_CountObjects(page);++i)
+            FPDFPageObj_Transform(FPDFPage_GetObject(page,i),a,bb,c,d,x-c*h,y-d*h);
+        return;
+    }
     switch (item.kind) {
     case clrop::Item::Kind::MarkerText:
     case clrop::Item::Kind::TextColor: {
@@ -2912,7 +2900,40 @@ void AddClropItemToPdfPage(FPDF_DOCUMENT doc, FPDF_PAGE page, const clrop::Item&
     case clrop::Item::Kind::Shape:
         if (item.bbox) {
             const auto& b = *item.bbox;
-            const bool fill = (item.shapeDrawMode == "fill" || item.shapeDrawMode == "filled");
+            const bool fill = item.shapeKind != "arc" && (item.shapeDrawMode == "fill" || item.shapeDrawMode == "filled");
+            ShapeBoundary boundary = ShapeBoundary::None;
+            if ((!item.shapeBoundary.empty() && ParseShapeBoundary(item.shapeBoundary,boundary) && boundary != ShapeBoundary::None) || item.shapeAngle != 0.0 || item.shapeKind == "arc") {
+                const auto kind = ParseShapeKind(Utf8ToWideLocal(item.shapeKind));
+                const auto angle = item.shapeRotation.value_or(kDefaultRotatedEllipseAngleRad);
+                const auto alpha = ClropAlphaByte(item,fill ? 0.35 : 1.0);
+                const auto addPath = [&](bool filling,const std::vector<double>& dash) {
+                    auto path = shape_outline::CreateDashedPdfPath(kind,b[0],b[1],b[0]+b[2],b[1]-b[3],angle,dash,item.shapeAngle);
+                    if (!path) return;
+                    const bool stroke = !filling || (boundary != ShapeBoundary::None && item.dash.empty());
+                    const auto borderColor = boundary == ShapeBoundary::None ? color : ShapeBoundaryColor(boundary);
+                    FPDFPageObj_SetFillColor(path,GetRValue(color),GetGValue(color),GetBValue(color),alpha);
+                    FPDFPageObj_SetStrokeColor(path,GetRValue(borderColor),GetGValue(borderColor),GetBValue(borderColor),alpha);
+                    FPDFPageObj_SetStrokeWidth(path,static_cast<float>(item.width > 0 ? item.width : 2.0));
+                    FPDFPath_SetDrawMode(path,filling ? FPDF_FILLMODE_ALTERNATE : FPDF_FILLMODE_NONE,stroke);
+                    FPDFPage_InsertObject(page,path);
+                };
+                if (fill) addPath(true,{});
+                if (!fill || (boundary != ShapeBoundary::None && !item.dash.empty())) addPath(false,item.dash);
+                break;
+            }
+            if (!fill && !item.dash.empty()) {
+                auto path = shape_outline::CreateDashedPdfPath(ParseShapeKind(Utf8ToWideLocal(item.shapeKind)),
+                    b[0], b[1], b[0] + b[2], b[1] - b[3],
+                    item.shapeRotation.value_or(kDefaultRotatedEllipseAngleRad), item.dash);
+                if (path) {
+                    FPDFPageObj_SetStrokeColor(path, GetRValue(color), GetGValue(color), GetBValue(color),
+                                              ClropAlphaByte(item, 1.0));
+                    FPDFPageObj_SetStrokeWidth(path, static_cast<float>(item.width > 0 ? item.width : 2.0));
+                    FPDFPath_SetDrawMode(path, FPDF_FILLMODE_NONE, TRUE);
+                    FPDFPage_InsertObject(page, path);
+                }
+                break;
+            }
             AddPdfRectObject(page, b[0], b[1] - b[3], b[2], b[3], color, ClropAlphaByte(item, fill ? 0.30 : 1.0),
                              fill, item.width > 0 ? item.width : 2.0);
         }
@@ -2928,13 +2949,17 @@ void AddClropItemToPdfPage(FPDF_DOCUMENT doc, FPDF_PAGE page, const clrop::Item&
 
 [[nodiscard]] bool SavePdfDocumentAtomic(FPDF_DOCUMENT doc, const std::filesystem::path& outPath, std::wstring& err) {
     if (!doc || outPath.empty() || outPath.parent_path().empty()) {
-        err = L"Invalid output path.";
+        err = localization::Text(L"readonly.pdf.export.invalid_path");
         return false;
     }
     std::filesystem::path temp;
     HANDLE file = INVALID_HANDLE_VALUE;
     if (!atomic_write::CreateUniqueTempFile(
             outPath, outPath.parent_path(), &temp, &file, &err)) {
+        if (!localization::IsEnglishBuild()) {
+            err = localization::Format(L"readonly.pdf.export.temp_create_failed",
+                                       {{L"PATH", outPath.wstring()}});
+        }
         return false;
     }
     PdfFileWriter writer{};
@@ -2949,10 +2974,25 @@ void AddClropItemToPdfPage(FPDF_DOCUMENT doc, FPDF_PAGE page, const clrop::Item&
     if (!ok) {
         std::error_code removeError;
         std::filesystem::remove(temp, removeError);
-        err = L"Failed to write PDF.";
+        err = localization::Text(L"readonly.pdf.export.write_failed");
         return false;
     }
     if (!atomic_write::AtomicReplaceFile(outPath, temp, outPath.parent_path(), &err)) {
+        if (!localization::IsEnglishBuild()) {
+            const bool protectionPending = err.rfind(L"Destination was replaced,", 0) == 0;
+            constexpr std::wstring_view retainedMarker = L"\nQuarantined temp file: ";
+            const size_t retainedAt = err.find(retainedMarker);
+            const std::wstring retainedPath = retainedAt == std::wstring::npos
+                ? L"" : err.substr(retainedAt + retainedMarker.size());
+            err = localization::Format(protectionPending
+                    ? L"readonly.pdf.export.protection_pending"
+                    : L"readonly.pdf.export.replace_failed",
+                    {{L"PATH", outPath.wstring()}});
+            if (!retainedPath.empty()) {
+                err += localization::Format(L"readonly.pdf.export.retained_temp",
+                                            {{L"PATH", retainedPath}});
+            }
+        }
         return false;
     }
     return true;
@@ -2960,26 +3000,26 @@ void AddClropItemToPdfPage(FPDF_DOCUMENT doc, FPDF_PAGE page, const clrop::Item&
 
 bool ExportAnnotatedPdf(HWND hwnd) {
     if (!g_state.pdf || !g_state.pdf->document) {
-        g_state.status = L"No PDF is open.";
+        g_state.status = localization::Text(L"readonly.pdf.export.no_pdf");
         InvalidateRect(hwnd, nullptr, FALSE);
         return false;
     }
     if (!g_state.clrop) {
-        g_state.status = L"No CLROP annotations are loaded.";
+        g_state.status = localization::Text(L"readonly.pdf.export.no_clrop");
         InvalidateRect(hwnd, nullptr, FALSE);
         return false;
     }
     auto outPath = PromptAnnotatedPdfSavePath(hwnd);
     if (!outPath) return false;
     if (SameAbsolutePath(*outPath, std::filesystem::path(g_state.pdf->path))) {
-        g_state.status = L"Export blocked: output path is the original PDF.";
+        g_state.status = localization::Text(L"readonly.pdf.export.same_as_source");
         InvalidateRect(hwnd, nullptr, FALSE);
         return false;
     }
 
     FPDF_DOCUMENT dest = FPDF_CreateNewDocument();
     if (!dest) {
-        g_state.status = L"Failed to create output PDF.";
+        g_state.status = localization::Text(L"readonly.pdf.export.create_failed");
         InvalidateRect(hwnd, nullptr, FALSE);
         return false;
     }
@@ -2987,7 +3027,7 @@ bool ExportAnnotatedPdf(HWND hwnd) {
     std::string range = "1-" + std::to_string(pageCount);
     if (!FPDF_ImportPages(dest, g_state.pdf->document, range.c_str(), 0)) {
         FPDF_CloseDocument(dest);
-        g_state.status = L"Failed to copy PDF pages.";
+        g_state.status = localization::Text(L"readonly.pdf.export.copy_pages_failed");
         InvalidateRect(hwnd, nullptr, FALSE);
         return false;
     }
@@ -3007,8 +3047,8 @@ bool ExportAnnotatedPdf(HWND hwnd) {
     std::wstring err;
     bool ok = SavePdfDocumentAtomic(dest, *outPath, err);
     FPDF_CloseDocument(dest);
-    g_state.status = ok ? (L"Exported annotated PDF: " + outPath->filename().wstring())
-                        : (L"Export failed: " + err);
+    g_state.status = ok ? (localization::Text(L"readonly.pdf.export.completed_prefix") + outPath->filename().wstring())
+                        : (localization::Text(L"readonly.pdf.export.failed_prefix") + err);
     InvalidateRect(hwnd, nullptr, FALSE);
     return ok;
 }
@@ -3157,6 +3197,18 @@ void DrawClropItem(HDC hdc,
     const RECT bounds = ItemBoundsClient(item, pageRect, pageWidthPt, pageHeightPt);
     if (bounds.left == bounds.right || bounds.top == bounds.bottom) return;
 
+    if ((item.kind == clrop::Item::Kind::Text || item.kind == clrop::Item::Kind::Math) && item.contentRotation) {
+        (void)ui::DrawQuarterTurnBox(hdc, bounds, item.contentRotation / 90, [&](HDC local, const RECT& rect) {
+            clrop::Item upright = item;
+            upright.contentRotation = 0;
+            const double scale = static_cast<double>(pageRect.right - pageRect.left) / pageWidthPt;
+            const double w = (rect.right - rect.left) / scale, h = (rect.bottom - rect.top) / scale;
+            upright.bbox = std::array<double,4>{0,h,w,h};
+            upright.bboxEndpoints.reset();
+            DrawClropItem(local, upright, rect, w, h, nullptr, selected);
+        });
+        return;
+    }
     switch (item.kind) {
     case clrop::Item::Kind::TextColor: {
         for (size_t qi = 0; qi + 7 < item.quads.size(); qi += 8) {
@@ -3242,86 +3294,60 @@ void DrawClropItem(HDC hdc,
     }
     case clrop::Item::Kind::Text:
     case clrop::Item::Kind::Math: {
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, color);
         int fontPx = std::max(8, static_cast<int>(std::lround((item.pt > 0 ? item.pt : 12.0) * (pageRect.right - pageRect.left) / pageWidthPt / 1.35)));
         LOGFONTW lf{};
         lf.lfHeight = -fontPx;
         const std::wstring face = item.font.empty() ? L"Segoe UI" : item.font;
         wcsncpy_s(lf.lfFaceName, face.c_str(), LF_FACESIZE - 1);
         HFONT font = CreateFontIndirectW(&lf);
-        HGDIOBJ oldFont = font ? SelectObject(hdc, font) : nullptr;
-        RECT textRect = bounds;
-        InflateRect(&textRect, -2, -2);
         std::wstring text = item.content;
         if (text.empty()) text = Utf8ToWideLocal(item.mathKind);
-        DrawTextW(hdc, text.c_str(), -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
-        if (oldFont) SelectObject(hdc, oldFont);
+        const bool drawn = ui::DrawQuarterTurnBox(hdc, bounds, item.contentRotation / 90,
+            [&](HDC local, const RECT& logical) {
+                SetBkMode(local, TRANSPARENT);
+                SetTextColor(local, color);
+                HGDIOBJ oldFont = font ? SelectObject(local, font) : nullptr;
+                RECT textRect = logical;
+                InflateRect(&textRect, -2, -2);
+                DrawTextW(local, text.c_str(), -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+                if (oldFont) SelectObject(local, oldFont);
+            });
+        (void)drawn;
         if (font) DeleteObject(font);
         break;
     }
     case clrop::Item::Kind::Shape: {
-        HPEN pen = CreatePen(PS_SOLID, std::max(1, static_cast<int>(std::lround(item.width > 0 ? item.width : 2.0))), color);
-        HGDIOBJ oldPen = SelectObject(hdc, pen);
-        const bool fill = (item.shapeDrawMode == "fill" || item.shapeDrawMode == "filled");
-        const bool ellipseShape = item.shapeKind == "ellipse" || item.shapeKind == "circle";
-        const bool rotatedEllipseShape = item.shapeKind == "rotated_ellipse";
-        auto buildRotatedEllipse = [&]() {
-            constexpr int kSegs = 96;
-            constexpr double kDefaultAngle = 0.78539816339744830962; // 45 degrees for legacy rotated_ellipse data
-            const double angle = (item.shapeRotation && std::isfinite(*item.shapeRotation)) ? *item.shapeRotation : kDefaultAngle;
-            std::vector<POINT> pts;
-            const int w = bounds.right - bounds.left;
-            const int h = bounds.bottom - bounds.top;
-            if (w <= 0 || h <= 0) return pts;
-            const double cx = (static_cast<double>(bounds.left) + static_cast<double>(bounds.right)) * 0.5;
-            const double cy = (static_cast<double>(bounds.top) + static_cast<double>(bounds.bottom)) * 0.5;
-            const double rx = std::max(0.5, static_cast<double>(w) * 0.5);
-            const double ry = std::max(0.5, static_cast<double>(h) * 0.5);
-            const double c = std::cos(angle);
-            const double s = std::sin(angle);
-            const double extentX = std::sqrt((rx * c) * (rx * c) + (ry * s) * (ry * s));
-            const double extentY = std::sqrt((rx * s) * (rx * s) + (ry * c) * (ry * c));
-            const double fit = std::min(rx / std::max(0.5, extentX), ry / std::max(0.5, extentY));
-            pts.reserve(kSegs);
-            for (int i = 0; i < kSegs; ++i) {
-                const double t = (2.0 * 3.14159265358979323846 * i) / kSegs;
-                const double x = std::cos(t) * rx * fit;
-                const double y = std::sin(t) * ry * fit;
-                pts.push_back(POINT{
-                    static_cast<LONG>(std::lround(cx + x * c - y * s)),
-                    static_cast<LONG>(std::lround(cy + x * s + y * c))
-                });
-            }
-            return pts;
-        };
-        if (fill && !(ellipseShape || rotatedEllipseShape)) {
-            BYTE alpha = static_cast<BYTE>(std::clamp(item.alpha > 0.0 ? item.alpha : 0.30, 0.0, 1.0) * 255.0);
-            FillRectAlpha(hdc, bounds, color, alpha);
+        const auto kind = ParseShapeKind(Utf8ToWideLocal(item.shapeKind));
+        const double scale = static_cast<double>(pageRect.right - pageRect.left) / pageWidthPt;
+        const bool fill = !ShapeKindIsOpen(kind) && (item.shapeDrawMode == "fill" || item.shapeDrawMode == "filled");
+        ShapeBoundary boundary=ShapeBoundary::None;
+        if (!item.shapeBoundary.empty()) (void)ParseShapeBoundary(item.shapeBoundary,boundary);
+        const auto strokeColor = boundary == ShapeBoundary::None ? color : ShapeBoundaryColor(boundary);
+        const int penWidth = std::max(1, static_cast<int>(std::lround((item.width > 0 ? item.width : 2.0) * scale)));
+        if (!fill && (ShapeKindIsOpen(kind) || !item.dash.empty() || boundary != ShapeBoundary::None || item.shapeAngle != 0.0)) {
+            ui::DrawDashedShapeOutline(hdc, kind, bounds, item.shapeRotation.value_or(kDefaultRotatedEllipseAngleRad),
+                penWidth, strokeColor, ClropAlphaByte(item, 1.0), item.dash, scale, item.contentRotation / 90,item.shapeAngle);
         } else {
-            HBRUSH fillBrush = nullptr;
-            HGDIOBJ oldBrush = nullptr;
+            std::vector<POINT> points;
+            for (const auto& p : shape_outline::BuildOriented(kind, bounds.left, bounds.top, bounds.right, bounds.bottom,
+                item.shapeRotation.value_or(kDefaultRotatedEllipseAngleRad), item.contentRotation / 90,item.shapeAngle))
+                points.push_back({static_cast<LONG>(std::lround(p.x)), static_cast<LONG>(std::lround(p.y))});
             if (fill) {
-                fillBrush = CreateSolidBrush(color);
-                oldBrush = SelectObject(hdc, fillBrush);
-            } else {
-                oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+                ui::FillPolygonAlpha(hdc, points, color, ClropAlphaByte(item,0.35));
+                if (boundary != ShapeBoundary::None)
+                    ui::DrawDashedShapeOutline(hdc,kind,bounds,item.shapeRotation.value_or(kDefaultRotatedEllipseAngleRad),
+                        penWidth,strokeColor,ClropAlphaByte(item,0.35),item.dash,scale,item.contentRotation/90,item.shapeAngle);
+                break;
             }
-            if (ellipseShape) {
-                Ellipse(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
-            } else if (rotatedEllipseShape) {
-                auto pts = buildRotatedEllipse();
-                if (!pts.empty()) {
-                    Polygon(hdc, pts.data(), static_cast<int>(pts.size()));
-                }
-            } else {
-                Rectangle(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
-            }
-            SelectObject(hdc, oldBrush);
-            if (fillBrush) DeleteObject(fillBrush);
+            HPEN pen = CreatePen(PS_SOLID, penWidth, strokeColor);
+            HBRUSH brush = nullptr;
+            const auto oldPen = SelectObject(hdc, pen);
+            const auto oldBrush = SelectObject(hdc, brush ? brush : GetStockObject(HOLLOW_BRUSH));
+            if (points.size() >= 3) Polygon(hdc, points.data(), static_cast<int>(points.size()));
+            SelectObject(hdc, oldBrush); SelectObject(hdc, oldPen);
+            if (brush) DeleteObject(brush);
+            DeleteObject(pen);
         }
-        SelectObject(hdc, oldPen);
-        DeleteObject(pen);
         break;
     }
     case clrop::Item::Kind::LinkMarker: {
@@ -3365,26 +3391,23 @@ void DrawClropAnnotations(HDC hdc,
         for (size_t i = 0; i < page.items.size(); ++i) {
             const bool selected = (g_state.selectedPage == page.page &&
                                    g_state.selectedItem == static_cast<int>(i));
-            DrawClropItem(hdc, page.items[i], pageRect, pageWidthPt, pageHeightPt, rendered, selected);
+            if (!rendered || rendered->rawWidth <= 0 || rendered->rawHeight <= 0) continue;
+            const auto item = clrop::ProjectItem(page.items[i], rendered->rawWidth, rendered->rawHeight,
+                rendered->displayRotation, rendered->originX, rendered->originY);
+            DrawClropItem(hdc, item, pageRect, pageWidthPt, pageHeightPt, rendered, selected);
         }
     }
 }
 
 void DrawTextSelection(HDC hdc, const PageLayout& layout) {
     if (g_state.hasRectSelection && g_state.selectionPage == layout.pageIndex) {
-        POINT p1 = PdfPointToClient(layout.rect,
-                                    layout.pageWidthPt,
-                                    layout.pageHeightPt,
-                                    g_state.selectionLeftPt,
-                                    g_state.selectionTopPt);
-        POINT p2 = PdfPointToClient(layout.rect,
-                                    layout.pageWidthPt,
-                                    layout.pageHeightPt,
-                                    g_state.selectionRightPt,
-                                    g_state.selectionBottomPt);
+        ScopedPdfPage page(layout.pageIndex);
+        POINT p1{}, p2{};
+        if (!PdfNativePointToClient(page.page, layout, g_state.selectionLeftPt, g_state.selectionTopPt, p1) ||
+            !PdfNativePointToClient(page.page, layout, g_state.selectionRightPt, g_state.selectionBottomPt, p2)) return;
         RECT r = NormalizeClientRect(p1, p2);
         if (RectHasArea(r)) {
-            FillRectAlpha(hdc, r, g_state.theme.selectionBg, 70);
+            FillRectAlpha(hdc, r, g_state.theme.selectionBg, g_state.regionText.HasText() ? 22 : 70);
             HPEN pen = CreatePen(PS_SOLID, 1, g_state.theme.accent);
             HGDIOBJ oldPen = SelectObject(hdc, pen);
             HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
@@ -3392,6 +3415,17 @@ void DrawTextSelection(HDC hdc, const PageLayout& layout) {
             SelectObject(hdc, oldBrush);
             SelectObject(hdc, oldPen);
             DeleteObject(pen);
+        }
+        const auto [begin, end] = g_state.regionText.SelectedRange();
+        const auto& glyphs = g_state.regionText.Glyphs();
+        for (auto i = begin; i < end; ++i) {
+            const auto& glyph = glyphs[i];
+            if (!glyph.drawable) continue;
+            POINT a{}, b{};
+            if (!PdfNativePointToClient(page.page, layout, glyph.bounds.left, glyph.bounds.top, a) ||
+                !PdfNativePointToClient(page.page, layout, glyph.bounds.right, glyph.bounds.bottom, b)) continue;
+            const RECT highlight = NormalizeClientRect(a, b);
+            if (RectHasArea(highlight)) FillRectAlpha(hdc, highlight, g_state.theme.selectionBg, 90);
         }
     }
 
@@ -3416,6 +3450,7 @@ bool BeginTextSelection(HWND hwnd, POINT pt) {
     if (!PageLayoutAtPoint(hwnd, pt, layout)) return false;
     g_state.selectingRect = true;
     g_state.hasRectSelection = false;
+    g_state.regionText = {};
     g_state.selectedText.clear();
     g_state.selectedPage = -1;
     g_state.selectedItem = -1;
@@ -3455,6 +3490,58 @@ void UpdateTextSelectionAutoScroll(HWND hwnd) {
     // moving farther outside the pane must not increase it any further.
     ScrollContinuousBy(hwnd, kTextSelectionAutoScrollMaxSpeedPx);
     UpdateTextSelection(hwnd, g_state.lastMouse);
+}
+
+[[nodiscard]] bool PrepareRegionTextSelection() {
+    if (!g_state.pdf || !g_state.pdf->document || !g_state.hasRectSelection) return false;
+    struct TextHandles {
+        FPDF_PAGE page = nullptr;
+        FPDF_TEXTPAGE text = nullptr;
+        ~TextHandles() { if (text) FPDFText_ClosePage(text); if (page) FPDF_ClosePage(page); }
+    } handles;
+    handles.page = FPDF_LoadPage(g_state.pdf->document, g_state.selectionPage);
+    if (!handles.page) return false;
+    handles.text = FPDFText_LoadPage(handles.page);
+    if (!handles.text) return false;
+    const int count = FPDFText_CountChars(handles.text);
+    if (count < 0 || static_cast<std::size_t>(count) > PdfRegionSelection::kMaxGlyphs) return false;
+    try {
+        std::vector<PdfRegionGlyph> glyphs;
+        glyphs.reserve(static_cast<std::size_t>(count));
+        for (int i = 0; i < count; ++i) {
+            PdfRegionGlyph glyph;
+            glyph.unicode = FPDFText_GetUnicode(handles.text, i);
+            if (!FPDFText_GetCharBox(handles.text, i, &glyph.bounds.left, &glyph.bounds.right,
+                                     &glyph.bounds.bottom, &glyph.bounds.top)) glyph.bounds = {};
+            glyphs.push_back(glyph);
+        }
+        if (!g_state.regionText.SetRegion({g_state.selectionLeftPt, g_state.selectionTopPt,
+                                           g_state.selectionRightPt, g_state.selectionBottomPt}, glyphs)) return false;
+        return !g_state.regionText.Glyphs().empty();
+    } catch (const std::bad_alloc&) { return false; }
+}
+
+// A frame is the first stage; starting inside it never replaces that frame.
+// All second-stage glyphs were filtered in PDF coordinates at frame completion.
+[[nodiscard]] bool BeginRegionTextSelection(HWND hwnd, POINT pt) {
+    if (!g_state.hasRectSelection) return false;
+    PageLayout page{};
+    if (!PageLayoutForIndex(hwnd, g_state.selectionPage, page) || !PtInRect(&page.rect, pt)) return false;
+    double x = 0.0, y = 0.0;
+    if (!ClientPointToPdfPoint(page, pt, x, y) || !g_state.regionText.Contains(x, y)) return false;
+    g_state.regionText.ClearText();
+    if (g_state.regionText.Begin(x, y)) SetCapture(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+void UpdateRegionTextSelection(HWND hwnd, POINT pt) {
+    PageLayout page{};
+    double x = 0.0, y = 0.0;
+    if (!PageLayoutForIndex(hwnd, g_state.selectionPage, page) ||
+        !ClientPointToPdfPoint(page, pt, x, y)) return;
+    g_state.regionText.Extend(x, y);
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 bool FinishTextSelection(HWND hwnd) {
@@ -3503,6 +3590,9 @@ bool FinishTextSelection(HWND hwnd) {
                                              g_state.selectionTopPt,
                                              g_state.selectionRightPt,
                                              g_state.selectionBottomPt);
+    if (!PrepareRegionTextSelection())
+        g_state.status = localization::Text(L"readonly.selection.region_unavailable");
+    else g_state.status = localization::Text(L"readonly.selection.region_ready");
     InvalidateRect(hwnd, nullptr, FALSE);
     return true;
 }
@@ -3518,7 +3608,13 @@ bool HitTestClropAnnotations(int pageIndex,
     for (const auto& page : g_state.clrop->document.pages) {
         if (page.page != pageIndex) continue;
         for (int i = static_cast<int>(page.items.size()) - 1; i >= 0; --i) {
-            RECT bounds = ItemBoundsClient(page.items[static_cast<size_t>(i)], pageRect, pageWidthPt, pageHeightPt);
+            const RenderedPage* rendered = nullptr;
+            for (const auto& cached : g_state.renderedPages) if (cached.pageIndex == pageIndex) { rendered = &cached; break; }
+            if (!rendered && g_state.rendered.pageIndex == pageIndex) rendered = &g_state.rendered;
+            if (!rendered || rendered->rawWidth <= 0 || rendered->rawHeight <= 0) return false;
+            const auto item = clrop::ProjectItem(page.items[static_cast<size_t>(i)], rendered->rawWidth, rendered->rawHeight,
+                rendered->displayRotation, rendered->originX, rendered->originY);
+            RECT bounds = ItemBoundsClient(item, pageRect, pageWidthPt, pageHeightPt);
             if (PtInRect(&bounds, clientPt)) {
                 g_state.selectedPage = page.page;
                 g_state.selectedItem = i;
@@ -3543,14 +3639,13 @@ double TempStrokeWidthPt(TempDrawTool tool) {
 
 void DrawTempStroke(HDC hdc, const TempStroke& stroke, const PageLayout& layout) {
     if (stroke.pageIndex != layout.pageIndex || stroke.path.size() < 4) return;
+    ScopedPdfPage page(layout.pageIndex);
     std::vector<POINT> pts;
     pts.reserve(stroke.path.size() / 2);
     for (size_t i = 0; i + 1 < stroke.path.size(); i += 2) {
-        pts.push_back(PdfPointToClient(layout.rect,
-                                       layout.pageWidthPt,
-                                       layout.pageHeightPt,
-                                       stroke.path[i],
-                                       stroke.path[i + 1]));
+        POINT point{};
+        if (!PdfNativePointToClient(page.page, layout, stroke.path[i], stroke.path[i + 1], point)) return;
+        pts.push_back(point);
     }
     if (pts.size() < 2) return;
     const double pageScale = static_cast<double>(std::max<LONG>(1, layout.rect.right - layout.rect.left)) /
@@ -3601,17 +3696,19 @@ void DrawPdfInfoOverlay(HDC hdc, const RECT& client) {
     SelectObject(hdc, oldPen);
     DeleteObject(pen);
 
-    std::wstring text = L"PDF information\n";
-    text += L"File: " + FileNameFromPath(g_state.pdf->path) + L"\n";
-    text += L"Pages: " + std::to_wstring(g_state.pdf->pageCount) + L"\n";
-    text += L"Current page: " + std::to_wstring(g_state.currentPage + 1) + L"\n";
+    std::wstring text = localization::Text(L"readonly.pdf.info.heading");
+    text += localization::Text(L"readonly.pdf.info.file_prefix") + FileNameFromPath(g_state.pdf->path) + L"\n";
+    text += localization::Text(L"readonly.pdf.info.pages_prefix") + std::to_wstring(g_state.pdf->pageCount) + L"\n";
+    text += localization::Text(L"readonly.pdf.info.current_page_prefix") + std::to_wstring(g_state.currentPage + 1) + L"\n";
     if (g_state.hasPdfWatchedMetadata) {
-        text += L"Size: " + std::to_wstring(g_state.pdfWatchedMetadata.size) + L" bytes\n";
+        text += localization::Text(L"readonly.pdf.info.size_prefix") +
+                std::to_wstring(g_state.pdfWatchedMetadata.size) +
+                localization::Text(L"readonly.pdf.info.bytes_suffix");
     }
     if (g_state.clrop) {
         text += L"CLROP: " + FileNameFromPath(g_state.clrop->path) + L"\n";
     } else {
-        text += L"CLROP: none\n";
+        text += localization::Text(L"readonly.pdf.info.no_clrop");
     }
 
     SetBkMode(hdc, TRANSPARENT);
@@ -3763,7 +3860,7 @@ bool PageLayoutAtPoint(HWND hwnd, POINT pt, PageLayout& out) {
 }
 
 void SetWindowTitle(HWND hwnd) {
-    std::wstring title = L"PDF Read-Only Viewer";
+    std::wstring title = localization::Text(L"readonly.pdf.window.title");
     if (g_state.pdf && !g_state.pdf->path.empty()) {
         title += L" - " + FileNameFromPath(g_state.pdf->path);
     }
@@ -3782,7 +3879,9 @@ void OpenPdfInViewer(HWND hwnd, const std::wstring& path, const std::wstring& cl
     FileMetadata metadata{};
     bool hasMetadata = ReadFileMetadataShared(path, metadata);
     g_state.pdf = std::move(next);
+    ClearPendingPdfResizeAnchor();
     g_state.currentPage = 0;
+    g_state.viewRotation = 0;
     g_state.pageRangeFirst = 0;
     g_state.pageRangeLast = g_state.pdf->pageCount > 500
         ? std::min(19, g_state.pdf->pageCount - 1)
@@ -3824,7 +3923,7 @@ void OpenInputPath(HWND hwnd, const std::wstring& path) {
         std::unique_ptr<LoadedClrop> loaded;
         std::wstring err;
         if (!LoadClropReadOnly(abs, loaded, err)) {
-            g_state.status = L"Could not read CLROP";
+            g_state.status = localization::Text(L"readonly.pdf.clrop_read_error");
             InvalidateRect(hwnd, nullptr, FALSE);
             return;
         }
@@ -3832,6 +3931,7 @@ void OpenInputPath(HWND hwnd, const std::wstring& path) {
         if (pdfPath.empty()) {
             g_state.clrop = std::move(loaded);
             g_state.pdf.reset();
+            ClearPendingPdfResizeAnchor();
             g_state.panX = 0.0;
             g_state.panY = 0.0;
             g_state.scrollY = 0.0;
@@ -3840,7 +3940,7 @@ void OpenInputPath(HWND hwnd, const std::wstring& path) {
             g_state.activeTempStroke = TempStroke{};
             g_state.tempStrokes.clear();
             ClearRenderCaches();
-            g_state.status = L"Could not resolve PDF for CLROP: " + FileNameFromPath(abs);
+            g_state.status = localization::Text(L"readonly.pdf.clrop_pdf_missing_prefix") + FileNameFromPath(abs);
             SetWindowTitle(hwnd);
             InvalidateRect(hwnd, nullptr, FALSE);
             return;
@@ -3948,7 +4048,7 @@ void LaunchMainSoftware(HWND hwnd) {
     if (!g_state.pdf) return;
     const std::filesystem::path mainExe = FindMainSoftwareExecutable();
     if (mainExe.empty()) {
-        g_state.status = L"Could not find main software: pdf_note_workspace.exe";
+        g_state.status = localization::Text(L"readonly.pdf.main_missing");
         InvalidateRect(hwnd, nullptr, FALSE);
         return;
     }
@@ -3956,7 +4056,7 @@ void LaunchMainSoftware(HWND hwnd) {
     params += QuoteArg(g_state.pdf->path);
     HINSTANCE result = ShellExecuteW(nullptr, L"open", mainExe.wstring().c_str(), params.c_str(), nullptr, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32) {
-        g_state.status = L"Could not launch main software";
+        g_state.status = localization::Text(L"readonly.pdf.main_launch_failed");
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 }
@@ -4028,6 +4128,9 @@ HMENU BuildViewerMenu() {
     AppendMenuW(view, MF_STRING, kCmdZoomIn, localization::Text(L"readonly.pdf.menu.zoom_in").c_str());
     AppendMenuW(view, MF_STRING, kCmdZoomOut, localization::Text(L"readonly.pdf.menu.zoom_out").c_str());
     AppendMenuW(view, MF_STRING, kCmdZoomReset, localization::Text(L"readonly.pdf.menu.zoom_reset").c_str());
+    AppendMenuW(view, MF_STRING, kCmdPdfFitPage, application_shortcuts::MenuHint(
+        localization::Text(L"shortcut.action.fit_page"), application_shortcuts::Action::FitPage,
+        application_shortcuts::Surface::Reader).c_str());
     HMENU themeMenu = CreatePopupMenu();
     for (UINT i = 0; i < g_state.themeCatalog.size(); ++i) {
         const auto& theme = g_state.themeCatalog[static_cast<size_t>(i)];
@@ -4041,6 +4144,7 @@ HMENU BuildViewerMenu() {
 }
 
 void RefreshViewerMenu(HWND hwnd) {
+    if (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) return;
     HMENU oldMenu = GetMenu(hwnd);
     HMENU newMenu = BuildViewerMenu();
     SetMenu(hwnd, newMenu);
@@ -4126,6 +4230,7 @@ PanAxisLock DetectPanAxisLock(int dx, int dy) {
 
 void BeginPagePan(HWND hwnd, POINT pt) {
     if (!g_state.pdf || !g_state.pdf->document) return;
+    g_state.regionText.Finish();
     // Stop only an unfinished selection drag. A completed selection remains
     // available for copying after navigation.
     if (g_state.selectingRect) {
@@ -4183,12 +4288,54 @@ void EndPagePan(HWND hwnd) {
 
 LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
-    case WM_SIZE:
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCLIENT && g_state.toolMode == ViewerToolMode::Select &&
+            g_state.tempTool == TempDrawTool::None && g_state.hasRectSelection) {
+            const DWORD position = GetMessagePos();
+            POINT point{GET_X_LPARAM(position), GET_Y_LPARAM(position)};
+            PageLayout page{};
+            double x = 0.0, y = 0.0;
+            if (g_state.regionText.Active() || (ScreenToClient(hwnd, &point) &&
+                PageLayoutForIndex(hwnd, g_state.selectionPage, page) &&
+                ClientPointToPdfPoint(page, point, x, y) && g_state.regionText.Contains(x, y))) {
+                SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+                return TRUE;
+            }
+        }
+        break;
+    case WM_COPY:
+        if (!CopyCurrentSelection(hwnd))
+            g_state.status = localization::Text(L"readonly.selection.copy_failed");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    case WM_WINDOWPOSCHANGING: {
+        const auto* position = reinterpret_cast<const WINDOWPOS*>(lParam);
+        RECT client{}; GetClientRect(hwnd, &client);
+        if (position && !(position->flags & SWP_NOSIZE) &&
+            (position->cx != client.right || position->cy != client.bottom)) {
+            const auto anchor = CapturePdfViewportAnchor(hwnd);
+            if (anchor.captured) {
+                g_state.resizeAnchor = anchor;
+                g_state.resizeDocument = g_state.pdf.get();
+            }
+        }
+        break;
+    }
+    case WM_SIZE: {
+        const RECT available = ViewerAvailableRect(hwnd);
+        // A minimized/zero-sized viewport cannot define a new reading position.
+        // Keep the last valid anchor until the panel has useful dimensions again.
+        if (available.right <= available.left || available.bottom <= available.top) return 0;
+        const auto anchor = g_state.resizeAnchor;
+        const bool sameDocument = g_state.resizeDocument == g_state.pdf.get();
+        ClearPendingPdfResizeAnchor();
+        if (sameDocument && RestorePdfViewportAnchor(hwnd, anchor)) return 0;
         ClearRenderCaches();
         ClampContinuousScroll(hwnd);
         SyncCurrentPageFromScroll(hwnd);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
+    }
     case WM_COMMAND: {
         const UINT id = LOWORD(wParam);
         if (id == kCmdOpen) {
@@ -4230,9 +4377,6 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
         if (id == kCmdToggleGrayscale) {
             g_state.showGrayscale = !g_state.showGrayscale;
-            if (!SaveReadonlyViewerSettings()) {
-                g_state.status = L"Could not save read-only viewer settings.";
-            }
             ClearRenderCaches();
             RefreshViewerMenu(hwnd);
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -4276,6 +4420,15 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             ResetZoom(hwnd);
             return 0;
         }
+        if (id == kCmdPdfFitPage) {
+            FitPageToViewport(hwnd);
+            return 0;
+        }
+        if (id == kCmdPdfRotateLeft || id == kCmdPdfRotateRight || id == kCmdPdfRotateReset) {
+            RotateView(hwnd, id == kCmdPdfRotateReset ? 0 : g_state.viewRotation +
+                (id == kCmdPdfRotateRight ? 1 : -1));
+            return 0;
+        }
         if (id == kCmdCloseAllViewers) {
             CloseAllViewerWindows();
             return 0;
@@ -4298,8 +4451,17 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
         const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        // Standalone PDF windows also expose this command in their own menu.
+        if (const auto* binding = application_shortcuts::Resolve(static_cast<UINT>(wParam), ctrlDown,
+                altDown, shiftDown, application_shortcuts::Surface::Reader);
+            binding && binding->action == application_shortcuts::Action::FitPage &&
+            !(GetKeyState(VK_LWIN) & 0x8000) && !(GetKeyState(VK_RWIN) & 0x8000)) {
+            if (application_shortcuts::MayRun(*binding, false, false, (lParam & 0x40000000) != 0))
+                FitPageToViewport(hwnd);
+            return 0;
+        }
         if (ctrlDown && !altDown && wParam == 'C') {
-            CopyCurrentSelection(hwnd);
+            SendMessageW(hwnd, WM_COPY, 0, 0);
             return 0;
         }
         WPARAM navKey = wParam;
@@ -4322,6 +4484,13 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             }
         }
         switch (navKey) {
+        case VK_ESCAPE:
+            KillTimer(hwnd, kTextSelectionAutoScrollTimerId);
+            if (g_state.regionText.Active() || g_state.regionText.HasText()) g_state.regionText.ClearText();
+            else ClearTextSelection();
+            if (GetCapture() == hwnd) ReleaseCapture();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
         case VK_NEXT:
             {
                 RECT rc{};
@@ -4397,7 +4566,11 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         } else if (zoomWithWheel) {
             double steps = static_cast<double>(delta) / WHEEL_DELTA;
             double factor = std::pow(1.15, steps);
-            AdjustZoom(hwnd, factor);
+            // Match the main PDF view: preserve the document point under the
+            // wheel's screen position, rather than returning to the page top.
+            POINT focus{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (ScreenToClient(hwnd, &focus))
+                AdjustZoomAroundPoint(hwnd, g_state.zoomFactor * factor, focus);
         } else {
             ScrollContinuousBy(hwnd,
                                (static_cast<double>(-delta) / WHEEL_DELTA) *
@@ -4484,6 +4657,10 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     }
     case WM_MOUSEMOVE:
         g_state.lastMouse = POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (g_state.regionText.Active()) {
+            UpdateRegionTextSelection(hwnd, g_state.lastMouse);
+            return 0;
+        }
         if (g_state.selectingRect) {
             UpdateTextSelection(hwnd, g_state.lastMouse);
             return 0;
@@ -4500,6 +4677,7 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         return 0;
     case WM_LBUTTONDOWN: {
         g_state.lastMouse = POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        SetFocus(hwnd);
         if (BeginTempStroke(hwnd, g_state.lastMouse)) {
             return 0;
         }
@@ -4507,6 +4685,7 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             BeginPagePan(hwnd, g_state.lastMouse);
             return 0;
         }
+        if (BeginRegionTextSelection(hwnd, g_state.lastMouse)) return 0;
         if (BeginTextSelection(hwnd, g_state.lastMouse)) {
             return 0;
         }
@@ -4516,7 +4695,23 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         if (EndTempStroke(hwnd)) {
             return 0;
         }
+        if (g_state.panning) {
+            EndPagePan(hwnd);
+            return 0;
+        }
         g_state.lastMouse = POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (g_state.regionText.Active()) {
+            UpdateRegionTextSelection(hwnd, g_state.lastMouse);
+            g_state.regionText.Finish();
+            if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
+        }
+        if (g_state.hasRectSelection) {
+            PageLayout page{};
+            double x = 0.0, y = 0.0;
+            if (PageLayoutForIndex(hwnd, g_state.selectionPage, page) &&
+                ClientPointToPdfPoint(page, g_state.lastMouse, x, y) && g_state.regionText.Contains(x, y)) return 0;
+        }
         if (FinishTextSelection(hwnd)) {
             return 0;
         }
@@ -4547,6 +4742,7 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         return 0;
     case WM_CAPTURECHANGED:
         if (reinterpret_cast<HWND>(lParam) != hwnd) {
+            g_state.regionText.Finish();
             KillTimer(hwnd, kTextSelectionAutoScrollTimerId);
             g_state.selectingRect = false;
             g_state.panning = false;
@@ -4583,6 +4779,7 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         DragAcceptFiles(hwnd, FALSE);
         ClearRenderCaches();
         g_state.pdf.reset();
+        ClearPendingPdfResizeAnchor();
         return 0;
     default:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -4634,6 +4831,18 @@ ThemeColors PdfPreviewPanel_GetTheme() {
     return pdf_panel::g_state.theme;
 }
 
+bool PdfPreviewPanel_IsGrayscaleEnabled(HWND hwnd) {
+    return hwnd && IsWindow(hwnd) && pdf_panel::g_state.showGrayscale;
+}
+
+int PdfPreviewPanel_GetRotation(HWND hwnd) {
+    return hwnd && IsWindow(hwnd) && pdf_panel::g_state.pdf ? pdf_panel::g_state.viewRotation : 0;
+}
+
+void PdfPreviewPanel_SetRotation(HWND hwnd, int turns) {
+    if (hwnd && IsWindow(hwnd)) pdf_panel::RotateView(hwnd, turns);
+}
+
 void PdfPreviewPanel_OpenPdf(HWND hwnd, const std::wstring& pdfPath, const std::wstring& clropPath) {
     pdf_panel::OpenPdfInViewer(hwnd, pdfPath, clropPath);
 }
@@ -4656,7 +4865,12 @@ void PdfPreviewPanel_JumpToPdfLocation(HWND hwnd, int pageIndex, double yPt, boo
     }
 
     if (hasYPt && std::isfinite(yPt)) {
-        ScrollToPdfY(hwnd, pageIndex, yPt);
+        FPDF_PAGE page = FPDF_LoadPage(g_state.pdf->document, pageIndex);
+        FS_RECTF crop{};
+        const bool hasCrop = page && FPDF_GetPageBoundingBox(page, &crop);
+        if (page) FPDF_ClosePage(page);
+        if (hasCrop) ScrollToPdfPoint(hwnd, pageIndex, (crop.left + crop.right) / 2.0, yPt);
+        else ScrollToPageTop(hwnd, pageIndex, 0.0);
     } else {
         ScrollToPageTop(hwnd, pageIndex, 0.0);
     }
@@ -4664,6 +4878,22 @@ void PdfPreviewPanel_JumpToPdfLocation(HWND hwnd, int pageIndex, double yPt, boo
 
 void PdfPreviewPanel_ChoosePageRange(HWND hwnd) {
     pdf_panel::ChoosePageRange(hwnd);
+}
+
+void PdfPreviewPanel_PromptJumpPage(HWND hwnd) {
+    using namespace pdf_panel;
+    if (!hwnd || !g_state.pdf || !g_state.pdf->document) return;
+    SyncCurrentPageFromScroll(hwnd);
+    int page = g_state.currentPage + 1;
+    int unusedLast = page;
+    if (!PromptPageRange(hwnd, g_state.pdf->pageCount, page, unusedLast, true)) return;
+    // The existing search-location path also handles targets outside a compact
+    // displayed range, preserving rotation and the source PDF/annotations.
+    PdfPreviewPanel_JumpToPdfLocation(hwnd, page - 1, 0.0, false);
+}
+
+bool PdfPreviewPanel_AreAnnotationsVisible(HWND hwnd) {
+    return hwnd && IsWindow(hwnd) && pdf_panel::g_state.showAnnotations;
 }
 
 std::wstring PdfPreviewPanel_GetPdfPath(HWND hwnd) {
@@ -4675,6 +4905,7 @@ std::wstring PdfPreviewPanel_GetPdfPath(HWND hwnd) {
 
 void PdfPreviewPanel_ClosePdf(HWND hwnd) {
     pdf_panel::g_state.pdf.reset();
+    pdf_panel::ClearPendingPdfResizeAnchor();
     pdf_panel::g_state.clrop.reset();
     pdf_panel::g_state.renderedPages.clear();
     pdf_panel::g_state.status.clear();

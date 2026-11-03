@@ -71,6 +71,8 @@ struct TextEdit {
 struct NoteMetadata {
     std::wstring file_name;
     std::wstring title;
+    // Parsing preference only; never rewrites canonical text or storage.
+    bool clro_ascii_only = false;
 };
 
 struct NoteTextModel {
@@ -207,6 +209,7 @@ struct Diagnostic {
 
 struct NoteDocument {
     NoteMetadata meta;
+    bool uses_clro_fullwidth_markdown = false;
     NoteDerivedSnapshotIdentity source_identity{};
     std::vector<BlockNode> blocks;
     std::vector<InlineNode> inlines;
@@ -248,7 +251,6 @@ bool NoteDocumentMatchesSourceIdentity(
     const NoteDocument& doc,
     NoteDerivedSnapshotIdentity sourceIdentity);
 bool NoteDocumentMatchesTextModel(const NoteDocument& doc, const NoteTextModel& model);
-void SetNoteLayoutSourceRevision(NoteLayout* layout, uint64_t sourceRevision);
 void SetNoteLayoutSourceIdentity(NoteLayout* layout,
                                  NoteDerivedSnapshotIdentity sourceIdentity);
 bool NoteLayoutMatchesSourceRevision(const NoteLayout& layout, uint64_t sourceRevision);

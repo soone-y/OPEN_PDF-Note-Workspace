@@ -68,6 +68,14 @@ void PushError(MathInputAnalysis* out,
     out->diagnostics.push_back(std::move(diag));
 }
 
+void ReportTrailingWrapperText(MathInputAnalysis* out, size_t closeEnd) {
+    if (!out || closeEnd >= out->trimmed_text.size()) return;
+    PushError(out,
+              L"NOTE-E-MATHBOX-TRAILING-TEXT",
+              L"Text after the closing math delimiter is outside the expression.",
+              Span{closeEnd, out->trimmed_text.size()});
+}
+
 size_t FindLegacyMathClose(std::wstring_view text,
                            size_t start,
                            size_t* outCloseLen) {
@@ -180,6 +188,7 @@ MathInputAnalysis AnalyzeMathBoxInput(std::wstring_view rawText) {
             return out;
         }
         out.content_text = NormalizeMathText(out.trimmed_text.substr(openTagEnd, closePos - openTagEnd));
+        ReportTrailingWrapperText(&out, closePos + closeLen);
         if (closeLen == 7) out.delimiter = MathDelimiter::MathTag;
         out.kind = ContainsLineBreak(out.trimmed_text, 0, closePos + closeLen)
             ? MathKind::Block
@@ -210,6 +219,7 @@ MathInputAnalysis AnalyzeMathBoxInput(std::wstring_view rawText) {
             return out;
         }
         out.content_text = NormalizeMathText(out.trimmed_text.substr(2, closePos - 2));
+        ReportTrailingWrapperText(&out, closePos + 2);
         return out;
     }
 
@@ -229,6 +239,7 @@ MathInputAnalysis AnalyzeMathBoxInput(std::wstring_view rawText) {
             return out;
         }
         out.content_text = NormalizeMathText(out.trimmed_text.substr(2, closePos - 2));
+        ReportTrailingWrapperText(&out, closePos + 2);
         return out;
     }
 
@@ -248,6 +259,7 @@ MathInputAnalysis AnalyzeMathBoxInput(std::wstring_view rawText) {
             return out;
         }
         out.content_text = NormalizeMathText(out.trimmed_text.substr(2, closePos - 2));
+        ReportTrailingWrapperText(&out, closePos + 2);
         return out;
     }
 
@@ -265,6 +277,7 @@ MathInputAnalysis AnalyzeMathBoxInput(std::wstring_view rawText) {
             return out;
         }
         out.content_text = NormalizeMathText(out.trimmed_text.substr(1, closePos - 1));
+        ReportTrailingWrapperText(&out, closePos + 1);
         return out;
     }
 

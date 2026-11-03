@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "contracts": [
+    {"id": "note.persistence", "component": "note", "level": "contract", "owner": "note/workspace persistence", "output": "recoverable persisted note", "input": "note identity and content"},
+    {"id": "note.presentation", "component": "note", "level": "contract", "owner": "view presentation", "output": "geometry/frame/pixels/caret", "input": "text snapshot and viewport"},
+    {"id": "note.settings", "component": "note", "level": "contract", "owner": "configuration", "output": "persisted display settings", "input": "setting command"},
+    {"id": "note.editing", "component": "note", "level": "contract", "owner": "canonical editor", "output": "updated source/history", "input": "editing intent"},
+    {"id": "math.panel", "component": "math pane", "level": "contract", "owner": "bottom math controls", "output": "validated formula preview/submission", "input": "formula input and pane event", "permits": ["note.presentation", "note.editing"]}
+  ],
+  "anchors": [
+    {"kind": "callee", "symbol": "ReadFile", "contract": "note.persistence"},
+    {"kind": "callee", "symbol": "WriteFile", "contract": "note.persistence"},
+    {"kind": "callee", "symbol": "note_snapshot::LoadTextStorageSnapshot", "contract": "note.persistence"},
+    {"kind": "callee", "pattern": "file_output::(DiscardRedundantStagedNoteFilesMatchingOriginal|ResetNoteStageSaveTracking)", "contract": "note.persistence"},
+    {"kind": "callee", "pattern": "file_output::SaveNote(File|IfDirty|Stage|StageIfDirty)", "contract": "note.persistence"},
+    {"kind": "callee", "pattern": ".*::(ResolveStage|ReadStage|LoadStage|LoadNote|SaveStage|PersistNote).*", "contract": "note.persistence"},
+    {"kind": "callee", "symbol": "PersistConfig", "contract": "note.settings"},
+    {"kind": "callee", "pattern": "(GetTextExtentPoint32W|GetTextExtentExPointW|GetTextMetricsW|TextOutW|ExtTextOutW|DrawTextW|FillRect|DrawFocusRect|BitBlt|SetCaretPos)", "contract": "note.presentation"},
+    {"kind": "type", "pattern": "note::NoteRenderFinal.*", "contract": "note.presentation"},
+    {"kind": "state", "pattern": "LocalNoteViewContext::final(RenderState|RenderScrollY|RenderLastCaretSource|RenderLastCaret|VerticalNavigation|ImePreedit)", "contract": "note.presentation", "ownership": true},
+    {"kind": "callee", "pattern": ".*::(ApplySourceEdit|ApplyEdit|Undo|Redo|CommitEdit|BeginEdit|ReplaceText).*", "contract": "note.editing"},
+    {"kind": "callee", "pattern": "(ReplaceNoteSelection|ApplyNoteEdit|CommitNote.*Edit|UndoNote|RedoNote)", "contract": "note.editing"},
+    {"kind": "callee", "pattern": "(PerformNoteNormalDelete|RegisterExpectedCurrentNoteSelectionReplacement|ExecuteNoteUndoRedoFromFocus)", "contract": "note.editing"},
+    {"kind": "state", "pattern": "g_(hBottomMath(Input|Preview|AddLatex|AddMarkup|Hint)|bottomMath.*)", "contract": "math.panel", "ownership": true},
+    {"kind": "entry", "symbol": "NoteEditProc", "contract": "note.presentation"},
+    {"kind": "entry", "symbol": "BottomMathProc", "contract": "math.panel"}
+  ],
+  "utilities": ["std::.*", "localization::.*", "GetViewContext", "Scale[XY]", "GetClientRect", "GetWindowRect"]
+}

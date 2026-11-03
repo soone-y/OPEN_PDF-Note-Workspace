@@ -8,7 +8,12 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <map>
 #include "core/constants.h"
+#include "core/open_preferences.h"
+#include "core/marker_display_mode.h"
+#include "core/annotation_blend_mode.h"
+#include "core/shape_boundary.h"
 
 struct ShortcutItem {
     int id;
@@ -30,12 +35,14 @@ struct WorkspaceConfig {
     std::wstring cacheDir   = kDefaultCacheDir;
     bool showAnnots = true;
     std::wstring pdfFlowMode = L"v_ttb"; // "v_ttb" | "v_btu" | "h_ltr" | "h_rtl"
+    std::wstring pdfOpenViewMode = L"auto"; // auto | previous | width | page
     int pdfBitmapBudgetMiB = kPdfBitmapBudgetMiBDefault;
     bool pdfSinglePageMode = false;
     // These independently control the page number and zoom percentage drawn
     // over the upper-left of the PDF view.
     bool showPdfPageOverlay = true;
     bool showPdfZoomOverlay = true;
+    int emptyViewGuideMode = 0; // 0 = usage and shortcuts, 1 = shortcuts, 2 = hidden
     // When false (the default), the wheel scrolls even while the Pan tool is active.
     // Ctrl+wheel remains the explicit zoom gesture.
     bool panMouseWheelZoom = false;
@@ -43,6 +50,7 @@ struct WorkspaceConfig {
     bool mouseWheelInvertHorizontal = false;
     bool touchpadInvertVertical = false;
     bool touchpadInvertHorizontal = false;
+    bool touchpadScrollStabilization = true;
     int leftWidth  = kDefaultLeftPane;
     int rightWidth = kDefaultRightPane;
     int topHeight  = 520;
@@ -91,7 +99,8 @@ struct WorkspaceConfig {
     std::wstring noteRenderFontName;
     std::wstring noteRenderJpFontName;
     std::wstring noteSystem = L"legacy"; // "legacy" only
-    std::wstring lectureSortMode = L"recent"; // "recent" | "name" | "schedule"
+    std::wstring lectureSortMode = L"manual"; // "manual" | "name" | "recent"
+    std::map<std::wstring, int> lecturePriorities; // managed lecture name -> 0..9999
     std::wstring sessionSortMode = L"numeric_asc"; // "numeric_asc" | "numeric_desc" | "name"
     std::wstring sessionNumberingMode = L"count"; // "count" | "max_number"
     // "separate_directories": <session>/pdf and <session>/note.
@@ -102,7 +111,13 @@ struct WorkspaceConfig {
     // Opt-in only. Sample workspaces use this to select the first session on a
     // first launch with no restorable last-open target.
     bool startupSelectFirstSession = false;
+    bool restoreLastSession = true;
     bool noteRenderEnabled = true;
+    bool clroAsciiOnly = false;
+    int noteBottomSpaceMode = 0;
+    int noteBottomSpaceFixedDip = 32;
+    int noteBottomSpaceFontPercent = 400;
+    int noteBottomSpaceViewportPercent = 25;
     bool noteRawOnly = false;
     bool noteRenderMath = true;
     bool noteWrapEnabled = true;
@@ -151,6 +166,9 @@ struct WorkspaceConfig {
     int autoIntegrateSeconds = kAutoIntegrateModeOffSwitchExit;
     int autoIntegrateCustomMinutes = kAutoIntegrateCustomMinutesDefault;
     std::wstring clroNamePattern;
+    std::wstring newNoteExtension = L".clro";
+    // Workspace-local opt-in suffixes; restricted formats never become notes.
+    std::vector<std::wstring> additionalNoteExtensions;
     // tool options (persisted in workspace.json)
     std::wstring textFontName = L"Meiryo";
     double textFontPt = 14.0;
@@ -177,6 +195,9 @@ struct WorkspaceConfig {
     double markerFreeWidthPt = 8.0;
     double markerTextWidthPt = 4.0;
     bool markerTextUnderline = false;
+    MarkerDisplayMode newMarkerDisplayMode = MarkerDisplayMode::Multiply;
+    AnnotationBlendMode newShapeBlendMode = AnnotationBlendMode::Normal;
+    ShapeBoundary newShapeBoundary = ShapeBoundary::None;
     double eraserWidthPt = 4.0;
     double markerAlpha = kMarkerAlphaDefault;
     double lineAlpha = kLineAlphaDefault;
@@ -208,13 +229,9 @@ struct WorkspaceConfig {
     std::wstring annotLastShapePresentation = L"stroke";
     std::wstring annotLastShapeGeometry = L"line";
     std::wstring annotLastShapeDetail = L"line";
-    std::wstring freehandCorrection = L"off";       // "off" | "smooth" | "hold" | "auto"
+    std::wstring freehandCorrection = L"auto";      // "off" | "smooth" | "hold" | "auto"
     std::wstring freehandCorrectionStyle = L"auto"; // "auto" | "pen" | "shape"
     std::wstring freehandCorrectionFill = L"off";   // "off" | "use_shape_setting" | "always_fill"
-    int scheduleDayMask = 0x1F; // Mon-Fri
-    int schedulePeriods = 6;
-    std::vector<std::wstring> scheduleCells;
-    std::vector<std::wstring> scheduleStartTimes;
     std::vector<ShortcutItem> shortcuts;
     int markFontPx = 0;     // 0 = follow UI font
     int headingFontPx = 0;  // 0 = follow UI font
@@ -225,6 +242,7 @@ struct WorkspaceConfig {
     bool headingLeftBar = true;
 
     // Export options
+    bool exportNormalizeClroSyntax = true;
     // When true, prefer FreeText with Unicode Contents and a vector appearance.
     // Default is true. Unrepresentable text appearances fall back to a Stamp
     // annotation (not to page content). False requests an image-based Stamp.
@@ -235,7 +253,10 @@ struct WorkspaceConfig {
     int quickPdfScalePercent = 100;
     bool quickPdfStandardTextAnnots = true;
     bool quickPdfMatchPdfPaneTextLayout = true;
-    bool quickNoteStripMarkup = true;
+    bool quickPdfKeepPageRotation = true;
+    int quickPdfTextColorMode = 0;
+    COLORREF quickPdfTextColorBackground = RGB(255, 255, 255);
+    bool quickNoteStripMarkup = false;
     bool quickNoteIncludeComments = true;
     bool quickNoteMathPlaceholder = false;
     std::wstring quickNoteMathPlaceholderText = L"[math]";

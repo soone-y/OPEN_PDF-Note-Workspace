@@ -1,0 +1,649 @@
+{
+  "version": 1,
+  "contracts": [
+    {
+      "id": "note.persistence",
+      "component": "note",
+      "level": "contract",
+      "owner": "note/workspace persistence",
+      "output": "recoverable persisted note",
+      "input": "note identity and content"
+    },
+    {
+      "id": "note.presentation",
+      "component": "note",
+      "level": "contract",
+      "owner": "view presentation",
+      "output": "geometry/frame/pixels/caret",
+      "input": "text snapshot and viewport"
+    },
+    {
+      "id": "note.settings",
+      "component": "note",
+      "level": "contract",
+      "owner": "configuration",
+      "output": "persisted display settings",
+      "input": "setting command"
+    },
+    {
+      "id": "note.editing",
+      "component": "note",
+      "level": "contract",
+      "owner": "canonical editor",
+      "output": "updated source/history",
+      "input": "editing intent"
+    },
+    {
+      "id": "math.panel",
+      "component": "math pane",
+      "level": "contract",
+      "owner": "bottom math controls",
+      "output": "validated formula preview/submission",
+      "input": "formula input and pane event",
+      "permits": [
+        "note.presentation",
+        "note.editing"
+      ]
+    },
+    {
+      "id": "persist.note",
+      "component": "file-output",
+      "level": "contract",
+      "owner": "note persistence",
+      "output": "persisted note/stage"
+    },
+    {
+      "id": "persist.annot",
+      "component": "file-output",
+      "level": "contract",
+      "owner": "annotation persistence",
+      "output": "persisted annotation stage"
+    },
+    {
+      "id": "export.pdf",
+      "component": "file-output",
+      "level": "contract",
+      "owner": "PDF export",
+      "output": "exported PDF/pages/PNG"
+    },
+    {
+      "id": "export.note",
+      "component": "file-output",
+      "level": "contract",
+      "owner": "note export",
+      "output": "exported note text/markup/HTML"
+    },
+    {
+      "id": "format.parse",
+      "component": "project-format",
+      "level": "contract",
+      "owner": "format decoder",
+      "output": "validated format document/sink events"
+    },
+    {
+      "id": "format.serialize",
+      "component": "project-format",
+      "level": "contract",
+      "owner": "format encoder",
+      "output": "serialized JSON bytes"
+    },
+    {
+      "id": "format.file",
+      "component": "project-format",
+      "level": "contract",
+      "owner": "format file IO",
+      "output": "loaded/persisted format file"
+    },
+    {
+      "id": "format.identity",
+      "component": "project-format",
+      "level": "contract",
+      "owner": "document identity",
+      "output": "hash/fast/strong identity decision"
+    },
+    {
+      "id": "format.bridge",
+      "component": "project-format",
+      "level": "contract",
+      "owner": "annotation format bridge",
+      "output": "application annotations/format items"
+    },
+    {
+      "id": "settings.apply",
+      "component": "settings",
+      "level": "contract",
+      "owner": "configuration application",
+      "output": "consistent runtime setting state"
+    },
+    {
+      "id": "settings.dialog",
+      "component": "settings",
+      "level": "contract",
+      "owner": "setting dialog",
+      "output": "setting edit/apply/cancel decision"
+    },
+    {
+      "id": "core.localization",
+      "component": "core",
+      "level": "contract",
+      "owner": "locale catalog",
+      "output": "locale-specific text/formatted text"
+    },
+    {
+      "id": "core.fonts",
+      "component": "core",
+      "level": "contract",
+      "owner": "private process fonts",
+      "output": "loaded/unloaded process font resources"
+    },
+    {
+      "id": "core.save-gate",
+      "component": "core",
+      "level": "contract",
+      "owner": "save transaction gate",
+      "output": "serialized/queued save ownership"
+    },
+    {
+      "id": "core.setup",
+      "component": "core",
+      "level": "contract",
+      "owner": "shared setup persistence",
+      "output": "persisted setup configuration"
+    },
+    {
+      "id": "core.notice",
+      "component": "core",
+      "level": "contract",
+      "owner": "shared quiet notification",
+      "output": "visual notice lifecycle"
+    },
+    {
+      "id": "math.parse",
+      "component": "math-render",
+      "level": "contract",
+      "owner": "math input parser",
+      "output": "math Node or literal-text fallback"
+    },
+    {
+      "id": "math.measure",
+      "component": "math-render",
+      "level": "contract",
+      "owner": "math layout measurement",
+      "output": "measured Layout"
+    },
+    {
+      "id": "math.draw",
+      "component": "math-render",
+      "level": "contract",
+      "owner": "math drawing",
+      "output": "drawn math frame"
+    },
+    {
+      "id": "math.style",
+      "component": "math-render",
+      "level": "contract",
+      "owner": "math style parameter",
+      "output": "clamped/automatic gap parameter"
+    }
+  ],
+  "anchors": [
+    {
+      "kind": "callee",
+      "symbol": "ReadFile",
+      "contract": "note.persistence",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "symbol": "WriteFile",
+      "contract": "note.persistence",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "symbol": "note_snapshot::LoadTextStorageSnapshot",
+      "contract": "note.persistence",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "file_output::(DiscardRedundantStagedNoteFilesMatchingOriginal|ResetNoteStageSaveTracking)",
+      "contract": "note.persistence",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "file_output::SaveNote(File|IfDirty|Stage|StageIfDirty)",
+      "contract": "note.persistence",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": ".*::(ResolveStage|ReadStage|LoadStage|LoadNote|SaveStage|PersistNote).*",
+      "contract": "note.persistence",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "symbol": "PersistConfig",
+      "contract": "note.settings",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "(GetTextExtentPoint32W|GetTextExtentExPointW|GetTextMetricsW|TextOutW|ExtTextOutW|DrawTextW|FillRect|DrawFocusRect|BitBlt|SetCaretPos)",
+      "contract": "note.presentation",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "type",
+      "pattern": "note::NoteRenderFinal.*",
+      "contract": "note.presentation",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "state",
+      "pattern": "LocalNoteViewContext::final(RenderState|RenderScrollY|RenderLastCaretSource|RenderLastCaret|VerticalNavigation|ImePreedit)",
+      "contract": "note.presentation",
+      "ownership": true,
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": ".*::(ApplySourceEdit|ApplyEdit|Undo|Redo|CommitEdit|BeginEdit|ReplaceText).*",
+      "contract": "note.editing",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "(ReplaceNoteSelection|ApplyNoteEdit|CommitNote.*Edit|UndoNote|RedoNote)",
+      "contract": "note.editing",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "(PerformNoteNormalDelete|RegisterExpectedCurrentNoteSelectionReplacement|ExecuteNoteUndoRedoFromFocus)",
+      "contract": "note.editing",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "state",
+      "pattern": "g_(hBottomMath(Input|Preview|AddLatex|AddMarkup|Hint)|bottomMath.*)",
+      "contract": "math.panel",
+      "ownership": true,
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "entry",
+      "symbol": "NoteEditProc",
+      "contract": "note.presentation",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "entry",
+      "symbol": "BottomMathProc",
+      "contract": "math.panel",
+      "file_prefixes": [
+        "src/note_view/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "file_output::(SaveNoteFile|SaveNoteIfDirty|LoadResolvedStagedNoteBytes|ResetNoteStageSaveTracking)",
+      "contract": "persist.note",
+      "file_prefixes": [
+        "src/file_output/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "file_output::(SaveNoteFile|SaveNoteIfDirty|LoadResolvedStagedNoteBytes|ResetNoteStageSaveTracking)",
+      "contract": "persist.note",
+      "file_prefixes": [
+        "src/file_output/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "file_output::(SaveAnnotationsIfDirty|LoadResolvedStagedAnnotations|IntegrateStagedNoteAndAnnotations|RunSaveAndIntegrateTransaction|StartBackgroundSaveAndIntegrateTransaction|CompleteBackgroundSaveAndIntegrateTransaction)",
+      "contract": "persist.annot",
+      "file_prefixes": [
+        "src/file_output/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "file_output::(SaveAnnotationsIfDirty|LoadResolvedStagedAnnotations|IntegrateStagedNoteAndAnnotations|RunSaveAndIntegrateTransaction|StartBackgroundSaveAndIntegrateTransaction|CompleteBackgroundSaveAndIntegrateTransaction)",
+      "contract": "persist.annot",
+      "file_prefixes": [
+        "src/file_output/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "file_output::(ExportPdfWithAnnotations|ExportPdfPages|ExportPdfPagePng|ConvertImageToPdf)",
+      "contract": "export.pdf",
+      "file_prefixes": [
+        "src/file_output/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "file_output::(ExportPdfWithAnnotations|ExportPdfPages|ExportPdfPagePng|ConvertImageToPdf)",
+      "contract": "export.pdf",
+      "file_prefixes": [
+        "src/file_output/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "file_output::ExportNote(PlainText|Markup|Html)",
+      "contract": "export.note",
+      "file_prefixes": [
+        "src/file_output/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "file_output::ExportNote(PlainText|Markup|Html)",
+      "contract": "export.note",
+      "file_prefixes": [
+        "src/file_output/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "clrop::ParseClropFromJson(ToSink)?",
+      "contract": "format.parse",
+      "file_prefixes": [
+        "src/clrop/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "clrop::ParseClropFromJson(ToSink)?",
+      "contract": "format.parse",
+      "file_prefixes": [
+        "src/clrop/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "(clrop::SerializeClrop|clrop_bridge::SerializeAnnotations)",
+      "contract": "format.serialize",
+      "file_prefixes": [
+        "src/clrop/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "(clrop::SerializeClrop|clrop_bridge::SerializeAnnotations)",
+      "contract": "format.serialize",
+      "file_prefixes": [
+        "src/clrop/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "clrop::(LoadClropFile(ToSink)?|SaveClropFile)",
+      "contract": "format.file",
+      "file_prefixes": [
+        "src/clrop/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "clrop::(LoadClropFile(ToSink)?|SaveClropFile)",
+      "contract": "format.file",
+      "file_prefixes": [
+        "src/clrop/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "(?:.*::)?(ComputeFileSha256|ComputePdfFastId|ComputePdfId|PdfIdHasFastFingerprint|PdfIdFastMatches|PdfIdStrongMatches)",
+      "contract": "format.identity",
+      "file_prefixes": [
+        "src/clrop/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "(?:.*::)?(ComputeFileSha256|ComputePdfFastId|ComputePdfId|PdfIdHasFastFingerprint|PdfIdFastMatches|PdfIdStrongMatches)",
+      "contract": "format.identity",
+      "file_prefixes": [
+        "src/clrop/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "clrop_bridge::(LoadAnnotations|SaveAnnotations|AppendAnnotationFromItem|ComputeLoadMismatch)",
+      "contract": "format.bridge",
+      "file_prefixes": [
+        "src/clrop/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "clrop_bridge::(LoadAnnotations|SaveAnnotations|AppendAnnotationFromItem|ComputeLoadMismatch)",
+      "contract": "format.bridge",
+      "file_prefixes": [
+        "src/clrop/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "(ApplyNoteFont|ApplyNoteSystem|ApplyBottomPaneEdgeStyle|UpdateMathListVisibility|UpdateAutoSaveTimer|UpdateAutoIntegrateTimer|UpdateBottomPaneMenuChecks|UpdateScrollDirectionMenuChecks|UpdatePdfSinglePageModeMenuCheck)",
+      "contract": "settings.apply",
+      "file_prefixes": [
+        "src/settings/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "(ApplyNoteFont|ApplyNoteSystem|ApplyBottomPaneEdgeStyle|UpdateMathListVisibility|UpdateAutoSaveTimer|UpdateAutoIntegrateTimer|UpdateBottomPaneMenuChecks|UpdateScrollDirectionMenuChecks|UpdatePdfSinglePageModeMenuCheck)",
+      "contract": "settings.apply",
+      "file_prefixes": [
+        "src/settings/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "Show(GeneralSettingsDialog|NoteSettingsDialog|MarkupSettingsDialog|AnnotationSettingsDialog|AnnotationSettingsForTool|PaletteSettingsDialog|AnnotationPaletteSettingsDialog|SettingsAssetsDialog)",
+      "contract": "settings.dialog",
+      "file_prefixes": [
+        "src/settings/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "Show(GeneralSettingsDialog|NoteSettingsDialog|MarkupSettingsDialog|AnnotationSettingsDialog|AnnotationSettingsForTool|PaletteSettingsDialog|AnnotationPaletteSettingsDialog|SettingsAssetsDialog)",
+      "contract": "settings.dialog",
+      "file_prefixes": [
+        "src/settings/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "localization::(Text|Format|UserInterfaceText|IsEnglishBuild)",
+      "contract": "core.localization",
+      "file_prefixes": [
+        "src/core/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "localization::(Text|Format|UserInterfaceText|IsEnglishBuild)",
+      "contract": "core.localization",
+      "file_prefixes": [
+        "src/core/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "(LoadLibreOfficePrivateFontsForProcess|UnloadLibreOfficePrivateFontsForProcess)",
+      "contract": "core.fonts",
+      "file_prefixes": [
+        "src/core/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "(LoadLibreOfficePrivateFontsForProcess|UnloadLibreOfficePrivateFontsForProcess)",
+      "contract": "core.fonts",
+      "file_prefixes": [
+        "src/core/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "(TryBeginSaveTransaction|RequestQueuedSaveTransaction|ShouldRunQueuedSaveTransaction|EndSaveTransaction|IsSaveTransactionRunning)",
+      "contract": "core.save-gate",
+      "file_prefixes": [
+        "src/core/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "(TryBeginSaveTransaction|RequestQueuedSaveTransaction|ShouldRunQueuedSaveTransaction|EndSaveTransaction|IsSaveTransactionRunning)",
+      "contract": "core.save-gate",
+      "file_prefixes": [
+        "src/core/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "(LoadSetup.*|PersistSetup.*|PersistAnnotToolUiConfigToSetupJson)",
+      "contract": "core.setup",
+      "file_prefixes": [
+        "src/core/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "(LoadSetup.*|PersistSetup.*|PersistAnnotToolUiConfigToSetupJson)",
+      "contract": "core.setup",
+      "file_prefixes": [
+        "src/core/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "(ShowSoftNotice|DismissSoftNotice|SoftNoticeProc)",
+      "contract": "core.notice",
+      "file_prefixes": [
+        "src/core/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "(ShowSoftNotice|DismissSoftNotice|SoftNoticeProc)",
+      "contract": "core.notice",
+      "file_prefixes": [
+        "src/core/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "mathrender::Parse",
+      "contract": "math.parse",
+      "file_prefixes": [
+        "src/math/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "mathrender::Parse",
+      "contract": "math.parse",
+      "file_prefixes": [
+        "src/math/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "mathrender::Measure",
+      "contract": "math.measure",
+      "file_prefixes": [
+        "src/math/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "mathrender::Measure",
+      "contract": "math.measure",
+      "file_prefixes": [
+        "src/math/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "mathrender::Draw",
+      "contract": "math.draw",
+      "file_prefixes": [
+        "src/math/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "mathrender::Draw",
+      "contract": "math.draw",
+      "file_prefixes": [
+        "src/math/"
+      ]
+    },
+    {
+      "kind": "function",
+      "pattern": "mathrender::(SetSupSubGapSupPercent|GetSupSubGapSupPercent)",
+      "contract": "math.style",
+      "file_prefixes": [
+        "src/math/"
+      ]
+    },
+    {
+      "kind": "callee",
+      "pattern": "mathrender::(SetSupSubGapSupPercent|GetSupSubGapSupPercent)",
+      "contract": "math.style",
+      "file_prefixes": [
+        "src/math/"
+      ]
+    }
+  ],
+  "utilities": [
+    "std::.*",
+    "localization::.*",
+    "GetViewContext",
+    "Scale[XY]",
+    "GetClientRect",
+    "GetWindowRect"
+  ]
+}

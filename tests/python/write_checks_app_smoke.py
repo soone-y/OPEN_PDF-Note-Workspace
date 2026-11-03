@@ -18,11 +18,15 @@ import uuid
 
 
 def main():
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools.dev.isolated_app_test import protect_entry_point
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--locale", choices=("ja", "en"), default="ja")
     parser.add_argument("--workspace-length", type=int, default=0,
                         help="UTF-16 units; a fresh Unicode/space-containing workspace tests deep paths")
     args = parser.parse_args()
+    protect_entry_point()
     if sys.platform != "win32":
         raise RuntimeError("This smoke test requires Windows")
     repo = Path(__file__).resolve().parents[2]

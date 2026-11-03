@@ -4,6 +4,7 @@
 
 #include "note/note_render_final_display_run.h"
 #include "note/note_render_final_style.h"
+#include "note/note_markup_color.h"
 #include "math/math_render.h"
 
 #include <algorithm>
@@ -44,60 +45,13 @@ struct FinalPaintRunStyle {
     bool strike = false;
 };
 
-[[nodiscard]] bool AsciiEqualsIgnoreCase(std::wstring_view lhs,
-                                          std::wstring_view rhs) noexcept {
-    if (lhs.size() != rhs.size()) return false;
-    for (size_t index = 0; index < lhs.size(); ++index) {
-        wchar_t a = lhs[index];
-        wchar_t b = rhs[index];
-        if (a >= L'A' && a <= L'Z') a = static_cast<wchar_t>(a - L'A' + L'a');
-        if (b >= L'A' && b <= L'Z') b = static_cast<wchar_t>(b - L'A' + L'a');
-        if (a != b) return false;
-    }
-    return true;
-}
-
-[[nodiscard]] std::wstring_view TrimAsciiWhitespace(std::wstring_view value) noexcept {
-    while (!value.empty() && (value.front() == L' ' || value.front() == L'\t' ||
-                              value.front() == L'\r' || value.front() == L'\n')) {
-        value.remove_prefix(1);
-    }
-    while (!value.empty() && (value.back() == L' ' || value.back() == L'\t' ||
-                              value.back() == L'\r' || value.back() == L'\n')) {
-        value.remove_suffix(1);
-    }
-    return value;
-}
-
-[[nodiscard]] int HexDigit(wchar_t ch) noexcept {
-    if (ch >= L'0' && ch <= L'9') return ch - L'0';
-    if (ch >= L'a' && ch <= L'f') return 10 + ch - L'a';
-    if (ch >= L'A' && ch <= L'F') return 10 + ch - L'A';
-    return -1;
-}
-
 [[nodiscard]] FinalStyleColor ParseStyleColor(std::wstring_view value) noexcept {
-    value = TrimAsciiWhitespace(value);
-    if (AsciiEqualsIgnoreCase(value, L"hicont") ||
-        AsciiEqualsIgnoreCase(value, L"hi-contrast") ||
-        AsciiEqualsIgnoreCase(value, L"highcontrast") ||
-        AsciiEqualsIgnoreCase(value, L"high-contrast")) {
+    const auto parsed = ResolveNoteMarkupColor(value);
+    if (parsed.kind == NoteMarkupColorKind::HighContrast)
         return {FinalStyleColorMode::HighContrast, RGB(0, 0, 0)};
-    }
-    if (value.size() >= 2 && value[0] == L'0' && (value[1] == L'x' || value[1] == L'X')) {
-        value.remove_prefix(2);
-    }
-    if (!value.empty() && value.front() == L'#') value.remove_prefix(1);
-    if (value.size() != 6) return {};
-    const int r1 = HexDigit(value[0]);
-    const int r2 = HexDigit(value[1]);
-    const int g1 = HexDigit(value[2]);
-    const int g2 = HexDigit(value[3]);
-    const int b1 = HexDigit(value[4]);
-    const int b2 = HexDigit(value[5]);
-    if (r1 < 0 || r2 < 0 || g1 < 0 || g2 < 0 || b1 < 0 || b2 < 0) return {};
+    if (parsed.kind != NoteMarkupColorKind::Explicit) return {};
     return {FinalStyleColorMode::Explicit,
-            RGB(r1 * 16 + r2, g1 * 16 + g2, b1 * 16 + b2)};
+            RGB((parsed.rgb >> 16) & 0xff, (parsed.rgb >> 8) & 0xff, parsed.rgb & 0xff)};
 }
 
 [[nodiscard]] int Luma(COLORREF colour) noexcept {
@@ -167,20 +121,23 @@ public:
         if (GetObjectW(old_, sizeof(font), &font) != sizeof(font)) return;
         TEXTMETRICW baseMetrics{};
         if (!GetTextMetricsW(hdc_, &baseMetrics)) return;
+        const int baseCharacterHeight = NoteRenderFinalFontCharacterHeight(
+            baseMetrics.tmHeight, baseMetrics.tmInternalLeading);
         NoteRenderFinalRunFontStyle style;
         if (!ResolveNoteRenderFinalRunFontStyle(
-                line, run, std::max<LONG>(1, baseMetrics.tmHeight), &style)) {
+                line, run, baseCharacterHeight, &style)) {
             return;
         }
         const bool needsFont = style.bold || style.italic || !style.font_family.empty() ||
-            style.font_height_px != std::max<LONG>(1, baseMetrics.tmHeight);
+            style.overrides_font_height;
         if (!needsFont) {
             valid_ = true;
             return;
         }
         if (style.bold) font.lfWeight = FW_BOLD;
         if (style.italic) font.lfItalic = TRUE;
-        font.lfHeight = -static_cast<LONG>(style.font_height_px);
+        if (style.overrides_font_height || !style.font_family.empty())
+            font.lfHeight = -static_cast<LONG>(style.font_height_px);
         if (!style.font_family.empty()) {
             std::copy(style.font_family.begin(), style.font_family.end(), font.lfFaceName);
             font.lfFaceName[style.font_family.size()] = L'\0';

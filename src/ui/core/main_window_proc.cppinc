@@ -5,7 +5,7 @@
 // NOTE: Timer IDs must be unique per HWND to avoid collisions in MainWndProc.
 // Keep this in sync with the MainWndProc timer registry in core/app_core.h.
 static constexpr UINT_PTR kSetupJsonExistenceVerifyTimerId = 0x508;
-static_assert(AllUniqueValues(std::array<UINT_PTR, 10>{
+static_assert(AllUniqueValues(std::array<UINT_PTR, 12>{
     kAutoSaveTimerId,
     kAutoIntegrateTimerId,
     kNoteStageSaveTimerId,
@@ -13,6 +13,8 @@ static_assert(AllUniqueValues(std::array<UINT_PTR, 10>{
     kNoteOverlayRefreshTimerId,
     kNoteFullReparseTimerId,
     kSetupJsonExistenceVerifyTimerId,
+    kTempPathWorkerTimerId,
+    kOfficeWorkerPollTimerId,
     kProcessShutdownObserveTimerId,
     kExitRetryTimerId,
     ui::kSplitDragTimerId,
@@ -124,11 +126,26 @@ static void ScheduleNoteOverlayRefresh(HWND hWnd, bool immediate, uint64_t targe
 }
 
 LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (recovery::HasActiveStageRecovery()) {
+        switch (msg) {
+        case WM_COMMAND: case WM_NOTIFY: case WM_TIMER: case WM_DROPFILES: case WM_COPYDATA:
+        case WM_CLOSE: case kMsgOpenStartupDocument: case kMsgSingleInstanceShutdownRequest:
+        case WM_SYSCOMMAND: case WM_HOTKEY: case WM_APPCOMMAND:
+        case kMsgReloadLectureList: case kMsgReloadSessionList: case kMsgNoteEnterInsertMode:
+        case kMsgNoteOverlayUpdate:
+            return 0;
+        case WM_ENDSESSION:
+            // The parent was checkpointed before recovery. The isolated
+            // process owns newer candidates; never stage the stale editor.
+            return 0;
+        default: break;
+        }
+    }
     // MainWndProc-local WM_APP messages. Values are listed in core/app_core.h.
     constexpr UINT kMsgInitLayout = WM_APP + 1;
     constexpr UINT kMsgRunUiAutomation = WM_APP + 210;
     constexpr UINT kMsgOtherPackageHeadlessProcessDiagnostics = WM_APP + 213;
-    static_assert(AllUniqueValues(std::array<UINT, 10>{
+    static_assert(AllUniqueValues(std::array<UINT, 12>{
         kMsgInitLayout,
         kMsgNoteOverlayUpdate,
         kMsgListMaybeScroll,
@@ -139,8 +156,21 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         kMsgOpenStartupDocument,
         kMsgBackgroundSaveComplete,
         kMsgOtherPackageHeadlessProcessDiagnostics,
+        kMsgStageRecovery,
+        kMsgDocumentSourceProtectionChanged,
     }));
     switch (msg) {
+    case kMsgDocumentSourceProtectionChanged:
+        RefreshStatusDisplay(hWnd);
+        if (document_source_protection::HasPendingProtection() || document_source_protection::HasRecoveryFailure()) {
+            ShowSoftNotice(hWnd, localization::Text(document_source_protection::HasRecoveryFailure()
+                ? L"workspace.source_recovery_unavailable" : L"workspace.source_protection_pending_notice"),
+                SoftNoticeKind::Warning);
+        }
+        return 0;
+    case kMsgStageRecovery:
+        recovery::HandleStageRecoveryRequest(hWnd);
+        return 0;
     case kMsgStartupWatchdogAbort:
         RecoverSelfMainWindowOrRequestClose();
         return 0;
@@ -153,6 +183,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         write_checks::EnableNormalObservations(false);
         DebugAppendLayoutLog(L"WM_CREATE", hWnd, 0, 0);
         CreateChildren(hWnd);
+        document_source_protection::SetNotificationWindow(hWnd, kMsgDocumentSourceProtectionChanged);
         DragAcceptFiles(hWnd, TRUE);
         std::wstring automationWorkspaceRoot;
         if (TryGetUiAutomationWorkspaceRoot(&automationWorkspaceRoot)) {
@@ -163,7 +194,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             std::error_code currentPathEc;
             const auto currentPath = std::filesystem::current_path(currentPathEc);
             if (currentPathEc) {
-                ShowSoftNotice(hWnd, L"作業フォルダを確認できません。", SoftNoticeKind::Error);
+                ShowSoftNotice(hWnd, localization::Text(L"main.workspace.current_path_unavailable"), SoftNoticeKind::Error);
                 return -1;
             }
             g_workspaceRoot = currentPath.wstring();
@@ -173,7 +204,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                        &workspaceLockError)) {
             std::wstring message = localization::Text(L"ui.window_proc.3c8c61980ca3");
             if (!workspaceLockError.empty()) message += L"\n\n" + workspaceLockError;
-            ShowSilentMessageDialog(hWnd, L"PDF Note Workspace", message,
+            ShowSilentMessageDialog(hWnd, localization::Text(L"ui.app_title"), message,
                                     SoftNoticeKind::Warning);
             return -1;
         }
@@ -189,7 +220,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         LoadTempExternalLecturesFromSetup();
         g_config = LoadWorkspaceConfig(g_workspaceRoot);
         ApplyRuntimeLogConfigFromWorkspace(g_workspaceRoot, g_config);
-        InitScheduleSortBaseTime();
         if (!EnsureWorkspaceResourceDirs(nullptr)) {
             std::wstring msg = localization::Format(L"ui.window.startup_workspace_not_writable",
                                                     {{L"ROOT", g_workspaceRoot}});
@@ -213,7 +243,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_DROPFILES:
-        HandlePdfNoteListDrop(hWnd, reinterpret_cast<HDROP>(wParam));
+        HandleWorkspaceListDrop(hWnd, reinterpret_cast<HDROP>(wParam));
         return 0;
     case WM_SHOWWINDOW:
         if (wParam && g_hSingleInstanceReadyEvent) {
@@ -252,6 +282,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (g_hLectureList && IsWindowVisible(hWnd)) {
                 if (HasPendingStartupOpenDocumentPath()) {
                     PostMessageW(hWnd, kMsgOpenStartupDocument, 0, 0);
+                } else if (!g_config.restoreLastSession) {
+                    SetFocus(g_leftPaneCollapsed ? hWnd : g_hLectureList);
                 } else if (g_leftPaneCollapsed) {
                     RestoreStartupLastOpenSelection(hWnd);
                     SetFocus(g_hPdfView ? g_hPdfView : hWnd);
@@ -281,7 +313,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             CompleteUnifiedExportsAfterSave(hWnd, /*saveSucceeded=*/false, /*saveRestarted=*/false);
             RefreshMainMenuBar(hWnd);
             RefreshStatusDisplay(hWnd);
-            if (!completion.error.empty()) {
+            if (!completion.failedStage.empty()) {
+                recovery::RequestStageRecovery(hWnd, completion.failedStage);
+            } else if (!completion.error.empty()) {
                 ShowSilentMessageDialog(
                     hWnd,
                     localization::Text(L"ui.window_proc.752f19065484"),
@@ -297,7 +331,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case kMsgOpenStartupDocument:
-        if (!OpenPendingStartupDocument(hWnd)) {
+        if (!OpenPendingStartupDocument(hWnd) && g_config.restoreLastSession) {
             if (g_hLectureList && IsWindowVisible(hWnd) &&
                 static_cast<int>(SendMessageW(g_hLectureList, LB_GETCURSEL, 0, 0)) < 0) {
                 if (g_leftPaneCollapsed) {
@@ -912,6 +946,14 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
     }
     case WM_TIMER:
+        if (wParam == kOfficeWorkerPollTimerId) {
+            PollOfficeConversionJobs(hWnd);
+            return 0;
+        }
+        if (wParam == kTempPathWorkerTimerId) {
+            PollTempPathAddition(hWnd);
+            return 0;
+        }
         if (wParam == kProcessShutdownObserveTimerId) {
             PollOtherPackageShutdownRequests(hWnd);
             return 0;
@@ -1037,9 +1079,13 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     case WM_CLOSE: {
+        if (HasActiveTempPathAddition() && !s_exitInProgress) {
+            CancelTempPathAddition(true);
+            return 0;
+        }
         // A normal close requests cancellation first.  Keep the window alive
-        // until every worker has posted its completion, so no detached worker
-        // can outlive the UI that owns its result and private temp directory.
+        // until every owned worker is complete and joined. Polling completion
+        // does not depend on a message or transfer a private temp directory.
         if (HasActiveOfficeConversionJobs() && !s_exitInProgress) {
             RequestOfficeConversionCancel(true);
             return 0;
@@ -1107,6 +1153,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // into our private conversion directory while Windows tears down
             // the session.  The worker Job Objects are killed synchronously.
             CancelOfficeConversionJobsForExit();
+            CancelTempPathAddition();
             // Never show a prompt or overwrite originals while Windows is
             // ending the session. A successful stage is recovered next start.
             // SaveNoteIfDirty inside the preservation function commits an
@@ -1124,6 +1171,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     case WM_DESTROY:
+        CancelTempPathAddition();
+        KillTimer(hWnd, kTempPathWorkerTimerId);
+        document_source_protection::SetNotificationWindow(nullptr, 0);
         {
             const bool evidenceSaved = write_checks::FlushNormalObservations(std::filesystem::path(g_workspaceRoot));
             (void)evidenceSaved; // Failed evidence remains pending; never overwrite a bad ledger.

@@ -23,8 +23,8 @@ fs::path MakeTestRoot() {
     root /= std::to_wstring(GetCurrentProcessId()) + L"_" +
             std::to_wstring(static_cast<unsigned long long>(GetTickCount64()));
     std::error_code ec;
-    fs::create_directories(root, ec);
-    return root;
+    const bool created = fs::create_directories(root, ec);
+    return (created && !ec) ? root : fs::path{};
 }
 
 std::string ReadAll(const fs::path& path) {
@@ -73,6 +73,7 @@ clrop::Document MakeDoc(const std::wstring& pdfPath, std::uint64_t size, const s
     item.updated = L"2026-05-12T00:00:01Z";
     item.content = L"safe save payload";
     item.bbox = std::array<double, 4>{1.0, 2.0, 3.0, 4.0};
+    item.bboxEndpoints = std::array<double, 4>{1.0, 2.0, 4.0, -2.0};
     page.items.push_back(std::move(item));
     doc.pages.push_back(std::move(page));
     return doc;
@@ -182,17 +183,37 @@ bool TestSaveEmptyDestinationFailsWithoutCreatingTmp(const fs::path& root) {
     return !saved && !err.empty() && !tmpExists && !escapeExists;
 }
 
+bool TestOversizedSerializationPreservesOriginal(const fs::path& root) {
+    const fs::path dest = root / L"serialized_limit.clrop";
+    std::wstring err;
+    auto doc = MakeDoc(L"large.pdf", 100, L"original-id");
+    if (!clrop::SaveClropFile(dest.wstring(), doc, err,
+                              root / L"tmp_limit_seed", root / L"escape_limit_seed")) return false;
+    const auto original = ReadAll(dest);
+    // UTF-8 expands each character to three bytes. Exercise the real reader
+    // limit, including formatting, without writing a huge file to disk.
+    doc.pages[0].items[0].content.assign((256ULL * 1024 * 1024) / 3 + 1, L'\u65e5');
+    err.clear();
+    const bool saved = clrop::SaveClropFile(dest.wstring(), doc, err,
+                                            root / L"tmp_limit", root / L"escape_limit");
+    return !saved && !err.empty() && ReadAll(dest) == original &&
+           !HasRegularFileUnder(root / L"tmp_limit") &&
+           !HasRegularFileUnder(root / L"escape_limit") &&
+           LoadHasTextItemId(dest, L"original-id");
+}
+
 bool TestNonfiniteDataFailsBeforeReplacingOriginal(const fs::path& root) {
     const fs::path dest = root / L"nonfinite.clrop";
     std::wstring err;
     auto doc = MakeDoc(L"finite.pdf", 100, L"original-id");
     if (!clrop::SaveClropFile(dest.wstring(), doc, err, root / L"tmp_finite", root / L"escape_finite")) return false;
     const auto before = ReadAll(dest);
-    for (int field = 0; field < 3; ++field) {
+    for (int field = 0; field < 4; ++field) {
         auto invalid = doc;
         if (field == 0) invalid.pages[0].items[0].pt = std::numeric_limits<double>::infinity();
         if (field == 1) (*invalid.pages[0].items[0].bbox)[0] = std::numeric_limits<double>::quiet_NaN();
-        if (field == 2) invalid.pdfId.pageSizesPt[0][0] = std::numeric_limits<double>::infinity();
+        if (field == 2) (*invalid.pages[0].items[0].bboxEndpoints)[0] = std::numeric_limits<double>::quiet_NaN();
+        if (field == 3) invalid.pdfId.pageSizesPt[0][0] = std::numeric_limits<double>::infinity();
         err.clear();
         if (clrop::SaveClropFile(dest.wstring(), invalid, err, root / L"tmp_invalid", root / L"escape_invalid") ||
             err.empty() || ReadAll(dest) != before || HasRegularFileUnder(root / L"tmp_invalid")) return false;
@@ -206,6 +227,10 @@ int main() {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 
     const fs::path root = MakeTestRoot();
+    if (root.empty()) {
+        std::cerr << "Could not reserve an owned CLROP safety test directory.\n";
+        return 2;
+    }
 
     auto run = [&](const char* name, bool (*fn)(const fs::path&)) {
         std::cout << "Testing: " << name << "... " << std::flush;
@@ -220,8 +245,17 @@ int main() {
     run("SaveClropFile read-only destination fails and preserves original", &TestSaveReadOnlyDestinationFailsAndPreservesOriginal);
     run("SaveClropFile empty destination fails without temp artifacts", &TestSaveEmptyDestinationFailsWithoutCreatingTmp);
     run("nonfinite data fails before replacing original", &TestNonfiniteDataFailsBeforeReplacingOriginal);
+    run("oversized serialized data preserves original without temp artifacts", &TestOversizedSerializationPreservesOriginal);
 
     std::error_code ec;
+    const fs::path resolvedRoot = fs::weakly_canonical(root, ec);
+    if (ec) return 2;
+    const fs::path resolvedTemp = fs::weakly_canonical(fs::temp_directory_path(), ec);
+    if (ec || resolvedRoot.parent_path().parent_path() != resolvedTemp ||
+        resolvedRoot.filename() != root.filename() || root.filename().empty()) {
+        std::cerr << "Refusing cleanup outside the owned CLROP safety test directory.\n";
+        return 2;
+    }
     fs::remove_all(root, ec);
 
     std::cout << "Summary: failed=" << g_failed << "\n";

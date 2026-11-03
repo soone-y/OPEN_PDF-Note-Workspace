@@ -19,7 +19,6 @@ enum class PromptCreateNameResult {
 };
 
 bool PromptNewLectureName(HWND owner, std::wstring& outName);
-bool PromptNewSessionName(HWND owner, std::wstring& outName);
 // The caller owns validation; a failed check keeps the same dialog and input
 // alive. No accepted value is published until the check succeeds.
 using SimpleTextValidator = std::function<bool(HWND, const std::wstring&)>;

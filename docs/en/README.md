@@ -1,19 +1,21 @@
 # PDF Note Workspace (English)
 
-This directory contains the guides for using the English release. Start with Getting Started, then open the guide for the task you want to perform.
+This directory contains the guides for using the English release. Begin with [Getting Started](Getting_Started.md) when installing the application; after that, choose a guide by the task you want to perform.
 
 - Start: `pdf_note_workspace.exe`
 - Read-only viewer: `readonly_viewer.exe`
 - Documentation and licenses: this `docs/` directory and the release `licenses/` directory
 
-[Getting Started](Getting_Started.md) covers launching the app, Full versus Lite, and protecting work data.
+[Using the Application](Using_the_App.md) is the everyday starting point: open a PDF, add notes or annotations, then save or export your work. Guides for formats, recovery, and troubleshooting are for the point at which you need them.
 
 - [Help Reference](Help_Reference.md)
 - [Saving and Recovery](Save_and_Recovery.md)
 - [File Formats](File_Formats.md)
 - [`.clro` Note Format](CLRO_Note_Format.md)
+- [Note writing guide](Note_Writing_Guide.md)
 - [`.clrop` PDF Annotation Data](CLROP_Annotation_Format.md)
 - [Using the Application](Using_the_App.md)
+- [Read-only Viewer](Read_Only_Viewer.md)
 - [Troubleshooting](Troubleshooting.md)
 - [Build and Verification](How_to_Build.md)
 

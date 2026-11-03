@@ -1,0 +1,11 @@
+/.gitattributes text eol=lf
+docs/internal/archive/operations/public_repo_release_allowlist_2026-07-28.txt text eol=lf
+docs/internal/public_repo_release_artifact_manifest_2026-08-12.tsv text eol=lf
+
+# Preserve the new upstream legal originals without newline conversion.
+third_party/pdfium/licenses/dragonbox-Apache2-LLVM.txt -text
+third_party/pdfium/licenses/dragonbox-Boost.txt -text
+third_party/pdfium/licenses/harfbuzz.txt -text
+third_party/pdfium/licenses/highway.txt -text
+STATISTICS.md text eol=lf
+docs/statistics/** text eol=lf

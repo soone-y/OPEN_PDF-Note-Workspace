@@ -400,6 +400,7 @@ NoteRenderFinalPresentationInteractionResult HitTestNoteRenderFinalPresentation(
     uint64_t bestVerticalDistance = std::numeric_limits<uint64_t>::max();
     int64_t bestDistance = std::numeric_limits<int64_t>::max();
     bool bestHidden = true;
+    bool bestContains = false;
     for (size_t runIndex = 0; runIndex < line.placement.runs.size(); ++runIndex) {
         const NoteRenderRunPlacement& run = line.placement.runs[runIndex];
         const bool hidden = !line.raw_surface &&
@@ -420,18 +421,23 @@ NoteRenderFinalPresentationInteractionResult HitTestNoteRenderFinalPresentation(
             }
             const int64_t distance = std::llabs(
                 static_cast<int64_t>(boundary.x_px) - static_cast<int64_t>(contentX));
+            // Match committed hit testing at a shared link/text boundary.
+            const bool contains = contentX >= fragment->x_px &&
+                static_cast<int64_t>(contentX) < static_cast<int64_t>(fragment->x_px) + fragment->width_px;
             // Invisible syntax can share an X coordinate with visible text.
             // It is a fallback for syntax-only rows, never the click owner
             // when this visual row contains a displayed source run.
             if (!bestBoundary || verticalDistance < bestVerticalDistance ||
                 (verticalDistance == bestVerticalDistance &&
                  ((bestHidden && !hidden) ||
-                  (bestHidden == hidden && distance < bestDistance)))) {
+                  (bestHidden == hidden && ((!bestContains && contains) ||
+                   (bestContains == contains && distance < bestDistance)))))) {
                 bestRun = runIndex;
                 bestBoundary = &boundary;
                 bestDistance = distance;
                 bestVerticalDistance = verticalDistance;
                 bestHidden = hidden;
+                bestContains = contains;
             }
         }
     }
@@ -454,13 +460,10 @@ NoteRenderFinalPresentationInteractionResult HitTestNoteRenderFinalPresentation(
             candidate.is_link = sourceRun->kind == NoteRenderSourceRunKind::LinkText &&
                 !sourceRun->link_target.empty();
             if (candidate.is_link) candidate.link_target = sourceRun->link_target;
-            for (const NoteRenderSourceStyleAttribute& style : sourceRun->styles) {
-                if (style.kind == StyleKind::LinkId && !style.value.empty()) {
-                    candidate.is_link = true;
-                    candidate.is_legacy_link_id = true;
-                    candidate.link_target = style.value;
-                    break;
-                }
+            if (const auto id = sourceRun->effective_link_id(); !id.empty()) {
+                candidate.is_link = true;
+                candidate.is_legacy_link_id = true;
+                candidate.link_target = id;
             }
         }
         *out = std::move(candidate);

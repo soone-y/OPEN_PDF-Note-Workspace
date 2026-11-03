@@ -21,6 +21,11 @@ static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintR
     DeleteObject(pdfBg);
 
     const int currentPage = PageAtCurrentView();
+    if (g_pdf.kind == DocKind::None && g_currentNotePath.empty()) {
+        empty_view_guide::Paint(hwnd, memDC, client,
+            shortcut_help::Build(g_config.emptyViewGuideMode, AnnotToolShortcutBindings(), g_shapeDrawMode),
+            g_hUIFont, g_theme);
+    } else empty_view_guide::Clear(hwnd, g_pdf.kind == DocKind::None);
     if (!g_pdf.pages.empty()) {
         BITMAPINFO bmi{};
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -105,6 +110,7 @@ static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintR
         DrawTextSelection(memDC);
         DrawMagnifierLens(memDC, client);
         DrawEraserHitVisualization(memDC, paint);
+        DrawShapeRotationHandles(memDC);
 
         // dotted preview removed; in-progress drawing is handled by DrawInProgress
     }
@@ -292,6 +298,9 @@ void JumpToPage(HWND pdfWnd, int index) {
 void JumpToPdfPoint(HWND pdfWnd, int pageIndex, double xPt, double yPt) {
     if (g_pdf.pages.empty()) return;
     if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return;
+    if (!EnsurePdfPageCoordinates(pageIndex)) return;
+    const auto projected = PdfPointForView(g_pdf.pages[static_cast<size_t>(pageIndex)], xPt, yPt);
+    xPt = projected.x; yPt = projected.y;
     MarkPdfVirtualViewportChange();
     if (PdfSinglePageModeActive()) {
         JumpToPage(pdfWnd, pageIndex);

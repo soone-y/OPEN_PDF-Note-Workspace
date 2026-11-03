@@ -444,7 +444,8 @@ static void SyncFinalNoteScrollBars(HWND hWnd) noexcept {
     GetClientRect(hWnd, &client);
     const int clientWidth = std::max(0, static_cast<int>(client.right - client.left));
     const int clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
-    const uint64_t contentHeight = frame->presentation()->line_layouts().total_height_px();
+    const uint64_t contentHeight = note::BottomSpaceExtent(
+        frame->presentation()->line_layouts().total_height_px(), NoteBottomSpacePx(hWnd, clientHeight));
     uint64_t extent = 0;
     if (frame->HorizontalExtent(&extent) !=
         note::NoteRenderFinalPresentationInteractionResult::Resolved) {
@@ -498,7 +499,9 @@ static void SyncFinalNoteScrollBars(HWND hWnd) noexcept {
 // Vim movement.  A published final frame deliberately does not borrow that
 // viewport: it owns its own origin. Reveal only a new source/caret geometry
 // or explicit keyboard input. Passive publications preserve the user's
-// viewport, including at the lower scroll limit. The remembered geometry
+// viewport, including at the lower scroll limit. A viewport/preference change
+// restores the margin only for an already visible caret, preserving a view
+// the user scrolled away from the caret. The remembered geometry
 // survives frame withdrawal but is never used for paint or hit testing.
 static void EnsureFinalNoteRenderCaretVisible(HWND hWnd) noexcept {
     if (!hWnd || (GetFocus() != hWnd &&
@@ -512,31 +515,35 @@ static void EnsureFinalNoteRenderCaretVisible(HWND hWnd) noexcept {
     }
     const note::NoteDerivedSnapshotIdentity source{
         CurrentNoteTextCoreOwner(), CurrentNoteTextCoreRevision()};
+    RECT client{};
+    if (!GetClientRect(hWnd, &client)) return;
+    const int clientWidth = std::max(0, static_cast<int>(client.right - client.left));
+    const int clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
+    if (clientWidth <= 0 || clientHeight <= 0) return;
+    const int bottomSpace = NoteBottomSpacePx(hWnd, clientHeight);
     const auto previous = context.finalRenderLastCaret;
     const bool unchanged = context.finalRenderLastCaretSource == source && previous &&
         previous->source_offset == caret.source_offset && previous->line_index == caret.line_index &&
         previous->x_px == caret.x_px && previous->top_px == caret.top_px &&
         previous->bottom_px == caret.bottom_px;
+    const bool sameViewport = context.finalRenderLastCaretViewportWidth == clientWidth &&
+        context.finalRenderLastCaretViewportHeight == clientHeight &&
+        context.finalRenderLastCaretBottomSpace == bottomSpace;
+    const int64_t oldLeft = std::max(0, g_noteRenderScrollX);
+    const bool wasVisible = context.finalRenderLastCaretViewportHeight > 0 &&
+        caret.bottom_px >= context.finalRenderScrollY &&
+        caret.bottom_px - context.finalRenderScrollY <=
+            static_cast<uint64_t>(context.finalRenderLastCaretViewportHeight) &&
+        caret.x_px >= oldLeft && caret.x_px < oldLeft + context.finalRenderLastCaretViewportWidth;
     context.finalRenderLastCaretSource = source;
     context.finalRenderLastCaret = caret;
-    if (unchanged) return;
-    RECT client{};
-    GetClientRect(hWnd, &client);
-    const int clientWidth = std::max(0, static_cast<int>(client.right - client.left));
-    const int clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
-    if (clientHeight > 0) {
-        const uint64_t viewport = static_cast<uint64_t>(clientHeight);
-        const uint64_t visibleBottom = context.finalRenderScrollY >
-                std::numeric_limits<uint64_t>::max() - viewport
-            ? std::numeric_limits<uint64_t>::max()
-            : context.finalRenderScrollY + viewport;
-        if (caret.top_px < context.finalRenderScrollY) {
-            context.finalRenderScrollY = caret.top_px;
-        } else if (caret.bottom_px > visibleBottom) {
-            context.finalRenderScrollY = caret.bottom_px > viewport
-                ? caret.bottom_px - viewport : 0;
-        }
-    }
+    context.finalRenderLastCaretViewportWidth = clientWidth;
+    context.finalRenderLastCaretViewportHeight = clientHeight;
+    context.finalRenderLastCaretBottomSpace = bottomSpace;
+    if (unchanged && (sameViewport || !wasVisible)) return;
+    context.finalRenderScrollY = note::RevealCaretWithBottomSpace(
+        context.finalRenderScrollY, caret.top_px, caret.bottom_px, clientHeight,
+        bottomSpace);
     if (clientWidth > 0) {
         const int64_t caretX = caret.x_px;
         const int64_t visibleLeft = std::max<int64_t>(0, g_noteRenderScrollX);
@@ -968,7 +975,8 @@ static bool TryPaintFinalNoteRenderFrame(HWND hWnd, HDC hdc) {
     paint.theme.text = g_noteFgColor;
     paint.theme.background = g_noteBgColor;
     paint.theme.caret = g_noteFgColor;
-    paint.theme.selection_surface = GetSysColor(COLOR_HIGHLIGHT);
+    paint.theme.selection_surface = BlendColor(
+        g_noteBgColor, GetSysColor(COLOR_HIGHLIGHT), Luma(g_noteBgColor) >= 128 ? 0.25 : 0.40);
     paint.theme.link = BlendColor(g_theme.accent, g_noteFgColor, 0.20);
     const bool painted = frame->Paint(hdc, paint);
     if (oldFont) SelectObject(hdc, oldFont);
@@ -1154,11 +1162,8 @@ static std::optional<std::wstring> ResolveFinalLegacyLinkIdAtCanonicalOffset(
                 canonicalOffset >= run.source_span.end.value) {
                 continue;
             }
-            for (const note::NoteRenderSourceStyleAttribute& style : run.styles) {
-                if (style.kind == note::StyleKind::LinkId && !style.value.empty()) {
-                    return style.value;
-                }
-            }
+            const auto id = run.effective_link_id();
+            if (!id.empty()) return std::wstring(id);
         }
     } catch (const std::bad_alloc&) {
         return std::nullopt;
@@ -1228,7 +1233,8 @@ static bool ScrollFinalNoteRenderBy(HWND hWnd, int horizontalDelta, int vertical
     uint64_t extent = 0;
     if (frame->HorizontalExtent(&extent) !=
         note::NoteRenderFinalPresentationInteractionResult::Resolved) return false;
-    const uint64_t height = frame->presentation()->line_layouts().total_height_px();
+    const uint64_t height = note::BottomSpaceExtent(
+        frame->presentation()->line_layouts().total_height_px(), NoteBottomSpacePx(hWnd, clientHeight));
     const int64_t nextX = static_cast<int64_t>(g_noteRenderScrollX) + horizontalDelta;
     const int64_t nextY = static_cast<int64_t>(context.finalRenderScrollY) + verticalDelta;
     g_noteRenderScrollX = ClampFinalScrollAxis(
@@ -1267,7 +1273,7 @@ static bool HandleFinalNoteRenderScrollCommand(HWND hWnd, bool horizontal, WPARA
         ? g_noteRenderScrollX
         : static_cast<int>(std::min<uint64_t>(GetViewContext(hWnd).finalRenderScrollY,
             static_cast<uint64_t>(std::numeric_limits<int>::max())));
-    int target = current;
+    int64_t target = current;
     switch (LOWORD(wParam)) {
     case SB_LINEUP:
         target -= line;

@@ -7,14 +7,22 @@
 #include "core/annot_stage_replay.h"
 #include "core/atomic_write.h"
 #include "diagnostics/normal_operations.h"
+#include "diagnostics/open_work_counters.h"
 #include "core/localization.h"
+#include "core/open_preferences.h"
 #include "core/preview_trace.h"
 #include "core/ui_notify.h"
+#include "core/text_encoding.h"
+#include "clrop/json.h"
+#include "diagnostics/write_checks.h"
 #include "note/note_identity.h"
 #include "note/note_identity_store.h"
 #include "note/note_persistence.h"
+#include "note/note_workspace_service.h"
 #include "workspace/workspace_actions.h"
 #include "workspace/workspace_write_lock.h"
+#include "recovery/stage_recovery.h"
+#include "recovery/annotation_transfer.h"
 
 #include <algorithm>
 #include <array>
@@ -27,8 +35,10 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <map>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -221,7 +231,7 @@ struct ScopedBatchSaveUiRefresh {
     HWND owner = g_batchSaveUiOwner ? g_batchSaveUiOwner : g_hMainWnd;
     g_batchSaveUiPending = false;
     g_batchSaveUiOwner = nullptr;
-    if (owner)
+    if (owner && !recovery::IsStageRecoveryProcess())
       RefreshMainWindowUiState(owner);
   }
 };
@@ -521,15 +531,16 @@ ResolveDeferredCurrentNotePath(std::wstring *outErr = nullptr) {
   const bool usePdfName =
       !pdfPath.empty() &&
       IsPathUnderRoot(std::filesystem::path(pdfPath), sessionRoot);
+  const std::wstring extension = open_preferences::NewNoteExtension(g_config.newNoteExtension);
   auto makeName = [&](int idx) {
     if (!usePdfName) {
       if (idx == 0)
-        return baseName + L".md";
-      return baseName + L"(" + std::to_wstring(idx) + L").md";
+        return baseName + extension;
+      return baseName + L"(" + std::to_wstring(idx) + L")" + extension;
     }
     if (idx <= 1)
-      return baseName + L".md";
-    return baseName + L"_Page" + std::to_wstring(idx) + L".md";
+      return baseName + extension;
+    return baseName + L"_Page" + std::to_wstring(idx) + extension;
   };
 
   std::error_code ec;
@@ -542,7 +553,11 @@ ResolveDeferredCurrentNotePath(std::wstring *outErr = nullptr) {
       continue;
     }
     if (!exists && !NoteCandidateHasStageConflict(candidate)) {
-      g_currentNotePath = candidate.wstring();
+      // A discarded draft can leave a live kernel at this otherwise unused
+      // filename. Preserve its text/history and choose another candidate.
+      const auto known = note::FindRuntimeNoteIdentityPath(candidate.wstring());
+      if (known && note::RuntimeNoteWorkspaceService().FindKernel(*known)) continue;
+      if (!BindDeferredNoteEditorToPath(candidate.wstring(), outErr)) return {};
       SyncLeftPaneSelection();
       RefreshDirtyUi(g_hMainWnd);
       return candidate;
@@ -755,8 +770,10 @@ CaptureCurrentNoteBytes(note::SnapshotIdentity *outIdentity = nullptr) {
   // format without consent.
   if (!g_lastNoteTextEncodingError.empty()) return {};
   std::string bytes;
+  text_encoding::ErrorCode encodingCode = text_encoding::ErrorCode::None;
   if (!text_encoding::EncodeText(ReadCurrentNoteText(), CurrentNoteStorageEncoding(),
-                                 &bytes, &g_lastNoteTextEncodingError)) {
+                                 &bytes, &g_lastNoteTextEncodingError, &encodingCode)) {
+    g_lastNoteTextEncodingError = localization::Text(text_encoding::ErrorTextId(encodingCode));
     return {};
   }
   if (outIdentity) {
@@ -1885,7 +1902,10 @@ void TrimBackupGenerationsForDestination(
   }
 }
 
-bool CreateBackupIfNeeded(file_output::StagedDiffKind kind,
+// Prepare recovery data without retiring any existing generation. The caller
+// may trim only after destination verification and any persistence commit
+// succeed; failed or interrupted saves deliberately leave extra backups.
+[[nodiscard]] bool CreateBackupIfNeeded(file_output::StagedDiffKind kind,
                           const std::filesystem::path &destPath,
                           std::filesystem::path *outBackupPath,
                           std::filesystem::path *outBackupMetaPath,
@@ -1931,7 +1951,6 @@ bool CreateBackupIfNeeded(file_output::StagedDiffKind kind,
     *outBackupPath = bak;
   if (outBackupMetaPath)
     *outBackupMetaPath = meta;
-  TrimBackupGenerationsForDestination(kind, destPath, meta);
   return true;
 }
 
@@ -2008,6 +2027,7 @@ bool DeleteResolvedEmptyClropDestination(const StageMeta &meta,
 }
 
 void RefreshDirtyUi(HWND owner) {
+  if (recovery::IsStageRecoveryProcess()) return;
   if (g_batchSaveUiDepth > 0) {
     g_batchSaveUiPending = true;
     if (owner)
@@ -2446,16 +2466,23 @@ bool AnnotationCompareEqual(const Annotation &a, const Annotation &b) {
     return false;
   if (a.writingMode != b.writingMode)
     return false;
+  if (a.contentRotation != b.contentRotation)
+    return false;
+  if (a.backgroundAssistMode != b.backgroundAssistMode)
+    return false;
+  if (a.type == Annotation::Type::MarkerText && a.markerDisplayMode != b.markerDisplayMode)
+    return false;
   if (a.linkId != b.linkId || a.linkNotePath != b.linkNotePath)
     return false;
   if (a.mathKind != b.mathKind)
     return false;
   if (a.shapeKind != b.shapeKind)
     return false;
-  if (a.shapeDrawMode != b.shapeDrawMode)
+  if (a.shapeDrawMode != b.shapeDrawMode || a.shapeBoundary != b.shapeBoundary)
     return false;
   if (a.arrowHead != b.arrowHead)
     return false;
+  if (!AnnotationCompareNearlyEqual(a.shapeAngle,b.shapeAngle)) return false;
   if (!AnnotationCompareNearlyEqual(a.shapeRotation, b.shapeRotation))
     return false;
   if (a.path.size() != b.path.size())
@@ -3287,9 +3314,10 @@ bool IntegrateStageMetaToDestination(HWND owner, const StageMeta &meta,
     return false;
   }
 
+  std::filesystem::path backupMetaPath;
   std::wstring backupErr;
   if (!notePersistence.destinationAlreadyWritten && !skipBackup &&
-      !CreateBackupIfNeeded(meta.kind, meta.destPath, nullptr, nullptr,
+      !CreateBackupIfNeeded(meta.kind, meta.destPath, nullptr, &backupMetaPath,
                             &backupErr)) {
     if (outErr)
       *outErr = backupErr;
@@ -3311,6 +3339,11 @@ bool IntegrateStageMetaToDestination(HWND owner, const StageMeta &meta,
     const ULONGLONG writeStartTick = preview_trace::TickNow();
     const bool atomicWriteOk = deleteEmptyClrop
         ? DeleteResolvedEmptyClropDestination(meta, &writeErr)
+        : recovery::IsStageRecoveryProcess() && meta.kind == file_output::StagedDiffKind::Note
+        ? recovery::WriteStageRecoveryOriginalNote(
+              meta.destPath, bytesToWrite,
+              meta.destinationExistedAtStage.value_or(false),
+              meta.destinationFingerprintAtStage.value_or(0), &writeErr)
         : AtomicWriteVerified(meta.destPath, bytesToWrite, std::filesystem::path(g_workspaceRoot), &writeErr);
     preview_trace::Append(
         L"IntegrateStage",
@@ -3344,6 +3377,10 @@ bool IntegrateStageMetaToDestination(HWND owner, const StageMeta &meta,
   }
   if (meta.kind == file_output::StagedDiffKind::Note) {
     RefreshCurrentNotePersistenceIdentity(meta.targetPath);
+  }
+
+  if (!backupMetaPath.empty()) {
+    TrimBackupGenerationsForDestination(meta.kind, meta.destPath, backupMetaPath);
   }
 
   const auto latest = FindLatestStageMeta(meta.kind, meta.targetPath);
@@ -3383,6 +3420,7 @@ bool IntegrateStageMetaToDestination(HWND owner, const StageMeta &meta,
 struct BackgroundSaveWorkerResult {
   bool ok = true;
   std::wstring error;
+  std::filesystem::path failedStage;
   std::vector<file_output::StagedDiffEntry> integrated;
   uint64_t snapshotRevision = 0;
   ULONGLONG startTick = 0;
@@ -3480,9 +3518,10 @@ bool WriteStageMetaToDestinationOnWorker(const StageMeta &meta,
     return false;
   }
 
+  std::filesystem::path backupMetaPath;
   std::wstring backupErr;
   if (!notePersistence.destinationAlreadyWritten &&
-      !CreateBackupIfNeeded(meta.kind, meta.destPath, nullptr, nullptr,
+      !CreateBackupIfNeeded(meta.kind, meta.destPath, nullptr, &backupMetaPath,
                             &backupErr)) {
     if (outErr)
       *outErr = backupErr;
@@ -3524,6 +3563,9 @@ bool WriteStageMetaToDestinationOnWorker(const StageMeta &meta,
     TraceSaveFailure(L"BackgroundSave", L"note_revision_commit_failed",
                      meta.targetPath, meta.stagePath, meta.destPath, writeErr);
     return false;
+  }
+  if (!backupMetaPath.empty()) {
+    TrimBackupGenerationsForDestination(meta.kind, meta.destPath, backupMetaPath);
   }
   return true;
 }
@@ -3690,6 +3732,7 @@ bool SaveNoteFile(HWND owner) {
 }
 
 bool SaveNoteIfDirty(HWND owner) {
+  open_work::Record(open_work::Kind::NoteStageCheck);
   const ULONGLONG saveStartTick = preview_trace::TickNow();
   SaveOperationGuard guard;
   // Saving is an observation boundary. Reconcile a deferred RichEdit or IME
@@ -4313,22 +4356,12 @@ void HandleDeferredAutoStageSaveTimer(HWND owner) {
   }
 }
 
-bool ShouldAutoIntegrateOnSwitchOrExit() { return false; }
-
 bool PrepareStagedDiffsForSwitch(HWND owner) {
   // Switching must remain responsive.  Persist only the small recoverable
   // work checkpoint here; original-file integration is reserved for explicit
   // Save Work, normal exit, and pre-output processing.
   return file_output::SaveNoteIfDirty(owner) &&
          file_output::SaveAnnotationsIfDirty(owner);
-}
-
-bool MaybeAutoIntegrateOnSwitchOrExit(HWND owner) {
-  if (!file_output::SaveNoteIfDirty(owner))
-    return false;
-  if (!file_output::SaveAnnotationsIfDirty(owner))
-    return false;
-  return true;
 }
 
 void ScheduleIntegrateAfterSwitch(HWND owner) {
@@ -4570,6 +4603,7 @@ StartBackgroundSaveAndIntegrateTransaction(HWND owner) {
           if (!WriteStageMetaToDestinationOnWorker(StageMetaFromEntry(entry),
                                                    observationRoot, &err)) {
             result->ok = false;
+            result->failedStage = entry.stagePath;
             result->error =
                 err.empty()
                     ? (localization::Text(L"file_output.stage.09fe64f5550a"))
@@ -4644,6 +4678,7 @@ CompleteBackgroundSaveAndIntegrateTransaction(HWND owner, void *rawResult) {
   ConfigureAutoIntegrateScheduling(owner);
   completion.ok = result->ok;
   completion.error = result->error;
+  completion.failedStage = result->failedStage;
 
   const bool shouldRunQueued =
       result->ok && ShouldRunQueuedSaveTransaction(result->snapshotRevision);
@@ -4848,6 +4883,143 @@ std::vector<StagedDiffEntry> ListStagedDiffEntries() {
   return entries;
 }
 
+recovery::Inspection InspectStagedDiff(const std::filesystem::path &stagePath) {
+  recovery::Inspection result;
+  result.stagePath = stagePath;
+  result.failure = recovery::Failure::Metadata;
+  // A stage selected in the active workspace is the only authority here.
+  // Do not follow a metadata-provided stage path or scan arbitrary folders.
+  const bool noteStage = IsSamePath(stagePath.parent_path(), StageDir(StagedDiffKind::Note));
+  result.isNote = noteStage;
+  if ((!noteStage && !IsSamePath(stagePath.parent_path(), StageDir(StagedDiffKind::Clrop))) ||
+      !write_checks::IsSafeLocalPath(stagePath)) return result;
+  StageMeta meta;
+  result.artifacts = {stagePath, StageMetaPath(stagePath)};
+  if (!LoadStageMetaFile(StageMetaPath(stagePath), &meta) ||
+      !IsSamePath(meta.stagePath, stagePath) ||
+      (meta.kind == StagedDiffKind::Note) != noteStage ||
+      !write_checks::IsSafeLocalPath(meta.targetPath) ||
+      !write_checks::IsSafeLocalPath(meta.destPath)) return result;
+  result.isNote = noteStage;
+  result.targetPath = meta.targetPath;
+  result.destination = meta.destPath;
+  result.failure = recovery::Failure::None;
+  if (!noteStage) {
+    if (!annot_stage_replay::IsCheckpointPrecision(meta.annotationNumericPrecision)) {
+      result.failure = recovery::Failure::Unsupported;
+      return result;
+    }
+    bool mismatch = false;
+    clrop::Document checkpoint;
+    clrop::LoadFileFailureKind failure{};
+    if (!clrop::LoadClropFile(stagePath.wstring(), checkpoint, result.diagnostic, &failure)) {
+      result.failure = failure == clrop::LoadFileFailureKind::Read
+          ? recovery::Failure::Read : recovery::Failure::Parse;
+      return result;
+    }
+    if (!clrop_bridge::LoadAnnotations(stagePath.wstring(), meta.targetPath,
+          result.annotations, mismatch, nullptr, result.diagnostic,
+          clrop_bridge::LoadAnnotationsValidation::Strong) ||
+        !annot_stage_replay::ValidList(result.annotations)) {
+      result.failure = recovery::Failure::Parse;
+      result.annotations.clear();
+      return result;
+    }
+    result.hasCandidate = true;
+    result.precision = meta.annotationNumericPrecision;
+    annot_stage_replay::State replay(result.annotations.size(), result.precision);
+    bool blocked = mismatch;
+    if (mismatch) result.failure = recovery::Failure::TargetMismatch;
+    for (const auto& segment : ListAnnotJournalSegmentsForTarget(meta.targetPath)) {
+      if (segment.baseRevision != meta.revision.value_or(0) || segment.revision <= segment.baseRevision) continue;
+      result.artifacts.push_back(segment.path);
+      const auto bytes = ReadFileBytes(segment.path);
+      std::vector<AnnotCommand> commands;
+      if (!bytes || !DeserializeAnnotCommandsJson(*bytes, &commands, &result.diagnostic)) {
+        if (result.failure == recovery::Failure::None)
+          result.failure = bytes ? recovery::Failure::Parse : recovery::Failure::Read;
+        result.incomplete = true;
+        // Later operations depend on this unreadable segment. Retain files,
+        // never pretend that applying a later segment repairs the missing one.
+        break;
+      }
+      for (const auto& command : commands) {
+        if (!blocked && !replay.Apply(&result.annotations, command)) {
+          result.failure = recovery::Failure::AnnotationConflict;
+          blocked = true;
+        }
+        if (blocked) result.remainingAnnotations.push_back(command);
+      }
+    }
+    // A modern operation applied over a legacy checkpoint must not inherit
+    // the older tolerance when a later operation is reviewed.
+    result.replayState = replay;
+  } else {
+    const auto bytes = ReadFileBytes(stagePath);
+    if (!bytes) { result.failure = recovery::Failure::Read; return result; }
+    result.noteBytes = *bytes;
+    result.hasCandidate = text_encoding::DecodeUtf8Strict(result.noteBytes).has_value();
+    if (!result.hasCandidate) { result.failure = recovery::Failure::Parse; return result; }
+    NoteStageState state;
+    if (PathExistsWin32(NoteStatePath(stagePath))) result.artifacts.push_back(NoteStatePath(stagePath));
+    if (!LoadNoteStageState(stagePath, &state, &result.diagnostic)) {
+      result.failure = recovery::Failure::Parse;
+      result.incomplete = true;
+      return result;
+    }
+    uint64_t expected = 1;
+    for (const auto& segment : ListNoteJournalSegmentsForStage(stagePath)) {
+      if (!segment.revision || segment.revision > state.appliedJournalRevision) continue;
+      result.artifacts.push_back(segment.path);
+      const auto part = ReadFileBytes(segment.path);
+      if (segment.revision != expected || !part) {
+        result.failure = part ? recovery::Failure::MissingData : recovery::Failure::Read;
+        result.incomplete = true;
+        return result;
+      }
+      result.noteBytes += *part;
+      ++expected;
+    }
+    if (expected - 1 != state.appliedJournalRevision) {
+      result.failure = recovery::Failure::MissingData; result.incomplete = true; return result;
+    }
+    result.noteBytes += state.textTailBytes;
+    result.noteBytes += BuildBlankTailBytes(state.blankTailCount);
+    expected = 1;
+    bool blocked = false;
+    for (const auto& segment : ListNoteEditJournalSegmentsForStage(stagePath)) {
+      if (!segment.revision || segment.revision > state.appliedEditJournalRevision) continue;
+      result.artifacts.push_back(segment.path);
+      const auto part = ReadFileBytes(segment.path);
+      const auto edit = part ? ParseNoteByteEdit(*part, &result.diagnostic) : std::nullopt;
+      if (segment.revision != expected || !edit) {
+        if (result.failure == recovery::Failure::None)
+          result.failure = !part ? recovery::Failure::Read : recovery::Failure::MissingData;
+        result.incomplete = true; return result;
+      }
+      recovery::NoteEdit operation{{edit->start}, edit->deletedBytes, edit->insertedBytes};
+      if (!blocked && !recovery::ApplyNoteEdit(&result.noteBytes, operation)) {
+        result.failure = recovery::Failure::NoteConflict; blocked = true;
+      }
+      if (blocked) result.remainingNoteEdits.push_back(std::move(operation));
+      ++expected;
+    }
+    if (expected - 1 != state.appliedEditJournalRevision) {
+      result.failure = recovery::Failure::MissingData; result.incomplete = true;
+    }
+    if (!text_encoding::DecodeUtf8Strict(result.noteBytes)) {
+      result.hasCandidate = false; result.failure = recovery::Failure::Parse;
+    }
+  }
+  if (result.failure == recovery::Failure::None &&
+      !DestinationStillMatchesStageObservation(meta, &result.diagnostic)) {
+    bool exists = false; uint64_t fingerprint = 0;
+    result.failure = CaptureStageDestinationObservation(meta.destPath, &exists, &fingerprint)
+        ? recovery::Failure::DestinationChanged : recovery::Failure::Read;
+  }
+  return result;
+}
+
 bool PromoteStagedDiff(const std::filesystem::path &stagePath) {
   if (stagePath.empty())
     return false;
@@ -4871,9 +5043,7 @@ bool IntegrateStagedDiff(HWND owner, const std::filesystem::path &stagePath, boo
   StageMeta meta;
   if (!LoadStageMetaFile(StageMetaPath(stagePath), &meta)) {
     TraceSaveFailure(L"IntegrateStage", L"load_meta_failed", {}, stagePath);
-    ShowStageMessageDialog(
-        owner, localization::Text(L"file_output.stage.0affa81c15a4"),
-        localization::Text(L"file_output.stage.fd82b89c811d"));
+    recovery::RequestStageRecovery(owner, stagePath);
     return false;
   }
   meta.stagePath = stagePath;
@@ -4910,19 +5080,7 @@ bool IntegrateStagedDiff(HWND owner, const std::filesystem::path &stagePath, boo
 
   if (!IntegrateStageMetaToDestination(owner, meta,
                                        /*discardOtherIfLatest=*/true, &err)) {
-    SilentDialogOptions options;
-    options.title = localization::Text(L"file_output.stage.0affa81c15a4");
-    options.message = err;
-    options.kind = SoftNoticeKind::Error;
-    options.buttons = SilentDialogButtons::YesNo;
-    options.yesLabel = localization::Text(L"file_output.stage.603bc62f3f34");
-    options.noLabel = localization::Text(L"file_output.stage.0300eea175d3");
-    options.defaultResult = SilentDialogResult::Yes;
-    options.escapeResult = SilentDialogResult::Yes;
-
-    if (ShowSilentDialog(owner, options) == SilentDialogResult::No) {
-      return doSkipBackup();
-    }
+    recovery::RequestStageRecovery(owner, stagePath);
     return false;
   }
   return true;
@@ -4945,11 +5103,6 @@ bool DiscardStagedDiff(const std::filesystem::path &stagePath) {
   }
   UpdateCurrentIntegrateFlags();
   return true;
-}
-
-std::filesystem::path StagedNotePathFor(const std::wstring &notePath) {
-  auto latest = FindLatestStageMeta(StagedDiffKind::Note, notePath);
-  return latest.has_value() ? latest->stagePath : std::filesystem::path{};
 }
 
 std::filesystem::path StagedClropPathForPdf(const std::wstring &pdfPath) {
@@ -5161,8 +5314,9 @@ bool RestoreFromBackupMeta(HWND owner,
         localization::Text(L"file_output.stage.631e5fb971b2"));
     return false;
   }
+  std::filesystem::path newBackupMetaPath;
   std::wstring err;
-  if (!CreateBackupIfNeeded(meta.kind, meta.destPath, nullptr, nullptr, &err)) {
+  if (!CreateBackupIfNeeded(meta.kind, meta.destPath, nullptr, &newBackupMetaPath, &err)) {
     ShowStageMessageDialog(
         owner, localization::Text(L"file_output.stage.5c4b18ff1f3d"), err);
     return false;
@@ -5171,6 +5325,9 @@ bool RestoreFromBackupMeta(HWND owner,
     ShowStageMessageDialog(
         owner, localization::Text(L"file_output.stage.5c4b18ff1f3d"), err);
     return false;
+  }
+  if (!newBackupMetaPath.empty()) {
+    TrimBackupGenerationsForDestination(meta.kind, meta.destPath, newBackupMetaPath);
   }
   if (outDest)
     *outDest = meta.destPath;
@@ -5182,5 +5339,7 @@ bool DeleteBackupMeta(const std::filesystem::path &backupMetaPath,
   SaveOperationGuard guard;
   return DeleteBackupMetaFiles(backupMetaPath, outErr);
 }
+
+#include "file_output_stage_recovery.cppinc"
 
 } // namespace file_output

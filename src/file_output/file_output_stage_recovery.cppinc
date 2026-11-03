@@ -1,0 +1,954 @@
+// Private stage adapter. Keep normal stage writers, backup, generation checks
+// and note persistence commits in their existing TU. Recovery owns independent
+// snapshots, never relaxes normal replay, and archives originals only after a
+// verified save plus a durable receipt. UI/process ownership is in recovery/.
+namespace recovery_store {
+namespace fs = std::filesystem;
+constexpr uint64_t limit = 128ull * 1024 * 1024;
+void Need(bool value) {
+  if (!value)
+    throw std::runtime_error("recovery persistence boundary failed");
+}
+bool Within(const fs::path &path, const fs::path &parent) {
+  const auto p = NormalizePathKey(path), r = NormalizePathKey(parent);
+  return p.size() > r.size() && p.compare(0, r.size(), r) == 0 &&
+         (p[r.size()] == L'\\' || p[r.size()] == L'/');
+}
+std::string Bytes(const fs::path &path) {
+  Need(write_checks::IsSafeLocalPath(path));
+  std::string bytes;
+  Need(ReadFileBytesNoFollowLimitedWin32(path, limit, bytes));
+  return bytes;
+}
+std::string Hash(const fs::path &path) {
+  Need(write_checks::IsSafeLocalPath(path));
+  auto native = path;
+  native.make_preferred();
+  std::string hash;
+  Need(clrop::ComputeFileSha256(native, &hash));
+  return hash;
+}
+void Put(std::string &bytes, std::string_view field) {
+  bytes += std::to_string(field.size()) + "\n";
+  bytes.append(field);
+}
+std::string Take(std::string_view &bytes) {
+  const auto end = bytes.find('\n');
+  Need(end != std::string_view::npos && end < 21);
+  const auto n = ParseUint64(UTF8ToWide(std::string(bytes.substr(0, end))));
+  Need(n && *n <= limit && *n <= bytes.size() - end - 1);
+  bytes.remove_prefix(end + 1);
+  std::string field(bytes.substr(0, static_cast<size_t>(*n)));
+  bytes.remove_prefix(static_cast<size_t>(*n));
+  return field;
+}
+size_t Count(std::string_view &bytes) {
+  const auto n = ParseUint64(UTF8ToWide(Take(bytes)));
+  Need(n && *n <= 10000);
+  return static_cast<size_t>(*n);
+}
+bool Flag(std::string_view &bytes) {
+  const auto value = Take(bytes);
+  Need(value == "0" || value == "1");
+  return value == "1";
+}
+void Write(const fs::path &path, std::string_view bytes) {
+  Need(Within(path, WorkspaceEscapeRoot() / L"recovery"));
+  std::wstring error;
+  Need(AtomicWriteVerified(path, bytes, fs::path(g_workspaceRoot), &error));
+}
+void NewFile(const fs::path &path, std::string_view bytes) {
+  Need(path.is_absolute() && write_checks::IsSafeLocalPath(path));
+  HANDLE file = CreateFileW(
+      ToExtendedWin32PathIfAbsoluteLocal(path).c_str(), GENERIC_WRITE,
+      FILE_SHARE_READ, nullptr, CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  Need(file != INVALID_HANDLE_VALUE);
+  struct Close {
+    HANDLE h;
+    ~Close() { CloseHandle(h); }
+  } close{file};
+  size_t offset = 0;
+  while (offset < bytes.size()) {
+    const auto count = static_cast<DWORD>(
+        std::min<size_t>(bytes.size() - offset, 1024 * 1024));
+    DWORD written = 0;
+    Need(WriteFile(file, bytes.data() + offset, count, &written, nullptr) &&
+         written > 0);
+    offset += written;
+  }
+  Need(FlushFileBuffers(file));
+  Need(Bytes(path) == bytes);
+}
+std::string Annots(const std::vector<Annotation> &annotations) {
+  Need(annot_stage_replay::ValidList(annotations));
+  std::vector<AnnotCommand> commands;
+  for (size_t i = 0; i < annotations.size(); ++i) {
+    AnnotCommand command;
+    command.kind = AnnotCommandKind::Add;
+    command.afterIndex = static_cast<int>(i);
+    command.after = annotations[i];
+    commands.push_back(std::move(command));
+  }
+  std::string bytes;
+  Need(SerializeAnnotCommandsJson(commands, &bytes));
+  return bytes;
+}
+std::vector<Annotation> Annots(std::string_view bytes) {
+  std::vector<AnnotCommand> commands;
+  std::vector<Annotation> annotations;
+  Need(DeserializeAnnotCommandsJson(std::string(bytes), &commands));
+  for (const auto &command : commands)
+    Need(command.kind == AnnotCommandKind::Add &&
+         ApplyAnnotCommandToList(&annotations, command));
+  Need(annot_stage_replay::ValidList(annotations));
+  return annotations;
+}
+fs::path Directory(const fs::path &stage) {
+  Need(stage.is_absolute() && write_checks::IsSafeLocalPath(stage));
+  Need(IsSamePath(stage.parent_path(), StageDir(StagedDiffKind::Note)) ||
+       IsSamePath(stage.parent_path(), StageDir(StagedDiffKind::Clrop)));
+  return WorkspaceEscapeRoot() / L"recovery" / StagePathHash(stage);
+}
+void Validate(const recovery::Review &review) {
+  Need(IsSamePath(review.directory, Directory(review.primaryStage)) &&
+       write_checks::IsSafeLocalPath(review.directory));
+  for (const auto &artifact : review.artifacts) {
+    Need(Within(artifact.original, StageRoot()) &&
+         IsSamePath(artifact.copy.parent_path(), review.directory));
+    Need(artifact.hash.size() == 64 && Hash(artifact.copy) == artifact.hash);
+  }
+}
+bool SourcesMatch(const recovery::Review &review) {
+  for (size_t i = 0; i < review.artifacts.size(); ++i) {
+    const auto &artifact = review.artifacts[i];
+    if (PathExistsWin32(artifact.original)) {
+      if (Hash(artifact.original) != artifact.hash)
+        return false;
+    } else if (!review.candidate.saved ||
+               !PathExistsWin32(review.directory /
+                                (L"archived_" + std::to_wstring(i))))
+      return false;
+  }
+  return true;
+}
+std::string Encode(const recovery::Candidate &candidate) {
+  Need(text_encoding::DecodeUtf8Strict(candidate.note).has_value());
+  std::string bytes = "recovery-candidate-v1\n";
+  for (const auto &field :
+       {Annots(candidate.annotations), candidate.note,
+        candidate.pdf.generic_u8string(),
+        candidate.destination.generic_u8string(), candidate.pdfHash,
+        candidate.destinationHash,
+        candidate.destinationExists ? std::string("1") : std::string("0"),
+        candidate.targetConfirmed ? std::string("1") : std::string("0"),
+        candidate.partialAccepted ? std::string("1") : std::string("0"),
+        candidate.saved ? std::string("1") : std::string("0"),
+        std::to_string(static_cast<int>(candidate.noteEncoding))})
+    Put(bytes, field);
+  return bytes;
+}
+recovery::Candidate Decode(std::string_view bytes) {
+  constexpr std::string_view magic = "recovery-candidate-v1\n";
+  Need(bytes.substr(0, magic.size()) == magic);
+  bytes.remove_prefix(magic.size());
+  recovery::Candidate result;
+  result.annotations = Annots(Take(bytes));
+  result.note = Take(bytes);
+  Need(text_encoding::DecodeUtf8Strict(result.note).has_value());
+  result.pdf = fs::u8path(Take(bytes));
+  result.destination = fs::u8path(Take(bytes));
+  result.pdfHash = Take(bytes);
+  result.destinationHash = Take(bytes);
+  result.destinationExists = Flag(bytes);
+  result.targetConfirmed = Flag(bytes);
+  result.partialAccepted = Flag(bytes);
+  result.saved = Flag(bytes);
+  const auto encoding = Count(bytes);
+  Need(encoding <= static_cast<size_t>(text_encoding::Encoding::Cp932));
+  result.noteEncoding = static_cast<text_encoding::Encoding>(encoding);
+  Need(bytes.empty());
+  Need(result.destination.empty() ||
+       (result.destination.is_absolute() &&
+        write_checks::IsSafeLocalPath(result.destination)));
+  Need(result.pdf.empty() ||
+       (result.pdf.is_absolute() && write_checks::IsSafeLocalPath(result.pdf)));
+  return result;
+}
+void Observe(recovery::Candidate &candidate) {
+  Need(CaptureStageDestinationObservation(
+      candidate.destination, &candidate.destinationExists, nullptr));
+  candidate.destinationHash =
+      candidate.destinationExists ? Hash(candidate.destination) : std::string{};
+}
+void SaveIntent(const recovery::Review &review,
+                const recovery::Candidate &candidate) {
+  static uint64_t sequence = 0;
+  const auto bytes = Encode(candidate);
+  const auto version =
+      review.directory /
+      (L"save_intent_" + std::to_wstring(GetCurrentProcessId()) + L"_" +
+       std::to_wstring(GetTickCount64()) + L"_" + std::to_wstring(++sequence) +
+       L".bin");
+  Need(!PathExistsWin32(version));
+  Write(version, bytes);
+  Write(review.directory / L"save_intent.bin", bytes);
+}
+bool DestinationMatches(const recovery::Candidate &candidate) {
+  bool exists = false;
+  Need(CaptureStageDestinationObservation(candidate.destination, &exists,
+                                          nullptr));
+  return exists == candidate.destinationExists &&
+         (!exists || Hash(candidate.destination) == candidate.destinationHash);
+}
+void ValidatePdf(const fs::path &path,
+                 const std::vector<Annotation> &annotations) {
+  std::lock_guard<std::recursive_mutex> lock(g_pdfiumMutex);
+  FPDF_DOCUMENT pdf = FPDF_LoadDocument(path.u8string().c_str(), nullptr);
+  Need(pdf != nullptr);
+  const int pages = FPDF_GetPageCount(pdf);
+  FPDF_CloseDocument(pdf);
+  Need(pages > 0);
+  for (const auto &annotation : annotations)
+    Need(annotation.pageIndex >= 0 && annotation.pageIndex < pages);
+}
+bool OutputMatches(const recovery::Review &review,
+                   const recovery::Candidate &candidate) {
+  try {
+    if (review.isNote) {
+      text_encoding::DecodedText decoded;
+      return text_encoding::DecodeExternalText(Bytes(candidate.destination),
+                                               &decoded) &&
+             WideToUTF8(decoded.text) == candidate.note;
+    }
+    Need(!candidate.pdf.empty() && Hash(candidate.pdf) == candidate.pdfHash);
+    Need(IsSamePath(candidate.destination,
+                    clrop_bridge::ClropPathForPdf(candidate.pdf.wstring())));
+    if (!PathExistsWin32(candidate.destination))
+      return candidate.annotations.empty();
+    std::vector<Annotation> actual;
+    bool mismatch = false;
+    std::wstring error;
+    Need(clrop_bridge::LoadAnnotations(candidate.destination.wstring(),
+                                       candidate.pdf.wstring(), actual,
+                                       mismatch, nullptr, error) &&
+         !mismatch && actual.size() == candidate.annotations.size());
+    for (size_t i = 0; i < actual.size(); ++i)
+      Need(AnnotationEquals(actual[i], candidate.annotations[i]));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+std::string Manifest(const recovery::Review &review);
+void PreserveArtifact(recovery::Review &review, const fs::path &path) {
+  if (!PathExistsWin32(path) ||
+      std::any_of(review.artifacts.begin(), review.artifacts.end(),
+                  [&](const recovery::Artifact &a) {
+                    return IsSamePath(a.original, path);
+                  }))
+    return;
+  Need(Within(path, StageRoot()));
+  const auto hash = Hash(path), bytes = Bytes(path);
+  const auto copy = review.directory /
+                    (L"source_" + std::to_wstring(review.artifacts.size()) +
+                     L"_" + UTF8ToWide(hash) + L".bin");
+  if (!PathExistsWin32(copy))
+    Write(copy, bytes);
+  Need(Hash(copy) == hash && Hash(path) == hash);
+  review.artifacts.push_back({path, copy, hash});
+}
+void ResumeSaveChecked(recovery::Review &review) {
+  // The intent is durable before any destination write. It lets a restart
+  // recognize a completed write even if the saved receipt could not be written.
+  const auto intent = review.directory / L"save_intent.bin";
+  if (!review.candidate.saved && PathExistsWin32(intent)) {
+    auto saved = Decode(Bytes(intent));
+    if (saved.note == review.candidate.note &&
+        Annots(saved.annotations) == Annots(review.candidate.annotations) &&
+        OutputMatches(review, saved)) {
+      const auto pending = review.directory / L"save_stage.bin";
+      if (PathExistsWin32(pending)) {
+        const auto path = fs::u8path(Bytes(pending));
+        if (!path.empty()) {
+          Need(IsSamePath(path.parent_path(),
+                          StageDir(review.isNote ? StagedDiffKind::Note
+                                                 : StagedDiffKind::Clrop)));
+          if (PathExistsWin32(StageMetaPath(path))) {
+            StageMeta meta;
+            std::wstring error;
+            Need(LoadStageMetaFile(StageMetaPath(path), &meta));
+            Need(IsSamePath(meta.stagePath, path) &&
+                 IsSamePath(meta.destPath, saved.destination) &&
+                 IsSamePath(meta.targetPath,
+                            review.isNote ? saved.destination : saved.pdf));
+            if (review.isNote) {
+              // Reload after a failed commit: a dirty runtime catalog must
+              // not be mistaken for an absent persistence record on retry.
+              Need(note::ConfigureRuntimeNoteIdentityStore(g_workspaceRoot,
+                                                           &error));
+              Need(meta.noteId.has_value() &&
+                   note::FindRuntimeNotePersistenceRecord(
+                       note::NoteId{*meta.noteId}, &error)
+                       .has_value());
+              ResolvedNoteStageData resolved;
+              text_encoding::DecodedText decoded;
+              Need(meta.kind == StagedDiffKind::Note &&
+                   LoadResolvedStageNoteDataForMeta(meta, &resolved, &error) &&
+                   text_encoding::DecodeExternalText(resolved.resolvedBytes,
+                                                     &decoded) &&
+                   WideToUTF8(decoded.text) == saved.note);
+              Need(IntegrateStageMetaToDestination(nullptr, meta, false,
+                                                   &error));
+            } else {
+              std::vector<Annotation> resolved;
+              Need(meta.kind == StagedDiffKind::Clrop &&
+                   LoadResolvedStageAnnotationsForMeta(meta, &resolved,
+                                                       &error) &&
+                   resolved.size() == saved.annotations.size());
+              for (size_t i = 0; i < resolved.size(); ++i)
+                Need(AnnotationEquals(resolved[i], saved.annotations[i]));
+              // PDF output has no note revision commit. The already verified
+              // destination must not be rewritten against the old generation.
+              // Protect its remaining checkpoint/journals with the other
+              // recovery sources; the durable saved receipt precedes archival.
+              const auto inspection = InspectStagedDiff(path);
+              for (const auto &artifact : inspection.artifacts)
+                PreserveArtifact(review, artifact);
+              if (std::none_of(
+                      review.stages.begin(), review.stages.end(),
+                      [&](const fs::path &p) { return IsSamePath(p, path); }))
+                review.stages.push_back(path);
+              Write(review.directory / L"review.bin", Manifest(review));
+            }
+          }
+        }
+      }
+      Need(OutputMatches(review, saved));
+      Observe(saved);
+      saved.saved = true;
+      review.candidate = std::move(saved);
+    }
+  }
+}
+void ResumeSave(recovery::Review &review) {
+  // A busy or damaged pending commit must leave the protected candidate
+  // available for review, deferral, and create-only rescue.
+  try {
+    ResumeSaveChecked(review);
+  } catch (...) {
+  }
+}
+void AddSource(recovery::Review &review, const recovery::Inspection &inspection,
+               const std::wstring &title) {
+  recovery::Source source{title, inspection.annotations, inspection.noteBytes};
+  if (!inspection.isNote) {
+    bool earlier = false;
+    for (const auto &command : inspection.remainingAnnotations) {
+      if (command.kind == AnnotCommandKind::Add ||
+          command.kind == AnnotCommandKind::Update) {
+        if (!earlier) {
+          review.sources.push_back(
+              {localization::Text(L"recovery.demo.earlier_group"),
+               inspection.annotations,
+               {}});
+          earlier = true;
+        }
+        if (command.after.id.empty() ||
+            !annot_stage_replay::IsFinite(command.after))
+          continue;
+        const int index =
+            FindAnnotIndexByIdInList(source.annotations, command.after.id);
+        if (index < 0)
+          source.annotations.push_back(command.after);
+        else
+          source.annotations[static_cast<size_t>(index)] = command.after;
+      } else if (command.kind == AnnotCommandKind::ClearAll &&
+                 !command.snapshot.empty())
+        review.sources.push_back(
+            {localization::Text(L"recovery.demo.earlier_group"),
+             command.snapshot,
+             {}});
+    }
+  } else
+    for (const auto &edit : inspection.remainingNoteEdits) {
+      if (text_encoding::DecodeUtf8Strict(edit.after).has_value())
+        review.sources.push_back(
+            {localization::Text(L"recovery.demo.recorded_text"),
+             {},
+             edit.after});
+      else
+        review.incomplete = true;
+    }
+  if (inspection.hasCandidate)
+    review.sources.push_back(std::move(source));
+}
+std::string Manifest(const recovery::Review &review) {
+  std::string bytes = "recovery-review-v1\n";
+  Put(bytes, review.isNote ? "1" : "0");
+  Put(bytes, review.incomplete ? "1" : "0");
+  Put(bytes, review.recoverable ? "1" : "0");
+  Put(bytes, review.originalTarget.generic_u8string());
+  Put(bytes, std::to_string(review.stages.size()));
+  for (const auto &stage : review.stages)
+    Put(bytes, stage.generic_u8string());
+  Put(bytes, std::to_string(review.sources.size()));
+  for (const auto &source : review.sources) {
+    Put(bytes, WideToUTF8(source.title));
+    Put(bytes, Annots(source.annotations));
+    Put(bytes, source.note);
+  }
+  Put(bytes, std::to_string(review.artifacts.size()));
+  for (const auto &artifact : review.artifacts) {
+    Put(bytes, artifact.original.generic_u8string());
+    Put(bytes, artifact.copy.filename().generic_u8string());
+    Put(bytes, artifact.hash);
+  }
+  return bytes;
+}
+void LoadManifest(recovery::Review &review, std::string_view bytes) {
+  constexpr std::string_view magic = "recovery-review-v1\n";
+  Need(bytes.substr(0, magic.size()) == magic);
+  bytes.remove_prefix(magic.size());
+  review.isNote = Flag(bytes);
+  review.incomplete = Flag(bytes);
+  review.recoverable = Flag(bytes);
+  review.originalTarget = fs::u8path(Take(bytes));
+  for (size_t n = Count(bytes); n; --n) {
+    const auto path = fs::u8path(Take(bytes));
+    Need(IsSamePath(path.parent_path(),
+                    StageDir(review.isNote ? StagedDiffKind::Note
+                                           : StagedDiffKind::Clrop)));
+    review.stages.push_back(path);
+  }
+  for (size_t n = Count(bytes); n; --n) {
+    const auto title = Take(bytes);
+    const auto annotations = Take(bytes);
+    const auto note = Take(bytes);
+    Need(text_encoding::DecodeUtf8Strict(title).has_value() &&
+         text_encoding::DecodeUtf8Strict(note).has_value());
+    review.sources.push_back({UTF8ToWide(title), Annots(annotations), note});
+  }
+  for (size_t n = Count(bytes); n; --n) {
+    const auto original = fs::u8path(Take(bytes)),
+               name = fs::u8path(Take(bytes));
+    const auto hash = Take(bytes);
+    Need(name == name.filename());
+    review.artifacts.push_back({original, review.directory / name, hash});
+  }
+  Need(bytes.empty());
+  Validate(review);
+}
+} // namespace recovery_store
+
+namespace recovery_note_write {
+using namespace recovery_store;
+fs::path Record(const recovery::Review &review, const std::wstring &token,
+                uint64_t sequence, bool reply) {
+  Need(token.size() == 32 &&
+       token.find_first_not_of(L"0123456789abcdef") == std::wstring::npos &&
+       sequence > 0 && IsSamePath(review.directory, Directory(review.primaryStage)));
+  return review.directory / (L"note_write_" + token + L"_" +
+      std::to_wstring(sequence) + (reply ? L".reply" : L".bin"));
+}
+recovery::Review Current(const recovery::Review &authorized) {
+  recovery::Review current;
+  current.primaryStage = authorized.primaryStage;
+  current.directory = authorized.directory;
+  LoadManifest(current, Bytes(current.directory / L"review.bin"));
+  current.candidate = Decode(Bytes(current.directory / L"candidate.bin"));
+  Need(current.isNote && current.recoverable && !current.candidate.saved &&
+       IsSamePath(current.originalTarget, authorized.originalTarget) &&
+       IsSamePath(current.originalTarget, current.candidate.destination) &&
+       current.candidate.targetConfirmed &&
+       (!current.incomplete || current.candidate.partialAccepted) &&
+       SourcesMatch(current));
+  return current;
+}
+std::string Header(const std::wstring &token, uint64_t sequence) {
+  return "recovery-note-write-v1\n" + WideToUTF8(token) + "\n" +
+         std::to_string(sequence) + "\n";
+}
+} // namespace recovery_note_write
+
+bool ProtectRecoveryNoteWrite(const recovery::Review &authorized,
+                             const std::wstring &token, uint64_t sequence,
+                             const std::filesystem::path &destination,
+                             std::string_view body, bool exists,
+                             uint64_t fingerprint) {
+  try {
+    using namespace recovery_note_write;
+    const auto path = Record(authorized, token, sequence, false);
+    const auto current = Current(authorized);
+    Need(IsSamePath(destination, current.originalTarget));
+    std::string bytes = Header(token, sequence);
+    Put(bytes, destination.generic_u8string());
+    Put(bytes, exists ? "1" : "0");
+    Put(bytes, std::to_string(fingerprint));
+    Put(bytes, body);
+    Need(bytes.size() <= limit);
+    // Retry of a request that failed before signalling must be byte-identical.
+    if (PathExistsWin32(path)) Need(Bytes(path) == bytes);
+    else Write(path, bytes);
+    return true;
+  } catch (...) { return false; }
+}
+bool ServeRecoveryNoteWrite(const recovery::Review &authorized,
+                           const std::wstring &token, uint64_t sequence) {
+  bool saved = false;
+  try {
+    using namespace recovery_note_write;
+    const auto request = Bytes(Record(authorized, token, sequence, false));
+    std::string_view fields(request);
+    const auto header = Header(token, sequence);
+    Need(fields.substr(0, header.size()) == header);
+    fields.remove_prefix(header.size());
+    const auto destination = fs::u8path(Take(fields));
+    const bool expectedExists = Flag(fields);
+    const auto fingerprint = ParseUint64(UTF8ToWide(Take(fields)));
+    const auto body = Take(fields);
+    Need(fields.empty() && fingerprint.has_value());
+    const auto current = Current(authorized);
+    Need(IsSamePath(destination, current.originalTarget) &&
+         current.candidate.destinationExists == expectedExists &&
+         DestinationMatches(current.candidate));
+    const auto wide = text_encoding::DecodeUtf8Strict(current.candidate.note);
+    std::string encoded;
+    std::wstring error;
+    Need(wide && text_encoding::EncodeText(*wide, current.candidate.noteEncoding,
+                                          &encoded, &error) && encoded == body);
+    bool exists = false;
+    uint64_t observed = 0;
+    Need(CaptureStageDestinationObservation(destination, &exists, &observed,
+                                             &error) &&
+         exists == expectedExists && observed == *fingerprint);
+    // Runs in the process owning the document's retained physical handle.
+    // The existing atomic writer restores it before any retry or return.
+    saved = AtomicWriteVerified(destination, body,
+                                fs::path(g_workspaceRoot), &error);
+  } catch (...) {}
+  try {
+    using namespace recovery_note_write;
+    const auto reply = Record(authorized, token, sequence, true);
+    Need(!PathExistsWin32(reply));
+    Write(reply, Header(token, sequence) + (saved ? "saved" : "failed"));
+  } catch (...) { return false; }
+  return saved;
+}
+bool ReadRecoveryNoteWriteReply(const recovery::Review &authorized,
+                               const std::wstring &token, uint64_t sequence) {
+  try {
+    using namespace recovery_note_write;
+    return Bytes(Record(authorized, token, sequence, true)) ==
+           Header(token, sequence) + "saved";
+  } catch (...) { return false; }
+}
+
+bool ProtectStageRecovery(const recovery::Review &review,
+                          const recovery::Candidate &candidate) {
+  try {
+    recovery_store::Validate(review);
+    const auto bytes = recovery_store::Encode(candidate);
+    static uint64_t sequence = 0;
+    const auto version =
+        review.directory /
+        (L"candidate_" + std::to_wstring(GetCurrentProcessId()) + L"_" +
+         std::to_wstring(GetTickCount64()) + L"_" +
+         std::to_wstring(++sequence) + L".bin");
+    recovery_store::Need(!PathExistsWin32(version));
+    recovery_store::Write(version, bytes);
+    recovery_store::Write(review.directory / L"candidate.bin", bytes);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool PrepareStageRecovery(const std::filesystem::path &stage,
+                          recovery::Review *output) {
+  if (!output)
+    return false;
+  try {
+    using namespace recovery_store;
+    recovery::Review review;
+    review.primaryStage = stage;
+    review.directory = Directory(stage);
+    Need(EnsureDir(review.directory));
+    bool reused = PathExistsWin32(review.directory / L"completed.bin") &&
+                  PathExistsWin32(stage);
+    if (!reused && PathExistsWin32(stage) &&
+        PathExistsWin32(review.directory / L"review.bin")) {
+      recovery::Review previous;
+      previous.primaryStage = stage;
+      previous.directory = review.directory;
+      LoadManifest(previous, Bytes(review.directory / L"review.bin"));
+      previous.candidate = Decode(Bytes(review.directory / L"candidate.bin"));
+      bool published = previous.candidate.saved;
+      if (!published &&
+          PathExistsWin32(review.directory / L"save_intent.bin")) {
+        const auto intent =
+            Decode(Bytes(review.directory / L"save_intent.bin"));
+        published = intent.note == previous.candidate.note &&
+                    Annots(intent.annotations) ==
+                        Annots(previous.candidate.annotations) &&
+                    OutputMatches(previous, intent);
+      }
+      if (published)
+        for (const auto &artifact : previous.artifacts)
+          if ((IsSamePath(artifact.original, stage) ||
+               IsSamePath(artifact.original, StageMetaPath(stage))) &&
+              PathExistsWin32(artifact.original) &&
+              Hash(artifact.original) != artifact.hash)
+            reused = true;
+    }
+    if (reused) {
+      // Normal stage revision numbers can restart after all active stages
+      // have been consumed. Never reuse a completed review for a new file at
+      // the same stage path; preserve its entire history under a new name.
+      static uint64_t sequence = 0;
+      fs::path history;
+      do {
+        history = review.directory.wstring() + L"_completed_" +
+                  std::to_wstring(GetCurrentProcessId()) + L"_" +
+                  std::to_wstring(GetTickCount64()) + L"_" +
+                  std::to_wstring(++sequence);
+      } while (PathExistsWin32(history));
+      Need(Within(review.directory, WorkspaceEscapeRoot() / L"recovery") &&
+           Within(history, WorkspaceEscapeRoot() / L"recovery") &&
+           write_checks::IsSafeLocalPath(review.directory) &&
+           write_checks::IsSafeLocalPath(history));
+      Need(MoveFileW(
+               ToExtendedWin32PathIfAbsoluteLocal(review.directory).c_str(),
+               ToExtendedWin32PathIfAbsoluteLocal(history).c_str()) != FALSE);
+      Need(EnsureDir(review.directory));
+    }
+    if (PathExistsWin32(review.directory / L"review.bin")) {
+      LoadManifest(review, Bytes(review.directory / L"review.bin"));
+      review.candidate = Decode(Bytes(review.directory / L"candidate.bin"));
+      ResumeSave(review);
+      *output = std::move(review);
+      return true;
+    }
+    auto inspection = InspectStagedDiff(stage);
+    review.isNote = inspection.isNote;
+    review.incomplete = inspection.incomplete;
+    review.recoverable = inspection.hasCandidate;
+    review.originalTarget = inspection.targetPath;
+    review.candidate.destination = inspection.destination;
+    // Even unreadable metadata gets a preserved, defer-only review.
+    std::vector<recovery::Inspection> inspections{inspection};
+    for (const auto &entry : ListStagedDiffEntries())
+      if (entry.stagePath != stage && !inspection.targetPath.empty() &&
+          IsSamePath(entry.targetPath, inspection.targetPath) &&
+          (entry.kind == StagedDiffKind::Note) == review.isNote)
+        inspections.push_back(InspectStagedDiff(entry.stagePath));
+    for (const auto &source : inspections) {
+      review.recoverable = review.recoverable || source.hasCandidate;
+      review.stages.push_back(source.stagePath);
+      review.incomplete =
+          review.incomplete || source.incomplete || !source.hasCandidate;
+      AddSource(review, source,
+                localization::Text(L"recovery.demo.failed_group") + L" " +
+                    std::to_wstring(review.stages.size()));
+      for (const auto &path : source.artifacts)
+        PreserveArtifact(review, path);
+    }
+    if (!review.candidate.destination.empty()) {
+      bool originalConfirmed = true;
+      Observe(review.candidate);
+      if (review.isNote && review.candidate.destinationExists) {
+        text_encoding::DecodedText decoded;
+        if (text_encoding::DecodeExternalText(
+                Bytes(review.candidate.destination), &decoded)) {
+          review.candidate.note = WideToUTF8(decoded.text);
+          review.candidate.noteEncoding = decoded.encoding;
+        } else {
+          originalConfirmed = false;
+          review.incomplete = true;
+        }
+      } else if (!review.isNote) {
+        try {
+          ValidatePdf(review.originalTarget, {});
+          review.candidate.pdf = review.originalTarget;
+          review.candidate.pdfHash = Hash(review.originalTarget);
+        } catch (...) {
+          review.incomplete = true;
+        }
+        if (review.candidate.destinationExists) {
+          bool mismatch = false;
+          std::wstring error;
+          if (!clrop_bridge::LoadAnnotations(
+                  review.candidate.destination.wstring(),
+                  review.originalTarget.wstring(), review.candidate.annotations,
+                  mismatch, nullptr, error,
+                  clrop_bridge::LoadAnnotationsValidation::None)) {
+            review.candidate.annotations.clear();
+            originalConfirmed = false;
+            review.incomplete = true;
+          }
+          if (!review.candidate.pdf.empty()) {
+            std::vector<Annotation> checked;
+            if (!clrop_bridge::LoadAnnotations(
+                    review.candidate.destination.wstring(),
+                    review.originalTarget.wstring(), checked, mismatch, nullptr,
+                    error) ||
+                mismatch) {
+              originalConfirmed = false;
+              review.incomplete = true;
+            }
+          }
+          if (mismatch)
+            review.incomplete = true;
+        }
+      }
+      review.candidate.targetConfirmed =
+          originalConfirmed &&
+          Within(review.candidate.destination,
+                 std::filesystem::path(g_workspaceRoot)) &&
+          (review.isNote
+               ? review.candidate.destinationExists
+               : !review.candidate.pdf.empty() &&
+                     inspection.failure != recovery::Failure::TargetMismatch);
+    }
+    review.sources.insert(review.sources.begin(),
+                          {localization::Text(L"recovery.demo.original_group"),
+                           review.candidate.annotations,
+                           review.candidate.note});
+    Need(ProtectStageRecovery(review, review.candidate));
+    Write(review.directory / L"review.bin", Manifest(review));
+    *output = std::move(review);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool SelectStageRecoveryPdf(recovery::Review &review,
+                            recovery::Candidate &candidate,
+                            const std::filesystem::path &pdf) {
+  try {
+    using namespace recovery_store;
+    Validate(review);
+    Need(!review.isNote && pdf.is_absolute() &&
+         write_checks::IsSafeLocalPath(pdf));
+    auto next = candidate;
+    const auto hash = Hash(pdf);
+    ValidatePdf(pdf, next.annotations);
+    next.pdf = pdf;
+    next.pdfHash = hash;
+    next.destination = clrop_bridge::ClropPathForPdf(pdf.wstring());
+    Observe(next);
+    const bool samePdf = IsSamePath(candidate.pdf, pdf);
+    const bool destinationChanged =
+        next.destinationExists != candidate.destinationExists ||
+        next.destinationHash != candidate.destinationHash;
+    if ((!samePdf || destinationChanged) && next.destinationExists) {
+      std::vector<Annotation> current;
+      bool mismatch = false;
+      std::wstring error;
+      Need(clrop_bridge::LoadAnnotations(next.destination.wstring(),
+                                         pdf.wstring(), current, mismatch,
+                                         nullptr, error) &&
+           !mismatch);
+      auto additions = next.annotations;
+      if (samePdf) {
+        // An unchanged shared version is the same annotation. Preserve both
+        // versions of an actual conflict, while retaining new external items.
+        std::map<std::wstring, const Annotation *> shared;
+        for (const auto &annotation : current)
+          shared.emplace(annotation.id, &annotation);
+        additions.erase(std::remove_if(additions.begin(), additions.end(),
+                                       [&](const Annotation &a) {
+                                         const auto found = shared.find(a.id);
+                                         return found != shared.end() &&
+                                                AnnotationEquals(*found->second,
+                                                                 a);
+                                       }),
+                        additions.end());
+      }
+      Need(recovery::AppendAnnotations(&current, additions));
+      next.annotations = std::move(current);
+    }
+    ValidatePdf(pdf, next.annotations);
+    Need(Hash(pdf) == hash && DestinationMatches(next));
+    next.targetConfirmed = true;
+    next.saved = false;
+    Need(ProtectStageRecovery(review, next));
+    candidate = std::move(next);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool CompleteStageRecovery(recovery::Review &review) {
+  try {
+    using namespace recovery_store;
+    Validate(review);
+    Need(review.candidate.saved && DestinationMatches(review.candidate) &&
+         OutputMatches(review, review.candidate) && SourcesMatch(review));
+    // Archival never precedes a durable saved receipt, including resumed saves.
+    Need(ProtectStageRecovery(review, review.candidate));
+    for (size_t i = 0; i < review.artifacts.size(); ++i) {
+      const auto &artifact = review.artifacts[i];
+      const auto archive =
+          review.directory / (L"archived_" + std::to_wstring(i));
+      if (PathExistsWin32(artifact.original)) {
+        Need(!PathExistsWin32(archive) &&
+             Hash(artifact.original) == artifact.hash);
+        Need(MoveFileW(
+                 ToExtendedWin32PathIfAbsoluteLocal(artifact.original).c_str(),
+                 ToExtendedWin32PathIfAbsoluteLocal(archive).c_str()) != FALSE);
+      }
+      Need(Hash(archive) == artifact.hash);
+    }
+    Write(review.directory / L"completed.bin", Encode(review.candidate));
+    UpdateCurrentIntegrateFlags();
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool SaveStageRecovery(recovery::Review &review, recovery::Candidate &candidate,
+                       const std::filesystem::path &newDestination) {
+  try {
+    using namespace recovery_store;
+    Validate(review);
+    Need(review.recoverable &&
+         (!review.incomplete || candidate.partialAccepted));
+    Need(ProtectStageRecovery(review, candidate) && SourcesMatch(review));
+    review.candidate = candidate;
+    if (newDestination.empty()) {
+      ResumeSave(review);
+      candidate = review.candidate;
+    }
+    if (candidate.saved) {
+      review.candidate = candidate;
+      return CompleteStageRecovery(review);
+    }
+    auto next = candidate;
+    if (!review.isNote) {
+      Need(!candidate.pdf.empty() && Hash(candidate.pdf) == candidate.pdfHash);
+      ValidatePdf(candidate.pdf, candidate.annotations);
+    }
+    if (!newDestination.empty()) {
+      Need(newDestination.is_absolute() &&
+           write_checks::IsSafeLocalPath(newDestination) &&
+           !PathExistsWin32(newDestination));
+      next.destination =
+          review.isNote ? newDestination
+                        : std::filesystem::path(clrop_bridge::ClropPathForPdf(
+                              newDestination.wstring()));
+      if (review.isNote)
+        next.noteEncoding = text_encoding::Encoding::Utf8;
+      else {
+        next.pdf = newDestination;
+      }
+      next.targetConfirmed = true;
+      Write(review.directory / L"save_stage.bin", "");
+      SaveIntent(review, next);
+      if (review.isNote)
+        NewFile(newDestination, candidate.note);
+      else {
+        const auto sidecar = std::filesystem::path(
+            clrop_bridge::ClropPathForPdf(newDestination.wstring()));
+        Need(!PathExistsWin32(sidecar));
+        // Intent precedes either create; partial files are retained on failure.
+        std::string intent;
+        Put(intent, newDestination.generic_u8string());
+        Put(intent, sidecar.generic_u8string());
+        Write(review.directory / L"rescue_intent.bin", intent);
+        NewFile(newDestination, Bytes(candidate.pdf));
+        std::string bytes;
+        std::wstring error;
+        Need(clrop_bridge::SerializeAnnotations(
+            newDestination.wstring(), candidate.annotations, bytes, error));
+        clrop::Document document;
+        Need(clrop::ParseClropFromJson(bytes, document, error));
+        document.pdfId = clrop::ComputePdfId(newDestination.wstring());
+        Need(!document.pdfId.sha256.empty());
+        Need(clrop::SerializeClrop(document, bytes, error));
+        NewFile(sidecar, bytes);
+        Need(Hash(newDestination) == candidate.pdfHash);
+        next.pdfHash = candidate.pdfHash;
+      }
+      next.destination =
+          review.isNote ? newDestination
+                        : std::filesystem::path(clrop_bridge::ClropPathForPdf(
+                              newDestination.wstring()));
+    } else {
+      Need(candidate.targetConfirmed && DestinationMatches(candidate));
+      Need(review.isNote
+               ? IsSamePath(candidate.destination, review.originalTarget)
+               : IsSamePath(
+                     candidate.destination,
+                     clrop_bridge::ClropPathForPdf(candidate.pdf.wstring())));
+      SaveIntent(review, next);
+      std::wstring error;
+      if (review.isNote)
+        Need(note::ConfigureRuntimeNoteIdentityStore(g_workspaceRoot, &error));
+      StageMeta meta;
+      meta.kind = review.isNote ? StagedDiffKind::Note : StagedDiffKind::Clrop;
+      meta.targetPath =
+          (review.isNote ? candidate.destination : candidate.pdf).wstring();
+      meta.destPath = candidate.destination;
+      meta.revision = NextRevisionFor(meta.kind, meta.targetPath);
+      meta.stagePath =
+          BuildStagePath(meta.kind, meta.targetPath, *meta.revision);
+      meta.metaPath = StageMetaPath(meta.stagePath);
+      Write(review.directory / L"save_stage.bin",
+            meta.stagePath.generic_u8string());
+      bool exists = false;
+      uint64_t fingerprint = 0;
+      Need(CaptureStageDestinationObservation(meta.destPath, &exists,
+                                              &fingerprint, &error));
+      meta.destinationExistedAtStage = exists;
+      meta.destinationFingerprintAtStage = fingerprint;
+      if (review.isNote) {
+        Need(exists);
+        const auto identity =
+            note::ResolveRuntimeNoteIdentityPath(meta.targetPath, &error);
+        Need(identity.valid());
+        const auto base = note::ObserveRuntimeNoteDiskSnapshot(
+            identity.note_id,
+            note::FingerprintSnapshotBytes(Bytes(meta.destPath)), &error);
+        Need(base > 0 && base < UINT64_MAX);
+        meta.noteId = identity.note_id.value;
+        meta.basePersistenceRevision = base;
+        meta.persistenceRevision = base + 1;
+        std::string encoded;
+        const auto wide = text_encoding::DecodeUtf8Strict(candidate.note);
+        Need(wide && text_encoding::EncodeText(*wide, candidate.noteEncoding,
+                                               &encoded, &error));
+        Need(AtomicWriteVerified(meta.stagePath, encoded,
+                                 std::filesystem::path(g_workspaceRoot),
+                                 &error));
+      } else {
+        meta.annotationNumericPrecision = AnnotNumericPrecision::RoundTrip17;
+        Need(clrop_bridge::SaveAnnotations(meta.stagePath.wstring(),
+                                           meta.targetPath,
+                                           candidate.annotations, error));
+      }
+      Need(WriteStageMetaFile(meta, &error) && DestinationMatches(candidate));
+      if (!review.isNote)
+        Need(Hash(candidate.pdf) == candidate.pdfHash);
+      Need(IntegrateStageMetaToDestination(nullptr, meta, false, &error));
+    }
+    Need(OutputMatches(review, next));
+    Observe(next);
+    next.saved = true;
+    candidate = next;
+    review.candidate = next;
+    Need(ProtectStageRecovery(review, next));
+    return CompleteStageRecovery(review);
+  } catch (...) {
+    try {
+      review.candidate = candidate;
+      recovery_store::ResumeSave(review);
+      candidate = review.candidate;
+    } catch (...) {
+    }
+    return false;
+  }
+}

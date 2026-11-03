@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cerrno>
 #include <cwchar>
 #include <limits>
 #ifndef NOMINMAX
@@ -69,13 +70,13 @@ namespace {
     if (end == buffer || *end != L'\0' || !std::isfinite(parsed)) return false;
     const bool relative = value.front() == L'+' || value.front() == L'-';
     const double requested = relative ? static_cast<double>(current_height_px) + parsed : parsed;
-    if (!(requested > 0.0) || requested > static_cast<double>(std::numeric_limits<int>::max())) {
+    if (!std::isfinite(requested) || (!relative && !(requested > 0.0))) {
         return false;
     }
     constexpr int kMinimumFontHeightPx = 6;
     constexpr int kMaximumFontHeightPx = 256;
-    *out_height_px = std::clamp(static_cast<int>(std::lround(requested)),
-                                kMinimumFontHeightPx, kMaximumFontHeightPx);
+    *out_height_px = static_cast<int>(std::lround(std::clamp(
+        requested, double{kMinimumFontHeightPx}, double{kMaximumFontHeightPx})));
     return true;
 }
 
@@ -123,8 +124,9 @@ namespace {
     wchar_t buffer[64]{};
     std::copy(value.begin(), value.end(), buffer);
     wchar_t* end = nullptr;
+    errno = 0;
     const long parsed = std::wcstol(buffer, &end, 10);
-    if (end == buffer || *end != L'\0' ||
+    if (errno == ERANGE || end == buffer || *end != L'\0' ||
         parsed < static_cast<long>(std::numeric_limits<int>::min()) ||
         parsed > static_cast<long>(std::numeric_limits<int>::max())) {
         return false;
@@ -163,6 +165,11 @@ namespace {
 
 } // namespace
 
+int NoteRenderFinalFontCharacterHeight(int cellHeightPx, int internalLeadingPx) noexcept {
+    if (cellHeightPx <= 0 || internalLeadingPx < 0 || internalLeadingPx >= cellHeightPx) return 0;
+    return cellHeightPx - internalLeadingPx;
+}
+
 bool ResolveNoteRenderFinalRunFontStyle(
     const NoteRenderSourceLinePlan& line,
     const NoteRenderSourceRun& run,
@@ -173,6 +180,7 @@ bool ResolveNoteRenderFinalRunFontStyle(
         NoteRenderFinalRunFontStyle resolved;
         resolved.font_height_px = baseFontHeightPx;
         bool explicitFontHeight = false;
+        bool absoluteFontHeight = false;
         for (const NoteRenderSourceStyleAttribute& attribute : run.styles) {
             switch (attribute.kind) {
             case StyleKind::Bold:
@@ -193,6 +201,8 @@ bool ResolveNoteRenderFinalRunFontStyle(
                 if (TryParseFontHeight(attribute.value, resolved.font_height_px, &height)) {
                     resolved.font_height_px = height;
                     explicitFontHeight = true;
+                    const auto value = TrimAsciiWhitespace(attribute.value);
+                    absoluteFontHeight = absoluteFontHeight || (value.front() != L'+' && value.front() != L'-');
                 }
                 break;
             }
@@ -233,6 +243,8 @@ bool ResolveNoteRenderFinalRunFontStyle(
             if (scaled <= 0 || scaled > std::numeric_limits<int>::max()) return false;
             resolved.font_height_px = static_cast<int>(scaled);
         }
+        resolved.font_size_specified = explicitFontHeight;
+        resolved.overrides_font_height = absoluteFontHeight || resolved.font_height_px != baseFontHeightPx;
         // Literal code uses its documented monospaced face unless a future
         // source-plan decoration introduces an explicit code-face attribute.
         if (line.decoration.has(NoteRenderSourceLineDecorationCodeBlock) ||

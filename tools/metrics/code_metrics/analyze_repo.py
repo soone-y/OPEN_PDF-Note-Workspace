@@ -162,6 +162,8 @@ class FileMetrics:
     approx_variable_refs: int = 0
     approx_unused_function_decls: int = 0
     approx_unused_variable_decls: int = 0
+    complexity_score: int = 0
+    max_nesting_depth: int = 0
 
 
 @dataclass
@@ -172,7 +174,7 @@ class ApproxSymbolMetrics:
     variable_ref_counter: Counter[str]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Collect deterministic repository size metrics without external access."
     )
@@ -223,7 +225,18 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Additional relative path prefix to exclude.",
     )
-    return parser.parse_args()
+    report_output = parser.add_mutually_exclusive_group()
+    report_output.add_argument(
+        "--report",
+        type=Path,
+        help="Write the rendered report to a new file. Existing files are never replaced.",
+    )
+    report_output.add_argument(
+        "--report-stdout",
+        action="store_true",
+        help="Print the rendered report to stdout without creating a file.",
+    )
+    return parser.parse_args(argv)
 
 
 def normalize_relpath(path: Path, root: Path) -> str:
@@ -272,21 +285,15 @@ def is_text_file(path: Path) -> bool:
 
 
 def read_text(path: Path) -> Optional[str]:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
+    data = path.read_bytes()
+    encodings = ["utf-16"] if data.startswith((b"\xff\xfe", b"\xfe\xff")) else ["utf-8-sig", "cp932"]
+    failures = []
+    for encoding in encodings:
         try:
-            return path.read_text(encoding="utf-8-sig")
-        except UnicodeDecodeError:
-            try:
-                return path.read_text(encoding="cp932")
-            except UnicodeDecodeError:
-                try:
-                    return path.read_text(encoding="utf-16")
-                except UnicodeDecodeError:
-                    return None
-    except OSError:
-        return None
+            return data.decode(encoding, errors="strict")
+        except UnicodeError as exc:
+            failures.append(f"{encoding}: {type(exc).__name__}: {exc}")
+    raise ValueError(f"required text decode failed: {path}; " + "; ".join(failures))
 
 
 def count_functions(path: Path, text: str) -> int:
@@ -596,6 +603,45 @@ def analyze_text_lines(path: Path, text: str) -> Dict[str, int]:
     }
 
 
+def estimate_file_complexity(path: Path, text: str) -> Tuple[int, int]:
+    suffix = path.suffix.lower()
+    if suffix in {".py"}:
+        branch_tokens = re.findall(r"\b(?:if|elif|for|while|with|except|and|or)\b|&&|\|\||\?", text, flags=re.IGNORECASE)
+        complexity = max(1, 1 + len(branch_tokens))
+        indentation = 0
+        max_depth = 0
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            depth = len(line) - len(stripped)
+            max_depth = max(max_depth, depth // 4)
+        return complexity, max_depth
+
+    if suffix in {".ps1"}:
+        branch_tokens = re.findall(r"\b(?:if|elseif|for|foreach|while|switch|and|or)\b|&&|\|\||\?", text, flags=re.IGNORECASE)
+        complexity = max(1, 1 + len(branch_tokens))
+        depth = 0
+        max_depth = 0
+        for line in text.splitlines():
+            depth += line.count("{") - line.count("}")
+            max_depth = max(max_depth, depth)
+        return complexity, max_depth
+
+    if suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp", ".inc", ".cppinc"}:
+        cleaned = strip_cpp_comments(text.splitlines())
+        branch_tokens = re.findall(r"\b(?:if|else if|for|while|switch|case|catch|and|or)\b|&&|\|\||\?", "\n".join(cleaned), flags=re.IGNORECASE)
+        complexity = max(1, 1 + len(branch_tokens))
+        depth = 0
+        max_depth = 0
+        for line in cleaned:
+            depth += line.count("{") - line.count("}")
+            max_depth = max(max_depth, depth)
+        return complexity, max_depth
+
+    return 1, 0
+
+
 def collect_files(
     root: Path,
     scope: str,
@@ -672,8 +718,9 @@ def build_file_metrics(root: Path, file_path: Path) -> FileMetrics:
                 count for name, count in approx.variable_decl_counter.items()
                 if approx.variable_ref_counter.get(name, 0) <= count
             )
+            metric.complexity_score, metric.max_nesting_depth = estimate_file_complexity(file_path, text)
         else:
-            metric.is_text = False
+            raise ValueError(f"required text input was not read: {file_path}")
     return metric
 
 
@@ -801,6 +848,8 @@ def summarize(files: Sequence[FileMetrics]) -> Dict[str, object]:
     total_approx_variable_refs = sum(item.approx_variable_refs for item in files)
     total_approx_unused_function_decls = sum(item.approx_unused_function_decls for item in files)
     total_approx_unused_variable_decls = sum(item.approx_unused_variable_decls for item in files)
+    avg_complexity = (sum(item.complexity_score for item in files) / len(files)) if files else 0.0
+    max_complexity = max((item.complexity_score for item in files), default=0)
     text_files = sum(1 for item in files if item.is_text)
     binary_files = len(files) - text_files
     empty_files = sum(1 for item in files if item.size_bytes == 0)
@@ -818,6 +867,10 @@ def summarize(files: Sequence[FileMetrics]) -> Dict[str, object]:
     approx_unused_variable_files = sorted(
         (item for item in files if item.approx_unused_variable_decls > 0),
         key=lambda item: (-item.approx_unused_variable_decls, item.path),
+    )
+    complexity_hotspots = sorted(
+        (item for item in files if item.complexity_score > 0),
+        key=lambda item: (-item.complexity_score, -item.max_nesting_depth, item.path),
     )
 
     return {
@@ -846,6 +899,8 @@ def summarize(files: Sequence[FileMetrics]) -> Dict[str, object]:
             "avg_lines_per_file": (total_lines / text_files) if text_files else 0.0,
             "avg_chars_per_line": (total_chars / total_lines) if total_lines else 0.0,
             "max_line_length": max((item.max_line_length for item in files), default=0),
+            "avg_complexity_score": avg_complexity,
+            "max_complexity_score": max_complexity,
         },
         "directories": directory_totals,
         "extensions": build_extension_totals(files),
@@ -857,6 +912,7 @@ def summarize(files: Sequence[FileMetrics]) -> Dict[str, object]:
         "longest_line_files": [file_to_dict(item) for item in longest_line_files],
         "approx_unused_function_files": [file_to_dict(item) for item in approx_unused_function_files],
         "approx_unused_variable_files": [file_to_dict(item) for item in approx_unused_variable_files],
+        "complexity_hotspots": [file_to_dict(item) for item in complexity_hotspots],
         "files": [file_to_dict(item) for item in sorted(files, key=lambda item: item.path)],
     }
 
@@ -883,6 +939,8 @@ def file_to_dict(item: FileMetrics) -> Dict[str, object]:
         "approx_variable_refs": item.approx_variable_refs,
         "approx_unused_function_decls": item.approx_unused_function_decls,
         "approx_unused_variable_decls": item.approx_unused_variable_decls,
+        "complexity_score": item.complexity_score,
+        "max_nesting_depth": item.max_nesting_depth,
     }
 
 
@@ -974,6 +1032,19 @@ def render_text_report(data: Dict[str, object], top_files: int, top_dirs: int, m
         f"  avg_lines_per_file: {summary['avg_lines_per_file']:.1f}",
         f"  avg_chars_per_line: {summary['avg_chars_per_line']:.1f}",
         f"  max_line_length: {summary['max_line_length']}",
+        f"  avg_complexity_score: {summary['avg_complexity_score']:.1f}",
+        f"  max_complexity_score: {summary['max_complexity_score']}",
+        "",
+        "Structure Analysis",
+        "  Key files by include/import references:",
+        *(
+            [
+                f"    {row['path']}: dependency_refs={row['dependency_refs']}, size={format_bytes(int(row['size_bytes']))}"
+                for row in data["largest_dependency_files"][:top_files]
+            ]
+            if data["largest_dependency_files"]
+            else ["    none"]
+        ),
         "",
         "Directory Tree",
         *[f"  {line}" for line in make_tree_lines(directories, max_tree_depth, top_dirs)],
@@ -1080,6 +1151,16 @@ def render_text_report(data: Dict[str, object], top_files: int, top_dirs: int, m
                 + f"approx_var_decls={row['approx_variable_decls']}, approx_var_refs={row['approx_variable_refs']}"
             )
 
+    complexity_hotspots = data["complexity_hotspots"][:top_files]
+    if complexity_hotspots:
+        summary_lines.extend(["", "Complexity Analysis"])
+        for row in complexity_hotspots:
+            summary_lines.append(
+                "  "
+                + f"{row['path']}: complexity={row['complexity_score']}, max_nesting={row['max_nesting_depth']}, "
+                + f"lines={row['lines']}, funcs={row['functions']}"
+            )
+
     return "\n".join(summary_lines)
 
 
@@ -1106,8 +1187,27 @@ def analyze_repository(
         "scope": scope,
         "include_roots": include_roots if scope == "own" else ["<all>"],
         "extra_excludes": list(exclude or []),
+        "complexity_method": "file regex branch-token estimate; not function cyclomatic complexity",
     }
+    data["analysis_status"] = "COMPLETE"
     return data
+
+
+def write_new_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8", newline="") as output_file:
+        output_file.write(text)
+        output_file.flush()
+        os.fsync(output_file.fileno())
+
+
+def write_or_print(text: str, path: Optional[Path]) -> None:
+    if path is None:
+        print(text, end="")
+    else:
+        if path.exists():
+            raise FileExistsError(f"output already exists: {path}")
+        write_new_text(path, text)
 
 
 def render_json_report(data: Dict[str, object], *, ensure_ascii: bool = True) -> str:
@@ -1115,26 +1215,39 @@ def render_json_report(data: Dict[str, object], *, ensure_ascii: bool = True) ->
     return json.dumps(data, ensure_ascii=ensure_ascii, indent=2)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
     root = Path(args.root).resolve()
     if not root.exists() or not root.is_dir():
         print(f"root is not a directory: {root}", file=sys.stderr)
         return 1
 
-    data = analyze_repository(
-        root=root,
-        scope=args.scope,
-        include=args.include,
-        exclude=args.exclude,
-    )
+    try:
+        data = analyze_repository(
+            root=root, scope=args.scope, include=args.include, exclude=args.exclude,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        print(f"ANALYSIS_INCOMPLETE: {exc}", file=sys.stderr)
+        return 2
 
     if args.format == "json":
-        print(render_json_report(data))
-        return 0
+        report_text = render_json_report(data)
+    else:
+        report_text = render_text_report(data, args.top_files, args.top_dirs, args.max_tree_depth)
 
-    print(render_text_report(data, args.top_files, args.top_dirs, args.max_tree_depth))
-    return 0
+    try:
+        if args.report is not None:
+            write_or_print(report_text, args.report)
+            print(f"report: {args.report.resolve()}", file=sys.stdout)
+            return 0
+        if args.report_stdout:
+            print(report_text, end="")
+            return 0
+        print(report_text)
+        return 0
+    except OSError as exc:
+        print(f"error: output creation failed; existing files were not overwritten: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

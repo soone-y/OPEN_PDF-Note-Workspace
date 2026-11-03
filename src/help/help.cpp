@@ -210,13 +210,18 @@ static std::optional<std::filesystem::path> FindBundledHelpDocsDir(const std::fi
     return std::nullopt;
 }
 
-static std::optional<std::filesystem::path> FindBundledHelpReferenceDocument(
-    const std::filesystem::path& exeDir) {
+static std::optional<std::filesystem::path> FindBundledHelpDocument(
+    const std::filesystem::path& exeDir, const wchar_t* filename) {
     const auto docsDir = FindBundledHelpDocsDir(exeDir);
     if (!docsDir) return std::nullopt;
-    const std::filesystem::path reference = *docsDir / L"Help_Reference.md";
+    const std::filesystem::path reference = *docsDir / filename;
     if (!IsSafeBundledHelpPath(reference, false)) return std::nullopt;
     return reference;
+}
+
+static std::optional<std::filesystem::path> FindBundledHelpReferenceDocument(
+    const std::filesystem::path& exeDir) {
+    return FindBundledHelpDocument(exeDir, L"Help_Reference.md");
 }
 
 static bool LaunchBundledHelpGuide(HWND owner) {
@@ -240,7 +245,7 @@ static std::wstring OfficeConversionHelpTextJa() {
         return
             L"■ OfficeファイルをPDFに変換\n"
             L"- この通常版では、.docx と .pptx を同梱LibreOfficeでローカルPDF変換できます。\n"
-            L"- メニューの変換機能またはワークスペースへのドロップで使えます。ドロップ時は変換、元ファイルをそのまま取り込む、キャンセルを選べます。\n"
+            + localization::Text(L"help.office.drop_import") + L"\n" +
             L"- Microsoft Officeやオンライン変換サービスは使用しません。元のOfficeファイルは変更しません。\n"
             L"- runtimeが見つからない場合はLite版へ切り替わりません。通常版の配布フォルダ一式を復元してください。\n"
             L"- 変換は試験的です。フォント、図形、数式などで見た目が異なることがあるため、PDFの結果を確認してください。\n"
@@ -259,7 +264,7 @@ static std::wstring OfficeConversionHelpTextEn() {
         return
             L"■ Convert Office Files To PDF\n"
             L"- This standard edition converts .docx and .pptx to PDF locally with bundled LibreOffice.\n"
-            L"- Use the conversion menu or drop files into a workspace. A drop asks for confirmation before conversion.\n"
+            + localization::Text(L"help.office.drop_import") + L"\n" +
             L"- It does not use Microsoft Office or an online conversion service, and does not modify the source Office file.\n"
             L"- A missing runtime does not turn this into Lite. Restore the complete standard-edition release folder.\n"
             L"- Conversion is experimental. Check the resulting PDF because fonts, shapes, or equations can differ.\n"
@@ -268,7 +273,7 @@ static std::wstring OfficeConversionHelpTextEn() {
     return
         L"■ Convert Office Files To PDF (Lite)\n"
         L"- This is the Lite edition, which does not include an Office-to-PDF conversion runtime. Its window title also shows Lite.\n"
-        L"- Dropped .docx / .pptx files are not converted or imported. Prepare a PDF before importing it.\n"
+        + localization::Text(L"help.office.lite_drop_import") + L"\n" +
         L"- Use the standard edition if you need in-app Office-to-PDF conversion. Microsoft Office and online conversion services are not used.\n"
         L"\n";
 }
@@ -657,8 +662,8 @@ static std::wstring HelpSectionBody(int section, bool english) {
             : L"■ メインソフト\r\n- ルートフォルダを指定し、ノート・PDF注釈を編集、保存、復元、出力します。\r\n- オンライン変換・更新確認・外部通信は使いません。\r\n\r\n■ 読み取り専用Viewer\r\n- 同梱Markdownなどを、関連付けに頼らず参照するための別ソフトです。\r\n- 長い案内は「詳細な案内」から開きます。\r\n";
     case kHelpSectionFiles:
         return english
-            ? L"■ Root folder and files\r\n- File menu: choose/reload the root folder; create lectures, sessions, and .clro notes; import files or folders.\r\n- Drop one or more files onto the PDF or note list to copy them into the current session. Folders cannot be dropped. Imported files are sorted automatically by format.\r\n- Operations: rename or move the current PDF/note only after selecting it.\r\n- Organize session files groups supported files in a session; review the result before saving.\r\n\r\n■ Formats\r\n- PDF and .clrop annotations are a pair. .clro/.md are notes; .txt/.csv are plain text.\r\n- UNC paths and reparse-point folders are not used as root folders, so local data stays predictable.\r\n"
-            : L"■ ルートフォルダとファイル\r\n- ファイルメニューから、ルートフォルダを指定／再読み込みする、講義・回次・.clroノートを作る、ファイルやフォルダを取り込みます。\r\n- PDF欄またはノート欄へ、1個以上のファイルをドロップすると現在の回次へコピーして取り込みます。フォルダーのドロップは非対応です。取り込み後は形式別に自動分類されます。\r\n- 操作メニューの名前変更・移動は、選択中のPDFまたはノートだけを対象にします。\r\n- 回次のファイル整理は対応形式をまとめます。保存前に結果を確認してください。\r\n\r\n■ 形式\r\n- PDFと.clropは組です。.clro/.mdはノート、.txt/.csvは書式なしテキストです。\r\n- UNCや再解析ポイントのフォルダは、保存先を取り違えないためルートフォルダに使いません。\r\n";
+            ? L"■ Root folder and files\r\n- File menu: choose/reload the root folder; create lectures, sessions, and .clro notes; import files or folders.\r\n" + localization::Text(L"help.workspace.drop_import") + L"\r\n- Operations: rename or move the current PDF/note only after selecting it.\r\n- Organize session files groups supported files in a session; review the result before saving.\r\n\r\n■ Formats\r\n- PDF and .clrop annotations are a pair. .clro/.md are notes; .txt/.csv are plain text.\r\n- UNC paths and reparse-point folders are not used as root folders, so local data stays predictable.\r\n"
+            : L"■ ルートフォルダとファイル\r\n- ファイルメニューから、ルートフォルダを指定／再読み込みする、講義・回次・.clroノートを作る、ファイルやフォルダを取り込みます。\r\n" + localization::Text(L"help.workspace.drop_import") + L"\r\n- 操作メニューの名前変更・移動は、選択中のPDFまたはノートだけを対象にします。\r\n- 回次のファイル整理は対応形式をまとめます。保存前に結果を確認してください。\r\n\r\n■ 形式\r\n- PDFと.clropは組です。.clro/.mdはノート、.txt/.csvは書式なしテキストです。\r\n- UNCや再解析ポイントのフォルダは、保存先を取り違えないためルートフォルダに使いません。\r\n";
     case kHelpSectionMenus:
         return english
             ? L"■ Menu map\r\n- File: create/import items, choose or reload the root folder, organize files, and open folders in Explorer.\r\n- Edit: undo/redo, rename, or move the current PDF or note.\r\n- View: closing, page navigation, zoom, scrolling, readability, note wrapping, and the left column.\r\n- Save: save the current work to the original or review protected work. Restore contains protected position/history recovery.\r\n- Output: quick PDF and TXT-note output, or the output dialog for PDF, PNG, TXT, Markdown, and HTML.\r\n- Tools: " + localization::Text(L"workspace_memo.title") + L", the read-only viewer, local conversion, and blank-PDF creation.\r\n- Search opens its dialog directly. Settings includes the unified dialog, palette, and presets. Help provides reference and diagnostics.\r\n"
@@ -671,8 +676,8 @@ static std::wstring HelpSectionBody(int section, bool english) {
             : L"■ 安全な保存\r\n- 編集中に元の PDF やノートを直接上書きしません。\r\n- 自動作業保護により、編集途中も復旧できるよう保持します。\r\n- Ctrl+S、「保存 > 作業保存」、通常終了、出力の直前には、バックアップを作成してから安全に原本へ保存します。\r\n- ファイル・回次・授業の切替では、保護中の作業を残し、原本は書き換えません。\r\n\r\n■ 復元\r\n- 「復元 > PDF位置」「復元 > 最終オープン時刻」では、対応する保護状態を削除または復元できます。\r\n- 「復元 > ファイル最終オープン履歴」では、回次ごとの最後に開いたPDF／ノートの記録を削除または復元できます。「復元 > バックアップ」では、保存済みバックアップを一覧から復元または個別に削除できます。\r\n- 保護中の作業があるときは、復元前に「保存状態を確認」を開いてください。\r\n\r\n■ 主な保存先\r\n- 内部作業保護: __pdf_note_workspace__/__tmp__/__stage__/\r\n- バックアップ: __pdf_note_workspace__/__escape__/backup/\r\n- ノート復旧: __pdf_note_workspace__/__escape__/note_recovery/\r\n";
     case kHelpSectionOutput:
         return english
-            ? L"■ Quick output\r\n- Quick PDF exports the current PDF with annotations. Configure its scale and annotation options in Output Dialog > Save as Quick PDF.\r\n- Quick Note exports the current note as TXT; TXT is the default quick-note format. Configure its text options in Output Dialog > Save as Quick Note. View quick output settings opens a compact summary that can be closed immediately.\r\n\r\n■ Output dialog\r\n- Choose annotated PDF, selected-page PDF, PNG, TXT, Markdown, or HTML. Set a destination folder and output file name, then export that one output directly or add multiple settings to the queue and select Export.\r\n- Select a reservation to change its destination or file name, then choose Update reservation. Export selected runs only that reservation. Output safely integrates current edits first; the open original and duplicate queued destinations are rejected.\r\n- The results dialog can reveal output in Explorer. PDFs can open in the read-only viewer; other formats open in their associated application.\r\n\r\n■ Safety\r\n- Output creates a separate result. Existing output files require explicit overwrite confirmation; protected PDFs can restrict copy and export.\r\n"
-            : L"■ 簡単出力\r\n- 簡単PDFは、現在のPDFを注釈入りの別ファイルへ出力します。出力ダイアログで倍率・注釈を設定し「簡単PDFに設定」を選ぶと、その設定を使います。\r\n- 簡単ノートは、現在のノートをtxtで出力します。簡単出力の規定形式はtxtです。出力ダイアログでテキストの設定を保存できます。「簡単出力設定を見る」では、現在の設定をすぐ閉じられる小さなウィンドウで確認できます。\r\n\r\n■ 出力ダイアログ\r\n- 注釈PDF、ページ指定PDF、PNG、txt、Markdown、HTMLを選べます。保存先フォルダと出力ファイル名を指定し、予約がなければその1件を「出力」で実行できます。複数の設定は予約に追加して「出力」でまとめて実行できます。\r\n- 予約を選び、保存先・ファイル名を変更して「予約を更新」できます。「選択を出力」はその予約1件だけを実行します。出力前には現在の変更を安全に統合し、原本と同じ出力先や予約間の重複を防ぎます。\r\n- 出力後の結果一覧から、エクスプローラーで表示できます。PDFは閲覧専用ソフトで開き、その他の形式は対応アプリで開けます。\r\n\r\n■ 安全性\r\n- 出力は別の結果ファイルを作ります。既存の出力先だけは上書きを確認します。保護付きPDFではコピー・出力が制限されます。\r\n";
+            ? L"■ Quick output\r\n- Quick PDF exports the current PDF with annotations. Configure its scale and annotation options in Output Dialog > Save as Quick PDF.\r\n- Quick Note exports the current note as TXT; TXT is the default quick-note format. Configure its text options in Output Dialog > Save as Quick Note. View quick output settings opens a compact summary that can be closed immediately.\r\n\r\n■ Output dialog\r\n- Choose annotated PDF, selected-page PDF, PNG, TXT, Markdown, or HTML. Set a destination folder and output file name, then export that one output directly or add multiple settings to the queue and select Export all queued.\r\n- Select a reservation to change its destination or file name, then choose Update reservation. Export selected runs only that reservation, removing it on success and keeping the dialog and remaining queue open. Failure or overwrite cancellation retains it. Closing the dialog discards unexecuted reservations. Move up/down changes the top-to-bottom output order. With at least two PDF-only reservations, Merge queued PDFs combines them into one chosen destination, retaining each reservation's pages, crop, scale, and annotations. Cancellation or failure retains the queue. Hover over the output folder field to see its complete path. TXT markup removal defaults to OFF. Output safely integrates current edits first; the open original and duplicate queued destinations are rejected.\r\n- The results dialog can reveal output in Explorer. PDFs can open in the read-only viewer; other formats open in their associated application.\r\n\r\n■ Safety\r\n- Output creates a separate result. Existing output files require explicit overwrite confirmation; protected PDFs can restrict copy and export.\r\n"
+            : L"■ 簡単出力\r\n- 簡単PDFは、現在のPDFを注釈入りの別ファイルへ出力します。出力ダイアログで倍率・注釈を設定し「簡単PDFに設定」を選ぶと、その設定を使います。\r\n- 簡単ノートは、現在のノートをtxtで出力します。簡単出力の規定形式はtxtです。出力ダイアログでテキストの設定を保存できます。「簡単出力設定を見る」では、現在の設定をすぐ閉じられる小さなウィンドウで確認できます。\r\n\r\n■ 出力ダイアログ\r\n- 注釈PDF、ページ指定PDF、PNG、txt、Markdown、HTMLを選べます。保存先フォルダと出力ファイル名を指定し、予約がなければその1件を「出力」で実行できます。複数の設定は予約に追加して「予約を一括出力」でまとめて実行できます。\r\n- 予約を選び、保存先・ファイル名を変更して「予約を更新」できます。「選択を出力」はその予約1件だけを実行し、成功した予約だけを外して残りと画面を保持します。失敗・上書き取消では予約を残します。画面を閉じると未出力予約は破棄されます。「上へ」「下へ」で順序を変更し、上から出力します。PDFのみ2件以上の予約では「PDFを結合出力」で結合先を選び、各予約のページ・抜き出し・倍率・注釈設定を保って上から1つのPDFへ結合できます。取消・失敗では予約を保持します。保存先フォルダ欄はホバーで全文を確認できます。txtのマークアップ除去は初期OFFです。出力前には現在の変更を安全に統合し、原本と同じ出力先や予約間の重複を防ぎます。\r\n- 出力後の結果一覧から、エクスプローラーで表示できます。PDFは閲覧専用ソフトで開き、その他の形式は対応アプリで開けます。\r\n\r\n■ 安全性\r\n- 出力は別の結果ファイルを作ります。既存の出力先だけは上書きを確認します。保護付きPDFではコピー・出力が制限されます。\r\n";
     case kHelpSectionView:
         return english
             ? L"■ View menu\r\n- Reset/set zoom and use first/previous/next/last/jump-to page for PDF navigation.\r\n- Left column changes workspace navigation visibility. Bottom-right pane function switches between note, headings, math, and status assist immediately for the current run. Status assist has a subtle dedicated header and scrolls vertically when needed. Its Change settings group contains only controls available from this pane, including the page-number and zoom displays drawn over the PDF. These displays can be turned on or off independently. Monitor contains information only. Enabling keyboard controls moves focus directly to the note's normal mode. It does not save the pane choice; reloading the root folder or starting again restores the General settings default.\r\n- Readable low-contrast text improves difficult PDF text; single-page mode and scroll direction change reading behavior.\r\n- Note wrap is unavailable while rendered note mode requires its own layout.\r\n"
@@ -686,9 +691,7 @@ static std::wstring HelpSectionBody(int section, bool english) {
             ? L"■ Annotation tools\r\n- Select, pan, eraser, and magnifier are interaction modes. Text, marker, pen, line, wave, arrow, and shapes create annotations stored separately in .clrop.\r\n- Annotation settings choose font, width, line style, arrow heads, fills, marker style, and freehand correction.\r\n\r\n■ Colors and palette\r\n- Tools can use their own colors. The user palette supplies reusable colors and a custom color slot.\r\n- Ctrl+Up/Down cycles the current annotation-tool color. Review tool and palette settings before changing a shared color.\r\n"
             : L"■ 注釈ツール\r\n- 選択、移動、消しゴム、拡大鏡は操作モードです。テキスト、マーカー、ペン、直線、波線、矢印、図形は.clropに保存する注釈を作ります。\r\n- 注釈設定では、フォント、線幅、線種、矢印、塗りつぶし、マーカー表示、手書き補正を選びます。\r\n\r\n■ 色とパレット\r\n- ツールごとの色に加え、再利用する色をユーザーパレットとカスタム色で管理します。\r\n- Ctrl+↑／Ctrl+↓は現在の注釈ツール色を切り替えます。共通色を変える前に、ツール設定とパレット設定を確認してください。\r\n";
     case kHelpSectionSettings:
-        return english
-            ? L"■ Settings categories\r\n- General: display/operation, note behavior, file/save protection, schedules/list order, and developer diagnostics. Choose the bottom-right pane function in Display and Interaction.\r\n- Note: fonts, rendering, wrapping, Vim-style editing, input, and markup-related behavior.\r\n- Annotation: tool appearance and behavior. Markup: supported note markup. Palette: reusable annotation colors.\r\n- Use the section selector at the top of a settings tab to jump directly to a section. It follows the section currently shown while you scroll.\r\n\r\n■ Applying settings\r\n- A settings preset stores the settings set, palette, shortcuts, schedule, and selected/custom themes. It never contains documents and can be loaded in another installation.\r\n- Loading first confirms replacement, keeps a recovery copy, and is not a document backup.\r\n- Some diagnostic log choices apply on the next launch. Settings do not rewrite existing PDF or note originals.\r\n"
-            : L"■ 設定のカテゴリ\r\n- 一般設定: 表示と操作、ノート、ファイル／保存、スケジュールと一覧順、開発者向け診断。右下領域の機能は「表示と操作」で選びます。\r\n- ノート設定: フォント、レンダリング、折返し、Vim的編集、入力、記法に関わる挙動。\r\n- 注釈設定: ツールの見た目と動作。markup設定: ノート記法。パレット設定: 再利用する注釈色です。\r\n- 各設定タブの上部にある節の選択欄で、目的の節へ直接移動できます。本文をスクロールすると表示中の節に自動で切り替わります。\r\n\r\n■ 設定の反映\r\n- 設定プリセットは設定、パレット、ショートカット、時間割、選択中／カスタムテーマをまとめて保存します。文書は含まず、別の環境でも読み込めます。\r\n- 読込み前に置換を確認し、既存設定を退避します。文書バックアップには使いません。\r\n- 一部の診断ログ設定は次回起動時に反映されます。設定変更で既存PDFやノート原本を書き換えません。\r\n";
+        return localization::Text(L"help.settings.content");
     case kHelpSectionShortcuts:
         return english
             ? L"■ Annotation shortcuts\r\n- Ctrl+Alt+number or a numpad key selects an annotation tool. Ctrl+Alt+arrow cycles tool category/detail; Ctrl+Up/Down cycles the current tool color.\r\n\r\n■ Vim-style note editing\r\n- The note settings choose whether normal mode keeps its structured rendering or shows its caret row as raw text, and whether a click enters insert mode. Insert mode always shows its caret or selection rows as raw text.\r\n- Text input, PDF text boxes, and IME composition take priority; do not assume navigation keys are commands while entering text.\r\n- Fixed annotation navigation keys cannot be replaced by the shortcut editor.\r\n"
@@ -1551,6 +1554,28 @@ static void ShowHelpCenterDialog(HWND owner, int initialSection) {
 
 void ShowHelpDialog(HWND owner) {
     ShowHelpCenterDialog(owner, kHelpSectionStart);
+}
+
+bool OpenBundledNoteWritingGuide(HWND owner) {
+    // UI thread owns the request. Resolve the locale document and viewer only
+    // beside this app (or its existing development docs path); never fall back
+    // to an OS association, empty viewer, download or document creation.
+    // The existing launcher owns process handles and the viewer's working dir.
+    const auto exeDir = GetExeDir();
+    const auto document = FindBundledHelpDocument(exeDir, L"Note_Writing_Guide.md");
+    if (!document) {
+        ShowSoftNotice(owner, localization::Text(L"note.input_assist.guide_missing"), SoftNoticeKind::Warning);
+        return false;
+    }
+    if (!IsSafeBundledHelpPath(exeDir / L"readonly_viewer.exe", false)) {
+        ShowSoftNotice(owner, localization::Text(L"note.input_assist.guide_viewer_missing"), SoftNoticeKind::Warning);
+        return false;
+    }
+    if (!LaunchReadOnlyViewerForFile(owner, document->wstring())) {
+        ShowSoftNotice(owner, localization::Text(L"note.input_assist.guide_open_failed"), SoftNoticeKind::Warning);
+        return false;
+    }
+    return true;
 }
 
 void OpenBundledHelpGuide(HWND owner) {

@@ -1,8 +1,10 @@
 #include "note/note_identity.h"
+#include "diagnostics/open_work_counters.h"
 
 namespace note {
 
 uint64_t FingerprintSnapshotBytes(std::string_view bytes) {
+    open_work::Record(open_work::Kind::NoteSnapshotFingerprint);
     constexpr uint64_t kOffsetBasis = 14695981039346656037ULL;
     constexpr uint64_t kPrime = 1099511628211ULL;
     uint64_t hash = kOffsetBasis;
@@ -193,16 +195,6 @@ void NoteIdentityRegistry::ForgetView(ViewId viewId) {
     if (!viewId.valid()) return;
     const std::lock_guard<std::mutex> lock(mutex_);
     views_by_id_.erase(viewId.value);
-}
-
-size_t NoteIdentityRegistry::note_count() const {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    return notes_by_id_.size();
-}
-
-size_t NoteIdentityRegistry::view_count() const {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    return views_by_id_.size();
 }
 
 NoteIdentityRegistry& RuntimeNoteIdentityRegistry() {

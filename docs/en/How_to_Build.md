@@ -40,6 +40,14 @@ python tests/python/validate_codebase.py
 python -m unittest tests/python/test_python_tools.py
 ```
 
+List checks with `./tests/scripts/run_repo_checks.ps1 -ListSteps`. Select related steps from PowerShell as shown below. A partial run does not establish a full pass; provide the selected checks' prerequisites and existing artifacts. Optional checks still require their `-Include...` switches. A requested step that is skipped fails the run. The no-argument command above runs the normal full suite; optional checks require separate switches.
+
+```powershell
+./tests/scripts/run_repo_checks.ps1 -OnlyStep 'Text Integrity Gate','Safety Scans'
+```
+
+Select active-content resistance checks with `./tests/scripts/run_repo_checks.ps1 -OnlyStep 'Script Resistance Tests'`. They cover passive PDFium processing and related static contracts; passing does not establish that the entire application is free of vulnerabilities.
+
 When changing saving behavior, also run:
 
 ```powershell

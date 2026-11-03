@@ -139,6 +139,61 @@ std::vector<ThemeColors> MakeBuiltInThemeCatalog() {
         RGB(160, 210, 255), RGB(0, 0, 0),
         RGB(0, 120, 215)
     ));
+    // Color-vision themes use neutral surfaces and one clearly distinct
+    // interaction color. They are complete themes, rather than adjustments
+    // layered over another theme, so their contrast does not depend on a
+    // separately selected color tendency.
+    themes.push_back(MakeTheme(
+        L"cvd_red_green",
+        L"cvd_red_green",
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(0, 79, 122), RGB(255, 255, 255),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(90, 153, 188), RGB(214, 232, 243),
+        RGB(173, 210, 231),
+        RGB(200, 200, 200), RGB(99, 143, 166),
+        RGB(230, 230, 230), RGB(255, 255, 255),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(0, 79, 122), RGB(255, 255, 255),
+        RGB(0, 114, 178)
+    ));
+    themes.push_back(MakeTheme(
+        L"cvd_blue_yellow",
+        L"cvd_blue_yellow",
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(122, 52, 93), RGB(255, 255, 255),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(202, 157, 182), RGB(247, 234, 241),
+        RGB(239, 212, 227),
+        RGB(200, 200, 200), RGB(193, 148, 174),
+        RGB(230, 230, 230), RGB(255, 255, 255),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(122, 52, 93), RGB(255, 255, 255),
+        RGB(204, 121, 167)
+    ));
+    themes.push_back(MakeTheme(
+        L"cvd_monochrome",
+        L"cvd_monochrome",
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(64, 64, 64), RGB(255, 255, 255),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(116, 116, 116), RGB(222, 222, 222),
+        RGB(194, 194, 194),
+        RGB(200, 200, 200), RGB(117, 117, 117),
+        RGB(230, 230, 230), RGB(255, 255, 255),
+        RGB(255, 255, 255), RGB(0, 0, 0),
+        RGB(64, 64, 64), RGB(255, 255, 255),
+        RGB(48, 48, 48)
+    ));
     return themes;
 }
 

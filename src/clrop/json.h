@@ -11,6 +11,9 @@ class ItemLoadSink {
 public:
     virtual ~ItemLoadSink() = default;
     virtual bool OnClropItem(int page, clrop::Item&& item, std::wstring& err) = 0;
+    // Called after full validation, even when metadata follows the pages.
+    // Unspecified marker modes use Legacy in document v1 and Multiply in v2.
+    virtual bool OnClropDocumentVersion(int, std::wstring&) { return true; }
 };
 
 enum class LoadFileFailureKind {
@@ -19,8 +22,11 @@ enum class LoadFileFailureKind {
     Parse,
 };
 
-// まだ非接続フェーズのスタブ。実装はフェーズ1の一部として拡張する。
+// Document output is replaced only after the entire input parses successfully.
 bool ParseClropFromJson(const std::string& json, clrop::Document& out, std::wstring& err);
+// Sink callbacks run while parsing. A parse error or sink rejection may leave
+// earlier items in the sink; callers must stage them and publish only on true.
+// outPdfId is replaced only after the entire input parses successfully.
 bool ParseClropFromJsonToSink(const std::string& json,
                               clrop::PdfId* outPdfId,
                               clrop::ItemLoadSink& sink,
@@ -29,6 +35,7 @@ bool LoadClropFile(const std::wstring& path,
                    clrop::Document& out,
                    std::wstring& err,
                    LoadFileFailureKind* failureKind = nullptr);
+// The same partial-sink contract applies after the file has been read.
 bool LoadClropFileToSink(const std::wstring& path,
                          clrop::PdfId* outPdfId,
                          clrop::ItemLoadSink& sink,

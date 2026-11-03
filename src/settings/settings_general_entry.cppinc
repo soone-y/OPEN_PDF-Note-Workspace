@@ -1,0 +1,24 @@
+// Public entry points for the general settings dialog.
+static void EnsureGeneralSettingsClass() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = GeneralSettingsProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush
+                                           : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"GeneralSettingsDlgClass";
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+} // namespace
+
+void ShowGeneralSettingsDialog(HWND owner) {
+    ShowUnifiedSettingsDialog(owner, kSettingsNavGeneral);
+}
+
+void ShowNoteSettingsDialog(HWND owner) {
+    ShowUnifiedSettingsDialog(owner, kSettingsNavNote);
+}

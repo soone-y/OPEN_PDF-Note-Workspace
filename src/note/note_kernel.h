@@ -89,6 +89,7 @@ public:
     void RequestFullRefresh();
     void DiscardPendingEditAndRequireFullRefresh();
     void ClearDerived();
+    [[nodiscard]] bool SetClroAsciiOnly(bool value);
 
     bool valid() const { return text_core_.valid(); }
     bool has_pending_edit() const { return pending_transaction_.active(); }
@@ -107,6 +108,7 @@ public:
     bool CanRedo() const { return history_.CanRedo(); }
 
 private:
+    friend class LocalNoteKernelRegistry;
     bool TryApplyIncrementalSyntax(const TextEdit& edit,
                                    const NoteInfluenceScope* influence);
     [[nodiscard]] NoteKernelRefreshResult RebuildAll(
@@ -141,10 +143,12 @@ public:
                            uint64_t persistenceRevision,
                            NoteContentKind contentKind);
     LocalNoteKernel* Find(NoteId noteId);
-    const LocalNoteKernel* Find(NoteId noteId) const;
     LocalNoteKernel* FindForView(const ViewIdentity& viewIdentity);
-    const LocalNoteKernel* FindForView(const ViewIdentity& viewIdentity) const;
-    bool Forget(NoteId noteId);
+    // UI-thread draft promotion. Reject an occupied target; retain text and
+    // undo/redo, and withdraw derived data carrying the former owner.
+    [[nodiscard]] LocalNoteKernel* Rekey(NoteId from, NoteId to,
+                                         NoteMetadata metadata,
+                                         NoteContentKind contentKind);
     size_t size() const { return kernels_.size(); }
 
 private:

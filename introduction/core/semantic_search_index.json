@@ -41,7 +41,7 @@
     {
       "intent": "Lite版と通常版の違い・どちらを選ぶべきか知りたい",
       "keywords": ["Lite", "通常版", "LibreOffice", "Office変換", "DOCX", "PPTX"],
-      "target_node": "introduction/core/features_faq.md",
+      "target_node": "introduction/core/features_and_scenarios.md",
       "evidence_path": "README.md"
     },
     {

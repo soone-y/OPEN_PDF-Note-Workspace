@@ -45,9 +45,6 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         const int sectionTextH = FontLineHeightPx(hWnd, SettingsSectionFont());
         const int rowH = std::max(ScaleY(hWnd, 24), uiTextH + ScaleY(hWnd, 10));
         const int comboDropH = ScaleY(hWnd, 240);
-        const int dayW = ScaleY(hWnd, 44);
-        const int dayGap = ScaleY(hWnd, 6);
-        const bool showBasicSections = ctx->pageMode == GeneralSettingsPageMode::Basic;
         const bool showNoteSectionOnly = ctx->pageMode == GeneralSettingsPageMode::Note;
         const int sectionNavH = rowH;
         const int sectionNavGap = ScaleY(hWnd, 8);
@@ -61,11 +58,11 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         const int headerH = ctx->embedded ? 0 : (titleH + subtitleH + sectionButtonH + ScaleY(hWnd, 20));
         const int panelTop = pad + headerH;
         const int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
-        const int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
+        const int panelH = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
         const int contentPaneX = pad;
-        const int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - pad * 2);
+        const int contentPaneW = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 320), clientW - pad * 2);
         const int contentPanelTop = panelTop + sectionNavH + sectionNavGap;
-        const int contentPanelH = std::max(ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
+        const int contentPanelH = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
         const int contentW = std::max(0, contentPaneW - pad * 2);
         int y = pad;
 
@@ -198,35 +195,6 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             }
         }
 
-        const std::array<std::wstring, kScheduleDayCount> dayLabels = {
-            localization::Text(L"settings.schedule.day.mon"),
-            localization::Text(L"settings.schedule.day.tue"),
-            localization::Text(L"settings.schedule.day.wed"),
-            localization::Text(L"settings.schedule.day.thu"),
-            localization::Text(L"settings.schedule.day.fri"),
-            localization::Text(L"settings.schedule.day.sat"),
-            localization::Text(L"settings.schedule.day.sun"),
-        };
-
-        std::wstring defaultScheduleDaysLabel;
-        int defaultDayMask = defaults.scheduleDayMask & 0x7F;
-        if (defaultDayMask == 0) defaultDayMask = kDefaultScheduleMask;
-        for (int i = 0; i < kScheduleDayCount; ++i) {
-            if (defaultDayMask & (1 << i)) {
-                if (!defaultScheduleDaysLabel.empty()) defaultScheduleDaysLabel += L"/";
-                defaultScheduleDaysLabel += dayLabels[i];
-            }
-        }
-        if (defaultScheduleDaysLabel.empty()) {
-            defaultScheduleDaysLabel = localization::Text(L"settings.general.320d24d48eee").c_str();
-        }
-        int defaultPeriods = std::clamp(defaults.schedulePeriods, 1, kScheduleMaxPeriods);
-        std::wstring defaultSchedulePeriodsLabel = localization::Format(
-            L"settings.schedule.period", {{L"COUNT", std::to_wstring(defaultPeriods)}});
-        std::wstring defaultUnsetLabel = localization::Text(L"settings.general.6e885e5bd098").c_str();
-        const std::wstring defaultShowMathLabel = defaults.showMathList
-            ? (localization::Text(L"settings.general.92b0b1833a5b").c_str())
-            : (localization::Text(L"settings.general.66a5fb46490f").c_str());
         std::wstring defaultDownKeyLabel = DownKeyLastLineLabel(defaults.downKeyLastLineAction);
         std::wstring defaultLeftRightLabel = LeftRightLineMoveLabel(defaults.leftRightLineMoveAction);
         std::wstring defaultSelectionStyleLabel = SelectionStyleLabel(defaults.selectionStyle);
@@ -243,22 +211,26 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         std::wstring defaultStudentModeLabel = defaults.studentMode ? L"ON" : L"OFF";
 
         HWND contentParent = ctx->scrollPanel ? ctx->scrollPanel : hWnd;
-        auto addLabel = [&](const std::wstring& text) -> HWND {
+        int subgroupInset = 0;
+        auto addLabel = [&](const std::wstring& text, int extraInset = 0) -> HWND {
+            const int inset = subgroupInset + extraInset;
+            const int width = std::max(1, contentW - inset * 2);
             int labelH = std::max(uiTextH + ScaleY(hWnd, 2),
-                                  MeasureTextHeight(hWnd, text, contentW, g_hUIFont));
+                                  MeasureTextHeight(hWnd, text, width, g_hUIFont));
             HWND h = CreateWindowExW(0, L"STATIC", text.c_str(),
                                      WS_CHILD | WS_VISIBLE,
-                                     pad, y, contentW, labelH, contentParent, nullptr, g_hInst, nullptr);
+                                     pad + inset, y, width, labelH, contentParent, nullptr, g_hInst, nullptr);
             SetUIFont(h);
             y += labelH + labelGap;
             return h;
         };
         auto addCombo = [&](int id, bool ownerDraw, int w) -> HWND {
+            w = std::min(w, std::max(1, contentW - subgroupInset * 2));
             DWORD style = WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST;
             if (ownerDraw) {
                 style |= CBS_OWNERDRAWFIXED | CBS_HASSTRINGS;
             }
-            int x = pad + std::max(0, contentW - w);
+            int x = pad + std::max(subgroupInset, contentW - subgroupInset - w);
             HWND cb = CreateWindowExW(0, L"COMBOBOX", L"",
                                       style,
                                       x, y, w, comboDropH, contentParent,
@@ -270,7 +242,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             return cb;
         };
         auto addButton = [&](int id, const wchar_t* label, int w, int h) -> HWND {
-            int x = pad + std::max(0, contentW - w);
+            w = std::min(w, std::max(1, contentW - subgroupInset * 2));
+            int x = pad + std::max(subgroupInset, contentW - subgroupInset - w);
             HWND b = CreateWindowExW(0, L"BUTTON", label,
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                      x, y, w, h, contentParent,
@@ -285,7 +258,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                                  int h) -> std::pair<HWND, HWND> {
             int gapX = ScaleY(hWnd, 10);
             int totalW = wLeft + gapX + wRight;
-            int x = pad + std::max(0, contentW - totalW);
+            int x = pad + std::max(subgroupInset, contentW - subgroupInset - totalW);
             HWND bl = CreateWindowExW(0, L"BUTTON", labelLeft,
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                       x, y, wLeft, h, contentParent,
@@ -302,14 +275,16 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             return { bl, br };
         };
         auto addCheck = [&](int id, const wchar_t* label, int w) -> HWND {
-            int x = pad + std::max(0, contentW - w);
+            w = std::min(w, std::max(1, contentW - subgroupInset * 2));
+            const int checkH = std::max(rowH, MeasureTextHeight(hWnd, label, std::max(1, w - ScaleY(hWnd, 26)), g_hUIFont) + ScaleY(hWnd, 8));
+            int x = pad + std::max(subgroupInset, contentW - subgroupInset - w);
             HWND c = CreateWindowExW(0, L"BUTTON", label,
-                                     WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                     x, y, w, rowH, contentParent,
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_MULTILINE,
+                                     x, y, w, checkH, contentParent,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                                      g_hInst, nullptr);
             SetUIFont(c);
-            y += rowH + gapY;
+            y += checkH + gapY;
             return c;
         };
         int sectionTop = y;
@@ -343,11 +318,42 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             y += groupTitlePad;
         };
 
-        if (showBasicSections) {
-            beginSection(kGeneralSectionDisplay, localization::Text(L"settings.general.section_display").c_str());
+
+        struct SubgroupLayout { int top; int inset; std::wstring title; };
+        const auto beginSubgroup = [&](const wchar_t* titleId) {
+            SubgroupLayout group{y, subgroupInset, localization::Text(titleId)};
+            y += groupTitlePad;
+            subgroupInset += ScaleY(hWnd, 12);
+            return group;
+        };
+        const auto endSubgroup = [&](const SubgroupLayout& group) {
+            subgroupInset = group.inset;
+            const int bottomPad = ScaleY(hWnd, 12);
+            HWND box = CreateWindowExW(0, L"BUTTON", group.title.c_str(), WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                pad + group.inset, group.top, std::max(1, contentW - group.inset * 2), y - group.top + bottomPad,
+                contentParent, nullptr, g_hInst, nullptr);
+            SetSettingsSectionFont(box);
+            SetWindowPos(box, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            y += bottomPad + gapY;
+        };
+
+        if (ctx->pageMode == GeneralSettingsPageMode::BottomPane) {
+            beginSection(0, localization::Text(settings_navigation::entries[ctx->navigationPage].label).c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.caeaed7a80fa").c_str(), defaultBottomPaneLabel));
             ctx->cbBottomPane = addCombo(IDC_BOTTOM_PANE, false, controlW);
+            addLabel(localization::Text(L"settings.bottom_pane.persistence_hint"));
+        }
 
+        if (ctx->pageMode == GeneralSettingsPageMode::Basic) {
+            beginSection(0, localization::Text(settings_navigation::entries[ctx->navigationPage].label).c_str());
+            ctx->chkRestoreLastSession = addCheck(IDC_RESTORE_LAST_SESSION,
+                localization::Text(L"settings.environment.restore_last_session").c_str(), wideW);
+            addLabel(localization::Text(L"settings.environment.restore_last_session_hint"));
+            addLabel(localization::Text(L"settings.guide.label"));
+            ctx->cbEmptyViewGuide = addCombo(IDC_EMPTY_VIEW_GUIDE, false, controlW);
+            addLabel(localization::Text(L"settings.guide.hint"));
+
+            const auto themeGroup = beginSubgroup(L"settings.subgroup.theme");
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.5c3d07c45ba5").c_str(), defaultThemeLabel));
             ctx->cbTone = addCombo(IDC_TONE, false, controlW);
             addLabel(localization::Text(L"settings.general.theme_save_hint"));
@@ -361,13 +367,57 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             }
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.e52cc8dfcb2e").c_str(), defaultToneVariantLabel));
             ctx->cbToneVariant = addCombo(IDC_TONE_VARIANT, false, controlW);
+            endSubgroup(themeGroup);
 
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.5b68f59d8849").c_str(), defaultShowMathLabel));
-            ctx->chkShowMath = addCheck(IDC_SHOW_MATH, localization::Text(L"settings.general.show").c_str(), checkW);
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b437cb79e5a2").c_str(),
+                                             defaultStudentModeLabel));
+            ctx->chkStudentMode = addCheck(IDC_STUDENT_MODE,
+                                           localization::Text(L"settings.general.acef35730ba0").c_str(),
+                                           wideW);
 
+            const auto mouseGroup = beginSubgroup(L"settings.subgroup.mouse_scroll");
+            addLabel(localization::Text(L"settings.general.wheel_invert_vertical").c_str());
+            ctx->chkWheelInvertVertical = addCheck(IDC_WHEEL_INVERT_VERTICAL, localization::Text(L"settings.general.invert").c_str(), checkW);
+
+            addLabel(localization::Text(L"settings.general.wheel_invert_horizontal").c_str());
+            ctx->chkWheelInvertHorizontal = addCheck(IDC_WHEEL_INVERT_HORIZONTAL, localization::Text(L"settings.general.invert").c_str(), checkW);
+            endSubgroup(mouseGroup);
+
+            const auto touchpadGroup = beginSubgroup(L"settings.subgroup.touchpad_scroll");
+            addLabel(localization::Text(L"settings.general.touchpad_invert_vertical").c_str());
+            ctx->chkTouchpadInvertVertical = addCheck(IDC_TOUCHPAD_INVERT_VERTICAL, localization::Text(L"settings.general.invert").c_str(), checkW);
+
+            addLabel(localization::Text(L"settings.general.touchpad_invert_horizontal").c_str());
+            ctx->chkTouchpadInvertHorizontal = addCheck(IDC_TOUCHPAD_INVERT_HORIZONTAL, localization::Text(L"settings.general.invert").c_str(), checkW);
+
+            addLabel(localization::Text(L"settings.general.touchpad_scroll_stabilization").c_str());
+            ctx->chkTouchpadScrollStabilization = addCheck(IDC_TOUCHPAD_SCROLL_STABILIZATION,
+                localization::Text(L"settings.general.touchpad_scroll_stabilization_enable").c_str(), wideW);
+            endSubgroup(touchpadGroup);
+
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.a138760d8332").c_str(),
+                                             defaultNativeFileDialogsLabel));
+            ctx->chkUseNativeFileDialogs = addCheck(
+                IDC_USE_NATIVE_FILE_DIALOGS,
+                localization::Text(L"settings.general.e6370a2e1c70").c_str(),
+                wideW);
+            addLabel(localization::Text(L"settings.general.b6fba6677e9b").c_str());
+
+            beginSection(1, localization::Text(L"settings.page.layout").c_str());
+            ctx->lblLayoutDefaults = addLabel(localization::Format(L"settings.general.layout_defaults", {{L"VALUE", LayoutDefaultsLabelText()}}));
+            addButton(IDC_LAYOUT_DEFAULT_SAVE, localization::Text(L"settings.general.save_layout_defaults").c_str(), contentW, rowH);
+
+        }
+
+        if (ctx->pageMode == GeneralSettingsPageMode::Pdf) {
+            beginSection(0, localization::Text(settings_navigation::entries[ctx->navigationPage].label).c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b4162c55939c").c_str(),
                                              PdfFlowModeLabel(g_config.pdfFlowMode)));
             ctx->cbPdfFlowMode = addCombo(IDC_PDF_FLOW_MODE, false, controlW);
+
+            addLabel(localization::Text(L"settings.pdf.open_view"));
+            ctx->cbPdfOpenViewMode = addCombo(IDC_PDF_OPEN_VIEW_MODE, false, controlW);
+            addLabel(localization::Text(L"settings.pdf.open_view_hint"));
 
             addLabel(localization::Text(L"settings.general.a0e9ebb0bedf").c_str());
             ctx->chkPdfSinglePageMode = addCheck(
@@ -375,6 +425,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 localization::Text(L"settings.general.ba5d74bf8466").c_str(),
                 wideW);
 
+            const auto overlaysGroup = beginSubgroup(L"settings.subgroup.pdf_overlays");
             addLabel(localization::Text(L"settings.general.pdf_page_overlay").c_str());
             ctx->chkPdfPageOverlay = addCheck(
                 IDC_PDF_PAGE_OVERLAY,
@@ -386,82 +437,24 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 IDC_PDF_ZOOM_OVERLAY,
                 localization::Text(L"settings.general.show").c_str(),
                 wideW);
+            endSubgroup(overlaysGroup);
 
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.d756a8fbd401").c_str(), defaultSelectionStyleLabel));
             ctx->cbSelectionStyle = addCombo(IDC_SELECTION_STYLE, false, controlW);
 
+            const auto pointerGroup = beginSubgroup(L"settings.subgroup.pdf_click_offset");
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.77a2cd7b241a").c_str(), defaultPointerOffsetLabel));
             ctx->cbPointerOffsetX = addCombo(IDC_POINTER_OFFSET_X, false, controlW);
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.96521a019558").c_str(), defaultPointerOffsetLabel));
             ctx->cbPointerOffsetY = addCombo(IDC_POINTER_OFFSET_Y, false, controlW);
+            endSubgroup(pointerGroup);
 
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b07f8dab1085").c_str(),
-                                             defaultAutoPairLabel));
-            ctx->chkAutoPairBrackets = addCheck(IDC_AUTO_PAIR_BRACKETS,
-                                                localization::Text(L"settings.general.0b8b663d67e3").c_str(), checkW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b437cb79e5a2").c_str(),
-                                             defaultStudentModeLabel));
-            ctx->chkStudentMode = addCheck(IDC_STUDENT_MODE,
-                                           localization::Text(L"settings.general.acef35730ba0").c_str(),
-                                           wideW);
-
-            addLabel(localization::Text(L"settings.general.wheel_invert_vertical").c_str());
-            ctx->chkWheelInvertVertical = addCheck(IDC_WHEEL_INVERT_VERTICAL, localization::Text(L"settings.general.invert").c_str(), checkW);
-
-            addLabel(localization::Text(L"settings.general.wheel_invert_horizontal").c_str());
-            ctx->chkWheelInvertHorizontal = addCheck(IDC_WHEEL_INVERT_HORIZONTAL, localization::Text(L"settings.general.invert").c_str(), checkW);
-
-            addLabel(localization::Text(L"settings.general.touchpad_invert_vertical").c_str());
-            ctx->chkTouchpadInvertVertical = addCheck(IDC_TOUCHPAD_INVERT_VERTICAL, localization::Text(L"settings.general.invert").c_str(), checkW);
-
-            addLabel(localization::Text(L"settings.general.touchpad_invert_horizontal").c_str());
-            ctx->chkTouchpadInvertHorizontal = addCheck(IDC_TOUCHPAD_INVERT_HORIZONTAL, localization::Text(L"settings.general.invert").c_str(), checkW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.c2c8853f9568").c_str(), defaultDownKeyLabel));
-            ctx->cbDownKeyAction = addCombo(IDC_DOWNKEY_LASTLINE_ACTION, false, controlW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.c0ea1bb8540b").c_str(), defaultLeftRightLabel));
-            ctx->cbLeftRightLineMoveAction = addCombo(IDC_LRKEY_LINE_MOVE_ACTION, false, controlW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.5bb4973da96e").c_str(),
-                                             defaultFullWidthParenCaretLabel));
-            ctx->chkFullWidthParenCaretInside = addCheck(IDC_FULLWIDTH_PAREN_CARET_INSIDE,
-                                                         localization::Text(L"settings.general.ae2b2ead1c80").c_str(),
-                                                         checkW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.37e102c14dac").c_str(),
-                                             defaultFullWidthParenCancelLeftLabel));
-            ctx->chkFullWidthParenCancelNextLeft = addCheck(IDC_FULLWIDTH_PAREN_CANCEL_NEXT_LEFT,
-                                                             localization::Text(L"settings.general.67dd379d0c70").c_str(),
-                                                             checkW);
-
-            addLabel(localization::Text(L"settings.general.90bafe523784").c_str());
-            ctx->cbQuickAnnotPopupPlacement = addCombo(IDC_QUICKANNOT_POPUP_PLACEMENT, false, controlW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.c3ceff37e484").c_str(), defaultShortcutTextTagKeyLabel));
-            ctx->cbShortcutTextTagKey = addCombo(IDC_SHORTCUT_TEXT_TAG_KEY, false, controlW);
-
-            addLabel(localization::Text(L"settings.general.ea90dd967716").c_str());
-            ctx->chkShortcutHeadingArrowInvert = addCheck(IDC_SHORTCUT_HEADING_ARROW_INVERT, localization::Text(L"settings.general.invert").c_str(), checkW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b8780efbcc5b").c_str(), localization::Text(L"settings.general.1b861de2aac9").c_str()));
-            ctx->btnShortcutEdit = addButton(IDC_SHORTCUT_EDIT, localization::Text(L"settings.general.edit").c_str(), buttonW, rowH);
-            addLabel(localization::Text(L"settings.general.shortcut_save_hint"));
         }
 
         if (showNoteSectionOnly) {
             std::wstring defaultRenderModeLabel = NoteRenderModeLabel(defaults.noteRenderEnabled, defaults.noteRenderMath);
             std::wstring defaultWrapLabel = defaults.noteWrapEnabled ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
                                                                      : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
-            std::wstring defaultVimLabel = defaults.noteVimModeEnabled ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
-                                                                       : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
-            std::wstring defaultCaretLineRawLabel = defaults.noteVimCaretLineRawTextVisible
-                ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
-                : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
-            std::wstring defaultClickInsertLabel = defaults.noteVimClickEntersInsertMode
-                ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
-                : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
             std::wstring defaultGridLabel = defaults.noteGridEnabled ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
                                                                      : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
             std::wstring defaultGridPitchLabel = std::to_wstring(defaults.noteGridPitch) + L"px";
@@ -512,10 +505,115 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             beginSection(1, localization::Text(L"settings.general.4c8d20a2540f").c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b87fc8e786dc").c_str(), defaultRenderModeLabel));
             ctx->cbNoteRenderMode = addCombo(IDC_NOTE_RENDER_MODE, false, controlW);
+            ctx->chkClroAsciiOnly = addCheck(IDC_CLRO_ASCII_ONLY,
+                localization::Text(L"settings.general.clro_ascii_only").c_str(), checkW);
+
+            const auto bottomSpaceGroup = beginSubgroup(L"settings.note.bottom_space");
+            addLabel(localization::Text(L"settings.note.bottom_space_mode"));
+            ctx->cbNoteBottomSpaceMode = addCombo(IDC_NOTE_BOTTOM_SPACE_MODE, false, controlW);
+            const auto addSpaceValue = [&](const wchar_t* label, int id, int value) {
+                addLabel(localization::Text(label));
+                HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", std::to_wstring(value).c_str(),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                    pad + std::max(subgroupInset, contentW - subgroupInset - controlW),
+                    y, controlW, rowH, contentParent,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+                SetUIFont(edit);
+                y += rowH + gapY;
+                return edit;
+            };
+            ctx->editNoteBottomSpaceFixed = addSpaceValue(L"settings.note.bottom_space_fixed",
+                IDC_NOTE_BOTTOM_SPACE_FIXED, g_config.noteBottomSpaceFixedDip);
+            ctx->editNoteBottomSpaceFont = addSpaceValue(L"settings.note.bottom_space_font",
+                IDC_NOTE_BOTTOM_SPACE_FONT, g_config.noteBottomSpaceFontPercent);
+            ctx->editNoteBottomSpaceViewport = addSpaceValue(L"settings.note.bottom_space_viewport",
+                IDC_NOTE_BOTTOM_SPACE_VIEWPORT, g_config.noteBottomSpaceViewportPercent);
+            addLabel(localization::Text(L"settings.note.bottom_space_hint"));
+            endSubgroup(bottomSpaceGroup);
 
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.db92a1a5fee5").c_str(), defaultWrapLabel));
             ctx->chkNoteWrapEnabled = addCheck(IDC_NOTE_WRAP_ENABLED, localization::Text(L"settings.general.0b8b663d67e3").c_str(), checkW);
 
+            beginSection(2, localization::Text(L"settings.general.16a547980a7a").c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.111e520d0d01").c_str(), defaultBgLabel));
+            ctx->cbNoteBgMode = addCombo(IDC_NOTE_BG_MODE, false, controlW);
+            ctx->btnNoteBgCustom = addButton(IDC_NOTE_BG_CUSTOM,
+                                             localization::Text(L"settings.general.b2fd77c3e2b0").c_str(),
+                                             wideW, rowH);
+
+            const auto gridGroup = beginSubgroup(L"settings.subgroup.note_grid");
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.6eadaeb59789").c_str(), defaultGridLabel));
+            ctx->chkNoteGridEnabled = addCheck(IDC_NOTE_GRID_ENABLED, localization::Text(L"settings.general.84c82e82e1cc").c_str(), checkW);
+
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.226e33eec6b1").c_str(), defaultGridPitchLabel));
+            ctx->cbNoteGridPitch = addCombo(IDC_NOTE_GRID_PITCH, false, controlW);
+            endSubgroup(gridGroup);
+
+            const auto mathGroup = beginSubgroup(L"settings.subgroup.note_math");
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.4468bb0e2582").c_str(), defaultMathMarginLabel));
+            ctx->cbNoteMathMargin = addCombo(IDC_NOTE_MATH_MARGIN, false, controlW);
+
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.e1164e3af8c7").c_str(), defaultSupSubLabel));
+            ctx->cbNoteMathSupSub = addCombo(IDC_NOTE_MATH_SUPSUB, false, controlW);
+
+            addLabel(SettingLabelWithDefault(
+                localization::Text(L"settings.general.inline_math_vertical_alignment").c_str(),
+                defaultInlineMathVerticalAlignmentLabel));
+            ctx->cbNoteInlineMathVerticalAlignment =
+                addCombo(IDC_NOTE_INLINE_MATH_VERTICAL_ALIGNMENT, false, controlW);
+            endSubgroup(mathGroup);
+
+            beginSection(3, localization::Text(L"settings.general.f669fef9c21a").c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.0f0d1e700cd7").c_str(), defaultOverlayRefreshDelayLabel));
+            ctx->cbNoteOverlayRefreshDelay = addCombo(IDC_NOTE_OVERLAY_REFRESH_DELAY, false, controlW);
+
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.7370854705ec").c_str(), defaultFullReparseDelayLabel));
+            ctx->cbNoteFullReparseDelay = addCombo(IDC_NOTE_FULL_REPARSE_DELAY, false, controlW);
+
+        }
+
+        if (ctx->pageMode == GeneralSettingsPageMode::NoteInput) {
+            beginSection(0, localization::Text(settings_navigation::entries[ctx->navigationPage].label).c_str());
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b07f8dab1085").c_str(),
+                                             defaultAutoPairLabel));
+            ctx->chkAutoPairBrackets = addCheck(IDC_AUTO_PAIR_BRACKETS,
+                                                localization::Text(L"settings.general.0b8b663d67e3").c_str(), checkW);
+
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.c2c8853f9568").c_str(), defaultDownKeyLabel));
+            ctx->cbDownKeyAction = addCombo(IDC_DOWNKEY_LASTLINE_ACTION, false, controlW);
+
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.c0ea1bb8540b").c_str(), defaultLeftRightLabel));
+            ctx->cbLeftRightLineMoveAction = addCombo(IDC_LRKEY_LINE_MOVE_ACTION, false, controlW);
+
+            const auto parenthesesGroup = beginSubgroup(L"settings.subgroup.fullwidth_parentheses");
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.5bb4973da96e").c_str(),
+                                             defaultFullWidthParenCaretLabel));
+            ctx->chkFullWidthParenCaretInside = addCheck(IDC_FULLWIDTH_PAREN_CARET_INSIDE,
+                                                         localization::Text(L"settings.general.ae2b2ead1c80").c_str(),
+                                                         checkW);
+
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.37e102c14dac").c_str(),
+                                             defaultFullWidthParenCancelLeftLabel));
+            ctx->chkFullWidthParenCancelNextLeft = addCheck(IDC_FULLWIDTH_PAREN_CANCEL_NEXT_LEFT,
+                                                             localization::Text(L"settings.general.67dd379d0c70").c_str(),
+                                                             checkW);
+            endSubgroup(parenthesesGroup);
+
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.c3ceff37e484").c_str(), defaultShortcutTextTagKeyLabel));
+            ctx->cbShortcutTextTagKey = addCombo(IDC_SHORTCUT_TEXT_TAG_KEY, false, controlW);
+
+            addLabel(localization::Text(L"settings.general.ea90dd967716").c_str());
+            ctx->chkShortcutHeadingArrowInvert = addCheck(IDC_SHORTCUT_HEADING_ARROW_INVERT, localization::Text(L"settings.general.invert").c_str(), checkW);
+
+            beginSection(1, localization::Text(L"settings.page.vim").c_str());
+            std::wstring defaultVimLabel = defaults.noteVimModeEnabled ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
+                                                                       : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
+            std::wstring defaultCaretLineRawLabel = defaults.noteVimCaretLineRawTextVisible
+                ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
+                : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
+            std::wstring defaultClickInsertLabel = defaults.noteVimClickEntersInsertMode
+                ? (localization::Text(L"settings.general.d6b8cb010d87").c_str())
+                : (localization::Text(L"settings.general.7d50fab6bf8b").c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.4c0160f87cbd").c_str(), defaultVimLabel));
             ctx->chkNoteVimMode = addCheck(IDC_NOTE_VIM_MODE, localization::Text(L"settings.general.0b8b663d67e3").c_str(), checkW);
 
@@ -529,49 +627,33 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             ctx->chkNoteVimClickInsert = addCheck(IDC_NOTE_VIM_CLICK_INSERT,
                                                   localization::Text(L"settings.general.0b8b663d67e3").c_str(), checkW);
 
-            beginSection(2, localization::Text(L"settings.general.16a547980a7a").c_str());
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.111e520d0d01").c_str(), defaultBgLabel));
-            ctx->cbNoteBgMode = addCombo(IDC_NOTE_BG_MODE, false, controlW);
-            ctx->btnNoteBgCustom = addButton(IDC_NOTE_BG_CUSTOM,
-                                             localization::Text(L"settings.general.b2fd77c3e2b0").c_str(),
-                                             wideW, rowH);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.6eadaeb59789").c_str(), defaultGridLabel));
-            ctx->chkNoteGridEnabled = addCheck(IDC_NOTE_GRID_ENABLED, localization::Text(L"settings.general.84c82e82e1cc").c_str(), checkW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.226e33eec6b1").c_str(), defaultGridPitchLabel));
-            ctx->cbNoteGridPitch = addCombo(IDC_NOTE_GRID_PITCH, false, controlW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.4468bb0e2582").c_str(), defaultMathMarginLabel));
-            ctx->cbNoteMathMargin = addCombo(IDC_NOTE_MATH_MARGIN, false, controlW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.e1164e3af8c7").c_str(), defaultSupSubLabel));
-            ctx->cbNoteMathSupSub = addCombo(IDC_NOTE_MATH_SUPSUB, false, controlW);
-
-            addLabel(SettingLabelWithDefault(
-                localization::Text(L"settings.general.inline_math_vertical_alignment").c_str(),
-                defaultInlineMathVerticalAlignmentLabel));
-            ctx->cbNoteInlineMathVerticalAlignment =
-                addCombo(IDC_NOTE_INLINE_MATH_VERTICAL_ALIGNMENT, false, controlW);
-
-            beginSection(3, localization::Text(L"settings.general.f669fef9c21a").c_str());
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.0f0d1e700cd7").c_str(), defaultOverlayRefreshDelayLabel));
-            ctx->cbNoteOverlayRefreshDelay = addCombo(IDC_NOTE_OVERLAY_REFRESH_DELAY, false, controlW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.7370854705ec").c_str(), defaultFullReparseDelayLabel));
-            ctx->cbNoteFullReparseDelay = addCombo(IDC_NOTE_FULL_REPARSE_DELAY, false, controlW);
         }
 
-        if (showBasicSections) {
-            beginSection(kGeneralSectionSave, localization::Text(L"settings.general.section_save").c_str());
-            addLabel(localization::Text(L"settings.general.independent_save_hint"));
-            ctx->lblLayoutDefaults = addLabel(localization::Format(L"settings.general.layout_defaults", {{L"VALUE", LayoutDefaultsLabelText()}}));
-            addButton(IDC_LAYOUT_DEFAULT_SAVE, localization::Text(L"settings.general.save_layout_defaults").c_str(), contentW, rowH);
+        if (ctx->pageMode == GeneralSettingsPageMode::AnnotationInput) {
+            beginSection(0, localization::Text(settings_navigation::entries[ctx->navigationPage].label).c_str());
+            addLabel(localization::Text(L"settings.general.90bafe523784").c_str());
+            ctx->cbQuickAnnotPopupPlacement = addCombo(IDC_QUICKANNOT_POPUP_PLACEMENT, false, controlW);
 
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b8780efbcc5b").c_str(), localization::Text(L"settings.general.1b861de2aac9").c_str()));
+            ctx->btnShortcutEdit = addButton(IDC_SHORTCUT_EDIT, localization::Text(L"settings.shortcut.open_panel").c_str(), contentW, rowH);
+            addLabel(localization::Text(L"settings.general.shortcut_save_hint"));
+            addButton(IDC_SETTINGS_PALETTE_LINK, localization::Text(L"settings.navigation.manage_palette").c_str(), contentW, rowH);
+        }
+
+        if (ctx->pageMode == GeneralSettingsPageMode::Save) {
+            beginSection(0, localization::Text(settings_navigation::entries[ctx->navigationPage].label).c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.0decd4e66de6").c_str(), defaultAutoSaveLabel));
             ctx->cbAutoSave = addCombo(IDC_AUTOSAVE, false, controlW);
             addLabel(localization::Text(L"settings.general.bee182ab69e9").c_str());
 
+            addLabel(localization::Text(L"settings.navigation.save_explanation"));
+        }
+
+        if (ctx->pageMode == GeneralSettingsPageMode::NoteFiles) {
+            beginSection(0, localization::Text(L"settings.note.files").c_str());
+            addLabel(localization::Text(L"settings.note.new_format"));
+            ctx->cbNewNoteExtension = addCombo(IDC_NEW_NOTE_EXTENSION, false, controlW);
+            addLabel(localization::Text(L"settings.note.new_format_hint"));
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.f7252c3f810f"), DefaultNameRule()));
             int editW = std::min(contentW, wideW);
             int editX = pad + std::max(0, contentW - editW);
@@ -583,71 +665,42 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             SetUIFont(ctx->editNameRule);
             y += rowH + gapY;
 
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.a138760d8332").c_str(),
-                                             defaultNativeFileDialogsLabel));
-            ctx->chkUseNativeFileDialogs = addCheck(
-                IDC_USE_NATIVE_FILE_DIALOGS,
-                localization::Text(L"settings.general.e6370a2e1c70").c_str(),
-                wideW);
-            addLabel(localization::Text(L"settings.general.b6fba6677e9b").c_str());
+            addLabel(localization::Text(L"settings.general.additional_note_extensions"));
+            ctx->editAdditionalNoteExtensions = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                editX, y, editW, rowH, contentParent,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ADDITIONAL_NOTE_EXTENSIONS)),
+                g_hInst, nullptr);
+            SetUIFont(ctx->editAdditionalNoteExtensions);
+            SendMessageW(ctx->editAdditionalNoteExtensions, EM_SETLIMITTEXT, 8192, 0);
+            y += rowH + gapY;
+            addLabel(localization::Text(L"settings.general.additional_note_extensions_hint"));
 
-            const auto scheduleTextId = [](const wchar_t* studentId, const wchar_t* parentId) {
+        }
+
+        if (ctx->pageMode == GeneralSettingsPageMode::Files) {
+            const auto sortTextId = [](const wchar_t* studentId, const wchar_t* parentId) {
                 return g_config.studentMode ? studentId : parentId;
             };
-            beginSection(kGeneralSectionSchedule,
-                         localization::Text(scheduleTextId(L"settings.general.schedule_student",
-                                                           L"settings.general.schedule_parent")).c_str());
-            addLabel(localization::Text(L"settings.general.schedule_save_hint"));
-            addLabel(SettingLabelWithDefault(
-                         localization::Text(scheduleTextId(L"settings.general.schedule_days_student",
-                                                           L"settings.general.schedule_days_parent")).c_str(),
-                         defaultScheduleDaysLabel));
-            ctx->scheduleDayChecks.assign(kScheduleDayCount, nullptr);
-            int dayTotalW = kScheduleDayCount * dayW + (kScheduleDayCount - 1) * dayGap;
-            int dayX = pad + std::max(0, contentW - dayTotalW);
-            for (int i = 0; i < kScheduleDayCount; ++i) {
-                int dx = dayX + i * (dayW + dayGap);
-                ctx->scheduleDayChecks[static_cast<size_t>(i)] = CreateWindowExW(
-                    0, L"BUTTON", dayLabels[i].c_str(),
-                    WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                    dx, y, dayW, rowH, contentParent,
-                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SCHEDULE_DAY_BASE + i)),
-                    g_hInst, nullptr);
-                SetUIFont(ctx->scheduleDayChecks[static_cast<size_t>(i)]);
-            }
-            y += rowH + gapY;
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.f13e50a4a779").c_str(), defaultSchedulePeriodsLabel));
-            ctx->cbSchedulePeriods = addCombo(IDC_SCHEDULE_PERIODS, false, controlW);
+            beginSection(0,
+                         localization::Text(L"lecture_order.title").c_str());
+            addLabel(localization::Text(L"lecture_order.settings_hint"));
+            ctx->btnLectureOrderEdit = addButton(IDC_LECTURE_ORDER_EDIT,
+                                                 localization::Text(L"lecture_order.edit").c_str(), buttonW, rowH);
 
             addLabel(SettingLabelWithDefault(
-                         localization::Text(scheduleTextId(L"settings.general.schedule_start_time_student",
-                                                           L"settings.general.schedule_start_time_parent")).c_str(),
-                         defaultUnsetLabel));
-            ctx->btnScheduleTimeEdit = addButton(IDC_SCHEDULE_TIME_EDIT,
-                                                 localization::Text(L"settings.general.edit").c_str(), buttonW, rowH);
-
-            addLabel(SettingLabelWithDefault(
-                         localization::Text(scheduleTextId(L"settings.general.timetable_assignment_student",
-                                                           L"settings.general.timetable_assignment_parent")).c_str(),
-                         defaultUnsetLabel));
-            ctx->btnScheduleEdit = addButton(IDC_SCHEDULE_EDIT,
-                                             localization::Text(L"settings.general.0365d40764d8").c_str(),
-                                             buttonW, rowH);
-
-            addLabel(SettingLabelWithDefault(
-                         localization::Text(scheduleTextId(L"settings.general.lecture_sort_student",
+                         localization::Text(sortTextId(L"settings.general.lecture_sort_student",
                                                            L"settings.general.lecture_sort_parent")).c_str(),
                          defaultLectureSortLabel));
             ctx->cbLectureSort = addCombo(IDC_LECTURE_SORT, false, controlW);
             addLabel(SettingLabelWithDefault(
-                         localization::Text(scheduleTextId(L"settings.general.session_sort_student",
+                         localization::Text(sortTextId(L"settings.general.session_sort_student",
                                                            L"settings.general.session_sort_parent")).c_str(),
                          defaultSessionSortLabel));
             ctx->cbSessionSort = addCombo(IDC_SESSION_SORT, false, controlW);
 
             addLabel(SettingLabelWithDefault(
-                         localization::Text(scheduleTextId(L"settings.general.session_numbering_student",
+                         localization::Text(sortTextId(L"settings.general.session_numbering_student",
                                                            L"settings.general.session_numbering_parent")).c_str(),
                          defaultSessionNumberingLabel));
             ctx->cbSessionNumbering = addCombo(IDC_SESSION_NUMBERING, false, controlW);
@@ -658,7 +711,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             addLabel(localization::Text(L"settings.general.session_file_layout_hint").c_str());
             addLabel(localization::Text(L"settings.general.e28bd1fb61a4").c_str());
 
-            beginSection(kGeneralSectionDebug, localization::Text(L"settings.general.4b6e39f0a93f").c_str());
+        }
+
+        if (ctx->pageMode == GeneralSettingsPageMode::Diagnostics) {
+            beginSection(0, localization::Text(L"settings.general.4b6e39f0a93f").c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.08ddd9365fa2").c_str(),
                                              defaultDeveloperModeLabel));
             ctx->chkDeveloperMode = addCheck(IDC_DEVELOPER_MODE,
@@ -666,9 +722,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                                              wideW);
 
             addLabel(localization::Text(L"settings.general.bb7f4156d3cd").c_str());
-            addLabel(localization::Format(
-                L"settings.general.log_output_path",
-                {{L"PATH", AppLogPath(AppLogKind::Crash).parent_path().wstring()}}));
+            addButton(IDC_SETTINGS_LOG_LOCATION, localization::Text(L"settings.navigation.log_location").c_str(), contentW, rowH);
             const auto logStatus = diagnostic_log::Inspect(g_workspaceRoot);
             addLabel(localization::Format(
                 L"settings.general.log_capacity",
@@ -699,6 +753,51 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             ctx->chkDebugLogStartupWatchdog = addCheck(IDC_DEBUG_LOG_STARTUP_WATCHDOG,
                                                        localization::Text(L"settings.general.7bb5d414f0b8").c_str(),
                                                        wideW);
+            addLabel(localization::Text(L"settings.navigation.independent_save"));
+            addButton(IDC_SETTINGS_PRESETS_LINK, localization::Text(L"settings.navigation.presets").c_str(), contentW, rowH);
+        }
+
+        if (ctx->pageMode == GeneralSettingsPageMode::Recovery) {
+            beginSection(0, localization::Text(settings_navigation::entries[ctx->navigationPage].label).c_str());
+            addLabel(localization::Text(L"settings.navigation.recovery_explanation"));
+            addButton(IDC_SETTINGS_RECOVERY_LINK, localization::Text(L"settings.navigation.recovery").c_str(), contentW, rowH);
+        }
+
+        const auto addPreferenceEdit = [&](int id, int limit, int inset = 0) {
+            inset += subgroupInset;
+            HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                pad + inset, y, std::max(1, contentW - inset * 2), rowH, contentParent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+            SetUIFont(edit);
+            SendMessageW(edit, EM_SETLIMITTEXT, limit, 0);
+            y += rowH + gapY;
+            return edit;
+        };
+        if (ctx->pageMode == GeneralSettingsPageMode::QuickPdf) {
+            beginSection(0, localization::Text(settings_navigation::entries[ctx->navigationPage].label).c_str());
+            addLabel(localization::Text(L"settings.navigation.quick_scope"));
+            addLabel(localization::Text(L"settings.navigation.quick_pdf_scale"));
+            ctx->cbQuickPdfScale = addCombo(IDC_QUICK_PDF_SCALE, false, controlW);
+            ctx->chkQuickPdfStandardText = addCheck(IDC_QUICK_PDF_STANDARD_TEXT, localization::Text(L"export.standard_text_annotation").c_str(), contentW);
+            ctx->chkQuickPdfMatchLayout = addCheck(IDC_QUICK_PDF_MATCH_LAYOUT, localization::Text(L"export.match_pdf_text_layout").c_str(), contentW);
+            ctx->chkQuickPdfKeepRotation = addCheck(IDC_QUICK_PDF_KEEP_ROTATION, localization::Text(L"export.rotation.preserve").c_str(), contentW);
+            const auto colorGroup = beginSubgroup(L"export.text_color_label");
+            ctx->cbQuickPdfColorMode = addCombo(IDC_QUICK_PDF_COLOR_MODE, false, controlW);
+            addLabel(localization::Text(L"settings.navigation.quick_background"), ScaleY(hWnd, 12));
+            ctx->editQuickPdfBackground = addPreferenceEdit(IDC_QUICK_PDF_BACKGROUND, 7, ScaleY(hWnd, 12));
+            endSubgroup(colorGroup);
+        }
+
+        if (ctx->pageMode == GeneralSettingsPageMode::QuickNote) {
+            beginSection(0, localization::Text(settings_navigation::entries[ctx->navigationPage].label).c_str());
+            addLabel(localization::Text(L"settings.navigation.quick_scope"));
+            addLabel(localization::Text(L"export.quick_settings_note_format"));
+            ctx->chkQuickNoteStripMarkup = addCheck(IDC_QUICK_NOTE_STRIP_MARKUP, localization::Text(L"export.strip_markup").c_str(), contentW);
+            ctx->chkQuickNoteComments = addCheck(IDC_QUICK_NOTE_COMMENTS, localization::Text(L"export.include_comments").c_str(), contentW);
+            const auto replacementGroup = beginSubgroup(L"settings.subgroup.quick_note_math");
+            ctx->chkQuickNoteMathPlaceholder = addCheck(IDC_QUICK_NOTE_MATH_PLACEHOLDER, localization::Text(L"settings.navigation.quick_math_placeholder").c_str(), contentW);
+            ctx->editQuickNotePlaceholder = addPreferenceEdit(IDC_QUICK_NOTE_PLACEHOLDER_TEXT, 512);
+            endSubgroup(replacementGroup);
         }
 
         finalizeSection();
@@ -742,6 +841,62 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                            &ctx->scrollPos, &ctx->scrollMax);
 
         // fill combos
+        if (ctx->cbQuickPdfScale) {
+            const int current = std::clamp(g_config.quickPdfScalePercent, 13, 800);
+            int selected = -1;
+            for (int percent : {13, 25, 50, 75, 100, 125, 150, 200, 300, 400, 800}) {
+                const auto text = std::to_wstring(percent) + L"%";
+                const int index = static_cast<int>(SendMessageW(ctx->cbQuickPdfScale, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str())));
+                SendMessageW(ctx->cbQuickPdfScale, CB_SETITEMDATA, index, percent);
+                if (percent == current) selected = index;
+            }
+            if (selected < 0) {
+                const auto text = std::to_wstring(current) + L"%";
+                selected = static_cast<int>(SendMessageW(ctx->cbQuickPdfScale, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str())));
+                SendMessageW(ctx->cbQuickPdfScale, CB_SETITEMDATA, selected, current);
+            }
+            SendMessageW(ctx->cbQuickPdfScale, CB_SETCURSEL, selected, 0);
+            const wchar_t* colors[] = {L"export.text_color_marker", L"export.text_color_transparent", L"export.text_color_auto", L"export.text_color_specified"};
+            for (const auto* id : colors) SendMessageW(ctx->cbQuickPdfColorMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(id).c_str()));
+            SendMessageW(ctx->cbQuickPdfColorMode, CB_SETCURSEL, std::clamp(g_config.quickPdfTextColorMode, 0, 3), 0);
+            SetWindowTextW(ctx->editQuickPdfBackground, GenHexColorW(g_config.quickPdfTextColorBackground).c_str());
+        }
+        const std::pair<HWND, bool> quickChecks[] = {
+            {ctx->chkQuickPdfStandardText, g_config.quickPdfStandardTextAnnots},
+            {ctx->chkQuickPdfMatchLayout, g_config.quickPdfMatchPdfPaneTextLayout},
+            {ctx->chkQuickPdfKeepRotation, g_config.quickPdfKeepPageRotation},
+            {ctx->chkQuickNoteStripMarkup, g_config.quickNoteStripMarkup},
+            {ctx->chkQuickNoteComments, g_config.quickNoteIncludeComments},
+            {ctx->chkQuickNoteMathPlaceholder, g_config.quickNoteMathPlaceholder}
+        };
+        for (const auto& check : quickChecks) if (check.first)
+            SendMessageW(check.first, BM_SETCHECK, check.second ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (ctx->editQuickNotePlaceholder) {
+            SetWindowTextW(ctx->editQuickNotePlaceholder, g_config.quickNoteMathPlaceholderText.c_str());
+            EnableWindow(ctx->editQuickNotePlaceholder, g_config.quickNoteMathPlaceholder);
+        }
+        const auto fillPreferenceCombo = [](HWND combo, const auto& options, const std::wstring& value) {
+            if (!combo) return;
+            int selected = 0;
+            for (size_t i = 0; i < std::size(options); ++i) {
+                SendMessageW(combo, CB_ADDSTRING, 0,
+                    reinterpret_cast<LPARAM>(localization::Text(options[i].label).c_str()));
+                if (value == options[i].value) selected = static_cast<int>(i);
+            }
+            SendMessageW(combo, CB_SETCURSEL, selected, 0);
+        };
+        fillPreferenceCombo(ctx->cbPdfOpenViewMode, kPdfOpenViewOptions,
+            open_preferences::PdfViewMode(g_config.pdfOpenViewMode));
+        fillPreferenceCombo(ctx->cbNewNoteExtension, kNewNoteExtensionOptions,
+            open_preferences::NewNoteExtension(g_config.newNoteExtension));
+        if (ctx->chkRestoreLastSession)
+            SendMessageW(ctx->chkRestoreLastSession, BM_SETCHECK, g_config.restoreLastSession ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (ctx->cbEmptyViewGuide) {
+            for (const auto* id : kEmptyViewGuideOptions)
+                SendMessageW(ctx->cbEmptyViewGuide, CB_ADDSTRING, 0,
+                    reinterpret_cast<LPARAM>(localization::Text(id).c_str()));
+            SendMessageW(ctx->cbEmptyViewGuide, CB_SETCURSEL, std::clamp(g_config.emptyViewGuideMode, 0, 2), 0);
+        }
         if (ctx->cbTone) {
             FillToneComboFromCatalog(ctx->cbTone);
         }
@@ -932,6 +1087,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             SendMessageW(ctx->chkTouchpadInvertHorizontal, BM_SETCHECK,
                          g_config.touchpadInvertHorizontal ? BST_CHECKED : BST_UNCHECKED, 0);
         }
+        if (ctx->chkTouchpadScrollStabilization) {
+            SendMessageW(ctx->chkTouchpadScrollStabilization, BM_SETCHECK,
+                         g_config.touchpadScrollStabilization ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
         if (ctx->chkAutoPairBrackets) {
             SendMessageW(ctx->chkAutoPairBrackets, BM_SETCHECK,
                          g_config.autoPairBrackets ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1014,6 +1173,20 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->chkNoteWrapEnabled) {
             SendMessageW(ctx->chkNoteWrapEnabled, BM_SETCHECK,
                          g_noteWrapEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        if (ctx->chkClroAsciiOnly) {
+            SendMessageW(ctx->chkClroAsciiOnly, BM_SETCHECK,
+                         g_config.clroAsciiOnly ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        if (ctx->cbNoteBottomSpaceMode) {
+            for (const auto* id : {L"settings.note.bottom_space_mode_fixed",
+                                  L"settings.note.bottom_space_mode_font",
+                                  L"settings.note.bottom_space_mode_viewport"}) {
+                SendMessageW(ctx->cbNoteBottomSpaceMode, CB_ADDSTRING, 0,
+                    reinterpret_cast<LPARAM>(localization::Text(id).c_str()));
+            }
+            SendMessageW(ctx->cbNoteBottomSpaceMode, CB_SETCURSEL,
+                std::clamp(g_config.noteBottomSpaceMode, 0, 2), 0);
         }
         if (ctx->chkNoteVimMode) {
             SendMessageW(ctx->chkNoteVimMode, BM_SETCHECK,
@@ -1119,34 +1292,20 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             SendMessageW(ctx->cbAutoIntegrate, CB_SETCURSEL, sel, 0);
         }
 
-        if (ctx->cbSchedulePeriods) {
-            int sel = 0;
-            int current = std::clamp(g_config.schedulePeriods, 1, kScheduleMaxPeriods);
-            for (int p = 1; p <= kScheduleMaxPeriods; ++p) {
-                std::wstring label = localization::Format(
-                    L"settings.schedule.period", {{L"COUNT", std::to_wstring(p)}});
-                int idx = static_cast<int>(SendMessageW(ctx->cbSchedulePeriods, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str())));
-                if (idx >= 0) SendMessageW(ctx->cbSchedulePeriods, CB_SETITEMDATA, idx, static_cast<LPARAM>(p));
-                if (p == current) sel = idx;
-            }
-            SendMessageW(ctx->cbSchedulePeriods, CB_SETCURSEL, sel, 0);
-        }
-
-        if (!ctx->scheduleDayChecks.empty()) {
-            int mask = g_config.scheduleDayMask & 0x7F;
-            if (mask == 0) mask = kDefaultScheduleMask;
-            for (int i = 0; i < kScheduleDayCount; ++i) {
-                UINT check = (mask & (1 << i)) ? BST_CHECKED : BST_UNCHECKED;
-                SendMessageW(ctx->scheduleDayChecks[static_cast<size_t>(i)], BM_SETCHECK, check, 0);
-            }
-        }
-
         if (ctx->editNameRule) {
             std::wstring rule = g_config.clroNamePattern;
             if (rule.empty()) {
                 rule = DefaultNameRule();
             }
             SetWindowTextW(ctx->editNameRule, rule.c_str());
+        }
+        if (ctx->editAdditionalNoteExtensions) {
+            std::wstring extensions;
+            for (const auto& extension : g_config.additionalNoteExtensions) {
+                if (!extensions.empty()) extensions += L", ";
+                extensions += extension;
+            }
+            SetWindowTextW(ctx->editAdditionalNoteExtensions, extensions.c_str());
         }
         if (ctx->chkUseNativeFileDialogs) {
             SendMessageW(ctx->chkUseNativeFileDialogs, BM_SETCHECK,
@@ -1191,16 +1350,11 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                     SendMessageW(ctx->navList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(noteSectionLabels[i].c_str()));
                 }
             } else {
-                const std::array<std::wstring, kGeneralSectionCount> sectionLabels = {
-                    localization::Text(L"settings.general.b79a5a7510fe").c_str(),
-                    localization::Text(L"settings.general.6be6c84101c7").c_str(),
-                    localization::Text(L"settings.general.bb3c59ed98e5").c_str(),
-                    localization::Text(g_config.studentMode ? L"settings.general.schedule_nav_student"
-                                                            : L"settings.general.schedule_nav_parent").c_str(),
-                    localization::Text(L"settings.general.4b6e39f0a93f").c_str(),
-                };
-                for (int i = 0; i < ctx->sectionCount && i < kGeneralSectionCount; ++i) {
-                    SendMessageW(ctx->navList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(sectionLabels[i].c_str()));
+                for (int i = 0; i < ctx->sectionCount; ++i) {
+                    const wchar_t* label = settings_navigation::entries[ctx->navigationPage].label;
+                    if (i == 1 && ctx->pageMode == GeneralSettingsPageMode::Basic) label = L"settings.page.layout";
+                    if (i == 1 && ctx->pageMode == GeneralSettingsPageMode::NoteInput) label = L"settings.page.vim";
+                    SendMessageW(ctx->navList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(localization::Text(label).c_str()));
                 }
             }
             int initialSection = showNoteSectionOnly ? 0
@@ -1327,6 +1481,24 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         int code = HIWORD(wParam);
         LogPanelEvent(L"General", L"WM_COMMAND", id, code, reinterpret_cast<HWND>(lParam));
         if (!ctx) break;
+        if (ctx->embedded) PostMessageW(GetParent(hWnd), kUnifiedSettingsDraftChangedMsg, 0, 0);
+        if (id == IDC_QUICK_NOTE_MATH_PLACEHOLDER && ctx->editQuickNotePlaceholder)
+            EnableWindow(ctx->editQuickNotePlaceholder, SendMessageW(ctx->chkQuickNoteMathPlaceholder, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        if (id == IDC_SETTINGS_PALETTE_LINK) {
+            SendMessageW(GetParent(hWnd), kUnifiedSettingsNavigateMsg, kSettingsNavPalette, 0);
+            return 0;
+        }
+        if (id == IDC_SETTINGS_LOG_LOCATION) {
+            ShowSilentMessageDialog(GetAncestor(hWnd, GA_ROOT), localization::Text(L"settings.page.diagnostics"),
+                localization::Text(L"settings.navigation.log_location"), SoftNoticeKind::Info,
+                {{localization::Text(L"settings.navigation.log_directory"), AppLogPath(AppLogKind::Crash).parent_path().wstring()}});
+            return 0;
+        }
+        if (id == IDC_SETTINGS_PRESETS_LINK || id == IDC_SETTINGS_RECOVERY_LINK) {
+            SendMessageW(GetParent(hWnd), kUnifiedSettingsActionMsg,
+                id == IDC_SETTINGS_PRESETS_LINK ? ID_SETTINGS_PRESETS : ID_WORKSPACE_RESTORE, 0);
+            return 0;
+        }
         if (id == IDC_GENERAL_SECTION_LIST && code == CBN_SELCHANGE) {
             int sel = static_cast<int>(SendMessageW(ctx->navList, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {
@@ -1419,10 +1591,9 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                                SoftNoticeKind::Warning);
                 return 0;
             }
-            g_themeCatalog[idx] = edited;
-
             HWND applyOwner = ctx->owner ? ctx->owner : hWnd;
-            ApplyThemeByName(edited.name, applyOwner, /*persist=*/true);
+            if (!ApplyThemeByName(edited.name, applyOwner, /*persist=*/true)) return 0;
+            g_themeCatalog[idx] = edited;
             if (ctx->owner) EnsureOwnerDrawUi(ctx->owner);
             ApplyThemeToDialog(hWnd);
             if (ctx->cbTone) FillToneComboFromCatalog(ctx->cbTone);
@@ -1472,12 +1643,9 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             ShowAnnotToolShortcutEditor(hWnd);
             return 0;
         }
-        if (id == IDC_SCHEDULE_TIME_EDIT) {
-            ShowScheduleTimeDialog(hWnd);
-            return 0;
-        }
-        if (id == IDC_SCHEDULE_EDIT) {
-            ShowScheduleWindow(hWnd);
+        if (id == IDC_LECTURE_ORDER_EDIT) {
+            if (ctx->cbLectureSort) SendMessageW(ctx->cbLectureSort, CB_SETCURSEL, 0, 0);
+            ShowLectureOrderWindow(hWnd);
             return 0;
         }
         if (id == IDC_LAYOUT_DEFAULT_SAVE) {
@@ -1542,7 +1710,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             DeleteObject(ctx->previewFont);
             ctx->previewFont = nullptr;
         }
-        if (ctx) RestoreOwnerAfterModal(ctx->owner);
+        if (ctx && !ctx->embedded) RestoreOwnerAfterModal(ctx->owner);
         if (ctx) ctx->done = true;
         return 0;
     default:
@@ -1550,13 +1718,4 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
     }
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
-
-// ---------------------------------------------------------------------
-// Settings: Schedule time options
-// ---------------------------------------------------------------------
-constexpr int kScheduleTimeDlgWidth = 460;
-constexpr int kScheduleTimeDlgHeight = 560;
-constexpr int IDC_SCHEDULE_TIME_DAY = 5101;
-constexpr int IDC_SCHEDULE_TIME_COPY = 5102;
-constexpr int IDC_SCHEDULE_TIME_BASE = 5120;
 

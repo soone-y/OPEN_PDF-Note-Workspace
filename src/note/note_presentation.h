@@ -20,23 +20,12 @@ struct NoteInteractionControlAvailability {
 [[nodiscard]] NoteInteractionControlAvailability ResolveNoteInteractionControlAvailability(
     bool render_active, bool vim_enabled) noexcept;
 
-enum class NotePresentationFrameAction {
-    RawFallback,
-    RenderCurrent,
-    // A same-logical-line edit keeps the last committed line geometry while
-    // the active raw editor line is visible. Structural edits use
-    // CommitBeforePaint instead.
-    ReuseCommittedLayout,
-    CommitBeforePaint,
-};
-
 // The frame kind describes the view-level owner. A DrawCommitted frame may
-// still expose a bounded EditorLine range for native input, but never mixes
-// two text owners for that same line.
+// still give a bounded line range to native input, but never mixes two text
+// owners for the same line.
 enum class NotePresentationFrameKind {
     NativeEditorFallback,
     DrawCommitted,
-    CommitThenDraw,
 };
 
 enum class NoteCaretPresenter {
@@ -50,7 +39,6 @@ enum class NotePresentationReason {
     StaleImeComposition,
     GeometryMayChange,
     CurrentSnapshot,
-    SameLinePendingEdit,
     SnapshotUnavailable,
 };
 
@@ -114,119 +102,20 @@ enum class NotePresentationLineSurface {
     Structured,
 };
 
-// Native RichEdit drawing is retained only as an input/IME transport.  A
-// fallback frame needs every line; a structured frame needs at most the lines
-// whose sole presentation owner is NativeRaw.
-enum class NoteNativePaintScope {
-    AllLines,
-    NativeRawLinesOnly,
-};
-
-struct NotePresentationFrameState {
-    bool render_active = false;
-    bool render_cache_present = false;
-    bool render_cache_current = false;
-    bool edit_pending = false;
-    bool line_count_may_change = false;
-    bool ime_composing = false;
-    // The UI adapter normally publishes this only after an exact
-    // editor-to-TextCore comparison for the current document revision. A live
-    // IME preedit may instead set it only when a bounded start-of-composition
-    // anchor proves the identity and geometry of the committed snapshot; the
-    // preedit itself remains outside the canonical document.
-    bool editor_text_core_current = true;
-    // The Win32 adapter proves this only when the live composition is confined
-    // to its current logical line and no structural/geometry-sensitive edit
-    // has occurred since the committed render snapshot.
-    bool ime_composition_can_reuse_committed_layout = false;
-};
-
+// The owner plan describes what paint may draw. A geometry change retains
+// native ownership for the whole visible range; paint does not commit edits.
 struct NotePresentationPlan {
     NotePresentationFrameKind frame_kind = NotePresentationFrameKind::NativeEditorFallback;
     NoteCaretPresenter caret_presenter = NoteCaretPresenter::NativeEditor;
     NotePresentationReason reason = NotePresentationReason::RenderingDisabled;
-    bool requires_full_repaint_after_commit = false;
-
-    [[nodiscard]] bool uses_committed_layout() const noexcept {
-        return frame_kind == NotePresentationFrameKind::DrawCommitted;
-    }
 };
 
-// A table grid is shared by every row in that table, so a stale edit inside a
-// table cannot reuse its prior column geometry.  In contrast, a proven
-// same-line edit outside every committed table may retain the immutable table
-// cache while its one editing row is owned by raw presentation.  This is a
-// policy decision only; the Win32 adapter still verifies the cache snapshot,
-// font metrics, and DPI before reading it.
-struct NoteCommittedTableLayoutReuseState {
-    bool committed_snapshot_available = false;
-    bool editor_text_core_current = false;
-    bool frame_reuses_committed_layout = false;
-    bool stale_range_is_one_line = false;
-    bool stale_line_touches_committed_table = false;
-    bool commit_before_paint = false;
-};
-
-[[nodiscard]] bool CanReuseCommittedTableLayoutForPendingEdit(
-    const NoteCommittedTableLayoutReuseState& state) noexcept;
-
-// Win32-independent geometry for one already-measured logical line. The
-// caller owns the boundary storage for the duration of this value's use; the
-// layout never copies or mutates it. Boundaries are source offsets in
-// nondecreasing order and may have non-monotonic X values for anchored runs.
+// Source/X boundary shared by the view's measured render caches.
+// The cache owns storage; X can be non-monotonic for anchored runs.
 struct EditorLineBoundary {
     size_t raw = 0;
     int x = 0;
 };
-
-struct EditorLineRect {
-    int left = 0;
-    int top = 0;
-    int right = 0;
-    int bottom = 0;
-};
-
-struct EditorLineCaretGeometry {
-    int x = 0;
-    int top = 0;
-    int bottom = 0;
-};
-
-class EditorLineLayout {
-public:
-    EditorLineLayout(EditorLineRect line_rect,
-                     const EditorLineBoundary* boundaries,
-                     size_t boundary_count) noexcept;
-
-    [[nodiscard]] bool valid() const noexcept;
-    // Returns the conservative enclosing rectangle. Anchored display runs can
-    // be non-monotonic in X, so selection rendering that needs disjoint
-    // regions must split its source range before calling this primitive.
-    [[nodiscard]] std::optional<EditorLineRect> TextRangeRect(
-        size_t raw_start, size_t raw_end) const noexcept;
-    [[nodiscard]] std::optional<EditorLineCaretGeometry> CaretAt(
-        size_t raw_offset) const noexcept;
-    [[nodiscard]] std::optional<size_t> HitTest(int client_x, int client_y) const noexcept;
-    [[nodiscard]] int MaxInlineExtent() const noexcept;
-
-private:
-    [[nodiscard]] size_t BoundaryIndexAtOrBefore(size_t raw_offset) const noexcept;
-
-    EditorLineRect line_rect_{};
-    const EditorLineBoundary* boundaries_ = nullptr;
-    size_t boundary_count_ = 0;
-};
-
-[[nodiscard]] NotePresentationPlan ResolveNotePresentationPlan(
-    const NotePresentationFrameState& state) noexcept;
-
-// Transitional adapter for existing call sites. NotePresentationPlan remains
-// the single owner of frame semantics; this action is derived from it.
-[[nodiscard]] NotePresentationFrameAction ResolveNotePresentationFrameAction(
-    const NotePresentationPlan& plan) noexcept;
-
-[[nodiscard]] NotePresentationFrameAction ResolveNotePresentationFrameAction(
-    const NotePresentationFrameState& state) noexcept;
 
 NotePresentationLineSurface ResolveNotePresentationLineSurface(
     bool native_raw_requested,
@@ -336,16 +225,9 @@ enum class NoteTableCellAlignment {
 // the compact presentation rather than creating an unbounded gap.
 [[nodiscard]] int ResolveNoteTableDividerHeightPx(int border_width_px) noexcept;
 
-[[nodiscard]] NoteNativePaintScope ResolveNoteNativePaintScope(
-    NotePresentationFrameAction action) noexcept;
-
 // GetWindowTextW exposes RichEdit hard line breaks as CRLF, while edit
 // positions and the renderer use one indexed character per hard line break.
 size_t RichEditWindowTextLengthForIndexedText(std::wstring_view indexed_text);
-
-// Counts hard logical lines without allocating per-line strings. CRLF is one
-// break, as are lone CR and LF characters. An empty document is one line.
-[[nodiscard]] size_t CountNoteLogicalLines(std::wstring_view indexed_text) noexcept;
 
 struct NoteDerivedRefreshRequest {
     bool render_active = false;

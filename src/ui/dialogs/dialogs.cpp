@@ -4,6 +4,7 @@
 #include "core/preview_trace.h"
 #include "core/secure_memory.h"
 #include "ui/noop_nav_guard.h"
+#include "ui/transient_display.h"
 
 #include <commctrl.h>
 
@@ -229,33 +230,6 @@ bool PromptNewLectureName(HWND owner, std::wstring& outName) {
     wc.lpszClassName = L"NewLectureDlgClass";
     RegisterClassW(&wc);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, ui.dlgNewLectureTitle.c_str(),
-                             WS_CAPTION | WS_POPUPWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 300, 170,
-                             owner, nullptr, g_hInst, &ctx);
-    if (!w) return false;
-    PlaceOwnedPopupAtAppTopLeft(w, owner);
-    ShowWindow(w, SW_SHOW);
-    UpdateWindow(w);
-    RunDialogMessageLoop(w, &ctx.done);
-    if (ctx.ok) {
-        outName = ctx.result;
-        return true;
-    }
-    return false;
-}
-
-bool PromptNewSessionName(HWND owner, std::wstring& outName) {
-    NewLectureCtx ctx;
-    const auto& ui = GetUiText();
-    ctx.title = ui.dlgNewSessionTitle;
-    ctx.label = ui.dlgNewSessionLabel;
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = NewLectureDlgProc;
-    wc.hInstance = g_hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"NewSessionDlgClass";
-    RegisterClassW(&wc);
-    HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, ui.dlgNewSessionTitle.c_str(),
                              WS_CAPTION | WS_POPUPWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, 300, 170,
                              owner, nullptr, g_hInst, &ctx);
@@ -1114,6 +1088,8 @@ static void DisablePasswordOverlayAnnotationControls(PasswordInputDialog* ctx) {
         g_hRadioTextReadableBackgroundInverted,
         g_hComboWidth,
         g_hComboMarkerAlpha,
+        g_hRadioBlendNormal,
+        g_hRadioBlendMultiply,
         g_hComboAnnotMethod,
         g_hComboFreehandCorrection,
         g_hComboMarkerTextStyle,
@@ -1913,8 +1889,12 @@ static void AddSilentDialogPathTooltip(SilentDialogState* ctx, HINSTANCE instanc
                                        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
                                        ctx->hwnd, nullptr, instance, nullptr);
     if (!ctx->pathTooltip) return;
+    if (!ui::ConfigureTransientTooltip(ctx->pathTooltip, ctx->pathTooltipText)) {
+        DestroyWindow(ctx->pathTooltip);
+        ctx->pathTooltip = nullptr;
+        return;
+    }
     SendMessageW(ctx->pathTooltip, TTM_SETMAXTIPWIDTH, 0, DialogScale(ctx->hwnd, 640));
-    SendMessageW(ctx->pathTooltip, TTM_SETDELAYTIME, TTDT_INITIAL, MAKELPARAM(400, 0));
     SendMessageW(ctx->pathTooltip, TTM_ACTIVATE, TRUE, 0);
     TOOLINFOW tool{};
     // The app also uses classic common controls. Their tooltip rejects the

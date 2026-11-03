@@ -71,8 +71,11 @@ inline constexpr int    kMinListHeight   = 60;
 //   0x509  kNoteOverlayRefreshTimerId
 //   0x50A  kNoteFullReparseTimerId
 //   0x50C  kProcessShutdownObserveTimerId (main.cpp; only while exit confirmation is pending)
+//   0x50D  kTempPathWorkerTimerId (completion/cancel polling; never runs probes)
+//   0x50E  kOfficeWorkerPollTimerId (owned conversion completion polling)
 // NoteEditProc timers:
 //   0x50B  kNoteLinkRenderGraceTimerId
+//   0x50F  kNoteSelectionScrollTimerId (only while a selection crosses a horizontal edge)
 //   0x5E11 kExitRetryTimerId (defined in main.cpp)
 //   0x6A11 ui::kSplitDragTimerId (defined in ui/splitter.h)
 // ---------------------------------------------------------------------
@@ -90,6 +93,9 @@ inline constexpr UINT_PTR kAutoSaveExecuteTimerId = 0x507;
 inline constexpr UINT_PTR kNoteOverlayRefreshTimerId = 0x509;
 inline constexpr UINT_PTR kNoteFullReparseTimerId = 0x50A;
 inline constexpr UINT_PTR kNoteLinkRenderGraceTimerId = 0x50B;
+inline constexpr UINT_PTR kNoteSelectionScrollTimerId = 0x50F;
+inline constexpr UINT_PTR kTempPathWorkerTimerId = 0x50D;
+inline constexpr UINT_PTR kOfficeWorkerPollTimerId = 0x50E;
 
 static_assert(AllUniqueValues(std::array<UINT_PTR, 4>{
     kScrollTimerId,
@@ -97,7 +103,7 @@ static_assert(AllUniqueValues(std::array<UINT_PTR, 4>{
     kPdfKeyboardScrollTimerId,
     kAutoScrollTimerId,
 }));
-static_assert(AllUniqueValues(std::array<UINT_PTR, 7>{
+static_assert(AllUniqueValues(std::array<UINT_PTR, 8>{
     kAutoSaveTimerId,
     kAutoIntegrateTimerId,
     kNoteStageSaveTimerId,
@@ -105,6 +111,7 @@ static_assert(AllUniqueValues(std::array<UINT_PTR, 7>{
     kNoteOverlayRefreshTimerId,
     kNoteFullReparseTimerId,
     kNoteLinkRenderGraceTimerId,
+    kNoteSelectionScrollTimerId,
 }));
 
 // ---------------------------------------------------------------------
@@ -190,6 +197,8 @@ inline constexpr wchar_t kDefaultCacheDir[]        = L"__pdf_note_workspace__/__
 //   WM_APP+211 kMsgOpenStartupDocument (defined in main.cpp)
 //   WM_APP+212 kMsgBackgroundSaveComplete
 //   WM_APP+213 kMsgOtherPackageHeadlessProcessDiagnostics
+//   WM_APP+214 kMsgStageRecovery (after save guards have unwound)
+//   WM_APP+215 kMsgDocumentSourceProtectionChanged (state only; no payload)
 //
 // PdfViewProc:
 //   WM_APP+4   kMsgTextBoxFontUpdate
@@ -216,7 +225,9 @@ inline constexpr UINT kMsgLectureContentOpened = WM_APP + 9;
 inline constexpr UINT kMsgPdfVirtualRenderComplete = WM_APP + 10;
 inline constexpr UINT kMsgReloadSessionList = WM_APP + 11;
 inline constexpr UINT kMsgBackgroundSaveComplete = WM_APP + 212;
-static_assert(AllUniqueValues(std::array<UINT, 10>{
+inline constexpr UINT kMsgStageRecovery = WM_APP + 214;
+inline constexpr UINT kMsgDocumentSourceProtectionChanged = WM_APP + 215;
+static_assert(AllUniqueValues(std::array<UINT, 12>{
     kMsgNoteOverlayUpdate,
     kMsgReloadLectureList,
     kMsgTextBoxFontUpdate,
@@ -227,6 +238,8 @@ static_assert(AllUniqueValues(std::array<UINT, 10>{
     kMsgLectureContentOpened,
     kMsgPdfVirtualRenderComplete,
     kMsgReloadSessionList,
+    kMsgStageRecovery,
+    kMsgDocumentSourceProtectionChanged,
 }));
 inline constexpr UINT kNoteShortcutInputCodeClickRendered = 1;
 inline constexpr UINT kNoteShortcutInputCodeClickRaw = 2;

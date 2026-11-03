@@ -8,7 +8,9 @@
 namespace note {
 
 // A user-visible UTF-16 text unit. A unit never splits CRLF, a valid surrogate
-// pair, combining marks, variation selectors, or a ZWJ emoji sequence.
+// pair, combining marks, variation selectors, emoji modifiers, regional-indicator
+// pairs, or a ZWJ emoji sequence. This is a targeted boundary model, not a full
+// Unicode extended-grapheme implementation.
 enum class TextUnitClass {
     LineBreak,
     Whitespace,
@@ -26,8 +28,6 @@ struct TextUnit {
 };
 
 [[nodiscard]] std::vector<TextUnit> BuildTextUnits(std::wstring_view text);
-[[nodiscard]] Span PreviousTextUnit(std::wstring_view text, Utf16CodeUnitOffset caret);
-[[nodiscard]] Span NextTextUnit(std::wstring_view text, Utf16CodeUnitOffset caret);
 [[nodiscard]] Span PreviousTextUnitRun(std::wstring_view text, Utf16CodeUnitOffset caret);
 [[nodiscard]] Span NextTextUnitRun(std::wstring_view text, Utf16CodeUnitOffset caret);
 

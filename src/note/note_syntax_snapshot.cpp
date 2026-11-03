@@ -2,6 +2,7 @@
 
 #include "note/note_parser.h"
 #include "note/note_syntax_lexical.h"
+#include "note/note_clro_markdown.h"
 #include "note/note_source_coordinate_transform.h"
 
 #include <exception>
@@ -41,7 +42,11 @@ namespace {
 }
 
 [[nodiscard]] bool ContainsLocalSyntaxSensitiveText(std::wstring_view text) noexcept {
-    return text.find_first_of(L"\r\n`*_~[]()<>#!$\\:|>") != std::wstring_view::npos;
+    return text.find_first_of(L"\r\n`*_~[]()<>#!$\\:|>") != std::wstring_view::npos ||
+        std::any_of(text.begin(), text.end(), [](wchar_t ch) {
+            return ClroMarkdownCharacter(ch) != ch || (ch >= L'\uFF10' && ch <= L'\uFF19') ||
+                   ch == L'\uFF58' || ch == L'\uFF38';
+        });
 }
 
 // A second, narrower proof for sticky/opaque parser contexts: an interior
@@ -109,6 +114,9 @@ NoteSyntaxSnapshotBuildResult NoteSyntaxSnapshot::BuildFromTextCoreWithCheckpoin
             parsed = contentKind == NoteContentKind::TeXSource
                 ? ParseTeXMathDocument(source)
                 : ParseNoteDocument(source);
+            if (NoteDocumentHasFatalParseFailure(parsed)) {
+                return NoteSyntaxSnapshotBuildResult::ParseFailure;
+            }
         } else {
             parsed.meta = source.meta;
         }
@@ -142,6 +150,7 @@ NoteSyntaxSnapshotBuildResult NoteSyntaxSnapshot::BuildFromTextCoreWithCheckpoin
         candidate->source_line_map_ = sourceLineMap;
         candidate->syntax_document_ = std::move(persistentDocument);
         candidate->has_structured_syntax_ = contentKind != NoteContentKind::PlainText;
+        candidate->uses_clro_fullwidth_markdown_ = parsed.uses_clro_fullwidth_markdown;
 
         // The source root can only be published if it still denotes the same
         // canonical document at the end of construction. This is normally a
@@ -173,6 +182,9 @@ NoteSyntaxSnapshotLocalPatchResult NoteSyntaxSnapshot::BuildLocalPlainTextPatch(
     NoteParserCheckpointIndex* outCheckpoint,
     NoteSyntaxSnapshotLocalPatchWork* outWork) noexcept {
     if (!outSnapshot || !outCheckpoint) return NoteSyntaxSnapshotLocalPatchResult::InvalidOutput;
+    if (previous && previous->uses_clro_fullwidth_markdown_) {
+        return NoteSyntaxSnapshotLocalPatchResult::RequiresFullSnapshot;
+    }
     if (!previous || !previous->valid_ || !previous->has_structured_syntax_ ||
         previous->content_kind_ != NoteContentKind::Markdown || !layoutKey.valid() ||
         !previous->syntax_document_ || !previousCheckpoint.valid ||
@@ -336,9 +348,10 @@ std::wstring NoteSyntaxSnapshot::CopySourceRange(Utf16CodeUnitOffset start,
 }
 
 bool NoteSyntaxSnapshot::CopyDocumentForCompleteBuild(NoteDocument* out) const noexcept {
-    return out && valid_ && syntax_document_ &&
-           syntax_document_->CopyDocumentForCompleteBuild(
-               source_line_map_, source_identity_, out);
+    if (!out || !valid_ || !syntax_document_ ||
+        !syntax_document_->CopyDocumentForCompleteBuild(source_line_map_, source_identity_, out)) return false;
+    out->uses_clro_fullwidth_markdown = uses_clro_fullwidth_markdown_;
+    return true;
 }
 
 bool NoteSyntaxSnapshot::MatchesTextCore(const NoteTextCore& textCore) const noexcept {

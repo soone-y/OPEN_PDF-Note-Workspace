@@ -3,13 +3,25 @@
 
 namespace {
 
+static void RequestLayout(HWND owner);
+
 // A failed explicit save keeps the editor's controls/draft, but must not leave
 // unsaved runtime values for a later auto-save after the user chooses Exit.
 static void RestoreSettingsRuntimeAfterFailedSave(HWND owner, const WorkspaceConfig& previous,
                                                  const std::wstring& previousTheme) {
+    // View-menu choices are runtime-only. Restoring persisted settings after a
+    // failed save must not replace the temporary mode active before that save.
+    const auto bottomPin = g_bottomPanePin;
+    const auto bottomMode = g_bottomNoteMode;
     g_config = previous;
     g_themeName = previousTheme;
     ApplyConfigToUI(owner);
+    g_bottomPanePin = bottomPin;
+    g_bottomNoteMode = bottomMode;
+    UpdateBottomPaneMenuChecks();
+    ApplyBottomPaneEdgeStyle();
+    RequestLayout(owner);
+    RefreshBottomPaneView();
     RefreshMainMenuBar(owner);
 }
 
@@ -156,7 +168,18 @@ static void SetSettingsSectionFont(HWND hWnd) {
 // UnifiedSettingsProc-local WM_APP message. Keep value in the central registry
 // comment in core/app_core.h because WM_APP values are otherwise hard to audit.
 constexpr UINT kUnifiedSettingsNavigateMsg = WM_APP + 140;
-static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initialAnnotSection = -1);
+constexpr UINT kUnifiedPaletteSavedMsg = WM_APP + 141;
+constexpr UINT kUnifiedSettingsActionMsg = WM_APP + 142;
+constexpr UINT kUnifiedSettingsDraftChangedMsg = WM_APP + 143;
+enum class PaletteDialogPurpose { SelectColor, EditAnnotationPalette };
+struct PaletteDialogRequest {
+    PaletteDialogPurpose purpose = PaletteDialogPurpose::SelectColor;
+    COLORREF initialColor = RGB(0, 0, 0);
+    COLORREF selectedColor = RGB(0, 0, 0);
+    bool accepted = false;
+};
+static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initialAnnotSection = -1,
+                                     PaletteDialogRequest* paletteRequest = nullptr);
 static void FillColorCombo(HWND cb);
 static void SelectComboByItemData(HWND cb, DWORD_PTR want);
 static void SelectComboClosestPt10(HWND cb, int wantPt10);
@@ -221,6 +244,17 @@ enum SettingsCategoryNavTarget : int {
     kSettingsNavMarkup = 2,
     kSettingsNavAnnot = 3,
     kSettingsNavPalette = 4,
+    kSettingsNavPdf = settings_navigation::Pdf,
+    kSettingsNavSave = settings_navigation::Save,
+    kSettingsNavOutput = settings_navigation::QuickPdf,
+    kSettingsNavFiles = settings_navigation::Files,
+    kSettingsNavDiagnostics = settings_navigation::Diagnostics,
+    kSettingsNavNoteFiles = settings_navigation::NoteFiles,
+    kSettingsNavNoteInput = settings_navigation::NoteInput,
+    kSettingsNavAnnotInput = settings_navigation::AnnotationInput,
+    kSettingsNavRecovery = settings_navigation::Recovery,
+    kSettingsNavOutputNote = settings_navigation::QuickNote,
+    kSettingsNavBottomPane = settings_navigation::BottomPane,
 };
 
 static std::wstring SettingsCategoryDialogTitle(int target) {

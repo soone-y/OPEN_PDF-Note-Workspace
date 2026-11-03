@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace note {
 
@@ -35,7 +36,6 @@ public:
                            uint64_t contentFingerprint);
 
     uint64_t workspace_nonce() const { return workspace_nonce_; }
-    uint64_t next_sequence() const { return next_sequence_; }
     size_t size() const { return records_by_path_.size(); }
     const std::map<std::string, PersistentNoteIdentityRecord>& records() const {
         return records_by_path_;
@@ -50,6 +50,8 @@ private:
 
 bool ConfigureRuntimeNoteIdentityStore(const std::filesystem::path& workspaceRoot,
                                        std::wstring* outError = nullptr);
+// Replaces the active temporary-folder permissions; does not write a catalog.
+void SetRuntimeNoteIdentityExternalRoots(const std::vector<std::filesystem::path>& roots);
 NoteIdentity ResolveRuntimeNoteIdentityPath(const std::wstring& absolutePath,
                                             std::wstring* outError = nullptr);
 // Read-only lookup used by workspace transaction recovery. Unlike Resolve,

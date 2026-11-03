@@ -1,0 +1,549 @@
+// Settings shell owns page lifetimes, navigation and unsaved drafts. Page
+// controllers retain their existing validation, rollback and persistence owners.
+namespace {
+constexpr int kUnifiedSettingsDlgWidth = 1040;
+constexpr int kUnifiedSettingsDlgHeight = 820;
+constexpr int IDC_UNIFIED_SETTINGS_TREE = 7100;
+constexpr int IDC_UNIFIED_SETTINGS_APPLY = 7101;
+constexpr int IDC_UNIFIED_SETTINGS_REVERT_PAGE = 7102;
+constexpr int IDC_UNIFIED_SETTINGS_LOCATION = 7103;
+using SettingsPageSnapshot = std::vector<std::wstring>;
+struct UnifiedSettingsShellCtx {
+    HWND owner = nullptr;
+    bool done = false;
+    PaletteDialogRequest* paletteRequest = nullptr;
+    int currentCategory = kSettingsNavGeneral;
+    int initialAnnotSection = -1;
+    UINT deferredCommand = 0;
+    HWND tree = nullptr, location = nullptr, labelApplyHint = nullptr;
+    HWND btnOk = nullptr, btnApply = nullptr, btnRevert = nullptr, btnCancel = nullptr;
+    HWND childMarkup = nullptr, childAnnot = nullptr, childPalette = nullptr;
+    std::array<HWND, settings_navigation::Count> generalChildren{};
+    std::array<std::unique_ptr<GeneralSettingsCtx>, settings_navigation::Count> generalPages;
+    std::unique_ptr<MarkupSettingsCtx> markupCtx;
+    std::unique_ptr<AnnotSettingsCtx> annotCtx;
+    std::unique_ptr<PaletteSettingsCtx> paletteCtx;
+    std::array<HTREEITEM, settings_navigation::Count> navigationItems{};
+    std::array<SettingsPageSnapshot, settings_navigation::Count> baselines;
+    bool dirty = false;
+};
+static bool IsUnifiedColorSelection(const UnifiedSettingsShellCtx* ctx) {
+    return ctx && ctx->paletteRequest && ctx->paletteRequest->purpose == PaletteDialogPurpose::SelectColor;
+}
+static HWND UnifiedPageWindow(UnifiedSettingsShellCtx* ctx, int page) {
+    if (page == kSettingsNavMarkup) return ctx->childMarkup;
+    if (page == kSettingsNavAnnot) return ctx->childAnnot;
+    if (page == kSettingsNavPalette) return ctx->childPalette;
+    return ctx->generalChildren[page];
+}
+static bool IsGeneralSettingsPage(int page) {
+    return page != kSettingsNavMarkup && page != kSettingsNavAnnot && page != kSettingsNavPalette;
+}
+static GeneralSettingsPageMode GeneralPageMode(int page) {
+    switch (page) {
+    case kSettingsNavNote: return GeneralSettingsPageMode::Note;
+    case kSettingsNavPdf: return GeneralSettingsPageMode::Pdf;
+    case kSettingsNavSave: return GeneralSettingsPageMode::Save;
+    case kSettingsNavOutput: return GeneralSettingsPageMode::QuickPdf;
+    case kSettingsNavFiles: return GeneralSettingsPageMode::Files;
+    case kSettingsNavDiagnostics: return GeneralSettingsPageMode::Diagnostics;
+    case kSettingsNavNoteFiles: return GeneralSettingsPageMode::NoteFiles;
+    case kSettingsNavNoteInput: return GeneralSettingsPageMode::NoteInput;
+    case kSettingsNavAnnotInput: return GeneralSettingsPageMode::AnnotationInput;
+    case kSettingsNavRecovery: return GeneralSettingsPageMode::Recovery;
+    case kSettingsNavOutputNote: return GeneralSettingsPageMode::QuickNote;
+    case kSettingsNavBottomPane: return GeneralSettingsPageMode::BottomPane;
+    default: return GeneralSettingsPageMode::Basic;
+    }
+}
+static std::wstring UnifiedSettingsLocation(int page) {
+    const auto& entry = settings_navigation::entries[page];
+    return localization::Text(settings_navigation::groups[entry.group]) + L" / " + localization::Text(entry.label);
+}
+static SIZE UnifiedSettingsInitialChildSize(HWND parent) {
+    RECT rc{}; GetClientRect(parent, &rc);
+    const int pad = ScaleY(parent, 12), gap = ScaleY(parent, 8);
+    const int row = std::max(ScaleY(parent, 30), FontLineHeightPx(parent, g_hUIFont) + ScaleY(parent, 10));
+    auto* ctx = reinterpret_cast<UnifiedSettingsShellCtx*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
+    const int navigation = IsUnifiedColorSelection(ctx) ? 0 : ScaleY(parent, 224) + gap;
+    return SIZE{std::max(ScaleY(parent, 320), static_cast<int>(rc.right) - pad * 2 - navigation),
+        std::max(ScaleY(parent, 180), static_cast<int>(rc.bottom) - pad * 2 - row * 3 - gap * 3)};
+}
+static HWND EnsureUnifiedGeneralPage(HWND parent, UnifiedSettingsShellCtx* shell, int page) {
+    if (shell->generalChildren[page]) return shell->generalChildren[page];
+    EnsureGeneralSettingsClass();
+    const SIZE size = UnifiedSettingsInitialChildSize(parent);
+    auto context = std::make_unique<GeneralSettingsCtx>();
+    context->owner = g_hMainWnd ? g_hMainWnd : shell->owner;
+    context->embedded = true;
+    context->navigationPage = page;
+    context->pageMode = GeneralPageMode(page);
+    context->initialSection = 0;
+    shell->generalChildren[page] = CreateWindowExW(0, L"GeneralSettingsDlgClass", L"",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN, 0, 0, size.cx, size.cy,
+        parent, nullptr, g_hInst, context.get());
+    if (shell->generalChildren[page]) shell->generalPages[page] = std::move(context);
+    return shell->generalChildren[page];
+}
+static HWND EnsureUnifiedMarkupPage(HWND parent, UnifiedSettingsShellCtx* shell) {
+    if (!parent || !shell) return nullptr;
+    if (shell->childMarkup) return shell->childMarkup;
+    static const wchar_t kClass[] = L"MarkupSettingsDlgClass";
+    EnsureMarkupSettingsClass();
+    const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
+    shell->markupCtx = std::make_unique<MarkupSettingsCtx>();
+    shell->markupCtx->owner = g_hMainWnd ? g_hMainWnd : shell->owner;
+    shell->markupCtx->embedded = true;
+    shell->childMarkup = CreateWindowExW(0, kClass, L"",
+                                         WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+                                         0, 0, childSize.cx, childSize.cy,
+                                         parent, nullptr, g_hInst, shell->markupCtx.get());
+    return shell->childMarkup;
+}
+
+static HWND EnsureUnifiedAnnotPage(HWND parent, UnifiedSettingsShellCtx* shell) {
+    if (!parent || !shell) return nullptr;
+    if (shell->childAnnot) return shell->childAnnot;
+    static const wchar_t kClass[] = L"AnnotSettingsDlgClass";
+    EnsureAnnotationSettingsClass();
+    const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
+    shell->annotCtx = std::make_unique<AnnotSettingsCtx>();
+    shell->annotCtx->owner = g_hMainWnd ? g_hMainWnd : shell->owner;
+    shell->annotCtx->embedded = true;
+    shell->annotCtx->initialSection = shell->initialAnnotSection;
+    shell->childAnnot = CreateWindowExW(0, kClass, L"",
+                                        WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+                                        0, 0, childSize.cx, childSize.cy,
+                                        parent, nullptr, g_hInst, shell->annotCtx.get());
+    return shell->childAnnot;
+}
+
+static HWND EnsureUnifiedPalettePage(HWND parent, UnifiedSettingsShellCtx* shell) {
+    if (!parent || !shell) return nullptr;
+    if (shell->childPalette) return shell->childPalette;
+    static const wchar_t kClass[] = L"PaletteSettingsDlgClass";
+    EnsurePaletteSettingsClass();
+    const SIZE childSize = UnifiedSettingsInitialChildSize(parent);
+    shell->paletteCtx = std::make_unique<PaletteSettingsCtx>();
+    shell->paletteCtx->owner = shell->owner;
+    shell->paletteCtx->embedded = true;
+    shell->paletteCtx->colorPickerPurpose = IsUnifiedColorSelection(shell);
+    shell->childPalette = CreateWindowExW(0, kClass, L"",
+                                          WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
+                                          0, 0, childSize.cx, childSize.cy,
+                                          parent, nullptr, g_hInst, shell->paletteCtx.get());
+    if (shell->childPalette && shell->paletteRequest) {
+        auto* palette = shell->paletteCtx.get();
+        palette->selectedSlot = kLastOkColorSlotIndex;
+        if (IsUnifiedColorSelection(shell)) {
+            const COLORREF initial = shell->paletteRequest->initialColor;
+            for (int i = 0; i < IDC_PALETTE_SLOT_COUNT; ++i) {
+                if (palette->colors[i] == initial) { palette->selectedSlot = i; break; }
+            }
+            // This is only a draft; selecting note/theme colors never saves it.
+            SetPaletteSettingsColor(shell->childPalette, palette, initial, false);
+        } else {
+            SyncPaletteSettingsEditor(shell->childPalette, palette, palette->colors[palette->selectedSlot]);
+            UpdatePaletteSelectedInfo(palette);
+            InvalidatePaletteSlots(shell->childPalette);
+        }
+    }
+    return shell->childPalette;
+}
+
+
+struct SettingsSnapshotCapture { int page; SettingsPageSnapshot* values; };
+static bool IsSnapshotNavigationControl(HWND control, int page) {
+    const int id = GetDlgCtrlID(control);
+    const int parentId = GetDlgCtrlID(GetParent(control));
+    if (id == IDC_GENERAL_SECTION_LIST || parentId == IDC_GENERAL_SECTION_LIST ||
+        id == IDC_MARKUP_SECTION_LIST || parentId == IDC_MARKUP_SECTION_LIST ||
+        id == IDC_ANNOT_SECTION_LIST || parentId == IDC_ANNOT_SECTION_LIST) return true;
+    if (page == kSettingsNavAnnot && (id == IDC_ANNOT_TOOL_STATE || parentId == IDC_ANNOT_TOOL_STATE)) return true;
+    if (page == kSettingsNavMarkup) {
+        for (int excluded : {IDC_MARKUP_CUSTOM_TAG_PRESET_SELECT, IDC_MARKUP_CUSTOM_TAG_BOLD,
+             IDC_MARKUP_CUSTOM_TAG_ITALIC, IDC_MARKUP_CUSTOM_TAG_UNDERLINE, IDC_MARKUP_CUSTOM_TAG_STRIKE,
+             IDC_MARKUP_CUSTOM_TAG_BACKCOLOR, IDC_MARKUP_CUSTOM_TAG_TEXTCOLOR}) {
+            if (id == excluded || parentId == excluded) return true;
+        }
+    }
+    return false;
+}
+static BOOL CALLBACK CaptureSettingsControl(HWND control, LPARAM param) {
+    auto* capture = reinterpret_cast<SettingsSnapshotCapture*>(param);
+    if (IsSnapshotNavigationControl(control, capture->page)) return TRUE;
+    wchar_t type[64]{}; GetClassNameW(control, type, 64);
+    std::wstring value;
+    if (_wcsicmp(type, L"EDIT") == 0 || _wcsicmp(type, L"ComboBox") == 0) {
+        value = ReadSettingsEdit(control);
+        if (_wcsicmp(type, L"ComboBox") == 0) {
+            const auto selected = SendMessageW(control, CB_GETCURSEL, 0, 0);
+            value += L":" + std::to_wstring(selected);
+            if (selected != CB_ERR) value += L":" + std::to_wstring(SendMessageW(control, CB_GETITEMDATA, selected, 0));
+        }
+    } else if (_wcsicmp(type, L"BUTTON") == 0) {
+        const auto style = GetWindowLongPtrW(control, GWL_STYLE) & BS_TYPEMASK;
+        if (style != BS_CHECKBOX && style != BS_AUTOCHECKBOX && style != BS_RADIOBUTTON &&
+            style != BS_AUTORADIOBUTTON && style != BS_3STATE && style != BS_AUTO3STATE) return TRUE;
+        value = std::to_wstring(SendMessageW(control, BM_GETCHECK, 0, 0));
+    } else return TRUE;
+    capture->values->push_back(std::to_wstring(reinterpret_cast<UINT_PTR>(control)) + L"=" + value);
+    return TRUE;
+}
+static SettingsPageSnapshot CaptureUnifiedDraft(UnifiedSettingsShellCtx* ctx, int page) {
+    SettingsPageSnapshot values;
+    HWND child = UnifiedPageWindow(ctx, page);
+    if (!child || page == kSettingsNavPalette) return values;
+    SettingsSnapshotCapture capture{page, &values};
+    EnumChildWindows(child, CaptureSettingsControl, reinterpret_cast<LPARAM>(&capture));
+    if (ctx->generalPages[page]) values.push_back(std::to_wstring(ctx->generalPages[page]->noteBgCustomColor));
+    if (page == kSettingsNavMarkup && ctx->markupCtx) {
+        StoreActiveMarkupCustomTagPreset(ctx->markupCtx.get());
+        for (int mask : ctx->markupCtx->customPresetMasks) values.push_back(std::to_wstring(mask));
+    }
+    if (page == kSettingsNavAnnot && ctx->annotCtx) {
+        for (const auto mode : ctx->annotCtx->expandedToolOrder) values.push_back(std::to_wstring(static_cast<int>(mode)));
+        for (const auto state : ctx->annotCtx->expandedToolStates) values.push_back(std::to_wstring(static_cast<int>(state)));
+    }
+    return values;
+}
+static bool UnifiedPageDirty(UnifiedSettingsShellCtx* ctx, int page) {
+    return UnifiedPageWindow(ctx, page) && page != kSettingsNavPalette && CaptureUnifiedDraft(ctx, page) != ctx->baselines[page];
+}
+static bool UnifiedSettingsDirty(UnifiedSettingsShellCtx* ctx) {
+    for (int page = 0; page < settings_navigation::Count; ++page) if (UnifiedPageDirty(ctx, page)) return true;
+    return false;
+}
+static void LayoutUnifiedSettingsShell(HWND window, UnifiedSettingsShellCtx* ctx) {
+    if (!ctx) return;
+    RECT rc{}; GetClientRect(window, &rc);
+    const int pad = ScaleY(window, 12), gap = ScaleY(window, 8);
+    const int row = std::max(ScaleY(window, 30), FontLineHeightPx(window, g_hUIFont) + ScaleY(window, 10));
+    const int width = static_cast<int>(rc.right), height = static_cast<int>(rc.bottom);
+    const bool selecting = IsUnifiedColorSelection(ctx);
+    const int navWidth = selecting ? 0 : ScaleY(window, 224);
+    const int contentX = pad + (selecting ? 0 : navWidth + gap);
+    const int contentTop = pad + row + gap;
+    const int footerTop = std::max(contentTop, height - pad - row * 2 - gap);
+    SetWindowPos(ctx->tree, nullptr, pad, pad, navWidth, std::max(0, footerTop - pad - gap), SWP_NOZORDER | SWP_NOACTIVATE);
+    ShowWindow(ctx->tree, selecting ? SW_HIDE : SW_SHOW);
+    EnableWindow(ctx->tree, !selecting);
+    SetWindowPos(ctx->location, nullptr, contentX, pad, std::max(0, width - contentX - pad), row, SWP_NOZORDER | SWP_NOACTIVATE);
+    for (int page = 0; page < settings_navigation::Count; ++page) {
+        if (HWND child = UnifiedPageWindow(ctx, page)) SetWindowPos(child, nullptr, contentX, contentTop,
+            std::max(0, width - contentX - pad), std::max(0, footerTop - contentTop - gap), SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    const bool paletteOnly = !selecting && ctx->currentCategory == kSettingsNavPalette && !ctx->dirty;
+    ShowWindow(ctx->btnApply, selecting || paletteOnly ? SW_HIDE : SW_SHOW);
+    ShowWindow(ctx->btnRevert, selecting || paletteOnly ? SW_HIDE : SW_SHOW);
+    ShowWindow(ctx->btnOk, selecting || paletteOnly ? SW_HIDE : SW_SHOW);
+    EnableWindow(ctx->btnRevert, ctx->currentCategory != kSettingsNavPalette);
+    const auto hint = localization::Text(selecting ? L"settings.palette.select_hint" : ctx->dirty
+        ? L"settings.navigation.pending" : paletteOnly ? L"settings.navigation.palette_autosave" : L"settings.navigation.apply_hint");
+    SetWindowTextW(ctx->labelApplyHint, hint.c_str());
+    SetWindowPos(ctx->labelApplyHint, nullptr, pad, footerTop, std::max(0, width - pad * 2), row, SWP_NOZORDER | SWP_NOACTIVATE);
+    const std::pair<HWND, int> buttons[] = {{ctx->btnCancel,108}, {ctx->btnOk,140}, {ctx->btnApply,128}, {ctx->btnRevert,200}};
+    int right = width - pad;
+    for (const auto& button : buttons) {
+        if ((GetWindowLongPtrW(button.first, GWL_STYLE) & WS_VISIBLE) == 0) continue;
+        const int buttonWidth = ScaleY(window, button.second);
+        right -= buttonWidth;
+        SetWindowPos(button.first, nullptr, right, footerTop + row + gap, buttonWidth, row, SWP_NOZORDER | SWP_NOACTIVATE);
+        right -= gap;
+    }
+}
+static BOOL CALLBACK PrepareSettingsKeyboardControl(HWND control, LPARAM) {
+    wchar_t type[64]{}; GetClassNameW(control, type, 64);
+    if (_wcsicmp(type, L"SettingsScrollPanelClass") == 0) {
+        SetWindowLongPtrW(control, GWL_EXSTYLE, GetWindowLongPtrW(control, GWL_EXSTYLE) | WS_EX_CONTROLPARENT);
+    } else if (_wcsicmp(type, L"EDIT") == 0 || _wcsicmp(type, L"ComboBox") == 0 ||
+               _wcsicmp(type, L"LISTBOX") == 0 || _wcsicmp(type, L"BUTTON") == 0) {
+        if (_wcsicmp(type, L"BUTTON") == 0 && (GetWindowLongPtrW(control, GWL_STYLE) & BS_TYPEMASK) == BS_GROUPBOX) return TRUE;
+        SetWindowLongPtrW(control, GWL_STYLE, GetWindowLongPtrW(control, GWL_STYLE) | WS_TABSTOP);
+    }
+    return TRUE;
+}
+static void RevealUnifiedSettingsFocus(UnifiedSettingsShellCtx* ctx) {
+    HWND focus = GetFocus();
+    const int page = ctx->currentCategory;
+    HWND child = UnifiedPageWindow(ctx, page), panel = nullptr;
+    int position = 0;
+    if (!focus || !child || !IsChild(child, focus)) return;
+    if (ctx->generalPages[page]) { panel = ctx->generalPages[page]->scrollPanel; position = ctx->generalPages[page]->scrollPos; }
+    else if (page == kSettingsNavMarkup && ctx->markupCtx) { panel = ctx->markupCtx->scrollPanel; position = ctx->markupCtx->scrollPos; }
+    else if (page == kSettingsNavAnnot && ctx->annotCtx) { panel = ctx->annotCtx->scrollPanel; position = ctx->annotCtx->scrollPos; }
+    if (!panel || !IsChild(panel, focus)) return;
+    RECT viewport{}, control{}; GetClientRect(panel, &viewport); GetWindowRect(focus, &control);
+    MapWindowPoints(nullptr, panel, reinterpret_cast<POINT*>(&control), 2);
+    const int delta = control.top < 0 ? control.top : control.bottom > viewport.bottom ? control.bottom - viewport.bottom : 0;
+    if (!delta) return;
+    if (ctx->generalPages[page]) ScrollGeneralSettingsTo(child, ctx->generalPages[page].get(), position + delta);
+    else if (page == kSettingsNavMarkup) ScrollMarkupSettingsTo(child, ctx->markupCtx.get(), position + delta);
+    else if (page == kSettingsNavAnnot) ScrollAnnotSettingsTo(child, ctx->annotCtx.get(), position + delta);
+}
+static void ShowUnifiedSettingsPage(HWND window, UnifiedSettingsShellCtx* ctx, int requested) {
+    const int page = IsUnifiedColorSelection(ctx) ? kSettingsNavPalette : std::clamp(requested, 0, settings_navigation::Count - 1);
+    const bool created = UnifiedPageWindow(ctx, page) != nullptr;
+    HWND target = nullptr;
+    if (page == kSettingsNavMarkup) target = EnsureUnifiedMarkupPage(window, ctx);
+    else if (page == kSettingsNavAnnot) target = EnsureUnifiedAnnotPage(window, ctx);
+    else if (page == kSettingsNavPalette) target = EnsureUnifiedPalettePage(window, ctx);
+    else target = EnsureUnifiedGeneralPage(window, ctx, page);
+    if (!target) { ShowSoftNotice(window, localization::Text(L"settings.navigation.page_failed"), SoftNoticeKind::Warning); return; }
+    ctx->currentCategory = page;
+    if (page == kSettingsNavAnnot && ctx->annotCtx) {
+        ctx->annotCtx->palettePreviewColor = g_paletteCustomColor;
+        if (ctx->annotCtx->previewPaletteCustom) InvalidateRect(ctx->annotCtx->previewPaletteCustom, nullptr, TRUE);
+    }
+    if (!created) {
+        SetWindowLongPtrW(target, GWL_EXSTYLE, GetWindowLongPtrW(target, GWL_EXSTYLE) | WS_EX_CONTROLPARENT);
+        EnumChildWindows(target, PrepareSettingsKeyboardControl, 0);
+        ctx->baselines[page] = CaptureUnifiedDraft(ctx, page);
+    }
+    for (int other = 0; other < settings_navigation::Count; ++other)
+        if (HWND child = UnifiedPageWindow(ctx, other)) ShowWindow(child, child == target ? SW_SHOW : SW_HIDE);
+    SetWindowTextW(ctx->location, UnifiedSettingsLocation(page).c_str());
+    SetWindowPos(target, ctx->location, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (ctx->tree && ctx->navigationItems[page] && TreeView_GetSelection(ctx->tree) != ctx->navigationItems[page])
+        TreeView_SelectItem(ctx->tree, ctx->navigationItems[page]);
+    ctx->dirty = UnifiedSettingsDirty(ctx);
+    LayoutUnifiedSettingsShell(window, ctx);
+    RequestLayout(target);
+    InvalidateRect(target, nullptr, TRUE);
+}
+[[nodiscard]] static bool PublishUnifiedPalette(UnifiedSettingsShellCtx* ctx) try {
+    if (!ctx || IsUnifiedColorSelection(ctx)) return false;
+    SyncUserPaletteToRuntime(); // Active file was already atomically committed by the palette page.
+    const bool annotationEntry = ctx->paletteRequest &&
+        ctx->paletteRequest->purpose == PaletteDialogPurpose::EditAnnotationPalette;
+    const COLORREF previousActive = g_activeColor;
+    const COLORREF previousTool = ToolColorForMode(g_toolMode);
+    const bool activeColorChanged = annotationEntry && g_activeColor == ctx->paletteRequest->initialColor &&
+        g_activeColor != g_paletteCustomColor;
+    if (activeColorChanged) {
+        g_activeColor = g_paletteCustomColor;
+        StoreToolColorForMode(g_toolMode, g_activeColor);
+    }
+    if (!TryPersistConfig()) {
+        if (activeColorChanged) { g_activeColor = previousActive; StoreToolColorForMode(g_toolMode, previousTool); }
+        return false;
+    }
+    if (annotationEntry) {
+        ctx->paletteRequest->initialColor = g_paletteCustomColor;
+        if (activeColorChanged && g_hPdfView) (void)ApplyActiveColorToSelectedAnnotation(g_hPdfView);
+    }
+    if (ctx->owner && IsWindow(ctx->owner)) UpdateToolbarUI(ctx->owner);
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+    if (g_hPdfToolbar) RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+    return true;
+} catch (...) {
+    return false;
+}
+
+
+static bool ApplyUnifiedSettings(HWND window, UnifiedSettingsShellCtx* ctx) {
+    if (!ctx || IsUnifiedColorSelection(ctx)) return false;
+    for (int page = 0; page < settings_navigation::Count; ++page) if (ctx->generalPages[page]) {
+        GeneralSettingsInputDraft draft;
+        if (!ReadGeneralSettingsInput(ctx->generalPages[page].get(), draft)) {
+            ShowUnifiedSettingsPage(window, ctx, page);
+            SetFocus(ctx->generalPages[page]->invalidControl);
+            return false;
+        }
+    }
+    if (ctx->childPalette) {
+        if (!ValidatePaletteSettingsEditor(ctx->childPalette, ctx->paletteCtx.get())) {
+            ShowUnifiedSettingsPage(window, ctx, kSettingsNavPalette); return false;
+        }
+        if (!FlushPaletteAutoSave(ctx->childPalette, ctx->paletteCtx.get())) return false;
+    }
+    constexpr int order[] = {0, 8, 9, 5, 1, 11, 2, 10, 3, 12, 6, 13, 7, 14, kSettingsNavBottomPane};
+    for (int page : order) {
+        // Explicit Save/Apply on this page also reapplies an unchanged saved
+        // choice over a temporary View-menu mode. Merely visiting/closing it,
+        // or saving an unrelated page, does not end the temporary choice.
+        const bool applyBottomPane = page == kSettingsNavBottomPane && ctx->currentCategory == page &&
+            ctx->generalPages[page] != nullptr;
+        if (!UnifiedPageDirty(ctx, page) && !applyBottomPane) continue;
+        const bool saved = IsGeneralSettingsPage(page) ? ApplyGeneralSettings(ctx->generalPages[page].get())
+            : page == kSettingsNavMarkup ? ApplyMarkupSettings(ctx->markupCtx.get()) : ApplyAnnotationSettings(ctx->annotCtx.get());
+        if (!saved) {
+            ShowUnifiedSettingsPage(window, ctx, page);
+            ShowSoftNotice(window, localization::Text(L"settings.unified.save_failed"), SoftNoticeKind::Warning);
+            return false;
+        }
+        ctx->baselines[page] = CaptureUnifiedDraft(ctx, page);
+    }
+    ctx->dirty = UnifiedSettingsDirty(ctx);
+    LayoutUnifiedSettingsShell(window, ctx);
+    return true;
+}
+static void RevertUnifiedSettingsPage(HWND window, UnifiedSettingsShellCtx* ctx) {
+    const int page = ctx->currentCategory;
+    if (page == kSettingsNavPalette) return;
+    if (HWND child = UnifiedPageWindow(ctx, page)) DestroyWindow(child);
+    if (page == kSettingsNavMarkup) { ctx->childMarkup = nullptr; ctx->markupCtx.reset(); }
+    else if (page == kSettingsNavAnnot) { ctx->childAnnot = nullptr; ctx->annotCtx.reset(); }
+    else { ctx->generalChildren[page] = nullptr; ctx->generalPages[page].reset(); }
+    ctx->baselines[page].clear();
+    ShowUnifiedSettingsPage(window, ctx, page);
+}
+[[nodiscard]] static bool CloseUnifiedSettings(HWND window, UnifiedSettingsShellCtx* ctx) {
+    if (!ctx) return false;
+    if (!IsUnifiedColorSelection(ctx) && UnifiedSettingsDirty(ctx)) {
+        SilentDialogOptions options;
+        options.title = localization::Text(L"settings.navigation.unsaved_title");
+        options.message = localization::Text(L"settings.navigation.unsaved_message");
+        options.buttons = SilentDialogButtons::YesNoCancel;
+        options.yesLabel = localization::Text(L"settings.navigation.save_close");
+        options.noLabel = localization::Text(L"settings.navigation.discard_close");
+        options.cancelLabel = localization::Text(L"settings.navigation.keep_editing");
+        options.defaultResult = options.escapeResult = SilentDialogResult::Cancel;
+        const auto result = ShowSilentDialog(window, options);
+        if (result == SilentDialogResult::Cancel || result == SilentDialogResult::None) return false;
+        if (result == SilentDialogResult::Yes && !ApplyUnifiedSettings(window, ctx)) return false;
+    }
+    if (ctx->childPalette && !IsUnifiedColorSelection(ctx) && !FinishPaletteEditing(ctx->childPalette, ctx->paletteCtx.get(), true)) return false;
+    ctx->done = true; DestroyWindow(window); return true;
+}
+static bool CreateUnifiedSettingsNavigation(HWND window, UnifiedSettingsShellCtx* ctx) {
+    ctx->tree = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS,
+        0, 0, 224, 500, window, reinterpret_cast<HMENU>(IDC_UNIFIED_SETTINGS_TREE), g_hInst, nullptr);
+    if (!ctx->tree) return false;
+    for (int group = 0; group < settings_navigation::GroupCount; ++group) {
+        auto text = localization::Text(settings_navigation::groups[group]);
+        TVINSERTSTRUCTW root{}; root.hParent = TVI_ROOT; root.hInsertAfter = TVI_LAST;
+        root.item.mask = TVIF_TEXT | TVIF_PARAM; root.item.pszText = text.data();
+        root.item.lParam = settings_navigation::firstPages[group];
+        const auto parent = reinterpret_cast<HTREEITEM>(SendMessageW(ctx->tree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&root)));
+        if (!parent) return false;
+        for (const auto page : settings_navigation::sidebarOrder) {
+            const auto& entry = settings_navigation::entries[page];
+            if (entry.group != group) continue;
+            text = localization::Text(entry.label);
+            TVINSERTSTRUCTW leaf{}; leaf.hParent = parent; leaf.hInsertAfter = TVI_LAST;
+            leaf.item.mask = TVIF_TEXT | TVIF_PARAM; leaf.item.pszText = text.data(); leaf.item.lParam = entry.page;
+            ctx->navigationItems[entry.page] = reinterpret_cast<HTREEITEM>(SendMessageW(ctx->tree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&leaf)));
+            if (!ctx->navigationItems[entry.page]) return false;
+        }
+        TreeView_Expand(ctx->tree, parent, TVE_EXPAND);
+    }
+    return true;
+}
+static LRESULT CALLBACK UnifiedSettingsShellProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<UnifiedSettingsShellCtx*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        ctx = reinterpret_cast<UnifiedSettingsShellCtx*>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        if (!ctx) return -1;
+        if (!CreateUnifiedSettingsNavigation(window, ctx)) return -1;
+        ctx->location = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+            0, 0, 100, 30, window, reinterpret_cast<HMENU>(IDC_UNIFIED_SETTINGS_LOCATION), g_hInst, nullptr);
+        ctx->labelApplyHint = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+            0, 0, 100, 30, window, nullptr, g_hInst, nullptr);
+        const bool selecting = IsUnifiedColorSelection(ctx);
+        const auto button = [&](int id, const wchar_t* key, DWORD style) {
+            return CreateWindowExW(0, L"BUTTON", localization::Text(key).c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
+                0, 0, 128, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+        };
+        ctx->btnOk = button(IDOK, selecting ? L"settings.palette.use_color" : L"settings.navigation.save_close", BS_DEFPUSHBUTTON);
+        ctx->btnApply = button(IDC_UNIFIED_SETTINGS_APPLY, L"settings.navigation.save", BS_PUSHBUTTON);
+        ctx->btnRevert = button(IDC_UNIFIED_SETTINGS_REVERT_PAGE, L"settings.navigation.revert", BS_PUSHBUTTON);
+        ctx->btnCancel = button(IDCANCEL, selecting ? L"settings.common.603bc62f3f34" : L"settings.navigation.close", BS_PUSHBUTTON);
+        for (HWND child : {ctx->tree, ctx->location, ctx->labelApplyHint, ctx->btnOk, ctx->btnApply, ctx->btnRevert, ctx->btnCancel}) {
+            if (!child) return -1;
+            SetUIFont(child);
+        }
+        SetSettingsCategoryFont(ctx->location);
+        ApplyThemeToDialog(window);
+        TreeView_SetBkColor(ctx->tree, g_theme.panelBg);
+        TreeView_SetTextColor(ctx->tree, g_theme.panelText);
+        ShowUnifiedSettingsPage(window, ctx, ctx->currentCategory);
+        return 0;
+    }
+    case WM_NOTIFY: {
+        const auto* header = reinterpret_cast<NMHDR*>(lParam);
+        if (ctx && header && header->hwndFrom == ctx->tree && header->code == TVN_SELCHANGEDW) {
+            const auto* selection = reinterpret_cast<NMTREEVIEWW*>(lParam);
+            const int page = static_cast<int>(selection->itemNew.lParam);
+            if (page < 0 || page >= settings_navigation::Count) return 0;
+            if (page != ctx->currentCategory || selection->itemNew.hItem != ctx->navigationItems[page])
+                ShowUnifiedSettingsPage(window, ctx, page);
+            return 0;
+        }
+        break;
+    }
+    case WM_COMMAND: {
+        if (!ctx) break;
+        const int id = LOWORD(wParam);
+        if (id == IDOK) {
+            if (IsUnifiedColorSelection(ctx)) {
+                if (!ctx->childPalette || !ValidatePaletteSettingsEditor(ctx->childPalette, ctx->paletteCtx.get())) return 0;
+                COLORREF color{}; if (!ReadPaletteEditorColor(ctx->childPalette, &color)) return 0;
+                ctx->paletteRequest->selectedColor = color; ctx->paletteRequest->accepted = true;
+            } else if (!ApplyUnifiedSettings(window, ctx)) return 0;
+            ctx->done = true; DestroyWindow(window); return 0;
+        }
+        if (id == IDC_UNIFIED_SETTINGS_APPLY) {
+            if (ApplyUnifiedSettings(window, ctx)) { ApplyThemeToDialog(window); ShowSoftNotice(window, localization::Text(L"settings.annot.fca7cf56577e")); }
+            return 0;
+        }
+        if (id == IDC_UNIFIED_SETTINGS_REVERT_PAGE) {
+            RevertUnifiedSettingsPage(window, ctx); ShowSoftNotice(window, localization::Text(L"settings.unified.reverted_page")); return 0;
+        }
+        if (id == IDCANCEL || id == 0) { (void)CloseUnifiedSettings(window, ctx); return 0; }
+        break;
+    }
+    case kUnifiedSettingsNavigateMsg:
+        if (ctx) ShowUnifiedSettingsPage(window, ctx, static_cast<int>(wParam));
+        return 0;
+    case kUnifiedSettingsDraftChangedMsg:
+        if (ctx) {
+            const bool dirty = UnifiedSettingsDirty(ctx);
+            if (dirty != ctx->dirty) { ctx->dirty = dirty; LayoutUnifiedSettingsShell(window, ctx); }
+        }
+        return 0;
+    case kUnifiedSettingsActionMsg:
+        if (ctx && (wParam == ID_SETTINGS_PRESETS || wParam == ID_WORKSPACE_RESTORE)) {
+            if (ctx->owner != g_hMainWnd) {
+                ShowSoftNotice(window, localization::Text(L"settings.navigation.action_from_main")); return 0;
+            }
+            ctx->deferredCommand = static_cast<UINT>(wParam);
+            if (!CloseUnifiedSettings(window, ctx)) ctx->deferredCommand = 0;
+        }
+        return 0;
+    case kUnifiedPaletteSavedMsg:
+        return PublishUnifiedPalette(ctx) ? TRUE : FALSE;
+    case WM_CLOSE:
+        if (ctx) (void)CloseUnifiedSettings(window, ctx);
+        return 0;
+    case WM_SIZE:
+        if (ctx) LayoutUnifiedSettingsShell(window, ctx);
+        return 0;
+    case WM_THEMECHANGED:
+        ApplyThemeToDialog(window);
+        if (ctx && ctx->tree) {
+            TreeView_SetBkColor(ctx->tree, g_theme.panelBg);
+            TreeView_SetTextColor(ctx->tree, g_theme.panelText);
+        }
+        return 0;
+    case WM_ERASEBKGND: {
+        RECT rc{}; GetClientRect(window, &rc);
+        FillRect(reinterpret_cast<HDC>(wParam), &rc, g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: case WM_CTLCOLORBTN:
+        return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
+    case WM_DRAWITEM:
+        if (DrawThemeButton(reinterpret_cast<DRAWITEMSTRUCT*>(lParam))) return TRUE;
+        break;
+    case WM_DESTROY:
+        UnregisterAppExitDialog(window);
+        if (ctx) { RestoreOwnerAfterModal(ctx->owner); ctx->done = true; }
+        return 0;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+} // namespace

@@ -2,7 +2,7 @@
 
 Inline dollar $x$
 Inline paren \(a + b\), tag <math display=inline>x^2</>
-::: note
+::: 間欠跛行
 - **Bold marker regression**
 :::
 
@@ -17,3 +17,7 @@ $$z$$
 | Item | Example | State |
 | :--- | :-----: | ---: |
 | Markdown | `value` | <link=ui-final-frame-link><lu>jump</></> |
+
+```cpp title="example.cpp"
+int x;
+```

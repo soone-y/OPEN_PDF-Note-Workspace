@@ -2,14 +2,17 @@
 param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'app_test_desktop.ps1')
+if (Invoke-AppTestDesktop -ScriptPath $PSCommandPath -Parameters $PSBoundParameters) { return }
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $outputDir = Join-Path $repoRoot "out/tests/write_checks"
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 $compiler = (Get-Command g++ -ErrorAction Stop).Source
 $testExe = Join-Path $outputDir "write_checks_tests.exe"
-& $compiler -std=c++17 -O2 -Wall -Wextra -municode -static-libgcc -static-libstdc++ -I (Join-Path $repoRoot "src") `
+& $compiler -DPDF_NOTE_WRITE_CHECKS_TESTING=1 -std=c++17 -O2 -Wall -Wextra -municode -static-libgcc -static-libstdc++ -I (Join-Path $repoRoot "src") `
     (Join-Path $repoRoot "tests/unit/write_checks_tests.cpp") `
-    (Join-Path $repoRoot "src/diagnostics/write_checks.cpp") -o $testExe
+    (Join-Path $repoRoot "src/diagnostics/write_checks.cpp") -ladvapi32 -o $testExe
 if ($LASTEXITCODE -ne 0) { throw "Write checks compilation failed." }
 Push-Location $outputDir
 try {

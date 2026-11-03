@@ -3,11 +3,16 @@
 #include "file_output/file_output.h"
 #include "bridge/view_bridge.h"
 #include "core/font_list.h"
+#include "core/annotation_rotation.h"
 #include "math/math_render.h"
 #include "clrop/bridge.h"
 #include "file_output/note_snapshot.h"
 #include "file_output/pdf_annotation_export.h"
+#include "file_output/shape_outline_pdf.h"
+#include "ui/dashed_shape_outline.h"
+#include "ui/quarter_turn_bitmap.h"
 #include "note/note_export.h"
+#include "note/note_file_policy.h"
 #include "note/note_workspace_service.h"
 #include "fpdf_save.h"
 #include "fpdf_edit.h"
@@ -427,14 +432,6 @@ static bool EnsureParentDir(const std::filesystem::path& path) {
     return !ec;
 }
 
-static std::wstring GetEditText(HWND hEdit) {
-    int len = GetWindowTextLengthW(hEdit);
-    std::wstring text(len, L'\0');
-    if (len > 0) {
-        GetWindowTextW(hEdit, text.data(), len + 1);
-    }
-    return text;
-}
 
 static bool WriteFileUtf8(const std::wstring& path, const std::string& data) {
     std::filesystem::path p(path);
@@ -583,11 +580,7 @@ static note_snapshot::CurrentEditTextSnapshot CurrentEditSnapshotForNotePath(con
 
 static bool IsPlainTextNotePath(const std::wstring& notePath) {
     if (notePath.empty()) return false;
-    std::wstring ext = std::filesystem::path(notePath).extension().wstring();
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t ch) {
-        return static_cast<wchar_t>(towlower(ch));
-    });
-    return ext == L".txt" || ext == L".csv";
+    return note::ContentKindForNotePath(notePath) == note::NoteContentKind::PlainText;
 }
 
 static bool IsTeXSourceNotePath(const std::wstring& notePath) {
@@ -627,20 +620,17 @@ static bool DecodeNoteSnapshotText(const std::wstring& notePath, const std::stri
 
 static bool IsSamePath(const std::filesystem::path& a, const std::filesystem::path& b) {
     if (a.empty() || b.empty()) return false;
+    std::error_code identityError;
+    if (std::filesystem::equivalent(a, b, identityError) && !identityError) return true;
     std::error_code ecA;
     std::error_code ecB;
     const auto normA = std::filesystem::weakly_canonical(a, ecA);
     const auto normB = std::filesystem::weakly_canonical(b, ecB);
-    if (!ecA && !ecB) {
-        return normA == normB;
-    }
-    auto lower = [](std::wstring value) {
-        std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
-            return static_cast<wchar_t>(towlower(ch));
-        });
-        return value;
-    };
-    return lower(a.lexically_normal().wstring()) == lower(b.lexically_normal().wstring());
+    const auto keyA = ecA ? a.lexically_normal().wstring() : normA.wstring();
+    const auto keyB = ecB ? b.lexically_normal().wstring() : normB.wstring();
+    // Canonical paths can still differ in case on Windows (e.g. a junction's
+    // target spelling). The original-path guard must use Windows comparison.
+    return CompareStringOrdinal(keyA.c_str(), -1, keyB.c_str(), -1, TRUE) == CSTR_EQUAL;
 }
 
 struct ResolvedNoteExportSource {
@@ -664,6 +654,7 @@ static std::optional<ResolvedNoteExportSource> ResolveNoteExportSource(
     }
     source.plain_text = IsPlainTextNotePath(source.snapshot.targetPath);
     note::NoteMetadata meta;
+    meta.clro_ascii_only = g_config.clroAsciiOnly;
     meta.file_name =
         std::filesystem::path(source.snapshot.targetPath).filename().wstring();
     meta.title = note::DeriveTitleFromFileName(meta.file_name);
@@ -678,6 +669,7 @@ static std::optional<ResolvedNoteExportSource> ResolveNoteExportSource(
         source.snapshot.identity.note_id);
     if (kernel && kernel->valid() &&
         kernel->content_kind() == contentKind &&
+        kernel->text_core().clro_ascii_only() == meta.clro_ascii_only &&
         kernel->text_core().MatchesRaw(source.raw) &&
         (source.snapshot.identity.content_revision == 0 ||
          source.snapshot.identity.content_revision ==
@@ -1886,6 +1878,27 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
             annPtr = &scaled;
         }
         const Annotation& a = *annPtr;
+        if (annotation_rotation::HasOrientedContent(a) && page_rotation::Normalize(a.contentRotation)) {
+            const auto extent = annotation_rotation::ContentExtent(a);
+            const auto origin = annotation_rotation::ContentOrigin(a);
+            Annotation local = a;
+            local.contentRotation = 0;
+            local.x1 = 0; local.y1 = extent.height;
+            local.x2 = extent.width; local.y2 = 0;
+            const int firstObject = FPDFPage_CountObjects(page);
+            DrawAnnotationAppearance({local}, fonts, dest, page, pageIndex, standardTextAnnots,
+                                     matchPdfPaneTextLayout, 1.0, bitmapDpiScale);
+            double aa = 1, bb = 0, cc = 0, dd = 1;
+            switch (page_rotation::Normalize(a.contentRotation)) {
+            case 1: aa = 0; bb = -1; cc = 1; dd = 0; break;
+            case 2: aa = -1; dd = -1; break;
+            case 3: aa = 0; bb = 1; cc = -1; dd = 0; break;
+            }
+            for (int i = firstObject; i < FPDFPage_CountObjects(page); ++i)
+                FPDFPageObj_Transform(FPDFPage_GetObject(page, i), aa, bb, cc, dd,
+                                      origin.x - cc * extent.height, origin.y - dd * extent.height);
+            continue;
+        }
         switch (a.type) {
         case Annotation::Type::MarkerText: {
             COLORREF col = DarkenColor(a.color, 0.85);
@@ -1918,7 +1931,8 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
             break;
         }
         case Annotation::Type::TextColor:
-            // Exact text recoloring requires changing existing page text content; blocked before PDF export.
+            // AddAnnotationsToPage handles the selected marker/overlay policy.
+            // Never paint a recoloring directly into the page content.
             break;
         case Annotation::Type::MarkerFree:
         case Annotation::Type::Freehand: {
@@ -2076,19 +2090,38 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
             double bottom = std::min(a.y1, a.y2);
             double top = std::max(a.y1, a.y2);
             BYTE alpha = AlphaFromNorm(a.alpha > 0.0 ? a.alpha : 0.35);
-            const bool outline = a.shapeDrawMode == ShapeDrawMode::Outline;
+            const bool outline = ShapeDrawModeForKind(a.shapeKind,a.shapeDrawMode) == ShapeDrawMode::Outline;
             const double strokeW = a.width > 0.0 ? a.width : 2.5;
             auto applyShapeStyle = [&](FPDF_PAGEOBJECT obj) {
                 if (!obj) return;
                 if (outline) {
-                    SetStrokeAndWidth(obj, a.color, alpha, strokeW, true);
+                    SetStrokeAndWidth(obj,a.shapeBoundary == ShapeBoundary::None ? a.color : ShapeBoundaryColor(a.shapeBoundary),alpha,strokeW,true);
                     FPDFPath_SetDrawMode(obj, FPDF_FILLMODE_NONE, TRUE);
                 } else {
                     FPDFPageObj_SetFillColor(obj, GetRValue(a.color), GetGValue(a.color), GetBValue(a.color), alpha);
-                    FPDFPath_SetDrawMode(obj, FPDF_FILLMODE_ALTERNATE, FALSE);
+                    const bool boundary = a.shapeBoundary != ShapeBoundary::None;
+                    const bool solidBoundary = boundary && a.dash.empty();
+                    if (solidBoundary) SetStrokeAndWidth(obj,ShapeBoundaryColor(a.shapeBoundary),alpha,strokeW,true);
+                    FPDFPath_SetDrawMode(obj, FPDF_FILLMODE_ALTERNATE, solidBoundary ? TRUE : FALSE);
                 }
                 FPDFPage_InsertObject(page, obj);
+                if (!outline && a.shapeBoundary != ShapeBoundary::None && !a.dash.empty()) {
+                    auto border = shape_outline::CreateDashedPdfPath(a.shapeKind,left,top,right,bottom,a.shapeRotation,a.dash,a.shapeAngle);
+                    if (border) {
+                        SetStrokeAndWidth(border,ShapeBoundaryColor(a.shapeBoundary),alpha,strokeW,true);
+                        FPDFPath_SetDrawMode(border,FPDF_FILLMODE_NONE,TRUE);FPDFPage_InsertObject(page,border);
+                    }
+                }
             };
+            if (outline && !a.dash.empty()) {
+                applyShapeStyle(shape_outline::CreateDashedPdfPath(a.shapeKind, left, top, right, bottom,
+                    std::isfinite(a.shapeRotation) ? a.shapeRotation : kDefaultRotatedEllipseAngleRad, a.dash,a.shapeAngle));
+                break;
+            }
+            if (ShapeKindIsOpen(a.shapeKind) || a.shapeAngle != 0.0) {
+                applyShapeStyle(shape_outline::CreateDashedPdfPath(a.shapeKind,left,top,right,bottom,a.shapeRotation,{},a.shapeAngle));
+                break;
+            }
             if (a.shapeKind == ShapeKind::Rectangle || a.shapeKind == ShapeKind::Square) {
                 double w = right - left;
                 double h = top - bottom;
@@ -2204,9 +2237,19 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
 [[nodiscard]] static bool AddAnnotationsToPage(const std::vector<Annotation>& annots,
                                  PdfTextFontCache& fonts, FPDF_DOCUMENT dest,
                                  FPDF_PAGE page, int pageIndex, bool standardTextAnnots,
-                                 bool matchPdfPaneTextLayout, double coordScale, double bitmapDpiScale) {
-    for (const auto& ann : annots) {
-        if (ann.pageIndex != pageIndex) continue;
+                                 bool matchPdfPaneTextLayout, double coordScale, double bitmapDpiScale,
+                                 const pdf_annotation_export::TextColorOptions& textColor) {
+    for (const auto& original : annots) {
+        if (original.pageIndex != pageIndex) continue;
+        Annotation ann = original;
+        if (ann.type == Annotation::Type::TextColor) {
+            if (textColor.mode != pdf_annotation_export::TextColorMode::Marker) {
+                if (!pdf_annotation_export::AddTextColorOverlay(page, ScaleAnnotationForExport(ann, coordScale), textColor)) return false;
+                continue;
+            }
+            ann.type = Annotation::Type::MarkerText;
+            ann.alpha = kMarkerAlphaDefault;
+        }
         const int scratchIndex = FPDF_GetPageCount(dest);
         FPDF_PAGE scratch = FPDFPage_New(dest, scratchIndex, FPDF_GetPageWidthF(page), FPDF_GetPageHeightF(page));
         if (!scratch) return false;
@@ -2665,106 +2708,6 @@ static void FillPolygonAlphaPx(HDC hdc, const std::vector<POINT>& pts, COLORREF 
     DeleteDC(mem);
 }
 
-static void FillEllipseAlphaPx(HDC hdc, const RECT& r, COLORREF color, BYTE alpha) {
-    int w = r.right - r.left;
-    int h = r.bottom - r.top;
-    if (w <= 0 || h <= 0 || alpha == 0) return;
-
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = w;
-    bmi.bmiHeader.biHeight = -h;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    std::vector<DWORD> buf(static_cast<size_t>(w) * h, 0);
-    const double a = alpha / 255.0;
-    const DWORD premul = (static_cast<DWORD>(alpha) << 24) |
-                         (static_cast<DWORD>(std::lround(GetRValue(color) * a)) << 16) |
-                         (static_cast<DWORD>(std::lround(GetGValue(color) * a)) << 8) |
-                         static_cast<DWORD>(std::lround(GetBValue(color) * a));
-    const double rx = static_cast<double>(w) * 0.5;
-    const double ry = static_cast<double>(h) * 0.5;
-    if (rx <= 0.0 || ry <= 0.0) return;
-    for (int y = 0; y < h; ++y) {
-        double ny = ((static_cast<double>(y) + 0.5) - ry) / ry;
-        for (int x = 0; x < w; ++x) {
-            double nx = ((static_cast<double>(x) + 0.5) - rx) / rx;
-            if (nx * nx + ny * ny <= 1.0) {
-                buf[static_cast<size_t>(y) * w + static_cast<size_t>(x)] = premul;
-            }
-        }
-    }
-
-    HDC mem = CreateCompatibleDC(hdc);
-    void* bits = nullptr;
-    HBITMAP hbmp = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (hbmp) {
-        memcpy(bits, buf.data(), buf.size() * sizeof(DWORD));
-        HGDIOBJ old = SelectObject(mem, hbmp);
-        BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-        AlphaBlend(hdc, r.left, r.top, w, h, mem, 0, 0, w, h, bf);
-        SelectObject(mem, old);
-        DeleteObject(hbmp);
-    }
-    DeleteDC(mem);
-}
-
-static std::vector<POINT> BuildEllipseOutlinePointsPx(const RECT& rc) {
-    std::vector<POINT> pts;
-    const int w = rc.right - rc.left;
-    const int h = rc.bottom - rc.top;
-    if (w <= 0 || h <= 0) return pts;
-    constexpr int kSegs = 64;
-    const double cx = (static_cast<double>(rc.left) + static_cast<double>(rc.right)) * 0.5;
-    const double cy = (static_cast<double>(rc.top) + static_cast<double>(rc.bottom)) * 0.5;
-    const double rx = static_cast<double>(w) * 0.5;
-    const double ry = static_cast<double>(h) * 0.5;
-    pts.reserve(kSegs + 1);
-    for (int i = 0; i <= kSegs; ++i) {
-        const double t = (2.0 * 3.14159265358979323846 * i) / kSegs;
-        pts.push_back(POINT{
-            static_cast<LONG>(std::lround(cx + rx * std::cos(t))),
-            static_cast<LONG>(std::lround(cy + ry * std::sin(t)))
-        });
-    }
-    return pts;
-}
-
-static double EffectiveRotatedEllipseAngleRad(double angleRad) {
-    return std::isfinite(angleRad) ? angleRad : kDefaultRotatedEllipseAngleRad;
-}
-
-static std::vector<POINT> BuildRotatedEllipseOutlinePointsPx(const RECT& rc, double angleRad) {
-    std::vector<POINT> pts;
-    const int w = rc.right - rc.left;
-    const int h = rc.bottom - rc.top;
-    if (w <= 0 || h <= 0) return pts;
-    constexpr int kSegs = 96;
-    const double cx = (static_cast<double>(rc.left) + static_cast<double>(rc.right)) * 0.5;
-    const double cy = (static_cast<double>(rc.top) + static_cast<double>(rc.bottom)) * 0.5;
-    const double rx = std::max(0.5, static_cast<double>(w) * 0.5);
-    const double ry = std::max(0.5, static_cast<double>(h) * 0.5);
-    const double angle = EffectiveRotatedEllipseAngleRad(angleRad);
-    const double c = std::cos(angle);
-    const double s = std::sin(angle);
-    const double extentX = std::sqrt((rx * c) * (rx * c) + (ry * s) * (ry * s));
-    const double extentY = std::sqrt((rx * s) * (rx * s) + (ry * c) * (ry * c));
-    const double fit = std::min(rx / std::max(0.5, extentX), ry / std::max(0.5, extentY));
-    pts.reserve(kSegs + 1);
-    for (int i = 0; i <= kSegs; ++i) {
-        const double t = (2.0 * 3.14159265358979323846 * i) / kSegs;
-        const double x = std::cos(t) * rx * fit;
-        const double y = std::sin(t) * ry * fit;
-        pts.push_back(POINT{
-            static_cast<LONG>(std::lround(cx + x * c - y * s)),
-            static_cast<LONG>(std::lround(cy + x * s + y * c))
-        });
-    }
-    return pts;
-}
-
 static void DrawShapeOutlineAlphaPx(HDC hdc, const RECT& rc, const std::vector<POINT>& polygon,
                                     int penW, COLORREF color, BYTE alpha) {
     if (penW <= 0 || alpha == 0) return;
@@ -2823,10 +2766,10 @@ static void DrawMathAnnotationPx(HDC hdc, const RECT& rc, const Annotation& ann,
     if (hFont) DeleteObject(hFont);
 }
 
-static void DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int pageIndex, double pageHeightPt,
+static bool DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int pageIndex, double pageHeightPt,
                                     double dpi, uint8_t* buf, int wPx, int hPx, int stride,
                                     AnnotationRenderMode mode, const PageCache* pageCache) {
-    if (!buf || stride <= 0 || wPx <= 0 || hPx <= 0) return;
+    if (!buf || stride <= 0 || wPx <= 0 || hPx <= 0) return false;
 
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -2840,12 +2783,14 @@ static void DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
     HBITMAP hbmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &dibBits, nullptr, 0);
     if (!hbmp || !dibBits) {
         if (hbmp) DeleteObject(hbmp);
-        return;
+        return false;
     }
     memcpy(dibBits, buf, static_cast<size_t>(stride) * hPx);
 
     HDC hdc = CreateCompatibleDC(nullptr);
+    if (!hdc) { DeleteObject(hbmp); return false; }
     HGDIOBJ oldBmp = SelectObject(hdc, hbmp);
+    bool painted = true;
 
     double scale = dpi / 72.0;
     std::vector<RECT> pageTextRects;
@@ -2953,62 +2898,25 @@ static void DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
             break;
         }
         case Annotation::Type::Shape: {
-            double leftPt = std::min(ann.x1, ann.x2);
-            double rightPt = std::max(ann.x1, ann.x2);
-            double bottomPt = std::min(ann.y1, ann.y2);
-            double topPt = std::max(ann.y1, ann.y2);
-            int l = PtToPxX(leftPt);
-            int r = PtToPxX(rightPt);
-            int t = PtToPxY(topPt);
-            int b = PtToPxY(bottomPt);
-            RECT rc{ std::min(l, r), std::min(t, b), std::max(l, r), std::max(t, b) };
-            if (rc.left >= rc.right || rc.top >= rc.bottom) break;
-            BYTE a = AlphaFromNorm(ann.alpha > 0.0 ? ann.alpha : 0.35);
-            const bool outline = ann.shapeDrawMode == ShapeDrawMode::Outline;
-            int penW = static_cast<int>(std::round(std::max(1.0, ((ann.width > 0.0) ? ann.width : 2.5) * scale)));
-            if (ann.shapeKind == ShapeKind::Rectangle || ann.shapeKind == ShapeKind::Square) {
-                if (outline) {
-                    DrawShapeOutlineAlphaPx(hdc, rc, {}, penW, ann.color, a);
-                } else {
-                    FillRectAlpha(hdc, rc, ann.color, a);
-                }
-            } else if (ann.shapeKind == ShapeKind::Ellipse || ann.shapeKind == ShapeKind::Circle) {
-                if (outline) {
-                    DrawPolylineAlphaPx(hdc, BuildEllipseOutlinePointsPx(rc), penW, ann.color, a);
-                } else {
-                    FillEllipseAlphaPx(hdc, rc, ann.color, a);
-                }
-            } else if (ann.shapeKind == ShapeKind::RotatedEllipse) {
-                const auto pts = BuildRotatedEllipseOutlinePointsPx(rc, EffectiveRotatedEllipseAngleRad(ann.shapeRotation));
-                if (outline) {
-                    DrawPolylineAlphaPx(hdc, pts, penW, ann.color, a);
-                } else {
-                    FillPolygonAlphaPx(hdc, pts, ann.color, a);
-                }
+            RECT rect{PtToPxX(std::min(ann.x1,ann.x2)), PtToPxY(std::max(ann.y1,ann.y2)),
+                      PtToPxX(std::max(ann.x1,ann.x2)), PtToPxY(std::min(ann.y1,ann.y2))};
+            const BYTE alpha = AlphaFromNorm(ann.alpha > 0 ? ann.alpha : 0.35);
+            const int penWidth = std::max(1, static_cast<int>(std::lround((ann.width > 0 ? ann.width : 2.5) * scale)));
+            const COLORREF boundaryColor = ann.shapeBoundary == ShapeBoundary::None ? ann.color : ShapeBoundaryColor(ann.shapeBoundary);
+            if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) == ShapeDrawMode::Outline && (ShapeKindIsOpen(ann.shapeKind) || !ann.dash.empty() || ann.shapeAngle != 0.0)) {
+                ui::DrawDashedShapeOutline(hdc, ann.shapeKind, rect, ann.shapeRotation, penWidth, boundaryColor,
+                                           alpha, ann.dash, scale, ann.contentRotation, ann.shapeAngle);
             } else {
-                const LONG midX = (rc.left + rc.right) / 2;
-                const LONG midY = (rc.top + rc.bottom) / 2;
-                std::vector<POINT> pts;
-                if (ann.shapeKind == ShapeKind::Diamond) {
-                    pts = {
-                        POINT{ midX, rc.top },
-                        POINT{ rc.right, midY },
-                        POINT{ midX, rc.bottom },
-                        POINT{ rc.left, midY },
-                    };
-                } else {
-                    pts = {
-                        POINT{ midX, rc.top },
-                        POINT{ rc.right, rc.bottom },
-                        POINT{ rc.left, rc.bottom },
-                    };
-                }
-                if (outline) {
-                    DrawShapeOutlineAlphaPx(hdc, rc, pts, penW, ann.color, a);
-                } else {
-                    FillPolygonAlphaPx(hdc, pts, ann.color, a);
-                }
+                std::vector<POINT> points;
+                for (const auto& p : shape_outline::BuildOriented(ann.shapeKind, rect.left, rect.top, rect.right,
+                                                                rect.bottom, ann.shapeRotation, ann.contentRotation, ann.shapeAngle))
+                    points.push_back({static_cast<LONG>(std::lround(p.x)),static_cast<LONG>(std::lround(p.y))});
+                if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) == ShapeDrawMode::Outline)
+                    DrawShapeOutlineAlphaPx(hdc, rect, points, penWidth, boundaryColor, alpha);
+                else FillPolygonAlphaPx(hdc, points, ann.color, alpha);
             }
+            if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) == ShapeDrawMode::Fill && ann.shapeBoundary != ShapeBoundary::None)
+                ui::DrawDashedShapeOutline(hdc,ann.shapeKind,rect,ann.shapeRotation,penWidth,boundaryColor,alpha,ann.dash,scale,ann.contentRotation,ann.shapeAngle);
             break;
         }
         case Annotation::Type::TextBox: {
@@ -3021,7 +2929,8 @@ static void DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
             int t = PtToPxY(topPt);
             int b = PtToPxY(bottomPt);
             RECT rc{ std::min(l, r), std::min(t, b), std::max(l, r), std::max(t, b) };
-            SetBkMode(hdc, TRANSPARENT);
+            painted = ui::DrawQuarterTurnBox(hdc, rc, ann.contentRotation, [&](HDC localDc, const RECT& localRect) {
+            SetBkMode(localDc, TRANSPARENT);
             LOGFONTW lf{};
             lf.lfHeight = -MulDiv(static_cast<int>(std::round(ann.fontPt > 0 ? ann.fontPt : g_textFontPt)),
                                   static_cast<int>(dpi), 72);
@@ -3032,12 +2941,12 @@ static void DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
             }
             HFONT hFont = CreateFontIndirectW(&lf);
             HGDIOBJ oldFont = nullptr;
-            if (hFont) oldFont = SelectObject(hdc, hFont);
-            SetTextColor(hdc, ann.color);
+            if (hFont) oldFont = SelectObject(localDc, hFont);
+            SetTextColor(localDc, ann.color);
             int pad = 4;
-            RECT tr{ rc.left + pad, rc.top + pad, rc.right - pad, rc.bottom - pad };
+            RECT tr{ localRect.left + pad, localRect.top + pad, localRect.right - pad, localRect.bottom - pad };
             TEXTMETRICW tm{};
-            GetTextMetricsW(hdc, &tm);
+            GetTextMetricsW(localDc, &tm);
             int lineHeight = std::max(1, static_cast<int>(tm.tmHeight));
             if (!ann.textLines.empty()) {
                 int y = tr.top;
@@ -3045,16 +2954,17 @@ static void DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
                 for (const auto& line : ann.textLines) {
                     if (y >= bottomLimit) break;
                     if (!line.empty()) {
-                        TextOutW(hdc, tr.left, y, line.c_str(), static_cast<int>(line.size()));
+                        TextOutW(localDc, tr.left, y, line.c_str(), static_cast<int>(line.size()));
                     }
                     y += lineHeight;
                 }
             } else {
-                DrawTextW(hdc, ann.text.c_str(), static_cast<int>(ann.text.size()), &tr,
+                DrawTextW(localDc, ann.text.c_str(), static_cast<int>(ann.text.size()), &tr,
                           DT_LEFT | DT_WORDBREAK | DT_EDITCONTROL);
             }
-            if (oldFont) SelectObject(hdc, oldFont);
+            if (oldFont) SelectObject(localDc, oldFont);
             if (hFont) DeleteObject(hFont);
+            }) && painted;
             break;
         }
         case Annotation::Type::MathBox: {
@@ -3067,7 +2977,9 @@ static void DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
             int t = PtToPxY(topPt);
             int b = PtToPxY(bottomPt);
             RECT rc{ std::min(l, r), std::min(t, b), std::max(l, r), std::max(t, b) };
-            DrawMathAnnotationPx(hdc, rc, ann, dpi);
+            painted = ui::DrawQuarterTurnBox(hdc, rc, ann.contentRotation, [&](HDC localDc, const RECT& localRect) {
+                DrawMathAnnotationPx(localDc, localRect, ann, dpi);
+            }) && painted;
             break;
         }
         case Annotation::Type::LinkMarker: {
@@ -3098,8 +3010,10 @@ static void DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
 
     SelectObject(hdc, oldBmp);
     DeleteDC(hdc);
-    memcpy(buf, dibBits, static_cast<size_t>(stride) * hPx);
+    GdiFlush();
+    if (painted) memcpy(buf, dibBits, static_cast<size_t>(stride) * hPx);
     DeleteObject(hbmp);
+    return painted;
 }
 
 static bool SavePdfDocument(FPDF_DOCUMENT doc, const std::wstring& outPath, std::wstring* err) {
@@ -3400,9 +3314,10 @@ static bool ConvertImageToPdfFile(const std::wstring& sourcePath,
                 ? FPDFBitmap_CreateEx(image.width, image.height, FPDFBitmap_BGRA,
                                        image.bgra.data(), image.stride)
                 : nullptr;
+            // PDFium already maps bitmap rows to PDF image space; do not flip them again.
             if (page && object && bitmap &&
                 FPDFImageObj_SetBitmap(&page, 1, object, bitmap) &&
-                FPDFImageObj_SetMatrix(object, widthPt, 0.0, 0.0, -heightPt, 0.0, heightPt)) {
+                FPDFImageObj_SetMatrix(object, widthPt, 0.0, 0.0, heightPt, 0.0, 0.0)) {
                 FPDFPage_InsertObject(page, object);
                 object = nullptr; // FPDFPage_InsertObject transfers ownership to PDFium.
                 prepared = !!FPDFPage_GenerateContent(page);
@@ -3428,18 +3343,20 @@ static bool ConvertImageToPdfFile(const std::wstring& sourcePath,
     return saved;
 }
 
-static bool ExportPdfDocumentWithSpecs(FPDF_DOCUMENT srcDoc,
+static bool ExportPdfDocumentWithParts(FPDF_DOCUMENT srcDoc,
                                        const std::vector<Annotation>& annots,
-                                       const std::vector<file_output::PdfPageSpec>& pages,
+                                       const std::vector<file_output::PdfExportPart>& parts,
                                        const std::wstring& outPath,
-                                       bool standardTextAnnots,
-                                       double exportScale,
-                                       bool matchPdfPaneTextLayout,
                                        std::wstring* err) {
-    if (!srcDoc) return false;
-    if (!IsValidPdfExportScale(exportScale)) {
-        if (err) *err = L"Invalid export scale.";
-        return false;
+    if (!srcDoc || parts.empty()) return false;
+    size_t totalPages = 0;
+    for (const auto& part : parts) {
+        if (part.pages.empty() || !IsValidPdfExportScale(part.exportScale) ||
+            part.pages.size() > static_cast<size_t>(std::numeric_limits<int>::max()) - totalPages) {
+            if (err) *err = L"Invalid PDF export segment.";
+            return false;
+        }
+        totalPages += part.pages.size();
     }
     FPDF_DOCUMENT dest = nullptr;
     PdfTextFontCache fontCache;
@@ -3452,91 +3369,112 @@ static bool ExportPdfDocumentWithSpecs(FPDF_DOCUMENT srcDoc,
         }
         int destIndex = 0;
         int pageCount = FPDF_GetPageCount(srcDoc);
-        for (const auto& spec : pages) {
-            if (spec.pageIndex < 0 || spec.pageIndex >= pageCount) {
-                if (err) *err = L"Page index out of range.";
-                ClosePdfTextFonts(fontCache);
-                FPDF_CloseDocument(dest);
-                return false;
-            }
-            double sourcePageWPt = 0.0;
-            double sourcePageHPt = 0.0;
-            if (spec.cropPt) {
-                if (!FPDF_GetPageSizeByIndex(srcDoc, spec.pageIndex, &sourcePageWPt, &sourcePageHPt) ||
-                    !IsValidPdfCropRectPt(*spec.cropPt, sourcePageWPt, sourcePageHPt)) {
-                    if (err) *err = L"Slide crop rectangle is outside the source page.";
+        for (const auto& part : parts) {
+            const auto& pages = part.pages;
+            const bool standardTextAnnots = part.standardTextAnnots;
+            const double exportScale = part.exportScale;
+            const bool matchPdfPaneTextLayout = part.matchPdfPaneTextLayout;
+            for (const auto& spec : pages) {
+                if (spec.pageIndex < 0 || spec.pageIndex >= pageCount || spec.rotation < 0 || spec.rotation > 3) {
+                    if (err) *err = L"Page index out of range.";
                     ClosePdfTextFonts(fontCache);
                     FPDF_CloseDocument(dest);
                     return false;
                 }
-            }
-            std::string range = std::to_string(spec.pageIndex + 1);
-            if (!FPDF_ImportPages(dest, srcDoc, range.c_str(), destIndex)) {
-                if (err) *err = L"Failed to import page.";
-                ClosePdfTextFonts(fontCache);
-                FPDF_CloseDocument(dest);
-                return false;
-            }
-            FPDF_PAGE page = FPDF_LoadPage(dest, destIndex);
-            if (page) {
-                bool dirty = false;
+                double sourcePageWPt = 0.0;
+                double sourcePageHPt = 0.0;
                 if (spec.cropPt) {
-                    ApplyPdfPageCropBoxes(page, *spec.cropPt);
-                    dirty = true;
-                }
-                if (exportScale != 1.0) {
-                    if (!pdf_annotation_export::CanScaleExisting(page, exportScale)) {
-                        if (err) *err = localization::Text(L"file_output.pdf.existing_annotation_scale");
+                    if (!FPDF_GetPageSizeByIndex(srcDoc, spec.pageIndex, &sourcePageWPt, &sourcePageHPt) ||
+                        !IsValidPdfCropRectPt(*spec.cropPt, sourcePageWPt, sourcePageHPt)) {
+                        if (err) *err = L"Slide crop rectangle is outside the source page.";
                         ClosePdfTextFonts(fontCache);
-                        FPDF_ClosePage(page);
                         FPDF_CloseDocument(dest);
                         return false;
                     }
-                    if (!ScalePdfPageInPlace(page, exportScale)) {
-                        if (err) *err = L"Failed to scale PDF page.";
-                        ClosePdfTextFonts(fontCache);
-                        FPDF_ClosePage(page);
-                        FPDF_CloseDocument(dest);
-                        return false;
-                    }
-                    dirty = true;
                 }
-                if (spec.withAnnotations) {
-                    if (!AddAnnotationsToPage(annots, fontCache, dest, page, spec.pageIndex,
-                                         standardTextAnnots, matchPdfPaneTextLayout,
-                                         exportScale, /*bitmapDpiScale=*/1.0)) {
+                std::string range = std::to_string(spec.pageIndex + 1);
+                if (!FPDF_ImportPages(dest, srcDoc, range.c_str(), destIndex)) {
+                    if (err) *err = L"Failed to import page.";
+                    ClosePdfTextFonts(fontCache);
+                    FPDF_CloseDocument(dest);
+                    return false;
+                }
+                FPDF_PAGE page = FPDF_LoadPage(dest, destIndex);
+                if (page) {
+                    bool dirty = false;
+                    if (spec.cropPt) {
+                        ApplyPdfPageCropBoxes(page, *spec.cropPt);
+                        dirty = true;
+                    }
+                    if (exportScale != 1.0) {
+                        if (!pdf_annotation_export::CanScaleExisting(page, exportScale)) {
+                            if (err) *err = localization::Text(L"file_output.pdf.existing_annotation_scale");
+                            ClosePdfTextFonts(fontCache);
+                            FPDF_ClosePage(page);
+                            FPDF_CloseDocument(dest);
+                            return false;
+                        }
+                        if (!ScalePdfPageInPlace(page, exportScale)) {
+                            if (err) *err = L"Failed to scale PDF page.";
+                            ClosePdfTextFonts(fontCache);
+                            FPDF_ClosePage(page);
+                            FPDF_CloseDocument(dest);
+                            return false;
+                        }
+                        dirty = true;
+                    }
+                    if (exportScale != 1.0 && spec.withAnnotations &&
+                        part.textColor.mode != pdf_annotation_export::TextColorMode::Marker) {
+                        // TransFormWithClip changes content streams, while an
+                        // already parsed text page still has the old positions.
+                        // Reparse the output copy before selecting glyphs.
+                        FPDF_ClosePage(page);
+                        page = FPDF_LoadPage(dest, destIndex);
+                        if (!page) {
+                            if (err) *err = localization::Text(L"file_output.pdf.annotation_failed");
+                            ClosePdfTextFonts(fontCache);
+                            FPDF_CloseDocument(dest);
+                            return false;
+                        }
+                    }
+                    if (spec.withAnnotations) {
+                        if (!AddAnnotationsToPage(annots, fontCache, dest, page, spec.pageIndex,
+                                             standardTextAnnots, matchPdfPaneTextLayout,
+                                             exportScale, /*bitmapDpiScale=*/1.0, part.textColor)) {
+                            if (err) *err = localization::Text(L"file_output.pdf.annotation_failed");
+                            ClosePdfTextFonts(fontCache);
+                            FPDF_ClosePage(page);
+                            FPDF_CloseDocument(dest);
+                            return false;
+                        }
+                    }
+                    FPDFPage_SetRotation(page, page_rotation::Normalize(FPDFPage_GetRotation(page) + spec.rotation));
+                    if (!pdf_annotation_export::Finalize(page)) {
                         if (err) *err = localization::Text(L"file_output.pdf.annotation_failed");
                         ClosePdfTextFonts(fontCache);
                         FPDF_ClosePage(page);
                         FPDF_CloseDocument(dest);
                         return false;
                     }
-                }
-                if (!pdf_annotation_export::Finalize(page)) {
-                    if (err) *err = localization::Text(L"file_output.pdf.annotation_failed");
-                    ClosePdfTextFonts(fontCache);
+                    if (dirty) {
+                        if (!FPDFPage_GenerateContent(page)) {
+                            if (err) *err = L"Failed to generate output page content.";
+                            ClosePdfTextFonts(fontCache);
+                            FPDF_ClosePage(page);
+                            FPDF_CloseDocument(dest);
+                            return false;
+                        }
+                    }
                     FPDF_ClosePage(page);
+                }
+                else {
+                    if (err) *err = L"Failed to load output page.";
+                    ClosePdfTextFonts(fontCache);
                     FPDF_CloseDocument(dest);
                     return false;
                 }
-                if (dirty) {
-                    if (!FPDFPage_GenerateContent(page)) {
-                        if (err) *err = L"Failed to generate output page content.";
-                        ClosePdfTextFonts(fontCache);
-                        FPDF_ClosePage(page);
-                        FPDF_CloseDocument(dest);
-                        return false;
-                    }
-                }
-                FPDF_ClosePage(page);
+                ++destIndex;
             }
-            else {
-                if (err) *err = L"Failed to load output page.";
-                ClosePdfTextFonts(fontCache);
-                FPDF_CloseDocument(dest);
-                return false;
-            }
-            ++destIndex;
         }
     }
     bool ok = SavePdfDocument(dest, outPath, err);
@@ -3599,9 +3537,9 @@ static bool ResolvePdfPageSize(int pageIndex, double* outWPt, double* outHPt) {
     if (!doc || pageIndex < 0) return false;
     if (pageIndex < static_cast<int>(g_pdf.pages.size())) {
         const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
-        if (page.widthPt > 0.0 && page.heightPt > 0.0) {
-            if (outWPt) *outWPt = page.widthPt;
-            if (outHPt) *outHPt = page.heightPt;
+        if (page.canonicalWidthPt > 0.0 && page.canonicalHeightPt > 0.0) {
+            if (outWPt) *outWPt = page.canonicalWidthPt;
+            if (outHPt) *outHPt = page.canonicalHeightPt;
             return true;
         }
     }
@@ -3662,38 +3600,15 @@ static std::vector<PdfPageSpec> BuildAllPdfPageSpecs(bool includeAnnotations) {
     return pages;
 }
 
-static bool HasTextColorAnnotationForPdfExport(const std::vector<PdfPageSpec>& pages,
-                                                const std::vector<Annotation>* annots) {
-    if (!annots) return false;
-    return std::any_of(pages.begin(), pages.end(), [&](const PdfPageSpec& spec) {
-        return spec.withAnnotations &&
-            std::any_of(annots->begin(), annots->end(), [&](const Annotation& ann) {
-                return ann.pageIndex == spec.pageIndex && ann.type == Annotation::Type::TextColor;
-            });
-    });
-}
-
-static bool RejectUnsupportedTextColorPdfExport(HWND owner, const std::vector<PdfPageSpec>& pages) {
-    if (!HasTextColorAnnotationForPdfExport(pages, CurrentLogicalPdfAnnotations())) return false;
-    // PDF export must not approximate TextColor as an opaque overlay. Until it
-    // can change the original PDF glyph colors faithfully, reject before an
-    // output path is selected or any destination write is started.
-    ShowSoftNotice(owner,
-                   localization::Text(L"file_output.text_color_export_unsupported"),
-                   SoftNoticeKind::Warning);
-    return true;
-}
-
-static bool ExportPdfPagesImpl(HWND owner,
-                               const std::vector<PdfPageSpec>& pages,
-                               const std::wstring& outPath,
-                               bool standardTextAnnots,
-                               double exportScale,
-                               bool matchPdfPaneTextLayout) {
+bool ExportPdfParts(HWND owner, const std::vector<PdfExportPart>& parts,
+                    const std::wstring& outPath) {
     FPDF_DOCUMENT doc = CurrentLogicalPdfDocument();
-    if (!doc || CurrentLogicalPdfPath().empty()) return false;
-    if (pages.empty()) return false;
-    if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;
+    if (!doc || CurrentLogicalPdfPath().empty() || parts.empty() || outPath.empty()) return false;
+    for (const auto& part : parts) {
+        if (part.pages.empty()) return false;
+        if (static_cast<unsigned>(part.textColor.mode) >
+            static_cast<unsigned>(pdf_annotation_export::TextColorMode::SpecifiedBackground)) return false;
+    }
     if (auto blockedMessage = GetProtectedPdfExportBlockMessage(doc)) {
         if (!ConfirmProtectedPdfExportAllowed(owner,
                                                ExperimentalExportDialogTitle(GetUiText().menuExportPdf),
@@ -3711,13 +3626,10 @@ static bool ExportPdfPagesImpl(HWND owner,
         return false;
     }
     std::wstring err;
-    if (!ExportPdfDocumentWithSpecs(doc,
+    if (!ExportPdfDocumentWithParts(doc,
                                     finalAnnots,
-                                    pages,
+                                    parts,
                                     outPath,
-                                    standardTextAnnots,
-                                    exportScale,
-                                    matchPdfPaneTextLayout,
                                     &err)) {
         if (!err.empty()) {
             ShowFileOutputMessageDialog(owner,
@@ -3730,25 +3642,19 @@ static bool ExportPdfPagesImpl(HWND owner,
     return true;
 }
 
-bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations) {
-    return ExportPdfWithAnnotations(owner, includeAnnotations, g_config.exportStandardTextAnnots, 1.0);
-}
-
-bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standardTextAnnots) {
-    return ExportPdfWithAnnotations(owner, includeAnnotations, standardTextAnnots, 1.0);
-}
-
-bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standardTextAnnots, double exportScale) {
-    return ExportPdfWithAnnotations(owner, includeAnnotations, standardTextAnnots, exportScale,
-                                    /*matchPdfPaneTextLayout=*/true, nullptr);
+static bool ExportPdfPagesImpl(HWND owner, const std::vector<PdfPageSpec>& pages,
+                               const std::wstring& outPath, bool standardTextAnnots,
+                               double exportScale, bool matchPdfPaneTextLayout,
+                               const pdf_annotation_export::TextColorOptions& textColor) {
+    return ExportPdfParts(owner, {{pages, standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor}}, outPath);
 }
 
 bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standardTextAnnots, double exportScale,
-                              bool matchPdfPaneTextLayout, std::wstring* outSavedPath) {
+                              bool matchPdfPaneTextLayout, std::wstring* outSavedPath,
+                              const pdf_annotation_export::TextColorOptions& textColor) {
     if (outSavedPath) outSavedPath->clear();
     if (!CurrentLogicalPdfDocument() || CurrentLogicalPdfPath().empty()) return false;
     const std::vector<PdfPageSpec> pages = BuildAllPdfPageSpecs(includeAnnotations);
-    if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;
     std::wstring defName = DefaultNameFromPath(CurrentLogicalPdfPath(), L"_annotated.pdf", L"document_annotated.pdf");
     std::wstring initialDir = InitialDirForPath(CurrentLogicalPdfPath());
     const std::wstring dialogTitle = ExperimentalExportDialogTitle(GetUiText().menuExportPdf);
@@ -3761,18 +3667,19 @@ bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standard
                                defName, initialDir, filters, 2, L"pdf");
     if (!target) return false;
     const bool ok = ExportPdfPagesImpl(owner, pages, *target,
-                                       standardTextAnnots, exportScale, matchPdfPaneTextLayout);
+                                       standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor);
     if (ok && outSavedPath) *outSavedPath = *target;
     return ok;
 }
 
 bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, const std::wstring& outPath,
                               bool standardTextAnnots, double exportScale,
-                              bool matchPdfPaneTextLayout) {
+                              bool matchPdfPaneTextLayout,
+                              const pdf_annotation_export::TextColorOptions& textColor) {
     if (!CurrentLogicalPdfDocument() || CurrentLogicalPdfPath().empty() || outPath.empty()) return false;
     const std::vector<PdfPageSpec> pages = BuildAllPdfPageSpecs(includeAnnotations);
     return ExportPdfPagesImpl(owner, pages, outPath, standardTextAnnots, exportScale,
-                              matchPdfPaneTextLayout);
+                              matchPdfPaneTextLayout, textColor);
 }
 
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages) {
@@ -3798,10 +3705,10 @@ bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool stan
 }
 
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool standardTextAnnots,
-                    double exportScale, bool matchPdfPaneTextLayout, std::wstring* outSavedPath) {
+                    double exportScale, bool matchPdfPaneTextLayout, std::wstring* outSavedPath,
+                              const pdf_annotation_export::TextColorOptions& textColor) {
     if (outSavedPath) outSavedPath->clear();
     if (!CurrentLogicalPdfDocument() || CurrentLogicalPdfPath().empty()) return false;
-    if (RejectUnsupportedTextColorPdfExport(owner, pages)) return false;
     std::wstring defName = DefaultNameFromPath(CurrentLogicalPdfPath(), L"_pages.pdf", L"document_pages.pdf");
     std::wstring initialDir = InitialDirForPath(CurrentLogicalPdfPath());
     const std::wstring dialogTitle = ExperimentalExportDialogTitle(GetUiText().menuExportPdfPages);
@@ -3812,7 +3719,7 @@ bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool stan
     auto target = PickSavePath(owner, dialogTitle.c_str(),
                                defName, initialDir, filters, 2, L"pdf");
     if (!target) return false;
-    const bool ok = ExportPdfPages(owner, pages, *target, standardTextAnnots, exportScale, matchPdfPaneTextLayout);
+    const bool ok = ExportPdfPages(owner, pages, *target, standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor);
     if (ok && outSavedPath) *outSavedPath = *target;
     return ok;
 }
@@ -3824,9 +3731,10 @@ bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std
 }
 
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std::wstring& outPath,
-                    bool standardTextAnnots, double exportScale, bool matchPdfPaneTextLayout) {
+                    bool standardTextAnnots, double exportScale, bool matchPdfPaneTextLayout,
+                    const pdf_annotation_export::TextColorOptions& textColor) {
     return ExportPdfPagesImpl(owner, pages, outPath, standardTextAnnots, exportScale,
-                              matchPdfPaneTextLayout);
+                              matchPdfPaneTextLayout, textColor);
 }
 
 static bool TryParseFinitePdfNumber(const std::wstring& text, double* out) {
@@ -3889,9 +3797,24 @@ static bool ExtractPdfCropRectFromPageToken(std::wstring* token,
     return true;
 }
 
-std::vector<PdfPageSpec> ParsePdfPageSpec(const std::wstring& spec, bool defaultAnnot, std::wstring* err) {
+std::vector<PdfPageSpec> ParsePdfPageSpec(const std::wstring& spec, int pageCount,
+                                       bool defaultAnnot, std::wstring* err) {
     if (err) err->clear();
     std::vector<PdfPageSpec> pages;
+    // This parser owns only a candidate selection, never the document. Require
+    // exact decimal page numbers in the source bounds before allocating ranges.
+    const auto parsePage = [pageCount](const std::wstring& text, int& value) {
+        value = 0;
+        if (text.empty() || pageCount <= 0) return false;
+        for (wchar_t digit : text) {
+            if (digit < L'0' || digit > L'9') return false;
+            const int number = digit - L'0';
+            if (value > pageCount / 10 ||
+                (value == pageCount / 10 && number > pageCount % 10)) return false;
+            value = value * 10 + number;
+        }
+        return value > 0;
+    };
     std::wstring normalized = spec;
     std::replace(normalized.begin(), normalized.end(), L'/', L',');
     size_t pos = 0;
@@ -3937,23 +3860,24 @@ std::vector<PdfPageSpec> ParsePdfPageSpec(const std::wstring& spec, bool default
                 if (err) *err = L"ページ範囲の指定が不正です。";
                 return {};
             }
-            int first = _wtoi(firstText.c_str());
-            int last = _wtoi(lastText.c_str());
-            if (first <= 0 || last <= 0 || first > last) {
+            int first = 0;
+            int last = 0;
+            if (!parsePage(firstText, first) || !parsePage(lastText, last) || first > last) {
                 if (err) *err = L"ページ範囲の指定が不正です。";
                 return {};
             }
-            for (int page = first; page <= last; ++page) {
+            for (int page = first;; ++page) {
                 if (!appendPage(page)) {
                     if (err) *err = L"ページ番号が不正です。";
                     return {};
                 }
+                if (page == last) break;
             }
             continue;
         }
 
-        int pageNo = _wtoi(token.c_str());
-        if (!appendPage(pageNo)) {
+        int pageNo = 0;
+        if (!parsePage(token, pageNo) || !appendPage(pageNo)) {
             if (err) *err = L"ページ番号が不正です。";
             return {};
         }
@@ -4037,9 +3961,8 @@ bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, Pd
         annots->begin(), annots->end(), [pageIndex](const Annotation& ann) {
             return ann.pageIndex == pageIndex && ann.type == Annotation::Type::TextColor;
         });
-    const PageCache* pageCache = (pageIndex >= 0 && pageIndex < static_cast<int>(g_pdf.pages.size()))
-        ? &g_pdf.pages[static_cast<size_t>(pageIndex)]
-        : nullptr;
+    const PageCache* pageCache = nullptr;
+    std::vector<Annotation> projectedAnnotations;
     PageCache textPageCache;
     if (hasTextColorAnnotation && (!pageCache || pageCache->charBoxes.empty()) &&
         LoadPageTextBoxesForPng(doc, pageIndex, widthPt, heightPt, &textPageCache)) {
@@ -4051,6 +3974,21 @@ bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, Pd
         std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
         FPDF_PAGE page = FPDF_LoadPage(doc, pageIndex);
         if (!page) return false;
+        FS_RECTF crop{};
+        if (!FPDF_GetPageBoundingBox(page, &crop)) { FPDF_ClosePage(page); return false; }
+        const int turn = std::max(0, FPDFPage_GetRotation(page));
+        for (const auto& annotation : *annots) {
+            if (annotation.pageIndex != pageIndex) continue;
+            const auto projected = annotation_rotation::InBasis(annotation, turn, crop.right-crop.left,
+                                                                crop.top-crop.bottom, crop.left, crop.bottom);
+            if (!projected) { FPDF_ClosePage(page); return false; }
+            projectedAnnotations.push_back(*projected);
+        }
+        for (auto& box : textPageCache.charBoxes) {
+            const auto p = page_rotation::FromCanonical({box.left-crop.left,box.bottom-crop.bottom},crop.right-crop.left,crop.top-crop.bottom,turn);
+            const auto z = page_rotation::FromCanonical({box.right-crop.left,box.top-crop.bottom},crop.right-crop.left,crop.top-crop.bottom,turn);
+            box.left=std::min(p.x,z.x);box.right=std::max(p.x,z.x);box.bottom=std::min(p.y,z.y);box.top=std::max(p.y,z.y);
+        }
         FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(outWidthPx, outHeightPx, FPDFBitmap_BGRA, nullptr, 0);
         if (!bitmap) {
             FPDF_ClosePage(page);
@@ -4070,11 +4008,11 @@ bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, Pd
         FPDF_ClosePage(page);
     }
     if (includeAnnotations && !pixels.empty()) {
-        DrawAnnotationsToBuffer(*annots,
+        if (!DrawAnnotationsToBuffer(projectedAnnotations,
                                 pageIndex, heightPt, dpi, pixels.data(), outWidthPx, outHeightPx, stride,
                                 style == PdfPngStyle::ViewerLike ? AnnotationRenderMode::ViewerLike
                                                                  : AnnotationRenderMode::PdfLike,
-                                pageCache);
+                                pageCache)) return false;
     }
 
     std::wstring err;
@@ -4222,6 +4160,7 @@ bool ExportNoteHtml(const std::wstring& notePath, const std::wstring& outPath, c
         config.mathPlaceholder = options.mathPlaceholder;
         config.includeTitleHeading = options.includeTitleHeading;
         config.shiftHeadingLevels = options.shiftHeadingLevels;
+        config.normalizeClroSyntax = options.normalizeClroSyntax;
         config.title = NoteTitleFromPath(notePath);
         const note::WorkspaceNoteExportResult result =
             note::ExportWorkspaceHtml(*source->index, config);
@@ -4250,6 +4189,7 @@ bool ExportNoteMarkup(const std::wstring& notePath, const std::wstring& outPath,
         config.mathPlaceholder = options.mathPlaceholder;
         config.includeTitleHeading = options.includeTitleHeading;
         config.shiftHeadingLevels = options.shiftHeadingLevels;
+        config.normalizeClroSyntax = options.normalizeClroSyntax;
         config.title = NoteTitleFromPath(notePath);
         const note::WorkspaceNoteExportResult result =
             (config.format == note::ExportMarkupFormat::Html)

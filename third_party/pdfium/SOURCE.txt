@@ -1,11 +1,12 @@
-Package version: 156.0.8076.0
+Package version: 158.0.8111.0
 Distribution: PDFium binaries by Benoit Blanchon
-Release: https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F8076
-Asset: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8076/pdfium-win-x64.tgz
-Asset SHA256: 808d36da9bc5a3104315fb307c80998121f565ee53953633bf33e80d7429e5ac
-Runtime SHA256: 69f1e860f6742fbaafcc4db80e785eec9a4ee0da36ea6d1dc0867ea0f18baea6
-Import library SHA256: a5b07aacd8a4c0fe4900152ca58332d512018c35619f555c0fbc68ed9213d5db
-Release attestation subject SHA256: 808d36da9bc5a3104315fb307c80998121f565ee53953633bf33e80d7429e5ac
-Release attestation source commit: f2e9a1c45bb17b85b540abf1af30146ef65416ac
-Attestation verification: gh attestation verify --repo bblanchon/pdfium-binaries succeeded on 2026-10-05
+Release: https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium/8111
+Asset: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8111/pdfium-win-x64.tgz
+Asset SHA256: 3452d11031050ec65e57f180215b57b9e6d465e3fbedafa8a77ad90885c7d23e
+Runtime SHA256: a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f
+Import library SHA256: 8842b071d21e96861bd5bd2960c143d8079bce1d7215905e7c4506016ab1fcdd
+Release attestation subject SHA256: 3452d11031050ec65e57f180215b57b9e6d465e3fbedafa8a77ad90885c7d23e
+Release attestation source commit: 2de99cdab0cd84493538ce141342515b95ebb15c
+Attestation verification: gh attestation verify --repo bblanchon/pdfium-binaries succeeded on 2026-10-26
 Local changes: patches/0001-fix-ijg-notice-link.patch (notice link only; no binary/header modifications)
+Security fixes confirmed in branch log: 58e11305710a506ce3369581662eeb14440639cf (570167922 / CVE-2026-110155); ac3cf1684db05bd68338acb84e3823e6feb72b5b and e764cc088a62b5f0510a73bed4e19c88c9af50bc (572237007 / CVE-2026-113212).

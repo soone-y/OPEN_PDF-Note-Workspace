@@ -37,11 +37,12 @@ layers.json example:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
-import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,24 @@ SOURCE_EXTS = {
     ".h", ".hh", ".hpp", ".hxx", ".ipp", ".inl",
     ".inc", ".cppinc",
 }
+
+ANALYZER_VERSION = "2"
+DEFAULT_IGNORE_DIRS = {
+    ".git", ".svn", ".hg", ".vs", ".vscode",
+    "out",
+    "build", "cmake-build-debug", "cmake-build-release",
+    "Debug", "Release", "x64", "x86",
+    "node_modules", "vendor",
+    "__pycache__",
+}
+
+# TODO: Add a source snapshot hash before claiming reproducibility for dirty worktrees.
+# TODO: Implement build-aware include resolution and shared-state read/write analysis.
+TODO_NOTICES = (
+    "Dirty source contents are not snapshotted; commit and clean/dirty state alone cannot reproduce local edits.",
+    "Shared-state ownership and read/write sites are not analyzed yet.",
+    "Only quoted project-local includes are scanned; compiler flags, conditional compilation, and angle includes are not resolved.",
+)
 
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*"([^"]+)"')
 
@@ -100,7 +119,7 @@ def is_source_file(path: Path) -> bool:
 
 def iter_project_files(root: Path, ignore_dirs: set[str]) -> Iterable[Path]:
     for path in root.rglob("*"):
-        if any(part in ignore_dirs for part in path.parts):
+        if any(part in ignore_dirs for part in path.relative_to(root).parts[:-1]):
             continue
         if is_source_file(path):
             yield path
@@ -393,7 +412,84 @@ def detect_layer_violations(result: AnalysisResult, rules: list[LayerRule]) -> l
     return violations
 
 
-def make_report(result: AnalysisResult, cycles: list[list[str]], layer_violations: list[tuple[str, str, str, str]] | None) -> str:
+def sha256_file(path: Path | None) -> str:
+    if path is None or not path.is_file():
+        return "unavailable"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def collect_provenance(
+    root: Path,
+    include_roots: list[Path],
+    ignore_dirs: set[str],
+    layer_path: Path | None,
+) -> dict[str, str]:
+    git_root = "unavailable"
+    git_commit = "unavailable"
+    worktree_clean = "unavailable"
+    try:
+        root_result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        git_root = root_result.stdout.strip()
+        commit_result = subprocess.run(
+            ["git", "-C", git_root, "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        status_result = subprocess.run(
+            ["git", "-C", git_root, "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+        )
+        git_commit = commit_result.stdout.strip()
+        worktree_clean = str(not status_result.stdout).lower()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    def display_path(path: Path | None) -> str:
+        if path is None:
+            return "not configured"
+        resolved = path.resolve()
+        if git_root != "unavailable":
+            try:
+                return resolved.relative_to(Path(git_root)).as_posix()
+            except ValueError:
+                pass
+        return str(resolved)
+
+    tool_path = Path(__file__).resolve()
+    return {
+        "analyzer_version": ANALYZER_VERSION,
+        "analyzer_sha256": sha256_file(tool_path),
+        "git_commit": git_commit,
+        "git_worktree_clean": worktree_clean,
+        "analysis_root": display_path(root),
+        "analysis_scope": "C/C++ source and include files under analysis root",
+        "source_extensions": ", ".join(sorted(SOURCE_EXTS)),
+        "ignored_directories": ", ".join(sorted(ignore_dirs)),
+        "include_roots": ", ".join(
+            display_path(path if path.is_absolute() else root / path)
+            for path in include_roots
+        ) or "none",
+        "include_resolution": "including-file directory -> analysis root -> manual include roots -> unique basename",
+        "layer_rules": display_path(layer_path),
+        "layer_rules_sha256": sha256_file(layer_path),
+    }
+
+
+def make_report(
+    result: AnalysisResult,
+    cycles: list[list[str]],
+    layer_violations: list[tuple[str, str, str, str]] | None,
+    provenance: dict[str, str],
+) -> str:
     lines: list[str] = []
 
     lines.append("# C/C++ Local Include Dependency Report")
@@ -402,6 +498,37 @@ def make_report(result: AnalysisResult, cycles: list[list[str]], layer_violation
     lines.append(f"Files scanned: **{len(result.files)}**")
     lines.append(f"Resolved local include edges: **{len(result.edges)}**")
     lines.append(f"Files with unresolved local includes: **{len(result.unresolved)}**")
+    lines.append("Report is complete only if the final `ANALYSIS_COMPLETE` marker is present.")
+    lines.append("")
+
+    lines.append("## Reproducibility")
+    lines.append("")
+    for key, label in (
+        ("analyzer_version", "Analyzer version"),
+        ("analyzer_sha256", "Analyzer SHA-256"),
+        ("git_commit", "Git commit"),
+        ("git_worktree_clean", "Git worktree clean"),
+        ("analysis_root", "Analysis root"),
+        ("analysis_scope", "Analysis scope"),
+        ("source_extensions", "Source extensions"),
+        ("ignored_directories", "Ignored directories"),
+        ("include_roots", "Manual include roots"),
+        ("include_resolution", "Include resolution order"),
+        ("layer_rules", "Layer rules"),
+        ("layer_rules_sha256", "Layer rules SHA-256"),
+    ):
+        lines.append(f"- {label}: `{provenance[key]}`")
+    lines.append("")
+
+    lines.append("## Interpretation")
+    lines.append("")
+    lines.append("- Counts and edges are measured according to the scanner rules recorded above.")
+    lines.append("- Centrality and layer violations are investigation signals, not proof of a maintainability defect.")
+    lines.append("")
+
+    lines.append("## TODO (not analyzed)")
+    lines.append("")
+    lines.extend(f"- {notice}" for notice in TODO_NOTICES)
     lines.append("")
 
     lines.append("## 1. File Dependency Graph")
@@ -472,41 +599,23 @@ def make_report(result: AnalysisResult, cycles: list[list[str]], layer_violation
                 lines.append(f"- line {line_no}: `#include \"{include_text}\"`")
             lines.append("")
 
+    lines.append("ANALYSIS_COMPLETE")
     return "\n".join(lines)
 
 
-def write_text_atomically(path: Path, text: str) -> None:
+def write_new_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="",
-            dir=str(path.parent),
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            temp_path = Path(temp_file.name)
-            temp_file.write(text)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        os.replace(temp_path, path)
-        temp_path = None
-    finally:
-        if temp_path is not None:
-            try:
-                temp_path.unlink()
-            except FileNotFoundError:
-                pass
+    with path.open("x", encoding="utf-8", newline="") as output_file:
+        output_file.write(text)
+        output_file.flush()
+        os.fsync(output_file.fileno())
 
 
 def write_or_print(text: str, path: Path | None) -> None:
     if path is None:
         print(text, end="")
     else:
-        write_text_atomically(path, text)
+        write_new_text(path, text)
 
 
 def validate_output_paths(result: AnalysisResult, outputs: list[tuple[str, Path | None]]) -> str | None:
@@ -520,6 +629,8 @@ def validate_output_paths(result: AnalysisResult, outputs: list[tuple[str, Path 
             return f"{seen[resolved]} and {label} output paths must be different."
         if resolved in source_paths:
             return f"{label} output path must not replace a scanned source file."
+        if resolved.exists():
+            return f"{label} output already exists; refusing to overwrite it."
         seen[resolved] = label
     return None
 
@@ -532,7 +643,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--format", choices=["mermaid", "dot"], default="mermaid", help="Graph output format")
     parser.add_argument("--out", type=Path, help="Write graph output to this file. If omitted, print to stdout.")
     parser.add_argument("--graph", type=Path, help="Alias of --out, useful when also writing --report")
-    parser.add_argument("--report", type=Path, help="Write Markdown analysis report")
+    report_output = parser.add_mutually_exclusive_group()
+    report_output.add_argument("--report", type=Path, help="Write Markdown report to a new file; existing files are never replaced.")
+    report_output.add_argument("--report-stdout", action="store_true", help="Print the Markdown report to stdout without creating a file.")
     parser.add_argument("--index", type=Path, help="Write compact TSV include search index")
     parser.add_argument("--layers", type=Path, help="Optional layers.json for layer violation detection")
     parser.add_argument(
@@ -546,7 +659,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--ignore-dir",
         action="append",
         default=[],
-        help="Directory name to ignore. Can be used multiple times. Defaults include common build dirs.",
+        help="Directory name to ignore below the selected root. Can be used multiple times. Defaults include common build dirs.",
     )
     return parser.parse_args(argv)
 
@@ -559,23 +672,20 @@ def main(argv: list[str]) -> int:
         print(f"error: root is not a directory: {root}", file=sys.stderr)
         return 2
 
-    ignore_dirs = {
-        ".git", ".svn", ".hg", ".vs", ".vscode",
-        "out",
-        "build", "cmake-build-debug", "cmake-build-release",
-        "Debug", "Release", "x64", "x86",
-        "node_modules", "vendor",
-        "__pycache__",
-    }
-    ignore_dirs.update(args.ignore_dir)
+    ignore_dirs = DEFAULT_IGNORE_DIRS | set(args.ignore_dir)
 
     result = analyze_project(root, ignore_dirs, args.include_root)
+    if not result.files:
+        print("error: no C/C++ source files found under the selected root after directory exclusions.", file=sys.stderr)
+        return 2
     cycles = find_cycles(result.graph)
 
     layer_violations: list[tuple[str, str, str, str]] | None = None
     if args.layers:
         rules = load_layers(args.layers)
         layer_violations = detect_layer_violations(result, rules)
+
+    provenance = collect_provenance(root, args.include_root, ignore_dirs, args.layers)
 
     graph_path = args.graph or args.out
     output_error = validate_output_paths(
@@ -586,30 +696,45 @@ def main(argv: list[str]) -> int:
         print(f"error: {output_error}", file=sys.stderr)
         return 2
 
-    if graph_path is not None or (args.report is None and args.index is None):
-        if args.format == "mermaid":
-            graph_text = emit_mermaid(result)
-        else:
-            graph_text = emit_dot(result)
-        write_or_print(graph_text, graph_path)
+    try:
+        if graph_path is not None or (args.report is None and not args.report_stdout and args.index is None):
+            if args.format == "mermaid":
+                graph_text = emit_mermaid(result)
+            else:
+                graph_text = emit_dot(result)
+            write_or_print(graph_text, graph_path)
 
-    if args.report:
-        report_text = make_report(result, cycles, layer_violations)
-        write_or_print(report_text, args.report)
+        if args.report:
+            report_text = make_report(result, cycles, layer_violations, provenance)
+            write_or_print(report_text, args.report)
+        elif args.report_stdout:
+            report_text = make_report(result, cycles, layer_violations, provenance)
+            write_or_print(report_text, None)
 
-    if args.index:
-        write_text_atomically(args.index, emit_search_index(result))
-
-    if args.report or args.index or graph_path:
-        print(f"scanned files: {len(result.files)}")
-        print(f"resolved edges: {len(result.edges)}")
-        print(f"cycles: {len(cycles)}")
-        if layer_violations is not None:
-            print(f"layer violations: {len(layer_violations)}")
-        if result.unresolved:
-            print(f"unresolved include files: {len(result.unresolved)}")
         if args.index:
-            print(f"index: {args.index.resolve()}")
+            write_new_text(args.index, emit_search_index(result))
+    except OSError as exc:
+        print(
+            f"error: output creation failed; existing files were not overwritten: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.report or args.report_stdout or args.index or graph_path:
+        summary_stream = sys.stderr if args.report_stdout else sys.stdout
+        print(f"scanned files: {len(result.files)}", file=summary_stream)
+        print(f"resolved edges: {len(result.edges)}", file=summary_stream)
+        print(f"cycles: {len(cycles)}", file=summary_stream)
+        if layer_violations is not None:
+            print(f"layer violations: {len(layer_violations)}", file=summary_stream)
+        if result.unresolved:
+            print(f"unresolved include files: {len(result.unresolved)}", file=summary_stream)
+        if args.index:
+            print(f"index: {args.index.resolve()}", file=summary_stream)
+
+    print("TODO (not analyzed):", file=sys.stderr)
+    for notice in TODO_NOTICES:
+        print(f"- {notice}", file=sys.stderr)
 
     return 0
 

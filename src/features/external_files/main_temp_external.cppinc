@@ -5,7 +5,7 @@
 static void LoadTempExternalLecturesFromSetup() {
     g_tempExternalLectures.clear();
     auto dirs = LoadSetupTempExternalLectureDirs();
-    if (dirs.empty()) return;
+    if (dirs.empty()) { ReloadExternalLecturePriorities(); return; }
     std::unordered_set<std::wstring> seen;
     seen.reserve(dirs.size());
     for (const auto& dir : dirs) {
@@ -17,6 +17,7 @@ static void LoadTempExternalLecturesFromSetup() {
             g_tempExternalLectures.push_back({canon});
         }
     }
+    ReloadExternalLecturePriorities();
 }
 
 bool PersistTempExternalLecturesToSetup(std::wstring* outError) {
@@ -32,13 +33,18 @@ static bool RemoveTempExternalLecturePath(const std::wstring& lecturePath) {
     if (lecturePath.empty()) return false;
     std::wstring canon = CanonicalOrSelf(std::filesystem::path(lecturePath)).wstring();
     if (canon.empty()) canon = lecturePath;
-    size_t before = g_tempExternalLectures.size();
-    g_tempExternalLectures.erase(
-        std::remove_if(g_tempExternalLectures.begin(), g_tempExternalLectures.end(),
+    auto retained = g_tempExternalLectures;
+    const size_t before = retained.size();
+    retained.erase(
+        std::remove_if(retained.begin(), retained.end(),
                        [&](const TempExternalLecture& item) { return item.path == canon; }),
-        g_tempExternalLectures.end());
-    if (g_tempExternalLectures.size() == before) return false;
-    PersistTempExternalLecturesToSetup();
+        retained.end());
+    if (retained.size() == before) return false;
+    std::vector<std::wstring> paths;
+    for (const auto& entry : retained) paths.push_back(entry.path);
+    if (!PersistSetupTempExternalLectureDirs(paths)) return false;
+    g_tempExternalLectures = std::move(retained);
+    ReloadExternalLecturePriorities();
     return true;
 }
 

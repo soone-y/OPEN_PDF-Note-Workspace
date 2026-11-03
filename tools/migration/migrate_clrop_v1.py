@@ -620,6 +620,11 @@ def resolve_scan_roots(root_arg: Optional[str], setup_json_arg: Optional[str]) -
 
 def migrate_one(src_path: Path, force: bool, dry_run: bool) -> Tuple[str, str]:
     root = read_json(src_path)
+    version = as_int(root.get("version"), -1) if isinstance(root, dict) else -1
+    if version >= 2:
+        # A v1 migration must not discard version-aware display defaults,
+        # including when --force is requested.
+        return ("skipped", "newer-format-preserved") if version == 2 else ("failed", "unsupported-newer-format")
     current_ok = is_current_v1_strict(root)
     if current_ok and not force:
         return ("skipped", "already-current")

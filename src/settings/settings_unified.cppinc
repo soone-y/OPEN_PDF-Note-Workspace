@@ -1,7 +1,9 @@
 // file: settings/settings_unified.cppinc
 // Included by settings.cpp (single TU).
 
-static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initialAnnotSection) {
+namespace {
+static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initialAnnotSection,
+                                     PaletteDialogRequest* paletteRequest) {
     static const wchar_t kClass[] = L"UnifiedSettingsShellClass";
     static bool registered = false;
     if (!registered) {
@@ -16,15 +18,19 @@ static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initi
         registered = true;
     }
 
+    if (owner) { if (HWND root = GetAncestor(owner, GA_ROOT)) owner = root; }
     UnifiedSettingsShellCtx ctx{};
     ctx.owner = owner;
-    ctx.currentCategory = std::clamp(initialCategory, static_cast<int>(kSettingsNavGeneral), static_cast<int>(kSettingsNavPalette));
+    ctx.currentCategory = std::clamp(initialCategory, 0, settings_navigation::Count - 1);
     ctx.initialAnnotSection = initialAnnotSection;
+    ctx.paletteRequest = paletteRequest;
 
     if (owner) EnableWindow(owner, FALSE);
     const int dpiRef = GetDpiY(owner);
-    const int wPx = MulDiv(kUnifiedSettingsDlgWidth, dpiRef, 96);
-    const int hPx = MulDiv(kUnifiedSettingsDlgHeight, dpiRef, 96);
+    MONITORINFO monitor{sizeof(monitor)};
+    const bool measured = GetMonitorInfoW(MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST), &monitor) != FALSE;
+    const int wPx = std::min<int>(MulDiv(kUnifiedSettingsDlgWidth, dpiRef, 96), measured ? monitor.rcWork.right - monitor.rcWork.left : GetSystemMetrics(SM_CXSCREEN));
+    const int hPx = std::min<int>(MulDiv(kUnifiedSettingsDlgHeight, dpiRef, 96), measured ? monitor.rcWork.bottom - monitor.rcWork.top : GetSystemMetrics(SM_CYSCREEN));
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass,
                              GetUiText().menuSettings.c_str(),
                              WS_CAPTION | WS_POPUPWINDOW,
@@ -50,13 +56,39 @@ static void ShowUnifiedSettingsDialog(HWND owner, int initialCategory, int initi
             continue; // First Escape cancels sampling, not the settings draft.
         }
         if (ui::ConsumeNoOpEdgeNavKeyForMultilineEdit(msg, g_hNoteEdit)) continue;
+        const HWND previousFocus = GetFocus();
         if (!IsDialogMessageW(w, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        if (!ctx.done && previousFocus != GetFocus()) RevealUnifiedSettingsFocus(&ctx);
     }
+    if (ctx.deferredCommand == ID_SETTINGS_PRESETS) ShowSettingsPresetDialog(g_hMainWnd);
+    if (ctx.deferredCommand == ID_WORKSPACE_RESTORE) ShowWorkspaceRestoreDialog(g_hMainWnd);
 }
 } // namespace
+
+bool SelectColorInPaletteSettings(HWND owner, COLORREF initial, COLORREF* outColor) {
+    if (!outColor) return false;
+    // Embedded settings pages are not modal owners: disable their entire shell,
+    // so it cannot close and invalidate the caller while color selection runs.
+    if (owner) {
+        HWND root = GetAncestor(owner, GA_ROOT);
+        if (root) owner = root;
+    }
+    PaletteDialogRequest request{};
+    request.initialColor = initial;
+    ShowUnifiedSettingsDialog(owner, kSettingsNavPalette, -1, &request);
+    if (request.accepted) *outColor = request.selectedColor;
+    return request.accepted;
+}
+
+void ShowAnnotationPaletteSettingsDialog(HWND owner) {
+    PaletteDialogRequest request{};
+    request.purpose = PaletteDialogPurpose::EditAnnotationPalette;
+    request.initialColor = g_paletteCustomColor;
+    ShowUnifiedSettingsDialog(owner, kSettingsNavPalette, -1, &request);
+}
 
 void ShowAnnotationSettingsDialog(HWND owner) {
     ShowUnifiedSettingsDialog(owner, kSettingsNavAnnot, kAnnotSectionText);
@@ -111,3 +143,11 @@ static void LogPanelEvent(const wchar_t* panel,
 }
 
 
+
+void ShowOutputSettingsDialog(HWND owner, bool noteOutput) {
+    ShowUnifiedSettingsDialog(owner, noteOutput ? kSettingsNavOutputNote : kSettingsNavOutput);
+}
+
+void ShowBottomPaneSettingsDialog(HWND owner) {
+    ShowUnifiedSettingsDialog(owner, kSettingsNavBottomPane);
+}

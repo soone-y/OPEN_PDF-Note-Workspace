@@ -2,6 +2,7 @@
 
 #include "note/note_workspace_index.h"
 
+#include <optional>
 #include <string>
 
 namespace note {
@@ -41,6 +42,7 @@ struct MarkupExportConfig {
     std::string mathPlaceholder = "[math]";
     bool includeTitleHeading = false;
     bool shiftHeadingLevels = true;
+    bool normalizeClroSyntax = true;
     std::wstring title;
 };
 
@@ -54,9 +56,11 @@ std::string ExportPlainText(const NoteTextModel& model,
                             const NoteDocument& doc,
                             const TextExportConfig& config);
 
-std::string ExportMarkdown(const NoteTextModel& model,
-                           const NoteDocument& doc,
-                           const MarkupExportConfig& config);
+// A title heading requires a fresh Markdown parse. A fatal parse failure must
+// stop export rather than publishing a partially rewritten document.
+std::optional<std::string> ExportMarkdown(const NoteTextModel& model,
+                                          const NoteDocument& doc,
+                                          const MarkupExportConfig& config);
 
 std::string ExportHtml(const NoteTextModel& model,
                        const NoteDocument& doc,

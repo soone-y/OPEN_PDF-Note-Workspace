@@ -24,9 +24,6 @@ static std::wstring NormalizeToneVariantValue(const std::wstring& value) {
     if (v == L"emphasis" || v == L"accent" || v == L"tone_emphasis" || v == L"toneemphasis") return L"emphasis";
     if (v == L"white") return L"white";
     if (v == L"black") return L"black";
-    if (v == L"cvd_red_green" || v == L"red_green" || v == L"protan_deutan") return L"cvd_red_green";
-    if (v == L"cvd_blue_yellow" || v == L"blue_yellow" || v == L"tritan") return L"cvd_blue_yellow";
-    if (v == L"cvd_monochrome" || v == L"monochrome" || v == L"achromatopsia") return L"cvd_monochrome";
     return L"pure";
 }
 
@@ -36,15 +33,11 @@ static std::wstring ToneVariantLabel(const std::wstring& value) {
     if (v == L"emphasis") return localization::Text(L"settings.general.tone_variant.emphasis");
     if (v == L"white") return localization::Text(L"settings.general.tone_variant.white");
     if (v == L"black") return localization::Text(L"settings.general.tone_variant.black");
-    if (v == L"cvd_red_green") return localization::Text(L"settings.general.tone_variant.cvd_red_green");
-    if (v == L"cvd_blue_yellow") return localization::Text(L"settings.general.tone_variant.cvd_blue_yellow");
-    if (v == L"cvd_monochrome") return localization::Text(L"settings.general.tone_variant.cvd_monochrome");
     return localization::Text(L"settings.general.tone_variant.pure");
 }
 
-static constexpr std::array<const wchar_t*, 8> kToneVariantValues{{
+static constexpr std::array<const wchar_t*, 5> kToneVariantValues{{
     L"pure", L"guard", L"emphasis", L"white", L"black",
-    L"cvd_red_green", L"cvd_blue_yellow", L"cvd_monochrome",
 }};
 
 static void FillToneVariantCombo(HWND cb, const std::wstring& currentValue) {
@@ -74,6 +67,15 @@ static std::wstring GenColorLabelW(COLORREF c) {
 static std::wstring FormatThemeLabel(const ThemeColors& theme) {
     if (theme.name == L"default") {
         return localization::Text(L"settings.general_controls.779a3b9d4381");
+    }
+    if (theme.name == L"cvd_red_green") {
+        return localization::Text(L"settings.general.tone_cvd_red_green");
+    }
+    if (theme.name == L"cvd_blue_yellow") {
+        return localization::Text(L"settings.general.tone_cvd_blue_yellow");
+    }
+    if (theme.name == L"cvd_monochrome") {
+        return localization::Text(L"settings.general.tone_cvd_monochrome");
     }
 
     std::wstring hex6;
@@ -126,6 +128,11 @@ static bool IsEditableThemeSelection(const std::wstring& themeName) {
     return TryParseHex6FromThemeFileId(themeName, nullptr);
 }
 
+static bool IsColorVisionThemeSelection(const std::wstring& themeName) {
+    return themeName == L"cvd_red_green" || themeName == L"cvd_blue_yellow" ||
+           themeName == L"cvd_monochrome";
+}
+
 static std::wstring GetSelectedToneThemeName(const GeneralSettingsCtx* ctx) {
     std::wstring targetTheme = g_themeName.empty() ? std::wstring(L"default") : g_themeName;
     if (!ctx || !ctx->cbTone) return targetTheme;
@@ -139,9 +146,16 @@ static std::wstring GetSelectedToneThemeName(const GeneralSettingsCtx* ctx) {
 }
 
 static void UpdateToneEditButtonEnabled(GeneralSettingsCtx* ctx) {
-    if (!ctx || !ctx->btnToneEdit) return;
+    if (!ctx) return;
     std::wstring targetTheme = GetSelectedToneThemeName(ctx);
-    EnableWindow(ctx->btnToneEdit, IsEditableThemeSelection(targetTheme) ? TRUE : FALSE);
+    if (ctx->btnToneEdit) {
+        EnableWindow(ctx->btnToneEdit, IsEditableThemeSelection(targetTheme) ? TRUE : FALSE);
+    }
+    if (ctx->cbToneVariant) {
+        const bool isColorVisionTheme = IsColorVisionThemeSelection(targetTheme);
+        if (isColorVisionTheme) SendMessageW(ctx->cbToneVariant, CB_SETCURSEL, 0, 0);
+        EnableWindow(ctx->cbToneVariant, isColorVisionTheme ? FALSE : TRUE);
+    }
 }
 
 static std::wstring FormatPtLabel(double pt) {
@@ -366,9 +380,107 @@ static std::wstring LeftRightLineMoveLabel(const std::wstring& action) {
     return localization::Text(kLeftRightLineMoveOptions[0].label);
 }
 
-static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
+[[nodiscard]] static std::wstring ReadSettingsEdit(HWND edit) {
+    if (!edit) return {};
+    const int length = GetWindowTextLengthW(edit);
+    std::wstring text(static_cast<size_t>(std::max(0, length)) + 1, L'\0');
+    const int read = GetWindowTextW(edit, text.data(), length + 1);
+    text.resize(static_cast<size_t>(std::max(0, read)));
+    return text;
+}
+struct GeneralSettingsInputDraft {
+    int bottomSpaceFixed = 32;
+    int bottomSpaceFont = 400;
+    int bottomSpaceViewport = 25;
+    std::vector<std::wstring> additionalExtensions;
+    COLORREF quickBackground = RGB(255, 255, 255);
+    std::wstring quickPlaceholder;
+};
+// Validation reads only the owning controls. The shell validates every opened
+// page before the first write; application retains the existing rollback path.
+[[nodiscard]] static bool ReadGeneralSettingsInput(GeneralSettingsCtx* ctx, GeneralSettingsInputDraft& draft) {
     if (!ctx) return false;
+    draft.additionalExtensions = g_config.additionalNoteExtensions;
+    draft.quickBackground = g_config.quickPdfTextColorBackground;
+    draft.quickPlaceholder = g_config.quickNoteMathPlaceholderText;
+    ctx->invalidControl = nullptr;
+    const auto reject = [&](HWND control, const wchar_t* id) {
+        ctx->invalidControl = control;
+        ShowSoftNotice(GetAncestor(control, GA_ROOT), localization::Text(id), SoftNoticeKind::Warning);
+        return false;
+    };
+    if (ctx->editNoteBottomSpaceFixed && !note::ParseBottomSpaceValue(
+            ReadSettingsEdit(ctx->editNoteBottomSpaceFixed), 2000, draft.bottomSpaceFixed))
+        return reject(ctx->editNoteBottomSpaceFixed, L"settings.note.bottom_space_invalid");
+    if (ctx->editNoteBottomSpaceFont && !note::ParseBottomSpaceValue(
+            ReadSettingsEdit(ctx->editNoteBottomSpaceFont), 2000, draft.bottomSpaceFont))
+        return reject(ctx->editNoteBottomSpaceFont, L"settings.note.bottom_space_invalid");
+    if (ctx->editNoteBottomSpaceViewport && !note::ParseBottomSpaceValue(
+            ReadSettingsEdit(ctx->editNoteBottomSpaceViewport), 90, draft.bottomSpaceViewport))
+        return reject(ctx->editNoteBottomSpaceViewport, L"settings.note.bottom_space_invalid");
+    if (ctx->editAdditionalNoteExtensions &&
+        !note::ParseAdditionalNoteExtensions(ReadSettingsEdit(ctx->editAdditionalNoteExtensions), &draft.additionalExtensions))
+        return reject(ctx->editAdditionalNoteExtensions, L"settings.general.additional_note_extensions_invalid");
+    if (ctx->editQuickPdfBackground) {
+        const auto text = ReadSettingsEdit(ctx->editQuickPdfBackground);
+        if (text.size() != 7 || text[0] != L'#') return reject(ctx->editQuickPdfBackground, L"settings.navigation.invalid_background");
+        unsigned rgb = 0;
+        for (size_t i = 1; i < text.size(); ++i) {
+            const auto ch = text[i];
+            const int digit = ch >= L'0' && ch <= L'9' ? ch - L'0'
+                : ch >= L'a' && ch <= L'f' ? ch - L'a' + 10 : ch >= L'A' && ch <= L'F' ? ch - L'A' + 10 : -1;
+            if (digit < 0) return reject(ctx->editQuickPdfBackground, L"settings.navigation.invalid_background");
+            rgb = rgb * 16 + static_cast<unsigned>(digit);
+        }
+        draft.quickBackground = RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+    }
+    if (ctx->editQuickNotePlaceholder && SendMessageW(ctx->chkQuickNoteMathPlaceholder, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        draft.quickPlaceholder = TrimWhitespace(ReadSettingsEdit(ctx->editQuickNotePlaceholder));
+        if (draft.quickPlaceholder.size() > 512) return reject(ctx->editQuickNotePlaceholder, L"settings.navigation.invalid_placeholder");
+        if (draft.quickPlaceholder.empty()) draft.quickPlaceholder = L"[math]";
+    }
+    return true;
+}
+
+static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
+    GeneralSettingsInputDraft input;
+    if (!ReadGeneralSettingsInput(ctx, input)) return false;
     const WorkspaceConfig previousConfig = g_config;
+    if (ctx->cbNoteBottomSpaceMode) {
+        g_config.noteBottomSpaceMode = std::clamp(static_cast<int>(SendMessageW(
+            ctx->cbNoteBottomSpaceMode, CB_GETCURSEL, 0, 0)), 0, 2);
+        g_config.noteBottomSpaceFixedDip = input.bottomSpaceFixed;
+        g_config.noteBottomSpaceFontPercent = input.bottomSpaceFont;
+        g_config.noteBottomSpaceViewportPercent = input.bottomSpaceViewport;
+    }
+    if (ctx->cbEmptyViewGuide)
+        g_config.emptyViewGuideMode = std::clamp(static_cast<int>(
+            SendMessageW(ctx->cbEmptyViewGuide, CB_GETCURSEL, 0, 0)), 0, 2);
+    const auto preferenceValue = [](HWND combo, const auto& options) {
+        const int selected = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+        return options[std::clamp(selected, 0, static_cast<int>(std::size(options)) - 1)].value;
+    };
+    if (ctx->cbPdfOpenViewMode)
+        g_config.pdfOpenViewMode = preferenceValue(ctx->cbPdfOpenViewMode, kPdfOpenViewOptions);
+    if (ctx->cbNewNoteExtension)
+        g_config.newNoteExtension = preferenceValue(ctx->cbNewNoteExtension, kNewNoteExtensionOptions);
+    if (ctx->chkRestoreLastSession)
+        g_config.restoreLastSession = SendMessageW(ctx->chkRestoreLastSession, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    g_config.additionalNoteExtensions = std::move(input.additionalExtensions);
+    if (ctx->cbQuickPdfScale) {
+        g_config.quickPdfScalePercent = std::clamp(static_cast<int>(SelectedComboItemData(ctx->cbQuickPdfScale, g_config.quickPdfScalePercent)), 13, 800);
+        g_config.quickPdfStandardTextAnnots = SendMessageW(ctx->chkQuickPdfStandardText, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_config.quickPdfMatchPdfPaneTextLayout = SendMessageW(ctx->chkQuickPdfMatchLayout, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_config.quickPdfKeepPageRotation = SendMessageW(ctx->chkQuickPdfKeepRotation, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_config.quickPdfTextColorMode = std::clamp(static_cast<int>(SendMessageW(ctx->cbQuickPdfColorMode, CB_GETCURSEL, 0, 0)), 0, 3);
+        g_config.quickPdfTextColorBackground = input.quickBackground;
+    }
+    if (ctx->chkQuickNoteStripMarkup) {
+        g_config.quickNoteStripMarkup = SendMessageW(ctx->chkQuickNoteStripMarkup, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_config.quickNoteIncludeComments = SendMessageW(ctx->chkQuickNoteComments, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_config.quickNoteMathPlaceholder = SendMessageW(ctx->chkQuickNoteMathPlaceholder, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_config.quickNoteMathPlaceholderText = input.quickPlaceholder;
+    }
     const int previousInlineMathVerticalAlignment = g_config.noteInlineMathVerticalAlignment;
     std::wstring prevLectureSort = g_config.lectureSortMode;
     std::wstring prevSessionSort = g_config.sessionSortMode;
@@ -411,7 +523,10 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     }
 
     bool toneVariantChanged = false;
-    if (ctx->cbToneVariant) {
+    if (ctx->cbTone && IsColorVisionThemeSelection(themeName)) {
+        g_config.toneVariant = L"pure";
+        toneVariantChanged = (prevToneVariant != L"pure");
+    } else if (ctx->cbToneVariant) {
         int selected = static_cast<int>(SendMessageW(ctx->cbToneVariant, CB_GETCURSEL, 0, 0));
         selected = std::clamp(selected, 0, static_cast<int>(kToneVariantValues.size()) - 1);
         g_config.toneVariant = kToneVariantValues[static_cast<size_t>(selected)];
@@ -425,26 +540,12 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         if (paneSel < 0 || paneSel >= static_cast<int>(std::size(kBottomPaneOptions))) paneSel = 0;
         BottomPanePin wantPin = kBottomPaneOptions[paneSel].pin;
         BottomNoteMode wantNoteMode = kBottomPaneOptions[paneSel].noteMode;
-        const BottomPanePin configuredPin = ParseBottomPanePin(g_config.bottomPanePin);
-        const BottomNoteMode configuredNoteMode = ParseBottomNoteMode(g_config.bottomNoteMode);
-        if (configuredPin != wantPin || configuredNoteMode != wantNoteMode) {
-            // An explicit General-settings change updates the persisted default
-            // and makes that choice active now.  Applying unrelated settings
-            // leaves a temporary View-menu selection untouched.
-            pinChanged = (g_bottomPanePin != wantPin);
-            noteModeChanged = (g_bottomNoteMode != wantNoteMode);
-            g_config.bottomPanePin = BottomPanePinToString(wantPin);
-            g_config.bottomNoteMode = BottomNoteModeToString(wantNoteMode);
-            g_bottomPanePin = wantPin;
-            g_bottomNoteMode = wantNoteMode;
-            if (pinChanged || noteModeChanged) {
-                UpdateBottomPaneMenuChecks();
-                ApplyBottomPaneEdgeStyle();
-            }
-            if ((pinChanged || noteModeChanged) && g_hBottomNote) {
-                InvalidateRect(g_hBottomNote, nullptr, TRUE);
-            }
-        }
+        pinChanged = (g_bottomPanePin != wantPin);
+        noteModeChanged = (g_bottomNoteMode != wantNoteMode);
+        // Commit the dialog's selection even when it matches the stored value.
+        // Runtime follows only after persistence succeeds, not during editing.
+        g_config.bottomPanePin = BottomPanePinToString(wantPin);
+        g_config.bottomNoteMode = BottomNoteModeToString(wantNoteMode);
     }
 
     bool quickAnnotPopupPlacementChanged = false;
@@ -573,6 +674,10 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         g_config.touchpadInvertHorizontal =
             (SendMessageW(ctx->chkTouchpadInvertHorizontal, BM_GETCHECK, 0, 0) == BST_CHECKED);
     }
+    if (ctx->chkTouchpadScrollStabilization) {
+        g_config.touchpadScrollStabilization =
+            SendMessageW(ctx->chkTouchpadScrollStabilization, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
     if (ctx->chkAutoPairBrackets) {
         g_config.autoPairBrackets =
             (SendMessageW(ctx->chkAutoPairBrackets, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -624,6 +729,9 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     if (ctx->chkNoteWrapEnabled) {
         g_noteWrapEnabled = (SendMessageW(ctx->chkNoteWrapEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED);
         g_config.noteWrapEnabled = g_noteWrapEnabled;
+    }
+    if (ctx->chkClroAsciiOnly) {
+        g_config.clroAsciiOnly = SendMessageW(ctx->chkClroAsciiOnly, BM_GETCHECK, 0, 0) == BST_CHECKED;
     }
     if (ctx->chkNoteVimMode) {
         g_noteVimModeEnabled = (SendMessageW(ctx->chkNoteVimMode, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -708,22 +816,24 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         g_config.noteSystem = NoteSystemToString(kNoteSystemOptions[noteSel].value);
     }
 
-    g_noteFontName = GenGetSelectedFontFace(ctx->cbNoteFontFace, g_noteFontName);
-    if (g_noteFontName.empty()) g_noteFontName = GetDefaultFontFaceName();
-    g_noteFontPt = GenGetSelectedPt(ctx->cbNoteFont, g_noteFontPt);
-    g_noteRenderFontName = GenGetSelectedFontFace(ctx->cbNoteRenderFontFace, g_noteRenderFontName);
-    if (g_noteRenderFontName.empty()) g_noteRenderFontName = g_noteFontName;
-    g_noteRenderJpFontName = GenGetSelectedFontFace(ctx->cbNoteRenderJpFontFace, g_noteRenderJpFontName);
-    if (g_noteRenderJpFontName.empty()) g_noteRenderJpFontName = g_noteRenderFontName;
-    if (g_config.noteFontCustomization == 1) {
-        g_noteFontName = g_noteRenderFontName;
-        g_noteRenderJpFontName = g_noteRenderFontName;
+    if (ctx->cbNoteFontFace || ctx->cbNoteFont) {
+        g_noteFontName = GenGetSelectedFontFace(ctx->cbNoteFontFace, g_noteFontName);
+        if (g_noteFontName.empty()) g_noteFontName = GetDefaultFontFaceName();
+        g_noteFontPt = GenGetSelectedPt(ctx->cbNoteFont, g_noteFontPt);
+        g_noteRenderFontName = GenGetSelectedFontFace(ctx->cbNoteRenderFontFace, g_noteRenderFontName);
+        if (g_noteRenderFontName.empty()) g_noteRenderFontName = g_noteFontName;
+        g_noteRenderJpFontName = GenGetSelectedFontFace(ctx->cbNoteRenderJpFontFace, g_noteRenderJpFontName);
+        if (g_noteRenderJpFontName.empty()) g_noteRenderJpFontName = g_noteRenderFontName;
+        if (g_config.noteFontCustomization == 1) {
+            g_noteFontName = g_noteRenderFontName;
+            g_noteRenderJpFontName = g_noteRenderFontName;
+        }
+        g_noteRenderFontPt = g_noteFontPt;
+        g_config.noteRenderFontName = g_noteRenderFontName;
+        g_config.noteRenderJpFontName = g_noteRenderJpFontName;
+        g_config.noteRenderFontPt = g_noteRenderFontPt;
+        ApplyNoteFont();
     }
-    g_noteRenderFontPt = g_noteFontPt;
-    g_config.noteRenderFontName = g_noteRenderFontName;
-    g_config.noteRenderJpFontName = g_noteRenderJpFontName;
-    g_config.noteRenderFontPt = g_noteRenderFontPt;
-    ApplyNoteFont();
 
     if (ctx->cbAutoSave) {
         g_config.autoSaveSeconds = NormalizeAutoStageSaveSeconds(
@@ -785,51 +895,45 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         g_config.debugLogs.startupWatchdog =
             (SendMessageW(ctx->chkDebugLogStartupWatchdog, BM_GETCHECK, 0, 0) == BST_CHECKED);
     }
-    int scheduleMask = 0;
-    if (!ctx->scheduleDayChecks.empty()) {
-        for (int i = 0; i < static_cast<int>(ctx->scheduleDayChecks.size()); ++i) {
-            if (SendMessageW(ctx->scheduleDayChecks[static_cast<size_t>(i)], BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                scheduleMask |= (1 << i);
-            }
-        }
-        scheduleMask &= 0x7F;
-        if (scheduleMask == 0) scheduleMask = kDefaultScheduleMask;
-        g_config.scheduleDayMask = scheduleMask;
-    }
-    if (ctx->cbSchedulePeriods) {
-        g_config.schedulePeriods = static_cast<int>(SelectedComboItemData(ctx->cbSchedulePeriods, g_config.schedulePeriods));
-    }
-    g_config.schedulePeriods = std::clamp(g_config.schedulePeriods, 1, kScheduleMaxPeriods);
-    size_t scheduleTotal = static_cast<size_t>(kScheduleDayCount * g_config.schedulePeriods);
-    if (g_config.scheduleCells.size() < scheduleTotal) {
-        g_config.scheduleCells.resize(scheduleTotal);
-    } else if (g_config.scheduleCells.size() > scheduleTotal) {
-        g_config.scheduleCells.resize(scheduleTotal);
-    }
-    EnsureScheduleStartTimesCapacity(g_config.scheduleStartTimes);
-
-    ApplyNoteSystem(ctx->owner);
-    SetPdfFlowMode(g_hPdfView, selectedPdfFlowMode);
-    UpdateScrollDirectionMenuChecks();
+    if (ctx->cbNoteSystem) ApplyNoteSystem(ctx->owner);
+    if (ctx->cbPdfFlowMode) SetPdfFlowMode(g_hPdfView, selectedPdfFlowMode);
+    if (ctx->cbPdfFlowMode) UpdateScrollDirectionMenuChecks();
     const bool themeChanged = (themeName != prevThemeName || toneVariantChanged);
     bool themeUiChanged = false;
     if (themeChanged) {
         themeUiChanged = ApplyThemeByNameForSettingsBatch(themeName, ctx->owner, true);
+        if (!themeUiChanged) {
+            RestoreSettingsRuntimeAfterFailedSave(ctx->owner, previousConfig, prevThemeName);
+            return false;
+        }
     }
-    g_noteBgColor = ResolveNoteBackgroundColor(g_config.noteBgSource, g_config.noteBgThemeName, g_config.noteBgColor);
-    RefreshNoteBackgroundUi(ctx->owner ? ctx->owner : g_hMainWnd);
+    if (ctx->cbNoteBgMode || themeChanged) {
+        g_noteBgColor = ResolveNoteBackgroundColor(g_config.noteBgSource, g_config.noteBgThemeName, g_config.noteBgColor);
+        RefreshNoteBackgroundUi(ctx->owner ? ctx->owner : g_hMainWnd);
+    }
     const bool saved = TryPersistConfig();
     if (!saved) {
         RestoreSettingsRuntimeAfterFailedSave(ctx->owner, previousConfig, prevThemeName);
         return false;
+    }
+    if (ctx->cbBottomPane) {
+        g_bottomPanePin = ParseBottomPanePin(g_config.bottomPanePin);
+        g_bottomNoteMode = ParseBottomNoteMode(g_config.bottomNoteMode);
+        UpdateBottomPaneMenuChecks();
+        ApplyBottomPaneEdgeStyle();
+        if ((pinChanged || noteModeChanged) && g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
+    }
+    if (g_config.additionalNoteExtensions != previousConfig.additionalNoteExtensions) {
+        const bool refreshed = RefreshCurrentSessionFiles();
+        (void)refreshed; // No selected session requires no enumeration.
     }
     if (g_config.noteInlineMathVerticalAlignment != previousInlineMathVerticalAlignment) {
         RefreshNoteRenderForPreferenceChange();
     }
 
     SettingsApplyEffects effects{};
-    effects.updateAutoSaveTimer = true;
-    effects.updateAutoIntegrateTimer = true;
+    effects.updateAutoSaveTimer = ctx->cbAutoSave != nullptr;
+    effects.updateAutoIntegrateTimer = ctx->cbAutoIntegrate != nullptr;
     effects.layout = pinChanged || noteModeChanged ||
                      quickAnnotPopupPlacementChanged || showMathChanged;
     effects.updateMathListVisibility = showMathChanged;
@@ -841,10 +945,11 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
     effects.reloadSessionList = sessionSortChanged;
     effects.applyThemeUi = themeUiChanged;
     effects.invalidatePdfView = selectionStyleChanged || pdfFlowModeChanged || pointerOffsetChanged;
+    if (g_config.emptyViewGuideMode != previousConfig.emptyViewGuideMode) effects.invalidatePdfView = true;
     if (pdfPageOverlayChanged || pdfZoomOverlayChanged) {
         effects.invalidatePdfView = true;
     }
-    effects.invalidateNoteEdit = true;
+    effects.invalidateNoteEdit = ctx->pageMode == GeneralSettingsPageMode::Note || ctx->pageMode == GeneralSettingsPageMode::NoteInput;
     CommitSettingsApplyEffects(ctx->owner, effects);
     return saved;
 }

@@ -1,0 +1,186 @@
+// Owns the opt-in gates, not the worker. Uses the real dispatch, PDFium render,
+// completion/apply, generation cancellation and document shutdown boundaries.
+bool RunPdfWorkerConcurrencyProbe(HWND pdfWnd, const std::wstring& alternatePdf,
+                                  std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    if (!pdfWnd || g_pdf.kind != DocKind::Pdf || g_pdf.pages.size() < 8 || alternatePdf.empty())
+        return fail(L"Worker probe requires its owned complex PDF fixtures.");
+    const std::wstring primary = g_pdf.path;
+    ShutdownPdfVirtualRenderWorker();
+    PdfInitialViewportUpdateGuard suppressAutomaticJobs;
+    struct Scope {
+        std::wstring flow = g_config.pdfFlowMode;
+        bool single = g_config.pdfSinglePageMode;
+        ~Scope() {
+            {
+                std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+                g_pdfVirtualWorkerProbe.enabled = false;
+                g_pdfVirtualWorkerProbe.holdBefore = g_pdfVirtualWorkerProbe.holdAfter = false;
+            }
+            g_pdfVirtualWorkerCv.notify_all();
+            ShutdownPdfVirtualRenderWorker();
+            g_config.pdfFlowMode = flow;
+            g_config.pdfSinglePageMode = single;
+        }
+    } scope;
+    g_config.pdfFlowMode = L"v_ttb";
+    g_config.pdfSinglePageMode = false;
+    g_pendingInitialFitWidth = g_pendingInitialFitHeight = false;
+    g_pendingPdfRestore.reset();
+    UpdatePageLayout(pdfWnd);
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        g_pdfVirtualWorkerProbe = {};
+        g_pdfVirtualWorkerProbe.enabled = true;
+    }
+    const auto wait = [&](auto ready) {
+        const ULONGLONG deadline = GetTickCount64() + 4500;
+        do {
+            {
+                std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+                if (g_pdfVirtualWorkerProbe.timedOut || g_pdfVirtualWorkerProbe.overflow) return false;
+                if (ready()) return true;
+            }
+            MSG message{};
+            for (int count = 0; count < 64 && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE); ++count) {
+                if (message.message == WM_QUIT) {
+                    PostQuitMessage(static_cast<int>(message.wParam));
+                    return false;
+                }
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            MsgWaitForMultipleObjectsEx(0, nullptr, 10, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        } while (GetTickCount64() < deadline);
+        return false;
+    };
+    const auto queue = [&](int page, int width, bool visible) {
+        PdfVirtualRenderCandidate job{};
+        job.index = static_cast<size_t>(page);
+        job.targetW = width;
+        job.targetH = 128;
+        job.targetPixels = static_cast<uint64_t>(width) * 128;
+        job.coarse = true;
+        job.visible = visible;
+        return QueuePdfVirtualRenderJob(pdfWnd, job);
+    };
+    const auto gate = [&](int page, bool after) {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        g_pdfVirtualWorkerProbe.gatePage = page;
+        g_pdfVirtualWorkerProbe.beforeEntered = g_pdfVirtualWorkerProbe.afterEntered = false;
+        g_pdfVirtualWorkerProbe.holdBefore = !after;
+        g_pdfVirtualWorkerProbe.holdAfter = after;
+    };
+    const auto release = [&]() {
+        {
+            std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+            g_pdfVirtualWorkerProbe.holdBefore = g_pdfVirtualWorkerProbe.holdAfter = false;
+        }
+        g_pdfVirtualWorkerCv.notify_all();
+    };
+    const auto drain = [&]() {
+        return wait([&] { return !g_pdfVirtualWorkerHasActiveJob && g_pdfVirtualJobs.empty() &&
+                                g_pdfVirtualResults.empty() && !g_pdfVirtualEmergencyResult; });
+    };
+    const auto refresh = [&]() {
+        const auto viewport = ComputePdfVirtualViewport(pdfWnd);
+        if (!viewport.valid) return false;
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        RefreshPdfVirtualJobPriorities(g_pdfVirtualJobs, viewport, g_pdf.renderGeneration, g_pdf.pageRects);
+        return true;
+    };
+    InvalidatePdfRenderGeneration();
+    JumpToPage(pdfWnd, 0);
+    gate(7, false);
+    if (!queue(7, 96, false) || !wait([&] { return g_pdfVirtualWorkerProbe.beforeEntered; }))
+        return fail(L"Worker did not enter its bounded dispatch gate.");
+    if (!queue(5, 96, false) || !queue(4, 96, false)) return fail(L"Cannot queue offscreen work.");
+    for (int width = 96; width < 101; ++width)
+        if (!queue(0, width, true)) return fail(L"Cannot queue visible work.");
+    if (!refresh()) return fail(L"Cannot refresh actual pending queue.");
+    release();
+    if (!drain()) return fail(L"Worker fairness phase did not drain.");
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        const auto& probe = g_pdfVirtualWorkerProbe;
+        const std::array<int, 8> expected{7, 0, 0, 0, 0, 5, 0, 4};
+        if (probe.dispatchCount != expected.size() || probe.rendered != expected.size() ||
+            probe.nonWhite != expected.size()) return fail(L"Worker did not render all nonblank jobs.");
+        for (size_t i = 0; i < expected.size(); ++i)
+            if (probe.dispatches[i].page != expected[i]) return fail(L"Actual worker order violated fairness/FIFO.");
+        for (size_t i = 1; i < 5; ++i)
+            if (probe.dispatches[i].width != 95 + static_cast<int>(i))
+                return fail(L"Equal-priority actual dispatch was not FIFO.");
+    }
+    gate(7, false);
+    if (!queue(7, 96, false) || !wait([&] { return g_pdfVirtualWorkerProbe.beforeEntered; }) ||
+        !queue(0, 96, true) || !queue(3, 96, false) || !queue(2, 96, false))
+        return fail(L"Cannot prepare actual viewport-change race.");
+    JumpToPage(pdfWnd, 2);
+    if (!refresh()) return fail(L"Cannot reprioritize after actual page jump.");
+    release();
+    if (!drain()) return fail(L"Viewport-change phase did not drain.");
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        if (g_pdfVirtualWorkerProbe.dispatchCount != 12 ||
+            g_pdfVirtualWorkerProbe.dispatches[9].page != 2)
+            return fail(L"New visible page did not overtake old pending work.");
+    }
+    // A real rendered bitmap finishes, then its generation is invalidated
+    // before the worker publishes it. Normal UI completion must reject it.
+    gate(2, true);
+    if (!queue(2, 97, true) || !wait([&] { return g_pdfVirtualWorkerProbe.afterEntered; }))
+        return fail(L"Worker did not complete the old-generation bitmap.");
+    const auto pixels = g_pdf.pages[2].pixels;
+    const auto pixelsGeneration = g_pdf.pages[2].pixelsGeneration;
+    const int bitmapWidth = g_pdf.pages[2].bmpW;
+    InvalidatePdfRenderGeneration();
+    release();
+    if (!drain()) return fail(L"Old-generation result did not drain through UI completion.");
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        if (g_pdfVirtualWorkerProbe.staleRejected != 1 || g_pdf.pages[2].pixels != pixels ||
+            g_pdf.pages[2].pixelsGeneration != pixelsGeneration || g_pdf.pages[2].bmpW != bitmapWidth)
+            return fail(L"Stale worker completion changed the current bitmap.");
+    }
+    // A different document is opened while the old worker has completed but
+    // not published. Real shutdown must release the gate and suppress output.
+    gate(2, true);
+    if (!queue(2, 98, true) || !wait([&] { return g_pdfVirtualWorkerProbe.afterEntered; }))
+        return fail(L"Cannot prepare document-switch completion race.");
+    if (!LoadPdfDocument(pdfWnd, alternatePdf) || g_pdf.path != alternatePdf || g_pdf.pages.size() != 1)
+        return fail(L"Actual document switch failed.");
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        if (g_pdfVirtualWorkerProbe.stoppedResults != 1 || g_pdfVirtualWorkerProbe.timedOut ||
+            g_pdfVirtualWorkerHasActiveJob || !g_pdfVirtualJobs.empty() || !g_pdfVirtualResults.empty() ||
+            !g_pdf.pages[0].pixels.empty()) return fail(L"Document shutdown retained old worker output.");
+    }
+    if (!LoadPdfDocument(pdfWnd, primary)) return fail(L"Cannot restore primary concurrency fixture.");
+    const auto retainedPixels = g_pdf.pages[0].pixels;
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        g_pdfVirtualWorkerProbe.throwRenderOnce = true;
+    }
+    if (!queue(0, 112, true) || !drain() || g_pdf.pages[0].pixels != retainedPixels)
+        return fail(L"Worker exception changed retained pixels or stranded work.");
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        g_pdfVirtualWorkerProbe.throwPublishOnce = true;
+    }
+    if (!queue(0, 113, true) || !drain() || g_pdf.pages[0].pixels != retainedPixels)
+        return fail(L"Allocation-free failure completion did not drain safely.");
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        if (g_pdfVirtualWorkerProbe.exceptions != 1 || g_pdfVirtualWorkerProbe.emergencyResults != 1)
+            return fail(L"Worker fault injection was not observed.");
+    }
+    if (!queue(0, 114, true) || !drain() || g_pdf.pages[0].pixels.empty() || g_pdf.pages[0].bmpW != 114)
+        return fail(L"Worker did not recover after an exception and publication failure.");
+    AppendUiAutomationTrace(L"automation:pdf_worker_faults_ok render=1 publish=1 recovery=1");
+    preview_trace::Append(L"PdfWorkerConcurrency", L"fairness=true viewport=true stale=true switch=true passed=true");
+    return true;
+}

@@ -1,5 +1,7 @@
 #include "note/note_render_source_plan.h"
 #include "note/note_source_coordinate_transform.h"
+#include "note/note_syntax_lexical.h"
+#include "note/note_clro_markdown.h"
 
 #include <algorithm>
 #include <exception>
@@ -763,34 +765,6 @@ void AddCut(std::vector<size_t>* cuts, size_t value, Span range) {
 // derive their exact source spans from the already-accepted style boundaries
 // instead of treating every HTML-looking token as syntax.  Unknown tags and
 // literal/code text consequently remain ordinary visible source text.
-[[nodiscard]] bool FindMarkupTagEndingAt(std::wstring_view source,
-                                          size_t end,
-                                          Span* out) noexcept {
-    if (!out || end == 0 || end > source.size() || source[end - 1] != L'>') return false;
-    size_t cursor = end - 1;
-    while (cursor > 0 && source[cursor - 1] != L'<' && source[cursor - 1] != L'\r' &&
-           source[cursor - 1] != L'\n') {
-        --cursor;
-    }
-    if (cursor == 0 || source[cursor - 1] != L'<') return false;
-    *out = {{cursor - 1}, {end}};
-    return true;
-}
-
-[[nodiscard]] bool FindMarkupTagStartingAt(std::wstring_view source,
-                                            size_t start,
-                                            Span* out) noexcept {
-    if (!out || start >= source.size() || source[start] != L'<') return false;
-    size_t end = start + 1;
-    while (end < source.size() && source[end] != L'>' && source[end] != L'\r' &&
-           source[end] != L'\n') {
-        ++end;
-    }
-    if (end >= source.size() || source[end] != L'>') return false;
-    *out = {{start}, {end + 1}};
-    return true;
-}
-
 void AddUniqueMarkupSyntaxSpan(std::vector<Span>* spans, Span candidate) {
     if (!spans || candidate.end <= candidate.start) return;
     for (const Span existing : *spans) {
@@ -919,6 +893,16 @@ void AppendStyle(std::vector<NoteRenderSourceStyleAttribute>* styles,
     styles->push_back(NoteRenderSourceStyleAttribute{kind, std::move(value)});
 }
 
+void BindTableCell(const TableCellBinding& cell, NoteRenderSourceRun* run) {
+    run->table_block = cell.table_block;
+    run->table_row_block = cell.table_row_block;
+    run->table_column = cell.column;
+    run->table_column_count = cell.column_count;
+    run->table_cell_align = cell.alignment;
+    run->table_header = cell.header;
+    if (cell.header) AppendStyle(&run->styles, StyleKind::Bold);
+}
+
 [[nodiscard]] bool AppendInlineStyles(
     const NoteSyntaxDocument& document,
     const NoteSourceLineMap::Snapshot& sourceLines,
@@ -951,7 +935,9 @@ void AppendStyle(std::vector<NoteRenderSourceStyleAttribute>* styles,
         StyleSpan style;
         if (!document.ResolveStyle(sourceLines, styleIndex, &style)) return false;
         if (SpanContains(style.span, range)) {
-            AppendStyle(styles, style.kind, style.value);
+            // Distinct nested relative attributes compose, even if their
+            // values are identical. Only idempotent inline flags deduplicate.
+            styles->push_back({style.kind, std::move(style.value)});
         }
     }
     return true;
@@ -993,17 +979,17 @@ void AppendStyle(std::vector<NoteRenderSourceStyleAttribute>* styles,
                                const NoteSourceLineMap::Snapshot& sourceLines,
                                const LineSemanticReferences& references,
                                Span range,
-                               bool* outIsMath) noexcept {
-    if (!outIsMath) return false;
+                               size_t* outMathIndex) noexcept {
+    if (!outMathIndex) return false;
     for (size_t mathIndex : references.math_indices) {
         MathSpan math;
         if (!document.ResolveMath(sourceLines, mathIndex, &math)) return false;
         if (SpanContains(math.span, range)) {
-            *outIsMath = true;
+            *outMathIndex = mathIndex;
             return true;
         }
     }
-    *outIsMath = false;
+    *outMathIndex = std::numeric_limits<size_t>::max();
     return true;
 }
 
@@ -1063,9 +1049,13 @@ void AddLineDecorationFlag(NoteRenderSourceLineDecoration* decoration,
 [[nodiscard]] bool AddHiddenSyntaxRuns(
     std::vector<NoteRenderSourceLinePlan>* lines,
     const NoteSourceLineMap::Snapshot& sourceLines,
-    const std::vector<bool>& blockMathLines) noexcept {
+    const std::vector<bool>& blockMathLines,
+    std::wstring_view rawSource,
+    const NoteSyntaxDocument& document,
+    const std::vector<LineSemanticReferences>& references) noexcept {
     if (!lines || lines->size() != sourceLines.line_count() ||
-        blockMathLines.size() != lines->size()) {
+        blockMathLines.size() != lines->size() || references.size() != lines->size() ||
+        rawSource.size() != sourceLines.text_length()) {
         return false;
     }
     try {
@@ -1082,8 +1072,35 @@ void AddLineDecorationFlag(NoteRenderSourceLineDecoration* decoration,
                           return lhs.source_span.end < rhs.source_span.end;
                       });
             std::vector<NoteRenderSourceRun> completed;
-            completed.reserve(line.runs.size() + 2);
+            completed.reserve(line.runs.size() + 3);
             size_t cursor = location->start.value;
+            // MD4C omits ordinary paragraph indentation. It is visible source,
+            // not zero-width syntax. Structural blocks already own their
+            // indentation; restoring those prefixes would count it twice.
+            constexpr uint32_t structuralIndent =
+                NoteRenderSourceLineDecorationHeading | NoteRenderSourceLineDecorationListItem |
+                NoteRenderSourceLineDecorationQuote | NoteRenderSourceLineDecorationCodeBlock |
+                NoteRenderSourceLineDecorationTable | NoteRenderSourceLineDecorationHorizontalRule |
+                NoteRenderSourceLineDecorationContainerOpening | NoteRenderSourceLineDecorationContainerClosing;
+            if ((line.decoration.flags & structuralIndent) == 0) {
+                const size_t firstRun = line.runs.empty()
+                    ? location->content_end.value : line.runs.front().source_span.start.value;
+                if (firstRun < cursor || firstRun > location->content_end.value) return false;
+                size_t prefixEnd = cursor;
+                while (prefixEnd < firstRun &&
+                       (rawSource[prefixEnd] == L' ' || rawSource[prefixEnd] == L'\t' ||
+                        rawSource[prefixEnd] == L'\u3000')) ++prefixEnd;
+                if (prefixEnd > cursor) {
+                    NoteRenderSourceRun prefix;
+                    prefix.source_span = {{cursor}, {prefixEnd}};
+                    prefix.display_source_span = prefix.source_span;
+                    prefix.line_index = {lineIndex};
+                    if (!AppendInlineStyles(document, sourceLines, references[lineIndex],
+                                            prefix.source_span, &prefix.styles)) return false;
+                    completed.push_back(std::move(prefix));
+                    cursor = prefixEnd;
+                }
+            }
             for (const NoteRenderSourceRun& run : line.runs) {
                 if (run.kind == NoteRenderSourceRunKind::BlockMath ||
                     run.source_span.start.value < cursor ||
@@ -1225,6 +1242,18 @@ void AddLineDecorationFlag(NoteRenderSourceLineDecoration* decoration,
     if (!location.has_value()) return false;
     NoteRenderSourceLinePlan line;
     if (!plan.ResolveLine(location->line_index, &line)) return false;
+    // At a shared text-run edge, generic span rebasing keeps an insertion
+    // outside both neighbours. In particular, a restored whitespace prefix
+    // and the parser's body leaf do not prove who owns a new boundary space.
+    // Rebuild this unproved boundary; ordinary interior edits still splice.
+    if (start == oldEnd) {
+        for (size_t index = 1; index < line.runs.size(); ++index) {
+            const auto& left = line.runs[index - 1];
+            const auto& right = line.runs[index];
+            if (left.kind == NoteRenderSourceRunKind::Text && right.kind == NoteRenderSourceRunKind::Text &&
+                left.source_span.end.value == start && right.source_span.start.value == start) return false;
+        }
+    }
     for (const NoteRenderSourceRun& run : line.runs) {
         if (run.kind != NoteRenderSourceRunKind::Text) continue;
         if (run.source_span.start.value <= start && run.source_span.end.value >= oldEnd &&
@@ -1467,12 +1496,19 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
                     rawSource.data() + location.start.value,
                     location.content_end.value - location.start.value);
                 NoteRenderSourceLineDecoration& decoration = lines[line].decoration;
-                if ((line >= firstLine.value && line <= lastLine.value) ||
-                    IsMarkdownFenceSourceLine(text)) {
+                std::wstring syntaxLine;
+                if (candidate->syntax_->uses_clro_fullwidth_markdown()) {
+                    syntaxLine.assign(text);
+                    std::transform(syntaxLine.begin(), syntaxLine.end(), syntaxLine.begin(), ClroMarkdownCharacter);
+                }
+                const bool fence = IsMarkdownFenceSourceLine(text) ||
+                    ((line < firstLine.value || line > lastLine.value) && !syntaxLine.empty() &&
+                     IsMarkdownFenceSourceLine(syntaxLine));
+                if ((line >= firstLine.value && line <= lastLine.value) || fence) {
                     AddLineDecorationFlag(&decoration,
                                           NoteRenderSourceLineDecorationCodeBlock);
                 }
-                if (IsMarkdownFenceSourceLine(text)) {
+                if (fence) {
                     AddLineDecorationFlag(&decoration,
                                           NoteRenderSourceLineDecorationCodeFence);
                 }
@@ -1488,7 +1524,12 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
             const std::wstring_view text(
                 rawSource.data() + location.start.value,
                 location.content_end.value - location.start.value);
-            if (IsMarkdownTableDividerSourceLine(text)) {
+            std::wstring syntaxLine;
+            if (candidate->syntax_->uses_clro_fullwidth_markdown()) {
+                syntaxLine.assign(text);
+                std::transform(syntaxLine.begin(), syntaxLine.end(), syntaxLine.begin(), ClroMarkdownCharacter);
+            }
+            if (IsMarkdownTableDividerSourceLine(syntaxLine.empty() ? text : std::wstring_view(syntaxLine))) {
                 AddLineDecorationFlag(&decoration,
                                       NoteRenderSourceLineDecorationTableDivider);
             }
@@ -1535,6 +1576,8 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
                 return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
             }
         }
+        std::vector<std::pair<Span, size_t>> orderedStyles;
+        orderedStyles.reserve(document.node_count(NoteSyntaxDocumentNodeKind::Style));
         for (size_t index = 0;
              index < document.node_count(NoteSyntaxDocumentNodeKind::Style); ++index) {
             StyleSpan style;
@@ -1544,21 +1587,27 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
             if (style.span.end <= style.span.start) {
                 continue;
             }
-            if (!indexSpanByLine(style.span, index,
-                                 &LineSemanticReferences::style_indices)) {
-                return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
-            }
+            orderedStyles.push_back({style.span, index});
             // A style span begins immediately after its accepted opening tag
             // and, when explicitly closed, ends immediately before that
             // closing tag. Only these parser-proven tokens become hidden;
             // ordinary angle-bracket text has no StyleSpan and remains text.
             Span markupTag;
-            if (FindMarkupTagEndingAt(rawSource, style.span.start.value, &markupTag)) {
+            if (FindNoteMarkupTagEndingAt(rawSource, style.span.start, &markupTag, candidate->syntax_->uses_clro_fullwidth_markdown())) {
                 AddUniqueMarkupSyntaxSpan(&legacyMarkupSyntaxSpans, markupTag);
             }
-            if (FindMarkupTagStartingAt(rawSource, style.span.end.value, &markupTag)) {
+            if (FindNoteMarkupTagStartingAt(rawSource, style.span.end, &markupTag, candidate->syntax_->uses_clro_fullwidth_markdown())) {
                 AddUniqueMarkupSyntaxSpan(&legacyMarkupSyntaxSpans, markupTag);
             }
+        }
+        // Parser close order is inner-first. Source attributes must instead
+        // apply outer-to-inner; sort metadata once, not once per glyph/run.
+        std::stable_sort(orderedStyles.begin(), orderedStyles.end(), [](const auto& a, const auto& b) {
+            return a.first.start != b.first.start ? a.first.start < b.first.start : a.first.end > b.first.end;
+        });
+        for (const auto& style : orderedStyles) {
+            if (!indexSpanByLine(style.first, style.second, &LineSemanticReferences::style_indices))
+                return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
         }
         for (const Span markupTag : legacyMarkupSyntaxSpans) {
             const auto first = NoteSourceLineMap::FindByOffset(sourceLines, markupTag.start);
@@ -1576,6 +1625,8 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
             }
         }
 
+        std::vector<size_t> mathParents(document.node_count(NoteSyntaxDocumentNodeKind::Math),
+                                        std::numeric_limits<size_t>::max());
         // Text nodes already exclude Markdown block and inline delimiters. Split
         // them at every semantic boundary, then let the later placement layer
         // use the preserved source span instead of guessing delimiter widths.
@@ -1649,11 +1700,12 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
                 cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
                 for (size_t cut = 1; cut < cuts.size(); ++cut) {
                     const Span runSpan{{cuts[cut - 1]}, {cuts[cut]}};
-                    bool isMath = false;
-                    if (!IsMathRange(document, sourceLines, references, runSpan, &isMath)) {
+                    size_t mathIndex = std::numeric_limits<size_t>::max();
+                    if (!IsMathRange(document, sourceLines, references, runSpan, &mathIndex)) {
                         return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
                     }
-                    if (runSpan.end <= runSpan.start || isMath) {
+                    if (mathIndex < mathParents.size()) mathParents[mathIndex] = textNode.parent_block;
+                    if (runSpan.end <= runSpan.start || mathIndex < mathParents.size()) {
                         continue;
                     }
                     NoteRenderSourceRun run;
@@ -1681,15 +1733,7 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
                         run.kind != NoteRenderSourceRunKind::InlineCode;
                     if (const TableCellBinding* tableCell = FindTableCellBinding(
                             tableCellBindings, document, sourceLines, textNode.parent_block)) {
-                        run.table_block = tableCell->table_block;
-                        run.table_row_block = tableCell->table_row_block;
-                        run.table_column = tableCell->column;
-                        run.table_column_count = tableCell->column_count;
-                        run.table_cell_align = tableCell->alignment;
-                        run.table_header = tableCell->header;
-                        if (run.table_header) {
-                            AppendStyle(&run.styles, StyleKind::Bold);
-                        }
+                        BindTableCell(*tableCell, &run);
                     }
                     lines[line].runs.push_back(std::move(run));
                 }
@@ -1721,6 +1765,14 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
             run.kind = math.kind == MathKind::Block
                 ? NoteRenderSourceRunKind::BlockMath
                 : NoteRenderSourceRunKind::InlineMath;
+            run.parent_block = mathParents[mathIndex];
+            run.heading_level = run.parent_block < headingLevels.size() ? headingLevels[run.parent_block] : 0;
+            if (!AppendInlineStyles(document, sourceLines, lineReferences[run.line_index.value],
+                                    math.span, &run.styles)) {
+                return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
+            }
+            if (const TableCellBinding* cell = FindTableCellBinding(
+                    tableCellBindings, document, sourceLines, run.parent_block)) BindTableCell(*cell, &run);
             lines[run.line_index.value].runs.push_back(std::move(run));
             if (math.kind == MathKind::Block) {
                 for (size_t line = firstLocation->line_index.value;
@@ -1736,7 +1788,35 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
             }
         }
 
-        if (!AddHiddenSyntaxRuns(&lines, sourceLines, blockMathLines)) {
+        // Titles are ordinary literal, bold source runs on the opening row.
+        // The same measurement/hit/selection/raw pipeline owns their geometry;
+        // remaining fence syntax is filled with zero-width runs below.
+        for (size_t index = 0; index < blocks.size(); ++index) {
+            const BlockNode& block = blocks[index];
+            const bool container = block.kind == BlockKind::FencedContainer;
+            if ((!container && block.kind != BlockKind::CodeBlock) || block.span.end <= block.span.start) continue;
+            const auto first = NoteSourceLineMap::FindByOffset(sourceLines, block.span.start);
+            if (!first || (!container && first->line_index.value == 0)) continue;
+            const size_t line = first->line_index.value - (container ? 0 : 1);
+            const auto& location = lineLocations[line];
+            std::wstring titleSyntax = rawSource.substr(
+                location.start.value, location.content_end.value - location.start.value);
+            if (candidate->syntax_->uses_clro_fullwidth_markdown()) {
+                std::transform(titleSyntax.begin(), titleSyntax.end(), titleSyntax.begin(), ClroMarkdownCharacter);
+            }
+            const Span title = NoteFenceTitleSpan(titleSyntax, container);
+            if (title.end <= title.start) continue;
+            NoteRenderSourceRun run;
+            run.source_span = {{location.start.value + title.start.value},
+                               {location.start.value + title.end.value}};
+            run.display_source_span = run.source_span;
+            run.line_index = {line};
+            run.parent_block = index;
+            AppendStyle(&run.styles, StyleKind::Bold);
+            lines[line].runs.push_back(std::move(run));
+        }
+
+        if (!AddHiddenSyntaxRuns(&lines, sourceLines, blockMathLines, rawSource, document, lineReferences)) {
             return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
         }
 

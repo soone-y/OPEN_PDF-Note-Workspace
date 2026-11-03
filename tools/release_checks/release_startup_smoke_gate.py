@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import time
 import zipfile
 from pathlib import Path, PurePosixPath
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.dev.isolated_app_test import OwnedProcess, PrivateDesktop
 
 
 STARTUP_WAIT_SECONDS = 4
@@ -105,28 +107,22 @@ def safe_extract(archive_path: Path, destination: Path, release_dir: Path, archi
 
 
 def smoke_start(executable: Path) -> None:
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    process = subprocess.Popen(
-        [str(executable)],
-        cwd=executable.parent,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=creationflags,
-    )
+    desktop = PrivateDesktop()
+    process = None
     try:
+        with open(os.devnull, "wb") as output:
+            process = OwnedProcess([str(executable)], executable.parent, desktop.path,
+                                   stdout=output, stderr=output)
         time.sleep(STARTUP_WAIT_SECONDS)
         exit_code = process.poll()
         if exit_code is not None:
             raise RuntimeError(f"application exited during startup smoke test (exit={exit_code})")
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+        try:
+            if process:
+                process.close()
+        finally:
+            desktop.close()
 
 
 def validate_release_set(release_set: Path) -> list[str]:

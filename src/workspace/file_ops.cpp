@@ -1,5 +1,6 @@
 // file: main/file_ops.cpp
 #include "workspace/file_ops.h"
+#include "recovery/stage_recovery.h"
 #include "ui/core/main_window_api.h"
 #include "workspace/workspace_tree.h"
 #include "workspace/workspace_actions.h"
@@ -10,7 +11,10 @@
 #include "core/app_core.h"
 #include "core/localization.h"
 #include "core/atomic_write.h"
+#include "core/fault_injection.h"
+#include "core/preview_trace.h"
 #include "clrop/bridge.h"
+#include "bridge/view_bridge.h"
 #include "file_output/file_output.h"
 #include "note/note_parser.h"
 #include "note/note_identity_store.h"
@@ -21,6 +25,7 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <cwctype>
 #include <optional>
 #include <set>
 #include <unordered_map>

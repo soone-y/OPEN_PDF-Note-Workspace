@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <numeric>
 #include <mutex>
+#include <condition_variable>
+#include <thread>
 #include <limits>
 
 namespace write_checks {
@@ -218,6 +220,37 @@ Result ProbeDirectory(const std::filesystem::path& target, bool write) {
     if (!ok) { result.step = failureStep; return result; }
     result.error = 0; result.outcome = Outcome::Passed; result.step = Step::Complete; return result;
 }
+bool IsParentDestinationProbe(const Record& record) {
+    if (record.result.source != Source::Manual || record.result.operationPath.empty() ||
+        (record.kind != Kind::PdfWrite && record.kind != Kind::NoteWrite)) return false;
+    const auto leaf = record.kind == Kind::PdfWrite ? L"pdf" : L"note";
+    return SameTarget(record.target, (std::filesystem::path(record.result.operationPath) / leaf).wstring());
+}
+Result ProbeSessionDestination(Kind kind, const std::filesystem::path& target,
+    const std::filesystem::path& session, const std::atomic_bool& cancel) {
+    Result result; result.time = UtcNow();
+    if (cancel.load()) { result.outcome = Outcome::Canceled; result.error = ERROR_CANCELLED; return result; }
+    result = ProbeDirectory(target, true);
+    if (result.outcome != Outcome::Unavailable || result.step != Step::Open ||
+        (result.error != ERROR_FILE_NOT_FOUND && result.error != ERROR_PATH_NOT_FOUND) ||
+        (kind != Kind::PdfWrite && kind != Kind::NoteWrite) || !IsSafeLocalPath(session)) return result;
+    const auto leaf = kind == Kind::PdfWrite ? L"pdf" : L"note";
+    if (!SameTarget(target.wstring(), (session / leaf).wstring())) return result;
+    const DWORD parentAttributes = GetFileAttributesW(ToExtendedWin32PathIfAbsoluteLocal(session).c_str());
+    if (parentAttributes == INVALID_FILE_ATTRIBUTES || !(parentAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (parentAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return result;
+    // Recheck the final component: no substitution for a newly created child,
+    // an inaccessible child, a file with that name, or a reparse point.
+    if (GetFileAttributesW(ToExtendedWin32PathIfAbsoluteLocal(target).c_str()) != INVALID_FILE_ATTRIBUTES) return result;
+    const DWORD childError = GetLastError();
+    if (childError != ERROR_FILE_NOT_FOUND && childError != ERROR_PATH_NOT_FOUND) return result;
+    if (cancel.load()) { result.outcome = Outcome::Canceled; result.error = ERROR_CANCELLED; return result; }
+    // Reuse the normal parent probe, including its retained ancestor handles,
+    // content verification and owned-file cleanup. Parent errors stay errors.
+    result = ProbeDirectory(session, true);
+    result.operationPath = session.wstring();
+    return result;
+}
 namespace {
 Result ReadProbeFile(const std::filesystem::path& target, DWORD access, std::uint64_t maxBytes,
                      const std::atomic_bool* cancel) {
@@ -382,11 +415,15 @@ void MergeLatest(std::vector<Record>& into, const std::vector<Record>& from) {
         if (!previous || previous->result.time <= row.result.time) Upsert(into, row);
     }
 }
-struct NormalEntry { std::filesystem::path store; Record record; bool pending = true; DWORD error = 0; ULONGLONG lastReadSave = 0; };
+struct NormalEntry { std::filesystem::path store; Record record; bool pending = true; DWORD error = 0; ULONGLONG lastReadSave = 0; bool scheduled = false; };
 std::mutex normalMemoryMutex, normalIoMutex;
 std::vector<NormalEntry> normalEntries;
 std::uint64_t normalRevision = 1;
 std::atomic_bool normalPersistence{false};
+std::condition_variable normalWake;
+#if defined(PDF_NOTE_WRITE_CHECKS_TESTING)
+std::atomic<void (*)()> beforeNormalPersist{nullptr};
+#endif
 bool SamePath(const std::filesystem::path& a, const std::filesystem::path& b) {
     return _wcsicmp(a.c_str(), b.c_str()) == 0;
 }
@@ -415,6 +452,62 @@ bool PersistNormalPending(const std::filesystem::path& store, std::vector<Record
     }
     return saved;
 }
+// Process-owned, one writer. UI observation never takes the I/O mutex or copies
+// a write queue. Scheduling lives in the existing bounded evidence registry.
+class NormalWriter {
+public:
+    NormalWriter() : thread_([this] { Run(); }) {}
+    ~NormalWriter() { Stop(); }
+    void Stop() noexcept {
+        { std::lock_guard<std::mutex> lock(normalMemoryMutex); stopping_ = true; }
+        normalWake.notify_all();
+        if (thread_.joinable()) thread_.join();
+    }
+private:
+    void Run() noexcept {
+        (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        for (;;) {
+            std::filesystem::path store;
+            try {
+                {
+                    std::unique_lock<std::mutex> lock(normalMemoryMutex);
+                    normalWake.wait(lock, [&] {
+                        return stopping_ || (normalPersistence.load() && std::any_of(normalEntries.begin(), normalEntries.end(),
+                            [](const auto& entry) { return entry.scheduled; }));
+                    });
+                    auto next = std::find_if(normalEntries.begin(), normalEntries.end(),
+                        [](const auto& entry) { return entry.scheduled; });
+                    if (next == normalEntries.end()) { if (stopping_) return; else continue; }
+                    store = next->store;
+                    for (auto& entry : normalEntries) if (SamePath(entry.store, store)) entry.scheduled = false;
+                }
+#if defined(PDF_NOTE_WRITE_CHECKS_TESTING)
+                if (auto hook = beforeNormalPersist.load()) hook();
+#endif
+                std::lock_guard<std::mutex> io(normalIoMutex);
+                std::vector<Record> pending;
+                {
+                    std::lock_guard<std::mutex> lock(normalMemoryMutex);
+                    for (const auto& entry : normalEntries)
+                        if (SamePath(entry.store, store) && entry.pending) pending.push_back(entry.record);
+                }
+                (void)PersistNormalPending(store, std::move(pending));
+            } catch (...) {
+                // Do not retry a failing ledger in a hot loop. Pending evidence
+                // remains available to explicit flush or the next observation.
+                std::lock_guard<std::mutex> lock(normalMemoryMutex);
+                for (auto& entry : normalEntries) if (entry.pending && (store.empty() || SamePath(entry.store, store))) {
+                    entry.error = ERROR_NOT_ENOUGH_MEMORY; entry.scheduled = false;
+                }
+                ++normalRevision;
+            }
+        }
+    }
+    bool stopping_ = false; // memory mutex protected
+    std::thread thread_;
+};
+NormalWriter* normalWriter = nullptr; // UI startup/shutdown only
+NormalWriter& Writer() { static NormalWriter writer; normalWriter = &writer; return writer; }
 void ObserveNormal(const std::filesystem::path& owner, const std::filesystem::path& original,
                    Kind kind, const std::filesystem::path& explicitTarget, bool passed, DWORD error) noexcept {
     try {
@@ -448,8 +541,6 @@ void ObserveNormal(const std::filesystem::path& owner, const std::filesystem::pa
         result.outcome = passed ? Outcome::Passed : Outcome::Failed;
         result.step = passed ? Step::Complete : (IsNormalRead(kind) ? Step::Open : kind == Kind::OfficeConversion ? Step::Convert : Step::Write);
         const Record observation{kind, target.wstring(), result};
-        std::lock_guard<std::mutex> io(normalIoMutex);
-        std::vector<Record> pending;
         bool persistNow = true;
         {
             std::lock_guard<std::mutex> lock(normalMemoryMutex);
@@ -465,7 +556,8 @@ void ObserveNormal(const std::filesystem::path& owner, const std::filesystem::pa
                 if (found->record.result.time <= observation.result.time) {
                     const auto lastSave = found->lastReadSave;
                     const auto pendingError = found->pending ? found->error : 0;
-                    *found = {store, observation, true, pendingError, lastSave};
+                    const bool scheduled = found->scheduled;
+                    *found = {store, observation, true, pendingError, lastSave, scheduled};
                 }
             }
             else normalEntries.push_back({store, observation, true, 0});
@@ -474,13 +566,12 @@ void ObserveNormal(const std::filesystem::path& owner, const std::filesystem::pa
                 const auto oldest = std::min_element(normalEntries.begin(), normalEntries.end(), [](const NormalEntry& a, const NormalEntry& b) { return a.record.result.time < b.record.result.time; });
                 normalEntries.erase(oldest);
             }
-            for (const auto& entry : normalEntries) if (SamePath(entry.store, store) && entry.pending) pending.push_back(entry.record);
+            if (persistNow) for (auto& entry : normalEntries)
+                if (SamePath(entry.store, store) && entry.pending) entry.scheduled = true;
             ++normalRevision;
         }
         if (!normalPersistence.load()) return; // Startup has not acquired its workspace lock yet.
-        // Repeated reads update memory immediately, but batch ledger writes.
-        // First reads, outcome/error changes and normal writes persist at once.
-        if (persistNow) { const bool saved = PersistNormalPending(store, std::move(pending)); (void)saved; }
+        if (persistNow) normalWake.notify_one();
     } catch (...) { /* Evidence must never change the real operation's result. */ }
 }
 }
@@ -498,9 +589,19 @@ bool SaveLatest(const std::filesystem::path& path, std::vector<Record>& records,
     return false;
 }
 void EnableNormalObservations(bool persist) noexcept {
+    try { if (persist) (void)Writer(); }
+    catch (...) { /* Leave persistence enabled: explicit flush can still recover pending evidence. */ }
     normalPersistence.store(persist);
     normalSink.store(&ObserveNormal);
+    normalWake.notify_one();
 }
+void ShutdownNormalObservations() noexcept {
+    normalSink.store(nullptr);
+    try { if (normalWriter) normalWriter->Stop(); } catch (...) {}
+}
+#if defined(PDF_NOTE_WRITE_CHECKS_TESTING)
+void SetBeforeNormalPersistForTesting(void (*hook)()) { beforeNormalPersist.store(hook); }
+#endif
 bool FlushNormalObservations(const std::filesystem::path& workspace) noexcept {
     try {
         if (!normalPersistence.load()) return false;
@@ -545,7 +646,7 @@ void AcknowledgeNormalObservations(const std::filesystem::path& store, const std
         for (auto& entry : normalEntries) if (SamePath(entry.store, store)) {
             const auto* row = Find(persisted, entry.record.kind, entry.record.target);
             if (row && row->result.time >= entry.record.result.time) {
-                entry.pending = false; entry.error = 0;
+                entry.pending = false; entry.error = 0; entry.scheduled = false;
                 if (IsNormalRead(entry.record.kind)) entry.lastReadSave = GetTickCount64();
             }
         }

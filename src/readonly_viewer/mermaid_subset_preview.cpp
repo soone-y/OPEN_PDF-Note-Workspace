@@ -1,6 +1,7 @@
 ﻿#include "readonly_viewer/mermaid_subset_preview.h"
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <utility>
 #include <vector>
@@ -21,12 +22,13 @@ struct PositionedNode {
 };
 
 SIZE MeasureNode(HDC hdc, const DiagramNode& node, float zoom) {
-    const int horizontal_padding = std::max(8, static_cast<int>(16 * zoom));
-    const int vertical_padding = std::max(6, static_cast<int>(12 * zoom));
+    const int horizontal_padding = std::max(2, static_cast<int>(16 * zoom));
+    const int vertical_padding = std::max(2, static_cast<int>(12 * zoom));
     RECT single_line{};
     DrawTextW(hdc, node.label.c_str(), static_cast<int>(node.label.size()), &single_line,
               DT_CALCRECT | DT_SINGLELINE);
-    const int text_width = std::max(90, std::min(static_cast<int>(kMaximumNodeTextWidth * zoom), static_cast<int>(single_line.right)));
+    const int text_width = std::max(std::max(1, static_cast<int>(90 * zoom)),
+        std::min(static_cast<int>(kMaximumNodeTextWidth * zoom), static_cast<int>(single_line.right)));
     RECT wrapped{0, 0, text_width, 0};
     DrawTextW(hdc, node.label.c_str(), static_cast<int>(node.label.size()), &wrapped,
               DT_CALCRECT | DT_WORDBREAK | DT_EDITCONTROL);
@@ -154,7 +156,7 @@ bool MermaidSubsetPreview::Create(HWND parent, HINSTANCE instance, int control_i
     if (hwnd_) return true;
     if (!RegisterWindowClass(instance)) return false;
     hwnd_ = CreateWindowExW(WS_EX_CLIENTEDGE, kPreviewWindowClass, L"",
-                            WS_CHILD | WS_VSCROLL | WS_HSCROLL,
+                            WS_CHILD | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP,
                             0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(control_id)),
                             instance, this);
     return hwnd_ != nullptr;
@@ -162,13 +164,12 @@ bool MermaidSubsetPreview::Create(HWND parent, HINSTANCE instance, int control_i
 
 void MermaidSubsetPreview::SetModel(DiagramModel model) {
     model_ = std::move(model);
-    scroll_x_ = 0;
-    scroll_y_ = 0;
-    if (hwnd_) InvalidateRect(hwnd_, nullptr, TRUE);
+    FitToWindow();
 }
 
 void MermaidSubsetPreview::Clear() {
     model_ = {};
+    scroll_x_ = scroll_y_ = 0;
     if (hwnd_) InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
@@ -193,10 +194,64 @@ void MermaidSubsetPreview::ZoomOut() {
 }
 
 void MermaidSubsetPreview::ResetView() {
+    fit_pending_ = false;
     zoom_ = 1.0F;
     scroll_x_ = 0;
     scroll_y_ = 0;
     if (hwnd_) InvalidateRect(hwnd_, nullptr, TRUE);
+}
+
+void MermaidSubsetPreview::FitToWindow() {
+    zoom_ = 1.0F;
+    scroll_x_ = scroll_y_ = 0;
+    fit_pending_ = true;
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, TRUE);
+}
+
+DiagramViewState MermaidSubsetPreview::GetViewState() const noexcept {
+    return {scroll_x_, scroll_y_, zoom_, !model_.nodes.empty()};
+}
+
+void MermaidSubsetPreview::RestoreViewState(const DiagramViewState& state) {
+    if (!state.captured || !std::isfinite(state.zoom)) return;
+    fit_pending_ = false;
+    zoom_ = std::clamp(state.zoom, 0.1F, 4.0F);
+    scroll_x_ = std::max(0, state.scroll_x);
+    scroll_y_ = std::max(0, state.scroll_y);
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, TRUE);
+}
+
+void MermaidSubsetPreview::UpdateScrollbars(int content_width, int content_height, const RECT& client) {
+    scroll_x_ = std::clamp(scroll_x_, 0, std::max(0, content_width - static_cast<int>(client.right)));
+    scroll_y_ = std::clamp(scroll_y_, 0, std::max(0, content_height - static_cast<int>(client.bottom)));
+    for (int bar : {SB_HORZ, SB_VERT}) {
+        const int extent = bar == SB_HORZ ? content_width : content_height;
+        const int page = bar == SB_HORZ ? client.right : client.bottom;
+        SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL};
+        info.nMax = std::max(0, extent - 1);
+        info.nPage = static_cast<UINT>(std::max(0, page));
+        info.nPos = bar == SB_HORZ ? scroll_x_ : scroll_y_;
+        SetScrollInfo(hwnd_, bar, &info, TRUE);
+    }
+}
+
+void MermaidSubsetPreview::HandleScroll(int bar, UINT command) {
+    SCROLLINFO info{sizeof(info), SIF_ALL};
+    if (!GetScrollInfo(hwnd_, bar, &info)) return;
+    int next = info.nPos;
+    switch (command) {
+    case SB_LINEUP: next -= 48; break;
+    case SB_LINEDOWN: next += 48; break;
+    case SB_PAGEUP: next -= static_cast<int>(info.nPage); break;
+    case SB_PAGEDOWN: next += static_cast<int>(info.nPage); break;
+    case SB_THUMBTRACK: case SB_THUMBPOSITION: next = info.nTrackPos; break;
+    case SB_TOP: next = info.nMin; break;
+    case SB_BOTTOM: next = info.nMax; break;
+    default: return;
+    }
+    next = std::clamp(next, info.nMin, std::max(info.nMin, info.nMax - static_cast<int>(info.nPage) + 1));
+    if (bar == SB_HORZ) scroll_x_ = next; else scroll_y_ = next;
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void MermaidSubsetPreview::ScrollBy(int horizontal_delta, int vertical_delta) {
@@ -206,7 +261,8 @@ void MermaidSubsetPreview::ScrollBy(int horizontal_delta, int vertical_delta) {
 }
 
 void MermaidSubsetPreview::ChangeZoom(float delta) {
-    zoom_ = std::max(0.5F, std::min(2.0F, zoom_ + delta));
+    fit_pending_ = false;
+    zoom_ = std::clamp(zoom_ + delta, 0.1F, 4.0F);
     if (hwnd_) InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
@@ -227,26 +283,55 @@ LRESULT CALLBACK MermaidSubsetPreview::WindowProc(HWND hwnd, UINT message, WPARA
     }
     if (preview && message == WM_MOUSEWHEEL) {
         const int delta = GET_WHEEL_DELTA_WPARAM(w_param);
+        if (delta == 0) return 0;
         if ((GET_KEYSTATE_WPARAM(w_param) & MK_CONTROL) != 0) {
             preview->ChangeZoom(delta > 0 ? 0.1F : -0.1F);
+        } else if ((GET_KEYSTATE_WPARAM(w_param) & MK_SHIFT) != 0) {
+            preview->ScrollBy(delta > 0 ? -48 : 48, 0);
+        } else if (preview->document_scroll_target_) {
+            // An embedded drawing must not trap ordinary document scrolling.
+            // Use native line scrolling: forwarding the original wheel event
+            // can be rejected because its hit target is the child drawing.
+            const int lines = 3 * std::clamp(std::abs(delta) / WHEEL_DELTA, 1, 4);
+            for (int line = 0; line < lines; ++line)
+                SendMessageW(preview->document_scroll_target_, WM_VSCROLL,
+                    delta > 0 ? SB_LINEUP : SB_LINEDOWN, 0);
         } else {
             preview->ScrollBy(0, delta > 0 ? -48 : 48);
         }
         return 0;
     }
     if (preview && message == WM_RBUTTONUP && preview->detached_window_target_) {
-        PostMessageW(preview->detached_window_target_, kOpenDetachedDiagramMessage, 0, 0);
+        PostMessageW(preview->detached_window_target_, kOpenDetachedDiagramMessage, reinterpret_cast<WPARAM>(hwnd), 0);
         return 0;
     }
     if (preview && message == WM_VSCROLL) {
-        const int code = LOWORD(w_param);
-        preview->ScrollBy(0, code == SB_LINEUP ? -48 : (code == SB_LINEDOWN ? 48 : 0));
+        preview->HandleScroll(SB_VERT, LOWORD(w_param));
         return 0;
     }
     if (preview && message == WM_HSCROLL) {
-        const int code = LOWORD(w_param);
-        preview->ScrollBy(code == SB_LINELEFT ? -48 : (code == SB_LINERIGHT ? 48 : 0), 0);
+        preview->HandleScroll(SB_HORZ, LOWORD(w_param));
         return 0;
+    }
+    if (preview && message == WM_MOUSEHWHEEL) {
+        preview->ScrollBy(GET_WHEEL_DELTA_WPARAM(w_param) > 0 ? 48 : -48, 0);
+        return 0;
+    }
+    if (preview && message == WM_LBUTTONDOWN) { SetFocus(hwnd); return 0; }
+    if (preview && message == WM_KEYDOWN) {
+        switch (w_param) {
+        case VK_LEFT: preview->HandleScroll(SB_HORZ, SB_LINEUP); return 0;
+        case VK_RIGHT: preview->HandleScroll(SB_HORZ, SB_LINEDOWN); return 0;
+        case VK_UP: preview->HandleScroll(SB_VERT, SB_LINEUP); return 0;
+        case VK_DOWN: preview->HandleScroll(SB_VERT, SB_LINEDOWN); return 0;
+        case VK_PRIOR: preview->HandleScroll(SB_VERT, SB_PAGEUP); return 0;
+        case VK_NEXT: preview->HandleScroll(SB_VERT, SB_PAGEDOWN); return 0;
+        default: break;
+        }
+    }
+    if (preview && message == WM_NCDESTROY) {
+        preview->hwnd_ = nullptr;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     }
     return DefWindowProcW(hwnd, message, w_param, l_param);
 }
@@ -255,7 +340,7 @@ void MermaidSubsetPreview::Paint(HDC hdc) {
     RECT client{};
     GetClientRect(hwnd_, &client);
     FillRect(hdc, &client, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
-    if (model_.nodes.empty()) return;
+    if (model_.nodes.empty()) { UpdateScrollbars(0, 0, client); return; }
 
     int font_height = static_cast<int>(-14 * zoom_);
     HFONT hFont = CreateFontW(font_height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, 
@@ -354,8 +439,21 @@ void MermaidSubsetPreview::Paint(HDC hdc) {
             }
         }
     }
-    scroll_x_ = std::min(scroll_x_, std::max(0, content_width - static_cast<int>(client.right)));
-    scroll_y_ = std::min(scroll_y_, std::max(0, content_height - static_cast<int>(client.bottom)));
+    if (fit_pending_ && client.right > 2 * kMargin && client.bottom > 2 * kMargin) {
+        fit_pending_ = false;
+        const float ratio = std::min(
+            static_cast<float>(client.right - 2 * kMargin) / std::max(1, content_width - 2 * kMargin),
+            static_cast<float>(client.bottom - 2 * kMargin) / std::max(1, content_height - 2 * kMargin));
+        const float fitted = std::clamp(zoom_ * std::min(1.0F, ratio), 0.1F, 1.0F);
+        if (std::abs(fitted - zoom_) > 0.01F) {
+            zoom_ = fitted;
+            SelectObject(hdc, old_font);
+            DeleteObject(hFont);
+            Paint(hdc); // One bounded layout retry; the pending flag is already cleared.
+            return;
+        }
+    }
+    UpdateScrollbars(content_width, content_height, client);
     for (PositionedNode& node : positioned) OffsetRect(&node.rect, -scroll_x_, -scroll_y_);
 
     for (size_t group_index = 0; group_index < model_.groups.size(); ++group_index) {

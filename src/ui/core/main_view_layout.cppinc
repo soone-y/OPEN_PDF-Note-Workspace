@@ -5,6 +5,9 @@
 // ---------------------------------------------------------------------
 // Layout and UI creation
 // ---------------------------------------------------------------------
+#include "ui/shape_boundary_options.h"
+#include "ui/toolbar_scroll.h"
+
 static bool IsAnnotOptionCycleComboId(int id) {
     switch (id) {
     case ID_TOOL_FONT:
@@ -71,25 +74,32 @@ static void ApplyToolbarChildUIFonts() {
 }
 
 static void CreateChildren(HWND hWnd) {
+    // The layout owns exact pane heights. Native whole-row snapping would
+    // change those bounds and force another move on every layout pass.
     g_hLectureList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
                                      WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP |
-                                     LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                                     LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
                                      0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
     g_hSessionList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
                                      WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP |
-                                     LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                                     LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
                                      0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
     g_hPdfList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
                                  WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP |
-                                 LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                                 LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
                                  0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
     g_hNoteList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
                                    WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP |
-                                   LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                                   LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
                                    0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
-    g_hPdfToolbar = CreateWindowExW(WS_EX_CONTROLPARENT, kToolbarHostClass, L"",
-                                    WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+    // Compose the toolbar and its native child controls together, so background
+    // and control paints cannot expose an empty intermediate toolbar frame.
+    g_hPdfToolbar = CreateWindowExW(WS_EX_CONTROLPARENT | WS_EX_COMPOSITED, kToolbarHostClass, L"",
+                                    WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VSCROLL,
                                     0, 0, 100, 32, hWnd, nullptr, g_hInst, nullptr);
+    if (!ui::toolbar_scroll::Install(g_hPdfToolbar, [](HWND host) {
+            ui::ApplyLayout(GetParent(host), ui::LayoutPass::Commit);
+        })) preview_trace::Append(L"ToolbarScroll", L"scroll host installation failed");
     g_hPdfView = CreateWindowExW(WS_EX_CLIENTEDGE, kPdfViewClass, L"",
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL,
                                  0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
@@ -110,7 +120,7 @@ static void CreateChildren(HWND hWnd) {
                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ANNOT_PANEL_CLEAR)),
                                     g_hInst, nullptr);
     g_hAnnotList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
-                                   WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP,
+                                   WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP | LBS_NOINTEGRALHEIGHT,
                                    0, 0, 100, 100, hWnd,
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ANNOT_PANEL_LIST)),
                                    g_hInst, nullptr);
@@ -182,6 +192,12 @@ static void CreateChildren(HWND hWnd) {
                       reinterpret_cast<DWORD_PTR>(&s_sessionListDblClick));
     SetWindowSubclass(g_hPdfList, PdfNoteListProc, 3, reinterpret_cast<DWORD_PTR>(&s_pdfListClick));
     SetWindowSubclass(g_hNoteList, PdfNoteListProc, 4, reinterpret_cast<DWORD_PTR>(&s_noteListClick));
+    for (const HWND list : {g_hLectureList, g_hSessionList, g_hPdfList, g_hNoteList, g_hAnnotList}) {
+        if (!ui::InstallListBoxScroll(list))
+            preview_trace::Append(L"ListBoxScroll", L"subclass installation failed; native scrolling retained");
+    }
+    DragAcceptFiles(g_hLectureList, TRUE);
+    DragAcceptFiles(g_hSessionList, TRUE);
     DragAcceptFiles(g_hPdfList, TRUE);
     DragAcceptFiles(g_hNoteList, TRUE);
     SetUIFont(g_hAnnotShow);
@@ -350,6 +366,7 @@ static void CreateChildren(HWND hWnd) {
     SetUIFont(g_hShortcutFontSizeEdit);
     SetUIFont(g_hShortcutTagEdit);
     SetUIFont(g_hBtnShortcutInput);
+    SetUIFont(g_hBtnNoteWritingGuide);
     SetUIFont(g_hBtnShortcutPdfLink);
 
     g_hComboFont = CreateWindowExW(0, L"COMBOBOX", L"",
@@ -517,18 +534,9 @@ static void CreateChildren(HWND hWnd) {
                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_LINE_DASH_STYLE)),
                                             g_hInst, nullptr);
     ui::GuardComboAgainstAccidentalChange(g_hComboLineDashStyle, g_hPdfView);
-    if (g_hComboLineDashStyle) {
-        auto add = [&](const wchar_t* label, int value) {
-            int idx = static_cast<int>(SendMessageW(g_hComboLineDashStyle, CB_ADDSTRING, 0,
-                                                    reinterpret_cast<LPARAM>(label)));
-            if (idx >= 0) {
-                SendMessageW(g_hComboLineDashStyle, CB_SETITEMDATA, idx, static_cast<LPARAM>(value));
-            }
-        };
-        add(localization::Text(L"ui.layout.93c21b87d6e3").c_str(), 0);
-        add(localization::Text(L"ui.layout.c93df0074dab").c_str(), 1);
-        SendMessageW(g_hComboLineDashStyle, CB_SETCURSEL, g_lineDashStyle == L"dash" ? 1 : 0, 0);
-    }
+    ui::PopulateLineStyleOptions(g_hComboLineDashStyle,false);
+    (void)ui::SyncLineStyleOption(g_hComboLineDashStyle,
+        g_lineDashStyle==L"dash" ? ShapeLineStyle::Dashed : ShapeLineStyle::Solid,false);
 
     g_hComboShapeKind = CreateWindowExW(0, L"COMBOBOX", L"",
                                         WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
@@ -546,7 +554,7 @@ static void CreateChildren(HWND hWnd) {
         };
         add(localization::Text(L"ui.layout.60bceaee61a7").c_str(), ShapeKind::Circle);
         add(localization::Text(L"ui.layout.3526a0625382").c_str(), ShapeKind::Ellipse);
-        add(localization::Text(L"ui.layout.e3f9e9d7366f").c_str(), ShapeKind::RotatedEllipse);
+        add(localization::Text(L"shape.arc.label").c_str(), ShapeKind::Arc);
         add(localization::Text(L"ui.layout.06b65b92aa7f").c_str(), ShapeKind::Square);
         add(localization::Text(L"ui.layout.9117e6d6ff5f").c_str(), ShapeKind::Rectangle);
         add(localization::Text(L"ui.layout.55914cda2140").c_str(), ShapeKind::Diamond);
@@ -589,6 +597,14 @@ static void CreateChildren(HWND hWnd) {
             }
         }
     }
+
+    g_hRadioBlendNormal = CreateWindowExW(0, L"BUTTON", localization::Text(L"annotation.blend.normal").c_str(),
+        WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON, 0,0,100,24,g_hPdfToolbar,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_BLEND_NORMAL)),g_hInst,nullptr);
+    g_hRadioBlendMultiply = CreateWindowExW(0, L"BUTTON", localization::Text(L"annotation.blend.multiply").c_str(),
+        WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON, 0,0,80,24,g_hPdfToolbar,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_BLEND_MULTIPLY)),g_hInst,nullptr);
+    SetUIFont(g_hRadioBlendNormal);SetUIFont(g_hRadioBlendMultiply);
 
     g_hComboMagnifierShape = CreateWindowExW(0, L"COMBOBOX", L"",
                                              WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
@@ -752,6 +768,12 @@ static void CreateChildren(HWND hWnd) {
                                             0, 0, 90, 26, hWnd,
                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_SHORTCUT_PDF_LINK)),
                                             g_hInst, nullptr);
+    g_hBtnNoteWritingGuide = CreateWindowExW(0, L"BUTTON", localization::Text(L"note.input_assist.guide").c_str(),
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                            0, 0, 130, 26, hWnd,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_NOTE_ASSIST_GUIDE)),
+                                            g_hInst, nullptr);
+    SetUIFont(g_hBtnNoteWritingGuide);
     g_hBtnNoteAssistBullet = CreateWindowExW(0, L"BUTTON", localization::Text(L"ui.layout.fb696da9fda6").c_str(),
                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                              0, 0, 70, 26, hWnd,
@@ -856,6 +878,7 @@ struct SessionOrganizeStats {
     int moved = 0;
     int renamedOnConflict = 0;
     int failed = 0;
+    bool failureReported = false;
     std::vector<std::wstring> failures;
     std::vector<std::pair<std::filesystem::path, std::filesystem::path>> movedPaths;
 };
@@ -927,6 +950,7 @@ static SessionOrganizeStats NormalizeCacheSession(const std::filesystem::path& s
         if (!OrganizeSessionFile(g_hMainWnd, src, destDir, &dest)) {
             stats.failed++;
             stats.failures.push_back(src.wstring());
+            stats.failureReported = true;
             break; // A recovery-required transaction must stop the batch.
         }
         stats.moved++;
@@ -997,7 +1021,10 @@ static void OrganizeCurrentSessionFiles(HWND hWnd) {
     if (g_hBtnModeWave) ShowWindow(g_hBtnModeWave, SW_HIDE);
     if (g_hBtnModeFreehand) ShowWindow(g_hBtnModeFreehand, SW_HIDE);
     if (organizeStats.failed > 0) {
-        ShowSilentMessageDialog(hWnd, ui.menuOrganizeSessionFiles, msg, SoftNoticeKind::Warning);
+        // The per-file operation already reports its cause (or a cancelled
+        // prompt). Do not stack a second organization-failed dialog on it.
+        if (!organizeStats.failureReported)
+            ShowSilentMessageDialog(hWnd, ui.menuOrganizeSessionFiles, msg, SoftNoticeKind::Warning);
     } else {
         ShowSoftNotice(hWnd, msg);
     }
@@ -1107,6 +1134,7 @@ static bool HandleAppExit(HWND hWnd) {
         preview_trace::Append(L"HandleAppExit", L"abort=exit_blocking_dialog_open");
         return false;
     }
+    if (!IsUiAutomationEnabled() && !pending_write_retry::ConfirmExit(hWnd)) return false;
     if (!SaveWorkspaceMemoForExit()) return false;
     CancelPendingLinkMode(hWnd);
     if (!CommitActiveEditsForAppExit(hWnd)) {
@@ -1227,7 +1255,6 @@ static void ReloadWorkspaceFromRoot(HWND hWnd, const std::wstring& root, bool pr
     SetAppLogWorkspaceRoot(g_workspaceRoot);
     g_config = LoadWorkspaceConfig(g_workspaceRoot);
     ApplyRuntimeLogConfigFromWorkspace(g_workspaceRoot, g_config);
-    InitScheduleSortBaseTime();
     EnsureWorkspaceResourceDirs(nullptr);
     {
         std::wstring identityErr;
@@ -1318,6 +1345,7 @@ static bool IsLeftPaneFocusWindow(HWND hwnd) {
         g_hShortcutFontSizeEdit,
         g_hShortcutTagEdit,
         g_hBtnShortcutInput,
+        g_hBtnNoteWritingGuide,
         g_hBtnShortcutPdfLink,
         g_hBtnNoteAssistBullet,
         g_hBtnNoteAssistQuote,

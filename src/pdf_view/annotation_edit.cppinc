@@ -364,6 +364,9 @@ static void TrimAnnotHistory() {
 }
 
 static void PushAnnotCommand(AnnotCommand cmd) {
+    if (!CanonicalizeAnnotation(cmd.before) || !CanonicalizeAnnotation(cmd.after)) return;
+    for (auto& item : cmd.snapshot) if (!CanonicalizeAnnotation(item)) return;
+    for (auto& item : cmd.afterSnapshot) if (!CanonicalizeAnnotation(item)) return;
     AnnotCommand pendingCopy = cmd;
     g_annotRedo.clear();
     g_annotUndo.push_back(std::move(cmd));
@@ -400,6 +403,8 @@ static void RecordAnnotAdd(int index, const Annotation& ann, bool revealLatest =
     Annotation recorded = ann;
     if (index >= 0 && index < static_cast<int>(g_annots.size())) {
         EnsureAnnotationId(g_annots[static_cast<size_t>(index)], g_annots, index);
+        SetAnnotationInputBasis(g_annots[static_cast<size_t>(index)]);
+        if (!CanonicalizeAnnotation(g_annots[static_cast<size_t>(index)])) return;
         recorded = g_annots[static_cast<size_t>(index)];
     } else {
         EnsureAnnotationId(recorded, g_annots, -1);
@@ -427,6 +432,7 @@ static void RecordAnnotUpdate(int beforeIndex, int afterIndex, const Annotation&
     Annotation afterRecorded = after;
     if (afterIndex >= 0 && afterIndex < static_cast<int>(g_annots.size())) {
         EnsureAnnotationId(g_annots[static_cast<size_t>(afterIndex)], g_annots, afterIndex);
+        if (!CanonicalizeAnnotation(g_annots[static_cast<size_t>(afterIndex)])) return;
         afterRecorded = g_annots[static_cast<size_t>(afterIndex)];
     } else {
         EnsureAnnotationId(afterRecorded, g_annots, -1);
@@ -666,7 +672,7 @@ bool DuplicateAnnotationAtIndex(HWND owner, int index) {
     index = FindAnnotIndexByIdOrFallback(selectedId, index);
     if (index < 0 || index >= static_cast<int>(g_annots.size())) return false;
 
-    Annotation duplicate = g_annots[static_cast<size_t>(index)];
+    Annotation duplicate = ProjectAnnotationForView(g_annots[static_cast<size_t>(index)]);
     duplicate.id.clear();
     OffsetDuplicateAnnotationWithinPage(duplicate);
     const int duplicateIndex = index + 1;
@@ -744,29 +750,6 @@ bool UpdateAnnotationAtIndex(HWND owner, int index, const Annotation& after) {
     MarkAnnotsDirty(owner);
     if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
     return true;
-}
-
-bool ApplyCurrentToolbarStyleToAnnotation(HWND owner, int index) {
-    if (index < 0 || index >= static_cast<int>(g_annots.size())) return false;
-    Annotation after = g_annots[static_cast<size_t>(index)];
-    after.color = g_activeColor;
-    if (g_hComboWidth) {
-        const int selected = static_cast<int>(SendMessageW(g_hComboWidth, CB_GETCURSEL, 0, 0));
-        if (selected >= 0) {
-            const LRESULT value = SendMessageW(g_hComboWidth, CB_GETITEMDATA, selected, 0);
-            if (value != CB_ERR && value > 0) after.width = static_cast<double>(value) / 10.0;
-        }
-    }
-    if (g_hComboMarkerAlpha) {
-        const int selected = static_cast<int>(SendMessageW(g_hComboMarkerAlpha, CB_GETCURSEL, 0, 0));
-        if (selected >= 0) {
-            const LRESULT value = SendMessageW(g_hComboMarkerAlpha, CB_GETITEMDATA, selected, 0);
-            if (value != CB_ERR && value >= 0 && value <= 1000) {
-                after.alpha = static_cast<double>(value) / 1000.0;
-            }
-        }
-    }
-    return UpdateAnnotationAtIndex(owner, index, after);
 }
 
 bool FinalizePendingPdfLinkMarkers(HWND owner, const std::wstring& linkId, const std::wstring& notePath) {
@@ -946,6 +929,7 @@ static bool AddMathAnnotationCore(HWND pdfWnd,
     }
     if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return false;
 
+    if (!EnsurePdfPageCoordinates(pageIndex)) return false;
     Annotation ann;
     ann.type = Annotation::Type::MathBox;
     ann.pageIndex = pageIndex;
@@ -1024,12 +1008,6 @@ static bool AddMathAnnotationCore(HWND pdfWnd,
     return true;
 }
 
-bool AddMathAnnotationFromList(HWND pdfWnd, int mathIndex, const POINT& screenPt) {
-    if (mathIndex < 0 || mathIndex >= static_cast<int>(g_mathEntries.size())) return false;
-    const MathEntry& entry = g_mathEntries[static_cast<size_t>(mathIndex)];
-    return AddMathAnnotationCore(pdfWnd, entry.text, entry.kind, &screenPt, false);
-}
-
 bool AddMathAnnotationFromTextAtPoint(HWND pdfWnd, const std::wstring& rawText, MathKind kind, const POINT& screenPt) {
     return AddMathAnnotationCore(pdfWnd, rawText, kind, &screenPt, false);
 }
@@ -1040,33 +1018,17 @@ bool AddMathAnnotationFromText(HWND pdfWnd, const std::wstring& rawText, MathKin
 
 static void BeginTextEdit(HWND hwnd, int pageIndex, double anchorX, double anchorY,
                           double wPt, double hPt, const std::wstring& text,
-                          const std::wstring& fontName, double fontPt) {
+                          const std::wstring& fontName, double fontPt, int contentRotation = 0) {
     if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return;
     const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
-    double left = anchorX;
-    double top = anchorY;
-    double right = left + wPt;
-    double bottom = top - hPt;
-    if (right > page.widthPt) {
-        double shift = right - page.widthPt;
-        left = std::max(0.0, left - shift);
-        right = page.widthPt;
-    }
-    if (bottom < 0.0) {
-        double shift = -bottom;
-        top = std::min(page.heightPt, top + shift);
-        bottom = 0.0;
-    }
-    if (left < 0.0) left = 0.0;
-    if (right > page.widthPt) right = page.widthPt;
-    if (top > page.heightPt) top = page.heightPt;
+    const auto initial = InitialTextBoxEditBounds(page, anchorX, anchorY, wPt, hPt, contentRotation);
     g_pdf.editingText = true;
-    SetTextBoxState(TextBoxInteractionState::Editing);
+    g_pdf.editContentRotation = page_rotation::Normalize(contentRotation);
     g_pdf.editPage = pageIndex;
-    g_pdf.editX1 = left;
-    g_pdf.editX2 = right;
-    g_pdf.editY1 = top;
-    g_pdf.editY2 = bottom;
+    g_pdf.editX1 = initial.left;
+    g_pdf.editX2 = initial.right;
+    g_pdf.editY1 = initial.top;
+    g_pdf.editY2 = initial.bottom;
     g_pdf.editText = text;
     g_pdf.editCaret = g_pdf.editText.size();
     g_pdf.editSelStart = g_pdf.editCaret;
@@ -1089,6 +1051,7 @@ static void BeginTextEdit(HWND hwnd, int pageIndex, double anchorX, double ancho
     SetFocus(hwnd);
     // Enable IME now that text editing has started.
     EnablePdfViewIme(hwnd);
+    BeginPdfTextInputAccessibility(hwnd);
     InvalidateEditingTextBoxRect(hwnd);
 }
 

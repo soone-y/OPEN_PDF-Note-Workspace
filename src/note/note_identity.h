@@ -101,8 +101,6 @@ public:
     std::optional<ViewIdentity> FindView(ViewId viewId) const;
     void ForgetView(ViewId viewId);
 
-    size_t note_count() const;
-    size_t view_count() const;
 
 private:
     NoteId AllocateNoteId();

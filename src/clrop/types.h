@@ -30,6 +30,12 @@ struct Item {
     std::wstring content; // text content
     std::vector<std::wstring> lines;
     std::string writingMode; // "horizontal" or "vertical_rl"; empty means horizontal
+    int contentRotation = 0; // clockwise degrees: 0, 90, 180, 270; text/math only
+    std::string backgroundAssistMode; // inherit|off|auto|inverted; empty means legacy inherit
+    std::string markerDisplayMode; // display only: legacy|multiply; empty uses the document version
+    double shapeAngle = 0.0; // v2, clockwise whole-shape angle in radians
+    std::string shapeBoundary; // v2 shape only: black|white; omission keeps existing rendering
+    std::string blendMode; // v2 display only, shape/marker-free: normal|multiply; empty is normal
     std::wstring linkId;
     std::wstring notePath;
     std::string mathKind;
@@ -39,6 +45,9 @@ struct Item {
     std::optional<double> shapeRotation; // radians; used by rotated_ellipse
 
     std::optional<std::array<double, 4>> bbox;   // x,y,w,h (text)
+    // Exact source endpoints for bbox items.  bbox remains the v1-compatible
+    // geometry; this optional field avoids losing a tiny endpoint to subtraction.
+    std::optional<std::array<double, 4>> bboxEndpoints; // x1,y1,x2,y2
     std::optional<std::array<double, 2>> p1;     // line start
     std::optional<std::array<double, 2>> p2;     // line end
     std::vector<double> quads;                   // marker-text / text-color, 8*N
@@ -52,7 +61,7 @@ struct Page {
 };
 
 struct Document {
-    int version = 1;
+    int version = 2; // v1 omitted marker mode is Legacy; v2 omitted mode is Multiply
     PdfId pdfId;
     std::vector<Page> pages;
     bool dirty = false;

@@ -15,6 +15,7 @@ std::wstring g_workspaceRoot;
 static int notices = 0, checks = 0;
 void SetUIFont(HWND hwnd) { SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), FALSE); }
 void ApplyThemeToDialog(HWND) {}
+bool DrawThemeButton(const DRAWITEMSTRUCT*) { return false; }
 LRESULT ThemeCtlColorPanel(HWND, HDC) { return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH)); }
 void ShowSilentMessageDialog(HWND, const std::wstring&, const std::wstring&, SoftNoticeKind, const std::vector<SilentDialogPath>&) { ++notices; }
 namespace localization { std::wstring Text(std::wstring_view id) { return std::wstring(id); } }

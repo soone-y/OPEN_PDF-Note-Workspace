@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include "path_safety.h"
+#include "document_source_protection.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -274,28 +275,42 @@ inline bool AtomicReplaceFile(const std::filesystem::path& dest,
     for (int attempt = 0; attempt < kMaxReplaceAttempts; ++attempt) {
         destAttrs = GetFileAttributesW(wDest.c_str());
         const bool destExists = (destAttrs != INVALID_FILE_ATTRIBUTES);
-
+        document_source_protection::Mutation protection(dest, dest);
+        if (!protection.ready()) { lastErr = protection.error(); break; }
+        bool replaced = false;
         if (destExists) {
             if (ReplaceFileW(wDest.c_str(), wTmp.c_str(),
                              /*lpBackupFileName=*/nullptr,
                              REPLACEFILE_WRITE_THROUGH,
                              /*lpExclude=*/nullptr,
                              /*lpReserved=*/nullptr)) {
-                return true;
+                replaced = true;
             }
-            if (MoveFileExW(wTmp.c_str(), wDest.c_str(),
+            if (!replaced && MoveFileExW(wTmp.c_str(), wDest.c_str(),
                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-                return true;
+                replaced = true;
             }
             lastErr = GetLastError();
         } else {
             if (MoveFileExW(wTmp.c_str(), wDest.c_str(),
                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-                return true;
+                replaced = true;
             }
             lastErr = GetLastError();
         }
-
+        DWORD protectionError = 0;
+        if (!protection.Finish(replaced, &protectionError)) {
+            // Keep the caller's stage/backup on failure, but do not describe
+            // already-published bytes as a failed filesystem replacement.
+            if (replaced) {
+                if (err) *err = L"Destination was replaced, but original-file protection is pending: " +
+                    wDest + L" (" + std::to_wstring(protectionError) + L") " + Win32ErrorMessage(protectionError);
+                return false;
+            }
+            lastErr = protectionError;
+            break;
+        }
+        if (replaced) return true;
         if (!IsTransientReplaceError(lastErr)) break;
         if (attempt + 1 < kMaxReplaceAttempts) {
             Sleep(static_cast<DWORD>((attempt + 1) * 20));

@@ -2,12 +2,15 @@
 param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'app_test_desktop.ps1')
+if (Invoke-AppTestDesktop -ScriptPath $PSCommandPath -Parameters $PSBoundParameters) { return }
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $outputDir = Join-Path $repoRoot "out/tests/local_path_browser"
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 $compiler = (Get-Command g++ -ErrorAction Stop).Source
 $testExe = Join-Path $outputDir "local_path_browser_tests.exe"
-& $compiler -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -static-libgcc -static-libstdc++ `
+& $compiler -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -static `
     -I (Join-Path $repoRoot "src") (Join-Path $repoRoot "tests/unit/local_path_browser_tests.cpp") `
     -lcomctl32 -lgdi32 -lole32 -lshell32 -luuid -limm32 -o $testExe
 if ($LASTEXITCODE -ne 0) { throw "Local path browser tests compilation failed." }

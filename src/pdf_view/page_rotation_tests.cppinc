@@ -1,0 +1,243 @@
+#include "pdf_view/annotation_display_tests.cppinc"
+
+// Called only by the explicitly requested, isolated PDF automation fixture.
+bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
+                             std::wstring* trace, std::wstring* outError) {
+    if (!owner || !g_hPdfView || g_pdf.kind != DocKind::Pdf || g_pdf.pages.empty() || g_pdf.editingText)
+        return false;
+    const auto originalAnnots = g_annots;
+    const auto originalRotations = g_pdf.pageViewRotations;
+    const auto originalTool = g_toolMode;
+    const auto originalFont = g_textFontName;
+    const double originalPt = g_textFontPt;
+    const bool originalAdaptive = g_textFontUseA4Scale;
+    const double originalScrollX = g_pdf.scrollX, originalScrollY = g_pdf.scrollY;
+    const bool originalDirty = g_annotsDirty, originalIntegrate = g_annotsNeedsIntegrate;
+    auto originalUndo = g_annotUndo, originalRedo = g_annotRedo;
+    auto originalPending = g_pendingAnnotStageCommands;
+    const auto originalPendingTarget = g_pendingAnnotStageTargetPath;
+    const bool originalPendingValid = g_pendingAnnotStageCommandsValid;
+    const bool originalHistoryDirty = g_annotHistoryDirty;
+    const int originalAutosave = g_config.autoSaveSeconds;
+    const COLORREF originalColor = g_activeColor;
+    const auto restore = [&]() {
+        if (g_pdf.editingText) EndInlineTextEditing(g_hPdfView, false);
+        g_annots = originalAnnots;
+        g_pdf.pageViewRotations = originalRotations;
+        BuildPageCaches(g_hPdfView);
+        UpdatePageLayout(g_hPdfView);
+        g_pdf.scrollX = originalScrollX; g_pdf.scrollY = originalScrollY;
+        SaveLastPdfViewInfo();
+        g_annotsDirty = originalDirty; g_annotsNeedsIntegrate = originalIntegrate;
+        g_annotUndo = std::move(originalUndo); g_annotRedo = std::move(originalRedo);
+        g_pendingAnnotStageCommands = std::move(originalPending);
+        g_pendingAnnotStageTargetPath = originalPendingTarget;
+        g_pendingAnnotStageCommandsValid = originalPendingValid;
+        g_annotHistoryDirty = originalHistoryDirty; g_config.autoSaveSeconds = originalAutosave;
+        g_toolMode = originalTool; g_textFontName = originalFont; g_textFontPt = originalPt;
+        g_textFontUseA4Scale = originalAdaptive; g_activeColor = originalColor;
+        ClearAnnotationSelection(); RefreshAnnotPanel(); UpdateToolbarUI(owner);
+    };
+    struct Restore { const decltype(restore)& action; ~Restore() { action(); } } scoped{restore};
+    const auto fail = [&](const wchar_t* message) { if (outError) *outError = message; return false; };
+    g_config.autoSaveSeconds = kAutoSaveModeOff;
+    g_toolMode = ToolMode::TextBox; g_textFontName = L"Arial"; g_textFontPt = 18;
+    g_textFontUseA4Scale = false;
+    if (!EnsurePdfPageCoordinates(0)) return fail(L"Rotation fixture page geometry is unavailable.");
+    const auto raw = g_pdf.pages.front();
+    Annotation fixture;
+    fixture.type = Annotation::Type::TextBox; fixture.pageIndex = 0; fixture.id = L"rotation-existing";
+    fixture.x1 = raw.pdfOriginX + 60; fixture.x2 = fixture.x1 + 180;
+    fixture.y1 = raw.pdfOriginY + raw.pdfHeightPt - 80; fixture.y2 = fixture.y1 - 45;
+    fixture.text = L"Rotation ABC"; fixture.fontName = L"Arial"; fixture.fontPt = 18;
+    fixture.color = RGB(0,80,230);
+    std::error_code directoryError;
+    std::filesystem::create_directories(outputDirectory, directoryError);
+    if (directoryError) return fail(L"Cannot create owned rotation test output directory.");
+    for (int turn = 0; turn < 4; ++turn) {
+        g_annots = {fixture}; ClearPdfAnnotationHistory();
+        g_annotsDirty = false; g_annotsNeedsIntegrate = false;
+        JumpToPage(g_hPdfView,0);
+        if (!RotateCurrentPdfPageView(g_hPdfView,0,true)) return fail(L"Reset rotation failed.");
+        JumpToPage(g_hPdfView,0);
+        if (!RotateCurrentPdfPageView(g_hPdfView,turn,false) || g_pdf.pages.front().viewRotation != turn)
+            return fail(L"Current-page rotation did not select the requested quarter turn.");
+        if (g_annotsDirty || g_annotsNeedsIntegrate || !AnnotationEquals(g_annots.front(),fixture) || !g_annotUndo.empty())
+            return fail(L"View rotation changed persistent annotation state.");
+        const int effective = page_rotation::Normalize(raw.intrinsicRotation + turn);
+        const auto projected = ProjectAnnotationForView(fixture);
+        RECT bounds{};
+        if (!PtRectToClientRect(0,projected.x1,projected.y1,projected.x2,projected.y2,bounds))
+            return fail(L"Rotated annotation bounds unavailable.");
+        const POINT center{(bounds.left+bounds.right)/2,(bounds.top+bounds.bottom)/2};
+        int hit=-1;
+        if (!HitTestAnnotationForMove(center,Annotation::Type::TextBox,hit) || hit!=0)
+            return fail(L"Rotated textbox hit test used a different coordinate basis.");
+        g_pdf.pendingTextBoxHit=true;g_pdf.pendingTextBoxIndex=0;g_pdf.pendingTextBoxDown=center;
+        CommitPendingTextBoxEdit(g_hPdfView);
+        if (!g_pdf.editingText || g_pdf.editContentRotation!=effective)
+            return fail(L"Rotated textbox did not reopen at its paper orientation.");
+        if (!VerifyTextBoxReeditHoverCaret(outError)) return false;
+        g_pdf.editCaret = g_pdf.editText.size(); ClearEditSelection();
+        POINT caret{}; RECT editor{};
+        if (!InlineCaretClientPoint(caret) || !EditingBoxClientRect(editor) ||
+            caret.x<editor.left-2 || caret.x>editor.right+2 || caret.y<editor.top-2 || caret.y>editor.bottom+2)
+            return fail(L"Rotated caret is outside the physical editor bounds.");
+        size_t caretIndex = 0;
+        if (!HitTestEditCaretFromClientPoint(caret,&caretIndex,true) || caretIndex != g_pdf.editCaret)
+            return fail(L"Rotated caret and click position do not round trip.");
+        SendMessageW(g_hPdfView,WM_CHAR,L'Z',0);
+        CommitActiveTextEditing(true);
+        if (g_pdf.editingText || g_annots.size()!=1 || g_annots.front().contentRotation!=0 ||
+            g_annots.front().projectedCoordinates || g_annots.front().text.find(L'Z')==std::wstring::npos)
+            return fail(L"Reedited textbox failed to return to canonical coordinates.");
+        const auto edited=g_annots.front();
+        if (!UndoAnnotCommand(owner) || !AnnotationEquals(g_annots.front(),fixture) ||
+            !RedoAnnotCommand(owner) || !AnnotationEquals(g_annots.front(),edited))
+            return fail(L"Rotated textbox undo/redo did not preserve the exact annotation.");
+        const auto& page=g_pdf.pages.front();
+        // Keep focus in the PDF pane: beginning the next empty box must publish
+        // its IME position without relying on WM_SETFOCUS or the first character.
+        SetFocus(g_hPdfView);
+        BeginTextEdit(g_hPdfView,0,page.widthPt*0.45,page.heightPt*0.55,160,40,L"",L"Arial",18);
+        POINT initialImeCaret{};
+        COMPOSITIONFORM initialImeForm{};
+        HIMC initialImeContext = ImmGetContext(g_hPdfView);
+        const bool initialImePositionRead = initialImeContext &&
+            ImmGetCompositionWindow(initialImeContext, &initialImeForm);
+        if (initialImeContext) ImmReleaseContext(g_hPdfView, initialImeContext);
+        const bool initialImeCaretRead = InlineCaretClientPoint(initialImeCaret);
+        if (!initialImePositionRead || !initialImeCaretRead ||
+            initialImeForm.ptCurrentPos.x != initialImeCaret.x ||
+            initialImeForm.ptCurrentPos.y != initialImeCaret.y || !g_pdf.editText.empty()) {
+            if (trace) *trace += L"pdf_rotation:initial_ime_failure context=" + std::to_wstring(initialImeContext != nullptr) +
+                L" form=" + std::to_wstring(initialImePositionRead) + L" caret=" + std::to_wstring(initialImeCaretRead) +
+                L" actual_x=" + std::to_wstring(initialImeForm.ptCurrentPos.x) + L" actual_y=" + std::to_wstring(initialImeForm.ptCurrentPos.y) +
+                L" expected_x=" + std::to_wstring(initialImeCaret.x) + L" expected_y=" + std::to_wstring(initialImeCaret.y) +
+                L" style=" + std::to_wstring(initialImeForm.dwStyle) + L"\n";
+            return fail(L"Empty textbox did not publish its IME position before input.");
+        }
+        g_activeColor = RGB(230,20,30);
+        for (wchar_t ch : std::wstring(L"New")) SendMessageW(g_hPdfView,WM_CHAR,ch,0);
+        CommitActiveTextEditing(true);
+        if (g_annots.size()!=2 || g_annots.back().contentRotation!=page_rotation::Normalize(-effective) ||
+            ProjectAnnotationForView(g_annots.back()).contentRotation!=0)
+            return fail(L"New text was not upright on the rotated view and anchored on paper.");
+        Annotation math;
+        math.type=Annotation::Type::MathBox;math.pageIndex=0;math.id=L"rotation-math";
+        math.x1=page.widthPt*0.6;math.x2=math.x1+100;math.y1=page.heightPt*0.4;math.y2=math.y1-50;
+        math.text=L"x^2";math.fontName=L"Arial";math.fontPt=18;math.color=RGB(20,180,30);
+        SetAnnotationInputBasis(math);
+        if (!CanonicalizeAnnotation(math)) return false;
+        g_annots.push_back(math);
+        Annotation triangle;
+        triangle.type=Annotation::Type::Shape;triangle.shapeKind=ShapeKind::Triangle;
+        triangle.pageIndex=0;triangle.id=L"rotation-triangle";triangle.color=RGB(240,130,0);triangle.alpha=1;
+        triangle.x1=page.widthPt*0.5;triangle.x2=triangle.x1+80;
+        triangle.y1=page.heightPt*0.25;triangle.y2=triangle.y1-50;
+        SetAnnotationInputBasis(triangle);
+        if (!CanonicalizeAnnotation(triangle)) return false;
+        g_annots.push_back(triangle);
+        const auto sidecar=std::filesystem::path(outputDirectory)/(L"rotation_"+std::to_wstring(turn)+L".clrop");
+        std::wstring error;
+        if (!clrop_bridge::SaveAnnotations(sidecar.wstring(),CurrentLogicalPdfPath(),g_annots,error))
+            return fail(L"Oriented sidecar save failed.");
+        std::vector<Annotation> reopened;bool mismatch=false;
+        if (!clrop_bridge::LoadAnnotations(sidecar.wstring(),CurrentLogicalPdfPath(),reopened,mismatch,nullptr,error) ||
+            mismatch || reopened.size()!=4 || !AnnotationEquals(reopened.back(),g_annots.back()))
+            return fail(L"Oriented sidecar reload changed annotation geometry or content direction.");
+        std::vector<file_output::PdfPageSpec> pages{{0,true}};pages.front().rotation=turn;
+        const auto output=std::filesystem::path(outputDirectory)/(L"rotation_"+std::to_wstring(turn)+L".pdf");
+        if (!file_output::ExportPdfPages(owner,pages,output.wstring(),true,1.0,true))
+            return fail(L"Rotated output PDF failed.");
+        if (!RunPdfAnnotationDisplayProbe(trace,outError)) return false;
+        if (trace) *trace += L"pdf_rotation:case_ok turn="+std::to_wstring(turn)+L"\n";
+    }
+    JumpToPage(g_hPdfView,0);
+    if (!RotateCurrentPdfPageView(g_hPdfView,0,true)) return false;
+    const auto saved=g_annots;
+    for (int i=0;i<16;++i) {
+        JumpToPage(g_hPdfView,0);
+        if (!RotateCurrentPdfPageView(g_hPdfView,1,false)) return false;
+    }
+    if (g_pdf.pages.front().viewRotation!=0 || g_annots.size()!=saved.size()) return false;
+    for (size_t i=0;i<saved.size();++i) if (!AnnotationEquals(g_annots[i],saved[i]))
+        return fail(L"Repeated page rotations changed persistent coordinates.");
+    if (g_pdf.pages.size() < 2) return fail(L"All-page rotation requires a multi-page fixture.");
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_ALL_RESET, 0);
+    JumpToPage(g_hPdfView, 1);
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_PAGE_RIGHT, 0);
+    if (g_pdf.pages[0].viewRotation != 0 || g_pdf.pages[1].viewRotation != 1)
+        return fail(L"Current-page rotation changed another page.");
+    std::vector<int> mixed;
+    for (const auto& page : g_pdf.pages) mixed.push_back(page.viewRotation);
+    const auto annotationsBeforeBatch = g_annots;
+    const size_t undoCount = g_annotUndo.size(), redoCount = g_annotRedo.size();
+    g_annotsDirty = false; g_annotsNeedsIntegrate = false;
+    const auto beforeGeneration = g_pdf.renderGeneration;
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_ALL_RIGHT, 0);
+    if (g_pdf.renderGeneration != beforeGeneration + 1)
+        return fail(L"All-page rotation must refresh the renderer once for the whole batch.");
+    for (size_t i=0; i<g_pdf.pages.size(); ++i) {
+        const auto& page = g_pdf.pages[i];
+        const int expected = page_rotation::Normalize(mixed[i] + 1);
+        const auto size = page_rotation::Extent(page.canonicalWidthPt,page.canonicalHeightPt,expected);
+        if (page.viewRotation != expected || g_pdf.pageViewRotations[i] != expected ||
+            page.widthPt != size.width || page.heightPt != size.height)
+            return fail(L"Batch rotation failed to preserve per-page differences and extents.");
+    }
+    // Zoom/layout rebuilds retain the session angles without loading all page contents.
+    BuildPageCaches(g_hPdfView);
+    for (size_t i=0; i<g_pdf.pages.size(); ++i)
+        if (g_pdf.pages[i].viewRotation != page_rotation::Normalize(mixed[i]+1))
+            return fail(L"Page-cache rebuild discarded an all-page rotation.");
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_ALL_LEFT, 0);
+    for (size_t i=0; i<g_pdf.pages.size(); ++i)
+        if (g_pdf.pages[i].viewRotation != mixed[i]) return fail(L"Batch left/right rotation did not round trip.");
+    // Current page is already zero; resetting the other pages must still update layout once.
+    JumpToPage(g_hPdfView,0);
+    const auto resetGeneration = g_pdf.renderGeneration;
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_ALL_RESET, 0);
+    if (g_pdf.renderGeneration != resetGeneration+1)
+        return fail(L"All-page reset ignored a rotated page outside the current page.");
+    const auto noOpGeneration = g_pdf.renderGeneration;
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_ALL_RESET, 0);
+    if (g_pdf.renderGeneration != noOpGeneration) return fail(L"No-op batch reset triggered rendering work.");
+    for (int i=0;i<4;++i)
+        if (!RotateAllPdfPagesView(g_hPdfView,1)) return fail(L"Repeated batch rotation failed.");
+    for (const auto& page:g_pdf.pages)
+        if (page.viewRotation != 0 || page.widthPt != page.canonicalWidthPt || page.heightPt != page.canonicalHeightPt)
+            return fail(L"Four batch rotations did not restore original page extents.");
+    if (g_annotsDirty || g_annotsNeedsIntegrate || g_annotUndo.size()!=undoCount || g_annotRedo.size()!=redoCount ||
+        g_annots.size()!=annotationsBeforeBatch.size()) return fail(L"Batch view rotation changed annotation persistence state.");
+    for (size_t i=0;i<g_annots.size();++i)
+        if (!AnnotationEquals(g_annots[i],annotationsBeforeBatch[i])) return fail(L"Batch rotation mutated a saved annotation.");
+    if (trace) *trace += L"pdf_rotation:all_pages_ok pages="+std::to_wstring(g_pdf.pages.size())+L"\n";
+    // Exercise the real metadata writer/reader and the same pre-layout restore
+    // used by document loading. Fit modes must retain rotations independently
+    // from whether a saved zoom/anchor is requested.
+    if (!RotateCurrentPdfPageView(g_hPdfView, 1, false)) return fail(L"Cannot seed persisted rotation.");
+    const auto persistedTurns = g_pdf.pageViewRotations;
+    PdfViewRestorePoint stored;
+    if (!ReadPdfViewRecordForPath(g_pdf.path, stored) || stored.pageRotations != persistedTurns)
+        return fail(L"Page rotations did not round trip through the real view record.");
+    const auto originalOpenMode = g_config.pdfOpenViewMode;
+    const bool originalOpeningPreference = g_usePdfOpeningPreference;
+    const bool originalOpeningAnchor = g_restorePdfOpeningAnchor;
+    for (const auto mode : {L"width", L"page", L"previous"}) {
+        g_config.pdfOpenViewMode = mode;
+        QueuePendingPdfRestoreForPath(g_pdf.path);
+        RestorePendingPdfPageRotations();
+        if (g_pdf.pageViewRotations != persistedTurns) return fail(L"Fit preference lost saved rotations.");
+        BuildPageCaches(g_hPdfView);
+        UpdatePageLayout(g_hPdfView);
+        if (g_pdf.pages.front().viewRotation != persistedTurns.front()) return fail(L"Layout preceded rotation restore.");
+    }
+    g_config.pdfOpenViewMode = originalOpenMode;
+    g_usePdfOpeningPreference = originalOpeningPreference;
+    g_restorePdfOpeningAnchor = originalOpeningAnchor;
+    g_pendingPdfRestore.reset();
+    if (!RotateAllPdfPagesView(g_hPdfView, 0, true)) return fail(L"Cannot restore zero rotations after record probe.");
+    if (trace) *trace += L"pdf_rotation:canonical_edit_save_undo_export_ok cases=4\n";
+    return true;
+}

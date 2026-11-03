@@ -10,7 +10,7 @@
 
 - [PDF Note Workspace の理念](core/principles.md) — 利用者の資料と情報利用に対する原理原則
 - [理念の根拠](core/rationale.md) — 開発の背景となった利用環境への問題意識
-- [説明と確認のための要点](project_overview.md) — ソフトを説明するときに区別する事実、方針、制約
+- [説明と確認のための要点](project_overview.md) — 開発者の説明責任と、ソフトを説明するときに区別する事実、方針、制約
 - [用途と設計の考え方](core/use_cases.md) — このプロジェクトが扱う作業と設計の狙い
 - [安全性と守る方針](core/safety_and_nonnegotiables.md) — 非通信、原本保護、静音性の方針と既知の制約
 - [保存とファイル形式の補足](core/file_formats.md) — `.clrop`、ノート、保存方式の考え方
@@ -18,7 +18,7 @@
 
 ## 機能・利用判断・確認
 
-- [主な機能とよくある質問](core/features_faq.md) — できることと利用上の前提
+- [主な機能と想定ケース](core/features_and_scenarios.md) — できること、利用時の前提、確認が必要な制約
 - [トラブルの確認観点](core/troubleshooting_quick.md) — 問題を切り分けるときの注意
 - [判断のための資料](core/decision_support.md) — 導入前の適合性、主張の確認範囲
 - [利用案内の参照資料](core/user_guidance_reference.md) — 導入、設定、保存、支援依頼の補足

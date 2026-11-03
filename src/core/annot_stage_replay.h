@@ -116,6 +116,7 @@ inline bool AnnotationMatches(const Annotation& current, const Annotation& expec
                               AnnotNumericPrecision expectedPrecision) {
     if (current.id.empty() || current.id != expected.id ||
         current.textLines != expected.textLines || current.writingMode != expected.writingMode ||
+        current.contentRotation != expected.contentRotation ||
         !IsFinite(current) || !IsFinite(expected)) return false;
     const int digits = std::min(static_cast<int>(currentPrecision),
                                 static_cast<int>(expectedPrecision));

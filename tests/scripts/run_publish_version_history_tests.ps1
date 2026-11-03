@@ -20,20 +20,7 @@ $publishAst = [System.Management.Automation.Language.Parser]::ParseFile(
 if ($parseErrors.Count -ne 0) {
     throw "publish.ps1 could not be parsed: $($parseErrors[0].Message)"
 }
-$functionAst = @(
-    $publishAst.FindAll(
-        {
-            param($node)
-            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq "Get-PreviousPublishedVersion"
-        },
-        $true
-    )
-)
-if ($functionAst.Count -ne 1) {
-    throw "Expected exactly one Get-PreviousPublishedVersion function in publish.ps1."
-}
-. ([scriptblock]::Create($functionAst[0].Extent.Text))
+. (Join-Path $repoRoot 'scripts/release/release_version.ps1')
 
 foreach ($helperName in @("Get-Sha256", "Get-EffectiveAllowlistEntries", "Get-AllowlistDiffLines")) {
     $helperAst = @($publishAst.FindAll({
@@ -86,7 +73,9 @@ function New-ChecklistFixture {
     (Get-Item -LiteralPath $path).LastWriteTime = $LastWriteTime
 }
 
-$fixtureDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("pdf_note_publish_version_history_" + [guid]::NewGuid().ToString("N"))
+$fixtureBase = Join-Path $repoRoot 'out/tests'
+New-Item -ItemType Directory -Path $fixtureBase -Force | Out-Null
+$fixtureDirectory = Join-Path $fixtureBase ("pdf_note_publish_version_history_" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $fixtureDirectory | Out-Null
 try {
     $baseTime = Get-Date "2026-08-27T00:00:00"
@@ -103,7 +92,7 @@ try {
         -Version "0.9.504" -IncludeVersionLine $true -HasUncheckedItems $true -HasSubmissionResult $false `
         -LastWriteTime $baseTime.AddMinutes(3)
 
-    $selectedVersion = Get-PreviousPublishedVersion -RecordsDirectory $fixtureDirectory
+    $selectedVersion = Get-PreviousSubmittedVersion -RecordsDirectory $fixtureDirectory
     Assert-Equal -Actual $selectedVersion -Expected "0.9.503" -Message "The latest submitted pair checklist must be selected over legacy and pending records."
 
     $nonPairFixtures = @(
@@ -113,8 +102,64 @@ try {
     foreach ($fixture in $nonPairFixtures) {
         Remove-Item -LiteralPath $fixture.FullName
     }
-    $selectedVersion = Get-PreviousPublishedVersion -RecordsDirectory $fixtureDirectory
+    $selectedVersion = Get-PreviousSubmittedVersion -RecordsDirectory $fixtureDirectory
     Assert-Equal -Actual $selectedVersion -Expected "0.9.503" -Message "A current paired checklist must supply its version from its body, not its filename."
+
+    New-ChecklistFixture -Directory $fixtureDirectory -Name 'PUBLISH_CHECKLIST_confirmed_only.txt' `
+        -Version '0.9.900' -IncludeVersionLine $true -HasUncheckedItems $false -HasSubmissionResult $false `
+        -LastWriteTime $baseTime.AddMinutes(5)
+    Assert-Equal -Actual (Get-PreviousSubmittedVersion $fixtureDirectory) -Expected '0.9.503' -Message 'Confirmation alone must not consume a version.'
+    New-ChecklistFixture -Directory $fixtureDirectory -Name 'PUBLISH_CHECKLIST_older_touched.txt' `
+        -Version '0.9.502' -IncludeVersionLine $true -HasUncheckedItems $false -HasSubmissionResult $true `
+        -LastWriteTime $baseTime.AddMinutes(6)
+    Assert-Equal -Actual (Get-PreviousSubmittedVersion $fixtureDirectory) -Expected '0.9.503' -Message 'Version ordering must not depend on file modification time.'
+
+    $versionRoot = Join-Path $fixtureDirectory 'repository'
+    $versionRecords = Join-Path $versionRoot 'docs/internal/archive/operations/publish_records'
+    New-Item -ItemType Directory -Path $versionRecords -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $fixtureDirectory 'publish_公開前確認文書_pdf_note_workspace_release_0.9.503_pair_ja-en_pair.txt') -Destination $versionRecords
+    $versionPath = Join-Path $versionRoot 'REPO_VERSION.txt'
+    Set-Content -LiteralPath $versionPath -Value '0.9.503' -Encoding UTF8
+    $lease = Enter-ReleaseVersion -RepositoryRoot $versionRoot
+    try {
+        Assert-Equal -Actual $lease.Version -Expected '0.9.504' -Message 'Release preparation must advance a submitted version.'
+        $blocked = $false
+        try { $unexpected = Enter-ReleaseVersion -RepositoryRoot $versionRoot; Exit-ReleaseVersion $unexpected } catch { $blocked = $true }
+        if (-not $blocked) { throw 'Concurrent release preparation was accepted.' }
+        $blocked = $false
+        try { [System.IO.File]::WriteAllText($versionPath, '0.9.900') } catch { $blocked = $true }
+        if (-not $blocked) { throw 'The version must remain read-only until both locales are frozen.' }
+        Assert-Equal -Actual ((Get-Content $versionPath -Raw).Trim()) -Expected '0.9.504' -Message 'Read sharing must allow child build inputs.'
+    }
+    finally { Exit-ReleaseVersion $lease }
+    $lease = Enter-ReleaseVersion $versionRoot
+    try { Assert-Equal -Actual $lease.Version -Expected '0.9.504' -Message 'A retry must retain its unsubmitted version.' }
+    finally { Exit-ReleaseVersion $lease }
+    Set-Content -LiteralPath $versionPath -Value '0.9.600' -Encoding UTF8
+    $lease = Enter-ReleaseVersion $versionRoot
+    try { Assert-Equal -Actual $lease.Version -Expected '0.9.600' -Message 'An explicitly advanced version must be retained.' }
+    finally { Exit-ReleaseVersion $lease }
+    foreach ($invalid in @('0.9.502', 'invalid')) {
+        Set-Content -LiteralPath $versionPath -Value $invalid -Encoding UTF8
+        $blocked = $false
+        try { $unexpected = Enter-ReleaseVersion $versionRoot; Exit-ReleaseVersion $unexpected } catch { $blocked = $true }
+        if (-not $blocked) { throw "Invalid/stale version was accepted: $invalid" }
+        Assert-Equal -Actual ((Get-Content $versionPath -Raw).Trim()) -Expected $invalid -Message 'Rejected inputs must remain unchanged.'
+    }
+    Set-Content -LiteralPath $versionPath -Value '0.9.503' -Encoding UTF8
+    foreach ($lockedPath in @((Join-Path $versionRoot 'out/build.lock'), $versionPath)) {
+        $lock = [System.IO.File]::Open($lockedPath, 'OpenOrCreate', 'Read', 'Read')
+        try {
+            $blocked = $false
+            try { $unexpected = Enter-ReleaseVersion $versionRoot; Exit-ReleaseVersion $unexpected } catch { $blocked = $true }
+            if (-not $blocked) { throw "Locked input accepted: $lockedPath" }
+            Assert-Equal -Actual ((Get-Content $versionPath -Raw).Trim()) -Expected '0.9.503' -Message 'Lock/replace failure must preserve original version.'
+        }
+        finally { $lock.Dispose() }
+    }
+    $backups = @(Get-ChildItem (Join-Path $versionRoot 'out/logs/release/version_backups') -File)
+    if ($backups.Count -ne 1) { throw 'Expected exactly one atomic version replacement backup.' }
+    Assert-Equal -Actual ((Get-Content $backups[0].FullName -Raw).Trim()) -Expected '0.9.503' -Message 'Atomic replacement must retain the original bytes.'
 
     $policyRoot = Join-Path $fixtureDirectory "internal"
     $policyArchive = Join-Path $policyRoot "archive\operations"
@@ -137,9 +182,71 @@ try {
         if (-not $diffText.Contains($expected)) { throw "Missing archive policy comparison evidence: $expected" }
     }
     if ($diffText.Contains("unexpected.md")) { throw "Policy history lookup must not recurse into unrelated trees." }
+
+    $checklistAst = @($publishAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "New-PairChecklist"
+    }, $true))
+    if ($checklistAst.Count -ne 1) { throw "Expected exactly one New-PairChecklist function." }
+    $global:publishChecklistOutputPath = Join-Path $fixtureDirectory "new_pair_checklist.txt"
+    $global:publishChecklistAllowlistPath = $currentPolicy
+    function Assert-UnifiedReleasePair { param([object[]]$Items) }
+    function Get-PairChecklistPath { param([object[]]$Items) return $global:publishChecklistOutputPath }
+    function Assert-ChildPath { param([string]$Root, [string]$RelativePath, [string]$Label) return $global:publishChecklistAllowlistPath }
+    function Get-ReleaseTag { param([object]$Manifest) return "v$($Manifest.app_version)" }
+    function New-ReleaseNotesText { param([object[]]$Items) return "release notes" }
+    function Write-Info { param([string]$Message) }
+    function Write-Warn { param([string]$Message) }
+    $checklistFunctionPath = Join-Path $fixtureDirectory "new_pair_checklist_function.ps1"
+    Set-Content -LiteralPath $checklistFunctionPath -Value $checklistAst[0].Extent.Text -Encoding UTF8
+    . $checklistFunctionPath
+    $checklistItems = @(
+        [PSCustomObject]@{
+            SetRoot = "C:\\release\\ja"
+            Result = [PSCustomObject]@{
+                Manifest = [PSCustomObject]@{ locale = "ja"; app_version = "1.2.3" }
+                SnapshotAllowlistName = $currentName
+                SnapshotFiles = 1
+                SnapshotTreeHash = "tree"
+                SnapshotAllowlistHash = "allowlist"
+                SnapshotArtifactManifestHash = "artifact"
+                FullZipHash = "ja-full"
+                LiteZipHash = "ja-lite"
+            }
+        },
+        [PSCustomObject]@{
+            SetRoot = "C:\\release\\en"
+            Result = [PSCustomObject]@{
+                Manifest = [PSCustomObject]@{ locale = "en"; app_version = "1.2.3" }
+                SnapshotAllowlistName = $currentName
+                SnapshotFiles = 1
+                SnapshotTreeHash = "tree"
+                SnapshotAllowlistHash = "allowlist"
+                SnapshotArtifactManifestHash = "artifact"
+                FullZipHash = "en-full"
+                LiteZipHash = "en-lite"
+            }
+        }
+    )
+    New-PairChecklist -Items $checklistItems -Repository "owner/repository" | Out-Null
+    New-PairChecklist -Items $checklistItems -Repository "owner/repository" | Out-Null
+    $checklistText = Get-Content -LiteralPath $global:publishChecklistOutputPath -Raw -Encoding UTF8
+    if ($checklistText.Contains("System.Object[]")) {
+        throw "New pair checklist must write each allowlist-diff line rather than an array placeholder."
+    }
+    foreach ($expected in @("--- ALLOWLIST DIFF BEGIN ---", "- 追加: 2 件", "  - + docs/en/", "--- ALLOWLIST DIFF END ---")) {
+        if (-not $checklistText.Contains($expected)) { throw "New pair checklist is missing allowlist-diff evidence: $expected" }
+    }
+    if (@([regex]::Matches($checklistText, '(?m)^--- ALLOWLIST DIFF BEGIN ---\r?$')).Count -ne 1) {
+        throw "An unconfirmed checklist must retain exactly one allowlist-diff section on repeated Confirm attempts."
+    }
 }
 finally {
+    Remove-Variable -Name publishChecklistOutputPath -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name publishChecklistAllowlistPath -Scope Global -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $fixtureDirectory) {
+        if (-not ([System.IO.Path]::GetFullPath($fixtureDirectory)).StartsWith(([System.IO.Path]::GetFullPath($fixtureBase) + [System.IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe fixture cleanup path.' }
         Remove-Item -LiteralPath $fixtureDirectory -Recurse -Force
     }
 }

@@ -16,13 +16,16 @@ void UpdateScrollDirectionMenuChecks();
 void UpdatePdfSinglePageModeMenuCheck();
 
 void ShowGeneralSettingsDialog(HWND owner);
+void ShowBottomPaneSettingsDialog(HWND owner);
 void ShowNoteSettingsDialog(HWND owner);
+void ShowOutputSettingsDialog(HWND owner, bool noteOutput = false);
 void ShowMarkupSettingsDialog(HWND owner);
 void ShowAnnotationSettingsDialog(HWND owner);
 void ShowAnnotationSettingsForTool(HWND owner, ToolMode mode);
 void ShowPaletteSettingsDialog(HWND owner);
+void ShowAnnotationPaletteSettingsDialog(HWND owner);
 void ShowSettingsAssetsDialog(HWND owner);
 [[nodiscard]] bool HandleSettingsAssetsMessage(const MSG& message);
-// The palette has its own editor so changing an annotation palette color never
-// mutates the Windows common-dialog custom-color history.
-bool ShowPaletteColorEditorDialog(HWND owner, COLORREF initial, COLORREF* outColor);
+// Reuse the settings palette page for independent color selection. No palette
+// file is written; cancellation leaves outColor unchanged.
+[[nodiscard]] bool SelectColorInPaletteSettings(HWND owner, COLORREF initial, COLORREF* outColor);

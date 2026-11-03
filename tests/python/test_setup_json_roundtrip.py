@@ -23,6 +23,7 @@ def production_sections(source: str) -> str:
         ("static std::string ReadTextFileUtf8(const std::filesystem::path& p) {", "static std::optional<bool> QuerySystemTouchpadInvertVertical("),
         ("static bool ParseJsonStringToken(", "static bool WorkspaceJsonHasUnknownTopLevelFields("),
         ("static bool SetupJsonHasUnknownTopLevelFields(", "static std::wstring SetupJsonAutoUpdateBlockedReason("),
+        ("static std::optional<int> ParseJsonIntField(", "static std::optional<int> ParseJsonColor("),
         ("[[nodiscard]] static std::filesystem::path QuarantineCorruptSetupJson(", "static std::wstring WorkspaceConfigRootKeyForCompare("),
         ("static setup_json_policy::AutoUpdateDecision ResolveSetupJsonAutoUpdateDecision(", "static bool ReadExistingSetupJsonForAutoUpdate("),
         ("// Locate only a top-level value,", "static const char* ToolModeKey("),
@@ -34,9 +35,8 @@ def production_sections(source: str) -> str:
         ("static std::optional<COLORREF> ParseJsonColorField(", "static bool ParseThemeBlock("),
         ("static void WriteThemeObject(std::ostream& os, const std::string& indent, const ThemeColors& theme) {", "static std::string ReadTextFileUtf8(const std::filesystem::path& p);"),
         ("static void WorkspaceSafeDirs(", "static void WriteThemeObject(std::ostream& os, const std::string& indent, const ThemeColors& theme) {"),
-        ("constexpr int kScheduleMaxDays = 7;", "static std::optional<int> ParseJsonIntField("),
         ("static std::vector<VerifiedThemeMeta> g_themeVerified;", "static std::wstring g_themeLastDisplayEn;"),
-        ("static void WriteThemeConfig(", "void SetPaletteCustomColor("),
+        ("[[nodiscard]] static bool WriteThemeConfig(", "void SetPaletteCustomColor("),
     ]
     sections = []
     for start, end in ranges:
@@ -81,9 +81,12 @@ class SetupJsonRoundTripTests(unittest.TestCase):
 #include "diagnostics/normal_operations.h"
 #include "core/text_encoding.h"
 #include "core/json_string.h"
+#include "core/json_number_token.h"
 #include "core/theme_types.h"
 #include "core/workspace_config.h"
 #include "core/setup_json_policy.h"
+#include "lecture_order/priority_policy.h"
+WorkspaceConfig g_config;
 static constexpr std::uint64_t kMaxSetupJsonBytes = 256ull * 1024ull;
 static std::optional<std::string> ParseJsonStringField(const std::string&, const std::string&);
 static bool ReplaceOrInsertJsonStringField(std::string&, const std::string&, const std::string&);
@@ -118,11 +121,26 @@ void LeaveSaveOperation();
                 if mode == "empty":
                     self.assertEqual(saved["tempExternalLectureDirs"], [])
                 if mode == "strings":
-                    schedule = json.loads((app / "__pdf_note_workspace__/__settings__/schedule.json").read_text(encoding="utf-8"))
-                    self.assertIn('"', schedule["scheduleCells"][0])
-                    self.assertIn("\n", schedule["scheduleCells"][0])
                     theme = json.loads((app / "theme_fixture.json").read_text(encoding="utf-8"))
                     self.assertIn('"', theme["verified"][0]["display"])
+                if mode == "write":
+                    setup = app / "pdf_note_workspace_setup.json"
+                    text = setup.read_text(encoding="utf-8")
+                    path_lines = text.split('"tempExternalLectureDirs": [', 1)[1].splitlines()[1:]
+                    # Every saved path is independently readable as a JSON string.
+                    for line, path in zip(path_lines, saved["tempExternalLectureDirs"]):
+                        self.assertEqual(json.loads(line.strip().removesuffix(",")), path)
+                    self.assertGreaterEqual(len(path_lines), len(saved["tempExternalLectureDirs"]) + 1)
+                    # Old single-line arrays and manually edited CRLF arrays both
+                    # pass through the production startup loader.
+                    setup.write_text(json.dumps(saved, ensure_ascii=False), encoding="utf-8")
+                    subprocess.run([str(executable), "read"], env=environment, check=True, timeout=20)
+                    edited = dict(saved)
+                    paths = saved["tempExternalLectureDirs"]
+                    edited["tempExternalLectureDirs"] = [paths[-1], paths[0]]
+                    setup.write_text(json.dumps(edited, ensure_ascii=False, indent=2), encoding="utf-8", newline="\r\n")
+                    subprocess.run([str(executable), "read-edited"], env=environment, check=True, timeout=20)
+                    setup.write_text(text, encoding="utf-8")
             subprocess.run([str(executable), "recovery"], env=environment, check=True, timeout=20)
 
 

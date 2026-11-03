@@ -188,11 +188,11 @@ static void LayoutMarkupSettingsChrome(HWND hWnd, MarkupSettingsCtx* ctx) {
     }
     int panelTop = pad + headerH;
     int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
-    int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
+    int panelH = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
     int contentPaneX = pad;
-    int contentPaneW = std::max(ScaleY(hWnd, 320), clientW - pad * 2);
+    int contentPaneW = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 320), clientW - pad * 2);
     int contentPanelTop = panelTop + sectionNavH + sectionNavGap;
-    int contentPanelH = std::max(ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
+    int contentPanelH = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
     if (!ctx->embedded && ctx->headerTitle) {
         SetWindowPos(ctx->headerTitle, nullptr, pad, pad, clientW - pad * 2, titleH,
                      SWP_NOZORDER | SWP_NOACTIVATE);
@@ -342,11 +342,11 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         const int headerH = ctx->embedded ? 0 : (titleH + subtitleH + sectionButtonH + ScaleY(hWnd, 20));
         const int panelTop = pad + headerH;
         const int panelBottomPad = ctx->embedded ? pad : (footerH + pad);
-        const int panelH = std::max(ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
+        const int panelH = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 320), clientH - panelTop - panelBottomPad);
         const int contentPaneX = pad;
-        const int contentPaneW = std::max(ScaleY(hWnd, 340), clientW - pad * 2);
+        const int contentPaneW = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 340), clientW - pad * 2);
         const int contentPanelTop = panelTop + sectionNavH + sectionNavGap;
-        const int contentPanelH = std::max(ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
+        const int contentPanelH = std::max(ctx->embedded ? 0 : ScaleY(hWnd, 240), panelH - sectionNavH - sectionNavGap);
         int contentW = std::max(0, contentPaneW - pad * 2);
         int controlW = SettingsControlWidth(hWnd, contentW, ctx->embedded, 240, 420);
         int y = pad;
@@ -744,6 +744,7 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
         if (!ctx) break;
+        if (ctx->embedded) PostMessageW(GetParent(hWnd), kUnifiedSettingsDraftChangedMsg, 0, 0);
         if (id == IDC_MARKUP_SECTION_LIST && code == CBN_SELCHANGE) {
             int sel = static_cast<int>(SendMessageW(ctx->navList, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {
@@ -807,7 +808,7 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         DestroyWindow(hWnd);
         return 0;
     case WM_DESTROY:
-        if (ctx) RestoreOwnerAfterModal(ctx->owner);
+        if (ctx && !ctx->embedded) RestoreOwnerAfterModal(ctx->owner);
         if (ctx) ctx->done = true;
         return 0;
     default:

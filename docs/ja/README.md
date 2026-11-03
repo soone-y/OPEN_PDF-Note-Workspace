@@ -2,9 +2,9 @@
 
 同梱リポジトリ版: (ZIP配布物ではここにバージョンが記載されます)
 
-このフォルダは、アプリを使うための説明の入口です。初めての方は、上から順に必要な文書だけ読めば使い始められます。
+このフォルダは、アプリを使うための説明の入口です。ファイル名ではなく、今したいことから文書を選べます。
 
-初めて使う場合は、まず [Getting_Started.md](Getting_Started.md) を読んで ZIP を展開し、その後 [Using_the_App.md](Using_the_App.md) を読んでください。
+初めて使う場合は、[Getting_Started.md](Getting_Started.md) で ZIP を展開して版を選び、次に [Using_the_App.md](Using_the_App.md) の「最初にすること」から始めてください。作業中に必要になった説明だけを開けば十分です。
 
 配布フォルダ内の EXE、DLL、`pdf_note_workspace_setup.json` は一緒に置いたまま使い、起動場所を変えたい場合はショートカットを作成してください。旧版の `pdf_workspace_setup.json` は読み取り互換のため残して構いません。
 
@@ -23,14 +23,19 @@ Lite版はウィンドウ名に `Lite` と表示されます。Lite版へ DOCX/P
 
 `Using_the_App.md` のような英語のファイル名は、Windows のフォルダ、ZIP 配布、開発用ツールでも同じ名前で確実に扱えるようにするための識別名です。読むために英語を理解する必要はありません。文書の見出しと本文は日本語です。
 
-## 利用者向け詳細一覧
-
-この一覧が第2段階の案内です。目的に合う文書を選んでください。
+## 資料を開いて、記録を始める
 
 | 文書 | 読む場面 |
 | --- | --- |
 | [Getting_Started.md](Getting_Started.md) | ZIP の展開、ショートカット、関連付け、更新を行いたい |
-| [Using_the_App.md](Using_the_App.md) | 起動、ノート作成、基本保存を知りたい |
+| [Using_the_App.md](Using_the_App.md) | PDFを開く、ノートや注釈を作る、出力する流れを知りたい |
+| [Note_Writing_Guide.md](Note_Writing_Guide.md) | 入力アシストの使い方と、対応するノート記法を例で調べたい |
+| [Read_Only_Viewer.md](Read_Only_Viewer.md) | 複数の資料や、CLROP注釈を伴うPDFを閲覧専用ソフトで読みたい |
+
+## 保存・ファイル・困ったとき
+
+| 文書 | 読む場面 |
+| --- | --- |
 | [Help_Reference.md](Help_Reference.md) | アプリ内ヘルプの全項目、メニュー、設定、出力を詳しく調べたい |
 | [File_Formats.md](File_Formats.md) | `.clro`、`.md`、`.txt`、`.clrop` の違いを知りたい |
 | [CLRO_Note_Format.md](CLRO_Note_Format.md) | `.clro` ノートの役割、記法、他ソフトとの扱いを知りたい |

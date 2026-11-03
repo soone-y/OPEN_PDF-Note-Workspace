@@ -107,6 +107,7 @@ bool GetNoteStatusAssistControlRect(NoteStatusAssistControl control, RECT* outRe
     case NoteStatusAssistControl::NormalCaretRaw: index = projection.assistLayout.vimCaretLineRawTextIdx; break;
     case NoteStatusAssistControl::ClickInsert: index = projection.assistLayout.vimClickInsertIdx; break;
     case NoteStatusAssistControl::CurrentDisplay: index = projection.assistLayout.noteDisplayIdx; break;
+    case NoteStatusAssistControl::BottomSpace: index = projection.assistLayout.bottomSpaceIdx; break;
     case NoteStatusAssistControl::InlineMathVerticalAlignment:
         index = projection.assistLayout.inlineMathVerticalAlignmentIdx;
         break;
@@ -204,6 +205,9 @@ static bool ExecuteBottomPaneCommand(HWND hWnd, const BottomPaneCommand& command
         return true;
     case BottomPaneCommandKind::ShowFontSizeMenu:
         ShowNoteAssistFontSizeMenu(hWnd);
+        return true;
+    case BottomPaneCommandKind::ShowBottomSpaceMenu:
+        ShowNoteAssistBottomSpaceMenu(hWnd);
         return true;
     case BottomPaneCommandKind::ShowBackgroundMenu:
         ShowNoteAssistNoteBackgroundMenu(hWnd);

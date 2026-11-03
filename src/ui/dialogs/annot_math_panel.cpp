@@ -5,6 +5,8 @@
 #include "core/font_list.h"
 #include "pdf_view/pdf_view.h"
 #include "bridge/view_bridge.h"
+#include "ui/listbox_presentation.h"
+#include "ui/shape_boundary_options.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -32,6 +34,8 @@ constexpr int kAnnotInspectorContent = 103;
 constexpr int kAnnotInspectorColor = 104;
 constexpr int kAnnotInspectorWidth = 105;
 constexpr int kAnnotInspectorAlpha = 106;
+constexpr int kAnnotInspectorBlendLabel = 123;
+constexpr int kAnnotInspectorDrawLabel = 124;
 constexpr int kAnnotInspectorShapeKind = 107;
 constexpr int kAnnotInspectorShapeDrawMode = 108;
 constexpr int kAnnotInspectorArrowHead = 109;
@@ -47,6 +51,7 @@ constexpr int kAnnotInspectorY2 = 118;
 constexpr int kAnnotInspectorColorHex = 119;
 constexpr int kAnnotInspectorFontName = 120;
 constexpr int kAnnotInspectorFontPt = 121;
+constexpr int kAnnotInspectorMarkerDisplay = 122;
 // This is the only timer owned by AnnotInspectorProc. Each inspector HWND
 // has its own timer namespace, so a fixed ID is safe for concurrent dialogs.
 constexpr UINT_PTR kAnnotInspectorApplyFeedbackTimer = 1;
@@ -159,6 +164,7 @@ std::wstring AnnotListLabel(const Annotation& ann) {
         case ShapeKind::EquilateralTriangle: shapeLabel = localization::Text(L"ui.annot_math.d826b2725d8a").c_str(); break;
         case ShapeKind::Triangle: shapeLabel = localization::Text(L"ui.annot_math.b6ccd52bc893").c_str(); break;
         case ShapeKind::Ellipse: shapeLabel = localization::Text(L"ui.annot_math.3526a0625382").c_str(); break;
+        case ShapeKind::Arc: shapeLabel = localization::Text(L"shape.arc.label"); break;
         case ShapeKind::Circle: shapeLabel = localization::Text(L"ui.annot_math.60bceaee61a7").c_str(); break;
         case ShapeKind::RotatedEllipse: shapeLabel = localization::Text(L"ui.annot_math.e3f9e9d7366f").c_str(); break;
         default: break;
@@ -286,36 +292,6 @@ bool GetAnnotJumpPoint(const Annotation& ann, double& outX, double& outY) {
     return true;
 }
 
-std::wstring AnnotationInspectorDetails(const Annotation& ann) {
-    const std::wstring page = ann.pageIndex >= 0 ? std::to_wstring(ann.pageIndex + 1) : L"?";
-    const wchar_t* mode = ann.shapeDrawMode == ShapeDrawMode::Fill ? L"塗りつぶし" : L"枠線";
-    const int opacity = static_cast<int>(std::lround(std::clamp(ann.alpha, 0.0, 1.0) * 100.0));
-    std::wstring text = L"種類: " + AnnotTypeLabel(ann) +
-        L"\r\nページ: " + page +
-        L"\r\n座標: (" + std::to_wstring(ann.x1) + L", " + std::to_wstring(ann.y1) +
-        L") - (" + std::to_wstring(ann.x2) + L", " + std::to_wstring(ann.y2) + L")" +
-        L"\r\n色: #";
-    const wchar_t hex[] = L"0123456789ABCDEF";
-    for (BYTE value : { GetRValue(ann.color), GetGValue(ann.color), GetBValue(ann.color) }) {
-        text.push_back(hex[value >> 4]);
-        text.push_back(hex[value & 0x0F]);
-    }
-    text += L"\r\n幅: " + std::to_wstring(ann.width) + L" pt" +
-        L"\r\n透明度: " + std::to_wstring(opacity) + L"%";
-    if (ann.type == Annotation::Type::Shape) {
-        text += L"\r\n描画: " + std::wstring(mode) + L"\r\n形状: " + ShapeKindToString(ann.shapeKind);
-    }
-    if (ann.type == Annotation::Type::Arrow) {
-        text += L"\r\n矢印の頭: " + std::wstring(ann.arrowHead == ArrowHead::Double ? L"双方向" : L"単方向");
-    }
-    if (ann.type == Annotation::Type::Line || ann.type == Annotation::Type::Arrow) {
-        text += L"\r\n線種: " + std::wstring(ann.dash.empty() ? L"実線" : L"破線");
-    }
-    if (ann.type == Annotation::Type::LinkMarker) {
-        text += L"\r\nリンクID: " + ann.linkId + L"\r\nリンク先: " + ann.linkNotePath;
-    }
-    return text;
-}
 
 bool InspectorHasContent(const Annotation::Type type) {
     return type == Annotation::Type::TextBox || type == Annotation::Type::MathBox ||
@@ -428,8 +404,12 @@ void SetAnnotInspectorEditable(HWND hWnd, AnnotInspectorCtx* ctx, bool editable)
                           kAnnotInspectorColorHex, kAnnotInspectorColor, kAnnotInspectorWidth, kAnnotInspectorAlpha,
                           kAnnotInspectorShapeKind, kAnnotInspectorShapeDrawMode,
                           kAnnotInspectorArrowHead, kAnnotInspectorDash, kAnnotInspectorFontName,
-                          kAnnotInspectorFontPt, kAnnotInspectorApply }) {
+                          kAnnotInspectorFontPt, kAnnotInspectorMarkerDisplay, kAnnotInspectorApply }) {
         if (HWND control = GetDlgItem(hWnd, id)) EnableWindow(control, ctx->editable);
+    }
+    if(ctx->type == Annotation::Type::Shape && ctx->index>=0 && ctx->index<static_cast<int>(g_annots.size()) &&
+       ShapeKindIsOpen(g_annots[ctx->index].shapeKind)) {
+        EnableWindow(GetDlgItem(hWnd,kAnnotInspectorShapeDrawMode),FALSE);
     }
 }
 
@@ -493,12 +473,21 @@ bool ApplyAnnotInspectorAll(HWND hWnd, AnnotInspectorCtx* ctx, bool showValidati
     after.color = color;
     after.width = width;
     after.alpha = opacity / 100.0;
+    if (after.type == Annotation::Type::MarkerText)
+        after.markerDisplayMode = static_cast<MarkerDisplayMode>(InspectorComboValue(hWnd,
+            kAnnotInspectorMarkerDisplay, static_cast<LPARAM>(after.markerDisplayMode)));
+    if (after.type == Annotation::Type::Shape || after.type == Annotation::Type::MarkerFree)
+        after.blendMode = InspectorComboValue(hWnd,kAnnotInspectorMarkerDisplay,
+            static_cast<LPARAM>(after.blendMode == AnnotationBlendMode::Multiply ? MarkerDisplayMode::Multiply : MarkerDisplayMode::Legacy))
+            == static_cast<LPARAM>(MarkerDisplayMode::Multiply) ? AnnotationBlendMode::Multiply : AnnotationBlendMode::Normal;
 
     if (after.type == Annotation::Type::Shape) {
         after.shapeKind = static_cast<ShapeKind>(InspectorComboValue(hWnd, kAnnotInspectorShapeKind,
             static_cast<LPARAM>(after.shapeKind)));
         after.shapeDrawMode = static_cast<ShapeDrawMode>(InspectorComboValue(hWnd, kAnnotInspectorShapeDrawMode,
             static_cast<LPARAM>(after.shapeDrawMode)));
+        ApplyShapeLineStyle(after,static_cast<ShapeLineStyle>(InspectorComboValue(hWnd,kAnnotInspectorDash,
+            static_cast<LPARAM>(AnnotationShapeLineStyle(after)))),after.width!=g_annots[static_cast<size_t>(ctx->index)].width);
     }
     if (after.type == Annotation::Type::Arrow) {
         after.arrowHead = static_cast<ArrowHead>(InspectorComboValue(hWnd, kAnnotInspectorArrowHead,
@@ -508,7 +497,7 @@ bool ApplyAnnotInspectorAll(HWND hWnd, AnnotInspectorCtx* ctx, bool showValidati
         const bool dashed = InspectorComboValue(hWnd, kAnnotInspectorDash, after.dash.empty() ? 0 : 1) != 0;
         after.dash = dashed ? std::vector<double>{ std::max(1.0, after.width * 4.0),
                                                     std::max(1.0, after.width * 2.0) }
-                            : std::vector<double>{};
+                                : std::vector<double>{};
     }
 
     if (InspectorHasFont(after.type)) {
@@ -546,7 +535,20 @@ bool ApplyAnnotInspectorAll(HWND hWnd, AnnotInspectorCtx* ctx, bool showValidati
         }
     }
 
+    NormalizeOpenShapeStyle(after);
     if (!UpdateAnnotationAtIndex(ctx->owner, ctx->index, after)) return false;
+    if(after.type == Annotation::Type::Shape) {
+        const bool closed=!ShapeKindIsOpen(after.shapeKind);
+        EnableWindow(GetDlgItem(hWnd,kAnnotInspectorShapeDrawMode),closed);
+        ShowWindow(GetDlgItem(hWnd,kAnnotInspectorShapeDrawMode),closed?SW_SHOW:SW_HIDE);
+        ShowWindow(GetDlgItem(hWnd,kAnnotInspectorDrawLabel),closed?SW_SHOW:SW_HIDE);
+        (void)ui::SyncLineStyleOption(GetDlgItem(hWnd,kAnnotInspectorDash),AnnotationShapeLineStyle(after),closed);
+        ShowWindow(GetDlgItem(hWnd,kAnnotInspectorMarkerDisplay),closed?SW_SHOW:SW_HIDE);
+        ShowWindow(GetDlgItem(hWnd,kAnnotInspectorBlendLabel),closed?SW_SHOW:SW_HIDE);
+        if(!closed) {
+            SelectInspectorComboValue(GetDlgItem(hWnd,kAnnotInspectorShapeDrawMode),static_cast<LPARAM>(ShapeDrawMode::Outline));
+        }
+    }
     (void)SyncTextBoxToolFontFromAnnotationIndex(ctx->index);
     SetAnnotInspectorTitle(hWnd, g_annots[static_cast<size_t>(ctx->index)]);
     ClearInspectorValidation(hWnd);
@@ -571,6 +573,7 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         const bool hasContent = InspectorHasContent(ann.type);
         const bool hasFont = InspectorHasFont(ann.type);
         const bool hasExtraRow = (ann.type == Annotation::Type::Shape ||
+                                  ann.type == Annotation::Type::MarkerText || ann.type == Annotation::Type::MarkerFree ||
                                   ann.type == Annotation::Type::Arrow ||
                                   ann.type == Annotation::Type::Line);
 
@@ -675,7 +678,7 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         }
 
         const int styleGroupY = currY;
-        const int styleGroupH = hasExtraRow ? 102 : 64;
+        const int styleGroupH = ann.type == Annotation::Type::Shape ? 138 : (hasExtraRow ? 102 : 64);
         CreateWindowExW(0, L"BUTTON", L"スタイル", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                         8, styleGroupY, 496, styleGroupH, hWnd, nullptr, g_hInst, nullptr);
 
@@ -721,7 +724,20 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         CreateWindowExW(0, L"STATIC", L"%", WS_CHILD | WS_VISIBLE,
                         430, y1 + 3, 16, 20, hWnd, nullptr, g_hInst, nullptr);
 
-        if (ann.type == Annotation::Type::Shape) {
+        const auto createBlendChoice = [&](int y2) {
+            CreateWindowExW(0, L"STATIC", localization::Text(L"marker.display.label").c_str(), WS_CHILD | WS_VISIBLE,
+                            20, y2 + 3, 100, 20, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorBlendLabel), g_hInst, nullptr);
+            HWND display = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                124, y2, ann.type == Annotation::Type::Shape ? 184 : 344, 180, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorMarkerDisplay), g_hInst, nullptr);
+            for (const auto& option : {std::pair<MarkerDisplayMode, const wchar_t*>{MarkerDisplayMode::Multiply, L"marker.display.multiply"},
+                    {MarkerDisplayMode::Legacy, L"marker.display.legacy"}})
+                AddInspectorComboItem(display, localization::Text(option.second).c_str(), static_cast<LPARAM>(option.first));
+            SelectInspectorComboValue(display, static_cast<LPARAM>(ann.type == Annotation::Type::MarkerText ? ann.markerDisplayMode :
+                (ann.blendMode == AnnotationBlendMode::Multiply ? MarkerDisplayMode::Multiply : MarkerDisplayMode::Legacy)));
+        };
+        if (ann.type == Annotation::Type::MarkerText || ann.type == Annotation::Type::MarkerFree) {
+            createBlendChoice(styleGroupY+60);
+        } else if (ann.type == Annotation::Type::Shape) {
             const int y2 = styleGroupY + 60;
             CreateWindowExW(0, L"STATIC", L"形状:", WS_CHILD | WS_VISIBLE,
                             20, y2 + 3, 36, 20, hWnd, nullptr, g_hInst, nullptr);
@@ -729,21 +745,38 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                                         58, y2, 130, 190, hWnd,
                                         reinterpret_cast<HMENU>(kAnnotInspectorShapeKind), g_hInst, nullptr);
             const std::pair<const wchar_t*, ShapeKind> kinds[] = {
-                {L"正円", ShapeKind::Circle}, {L"円", ShapeKind::Ellipse}, {L"斜め円", ShapeKind::RotatedEllipse},
+                {L"正円", ShapeKind::Circle}, {L"円", ShapeKind::Ellipse},
                 {L"正方形", ShapeKind::Square}, {L"長方形", ShapeKind::Rectangle}, {L"菱形", ShapeKind::Diamond},
                 {L"三角形", ShapeKind::Triangle}, {L"正三角形", ShapeKind::EquilateralTriangle}
             };
             for (const auto& option : kinds) AddInspectorComboItem(kind, option.first, static_cast<LPARAM>(option.second));
+            AddInspectorComboItem(kind,localization::Text(L"shape.arc.label").c_str(),static_cast<LPARAM>(ShapeKind::Arc));
+            if (ann.shapeKind == ShapeKind::RotatedEllipse)
+                AddInspectorComboItem(kind,localization::Text(L"ui.annot_math.e3f9e9d7366f").c_str(),static_cast<LPARAM>(ShapeKind::RotatedEllipse));
             SelectInspectorComboValue(kind, static_cast<LPARAM>(ann.shapeKind));
 
             CreateWindowExW(0, L"STATIC", L"描画:", WS_CHILD | WS_VISIBLE,
-                            200, y2 + 3, 36, 20, hWnd, nullptr, g_hInst, nullptr);
+                            200, y2 + 3, 36, 20, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorDrawLabel), g_hInst, nullptr);
             HWND drawMode = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
                                             238, y2, 110, 120, hWnd,
                                             reinterpret_cast<HMENU>(kAnnotInspectorShapeDrawMode), g_hInst, nullptr);
             AddInspectorComboItem(drawMode, L"塗りつぶし", static_cast<LPARAM>(ShapeDrawMode::Fill));
             AddInspectorComboItem(drawMode, L"枠線", static_cast<LPARAM>(ShapeDrawMode::Outline));
             SelectInspectorComboValue(drawMode, static_cast<LPARAM>(ann.shapeDrawMode));
+            CreateWindowExW(0, L"STATIC", localization::Text(L"ui.annot_math.line_style_label").c_str(), WS_CHILD | WS_VISIBLE,
+                            326, styleGroupY+97, 36, 20, hWnd, nullptr, g_hInst, nullptr);
+            HWND dash = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                        364, styleGroupY+94, 120, 160, hWnd,
+                                        reinterpret_cast<HMENU>(kAnnotInspectorDash), g_hInst, nullptr);
+            ui::PopulateLineStyleOptions(dash,!ShapeKindIsOpen(ann.shapeKind));
+            (void)ui::SyncLineStyleOption(dash,AnnotationShapeLineStyle(ann),!ShapeKindIsOpen(ann.shapeKind));
+            createBlendChoice(styleGroupY+94);
+            if(ShapeKindIsOpen(ann.shapeKind)) {
+                ShowWindow(drawMode,SW_HIDE);
+                ShowWindow(GetDlgItem(hWnd,kAnnotInspectorDrawLabel),SW_HIDE);
+                ShowWindow(GetDlgItem(hWnd,kAnnotInspectorMarkerDisplay),SW_HIDE);
+                ShowWindow(GetDlgItem(hWnd,kAnnotInspectorBlendLabel),SW_HIDE);
+            }
         } else if (ann.type == Annotation::Type::Arrow) {
             const int y2 = styleGroupY + 60;
             CreateWindowExW(0, L"STATIC", L"矢印:", WS_CHILD | WS_VISIBLE,
@@ -821,6 +854,9 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_CTLCOLORLISTBOX:
     case WM_CTLCOLORBTN:
         return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
+    case WM_DRAWITEM:
+        if (DrawThemeButton(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam))) return TRUE;
+        break;
     case WM_COMMAND: {
         const int id = LOWORD(wParam);
         const int code = HIWORD(wParam);
@@ -846,7 +882,8 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         }
         if ((id == kAnnotInspectorWidth || id == kAnnotInspectorAlpha || id == kAnnotInspectorFontName ||
              id == kAnnotInspectorShapeKind || id == kAnnotInspectorShapeDrawMode ||
-             id == kAnnotInspectorArrowHead || id == kAnnotInspectorDash) && code == CBN_SELCHANGE) {
+             id == kAnnotInspectorArrowHead || id == kAnnotInspectorDash ||
+             id == kAnnotInspectorMarkerDisplay) && code == CBN_SELCHANGE) {
             ApplyAnnotInspectorAll(hWnd, ctx, false);
             return 0;
         }
@@ -942,18 +979,9 @@ bool SyncTextBoxToolFontFromAnnotationIndex(int index) {
     const Annotation& ann = g_annots[static_cast<size_t>(index)];
     if (ann.type != Annotation::Type::TextBox) return false;
 
-    bool changed = false;
-    if (!ann.fontName.empty() && g_textFontName != ann.fontName) {
-        g_textFontName = ann.fontName;
-        changed = true;
-    }
-    // TextBox font-size changes are applied to the selected/editing TextBox itself.
-    // Selecting a TextBox must not overwrite the annotation toolbar A/B size slots.
-    if (changed) {
-        SyncToolbarFontSizeCombo();
-        PersistConfig();
-        if (g_hPdfView) PostMessageW(g_hPdfView, kMsgTextBoxFontUpdate, 0, 0);
-    }
+    // Selection changes the display only. No tool-default write, queued font
+    // application, annotation mutation, or persistence belongs on this path.
+    SyncToolbarFontSizeCombo();
     return true;
 }
 void UpdateAnnotPanelSummary() {
@@ -972,6 +1000,8 @@ void UpdateAnnotPanelSummary() {
 }
 
 static std::wstring s_selectedAnnotId;
+static std::wstring s_panelDocumentPath;
+static std::vector<std::wstring> s_panelAnnotationIds;
 
 static int FindAnnotationIndexByPanelSelectionId() {
     if (s_selectedAnnotId.empty()) return -1;
@@ -1003,8 +1033,10 @@ void SelectAnnotPanelAnnotationByIndex(int index, bool reveal) {
     }
     s_selectedAnnotId = g_annots[static_cast<size_t>(index)].id;
     if (g_hAnnotList) {
+        const auto top = SendMessageW(g_hAnnotList, LB_GETTOPINDEX, 0, 0);
         SendMessageW(g_hAnnotList, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
         if (reveal) SendMessageW(g_hAnnotList, LB_SETTOPINDEX, static_cast<WPARAM>(index), 0);
+        else if (top != LB_ERR) SendMessageW(g_hAnnotList, LB_SETTOPINDEX, static_cast<WPARAM>(top), 0);
         InvalidateRect(g_hAnnotList, nullptr, FALSE);
     }
     UpdateAnnotPanelSummary();
@@ -1022,17 +1054,26 @@ void RefreshAnnotPanel() {
         UpdateAnnotPanelSummary();
         return;
     }
-    if (s_selectedAnnotId.empty()) SyncAnnotPanelSelectionFromList();
-    SendMessageW(g_hAnnotList, WM_SETREDRAW, FALSE, 0);
+    const std::wstring documentPath = CurrentLogicalPdfPath();
+    const bool sameDocument = documentPath == s_panelDocumentPath;
+    const auto oldTop = SendMessageW(g_hAnnotList, LB_GETTOPINDEX, 0, 0);
+    const std::wstring anchor = sameDocument && oldTop >= 0 && static_cast<size_t>(oldTop) < s_panelAnnotationIds.size()
+        ? s_panelAnnotationIds[static_cast<size_t>(oldTop)] : L"";
+    if (!sameDocument) s_selectedAnnotId.clear();
+    else if (s_selectedAnnotId.empty()) SyncAnnotPanelSelectionFromList();
+    const bool revealLatest = s_revealLatestAnnotOnNextRefresh;
+    const ui::ListBoxUpdate update(g_hAnnotList);
     SendMessageW(g_hAnnotList, LB_RESETCONTENT, 0, 0);
+    s_panelAnnotationIds.clear();
+    s_panelDocumentPath = documentPath;
     for (const auto& ann : g_annots) {
         std::wstring label = AnnotListLabel(ann);
         SendMessageW(g_hAnnotList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        s_panelAnnotationIds.push_back(ann.id);
     }
-    SendMessageW(g_hAnnotList, WM_SETREDRAW, TRUE, 0);
     int count = static_cast<int>(g_annots.size());
     int targetSel = -1;
-    if (s_revealLatestAnnotOnNextRefresh && count > 0) {
+    if (revealLatest && count > 0) {
         targetSel = count - 1;
         s_selectedAnnotId = g_annots.back().id;
     } else {
@@ -1040,9 +1081,16 @@ void RefreshAnnotPanel() {
     }
     s_revealLatestAnnotOnNextRefresh = false;
     if (targetSel >= 0) {
-        SelectAnnotPanelAnnotationByIndex(targetSel, true);
+        SelectAnnotPanelAnnotationByIndex(targetSel, revealLatest);
     } else {
         ClearAnnotPanelSelection();
+    }
+    if (!revealLatest && sameDocument && oldTop >= 0 && count > 0) {
+        const auto found = std::find(s_panelAnnotationIds.begin(), s_panelAnnotationIds.end(), anchor);
+        const int top = found != s_panelAnnotationIds.end()
+            ? static_cast<int>(found - s_panelAnnotationIds.begin())
+            : std::min(static_cast<int>(oldTop), count - 1);
+        SendMessageW(g_hAnnotList, LB_SETTOPINDEX, static_cast<WPARAM>(top), 0);
     }
     UpdateAnnotPanelSummary();
     // A shorter list exposes unused rows that LISTBOX does not reliably clear

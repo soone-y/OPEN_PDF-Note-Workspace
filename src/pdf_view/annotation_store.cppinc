@@ -396,7 +396,8 @@ static bool TextWritingModeFromString(const std::string& s, TextWritingMode& out
 }
 
 static bool AnnotationJsonNumbersFinite(const Annotation& a) {
-    for (double v : {a.x1, a.y1, a.x2, a.y2, a.width, a.alpha, a.fontPt, a.shapeRotation}) {
+    if (a.contentRotation < 0 || a.contentRotation > 3 || !annotation_rotation::Canonical(a)) return false;
+    for (double v : {a.x1, a.y1, a.x2, a.y2, a.width, a.alpha, a.fontPt, a.shapeRotation, a.shapeAngle}) {
         if (!std::isfinite(v)) return false;
     }
     for (const auto& p : a.path) if (!std::isfinite(p.x) || !std::isfinite(p.y)) return false;
@@ -406,6 +407,12 @@ static bool AnnotationJsonNumbersFinite(const Annotation& a) {
 }
 
 static void WriteAnnotationJson(std::ostringstream& oss, const Annotation& a) {
+    if (a.projectedCoordinates) {
+        const auto canonical = annotation_rotation::Canonical(a);
+        if (!canonical) { oss.setstate(std::ios::failbit); return; }
+        WriteAnnotationJson(oss, *canonical);
+        return;
+    }
     oss << '{';
     oss << "\"type\":";
     WriteJsonString(oss, AnnotTypeToString(a.type));
@@ -416,9 +423,17 @@ static void WriteAnnotationJson(std::ostringstream& oss, const Annotation& a) {
     oss << ",\"y1\":" << a.y1;
     oss << ",\"x2\":" << a.x2;
     oss << ",\"y2\":" << a.y2;
+    if (a.type == Annotation::Type::Shape && a.shapeAngle != 0.0) oss << ",\"shape_angle\":" << a.shapeAngle;
+    if (a.type == Annotation::Type::Shape && a.shapeBoundary != ShapeBoundary::None)
+        oss << ",\"shape_boundary\":\"" << ShapeBoundaryName(a.shapeBoundary) << "\"";
     oss << ",\"width\":" << a.width;
     oss << ",\"alpha\":" << a.alpha;
+    if ((a.type == Annotation::Type::Shape || a.type == Annotation::Type::MarkerFree) && a.blendMode != AnnotationBlendMode::Normal)
+        oss << ",\"blend_mode\":\"" << AnnotationBlendModeName(a.blendMode) << "\"";
+    if (a.type == Annotation::Type::MarkerText && a.markerDisplayMode == MarkerDisplayMode::Legacy)
+        oss << ",\"marker_display_mode\":\"" << MarkerDisplayModeName(a.markerDisplayMode) << "\"";
     oss << ",\"fontPt\":" << a.fontPt;
+    if (a.contentRotation != 0) oss << ",\"content_rotation\":" << a.contentRotation * 90;
     oss << ",\"color\":" << static_cast<unsigned int>(a.color);
     oss << ",\"text\":";
     WriteJsonString(oss, WideToUTF8(a.text));
@@ -503,6 +518,7 @@ static void WriteCommandJson(std::ostringstream& oss, const AnnotCommand& cmd) {
     oss << "\"kind\":";
     WriteJsonString(oss, kind);
     oss << ",\"numeric_precision\":" << static_cast<int>(cmd.numericPrecision);
+    oss << ",\"marker_display_version\":1";
     oss << std::setprecision(static_cast<int>(cmd.numericPrecision));
     oss << ",\"beforeIndex\":" << cmd.beforeIndex;
     oss << ",\"afterIndex\":" << cmd.afterIndex;
@@ -601,14 +617,15 @@ static bool GetNumberArrayField(const AnnotHistoryJsonValue& obj, const char* ke
     return true;
 }
 
-static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
+static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out,
+                            MarkerDisplayMode defaultMarkerMode = MarkerDisplayMode::Legacy) {
     if (v.type != AnnotHistoryJsonValue::Type::Object) return false;
     // Absence keeps legacy defaults; a present malformed field never does.
     std::unordered_set<std::string> keys;
     for (const auto& field : v.obj) if (!keys.insert(field.first).second) return false;
     for (const char* key : {"id", "text", "font", "shape_kind", "shape_draw_mode",
                             "arrow_head", "link_id", "note_path", "math_kind",
-                            "writing_mode", "background_assist_mode"}) {
+                            "writing_mode", "background_assist_mode", "marker_display_mode", "blend_mode", "shape_boundary"}) {
         const auto* field = FindField(v, key);
         if (field && field->type != AnnotHistoryJsonValue::Type::String) return false;
     }
@@ -631,6 +648,11 @@ static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
     int page = -1;
     if (!GetIntField(v, "page", page)) return false;
     out.pageIndex = page;
+    if (const auto* rotation = FindField(v, "content_rotation")) {
+        if (rotation->type != AnnotHistoryJsonValue::Type::Number ||
+            (rotation->num != 0 && rotation->num != 90 && rotation->num != 180 && rotation->num != 270)) return false;
+        out.contentRotation = static_cast<int>(rotation->num) / 90;
+    }
     GetNumberField(v, "x1", out.x1);
     GetNumberField(v, "y1", out.y1);
     GetNumberField(v, "x2", out.x2);
@@ -666,6 +688,10 @@ static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
     if (GetStringField(v, "shape_kind", shapeKind)) {
         out.shapeKind = ParseShapeKind(UTF8ToWide(shapeKind));
     }
+    out.shapeAngle=0.0;
+    if (const auto* angle=FindField(v,"shape_angle")) {
+        if (angle->type != AnnotHistoryJsonValue::Type::Number || !GetNumberField(v,"shape_angle",out.shapeAngle) || !std::isfinite(out.shapeAngle)) return false;
+    }
     std::string shapeDrawMode;
     if (GetStringField(v, "shape_draw_mode", shapeDrawMode)) {
         out.shapeDrawMode = ParseShapeDrawMode(UTF8ToWide(shapeDrawMode));
@@ -692,6 +718,16 @@ static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
         out.mathKind = (mathKind == "markup") ? MathKind::Markup : MathKind::Latex;
     }
     out.writingMode = TextWritingMode::Horizontal;
+    out.markerDisplayMode = out.type == Annotation::Type::MarkerText ? defaultMarkerMode : MarkerDisplayMode::Multiply;
+    out.shapeBoundary = ShapeBoundary::None;
+    std::string shapeBoundary;
+    if (GetStringField(v,"shape_boundary",shapeBoundary) && !ParseShapeBoundary(shapeBoundary,out.shapeBoundary)) return false;
+    out.blendMode = AnnotationBlendMode::Normal;
+    std::string blendMode;
+    if (GetStringField(v,"blend_mode",blendMode) && !ParseAnnotationBlendMode(blendMode,out.blendMode)) return false;
+    std::string markerDisplayMode;
+    if (GetStringField(v, "marker_display_mode", markerDisplayMode) &&
+        (markerDisplayMode.empty() || !ParseMarkerDisplayMode(markerDisplayMode, out.markerDisplayMode))) return false;
     std::string writingMode;
     if (GetStringField(v, "writing_mode", writingMode)) {
         TextWritingMode parsedWritingMode = TextWritingMode::Horizontal;
@@ -745,6 +781,8 @@ static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out) {
 
     out.quads.clear();
     if (FindField(v, "quads") && !GetNumberArrayField(v, "quads", out.quads)) return false;
+    if(out.type == Annotation::Type::Shape && ShapeKindIsOpen(out.shapeKind) &&
+       out.shapeDrawMode != ShapeDrawMode::Outline)return false;
     return AnnotationJsonNumbersFinite(out);
 }
 
@@ -752,6 +790,11 @@ static bool ParseCommand(const AnnotHistoryJsonValue& v, AnnotCommand& out) {
     if (v.type != AnnotHistoryJsonValue::Type::Object) return false;
     std::unordered_set<std::string> keys;
     for (const auto& field : v.obj) if (!keys.insert(field.first).second) return false;
+    MarkerDisplayMode defaultMarkerMode = MarkerDisplayMode::Legacy;
+    if (const auto* displayVersion = FindField(v, "marker_display_version")) {
+        if (displayVersion->type != AnnotHistoryJsonValue::Type::Number || displayVersion->num != 1.0) return false;
+        defaultMarkerMode = MarkerDisplayMode::Multiply;
+    }
     std::string kind;
     if (!GetStringField(v, "kind", kind)) return false;
     if (kind == "add") out.kind = AnnotCommandKind::Add;
@@ -776,14 +819,14 @@ static bool ParseCommand(const AnnotHistoryJsonValue& v, AnnotCommand& out) {
         if (beforeVal->type != AnnotHistoryJsonValue::Type::Object &&
             beforeVal->type != AnnotHistoryJsonValue::Type::Null) return false;
         if (beforeVal->type == AnnotHistoryJsonValue::Type::Object) {
-            if (!ParseAnnotation(*beforeVal, out.before)) return false;
+            if (!ParseAnnotation(*beforeVal, out.before, defaultMarkerMode)) return false;
         }
     }
     if (const auto* afterVal = FindField(v, "after")) {
         if (afterVal->type != AnnotHistoryJsonValue::Type::Object &&
             afterVal->type != AnnotHistoryJsonValue::Type::Null) return false;
         if (afterVal->type == AnnotHistoryJsonValue::Type::Object) {
-            if (!ParseAnnotation(*afterVal, out.after)) return false;
+            if (!ParseAnnotation(*afterVal, out.after, defaultMarkerMode)) return false;
         }
     }
     out.snapshot.clear();
@@ -792,7 +835,7 @@ static bool ParseCommand(const AnnotHistoryJsonValue& v, AnnotCommand& out) {
         if (snapVal->type == AnnotHistoryJsonValue::Type::Array) {
             for (const auto& a : snapVal->arr) {
                 Annotation ann;
-                if (!ParseAnnotation(a, ann)) return false;
+                if (!ParseAnnotation(a, ann, defaultMarkerMode)) return false;
                 out.snapshot.push_back(std::move(ann));
             }
         }
@@ -803,7 +846,7 @@ static bool ParseCommand(const AnnotHistoryJsonValue& v, AnnotCommand& out) {
         if (afterSnapVal->type == AnnotHistoryJsonValue::Type::Array) {
             for (const auto& a : afterSnapVal->arr) {
                 Annotation ann;
-                if (!ParseAnnotation(a, ann)) return false;
+                if (!ParseAnnotation(a, ann, defaultMarkerMode)) return false;
                 out.afterSnapshot.push_back(std::move(ann));
             }
         }
@@ -828,6 +871,7 @@ bool SerializeAnnotCommandsJson(const std::vector<AnnotCommand>& cmds, std::stri
     oss.imbue(std::locale::classic());
     oss << std::setprecision(std::numeric_limits<double>::max_digits10);
     WriteCommandArray(oss, cmds);
+    if (!oss.good()) return false;
     *outJson = oss.str();
     return true;
 }
@@ -1061,11 +1105,14 @@ static bool StageMergeAnnotationEquals(const Annotation& a, const Annotation& b)
     if (a.text != b.text || a.textLines != b.textLines) return false;
     if (a.fontName != b.fontName) return false;
     if (a.writingMode != b.writingMode || a.backgroundAssistMode != b.backgroundAssistMode) return false;
+    if (a.type == Annotation::Type::MarkerText && a.markerDisplayMode != b.markerDisplayMode) return false;
+    if ((a.type == Annotation::Type::Shape || a.type == Annotation::Type::MarkerFree) && a.blendMode != b.blendMode) return false;
     if (a.linkId != b.linkId || a.linkNotePath != b.linkNotePath) return false;
     if (a.mathKind != b.mathKind) return false;
     if (a.shapeKind != b.shapeKind) return false;
-    if (a.shapeDrawMode != b.shapeDrawMode) return false;
+    if (a.shapeDrawMode != b.shapeDrawMode || a.shapeBoundary != b.shapeBoundary) return false;
     if (a.arrowHead != b.arrowHead) return false;
+    if (!StageMergeNearlyEqual(a.shapeAngle,b.shapeAngle)) return false;
     if (!StageMergeNearlyEqual(a.shapeRotation, b.shapeRotation)) return false;
     if (a.path.size() != b.path.size()) return false;
     for (size_t i = 0; i < a.path.size(); ++i) {
@@ -1141,7 +1188,7 @@ static void RestorePreviousDocumentAfterOpenFailure(HWND owner,
     }
 
     if (previousKind == DocKind::Pdf) {
-        QueuePendingPdfRestoreForPath(previousPath);
+        QueuePendingPdfRestoreForPath(previousPath, false);
         if (!previousPasswordUtf8.empty()) {
             QueuePdfOpenPasswordForNextLoad(previousPasswordUtf8);
         }
@@ -1353,74 +1400,59 @@ bool LoadAnnotationsForCurrentPdf(HWND owner) {
     return true;
 }
 
-bool MergeStagedAnnotationsIntoCurrentPdf(HWND owner, const std::filesystem::path& stagePath) {
-    if (g_pdf.kind != DocKind::Pdf || g_pdf.path.empty() || stagePath.empty()) return false;
+// A same-document reload may clear the current lists before its .clrop load
+// fails. Keep the complete in-memory annotation session until it commits.
+struct CurrentPdfAnnotationReloadSnapshot {
+    bool active = false;
+    std::vector<Annotation> annots;
+    std::vector<AnnotCommand> undo;
+    std::vector<AnnotCommand> redo;
+    std::vector<AnnotCommand> pendingStageCommands;
+    std::wstring pendingStageTargetPath;
+    clrop::PdfId loadedPdfId;
+    bool annotsDirty = false;
+    bool annotsNeedsIntegrate = false;
+    bool annotsRequireStrongValidation = false;
+    bool annotsLoadedPdfIdValid = false;
+    bool pendingStageCommandsValid = true;
+    bool historyDirty = false;
+    bool historyLoadWarned = false;
 
-    std::wstring err;
-    std::vector<Annotation> loaded;
-    if (!file_output::LoadResolvedStagedAnnotations(g_pdf.path, stagePath, &loaded, &err)) {
-        std::wstring msg = L"注釈差分の読み込みに失敗しました。";
-        if (!err.empty()) msg += L"\n\n" + err;
-        ShowPdfMessageDialog(owner, L"clrop merge", msg, SoftNoticeKind::Error,
-                             {{L"", g_pdf.path},
-                              {localization::Text(L"dialog.path.stage"), stagePath.wstring()}});
-        return false;
+    void Capture() noexcept {
+        annots.swap(g_annots);
+        undo.swap(g_annotUndo);
+        redo.swap(g_annotRedo);
+        pendingStageCommands.swap(g_pendingAnnotStageCommands);
+        pendingStageTargetPath.swap(g_pendingAnnotStageTargetPath);
+        std::swap(loadedPdfId, g_annotsLoadedPdfId);
+        annotsDirty = g_annotsDirty;
+        annotsNeedsIntegrate = g_annotsNeedsIntegrate;
+        annotsRequireStrongValidation = g_annotsRequireStrongValidation;
+        annotsLoadedPdfIdValid = g_annotsLoadedPdfIdValid;
+        pendingStageCommandsValid = g_pendingAnnotStageCommandsValid;
+        historyDirty = g_annotHistoryDirty;
+        historyLoadWarned = g_annotHistoryLoadWarned;
+        active = true;
     }
 
-    std::vector<Annotation> merged = g_annots;
-    size_t added = 0;
-    for (const auto& candidate : loaded) {
-        bool exists = false;
-        for (const auto& current : merged) {
-            if (StageMergeAnnotationEquals(candidate, current)) {
-                exists = true;
-                break;
-            }
-        }
-        if (!exists) {
-            merged.push_back(candidate);
-            ++added;
-        }
+    void Restore() noexcept {
+        if (!active) return;
+        annots.swap(g_annots);
+        undo.swap(g_annotUndo);
+        redo.swap(g_annotRedo);
+        pendingStageCommands.swap(g_pendingAnnotStageCommands);
+        pendingStageTargetPath.swap(g_pendingAnnotStageTargetPath);
+        std::swap(loadedPdfId, g_annotsLoadedPdfId);
+        g_annotsDirty = annotsDirty;
+        g_annotsNeedsIntegrate = annotsNeedsIntegrate;
+        g_annotsRequireStrongValidation = annotsRequireStrongValidation;
+        g_annotsLoadedPdfIdValid = annotsLoadedPdfIdValid;
+        g_pendingAnnotStageCommandsValid = pendingStageCommandsValid;
+        g_annotHistoryDirty = historyDirty;
+        g_annotHistoryLoadWarned = historyLoadWarned;
+        active = false;
     }
-    if (added == 0) {
-        ShowSoftNotice(owner ? owner : g_hMainWnd,
-                       localization::Text(L"pdf.annotation_store.237a7cf61796"));
-        return true;
-    }
-
-    g_annots = std::move(merged);
-    InvalidatePendingAnnotStageCommands(g_pdf.path);
-    EnsureAnnotationIds(g_annots);
-    for (auto& ann : g_annots) {
-        if (ann.type == Annotation::Type::TextBox && ann.textLines.empty()) {
-            EnsureAnnotationTextLines(ann);
-        }
-    }
-    g_annotsLoadedPdfId = clrop::ComputePdfId(g_pdf.path);
-    g_annotsLoadedPdfIdValid = !g_annotsLoadedPdfId.sha256.empty();
-    g_annotsRequireStrongValidation = false;
-    g_annotsDirty = true;
-    g_annotsNeedsIntegrate = false;
-    InvalidateRect(g_hPdfView, nullptr, FALSE);
-    RefreshAnnotPanel();
-    RefreshMainWindowUiState(owner);
-
-    if (!file_output::SaveAnnotationsIfDirty(owner)) {
-        return false;
-    }
-    if (!file_output::IntegrateStagedDiff(owner, file_output::StagedClropPathForPdf(g_pdf.path))) {
-        return false;
-    }
-    g_annotsNeedsIntegrate = false;
-    RefreshMainWindowUiState(owner);
-
-    if (stagePath != file_output::StagedClropPathForPdf(g_pdf.path)) {
-        file_output::DiscardStagedDiff(stagePath);
-    }
-    ShowSoftNotice(owner ? owner : g_hMainWnd,
-                   localization::Text(L"pdf.annotation_store.6f64f17d4c0f"));
-    return true;
-}
+};
 
 bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
     const ULONGLONG startTick = preview_trace::TickNow();
@@ -1435,6 +1467,20 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
         L" previousKind=" + std::to_wstring(static_cast<int>(previousKind)));
     auto syncOwnerUi = [&]() {
         RefreshMainWindowUiState(owner);
+    };
+    CurrentPdfAnnotationReloadSnapshot reloadSnapshot;
+    bool samePdfReloadWasCaptured = false;
+    auto restorePreviousAfterException = [&]() {
+        if (!samePdfReloadWasCaptured) {
+            RestorePreviousDocumentAfterOpenFailure(owner, previousKind, previousPath, previousPasswordUtf8);
+            return;
+        }
+        reloadSnapshot.Restore();
+        RefreshAnnotPanel();
+        QueuePendingPdfRestoreForPath(previousPath, false);
+        SyncLeftPaneSelection();
+        if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+        syncOwnerUi();
     };
     try {
         fault_injection::MaybeThrow(L"OpenPdfWithAnnotations:start");
@@ -1466,35 +1512,21 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
         const bool reopeningCurrentPdf =
             IsPdfFile(path) && previousKind == DocKind::Pdf && IsSameDocumentPath(path, previousPath);
         const bool forceReloadCurrentPdf = reopeningCurrentPdf && g_pendingPdfOpenPasswordUtf8.has_value();
-        std::vector<Annotation> previousAnnots;
-        bool previousAnnotsDirty = false;
-        bool previousAnnotsNeedsIntegrate = false;
-        bool previousAnnotsRequireStrongValidation = false;
-        bool previousAnnotsLoadedPdfIdValid = false;
-        clrop::PdfId previousAnnotsLoadedPdfId{};
         if (reopeningCurrentPdf && !forceReloadCurrentPdf) {
-            previousAnnots = g_annots;
-            previousAnnotsDirty = g_annotsDirty;
-            previousAnnotsNeedsIntegrate = g_annotsNeedsIntegrate;
-            previousAnnotsRequireStrongValidation = g_annotsRequireStrongValidation;
-            previousAnnotsLoadedPdfIdValid = g_annotsLoadedPdfIdValid;
-            if (previousAnnotsLoadedPdfIdValid) {
-                previousAnnotsLoadedPdfId = g_annotsLoadedPdfId;
-            }
+            reloadSnapshot.Capture();
+            samePdfReloadWasCaptured = true;
         }
         g_pendingPdfRestore.reset();
         if (IsPdfFile(path)) {
-            QueuePendingPdfRestoreForPath(path);
+            QueuePendingPdfRestoreForPath(path, !reopeningCurrentPdf);
         }
         if (reopeningCurrentPdf && !forceReloadCurrentPdf) {
             if (!LoadAnnotationsForCurrentPdf(owner)) {
-                ApplyLoadedAnnotationsForCurrentPdf(std::move(previousAnnots),
-                                                   previousAnnotsNeedsIntegrate,
-                                                   previousAnnotsLoadedPdfIdValid ? &previousAnnotsLoadedPdfId : nullptr,
-                                                   previousAnnotsRequireStrongValidation);
-                g_annotsDirty = previousAnnotsDirty;
+                reloadSnapshot.Restore();
+                RefreshAnnotPanel();
+                if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
                 RefreshMainWindowUiState(owner);
-                QueuePendingPdfRestoreForPath(previousPath);
+                QueuePendingPdfRestoreForPath(previousPath, false);
                 SyncLeftPaneSelection();
                 bool restored = false;
                 if (!g_pendingInitialFitWidth && !g_pendingInitialFitHeight) {
@@ -1524,6 +1556,8 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
             preview_trace::Append(
                 L"OpenPdfWithAnnotations",
                 L"end reopen_current_pdf elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+            reloadSnapshot.active = false;
+            samePdfReloadWasCaptured = false;
             return true;
         }
         if (IsPdfFile(path)) {
@@ -1604,7 +1638,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
     } catch (const std::exception& ex) {
         AppendPdfOperationExceptionLog("OpenPdfWithAnnotations", ex.what());
         try {
-            RestorePreviousDocumentAfterOpenFailure(owner, previousKind, previousPath, previousPasswordUtf8);
+            restorePreviousAfterException();
         } catch (...) {
         }
         ShowPdfMessageDialog(owner ? owner : g_hMainWnd,
@@ -1615,7 +1649,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
     } catch (...) {
         AppendPdfOperationExceptionLog("OpenPdfWithAnnotations", nullptr);
         try {
-            RestorePreviousDocumentAfterOpenFailure(owner, previousKind, previousPath, previousPasswordUtf8);
+            restorePreviousAfterException();
         } catch (...) {
         }
         ShowPdfMessageDialog(owner ? owner : g_hMainWnd,
@@ -1626,8 +1660,5 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
     }
 }
 
-bool ExportPdfWithAnnotations(HWND owner) {
-    return file_output::ExportPdfWithAnnotations(owner, true, g_config.exportStandardTextAnnots);
-}
 #endif
 #endif // PDF_NOTE_ANNOT_COMMAND_CODEC_ONLY / PDF_NOTE_ANNOT_HISTORY_PARSER_ONLY

@@ -121,6 +121,9 @@ static std::wstring BottomMathValidationMessage(const note::MathInputAnalysis& a
     if (firstError->code == L"NOTE-E-MATHBOX-UNCLOSED-DOLLAR") {
         return localization::Text(L"note.bottom_math.validation.unclosed_dollar");
     }
+    if (firstError->code == L"NOTE-E-MATHBOX-TRAILING-TEXT") {
+        return localization::Text(L"note.bottom_math.validation.trailing_text");
+    }
     return firstError->message;
 }
 

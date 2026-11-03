@@ -4,6 +4,17 @@
 
 namespace pdf_annotation_export {
 
+enum class TextColorMode { Marker, Transparent, AutomaticBackground, SpecifiedBackground };
+struct TextColorOptions {
+    TextColorMode mode = TextColorMode::Marker;
+    COLORREF background = RGB(255, 255, 255);
+};
+
+// Destination copy only. Reuse source glyph outlines/positions as a Stamp AP;
+// the page's text objects stay intact. Failure discards the entire output.
+[[nodiscard]] bool AddTextColorOverlay(FPDF_PAGE destination, const Annotation& scaled,
+                                      const TextColorOptions& options);
+
 // Caller owns this new, empty output document and closes it with PDFium.
 // A controlled memory initializer supplies valid indirect default-font
 // resources and an empty Fields array. It never reads a user file or path.

@@ -16,6 +16,14 @@ See [Saving and Recovery](Save_and_Recovery.md) for protected work and recovery.
 
 Check the intended use of the file type in [File Formats](File_Formats.md). Do not rename extensions or alter original and working files by hand.
 
+## A window does not appear, or another package is found
+
+Starting again from the same package location brings the existing main window forward. Packages at different locations can run independently, but concurrent access to the same protected PDF, note, or related document is restricted.
+
+At startup, the application can find a package at another location whose main window is not displayed. It does not force that process to close, because it may be saving or waiting for confirmation. You can request a normal exit after confirming the target. If exit is not confirmed within 10 seconds, it remains unconfirmed. No exit request is sent to an older version that does not support its process-specific endpoint.
+
+If this application's main window is unavailable for at least 15 seconds, it makes up to three display-recovery attempts. If the window does not return, a silent notice offers **Retry display**, **Try normal exit**, or **Keep waiting**. The notice closes when the window returns. Minimization or a brief hide is not treated as exit. This does not detect an application that is unresponsive while its window remains visible.
+
 ## Office conversion and long paths
 
 Office conversion supports long local file paths without a blanket 220-character cutoff. The file name component, Windows process working directory, and complete command line have separate limits. If an error identifies the runtime working directory, move the entire application to a shorter location. Keep existing workspace data intact. Conversion temporary files stay in the selected workspace's `__pdf_note_workspace__/__tmp__/lo/`; an unwritable location does not trigger a fallback to the OS temporary directory.
@@ -30,7 +38,7 @@ The `__tmp__` and `__escape__` directories can contain unsaved and recovery data
 
 ## Inspect log and generated-file sizes
 
-Use Help > Asset presence check > Check sizes to inspect the selected workspace's management directory and its logs, temporary work, recovery and working data, save backups, operation recovery, and memo backups. The list shows sizes, observed file counts and changes; Details includes exact byte counts, the size-check time and completion state.
+Use Help > Checks > Asset presence check > Check sizes to inspect the selected workspace's management directory and its logs, temporary work, recovery and working data, save backups, operation recovery, and memo backups. The list shows sizes, observed file counts and changes; Details includes exact byte counts, the size-check time and completion state.
 
 Scanning runs in the background after an explicit action. It creates, changes and deletes no files. Original PDFs and other files outside the management directory are excluded; links are not followed. Sizes sum logical file sizes per name, rather than disk allocation. Parent rows contain child rows, so do not add the rows together. The log-directory row includes ZIP copies and inspection logs, separately from the five diagnostic logs' 10 MB budget.
 

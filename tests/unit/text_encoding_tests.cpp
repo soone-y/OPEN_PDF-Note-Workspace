@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <string>
+#include <utility>
 
 int main() {
     using text_encoding::DecodedText;
@@ -32,7 +33,33 @@ int main() {
 
     assert(!text_encoding::DecodeUtf8Strict(cp932Dummy).has_value());
     std::wstring error;
-    assert(!text_encoding::EncodeText(L"emoji \U0001F642", Encoding::Cp932, &encoded, &error));
+    text_encoding::ErrorCode errorCode = text_encoding::ErrorCode::None;
+    assert(!text_encoding::EncodeText(L"emoji \U0001F642", Encoding::Cp932, &encoded, &error, &errorCode));
     assert(!error.empty());
+    assert(errorCode == text_encoding::ErrorCode::Cp932Unrepresentable);
+    assert(std::wstring_view(text_encoding::ErrorTextId(errorCode)) == L"text_encoding.cp932_unrepresentable");
+
+    // An empty note remains valid after creation, clearing its text, or a prior
+    // conversion failure. Preserve each selected encoding's BOM exactly.
+    const std::pair<Encoding, std::string> emptyCases[] = {
+        {Encoding::Utf8, ""}, {Encoding::Utf8Bom, "\xEF\xBB\xBF"},
+        {Encoding::Cp932, ""}, {Encoding::Utf16Le, "\xFF\xFE"},
+        {Encoding::Utf16Be, "\xFE\xFF"},
+    };
+    for (const auto& [encoding, expected] : emptyCases) {
+        encoded = "previous content"; error = L"previous failure";
+        assert(text_encoding::EncodeText(std::wstring_view{}, encoding, &encoded, &error));
+        assert(encoded == expected && error.empty());
+        assert(text_encoding::DecodeExternalText(encoded, &decoded));
+        assert(decoded.text.empty());
+        assert(text_encoding::EncodeText(L"次の本文", encoding, &encoded, &error));
+        assert(text_encoding::EncodeText(L"", encoding, &encoded, &error));
+        assert(encoded == expected && error.empty());
+    }
+    const std::wstring invalidUtf16(1, static_cast<wchar_t>(0xD800));
+    assert(!text_encoding::EncodeText(invalidUtf16, Encoding::Utf8, &encoded, &error));
+    assert(encoded.empty() && !error.empty());
+    assert(text_encoding::EncodeText(L"", Encoding::Utf8, &encoded, &error));
+    assert(encoded.empty() && error.empty());
     return 0;
 }

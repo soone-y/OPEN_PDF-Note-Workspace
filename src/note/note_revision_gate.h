@@ -30,8 +30,5 @@ struct NoteDerivedReadContext {
 NoteDerivedReadDecision ResolveNoteDerivedRead(
     const NoteDerivedSnapshotState& derived,
     const NoteDerivedReadContext& context);
-bool CanReadCurrentNoteDerivedSnapshot(
-    const NoteDerivedSnapshotState& derived,
-    const NoteDerivedReadContext& context);
 
 } // namespace note

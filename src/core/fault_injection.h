@@ -46,4 +46,25 @@ inline void MaybeThrow(const wchar_t* point) {
     throw std::runtime_error(std::string(msg.begin(), msg.end()));
 }
 
+// Deterministic crash tests own all three named events and the disposable child
+// process. No files are written. Disabled unless explicitly enabled and armed;
+// missing events are a no-op, and a lost parent cannot block the app indefinitely.
+inline void MaybePauseForCrashTest(const wchar_t* point) {
+    if (!point || !IsEnabled()) return;
+    std::wstring selected, armedName, readyName, releaseName;
+    if (!ReadEnvVar(L"PDF_NOTE_SMALL_PAUSE_POINT", &selected) || selected != point ||
+        !ReadEnvVar(L"PDF_NOTE_SMALL_PAUSE_ARM_EVENT", &armedName) ||
+        !ReadEnvVar(L"PDF_NOTE_SMALL_PAUSE_READY_EVENT", &readyName) ||
+        !ReadEnvVar(L"PDF_NOTE_SMALL_PAUSE_RELEASE_EVENT", &releaseName)) return;
+    HANDLE armed = OpenEventW(SYNCHRONIZE, FALSE, armedName.c_str());
+    HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, readyName.c_str());
+    HANDLE release = OpenEventW(SYNCHRONIZE, FALSE, releaseName.c_str());
+    if (armed && ready && release && WaitForSingleObject(armed, 0) == WAIT_OBJECT_0 && SetEvent(ready)) {
+        (void)WaitForSingleObject(release, 30000);
+    }
+    if (release) CloseHandle(release);
+    if (ready) CloseHandle(ready);
+    if (armed) CloseHandle(armed);
+}
+
 } // namespace fault_injection

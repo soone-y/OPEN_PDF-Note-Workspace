@@ -14,23 +14,50 @@ constexpr int IDC_PALETTE_EDITOR_RED_LABEL = 5219;
 constexpr int IDC_PALETTE_EDITOR_RED = 5220;
 constexpr int IDC_PALETTE_EDITOR_GREEN = 5221;
 constexpr int IDC_PALETTE_EDITOR_BLUE = 5222;
-constexpr int IDC_PALETTE_EDITOR_PREVIEW = 5223;
 constexpr int IDC_PALETTE_EDITOR_HEX = 5224;
 constexpr int IDC_PALETTE_EDITOR_EYEDROPPER = 5227;
-constexpr int IDC_PALETTE_EDITOR_CHOICE_BASE = 5230;
-constexpr int IDC_PALETTE_EDITOR_CHOICE_COUNT = 8;
 constexpr int IDC_PALETTE_EDITOR_GREEN_LABEL = 5240;
 constexpr int IDC_PALETTE_EDITOR_BLUE_LABEL = 5241;
 constexpr int IDC_PALETTE_EDITOR_HEX_LABEL = 5242;
+constexpr int IDC_PALETTE_STOCK_TITLE = 5250;
+constexpr int IDC_PALETTE_STOCK_HINT = 5251;
+constexpr int IDC_PALETTE_STOCK_LIST = 5252;
+constexpr int IDC_PALETTE_STOCK_ADD = 5253;
+constexpr int IDC_PALETTE_STOCK_USE = 5254;
+constexpr int IDC_PALETTE_STOCK_REMOVE = 5255;
+constexpr int IDC_PALETTE_STOCK_RELOAD = 5256;
+constexpr int IDC_PALETTE_SETS_TITLE = 5260;
+constexpr int IDC_PALETTE_SETS_HINT = 5261;
+constexpr int IDC_PALETTE_SETS_LIST = 5262;
+constexpr int IDC_PALETTE_SETS_PREVIEW = 5263;
+constexpr int IDC_PALETTE_SETS_APPLY = 5264;
+constexpr int IDC_PALETTE_SETS_SAVE = 5265;
+constexpr int IDC_PALETTE_SETS_CLEAR = 5266;
+constexpr int IDC_PALETTE_SETS_RELOAD = 5267;
+constexpr int IDC_PALETTE_HUE = 5270;
+constexpr int IDC_PALETTE_SV = 5271;
+constexpr int IDC_PALETTE_HUE_LABEL = 5272;
+constexpr int IDC_PALETTE_SV_LABEL = 5273;
+constexpr int IDC_PALETTE_SAVE_STATUS = 5280;
+constexpr int IDC_PALETTE_USE_COLOR = 5281;
+constexpr int IDC_PALETTE_RETRY = 5282;
+constexpr int IDC_PALETTE_RELOAD_ACTIVE = 5283;
+// Palette page HWND timer ledger: 1 = valid numeric input debounce (500 ms).
+// Killed before each commit, on invalid input, and before page destruction.
+constexpr UINT_PTR kPaletteAutoSaveTimer = 1;
 
 struct PaletteSettingsCtx {
+    PaletteSettingsCtx() = default;
+    PaletteSettingsCtx(const PaletteSettingsCtx&) = delete; // Gradient states borrow this object's HSV.
+    PaletteSettingsCtx& operator=(const PaletteSettingsCtx&) = delete;
     HWND owner = nullptr;
+    std::uint64_t retryIdentity = 0;
     bool done = false;
     bool ok = false;
     bool embedded = false;
+    bool colorPickerPurpose = false;
     bool reopenOnCancel = false;
-    // Keep legacy picker slots when saving, but expose only the seven presets
-    // and one application-owned custom color.
+    // All eight visible slots are editable. Preserve hidden legacy picker slots.
     COLORREF colors[kToolPaletteCommandSlotCapacity]{};
     int selectedSlot = 0;
     int changedSlot = -1;
@@ -49,6 +76,29 @@ struct PaletteSettingsCtx {
     bool syncingFields = false;
     bool eyedropperActive = false;
     COLORREF eyedropperInitialColor = RGB(0, 0, 0);
+    std::filesystem::path stockRoot;
+    palette_stock::Snapshot stock;
+    HWND stockTitle = nullptr;
+    HWND stockHint = nullptr;
+    HWND stockList = nullptr;
+    std::array<HWND, 4> stockButtons{};
+    palette_presets::Snapshot sets;
+    HWND setsTitle = nullptr;
+    HWND setsHint = nullptr;
+    HWND setsList = nullptr;
+    HWND setsPreview = nullptr;
+    std::array<HWND, 4> setsButtons{};
+    int scrollY = 0;
+    bool layingOut = false;
+    bool correctingScrollbarWidth = false;
+    palette_color::Hsv hsv{};
+    ui::color_gradient::State hueState{&hsv, true}, svState{&hsv, false};
+    HWND hue = nullptr, sv = nullptr, hueLabel = nullptr, svLabel = nullptr;
+    HWND saveStatus = nullptr, useColor = nullptr, retry = nullptr, reloadActive = nullptr;
+    palette_active::Snapshot active;
+    COLORREF committedColors[kToolPaletteCommandSlotCapacity]{};
+    bool runtimePending = false;
+    COLORREF gradientInitialColor = RGB(0, 0, 0);
 };
 
 static void DrawPaletteSlotButton(const DRAWITEMSTRUCT* dis, COLORREF color, bool isTargetSlot, bool isChangedSlot) {
@@ -115,19 +165,6 @@ static bool IsPaletteSlotId(int id) {
     return id >= IDC_PALETTE_SLOT_BASE && id < IDC_PALETTE_SLOT_BASE + IDC_PALETTE_SLOT_COUNT;
 }
 
-struct PaletteColorEditorCtx {
-    HWND owner = nullptr;
-    COLORREF color = RGB(0, 0, 0);
-    bool done = false;
-    bool accepted = false;
-    bool syncingFields = false;
-    bool eyedropperActive = false;
-    COLORREF eyedropperInitialColor = RGB(0, 0, 0);
-    HWND preview = nullptr;
-    std::array<COLORREF, IDC_PALETTE_EDITOR_CHOICE_COUNT> choices{};
-    size_t choiceCount = 0;
-};
-
 static bool TryReadPaletteChannel(HWND hWnd, int id, BYTE* out) {
     if (!out) return false;
     HWND edit = GetDlgItem(hWnd, id);
@@ -186,26 +223,6 @@ static std::wstring PaletteEditorHex(COLORREF color) {
     return text;
 }
 
-static void SetPaletteEditorColor(HWND hWnd, PaletteColorEditorCtx* ctx, COLORREF color) {
-    if (!ctx) return;
-    ctx->syncingFields = true;
-    const std::array<std::pair<int, BYTE>, 3> channels{{
-        {IDC_PALETTE_EDITOR_RED, GetRValue(color)},
-        {IDC_PALETTE_EDITOR_GREEN, GetGValue(color)},
-        {IDC_PALETTE_EDITOR_BLUE, GetBValue(color)},
-    }};
-    for (const auto& [id, value] : channels) {
-        const std::wstring text = std::to_wstring(value);
-        SetWindowTextW(GetDlgItem(hWnd, id), text.c_str());
-    }
-    const std::wstring hex = PaletteEditorHex(color);
-    SetWindowTextW(GetDlgItem(hWnd, IDC_PALETTE_EDITOR_HEX), hex.c_str());
-    ctx->color = color;
-    ctx->syncingFields = false;
-    if (ctx->preview) InvalidateRect(ctx->preview, nullptr, TRUE);
-    InvalidateRect(hWnd, nullptr, FALSE);
-}
-
 static bool SamplePaletteColorAtCursor(COLORREF* outColor) {
     if (!outColor) return false;
     POINT pt{};
@@ -227,273 +244,32 @@ static bool ReadPaletteEditorColor(HWND hWnd, COLORREF* out) {
     return true;
 }
 
-static void UpdatePaletteEditorFromRgb(HWND hWnd, PaletteColorEditorCtx* ctx) {
-    if (!ctx || ctx->syncingFields) return;
-    COLORREF color{};
-    if (!ReadPaletteEditorRgb(hWnd, &color)) return;
-    SetPaletteEditorColor(hWnd, ctx, color);
-}
-
-static void UpdatePaletteEditorFromHex(HWND hWnd, PaletteColorEditorCtx* ctx) {
-    if (!ctx || ctx->syncingFields) return;
-    COLORREF color{};
-    if (!TryReadPaletteHex(hWnd, &color)) return;
-    SetPaletteEditorColor(hWnd, ctx, color);
-}
-
-static void EnsurePaletteColorEditorClass() {
-    static bool registered = false;
-    if (registered) return;
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = [](HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
-        auto* ctx = reinterpret_cast<PaletteColorEditorCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
-        switch (msg) {
-        case WM_CREATE: {
-            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-            ctx = reinterpret_cast<PaletteColorEditorCtx*>(cs->lpCreateParams);
-            SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
-            if (!ctx) return -1;
-            const int pad = ScaleY(hWnd, 14);
-            const int rowH = std::max(ScaleY(hWnd, 26), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 8));
-            const int labelW = ScaleY(hWnd, 24);
-            const int editW = ScaleY(hWnd, 64);
-            const int gap = ScaleY(hWnd, 8);
-            const int previewW = ScaleY(hWnd, 116);
-            const int previewH = rowH;
-            const int buttonW = ScaleY(hWnd, 92);
-            const int choiceW = ScaleY(hWnd, 28);
-            const int choiceGap = ScaleY(hWnd, 6);
-            const int y0 = pad;
-            const std::array<std::pair<const wchar_t*, int>, 3> channels{{
-                {L"R", IDC_PALETTE_EDITOR_RED}, {L"G", IDC_PALETTE_EDITOR_GREEN}, {L"B", IDC_PALETTE_EDITOR_BLUE}
-            }};
-            const BYTE values[] = {GetRValue(ctx->color), GetGValue(ctx->color), GetBValue(ctx->color)};
-            for (size_t i = 0; i < channels.size(); ++i) {
-                const int y = y0 + static_cast<int>(i) * (rowH + gap);
-                HWND label = CreateWindowExW(0, L"STATIC", channels[i].first, WS_CHILD | WS_VISIBLE,
-                                              pad, y + ScaleY(hWnd, 4), labelW, rowH, hWnd, nullptr, g_hInst, nullptr);
-                SetUIFont(label);
-                const std::wstring value = std::to_wstring(values[i]);
-                HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", value.c_str(),
-                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
-                                             pad + labelW, y, editW, rowH, hWnd,
-                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(channels[i].second)), g_hInst, nullptr);
-                SetUIFont(edit);
-            }
-            const int previewY = y0 + 3 * (rowH + gap);
-            ctx->preview = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-                                           pad, previewY, previewW, previewH, hWnd,
-                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_PREVIEW)), g_hInst, nullptr);
-            const int hexY = previewY + previewH + gap;
-            HWND hexLabel = CreateWindowExW(0, L"STATIC", L"HEX", WS_CHILD | WS_VISIBLE,
-                                             pad, hexY + ScaleY(hWnd, 4), labelW + ScaleY(hWnd, 14), rowH,
-                                             hWnd, nullptr, g_hInst, nullptr);
-            SetUIFont(hexLabel);
-            const std::wstring initialHex = PaletteEditorHex(ctx->color);
-            HWND hexEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", initialHex.c_str(),
-                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                                            pad + labelW + ScaleY(hWnd, 14), hexY, editW + ScaleY(hWnd, 44), rowH, hWnd,
-                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_HEX)), g_hInst, nullptr);
-            SetUIFont(hexEdit);
-            const int choiceY = hexY + rowH + gap;
-            for (size_t i = 0; i < ctx->choiceCount; ++i) {
-                const int x = pad + static_cast<int>(i % 4) * (choiceW + choiceGap);
-                const int y = choiceY + static_cast<int>(i / 4) * (rowH + gap);
-                const std::wstring label = std::to_wstring(i + 1);
-                HWND choice = CreateWindowExW(0, L"BUTTON", label.c_str(),
-                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                                              x, y, choiceW, rowH, hWnd,
-                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_CHOICE_BASE + i)),
-                                              g_hInst, nullptr);
-                SetUIFont(choice);
-            }
-            const int eyedropperY = choiceY + 2 * (rowH + gap);
-            HWND eyedropper = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.palette.eyedropper").c_str(),
-                                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                              pad, eyedropperY, ScaleY(hWnd, 156), rowH, hWnd,
-                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_EDITOR_EYEDROPPER)), g_hInst, nullptr);
-            SetUIFont(eyedropper);
-            const int buttonY = eyedropperY + rowH + ScaleY(hWnd, 14);
-            HWND ok = CreateWindowExW(0, L"BUTTON", UiOkLabel().c_str(),
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                                      pad, buttonY, buttonW, rowH,
-                                      hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_hInst, nullptr);
-            HWND cancel = CreateWindowExW(0, L"BUTTON", UiCancelLabel().c_str(),
-                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                          pad + buttonW + gap, buttonY, buttonW, rowH,
-                                          hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_hInst, nullptr);
-            SetUIFont(ok);
-            SetUIFont(cancel);
-            ApplyThemeToDialog(hWnd);
-            return 0;
-        }
-        case WM_DRAWITEM: {
-            auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
-            if (!ctx || !dis) break;
-            if (dis->CtlID >= IDC_PALETTE_EDITOR_CHOICE_BASE &&
-                dis->CtlID < IDC_PALETTE_EDITOR_CHOICE_BASE + static_cast<UINT>(ctx->choiceCount)) {
-                const size_t idx = static_cast<size_t>(dis->CtlID - IDC_PALETTE_EDITOR_CHOICE_BASE);
-                DrawPaletteSlotButton(dis, ctx->choices[idx], ctx->choices[idx] == ctx->color, false);
-                return TRUE;
-            }
-            if (dis->CtlID != IDC_PALETTE_EDITOR_PREVIEW) break;
-            HBRUSH fill = CreateSolidBrush(ctx->color);
-            FillRect(dis->hDC, &dis->rcItem, fill);
-            DeleteObject(fill);
-            HBRUSH border = CreateSolidBrush(g_theme.buttonBorder);
-            FrameRect(dis->hDC, &dis->rcItem, border);
-            DeleteObject(border);
-            return TRUE;
-        }
-        case WM_COMMAND: {
-            const int id = LOWORD(wParam);
-            const int code = HIWORD(wParam);
-            if (id == IDC_PALETTE_EDITOR_EYEDROPPER && code == BN_CLICKED) {
-                ctx->eyedropperInitialColor = ctx->color;
-                ctx->eyedropperActive = true;
-                SetCapture(hWnd);
-                return 0;
-            }
-            if (id >= IDC_PALETTE_EDITOR_CHOICE_BASE &&
-                id < IDC_PALETTE_EDITOR_CHOICE_BASE + static_cast<int>(ctx->choiceCount) && code == BN_CLICKED) {
-                SetPaletteEditorColor(hWnd, ctx, ctx->choices[static_cast<size_t>(id - IDC_PALETTE_EDITOR_CHOICE_BASE)]);
-                return 0;
-            }
-            if (id == IDOK) {
-                COLORREF color{};
-                if (!ReadPaletteEditorColor(hWnd, &color)) {
-                    const int fields[] = {IDC_PALETTE_EDITOR_RED, IDC_PALETTE_EDITOR_GREEN, IDC_PALETTE_EDITOR_BLUE};
-                    bool invalidChannel = false;
-                    for (int field : fields) {
-                        BYTE unused{};
-                        if (!TryReadPaletteChannel(hWnd, field, &unused)) {
-                            invalidChannel = true;
-                            HWND invalid = GetDlgItem(hWnd, field);
-                            if (invalid) {
-                                SetFocus(invalid);
-                                SendMessageW(invalid, EM_SETSEL, 0, -1);
-                            }
-                            break;
-                        }
-                    }
-                    if (!invalidChannel) {
-                        HWND invalid = GetDlgItem(hWnd, IDC_PALETTE_EDITOR_HEX);
-                        if (invalid) {
-                            SetFocus(invalid);
-                            SendMessageW(invalid, EM_SETSEL, 0, -1);
-                        }
-                    }
-                    return 0;
-                }
-                ctx->color = color;
-                ctx->accepted = true;
-                DestroyWindow(hWnd);
-                return 0;
-            }
-            if (id == IDCANCEL) {
-                DestroyWindow(hWnd);
-                return 0;
-            }
-            if (code == EN_CHANGE && (id == IDC_PALETTE_EDITOR_RED || id == IDC_PALETTE_EDITOR_GREEN || id == IDC_PALETTE_EDITOR_BLUE)) {
-                UpdatePaletteEditorFromRgb(hWnd, ctx);
-                return 0;
-            }
-            if (code == EN_CHANGE && id == IDC_PALETTE_EDITOR_HEX) {
-                UpdatePaletteEditorFromHex(hWnd, ctx);
-                return 0;
-            }
-            break;
-        }
-        case WM_LBUTTONUP:
-            if (ctx && ctx->eyedropperActive) {
-                COLORREF sampled{};
-                if (SamplePaletteColorAtCursor(&sampled)) SetPaletteEditorColor(hWnd, ctx, sampled);
-                ctx->eyedropperActive = false;
-                if (GetCapture() == hWnd) ReleaseCapture();
-                return 0;
-            }
-            break;
-        case WM_CAPTURECHANGED:
-            if (ctx && ctx->eyedropperActive) ctx->eyedropperActive = false;
-            break;
-        case WM_KEYDOWN:
-            if (ctx && ctx->eyedropperActive && wParam == VK_ESCAPE) {
-                ctx->eyedropperActive = false;
-                SetPaletteEditorColor(hWnd, ctx, ctx->eyedropperInitialColor);
-                if (GetCapture() == hWnd) ReleaseCapture();
-                return 0;
-            }
-            break;
-        case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLOREDIT:
-        case WM_CTLCOLORBTN:
-            return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
-        case WM_CLOSE:
-            DestroyWindow(hWnd);
-            return 0;
-        case WM_DESTROY:
-            if (ctx) {
-                RestoreOwnerAfterModal(ctx->owner);
-                ctx->done = true;
-            }
-            return 0;
-        default:
-            break;
-        }
-        return DefWindowProcW(hWnd, msg, wParam, lParam);
-    };
-    wc.hInstance = g_hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    wc.lpszClassName = L"PaletteColorEditorDlgClass";
-    RegisterClassW(&wc);
-    registered = true;
-}
-
-static bool ShowPaletteColorEditorDialogImpl(HWND owner, COLORREF initial, COLORREF* outColor,
-                                             const COLORREF* choices = nullptr, size_t choiceCount = 0) {
-    if (!outColor) return false;
-    EnsurePaletteColorEditorClass();
-    PaletteColorEditorCtx ctx{};
-    ctx.owner = owner;
-    ctx.color = initial;
-    if (choices) {
-        ctx.choiceCount = std::min(choiceCount, ctx.choices.size());
-        std::copy_n(choices, ctx.choiceCount, ctx.choices.begin());
-    }
-    if (owner) EnableWindow(owner, FALSE);
-    const int dpi = GetDpiY(owner);
-    HWND hWnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"PaletteColorEditorDlgClass",
-                                GetUiText().menuPaletteSettings.c_str(), WS_CAPTION | WS_POPUPWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(300, dpi, 96), MulDiv(360, dpi, 96),
-                                owner, nullptr, g_hInst, &ctx);
-    if (!hWnd) {
-        RestoreOwnerAfterModal(owner);
-        return false;
-    }
-    PlaceOwnedPopupAtAppTopLeft(hWnd, owner);
-    ShowWindow(hWnd, SW_SHOW);
-    MSG msg;
-    while (!ctx.done && GetMessageW(&msg, nullptr, 0, 0)) {
-        if (HandleWorkspaceMemoMessage(msg)) continue;
-        if (ShouldSkipImeMessageInModalLoop(msg)) continue;
-        if (ctx.eyedropperActive && msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
-            SendMessageW(hWnd, WM_KEYDOWN, VK_ESCAPE, 0);
-            continue;
-        }
-        if (!IsDialogMessageW(hWnd, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    if (ctx.accepted) *outColor = ctx.color;
-    return ctx.accepted;
-}
-
 MAYBE_UNUSED static std::wstring PaletteHexColorW(COLORREF c) {
     wchar_t buf[16]{};
     swprintf(buf, std::size(buf), L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
     return std::wstring(buf);
+}
+
+// Keep repeated drag samples from repainting controls whose displayed value
+// has not changed. Do not reset the caret in the user's source edit.
+static void SetPaletteControlText(HWND control, const std::wstring& text) {
+    if (!control) return;
+    const int length = GetWindowTextLengthW(control);
+    if (length >= 0 && static_cast<size_t>(length) == text.size()) {
+        std::wstring current(static_cast<size_t>(length) + 1, L'\0');
+        current.resize(static_cast<size_t>(GetWindowTextW(control, current.data(), length + 1)));
+        if (current == text) return;
+    }
+    SetWindowTextW(control, text.c_str());
+}
+
+static void InvalidatePaletteSlot(HWND page, int slot) {
+    if (slot < 0 || slot >= IDC_PALETTE_SLOT_COUNT) return;
+    if (HWND button = GetDlgItem(page, IDC_PALETTE_SLOT_BASE + slot)) InvalidateRect(button, nullptr, FALSE);
+}
+
+static void InvalidatePaletteSlots(HWND page) {
+    for (int slot = 0; slot < IDC_PALETTE_SLOT_COUNT; ++slot) InvalidatePaletteSlot(page, slot);
 }
 
 static void UpdatePaletteSelectedInfo(PaletteSettingsCtx* ctx) {
@@ -514,8 +290,8 @@ static void UpdatePaletteSelectedInfo(PaletteSettingsCtx* ctx) {
     if (ctx->changedSlot == idx) {
         text += localization::Text(L"settings.palette.8c31962ed379");
     }
-    SetWindowTextW(ctx->selectedInfo, text.c_str());
-    if (ctx->selectedPreview) InvalidateRect(ctx->selectedPreview, nullptr, TRUE);
+    SetPaletteControlText(ctx->selectedInfo, text);
+    if (ctx->selectedPreview) InvalidateRect(ctx->selectedPreview, nullptr, FALSE); // Owner draw fills the entire preview.
 }
 
 static void SyncPaletteSettingsEditor(HWND hWnd, PaletteSettingsCtx* ctx, COLORREF color, HWND source = nullptr) {
@@ -528,21 +304,27 @@ static void SyncPaletteSettingsEditor(HWND hWnd, PaletteSettingsCtx* ctx, COLORR
         // Do not replace the field/group being typed into (caret and partial
         // input belong to the user); only synchronize the other representation.
         if (edit && source != ctx->editRed && source != ctx->editGreen && source != ctx->editBlue)
-            SetWindowTextW(edit, std::to_wstring(value).c_str());
+            SetPaletteControlText(edit, std::to_wstring(value));
     }
-    if (ctx->editHex && source != ctx->editHex) SetWindowTextW(ctx->editHex, PaletteEditorHex(color).c_str());
+    if (ctx->editHex && source != ctx->editHex) SetPaletteControlText(ctx->editHex, PaletteEditorHex(color));
     ctx->syncingFields = false;
+    if (source != ctx->hue && source != ctx->sv) ctx->hsv = palette_color::FromRgb(color, ctx->hsv.h);
+    if (ctx->hue) InvalidateRect(ctx->hue, nullptr, FALSE);
+    if (ctx->sv) InvalidateRect(ctx->sv, nullptr, FALSE);
 }
 
 static void SetPaletteSettingsColor(HWND hWnd, PaletteSettingsCtx* ctx, COLORREF color, bool markChanged,
                                     HWND source = nullptr) {
     if (!ctx) return;
     const int idx = std::clamp(ctx->selectedSlot, 0, IDC_PALETTE_SLOT_COUNT - 1);
+    const int previousChangedSlot = ctx->changedSlot;
     ctx->colors[idx] = color;
     ctx->changedSlot = markChanged ? idx : -1;
     SyncPaletteSettingsEditor(hWnd, ctx, color, source);
     UpdatePaletteSelectedInfo(ctx);
-    InvalidateRect(hWnd, nullptr, TRUE);
+    // A color edit changes these swatches, not the page background or stock/preset lists.
+    InvalidatePaletteSlot(hWnd, idx);
+    if (previousChangedSlot != idx) InvalidatePaletteSlot(hWnd, previousChangedSlot);
 }
 
 static void UpdatePaletteSettingsFromRgb(HWND hWnd, PaletteSettingsCtx* ctx, HWND source) {
@@ -571,8 +353,481 @@ static bool ValidatePaletteSettingsEditor(HWND hWnd, PaletteSettingsCtx* ctx) {
     return false;
 }
 
+static void PaletteSaveStatus(PaletteSettingsCtx* ctx, const wchar_t* id) {
+    if (ctx && ctx->saveStatus) SetPaletteControlText(ctx->saveStatus, localization::Text(id));
+}
+
+static std::uint64_t s_nextPaletteRetryIdentity = 0;
+
+[[nodiscard]] static PaletteSettingsCtx* LivePaletteRetryContext(HWND page, std::uint64_t identity) {
+    if (!IsWindow(page)) return nullptr;
+    wchar_t className[64]{};
+    if (!GetClassNameW(page, className, static_cast<int>(std::size(className))) ||
+        wcscmp(className, L"PaletteSettingsDlgClass") != 0) return nullptr;
+    auto* ctx = reinterpret_cast<PaletteSettingsCtx*>(GetWindowLongPtrW(page, GWLP_USERDATA));
+    return ctx && ctx->retryIdentity == identity ? ctx : nullptr;
+}
+
+[[nodiscard]] static std::wstring ActivePaletteRetryKey(const std::filesystem::path& root) {
+    return L"palette-active:" + root.wstring();
+}
+
+struct ActivePaletteRetry {
+    palette_active::Snapshot snapshot;
+    std::vector<COLORREF> colors;
+    HWND page = nullptr;
+    std::uint64_t identity = 0;
+    bool fileSaved = false;
+};
+
+static void RememberActivePaletteFailure(HWND page, PaletteSettingsCtx* ctx,
+                                         const std::vector<COLORREF>& colors, bool fileSaved) {
+    std::string bytes;
+    if (!ctx || !palette_active::Serialize(colors, bytes)) return; // The live editor still owns the draft.
+    auto state = std::make_shared<ActivePaletteRetry>();
+    state->snapshot = ctx->active;
+    state->colors = colors;
+    state->page = page;
+    state->identity = ctx->retryIdentity;
+    state->fileSaved = fileSaved;
+    pending_write_retry::Attempt attempt;
+    attempt.key = ActivePaletteRetryKey(ctx->stockRoot);
+    attempt.coalesce = true;
+    attempt.operation = localization::Text(L"write_retry.palette_active");
+    attempt.targetPath = palette_stock::FilePath(ctx->stockRoot, L"user_palette.json").wstring();
+    attempt.content = UTF8ToWide(bytes);
+    for (COLORREF color : colors) {
+        if (!attempt.preview.empty()) attempt.preview += L"  ";
+        attempt.preview += PaletteHexColorW(color);
+    }
+    attempt.error = localization::Text(fileSaved
+        ? L"settings.palette.auto.runtime_failed" : L"settings.palette.auto.failed");
+    attempt.retry = [state](std::wstring& error) -> pending_write_retry::Result {
+        if (state->snapshot.root != std::filesystem::path(g_workspaceRoot)) {
+            error = localization::Text(L"write_retry.target_changed");
+            return pending_write_retry::Result::Conflict;
+        }
+        auto* live = LivePaletteRetryContext(state->page, state->identity);
+        if (live && !std::equal(state->colors.begin(), state->colors.end(), std::begin(live->colors))) {
+            error = localization::Text(L"write_retry.target_changed");
+            return pending_write_retry::Result::Conflict;
+        }
+        palette_active::Snapshot current;
+        if (!palette_active::Load(state->snapshot.root, current)) {
+            error = localization::Text(L"write_retry.failed");
+            return pending_write_retry::Result::Failed;
+        }
+        if (current.exists != state->snapshot.exists || current.bytes != state->snapshot.bytes) {
+            error = localization::Text(L"write_retry.target_changed");
+            return pending_write_retry::Result::Conflict;
+        }
+        if (!state->fileSaved) {
+            SaveOperationGuard guard;
+            if (!palette_active::Save(state->snapshot, state->colors)) {
+                error = localization::Text(L"write_retry.failed");
+                return pending_write_retry::Result::Failed;
+            }
+            state->fileSaved = true;
+            if (live) {
+                live->active = state->snapshot;
+                std::copy(state->colors.begin(), state->colors.end(), std::begin(live->committedColors));
+                live->runtimePending = true;
+            }
+        }
+        bool published = false;
+        if (live) {
+            published = SendMessageW(GetParent(state->page), kUnifiedPaletteSavedMsg, 0, 0) != 0;
+            if (published) live->runtimePending = false;
+        } else {
+            SyncUserPaletteToRuntime();
+            published = TryPersistConfig();
+            if (published && g_hMainWnd) UpdateToolbarUI(g_hMainWnd);
+        }
+        if (!published) {
+            error = localization::Text(L"settings.palette.auto.runtime_failed");
+            return pending_write_retry::Result::Failed;
+        }
+        if (live) PaletteSaveStatus(live, L"settings.palette.auto.saved");
+        return pending_write_retry::Result::Saved;
+    };
+    pending_write_retry::Remember(g_hMainWnd, std::move(attempt));
+}
+
+[[nodiscard]] static bool FlushPaletteAutoSave(HWND hWnd, PaletteSettingsCtx* ctx) try {
+    if (!ctx || !hWnd) return false;
+    KillTimer(hWnd, kPaletteAutoSaveTimer);
+    if (ctx->colorPickerPurpose) return true; // Single-color selection never commits the annotation palette.
+    COLORREF color{};
+    if (!ReadPaletteEditorColor(hWnd, &color)) {
+        PaletteSaveStatus(ctx, L"settings.palette.auto.incomplete");
+        return false;
+    }
+    const bool changed = !std::equal(std::begin(ctx->colors), std::end(ctx->colors), std::begin(ctx->committedColors));
+    const bool committedOrPublished = changed || ctx->runtimePending;
+    if (changed) {
+        SaveOperationGuard guard;
+        const std::vector<COLORREF> colors(std::begin(ctx->colors), std::end(ctx->colors));
+        if (ctx->stockRoot != std::filesystem::path(g_workspaceRoot) || !palette_active::Save(ctx->active, colors)) {
+            PaletteSaveStatus(ctx, L"settings.palette.auto.failed");
+            RememberActivePaletteFailure(hWnd, ctx, colors, false);
+            return false;
+        }
+        std::copy(std::begin(ctx->colors), std::end(ctx->colors), std::begin(ctx->committedColors));
+        ctx->runtimePending = true;
+    }
+    if (ctx->runtimePending) {
+        if (!SendMessageW(GetParent(hWnd), kUnifiedPaletteSavedMsg, 0, 0)) {
+            PaletteSaveStatus(ctx, L"settings.palette.auto.runtime_failed");
+            RememberActivePaletteFailure(hWnd, ctx,
+                std::vector<COLORREF>(std::begin(ctx->colors), std::end(ctx->colors)), true);
+            return false;
+        }
+        ctx->runtimePending = false;
+    }
+    PaletteSaveStatus(ctx, !ctx->active.ready ? L"settings.palette.auto.unavailable"
+        : ctx->active.exists ? L"settings.palette.auto.saved" : L"settings.palette.auto.defaults");
+    if (committedOrPublished) pending_write_retry::Forget(ActivePaletteRetryKey(ctx->stockRoot));
+    return true;
+} catch (...) {
+    try { PaletteSaveStatus(ctx, L"settings.palette.auto.failed"); } catch (...) {}
+    return false;
+}
+
+static void SchedulePaletteAutoSave(HWND hWnd, PaletteSettingsCtx* ctx) {
+    if (!ctx || ctx->syncingFields || ctx->colorPickerPurpose) return;
+    KillTimer(hWnd, kPaletteAutoSaveTimer);
+    COLORREF color{};
+    if (!ReadPaletteEditorColor(hWnd, &color)) {
+        PaletteSaveStatus(ctx, L"settings.palette.auto.incomplete");
+        return;
+    }
+    PaletteSaveStatus(ctx, L"settings.palette.auto.pending");
+    if (!SetTimer(hWnd, kPaletteAutoSaveTimer, 500, nullptr)) (void)FlushPaletteAutoSave(hWnd, ctx);
+}
+
+[[nodiscard]] static bool FinishPaletteEditing(HWND hWnd, PaletteSettingsCtx* ctx, bool allowDiscard = false) try {
+    if (!ctx || !hWnd || ctx->colorPickerPurpose) return true;
+    if (ctx->eyedropperActive || ctx->hueState.dragging || ctx->svState.dragging) return false;
+    if (FlushPaletteAutoSave(hWnd, ctx)) return true;
+    if (allowDiscard) {
+        SilentDialogOptions options;
+        options.title = GetUiText().menuPaletteSettings;
+        options.message = localization::Text(L"settings.palette.auto.discard_confirm");
+        options.kind = SoftNoticeKind::Warning;
+        options.buttons = SilentDialogButtons::YesNo;
+        options.yesLabel = localization::Text(L"settings.palette.auto.discard_close");
+        options.noLabel = localization::Text(L"settings.palette.auto.keep_editing");
+        options.defaultResult = SilentDialogResult::No;
+        options.escapeResult = SilentDialogResult::No;
+        return ShowSilentDialog(hWnd, options) == SilentDialogResult::Yes;
+    }
+    ShowSoftNotice(hWnd, localization::Text(L"settings.palette.auto.finish_failed"), SoftNoticeKind::Warning);
+    return false;
+} catch (...) {
+    return false; // Keep the editor if even the confirmation cannot be created.
+}
+
+static void UpdatePaletteStockControls(PaletteSettingsCtx* ctx, int selection = -1) {
+    if (!ctx || !ctx->stockList) return;
+    if (selection < 0) selection = static_cast<int>(SendMessageW(ctx->stockList, LB_GETCURSEL, 0, 0));
+    SendMessageW(ctx->stockList, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(ctx->stockList, LB_RESETCONTENT, 0, 0);
+    for (COLORREF color : ctx->stock.colors) {
+        const auto hex = PaletteHexColorW(color);
+        const LRESULT index = SendMessageW(ctx->stockList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(hex.c_str()));
+        if (index >= 0) SendMessageW(ctx->stockList, LB_SETITEMDATA, index, static_cast<LPARAM>(color));
+    }
+    if (!ctx->stock.colors.empty()) {
+        selection = std::clamp(selection, 0, static_cast<int>(ctx->stock.colors.size()) - 1);
+        SendMessageW(ctx->stockList, LB_SETCURSEL, selection, 0);
+    }
+    SendMessageW(ctx->stockList, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(ctx->stockList, nullptr, TRUE);
+    const auto title = localization::Format(L"settings.palette.stock.title",
+        {{L"COUNT", std::to_wstring(ctx->stock.colors.size())}, {L"MAX", std::to_wstring(palette_stock::kMaxColors)}});
+    SetWindowTextW(ctx->stockTitle, title.c_str());
+    SetWindowTextW(ctx->stockHint, localization::Text(ctx->stock.ready
+        ? L"settings.palette.stock.hint" : L"settings.palette.stock.load_failed").c_str());
+    EnableWindow(ctx->stockButtons[0], ctx->stock.ready);
+    const bool selected = ctx->stock.ready && !ctx->stock.colors.empty();
+    EnableWindow(ctx->stockButtons[1], selected);
+    EnableWindow(ctx->stockButtons[2], selected);
+}
+
+[[nodiscard]] static bool RememberStockPaletteFailure(HWND page, PaletteSettingsCtx* ctx,
+                                                      const std::vector<COLORREF>& colors, int selection) {
+    std::string bytes;
+    if (!palette_stock::Serialize(colors, bytes)) return false;
+    const auto snapshot = ctx->stock;
+    const auto root = ctx->stockRoot;
+    const auto identity = ctx->retryIdentity;
+    pending_write_retry::Attempt attempt;
+    attempt.key = L"palette-stock:" + root.wstring();
+    attempt.operation = localization::Text(L"write_retry.palette_stock");
+    attempt.targetPath = palette_stock::FilePath(root).wstring();
+    attempt.content = UTF8ToWide(bytes);
+    for (COLORREF color : colors) {
+        if (!attempt.preview.empty()) attempt.preview += L"  ";
+        attempt.preview += PaletteHexColorW(color);
+    }
+    attempt.error = localization::Text(L"settings.palette.stock.save_failed");
+    attempt.retry = [page, identity, root, snapshot, colors, selection](std::wstring& error) {
+        if (root != std::filesystem::path(g_workspaceRoot)) {
+            error = localization::Text(L"write_retry.target_changed");
+            return pending_write_retry::Result::Conflict;
+        }
+        auto* live = LivePaletteRetryContext(page, identity);
+        if (live && (live->stock.exists != snapshot.exists || live->stock.bytes != snapshot.bytes)) {
+            error = localization::Text(L"write_retry.target_changed");
+            return pending_write_retry::Result::Conflict;
+        }
+        palette_stock::Snapshot current;
+        if (!palette_stock::Load(root, current)) {
+            error = localization::Text(L"write_retry.failed");
+            return pending_write_retry::Result::Failed;
+        }
+        if (current.exists != snapshot.exists || current.bytes != snapshot.bytes) {
+            error = localization::Text(L"write_retry.target_changed");
+            return pending_write_retry::Result::Conflict;
+        }
+        auto next = snapshot;
+        SaveOperationGuard guard;
+        if (!palette_stock::Save(next, colors)) {
+            error = localization::Text(L"write_retry.failed");
+            return pending_write_retry::Result::Failed;
+        }
+        if (live) { live->stock = std::move(next); UpdatePaletteStockControls(live, selection); }
+        return pending_write_retry::Result::Saved;
+    };
+    pending_write_retry::Remember(g_hMainWnd, std::move(attempt));
+    return true;
+}
+
+static void ReloadPaletteStock(HWND hWnd, PaletteSettingsCtx* ctx, bool notify) {
+    if (!ctx) return;
+    palette_stock::Snapshot next;
+    if (palette_stock::Load(ctx->stockRoot, next)) {
+        ctx->stock = std::move(next);
+    } else {
+        ctx->stock.ready = false; // Retain existing memory/file; disable mutation.
+        if (notify) ShowSoftNotice(hWnd, localization::Text(L"settings.palette.stock.load_failed"), SoftNoticeKind::Warning);
+    }
+    UpdatePaletteStockControls(ctx);
+    if (notify) SendMessageW(hWnd, WM_SIZE, 0, 0);
+}
+
+[[nodiscard]] static const wchar_t* PaletteSetHintId(const PaletteSettingsCtx* ctx) {
+    if (!ctx->sets.ready) return L"settings.palette.sets.load_failed";
+    return ctx->colorPickerPurpose ? L"settings.palette.sets.hint_picker" : L"settings.palette.sets.hint";
+}
+
+static void HandlePaletteStockCommand(HWND hWnd, PaletteSettingsCtx* ctx, int id) {
+    if (!ctx) return;
+    if (id == IDC_PALETTE_STOCK_RELOAD) { ReloadPaletteStock(hWnd, ctx, true); return; }
+    if (!ctx->stock.ready) return;
+    const int selected = static_cast<int>(SendMessageW(ctx->stockList, LB_GETCURSEL, 0, 0));
+    if (id == IDC_PALETTE_STOCK_USE) {
+        if (selected < 0 || static_cast<size_t>(selected) >= ctx->stock.colors.size()) return;
+        if (!ValidatePaletteSettingsEditor(hWnd, ctx)) return;
+        SetPaletteSettingsColor(hWnd, ctx, ctx->stock.colors[static_cast<size_t>(selected)], true);
+        (void)FlushPaletteAutoSave(hWnd, ctx);
+        return; // Only the selected slot changes; picker purpose remains a draft.
+    }
+    auto colors = ctx->stock.colors;
+    int nextSelection = selected;
+    if (id == IDC_PALETTE_STOCK_ADD) {
+        if (!ValidatePaletteSettingsEditor(hWnd, ctx)) return;
+        COLORREF color{};
+        if (!ReadPaletteEditorColor(hWnd, &color)) return;
+        const auto existing = std::find(colors.begin(), colors.end(), color);
+        if (existing != colors.end()) {
+            UpdatePaletteStockControls(ctx, static_cast<int>(existing - colors.begin()));
+            ShowSoftNotice(hWnd, localization::Text(L"settings.palette.stock.duplicate"));
+            return;
+        }
+        if (colors.size() == palette_stock::kMaxColors) {
+            ShowSoftNotice(hWnd, localization::Text(L"settings.palette.stock.full"), SoftNoticeKind::Warning);
+            return;
+        }
+        colors.push_back(color);
+        nextSelection = static_cast<int>(colors.size()) - 1;
+    } else if (id == IDC_PALETTE_STOCK_REMOVE) {
+        if (selected < 0 || static_cast<size_t>(selected) >= colors.size()) return;
+        colors.erase(colors.begin() + selected);
+    } else return;
+    SaveOperationGuard guard;
+    if (ctx->stockRoot != std::filesystem::path(g_workspaceRoot) || !palette_stock::Save(ctx->stock, colors)) {
+        if (!RememberStockPaletteFailure(hWnd, ctx, colors, nextSelection))
+            ShowSoftNotice(hWnd, localization::Text(L"settings.palette.stock.save_failed"), SoftNoticeKind::Warning);
+        return;
+    }
+    UpdatePaletteStockControls(ctx, nextSelection);
+    ShowSoftNotice(hWnd, localization::Text(id == IDC_PALETTE_STOCK_ADD
+        ? L"settings.palette.stock.saved" : L"settings.palette.stock.removed"));
+}
+
+[[nodiscard]] static const palette_presets::Colors* SelectedPaletteSet(const PaletteSettingsCtx* ctx) {
+    if (!ctx || !ctx->setsList) return nullptr;
+    const int selected = static_cast<int>(SendMessageW(ctx->setsList, CB_GETCURSEL, 0, 0));
+    if (selected == 0) return &palette_presets::kInitial; // Usable even if the user file is unreadable.
+    if (!ctx->sets.ready || selected < 1 || selected > static_cast<int>(palette_presets::kUserCount)) return nullptr;
+    const auto& colors = ctx->sets.colors.users[static_cast<size_t>(selected - 1)];
+    return colors ? &*colors : nullptr;
+}
+
+static void UpdatePaletteSetControls(PaletteSettingsCtx* ctx, bool refill = false) {
+    if (!ctx || !ctx->setsList) return;
+    int selected = static_cast<int>(SendMessageW(ctx->setsList, CB_GETCURSEL, 0, 0));
+    if (refill) {
+        SendMessageW(ctx->setsList, CB_RESETCONTENT, 0, 0);
+        const auto initial = localization::Text(L"settings.palette.sets.initial");
+        SendMessageW(ctx->setsList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(initial.c_str()));
+        for (size_t i = 0; i < palette_presets::kUserCount; ++i) {
+            const auto label = localization::Format(L"settings.palette.sets.user",
+                {{L"NUMBER", std::to_wstring(i + 1)}, {L"STATE", localization::Text(!ctx->sets.ready
+                    ? L"settings.palette.sets.unavailable" : ctx->sets.colors.users[i]
+                    ? L"settings.palette.sets.saved_state" : L"settings.palette.sets.empty")}});
+            SendMessageW(ctx->setsList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+        selected = std::clamp(selected, 0, static_cast<int>(palette_presets::kUserCount));
+        SendMessageW(ctx->setsList, CB_SETCURSEL, selected, 0);
+    }
+    const bool user = ctx->sets.ready && selected >= 1 && selected <= static_cast<int>(palette_presets::kUserCount);
+    const auto* colors = SelectedPaletteSet(ctx);
+    EnableWindow(ctx->setsButtons[0], colors != nullptr);
+    EnableWindow(ctx->setsButtons[1], user);
+    EnableWindow(ctx->setsButtons[2], user && colors != nullptr);
+    SetWindowTextW(ctx->setsHint, localization::Text(PaletteSetHintId(ctx)).c_str());
+    InvalidateRect(ctx->setsPreview, nullptr, TRUE);
+}
+
+[[nodiscard]] static bool RememberPaletteSetFailure(HWND page, PaletteSettingsCtx* ctx,
+                                                    const palette_presets::Document& doc) {
+    std::string bytes;
+    if (!palette_presets::Serialize(doc, bytes)) return false;
+    const auto snapshot = ctx->sets;
+    const auto root = ctx->stockRoot;
+    const auto identity = ctx->retryIdentity;
+    pending_write_retry::Attempt attempt;
+    attempt.key = L"palette-sets:" + root.wstring();
+    attempt.operation = localization::Text(L"write_retry.palette_sets");
+    attempt.targetPath = palette_presets::FilePath(root).wstring();
+    attempt.content = UTF8ToWide(bytes);
+    attempt.error = localization::Text(L"settings.palette.sets.save_failed");
+    attempt.retry = [page, identity, root, snapshot, doc](std::wstring& error) {
+        if (root != std::filesystem::path(g_workspaceRoot)) {
+            error = localization::Text(L"write_retry.target_changed");
+            return pending_write_retry::Result::Conflict;
+        }
+        auto* live = LivePaletteRetryContext(page, identity);
+        if (live && (live->sets.exists != snapshot.exists || live->sets.bytes != snapshot.bytes)) {
+            error = localization::Text(L"write_retry.target_changed");
+            return pending_write_retry::Result::Conflict;
+        }
+        palette_presets::Snapshot current;
+        if (!palette_presets::Load(root, current)) {
+            error = localization::Text(L"write_retry.failed");
+            return pending_write_retry::Result::Failed;
+        }
+        if (current.exists != snapshot.exists || current.bytes != snapshot.bytes) {
+            error = localization::Text(L"write_retry.target_changed");
+            return pending_write_retry::Result::Conflict;
+        }
+        auto next = snapshot;
+        SaveOperationGuard guard;
+        if (!palette_presets::Save(next, doc)) {
+            error = localization::Text(L"write_retry.failed");
+            return pending_write_retry::Result::Failed;
+        }
+        if (live) { live->sets = std::move(next); UpdatePaletteSetControls(live, true); }
+        return pending_write_retry::Result::Saved;
+    };
+    pending_write_retry::Remember(g_hMainWnd, std::move(attempt));
+    return true;
+}
+
+static void ReloadPaletteSets(HWND hWnd, PaletteSettingsCtx* ctx, bool notify) {
+    if (!ctx) return;
+    palette_presets::Snapshot next;
+    if (palette_presets::Load(ctx->stockRoot, next)) ctx->sets = std::move(next);
+    else {
+        ctx->sets.ready = false; // A damaged file is never treated as five writable empty slots.
+        if (notify) ShowSoftNotice(hWnd, localization::Text(L"settings.palette.sets.load_failed"), SoftNoticeKind::Warning);
+    }
+    UpdatePaletteSetControls(ctx, true);
+    if (notify) SendMessageW(hWnd, WM_SIZE, 0, 0);
+}
+
+[[nodiscard]] static bool ConfirmPaletteSetChange(HWND hWnd, const wchar_t* message, const wchar_t* action) {
+    SilentDialogOptions options;
+    options.title = localization::Text(L"settings.palette.sets.title");
+    options.message = localization::Text(message);
+    options.kind = SoftNoticeKind::Warning;
+    options.buttons = SilentDialogButtons::YesNo;
+    options.yesLabel = localization::Text(action);
+    options.noLabel = localization::Text(L"settings.palette.sets.keep");
+    options.defaultResult = SilentDialogResult::No;
+    options.escapeResult = SilentDialogResult::No;
+    return ShowSilentDialog(hWnd, options) == SilentDialogResult::Yes;
+}
+
+static void HandlePaletteSetCommand(HWND hWnd, PaletteSettingsCtx* ctx, int id) {
+    if (!ctx) return;
+    if (id == IDC_PALETTE_SETS_RELOAD) { ReloadPaletteSets(hWnd, ctx, true); return; }
+    const int selected = static_cast<int>(SendMessageW(ctx->setsList, CB_GETCURSEL, 0, 0));
+    if (id == IDC_PALETTE_SETS_APPLY) {
+        const auto* colors = SelectedPaletteSet(ctx);
+        if (!colors || !ValidatePaletteSettingsEditor(hWnd, ctx)) return;
+        if (!std::equal(colors->begin(), colors->end(), ctx->colors) &&
+            !ConfirmPaletteSetChange(hWnd, ctx->colorPickerPurpose ? L"settings.palette.sets.apply_confirm"
+                : L"settings.palette.sets.apply_confirm_active", L"settings.palette.sets.apply")) return;
+        std::copy(colors->begin(), colors->end(), ctx->colors); // Eight slots only; stock and legacy slots stay untouched.
+        ctx->changedSlot = -1;
+        SyncPaletteSettingsEditor(hWnd, ctx, ctx->colors[ctx->selectedSlot]);
+        UpdatePaletteSelectedInfo(ctx);
+        InvalidatePaletteSlots(hWnd);
+        if (FlushPaletteAutoSave(hWnd, ctx)) ShowSoftNotice(hWnd, localization::Text(L"settings.palette.sets.applied"));
+        return;
+    }
+    // Defense in depth: the immutable initial set has no writable slot in the document.
+    if (!ctx->sets.ready || selected < 1 || selected > static_cast<int>(palette_presets::kUserCount)) return;
+    auto doc = ctx->sets.colors;
+    auto& target = doc.users[static_cast<size_t>(selected - 1)];
+    if (id == IDC_PALETTE_SETS_SAVE) {
+        if (!ValidatePaletteSettingsEditor(hWnd, ctx)) return;
+        if (target && !ConfirmPaletteSetChange(hWnd, L"settings.palette.sets.overwrite_confirm", L"settings.palette.sets.overwrite")) return;
+        palette_presets::Colors colors{};
+        std::copy_n(ctx->colors, colors.size(), colors.begin());
+        target = colors;
+    } else if (id == IDC_PALETTE_SETS_CLEAR) {
+        if (!target || !ConfirmPaletteSetChange(hWnd, L"settings.palette.sets.clear_confirm", L"settings.palette.sets.clear")) return;
+        target.reset();
+    } else return;
+    SaveOperationGuard guard;
+    if (ctx->stockRoot != std::filesystem::path(g_workspaceRoot) || !palette_presets::Save(ctx->sets, doc)) {
+        if (!RememberPaletteSetFailure(hWnd, ctx, doc))
+            ShowSoftNotice(hWnd, localization::Text(L"settings.palette.sets.save_failed"), SoftNoticeKind::Warning);
+        return;
+    }
+    UpdatePaletteSetControls(ctx, true);
+    ShowSoftNotice(hWnd, localization::Text(id == IDC_PALETTE_SETS_SAVE
+        ? L"settings.palette.sets.saved" : L"settings.palette.sets.cleared"));
+}
+
+static void ScrollPaletteSettingsPage(HWND hWnd, PaletteSettingsCtx* ctx, int position) {
+    SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE};
+    if (!ctx || !GetScrollInfo(hWnd, SB_VERT, &info)) return;
+    position = std::clamp(position, 0, std::max(0, info.nMax - static_cast<int>(info.nPage) + 1));
+    const int delta = ctx->scrollY - position;
+    ctx->scrollY = position;
+    SetScrollPos(hWnd, SB_VERT, position, TRUE);
+    if (delta) ScrollWindowEx(hWnd, 0, delta, nullptr, nullptr, nullptr, nullptr,
+                              SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+}
+
 static void LayoutPaletteSettingsPage(HWND hWnd, PaletteSettingsCtx* ctx) {
-    if (!hWnd || !ctx) return;
+    if (!hWnd || !ctx || !ctx->stockList || ctx->layingOut) return;
+    ctx->layingOut = true;
     RECT clientRc{};
     GetClientRect(hWnd, &clientRc);
     const int clientW = std::max(0, static_cast<int>(clientRc.right - clientRc.left));
@@ -610,20 +865,57 @@ static void LayoutPaletteSettingsPage(HWND hWnd, PaletteSettingsCtx* ctx) {
                      ScaleY(hWnd, 96), rowH, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
+    const int setsY = actionY + (ctx->btnClose ? rowH + gap : 0);
+    const int setsHintH = std::max(ScaleY(hWnd, 64), MeasureTextHeight(hWnd,
+        localization::Text(PaletteSetHintId(ctx)), leftW, g_hUIFont));
+    SetWindowPos(ctx->setsTitle, nullptr, pad, setsY, leftW, rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(ctx->setsHint, nullptr, pad, setsY + rowH, leftW, setsHintH, SWP_NOZORDER | SWP_NOACTIVATE);
+    const int setsListY = setsY + rowH + setsHintH + gap;
+    SetWindowPos(ctx->setsList, nullptr, pad, setsListY, leftW, rowH * 8, SWP_NOZORDER | SWP_NOACTIVATE);
+    const int setsPreviewY = setsListY + rowH + gap;
+    SetWindowPos(ctx->setsPreview, nullptr, pad, setsPreviewY, leftW, rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+    const int buttonW = (leftW - gap) / 2;
+    for (size_t i = 0; i < ctx->setsButtons.size(); ++i) {
+        SetWindowPos(ctx->setsButtons[i], nullptr, pad + static_cast<int>(i % 2) * (buttonW + gap),
+            setsPreviewY + rowH + gap + static_cast<int>(i / 2) * (rowH + gap), buttonW, rowH,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    const int stockY = setsPreviewY + rowH * 3 + gap * 3 + ScaleY(hWnd, 12);
+    const int hintH = std::max(ScaleY(hWnd, 56), MeasureTextHeight(hWnd,
+        localization::Text(ctx->stock.ready ? L"settings.palette.stock.hint" : L"settings.palette.stock.load_failed"), leftW, g_hUIFont));
+    const int listY = stockY + rowH + hintH + gap;
+    const int listH = std::max(ScaleY(hWnd, 96), std::min(ScaleY(hWnd, 260), clientH - listY - rowH * 2 - gap * 3 - pad));
+    SetWindowPos(ctx->stockTitle, nullptr, pad, stockY, leftW, rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(ctx->stockHint, nullptr, pad, stockY + rowH, leftW, hintH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(ctx->stockList, nullptr, pad, listY, leftW, listH, SWP_NOZORDER | SWP_NOACTIVATE);
+    for (size_t i = 0; i < ctx->stockButtons.size(); ++i) {
+        SetWindowPos(ctx->stockButtons[i], nullptr, pad + static_cast<int>(i % 2) * (buttonW + gap),
+            listY + listH + gap + static_cast<int>(i / 2) * (rowH + gap), buttonW, rowH,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    const int stockBottom = listY + listH + rowH * 2 + gap * 2;
     const int rightX = sideBySide ? pad + leftW + ScaleY(hWnd, 24) : pad;
-    const int rightY = sideBySide ? gridY : actionY + ScaleY(hWnd, 18);
+    const int rightY = sideBySide ? gridY : stockBottom + ScaleY(hWnd, 24);
     const int rightW = sideBySide ? std::max(ScaleY(hWnd, 210), clientW - rightX - pad) : leftW;
-    const int previewH = std::max(ScaleY(hWnd, 104), std::min(ScaleY(hWnd, 168), clientH / 4));
+    const int hueY = rightY + rowH;
+    const int svY = hueY + rowH + gap + rowH;
+    const int svH = ScaleY(hWnd, 170);
+    SetWindowPos(ctx->hueLabel, nullptr, rightX, rightY, rightW, rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(ctx->hue, nullptr, rightX, hueY, rightW, rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(ctx->svLabel, nullptr, rightX, hueY + rowH + gap, rightW, rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(ctx->sv, nullptr, rightX, svY, rightW, svH, SWP_NOZORDER | SWP_NOACTIVATE);
+    const int previewY = svY + svH + gap;
+    const int previewH = ScaleY(hWnd, 36);
     if (ctx->selectedPreview) {
-        SetWindowPos(ctx->selectedPreview, nullptr, rightX, rightY, rightW, previewH,
+        SetWindowPos(ctx->selectedPreview, nullptr, rightX, previewY, rightW, previewH,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (ctx->selectedInfo) {
-        SetWindowPos(ctx->selectedInfo, nullptr, rightX, rightY + previewH + gap, rightW,
+        SetWindowPos(ctx->selectedInfo, nullptr, rightX, previewY + previewH + gap, rightW,
                      ScaleY(hWnd, 52),
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
-    const int editorY = rightY + previewH + gap + ScaleY(hWnd, 58);
+    const int editorY = previewY + previewH + gap + ScaleY(hWnd, 58);
     const int channelGap = ScaleY(hWnd, 8);
     const int channelW = std::max(ScaleY(hWnd, 54), (rightW - channelGap * 2) / 3);
     const std::array<HWND, 3> channelEdits{{ctx->editRed, ctx->editGreen, ctx->editBlue}};
@@ -639,14 +931,64 @@ static void LayoutPaletteSettingsPage(HWND hWnd, PaletteSettingsCtx* ctx) {
         }
     }
     const int hexY = editorY + rowH * 2 + gap;
-    const int eyeW = std::min(ScaleY(hWnd, 156), std::max(ScaleY(hWnd, 92), rightW / 3));
+    const auto eyeLabel = localization::Text(L"settings.palette.eyedropper");
+    SIZE eyeText{};
+    if (HDC dc = GetDC(hWnd)) {
+        const auto oldFont = SelectObject(dc, g_hUIFont);
+        GetTextExtentPoint32W(dc, eyeLabel.c_str(), static_cast<int>(eyeLabel.size()), &eyeText);
+        SelectObject(dc, oldFont);
+        ReleaseDC(hWnd, dc);
+    }
+    const int eyeW = std::max(ScaleY(hWnd, 92), static_cast<int>(eyeText.cx) + gap * 2);
+    const bool eyeBelow = rightW < ScaleY(hWnd, 44 + 80) + gap + eyeW;
+    const int eyeY = eyeBelow ? hexY + rowH + gap : hexY;
     if (ctx->editorLabels[3]) SetWindowPos(ctx->editorLabels[3], nullptr, rightX, hexY, ScaleY(hWnd, 42), rowH,
                                             SWP_NOZORDER | SWP_NOACTIVATE);
     if (ctx->editHex) SetWindowPos(ctx->editHex, nullptr, rightX + ScaleY(hWnd, 44), hexY,
-                                   std::max(ScaleY(hWnd, 64), rightW - ScaleY(hWnd, 44) - eyeW - gap), rowH,
+                                   std::max(ScaleY(hWnd, 64), rightW - ScaleY(hWnd, 44) - (eyeBelow ? 0 : eyeW + gap)), rowH,
                                    SWP_NOZORDER | SWP_NOACTIVATE);
-    if (ctx->btnEyedropper) SetWindowPos(ctx->btnEyedropper, nullptr, rightX + rightW - eyeW, hexY, eyeW, rowH,
+    if (ctx->btnEyedropper) SetWindowPos(ctx->btnEyedropper, nullptr, eyeBelow ? rightX : rightX + rightW - eyeW, eyeY,
+                                         eyeBelow ? rightW : eyeW, rowH,
                                          SWP_NOZORDER | SWP_NOACTIVATE);
+    const int statusY = eyeY + rowH + gap;
+    int statusH = rowH * 3;
+    for (const wchar_t* id : {L"settings.palette.auto.saved", L"settings.palette.auto.incomplete",
+        L"settings.palette.auto.failed", L"settings.palette.auto.runtime_failed", L"settings.palette.auto.unavailable",
+        L"settings.palette.select_hint"}) statusH = std::max(statusH, MeasureTextHeight(hWnd, localization::Text(id), rightW, g_hUIFont));
+    SetWindowPos(ctx->saveStatus, nullptr, rightX, statusY, rightW, statusH, SWP_NOZORDER | SWP_NOACTIVATE);
+    const int commitY = statusY + statusH + gap;
+    if (ctx->colorPickerPurpose) SetWindowPos(ctx->useColor, nullptr, rightX, commitY, rightW, rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+    else {
+        SetWindowPos(ctx->retry, nullptr, rightX, commitY, (rightW - gap) / 2, rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(ctx->reloadActive, nullptr, rightX + (rightW + gap) / 2, commitY, (rightW - gap) / 2, rowH, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    const int contentH = std::max(stockBottom, commitY + rowH) + pad;
+    ctx->scrollY = std::clamp(ctx->scrollY, 0, std::max(0, contentH - clientH));
+    SCROLLINFO scroll{sizeof(scroll), SIF_RANGE | SIF_PAGE | SIF_POS};
+    scroll.nMax = contentH - 1;
+    scroll.nPage = static_cast<UINT>(clientH);
+    scroll.nPos = ctx->scrollY;
+    SetScrollInfo(hWnd, SB_VERT, &scroll, TRUE);
+    if (ctx->scrollY) {
+        for (HWND child = GetWindow(hWnd, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+            RECT bounds{};
+            GetWindowRect(child, &bounds);
+            MapWindowPoints(nullptr, hWnd, reinterpret_cast<POINT*>(&bounds), 2);
+            SetWindowPos(child, nullptr, bounds.left, bounds.top - ctx->scrollY, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+    RECT finalClient{};
+    GetClientRect(hWnd, &finalClient);
+    const bool widthChanged = finalClient.right - finalClient.left != clientW;
+    ctx->layingOut = false;
+    if (widthChanged && !ctx->correctingScrollbarWidth) {
+        // SetScrollInfo may expose the vertical bar and shrink the client after
+        // the controls were placed. Recompute against that actual width once.
+        ctx->correctingScrollbarWidth = true;
+        LayoutPaletteSettingsPage(hWnd, ctx);
+        ctx->correctingScrollbarWidth = false;
+    }
 }
 
 static void EnsurePaletteSettingsClass() {
@@ -655,12 +997,14 @@ static void EnsurePaletteSettingsClass() {
     WNDCLASSW wc{};
     wc.lpfnWndProc = [](HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
         auto* ctx = reinterpret_cast<PaletteSettingsCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+        try {
         switch (msg) {
         case WM_CREATE: {
             auto cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
             ctx = reinterpret_cast<PaletteSettingsCtx*>(cs->lpCreateParams);
             SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
             if (!ctx) return -1;
+            ctx->retryIdentity = ++s_nextPaletteRetryIdentity;
 
             LoadUserPaletteColorsForSettings(ctx->colors, std::size(ctx->colors));
 
@@ -774,6 +1118,83 @@ static void EnsurePaletteSettingsClass() {
             SetUIFont(ctx->editHex);
             SetUIFont(ctx->btnEyedropper);
             SetUIFont(ctx->selectedInfo);
+            ctx->stockRoot = std::filesystem::path(g_workspaceRoot);
+            (void)palette_active::Load(ctx->stockRoot, ctx->active);
+            if (ctx->active.ready && ctx->active.exists)
+                std::copy(ctx->active.colors.begin(), ctx->active.colors.end(), std::begin(ctx->colors));
+            std::copy(std::begin(ctx->colors), std::end(ctx->colors), std::begin(ctx->committedColors));
+            ctx->hueLabel = CreateWindowExW(0, L"STATIC", localization::Text(L"settings.palette.gradient.hue").c_str(),
+                WS_CHILD | WS_VISIBLE, 0, 0, 100, rowH, hWnd, reinterpret_cast<HMENU>(IDC_PALETTE_HUE_LABEL), g_hInst, nullptr);
+            ctx->svLabel = CreateWindowExW(0, L"STATIC", localization::Text(L"settings.palette.gradient.sv").c_str(),
+                WS_CHILD | WS_VISIBLE, 0, 0, 100, rowH, hWnd, reinterpret_cast<HMENU>(IDC_PALETTE_SV_LABEL), g_hInst, nullptr);
+            ctx->hue = ui::color_gradient::Create(hWnd, IDC_PALETTE_HUE, localization::Text(L"settings.palette.gradient.hue").c_str(), ctx->hueState);
+            ctx->sv = ui::color_gradient::Create(hWnd, IDC_PALETTE_SV, localization::Text(L"settings.palette.gradient.sv").c_str(), ctx->svState);
+            if (!ctx->hue || !ctx->sv) return -1;
+            ctx->saveStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                0, 0, 100, rowH * 3, hWnd, reinterpret_cast<HMENU>(IDC_PALETTE_SAVE_STATUS), g_hInst, nullptr);
+            ctx->useColor = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.palette.use_color").c_str(),
+                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 100, rowH, hWnd, reinterpret_cast<HMENU>(IDC_PALETTE_USE_COLOR), g_hInst, nullptr);
+            ctx->retry = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.palette.auto.retry").c_str(),
+                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 100, rowH, hWnd, reinterpret_cast<HMENU>(IDC_PALETTE_RETRY), g_hInst, nullptr);
+            ctx->reloadActive = CreateWindowExW(0, L"BUTTON", localization::Text(L"settings.palette.auto.reload").c_str(),
+                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 100, rowH, hWnd, reinterpret_cast<HMENU>(IDC_PALETTE_RELOAD_ACTIVE), g_hInst, nullptr);
+            for (HWND control : {ctx->hueLabel, ctx->svLabel, ctx->saveStatus, ctx->useColor, ctx->retry, ctx->reloadActive}) SetUIFont(control);
+            ShowWindow(ctx->useColor, ctx->colorPickerPurpose ? SW_SHOW : SW_HIDE);
+            ShowWindow(ctx->retry, ctx->colorPickerPurpose ? SW_HIDE : SW_SHOW);
+            ShowWindow(ctx->reloadActive, ctx->colorPickerPurpose ? SW_HIDE : SW_SHOW);
+            PaletteSaveStatus(ctx, ctx->colorPickerPurpose ? L"settings.palette.select_hint" : !ctx->active.ready
+                ? L"settings.palette.auto.unavailable" : ctx->active.exists ? L"settings.palette.auto.saved" : L"settings.palette.auto.defaults");
+            ctx->setsTitle = CreateWindowExW(0, L"STATIC", localization::Text(L"settings.palette.sets.title").c_str(),
+                WS_CHILD | WS_VISIBLE, 0, 0, 100, rowH, hWnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_SETS_TITLE)), g_hInst, nullptr);
+            ctx->setsHint = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
+                0, 0, 100, rowH * 2, hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_SETS_HINT)), g_hInst, nullptr);
+            ctx->setsList = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+                0, 0, 100, rowH * 8, hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_SETS_LIST)), g_hInst, nullptr);
+            ctx->setsPreview = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+                0, 0, 100, rowH, hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_SETS_PREVIEW)), g_hInst, nullptr);
+            const std::array<std::pair<int, const wchar_t*>, 4> setActions{{
+                {IDC_PALETTE_SETS_APPLY, L"settings.palette.sets.apply"},
+                {IDC_PALETTE_SETS_SAVE, L"settings.palette.sets.save"},
+                {IDC_PALETTE_SETS_CLEAR, L"settings.palette.sets.clear"},
+                {IDC_PALETTE_SETS_RELOAD, L"settings.palette.sets.reload"},
+            }};
+            for (size_t i = 0; i < setActions.size(); ++i) {
+                ctx->setsButtons[i] = CreateWindowExW(0, L"BUTTON", localization::Text(setActions[i].second).c_str(),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_NOTIFY, 0, 0, 100, rowH,
+                    hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(setActions[i].first)), g_hInst, nullptr);
+                SetUIFont(ctx->setsButtons[i]);
+            }
+            SetSettingsSectionFont(ctx->setsTitle);
+            SetUIFont(ctx->setsHint);
+            SetUIFont(ctx->setsList);
+            ui::GuardComboAgainstAccidentalChange(ctx->setsList, hWnd);
+            ReloadPaletteSets(hWnd, ctx, false);
+            ctx->stockTitle = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                0, 0, 100, rowH, hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_STOCK_TITLE)), g_hInst, nullptr);
+            ctx->stockHint = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
+                0, 0, 100, rowH * 2, hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_STOCK_HINT)), g_hInst, nullptr);
+            ctx->stockList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_HASSTRINGS |
+                    LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT,
+                0, 0, 100, 100, hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PALETTE_STOCK_LIST)), g_hInst, nullptr);
+            const std::array<std::pair<int, const wchar_t*>, 4> stockActions{{
+                {IDC_PALETTE_STOCK_ADD, L"settings.palette.stock.add"},
+                {IDC_PALETTE_STOCK_USE, L"settings.palette.stock.use"},
+                {IDC_PALETTE_STOCK_REMOVE, L"settings.palette.stock.remove"},
+                {IDC_PALETTE_STOCK_RELOAD, L"settings.palette.stock.reload"},
+            }};
+            for (size_t i = 0; i < stockActions.size(); ++i) {
+                ctx->stockButtons[i] = CreateWindowExW(0, L"BUTTON", localization::Text(stockActions[i].second).c_str(),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_NOTIFY, 0, 0, 100, rowH,
+                    hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(stockActions[i].first)), g_hInst, nullptr);
+                SetUIFont(ctx->stockButtons[i]);
+            }
+            SetSettingsSectionFont(ctx->stockTitle);
+            SetUIFont(ctx->stockHint);
+            SetUIFont(ctx->stockList);
+            SendMessageW(ctx->stockList, LB_SETITEMHEIGHT, 0, rowH);
+            ReloadPaletteStock(hWnd, ctx, false);
             UpdatePaletteSelectedInfo(ctx);
             SyncPaletteSettingsEditor(hWnd, ctx, ctx->colors[ctx->selectedSlot]);
 
@@ -803,6 +1224,62 @@ static void EnsurePaletteSettingsClass() {
         case WM_DRAWITEM: {
             auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
             if (!ctx || !dis) break;
+            if (dis->CtlID == IDC_PALETTE_SETS_PREVIEW) {
+                const auto* colors = SelectedPaletteSet(ctx);
+                HGDIOBJ oldFont = SelectObject(dis->hDC, g_hUIFont);
+                HBRUSH bg = CreateSolidBrush(g_theme.panelBg);
+                FillRect(dis->hDC, &dis->rcItem, bg);
+                DeleteObject(bg);
+                if (colors) {
+                    const int width = dis->rcItem.right - dis->rcItem.left;
+                    for (size_t i = 0; i < colors->size(); ++i) {
+                        DRAWITEMSTRUCT swatch = *dis;
+                        swatch.CtlID = IDC_PALETTE_SLOT_BASE + static_cast<UINT>(i);
+                        swatch.itemState = 0;
+                        swatch.rcItem.left = dis->rcItem.left + MulDiv(width, static_cast<int>(i), IDC_PALETTE_SLOT_COUNT);
+                        swatch.rcItem.right = dis->rcItem.left + MulDiv(width, static_cast<int>(i + 1), IDC_PALETTE_SLOT_COUNT) - ScaleY(hWnd, 2);
+                        DrawPaletteSlotButton(&swatch, (*colors)[i], false, false);
+                    }
+                } else {
+                    SetBkMode(dis->hDC, TRANSPARENT);
+                    SetTextColor(dis->hDC, g_theme.panelText);
+                    const auto text = localization::Text(ctx->sets.ready
+                        ? L"settings.palette.sets.empty" : L"settings.palette.sets.unavailable");
+                    RECT bounds = dis->rcItem;
+                    DrawTextW(dis->hDC, text.c_str(), -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+                SelectObject(dis->hDC, oldFont);
+                return TRUE;
+            }
+            if (dis->CtlID == IDC_PALETTE_STOCK_LIST) {
+                const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+                HBRUSH bg = CreateSolidBrush(selected ? g_theme.selectionBg : g_theme.panelBg);
+                FillRect(dis->hDC, &dis->rcItem, bg);
+                DeleteObject(bg);
+                if (dis->itemID != static_cast<UINT>(-1)) {
+                    RECT swatch = dis->rcItem;
+                    swatch.left += ScaleY(hWnd, 8);
+                    swatch.right = swatch.left + ScaleY(hWnd, 34);
+                    swatch.top += ScaleY(hWnd, 5);
+                    swatch.bottom -= ScaleY(hWnd, 5);
+                    HBRUSH color = CreateSolidBrush(static_cast<COLORREF>(dis->itemData));
+                    FillRect(dis->hDC, &swatch, color);
+                    DeleteObject(color);
+                    HBRUSH border = CreateSolidBrush(g_theme.buttonBorder);
+                    FrameRect(dis->hDC, &swatch, border);
+                    DeleteObject(border);
+                    RECT textRc = dis->rcItem;
+                    textRc.left = swatch.right + ScaleY(hWnd, 12);
+                    SetBkMode(dis->hDC, TRANSPARENT);
+                    SetTextColor(dis->hDC, selected ? g_theme.selectionText : g_theme.panelText);
+                    HGDIOBJ oldFont = SelectObject(dis->hDC, g_hUIFont);
+                    const auto hex = PaletteHexColorW(static_cast<COLORREF>(dis->itemData));
+                    DrawTextW(dis->hDC, hex.c_str(), -1, &textRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    SelectObject(dis->hDC, oldFont);
+                }
+                if (dis->itemState & ODS_FOCUS) DrawFocusRect(dis->hDC, &dis->rcItem);
+                return TRUE;
+            }
             if (dis->CtlID == IDC_PALETTE_SELECTED_PREVIEW) {
                 const int idx = std::clamp(ctx->selectedSlot, 0, IDC_PALETTE_SLOT_COUNT - 1);
                 HBRUSH fill = CreateSolidBrush(ctx->colors[idx]);
@@ -813,7 +1290,10 @@ static void EnsurePaletteSettingsClass() {
                 DeleteObject(border);
                 return TRUE;
             }
-            if (!IsPaletteSlotId(static_cast<int>(dis->CtlID))) break;
+            if (!IsPaletteSlotId(static_cast<int>(dis->CtlID))) {
+                if (DrawThemeButton(dis)) return TRUE;
+                break;
+            }
             int idx = static_cast<int>(dis->CtlID) - IDC_PALETTE_SLOT_BASE;
             if (idx < 0 || idx >= IDC_PALETTE_SLOT_COUNT) break;
             const bool isTargetSlot = (idx == ctx->selectedSlot);
@@ -824,11 +1304,110 @@ static void EnsurePaletteSettingsClass() {
         case WM_SIZE:
             LayoutPaletteSettingsPage(hWnd, ctx);
             return 0;
+        case WM_MEASUREITEM: {
+            auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+            if (measure && measure->CtlID == IDC_PALETTE_STOCK_LIST) {
+                measure->itemHeight = static_cast<UINT>(std::max(ScaleY(hWnd, 30),
+                    FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10)));
+                return TRUE;
+            }
+            break;
+        }
+        case WM_VSCROLL: {
+            if (!ctx) break;
+            SCROLLINFO info{sizeof(info), SIF_ALL};
+            GetScrollInfo(hWnd, SB_VERT, &info);
+            int position = ctx->scrollY;
+            switch (LOWORD(wParam)) {
+            case SB_LINEUP: position -= ScaleY(hWnd, 30); break;
+            case SB_LINEDOWN: position += ScaleY(hWnd, 30); break;
+            case SB_PAGEUP: position -= static_cast<int>(info.nPage); break;
+            case SB_PAGEDOWN: position += static_cast<int>(info.nPage); break;
+            case SB_THUMBTRACK: case SB_THUMBPOSITION: position = info.nTrackPos; break;
+            case SB_TOP: position = 0; break;
+            case SB_BOTTOM: position = info.nMax; break;
+            default: break;
+            }
+            ScrollPaletteSettingsPage(hWnd, ctx, position);
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+            if (ctx) ScrollPaletteSettingsPage(hWnd, ctx,
+                ctx->scrollY - MulDiv(GET_WHEEL_DELTA_WPARAM(wParam), ScaleY(hWnd, 90), WHEEL_DELTA));
+            return 0;
         case WM_COMMAND: {
             int id = LOWORD(wParam);
             int code = HIWORD(wParam);
             if (!ctx) break;
+            if (id == IDC_PALETTE_HUE || id == IDC_PALETTE_SV) {
+                if (code == ui::color_gradient::kBegin) {
+                    if (!ValidatePaletteSettingsEditor(hWnd, ctx)) return FALSE;
+                    if (!FlushPaletteAutoSave(hWnd, ctx)) return FALSE;
+                    ctx->gradientInitialColor = ctx->colors[ctx->selectedSlot];
+                    return TRUE;
+                }
+                if (code == ui::color_gradient::kChanged || code == ui::color_gradient::kCancel) {
+                    SetPaletteSettingsColor(hWnd, ctx, code == ui::color_gradient::kCancel
+                        ? ctx->gradientInitialColor : palette_color::ToRgb(ctx->hsv), true, reinterpret_cast<HWND>(lParam));
+                    return 0;
+                }
+                if (code == ui::color_gradient::kEnd) { (void)FlushPaletteAutoSave(hWnd, ctx); return 0; }
+            }
+            if (id == IDC_PALETTE_USE_COLOR && code == BN_CLICKED && ctx->colorPickerPurpose) {
+                SendMessageW(GetParent(hWnd), WM_COMMAND, IDOK, 0);
+                return 0;
+            }
+            if (id == IDC_PALETTE_RETRY && code == BN_CLICKED) { (void)FlushPaletteAutoSave(hWnd, ctx); return 0; }
+            if (id == IDC_PALETTE_RELOAD_ACTIVE && code == BN_CLICKED) {
+                if ((!ReadPaletteEditorColor(hWnd, nullptr) ||
+                     !std::equal(std::begin(ctx->colors), std::end(ctx->colors), std::begin(ctx->committedColors))) &&
+                    !ConfirmPaletteSetChange(hWnd, L"settings.palette.auto.reload_confirm", L"settings.palette.auto.reload")) return 0;
+                palette_active::Snapshot next;
+                if (ctx->stockRoot != std::filesystem::path(g_workspaceRoot) || !palette_active::Load(ctx->stockRoot, next)) {
+                    PaletteSaveStatus(ctx, L"settings.palette.auto.unavailable"); return 0;
+                }
+                KillTimer(hWnd, kPaletteAutoSaveTimer);
+                ctx->active = std::move(next);
+                LoadUserPaletteColorsForSettings(ctx->colors, std::size(ctx->colors));
+                if (ctx->active.exists) std::copy(ctx->active.colors.begin(), ctx->active.colors.end(), std::begin(ctx->colors));
+                std::copy(std::begin(ctx->colors), std::end(ctx->colors), std::begin(ctx->committedColors));
+                ctx->runtimePending = true;
+                SyncPaletteSettingsEditor(hWnd, ctx, ctx->colors[ctx->selectedSlot]);
+                UpdatePaletteSelectedInfo(ctx);
+                InvalidatePaletteSlots(hWnd);
+                (void)FlushPaletteAutoSave(hWnd, ctx);
+                return 0;
+            }
+            if (code == EN_SETFOCUS || code == BN_SETFOCUS || code == LBN_SETFOCUS || code == CBN_SETFOCUS) {
+                const HWND control = reinterpret_cast<HWND>(lParam);
+                if (control && GetParent(control) == hWnd) {
+                    RECT bounds{}, client{};
+                    GetWindowRect(control, &bounds);
+                    MapWindowPoints(nullptr, hWnd, reinterpret_cast<POINT*>(&bounds), 2);
+                    GetClientRect(hWnd, &client);
+                    if (bounds.top < 0) ScrollPaletteSettingsPage(hWnd, ctx, ctx->scrollY + bounds.top);
+                    else if (bounds.bottom > client.bottom) ScrollPaletteSettingsPage(hWnd, ctx,
+                        ctx->scrollY + bounds.bottom - client.bottom);
+                }
+            }
+            if (id == IDC_PALETTE_SETS_LIST && code == CBN_SELCHANGE) {
+                UpdatePaletteSetControls(ctx);
+                return 0; // Selection is preview only; never silently apply.
+            }
+            if (id >= IDC_PALETTE_SETS_APPLY && id <= IDC_PALETTE_SETS_RELOAD && code == BN_CLICKED) {
+                HandlePaletteSetCommand(hWnd, ctx, id);
+                return 0;
+            }
+            if (id == IDC_PALETTE_STOCK_LIST && code == LBN_DBLCLK) {
+                HandlePaletteStockCommand(hWnd, ctx, IDC_PALETTE_STOCK_USE);
+                return 0;
+            }
+            if (id >= IDC_PALETTE_STOCK_ADD && id <= IDC_PALETTE_STOCK_RELOAD && code == BN_CLICKED) {
+                HandlePaletteStockCommand(hWnd, ctx, id);
+                return 0;
+            }
             if (id == IDC_PALETTE_EDITOR_EYEDROPPER && code == BN_CLICKED) {
+                if (!ValidatePaletteSettingsEditor(hWnd, ctx) || !FlushPaletteAutoSave(hWnd, ctx)) return 0;
                 ctx->eyedropperInitialColor = ctx->colors[std::clamp(ctx->selectedSlot, 0, IDC_PALETTE_SLOT_COUNT - 1)];
                 ctx->eyedropperActive = true;
                 SetCapture(hWnd);
@@ -837,10 +1416,12 @@ static void EnsurePaletteSettingsClass() {
             if (code == EN_CHANGE && (id == IDC_PALETTE_EDITOR_RED || id == IDC_PALETTE_EDITOR_GREEN ||
                                       id == IDC_PALETTE_EDITOR_BLUE)) {
                 UpdatePaletteSettingsFromRgb(hWnd, ctx, reinterpret_cast<HWND>(lParam));
+                SchedulePaletteAutoSave(hWnd, ctx);
                 return 0;
             }
             if (code == EN_CHANGE && id == IDC_PALETTE_EDITOR_HEX) {
                 UpdatePaletteSettingsFromHex(hWnd, ctx);
+                SchedulePaletteAutoSave(hWnd, ctx);
                 return 0;
             }
             if (id == IDCANCEL || id == 0) {
@@ -848,13 +1429,14 @@ static void EnsurePaletteSettingsClass() {
                 DestroyWindow(hWnd);
                 return 0;
             }
-            if (IsPaletteSlotId(id)) {
+            if (IsPaletteSlotId(id) && code == BN_CLICKED) {
                 if (!ValidatePaletteSettingsEditor(hWnd, ctx)) return 0;
+                if (!FlushPaletteAutoSave(hWnd, ctx)) return 0;
                 int idx = id - IDC_PALETTE_SLOT_BASE;
                 ctx->selectedSlot = idx;
                 ctx->changedSlot = -1;
                 SyncPaletteSettingsEditor(hWnd, ctx, ctx->colors[idx]);
-                InvalidateRect(hWnd, nullptr, TRUE);
+                InvalidatePaletteSlots(hWnd);
                 UpdatePaletteSelectedInfo(ctx);
                 return 0;
             }
@@ -866,6 +1448,7 @@ static void EnsurePaletteSettingsClass() {
                 if (SamplePaletteColorAtCursor(&sampled)) SetPaletteSettingsColor(hWnd, ctx, sampled, true);
                 ctx->eyedropperActive = false;
                 if (GetCapture() == hWnd) ReleaseCapture();
+                (void)FlushPaletteAutoSave(hWnd, ctx);
                 return 0;
             }
             break;
@@ -884,12 +1467,22 @@ static void EnsurePaletteSettingsClass() {
             if (ctx && ctx->embedded) return 0;
             DestroyWindow(hWnd);
             return 0;
+        case WM_TIMER:
+            if (wParam == kPaletteAutoSaveTimer && ctx) { (void)FlushPaletteAutoSave(hWnd, ctx); return 0; }
+            break;
         case WM_DESTROY:
-            if (ctx) RestoreOwnerAfterModal(ctx->owner);
+            KillTimer(hWnd, kPaletteAutoSaveTimer);
+            if (ctx && !ctx->embedded) RestoreOwnerAfterModal(ctx->owner);
             if (ctx) ctx->done = true;
             return 0;
         default:
             break;
+        }
+        } catch (...) {
+            KillTimer(hWnd, kPaletteAutoSaveTimer);
+            if (ctx) { ctx->syncingFields = false; ctx->layingOut = false; }
+            try { PaletteSaveStatus(ctx, L"settings.palette.auto.failed"); } catch (...) {}
+            return msg == WM_CREATE ? -1 : 0;
         }
         return DefWindowProcW(hWnd, msg, wParam, lParam);
     };
@@ -902,10 +1495,6 @@ static void EnsurePaletteSettingsClass() {
     registered = true;
 }
 } // namespace
-
-bool ShowPaletteColorEditorDialog(HWND owner, COLORREF initial, COLORREF* outColor) {
-    return ShowPaletteColorEditorDialogImpl(owner, initial, outColor, g_palette.data(), g_palette.size());
-}
 
 void ShowPaletteSettingsDialog(HWND owner) {
     ShowUnifiedSettingsDialog(owner, kSettingsNavPalette);

@@ -1,0 +1,39 @@
+// Literal content must be preserved; comments do not affect lexical clones.
+int CloneFirst(int n) {
+    int value = 0;
+    for (int i = 0; i < n; ++i) {
+        if (i % 2 == 0) value += i * 3;
+        else value -= i + 4;
+    }
+    return value + n;
+}
+int CloneExact(int n) {
+    int value = 0;
+    for (int i = 0; i < n; ++i) {
+        if (i % 2 == 0) value += i * 3;
+        else value -= i + 4;
+    }
+    return value + n;
+}
+int CloneRenamed(int count) {
+    int answer = 0;
+    for (int j = 0; j < count; ++j) {
+        if (j % 2 == 0) answer += j * 3;
+        else answer -= j + 4;
+    }
+    return answer + count;
+}
+void FillRect(int);
+void TechnologyEvidence(int n) { FillRect(n); }
+void NoTechnologyEvidence() { const char* text = "FillRect CreateFileW"; }
+void LegacySave(int n) { g_typing = n; Persist(n); }
+int DifferentLiteral(int n) {
+    int value = 0;
+    for (int i = 0; i < n; ++i) {
+        if (i % 2 == 0) value += i * 9;
+        else value -= i + 4;
+    }
+    return value + n;
+}
+void LambdaFirst() { auto value = [] { Paint(41); }; }
+void LambdaSecond() { auto value = [] { Paint(42); }; }

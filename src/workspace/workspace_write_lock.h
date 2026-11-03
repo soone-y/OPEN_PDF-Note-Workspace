@@ -29,7 +29,12 @@ private:
 
 // An opened PDF, image, or note is exclusively owned by one application
 // process. Unlike the workspace lock, this permits independent workspaces
-// while preventing two windows from editing the same source file.
+// while preventing two windows from editing the same source file. A retained
+// read handle also denies external deletion/rename until close or switching.
+// App-owned atomic replacement/move temporarily suspends only its target's
+// physical handle, then reacquires it before returning or retrying.
+// A failed reacquisition is retried by the process-owned recovery worker;
+// the UI exposes pending protection separately from completed file movement.
 class DocumentOpenLockCandidate {
 public:
     DocumentOpenLockCandidate(const std::filesystem::path& path, std::wstring* outError);

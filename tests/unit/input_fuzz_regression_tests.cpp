@@ -226,13 +226,19 @@ int main() {
             L"before <math>x^2</math> after\r\n<math>\r\n\\frac{1}{2}\r\n</math>\r\n"
             L"<math>nested <math>x</math></math>\r\n`<math>literal</math>`\r\n<math>unclosed",
             L"<u>text <math display=inline future='a>b'>x</> tail</>\r\n"
-            L"<math display='block'>\r\n\\frac{1}{2}\r\n</>\r\n<math display=\"unfinished"}) {
+            L"<math display='block'>\r\n\\frac{1}{2}\r\n</>\r\n<math display=\"unfinished",
+            L"＃見出し\n\n＊＊強調＊＊\n\n｜左｜右｜\n｜：－－｜－－：｜\n｜一｜二｜\n",
+            L"｀｀｀\n＃ literal\n｀｀｀\n$ a＊b $\n＄not math＄\n［説明］（local（１）.txt）\n＼＊literal＼＊"}) {
         for (uint32_t round = 0; round < kMutationRounds; ++round) {
             note::NoteMetadata metadata;
-            metadata.file_name = L"fuzz.md";
+            metadata.file_name = noteSeed.find(L'＃') != std::wstring::npos ? L"fuzz.clro" : L"fuzz.md";
             const note::NoteTextModel model = note::MakeNoteTextModel(
                 std::move(metadata), Mutate<wchar_t>(noteSeed, round), round + 1);
             const note::NoteDocument parsed = note::ParseNoteDocument(model);
+            if (model.meta.file_name == L"fuzz.clro") {
+                const auto normalized = note::BuildClroMarkdownExportSource(model);
+                if (note::NoteDocumentHasFatalParseFailure(parsed) && normalized) ++failures;
+            }
             for (size_t index = 0; index < parsed.blocks.size(); ++index) {
                 const auto& block = parsed.blocks[index];
                 if (block.span.end < block.span.start || block.span.end.value > model.raw.size() ||

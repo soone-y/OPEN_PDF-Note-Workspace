@@ -131,10 +131,16 @@ python tools/metrics/code_metrics/analyze_repo.py --scope all
 ```
 
 ```powershell
-python tools/metrics/code_metrics/analyze_repo.py --format json > tools/metrics/code_metrics/out/own_metrics.json
+python tools/metrics/code_metrics/analyze_repo.py --scope all --report-stdout
+```
+
+```powershell
+python tools/metrics/code_metrics/analyze_repo.py --scope all --report tools/metrics/code_metrics/out/own_metrics.json --format json
 ```
 
 CLIのJSON出力は、従来のWindows PowerShellでのリダイレクト時にも文字コード変換で壊れないよう、非ASCII文字をJSONの`\uXXXX`エスケープとして出力する。JSONパーサで読み戻すと元のUnicode文字列に復元される。GUI上の表示と保存はUTF-8のまま扱う。
+
+出力は既定で端末に表示し、ファイル保存は `--report` を明示した場合だけ行う。既存ファイルは上書きせず、エラーになる。
 
 ```powershell
 python tools/metrics/code_metrics/analyze_repo.py --scope all --top-files 20 --top-dirs 15 --max-tree-depth 4
@@ -149,6 +155,11 @@ python tools/metrics/code_metrics/analyze_repo.py --scope all --top-files 20 --t
 - `--format text|json|strings`
   - 人間向けテキストか JSON かを切り替えます
   - `strings` は復元できた文字列だけを 1 行ずつ出力します
+- `--report`
+  - 端末出力の代わりに新規ファイルへ書き出します
+  - 既存pathがあれば失敗し、上書きしません
+- `--report-stdout`
+  - レポート本文を端末へ出力し、ファイルは作成しません
 - `--top-files`
   - 上位表示するファイル数
 - `--top-dirs`
@@ -166,6 +177,22 @@ python tools/metrics/code_metrics/analyze_repo.py --scope all --top-files 20 --t
 - `Root`, `Scope`, `Format`, `Top Files`, `Top Dirs`, `Tree Depth`, `Include`, `Exclude` を操作して集計できます
 - 結果は画面表示に加えて `Save Output` で保存できます
 - GUI も外部通信は行わず、対象ファイルを書き換えません
+
+## C/C++ ソース構造検査
+
+規模集計とは別に、`tools/metrics/cpp_include_visualizer.py` でローカルinclude依存・循環・レイヤー違反を検査できます。既定ではレポートを端末に表示し、ファイルは作成しません。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/report_include_layers.ps1
+```
+
+保存する場合だけ、明示的に新しい出力pathを指定します。既存pathは上書きされず、エラーになります。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/report_include_layers.ps1 -ReportPath docs/internal/archive/reports/code_analytics/002_tool_include依存検査結果_2026-10-11.md
+```
+
+対象範囲、再現条件、判断上の限界、向上候補は[コード分析基盤設計](../../../docs/internal/tool_コード分析基盤_設計_2026-10-11.md)を参照してください。
 
 ## 注意
 

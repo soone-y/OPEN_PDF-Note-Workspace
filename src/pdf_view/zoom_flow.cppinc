@@ -75,7 +75,46 @@ static void ApplyPdfScaleDirect(HWND pdfWnd, double newScale, POINT focusInClien
     }
 }
 
+static void CompleteInitialPdfFit(HWND pdfWnd, double fit) {
+    {
+        PdfInitialViewportUpdateGuard viewportGuard;
+        g_pendingInitialFitWidth = g_pendingInitialFitHeight = false;
+        g_pendingInitialFitWidthPt = g_pendingInitialFitHeightPt = 0.0;
+        if (std::abs(fit - g_pdf.scale) >= 1e-6) {
+            g_zoomAnimating = false;
+            KillTimer(pdfWnd, kZoomTimerId);
+            g_zoomAnchor = {};
+            ApplyPdfScaleDirect(pdfWnd, fit, POINT{0, 0}, true);
+            g_pdf.scrollX = g_pdf.scrollY = 0.0;
+        }
+        RECT rc{};
+        GetClientRect(pdfWnd, &rc);
+        ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+        if (!ApplyPendingPdfRestore(pdfWnd)) JumpToPage(pdfWnd, 0);
+    }
+    // Same-scale and changed-scale paths both schedule only the final viewport.
+    UpdatePdfVirtualScrollCaches(pdfWnd);
+    InvalidateRect(pdfWnd, nullptr, FALSE);
+}
+
+// Resolve only after the real viewport is sized. CompleteInitialPdfFit remains
+// the single owner of scale, anchor restoration and final render scheduling.
+[[nodiscard]] static std::optional<double> PreferredInitialPdfScale(HWND pdfWnd, double legacySize, bool width) {
+    const auto mode = g_usePdfOpeningPreference ? open_preferences::PdfViewMode(g_config.pdfOpenViewMode) : L"previous";
+    if (mode == L"previous" && g_pendingPdfRestore && g_pendingPdfRestore->scale > 0.0)
+        return g_pendingPdfRestore->scale;
+    if (!g_pdf.pages.empty() && (mode == L"width" || mode == L"page")) {
+        const auto fitWidth = CalcFitWidthScale(pdfWnd, g_pdf.pages.front().widthPt);
+        if (mode == L"width") return fitWidth;
+        const auto fitHeight = CalcFitHeightScale(pdfWnd, g_pdf.pages.front().heightPt);
+        if (!fitWidth || !fitHeight) return std::nullopt;
+        return std::min(*fitWidth, *fitHeight);
+    }
+    return width ? CalcFitWidthScale(pdfWnd, legacySize) : CalcFitHeightScale(pdfWnd, legacySize);
+}
+
 static bool TryApplyInitialFitWidth(HWND pdfWnd) {
+    if (g_pdfInitialViewportUpdateDepth != 0) return false;
     if (!g_pendingInitialFitWidth) return false;
     if (!FlowIsVertical(CurrentFlowMode())) {
         g_pendingInitialFitWidth = false;
@@ -88,42 +127,15 @@ static bool TryApplyInitialFitWidth(HWND pdfWnd) {
         return false;
     }
 
-    auto fit = CalcFitWidthScale(pdfWnd, g_pendingInitialFitWidthPt);
+    auto fit = PreferredInitialPdfScale(pdfWnd, g_pendingInitialFitWidthPt, true);
     if (!fit) return false;
 
-    g_pendingInitialFitWidth = false;
-    g_pendingInitialFitWidthPt = 0.0;
-
-    RECT rc{};
-    GetClientRect(pdfWnd, &rc);
-
-    // If scale stays the same, we still need to render pages (BuildPageCaches skipped it while pending).
-    if (std::abs(*fit - g_pdf.scale) < 1e-6) {
-        UpdatePdfVirtualScrollCaches(pdfWnd);
-        ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
-        if (!ApplyPendingPdfRestore(pdfWnd)) {
-            JumpToPage(pdfWnd, 0);
-        }
-        return true;
-    }
-
-    // Cancel any in-flight zoom animation; this should apply immediately.
-    g_zoomAnimating = false;
-    KillTimer(pdfWnd, kZoomTimerId);
-    g_zoomAnchor = {};
-
-    POINT focus{ 0, 0 };
-    ApplyPdfScaleDirect(pdfWnd, *fit, focus, true);
-    g_pdf.scrollX = 0.0;
-    g_pdf.scrollY = 0.0;
-    ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
-    if (!ApplyPendingPdfRestore(pdfWnd)) {
-        JumpToPage(pdfWnd, 0);
-    }
+    CompleteInitialPdfFit(pdfWnd, *fit);
     return true;
 }
 
 static bool TryApplyInitialFitHeight(HWND pdfWnd) {
+    if (g_pdfInitialViewportUpdateDepth != 0) return false;
     if (!g_pendingInitialFitHeight) return false;
     if (FlowIsVertical(CurrentFlowMode())) {
         g_pendingInitialFitHeight = false;
@@ -136,36 +148,10 @@ static bool TryApplyInitialFitHeight(HWND pdfWnd) {
         return false;
     }
 
-    auto fit = CalcFitHeightScale(pdfWnd, g_pendingInitialFitHeightPt);
+    auto fit = PreferredInitialPdfScale(pdfWnd, g_pendingInitialFitHeightPt, false);
     if (!fit) return false;
 
-    g_pendingInitialFitHeight = false;
-    g_pendingInitialFitHeightPt = 0.0;
-
-    RECT rc{};
-    GetClientRect(pdfWnd, &rc);
-
-    if (std::abs(*fit - g_pdf.scale) < 1e-6) {
-        UpdatePdfVirtualScrollCaches(pdfWnd);
-        ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
-        if (!ApplyPendingPdfRestore(pdfWnd)) {
-            JumpToPage(pdfWnd, 0);
-        }
-        return true;
-    }
-
-    g_zoomAnimating = false;
-    KillTimer(pdfWnd, kZoomTimerId);
-    g_zoomAnchor = {};
-
-    POINT focus{ 0, 0 };
-    ApplyPdfScaleDirect(pdfWnd, *fit, focus, true);
-    g_pdf.scrollX = 0.0;
-    g_pdf.scrollY = 0.0;
-    ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
-    if (!ApplyPendingPdfRestore(pdfWnd)) {
-        JumpToPage(pdfWnd, 0);
-    }
+    CompleteInitialPdfFit(pdfWnd, *fit);
     return true;
 }
 
@@ -190,6 +176,15 @@ void SetPdfScale(HWND pdfWnd, double newScale, POINT focusInClient) {
     ApplyPdfScaleDirect(pdfWnd, newScale, focusInClient, false);
     g_zoomAnimating = true;
     SetTimer(pdfWnd, kZoomTimerId, kZoomTimerIntervalMs, nullptr);
+}
+
+bool StartPendingPdfInitialRender(HWND pdfWnd) {
+    if (!pdfWnd || !IsWindowVisible(pdfWnd) || g_pdf.kind != DocKind::Pdf ||
+        g_pdfInitialViewportUpdateDepth != 0) return false;
+    // No message pumping, forced paint or worker wait. The normal fit/restore
+    // transaction queues only the final viewport and is idempotent thereafter.
+    if (TryApplyInitialFitWidth(pdfWnd)) return true;
+    return TryApplyInitialFitHeight(pdfWnd);
 }
 
 void SetPdfFlowMode(HWND pdfWnd, const std::wstring& mode) {
@@ -283,6 +278,52 @@ int PageAtCurrentView() {
         ? (g_pdf.scrollY + static_cast<double>(viewH) * 0.22)
         : (g_pdf.scrollX + static_cast<double>(viewW) * 0.5);
     return PageAtPrimaryDocPos(pos);
+}
+
+// Reuse this module's fit/layout/cache transaction. The user command owns the
+// final viewport, superseding queued opening anchors and in-flight zoom/scroll.
+// PDF bytes, annotations, history and page rotations are not changed here.
+bool FitCurrentPdfPageToView(HWND pdfWnd) {
+    if (!pdfWnd || g_pdf.kind != DocKind::Pdf || g_pdf.pages.empty() ||
+        g_pdf.editingText || g_pdf.drawingAnnot || g_pdf.selectingText || g_pdf.panning) return false;
+    const int index = std::clamp(PageAtCurrentView(), 0, static_cast<int>(g_pdf.pages.size()) - 1);
+    const auto widthPt = g_pdf.pages[static_cast<size_t>(index)].widthPt;
+    const auto heightPt = g_pdf.pages[static_cast<size_t>(index)].heightPt;
+    if (!std::isfinite(widthPt) || !std::isfinite(heightPt) ||
+        !CalcFitWidthScale(pdfWnd, widthPt) || !CalcFitHeightScale(pdfWnd, heightPt)) return false;
+    {
+        PdfInitialViewportUpdateGuard viewportGuard;
+        g_pendingInitialFitWidth = g_pendingInitialFitHeight = false;
+        g_pendingInitialFitWidthPt = g_pendingInitialFitHeightPt = 0.0;
+        g_pendingPdfRestore.reset();
+        g_zoomAnimating = false;
+        KillTimer(pdfWnd, kZoomTimerId);
+        g_zoomAnchor = {};
+        g_scrollVelocity = 0.0;
+        KillTimer(pdfWnd, kScrollTimerId);
+        // Layout can add/remove scrollbars. Resolve against the resulting
+        // client size as well, without scheduling intermediate page pixels.
+        for (int pass = 0; pass < 3; ++pass) {
+            const auto width = CalcFitWidthScale(pdfWnd, widthPt);
+            const auto height = CalcFitHeightScale(pdfWnd, heightPt);
+            if (!width || !height) break;
+            const double scale = std::min(*width, *height);
+            if (std::abs(scale - g_pdf.scale) >= 1e-6)
+                ApplyPdfScaleDirect(pdfWnd, scale, POINT{0, 0}, true);
+            else UpdatePageLayout(pdfWnd);
+        }
+        RECT client{};
+        GetClientRect(pdfWnd, &client);
+        const auto& page = g_pdf.pageRects[static_cast<size_t>(index)];
+        const auto flow = CurrentFlowMode();
+        g_pdf.scrollX = (page.left + page.right) * 0.5 + FlowCrossPaddingX(flow) - client.right * 0.5;
+        g_pdf.scrollY = (page.top + page.bottom) * 0.5 + FlowCrossPaddingY(flow) - client.bottom * 0.5;
+        ClampPdfScroll(client.bottom, client.right);
+        MarkPdfVirtualViewportChange();
+    }
+    UpdatePdfVirtualScrollCaches(pdfWnd);
+    InvalidateRect(pdfWnd, nullptr, FALSE);
+    return true;
 }
 
 void ApplyPdfDisplayMode(HWND pdfWnd) {

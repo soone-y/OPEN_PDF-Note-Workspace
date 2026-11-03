@@ -2,6 +2,9 @@
 param([switch]$AppIntegration, [string]$AppExecutable = "")
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'app_test_desktop.ps1')
+if (Invoke-AppTestDesktop -ScriptPath $PSCommandPath -Parameters $PSBoundParameters) { return }
+
 if ($AppExecutable -and -not $AppIntegration) { throw "-AppExecutable requires -AppIntegration." }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 & (Join-Path $PSScriptRoot "run_artifact_usage_tests.ps1")
@@ -49,12 +52,14 @@ try {
         $appDir = Join-Path $fixture "app"
         New-Item -ItemType Directory -Path $appDir -Force | Out-Null
         # An explicit build may have a different name when the normal exe is
-        # running/locked. Always test a fresh copy with the driver's fixed name.
+        # running/locked. Give each fixture its own process image name as well
+        # as its own files; other-package diagnostics scan all session processes.
         $binarySource = if ($AppExecutable) { (Get-Item -LiteralPath $AppExecutable -ErrorAction Stop).FullName }
             else { Join-Path $repoRoot "out/bin/pdf_note_workspace.exe" }
         if (-not (Test-Path -LiteralPath $binarySource -PathType Leaf)) { throw "Application source executable is missing: $binarySource" }
         $binaryDir = Split-Path -Parent $binarySource
-        Copy-Item -LiteralPath $binarySource -Destination (Join-Path $appDir "pdf_note_workspace.exe")
+        $ownedAppName = 'pdf_note_memo_' + [IO.Path]::GetFileName($fixture) + '.exe'
+        Copy-Item -LiteralPath $binarySource -Destination (Join-Path $appDir $ownedAppName)
         Get-ChildItem -LiteralPath $binaryDir -Filter "*.dll" -File | ForEach-Object {
             Copy-Item -LiteralPath $_.FullName -Destination $appDir
         }
@@ -66,5 +71,7 @@ try {
         } finally {
             [Environment]::SetEnvironmentVariable("WORKSPACE_MEMO_APP_TEST_ROOT", $savedRoot, "Process")
         }
+        & (Join-Path $PSScriptRoot "run_settings_workflow_tests.ps1") -AppExecutable $binarySource
+        if (-not $?) { throw "Settings/workspace workflow runner failed." }
     }
 } finally { Pop-Location }

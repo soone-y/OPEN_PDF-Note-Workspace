@@ -4,9 +4,13 @@ struct PdfViewRestorePoint {
     double xPt = 0.0;
     double yPt = 0.0;
     std::wstring flowMode;
+    double scale = 0.0; // Optional in older position records; zero means unknown.
+    std::vector<int> pageRotations; // Additional clockwise quarter turns, before fit/anchor restoration.
 };
 
 static std::optional<PdfViewRestorePoint> g_pendingPdfRestore;
+static bool g_usePdfOpeningPreference = true;
+static bool g_restorePdfOpeningAnchor = true;
 
 static std::filesystem::path LastPdfViewFilePath() {
     if (g_workspaceRoot.empty()) return {};
@@ -32,12 +36,20 @@ static std::wstring NormalizePathKey(const std::filesystem::path& p) {
 
 void UpdateScrollDirectionMenuChecks(); // settings.cpp; avoid settings.h from pdf_view TU
 
-static std::unordered_map<std::wstring, PdfViewRestorePoint> LoadPdfViewRecordMap() {
+static std::unordered_map<std::wstring, PdfViewRestorePoint> LoadPdfViewRecordMap(bool* complete = nullptr) try {
+    if (complete) *complete = false;
     std::unordered_map<std::wstring, PdfViewRestorePoint> out;
     auto path = LastPdfViewFilePath();
     if (path.empty()) return out;
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) return out;
+    if (!exists) { if (complete) *complete = true; return out; }
+    const auto bytes = std::filesystem::file_size(path, ec);
+    if (ec || bytes > 16 * 1024 * 1024) return out;
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs) return out;
+    bool valid = true;
     std::string line;
     while (std::getline(ifs, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -47,24 +59,27 @@ static std::unordered_map<std::wstring, PdfViewRestorePoint> LoadPdfViewRecordMa
         double xpt = 0.0;
         double ypt = 0.0;
         std::string flow;
-        if (!(iss >> std::quoted(pathUtf8))) continue;
-        if (!(iss >> page)) continue;
+        if (line.empty()) continue;
+        if (!(iss >> std::quoted(pathUtf8))) { valid = false; continue; }
+        if (!(iss >> page) || page < 0) { valid = false; continue; }
         double first = 0.0;
-        if (!(iss >> first)) continue;
+        if (!(iss >> first) || !std::isfinite(first)) { valid = false; continue; }
         double second = 0.0;
         if (iss >> second) {
             xpt = first;
             ypt = second;
+            if (!std::isfinite(second)) { valid = false; continue; }
             if (iss >> flow) {
                 // flow optional
             }
         } else {
             // legacy: page + yPt only
+            if (!iss.eof()) { valid = false; continue; }
             xpt = 0.0;
             ypt = first;
         }
         std::wstring key = NormalizePathKey(UTF8ToWide(pathUtf8));
-        if (key.empty()) continue;
+        if (key.empty()) { valid = false; continue; }
         PdfViewRestorePoint rec;
         rec.path = key;
         rec.pageIndex = page;
@@ -72,20 +87,39 @@ static std::unordered_map<std::wstring, PdfViewRestorePoint> LoadPdfViewRecordMa
         rec.yPt = ypt;
         if (!flow.empty()) {
             rec.flowMode = UTF8ToWide(flow);
+            double scale = 0.0;
+            if ((iss >> scale) && std::isfinite(scale) && scale >= kMinScale && scale <= kMaxScale)
+                rec.scale = scale;
+            if (iss.fail() && !iss.eof()) { valid = false; continue; }
+            if (!iss.fail()) {
+                std::string rotations;
+                if (iss >> rotations) {
+                    if (!view_rotation_record::Decode(rotations, rec.pageRotations)) { valid = false; continue; }
+                    iss >> std::ws;
+                    if (!iss.eof()) { valid = false; continue; }
+                }
+            }
         }
         out[key] = rec;
     }
+    if (ifs.bad() || !valid) return {};
+    if (complete) *complete = true;
     return out;
+} catch (...) {
+    if (complete) *complete = false;
+    return {};
 }
 
-static bool WritePdfViewRecordMap(const std::unordered_map<std::wstring, PdfViewRestorePoint>& entries) {
+static bool WritePdfViewRecordMap(const std::unordered_map<std::wstring, PdfViewRestorePoint>& entries) try {
     auto path = LastPdfViewFilePath();
     if (path.empty()) return false;
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) return false;
     auto escapeDir = WorkspaceEscapeDir();
     if (!escapeDir.empty()) {
         std::filesystem::create_directories(escapeDir, ec);
+        if (ec) return false;
     }
     std::vector<std::pair<std::wstring, PdfViewRestorePoint>> ordered(entries.begin(), entries.end());
     std::sort(ordered.begin(), ordered.end(),
@@ -93,16 +127,25 @@ static bool WritePdfViewRecordMap(const std::unordered_map<std::wstring, PdfView
     std::ostringstream oss;
     for (const auto& kv : ordered) {
         const auto& rec = kv.second;
-        std::wstring flow = rec.flowMode.empty() ? g_config.pdfFlowMode : rec.flowMode;
+        std::wstring flow = rec.flowMode.empty() ? NormalizeFlowModeString(g_config.pdfFlowMode) : rec.flowMode;
         oss << std::quoted(WideToUTF8(kv.first)) << "\t" << rec.pageIndex << "\t"
             << std::setprecision(17) << rec.xPt << "\t" << rec.yPt;
         if (!flow.empty()) {
             oss << "\t" << WideToUTF8(flow);
+            oss << "\t" << (std::isfinite(rec.scale) ? rec.scale : 0.0);
+        }
+        if (!rec.pageRotations.empty()) {
+            const auto encoded = view_rotation_record::Encode(rec.pageRotations);
+            if (!encoded) return false;
+            oss << "\t" << *encoded;
         }
         oss << "\n";
+        if (!oss || oss.tellp() > 16 * 1024 * 1024) return false;
     }
     std::wstring err;
     return write_checks::ObservedWriteUtf8(g_workspaceRoot, path, oss.str(), path.parent_path(), escapeDir, &err);
+} catch (...) {
+    return false;
 }
 
 static bool ReadPdfViewRecordForPath(const std::wstring& path, PdfViewRestorePoint& out) {
@@ -118,10 +161,13 @@ static bool ReadPdfViewRecordForPath(const std::wstring& path, PdfViewRestorePoi
 
 static bool BuildCurrentPdfViewRecord(PdfViewRestorePoint& out) {
     out = {};
-    if (g_pdf.kind != DocKind::Pdf || g_pdf.pages.empty()) return false;
+    if (g_pdf.kind != DocKind::Pdf || g_pdf.pages.empty() || g_pdf.pages.size() != g_pdf.pageRects.size() ||
+        g_pdf.pages.size() != static_cast<size_t>(g_pdf.pageCount)) return false;
     if (g_pdf.path.empty()) return false;
     out.path = NormalizePathKey(std::filesystem::path(g_pdf.path));
     if (out.path.empty()) return false;
+    out.scale = g_pdf.scale;
+    out.pageRotations = g_pdf.pageViewRotations;
 
     PdfFlowMode mode = CurrentFlowMode();
     RECT rc{};
@@ -220,16 +266,30 @@ static bool ApplyPdfViewAnchor(HWND pdfWnd, int pageIndex, double xPt, double yP
     return true;
 }
 
-static void QueuePendingPdfRestoreForPath(const std::wstring& path) {
+static void QueuePendingPdfRestoreForPath(const std::wstring& path, bool useOpeningPreference = true) {
     g_pendingPdfRestore.reset();
+    g_usePdfOpeningPreference = useOpeningPreference;
+    g_restorePdfOpeningAnchor = !(useOpeningPreference &&
+        (g_config.pdfOpenViewMode == L"width" || g_config.pdfOpenViewMode == L"page"));
     PdfViewRestorePoint record;
     if (!ReadPdfViewRecordForPath(path, record)) return;
     if (record.path.empty()) return;
     g_pendingPdfRestore = record;
 }
 
+// Metadata is applied before BuildPageCaches, so both fit modes and saved
+// scale/position restoration see the final rotated page geometry.
+static void RestorePendingPdfPageRotations() {
+    g_pdf.pageViewRotations.clear();
+    if (g_pdf.kind != DocKind::Pdf || !g_pendingPdfRestore || g_pdf.pageCount <= 0 ||
+        NormalizePathKey(g_pdf.path) != NormalizePathKey(g_pendingPdfRestore->path)) return;
+    const auto& turns = g_pendingPdfRestore->pageRotations;
+    if (turns.size() == static_cast<size_t>(g_pdf.pageCount)) g_pdf.pageViewRotations = turns;
+}
+
 static bool ApplyPendingPdfRestore(HWND pdfWnd) {
     if (!g_pendingPdfRestore) return false;
+    if (!g_restorePdfOpeningAnchor) { g_pendingPdfRestore.reset(); return false; }
     if (!pdfWnd) {
         g_pendingPdfRestore.reset();
         return false;
@@ -273,12 +333,19 @@ void SaveLastPdfViewInfo() {
             L"skip=no_record elapsed_ms=" + preview_trace::ElapsedMs(startTick));
         return;
     }
-    auto entries = LoadPdfViewRecordMap();
+    bool complete = false;
+    auto entries = LoadPdfViewRecordMap(&complete);
+    if (!complete) {
+        ShowSoftNotice(g_hPdfView, localization::Text(L"pdf.view_state.save_failed"), SoftNoticeKind::Warning);
+        return;
+    }
     entries[record.path] = record;
-    WritePdfViewRecordMap(entries);
+    const bool saved = WritePdfViewRecordMap(entries);
+    if (!saved)
+        ShowSoftNotice(g_hPdfView, localization::Text(L"pdf.view_state.save_failed"), SoftNoticeKind::Warning);
     preview_trace::Append(
         L"SaveLastPdfViewInfo",
-        L"end path=" + record.path +
+        L"end saved=" + std::to_wstring(saved ? 1 : 0) + L" path=" + record.path +
         L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
 }
 
@@ -289,7 +356,9 @@ bool MovePdfViewInfoPath(const std::wstring& oldPath, const std::wstring& newPat
     if (oldKey.empty() || newKey.empty()) return false;
     if (oldKey == newKey) return true;
 
-    auto entries = LoadPdfViewRecordMap();
+    bool complete = false;
+    auto entries = LoadPdfViewRecordMap(&complete);
+    if (!complete) return false;
     auto it = entries.find(oldKey);
     if (it == entries.end()) return false;
 
@@ -594,7 +663,9 @@ static double NewTextBoxTopFromClickY(double clickYpt, double fontPt, const std:
         lineHeightPx = fallbackPx;
     }
     int padPx = std::max(1, static_cast<int>(std::round(kTextPadPx * scale)));
-    int offsetPx = padPx + lineHeightPx;
+    // PDF Y increases upward; reduce the offset to start input slightly lower.
+    constexpr int kTextClickDownOffsetPx = 2;
+    int offsetPx = padPx + lineHeightPx - kTextClickDownOffsetPx;
     double offsetPt = offsetPx * 72.0 / kDpi / scale;
     return clickYpt + offsetPt;
 }

@@ -1,4 +1,5 @@
 // file: main/main_local_path_browser.cppinc
+#include "ui/transient_display.h"
 
 enum class LocalPathBrowserEntryKind {
     DriveRoot,
@@ -40,6 +41,10 @@ struct LocalPathBrowserState {
     bool allowMultiple = false;
     bool browseOnly = false;
     bool saveMode = false;
+    bool importFileTools = false;
+    bool pdfOnly = false;
+    std::filesystem::path downloadsDir;
+    std::filesystem::path documentsDir;
     std::wstring fileName;
     std::wstring defaultExtension;
     bool showDriveRoots = false;
@@ -155,6 +160,12 @@ static void RebuildLocalPathBrowserHits(LocalPathBrowserState* state, HWND pathB
     if (!state || !pathBar) return;
     state->pathHits.clear();
     state->pathTooltipText = state->showDriveRoots ? L"" : state->currentDir.wstring();
+    if (state->pathTooltip) {
+        if (!ui::ConfigureTransientTooltip(state->pathTooltip, state->pathTooltipText)) {
+            DestroyWindow(state->pathTooltip);
+            state->pathTooltip = nullptr;
+        }
+    }
     if (state->pathTooltip) {
         TOOLINFOW tool{};
         // V2 is accepted by both legacy and manifest-enabled common controls.
@@ -359,8 +370,25 @@ static LRESULT CALLBACK LocalPathBarSubclassProc(HWND hWnd,
     return DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
+// Outside Downloads, the quick jump prioritizes Downloads. From Downloads it
+// returns to Documents. Both locations are resolved once and owned by the dialog.
+[[nodiscard]] static const std::filesystem::path& LocalBrowserQuickJumpFolder(const LocalPathBrowserState& state) {
+    const bool atDownloads = !state.showDriveRoots && !state.downloadsDir.empty() &&
+        NormalizePathKey(state.currentDir.wstring()) == NormalizePathKey(state.downloadsDir.wstring());
+    return atDownloads || state.downloadsDir.empty() ? state.documentsDir : state.downloadsDir;
+}
+
 static void RefreshLocalPathBrowserList(LocalPathBrowserState* state) {
     if (!state || !state->list) return;
+    if (state->importFileTools) {
+        const auto& target = LocalBrowserQuickJumpFolder(*state);
+        HWND jump = GetDlgItem(state->hwnd, 207);
+        SetWindowTextW(jump, localization::Text(&target == &state->documentsDir
+                                              ? L"ui.local_path.documents" : L"ui.local_path.downloads").c_str());
+        const bool atTarget = !state->showDriveRoots &&
+            NormalizePathKey(state->currentDir.wstring()) == NormalizePathKey(target.wstring());
+        EnableWindow(jump, !target.empty() && !atTarget);
+    }
     SendMessageW(state->list, LB_RESETCONTENT, 0, 0);
     SendMessageW(state->suggestionList, LB_RESETCONTENT, 0, 0);
     state->entries.clear();
@@ -369,7 +397,7 @@ static void RefreshLocalPathBrowserList(LocalPathBrowserState* state) {
         if (state->edit) {
             RebuildLocalPathBrowserHits(state, state->edit);
         }
-        state->entries = EnumerateLocalBrowserDriveRoots();
+        if (!state->pdfOnly) state->entries = EnumerateLocalBrowserDriveRoots();
         for (size_t index = 0; index < state->entries.size(); ++index) {
             const std::wstring label = DisplayNameForBrowserEntry(state->entries[index]);
             LRESULT item = SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
@@ -399,11 +427,12 @@ static void RefreshLocalPathBrowserList(LocalPathBrowserState* state) {
         if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) continue;
         std::error_code typeEc;
         if (it->is_directory(typeEc) && !typeEc) {
-            dirs.push_back({path, LocalPathBrowserEntryKind::Directory});
+            if (!state->pdfOnly) dirs.push_back({path, LocalPathBrowserEntryKind::Directory});
             continue;
         }
         if ((!state->requireDirectory || state->browseOnly) &&
-            it->is_regular_file(typeEc) && !typeEc) {
+            it->is_regular_file(typeEc) && !typeEc &&
+            (!state->pdfOnly || ToLowerAscii(path.extension().wstring()) == L".pdf")) {
             files.push_back({path, LocalPathBrowserEntryKind::File});
         }
     }
@@ -463,6 +492,43 @@ static void RefreshLocalPathBrowserList(LocalPathBrowserState* state) {
         SendMessageW(list, state->allowMultiple ? LB_SETSEL : LB_SETCURSEL,
                      state->allowMultiple ? TRUE : static_cast<WPARAM>(item), state->allowMultiple ? item : 0);
         SendMessageW(list, LB_SETCARETINDEX, static_cast<WPARAM>(item), FALSE);
+    }
+    UpdateLocalPathBrowserStatus(state);
+}
+
+// A filter changes visibility only. Retain visible selections in their pane;
+// hidden files must no longer contribute to acceptance or the selection count.
+static void SetLocalBrowserPdfOnly(LocalPathBrowserState* state, bool enabled) {
+    if (!state || !state->importFileTools || state->pdfOnly == enabled) return;
+    std::array<std::vector<std::filesystem::path>, 2> selectedPaths;
+    const std::array<HWND, 2> lists{state->suggestionList, state->list};
+    for (size_t pane = 0; pane < lists.size(); ++pane) {
+        const int count = static_cast<int>(SendMessageW(lists[pane], LB_GETCOUNT, 0, 0));
+        for (int item = 0; item < count; ++item) {
+            const bool selected = state->allowMultiple
+                ? SendMessageW(lists[pane], LB_GETSEL, item, 0) > 0
+                : SendMessageW(lists[pane], LB_GETCURSEL, 0, 0) == item;
+            const LRESULT index = SendMessageW(lists[pane], LB_GETITEMDATA, item, 0);
+            if (selected && index >= 0 && static_cast<size_t>(index) < state->entries.size()) {
+                selectedPaths[pane].push_back(state->entries[static_cast<size_t>(index)].path);
+            }
+        }
+    }
+    state->pdfOnly = enabled;
+    RefreshLocalPathBrowserList(state);
+    for (size_t pane = 0; pane < lists.size(); ++pane) {
+        SendMessageW(lists[pane], state->allowMultiple ? LB_SETSEL : LB_SETCURSEL,
+                     state->allowMultiple ? FALSE : static_cast<WPARAM>(-1), -1);
+        const int count = static_cast<int>(SendMessageW(lists[pane], LB_GETCOUNT, 0, 0));
+        for (int item = 0; item < count; ++item) {
+            const LRESULT index = SendMessageW(lists[pane], LB_GETITEMDATA, item, 0);
+            if (index < 0 || static_cast<size_t>(index) >= state->entries.size()) continue;
+            const auto& path = state->entries[static_cast<size_t>(index)].path;
+            if (std::find(selectedPaths[pane].begin(), selectedPaths[pane].end(), path) != selectedPaths[pane].end()) {
+                SendMessageW(lists[pane], state->allowMultiple ? LB_SETSEL : LB_SETCURSEL,
+                             state->allowMultiple ? TRUE : static_cast<WPARAM>(item), state->allowMultiple ? item : 0);
+            }
+        }
     }
     UpdateLocalPathBrowserStatus(state);
 }
@@ -630,11 +696,20 @@ static LRESULT CALLBACK LocalPathBrowserProc(HWND hWnd, UINT msg, WPARAM wParam,
                             ? (localization::Text(L"ui.local_path.8eb379b072ec").c_str())
                             : (localization::Text(L"ui.local_path.644b3bdfaec0").c_str()),
                         WS_CHILD | WS_VISIBLE,
-                        12, 10, 660, 20, hWnd, nullptr, cs->hInstance, nullptr);
+                        12, 10, state->importFileTools ? 480 : 660, 20, hWnd, nullptr, cs->hInstance, nullptr);
         state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", L"",
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | SS_LEFTNOWORDWRAP | SS_NOTIFY,
-                                      12, 32, 660, 24, hWnd, reinterpret_cast<HMENU>(101),
+                                      12, 32, state->importFileTools ? 510 : 660, 24, hWnd, reinterpret_cast<HMENU>(101),
                                       cs->hInstance, nullptr);
+        if (state->importFileTools) {
+            CreateWindowExW(0, L"BUTTON", localization::Text(L"ui.local_path.pdf_only").c_str(),
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                            510, 8, 162, 22, hWnd, reinterpret_cast<HMENU>(208), cs->hInstance, nullptr);
+            HWND downloads = CreateWindowExW(0, L"BUTTON", localization::Text(L"ui.local_path.downloads").c_str(),
+                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                             534, 32, 138, 24, hWnd, reinterpret_cast<HMENU>(207), cs->hInstance, nullptr);
+            EnableWindow(downloads, state->downloadsDir.empty() ? FALSE : TRUE);
+        }
         if (state->edit) {
             SetWindowSubclass(state->edit, LocalPathBarSubclassProc, 1, reinterpret_cast<DWORD_PTR>(state));
             state->pathTooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
@@ -649,7 +724,6 @@ static LRESULT CALLBACK LocalPathBrowserProc(HWND hWnd, UINT msg, WPARAM wParam,
             tool.lpszText = state->pathTooltipText.data();
             SendMessageW(state->pathTooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
             SendMessageW(state->pathTooltip, TTM_SETMAXTIPWIDTH, 0, 660);
-            SendMessageW(state->pathTooltip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 30000);
         }
         const DWORD listStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
                                 LBS_NOTIFY | LBS_NOINTEGRALHEIGHT |
@@ -662,6 +736,10 @@ static LRESULT CALLBACK LocalPathBrowserProc(HWND hWnd, UINT msg, WPARAM wParam,
                                                 WS_CHILD, 12, 64, 660, 18, hWnd, nullptr, cs->hInstance, nullptr);
         state->suggestionList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", listStyle,
                                                12, 84, 660, 60, hWnd, reinterpret_cast<HMENU>(104), cs->hInstance, nullptr);
+        for (const HWND list : {state->list, state->suggestionList}) {
+            if (!ui::InstallListBoxScroll(list))
+                preview_trace::Append(L"ListBoxScroll", L"path browser subclass installation failed");
+        }
         state->listDivider = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | SS_ETCHEDHORZ,
                                             12, 150, 660, 2, hWnd, nullptr, cs->hInstance, nullptr);
         state->allEntriesLabel = CreateWindowExW(0, L"STATIC", localization::Text(L"ui.local_path.all_entries").c_str(),
@@ -748,6 +826,9 @@ static LRESULT CALLBACK LocalPathBrowserProc(HWND hWnd, UINT msg, WPARAM wParam,
         HWND ctl = reinterpret_cast<HWND>(lParam);
         return ThemeCtlColorPanel(ctl, hdc);
     }
+    case WM_DRAWITEM:
+        if (DrawThemeButton(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam))) return TRUE;
+        break;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDCANCEL) {
             if (state) state->done = true;
@@ -782,6 +863,20 @@ static LRESULT CALLBACK LocalPathBrowserProc(HWND hWnd, UINT msg, WPARAM wParam,
         }
         if (LOWORD(wParam) == 206 && state) {
             if (!state->showDriveRoots) (void)CopyPathToClipboard(hWnd, state->currentDir.wstring());
+            return 0;
+        }
+        if (LOWORD(wParam) == 207 && state && state->importFileTools) {
+            const auto& target = LocalBrowserQuickJumpFolder(*state);
+            if (!target.empty() &&
+                ValidateExistingLocalPathForBrowser(hWnd, target, state->title, true)) {
+                state->currentDir = target;
+                state->showDriveRoots = false;
+                RefreshLocalPathBrowserList(state);
+            }
+            return 0;
+        }
+        if (LOWORD(wParam) == 208 && state && state->importFileTools) {
+            SetLocalBrowserPdfOnly(state, SendMessageW(GetDlgItem(hWnd, 208), BM_GETCHECK, 0, 0) == BST_CHECKED);
             return 0;
         }
         if (LOWORD(wParam) == 204 && state) {
@@ -841,7 +936,8 @@ static std::vector<std::wstring> PromptLocalPathBrowser(HWND owner,
                                                         const std::filesystem::path& highlightPath,
                                                         SavePathPromptSelection* saveSelection = nullptr,
                                                         const std::wstring& defaultExtension = {},
-                                                        const std::wstring& confirmLabel = {}) {
+                                                        const std::wstring& confirmLabel = {},
+                                                        bool importFileTools = false) {
     LocalPathBrowserState state;
     state.owner = owner;
     state.title = title;
@@ -852,6 +948,11 @@ static std::vector<std::wstring> PromptLocalPathBrowser(HWND owner,
     state.allowMultiple = allowMultiple;
     state.browseOnly = browseOnly;
     state.saveMode = saveSelection != nullptr;
+    state.importFileTools = importFileTools && !requireDirectory && !browseOnly && !state.saveMode;
+    if (state.importFileTools) {
+        state.downloadsDir = DialogKnownFolderInitialFolder(FOLDERID_Downloads);
+        state.documentsDir = DialogKnownFolderInitialFolder(FOLDERID_Documents);
+    }
     if (saveSelection) state.fileName = saveSelection->fileName;
     state.defaultExtension = defaultExtension;
     if (state.currentDir.empty()) return {};
@@ -1072,14 +1173,15 @@ static std::vector<std::wstring> PromptExistingLocalFilesAppFirst(HWND owner,
                                                                   const std::filesystem::path& initial,
                                                                   const std::wstring& title,
                                                                   bool allowMultiple,
-                                                                  const std::wstring& confirmLabel = {}) {
+                                                                  const std::wstring& confirmLabel = {},
+                                                                  bool importFileTools = false) {
     if (g_config.useNativeFileDialogs) {
         return PromptNativeExistingLocalPaths(owner, initial, title, /*requireDirectory=*/false,
                                              allowMultiple, {}, confirmLabel);
     }
     std::vector<std::wstring> picked =
         PromptLocalPathBrowser(owner, initial, title, /*requireDirectory=*/false, allowMultiple,
-                               /*browseOnly=*/false, {}, nullptr, {}, confirmLabel);
+                               /*browseOnly=*/false, {}, nullptr, {}, confirmLabel, importFileTools);
     std::vector<std::wstring> results;
     for (const auto& item : picked) {
         std::filesystem::path selected(item);

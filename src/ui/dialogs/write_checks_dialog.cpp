@@ -87,6 +87,11 @@ void Snapshot(Context& ctx) {
     for (auto& path : ctx.targets) if (!path.empty()) path = path.lexically_normal();
     ctx.store = root.empty() ? std::filesystem::path{} : root / L"__pdf_note_workspace__" / L"__log__" / L"write_checks.log";
 }
+bool TargetsChanged(const Context& ctx) {
+    return ctx.snapshotRoot != g_workspaceRoot || ctx.snapshotSession != g_currentSessionPath ||
+        ctx.snapshotPdf != CurrentLogicalPdfPath() || ctx.snapshotNote != g_currentNotePath ||
+        ctx.targets[8] != CurrentPdfDirectory().lexically_normal() || ctx.targets[9] != CurrentNoteDirectory().lexically_normal();
+}
 void LoadRecords(Context& ctx) {
     ctx.records.clear(); ctx.baseline.clear(); ctx.unsaved = false;
     try { ctx.loadOk = Load(ctx.store, ctx.records, ctx.baseline, ctx.storageError); }
@@ -113,6 +118,12 @@ std::wstring Timestamp(std::uint64_t value) {
     swprintf_s(buffer, L"%04u-%02u-%02u %02u:%02u:%02u", time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond);
     return buffer;
 }
+std::wstring ResultText(const Record* record, bool loadOk) {
+    auto text = T(record ? OutcomeId(record->result.outcome) : (loadOk ? L"checks.no_record" : L"checks.check_failure"));
+    if (!record || !IsParentDestinationProbe(*record)) return text;
+    if (record->result.outcome == Outcome::Unavailable) text = T(L"checks.unavailable_short");
+    return localization::Format(L"checks.parent_result", {{L"RESULT", text}});
+}
 int Selected(Context& ctx) { return ListView_GetNextItem(ctx.list, -1, LVNI_SELECTED); }
 std::wstring Key(const std::filesystem::path& path) { return path.empty() ? L"(no target)" : path.wstring(); }
 std::wstring TargetName(std::filesystem::path path) {
@@ -130,7 +141,7 @@ void Fill(Context& ctx) {
         item.mask = LVIF_TEXT; item.iItem = static_cast<int>(i); item.pszText = label.data();
         ListView_InsertItem(ctx.list, &item);
         const Record* record = Find(ctx.records, kind, Key(ctx.targets[i]));
-        auto status = T(record ? OutcomeId(record->result.outcome) : (ctx.loadOk ? L"checks.no_record" : L"checks.check_failure"));
+        auto status = ResultText(record, ctx.loadOk);
         ListView_SetItemText(ctx.list, static_cast<int>(i), 1, status.data());
         auto time = record ? Timestamp(record->result.time) : std::wstring(L"—");
         ListView_SetItemText(ctx.list, static_cast<int>(i), 2, time.data());
@@ -145,8 +156,7 @@ void UpdateStatus(Context& ctx) {
     const auto remaining = manualLimit.Remaining(now);
     std::wstring status;
     const bool busy = ctx.pending || manualLimit.busy();
-    const bool stale = ctx.snapshotRoot != g_workspaceRoot || ctx.snapshotSession != g_currentSessionPath ||
-        ctx.snapshotPdf != CurrentLogicalPdfPath() || ctx.snapshotNote != g_currentNotePath;
+    const bool stale = TargetsChanged(ctx);
     if (busy) status = T(ctx.closing ? L"checks.canceling" : L"checks.running");
     else if (remaining) status = localization::Format(L"checks.cooldown", {{L"SECONDS", std::to_wstring((remaining + 999) / 1000)}}) + L" " +
         (manualLimit.RecoveryAvailable(now) ? localization::Format(L"checks.exception_available", {{L"COUNT", std::to_wstring(manualLimit.RemainingRetries(now))}}) : T(L"checks.exception_used"));
@@ -175,8 +185,7 @@ void Detail(HWND hwnd, Context& ctx, size_t index) {
     const auto* record = Find(ctx.records, kind, Key(ctx.targets[index]));
     SilentDialogOptions options;
     options.title = T(ItemLabelId(index));
-    options.message = T(L"dialog.details.status") + L"\n" +
-        T(record ? OutcomeId(record->result.outcome) : (ctx.loadOk ? L"checks.no_record" : L"checks.check_failure"));
+    options.message = T(L"dialog.details.status") + L"\n" + ResultText(record, ctx.loadOk);
     options.additionalInformation = T(L"dialog.details.additional_information") + L"\n" +
         T(record && record->result.source == Source::Normal ?
         (kind == Kind::SetupRead || kind == Kind::WorkspaceRead || kind == Kind::PdfRead ? L"checks.description.normal_read" : L"checks.description.normal") :
@@ -187,7 +196,8 @@ void Detail(HWND hwnd, Context& ctx, size_t index) {
         kind == Kind::WorkspaceRead ? L"checks.description.read" : L"checks.description.write");
     if (kind == Kind::OfficeTempWrite) options.additionalInformation += L"\n" + T(L"checks.description.office_location");
     if (kind == Kind::PdfWrite || kind == Kind::NoteWrite)
-        options.additionalInformation += L"\n" + T(L"checks.description.destination");
+        options.additionalInformation += L"\n" + T(record && IsParentDestinationProbe(*record)
+            ? L"checks.description.parent_probe" : L"checks.description.destination");
     if (ctx.targets[index].empty()) options.additionalInformation += L"\n" + T(L"checks.reason.no_target");
     if (!ctx.loadOk) options.additionalInformation += L"\n" + T(L"checks.record_load_failed") +
         L"\n" + std::to_wstring(ctx.loadError) + L": " + atomic_write::Win32ErrorMessage(ctx.loadError);
@@ -214,7 +224,7 @@ void Detail(HWND hwnd, Context& ctx, size_t index) {
     if (options.paths.empty()) options.message += L"\n" + T(L"checks.no_target");
     const auto ignored = ShowSilentDialog(hwnd, options); (void)ignored;
 }
-Result Execute(Kind kind, const std::filesystem::path& target, std::atomic_bool& cancel) {
+Result Execute(Kind kind, const std::filesystem::path& target, const std::filesystem::path& session, std::atomic_bool& cancel) {
     IgnoreNormalOperations ignore;
     Result result; result.time = UtcNow();
     if (cancel.load()) { result.outcome = Outcome::Canceled; result.error = ERROR_CANCELLED; return result; }
@@ -249,12 +259,12 @@ Result Execute(Kind kind, const std::filesystem::path& target, std::atomic_bool&
         return result;
     }
     if (kind == Kind::NoteReadWrite) return ProbeNoteFile(target, cancel);
+    if (kind == Kind::PdfWrite || kind == Kind::NoteWrite) return ProbeSessionDestination(kind, target, session, cancel);
     return kind == Kind::SetupRead ? ProbeFile(target) : ProbeDirectory(target, kind != Kind::WorkspaceRead);
 }
 void Run(HWND hwnd, Context& ctx) {
     const int selected = Selected(ctx);
-    if (selected < 0 || manualLimit.busy() || ctx.pending || ctx.snapshotRoot != g_workspaceRoot || ctx.snapshotSession != g_currentSessionPath ||
-        ctx.snapshotPdf != CurrentLogicalPdfPath() || ctx.snapshotNote != g_currentNotePath) return;
+    if (selected < 0 || manualLimit.busy() || ctx.pending || TargetsChanged(ctx)) return;
     const auto kind = kItemKinds[selected];
     const auto* previous = Find(ctx.records, kind, Key(ctx.targets[selected]));
     const bool recovery = manualLimit.Remaining(GetTickCount64()) && previous && previous->result.outcome == Outcome::Failed;
@@ -272,11 +282,12 @@ void Run(HWND hwnd, Context& ctx) {
     ctx.pending = true;
     ctx.storageOnly = false;
     const auto target = ctx.targets[selected];
+    const auto session = std::filesystem::path(ctx.snapshotSession).lexically_normal();
     try {
         Record initial; initial.kind = kind; initial.target = Key(target);
-        ctx.worker = std::thread([&ctx, kind, target, completed = std::move(initial), records = ctx.records, baseline = ctx.baseline,
+        ctx.worker = std::thread([&ctx, kind, target, session, completed = std::move(initial), records = ctx.records, baseline = ctx.baseline,
                                   store = ctx.store, loadOk = ctx.loadOk, storageError = ctx.storageError]() mutable {
-            try { completed.result = Execute(kind, target, ctx.cancel); }
+            try { completed.result = Execute(kind, target, session, ctx.cancel); }
             catch (...) { completed.result.outcome = Outcome::Unavailable; completed.result.error = ERROR_UNHANDLED_EXCEPTION; completed.result.time = UtcNow(); }
             completed.result.time = UtcNow(); // Timestamp confirmation, not probe start.
             try {

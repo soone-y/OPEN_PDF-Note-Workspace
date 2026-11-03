@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$Rebuild,
     [switch]$Clean,
@@ -100,6 +100,8 @@ $logDir = Join-Path $outRoot "logs"
 $endTimeLogPath = Join-Path $logDir "build_readonly_viewer_end_time.log"
 $buildDetailLogPath = Join-Path $logDir ("build_readonly_viewer_detail_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
 $versionFilePath = Join-Path $repoRoot "REPO_VERSION.txt"
+$versionSupportPath = Join-Path $repoRoot "scripts/build/build_version.ps1"
+. $versionSupportPath
 
 function Append-BuildDetailLog {
     param([AllowNull()]$Line)
@@ -482,7 +484,8 @@ try {
         "-mwindows",
         "-Wall",
         "-pipe",
-        "-DCLROP_READ_ONLY_BUILD"
+        "-DCLROP_READ_ONLY_BUILD",
+        "-DMD4C_USE_UTF16"
     )
 
     if (-not (Get-Command $compiler -ErrorAction SilentlyContinue)) {
@@ -559,6 +562,7 @@ try {
         ResourceFiles    = $resourceInputs
         OutputExe        = $outputExe
         BuildDriverHash  = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+        VersionSupportHash = (Get-FileHash -LiteralPath $versionSupportPath -Algorithm SHA256).Hash
     }
 
     $signatureJson = $signature | ConvertTo-Json -Depth 10 -Compress
@@ -585,26 +589,13 @@ try {
         }
     }
 
-    $versionChanged = $false
-    if (Test-Path -LiteralPath $buildInfoManifestPath) {
-        $manifestContent = Get-Content -LiteralPath $buildInfoManifestPath -Raw -ErrorAction SilentlyContinue
-        $manifestMatch = [regex]::Match($manifestContent, '(?m)^version`t(?<ver>.+)`r?$')
-        if ($manifestMatch.Success -and $manifestMatch.Groups["ver"].Value.Trim() -ne $appVersion) {
-            $versionChanged = $true
-        }
+    $versionChanged = Test-BuildVersionNeedsRefresh -VersionPath $versionFilePath -Version $appVersion `
+        -ExecutablePath $outputExe -BuildInfoPath $buildInfoManifestPath
+    if ($versionChanged -and $sourceFiles -notcontains "src/readonly_viewer/main.cpp") {
+        throw "Required version source is missing from the build manifest: src/readonly_viewer/main.cpp"
     }
-    elseif (Test-Path -LiteralPath $versionFilePath) {
-        if (-not (Test-Path -LiteralPath $outputExe) -or (Get-Item -LiteralPath $versionFilePath).LastWriteTimeUtc -gt (Get-Item -LiteralPath $outputExe).LastWriteTimeUtc) {
-            $versionChanged = $true
-        }
-    }
-
     if ($versionChanged) {
-        Write-Host "Repo version changed ($appVersion); updating read-only viewer version component and relinking..." -ForegroundColor Yellow
-        $mainObj = Join-Path $objDir "main.o"
-        if (Test-Path -LiteralPath $mainObj) {
-            Remove-Item -Force -LiteralPath $mainObj -ErrorAction SilentlyContinue
-        }
+        Write-Host "Version inputs changed ($appVersion); recompiling the version source and relinking..." -ForegroundColor Yellow
         $forceLink = $true
     }
 
@@ -667,7 +658,11 @@ try {
         if (-not (Test-Path -LiteralPath $DependencyFile)) {
             return $true
         }
-        foreach ($dep in (Get-DependencyPaths -DependencyFile $DependencyFile)) {
+        $dependencies = @(Get-DependencyPaths -DependencyFile $DependencyFile)
+        if ($dependencies.Count -eq 0 -or $Source -notin $dependencies) {
+            return $true
+        }
+        foreach ($dep in $dependencies) {
             if (-not (Test-Path -LiteralPath $dep)) {
                 return $true
             }
@@ -728,12 +723,19 @@ try {
             }
         }
 
+        # Version evidence applies even to a user-selected subset of sources.
+        if ($versionChanged -and $src -eq "src/readonly_viewer/main.cpp") {
+            $isTargetFile = $true
+            $forceCompileThis = $true
+        }
+
         if ($isTargetFile -and ($forceRecompile -or $forceCompileThis -or (Should-Compile -Source $src -Object $objPath -DependencyFile $depPath))) {
             if ($VerboseOutput) {
                 Write-Host "Compiling: $src" -ForegroundColor Yellow
             }
             $fileCompiler = if ($src -match "\.c$") { "gcc" } else { $compiler }
             $cmdArgs = @("-c", $src, "-o", $objPath, "-MMD", "-MF", $depPath, "-MT", $objPath) + $includes + $flags
+            $cmdArgs += if ($src -match "\.c$") { "-std=c11" } else { "-std=c++17" }
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $compileExitCode = Invoke-BuildNativeCommand -FilePath $fileCompiler -Arguments $cmdArgs
             $sw.Stop()
@@ -847,6 +849,8 @@ try {
     else {
         Write-Host ("Read-only viewer up to date. ({0} files skipped)" -f $skippedCount) -ForegroundColor Green
     }
+    & python tools/dev/prepare_readonly_viewer_next_licenses.py --locale $Locale --output $binDir --variant standard
+    if ($LASTEXITCODE -ne 0) { throw 'Required read-only viewer license files could not be prepared.' }
     Write-BuildOutputSummary -ExePath $outputExe -BinDir $binDir -LogDir $logDir
 
     $buildInfoArtifactPaths = Sync-ReadOnlyViewerRuntimeArtifacts -OutputExePath $outputExe -BinDir $binDir -Compiler $compiler

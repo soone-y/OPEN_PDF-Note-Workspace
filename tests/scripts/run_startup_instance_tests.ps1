@@ -2,6 +2,9 @@
 param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'app_test_desktop.ps1')
+if (Invoke-AppTestDesktop -ScriptPath $PSCommandPath -Parameters $PSBoundParameters) { return }
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $testDir = Join-Path $repoRoot "out\tests\startup_instance"
 $compiler = Get-Command g++ -ErrorAction Stop

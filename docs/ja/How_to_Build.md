@@ -44,7 +44,15 @@ python tests/python/validate_codebase.py
 python -m unittest tests/python/test_python_tools.py
 ```
 
-`run_repo_checks.ps1` は、`REPO_VERSION.txt` と最新ビルドの Full / Lite / 閲覧専用ビューアの `.buildinfo.txt` を比較し、版番号の不一致を検出します。`-SkipBuild` を付けた場合も、既存のビルド成果物についてこの確認を行います。配布版番号はrelease setのmanifest、ZIP、チェックサム、locale別タグとRelease Notesで固定・照合されます。利用者文書には、置換前提の版番号マーカーを置きません。
+`run_repo_checks.ps1` は、`REPO_VERSION.txt` と最新ビルドの Full / Lite / 閲覧専用ビューアの `.buildinfo.txt` を比較し、版番号の不一致を検出します。通常の検査で `-SkipBuild` を付けた場合も、既存のビルド成果物についてこの確認を行います。配布版番号はrelease setのmanifest、ZIP、チェックサム、locale別タグとRelease Notesで固定・照合されます。利用者文書には、置換前提の版番号マーカーを置きません。
+
+検査の一覧は `./tests/scripts/run_repo_checks.ps1 -ListSteps` で確認できます。関連するステップだけを実行する例は次のとおりです。複数指定は PowerShell から配列で渡します。部分実行は全体の合格を意味せず、選択した検査の前提や既存成果物は各自で用意してください。追加検査は従来の `-Include...` 指定も必要です。指定したステップが省略された場合は失敗します。全体の通常検査は上記の引数なしのコマンドです（追加検査は別途指定）。
+
+```powershell
+./tests/scripts/run_repo_checks.ps1 -OnlyStep 'Text Integrity Gate','Safety Scans'
+```
+
+能動コンテンツへの耐性検査は `./tests/scripts/run_repo_checks.ps1 -OnlyStep 'Script Resistance Tests'` で選べます。PDFiumの実入力処理と関連する静的契約を確認します。アプリ全体の脆弱性不在を保証する検査ではありません。
 
 保存処理を変更した場合は、保存系テストも実行してください。
 

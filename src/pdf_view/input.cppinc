@@ -334,9 +334,13 @@ static bool ConsumeRecentPdfLinkPlacementDblClickSuppress(const POINT& pt) {
     return sameClickArea;
 }
 
-static bool IsTextFontSizeComboFocusTarget(HWND target) {
+static bool IsTextBoxOptionFocusTarget(HWND target) {
     if (!target) return false;
-    if (target == g_hRadioFontSizeSlotA || target == g_hRadioFontSizeSlotB) return true;
+    if (target == g_hRadioFontSizeSlotA || target == g_hRadioFontSizeSlotB ||
+        target == g_hRadioBlendNormal || target == g_hRadioBlendMultiply) return true;
+    for (HWND button : g_colorButtons) if (target == button) return true;
+    if (target == g_hChkTextReadableBackground || target == g_hRadioTextReadableBackgroundNormal ||
+        target == g_hRadioTextReadableBackgroundInverted || target == g_hChkTextAutoWrap) return true;
 
     auto isComboTarget = [&](HWND combo) {
         if (!combo || !IsWindow(combo)) return false;
@@ -351,7 +355,7 @@ static bool IsTextFontSizeComboFocusTarget(HWND target) {
         return target == list || target == dropWnd ||
                IsChild(list, target) || IsChild(dropWnd, target);
     };
-    return isComboTarget(g_hComboFontSize) || isComboTarget(g_hComboFontSizeAlt);
+    return isComboTarget(g_hComboFontSize) || isComboTarget(g_hComboFontSizeAlt) || isComboTarget(g_hComboFont) || isComboTarget(g_hComboLineDashStyle);
 }
 
 static bool ResolvePdfCtrlInsertNavKey(HWND hwnd, WPARAM wParam, WPARAM* outNavKey) {
@@ -466,23 +470,29 @@ static void InsertPdfEditTextAtSelection(const std::wstring& text) {
     }
 }
 
+// Fine control for ordinary annotation text; larger display sizes need fewer
+// key presses. The endpoints match the annotation inspector's 4..200 pt range.
+static constexpr double kTextBoxFontPtSteps[] = {
+    4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+    26, 28, 30, 32,
+    36, 40, 44, 48,
+    56, 64, 72, 80, 88, 96,
+    112, 128, 144, 160, 176, 192, 200
+};
+
 static double NextTextBoxFontPt(double currentPt) {
-    currentPt = std::clamp(currentPt, 6.0, 96.0);
-    constexpr double presets[] = { 8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 56, 64, 72, 96 };
-    for (double pt : presets) {
+    for (double pt : kTextBoxFontPtSteps) {
         if (pt > currentPt + 0.05) return pt;
     }
-    if (currentPt < 96.0) return std::min(96.0, currentPt + 4.0);
+    // Do not shrink an imported/custom value above the preset range.
     return currentPt;
 }
 
 static double PreviousTextBoxFontPt(double currentPt) {
-    currentPt = std::clamp(currentPt, 6.0, 96.0);
-    constexpr double presets[] = { 8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 56, 64, 72, 96 };
-    for (int i = static_cast<int>(std::size(presets)) - 1; i >= 0; --i) {
-        if (presets[i] < currentPt - 0.05) return presets[i];
+    for (int i = static_cast<int>(std::size(kTextBoxFontPtSteps)) - 1; i >= 0; --i) {
+        if (kTextBoxFontPtSteps[i] < currentPt - 0.05) return kTextBoxFontPtSteps[i];
     }
-    if (currentPt > 6.0) return std::max(6.0, currentPt - 4.0);
+    // Do not enlarge an imported/custom value below the preset range.
     return currentPt;
 }
 
@@ -564,7 +574,7 @@ static bool ChangeSelectedTextBoxFont(HWND hwnd, bool enlarge) {
     double currentPt = (before.fontPt > 0.0) ? before.fontPt : g_textFontPt;
     double nextPt = enlarge ? NextTextBoxFontPt(currentPt) : PreviousTextBoxFontPt(currentPt);
     if (std::abs(nextPt - currentPt) <= 0.05) {
-        (void)SyncTextBoxToolFontFromAnnotationIndex(idx);
+        SyncToolbarFontSizeCombo(true);
         return true;
     }
 
@@ -575,12 +585,17 @@ static bool ChangeSelectedTextBoxFont(HWND hwnd, bool enlarge) {
     g_annots[static_cast<size_t>(idx)] = after;
     RecordAnnotUpdate(idx, idx, before, after);
     MarkAnnotsDirty(GetParent(hwnd));
-    (void)SyncTextBoxToolFontFromAnnotationIndex(idx);
+    SyncToolbarFontSizeCombo(true);
     InvalidateRect(hwnd, nullptr, FALSE);
     return true;
 }
 
 bool ApplyActiveColorToSelectedAnnotation(HWND hwnd) {
+    if (g_pdf.editingText) {
+        // Palette changes keep the live editor and its text selection intact.
+        InvalidateEditingTextBoxRect(hwnd);
+        return true;
+    }
     int idx = GetSelectedTextBoxAnnotationIndex();
     if (idx < 0 || idx >= static_cast<int>(g_annots.size())) return false;
     Annotation before = g_annots[static_cast<size_t>(idx)];
@@ -597,19 +612,22 @@ bool ApplyActiveColorToSelectedAnnotation(HWND hwnd) {
     return true;
 }
 
-static bool ApplyActiveTextToolFontToSelectedTextBox(HWND hwnd) {
+static bool ApplyActiveTextToolFontToSelectedTextBox(HWND hwnd, WPARAM field) {
     int idx = GetSelectedTextBoxAnnotationIndex();
     if (idx < 0 || idx >= static_cast<int>(g_annots.size())) return false;
-    Annotation before = g_annots[static_cast<size_t>(idx)];
-    if (before.type != Annotation::Type::TextBox) return false;
-
-    Annotation after = before;
-    after.fontPt = ResolveAdaptiveTextFontPtForPage(after.pageIndex, g_textFontPt);
-    after.fontName = g_textFontName;
-    if (std::abs(((before.fontPt > 0.0) ? before.fontPt : after.fontPt) - after.fontPt) <= 0.05 &&
-        before.fontName == after.fontName) {
+    const auto& current = g_annots[static_cast<size_t>(idx)];
+    if (current.type != Annotation::Type::TextBox) return false;
+    const auto& nextName = field == kTextBoxFontSizeOnly ? current.fontName : g_textFontName;
+    const double nextPt = field == kTextBoxFontFamilyOnly ? current.fontPt
+        : ResolveAdaptiveTextFontPtForPage(current.pageIndex, g_textFontPt);
+    if (std::abs(((current.fontPt > 0.0) ? current.fontPt : nextPt) - nextPt) <= 0.05 &&
+        current.fontName == nextName) {
         return true;
     }
+    Annotation before = current;
+    Annotation after = before;
+    after.fontPt = nextPt;
+    after.fontName = nextName;
     ReflowMovedTextBox(after);
     g_annots[static_cast<size_t>(idx)] = after;
     RecordAnnotUpdate(idx, idx, before, after);
@@ -670,6 +688,75 @@ static Annotation::Type PreferredMoveAnnotationTypeForTool() {
     }
 }
 
+static void ApplyCurrentLineToolStyle(Annotation& ann) {
+    ann.type = IsArrowAnnotToolMode(g_toolMode) ? Annotation::Type::Arrow
+        : IsWaveAnnotToolMode(g_toolMode) ? Annotation::Type::Wave : Annotation::Type::Line;
+    if (ann.type == Annotation::Type::Arrow) ann.arrowHead = g_arrowHead;
+    const double widthPt = ToolWidthPtForMode(g_toolMode);
+    ann.width = widthPt > 0.0 ? widthPt : 2.0;
+    ann.dash = g_lineDashStyle == L"dash"
+        ? std::vector<double>{std::max(1.0, ann.width * 4.0), std::max(1.0, ann.width * 2.0)}
+        : std::vector<double>{};
+}
+
+// UI-thread metric cache. Only the resolved font affects the 576-DPI line height;
+// document text, zoom and viewport do not. Own no GDI resources between calls.
+[[nodiscard]] static double TextBoxReeditLineHeightPt(const Annotation& ann) {
+    const double fontPt = ann.fontPt > 0.0 ? ann.fontPt
+        : ResolveAdaptiveTextFontPtForPage(ann.pageIndex, g_textFontPt);
+    std::wstring name = ann.fontName.empty() ? g_textFontName : ann.fontName;
+    if (name.empty()) name = GetDefaultFontFaceName();
+    const int fontPx = TextBoxFontHeightPx(fontPt);
+    static std::wstring cachedName;
+    static int cachedFontPx = 0;
+    static double cachedHeightPt = 0.0;
+    if (cachedFontPx == fontPx && cachedName == name) return cachedHeightPt;
+
+    HDC dc = GetDC(g_hPdfView);
+    if (!dc) return fontPt;
+    LOGFONTW lf{};
+    lf.lfHeight = -fontPx;
+    lf.lfQuality = ANTIALIASED_QUALITY;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    if (!name.empty()) wcsncpy_s(lf.lfFaceName, name.c_str(), LF_FACESIZE - 1);
+    HFONT font = CreateFontIndirectW(&lf);
+    HGDIOBJ previous = font ? SelectObject(dc, font) : nullptr;
+    TEXTMETRICW tm{};
+    const bool ok = previous && previous != HGDI_ERROR && GetTextMetricsW(dc, &tm) && tm.tmHeight > 0;
+    if (previous && previous != HGDI_ERROR) SelectObject(dc, previous);
+    if (font) DeleteObject(font);
+    ReleaseDC(g_hPdfView, dc);
+    if (!ok) return fontPt;
+    cachedName = std::move(name);
+    cachedFontPx = fontPx;
+    cachedHeightPt = LayoutPxToPt(tm.tmHeight);
+    return cachedHeightPt;
+}
+
+[[nodiscard]] static bool IsPointInTextReeditBounds(const Annotation& ann, double px, double py) {
+    const double minX = std::min(ann.x1, ann.x2);
+    const double maxX = std::max(ann.x1, ann.x2);
+    const double minY = std::min(ann.y1, ann.y2);
+    const double maxY = std::max(ann.y1, ann.y2);
+    if (px < minX || px > maxX || py < minY || py > maxY) return false;
+    // Keep the full width and the existing screen-vertical inset. Each edge
+    // excludes 10% of the box height, capped at 31% of its font's line height.
+    // MathBox retains its full bounds.
+    const double insetY = ann.type == Annotation::Type::TextBox
+        ? std::min((maxY - minY) * 0.1, TextBoxReeditLineHeightPt(ann) * 0.31) : 0.0;
+    return py >= minY + insetY && py <= maxY - insetY;
+}
+
+// Preserve click priority (newest first, including MathBox blocking an underlying TextBox).
+[[nodiscard]] static int FindTextReeditAnnotation(int pageIndex, double px, double py) {
+    for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
+        const auto ann = ProjectAnnotationForView(g_annots[static_cast<size_t>(i)]);
+        if ((ann.type == Annotation::Type::TextBox || ann.type == Annotation::Type::MathBox) &&
+            ann.pageIndex == pageIndex && IsPointInTextReeditBounds(ann, px, py)) return i;
+    }
+    return -1;
+}
+
 static bool CanShowTextBoxEditCursorAtPoint(const POINT& pt) {
     if (IsPdfPreviewReadOnlyActive() || g_pdf.kind != DocKind::Pdf) return false;
     if (g_pdf.editingText) {
@@ -684,20 +771,10 @@ static bool CanShowTextBoxEditCursorAtPoint(const POINT& pt) {
     int pageIndex = -1;
     double px = 0.0, py = 0.0, pageTop = 0.0;
     if (!HitTestPagePoint(pt, pageIndex, px, py, pageTop)) return false;
-    for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
-        const auto& ann = g_annots[static_cast<size_t>(i)];
-        if (ann.type != Annotation::Type::TextBox || ann.pageIndex != pageIndex) {
-            continue;
-        }
-        double minX = std::min(ann.x1, ann.x2);
-        double maxX = std::max(ann.x1, ann.x2);
-        double minY = std::min(ann.y1, ann.y2);
-        double maxY = std::max(ann.y1, ann.y2);
-        if (px >= minX && px <= maxX && py >= minY && py <= maxY) {
-            return true;
-        }
-    }
-    return false;
+    int linkIndex = -1;
+    if (g_linkPending.active || HitTestLinkMarkerAtPoint(pt, linkIndex)) return false;
+    const int index = FindTextReeditAnnotation(pageIndex, px, py);
+    return index >= 0 && g_annots[static_cast<size_t>(index)].type == Annotation::Type::TextBox;
 }
 
 static bool CanShowAnnotationMoveCursorAtPoint(const POINT& pt) {
@@ -782,6 +859,18 @@ static bool TryShowPdfQuickAnnotRightDrag(HWND hwnd, const POINT& pt) {
 // ---------------------------------------------------------------------
 
 LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if(ShapeRotationMessage(hwnd,msg,wParam,lParam))return 0;
+    if (msg == WM_LBUTTONDOWN || msg == WM_MBUTTONDOWN || msg == WM_RBUTTONDOWN ||
+        msg == WM_POINTERDOWN || msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN ||
+        msg == WM_VSCROLL || msg == WM_HSCROLL || msg == WM_KILLFOCUS || msg == WM_DESTROY) {
+        g_pdfWheelInput.Reset();
+    }
+    if (msg == WM_GETOBJECT && static_cast<LONG>(lParam) == static_cast<LONG>(OBJID_CLIENT) &&
+        g_pdf.editingText && g_pdfTextInputPublished) {
+        return text_input_accessibility::Expose(hwnd, wParam, g_pdfTextInputGeneration,
+                                                ReadPdfTextInput, ModifyPdfTextInput);
+    }
+    if (msg == WM_DESTROY) EndPdfTextInputAccessibility(hwnd);
     // Keyup can be blocked by a save transaction, so cancellation precedes that gate.
     if (msg == WM_KEYUP && pdf_keyboard_scroll::Motion::KeyIndex(static_cast<unsigned>(wParam)) >= 0) {
         g_pdfKeyboardMotion.SetKey(static_cast<unsigned>(wParam), false);
@@ -795,21 +884,32 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     if (BlockPdfViewEditInputDuringSave(hwnd, msg, wParam, lParam)) return 0;
     switch (msg) {
     case kMsgTextBoxFontUpdate: {
+        if (wParam == kTextBoxFontDisplayOnly) {
+            SyncToolbarFontSizeCombo();
+            return 0;
+        }
         if (g_pdf.editingText) {
+            const auto& requestedName = wParam == kTextBoxFontSizeOnly ? g_pdf.editFontName : g_textFontName;
+            const double nextPt = wParam == kTextBoxFontFamilyOnly ? g_pdf.editFontPt
+                : ResolveAdaptiveTextFontPtForPage(g_pdf.editPage, g_textFontPt);
+            if (requestedName == g_pdf.editFontName && std::abs(nextPt - g_pdf.editFontPt) <= 0.05) return 0;
+            std::wstring nextName = requestedName;
             RECT before{};
             bool hadBefore = GetEditingTextBoxClientRect(&before);
-            g_pdf.editFontName = g_textFontName;
-            g_pdf.editFontPt = ResolveAdaptiveTextFontPtForPage(g_pdf.editPage, g_textFontPt);
+            RecordTextEditChange();
+            g_pdf.editFontName.swap(nextName);
+            g_pdf.editFontPt = nextPt;
             g_pdf.editLayoutDirty = true;
             EnsureEditLayoutCache(true);
             RecalcEditingTextboxSize(true);
             EnsureEditingTextBoxVisible(hwnd, L"textbox_font_update");
             UpdateImeWindowPosition(hwnd, true);
             InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
-        } else if (!ApplyActiveTextToolFontToSelectedTextBox(hwnd) &&
+        } else if (!ApplyActiveTextToolFontToSelectedTextBox(hwnd, wParam) &&
                    g_toolMode == ToolMode::TextBox && g_pdf.textBoxHoverValid) {
             InvalidateRect(hwnd, nullptr, FALSE);
         }
+        SyncToolbarFontSizeCombo();
         return 0;
     }
     case kMsgApplyInitialPdfFitWidth: {
@@ -829,6 +929,11 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_SIZE: {
+        if (g_pdf.kind == DocKind::None) {
+            // The guide owns this pane's scrollbar until a document is open.
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         MarkPdfVirtualViewportChange();
         if (TryApplyInitialFitWidth(hwnd)) return 0;
         if (TryApplyInitialFitHeight(hwnd)) return 0;
@@ -847,6 +952,9 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             DWORD pos = GetMessagePos();
             POINT pt{ GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
             ScreenToClient(hwnd, &pt);
+            if (!(GetKeyState(VK_CONTROL)&0x8000) && IsShapeRotationHandle(hwnd,pt)) {
+                SetCursor(LoadCursor(nullptr,IDC_HAND));return TRUE;
+            }
             if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
                 if (CanShowAnnotationMoveCursorAtPoint(pt)) {
                     SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
@@ -891,7 +999,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         if (ForwardWheelToDroppedCombo(WM_MOUSEWHEEL, wParam, lParam)) return 0;
+        if (g_pdf.kind == DocKind::None && g_currentNotePath.empty() && g_config.emptyViewGuideMode != 2 &&
+            empty_view_guide::Scroll(hwnd, msg, wParam)) return 0;
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        if (delta == 0) return 0;
         RECT rc;
         GetClientRect(hwnd, &rc);
         PdfFlowMode mode = CurrentFlowMode();
@@ -952,6 +1063,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         if (ForwardWheelToDroppedCombo(WM_MOUSEHWHEEL, wParam, lParam)) return 0;
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        if (delta == 0) return 0;
         RECT rc;
         GetClientRect(hwnd, &rc);
         const int viewH = rc.bottom - rc.top;
@@ -977,6 +1089,8 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_VSCROLL: {
+        if (g_pdf.kind == DocKind::None && g_currentNotePath.empty() && g_config.emptyViewGuideMode != 2 &&
+            empty_view_guide::Scroll(hwnd, msg, wParam)) return 0;
         RECT rc;
         GetClientRect(hwnd, &rc);
         int viewH = rc.bottom - rc.top;
@@ -1233,6 +1347,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         bool previewReadOnly = IsPdfPreviewReadOnlyActive();
         bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if(ShapeRotationPointerDown(hwnd,pt,ctrlDown))return 0;
         int hitPageIndex = -1;
         double hitPx = 0.0, hitPy = 0.0, hitPageTop = 0.0;
         bool hitPage = HitTestPagePoint(pt, hitPageIndex, hitPx, hitPy, hitPageTop);
@@ -1316,8 +1431,8 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 g_linkPending.havePdf = true;
                 ++g_linkPending.pdfPoints;
                 g_linkPending.pdfPage = hitPageIndex;
-                g_linkPending.pdfX = hitPx;
-                g_linkPending.pdfY = hitPy;
+                g_linkPending.pdfX = g_annots.back().x1;
+                g_linkPending.pdfY = g_annots.back().y1;
                 g_linkPending.pdfAnnotIndex = static_cast<int>(g_annots.size() - 1);
 
                 if (g_linkPending.pdfPoints + g_linkPending.notePoints >= 2) {
@@ -1333,7 +1448,6 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             int hitIdx = -1;
             if (HitTestLinkMarkerAtPoint(pt, hitIdx)) {
                 g_pdf.pendingTextBoxHit = true;
-                    SetTextBoxState(TextBoxInteractionState::PendingClick);
                 g_pdf.pendingTextBoxIndex = hitIdx;
                 g_pdf.pendingTextBoxDown = pt;
                 SetCapture(hwnd);
@@ -1368,7 +1482,6 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (HitTestAnnotationForMove(pt, pref, idx)) {
                 SelectAnnotPanelAnnotationByIndex(idx);
                 g_pdf.movingAnnot = true;
-                SetTextBoxState(TextBoxInteractionState::Moving);
                 g_pdf.movingIndex = idx;
                 g_pdf.movingOriginal = g_annots[static_cast<size_t>(idx)];
                 g_pdf.movePage = g_pdf.movingOriginal.pageIndex;
@@ -1384,29 +1497,12 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (g_toolMode == ToolMode::TextBox && hitPage) {
             NotifyAnnotationInputWhileHidden(hwnd);
             if (!ctrlDown) {
-                int hitIdx = -1;
-                for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
-                    const auto& ann = g_annots[static_cast<size_t>(i)];
-                    if ((ann.type != Annotation::Type::TextBox &&
-                         ann.type != Annotation::Type::MathBox) ||
-                        ann.pageIndex != hitPageIndex) {
-                        continue;
-                    }
-                    double minX = std::min(ann.x1, ann.x2);
-                    double maxX = std::max(ann.x1, ann.x2);
-                    double minY = std::min(ann.y1, ann.y2);
-                    double maxY = std::max(ann.y1, ann.y2);
-                    if (hitPx >= minX && hitPx <= maxX && hitPy >= minY && hitPy <= maxY) {
-                        hitIdx = i;
-                        break;
-                    }
-                }
+                const int hitIdx = FindTextReeditAnnotation(hitPageIndex, hitPx, hitPy);
                 if (hitIdx >= 0) {
                     SelectAnnotPanelAnnotationByIndex(hitIdx);
-                    (void)SyncTextBoxToolFontFromAnnotationIndex(hitIdx);
                     g_pdf.pendingTextBoxHit = true;
-                    SetTextBoxState(TextBoxInteractionState::PendingClick);
                     g_pdf.pendingTextBoxIndex = hitIdx;
+                    (void)SyncTextBoxToolFontFromAnnotationIndex(hitIdx);
                     g_pdf.pendingTextBoxDown = pt;
                     SetCapture(hwnd);
                     return 0;
@@ -1479,6 +1575,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
     case WM_MOUSEMOVE: {
         POINT cur{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if(ShapeRotationPointerMove(hwnd,cur))return 0;
         RecordRecentMouseMove(hwnd, &cur);
         if ((wParam & MK_RBUTTON) != 0 &&
             !g_pdf.editingText &&
@@ -1626,8 +1723,9 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         bool wantHoverCaret = (g_toolMode == ToolMode::TextBox &&
+                               g_pdf.kind == DocKind::Pdf && !IsPdfPreviewReadOnlyActive() &&
+                               !g_linkPending.active &&
                                (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
-                               GetFocus() == hwnd &&
                                !g_pdf.editingText && !g_pdf.drawingAnnot &&
                                !g_pdf.movingAnnot && !g_pdf.pendingTextBoxHit &&
                                !g_pdf.selectingText && !g_pdf.panning && !g_pdf.erasing);
@@ -1639,7 +1737,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 hoverChanged = true;
             }
             g_pdf.textBoxHoverValid = true;
-            g_pdf.textBoxHoverPos = ApplyPdfPointerOffset(cur);
+            g_pdf.textBoxHoverPos = cur;
         } else if (g_pdf.textBoxHoverValid) {
             g_pdf.textBoxHoverValid = false;
             hoverChanged = true;
@@ -1719,6 +1817,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
     }
     case WM_LBUTTONUP: {
+        if(ShapeRotationPointerUp(hwnd,POINT{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)}))return 0;
         if (IsPdfPreviewReadOnlyActive() && !g_pdf.panning && !g_pdf.selectingText) {
             return 0;
         }
@@ -1769,22 +1868,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 ann.x1 = sx; ann.y1 = sy;
                 ann.x2 = ex; ann.y2 = ey;
                 if (IsLineLikeAnnotToolMode(g_toolMode) && endOk) {
-                    ann.type = IsArrowAnnotToolMode(g_toolMode)
-                                   ? Annotation::Type::Arrow
-                                   : IsWaveAnnotToolMode(g_toolMode)
-                                         ? Annotation::Type::Wave
-                                         : Annotation::Type::Line;
-                    if (ann.type == Annotation::Type::Arrow) {
-                        ann.arrowHead = g_arrowHead;
-                    }
-                    double wPt = ToolWidthPtForMode(g_toolMode);
-                    ann.width = (wPt > 0.0) ? wPt : 2.0;
-                    if ((ann.type == Annotation::Type::Line ||
-                         ann.type == Annotation::Type::Arrow ||
-                         ann.type == Annotation::Type::Wave) &&
-                        g_lineDashStyle == L"dash") {
-                        ann.dash = { std::max(1.0, ann.width * 4.0), std::max(1.0, ann.width * 2.0) };
-                    }
+                    ApplyCurrentLineToolStyle(ann);
                     g_annots.push_back(ann);
                     RecordAnnotAdd(static_cast<int>(g_annots.size() - 1), g_annots.back());
                     MarkAnnotsDirty(GetParent(hwnd));
@@ -1794,12 +1878,18 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if ((bounds.right - bounds.left) >= 0.5 && (bounds.top - bounds.bottom) >= 0.5) {
                         ann.type = Annotation::Type::Shape;
                         ann.shapeKind = g_shapeKind;
-                        ann.shapeDrawMode = g_shapeDrawMode;
+                        ann.blendMode = ShapeKindIsOpen(g_shapeKind)?AnnotationBlendMode::Normal:g_config.newShapeBlendMode;
+                        ann.shapeDrawMode = ShapeDrawModeForKind(g_shapeKind,g_shapeDrawMode);
+                        ann.shapeBoundary = ShapeKindIsOpen(g_shapeKind)?ShapeBoundary::None:g_config.newShapeBoundary;
+                        if (ShapeKindIsOpen(g_shapeKind)) ann.shapeAngle=shape_rotation::ArcAngleFromDrag(start.x,end.x);
                         if (ann.shapeKind == ShapeKind::RotatedEllipse) {
                             ann.shapeRotation = ShapeRotationFromClientEndpoints(start.x, start.y, end.x, end.y);
                         }
                         ann.alpha = ToolAlphaForMode(g_toolMode);
                         ann.width = (g_lineWidthPt > 0.0) ? g_lineWidthPt : 2.5;
+                        if ((ann.shapeDrawMode == ShapeDrawMode::Outline || ann.shapeBoundary != ShapeBoundary::None) && g_lineDashStyle == L"dash") {
+                            ann.dash = { std::max(1.0, ann.width * 4.0), std::max(1.0, ann.width * 2.0) };
+                        }
                         ann.x1 = bounds.left;
                         ann.y1 = bounds.top;
                         ann.x2 = bounds.right;
@@ -1807,6 +1897,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         g_annots.push_back(ann);
                         RecordAnnotAdd(static_cast<int>(g_annots.size() - 1), g_annots.back());
                         MarkAnnotsDirty(GetParent(hwnd));
+                        BindShapeRotation(hwnd,static_cast<int>(g_annots.size()-1));
                         added = true;
                     }
                 } else if (g_toolMode == ToolMode::TextBox && endOk) {
@@ -1848,6 +1939,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     SetFocus(hwnd);
                     // Enable IME now that text editing has started.
                     EnablePdfViewIme(hwnd);
+                    BeginPdfTextInputAccessibility(hwnd);
                     InvalidateEditingTextBoxRect(hwnd);
                     added = false; // commit happens later
                 } else if (g_toolMode == ToolMode::MarkerFree || g_toolMode == ToolMode::Freehand) {
@@ -1858,6 +1950,8 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         pts.push_back(end);
                     }
                     ann.width = (g_toolMode == ToolMode::MarkerFree) ? g_markerFreeWidthPt : g_freehandWidthPt;
+                    if (g_toolMode == ToolMode::MarkerFree) ann.blendMode = g_config.newMarkerDisplayMode == MarkerDisplayMode::Multiply
+                        ? AnnotationBlendMode::Multiply : AnnotationBlendMode::Normal;
                     ann.alpha = (g_toolMode == ToolMode::MarkerFree) ? g_markerAlpha : ToolAlphaForMode(g_toolMode);
                     Annotation::Pt prevPt{};
                     bool first = true;
@@ -2032,6 +2126,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         ann.color = g_activeColor;
                         ann.width = textColorMarker ? 0.0 : ((g_markerTextWidthPt > 0.0) ? g_markerTextWidthPt : 2.0);
                         ann.alpha = textColorMarker ? 1.0 : g_markerAlpha;
+                        if (!textColorMarker) ann.markerDisplayMode = g_config.newMarkerDisplayMode;
                         if (selectionByText || !haveRect) {
                             ann.x1 = overallMinX;
                             ann.x2 = overallMaxX;
@@ -2169,6 +2264,9 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             wParam == VK_HOME || wParam == VK_END) {
             if (ForwardWheelToDroppedCombo(WM_KEYDOWN, wParam, lParam)) return 0;
         }
+        if (g_pdf.kind == DocKind::None && g_currentNotePath.empty() && g_config.emptyViewGuideMode != 2 &&
+            (GetKeyState(VK_CONTROL) & 0x8000) == 0 && (GetKeyState(VK_MENU) & 0x8000) == 0 &&
+            empty_view_guide::Scroll(hwnd, msg, wParam)) return 0;
 
         bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
@@ -2277,9 +2375,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
              return 0;
         }
 
-        if (g_pdf.drawingAnnot &&
-            (AnnotToolUsesGeometry(g_toolMode, AnnotToolGeometry::Line) ||
-             IsArrowAnnotToolMode(g_toolMode)) &&
+        if (g_pdf.drawingAnnot && IsLineLikeAnnotToolMode(g_toolMode) &&
             ((wParam == VK_CONTROL) || (wParam == VK_RETURN)) &&
             ((lParam & (1LL << 30)) == 0)) {
             POINT start = g_pdf.drawStart;
@@ -2295,12 +2391,15 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     bool endOk = HitTestAdjustedPagePoint(end, pageIndex, ex, ey, dummy);
                     if (endOk) {
                         Annotation ann;
-                        ann.type = Annotation::Type::Line; // intermediate segments are always lines
                         ann.pageIndex = pageIndex;
                         ann.color = g_activeColor;
                         ann.alpha = ToolAlphaForMode(g_toolMode);
-                        double wPt = ToolWidthPtForMode(g_toolMode);
-                        ann.width = (wPt > 0.0) ? wPt : 2.0;
+                        ApplyCurrentLineToolStyle(ann);
+                        // Ctrl bends an arrow: intermediate segments have no
+                        // arrowhead, while mouse-up finishes with the selected arrow.
+                        if (wParam == VK_CONTROL && ann.type == Annotation::Type::Arrow) {
+                            ann.type = Annotation::Type::Line;
+                        }
                         ann.x1 = sx; ann.y1 = sy;
                         ann.x2 = ex; ann.y2 = ey;
                         g_annots.push_back(ann);
@@ -2931,9 +3030,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_SETFOCUS: {
+        SyncToolbarFontSizeCombo();
         if (g_pdf.editingText) {
             EnablePdfViewIme(hwnd);
-            UpdateImeWindowPosition(hwnd, true);
+            NotifyPdfTextInputAccessibility(hwnd);
         } else {
             // When PDF view gains focus, disable IME if not currently editing text.
             // This prevents IME composition/candidate display when user types shortcuts.
@@ -2947,10 +3047,11 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         g_pdfIgnoreNextLeftKeyUntilTick = 0;
         if (g_pdf.editingText) {
             HWND nextFocus = reinterpret_cast<HWND>(wParam);
-            if (IsTextFontSizeComboFocusTarget(nextFocus)) {
-                // Let font-size changes apply without closing the active textbox edit session.
+            if (IsTextBoxOptionFocusTarget(nextFocus)) {
+                // Let option changes apply without closing the active textbox edit session.
                 ForceImeComplete(hwnd, true);
                 DisablePdfViewIme(hwnd);
+                NotifyPdfTextInputAccessibility(hwnd);
                 if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
                 return 0;
             }

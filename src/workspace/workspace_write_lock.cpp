@@ -1,4 +1,6 @@
 #include "workspace/workspace_write_lock.h"
+#include "core/document_source_protection.h"
+#include "core/localization.h"
 
 #include <windows.h>
 
@@ -51,6 +53,10 @@ std::wstring WorkspaceWriteLockName(const std::wstring& key) {
 }
 
 std::wstring NormalizeDocumentOpenLockKey(const std::filesystem::path& path) {
+    // Do not admit new document path spellings before note/stage identity and
+    // editor caches support them. Native extended paths remain valid for the
+    // internal replacement boundary, and ordinary-path mutex names stay intact.
+    if (path.empty() || !path.is_absolute() || IsUncPath(path)) return {};
     return NormalizeWorkspaceWriteLockKey(path);
 }
 
@@ -63,6 +69,7 @@ std::wstring DocumentOpenLockName(const std::wstring& key) {
 void ReleaseDocumentOpenLockByKey(const std::wstring& key) {
     const auto found = g_documentOpenLocks.find(key);
     if (found == g_documentOpenLocks.end()) return;
+    document_source_protection::Release(std::filesystem::path(key));
     ReleaseMutex(found->second);
     CloseHandle(found->second);
     g_documentOpenLocks.erase(found);
@@ -128,6 +135,13 @@ DocumentOpenLockCandidate::DocumentOpenLockCandidate(const std::filesystem::path
 
     ++g_documentOpenLockTransitionDepth;
     if (g_documentOpenLocks.find(key_) != g_documentOpenLocks.end()) {
+        DWORD error = 0;
+        if (!document_source_protection::Acquire(path, &error)) {
+            if (outError) *outError = localization::Format(L"workspace.source_protection_failed",
+                {{L"code", std::to_wstring(error)}});
+            --g_documentOpenLockTransitionDepth;
+            return;
+        }
         acquired_ = true;
         return;
     }
@@ -149,6 +163,15 @@ DocumentOpenLockCandidate::DocumentOpenLockCandidate(const std::filesystem::path
         return;
     }
 
+    DWORD protectionError = 0;
+    if (!document_source_protection::Acquire(path, &protectionError)) {
+        ReleaseMutex(candidate);
+        CloseHandle(candidate);
+        if (outError) *outError = localization::Format(L"workspace.source_protection_failed",
+            {{L"code", std::to_wstring(protectionError)}});
+        --g_documentOpenLockTransitionDepth;
+        return;
+    }
     g_documentOpenLocks.emplace(key_, candidate);
     acquired_ = true;
     newlyAcquired_ = true;
@@ -200,6 +223,7 @@ void ReleaseDocumentOpenLock(const std::filesystem::path& path) {
 }
 
 void ReleaseAllDocumentOpenLocks() {
+    document_source_protection::ReleaseAll();
     for (const auto& [key, handle] : g_documentOpenLocks) {
         ReleaseMutex(handle);
         CloseHandle(handle);

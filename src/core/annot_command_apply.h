@@ -1,13 +1,21 @@
 #pragma once
 
 #include "core/annot_commands.h"
+#include "core/annotation_rotation.h"
 
 // Pure, exact command preconditions shared by editing and stage replay.
 inline bool AnnotationEquals(const Annotation& a, const Annotation& b) {
+    if (a.projectedCoordinates || b.projectedCoordinates) {
+        const auto ca = annotation_rotation::Canonical(a);
+        const auto cb = annotation_rotation::Canonical(b);
+        return ca && cb && AnnotationEquals(*ca, *cb);
+    }
+    if (a.contentRotation != b.contentRotation) return false;
     if (a.type != b.type) return false;
     if (a.shapeKind != b.shapeKind) return false;
-    if (a.shapeDrawMode != b.shapeDrawMode) return false;
+    if (a.shapeDrawMode != b.shapeDrawMode || a.shapeBoundary != b.shapeBoundary) return false;
     if (a.arrowHead != b.arrowHead) return false;
+    if (a.shapeAngle != b.shapeAngle) return false;
     if (a.shapeRotation != b.shapeRotation) return false;
     if (a.pageIndex != b.pageIndex) return false;
     if (a.x1 != b.x1 || a.y1 != b.y1 || a.x2 != b.x2 || a.y2 != b.y2) return false;
@@ -16,6 +24,8 @@ inline bool AnnotationEquals(const Annotation& a, const Annotation& b) {
     if (a.text != b.text || a.fontName != b.fontName) return false;
     if (a.linkId != b.linkId || a.linkNotePath != b.linkNotePath) return false;
     if (a.mathKind != b.mathKind || a.backgroundAssistMode != b.backgroundAssistMode) return false;
+    if (a.type == Annotation::Type::MarkerText && a.markerDisplayMode != b.markerDisplayMode) return false;
+    if ((a.type == Annotation::Type::Shape || a.type == Annotation::Type::MarkerFree) && a.blendMode != b.blendMode) return false;
     if (a.path.size() != b.path.size()) return false;
     for (size_t i = 0; i < a.path.size(); ++i) {
         if (a.path[i].x != b.path[i].x || a.path[i].y != b.path[i].y) return false;

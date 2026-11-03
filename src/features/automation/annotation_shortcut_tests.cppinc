@@ -1,0 +1,189 @@
+// Runs only inside the existing isolated UI-automation fixture, never at startup.
+// Selection uses the real dispatch path. No physical keyboard input is injected.
+#include "settings/shortcut_key_model.h"
+
+[[nodiscard]] static bool RunUiAutomationAnnotationShortcutScenario(HWND owner, std::wstring* error) {
+    if (!owner || !g_hPdfView || g_pdf.kind != DocKind::Pdf || g_pdf.editingText) {
+        if (error) *error = L"Annotation shortcut fixture requires an idle editable PDF.";
+        return false;
+    }
+    int selectorCases = 0;
+    for (const auto& key : shortcut_key_model::Keys()) {
+        if (shortcut_key_model::Find(key.vk) != &key) {
+            if (error) *error = L"Shortcut selector contains duplicate virtual keys.";
+            return false;
+        }
+        for (int mask = 0; mask < 8; ++mask) {
+            const bool ctrl = (mask & 1) != 0, alt = (mask & 2) != 0, shift = (mask & 4) != 0;
+            const auto chord = shortcut_key_model::Format(key.vk, ctrl, alt, shift);
+            AnnotToolShortcutBinding parsed;
+            const bool accepted = ParseAnnotToolShortcutKeyForUser(chord, parsed);
+            const bool expected = ctrl || alt || (key.vk >= VK_NUMPAD0 && key.vk <= VK_NUMPAD9);
+            if (accepted != expected || (accepted && (parsed.vk != key.vk ||
+                parsed.ctrl != ctrl || parsed.alt != alt || parsed.shift != shift))) {
+                if (error) *error = L"Shortcut selector cannot round-trip through the actual persistence parser.";
+                return false;
+            }
+            ++selectorCases;
+        }
+    }
+    for (const auto& binding : DefaultAnnotToolShortcuts()) {
+        if (!shortcut_key_model::Find(binding.vk)) {
+            if (error) *error = L"Shortcut selector lost an existing default key.";
+            return false;
+        }
+    }
+    AppendUiAutomationTrace(L"annotation_shortcuts:selector_ok cases=" + std::to_wstring(selectorCases));
+    // Exercise the actual shared resolver rather than a second list of key rules.
+    int applicationCases = 0;
+    int closeGuardCases = 0;
+    for (auto surface : {application_shortcuts::Surface::Main, application_shortcuts::Surface::Reader}) {
+        if (application_shortcuts::Resolve('Q', true, false, false, surface) ||
+            application_shortcuts::Resolve('Q', true, true, false, surface) ||
+            application_shortcuts::Resolve('W', true, false, false, surface) ||
+            application_shortcuts::Resolve('W', true, false, true, surface)) {
+            if (error) *error = L"Closing shortcut accepted a chord without its safety modifier or an old W alias.";
+            return false;
+        }
+        closeGuardCases += 4;
+        for (const auto& binding : application_shortcuts::bindings) {
+            const auto* resolved = application_shortcuts::Resolve(binding.key, true, binding.alt, binding.shift, surface);
+            const bool supported = application_shortcuts::Supports(binding, surface);
+            if ((supported && resolved != &binding) || (!supported && resolved) ||
+                application_shortcuts::Resolve(binding.key, false, binding.alt, binding.shift, surface) ||
+                application_shortcuts::MayRun(binding, false, true, false) ||
+                application_shortcuts::MayRun(binding, false, false, true) ||
+                application_shortcuts::MayRun(binding, true, false, false) != binding.allowTextInput) {
+                if (error) *error = L"Application shortcut surface/modifier/input policy failed.";
+                return false;
+            }
+            ++applicationCases;
+        }
+    }
+    AppendUiAutomationTrace(L"application_shortcuts:close_guard_ok cases=" + std::to_wstring(closeGuardCases));
+    AppendUiAutomationTrace(L"application_shortcuts:policy_ok cases=" + std::to_wstring(applicationCases));
+    int page = 77;
+    for (const auto input : {L"", L"0", L"-1", L"12abc", L"2147483648", L"9999999999999999", L"101"}) {
+        if (ui::ParsePageNumber(input, 100, page) || page != 77) {
+            if (error) *error = L"Page jump accepted invalid input or changed the output on failure.";
+            return false;
+        }
+    }
+    if (!ui::ParsePageNumber(L"100", 100, page) || page != 100 ||
+        !ui::ParsePageNumber(L"0001", 100, page) || page != 1) {
+        if (error) *error = L"Page jump rejected a valid boundary or zero-padded number.";
+        return false;
+    }
+    AppendUiAutomationTrace(L"application_shortcuts:page_number_ok cases=9");
+    const auto originalOrder = AnnotToolModeUiOrder();
+    const auto originalStates = GetAnnotToolModeUiStates();
+    const auto originalConfig = g_config;
+    const auto originalBindings = AnnotToolShortcutBindings();
+    const auto originalMode = g_toolMode;
+    const auto originalShapeDetail = g_shapeDetail;
+    const auto originalShapeKind = g_shapeKind;
+    const auto originalShapeMode = g_shapeGroupMode;
+    const auto originalShapeSelection = g_shapeToolSelection;
+    const auto originalMarker = g_markerGroupMode;
+    const auto originalPen = g_penGroupMode;
+    const auto originalKind = g_pdf.kind;
+    const auto originalUnderline = g_markerTextUnderline;
+    const auto originalColor = g_activeColor;
+    auto restore = [&]() {
+        g_pdf.kind = originalKind;
+        g_config = originalConfig;
+        g_toolMode = originalMode;
+        g_shapeDetail = originalShapeDetail;
+        g_shapeKind = originalShapeKind;
+        g_shapeGroupMode = originalShapeMode;
+        g_shapeToolSelection = originalShapeSelection;
+        g_markerGroupMode = originalMarker;
+        g_penGroupMode = originalPen;
+        g_markerTextUnderline = originalUnderline;
+        g_activeColor = originalColor;
+        ApplyAnnotToolModeUiConfig(originalOrder, originalStates, false);
+        UpdateToolbarUI(owner);
+        const bool shortcutsRestored = ReplaceAnnotToolShortcutBindings(originalBindings);
+        const bool configRestored = TryPersistConfig();
+        return shortcutsRestored && configRestored;
+    };
+    auto fail = [&](const wchar_t* message) {
+        const bool restored = restore();
+        if (error) *error = std::wstring(message) + (restored ? L"" : L" Fixture restoration also failed.");
+        return false;
+    };
+    auto order = originalOrder;
+    std::reverse(order.begin(), order.end());
+    int cases = 0;
+    for (const auto state : {AnnotToolUiState::Hidden, AnnotToolUiState::Disabled}) {
+        for (int value = 0; value < kToolModeCount; ++value) {
+            // The bar policy requires one enabled button. Keep a different
+            // sentinel enabled so every target really is hidden/disabled.
+            std::vector<AnnotToolUiState> states(kToolModeCount, state);
+            states[static_cast<size_t>((value + 1) % kToolModeCount)] = AnnotToolUiState::Enabled;
+            ApplyAnnotToolModeUiConfig(order, states, false);
+            const auto mode = static_cast<ToolMode>(value);
+            if (!SelectAnnotToolMode(owner, mode, false, false, true) || g_toolMode != mode ||
+                GetAnnotToolModeUiStates() != states || AnnotToolModeUiOrder() != order) {
+                return fail(L"Direct annotation binding depended on bar visibility/order or changed its target.");
+            }
+            UpdateToolbarUI(owner);
+            if (g_toolMode != mode) return fail(L"Toolbar refresh undid a direct annotation binding.");
+            ++cases;
+        }
+    }
+    g_pdf.kind = DocKind::Image;
+    const auto beforeImage = g_toolMode;
+    if (SelectAnnotToolMode(owner, ToolMode::TextBox, false, false, true) || g_toolMode != beforeImage) {
+        return fail(L"Direct annotation binding bypassed image safety.");
+    }
+    g_pdf.kind = originalKind;
+
+    const auto defaults = DefaultAnnotToolShortcuts();
+    int digits = 0;
+    for (const auto& binding : defaults) {
+        if (binding.ctrl && !binding.alt && !binding.shift && binding.vk >= '1' && binding.vk <= '9') {
+            if (binding.targetKind != AnnotToolShortcutTargetKind::Detail || IsReservedAnnotToolShortcut(binding)) {
+                return fail(L"Ctrl+digit default is indirect or conflicts with a fixed key.");
+            }
+            ++digits;
+        }
+    }
+    if (digits != 9 || !ReplaceAnnotToolShortcutBindings(defaults)) return fail(L"Ctrl+digit defaults are incomplete.");
+    const auto path = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" /
+        L"__settings__" / L"tool_shortcuts.json";
+    std::string before;
+    if (!ReadUiAutomationFileBytes(path, &before)) return fail(L"Cannot snapshot shortcut file.");
+    auto duplicates = defaults;
+    duplicates.push_back(defaults.front());
+    if (ReplaceAnnotToolShortcutBindings(duplicates) || AnnotToolShortcutBindings().size() != defaults.size()) {
+        return fail(L"Duplicate rejection changed the active shortcuts.");
+    }
+    auto reserved = defaults;
+    reserved.front().key = L"Ctrl+0";
+    if (ReplaceAnnotToolShortcutBindings(reserved)) return fail(L"Shortcut save bypassed the zoom reservation.");
+    HANDLE lock = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (lock == INVALID_HANDLE_VALUE) return fail(L"Cannot prepare shortcut save-failure fixture.");
+    auto changed = defaults;
+    changed.front().key = L"Ctrl+Shift+1";
+    const bool lockedSave = ReplaceAnnotToolShortcutBindings(changed);
+    const bool closed = CloseHandle(lock) != FALSE;
+    std::string after;
+    if (!closed || lockedSave || !ReadUiAutomationFileBytes(path, &after) || before != after ||
+        AnnotToolShortcutBindings().front().key != defaults.front().key) {
+        return fail(L"Rejected/failed shortcut save changed the file or active bindings.");
+    }
+    AnnotToolShortcutBinding invalid;
+    if (ParseAnnotToolShortcutKeyForUser(L"Ctrl+F9999999999999999999999", invalid)) {
+        return fail(L"Out-of-range shortcut key was accepted.");
+    }
+    if (!ReplaceAnnotToolShortcutBindings({})) return fail(L"Empty shortcut list could not be saved.");
+    SyncUserToolShortcutsToRuntime();
+    if (!AnnotToolShortcutBindings().empty()) return fail(L"Deleted bindings returned after reload.");
+    if (!restore()) {
+        if (error) *error = L"Annotation shortcut fixture restoration failed.";
+        return false;
+    }
+    AppendUiAutomationTrace(L"annotation_shortcuts:independent_ok cases=" + std::to_wstring(cases));
+    return true;
+}

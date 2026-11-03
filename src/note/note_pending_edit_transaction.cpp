@@ -25,22 +25,20 @@ bool PendingNoteEditTransaction::Append(NoteDerivedSnapshotIdentity before,
         return false;
     }
 
-    if (!active()) {
-        base_identity_ = before;
-    } else if (!current_identity_.has_value() ||
-               current_identity_->note_id != before.note_id ||
-               current_identity_->source_revision != before.source_revision) {
+    if (active() &&
+        (!current_identity_.has_value() ||
+         current_identity_->note_id != before.note_id ||
+         current_identity_->source_revision != before.source_revision)) {
         return false;
     }
 
-    edits_.push_back(AppliedNoteEdit{before.source_revision, std::move(edit)});
+    edits_.push_back(std::move(edit));
     current_identity_ = NoteDerivedSnapshotIdentity{
         before.note_id, before.source_revision + 1};
     return true;
 }
 
 void PendingNoteEditTransaction::Clear() {
-    base_identity_.reset();
     current_identity_.reset();
     edits_.clear();
 }
@@ -48,11 +46,11 @@ void PendingNoteEditTransaction::Clear() {
 std::optional<TextEdit> PendingNoteEditTransaction::TryBuildEquivalentEdit() const {
     if (edits_.empty()) return std::nullopt;
 
-    TextEdit combined = edits_.front().edit;
+    TextEdit combined = edits_.front();
     if (IsNoOp(combined)) return std::nullopt;
 
     for (size_t index = 1; index < edits_.size(); ++index) {
-        const TextEdit& next = edits_[index].edit;
+        const TextEdit& next = edits_[index];
         if (IsNoOp(next)) return std::nullopt;
 
         size_t combinedInsertedEnd = 0;

@@ -5,4 +5,4 @@
 #include "settings/settings_general_foundation.cppinc"
 #include "settings/settings_general_controls.cppinc"
 #include "settings/settings_general_dialog.cppinc"
-#include "settings/settings_general_schedule.cppinc"
+#include "settings/settings_general_entry.cppinc"

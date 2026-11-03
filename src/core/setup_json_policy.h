@@ -16,6 +16,7 @@ inline bool IsKnownTopLevelField(const std::string& key) {
     return key == "workspaceRoot" ||
            key == "workspaceRootMode" ||
            key == "tempExternalLectureDirs" ||
+           key == "tempExternalLecturePriorities" ||
            // Optional read-only viewer state. Keep it known so main-app setup
            // updates preserve a shared setup supplied by the user.
            key == "readonlyViewer" ||

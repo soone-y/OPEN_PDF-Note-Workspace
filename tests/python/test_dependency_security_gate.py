@@ -20,6 +20,10 @@ class DependencySecurityGateTests(unittest.TestCase):
         spec.loader.exec_module(gate)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            # A workspace-local TEMP must be its own Git root. Otherwise Git
+            # discovers the parent checkout and can silently skip fixture paths.
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True,
+                           capture_output=True)
             self.assertEqual(2, len(gate.validate_local_patches(root)))
             for vendor, patch in gate.LOCAL_PATCHES:
                 target = root / vendor

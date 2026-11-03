@@ -13,18 +13,23 @@ bool IsCombining(wchar_t ch) {
            (ch >= 0xFE20 && ch <= 0xFE2F);
 }
 bool IsVariationSelector16(wchar_t ch) { return ch >= 0xFE00 && ch <= 0xFE0F; }
-bool IsSupplementaryVariationSelector(std::wstring_view text, size_t pos) {
-    if (pos + 1 >= text.size() || !IsHigh(text[pos]) || !IsLow(text[pos + 1])) return false;
-    const unsigned scalar = 0x10000u + ((static_cast<unsigned>(text[pos]) - 0xD800u) << 10) +
-                            (static_cast<unsigned>(text[pos + 1]) - 0xDC00u);
-    return scalar >= 0xE0100u && scalar <= 0xE01EFu;
+unsigned SupplementaryScalar(std::wstring_view text, size_t pos) {
+    if (pos + 1 >= text.size() || !IsHigh(text[pos]) || !IsLow(text[pos + 1])) return 0;
+    return 0x10000u + ((static_cast<unsigned>(text[pos]) - 0xD800u) << 10) +
+           (static_cast<unsigned>(text[pos + 1]) - 0xDC00u);
+}
+bool IsRegionalIndicator(std::wstring_view text, size_t pos) {
+    const unsigned scalar = SupplementaryScalar(text, pos);
+    return scalar >= 0x1F1E6u && scalar <= 0x1F1FFu;
 }
 
 void ConsumeExtenders(std::wstring_view text, size_t* end) {
     while (*end < text.size()) {
         if (IsCombining(text[*end]) || IsVariationSelector16(text[*end])) {
             ++*end;
-        } else if (IsSupplementaryVariationSelector(text, *end)) {
+        } else if (const unsigned scalar = SupplementaryScalar(text, *end);
+                   (scalar >= 0xE0100u && scalar <= 0xE01EFu) ||
+                   (scalar >= 0x1F3FBu && scalar <= 0x1F3FFu)) {
             *end += 2;
         } else {
             break;
@@ -53,6 +58,10 @@ size_t NextUnitEnd(std::wstring_view text, size_t start) {
     if (text[start] == L'\n') return start + 1;
     size_t end = start + ((IsHigh(text[start]) && start + 1 < text.size() && IsLow(text[start + 1])) ? 2 : 1);
     ConsumeExtenders(text, &end);
+    if (IsRegionalIndicator(text, start) && IsRegionalIndicator(text, end)) {
+        end += 2;
+        ConsumeExtenders(text, &end);
+    }
     while (end < text.size() && text[end] == 0x200D) {
         ++end;
         if (end >= text.size()) break;
@@ -74,22 +83,6 @@ std::vector<TextUnit> BuildTextUnits(std::wstring_view text) {
         start = end;
     }
     return out;
-}
-
-Span PreviousTextUnit(std::wstring_view text, Utf16CodeUnitOffset caret) {
-    const auto units = BuildTextUnits(text);
-    const size_t pos = std::min(caret.value, text.size());
-    size_t index = 0;
-    while (index < units.size() && units[index].span.end.value <= pos) ++index;
-    return index == 0 ? Span{{pos}, {pos}} : units[index - 1].span;
-}
-
-Span NextTextUnit(std::wstring_view text, Utf16CodeUnitOffset caret) {
-    const auto units = BuildTextUnits(text);
-    const size_t pos = std::min(caret.value, text.size());
-    size_t index = 0;
-    while (index < units.size() && units[index].span.end.value <= pos) ++index;
-    return index == units.size() ? Span{{pos}, {pos}} : units[index].span;
 }
 
 Span PreviousTextUnitRun(std::wstring_view text, Utf16CodeUnitOffset caret) {

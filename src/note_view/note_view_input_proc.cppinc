@@ -98,10 +98,8 @@ private:
     DWORD m_selEnd = 0;
 };
 
-// Precision touchpads can send wheel deltas smaller than WHEEL_DELTA.  Keep
-// the unconsumed fraction so rendered notes retain the device's continuous
-// motion instead of being quantized to RichEdit's line-scroll steps.
-static int s_noteVerticalWheelRemainder = 0;
+// Wheel gesture/filter state and fractional pixels belong to each view's
+// LocalNoteViewContext, so another note window cannot consume its remainder.
 // Touch input is handled separately from mouse selection.  These are kept at
 // procedure scope so capture-loss can reliably cancel an interrupted drag.
 static bool s_noteTouchPanning = false;
@@ -199,6 +197,21 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     NoteInputLatencyTrace inputLatencyTrace(hWnd, msg, wParam);
     bool forgetViewContextAfterDefault = false;
     bool releaseOpeningFocusHoldAfterDefault = false;
+
+    if (msg == WM_NCCALCSIZE && lParam) {
+        const LRESULT result = CallWindowProcW(g_oldNoteProc, hWnd, msg, wParam, lParam);
+        RECT& client = wParam ? reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam)->rgrc[0]
+            : *reinterpret_cast<RECT*>(lParam);
+        const int height = std::max<LONG>(0, client.bottom - client.top);
+        auto& frame = GetViewContext(hWnd).nativeBottomSpaceFrame;
+        frame.Apply(client, NoteUsesNativeBottomSpace() ? NoteBottomSpacePx(hWnd, height) : 0);
+        return frame.padding_px > 0 ? 0 : result;
+    }
+    if (msg == WM_NCPAINT) {
+        const LRESULT result = CallWindowProcW(g_oldNoteProc, hWnd, msg, wParam, lParam);
+        (void)GetViewContext(hWnd).nativeBottomSpaceFrame.Paint(hWnd, g_noteBgColor);
+        return result;
+    }
 
     if (msg == WM_SETREDRAW) {
         auto& context = GetViewContext(hWnd);
@@ -342,6 +355,14 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     if ((msg == WM_KEYDOWN && !verticalKey) || msg == WM_CHAR || msg == WM_LBUTTONDOWN ||
         msg == WM_LBUTTONDBLCLK || msg == WM_IME_STARTCOMPOSITION || msg == WM_KILLFOCUS) {
         GetViewContext(hWnd).finalVerticalNavigation.reset();
+    }
+    if (msg == WM_KEYDOWN || msg == WM_LBUTTONDOWN || msg == WM_MBUTTONDOWN ||
+        msg == WM_RBUTTONDOWN || msg == WM_POINTERDOWN || msg == WM_KILLFOCUS ||
+        msg == WM_VSCROLL || msg == WM_HSCROLL || msg == WM_SETTEXT) {
+        auto& wheelContext = GetViewContext(hWnd);
+        wheelContext.wheelInput.Reset();
+        wheelContext.horizontalWheelPixels.Reset();
+        wheelContext.verticalWheelPixels.Reset();
     }
     struct ScopedNoteInputFrameCompletion {
         HWND window;
@@ -1263,6 +1284,21 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
     case WM_MOUSEHWHEEL:
     case WM_MOUSEWHEEL: {
+        auto& wheelContext = GetViewContext(hWnd);
+        const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        if (delta == 0) return 0;
+        const uint32_t time = scroll_input::MessageTime();
+        const bool precise = wheelContext.wheelInput.IsPrecise(delta, time,
+            scroll_input::CurrentMessageIsTouchpad());
+        const bool stabilize = precise && g_config.touchpadScrollStabilization;
+        if (IsNoteRenderActive() && FinalRenderRouteEnabled(hWnd) && !FinalFrameCanUseCustomPaint(hWnd)) {
+            // A missing publication is whole-native input. Do not consume a
+            // subpixel packet or retain a remainder before delegating it.
+            wheelContext.wheelInput.Reset();
+            wheelContext.horizontalWheelPixels.Reset();
+            wheelContext.verticalWheelPixels.Reset();
+            break;
+        }
         // Render overlay can exceed the viewport width (e.g. <s=> / math rendering). Provide an easy horizontal scroll:
         // - Shift + wheel (vertical wheel) => horizontal scroll
         // - Horizontal wheel (tilt) => horizontal scroll
@@ -1270,15 +1306,16 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             const bool isHWheel = (msg == WM_MOUSEHWHEEL);
             const bool shiftHeld = ((GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0);
             if (isHWheel || shiftHeld) {
-                short delta = GET_WHEEL_DELTA_WPARAM(wParam);
                 if (delta != 0) {
-                    int step = std::max(8, ScaleY(hWnd, 40));
-                    int ticks = delta / WHEEL_DELTA;
-                    int dx = ticks * step;
+                    const int step = std::max(8, ScaleY(hWnd, 40));
+                    double pixels = static_cast<double>(delta) * step / WHEEL_DELTA;
                     if (!isHWheel) {
                         // Match common UX: Shift+Wheel up => scroll left.
-                        dx = -dx;
+                        pixels = -pixels;
                     }
+                    pixels = wheelContext.wheelInput.Filter(true, pixels, time, stabilize, ScaleY(hWnd, 2));
+                    const int dx = wheelContext.horizontalWheelPixels.Take(pixels);
+                    if (dx == 0) return 0;
                     if (ScrollFinalNoteRenderBy(hWnd, dx, 0)) {
                         return 0;
                     }
@@ -1287,7 +1324,10 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     // whole RichEdit fallback, not permission to resurrect
                     // the retired canvas scroll owner.  Let RichEdit process
                     // the wheel message with its native rectangle/ranges.
-                    if (FinalRenderRouteEnabled(hWnd)) break;
+                    if (FinalRenderRouteEnabled(hWnd)) {
+                        wheelContext.horizontalWheelPixels.Reset();
+                        break;
+                    }
                     SetNoteRenderScrollPosX(hWnd, g_noteRenderScrollX + dx);
                     if (g_noteImeComposing) SyncNoteImeCandidateWindowToCaret(hWnd);
                     return 0;
@@ -1296,7 +1336,6 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         if (IsNoteRenderActive() && msg == WM_MOUSEWHEEL &&
             (GET_KEYSTATE_WPARAM(wParam) & (MK_SHIFT | MK_CONTROL)) == 0) {
-            const short delta = GET_WHEEL_DELTA_WPARAM(wParam);
             if (delta != 0) {
                 UINT wheelLines = 3;
                 SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &wheelLines, 0);
@@ -1304,13 +1343,14 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 GetClientRect(hWnd, &client);
                 const int linePx = std::max(8, ScaleY(hWnd, 16));
                 const int clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
-                const int pixelsPerWheel = (wheelLines == WHEEL_PAGESCROLL)
+                const double pixelsPerWheel = (wheelLines == WHEEL_PAGESCROLL)
                     ? std::max(linePx, clientHeight - linePx)
-                    : std::max(linePx, static_cast<int>(wheelLines) * linePx);
-                const int numerator =
-                    s_noteVerticalWheelRemainder - static_cast<int>(delta) * pixelsPerWheel;
-                const int deltaY = numerator / WHEEL_DELTA;
-                s_noteVerticalWheelRemainder = numerator % WHEEL_DELTA;
+                    : static_cast<double>(wheelLines) * linePx;
+                const double pixels = wheelContext.wheelInput.Filter(false,
+                    -static_cast<double>(delta) * pixelsPerWheel / WHEEL_DELTA,
+                    time, stabilize, ScaleY(hWnd, 2));
+                const int deltaY = wheelContext.verticalWheelPixels.Take(pixels);
+                if (deltaY == 0) return 0;
 
                 if (ScrollFinalNoteRenderBy(hWnd, 0, deltaY)) {
                     return 0;
@@ -1318,9 +1358,8 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
                 POINT nativeScroll{};
                 if (QueryNativeEditScrollPos(hWnd, &nativeScroll)) {
-                    nativeScroll.x = 0;
-                    nativeScroll.y = std::max<LONG>(
-                        0, nativeScroll.y + static_cast<LONG>(deltaY));
+                    nativeScroll.y = static_cast<LONG>(std::clamp<int64_t>(
+                        static_cast<int64_t>(nativeScroll.y) + deltaY, 0, std::numeric_limits<LONG>::max()));
                     if (SendMessageW(hWnd, EM_SETSCROLLPOS, 0,
                                      reinterpret_cast<LPARAM>(&nativeScroll))) {
                         InvalidateRect(hWnd, nullptr, FALSE);
@@ -1330,7 +1369,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 }
                 // Do not combine a partially accumulated precision delta with
                 // RichEdit's fallback line scrolling.
-                s_noteVerticalWheelRemainder = 0;
+                wheelContext.verticalWheelPixels.Reset();
             }
         }
         break;
@@ -1749,6 +1788,13 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_MOUSEMOVE: {
         POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         RecordRecentMouseMove(hWnd, &pt);
+        UpdateNoteSelectionHorizontalScroll(hWnd, pt, wParam);
+        if (GetCapture() == hWnd && (g_noteRenderMouseDragActive || g_noteNormalMouseDragActive)) {
+            RECT client{};
+            GetClientRect(hWnd, &client);
+            lParam = MAKELPARAM(std::clamp<LONG>(pt.x, 0, std::max<LONG>(0, client.right - 1)),
+                               std::clamp<LONG>(pt.y, -32768, 32767));
+        }
         if (HandleNoteLineSelectionMouseMove(hWnd, wParam, lParam)) {
             RefreshNoteLineSpacingForPresentationSurface(hWnd);
             return 0;
@@ -1782,7 +1828,6 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 ResolveNotePointerPresentationHit(
                     hWnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             if (pointerHit.raw_index.has_value() && pointerHit.editor_index.has_value()) {
-                const size_t idx = *pointerHit.raw_index;
                 const size_t editorIdx = *pointerHit.editor_index;
                 const std::optional<size_t> anchorEditorIdx =
                     MapCanonicalNoteOffsetToEditorTransportForInput(
@@ -1800,6 +1845,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
     case WM_LBUTTONUP:
     case WM_KEYUP:
+        if (msg == WM_LBUTTONUP) KillTimer(hWnd, kNoteSelectionScrollTimerId);
         if (msg == WM_LBUTTONUP && HandleNoteLineSelectionMouseUp(hWnd)) {
             UpdatePreviewNoteFromCaretLine(hWnd);
             if (g_hBottomMath && g_bottomPanePin == BottomPanePin::Math) {
@@ -1838,7 +1884,9 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         InvalidateRect(hWnd, nullptr, FALSE);
         MaybeFlushNoteStageOnCaretOrFocusChange(hWnd, false);
         break;
+    case WM_CANCELMODE:
     case WM_CAPTURECHANGED:
+        KillTimer(hWnd, kNoteSelectionScrollTimerId);
         // Pointer-up is not guaranteed when Windows transfers capture (for
         // example during a system gesture).  Drop the private touch state so
         // the next contact always starts a fresh scroll.
@@ -1942,6 +1990,18 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         InvalidateRect(hWnd, nullptr, FALSE);
         break;
     case WM_TIMER:
+        if (wParam == kNoteSelectionScrollTimerId) {
+            POINT point{};
+            if (GetCapture() != hWnd || !(GetKeyState(VK_LBUTTON) & 0x8000) ||
+                !GetCursorPos(&point) || !ScreenToClient(hWnd, &point)) {
+                KillTimer(hWnd, kNoteSelectionScrollTimerId);
+            } else {
+                SendMessageW(hWnd, WM_MOUSEMOVE, MK_LBUTTON,
+                    MAKELPARAM(std::clamp<LONG>(point.x, -32768, 32767),
+                               std::clamp<LONG>(point.y, -32768, 32767)));
+            }
+            return 0;
+        }
         if (wParam == kNoteLinkRenderGraceTimerId) {
             const DWORD remainingMs = NoteLinkRenderGraceRemainingMs();
             if (remainingMs > 0) {
@@ -2042,7 +2102,6 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     }
     case WM_NCDESTROY:
-        s_noteVerticalWheelRemainder = 0;
         g_noteVisualAssistMarginByHwnd.erase(hWnd);
         ForgetNoteViewState(hWnd);
         forgetViewContextAfterDefault = true;

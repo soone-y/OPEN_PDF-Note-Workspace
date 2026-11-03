@@ -6,9 +6,10 @@
 #include "core/preview_trace.h"
 #include "diagnostics/normal_operations.h"
 #include "ui/core/main_window_api.h"
+#include "ui/listbox_presentation.h"
 #include "workspace/workspace_config_io.h"
 #include "workspace/workspace_actions.h"
-#include "schedule/schedule.h"
+#include "lecture_order/lecture_order.h"
 #include "workspace/file_ops.h"
 #include <windows.h>
 #include <string>

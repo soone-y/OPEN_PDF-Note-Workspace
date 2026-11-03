@@ -11,7 +11,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:runLogPath = Join-Path $PSScriptRoot ("out\logs\build\build_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+$script:runLogPath = Join-Path $PSScriptRoot ("out\logs\build\build_{0}_{1}_{2}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"), $PID, [guid]::NewGuid().ToString("N"))
 $script:runTranscriptStarted = $false
 
 function Stop-RunLog {
@@ -22,9 +22,10 @@ function Stop-RunLog {
 }
 
 trap {
+    Write-Error -ErrorRecord $_ -ErrorAction Continue
     Write-Host "ビルドに失敗しました。実行ログ: $script:runLogPath" -ForegroundColor Yellow
     Stop-RunLog
-    throw $_
+    exit 1
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:runLogPath) | Out-Null
@@ -59,10 +60,17 @@ function Invoke-FullBuildStep {
     $arguments += @("-Locale", $Locale)
     if (-not [string]::IsNullOrWhiteSpace($Edition)) { $arguments += @("-Edition", $Edition) }
 
-    & $powerShellExe @arguments
-    if ($LASTEXITCODE -ne 0) {
+    $previousErrorAction = $ErrorActionPreference
+    $global:LASTEXITCODE = $null
+    try {
+        $ErrorActionPreference = "Continue"
+        & $powerShellExe @arguments 2>&1 | ForEach-Object { Write-Host $_ }
+        $childExitCode = $global:LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previousErrorAction }
+    if ($null -eq $childExitCode -or $childExitCode -ne 0) {
         $target = if ([string]::IsNullOrWhiteSpace($Edition)) { "通常版" } else { "$Edition 版" }
-        throw "${target}のビルドに失敗しました（終了コード: $LASTEXITCODE、言語: $Locale）。出力されたエラーと out\\logs を確認してください。"
+        throw "${target}のビルドに失敗しました（終了コード: $childExitCode、言語: $Locale）。出力されたエラーと out\\logs を確認してください。"
     }
 }
 
@@ -99,8 +107,15 @@ if ($AllLocales) {
         if ($Clean) { $arguments += "-Clean" }
         if ($VerboseOutput) { $arguments += "-VerboseOutput" }
         if ($Lite) { $arguments += "-Lite" }
-        & $powerShellExe @arguments
-        if ($LASTEXITCODE -ne 0) { throw "両言語ビルドに失敗しました（言語: $targetLocale、終了コード: $LASTEXITCODE）。" }
+        $previousErrorAction = $ErrorActionPreference
+        $global:LASTEXITCODE = $null
+        try {
+            $ErrorActionPreference = "Continue"
+            & $powerShellExe @arguments 2>&1 | ForEach-Object { Write-Host $_ }
+            $childExitCode = $global:LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $previousErrorAction }
+        if ($null -eq $childExitCode -or $childExitCode -ne 0) { throw "両言語ビルドに失敗しました（言語: $targetLocale、終了コード: $childExitCode）。" }
     }
     Stop-RunLog
     exit 0

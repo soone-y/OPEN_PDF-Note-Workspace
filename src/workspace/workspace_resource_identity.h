@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // Stable identity for workspace resources whose path can be changed by a
 // transaction.  This intentionally has no implicit conversion to a path or
@@ -60,6 +61,10 @@ struct WorkspaceResourceIdentity {
 [[nodiscard]] bool ConfigureRuntimeWorkspaceResourceCatalog(
     const std::filesystem::path& workspaceRoot,
     std::wstring* outError = nullptr);
+[[nodiscard]] bool ConfigureRuntimeWorkspaceResourceCatalog(
+    const std::filesystem::path& workspaceRoot,
+    const std::vector<std::filesystem::path>& registeredExternalRoots,
+    std::wstring* outError = nullptr);
 
 // Registers an unbound local regular file only after capturing its full
 // fingerprint. Existing aliases keep their ID; an observed fingerprint change
@@ -86,5 +91,3 @@ FindRuntimeWorkspaceResourceIdentityPath(WorkspaceResourceKind kind,
     const std::wstring& newAbsolutePath,
     const WorkspaceResourceFingerprint& expectedDestinationFingerprint,
     std::wstring* outError = nullptr);
-
-[[nodiscard]] std::filesystem::path RuntimeWorkspaceResourceCatalogPath();

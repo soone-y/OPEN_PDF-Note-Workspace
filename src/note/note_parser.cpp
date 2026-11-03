@@ -2,6 +2,8 @@
 
 #include "note/note_md4c_adapter.h"
 #include "note/note_syntax_lexical.h"
+#include "note/note_clro_markdown.h"
+#include "note/note_markdown_escape.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -825,6 +827,11 @@ void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc) 
             ++pos;
             continue;
         }
+        if (model.meta.clro_ascii_only && IsClroMarkdownFile(model.meta.file_name) &&
+            !IsAsciiClroTagSyntax(std::wstring_view(model.raw).substr(pos, tagEnd - pos))) {
+            pos = tagEnd;
+            continue;
+        }
 
         if (content == L"/") {
             for (size_t idx = stack.size(); idx-- > 0;) {
@@ -1277,6 +1284,17 @@ void ApplyHeadingTagPromotion(const NoteTextModel& model, NoteDocument* doc) {
         if (!TryParseLegacyHeadingOpen(model.raw, lineStart, lineEnd, &promotion)) {
             continue;
         }
+        if (model.meta.clro_ascii_only && IsClroMarkdownFile(model.meta.file_name)) {
+            const size_t opener = model.raw.find(L'<', lineStart);
+            if (opener == std::wstring::npos || !IsAsciiClroTagSyntax(
+                    std::wstring_view(model.raw).substr(opener, promotion.content_span.start.value - opener))) continue;
+            const size_t closer = model.raw.find(L'<', promotion.content_span.end.value);
+            if (closer < lineEnd) {
+                const size_t closerEnd = model.raw.find(L'>', closer);
+                if (closerEnd < lineEnd && !IsAsciiClroTagSyntax(
+                        std::wstring_view(model.raw).substr(closer, closerEnd + 1 - closer))) continue;
+            }
+        }
         if (IsInsideAnySpan(literalSpans, promotion.block_span)) {
             continue;
         }
@@ -1315,11 +1333,19 @@ void ApplyHeadingTagPromotion(const NoteTextModel& model, NoteDocument* doc) {
     }
 }
 
-void PostProcessNoteDocument(const NoteTextModel& model, NoteDocument* doc) {
+void PostProcessNoteDocument(const NoteTextModel& model, NoteDocument* doc,
+                             const NoteTextModel* mathSource = nullptr) {
     if (!doc) return;
-    ExtractTexMathSpans(model, doc);
+    ExtractTexMathSpans(mathSource ? *mathSource : model, doc);
     ApplyHeadingTagPromotion(model, doc);
     ApplyLegacyMarkupStyleSpans(model, doc);
+    if (model.meta.clro_ascii_only && IsClroMarkdownFile(model.meta.file_name)) {
+        doc->style_spans.erase(std::remove_if(doc->style_spans.begin(), doc->style_spans.end(),
+            [](const StyleSpan& style) {
+                return (style.kind == StyleKind::TextColor || style.kind == StyleKind::BackgroundColor) &&
+                    std::any_of(style.value.begin(), style.value.end(), [](wchar_t ch) { return ch > 0x7f; });
+            }), doc->style_spans.end());
+    }
 }
 
 // The parser owns container boundaries; placement never rediscovers them.
@@ -1327,11 +1353,11 @@ void PostProcessNoteDocument(const NoteTextModel& model, NoteDocument* doc) {
 // cross an opening or closing fence. Source and recovery data stay unchanged;
 // every local parser offset is translated back to canonical UTF-16 offsets.
 void AppendMarkdownRegion(const NoteTextModel& source, Span region,
-                          size_t owner, NoteDocument* out) {
+                          size_t owner, NoteDocument* out, bool permissiveHeadings) {
     if (region.end <= region.start) return;
     const NoteTextModel local = MakeNoteTextModel(
         source.meta, source.raw.substr(region.start.value, region.end - region.start), source.revision);
-    NoteDocument parsed = ParseNoteDocumentWithMd4c(local);
+    NoteDocument parsed = ParseNoteDocumentWithMd4c(local, permissiveHeadings);
     const size_t blockBase = out->blocks.size();
     const size_t inlineBase = out->inlines.size();
     const LineColumn regionLocation = ResolveLineColumn(source, region.start.value);
@@ -1358,7 +1384,7 @@ void AppendMarkdownRegion(const NoteTextModel& source, Span region,
     }
 }
 
-[[nodiscard]] NoteDocument ParseMarkdownContainers(const NoteTextModel& model) {
+[[nodiscard]] NoteDocument ParseMarkdownContainers(const NoteTextModel& model, bool permissiveHeadings) {
     NoteDocument out;
     out.meta = model.meta;
     SetNoteDocumentSourceRevision(&out, model.revision);
@@ -1392,16 +1418,23 @@ void AppendMarkdownRegion(const NoteTextModel& source, Span region,
         while (end > start && (model.raw[end - 1] == L'\r' || model.raw[end - 1] == L'\n')) --end;
         while (protectedIndex < protectedSpans.size() &&
                protectedSpans[protectedIndex].end.value <= start) ++protectedIndex;
+        // A literal/math span entered on an earlier row owns this row.
+        // Delimiters inside a ::: opening's title are literal title text,
+        // not a reason to discard the parser-proven container boundary.
         if (protectedIndex < protectedSpans.size() &&
-            protectedSpans[protectedIndex].start.value < end) continue;
+            protectedSpans[protectedIndex].start.value <= start) continue;
         NoteContainerFenceRun fence;
         const std::wstring_view text(model.raw.data() + start, end - start);
         if (!TryParseNoteContainerFenceRun(text, &fence)) continue;
+        // A span beginning in the title cannot protect later body/fence rows,
+        // even if the raw pre-scan paired its delimiter with text far below.
+        while (protectedIndex < protectedSpans.size() &&
+               protectedSpans[protectedIndex].start.value < end) ++protectedIndex;
         const bool bare = fence.info_span.start == fence.info_span.end;
         if (bare && !stack.empty() &&
             fence.marker_count < out.blocks[stack.back()].fence_marker_count) continue;
         const size_t owner = stack.empty() ? static_cast<size_t>(-1) : stack.back();
-        AppendMarkdownRegion(model, {{regionStart}, {start}}, owner, &out);
+        AppendMarkdownRegion(model, {{regionStart}, {start}}, owner, &out, permissiveHeadings);
         if (bare && !stack.empty()) {
             out.blocks[stack.back()].span.end = {next};
             out.blocks[stack.back()].fence_closed = true;
@@ -1422,16 +1455,26 @@ void AppendMarkdownRegion(const NoteTextModel& source, Span region,
         regionStart = next;
     }
     AppendMarkdownRegion(model, {{regionStart}, {model.raw.size()}},
-                         stack.empty() ? static_cast<size_t>(-1) : stack.back(), &out);
+                         stack.empty() ? static_cast<size_t>(-1) : stack.back(), &out, permissiveHeadings);
     return out;
 }
 
 } // namespace
 
-NoteDocument ParseNoteDocument(const NoteTextModel& model) {
+static NoteDocument ParseNoteDocumentCore(const NoteTextModel& model, bool permissiveHeadings = false,
+                                           const NoteTextModel* mathSource = nullptr) {
     NoteDocument doc = model.raw.find(L":::") == std::wstring::npos
-        ? ParseNoteDocumentWithMd4c(model) : ParseMarkdownContainers(model);
-    PostProcessNoteDocument(model, &doc);
+        ? ParseNoteDocumentWithMd4c(model, permissiveHeadings) : ParseMarkdownContainers(model, permissiveHeadings);
+    if (NoteDocumentHasFatalParseFailure(doc)) {
+        // Container parsing can have completed earlier regions. Retain the
+        // diagnostic and original source identity, but publish no partial AST.
+        doc.blocks.clear();
+        doc.inlines.clear();
+        doc.style_spans.clear();
+        doc.math_spans.clear();
+        return doc;
+    }
+    PostProcessNoteDocument(model, &doc, mathSource);
     // Legacy standalone heading promotion appends new roots after parsing.
     // Attach those roots to the narrowest parsed enclosing container too.
     std::vector<size_t> containers;
@@ -1456,6 +1499,164 @@ NoteDocument ParseNoteDocument(const NoteTextModel& model) {
         }
     }
     return doc;
+}
+
+// Accept punctuation variants only for existing style/heading syntax. Values
+// (font names, link IDs, colours, etc.) and unknown/math tags stay verbatim.
+static void ProjectClroMarkupTags(std::wstring_view raw, const std::vector<Span>& protectedRanges,
+                                  std::wstring* syntax) {
+    for (size_t start = 0; start < raw.size(); ++start) {
+        if ((raw[start] != L'<' && raw[start] != L'\uFF1C') ||
+            ClroRangeContains(protectedRanges, start + 1)) continue;
+        const size_t end = raw.find_first_of(L">\uFF1E<\uFF1C\r\n", start + 1);
+        if (end == std::wstring_view::npos) break;
+        if (raw[end] != L'>' && raw[end] != L'\uFF1E') continue;
+        std::wstring tag(raw.substr(start, end - start + 1));
+        std::transform(tag.begin(), tag.end(), tag.begin(), ClroMarkdownCharacter);
+        // Fold name letters only outside values. Preserve attribute data,
+        // folding just its enclosing quote pair. Unknown/math tags are
+        // restored below, so this never rewrites ordinary text or TeX.
+        for (size_t i = 1; i + 1 < tag.size(); ++i) {
+            tag[i] = FoldClroMarkupNameLetter(tag[i]);
+            if (tag[i] != L'=') continue;
+            ++i;
+            while (i + 1 < tag.size() && iswspace(tag[i])) ++i;
+            const wchar_t quote = tag[i] == L'\'' || tag[i] == L'"' ? tag[i++] : 0;
+            while (i + 1 < tag.size() && (quote ? tag[i] != quote :
+                   !iswspace(tag[i]) && tag[i] != L',')) {
+                tag[i] = raw[start + i];
+                ++i;
+            }
+        }
+        std::wstring content = TrimWhitespace(std::wstring_view(tag).substr(1, tag.size() - 2));
+        if (!content.empty() && content.front() == L'/') content = TrimWhitespace(content.substr(1));
+        StyleFrame frame;
+        const size_t keyEnd = content.find_first_of(L" \t=,");
+        const bool math = ToLowerAscii(content.substr(0, keyEnd)) == L"math";
+        const bool accepted = !math && (content.empty() || ParseHashHeadingCloseSelector(content) > 0 ||
+            ParseStyleOpenTag(content, &frame) || ParseStyleOpenTag(content + L"=1", &frame));
+        RestoreClroSourceRange(raw, {{start}, {end + 1}}, syntax);
+        if (accepted) syntax->replace(start, tag.size(), tag);
+        start = end;
+    }
+}
+
+static NoteDocument ParseNoteDocumentProjected(const NoteTextModel& model, std::wstring* projection) {
+    if (!HasClroFullwidthMarkdown(model)) {
+        if (projection) *projection = model.raw;
+        return ParseNoteDocumentCore(model);
+    }
+    // Only recognized auxiliary tags accept fullwidth syntax. Markdown and
+    // ordinary Japanese punctuation are parsed exactly as written.
+    NoteTextModel syntax = model;
+    std::vector<Span> protectedRanges = CollectRawMarkdownLiteralSpans(model.raw);
+    NoteDocument originalMath;
+    ExtractTexMathSpans(model, &originalMath);
+    for (const auto& math : originalMath.math_spans) protectedRanges.push_back(math.span);
+    ProjectClroMarkupTags(model.raw, protectedRanges, &syntax.raw);
+    NoteDocument doc = ParseNoteDocumentCore(syntax, false, &model);
+    if (NoteDocumentHasFatalParseFailure(doc)) return doc;
+    doc.uses_clro_fullwidth_markdown = syntax.raw != model.raw;
+    if (projection) *projection = std::move(syntax.raw);
+    return doc;
+}
+
+NoteDocument ParseNoteDocument(const NoteTextModel& model) {
+    return ParseNoteDocumentProjected(model, nullptr);
+}
+
+std::optional<std::wstring> BuildClroMarkdownExportSource(const NoteTextModel& model) {
+    std::wstring projected;
+    const NoteDocument doc = ParseNoteDocumentProjected(model, &projected);
+    if (NoteDocumentHasFatalParseFailure(doc)) return std::nullopt;
+    if (!doc.uses_clro_fullwidth_markdown) return model.raw;
+    const std::wstring syntax = projected;
+    std::vector<std::pair<size_t, wchar_t>> edits;
+    // Text leaves own literal glyphs. Only parser-proven gaps/tags are syntax;
+    // normal prose punctuation, code, TeX, paths and values are not folded.
+    for (const InlineNode& node : doc.inlines) {
+        if (node.kind == InlineKind::Text || node.kind == InlineKind::Code)
+            RestoreClroSourceRange(model.raw, node.span, &projected);
+        if (node.kind != InlineKind::Text) continue;
+        for (size_t pos = node.span.start.value; pos < node.span.end.value; ++pos) {
+            // A preserved fullwidth literal needs no ASCII Markdown escape.
+            if (pos > 0 && model.raw[pos] > 0x7f && model.raw[pos] != syntax[pos] &&
+                IsMarkdownBackslashEscapeAt(syntax, pos - 1)) edits.push_back({pos - 1, 0});
+        }
+    }
+    for (const StyleSpan& style : doc.style_spans) {
+        Span token;
+        for (bool opening : {true, false}) {
+            const bool found = opening ? FindNoteMarkupTagEndingAt(syntax, style.span.start, &token)
+                                       : FindNoteMarkupTagStartingAt(syntax, style.span.end, &token);
+            if (found) RestoreClroSourceRange(syntax, token, &projected);
+        }
+    }
+    for (const MathSpan& math : doc.math_spans) {
+        RestoreClroSourceRange(model.raw, math.span, &projected);
+        // A fullwidth slash is not a TeX escape. Folding a prefix immediately
+        // before $ or a math tag could accidentally disable that original math.
+        const size_t start = math.span.start.value;
+        if (start > 0 && model.raw[start - 1] == L'\uFF3C') projected[start - 1] = model.raw[start - 1];
+    }
+    for (const BlockNode& block : doc.blocks) {
+        if (block.kind == BlockKind::CodeBlock) RestoreClroSourceRange(model.raw, block.span, &projected);
+        if (block.kind == BlockKind::Heading && block.origin == BlockOrigin::Markdown &&
+            block.loc.line > 0 && static_cast<size_t>(block.loc.line) <= model.line_starts.size()) {
+            const size_t start = model.line_starts[block.loc.line - 1];
+            size_t hash = syntax.find(L'#', start);
+            bool fullwidth = false;
+            size_t count = 0;
+            while (hash < block.span.start.value && syntax[hash] == L'#') {
+                fullwidth = fullwidth || model.raw[hash] == L'\uFF03';
+                ++hash; ++count;
+            }
+            if (fullwidth && count == static_cast<size_t>(block.level) && hash < syntax.size() &&
+                !iswspace(syntax[hash])) edits.push_back({hash, L' '});
+        }
+        if (block.kind != BlockKind::CodeBlock && block.kind != BlockKind::FencedContainer) continue;
+        auto line = std::upper_bound(model.line_starts.begin(), model.line_starts.end(), block.span.start.value);
+        if (line == model.line_starts.begin()) continue;
+        --line;
+        const bool container = block.kind == BlockKind::FencedContainer;
+        if (!container) { if (line == model.line_starts.begin()) continue; --line; }
+        const size_t start = *line;
+        const size_t newline = syntax.find_first_of(L"\r\n", start);
+        const size_t end = newline == std::wstring::npos ? syntax.size() : newline;
+        const Span title = NoteFenceTitleSpan(std::wstring_view(syntax).substr(start, end - start), container);
+        RestoreClroSourceRange(model.raw, {{start + title.start.value}, {start + title.end.value}}, &projected);
+    }
+    // Reference labels are identifiers, including the otherwise invisible
+    // second label and definition label. Preserve them like link targets.
+    std::vector<size_t> brackets;
+    for (size_t i = 0; i < syntax.size(); ++i) {
+        if (syntax[i] == L'\r' || syntax[i] == L'\n') brackets.clear();
+        if (syntax[i] == L'[') brackets.push_back(i);
+        if (syntax[i] != L']' || brackets.empty()) continue;
+        const size_t start = brackets.back();
+        brackets.pop_back();
+        if ((start > 0 && syntax[start - 1] == L']') || (i + 1 < syntax.size() && syntax[i + 1] == L':'))
+            RestoreClroSourceRange(model.raw, {{start + 1}, {i}}, &projected);
+    }
+    for (size_t i = 0; i < projected.size(); ++i) {
+        if (projected[i] == L'\uE001' && model.raw[i] == L'#') projected[i] = L'#';
+    }
+    std::sort(edits.begin(), edits.end(), [](const auto& a, const auto& b) {
+        return a.first != b.first ? a.first > b.first : a.second < b.second;
+    });
+    edits.erase(std::unique(edits.begin(), edits.end()), edits.end());
+    for (const auto& edit : edits) {
+        if (edit.second) projected.insert(edit.first, 1, edit.second);
+        else projected.erase(edit.first, 1);
+    }
+    return projected;
+}
+
+bool NoteDocumentHasFatalParseFailure(const NoteDocument& document) noexcept {
+    return std::any_of(document.diagnostics.begin(), document.diagnostics.end(),
+        [](const Diagnostic& diagnostic) {
+            return diagnostic.code == L"NOTE-E-MD4C-PARSE";
+        });
 }
 
 NoteDocument ParseTeXMathDocument(const NoteTextModel& model) {

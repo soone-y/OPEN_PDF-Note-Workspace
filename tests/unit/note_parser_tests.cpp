@@ -3,8 +3,12 @@
 #endif
 
 #include <windows.h>
+#include "diagnostics/open_work_counters.h"
+#include "pdf_view/render_queue_policy.h"
 
 #include <algorithm>
+#include <array>
+#include <deque>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -18,6 +22,8 @@
 #include "note/note_influence.h"
 #include "note/note_identity.h"
 #include "note/note_identity_store.h"
+#include "note/note_file_policy.h"
+#include "note_clro_fullwidth_regression.h"
 #include "note/note_layout.h"
 #include "note/note_kernel.h"
 #include "note/note_line_sequence.h"
@@ -59,6 +65,20 @@
 #include "core/setup_json_policy.h"
 #include "core/cache_dir_policy.h"
 #include "core/sha256.h"
+#include "note_font_size_regression.h"
+#include "note_leading_whitespace_regression.h"
+#include "note_markup_consistency_regression.h"
+#include "note_named_color_regression.h"
+#include "note/note_render_final_style.h"
+
+#ifdef NOTE_MD4C_FATAL_FAULT_TEST
+extern "C" {
+void note_md4c_fault_reset(size_t fail_at);
+size_t note_md4c_fault_allocations(void);
+size_t note_md4c_fault_live(void);
+int note_md4c_fault_injected(void);
+}
+#endif
 
 std::wstring UTF8ToWide(const std::string& s) {
     if (s.empty()) return L"";
@@ -473,6 +493,146 @@ bool ApplyTextEditKeepsLineStartsInSync(std::wstring text, note::TextEdit edit) 
 
 int main() {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    {
+        const auto fullwidth = note_fullwidth_test::Run();
+        Expect(note_fullwidth_test::RunExport(TestWideToUTF8),
+               "CLRO Markdown export defaults to syntax-only normalization, preserves OFF/source/literals and composes with headings/math");
+        Expect(fullwidth.cases >= 50 && fullwidth.parsing && fullwidth.literals && fullwidth.coordinates && fullwidth.editing,
+               "CLRO fullwidth tags preserve prose punctuation, code/math, UTF-16 spans and standard Markdown compatibility");
+    }
+    {
+        std::vector<std::wstring> extensions{L".old"};
+        Expect(note::ParseAdditionalNoteExtensions(L"LOG, .Memo; .LOG .txt", &extensions) &&
+               extensions == std::vector<std::wstring>{L".log", L".memo"},
+               "additional note extensions normalize, deduplicate and omit built-in formats");
+        Expect(!note::ParseAdditionalNoteExtensions(L".log .PDF", &extensions) &&
+               extensions == std::vector<std::wstring>{L".log", L".memo"},
+               "a restricted extension rejects the whole draft without changing accepted settings");
+        bool restricted = true;
+        for (const auto* name : {L"n.PDF", L"n.docx", L"n.xlsx", L"n.pptx", L"n.odt", L"n.EXE",
+                                 L"n.cmd", L"n.ps1", L"n.dll", L"n.lnk", L"n.png", L"n.clrop", L"n.stage"}) {
+            restricted = restricted && note::IsForbiddenNoteRenamePath(name) &&
+                !note::IsAdditionalNotePath(name, {note::NoteFileExtension(name)});
+        }
+        Expect(restricted, "restricted formats cannot be enabled by hand-editing the extension list");
+        Expect(note::IsAdditionalNotePath(L"n.MEMO", {L"memo"}) &&
+               !note::IsAdditionalNotePath(L"n.unknown", extensions),
+               "only configured extensions become additional note candidates, ignoring case");
+        for (const auto* draft : {L"../memo", L"*.log", L".a.b", L".", L".exe", L".docm"}) {
+            Expect(!note::ParseAdditionalNoteExtensions(draft, &extensions),
+                   "invalid or restricted additional extension is rejected");
+        }
+        Expect(note::ContentKindForNotePath(L"n.memo") == note::NoteContentKind::PlainText &&
+               note::ContentKindForNotePath(L"n.LOG") == note::NoteContentKind::PlainText &&
+               note::ContentKindForNotePath(L"n.txt") == note::NoteContentKind::PlainText &&
+               note::ContentKindForNotePath(L"n.csv") == note::NoteContentKind::PlainText &&
+               note::ContentKindForNotePath(L"n.md") == note::NoteContentKind::Markdown &&
+               note::ContentKindForNotePath(L"n.clro") == note::NoteContentKind::Markdown &&
+               note::ContentKindForNotePath(L"n.tex") == note::NoteContentKind::TeXSource,
+               "additional suffixes use TXT semantics while built-in note routes remain unchanged");
+        Expect(note::ParseAdditionalNoteExtensions(L"", &extensions) && extensions.empty(),
+               "clearing additional extensions removes the opt-ins");
+    }
+    {
+        const auto fonts = note_font_test::Run();
+        Expect(fonts.cases == 48 && fonts.metrics, "bold and relative/nested font sizes match Win32 font measurements for two real fonts and both LOGFONT height conventions");
+        Expect(fonts.cases == 48 && fonts.pixels, "final font painting matches independent Win32 glyph pixels without internal-leading enlargement");
+        Expect(fonts.cases == 48 && fonts.source, "font changes preserve source, hit positions and the caller's selected font");
+        note::NoteRenderSourceLinePlan line;
+        note::NoteRenderSourceRun run;
+        run.styles = {{note::StyleKind::FontSize, L"-9"}};
+        note::NoteRenderFinalRunFontStyle style;
+        Expect(note::ResolveNoteRenderFinalRunFontStyle(line, run, 8, &style) && style.font_height_px == 6,
+               "a negative relative font size below zero clamps to the minimum instead of silently retaining the old size");
+    }
+    {
+        const auto colors = note_named_color_test::Run();
+        Expect(colors.vocabulary && colors.aliases == 78, "English/Japanese named colours, pale colours, numeric values and invalid values share a fixed vocabulary");
+        Expect(colors.exports, "named colours export as bounded HTML RGB while preserving source, Markdown and TXT content");
+        Expect(colors.pixels && colors.paints == 96, "named colour GDI pixels match numeric colours for text, backgrounds, math, tables and nested markup");
+        const auto markup = note_markup_test::Run();
+        Expect(markup.text, "text export preserves unknown, orphan and literal code tags while removing accepted markup only");
+        Expect(markup.html, "HTML export normalizes sizes, nested colors and combined decoration without accepting arbitrary CSS");
+        Expect(markup.links, "nested link IDs prefer the inner scope in committed and presented hit testing");
+        Expect(markup.math, "outer math styles survive source planning, measurement, painting, hit testing and table binding");
+        Expect(markup.indent, "large or invalid indentation never disables structured rendering in either wrap mode");
+    }
+    {
+        struct Job { int id; bool visible; double distance; };
+        std::deque<Job> jobs;
+        Expect(!pdf_render_queue::ChooseNext(jobs, 0), "empty PDF queue has no dispatch");
+        jobs = {{0, false, 1}, {1, true, 20}, {2, true, 5}, {3, true, 5}};
+        Expect(pdf_render_queue::ChooseNext(jobs, 0) == 2,
+               "nearest visible PDF work overtakes pending offscreen work");
+        jobs.erase(jobs.begin() + 2);
+        Expect(pdf_render_queue::ChooseNext(jobs, 0) == 2,
+               "equal visible PDF priorities preserve arrival order");
+        jobs[1].distance = jobs[2].distance;
+        Expect(pdf_render_queue::ChooseNext(jobs, 0) == 1,
+               "visible PDF distance ties are FIFO");
+        jobs[0].visible = true;
+        jobs[1].visible = jobs[2].visible = false;
+        Expect(pdf_render_queue::ChooseNext(jobs, 0) == 0,
+               "latest viewport promotion and demotion affect pending PDF dispatch");
+        jobs = {{0, true, std::numeric_limits<double>::quiet_NaN()}, {1, true, 2}};
+        Expect(pdf_render_queue::ChooseNext(jobs, 0) == 1,
+               "invalid PDF distance does not displace a finite visible priority");
+        jobs[1].distance = -1;
+        Expect(pdf_render_queue::ChooseNext(jobs, 0) == 0,
+               "all invalid visible PDF distances retain arrival order");
+        jobs = {{0, false, 100}, {1, false, 1}, {2, true, 0}};
+        unsigned burst = 0;
+        bool fair = true;
+        for (int round = 0; round < 3; ++round) {
+            for (unsigned i = 0; i < pdf_render_queue::kMaxVisibleBurst; ++i) {
+                const auto next = pdf_render_queue::ChooseNext(jobs, burst);
+                fair = fair && next == 2;
+                burst = pdf_render_queue::AfterDispatch(burst, true);
+                ++jobs[2].id; // Visible arrivals cannot postpone older offscreen work indefinitely.
+            }
+            fair = fair && pdf_render_queue::ChooseNext(jobs, burst) == 0;
+            burst = pdf_render_queue::AfterDispatch(burst, false);
+        }
+        Expect(fair && burst == 0, "PDF visible bursts are bounded and oldest offscreen work progresses");
+        jobs = {{0, false, 100}, {1, false, 1}};
+        Expect(pdf_render_queue::ChooseNext(jobs, 0) == 0,
+               "offscreen-only PDF work progresses in arrival order");
+        jobs[0].visible = jobs[1].visible = true;
+        Expect(pdf_render_queue::ChooseNext(jobs, pdf_render_queue::kMaxVisibleBurst) == 1,
+               "visible-only PDF queue does not stall at the fairness bound");
+        Expect(pdf_render_queue::AfterDispatch(std::numeric_limits<unsigned>::max(), true) ==
+                   pdf_render_queue::kMaxVisibleBurst,
+               "PDF fairness counter saturates without overflow");
+    }
+
+    {
+        using open_work::Kind;
+        const auto baseline = open_work::totals;
+        open_work::Record(Kind::NoteStageCheck);
+        Expect(open_work::totals == baseline, "open work counters disabled outside observation");
+        {
+            open_work::Observation outer;
+            open_work::Record(Kind::Count);
+            open_work::Record(static_cast<Kind>(100));
+            Expect(open_work::Get(outer.Read(), static_cast<Kind>(100)) == 0,
+                   "invalid open work diagnostic keys are rejected without indexing outside counters");
+            open_work::Record(Kind::NoteStageCheck);
+            {
+                open_work::Observation inner;
+                open_work::Record(Kind::NoteStageCheck);
+                open_work::Record(Kind::NoteEditorSyncFullRead);
+                Expect(open_work::Get(inner.Read(), Kind::NoteStageCheck) == 1,
+                       "nested open work observation uses its own baseline");
+            }
+            Expect(open_work::Get(outer.Read(), Kind::NoteStageCheck) == 2 &&
+                   open_work::Get(outer.Read(), Kind::NoteEditorSyncFullRead) == 1,
+                   "outer open work observation includes nested operation counts");
+        }
+        const auto stopped = open_work::totals;
+        open_work::Record(Kind::NoteFullParse);
+        Expect(open_work::totals == stopped && open_work::observationDepth == 0,
+               "open work observation restores disabled state");
+    }
 
     {
         note::InputAssistFormat format;
@@ -509,6 +669,58 @@ int main() {
                note::BuildInputAssistSnippet(L" \t\x3000\r\n", format) == L" \t\x3000\r\n" &&
                note::BuildInputAssistSnippet(L"", format).empty(),
                "input assist limits headings to Markdown levels and adds no invented text to empty input");
+    }
+
+    {
+        const auto title = [](std::wstring_view line, bool container) {
+            const auto span = note::NoteFenceTitleSpan(line, container);
+            return std::wstring(line.substr(span.start.value, span.end - span.start));
+        };
+        Expect(title(L"::: 間欠跛行", true) == L"間欠跛行" &&
+               title(L"  :::: 長い 題名  ", true) == L"長い 題名" &&
+               title(L"::: note title=\"注意事項\"", true) == L"注意事項" &&
+               title(L"```cpp title=\"example.cpp\"", false) == L"example.cpp" &&
+               title(L"~~~ title='日本語 & <文字>'", false) == L"日本語 & <文字>",
+               "fence titles retain literal Unicode source spans for bare containers and explicit code attributes");
+        Expect(title(L":::", true).empty() && title(L"```cpp", false).empty() &&
+               title(L"::: note title=\"\"", true).empty() &&
+               title(L"::: note title=\"未閉鎖", true).empty() &&
+               title(L"::: title=x title=y", true).empty() &&
+               title(L"::: title=\"x\"suffix", true).empty() &&
+               title(L"inline ::: name", true).empty(),
+               "empty or malformed explicit titles and non-fences never synthesize partial titles");
+        const auto fixture = note::MakeNoteTextModel({L"titles.md", L""},
+            L"::: 間欠跛行\r\n休んだり歩いたりを繰り返す歩行です。\r\n:::\r\n"
+            L"```cpp title=\"example.cpp\"\r\nint x;\r\n```\r\n"
+            L"::: note title='<title>&'\r\n本文\r\n:::\r\n", 1);
+        const auto parsed = note::ParseNoteDocument(fixture);
+        const auto plain = note::ExportPlainText(fixture, parsed, note::TextExportConfig{});
+        const auto html = note::ExportHtml(fixture, parsed, note::MarkupExportConfig{});
+        Expect(plain.find("間欠跛行") != std::string::npos &&
+               plain.find("休んだり歩いたり") != std::string::npos &&
+               plain.find("example.cpp") != std::string::npos && plain.find("int x;") != std::string::npos &&
+               plain.find("<title>&") != std::string::npos && plain.find("title=") == std::string::npos,
+               "TXT export preserves block titles and bodies while removing only wrapper syntax");
+        Expect(html.find("note-block-title") != std::string::npos &&
+               html.find("間欠跛行") != std::string::npos && html.find("example.cpp") != std::string::npos &&
+               html.find("<strong>example.cpp</strong>") != std::string::npos &&
+               html.find("language-cpp") != std::string::npos &&
+               html.find("&lt;title&gt;&amp;") != std::string::npos,
+               "HTML export emits escaped titles separately from code language metadata");
+        const auto literalTitle = note::MakeNoteTextModel({L"titles.md", L""},
+            L"::: title=\"A `B` $x$ <b> C\"\nbody\n:::\n", 2);
+        const auto literalParsed = note::ParseNoteDocument(literalTitle);
+        Expect(literalParsed.math_spans.empty() && literalParsed.style_spans.empty() &&
+               FindBlock(literalParsed, note::BlockKind::FencedContainer) &&
+               note::ExportPlainText(literalTitle, literalParsed, note::TextExportConfig{}).find("A `B` $x$ <b> C") != std::string::npos,
+               "container title punctuation stays literal rather than creating inline math or hiding its block");
+        const auto crossing = note::MakeNoteTextModel({L"titles.md", L""},
+            L"::: Weird $ and `\nbody\n:::\nOutside $ and `\ntail", 3);
+        const auto crossingParsed = note::ParseNoteDocument(crossing);
+        const auto* crossingBlock = FindBlock(crossingParsed, note::BlockKind::FencedContainer);
+        Expect(crossingBlock && crossingBlock->fence_closed &&
+               crossingBlock->span.end.value == crossing.raw.find(L"Outside"),
+               "literal title delimiters cannot extend a container into following unrelated rows");
     }
 
     {
@@ -588,6 +800,19 @@ int main() {
     }
 
     {
+        const std::wstring thumbAndModifier = L"\xD83D\xDC4D\xD83C\xDFFD";
+        const auto thumbUnits = note::BuildTextUnits(thumbAndModifier);
+        Expect(thumbUnits.size() == 1 && thumbUnits[0].span.start.value == 0 &&
+                   thumbUnits[0].span.end.value == 4,
+               "emoji modifier remains in the same deletion unit as the thumb");
+        const std::wstring indicators = L"\xD83C\xDDEF\xD83C\xDDF5\xD83C\xDDFA";
+        const auto flagUnits = note::BuildTextUnits(indicators);
+        Expect(flagUnits.size() == 2 && flagUnits[0].span.end.value == 4 &&
+                   flagUnits[1].span.start.value == 4 && flagUnits[1].span.end.value == 6,
+               "regional indicators group into pairs without consuming a third symbol");
+    }
+
+    {
         note::NoteIdentityRegistry registry;
         const note::NoteIdentity first = registry.ResolvePath(L"c:\\notes\\first.md");
         const note::NoteIdentity firstAgain = registry.ResolvePath(L"c:\\notes\\first.md");
@@ -664,6 +889,25 @@ int main() {
                    diskSnapshot.identity.note_id == first.note_id &&
                    diskSnapshot.identity.content_fingerprint != 0,
                "snapshot resolver labels disk source with note id and content fingerprint");
+
+        note_snapshot::TextStorageSnapshot cachedDisk;
+        cachedDisk.noteIdentity = first;
+        cachedDisk.diskOk = true;
+        cachedDisk.diskPersistenceRevision = 5;
+        cachedDisk.diskBytes = "line1\r\nline2";
+        cachedDisk.diskContentFingerprint = note::FingerprintSnapshotBytes(cachedDisk.diskBytes);
+        const auto expectedDisk = note::BuildSnapshotIdentity(first.note_id, 0, 5, cachedDisk.diskBytes);
+        note_snapshot::LatestTextSnapshot reusedDisk;
+        open_work::Counts diskWork{};
+        {
+            open_work::Observation observation;
+            reusedDisk = note_snapshot::ResolveLatestTextSnapshot(
+                L"c:\\notes\\renamed.md", std::move(cachedDisk));
+            diskWork = observation.Read();
+        }
+        Expect(reusedDisk.ok && note::SameSnapshotIdentity(reusedDisk.identity, expectedDisk) &&
+                   open_work::Get(diskWork, open_work::Kind::NoteSnapshotFingerprint) == 0,
+               "snapshot resolver reuses the observed fingerprint without a second byte scan");
 
         note_snapshot::TextStorageSnapshot stageStorage;
         stageStorage.noteIdentity = first;
@@ -931,8 +1175,7 @@ int main() {
         const note::NoteDerivedSnapshotState derived{
             note::NoteDerivedSnapshotIdentity{owner, 12}, true};
         const note::NoteDerivedReadContext current{owner, 12, false, false};
-        Expect(note::ResolveNoteDerivedRead(derived, current) == Decision::Current &&
-                   note::CanReadCurrentNoteDerivedSnapshot(derived, current),
+        Expect(note::ResolveNoteDerivedRead(derived, current) == Decision::Current,
                "revision gate accepts a present derived snapshot from the current owner and revision");
         Expect(note::ResolveNoteDerivedRead(
                    note::NoteDerivedSnapshotState{
@@ -1019,6 +1262,26 @@ int main() {
                    typedEquivalent->inserted_text == L"ab",
                "pending note edit transaction composes contiguous typed insertion exactly");
 
+        const bool wrongOwnerRejected = !typed.Append(
+            {note::NoteId{0x4602ULL}, 12}, note::TextEdit{5, 0, L"c"});
+        const auto afterWrongOwner = typed.TryBuildEquivalentEdit();
+        Expect(wrongOwnerRejected && typed.size() == 2 && afterWrongOwner &&
+                   afterWrongOwner->inserted_text == L"ab",
+               "pending transaction rejects another owner without losing accumulated edits");
+        const bool overflowRejected = !typed.Append(
+            {owner, std::numeric_limits<uint64_t>::max()}, note::TextEdit{5, 0, L"c"});
+        const bool noOpRejected = !typed.Append({owner, 12}, note::TextEdit{5, 0, L""});
+        const auto afterRejected = typed.TryBuildEquivalentEdit();
+        Expect(overflowRejected && noOpRejected && typed.size() == 2 && afterRejected &&
+                   afterRejected->inserted_text == L"ab",
+               "pending transaction rejects exhausted revision and no-op while retaining edits");
+        typed.Clear();
+        const bool freshOwnerAccepted = typed.Append(
+            {note::NoteId{0x4602ULL}, 1}, note::TextEdit{0, 0, L"q"});
+        const auto freshOwnerEdit = typed.TryBuildEquivalentEdit();
+        Expect(freshOwnerAccepted && freshOwnerEdit && freshOwnerEdit->inserted_text == L"q",
+               "cleared pending transaction accepts a fresh owner and revision");
+
         note::PendingNoteEditTransaction backwardDelete;
         Expect(backwardDelete.Append({owner, 20}, note::TextEdit{6, 1, L""}) &&
                    backwardDelete.Append({owner, 21}, note::TextEdit{5, 1, L""}),
@@ -1063,6 +1326,21 @@ int main() {
                    kernel.CanReadSemantic() &&
                    kernel.semantic_index().headings.size() == 1,
                "local note kernel atomically builds syntax and semantic snapshots");
+
+        const auto syntaxRevision = kernel.syntax_source().revision;
+        open_work::Counts persistenceWork{};
+        {
+            open_work::Observation observation;
+            kernel.text_core().SetPersistenceRevision(4);
+            const auto unchanged = kernel.RefreshDerived();
+            persistenceWork = observation.Read();
+            Expect(unchanged.current && kernel.CanReadSyntax() && kernel.CanReadSemantic() &&
+                       kernel.text_core().persistence_revision() == 4 &&
+                       kernel.syntax_source().revision == syntaxRevision && !kernel.has_pending_edit(),
+                   "persistence-only update preserves current canonical syntax");
+        }
+        Expect(open_work::Get(persistenceWork, open_work::Kind::NoteFullParse) == 0,
+               "persistence-only update does not reparse unchanged canonical content");
 
         const size_t bodyEnd = kernel.text_core().model().raw.size();
         const note::NoteKernelApplyResult ordinary =
@@ -1381,6 +1659,57 @@ int main() {
                    registry.Find(first) != registry.Find(second) &&
                    registry.size() == 2,
                "local note kernel registry isolates notes while sharing one kernel per view owner");
+        const note::ViewIdentity reboundView{firstView.view_id, second, 2};
+        Expect(registry.FindForView(reboundView) == registry.Find(second) &&
+                   registry.FindForView(note::ViewIdentity{}) == nullptr,
+               "live kernel registry resolves a rebound view and rejects an invalid binding");
+        Expect(registry.Reset({}, {}, L"rejected", 1, 0, note::NoteContentKind::Markdown) == nullptr &&
+                   registry.Find({}) == nullptr && registry.Find(note::NoteId{0x47ffULL}) == nullptr &&
+                   registry.size() == 2,
+               "live kernel registry rejects invalid owners and missing lookups without allocating");
+        note::LocalNoteKernel* firstKernel = registry.Find(first);
+        note::LocalNoteKernel* resetFirst = registry.Reset(
+            first, {}, L"updated", 2, 1, note::NoteContentKind::Markdown);
+        Expect(resetFirst && resetFirst == firstKernel && resetFirst->text_core().MatchesRaw(L"updated") &&
+                   resetFirst->text_core().content_revision() == 2 &&
+                   resetFirst->text_core().persistence_revision() == 1,
+               "live kernel registry resets one note without replacing its stable instance");
+        const note::LocalNoteKernel* secondKernel = registry.Find(second);
+        Expect(secondKernel && secondKernel->text_core().MatchesRaw(L"second") &&
+                   secondKernel->text_core().content_revision() == 1 &&
+                   secondKernel->text_core().persistence_revision() == 0 && registry.size() == 2,
+               "live kernel registry keeps another note unchanged during an individual reset");
+
+        const note::NoteId durable{0x4703ULL};
+        const auto edit = firstKernel->ApplyUserEdit(
+            note::TextEdit{note::Utf16CodeUnitOffset{7}, 0, L"!"}, {}, {},
+            note::NoteHistoryOperationKind::Typing, 100, false);
+        const auto draftRoot = firstKernel->text_core().TakeSnapshot();
+        const uint64_t draftRevision = firstKernel->text_core().content_revision();
+        Expect(edit.applied() && firstKernel->CanUndo() &&
+                   !registry.Rekey(first, second, {}, note::NoteContentKind::Markdown) &&
+                   !registry.Rekey(first, {}, {}, note::NoteContentKind::Markdown) &&
+                   !registry.Rekey(first, first, {}, note::NoteContentKind::Markdown) &&
+                   firstKernel->text_core().MatchesSnapshot(draftRoot),
+               "draft promotion rejects occupied or invalid owners without changing text or history");
+        note::NoteMetadata durableMetadata;
+        durableMetadata.file_name = L"saved.md";
+        auto* promoted = registry.Rekey(first, durable, durableMetadata, note::NoteContentKind::Markdown);
+        Expect(promoted == firstKernel && !registry.Find(first) && registry.Find(durable) == promoted &&
+                   promoted->text_core().note_id() == durable &&
+                   promoted->text_core().MatchesSnapshot(draftRoot) &&
+                   promoted->text_core().content_revision() == draftRevision &&
+                   promoted->text_core().model().meta.file_name == L"saved.md" &&
+                   !promoted->CanReadSyntax() && promoted->CanUndo(),
+               "draft promotion preserves the kernel and immutable history roots under the durable owner");
+        const auto undoPromoted = promoted ? promoted->Undo(false) : std::nullopt;
+        const bool undoOk = undoPromoted && undoPromoted->applied() &&
+            promoted->text_core().MatchesRaw(L"updated") && promoted->CanRedo();
+        const auto redoPromoted = promoted ? promoted->Redo(false) : std::nullopt;
+        Expect(undoOk && redoPromoted && redoPromoted->applied() &&
+                   promoted->text_core().MatchesRaw(L"updated!") &&
+                   promoted->text_core().note_id() == durable,
+               "draft promotion retains functional undo and redo");
     }
 
     {
@@ -1407,8 +1736,9 @@ int main() {
                    note::NoteDirtyGraphAllowsLineSpacingFastPath(plainGraph),
                "dirty graph enables bounded render and spacing fast paths for short plain edits");
 
+        const note::TextEdit structuralInput{2, 0, L":"};
         const note::NoteDirtyGraph structuralGraph = note::BuildNoteDirtyGraph(
-            before, starts, note::TextEdit{2, 0, L":"}, true);
+            before, starts, structuralInput, true);
         Expect(structuralGraph.edit_kind == note::NoteEditKind::StructuralText &&
                    structuralGraph.structure_dirty &&
                    note::HasNoteDirtySyntaxFeature(
@@ -1444,9 +1774,13 @@ int main() {
                    invalidGraph.stale_lines.first == 0 &&
                    invalidGraph.stale_lines.last == 1,
                "dirty graph fails closed for an invalid source edit range");
-        Expect(note::TextEditsEqual(plain, note::TextEdit{2, 0, L"x"}) &&
-                   !note::TextEditsEqual(plain, structuralGraph.edit),
-               "dirty graph can carry one exact edit across derived layers");
+        Expect(plainGraph.edit.start == plain.start &&
+                   plainGraph.edit.deleted_len == plain.deleted_len &&
+                   plainGraph.edit.inserted_text == plain.inserted_text &&
+                   structuralGraph.edit.start == structuralInput.start &&
+                   structuralGraph.edit.deleted_len == structuralInput.deleted_len &&
+                   structuralGraph.edit.inserted_text == structuralInput.inserted_text,
+               "dirty graph carries the exact plain and structural edits across derived layers");
 
         {
             auto [scopedModel, scopedDocument] = BuildMd4cModelAndDoc(
@@ -3826,6 +4160,23 @@ int main() {
 
         note::NotePresentationOwnerInput geometryPendingInput = ownerInput;
         geometryPendingInput.geometry_may_change = true;
+        std::shared_ptr<const note::NotePresentationOwnerPlan> geometryOwnerPlan;
+        Expect(note::NotePresentationOwnerPlan::Build(
+                   geometryPendingInput, placementCore, placementKey, preservedPlacement,
+                   &geometryOwnerPlan) == note::NotePresentationOwnerPlanBuildResult::Built &&
+                   geometryOwnerPlan && geometryOwnerPlan->valid() &&
+                   geometryOwnerPlan->frame().frame_kind ==
+                       note::NotePresentationFrameKind::NativeEditorFallback &&
+                   geometryOwnerPlan->frame().reason ==
+                       note::NotePresentationReason::GeometryMayChange &&
+                   geometryOwnerPlan->owner_ranges().size() == 1 &&
+                   geometryOwnerPlan->owner_ranges().front().lines.first ==
+                       geometryPendingInput.visible_lines.first &&
+                   geometryOwnerPlan->owner_ranges().front().lines.last_exclusive ==
+                       geometryPendingInput.visible_lines.last_exclusive &&
+                   geometryOwnerPlan->owner_ranges().front().owner ==
+                       note::NotePresentationLineOwner::NativeEditor,
+               "geometry changes retain one whole-visible native owner without a paint-time commit");
         Expect(note::NoteRenderFinalPublication::Build(
                    geometryPendingInput, placementCore, placementKey, placementSource, placementLayout,
                    preservedPlacement, &finalPublication) ==
@@ -3893,6 +4244,12 @@ int main() {
                "a complete final transaction preserves TeX text with inline and block math runs");
     }
 
+    HDC interactionMeasurementDc = CreateCompatibleDC(nullptr);
+    HGDIOBJ interactionPreviousFont = nullptr;
+    if (interactionMeasurementDc) {
+        interactionPreviousFont = SelectObject(interactionMeasurementDc, GetStockObject(DEFAULT_GUI_FONT));
+    }
+    note::NoteRenderFinalGdiMeasurementProvider interactionGdiProvider(interactionMeasurementDc);
     {
         note::NoteTextCore interactionCore;
         interactionCore.Reset(
@@ -3913,8 +4270,12 @@ int main() {
             note::NoteRenderFinalTransaction::BuildComplete(
                 interactionCore, interactionInput, interactionMeasurementProvider,
                 &interactionPublication);
-        note::NoteRenderFinalResolvedLine committedInteractionLine;
-        note::NoteRenderFinalResolvedLine nativeInteractionLine;
+        std::shared_ptr<const note::NoteRenderFinalPresentationSnapshot> interactionPresentation;
+        const auto interactionPresentationResult = interactionPublication
+            ? note::NoteRenderFinalPresentationSnapshot::Build(
+                interactionCore, interactionPublication, interactionInput.owner_input,
+                interactionGdiProvider, &interactionPresentation)
+            : note::NoteRenderFinalPresentationSnapshotBuildResult::InvalidStructuralPublication;
         note::NoteRenderSourceLinePlan interactionSourceLine;
         note::NoteRenderLinePlacement interactionPlacementLine;
         size_t interactionLinkRun = static_cast<size_t>(-1);
@@ -3945,18 +4306,14 @@ int main() {
         const note::Span interactionLinkSpan = interactionHasLinkGeometry
             ? interactionSourceLine.runs[interactionLinkRun].source_span
             : note::Span{};
-        const note::NoteRenderFinalInteractionResult committedLineResult = interactionPublication
-            ? note::ResolveNoteRenderFinalCommittedLine(
-                *interactionPublication, {0}, &committedInteractionLine)
-            : note::NoteRenderFinalInteractionResult::InvalidPublication;
-        const note::NoteRenderFinalInteractionResult nativeLineResult = interactionPublication
-            ? note::ResolveNoteRenderFinalCommittedLine(
-                *interactionPublication, {1}, &nativeInteractionLine)
-            : note::NoteRenderFinalInteractionResult::InvalidPublication;
-        const note::NoteRenderFinalInteractionResult hitResult = interactionPublication && interactionHasLinkGeometry
-            ? note::HitTestNoteRenderFinalPublication(
-                *interactionPublication, interactionLinkX, 8, &interactionHit)
-            : note::NoteRenderFinalInteractionResult::InvalidPublication;
+        const auto interactionLineLayout = interactionPublication
+            ? note::NoteRenderLineLayoutMap::LineAt(interactionPublication->layout()->line_layouts(), {0})
+            : std::nullopt;
+        const note::NoteRenderFinalPresentationInteractionResult hitResult =
+            interactionPresentation && interactionHasLinkGeometry
+            ? note::HitTestNoteRenderFinalPresentation(
+                *interactionPresentation, interactionLinkX, 8, &interactionHit)
+            : note::NoteRenderFinalPresentationInteractionResult::InvalidPresentation;
         const note::NoteRenderFinalInteractionResult caretResult = interactionPublication && interactionHasLinkGeometry
             ? note::ResolveNoteRenderFinalCaret(
                 *interactionPublication, interactionLinkSpan.start, &interactionCaret)
@@ -3965,20 +4322,19 @@ int main() {
             ? note::ResolveNoteRenderFinalSelection(
                 *interactionPublication, interactionLinkSpan, &interactionSelection)
             : note::NoteRenderFinalInteractionResult::InvalidPublication;
-        const note::NoteRenderFinalInteractionResult horizontalExtentResult = interactionPublication
-            ? note::ResolveNoteRenderFinalHorizontalExtent(
-                *interactionPublication, &interactionHorizontalExtent)
-            : note::NoteRenderFinalInteractionResult::InvalidPublication;
+        const auto horizontalExtentResult = interactionPresentation
+            ? note::ResolveNoteRenderFinalPresentationHorizontalExtent(
+                *interactionPresentation, &interactionHorizontalExtent)
+            : note::NoteRenderFinalPresentationInteractionResult::InvalidPresentation;
         Expect(interactionBuildResult == note::NoteRenderFinalCompleteBuildResult::Built &&
                    interactionPublication && interactionHasLinkGeometry &&
-                   committedLineResult == note::NoteRenderFinalInteractionResult::Resolved &&
-                   committedInteractionLine.line_index == note::LineIndex{0} &&
-                   committedInteractionLine.layout.top_px == 0 &&
-                   committedInteractionLine.layout.bottom_px == 16 &&
-                   committedInteractionLine.source_line.runs.size() ==
-                       committedInteractionLine.placement_line.runs.size() &&
-                   nativeLineResult == note::NoteRenderFinalInteractionResult::NativeEditorOwner &&
-                   hitResult == note::NoteRenderFinalInteractionResult::Resolved &&
+                   interactionPresentationResult == note::NoteRenderFinalPresentationSnapshotBuildResult::Built &&
+                   interactionPresentation && interactionLineLayout &&
+                   interactionLineLayout->top_px == 0 && interactionLineLayout->bottom_px == 16 &&
+                   interactionSourceLine.runs.size() == interactionPlacementLine.runs.size() &&
+                   interactionPresentation->SurfaceAt({0}) == note::NoteRenderFinalSurfaceKind::StructuredPaint &&
+                   interactionPresentation->SurfaceAt({1}) == note::NoteRenderFinalSurfaceKind::RawPaint &&
+                   hitResult == note::NoteRenderFinalPresentationInteractionResult::Resolved &&
                    interactionHit.line_index == note::LineIndex{0} &&
                    interactionHit.is_link && !interactionHit.is_legacy_link_id &&
                    interactionHit.link_target == L"target-note.md" &&
@@ -3992,9 +4348,11 @@ int main() {
                    interactionSelection.front().top_px == 0 &&
                    interactionSelection.front().bottom_px == 16 &&
                    interactionSelection.front().right_px > interactionSelection.front().left_px &&
-                   horizontalExtentResult == note::NoteRenderFinalInteractionResult::Resolved &&
-                   interactionHorizontalExtent == 93,
-               "one final publication supplies paint, link hit test, caret, selection, and scroll geometry while native-owned rows expose none of its placement");
+                   horizontalExtentResult == note::NoteRenderFinalPresentationInteractionResult::Resolved &&
+                   interactionHorizontalExtent >= static_cast<uint64_t>(
+                       interactionPlacementLine.runs[interactionLinkRun].x_px +
+                       interactionPlacementLine.runs[interactionLinkRun].width_px),
+               "one hybrid presentation supplies structured paint, link hit test, caret, selection, and scroll geometry while the editing row uses raw paint");
     }
 
     {
@@ -4019,6 +4377,12 @@ int main() {
             note::NoteRenderFinalTransaction::BuildComplete(
                 legacyLinkCore, legacyLinkInput, legacyLinkMeasurementProvider,
                 &legacyLinkPublication);
+        std::shared_ptr<const note::NoteRenderFinalPresentationSnapshot> legacyLinkPresentation;
+        if (legacyLinkPublication) {
+            (void)note::NoteRenderFinalPresentationSnapshot::Build(
+                legacyLinkCore, legacyLinkPublication, legacyLinkInput.owner_input,
+                interactionGdiProvider, &legacyLinkPresentation);
+        }
         note::NoteRenderSourceLinePlan legacyLinkSourceLine;
         note::NoteRenderLinePlacement legacyLinkPlacementLine;
         size_t legacyLinkRun = static_cast<size_t>(-1);
@@ -4042,17 +4406,17 @@ int main() {
             legacyLinkRun < legacyLinkPlacementLine.runs.size() &&
             !legacyLinkPlacementLine.runs[legacyLinkRun].boundaries.empty();
         note::NoteRenderFinalHit legacyLinkHit;
-        const note::NoteRenderFinalInteractionResult legacyLinkHitResult =
-            legacyLinkPublication && legacyLinkHasGeometry
-                ? note::HitTestNoteRenderFinalPublication(
-                    *legacyLinkPublication,
+        const auto legacyLinkHitResult =
+            legacyLinkPresentation && legacyLinkHasGeometry
+                ? note::HitTestNoteRenderFinalPresentation(
+                    *legacyLinkPresentation,
                     legacyLinkPlacementLine.runs[legacyLinkRun].x_px +
                         legacyLinkPlacementLine.runs[legacyLinkRun].width_px / 2,
                     8, &legacyLinkHit)
-                : note::NoteRenderFinalInteractionResult::InvalidPublication;
+                : note::NoteRenderFinalPresentationInteractionResult::InvalidPresentation;
         Expect(legacyLinkBuildResult == note::NoteRenderFinalCompleteBuildResult::Built &&
                    legacyLinkHasGeometry &&
-                   legacyLinkHitResult == note::NoteRenderFinalInteractionResult::Resolved &&
+                   legacyLinkHitResult == note::NoteRenderFinalPresentationInteractionResult::Resolved &&
                    legacyLinkHit.is_link && legacyLinkHit.is_legacy_link_id &&
                    legacyLinkHit.link_target == L"workspace-jump",
                "a final publication resolves persisted link IDs from its own immutable source run");
@@ -4075,13 +4439,19 @@ int main() {
             note::NoteRenderFinalTransaction::BuildComplete(
                 wrappedInteractionCore, wrappedInteractionInput, wrappedMeasurementProvider,
                 &wrappedPublication);
+        std::shared_ptr<const note::NoteRenderFinalPresentationSnapshot> wrappedPresentation;
+        if (wrappedPublication) {
+            (void)note::NoteRenderFinalPresentationSnapshot::Build(
+                wrappedInteractionCore, wrappedPublication, wrappedInteractionInput.owner_input,
+                interactionGdiProvider, &wrappedPresentation);
+        }
         note::NoteRenderFinalHit wrappedLowerHit;
         note::NoteRenderFinalCaretGeometry wrappedBeforeCaret;
         note::NoteRenderFinalCaretGeometry wrappedAfterCaret;
         std::vector<note::NoteRenderFinalRect> wrappedSelection;
-        const note::NoteRenderFinalInteractionResult wrappedHitResult = wrappedPublication
-            ? note::HitTestNoteRenderFinalPublication(*wrappedPublication, 12, 20, &wrappedLowerHit)
-            : note::NoteRenderFinalInteractionResult::InvalidPublication;
+        const auto wrappedHitResult = wrappedPresentation
+            ? note::HitTestNoteRenderFinalPresentation(*wrappedPresentation, 12, 20, &wrappedLowerHit)
+            : note::NoteRenderFinalPresentationInteractionResult::InvalidPresentation;
         const note::NoteRenderFinalInteractionResult wrappedBeforeCaretResult = wrappedPublication
             ? note::ResolveNoteRenderFinalCaret(
                 *wrappedPublication, {3}, note::NoteRenderFinalCaretAffinity::BeforeVisualWrap,
@@ -4097,7 +4467,7 @@ int main() {
             : note::NoteRenderFinalInteractionResult::InvalidPublication;
         Expect(wrappedBuildResult == note::NoteRenderFinalCompleteBuildResult::Built &&
                    wrappedPublication &&
-                   wrappedHitResult == note::NoteRenderFinalInteractionResult::Resolved &&
+                   wrappedHitResult == note::NoteRenderFinalPresentationInteractionResult::Resolved &&
                    wrappedLowerHit.source_offset == note::Utf16CodeUnitOffset{3} &&
                    wrappedBeforeCaretResult == note::NoteRenderFinalInteractionResult::Resolved &&
                    wrappedBeforeCaret.top_px == 0 && wrappedBeforeCaret.bottom_px == 16 &&
@@ -4109,6 +4479,11 @@ int main() {
                    wrappedSelection[1].top_px == 16 && wrappedSelection[1].bottom_px == 32,
                "wrapped final placement supplies one shared fragment geometry for paint, click, caret affinity, and selection");
     }
+
+    if (interactionMeasurementDc && interactionPreviousFont) {
+        (void)SelectObject(interactionMeasurementDc, interactionPreviousFont);
+    }
+    if (interactionMeasurementDc) (void)DeleteDC(interactionMeasurementDc);
 
     {
         HDC gdiMeasurementDc = CreateCompatibleDC(nullptr);
@@ -4127,6 +4502,15 @@ int main() {
         gdiInput.owner_input.editor_text_core_current = true;
         gdiInput.owner_input.visible_lines = {{0}, {gdiWrappedCore.logical_line_count()}};
         note::NoteRenderFinalGdiMeasurementProvider gdiProvider(gdiMeasurementDc);
+        const auto whitespace = note_whitespace_test::Run(gdiMeasurementDc);
+        Expect(whitespace.cases == 24 && whitespace.display,
+               "structured paragraphs preserve leading whitespace without duplicating Markdown structural indentation");
+        Expect(whitespace.cases == 24 && whitespace.geometry,
+               "leading spaces and tabs have measured placement width, including whitespace-only lines");
+        Expect(whitespace.cases == 24 && whitespace.editing,
+               "leading whitespace hit positions survive raw editing handoff without changing source");
+        Expect(whitespace.reuse,
+               "body edits beside visible leading whitespace reuse unaffected rows and match a complete build");
         const bool gdiStableRawAllocations = [&]() {
             struct Fixture {
                 const wchar_t* text;
@@ -4502,7 +4886,7 @@ int main() {
                     publication->syntax()->source_line_map(), {index});
                 if (!location || location->start != location->content_end) continue;
                 note::NoteRenderFinalCaretGeometry caret, hybridCaret;
-                note::NoteRenderFinalHit hit, hybridHit;
+                note::NoteRenderFinalHit hybridHit;
                 note::NoteRenderFinalGdiPaintOptions options;
                 options.caret = location->start;
                 const auto layout = note::NoteRenderLineLayoutMap::LineAt(
@@ -4513,9 +4897,6 @@ int main() {
                     note::ResolveNoteRenderFinalPresentationEditorCaret(
                         *presentation, location->start, &hybridCaret) ==
                         note::NoteRenderFinalPresentationInteractionResult::Resolved &&
-                    note::HitTestNoteRenderFinalPublication(
-                        *publication, 5, layout->top_px, &hit) ==
-                        note::NoteRenderFinalInteractionResult::Resolved &&
                     note::HitTestNoteRenderFinalPresentationEditor(
                         *presentation, 5, layout->top_px, &hybridHit) ==
                         note::NoteRenderFinalPresentationInteractionResult::Resolved;
@@ -4523,7 +4904,7 @@ int main() {
                     caret.source_offset == location->start && caret.x_px == 0 &&
                     caret.top_px == layout->top_px && caret.bottom_px == layout->bottom_px &&
                     hybridCaret.top_px == caret.top_px && hybridCaret.bottom_px == caret.bottom_px &&
-                    hit.source_offset == location->start && hybridHit.source_offset == location->start &&
+                    hybridHit.source_offset == location->start &&
                     note::NoteRenderFinalGdiPainter::Paint(gdiMeasurementDc, *publication, options) &&
                     note::NoteRenderFinalGdiPainter::Paint(gdiMeasurementDc, *presentation, options);
             }
@@ -4741,7 +5122,7 @@ int main() {
                        block.kind == note::NoteRenderAtomicGroupKind::BlockMath,
                    "deleting surrounding plain text reclassifies tag math as a block instead of retaining an old inline layout");
         }
-        // This is the exact mixed Markdown/TeX fixture used by the UI
+        // This is a representative mixed Markdown/TeX fixture for the UI
         // automation.  Keep its final GDI route here: a structural build is
         // insufficient if the published hybrid frame cannot paint the same
         // content with the current selection and caret.
@@ -4855,11 +5236,66 @@ int main() {
             note::NoteRenderSourceLinePlan opening;
             containerGeometry = containerGeometry &&
                 gdiContainerPublication->source_plan()->ResolveLine({1}, &opening) &&
-                std::all_of(opening.runs.begin(), opening.runs.end(), [](const auto& run) {
-                    return run.kind == note::NoteRenderSourceRunKind::HiddenSyntax;
-                });
+                std::count_if(opening.runs.begin(), opening.runs.end(), [](const auto& run) {
+                    return run.kind == note::NoteRenderSourceRunKind::Text &&
+                        std::any_of(run.styles.begin(), run.styles.end(), [](const auto& style) {
+                            return style.kind == note::StyleKind::Bold;
+                        });
+                }) == 1;
         }
-        Expect(containerGeometry, "final GDI container surfaces retain nested depths, hidden fences, tables and block math");
+        Expect(containerGeometry, "final GDI container surfaces retain nested depths, opening titles, tables and block math");
+        {
+            const std::wstring text = L"::: 間欠跛行\r\n休んだり歩いたりを繰り返す歩行です。\r\n:::\r\n"
+                L"```cpp title=\"example.cpp\"\r\nint x;\r\n```\r\n"
+                L"::: note title=\"長い題名が折り返されても配置は同じ\"\r\n本文\r\n:::\r\n";
+            note::NoteTextCore core;
+            core.Reset(note::NoteId{1051}, note::NoteMetadata{L"titles.md", L"titles"}, text, 451, 3);
+            auto input = gdiContainerInput;
+            input.layout_key.client_width_px = 140;
+            input.owner_input.visible_lines = {{0}, {core.logical_line_count()}};
+            std::shared_ptr<const note::NoteRenderFinalPublication> frame;
+            bool valid = note::NoteRenderFinalTransaction::BuildComplete(core, input, gdiProvider, &frame) ==
+                note::NoteRenderFinalCompleteBuildResult::Built;
+            std::shared_ptr<const note::NoteRenderFinalPresentationSnapshot> structured;
+            valid = valid && note::NoteRenderFinalPresentationSnapshot::Build(
+                core, frame, input.owner_input, gdiProvider, &structured) ==
+                    note::NoteRenderFinalPresentationSnapshotBuildResult::Built;
+            const std::array<std::pair<size_t, std::wstring>, 3> cases{{
+                {0, L"間欠跛行"}, {3, L"example.cpp"}, {6, L"長い題名が折り返されても配置は同じ"}}};
+            for (const auto& item : cases) {
+                if (!valid) break;
+                note::NoteRenderSourceLinePlan source;
+                note::NoteRenderLinePlacement placed;
+                valid = frame->source_plan()->ResolveLine({item.first}, &source) &&
+                    frame->placement()->ResolveLine({item.first}, &placed);
+                size_t found = 0;
+                for (size_t index = 0; valid && index < source.runs.size(); ++index) {
+                    const auto& run = source.runs[index];
+                    if (run.kind == note::NoteRenderSourceRunKind::HiddenSyntax) continue;
+                    note::NoteRenderFinalDisplayRun display;
+                    valid = note::BuildNoteRenderFinalDisplayRun(*frame->source_plan()->syntax(), run, &display) ==
+                        note::NoteRenderFinalDisplayRunBuildResult::Built && display.display_text == item.second;
+                    const auto layout = note::NoteRenderLineLayoutMap::LineAt(frame->layout()->line_layouts(), {item.first});
+                    note::NoteRenderFinalHit hit;
+                    valid = valid && layout && index < placed.runs.size() &&
+                        note::HitTestNoteRenderFinalPresentation(*structured, placed.runs[index].x_px,
+                            layout->top_px, &hit) ==
+                            note::NoteRenderFinalPresentationInteractionResult::Resolved &&
+                        hit.source_offset == run.source_span.start;
+                    ++found;
+                }
+                valid = valid && found == 1;
+            }
+            auto raw = input.owner_input;
+            raw.caret_line = 0;
+            raw.requested_editor_lines = {{{0}, {1}}};
+            std::shared_ptr<const note::NoteRenderFinalPresentationSnapshot> hybrid;
+            valid = valid && note::NoteRenderFinalPresentationSnapshot::Build(core, frame, raw, gdiProvider, &hybrid) ==
+                note::NoteRenderFinalPresentationSnapshotBuildResult::Built &&
+                hybrid->SurfaceAt({0}) == note::NoteRenderFinalSurfaceKind::RawPaint &&
+                hybrid->SurfaceAt({1}) == note::NoteRenderFinalSurfaceKind::StructuredPaint && core.MatchesRaw(text);
+            Expect(valid, "final GDI titles wrap, hit their exact source, and switch only the editing row to raw without source loss");
+        }
         auto containerRawOwner = gdiContainerInput.owner_input;
         containerRawOwner.caret_line = 2;
         containerRawOwner.requested_editor_lines = {{{2}, {3}}};
@@ -4871,16 +5307,18 @@ int main() {
             gdiContainerRawPresentation->SurfaceAt({2}) == note::NoteRenderFinalSurfaceKind::RawPaint &&
             gdiContainerRawPresentation->SurfaceAt({4}) == note::NoteRenderFinalSurfaceKind::StructuredPaint;
         Expect(containerHybrid, "editing a container body switches only the caret row to raw, not its whole enclosing block");
-        bool containerClickMatchesSource = containerGeometry;
+        bool containerClickMatchesSource = containerHybrid;
         if (containerClickMatchesSource) {
             const auto offset = note::Utf16CodeUnitOffset{containerSource.find(L"plain body") + 3};
             note::NoteRenderFinalCaretGeometry caret;
             note::NoteRenderFinalHit hit;
-            containerClickMatchesSource = note::ResolveNoteRenderFinalCaret(*gdiContainerPublication, offset,
+            containerClickMatchesSource = note::ResolveNoteRenderFinalPresentationCaret(
+                *gdiContainerRawPresentation, offset,
                 note::NoteRenderFinalCaretAffinity::AfterVisualWrap, &caret) ==
-                    note::NoteRenderFinalInteractionResult::Resolved &&
-                note::HitTestNoteRenderFinalPublication(*gdiContainerPublication,
-                    caret.x_px, caret.top_px, &hit) == note::NoteRenderFinalInteractionResult::Resolved &&
+                    note::NoteRenderFinalPresentationInteractionResult::Resolved &&
+                note::HitTestNoteRenderFinalPresentation(*gdiContainerRawPresentation,
+                    caret.x_px, caret.top_px, &hit) ==
+                    note::NoteRenderFinalPresentationInteractionResult::Resolved &&
                 hit.source_offset == offset;
         }
         Expect(containerClickMatchesSource, "container inset geometry shares the exact source position with caret and hit testing");
@@ -5057,13 +5495,10 @@ int main() {
                         boundary->fragment_index >= measured.fragments.size()) return false;
                     const auto& fragment = measured.fragments[boundary->fragment_index];
                     const auto y = layout->top_px + fragment.top_offset_px;
-                    note::NoteRenderFinalHit committedHit;
                     note::NoteRenderFinalHit presentedHit;
-                    if (note::HitTestNoteRenderFinalPublication(*publication, boundary->x_px, y,
-                            &committedHit) != note::NoteRenderFinalInteractionResult::Resolved ||
-                        structured->HitTest(boundary->x_px, y, &presentedHit) !=
+                    if (structured->HitTest(boundary->x_px, y, &presentedHit) !=
                             note::NoteRenderFinalPresentationInteractionResult::Resolved ||
-                        committedHit.source_offset != expected || presentedHit.source_offset != expected) {
+                        presentedHit.source_offset != expected) {
                         return false;
                     }
                     auto rawInput = input;
@@ -5221,14 +5656,11 @@ int main() {
             }
             const auto verify = [&](int x, uint64_t hitY, note::Utf16CodeUnitOffset expected,
                                     bool blank) {
-                note::NoteRenderFinalHit committed, presented;
-                return note::HitTestNoteRenderFinalPublication(*publication, x, hitY, &committed) ==
-                        note::NoteRenderFinalInteractionResult::Resolved &&
-                    frame->HitTest(x, hitY, &presented) ==
+                note::NoteRenderFinalHit presented;
+                return frame->HitTest(x, hitY, &presented) ==
                         note::NoteRenderFinalPresentationInteractionResult::Resolved &&
-                    committed.source_offset == expected && presented.source_offset == expected &&
-                    (!blank || (!committed.is_link && !presented.is_link &&
-                                committed.link_target.empty() && presented.link_target.empty()));
+                    presented.source_offset == expected &&
+                    (!blank || (!presented.is_link && presented.link_target.empty()));
             };
             if (!verify(glyphEnd->x_px, y, beforeClose, false) ||
                 !verify(right, y, beforeClose, false) ||
@@ -7077,6 +7509,38 @@ int main() {
                    textCore.MatchesRaw(L"z"),
                "text core rejects mutation when its monotonic revision is exhausted");
 
+        {
+            note::NoteTextCore historySource;
+            historySource.Reset(note::NoteId{0x5489ULL}, metadata, L"a", 1, 0);
+            const auto beforeHistoryEdit = historySource.TakeSnapshot();
+            const note::TextEdit historyEdit{1, 0, L"b"};
+            const auto applyResult = historySource.Apply(historyEdit);
+            const auto afterHistoryEdit = historySource.TakeSnapshot();
+            note::NoteHistory snapshotHistory;
+            const note::NoteTextSelection beforeSelection{{1}, {1}};
+            const note::NoteTextSelection afterSelection{{2}, {2}};
+            Expect(!snapshotHistory.Record({}, afterHistoryEdit, L"", historyEdit,
+                       beforeSelection, afterSelection, note::NoteHistoryOperationKind::Other, 100) &&
+                       !snapshotHistory.CanUndo(),
+                   "history rejects a missing before snapshot without creating an entry");
+            Expect(!snapshotHistory.Record(beforeHistoryEdit, {}, L"", historyEdit,
+                       beforeSelection, afterSelection, note::NoteHistoryOperationKind::Other, 100) &&
+                       !snapshotHistory.CanUndo(),
+                   "history rejects a missing after snapshot without creating an entry");
+            const bool recorded = snapshotHistory.Record(beforeHistoryEdit, afterHistoryEdit,
+                L"", historyEdit, beforeSelection, afterSelection, note::NoteHistoryOperationKind::Other, 100);
+            const auto replay = snapshotHistory.PeekUndo();
+            Expect(applyResult == note::NoteTextApplyResult::Applied && recorded && replay &&
+                       replay->expected_snapshot.valid() && historySource.MatchesSnapshot(replay->expected_snapshot),
+                   "history publishes the exact canonical snapshot for a valid record");
+            const bool rejected = !snapshotHistory.Record(beforeHistoryEdit, {}, L"", historyEdit,
+                beforeSelection, afterSelection, note::NoteHistoryOperationKind::Other, 200);
+            const auto retainedReplay = snapshotHistory.PeekUndo();
+            Expect(rejected && retainedReplay &&
+                       historySource.MatchesSnapshot(retainedReplay->expected_snapshot),
+                   "rejected history input preserves the existing replay snapshot");
+        }
+
         note::LocalNoteKernel historyKernel;
         historyKernel.Reset(note::NoteId{78}, metadata, L"", 1, 0,
                             note::NoteContentKind::PlainText);
@@ -7156,31 +7620,6 @@ int main() {
                    lineHistoryKernel.text_core().MatchesRaw(L""),
                "history undo stops at a line boundary before resuming on the preceding line");
 
-        note::NoteTextCoreRegistry textCores;
-        note::NoteTextCore* firstCore = textCores.Reset(
-            note::NoteId{101}, metadata, L"first", 1, 0);
-        note::NoteTextCore* sameCore = textCores.Find(note::NoteId{101});
-        note::NoteTextCore* secondCore = textCores.Reset(
-            note::NoteId{202}, metadata, L"second", 1, 0);
-        Expect(firstCore && firstCore == sameCore && secondCore &&
-                   secondCore != firstCore && textCores.size() == 2,
-               "text core registry shares one stable core per note id");
-        const note::ViewIdentity firstView{
-            note::ViewId{301}, note::NoteId{101}, 1};
-        const note::ViewIdentity reboundView{
-            note::ViewId{301}, note::NoteId{202}, 2};
-        Expect(textCores.FindForView(firstView) == firstCore &&
-                   textCores.FindForView(reboundView) == secondCore &&
-                   textCores.FindForView(note::ViewIdentity{}) == nullptr,
-               "text core registry resolves the model from a valid view binding");
-        note::NoteTextCore* resetFirst = textCores.Reset(
-            note::NoteId{101}, metadata, L"updated", 2, 1);
-        Expect(resetFirst == firstCore && firstCore->MatchesRaw(L"updated") &&
-                   firstCore->persistence_revision() == 1,
-               "text core registry resets one note without replacing its shared instance");
-        Expect(textCores.Forget(note::NoteId{202}) &&
-                   !textCores.Find(note::NoteId{202}) && textCores.size() == 1,
-               "text core registry forgets one note without affecting other cores");
     }
 
     {
@@ -7738,9 +8177,10 @@ int main() {
             const auto& doc = parsed.second;
             const auto* underline = FindStyleSpan(doc, note::StyleKind::Underline);
             note::MarkupExportConfig config;
+            const auto exported = note::ExportMarkdown(parsed.first, doc, config);
             Expect(doc.math_spans.size() == 1 && underline && underline->span.end.value == raw.rfind(L"</>") &&
                        FindDiagnostic(doc, L"NOTE-W-MATH-TAG-ATTRIBUTE") &&
-                       note::ExportMarkdown(parsed.first, doc, config).find("future='a>b'") != std::string::npos,
+                       exported && exported->find("future='a>b'") != std::string::npos,
                    "math owns its closer without closing outer underline and preserves unknown quoted attributes in Markdown");
         }
         for (const std::wstring raw : {L"text <math display=block>x</> tail",
@@ -8143,6 +8583,24 @@ int main() {
     }
 
     {
+        const std::vector<std::wstring> trailingInputs{
+            L"<math>x</>TAIL", L"<math>x</math>TAIL", L"$$x$$TAIL",
+            L"\\[x\\]TAIL", L"\\(x\\)TAIL", L"$x$TAIL"};
+        bool rejectsEveryTail = true;
+        for (const auto& input : trailingInputs) {
+            const auto analysis = note::AnalyzeMathBoxInput(input);
+            rejectsEveryTail = rejectsEveryTail && analysis.has_wrapping &&
+                analysis.trimmed_text == input && analysis.content_text == L"x" &&
+                HasError(analysis, L"NOTE-E-MATHBOX-TRAILING-TEXT");
+        }
+        Expect(rejectsEveryTail,
+               "MathBox reports non-whitespace text after every supported closing wrapper");
+        const auto whitespace = note::AnalyzeMathBoxInput(L"$$x$$ \n");
+        Expect(whitespace.content_text == L"x" && whitespace.diagnostics.empty(),
+               "MathBox permits whitespace outside a closed wrapper");
+    }
+
+    {
         auto node = mathrender::Parse(L"q = \\dfrac{a+b}{c}");
         Expect(ContainsMathNodeType(node.get(), mathrender::Node::Type::Fraction),
                "math renderer parses \\dfrac as a fraction node");
@@ -8225,10 +8683,10 @@ int main() {
         config.includeTitleHeading = true;
         config.shiftHeadingLevels = true;
         config.title = L"Doc";
-        const std::string out = note::ExportMarkdown(parsed.first, parsed.second, config);
-        Expect(out.find("# Doc") != std::string::npos, "markdown export can prepend title heading");
-        Expect(out.find("## Head") != std::string::npos, "markdown export can shift existing headings");
-        Expect(out.find("[math]") != std::string::npos, "markdown export can replace math spans");
+        const auto out = note::ExportMarkdown(parsed.first, parsed.second, config);
+        Expect(out && out->find("# Doc") != std::string::npos, "markdown export can prepend title heading");
+        Expect(out && out->find("## Head") != std::string::npos, "markdown export can shift existing headings");
+        Expect(out && out->find("[math]") != std::string::npos, "markdown export can replace math spans");
     }
 
     {
@@ -8271,8 +8729,8 @@ int main() {
 
         note::MarkupExportConfig markdownConfig{};
         markdownConfig.format = note::ExportMarkupFormat::Markdown;
-        const std::string markdown = note::ExportMarkdown(parsed.first, parsed.second, markdownConfig);
-        Expect(markdown.find("escaped \\* mark, escaped \\\\ slash") != std::string::npos,
+        const auto markdown = note::ExportMarkdown(parsed.first, parsed.second, markdownConfig);
+        Expect(markdown && markdown->find("escaped \\* mark, escaped \\\\ slash") != std::string::npos,
                "Markdown export preserves raw U+005C escape source");
     }
 
@@ -8346,6 +8804,189 @@ int main() {
         Expect(out.find("<title>&lt;Unsafe&gt;</title>") != std::string::npos,
                "html export escapes title text");
     }
+
+#ifdef NOTE_MD4C_FATAL_FAULT_TEST
+    {
+        const auto model = note::MakeNoteTextModel({L"fault.clro", L""},
+            L"# 見出し\n\n::: note\n<ｃ=red>**strong**</>\n\n|a|b|\n|---|---|\n|x|y|\n:::", 7);
+        note_md4c_fault_reset(0);
+        const auto baseline = note::ParseNoteDocument(model);
+        const size_t allocations = note_md4c_fault_allocations();
+        bool rejected = baseline.uses_clro_fullwidth_markdown && !baseline.blocks.empty() && allocations > 1;
+        size_t injected = 0;
+        for (size_t failAt = 1; failAt <= allocations; ++failAt) {
+            note_md4c_fault_reset(failAt);
+            const auto document = note::ParseNoteDocument(model);
+            if (note_md4c_fault_injected()) {
+                ++injected;
+                rejected = rejected && note::NoteDocumentHasFatalParseFailure(document) &&
+                    document.blocks.empty() && document.inlines.empty() && document.style_spans.empty() && document.math_spans.empty();
+            }
+            rejected = rejected && note_md4c_fault_live() == 0;
+            note_md4c_fault_reset(failAt);
+            const auto output = note::ExportMarkdown(model, baseline, {});
+            rejected = rejected && note_md4c_fault_injected() && !output && note_md4c_fault_live() == 0;
+        }
+        note_md4c_fault_reset(0);
+        Expect(rejected && injected == allocations,
+               "CLRO preliminary/final parses and normalized export fail closed and release every injected allocation failure");
+    }
+    {
+        std::wstring raw = L"# Heading\n<link=jump>target</>\n\n";
+        for (int i = 0; i < 80; ++i) {
+            raw += L"**strong** and [local link](target.md)\n\n";
+            raw += L"| left | right |\n| --- | --- |\n| a | b |\n\n";
+        }
+        const note::NoteMetadata metadata{L"fault.md", L"fault"};
+        const note::NoteTextModel model = note::MakeNoteTextModel(metadata, raw, 7);
+        note_md4c_fault_reset(0);
+        const note::NoteDocument baseline = note::ParseNoteDocument(model);
+        const size_t allocations = note_md4c_fault_allocations();
+        Expect(!baseline.blocks.empty() && allocations > 7 && note_md4c_fault_live() == 0,
+               "fault fixture parses completely before MD4C injection");
+
+        bool rejectedEveryFailure = true;
+        size_t injectedCases = 0;
+        for (size_t failAt = 1; failAt <= allocations; ++failAt) {
+            note_md4c_fault_reset(failAt);
+            const note::NoteDocument parsed = note::ParseNoteDocument(model);
+            if (note_md4c_fault_injected()) {
+                ++injectedCases;
+                rejectedEveryFailure = rejectedEveryFailure &&
+                    note::NoteDocumentHasFatalParseFailure(parsed) &&
+                    parsed.blocks.empty() && parsed.inlines.empty() &&
+                    parsed.style_spans.empty() && parsed.math_spans.empty();
+            }
+            rejectedEveryFailure = rejectedEveryFailure && note_md4c_fault_live() == 0;
+        }
+        Expect(injectedCases == allocations && rejectedEveryFailure && model.raw == raw,
+               "all injected MD4C failures discard partial structure and preserve source");
+
+        note::NoteTextCore core;
+        core.Reset(note::NoteId{971}, metadata, raw, 7, 1);
+        std::shared_ptr<const note::NoteSyntaxSnapshot> snapshot;
+        note_md4c_fault_reset(0);
+        Expect(note::NoteSyntaxSnapshot::BuildFromTextCore(
+                   core, note::NoteContentKind::Markdown, &snapshot) ==
+                   note::NoteSyntaxSnapshotBuildResult::Built && snapshot,
+               "fault fixture has a complete syntax snapshot to preserve");
+        const auto completeSnapshot = snapshot;
+        note_md4c_fault_reset(7);
+        const auto failedBuild = note::NoteSyntaxSnapshot::BuildFromTextCore(
+            core, note::NoteContentKind::Markdown, &snapshot);
+        Expect(note_md4c_fault_injected() && note_md4c_fault_live() == 0 &&
+                   failedBuild == note::NoteSyntaxSnapshotBuildResult::ParseFailure &&
+                   snapshot == completeSnapshot && core.model().raw == raw,
+               "fatal MD4C failure cannot replace a complete final syntax snapshot");
+
+        note::LocalNoteKernel kernel;
+        kernel.Reset(note::NoteId{972}, metadata, raw, 7, 1,
+                     note::NoteContentKind::Markdown);
+        const note::NoteTextSelection beforeEdit{{raw.size()}, {raw.size()}};
+        const note::NoteTextSelection afterEdit{{raw.size() + 1}, {raw.size() + 1}};
+        const auto applied = kernel.ApplyUserEdit(
+            note::TextEdit{raw.size(), 0, L"X"}, beforeEdit, afterEdit,
+            note::NoteHistoryOperationKind::Typing, 100, true);
+        const std::wstring editedRaw = raw + L"X";
+        Expect(applied.applied() && kernel.CanUndo() &&
+                   kernel.text_core().model().raw == editedRaw,
+               "canonical user edit and undo history exist before parse failure");
+        note_md4c_fault_reset(7);
+        const auto failedRefresh = kernel.RefreshDerived();
+        Expect(note_md4c_fault_injected() && note_md4c_fault_live() == 0 &&
+                   !failedRefresh.current && !kernel.CanReadSyntax() &&
+                   !kernel.CanReadSemantic() && kernel.CanUndo() &&
+                   kernel.text_core().model().raw == editedRaw,
+               "fatal MD4C failure withdraws derived state without losing text or undo history");
+        const auto failedActiveIndex = note::BuildWorkspaceNoteIndexFromKernel(
+            note::BuildSnapshotIdentity(note::NoteId{972},
+                                        kernel.text_core().content_revision(), 1,
+                                        TestWideToUTF8(editedRaw)),
+            L"fault.md", kernel);
+        Expect(!failedActiveIndex.valid,
+               "active Kernel index rejects a fatal derived refresh");
+        const auto undone = kernel.Undo(true);
+        Expect(undone.has_value() && undone->applied() && kernel.CanRedo() &&
+                   kernel.text_core().model().raw == raw,
+               "undo still restores the original text after fatal parse failure");
+        const auto redone = kernel.Redo(true);
+        Expect(redone.has_value() && redone->applied() &&
+                   kernel.text_core().model().raw == editedRaw,
+               "redo still restores the edit after fatal parse failure");
+        note_md4c_fault_reset(0);
+        const auto recovered = kernel.RefreshDerived();
+        Expect(recovered.current && kernel.CanReadSyntax() && kernel.CanReadSemantic() &&
+                   kernel.text_core().model().raw == editedRaw,
+               "full syntax refresh recovers after transient MD4C allocation failure");
+
+        note_md4c_fault_reset(7);
+        const auto index = note::BuildWorkspaceNoteIndex(
+            note::SnapshotIdentity{note::NoteId{973}, 7, 1, 0},
+            L"fault.md", metadata, raw, note::NoteContentKind::Markdown);
+        Expect(note_md4c_fault_injected() && note_md4c_fault_live() == 0 && !index.valid,
+               "workspace index cannot certify fatal MD4C partial syntax");
+        const note::NoteQueryGroups query{{L"strong"}};
+        note::MarkupExportConfig htmlConfig;
+        htmlConfig.format = note::ExportMarkupFormat::Html;
+        Expect(note::SearchWorkspaceNoteIndex(index, query).empty() &&
+                   !note::FindWorkspaceLinkIdAnchor(index, L"jump") &&
+                   !note::ExportWorkspaceHtml(index, htmlConfig).ok,
+               "failed workspace index cannot feed search, link navigation, or export");
+
+        note::NoteWorkspaceService service;
+        const auto serviceIdentity = note::BuildSnapshotIdentity(
+            note::NoteId{975}, 7, 1, TestWideToUTF8(raw));
+        note_md4c_fault_reset(7);
+        const auto failedServiceIndex = service.ResolveIndex(
+            serviceIdentity, L"fault.md", metadata, raw,
+            note::NoteContentKind::Markdown);
+        Expect(note_md4c_fault_injected() && !failedServiceIndex &&
+                   service.index_cache_size() == 0,
+               "workspace service does not cache a failed derived index");
+        note_md4c_fault_reset(0);
+        const auto recoveredServiceIndex = service.ResolveIndex(
+            serviceIdentity, L"fault.md", metadata, raw,
+            note::NoteContentKind::Markdown);
+        Expect(recoveredServiceIndex && recoveredServiceIndex->valid &&
+                   service.index_cache_size() == 1 &&
+                   !note::SearchWorkspaceNoteIndex(*recoveredServiceIndex, query).empty() &&
+                   note::FindWorkspaceLinkIdAnchor(*recoveredServiceIndex, L"jump") &&
+                   note::ExportWorkspaceHtml(*recoveredServiceIndex, htmlConfig).ok,
+               "workspace service rebuilds searchable, navigable, exportable index after recovery");
+
+        note_md4c_fault_reset(0);
+        const auto validIndex = note::BuildWorkspaceNoteIndex(
+            note::BuildSnapshotIdentity(note::NoteId{974}, 7, 1, TestWideToUTF8(raw)),
+            L"fault.md", metadata, raw, note::NoteContentKind::Markdown);
+        Expect(validIndex.valid && note::WorkspaceNoteIndexCanExport(validIndex),
+               "fault fixture can export its completed workspace index");
+        note_md4c_fault_reset(7);
+        const auto fatalDocument = note::ParseNoteDocument(model);
+        note_md4c_fault_reset(0);
+        note::MarkupExportConfig rawConfig;
+        const auto directExport = note::ExportMarkdown(model, fatalDocument, rawConfig);
+        auto taintedIndex = validIndex;
+        taintedIndex.document.diagnostics = fatalDocument.diagnostics;
+        Expect(note::NoteDocumentHasFatalParseFailure(fatalDocument) && !directExport &&
+                   !note::WorkspaceNoteIndexCanExport(taintedIndex),
+               "fatal source document is rejected by direct and workspace export boundaries");
+        note::MarkupExportConfig markdownConfig;
+        markdownConfig.includeTitleHeading = true;
+        markdownConfig.title = L"Export title";
+        note_md4c_fault_reset(7);
+        const auto failedExport = note::ExportWorkspaceMarkdown(validIndex, markdownConfig);
+        Expect(note_md4c_fault_injected() && note_md4c_fault_live() == 0 &&
+                   !failedExport.ok && failedExport.bytes.empty() && validIndex.valid &&
+                   validIndex.text_model.raw == raw,
+               "fatal heading rewrite parse cannot publish partial Markdown export");
+        note_md4c_fault_reset(0);
+        const auto recoveredExport = note::ExportWorkspaceMarkdown(validIndex, markdownConfig);
+        Expect(recoveredExport.ok &&
+                   recoveredExport.bytes.find("# Export title") != std::string::npos,
+               "Markdown export recovers after transient heading rewrite parse failure");
+        note_md4c_fault_reset(0);
+    }
+#endif
 
     std::cout << "Summary: failed=" << g_failed << "\n";
     return g_failed == 0 ? 0 : 1;

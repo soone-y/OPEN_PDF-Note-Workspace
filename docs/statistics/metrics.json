@@ -1,0 +1,6487 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "63f1f0fd8bce8a36708731acd8c2b372ed8ef9b5362427a97872427bc60b826b": {
+      "id": "public-aggregate/v1",
+      "toolset_sha256": "cf6b1ad40fce117b5b00e2ddb378f9107f7a7849257c378a6942bb4ec430b720",
+      "classification": "public-path-groups/v1",
+      "lines": "splitlines/v1; supported-source-classification-is-approximate",
+      "lexical": "physical-utf8-byte-partition/v2; lexical-items-not-clang-tokens",
+      "scope": "exported-input-minus-statistics-and-generated-pages/v1"
+    },
+    "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483": {
+      "id": "public-aggregate/v1",
+      "toolset_sha256": "ebeb38c3f1389c0bb15e4962d24b331f939294d49f4b36fe33bb320e5bd5695b",
+      "classification": "public-path-groups/v2",
+      "lines": "splitlines/v1; supported-source-classification-is-approximate",
+      "lexical": "physical-utf8-byte-partition/v2; lexical-items-not-clang-tokens",
+      "scope": "exported-input-minus-statistics-and-generated-pages/v1"
+    }
+  },
+  "current": {
+    "release": {
+      "version": "0.9.555",
+      "published_at": null,
+      "public_url": null,
+      "tag": null
+    },
+    "measurement": {
+      "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+      "measured_at": "2026-11-03T11:36:24.992067+00:00",
+      "source_kind": "release-candidate",
+      "input_sha256": "bcf45933d3a2f797609b1fd5e92cab9d6614f2d00c130dcb507cdeb1aa52c782",
+      "allowlist_sha256": "5252cf9699718c7dd25466c67e39cc32a4f0a6539a28527dc3740618cbd030c7"
+    },
+    "inventory": {
+      "status": "COMPLETE",
+      "files": 950,
+      "size_bytes": 26604760,
+      "text_files": 901,
+      "binary_files": 49,
+      "lines": 348907,
+      "blank_lines": 24188,
+      "legacy_text_files": 1,
+      "groups": {
+        "application": {
+          "files": 391,
+          "size_bytes": 8655834
+        },
+        "tests_source": {
+          "files": 175,
+          "size_bytes": 2997309
+        },
+        "tests_fixture": {
+          "files": 27,
+          "size_bytes": 2041250
+        },
+        "tools": {
+          "files": 115,
+          "size_bytes": 1382008
+        },
+        "dependencies": {
+          "files": 73,
+          "size_bytes": 9022019
+        },
+        "dependency_patches": {
+          "files": 52,
+          "size_bytes": 106045
+        },
+        "documents": {
+          "files": 65,
+          "size_bytes": 521424
+        },
+        "resources": {
+          "files": 11,
+          "size_bytes": 996345
+        },
+        "samples": {
+          "files": 35,
+          "size_bytes": 874112
+        },
+        "metadata": {
+          "files": 6,
+          "size_bytes": 8414
+        },
+        "generated": {
+          "files": 0,
+          "size_bytes": 0
+        }
+      },
+      "extensions": {
+        ".a": {
+          "files": 1,
+          "size_bytes": 59852
+        },
+        ".c": {
+          "files": 3,
+          "size_bytes": 272039
+        },
+        ".cjs": {
+          "files": 1,
+          "size_bytes": 13634
+        },
+        ".clro": {
+          "files": 9,
+          "size_bytes": 7057
+        },
+        ".clrop": {
+          "files": 3,
+          "size_bytes": 3971
+        },
+        ".cmake": {
+          "files": 1,
+          "size_bytes": 1705
+        },
+        ".cpp": {
+          "files": 173,
+          "size_bytes": 5800988
+        },
+        ".cppinc": {
+          "files": 62,
+          "size_bytes": 3512512
+        },
+        ".csv": {
+          "files": 2,
+          "size_bytes": 735
+        },
+        ".dll": {
+          "files": 2,
+          "size_bytes": 7707136
+        },
+        ".docx": {
+          "files": 6,
+          "size_bytes": 300607
+        },
+        ".gn": {
+          "files": 1,
+          "size_bytes": 216
+        },
+        ".h": {
+          "files": 252,
+          "size_bytes": 1401747
+        },
+        ".html": {
+          "files": 4,
+          "size_bytes": 34705
+        },
+        ".ico": {
+          "files": 3,
+          "size_bytes": 105651
+        },
+        ".ijg": {
+          "files": 1,
+          "size_bytes": 13059
+        },
+        ".inc": {
+          "files": 1,
+          "size_bytes": 57164
+        },
+        ".input": {
+          "files": 3,
+          "size_bytes": 5931
+        },
+        ".json": {
+          "files": 24,
+          "size_bytes": 1565722
+        },
+        ".lib": {
+          "files": 1,
+          "size_bytes": 115006
+        },
+        ".manifest": {
+          "files": 1,
+          "size_bytes": 377
+        },
+        ".md": {
+          "files": 72,
+          "size_bytes": 606616
+        },
+        ".patch": {
+          "files": 52,
+          "size_bytes": 106045
+        },
+        ".pdf": {
+          "files": 9,
+          "size_bytes": 511768
+        },
+        ".png": {
+          "files": 5,
+          "size_bytes": 794937
+        },
+        ".pptx": {
+          "files": 6,
+          "size_bytes": 607298
+        },
+        ".ps1": {
+          "files": 77,
+          "size_bytes": 518416
+        },
+        ".py": {
+          "files": 126,
+          "size_bytes": 2193737
+        },
+        ".rc": {
+          "files": 1,
+          "size_bytes": 298
+        },
+        ".tex": {
+          "files": 2,
+          "size_bytes": 1617
+        },
+        ".tsv": {
+          "files": 2,
+          "size_bytes": 12924
+        },
+        ".txt": {
+          "files": 31,
+          "size_bytes": 166856
+        },
+        ".xcf": {
+          "files": 1,
+          "size_bytes": 70116
+        },
+        ".xml": {
+          "files": 1,
+          "size_bytes": 26329
+        },
+        ".yml": {
+          "files": 2,
+          "size_bytes": 2185
+        },
+        "<none>": {
+          "files": 9,
+          "size_bytes": 5804
+        }
+      }
+    },
+    "source_scale": {
+      "status": "COMPLETE",
+      "application": {
+        "files": 391,
+        "text_files": 391,
+        "size_bytes": 8655834,
+        "lines": 190794,
+        "blank_lines": 12261,
+        "code_lines": 171725,
+        "comment_lines": 6808,
+        "classified_files": 391
+      },
+      "tests_source": {
+        "files": 175,
+        "text_files": 175,
+        "size_bytes": 2997309,
+        "lines": 50570,
+        "blank_lines": 2862,
+        "code_lines": 47002,
+        "comment_lines": 706,
+        "classified_files": 175
+      },
+      "tools": {
+        "files": 115,
+        "text_files": 115,
+        "size_bytes": 1382008,
+        "lines": 30656,
+        "blank_lines": 3234,
+        "code_lines": 25105,
+        "comment_lines": 324,
+        "classified_files": 100
+      },
+      "src_tree": {
+        "files": 407,
+        "size_bytes": 8936268
+      }
+    },
+    "lexical": {
+      "status": "COMPLETE",
+      "files": 391,
+      "source_bytes": 8655834,
+      "bytes": {
+        "code": 5610770,
+        "literal": 483396,
+        "comment": 404916,
+        "whitespace": 2156752
+      },
+      "literal_bytes": {
+        "string": 410192,
+        "character": 14038,
+        "number": 59166,
+        "other": 0
+      },
+      "literal_counts": {
+        "string": 17817,
+        "character": 3286,
+        "number": 33360,
+        "other": 0
+      },
+      "lexical_items": 1578491,
+      "string_payload_source_bytes": 360557,
+      "string_purpose": "UNCLASSIFIED"
+    },
+    "localization": {
+      "status": "COMPLETE",
+      "ja_ids": 3170,
+      "en_ids": 3170,
+      "en_missing_ids": 0
+    },
+    "packages": [
+      {
+        "status": "COMPLETE",
+        "locale": "en",
+        "edition": "full",
+        "sha256": "b5e1ed5dc9bb7b620f8378478bfc158505824846d7aaae96bb94120fc96d2b3b",
+        "zip_bytes": 123531707,
+        "unpacked_bytes": 330180484,
+        "file_count": 1431,
+        "basis": "archive-bytes"
+      },
+      {
+        "status": "COMPLETE",
+        "locale": "en",
+        "edition": "lite",
+        "sha256": "0b4cf860295fa211ed6355756b34ef3eb0e66487c022ae41c9dc11bfc54caa7c",
+        "zip_bytes": 15049823,
+        "unpacked_bytes": 34605775,
+        "file_count": 92,
+        "basis": "archive-bytes"
+      },
+      {
+        "status": "COMPLETE",
+        "locale": "ja",
+        "edition": "full",
+        "sha256": "3b558daaab9d40793f820e28088a975a1c39163b924e8de87390f63a6dc01656",
+        "zip_bytes": 124152853,
+        "unpacked_bytes": 330774273,
+        "file_count": 1434,
+        "basis": "archive-bytes"
+      },
+      {
+        "status": "COMPLETE",
+        "locale": "ja",
+        "edition": "lite",
+        "sha256": "ad7474ea5daeca674c9b8e0ea9ddd6194ed3e67fdda45364850fc669e6443f3a",
+        "zip_bytes": 15658787,
+        "unpacked_bytes": 35187183,
+        "file_count": 95,
+        "basis": "archive-bytes"
+      }
+    ],
+    "verification": {
+      "status": "UNMEASURED",
+      "reason": "no-bound-public-verification-receipt",
+      "suites": []
+    },
+    "supplemental": {
+      "status": "UNMEASURED",
+      "reason": "not-selected"
+    },
+    "record_id": "cc9b84374c895d6c28b3a76f693d9ac0bfa6d0499940f8cd45579bb158673199",
+    "comparison": {
+      "status": "NOT_APPLICABLE",
+      "reason": "profile-or-source-kind-changed",
+      "baseline_record_id": "84c8bdbf89ebe2fd84722286b36d42c666eabd9377bd2433dccd016add6354de",
+      "application_lines_delta": null
+    }
+  },
+  "history": [
+    {
+      "release": {
+        "version": "0.9.008",
+        "published_at": "2026-07-27T16:14:06Z",
+        "public_url": "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases/tag/v0.9.008",
+        "tag": "v0.9.008"
+      },
+      "measurement": {
+        "profile_key": "63f1f0fd8bce8a36708731acd8c2b372ed8ef9b5362427a97872427bc60b826b",
+        "measured_at": "2026-10-26T23:02:28.414903+00:00",
+        "source_kind": "public-snapshot",
+        "input_sha256": "66204af38f10f474725457544229184e7dc293a3d51b26f6815bcd44a9cea4a1",
+        "allowlist_sha256": null
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 443,
+        "size_bytes": 17291187,
+        "text_files": 413,
+        "binary_files": 30,
+        "lines": 179716,
+        "blank_lines": 15909,
+        "legacy_text_files": 2,
+        "groups": {
+          "application": {
+            "files": 197,
+            "size_bytes": 5396950
+          },
+          "tests_source": {
+            "files": 33,
+            "size_bytes": 504433
+          },
+          "tests_fixture": {
+            "files": 15,
+            "size_bytes": 729076
+          },
+          "tools": {
+            "files": 44,
+            "size_bytes": 595222
+          },
+          "dependencies": {
+            "files": 55,
+            "size_bytes": 6801732
+          },
+          "dependency_patches": {
+            "files": 37,
+            "size_bytes": 83430
+          },
+          "documents": {
+            "files": 30,
+            "size_bytes": 172702
+          },
+          "resources": {
+            "files": 8,
+            "size_bytes": 485223
+          },
+          "samples": {
+            "files": 19,
+            "size_bytes": 2516818
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 5601
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".c": {
+            "files": 1,
+            "size_bytes": 235085
+          },
+          ".clro": {
+            "files": 1,
+            "size_bytes": 1649
+          },
+          ".clrop": {
+            "files": 1,
+            "size_bytes": 2921
+          },
+          ".cpp": {
+            "files": 72,
+            "size_bytes": 2963080
+          },
+          ".cppinc": {
+            "files": 45,
+            "size_bytes": 2312466
+          },
+          ".csv": {
+            "files": 1,
+            "size_bytes": 168
+          },
+          ".dll": {
+            "files": 1,
+            "size_bytes": 5786624
+          },
+          ".docx": {
+            "files": 4,
+            "size_bytes": 225087
+          },
+          ".h": {
+            "files": 115,
+            "size_bytes": 691492
+          },
+          ".html": {
+            "files": 1,
+            "size_bytes": 3329
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 1,
+            "size_bytes": 1190
+          },
+          ".json": {
+            "files": 7,
+            "size_bytes": 29104
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 110864
+          },
+          ".md": {
+            "files": 39,
+            "size_bytes": 236817
+          },
+          ".patch": {
+            "files": 37,
+            "size_bytes": 83430
+          },
+          ".pdf": {
+            "files": 5,
+            "size_bytes": 2158662
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 4,
+            "size_bytes": 357623
+          },
+          ".ps1": {
+            "files": 29,
+            "size_bytes": 265906
+          },
+          ".py": {
+            "files": 30,
+            "size_bytes": 619512
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 270
+          },
+          ".tex": {
+            "files": 1,
+            "size_bytes": 412
+          },
+          ".txt": {
+            "files": 27,
+            "size_bytes": 140825
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 24387
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2170
+          },
+          "<none>": {
+            "files": 5,
+            "size_bytes": 2120
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 197,
+          "text_files": 197,
+          "size_bytes": 5396950,
+          "lines": 127337,
+          "blank_lines": 9412,
+          "code_lines": 115757,
+          "comment_lines": 2168,
+          "classified_files": 197
+        },
+        "tests_source": {
+          "files": 33,
+          "text_files": 33,
+          "size_bytes": 504433,
+          "lines": 10502,
+          "blank_lines": 1086,
+          "code_lines": 9384,
+          "comment_lines": 32,
+          "classified_files": 33
+        },
+        "tools": {
+          "files": 44,
+          "text_files": 44,
+          "size_bytes": 595222,
+          "lines": 15526,
+          "blank_lines": 1914,
+          "code_lines": 12945,
+          "comment_lines": 129,
+          "classified_files": 37
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 197,
+        "source_bytes": 5396950,
+        "bytes": {
+          "code": 3411035,
+          "literal": 378525,
+          "comment": 93385,
+          "whitespace": 1514005
+        },
+        "literal_bytes": {
+          "string": 327916,
+          "character": 10252,
+          "number": 40357,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 13757,
+          "character": 2389,
+          "number": 22816,
+          "other": 0
+        },
+        "lexical_items": 996057,
+        "string_payload_source_bytes": 289144,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "full",
+          "sha256": "9f6ca1079ea67184b4ef871834d86559b5ef138a2e6ef5580c1f788f659c4105",
+          "zip_bytes": 122311059,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "lite",
+          "sha256": "a8fb0d4fcc474fbd0786fa62c9306ec766909eca12ee9a2129c18e5671c30956",
+          "zip_bytes": 14228936,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        }
+      ],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "379da4668b523b7176761fd705f86610c9a15b66920e836070de09187965c6b3",
+      "comparison": {
+        "status": "UNMEASURED",
+        "reason": "no-compatible-baseline",
+        "baseline_record_id": null
+      }
+    },
+    {
+      "release": {
+        "version": "0.9.014",
+        "published_at": "2026-08-12T15:19:36Z",
+        "public_url": "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases/tag/v0.9.014",
+        "tag": "v0.9.014"
+      },
+      "measurement": {
+        "profile_key": "63f1f0fd8bce8a36708731acd8c2b372ed8ef9b5362427a97872427bc60b826b",
+        "measured_at": "2026-10-26T23:02:28.414903+00:00",
+        "source_kind": "public-snapshot",
+        "input_sha256": "53fe98ebe680337e9bdf9909c06280518e5298ea6439067d4f88b713386e05ce",
+        "allowlist_sha256": null
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 485,
+        "size_bytes": 19622916,
+        "text_files": 449,
+        "binary_files": 36,
+        "lines": 193066,
+        "blank_lines": 17538,
+        "legacy_text_files": 2,
+        "groups": {
+          "application": {
+            "files": 199,
+            "size_bytes": 5646585
+          },
+          "tests_source": {
+            "files": 39,
+            "size_bytes": 574281
+          },
+          "tests_fixture": {
+            "files": 15,
+            "size_bytes": 729076
+          },
+          "tools": {
+            "files": 52,
+            "size_bytes": 694969
+          },
+          "dependencies": {
+            "files": 69,
+            "size_bytes": 8661492
+          },
+          "dependency_patches": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          "documents": {
+            "files": 32,
+            "size_bytes": 215207
+          },
+          "resources": {
+            "files": 8,
+            "size_bytes": 485223
+          },
+          "samples": {
+            "files": 19,
+            "size_bytes": 2516818
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 5586
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".a": {
+            "files": 1,
+            "size_bytes": 59852
+          },
+          ".c": {
+            "files": 1,
+            "size_bytes": 262956
+          },
+          ".clro": {
+            "files": 1,
+            "size_bytes": 1649
+          },
+          ".clrop": {
+            "files": 1,
+            "size_bytes": 2921
+          },
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 74,
+            "size_bytes": 3110729
+          },
+          ".cppinc": {
+            "files": 45,
+            "size_bytes": 2408300
+          },
+          ".csv": {
+            "files": 1,
+            "size_bytes": 168
+          },
+          ".dll": {
+            "files": 2,
+            "size_bytes": 7380480
+          },
+          ".docx": {
+            "files": 4,
+            "size_bytes": 225087
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 119,
+            "size_bytes": 849673
+          },
+          ".html": {
+            "files": 1,
+            "size_bytes": 3346
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 2,
+            "size_bytes": 3704
+          },
+          ".json": {
+            "files": 8,
+            "size_bytes": 35470
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 113344
+          },
+          ".md": {
+            "files": 42,
+            "size_bytes": 289240
+          },
+          ".patch": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          ".pdf": {
+            "files": 5,
+            "size_bytes": 2158662
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 4,
+            "size_bytes": 357623
+          },
+          ".ps1": {
+            "files": 32,
+            "size_bytes": 278333
+          },
+          ".py": {
+            "files": 38,
+            "size_bytes": 754772
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 270
+          },
+          ".tex": {
+            "files": 1,
+            "size_bytes": 412
+          },
+          ".tsv": {
+            "files": 2,
+            "size_bytes": 18726
+          },
+          ".txt": {
+            "files": 28,
+            "size_bytes": 142497
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 26458
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2155
+          },
+          "<none>": {
+            "files": 8,
+            "size_bytes": 4425
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 199,
+          "text_files": 199,
+          "size_bytes": 5646585,
+          "lines": 131948,
+          "blank_lines": 9647,
+          "code_lines": 119681,
+          "comment_lines": 2620,
+          "classified_files": 199
+        },
+        "tests_source": {
+          "files": 39,
+          "text_files": 39,
+          "size_bytes": 574281,
+          "lines": 11878,
+          "blank_lines": 1232,
+          "code_lines": 10612,
+          "comment_lines": 34,
+          "classified_files": 39
+        },
+        "tools": {
+          "files": 52,
+          "text_files": 52,
+          "size_bytes": 694969,
+          "lines": 17615,
+          "blank_lines": 2158,
+          "code_lines": 14684,
+          "comment_lines": 147,
+          "classified_files": 44
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 199,
+        "source_bytes": 5646585,
+        "bytes": {
+          "code": 3554171,
+          "literal": 409496,
+          "comment": 112004,
+          "whitespace": 1570914
+        },
+        "literal_bytes": {
+          "string": 356969,
+          "character": 10526,
+          "number": 42001,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 14443,
+          "character": 2464,
+          "number": 23640,
+          "other": 0
+        },
+        "lexical_items": 1034738,
+        "string_payload_source_bytes": 316221,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "full",
+          "sha256": "c8d98845b07e4e729963dc1bbf7875369f92471a3d95e02a914000670077dffd",
+          "zip_bytes": 122641270,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "lite",
+          "sha256": "af302a7983ebf2ab05025656f271586b79d016121a00b2b4ec0eb6c8914585ed",
+          "zip_bytes": 15098084,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        }
+      ],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "6c2cd1c765bf45ff2f80fd7563195875261df637339fb191241ab25b97334d66",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "379da4668b523b7176761fd705f86610c9a15b66920e836070de09187965c6b3",
+        "application_lines_delta": 4611
+      }
+    },
+    {
+      "release": {
+        "version": "0.9.015",
+        "published_at": "2026-08-14T03:55:37Z",
+        "public_url": "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases/tag/v0.9.015",
+        "tag": "v0.9.015"
+      },
+      "measurement": {
+        "profile_key": "63f1f0fd8bce8a36708731acd8c2b372ed8ef9b5362427a97872427bc60b826b",
+        "measured_at": "2026-10-26T23:02:28.414903+00:00",
+        "source_kind": "public-snapshot",
+        "input_sha256": "79c8b4b31d3feea79a7bd9748e8e6e31d8ecb4d01a91131c517029f9e605cbcb",
+        "allowlist_sha256": null
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 485,
+        "size_bytes": 19630795,
+        "text_files": 449,
+        "binary_files": 36,
+        "lines": 193208,
+        "blank_lines": 17544,
+        "legacy_text_files": 2,
+        "groups": {
+          "application": {
+            "files": 199,
+            "size_bytes": 5653141
+          },
+          "tests_source": {
+            "files": 39,
+            "size_bytes": 575745
+          },
+          "tests_fixture": {
+            "files": 15,
+            "size_bytes": 729076
+          },
+          "tools": {
+            "files": 52,
+            "size_bytes": 694614
+          },
+          "dependencies": {
+            "files": 69,
+            "size_bytes": 8661492
+          },
+          "dependency_patches": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          "documents": {
+            "files": 32,
+            "size_bytes": 215421
+          },
+          "resources": {
+            "files": 8,
+            "size_bytes": 485223
+          },
+          "samples": {
+            "files": 19,
+            "size_bytes": 2516818
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 5586
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".a": {
+            "files": 1,
+            "size_bytes": 59852
+          },
+          ".c": {
+            "files": 1,
+            "size_bytes": 262956
+          },
+          ".clro": {
+            "files": 1,
+            "size_bytes": 1649
+          },
+          ".clrop": {
+            "files": 1,
+            "size_bytes": 2921
+          },
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 74,
+            "size_bytes": 3117285
+          },
+          ".cppinc": {
+            "files": 45,
+            "size_bytes": 2408300
+          },
+          ".csv": {
+            "files": 1,
+            "size_bytes": 168
+          },
+          ".dll": {
+            "files": 2,
+            "size_bytes": 7380480
+          },
+          ".docx": {
+            "files": 4,
+            "size_bytes": 225087
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 119,
+            "size_bytes": 849673
+          },
+          ".html": {
+            "files": 1,
+            "size_bytes": 3346
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 2,
+            "size_bytes": 3704
+          },
+          ".json": {
+            "files": 8,
+            "size_bytes": 35552
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 113344
+          },
+          ".md": {
+            "files": 42,
+            "size_bytes": 289454
+          },
+          ".patch": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          ".pdf": {
+            "files": 5,
+            "size_bytes": 2158662
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 4,
+            "size_bytes": 357623
+          },
+          ".ps1": {
+            "files": 32,
+            "size_bytes": 278333
+          },
+          ".py": {
+            "files": 38,
+            "size_bytes": 755799
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 270
+          },
+          ".tex": {
+            "files": 1,
+            "size_bytes": 412
+          },
+          ".tsv": {
+            "files": 2,
+            "size_bytes": 18726
+          },
+          ".txt": {
+            "files": 28,
+            "size_bytes": 142497
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 26458
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2155
+          },
+          "<none>": {
+            "files": 8,
+            "size_bytes": 4425
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 199,
+          "text_files": 199,
+          "size_bytes": 5653141,
+          "lines": 132065,
+          "blank_lines": 9656,
+          "code_lines": 119789,
+          "comment_lines": 2620,
+          "classified_files": 199
+        },
+        "tests_source": {
+          "files": 39,
+          "text_files": 39,
+          "size_bytes": 575745,
+          "lines": 11903,
+          "blank_lines": 1234,
+          "code_lines": 10635,
+          "comment_lines": 34,
+          "classified_files": 39
+        },
+        "tools": {
+          "files": 52,
+          "text_files": 52,
+          "size_bytes": 694614,
+          "lines": 17611,
+          "blank_lines": 2151,
+          "code_lines": 14684,
+          "comment_lines": 149,
+          "classified_files": 44
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 199,
+        "source_bytes": 5653141,
+        "bytes": {
+          "code": 3557852,
+          "literal": 411040,
+          "comment": 112004,
+          "whitespace": 1572245
+        },
+        "literal_bytes": {
+          "string": 358316,
+          "character": 10630,
+          "number": 42094,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 14477,
+          "character": 2494,
+          "number": 23694,
+          "other": 0
+        },
+        "lexical_items": 1036069,
+        "string_payload_source_bytes": 317475,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "full",
+          "sha256": "c3f88f6397f9f52a0aa95c3b03e7f4b4f22b9d1d296362acc711009474ad78ff",
+          "zip_bytes": 122645757,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "lite",
+          "sha256": "cd749ba8b1a63d72d9d886ff22ab72ebe6761bda684bef1fc898527a9e8e1aa9",
+          "zip_bytes": 15101781,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        }
+      ],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "277fb4a65d19f2bca3f8ced715d57ac54cef114129a5de7f39b51a290540daab",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "6c2cd1c765bf45ff2f80fd7563195875261df637339fb191241ab25b97334d66",
+        "application_lines_delta": 117
+      }
+    },
+    {
+      "release": {
+        "version": "0.9.502",
+        "published_at": "2026-08-24T15:09:45Z",
+        "public_url": "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases/tag/v0.9.502",
+        "tag": "v0.9.502"
+      },
+      "measurement": {
+        "profile_key": "63f1f0fd8bce8a36708731acd8c2b372ed8ef9b5362427a97872427bc60b826b",
+        "measured_at": "2026-10-26T23:02:28.414903+00:00",
+        "source_kind": "public-snapshot",
+        "input_sha256": "23b255b7e9788e358906639c0649c432a560908d9ac51275816d40493115a4a5",
+        "allowlist_sha256": null
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 533,
+        "size_bytes": 20219752,
+        "text_files": 493,
+        "binary_files": 40,
+        "lines": 200826,
+        "blank_lines": 18168,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 201,
+            "size_bytes": 5666209
+          },
+          "tests_source": {
+            "files": 40,
+            "size_bytes": 620671
+          },
+          "tests_fixture": {
+            "files": 15,
+            "size_bytes": 729076
+          },
+          "tools": {
+            "files": 60,
+            "size_bytes": 787223
+          },
+          "dependencies": {
+            "files": 69,
+            "size_bytes": 8661492
+          },
+          "dependency_patches": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          "documents": {
+            "files": 46,
+            "size_bytes": 239795
+          },
+          "resources": {
+            "files": 10,
+            "size_bytes": 786456
+          },
+          "samples": {
+            "files": 40,
+            "size_bytes": 2627120
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 8031
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".a": {
+            "files": 1,
+            "size_bytes": 59852
+          },
+          ".c": {
+            "files": 1,
+            "size_bytes": 262956
+          },
+          ".clro": {
+            "files": 3,
+            "size_bytes": 2999
+          },
+          ".clrop": {
+            "files": 1,
+            "size_bytes": 2921
+          },
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 75,
+            "size_bytes": 3133150
+          },
+          ".cppinc": {
+            "files": 45,
+            "size_bytes": 2402312
+          },
+          ".csv": {
+            "files": 1,
+            "size_bytes": 168
+          },
+          ".dll": {
+            "files": 2,
+            "size_bytes": 7380480
+          },
+          ".docx": {
+            "files": 4,
+            "size_bytes": 225087
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 120,
+            "size_bytes": 853805
+          },
+          ".html": {
+            "files": 6,
+            "size_bytes": 17790
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 2,
+            "size_bytes": 3704
+          },
+          ".json": {
+            "files": 12,
+            "size_bytes": 337235
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 113344
+          },
+          ".md": {
+            "files": 61,
+            "size_bytes": 319409
+          },
+          ".patch": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          ".pdf": {
+            "files": 9,
+            "size_bytes": 2260310
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 4,
+            "size_bytes": 357623
+          },
+          ".ps1": {
+            "files": 32,
+            "size_bytes": 301305
+          },
+          ".py": {
+            "files": 46,
+            "size_bytes": 858570
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 270
+          },
+          ".tex": {
+            "files": 1,
+            "size_bytes": 412
+          },
+          ".tsv": {
+            "files": 2,
+            "size_bytes": 18726
+          },
+          ".txt": {
+            "files": 32,
+            "size_bytes": 142651
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 26330
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2254
+          },
+          "<none>": {
+            "files": 8,
+            "size_bytes": 4425
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 201,
+          "text_files": 201,
+          "size_bytes": 5666209,
+          "lines": 133149,
+          "blank_lines": 9797,
+          "code_lines": 120652,
+          "comment_lines": 2700,
+          "classified_files": 201
+        },
+        "tests_source": {
+          "files": 40,
+          "text_files": 40,
+          "size_bytes": 620671,
+          "lines": 12681,
+          "blank_lines": 1333,
+          "code_lines": 11314,
+          "comment_lines": 34,
+          "classified_files": 40
+        },
+        "tools": {
+          "files": 60,
+          "text_files": 60,
+          "size_bytes": 787223,
+          "lines": 19413,
+          "blank_lines": 2343,
+          "code_lines": 16139,
+          "comment_lines": 179,
+          "classified_files": 51
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 201,
+        "source_bytes": 5666209,
+        "bytes": {
+          "code": 3649425,
+          "literal": 331416,
+          "comment": 117706,
+          "whitespace": 1567662
+        },
+        "literal_bytes": {
+          "string": 278107,
+          "character": 10681,
+          "number": 42628,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 12824,
+          "character": 2507,
+          "number": 24033,
+          "other": 0
+        },
+        "lexical_items": 1059428,
+        "string_payload_source_bytes": 242278,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "COMPLETE",
+        "ja_ids": 1979,
+        "en_ids": 1979,
+        "en_missing_ids": 0
+      },
+      "packages": [
+        {
+          "status": "PARTIAL",
+          "locale": "en",
+          "edition": "full",
+          "sha256": "ec5d8d6b336b64f048101366971fed119e94dac8af12915d2c90bec0a308cdf8",
+          "zip_bytes": 120744221,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "en",
+          "edition": "lite",
+          "sha256": "9c2e9a4b03b42750b3ab45f4761a6d33135b7883acc4094034a43720fc4044bc",
+          "zip_bytes": 13067446,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "full",
+          "sha256": "7d5002b5783c3cabf1ee52b584f7c1ef5a6c3de922d854487552da65201eeb03",
+          "zip_bytes": 122958871,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "lite",
+          "sha256": "73841d8a437c9390ab68c5a182c577a703187b390421e1ce2bbfddf9641898d5",
+          "zip_bytes": 13669019,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        }
+      ],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "aec2006785b0d7e904324fec1768c3d92d2056bee87b21ebb726b44d4d372ee4",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "277fb4a65d19f2bca3f8ced715d57ac54cef114129a5de7f39b51a290540daab",
+        "application_lines_delta": 1084
+      }
+    },
+    {
+      "release": {
+        "version": "0.9.503",
+        "published_at": "2026-08-24T17:19:38Z",
+        "public_url": "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases/tag/v0.9.503",
+        "tag": "v0.9.503"
+      },
+      "measurement": {
+        "profile_key": "63f1f0fd8bce8a36708731acd8c2b372ed8ef9b5362427a97872427bc60b826b",
+        "measured_at": "2026-10-26T23:02:28.414903+00:00",
+        "source_kind": "public-snapshot",
+        "input_sha256": "23b3c9e21cabffb684137af43f0a0e530f59b9bfc846e5f0deaa5c437d3b8f00",
+        "allowlist_sha256": null
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 533,
+        "size_bytes": 20237275,
+        "text_files": 493,
+        "binary_files": 40,
+        "lines": 201101,
+        "blank_lines": 18185,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 201,
+            "size_bytes": 5667748
+          },
+          "tests_source": {
+            "files": 40,
+            "size_bytes": 624954
+          },
+          "tests_fixture": {
+            "files": 15,
+            "size_bytes": 729076
+          },
+          "tools": {
+            "files": 60,
+            "size_bytes": 798917
+          },
+          "dependencies": {
+            "files": 69,
+            "size_bytes": 8661499
+          },
+          "dependency_patches": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          "documents": {
+            "files": 46,
+            "size_bytes": 239795
+          },
+          "resources": {
+            "files": 10,
+            "size_bytes": 786456
+          },
+          "samples": {
+            "files": 40,
+            "size_bytes": 2627120
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 8031
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".a": {
+            "files": 1,
+            "size_bytes": 59852
+          },
+          ".c": {
+            "files": 1,
+            "size_bytes": 262956
+          },
+          ".clro": {
+            "files": 3,
+            "size_bytes": 2999
+          },
+          ".clrop": {
+            "files": 1,
+            "size_bytes": 2921
+          },
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 75,
+            "size_bytes": 3133251
+          },
+          ".cppinc": {
+            "files": 45,
+            "size_bytes": 2403620
+          },
+          ".csv": {
+            "files": 1,
+            "size_bytes": 168
+          },
+          ".dll": {
+            "files": 2,
+            "size_bytes": 7380480
+          },
+          ".docx": {
+            "files": 4,
+            "size_bytes": 225087
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 120,
+            "size_bytes": 853935
+          },
+          ".html": {
+            "files": 6,
+            "size_bytes": 22998
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 2,
+            "size_bytes": 3704
+          },
+          ".json": {
+            "files": 12,
+            "size_bytes": 337235
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 113344
+          },
+          ".md": {
+            "files": 61,
+            "size_bytes": 319416
+          },
+          ".patch": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          ".pdf": {
+            "files": 9,
+            "size_bytes": 2260310
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 4,
+            "size_bytes": 357623
+          },
+          ".ps1": {
+            "files": 32,
+            "size_bytes": 306452
+          },
+          ".py": {
+            "files": 46,
+            "size_bytes": 864192
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 270
+          },
+          ".tex": {
+            "files": 1,
+            "size_bytes": 412
+          },
+          ".tsv": {
+            "files": 2,
+            "size_bytes": 18726
+          },
+          ".txt": {
+            "files": 32,
+            "size_bytes": 142651
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 26330
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2254
+          },
+          "<none>": {
+            "files": 8,
+            "size_bytes": 4425
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 201,
+          "text_files": 201,
+          "size_bytes": 5667748,
+          "lines": 133182,
+          "blank_lines": 9799,
+          "code_lines": 120680,
+          "comment_lines": 2703,
+          "classified_files": 201
+        },
+        "tests_source": {
+          "files": 40,
+          "text_files": 40,
+          "size_bytes": 624954,
+          "lines": 12743,
+          "blank_lines": 1333,
+          "code_lines": 11376,
+          "comment_lines": 34,
+          "classified_files": 40
+        },
+        "tools": {
+          "files": 60,
+          "text_files": 60,
+          "size_bytes": 798917,
+          "lines": 19593,
+          "blank_lines": 2358,
+          "code_lines": 16276,
+          "comment_lines": 183,
+          "classified_files": 51
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 201,
+        "source_bytes": 5667748,
+        "bytes": {
+          "code": 3650237,
+          "literal": 331490,
+          "comment": 117924,
+          "whitespace": 1568097
+        },
+        "literal_bytes": {
+          "string": 278177,
+          "character": 10681,
+          "number": 42632,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 12826,
+          "character": 2507,
+          "number": 24035,
+          "other": 0
+        },
+        "lexical_items": 1059571,
+        "string_payload_source_bytes": 242342,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "COMPLETE",
+        "ja_ids": 1979,
+        "en_ids": 1979,
+        "en_missing_ids": 0
+      },
+      "packages": [
+        {
+          "status": "PARTIAL",
+          "locale": "en",
+          "edition": "full",
+          "sha256": "44f6f28bfcfc23f77c45aeaa9636fc7287aba7b8986a6733e7410fd6bb74d324",
+          "zip_bytes": 120744524,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "en",
+          "edition": "lite",
+          "sha256": "26c18d9da40e0b37019162c9e2ae08f5a480684923c0c24c5d64fcf1ac47b7c1",
+          "zip_bytes": 13068051,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "full",
+          "sha256": "a8483c29868f78f4a1b0b25c91bcdc219c219836f10736d3f488e9e22475e5d1",
+          "zip_bytes": 122959386,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "lite",
+          "sha256": "153b741a8087bf742c4511a656fa4a7225dea6cac7d60a8942329039fe80f254",
+          "zip_bytes": 13669481,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        }
+      ],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "e8a9b3318c01da49c41c27dcead764330fbb59ef27ba2d3eff7af2ff4c36df9f",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "aec2006785b0d7e904324fec1768c3d92d2056bee87b21ebb726b44d4d372ee4",
+        "application_lines_delta": 33
+      }
+    },
+    {
+      "release": {
+        "version": "0.9.504",
+        "published_at": "2026-08-27T03:56:49Z",
+        "public_url": "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases/tag/v0.9.504",
+        "tag": "v0.9.504"
+      },
+      "measurement": {
+        "profile_key": "63f1f0fd8bce8a36708731acd8c2b372ed8ef9b5362427a97872427bc60b826b",
+        "measured_at": "2026-10-26T23:02:28.414903+00:00",
+        "source_kind": "public-snapshot",
+        "input_sha256": "88422e425031e14bf653fc228574a382f8b1daeb8975af77c552fa9afbbf6657",
+        "allowlist_sha256": null
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 535,
+        "size_bytes": 20257916,
+        "text_files": 495,
+        "binary_files": 40,
+        "lines": 201518,
+        "blank_lines": 18215,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 201,
+            "size_bytes": 5673968
+          },
+          "tests_source": {
+            "files": 42,
+            "size_bytes": 638113
+          },
+          "tests_fixture": {
+            "files": 15,
+            "size_bytes": 729076
+          },
+          "tools": {
+            "files": 60,
+            "size_bytes": 799314
+          },
+          "dependencies": {
+            "files": 69,
+            "size_bytes": 8661499
+          },
+          "dependency_patches": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          "documents": {
+            "files": 46,
+            "size_bytes": 240293
+          },
+          "resources": {
+            "files": 10,
+            "size_bytes": 786823
+          },
+          "samples": {
+            "files": 40,
+            "size_bytes": 2627120
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 8031
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".a": {
+            "files": 1,
+            "size_bytes": 59852
+          },
+          ".c": {
+            "files": 1,
+            "size_bytes": 262956
+          },
+          ".clro": {
+            "files": 3,
+            "size_bytes": 2999
+          },
+          ".clrop": {
+            "files": 1,
+            "size_bytes": 2921
+          },
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 75,
+            "size_bytes": 3134555
+          },
+          ".cppinc": {
+            "files": 45,
+            "size_bytes": 2408536
+          },
+          ".csv": {
+            "files": 1,
+            "size_bytes": 168
+          },
+          ".dll": {
+            "files": 2,
+            "size_bytes": 7380480
+          },
+          ".docx": {
+            "files": 4,
+            "size_bytes": 225087
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 120,
+            "size_bytes": 853935
+          },
+          ".html": {
+            "files": 6,
+            "size_bytes": 22998
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 2,
+            "size_bytes": 3704
+          },
+          ".json": {
+            "files": 12,
+            "size_bytes": 337602
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 113344
+          },
+          ".md": {
+            "files": 61,
+            "size_bytes": 319914
+          },
+          ".patch": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          ".pdf": {
+            "files": 9,
+            "size_bytes": 2260310
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 4,
+            "size_bytes": 357623
+          },
+          ".ps1": {
+            "files": 34,
+            "size_bytes": 319163
+          },
+          ".py": {
+            "files": 46,
+            "size_bytes": 865037
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 270
+          },
+          ".tex": {
+            "files": 1,
+            "size_bytes": 412
+          },
+          ".tsv": {
+            "files": 2,
+            "size_bytes": 18726
+          },
+          ".txt": {
+            "files": 32,
+            "size_bytes": 142651
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 26330
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2254
+          },
+          "<none>": {
+            "files": 8,
+            "size_bytes": 4425
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 201,
+          "text_files": 201,
+          "size_bytes": 5673968,
+          "lines": 133314,
+          "blank_lines": 9802,
+          "code_lines": 120804,
+          "comment_lines": 2708,
+          "classified_files": 201
+        },
+        "tests_source": {
+          "files": 42,
+          "text_files": 42,
+          "size_bytes": 638113,
+          "lines": 13017,
+          "blank_lines": 1359,
+          "code_lines": 11618,
+          "comment_lines": 40,
+          "classified_files": 42
+        },
+        "tools": {
+          "files": 60,
+          "text_files": 60,
+          "size_bytes": 799314,
+          "lines": 19598,
+          "blank_lines": 2358,
+          "code_lines": 16278,
+          "comment_lines": 186,
+          "classified_files": 51
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 201,
+        "source_bytes": 5673968,
+        "bytes": {
+          "code": 3653359,
+          "literal": 332596,
+          "comment": 118307,
+          "whitespace": 1569706
+        },
+        "literal_bytes": {
+          "string": 279270,
+          "character": 10681,
+          "number": 42645,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 12866,
+          "character": 2507,
+          "number": 24048,
+          "other": 0
+        },
+        "lexical_items": 1060385,
+        "string_payload_source_bytes": 243315,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "COMPLETE",
+        "ja_ids": 1981,
+        "en_ids": 1981,
+        "en_missing_ids": 0
+      },
+      "packages": [
+        {
+          "status": "PARTIAL",
+          "locale": "en",
+          "edition": "full",
+          "sha256": "fd806783ed8fe45b64b7781bf0ddb3d69fb3d0bac468b669084f5f1e745090f6",
+          "zip_bytes": 120673238,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "en",
+          "edition": "lite",
+          "sha256": "523163741bd6ed7e85e0d33e76ef4408f3512892133db1445fe7a0ef5aeb5a10",
+          "zip_bytes": 13070749,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "full",
+          "sha256": "41d36654986b42b40cc10d9420febdb8a936e995df85ce26a4f795846490ec67",
+          "zip_bytes": 122888272,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "lite",
+          "sha256": "55e951b65d27800b7311ca842db910fa7e5b36a241062f6c7a258387b5844fee",
+          "zip_bytes": 13671776,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        }
+      ],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "9657038fb9b795a4f0f93be254e29dddc6837e7e94200ab0c1c6e21326354f5b",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "e8a9b3318c01da49c41c27dcead764330fbb59ef27ba2d3eff7af2ff4c36df9f",
+        "application_lines_delta": 132
+      }
+    },
+    {
+      "release": {
+        "version": "0.9.511",
+        "published_at": "2026-09-21T16:54:25Z",
+        "public_url": "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases/tag/v0.9.511",
+        "tag": "v0.9.511"
+      },
+      "measurement": {
+        "profile_key": "63f1f0fd8bce8a36708731acd8c2b372ed8ef9b5362427a97872427bc60b826b",
+        "measured_at": "2026-10-26T23:02:28.414903+00:00",
+        "source_kind": "public-snapshot",
+        "input_sha256": "b94c1491a2c14a37abced3e4a31e02c9eacdfaf0460af7b114f03cc375e7e9ae",
+        "allowlist_sha256": null
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 549,
+        "size_bytes": 19502481,
+        "text_files": 502,
+        "binary_files": 47,
+        "lines": 214054,
+        "blank_lines": 19014,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 206,
+            "size_bytes": 6166566
+          },
+          "tests_source": {
+            "files": 44,
+            "size_bytes": 722080
+          },
+          "tests_fixture": {
+            "files": 19,
+            "size_bytes": 1054269
+          },
+          "tools": {
+            "files": 64,
+            "size_bytes": 842621
+          },
+          "dependencies": {
+            "files": 69,
+            "size_bytes": 8661499
+          },
+          "dependency_patches": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          "documents": {
+            "files": 50,
+            "size_bytes": 261774
+          },
+          "resources": {
+            "files": 10,
+            "size_bytes": 817127
+          },
+          "samples": {
+            "files": 35,
+            "size_bytes": 874835
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 8031
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".a": {
+            "files": 1,
+            "size_bytes": 59852
+          },
+          ".c": {
+            "files": 1,
+            "size_bytes": 262956
+          },
+          ".clro": {
+            "files": 8,
+            "size_bytes": 6667
+          },
+          ".clrop": {
+            "files": 3,
+            "size_bytes": 3974
+          },
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 78,
+            "size_bytes": 3295435
+          },
+          ".cppinc": {
+            "files": 46,
+            "size_bytes": 2734741
+          },
+          ".csv": {
+            "files": 2,
+            "size_bytes": 747
+          },
+          ".dll": {
+            "files": 2,
+            "size_bytes": 7380480
+          },
+          ".docx": {
+            "files": 6,
+            "size_bytes": 300607
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 122,
+            "size_bytes": 883220
+          },
+          ".html": {
+            "files": 4,
+            "size_bytes": 22208
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 2,
+            "size_bytes": 3704
+          },
+          ".json": {
+            "files": 12,
+            "size_bytes": 368771
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 113344
+          },
+          ".md": {
+            "files": 61,
+            "size_bytes": 340558
+          },
+          ".patch": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          ".pdf": {
+            "files": 9,
+            "size_bytes": 512079
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 6,
+            "size_bytes": 607298
+          },
+          ".ps1": {
+            "files": 35,
+            "size_bytes": 324870
+          },
+          ".py": {
+            "files": 50,
+            "size_bytes": 961380
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 270
+          },
+          ".tex": {
+            "files": 2,
+            "size_bytes": 1692
+          },
+          ".tsv": {
+            "files": 2,
+            "size_bytes": 18726
+          },
+          ".txt": {
+            "files": 24,
+            "size_bytes": 134229
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 26330
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2254
+          },
+          "<none>": {
+            "files": 8,
+            "size_bytes": 4425
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 206,
+          "text_files": 206,
+          "size_bytes": 6166566,
+          "lines": 142957,
+          "blank_lines": 10306,
+          "code_lines": 129184,
+          "comment_lines": 3467,
+          "classified_files": 206
+        },
+        "tests_source": {
+          "files": 44,
+          "text_files": 44,
+          "size_bytes": 722080,
+          "lines": 14404,
+          "blank_lines": 1455,
+          "code_lines": 12904,
+          "comment_lines": 45,
+          "classified_files": 44
+        },
+        "tools": {
+          "files": 64,
+          "text_files": 64,
+          "size_bytes": 842621,
+          "lines": 20537,
+          "blank_lines": 2478,
+          "code_lines": 17083,
+          "comment_lines": 196,
+          "classified_files": 55
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 206,
+        "source_bytes": 6166566,
+        "bytes": {
+          "code": 3948555,
+          "literal": 366131,
+          "comment": 161849,
+          "whitespace": 1690031
+        },
+        "literal_bytes": {
+          "string": 309026,
+          "character": 11244,
+          "number": 45861,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 13858,
+          "character": 2645,
+          "number": 25688,
+          "other": 0
+        },
+        "lexical_items": 1138393,
+        "string_payload_source_bytes": 270372,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "COMPLETE",
+        "ja_ids": 2221,
+        "en_ids": 2221,
+        "en_missing_ids": 0
+      },
+      "packages": [
+        {
+          "status": "PARTIAL",
+          "locale": "en",
+          "edition": "full",
+          "sha256": "9588b6503c280e3c2b8a7b8d7aef10e99ad0f47e883f2c906174c190c682cc41",
+          "zip_bytes": 120895156,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "en",
+          "edition": "lite",
+          "sha256": "a4aa90a70b45959262860c980e0c7d31e3a1a03b3c70c8398a698b8aba2fffad",
+          "zip_bytes": 13327594,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "full",
+          "sha256": "ce59170258fd32924d38ab66c97b8adc37d2b9b9b9e5de974ee800c806fc8dd6",
+          "zip_bytes": 121519110,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "lite",
+          "sha256": "5890c0ae1f86127a30b963c1ec263454efe6b59d79d167ad65121dd20c70b234",
+          "zip_bytes": 13938642,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        }
+      ],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "0c507f53958b5cf76323cbfb533139e2883992f4e9d70a743b3349f2184984cb",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "9657038fb9b795a4f0f93be254e29dddc6837e7e94200ab0c1c6e21326354f5b",
+        "application_lines_delta": 9643
+      }
+    },
+    {
+      "release": {
+        "version": "0.9.520",
+        "published_at": "2026-10-06T08:05:20Z",
+        "public_url": "https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases/tag/v0.9.520",
+        "tag": "v0.9.520"
+      },
+      "measurement": {
+        "profile_key": "63f1f0fd8bce8a36708731acd8c2b372ed8ef9b5362427a97872427bc60b826b",
+        "measured_at": "2026-10-26T23:02:28.414903+00:00",
+        "source_kind": "public-snapshot",
+        "input_sha256": "10fb76075356c939ff58929f2dabf0e7878672d4e262fd04cb3b3274f1064e38",
+        "allowlist_sha256": null
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 638,
+        "size_bytes": 21752865,
+        "text_files": 590,
+        "binary_files": 48,
+        "lines": 253258,
+        "blank_lines": 21176,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 268,
+            "size_bytes": 7538330
+          },
+          "tests_source": {
+            "files": 59,
+            "size_bytes": 1370151
+          },
+          "tests_fixture": {
+            "files": 19,
+            "size_bytes": 1054485
+          },
+          "tools": {
+            "files": 65,
+            "size_bytes": 875830
+          },
+          "dependencies": {
+            "files": 69,
+            "size_bytes": 8798424
+          },
+          "dependency_patches": {
+            "files": 51,
+            "size_bytes": 97011
+          },
+          "documents": {
+            "files": 56,
+            "size_bytes": 300660
+          },
+          "resources": {
+            "files": 11,
+            "size_bytes": 835144
+          },
+          "samples": {
+            "files": 35,
+            "size_bytes": 874799
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 8031
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".a": {
+            "files": 1,
+            "size_bytes": 59852
+          },
+          ".c": {
+            "files": 2,
+            "size_bytes": 274612
+          },
+          ".clro": {
+            "files": 8,
+            "size_bytes": 6631
+          },
+          ".clrop": {
+            "files": 3,
+            "size_bytes": 3974
+          },
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 111,
+            "size_bytes": 4595184
+          },
+          ".cppinc": {
+            "files": 47,
+            "size_bytes": 3146015
+          },
+          ".csv": {
+            "files": 2,
+            "size_bytes": 747
+          },
+          ".dll": {
+            "files": 2,
+            "size_bytes": 7501824
+          },
+          ".docx": {
+            "files": 6,
+            "size_bytes": 300607
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 155,
+            "size_bytes": 1058688
+          },
+          ".html": {
+            "files": 4,
+            "size_bytes": 30467
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 3,
+            "size_bytes": 5957
+          },
+          ".json": {
+            "files": 12,
+            "size_bytes": 392358
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 114736
+          },
+          ".manifest": {
+            "files": 1,
+            "size_bytes": 385
+          },
+          ".md": {
+            "files": 67,
+            "size_bytes": 387769
+          },
+          ".patch": {
+            "files": 51,
+            "size_bytes": 97011
+          },
+          ".pdf": {
+            "files": 9,
+            "size_bytes": 512079
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 6,
+            "size_bytes": 607298
+          },
+          ".ps1": {
+            "files": 39,
+            "size_bytes": 342565
+          },
+          ".py": {
+            "files": 56,
+            "size_bytes": 1094312
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 307
+          },
+          ".tex": {
+            "files": 2,
+            "size_bytes": 1692
+          },
+          ".tsv": {
+            "files": 2,
+            "size_bytes": 13018
+          },
+          ".txt": {
+            "files": 23,
+            "size_bytes": 133281
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 26330
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2254
+          },
+          "<none>": {
+            "files": 8,
+            "size_bytes": 4927
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 268,
+          "text_files": 268,
+          "size_bytes": 7538330,
+          "lines": 170588,
+          "blank_lines": 11906,
+          "code_lines": 153114,
+          "comment_lines": 5568,
+          "classified_files": 268
+        },
+        "tests_source": {
+          "files": 59,
+          "text_files": 59,
+          "size_bytes": 1370151,
+          "lines": 24384,
+          "blank_lines": 1777,
+          "code_lines": 22420,
+          "comment_lines": 187,
+          "classified_files": 59
+        },
+        "tools": {
+          "files": 65,
+          "text_files": 65,
+          "size_bytes": 875830,
+          "lines": 21101,
+          "blank_lines": 2529,
+          "code_lines": 17476,
+          "comment_lines": 205,
+          "classified_files": 56
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 268,
+        "source_bytes": 7538330,
+        "bytes": {
+          "code": 4822170,
+          "literal": 388849,
+          "comment": 308507,
+          "whitespace": 2018804
+        },
+        "literal_bytes": {
+          "string": 326694,
+          "character": 12414,
+          "number": 49741,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 14531,
+          "character": 2912,
+          "number": 28284,
+          "other": 0
+        },
+        "lexical_items": 1345949,
+        "string_payload_source_bytes": 286140,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "COMPLETE",
+        "ja_ids": 2334,
+        "en_ids": 2334,
+        "en_missing_ids": 0
+      },
+      "packages": [
+        {
+          "status": "PARTIAL",
+          "locale": "en",
+          "edition": "full",
+          "sha256": "7ff31617a17b23fa7afea523e67477d475616ea07ce803672d1db43cd6451eda",
+          "zip_bytes": 122317221,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "en",
+          "edition": "lite",
+          "sha256": "b3b6f8564a414f99e548cbdffa008b28e9aae94c13ac19052d50aa1259734997",
+          "zip_bytes": 13856420,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "full",
+          "sha256": "f1809cd5e26f3095e5f4459ee3a765702a6ec9c40fe8da2b425dfca4425d754c",
+          "zip_bytes": 122942561,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        },
+        {
+          "status": "PARTIAL",
+          "locale": "ja",
+          "edition": "lite",
+          "sha256": "c2a4acf28ffc3f0565aa8c8098f41380bd99017e43a9070e138870eed4903fe9",
+          "zip_bytes": 14469007,
+          "unpacked_bytes": null,
+          "file_count": null,
+          "basis": "published-asset-metadata"
+        }
+      ],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "84c8bdbf89ebe2fd84722286b36d42c666eabd9377bd2433dccd016add6354de",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "0c507f53958b5cf76323cbfb533139e2883992f4e9d70a743b3349f2184984cb",
+        "application_lines_delta": 27631
+      }
+    }
+  ],
+  "development_history": [
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "e2b3434b5a4e7f66ab67fb450d137bcfe35fca40ed1a64b5fdbde9eeadd8909e",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2025-12-06"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 7,
+        "size_bytes": 30697,
+        "text_files": 7,
+        "binary_files": 0,
+        "lines": 963,
+        "blank_lines": 179,
+        "legacy_text_files": 0,
+        "groups": {
+          "application": {
+            "files": 6,
+            "size_bytes": 30669
+          },
+          "tests_source": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tests_fixture": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tools": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "dependencies": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 1,
+            "size_bytes": 28
+          },
+          "resources": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cpp": {
+            "files": 2,
+            "size_bytes": 10618
+          },
+          ".h": {
+            "files": 1,
+            "size_bytes": 2114
+          },
+          ".md": {
+            "files": 1,
+            "size_bytes": 28
+          },
+          ".py": {
+            "files": 3,
+            "size_bytes": 17937
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 6,
+          "text_files": 6,
+          "size_bytes": 30669,
+          "lines": 961,
+          "blank_lines": 179,
+          "code_lines": 714,
+          "comment_lines": 68,
+          "classified_files": 6
+        },
+        "tests_source": {
+          "files": 0,
+          "text_files": 0,
+          "size_bytes": 0,
+          "lines": 0,
+          "blank_lines": 0,
+          "code_lines": 0,
+          "comment_lines": 0,
+          "classified_files": 0
+        },
+        "tools": {
+          "files": 0,
+          "text_files": 0,
+          "size_bytes": 0,
+          "lines": 0,
+          "blank_lines": 0,
+          "code_lines": 0,
+          "comment_lines": 0,
+          "classified_files": 0
+        },
+        "src_tree": {
+          "files": 6,
+          "size_bytes": 30669
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 3,
+        "source_bytes": 12732,
+        "bytes": {
+          "code": 7084,
+          "literal": 418,
+          "comment": 1593,
+          "whitespace": 3637
+        },
+        "literal_bytes": {
+          "string": 330,
+          "character": 0,
+          "number": 88,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 22,
+          "character": 0,
+          "number": 59,
+          "other": 0
+        },
+        "lexical_items": 2262,
+        "string_payload_source_bytes": 286,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "9cbe89919052a2728efa02742671ab03c99d58d0bb29bcbea0523e5625a85767",
+      "comparison": {
+        "status": "UNMEASURED",
+        "reason": "no-compatible-baseline",
+        "baseline_record_id": null
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "9277948ef3267f06754f460d32e3490fab43e387d7a7792e914a3f837f971559",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2025-12-29"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 71,
+        "size_bytes": 1258571,
+        "text_files": 71,
+        "binary_files": 0,
+        "lines": 30794,
+        "blank_lines": 2196,
+        "legacy_text_files": 0,
+        "groups": {
+          "application": {
+            "files": 69,
+            "size_bytes": 1249946
+          },
+          "tests_source": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tests_fixture": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 2102
+          },
+          "dependencies": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 1,
+            "size_bytes": 6523
+          },
+          "resources": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cpp": {
+            "files": 21,
+            "size_bytes": 788268
+          },
+          ".h": {
+            "files": 48,
+            "size_bytes": 461678
+          },
+          ".md": {
+            "files": 1,
+            "size_bytes": 6523
+          },
+          ".ps1": {
+            "files": 1,
+            "size_bytes": 2102
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 69,
+          "text_files": 69,
+          "size_bytes": 1249946,
+          "lines": 30667,
+          "blank_lines": 2175,
+          "code_lines": 21752,
+          "comment_lines": 6740,
+          "classified_files": 69
+        },
+        "tests_source": {
+          "files": 0,
+          "text_files": 0,
+          "size_bytes": 0,
+          "lines": 0,
+          "blank_lines": 0,
+          "code_lines": 0,
+          "comment_lines": 0,
+          "classified_files": 0
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 2102,
+          "lines": 75,
+          "blank_lines": 11,
+          "code_lines": 62,
+          "comment_lines": 2,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 69,
+          "size_bytes": 1249946
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 69,
+        "source_bytes": 1249946,
+        "bytes": {
+          "code": 598619,
+          "literal": 37613,
+          "comment": 311835,
+          "whitespace": 301879
+        },
+        "literal_bytes": {
+          "string": 26381,
+          "character": 2084,
+          "number": 9148,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 1852,
+          "character": 521,
+          "number": 4911,
+          "other": 0
+        },
+        "lexical_items": 189054,
+        "string_payload_source_bytes": 21559,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "1d3d27234fb6f3621971ccecf1bc81b89e8c198df7e9a4cdf9c2e347bb2ac636",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "9cbe89919052a2728efa02742671ab03c99d58d0bb29bcbea0523e5625a85767",
+        "application_lines_delta": 29706
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "1aba00e96298438e685f54e7aa18adaeb8da5bcbb233f0acb67108012a14922e",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2025-12-30"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 70,
+        "size_bytes": 1258643,
+        "text_files": 70,
+        "binary_files": 0,
+        "lines": 30955,
+        "blank_lines": 2192,
+        "legacy_text_files": 0,
+        "groups": {
+          "application": {
+            "files": 69,
+            "size_bytes": 1256541
+          },
+          "tests_source": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tests_fixture": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 2102
+          },
+          "dependencies": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "resources": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cpp": {
+            "files": 21,
+            "size_bytes": 794731
+          },
+          ".h": {
+            "files": 48,
+            "size_bytes": 461810
+          },
+          ".ps1": {
+            "files": 1,
+            "size_bytes": 2102
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 69,
+          "text_files": 69,
+          "size_bytes": 1256541,
+          "lines": 30880,
+          "blank_lines": 2181,
+          "code_lines": 21959,
+          "comment_lines": 6740,
+          "classified_files": 69
+        },
+        "tests_source": {
+          "files": 0,
+          "text_files": 0,
+          "size_bytes": 0,
+          "lines": 0,
+          "blank_lines": 0,
+          "code_lines": 0,
+          "comment_lines": 0,
+          "classified_files": 0
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 2102,
+          "lines": 75,
+          "blank_lines": 11,
+          "code_lines": 62,
+          "comment_lines": 2,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 69,
+          "size_bytes": 1256541
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 69,
+        "source_bytes": 1256541,
+        "bytes": {
+          "code": 604600,
+          "literal": 37916,
+          "comment": 311806,
+          "whitespace": 302219
+        },
+        "literal_bytes": {
+          "string": 26570,
+          "character": 2098,
+          "number": 9248,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 1871,
+          "character": 524,
+          "number": 4981,
+          "other": 0
+        },
+        "lexical_items": 190748,
+        "string_payload_source_bytes": 21691,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "c9c37af39270d5e47255c6071ec32fd85b3d3f5511e726190f053bfd19c8a384",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "1d3d27234fb6f3621971ccecf1bc81b89e8c198df7e9a4cdf9c2e347bb2ac636",
+        "application_lines_delta": 213
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "c6a0fbeb84138328e82222c7f6da584c432dccbaf5c326fe4edc56db8b10a150",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2025-12-31"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 68,
+        "size_bytes": 1163182,
+        "text_files": 68,
+        "binary_files": 0,
+        "lines": 28298,
+        "blank_lines": 2068,
+        "legacy_text_files": 0,
+        "groups": {
+          "application": {
+            "files": 67,
+            "size_bytes": 1161123
+          },
+          "tests_source": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tests_fixture": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 2059
+          },
+          "dependencies": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "resources": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cpp": {
+            "files": 20,
+            "size_bytes": 699062
+          },
+          ".h": {
+            "files": 47,
+            "size_bytes": 462061
+          },
+          ".ps1": {
+            "files": 1,
+            "size_bytes": 2059
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 67,
+          "text_files": 67,
+          "size_bytes": 1161123,
+          "lines": 28224,
+          "blank_lines": 2057,
+          "code_lines": 19410,
+          "comment_lines": 6757,
+          "classified_files": 67
+        },
+        "tests_source": {
+          "files": 0,
+          "text_files": 0,
+          "size_bytes": 0,
+          "lines": 0,
+          "blank_lines": 0,
+          "code_lines": 0,
+          "comment_lines": 0,
+          "classified_files": 0
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 2059,
+          "lines": 74,
+          "blank_lines": 11,
+          "code_lines": 61,
+          "comment_lines": 2,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 67,
+          "size_bytes": 1161123
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 67,
+        "source_bytes": 1161123,
+        "bytes": {
+          "code": 541754,
+          "literal": 37329,
+          "comment": 312915,
+          "whitespace": 269125
+        },
+        "literal_bytes": {
+          "string": 27087,
+          "character": 1610,
+          "number": 8632,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 1841,
+          "character": 421,
+          "number": 4473,
+          "other": 0
+        },
+        "lexical_items": 168837,
+        "string_payload_source_bytes": 22291,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "8dc3cbe2949ead68bc539f858c08314ea8a3409783dae8f4fe9199e901c8eb0a",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "c9c37af39270d5e47255c6071ec32fd85b3d3f5511e726190f053bfd19c8a384",
+        "application_lines_delta": -2656
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "6d7f961ff157e2b399f5375cf59954cf5822240ba8739ef354cef2c7d6db4b57",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-01-31"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 74,
+        "size_bytes": 1737469,
+        "text_files": 74,
+        "binary_files": 0,
+        "lines": 42009,
+        "blank_lines": 2972,
+        "legacy_text_files": 0,
+        "groups": {
+          "application": {
+            "files": 71,
+            "size_bytes": 1719539
+          },
+          "tests_source": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tests_fixture": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 9211
+          },
+          "dependencies": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 2,
+            "size_bytes": 8719
+          },
+          "resources": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cpp": {
+            "files": 21,
+            "size_bytes": 1235475
+          },
+          ".h": {
+            "files": 50,
+            "size_bytes": 484064
+          },
+          ".md": {
+            "files": 2,
+            "size_bytes": 8719
+          },
+          ".ps1": {
+            "files": 1,
+            "size_bytes": 9211
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 71,
+          "text_files": 71,
+          "size_bytes": 1719539,
+          "lines": 41584,
+          "blank_lines": 2892,
+          "code_lines": 31868,
+          "comment_lines": 6824,
+          "classified_files": 71
+        },
+        "tests_source": {
+          "files": 0,
+          "text_files": 0,
+          "size_bytes": 0,
+          "lines": 0,
+          "blank_lines": 0,
+          "code_lines": 0,
+          "comment_lines": 0,
+          "classified_files": 0
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 9211,
+          "lines": 319,
+          "blank_lines": 51,
+          "code_lines": 268,
+          "comment_lines": 0,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 71,
+          "size_bytes": 1719539
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 71,
+        "source_bytes": 1719539,
+        "bytes": {
+          "code": 910914,
+          "literal": 60279,
+          "comment": 318471,
+          "whitespace": 429875
+        },
+        "literal_bytes": {
+          "string": 43504,
+          "character": 2439,
+          "number": 14336,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 3011,
+          "character": 616,
+          "number": 7709,
+          "other": 0
+        },
+        "lexical_items": 284295,
+        "string_payload_source_bytes": 35521,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "e786300369e3d8e5f0449b13e155f28c60a94b651aad629002abf92f2bf36ea0",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "8dc3cbe2949ead68bc539f858c08314ea8a3409783dae8f4fe9199e901c8eb0a",
+        "application_lines_delta": 13360
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "a2b2daa2f06ca69172befe83facc89c6f8cb6dfd4e597333ea385054a93bfedb",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-02-28"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 95,
+        "size_bytes": 2584648,
+        "text_files": 95,
+        "binary_files": 0,
+        "lines": 61938,
+        "blank_lines": 4659,
+        "legacy_text_files": 0,
+        "groups": {
+          "application": {
+            "files": 87,
+            "size_bytes": 2555437
+          },
+          "tests_source": {
+            "files": 3,
+            "size_bytes": 10309
+          },
+          "tests_fixture": {
+            "files": 1,
+            "size_bytes": 4867
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 380
+          },
+          "dependencies": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 3,
+            "size_bytes": 13655
+          },
+          "resources": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cpp": {
+            "files": 34,
+            "size_bytes": 2046877
+          },
+          ".h": {
+            "files": 54,
+            "size_bytes": 515429
+          },
+          ".md": {
+            "files": 4,
+            "size_bytes": 18522
+          },
+          ".ps1": {
+            "files": 3,
+            "size_bytes": 3820
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 87,
+          "text_files": 87,
+          "size_bytes": 2555437,
+          "lines": 61291,
+          "blank_lines": 4525,
+          "code_lines": 49582,
+          "comment_lines": 7184,
+          "classified_files": 87
+        },
+        "tests_source": {
+          "files": 3,
+          "text_files": 3,
+          "size_bytes": 10309,
+          "lines": 300,
+          "blank_lines": 48,
+          "code_lines": 252,
+          "comment_lines": 0,
+          "classified_files": 3
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 380,
+          "lines": 17,
+          "blank_lines": 3,
+          "code_lines": 14,
+          "comment_lines": 0,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 87,
+          "size_bytes": 2555437
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 87,
+        "source_bytes": 2555437,
+        "bytes": {
+          "code": 1420524,
+          "literal": 115523,
+          "comment": 347049,
+          "whitespace": 672341
+        },
+        "literal_bytes": {
+          "string": 91644,
+          "character": 3831,
+          "number": 20048,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 5011,
+          "character": 941,
+          "number": 11223,
+          "other": 0
+        },
+        "lexical_items": 432770,
+        "string_payload_source_bytes": 77984,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "5564a8a16793127c0b331d00a7236e57cfb2061945c9eec4b1fb425d3678bd03",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "e786300369e3d8e5f0449b13e155f28c60a94b651aad629002abf92f2bf36ea0",
+        "application_lines_delta": 19707
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "1f3d05e77a40f05392d0cca047df375410be0bcd82fcc05c5a29a20a5c3d4fa4",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-03-31"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 150,
+        "size_bytes": 9728332,
+        "text_files": 140,
+        "binary_files": 10,
+        "lines": 85011,
+        "blank_lines": 6663,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 70,
+            "size_bytes": 2938684
+          },
+          "tests_source": {
+            "files": 21,
+            "size_bytes": 82221
+          },
+          "tests_fixture": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 533
+          },
+          "dependencies": {
+            "files": 49,
+            "size_bytes": 6540036
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 4,
+            "size_bytes": 16240
+          },
+          "resources": {
+            "files": 5,
+            "size_bytes": 150618
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 42,
+            "size_bytes": 2856463
+          },
+          ".dll": {
+            "files": 1,
+            "size_bytes": 5786624
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 58,
+            "size_bytes": 533187
+          },
+          ".ico": {
+            "files": 1,
+            "size_bytes": 43453
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 110864
+          },
+          ".md": {
+            "files": 6,
+            "size_bytes": 22816
+          },
+          ".orig": {
+            "files": 1,
+            "size_bytes": 66323
+          },
+          ".png": {
+            "files": 1,
+            "size_bytes": 42431
+          },
+          ".ps1": {
+            "files": 12,
+            "size_bytes": 21820
+          },
+          ".py": {
+            "files": 4,
+            "size_bytes": 34165
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 69
+          },
+          ".txt": {
+            "files": 15,
+            "size_bytes": 129175
+          },
+          ".xcf": {
+            "files": 2,
+            "size_bytes": 64665
+          },
+          "<none>": {
+            "files": 2,
+            "size_bytes": 1227
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 70,
+          "text_files": 70,
+          "size_bytes": 2938684,
+          "lines": 69583,
+          "blank_lines": 4947,
+          "code_lines": 63192,
+          "comment_lines": 1444,
+          "classified_files": 70
+        },
+        "tests_source": {
+          "files": 21,
+          "text_files": 21,
+          "size_bytes": 82221,
+          "lines": 2438,
+          "blank_lines": 363,
+          "code_lines": 2072,
+          "comment_lines": 3,
+          "classified_files": 21
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 533,
+          "lines": 24,
+          "blank_lines": 3,
+          "code_lines": 21,
+          "comment_lines": 0,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 76,
+          "size_bytes": 3092274
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 70,
+        "source_bytes": 2938684,
+        "bytes": {
+          "code": 1853994,
+          "literal": 162673,
+          "comment": 61569,
+          "whitespace": 860448
+        },
+        "literal_bytes": {
+          "string": 132966,
+          "character": 5369,
+          "number": 24338,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 6568,
+          "character": 1305,
+          "number": 14090,
+          "other": 0
+        },
+        "lexical_items": 564884,
+        "string_payload_source_bytes": 114795,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "0a47d147e34a0460fa5fe3e70676a2f11013ee52e14aa660ecf4440baf32fd6a",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "5564a8a16793127c0b331d00a7236e57cfb2061945c9eec4b1fb425d3678bd03",
+        "application_lines_delta": 8292
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "5dcfaf961bbf18054f6df874458eede3e9c4bd0dd315260a7590e04af1636e13",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-04-08"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 154,
+        "size_bytes": 10015190,
+        "text_files": 144,
+        "binary_files": 10,
+        "lines": 91657,
+        "blank_lines": 7037,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 72,
+            "size_bytes": 3210773
+          },
+          "tests_source": {
+            "files": 23,
+            "size_bytes": 95122
+          },
+          "tests_fixture": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 533
+          },
+          "dependencies": {
+            "files": 49,
+            "size_bytes": 6540036
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 4,
+            "size_bytes": 18108
+          },
+          "resources": {
+            "files": 5,
+            "size_bytes": 150618
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 43,
+            "size_bytes": 3090901
+          },
+          ".dll": {
+            "files": 1,
+            "size_bytes": 5786624
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 59,
+            "size_bytes": 540027
+          },
+          ".ico": {
+            "files": 1,
+            "size_bytes": 43453
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 42737
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 110864
+          },
+          ".md": {
+            "files": 6,
+            "size_bytes": 24684
+          },
+          ".orig": {
+            "files": 1,
+            "size_bytes": 66323
+          },
+          ".png": {
+            "files": 1,
+            "size_bytes": 42431
+          },
+          ".ps1": {
+            "files": 13,
+            "size_bytes": 22795
+          },
+          ".py": {
+            "files": 4,
+            "size_bytes": 34165
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 69
+          },
+          ".txt": {
+            "files": 15,
+            "size_bytes": 129175
+          },
+          ".xcf": {
+            "files": 2,
+            "size_bytes": 64665
+          },
+          "<none>": {
+            "files": 2,
+            "size_bytes": 1227
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 72,
+          "text_files": 72,
+          "size_bytes": 3210773,
+          "lines": 75876,
+          "blank_lines": 5288,
+          "code_lines": 69148,
+          "comment_lines": 1440,
+          "classified_files": 72
+        },
+        "tests_source": {
+          "files": 23,
+          "text_files": 23,
+          "size_bytes": 95122,
+          "lines": 2759,
+          "blank_lines": 390,
+          "code_lines": 2366,
+          "comment_lines": 3,
+          "classified_files": 23
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 533,
+          "lines": 24,
+          "blank_lines": 3,
+          "code_lines": 21,
+          "comment_lines": 0,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 78,
+          "size_bytes": 3364363
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 72,
+        "source_bytes": 3210773,
+        "bytes": {
+          "code": 2012283,
+          "literal": 193904,
+          "comment": 61927,
+          "whitespace": 942659
+        },
+        "literal_bytes": {
+          "string": 162400,
+          "character": 5774,
+          "number": 25730,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 7809,
+          "character": 1425,
+          "number": 14821,
+          "other": 0
+        },
+        "lexical_items": 611460,
+        "string_payload_source_bytes": 140589,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "8b12ab8545934fd37eb13a245c0829c65c02cb73c0dd8fb81354340dd09f2f2f",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "0a47d147e34a0460fa5fe3e70676a2f11013ee52e14aa660ecf4440baf32fd6a",
+        "application_lines_delta": 6293
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "1065180fffdd6d6c8dcfeb009f829565e3dcf915158ecabbcdc44604a523de64",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-04-09"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 140,
+        "size_bytes": 9598885,
+        "text_files": 131,
+        "binary_files": 9,
+        "lines": 83648,
+        "blank_lines": 6436,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 70,
+            "size_bytes": 2905826
+          },
+          "tests_source": {
+            "files": 12,
+            "size_bytes": 47266
+          },
+          "tests_fixture": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 533
+          },
+          "dependencies": {
+            "files": 48,
+            "size_bytes": 6473713
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 4,
+            "size_bytes": 20929
+          },
+          "resources": {
+            "files": 5,
+            "size_bytes": 150618
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 38,
+            "size_bytes": 2772026
+          },
+          ".dll": {
+            "files": 1,
+            "size_bytes": 5786624
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 58,
+            "size_bytes": 532758
+          },
+          ".ico": {
+            "files": 1,
+            "size_bytes": 43453
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 42737
+          },
+          ".lib": {
+            "files": 1,
+            "size_bytes": 110864
+          },
+          ".md": {
+            "files": 6,
+            "size_bytes": 27505
+          },
+          ".png": {
+            "files": 1,
+            "size_bytes": 42431
+          },
+          ".ps1": {
+            "files": 7,
+            "size_bytes": 16109
+          },
+          ".py": {
+            "files": 3,
+            "size_bytes": 14192
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 69
+          },
+          ".txt": {
+            "files": 15,
+            "size_bytes": 129175
+          },
+          ".xcf": {
+            "files": 2,
+            "size_bytes": 64665
+          },
+          "<none>": {
+            "files": 2,
+            "size_bytes": 1227
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 70,
+          "text_files": 70,
+          "size_bytes": 2905826,
+          "lines": 69191,
+          "blank_lines": 4853,
+          "code_lines": 62932,
+          "comment_lines": 1406,
+          "classified_files": 70
+        },
+        "tests_source": {
+          "files": 12,
+          "text_files": 12,
+          "size_bytes": 47266,
+          "lines": 1374,
+          "blank_lines": 207,
+          "code_lines": 1165,
+          "comment_lines": 2,
+          "classified_files": 12
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 533,
+          "lines": 24,
+          "blank_lines": 3,
+          "code_lines": 21,
+          "comment_lines": 0,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 76,
+          "size_bytes": 3059416
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 70,
+        "source_bytes": 2905826,
+        "bytes": {
+          "code": 1820460,
+          "literal": 171784,
+          "comment": 58799,
+          "whitespace": 854783
+        },
+        "literal_bytes": {
+          "string": 142794,
+          "character": 5499,
+          "number": 23491,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 6979,
+          "character": 1362,
+          "number": 13584,
+          "other": 0
+        },
+        "lexical_items": 557291,
+        "string_payload_source_bytes": 123442,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "4ea6f5213240dce070b9874f5822ad80ae8bec7c4dbb94b4a0d31fe53d22660e",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "8b12ab8545934fd37eb13a245c0829c65c02cb73c0dd8fb81354340dd09f2f2f",
+        "application_lines_delta": -6685
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "2c83b1d59e983e79362112e1042a009664ca574028b4996e1090621f56d4fcdb",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-04-30"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 136,
+        "size_bytes": 3759192,
+        "text_files": 129,
+        "binary_files": 7,
+        "lines": 85440,
+        "blank_lines": 6925,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 86,
+            "size_bytes": 3291227
+          },
+          "tests_source": {
+            "files": 14,
+            "size_bytes": 82132
+          },
+          "tests_fixture": {
+            "files": 1,
+            "size_bytes": 204
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 533
+          },
+          "dependencies": {
+            "files": 25,
+            "size_bytes": 201989
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 4,
+            "size_bytes": 32489
+          },
+          "resources": {
+            "files": 5,
+            "size_bytes": 150618
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cpp": {
+            "files": 29,
+            "size_bytes": 1878520
+          },
+          ".cppinc": {
+            "files": 27,
+            "size_bytes": 1291451
+          },
+          ".h": {
+            "files": 33,
+            "size_bytes": 123143
+          },
+          ".ico": {
+            "files": 1,
+            "size_bytes": 43453
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 47977
+          },
+          ".md": {
+            "files": 10,
+            "size_bytes": 90778
+          },
+          ".png": {
+            "files": 1,
+            "size_bytes": 42431
+          },
+          ".ps1": {
+            "files": 8,
+            "size_bytes": 18609
+          },
+          ".py": {
+            "files": 3,
+            "size_bytes": 14192
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 69
+          },
+          ".txt": {
+            "files": 16,
+            "size_bytes": 129379
+          },
+          ".xcf": {
+            "files": 2,
+            "size_bytes": 64665
+          },
+          "<none>": {
+            "files": 3,
+            "size_bytes": 1466
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 86,
+          "text_files": 86,
+          "size_bytes": 3291227,
+          "lines": 78699,
+          "blank_lines": 5667,
+          "code_lines": 71609,
+          "comment_lines": 1423,
+          "classified_files": 86
+        },
+        "tests_source": {
+          "files": 14,
+          "text_files": 14,
+          "size_bytes": 82132,
+          "lines": 2202,
+          "blank_lines": 288,
+          "code_lines": 1912,
+          "comment_lines": 2,
+          "classified_files": 14
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 533,
+          "lines": 24,
+          "blank_lines": 3,
+          "code_lines": 21,
+          "comment_lines": 0,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 92,
+          "size_bytes": 3445307
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 86,
+        "source_bytes": 3291227,
+        "bytes": {
+          "code": 2070130,
+          "literal": 200116,
+          "comment": 59454,
+          "whitespace": 961527
+        },
+        "literal_bytes": {
+          "string": 168737,
+          "character": 6401,
+          "number": 24978,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 7792,
+          "character": 1544,
+          "number": 14636,
+          "other": 0
+        },
+        "lexical_items": 623079,
+        "string_payload_source_bytes": 146865,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "f199536ecd1972769aadc241eaf8305a441923fe7fe8cb40ba0e89ffd867a9b7",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "4ea6f5213240dce070b9874f5822ad80ae8bec7c4dbb94b4a0d31fe53d22660e",
+        "application_lines_delta": 9508
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "a064eb306615f58420686735cc662db9d031b79e024b1ae225cf11ad70d323f1",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-05-31"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 192,
+        "size_bytes": 5282041,
+        "text_files": 180,
+        "binary_files": 12,
+        "lines": 101179,
+        "blank_lines": 8306,
+        "legacy_text_files": 2,
+        "groups": {
+          "application": {
+            "files": 127,
+            "size_bytes": 3856770
+          },
+          "tests_source": {
+            "files": 22,
+            "size_bytes": 165597
+          },
+          "tests_fixture": {
+            "files": 6,
+            "size_bytes": 782099
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 533
+          },
+          "dependencies": {
+            "files": 26,
+            "size_bytes": 209852
+          },
+          "dependency_patches": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "documents": {
+            "files": 4,
+            "size_bytes": 43360
+          },
+          "resources": {
+            "files": 6,
+            "size_bytes": 223830
+          },
+          "samples": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cpp": {
+            "files": 45,
+            "size_bytes": 1919212
+          },
+          ".cppinc": {
+            "files": 39,
+            "size_bytes": 1833489
+          },
+          ".exe": {
+            "files": 3,
+            "size_bytes": 780218
+          },
+          ".h": {
+            "files": 51,
+            "size_bytes": 142648
+          },
+          ".ico": {
+            "files": 2,
+            "size_bytes": 74552
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 51193
+          },
+          ".input": {
+            "files": 1,
+            "size_bytes": 1069
+          },
+          ".md": {
+            "files": 11,
+            "size_bytes": 110083
+          },
+          ".png": {
+            "files": 2,
+            "size_bytes": 78962
+          },
+          ".ps1": {
+            "files": 11,
+            "size_bytes": 28275
+          },
+          ".py": {
+            "files": 3,
+            "size_bytes": 48083
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 200
+          },
+          ".txt": {
+            "files": 16,
+            "size_bytes": 129379
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          "<none>": {
+            "files": 4,
+            "size_bytes": 1503
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 127,
+          "text_files": 127,
+          "size_bytes": 3856770,
+          "lines": 92125,
+          "blank_lines": 6711,
+          "code_lines": 83857,
+          "comment_lines": 1557,
+          "classified_files": 127
+        },
+        "tests_source": {
+          "files": 22,
+          "text_files": 22,
+          "size_bytes": 165597,
+          "lines": 4216,
+          "blank_lines": 560,
+          "code_lines": 3639,
+          "comment_lines": 17,
+          "classified_files": 22
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 533,
+          "lines": 24,
+          "blank_lines": 3,
+          "code_lines": 21,
+          "comment_lines": 0,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 134,
+          "size_bytes": 4084062
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 127,
+        "source_bytes": 3856770,
+        "bytes": {
+          "code": 2437492,
+          "literal": 237924,
+          "comment": 67721,
+          "whitespace": 1113633
+        },
+        "literal_bytes": {
+          "string": 201331,
+          "character": 7013,
+          "number": 29580,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 9186,
+          "character": 1693,
+          "number": 17132,
+          "other": 0
+        },
+        "lexical_items": 727394,
+        "string_payload_source_bytes": 175454,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "fe5b9aae1377c83ad643576e7d58790bcdc93cf81bf7cd0c41619b4025f5b4e6",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "f199536ecd1972769aadc241eaf8305a441923fe7fe8cb40ba0e89ffd867a9b7",
+        "application_lines_delta": 13426
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "94256e52002091d91c4ea55338be886a8f92277c7665c8f17644a8cdf7d42510",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-06-30"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 257,
+        "size_bytes": 5564610,
+        "text_files": 248,
+        "binary_files": 9,
+        "lines": 125300,
+        "blank_lines": 10165,
+        "legacy_text_files": 2,
+        "groups": {
+          "application": {
+            "files": 159,
+            "size_bytes": 4715141
+          },
+          "tests_source": {
+            "files": 25,
+            "size_bytes": 305802
+          },
+          "tests_fixture": {
+            "files": 3,
+            "size_bytes": 2471
+          },
+          "tools": {
+            "files": 1,
+            "size_bytes": 1352
+          },
+          "dependencies": {
+            "files": 26,
+            "size_bytes": 213982
+          },
+          "dependency_patches": {
+            "files": 24,
+            "size_bytes": 33217
+          },
+          "documents": {
+            "files": 5,
+            "size_bytes": 66435
+          },
+          "resources": {
+            "files": 6,
+            "size_bytes": 223830
+          },
+          "samples": {
+            "files": 8,
+            "size_bytes": 2380
+          },
+          "metadata": {
+            "files": 0,
+            "size_bytes": 0
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".cpp": {
+            "files": 60,
+            "size_bytes": 2459182
+          },
+          ".cppinc": {
+            "files": 39,
+            "size_bytes": 2167114
+          },
+          ".h": {
+            "files": 69,
+            "size_bytes": 197476
+          },
+          ".ico": {
+            "files": 2,
+            "size_bytes": 74552
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 51441
+          },
+          ".input": {
+            "files": 1,
+            "size_bytes": 1161
+          },
+          ".json": {
+            "files": 1,
+            "size_bytes": 515
+          },
+          ".md": {
+            "files": 13,
+            "size_bytes": 138006
+          },
+          ".patch": {
+            "files": 24,
+            "size_bytes": 33217
+          },
+          ".png": {
+            "files": 2,
+            "size_bytes": 78962
+          },
+          ".ps1": {
+            "files": 13,
+            "size_bytes": 64468
+          },
+          ".py": {
+            "files": 3,
+            "size_bytes": 82614
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 200
+          },
+          ".txt": {
+            "files": 22,
+            "size_bytes": 131024
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          "<none>": {
+            "files": 4,
+            "size_bytes": 1503
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 159,
+          "text_files": 159,
+          "size_bytes": 4715141,
+          "lines": 111996,
+          "blank_lines": 8244,
+          "code_lines": 102116,
+          "comment_lines": 1636,
+          "classified_files": 159
+        },
+        "tests_source": {
+          "files": 25,
+          "text_files": 25,
+          "size_bytes": 305802,
+          "lines": 6993,
+          "blank_lines": 767,
+          "code_lines": 6207,
+          "comment_lines": 19,
+          "classified_files": 25
+        },
+        "tools": {
+          "files": 1,
+          "text_files": 1,
+          "size_bytes": 1352,
+          "lines": 47,
+          "blank_lines": 8,
+          "code_lines": 39,
+          "comment_lines": 0,
+          "classified_files": 1
+        },
+        "src_tree": {
+          "files": 166,
+          "size_bytes": 4942433
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 159,
+        "source_bytes": 4715141,
+        "bytes": {
+          "code": 2992295,
+          "literal": 305728,
+          "comment": 73294,
+          "whitespace": 1343824
+        },
+        "literal_bytes": {
+          "string": 261629,
+          "character": 8939,
+          "number": 35160,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 11404,
+          "character": 2085,
+          "number": 19968,
+          "other": 0
+        },
+        "lexical_items": 878795,
+        "string_payload_source_bytes": 229634,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "258f43b93c7a9085f1fccac116de1f2f240c680d219346d27b6439645accd94b",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "fe5b9aae1377c83ad643576e7d58790bcdc93cf81bf7cd0c41619b4025f5b4e6",
+        "application_lines_delta": 19871
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "1e4c8de448a3710d6c40d8eb9b07071958af3870df5da7581e68ec4c8c02ef0c",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-07-31"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 391,
+        "size_bytes": 10643750,
+        "text_files": 363,
+        "binary_files": 28,
+        "lines": 161833,
+        "blank_lines": 13721,
+        "legacy_text_files": 2,
+        "groups": {
+          "application": {
+            "files": 197,
+            "size_bytes": 5427242
+          },
+          "tests_source": {
+            "files": 33,
+            "size_bytes": 507699
+          },
+          "tests_fixture": {
+            "files": 15,
+            "size_bytes": 729076
+          },
+          "tools": {
+            "files": 46,
+            "size_bytes": 608397
+          },
+          "dependencies": {
+            "files": 27,
+            "size_bytes": 229205
+          },
+          "dependency_patches": {
+            "files": 37,
+            "size_bytes": 83430
+          },
+          "documents": {
+            "files": 5,
+            "size_bytes": 51570
+          },
+          "resources": {
+            "files": 8,
+            "size_bytes": 485223
+          },
+          "samples": {
+            "files": 19,
+            "size_bytes": 2516818
+          },
+          "metadata": {
+            "files": 4,
+            "size_bytes": 5090
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".clro": {
+            "files": 1,
+            "size_bytes": 1649
+          },
+          ".clrop": {
+            "files": 1,
+            "size_bytes": 2921
+          },
+          ".cpp": {
+            "files": 72,
+            "size_bytes": 2974243
+          },
+          ".cppinc": {
+            "files": 45,
+            "size_bytes": 2330724
+          },
+          ".csv": {
+            "files": 1,
+            "size_bytes": 168
+          },
+          ".docx": {
+            "files": 4,
+            "size_bytes": 225087
+          },
+          ".h": {
+            "files": 90,
+            "size_bytes": 252409
+          },
+          ".html": {
+            "files": 1,
+            "size_bytes": 3329
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 1,
+            "size_bytes": 1190
+          },
+          ".json": {
+            "files": 5,
+            "size_bytes": 20509
+          },
+          ".md": {
+            "files": 18,
+            "size_bytes": 150033
+          },
+          ".patch": {
+            "files": 37,
+            "size_bytes": 83430
+          },
+          ".pdf": {
+            "files": 5,
+            "size_bytes": 2158662
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 4,
+            "size_bytes": 357623
+          },
+          ".ps1": {
+            "files": 29,
+            "size_bytes": 266909
+          },
+          ".py": {
+            "files": 32,
+            "size_bytes": 634950
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 270
+          },
+          ".tex": {
+            "files": 1,
+            "size_bytes": 412
+          },
+          ".txt": {
+            "files": 26,
+            "size_bytes": 139459
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2170
+          },
+          "<none>": {
+            "files": 4,
+            "size_bytes": 1609
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 197,
+          "text_files": 197,
+          "size_bytes": 5427242,
+          "lines": 127835,
+          "blank_lines": 9424,
+          "code_lines": 116182,
+          "comment_lines": 2229,
+          "classified_files": 197
+        },
+        "tests_source": {
+          "files": 33,
+          "text_files": 33,
+          "size_bytes": 507699,
+          "lines": 10567,
+          "blank_lines": 1101,
+          "code_lines": 9434,
+          "comment_lines": 32,
+          "classified_files": 33
+        },
+        "tools": {
+          "files": 46,
+          "text_files": 46,
+          "size_bytes": 608397,
+          "lines": 15832,
+          "blank_lines": 1963,
+          "code_lines": 13200,
+          "comment_lines": 131,
+          "classified_files": 39
+        },
+        "src_tree": {
+          "files": 205,
+          "size_bytes": 5685753
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 197,
+        "source_bytes": 5427242,
+        "bytes": {
+          "code": 3428196,
+          "literal": 381032,
+          "comment": 97559,
+          "whitespace": 1520455
+        },
+        "literal_bytes": {
+          "string": 330003,
+          "character": 10277,
+          "number": 40752,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 13870,
+          "character": 2396,
+          "number": 22996,
+          "other": 0
+        },
+        "lexical_items": 1001052,
+        "string_payload_source_bytes": 290910,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "UNMEASURED",
+        "ja_ids": null,
+        "en_ids": null,
+        "en_missing_ids": null
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "700b8eb110e08ca605a79f7212b6a1e18c26d3b86dfaab0e3c0c415c2c008156",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "258f43b93c7a9085f1fccac116de1f2f240c680d219346d27b6439645accd94b",
+        "application_lines_delta": 15839
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "1f35dfd606b2a79656eba74ae102a446066ddf7ae57a10a5e3f465fcf257dac0",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-08-31"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 506,
+        "size_bytes": 12172900,
+        "text_files": 468,
+        "binary_files": 38,
+        "lines": 183948,
+        "blank_lines": 16219,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 202,
+            "size_bytes": 5689012
+          },
+          "tests_source": {
+            "files": 42,
+            "size_bytes": 645961
+          },
+          "tests_fixture": {
+            "files": 15,
+            "size_bytes": 729076
+          },
+          "tools": {
+            "files": 60,
+            "size_bytes": 799970
+          },
+          "dependencies": {
+            "files": 39,
+            "size_bytes": 552613
+          },
+          "dependency_patches": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          "documents": {
+            "files": 46,
+            "size_bytes": 240293
+          },
+          "resources": {
+            "files": 10,
+            "size_bytes": 787456
+          },
+          "samples": {
+            "files": 40,
+            "size_bytes": 2627120
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 7720
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".a": {
+            "files": 1,
+            "size_bytes": 59852
+          },
+          ".clro": {
+            "files": 3,
+            "size_bytes": 2999
+          },
+          ".clrop": {
+            "files": 1,
+            "size_bytes": 2921
+          },
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 76,
+            "size_bytes": 3136333
+          },
+          ".cppinc": {
+            "files": 45,
+            "size_bytes": 2418499
+          },
+          ".csv": {
+            "files": 1,
+            "size_bytes": 168
+          },
+          ".dll": {
+            "files": 1,
+            "size_bytes": 120320
+          },
+          ".docx": {
+            "files": 4,
+            "size_bytes": 225087
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 95,
+            "size_bytes": 404219
+          },
+          ".html": {
+            "files": 6,
+            "size_bytes": 22998
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 2,
+            "size_bytes": 3704
+          },
+          ".json": {
+            "files": 12,
+            "size_bytes": 338306
+          },
+          ".md": {
+            "files": 61,
+            "size_bytes": 319914
+          },
+          ".patch": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          ".pdf": {
+            "files": 9,
+            "size_bytes": 2260310
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 4,
+            "size_bytes": 357623
+          },
+          ".ps1": {
+            "files": 34,
+            "size_bytes": 319757
+          },
+          ".py": {
+            "files": 46,
+            "size_bytes": 872195
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 270
+          },
+          ".tex": {
+            "files": 1,
+            "size_bytes": 412
+          },
+          ".txt": {
+            "files": 32,
+            "size_bytes": 142651
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 26330
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2254
+          },
+          "<none>": {
+            "files": 8,
+            "size_bytes": 4114
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 202,
+          "text_files": 202,
+          "size_bytes": 5689012,
+          "lines": 133633,
+          "blank_lines": 9827,
+          "code_lines": 121068,
+          "comment_lines": 2738,
+          "classified_files": 202
+        },
+        "tests_source": {
+          "files": 42,
+          "text_files": 42,
+          "size_bytes": 645961,
+          "lines": 13155,
+          "blank_lines": 1375,
+          "code_lines": 11740,
+          "comment_lines": 40,
+          "classified_files": 42
+        },
+        "tools": {
+          "files": 60,
+          "text_files": 60,
+          "size_bytes": 799970,
+          "lines": 19613,
+          "blank_lines": 2358,
+          "code_lines": 16292,
+          "comment_lines": 186,
+          "classified_files": 51
+        },
+        "src_tree": {
+          "files": 210,
+          "size_bytes": 5947523
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 202,
+        "source_bytes": 5689012,
+        "bytes": {
+          "code": 3663056,
+          "literal": 333105,
+          "comment": 120298,
+          "whitespace": 1572553
+        },
+        "literal_bytes": {
+          "string": 279734,
+          "character": 10697,
+          "number": 42674,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 12886,
+          "character": 2511,
+          "number": 24067,
+          "other": 0
+        },
+        "lexical_items": 1062351,
+        "string_payload_source_bytes": 243724,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "COMPLETE",
+        "ja_ids": 1986,
+        "en_ids": 1986,
+        "en_missing_ids": 0
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "530c04d1c0384361e299d977f9239a2c25a87a0515585405e89194c110b322cd",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "700b8eb110e08ca605a79f7212b6a1e18c26d3b86dfaab0e3c0c415c2c008156",
+        "application_lines_delta": 5798
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "6aaf5ec1c390da25384aaa0bf744282aa45d75efb025be4264d8e5a3570adf55",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-09-30"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 581,
+        "size_bytes": 12690090,
+        "text_files": 536,
+        "binary_files": 45,
+        "lines": 221629,
+        "blank_lines": 18664,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 260,
+            "size_bytes": 7069614
+          },
+          "tests_source": {
+            "files": 44,
+            "size_bytes": 1069366
+          },
+          "tests_fixture": {
+            "files": 19,
+            "size_bytes": 1054269
+          },
+          "tools": {
+            "files": 65,
+            "size_bytes": 865962
+          },
+          "dependencies": {
+            "files": 39,
+            "size_bytes": 552640
+          },
+          "dependency_patches": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          "documents": {
+            "files": 56,
+            "size_bytes": 283321
+          },
+          "resources": {
+            "files": 11,
+            "size_bytes": 818720
+          },
+          "samples": {
+            "files": 35,
+            "size_bytes": 874799
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 7720
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".a": {
+            "files": 1,
+            "size_bytes": 59852
+          },
+          ".clro": {
+            "files": 8,
+            "size_bytes": 6631
+          },
+          ".clrop": {
+            "files": 3,
+            "size_bytes": 3974
+          },
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 104,
+            "size_bytes": 4268801
+          },
+          ".cppinc": {
+            "files": 47,
+            "size_bytes": 2832858
+          },
+          ".csv": {
+            "files": 2,
+            "size_bytes": 747
+          },
+          ".dll": {
+            "files": 1,
+            "size_bytes": 120320
+          },
+          ".docx": {
+            "files": 6,
+            "size_bytes": 300607
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 124,
+            "size_bytes": 569051
+          },
+          ".html": {
+            "files": 4,
+            "size_bytes": 30467
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 2,
+            "size_bytes": 3704
+          },
+          ".json": {
+            "files": 12,
+            "size_bytes": 372706
+          },
+          ".manifest": {
+            "files": 1,
+            "size_bytes": 385
+          },
+          ".md": {
+            "files": 67,
+            "size_bytes": 362105
+          },
+          ".patch": {
+            "files": 47,
+            "size_bytes": 93679
+          },
+          ".pdf": {
+            "files": 9,
+            "size_bytes": 512079
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 6,
+            "size_bytes": 607298
+          },
+          ".ps1": {
+            "files": 35,
+            "size_bytes": 328588
+          },
+          ".py": {
+            "files": 51,
+            "size_bytes": 1009327
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 307
+          },
+          ".tex": {
+            "files": 2,
+            "size_bytes": 1692
+          },
+          ".txt": {
+            "files": 24,
+            "size_bytes": 134229
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 26330
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2254
+          },
+          "<none>": {
+            "files": 8,
+            "size_bytes": 4114
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 260,
+          "text_files": 260,
+          "size_bytes": 7069614,
+          "lines": 162501,
+          "blank_lines": 11694,
+          "code_lines": 146151,
+          "comment_lines": 4656,
+          "classified_files": 260
+        },
+        "tests_source": {
+          "files": 44,
+          "text_files": 44,
+          "size_bytes": 1069366,
+          "lines": 19827,
+          "blank_lines": 1646,
+          "code_lines": 18103,
+          "comment_lines": 78,
+          "classified_files": 44
+        },
+        "tools": {
+          "files": 65,
+          "text_files": 65,
+          "size_bytes": 865962,
+          "lines": 20918,
+          "blank_lines": 2519,
+          "code_lines": 17342,
+          "comment_lines": 197,
+          "classified_files": 56
+        },
+        "src_tree": {
+          "files": 269,
+          "size_bytes": 7328547
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 260,
+        "source_bytes": 7069614,
+        "bytes": {
+          "code": 4536981,
+          "literal": 374832,
+          "comment": 244500,
+          "whitespace": 1913301
+        },
+        "literal_bytes": {
+          "string": 315004,
+          "character": 11950,
+          "number": 47878,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 14076,
+          "character": 2804,
+          "number": 27040,
+          "other": 0
+        },
+        "lexical_items": 1275618,
+        "string_payload_source_bytes": 275800,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "COMPLETE",
+        "ja_ids": 2228,
+        "en_ids": 2228,
+        "en_missing_ids": 0
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "e45f470c248e9b58c49052e05a8b7966d6265541ce51bb8471e787cc191bdcad",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "530c04d1c0384361e299d977f9239a2c25a87a0515585405e89194c110b322cd",
+        "application_lines_delta": 28868
+      }
+    },
+    {
+      "release": {
+        "version": null,
+        "published_at": null,
+        "public_url": null,
+        "tag": null
+      },
+      "measurement": {
+        "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
+        "measured_at": "2026-10-27T12:59:17.200636+00:00",
+        "source_kind": "private-history-allowlisted",
+        "input_sha256": "6188a58a3777be71e3500593d34c98556f2c35e9185d453347510ac00f722c85",
+        "allowlist_sha256": "becb64634607ef1012352241ae3f892c0b3b6fc9644b1e211097922fdb7dcbcb",
+        "observed_on": "2026-10-05"
+      },
+      "inventory": {
+        "status": "COMPLETE",
+        "files": 603,
+        "size_bytes": 13385474,
+        "text_files": 557,
+        "binary_files": 46,
+        "lines": 232713,
+        "blank_lines": 18985,
+        "legacy_text_files": 1,
+        "groups": {
+          "application": {
+            "files": 266,
+            "size_bytes": 7476049
+          },
+          "tests_source": {
+            "files": 54,
+            "size_bytes": 1299308
+          },
+          "tests_fixture": {
+            "files": 19,
+            "size_bytes": 1054485
+          },
+          "tools": {
+            "files": 65,
+            "size_bytes": 871338
+          },
+          "dependencies": {
+            "files": 41,
+            "size_bytes": 575349
+          },
+          "dependency_patches": {
+            "files": 51,
+            "size_bytes": 97011
+          },
+          "documents": {
+            "files": 56,
+            "size_bytes": 296611
+          },
+          "resources": {
+            "files": 11,
+            "size_bytes": 832807
+          },
+          "samples": {
+            "files": 35,
+            "size_bytes": 874799
+          },
+          "metadata": {
+            "files": 5,
+            "size_bytes": 7717
+          },
+          "generated": {
+            "files": 0,
+            "size_bytes": 0
+          }
+        },
+        "extensions": {
+          ".a": {
+            "files": 1,
+            "size_bytes": 59852
+          },
+          ".c": {
+            "files": 1,
+            "size_bytes": 6358
+          },
+          ".clro": {
+            "files": 8,
+            "size_bytes": 6631
+          },
+          ".clrop": {
+            "files": 3,
+            "size_bytes": 3974
+          },
+          ".cmake": {
+            "files": 1,
+            "size_bytes": 1766
+          },
+          ".cpp": {
+            "files": 109,
+            "size_bytes": 4545737
+          },
+          ".cppinc": {
+            "files": 47,
+            "size_bytes": 3100752
+          },
+          ".csv": {
+            "files": 2,
+            "size_bytes": 747
+          },
+          ".dll": {
+            "files": 1,
+            "size_bytes": 120320
+          },
+          ".docx": {
+            "files": 6,
+            "size_bytes": 300607
+          },
+          ".gn": {
+            "files": 1,
+            "size_bytes": 225
+          },
+          ".h": {
+            "files": 128,
+            "size_bytes": 592732
+          },
+          ".html": {
+            "files": 4,
+            "size_bytes": 30467
+          },
+          ".ico": {
+            "files": 3,
+            "size_bytes": 105651
+          },
+          ".ijg": {
+            "files": 1,
+            "size_bytes": 13059
+          },
+          ".inc": {
+            "files": 1,
+            "size_bytes": 52231
+          },
+          ".input": {
+            "files": 3,
+            "size_bytes": 5957
+          },
+          ".json": {
+            "files": 12,
+            "size_bytes": 390021
+          },
+          ".manifest": {
+            "files": 1,
+            "size_bytes": 385
+          },
+          ".md": {
+            "files": 67,
+            "size_bytes": 383720
+          },
+          ".patch": {
+            "files": 51,
+            "size_bytes": 97011
+          },
+          ".pdf": {
+            "files": 9,
+            "size_bytes": 512079
+          },
+          ".png": {
+            "files": 5,
+            "size_bytes": 794937
+          },
+          ".pptx": {
+            "files": 6,
+            "size_bytes": 607298
+          },
+          ".ps1": {
+            "files": 39,
+            "size_bytes": 340419
+          },
+          ".py": {
+            "files": 53,
+            "size_bytes": 1060927
+          },
+          ".rc": {
+            "files": 1,
+            "size_bytes": 307
+          },
+          ".tex": {
+            "files": 2,
+            "size_bytes": 1692
+          },
+          ".tsv": {
+            "files": 2,
+            "size_bytes": 13018
+          },
+          ".txt": {
+            "files": 23,
+            "size_bytes": 133281
+          },
+          ".xcf": {
+            "files": 1,
+            "size_bytes": 70116
+          },
+          ".xml": {
+            "files": 1,
+            "size_bytes": 26330
+          },
+          ".yml": {
+            "files": 2,
+            "size_bytes": 2254
+          },
+          "<none>": {
+            "files": 8,
+            "size_bytes": 4613
+          }
+        }
+      },
+      "source_scale": {
+        "status": "COMPLETE",
+        "application": {
+          "files": 266,
+          "text_files": 266,
+          "size_bytes": 7476049,
+          "lines": 169514,
+          "blank_lines": 11866,
+          "code_lines": 152160,
+          "comment_lines": 5488,
+          "classified_files": 266
+        },
+        "tests_source": {
+          "files": 54,
+          "text_files": 54,
+          "size_bytes": 1299308,
+          "lines": 23268,
+          "blank_lines": 1725,
+          "code_lines": 21402,
+          "comment_lines": 141,
+          "classified_files": 54
+        },
+        "tools": {
+          "files": 65,
+          "text_files": 65,
+          "size_bytes": 871338,
+          "lines": 20992,
+          "blank_lines": 2523,
+          "code_lines": 17378,
+          "comment_lines": 200,
+          "classified_files": 56
+        },
+        "src_tree": {
+          "files": 275,
+          "size_bytes": 7734982
+        }
+      },
+      "lexical": {
+        "status": "COMPLETE",
+        "files": 266,
+        "source_bytes": 7476049,
+        "bytes": {
+          "code": 4783194,
+          "literal": 385791,
+          "comment": 302621,
+          "whitespace": 2004443
+        },
+        "literal_bytes": {
+          "string": 324575,
+          "character": 12229,
+          "number": 48987,
+          "other": 0
+        },
+        "literal_counts": {
+          "string": 14452,
+          "character": 2860,
+          "number": 27939,
+          "other": 0
+        },
+        "lexical_items": 1335645,
+        "string_payload_source_bytes": 284276,
+        "string_purpose": "UNCLASSIFIED"
+      },
+      "localization": {
+        "status": "COMPLETE",
+        "ja_ids": 2313,
+        "en_ids": 2313,
+        "en_missing_ids": 0
+      },
+      "packages": [],
+      "verification": {
+        "status": "UNMEASURED",
+        "reason": "no-bound-public-verification-receipt",
+        "suites": []
+      },
+      "supplemental": {
+        "status": "UNMEASURED",
+        "reason": "not-selected"
+      },
+      "record_id": "363e8488742887a4255f79fecd284ade8377580bff9bac5e5b8f78254c8b1ca3",
+      "comparison": {
+        "status": "COMPLETE",
+        "reason": null,
+        "baseline_record_id": "e45f470c248e9b58c49052e05a8b7966d6265541ce51bb8471e787cc191bdcad",
+        "application_lines_delta": 7013
+      }
+    }
+  ]
+}

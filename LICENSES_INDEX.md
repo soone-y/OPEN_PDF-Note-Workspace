@@ -34,7 +34,7 @@ release パッケージを受け取った利用者は、`docs/` と `licenses/` 
 
 | コンポーネント | 主な用途 | 同梱/利用形態 | 主なライセンス | 注意度 | 必要な対応 |
 | --- | --- | --- | --- | --- | --- |
-| PDFium package `156.0.8076.0` | PDFium バイナリ/ヘッダのパッケージ | `third_party/pdfium/`、release では `pdfium.dll` | MIT 系 | 低 | `third_party/pdfium/LICENSE` を同梱 |
+| PDFium package `158.0.8111.0` | PDFium バイナリ/ヘッダのパッケージ | `third_party/pdfium/`、release では `pdfium.dll` | MIT 系 | 低 | `third_party/pdfium/LICENSE` を同梱 |
 | PDFium 本体 | PDF 読み込み、描画、テキスト抽出、書き出し | `pdfium.dll` | BSD 3-Clause + Apache 2.0 系 | 中 | `pdfium.txt` と関連 license 群を同梱 |
 | Abseil | PDFium 依存 | PDFium 同梱 | Apache License 2.0 | 中 | LICENSE、NOTICE がある場合は NOTICE、改変表示 |
 | Anti-Grain Geometry / AGG 2.3 | PDFium 依存 | PDFium 同梱 | permissive notice | 低 | 著作権表示を保持 |
@@ -66,8 +66,11 @@ PDFium を配布する場合、少なくとも次を release の `licenses/pdfiu
 | `pdfium.txt` | PDFium 本体 | BSD 3-Clause + Apache 2.0 |
 | `abseil.txt` | Abseil | Apache License 2.0 |
 | `agg23.txt` | Anti-Grain Geometry | permissive notice |
+| `dragonbox-Apache2-LLVM.txt` / `dragonbox-Boost.txt` | Dragonbox | Apache 2.0 with LLVM Exceptions / Boost Software License 1.0 |
 | `fast_float.txt` | fast_float | MIT License |
 | `freetype.txt` | FreeType | FreeType Project License |
+| `harfbuzz.txt` | HarfBuzz | Old MIT License |
+| `highway.txt` | Highway | Apache License 2.0 |
 | `icu.txt` | ICU | Unicode License V3、ICU License、同梱 third-party notices |
 | `lcms.txt` | Little CMS | MIT License |
 | `libjpeg_turbo.md` | libjpeg-turbo | IJG / Modified BSD 3-Clause / zlib の整理 |

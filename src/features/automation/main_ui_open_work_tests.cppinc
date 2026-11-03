@@ -1,0 +1,535 @@
+// Uses the production selection routes. Observation ends before assertions
+// read text/files, so inspection cannot inflate the operation's work counts.
+static bool PumpOpenWorkMessages() {
+    // Keep the real UI responsive between bounded observations. Queued paint,
+    // fit and semantic timers are not part of the synchronous selection count.
+    MSG message{};
+    for (int count = 0; count < 64 && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE); ++count) {
+        if (message.message == WM_QUIT) {
+            PostQuitMessage(static_cast<int>(message.wParam));
+            return false;
+        }
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    return true;
+}
+
+static bool RunUiAutomationFailedNoteLoadMetadataScenario(const std::wstring& currentPath,
+                                                           const std::wstring& expectedText,
+                                                           std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    if (!g_noteNeedsIntegrate || CurrentNoteStorageEncoding() == text_encoding::Encoding::Utf16Le) {
+        return fail(L"Failed note load probe requires a staged non-UTF-16 current note.");
+    }
+    std::wstring workspaceRoot;
+    if (!TryGetUiAutomationWorkspaceRoot(&workspaceRoot)) {
+        return fail(L"Failed note load probe requires its isolated workspace.");
+    }
+    const std::filesystem::path directory = std::filesystem::path(workspaceRoot) /
+        L"__pdf_note_workspace__" / L"__tmp__" / L"open_work";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    const std::filesystem::path target = directory / L"failed_note_load_utf16.md";
+    if (ec || std::filesystem::exists(target, ec) || ec) {
+        return fail(L"Failed note load probe could not reserve its owned input path.");
+    }
+    std::string utf16Bytes;
+    std::wstring error;
+    if (!text_encoding::EncodeText(L"# Load failure fixture\n", text_encoding::Encoding::Utf16Le,
+                                   &utf16Bytes, &error) ||
+        !atomic_write::AtomicWriteUtf8(target, utf16Bytes, directory, &error)) {
+        return fail(L"Failed note load probe could not write its UTF-16 input.");
+    }
+    struct RemoveOwnedInput {
+        std::filesystem::path path;
+        ~RemoveOwnedInput() {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+    } removeOwnedInput{target};
+    const auto oldEncoding = CurrentNoteStorageEncoding();
+    const uint64_t oldRevision = CurrentEditRevision();
+    {
+        ScopedDocumentOpenLockNoticeSuppression suppressNotice;
+        // The invalid owner makes the new RichEdit creation fail after decoding
+        // the valid UTF-16 target. The displayed editor remains the current one.
+        LoadNoteFile(reinterpret_cast<HWND>(static_cast<INT_PTR>(1)), target.wstring());
+    }
+    if (g_currentNotePath != currentPath || GetNoteAutomationIndexingText() != expectedText ||
+        CurrentEditRevision() != oldRevision || !g_noteNeedsIntegrate ||
+        CurrentNoteStorageEncoding() != oldEncoding ||
+        CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, currentPath) == 0) {
+        return fail(L"Failed note load changed the current note's text, stage flag, or storage encoding.");
+    }
+    AppendUiAutomationTrace(L"open_work:failed_note_load_metadata_ok");
+    return true;
+}
+
+static bool RunUiAutomationRejectedNoteOpenResultScenario(HWND owner,
+                                                           const std::wstring& currentPath,
+                                                           const std::wstring& expectedText,
+                                                           std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    std::wstring workspaceRoot;
+    if (!TryGetUiAutomationWorkspaceRoot(&workspaceRoot)) {
+        return fail(L"Rejected note open probe requires its isolated workspace.");
+    }
+    const std::filesystem::path directory = std::filesystem::path(workspaceRoot) /
+        L"__pdf_note_workspace__" / L"__tmp__" / L"open_work";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    const std::filesystem::path target = directory / L"rejected_note_open_utf16.md";
+    if (ec || std::filesystem::exists(target, ec) || ec) {
+        return fail(L"Rejected note open probe could not reserve its owned input path.");
+    }
+    const std::string invalidUtf16{"\xFF\xFE\x41", 3};
+    std::wstring error;
+    if (!atomic_write::AtomicWriteUtf8(target, invalidUtf16, directory, &error)) {
+        return fail(L"Rejected note open probe could not write its malformed input.");
+    }
+    struct RemoveOwnedInput {
+        std::filesystem::path path;
+        ~RemoveOwnedInput() {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+    } removeOwnedInput{target};
+    if (!BeginOwnedDialogPresenceAutomation(owner, L"SilentDialogClass", outError)) return false;
+    const bool opened = OpenNoteIfDifferent(owner, target.wstring());
+    const bool dialogClosed = EndOwnedDialogPresenceAutomation(owner, L"rejected note decode", outError);
+    if (opened || !dialogClosed || g_currentNotePath != currentPath ||
+        GetNoteAutomationIndexingText() != expectedText) {
+        return fail(L"Rejected note open was reported as success or changed the current note.");
+    }
+    AppendUiAutomationTrace(L"open_work:rejected_note_open_result_ok");
+    return true;
+}
+
+static bool RunUiAutomationExternalReloadRetryScenario(HWND owner,
+                                                       const std::wstring& currentPath,
+                                                       std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    std::wstring workspaceRoot;
+    if (!TryGetUiAutomationWorkspaceRoot(&workspaceRoot))
+        return fail(L"External reload probe requires its isolated workspace.");
+    const std::filesystem::path directory = std::filesystem::path(workspaceRoot) /
+        L"__pdf_note_workspace__" / L"__tmp__" / L"open_work";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    const std::filesystem::path target = directory / L"external_reload_retry.md";
+    if (ec || std::filesystem::exists(target, ec) || ec)
+        return fail(L"External reload probe could not reserve its owned input path.");
+    constexpr char original[] = "External reload fixture\n";
+    const std::string invalidUtf16{"\xFF\xFE\x41", 3};
+    std::wstring error;
+    if (!atomic_write::AtomicWriteUtf8(target, original, directory, &error) ||
+        !LoadNoteFile(owner, target.wstring()))
+        return fail(L"External reload probe could not open its clean note.");
+    const std::wstring displayedText = GetNoteAutomationIndexingText();
+    if (g_currentNotePath != target.wstring() ||
+        !atomic_write::AtomicWriteUtf8(target, invalidUtf16, directory, &error))
+        return fail(L"External reload probe could not prepare its changed note.");
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!BeginOwnedDialogPresenceAutomation(owner, L"SilentDialogClass", outError)) return false;
+        g_ownedDialogCloseAutomation.silentFinishCommand = 5102; // Reload, not dismiss.
+        bool detected = false;
+        {
+            ScopedDocumentOpenLockNoticeSuppression suppressNotice;
+            detected = CheckCurrentNoteFileExternalChange(owner);
+        }
+        if (!EndOwnedDialogPresenceAutomation(owner, L"failed external note reload", outError) ||
+            !detected ||
+            g_currentNotePath != target.wstring() ||
+            GetNoteAutomationIndexingText() != displayedText)
+            return fail(L"Failed external reload was hidden or changed the displayed note.");
+    }
+    if (!atomic_write::AtomicWriteUtf8(target, original, directory, &error) ||
+        !LoadNoteFile(owner, currentPath))
+        return fail(L"External reload probe could not restore its clean display.");
+    std::filesystem::remove(target, ec);
+    AppendUiAutomationTrace(L"open_work:external_reload_retry_ok");
+    return true;
+}
+
+struct ExternalCopyRetryAutomation {
+    HWND owner = nullptr;
+    std::wstring rejectedPath;
+    int phase = 0;
+};
+
+static ExternalCopyRetryAutomation g_externalCopyRetryAutomation;
+// Thread timer ledger: request an OS-assigned ID and kill exactly the returned ID.
+constexpr UINT_PTR kExternalCopyRetryAutomationTimerId = 0;
+
+static void CALLBACK AdvanceExternalCopyRetryAutomation(HWND, UINT, UINT_PTR, DWORD) {
+    auto& state = g_externalCopyRetryAutomation;
+    if (!state.owner || !IsWindow(state.owner)) return;
+    HWND dialog = GetWindow(state.owner, GW_ENABLEDPOPUP);
+    if (!dialog || dialog == state.owner) return;
+    wchar_t className[64]{};
+    if (!GetClassNameW(dialog, className, static_cast<int>(std::size(className)))) return;
+    if (state.phase == 0 && wcscmp(className, L"SilentDialogClass") == 0) {
+        if (PostMessageW(dialog, WM_COMMAND, 5102, 0)) state.phase = 1; // Save copy.
+    } else if (state.phase == 1 && wcscmp(className, L"SimpleInputDlg") == 0) {
+        HWND edit = GetDlgItem(dialog, 101);
+        if (edit && SetWindowTextW(edit, state.rejectedPath.c_str()) &&
+            PostMessageW(dialog, WM_COMMAND, IDOK, 0)) state.phase = 2;
+    }
+}
+
+static bool RunUiAutomationExternalCopyRetryScenario(HWND owner,
+                                                     const std::wstring& currentPath,
+                                                     std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    std::wstring workspaceRoot;
+    if (!TryGetUiAutomationWorkspaceRoot(&workspaceRoot))
+        return fail(L"External copy probe requires its isolated workspace.");
+    const std::filesystem::path directory = std::filesystem::path(workspaceRoot) /
+        L"__pdf_note_workspace__" / L"__tmp__" / L"open_work";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    const std::filesystem::path target = directory / L"external_copy_retry.md";
+    if (ec || std::filesystem::exists(target, ec) || ec)
+        return fail(L"External copy probe could not reserve its owned input path.");
+    constexpr char original[] = "External copy fixture\n";
+    constexpr char changed[] = "External copy fixture changed on disk\n";
+    std::wstring error;
+    if (!atomic_write::AtomicWriteUtf8(target, original, directory, &error) ||
+        !LoadNoteFile(owner, target.wstring()))
+        return fail(L"External copy probe could not open its clean note.");
+    const std::wstring displayedText = GetNoteAutomationIndexingText();
+    SendMessageW(g_hNoteEdit, EM_SETMODIFY, TRUE, 0); // Select copy-before-reload.
+    if (g_currentNotePath != target.wstring() ||
+        !atomic_write::AtomicWriteUtf8(target, changed, directory, &error))
+        return fail(L"External copy probe could not change its owned input.");
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        g_externalCopyRetryAutomation = {owner, target.wstring(), 0};
+        const UINT_PTR timer = SetTimer(nullptr, kExternalCopyRetryAutomationTimerId,
+                                       20, AdvanceExternalCopyRetryAutomation);
+        if (!timer) return fail(L"External copy probe could not schedule its dialogs.");
+        const bool detected = CheckCurrentNoteFileExternalChange(owner);
+        KillTimer(nullptr, timer);
+        const int phase = g_externalCopyRetryAutomation.phase;
+        g_externalCopyRetryAutomation = {};
+        if (!detected || phase != 2 || g_currentNotePath != target.wstring() ||
+            GetNoteAutomationIndexingText() != displayedText)
+            return fail(L"Failed external-change copy was hidden or changed the displayed note.");
+    }
+    SendMessageW(g_hNoteEdit, EM_SETMODIFY, FALSE, 0);
+    if (!LoadNoteFile(owner, currentPath))
+        return fail(L"External copy probe could not restore its clean display.");
+    std::filesystem::remove(target, ec);
+    AppendUiAutomationTrace(L"open_work:external_copy_retry_ok");
+    return true;
+}
+
+static bool RunUiAutomationOpenWorkScenario(HWND owner, std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    const std::wstring notePath = g_currentNotePath;
+    const int noteIndex = CurrentNoteIndex();
+    const int pdfIndex = CurrentPdfIndex();
+    const int otherNote = FindAlternativeFileIndex(g_hNoteList, noteIndex);
+    const int otherPdf = FindAlternativeFileIndex(g_hPdfList, pdfIndex);
+    if (noteIndex < 0 || pdfIndex < 0 || otherNote < 0 || otherPdf < 0)
+        return fail(L"Open work probe requires two notes and two PDFs.");
+    std::string originalBytes;
+    if (!ReadUiAutomationFileBytes(notePath, &originalBytes))
+        return fail(L"Cannot read original note for open work probe.");
+    const std::wstring originalText = GetNoteAutomationIndexingText();
+
+    const auto select = [&](HWND list, int index, const wchar_t* label,
+                            uint64_t expectedChecks) {
+        open_work::Counts counts{};
+        const ULONGLONG start = GetTickCount64();
+        {
+            open_work::Observation observation;
+            SetListboxSelAndNotify(list, index);
+            counts = observation.Read();
+        }
+        const auto checks = open_work::Get(counts, open_work::Kind::NoteStageCheck);
+        const auto reads = open_work::Get(counts, open_work::Kind::NoteEditorSyncFullRead);
+        AppendUiAutomationTrace(std::wstring(L"open_work:") + label +
+            L" stage_checks=" + std::to_wstring(checks) +
+            L" sync_full_reads=" + std::to_wstring(reads) +
+            L" full_parses=" + std::to_wstring(open_work::Get(counts, open_work::Kind::NoteFullParse)) +
+            L" elapsed_ms=" + std::to_wstring(GetTickCount64() - start));
+        if (checks != expectedChecks || reads != expectedChecks)
+            return fail(L"Selection repeated or omitted the note checkpoint/full-sync boundary.");
+        return PumpOpenWorkMessages() || fail(L"Open work probe received a quit request.");
+    };
+
+    if (!select(g_hNoteList, noteIndex, L"same_note", 0)) return false;
+    if (!select(g_hNoteList, otherNote, L"clean_note", 1)) return false;
+    if (CurrentNoteIndex() != otherNote) return fail(L"Clean note switch failed.");
+    if (!select(g_hNoteList, noteIndex, L"cached_note", 1)) return false;
+    if (g_currentNotePath != notePath || GetNoteAutomationIndexingText() != originalText)
+        return fail(L"Cached note switch lost original text.");
+
+    const std::wstring token = L"openworktoken";
+    InsertSnippetIntoNoteAt(originalText.size(), token);
+    const std::wstring editedText = GetNoteAutomationIndexingText();
+    if (editedText != originalText + token)
+        return fail(L"Cannot prepare dirty note for open work probe.");
+    if (!select(g_hNoteList, otherNote, L"dirty_note", 1)) return false;
+    if (CurrentNoteIndex() != otherNote ||
+        CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) == 0)
+        return fail(L"Dirty note switch did not preserve its recovery checkpoint.");
+    if (!select(g_hNoteList, noteIndex, L"staged_note", 1)) return false;
+    if (g_currentNotePath != notePath || GetNoteAutomationIndexingText() != editedText)
+        return fail(L"Returning to staged note lost its edit.");
+    if (!RunUiAutomationFailedNoteLoadMetadataScenario(notePath, editedText, outError)) return false;
+    if (!SendUiAutomationNoteUndoChangedText() || GetNoteAutomationIndexingText() != originalText ||
+        !SendUiAutomationNoteRedoChangedText() || GetNoteAutomationIndexingText() != editedText)
+        return fail(L"Undo/redo was not preserved across note switching.");
+
+    // PDF selection must also checkpoint the still-open dirty note once.
+    if (!select(g_hPdfList, otherPdf, L"dirty_pdf", 1)) return false;
+    if (CurrentPdfIndex() != otherPdf || g_currentNotePath != notePath ||
+        GetNoteAutomationIndexingText() != editedText ||
+        CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) == 0)
+        return fail(L"PDF switching failed or lost the note edit/checkpoint.");
+    if (!select(g_hPdfList, pdfIndex, L"clean_pdf", 1)) return false;
+    if (CurrentPdfIndex() != pdfIndex) return fail(L"Returning to original PDF failed.");
+    if (!select(g_hPdfList, pdfIndex, L"same_pdf", 0)) return false;
+    if (!SendUiAutomationNoteUndoChangedText() || GetNoteAutomationIndexingText() != originalText ||
+        !SaveNoteIfDirty(owner))
+        return fail(L"Undo/checkpoint cleanup failed after PDF switching.");
+    std::string finalBytes;
+    if (!ReadUiAutomationFileBytes(notePath, &finalBytes) || finalBytes != originalBytes ||
+        CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, notePath) != 0)
+        return fail(L"Open work probe changed the original or left a reverted checkpoint.");
+    AppendUiAutomationTrace(L"open_work:content_stage_undo_redo_ok");
+    if (!RunUiAutomationRejectedNoteOpenResultScenario(owner, notePath, originalText, outError)) return false;
+    if (!RunUiAutomationExternalReloadRetryScenario(owner, notePath, outError)) return false;
+    if (!RunUiAutomationExternalCopyRetryScenario(owner, notePath, outError)) return false;
+    return true;
+}
+
+static bool RunUiAutomationSourceProtectionCloseScenario(HWND owner, std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    const std::wstring pdf = CurrentLogicalPdfPath(), note = g_currentNotePath;
+    const std::wstring session = g_currentSessionPath;
+    if (pdf.empty() || note.empty()) return fail(L"Close probe requires both documents.");
+    const auto protectedSource = [](const std::wstring& path, bool expected) {
+        HANDLE probe = CreateFileW(ToExtendedWin32PathIfAbsoluteLocal(path).c_str(), DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        const DWORD error = GetLastError();
+        if (probe != INVALID_HANDLE_VALUE) CloseHandle(probe);
+        return expected ? probe == INVALID_HANDLE_VALUE && error == ERROR_SHARING_VIOLATION
+                        : probe != INVALID_HANDLE_VALUE;
+    };
+    const auto closeEnabled = [](bool expected) {
+        HMENU menu = BuildMenuBarForState(CaptureMainMenuStateSnapshot());
+        if (!menu) return false;
+        const UINT state = GetMenuState(GetSubMenu(menu, 0), ID_FILE_CLOSE, MF_BYCOMMAND);
+        DestroyMenu(menu);
+        return state != static_cast<UINT>(-1) &&
+            ((state & (MF_DISABLED | MF_GRAYED)) == 0) == expected;
+    };
+    const auto command = [&](UINT id) {
+        SendMessageW(owner, WM_COMMAND, MAKEWPARAM(id, 0), 0);
+    };
+    if (!closeEnabled(true) || !protectedSource(pdf, true) || !protectedSource(note, true))
+        return fail(L"Open documents are not protected or File Close is unavailable.");
+    {
+        // Exercise the production worker and its posted UI notification. The
+        // DELETE handle models an external conflict; no fixture bytes change.
+        struct DeleteAccess {
+            HANDLE value = INVALID_HANDLE_VALUE;
+            ~DeleteAccess() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+        } conflict;
+        document_source_protection::Mutation mutation(note, note);
+        conflict.value = CreateFileW(ToExtendedWin32PathIfAbsoluteLocal(note).c_str(), DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (conflict.value == INVALID_HANDLE_VALUE) return fail(L"Cannot prepare protection recovery conflict.");
+        DWORD error = 0;
+        if (mutation.Finish(false, &error) || error != ERROR_SHARING_VIOLATION)
+            return fail(L"Protection conflict did not enter recovery.");
+        const auto pendingText = localization::Text(L"workspace.source_protection_pending_status");
+        const auto menuShowsPending = [&]() {
+            HMENU menu = GetMenu(owner);
+            const int length = GetMenuStringW(menu, ID_STATUS_DISPLAY, nullptr, 0, MF_BYCOMMAND);
+            std::wstring text(static_cast<size_t>(std::max(0, length)) + 1, L'\0');
+            GetMenuStringW(menu, ID_STATUS_DISPLAY, text.data(), static_cast<int>(text.size()), MF_BYCOMMAND);
+            return text.find(pendingText) != std::wstring::npos;
+        };
+        ULONGLONG deadline = GetTickCount64() + 5000;
+        while (!menuShowsPending() && GetTickCount64() < deadline) {
+            if (!PumpOpenWorkMessages()) return fail(L"Recovery probe received quit.");
+            Sleep(10);
+        }
+        if (!document_source_protection::HasPendingProtection() || !menuShowsPending())
+            return fail(L"Pending source protection was not displayed in the actual menu.");
+        CloseHandle(conflict.value); conflict.value = INVALID_HANDLE_VALUE;
+        deadline = GetTickCount64() + 5000;
+        while ((document_source_protection::HasPendingProtection() || menuShowsPending()) && GetTickCount64() < deadline) {
+            if (!PumpOpenWorkMessages()) return fail(L"Recovery probe received quit.");
+            Sleep(10);
+        }
+        if (document_source_protection::HasPendingProtection() || menuShowsPending() ||
+            !protectedSource(note, true) || !protectedSource(pdf, true) ||
+            g_currentNotePath != note || CurrentLogicalPdfPath() != pdf)
+            return fail(L"Automatic recovery did not restore protection and clear the pending UI without reopening.");
+        AppendUiAutomationTrace(L"open_work:source_protection_recovery_ok");
+    }
+    command(ID_FILE_CLOSE);
+    if (!CurrentLogicalPdfPath().empty() || !g_currentNotePath.empty() ||
+        g_currentSessionPath != session || !closeEnabled(false) ||
+        !protectedSource(pdf, false) || !protectedSource(note, false))
+        return fail(L"File Close did not close and release both documents while keeping the session.");
+    if (!OpenPdfWithAnnotations(owner, pdf)) return fail(L"Cannot reopen closed PDF.");
+    LoadNoteFile(owner, note);
+    command(ID_VIEW_CLOSE_PDF);
+    if (!CurrentLogicalPdfPath().empty() || g_currentNotePath != note ||
+        !protectedSource(pdf, false) || !protectedSource(note, true))
+        return fail(L"View Close PDF changed or released the note.");
+    if (!OpenPdfWithAnnotations(owner, pdf)) return fail(L"Cannot reopen individually closed PDF.");
+    command(ID_VIEW_CLOSE_NOTE);
+    if (!g_currentNotePath.empty() || CurrentLogicalPdfPath() != pdf ||
+        !protectedSource(pdf, true) || !protectedSource(note, false))
+        return fail(L"View Close Note changed or released the PDF.");
+    LoadNoteFile(owner, note);
+    const auto originalText = GetNoteAutomationIndexingText();
+    std::string originalBytes;
+    if (!ReadUiAutomationFileBytes(note, &originalBytes)) return fail(L"Cannot read close fixture.");
+    const std::wstring token = L"closeworktoken";
+    if (!InsertSnippetIntoNoteAt(originalText.size(), token)) return fail(L"Cannot edit close fixture.");
+    command(ID_FILE_CLOSE);
+    std::string closedBytes;
+    if (!CurrentLogicalPdfPath().empty() || !g_currentNotePath.empty() ||
+        !ReadUiAutomationFileBytes(note, &closedBytes) || closedBytes != originalBytes ||
+        CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, note) == 0)
+        return fail(L"Closing edited files lost the checkpoint or changed the original.");
+    if (!OpenPdfWithAnnotations(owner, pdf)) return fail(L"Cannot restore close fixture PDF.");
+    LoadNoteFile(owner, note);
+    if (GetNoteAutomationIndexingText() != originalText + token ||
+        !protectedSource(pdf, true) || !protectedSource(note, true))
+        return fail(L"Reopening closed files lost protected edits or source protection.");
+    // Explicit close destroys the editor cache, unlike switching. Verify the
+    // recovered text and the new editor's history; do not require the closed
+    // editor's undo stack to survive its documented lifetime.
+    const std::wstring nextToken = L"postcloseworktoken";
+    if (!InsertSnippetIntoNoteAt((originalText + token).size(), nextToken) ||
+        GetNoteAutomationIndexingText() != originalText + token + nextToken ||
+        !SendUiAutomationNoteUndoChangedText() || GetNoteAutomationIndexingText() != originalText + token ||
+        !SendUiAutomationNoteRedoChangedText() || GetNoteAutomationIndexingText() != originalText + token + nextToken ||
+        !SendUiAutomationNoteUndoChangedText() || GetNoteAutomationIndexingText() != originalText + token)
+        return fail(L"Reopened editor history or close fixture cleanup failed.");
+    if (!SelectNoteTextSnippet(token)) return fail(L"Cannot select close fixture cleanup token.");
+    SendMessageW(g_hNoteEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    if (GetNoteAutomationIndexingText() != originalText || !SaveNoteIfDirty(owner))
+        return fail(L"Cannot checkpoint reverted close fixture.");
+    if (!ReadUiAutomationFileBytes(note, &closedBytes) || closedBytes != originalBytes ||
+        CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, note) != 0)
+        return fail(L"Close probe changed the original or left a reverted checkpoint.");
+    AppendUiAutomationTrace(L"open_work:source_protection_close_ok");
+    return true;
+}
+
+static bool RunUiAutomationNoteParseReuseScenario(HWND owner, std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    const int previous = CurrentNoteIndex();
+    int markdown = -1;
+    for (size_t i = 0; i < g_noteFiles.size(); ++i) {
+        if (std::filesystem::path(g_noteFiles[i].path).filename() == L"note_math.md")
+            markdown = static_cast<int>(i);
+    }
+    if (markdown < 0 || previous < 0 || markdown == previous)
+        return fail(L"Parse reuse probe requires its Markdown fixture and an alternate note.");
+    const std::filesystem::path path(g_noteFiles[static_cast<size_t>(markdown)].path);
+    std::string original;
+    if (!ReadUiAutomationFileBytes(path, &original)) return fail(L"Cannot read parse reuse fixture.");
+    const auto select = [&](int index, const wchar_t* label, uint64_t expectedParses) {
+        open_work::Counts counts{};
+        {
+            open_work::Observation observation;
+            SetListboxSelAndNotify(g_hNoteList, index);
+            counts = observation.Read();
+        }
+        const auto parses = open_work::Get(counts, open_work::Kind::NoteFullParse);
+        AppendUiAutomationTrace(std::wstring(L"open_work:") + label +
+            L" full_parses=" + std::to_wstring(parses));
+        if (CurrentNoteIndex() != index || parses != expectedParses)
+            return fail(L"Parse reuse was missed or changed content reused stale syntax.");
+        if (index == markdown) {
+            const auto state = CaptureNoteUiSnapshot();
+            if (!state.documentReady || !state.finalFrameActive)
+                return fail(L"Parse reuse did not preserve composed note rendering.");
+        }
+        return PumpOpenWorkMessages() || fail(L"Parse reuse probe received a quit request.");
+    };
+    if (!select(markdown, L"parse_cold", 1)) return false;
+    const std::wstring originalText = GetNoteAutomationIndexingText();
+    if (!select(previous, L"parse_away", 0) || !select(markdown, L"parse_cached", 0)) return false;
+    if (GetNoteAutomationIndexingText() != originalText)
+        return fail(L"Reusing parsed note changed its content.");
+
+    const std::wstring token = L"parseworktoken";
+    InsertSnippetIntoNoteAt(originalText.size(), token);
+    // This case measures reuse of already parsed edited content. A pending
+    // semantic refresh is real work, not a duplicate parse of a cached result.
+    RecomputeMathFromNote();
+    if (!SaveNoteIfDirty(owner) ||
+        CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, path.wstring()) == 0)
+        return fail(L"Cannot checkpoint edited Markdown fixture.");
+    if (!select(previous, L"parse_staged_away", 0) ||
+        !select(markdown, L"parse_staged_cached", 0)) return false;
+    if (GetNoteAutomationIndexingText() != originalText + token ||
+        !SendUiAutomationNoteUndoChangedText() || GetNoteAutomationIndexingText() != originalText ||
+        !SendUiAutomationNoteRedoChangedText() || GetNoteAutomationIndexingText() != originalText + token ||
+        !SendUiAutomationNoteUndoChangedText() || !SaveNoteIfDirty(owner))
+        return fail(L"Parsed stage reuse lost text or undo/redo.");
+    RecomputeMathFromNote();
+
+    // Reverted text can still have a recovery stage because native CRLF and
+    // the original LF differ as bytes. Integrate it safely before simulating
+    // an external disk edit; a valid stage must continue to win over disk.
+    const auto revertedStage = file_output::FindLatestStagedNoteSnapshotFor(path.wstring());
+    if (revertedStage && !file_output::IntegrateStagedDiff(owner, revertedStage->stagePath))
+        return fail(L"Cannot integrate reverted parse fixture before its external change.");
+    if (CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, path.wstring()) != 0)
+        return fail(L"External change probe still has a recovery stage.");
+    if (!select(previous, L"parse_external_away", 0)) return false;
+    // Only the isolated fixture is changed. Same native window, different
+    // disk content must invalidate syntax; mtime/size alone are not a proof.
+    std::wstring error;
+    if (!atomic_write::AtomicWriteUtf8(path, original + "\n**externalchange**\n", path.parent_path(), &error))
+        return fail(L"Cannot prepare external fixture change.");
+    if (!select(markdown, L"parse_external_changed", 1) ||
+        FindNoteTextSnippetStart(L"externalchange") < 0) return false;
+    const auto changed = CaptureNoteUiSnapshot();
+    if (changed.canonicalText.find(L"externalchange") == std::wstring::npos || !changed.documentReady)
+        return fail(L"External change did not reach canonical syntax.");
+    if (!select(previous, L"parse_restore_away", 0) ||
+        !atomic_write::AtomicWriteUtf8(path, original, path.parent_path(), &error) ||
+        !select(markdown, L"parse_external_restored", 1)) return false;
+    if (GetNoteAutomationIndexingText() != originalText)
+        return fail(L"Restoring external fixture did not restore its text.");
+    if (!select(previous, L"parse_finish", 0)) return false;
+    AppendUiAutomationTrace(L"open_work:parse_reuse_stage_external_ok");
+    return true;
+}

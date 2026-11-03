@@ -119,9 +119,7 @@ NotePresentationOwnerPlanBuildResult NotePresentationOwnerPlan::Build(
             candidate->frame_.reason = NotePresentationReason::EditorBindingUnavailable;
             AppendWholeVisibleNativeOwner(&candidate->owner_ranges_, input.visible_lines);
         } else if (input.geometry_may_change) {
-            candidate->frame_.frame_kind = NotePresentationFrameKind::CommitThenDraw;
             candidate->frame_.reason = NotePresentationReason::GeometryMayChange;
-            candidate->frame_.requires_full_repaint_after_commit = true;
             AppendWholeVisibleNativeOwner(&candidate->owner_ranges_, input.visible_lines);
         } else if (input.ime_preedit && !input.ime_preedit_can_reuse_committed_layout) {
             candidate->frame_.reason = NotePresentationReason::StaleImeComposition;

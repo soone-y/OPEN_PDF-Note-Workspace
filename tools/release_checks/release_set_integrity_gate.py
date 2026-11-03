@@ -11,6 +11,9 @@ import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.release_checks import public_snapshot_inventory as snapshot_inventory
+
 
 SNAPSHOT_MANIFEST_NAME = "public_snapshot_manifest.json"
 SCHEMA_VERSION = 2
@@ -34,21 +37,7 @@ def child_path(root: Path, value: object, *, label: str) -> Path:
 
 
 def file_records(root: Path, *, exclude_git_metadata: bool = False) -> list[dict[str, object]]:
-    def included(path: Path) -> bool:
-        relative = path.relative_to(root)
-        return not (exclude_git_metadata and relative.parts and relative.parts[0] == ".git")
-
-    return [
-        {
-            "path": path.relative_to(root).as_posix(),
-            "sha256": sha256_file(path),
-            "size": path.stat().st_size,
-        }
-        for path in sorted(
-            (path for path in root.rglob("*") if path.is_file() and included(path)),
-            key=lambda item: item.as_posix(),
-        )
-    ]
+    return snapshot_inventory.file_records(root, exclude_git_metadata=exclude_git_metadata)
 
 
 def snapshot_link_errors(root: Path) -> list[str]:
@@ -61,10 +50,7 @@ def snapshot_link_errors(root: Path) -> list[str]:
 
 
 def tree_sha256(records: list[dict[str, object]]) -> str:
-    canonical = "".join(
-        f"{record['path']}\t{record['size']}\t{record['sha256']}\n" for record in records
-    ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    return snapshot_inventory.tree_sha256(records)
 
 
 def load_release_components(release_set: Path) -> tuple[dict[str, object], Path]:
@@ -251,6 +237,23 @@ def parse_build_info(path: Path) -> dict[str, str]:
     return values
 
 
+def validate_build_info_artifacts(release_dir: Path, fields: dict[str, str], label: str, primary_name: str) -> list[str]:
+    errors: list[str] = []
+    for key, expected_hash in fields.items():
+        if not key.startswith("artifact:"):
+            continue
+        name = key.removeprefix("artifact:")
+        if name == primary_name:
+            continue
+        if not name or name in (".", "..") or "/" in name or "\\" in name:
+            errors.append(f"{label}: invalid build-info artifact name: {name}")
+            continue
+        path = release_dir / name
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_hash) or not path.is_file() or sha256_file(path) != expected_hash:
+            errors.append(f"{label}: {name} does not match its build-info hash")
+    return errors
+
+
 def validate_release_metadata(release_set: Path, components: dict[str, object], zip_roots: dict[str, object]) -> list[str]:
     errors: list[str] = []
     try:
@@ -294,6 +297,24 @@ def validate_release_metadata(release_set: Path, components: dict[str, object], 
         executable = release_dir / "pdf_note_workspace.exe"
         if not executable.is_file() or fields.get("artifact:pdf_note_workspace.exe") != sha256_file(executable):
             errors.append(f"{label}: application executable does not match its build-info hash")
+        errors.extend(validate_build_info_artifacts(release_dir, fields, label, "pdf_note_workspace.exe"))
+        viewer_info = release_dir / "readonly_viewer.exe.buildinfo.txt"
+        if not viewer_info.is_file():
+            errors.append(f"{label}: missing read-only viewer build-info file")
+            continue
+        try:
+            viewer_fields = parse_build_info(viewer_info)
+        except (OSError, UnicodeDecodeError) as error:
+            errors.append(f"{label}: invalid read-only viewer build-info file ({error})")
+            continue
+        if viewer_fields.get("version") != version:
+            errors.append(f"{label}: read-only viewer build-info version does not match release-set app_version")
+        if viewer_fields.get("locale") != locale:
+            errors.append(f"{label}: read-only viewer build-info locale does not match release-set locale")
+        viewer = release_dir / "readonly_viewer.exe"
+        if not viewer.is_file() or viewer_fields.get("artifact:readonly_viewer.exe") != sha256_file(viewer):
+            errors.append(f"{label}: read-only viewer executable does not match its build-info hash")
+        errors.extend(validate_build_info_artifacts(release_dir, viewer_fields, label, "readonly_viewer.exe"))
     try:
         full_dir = child_path(release_set, components.get("release"), label="full directory")
         lite_dir = child_path(release_set, components.get("release_lite"), label="Lite directory")
@@ -338,6 +359,8 @@ def validate_release_set(release_set: Path) -> list[str]:
             errors.append(f"{label}: release-set manifest has an invalid ZIP root")
             continue
         errors.extend(f"{label}: {error}" for error in validate_release_zip(release_dir, zip_path, archive_root))
+    from tools.release_checks.public_statistics_gate import validate_set as validate_statistics
+    errors.extend(validate_statistics(release_set))
     return errors
 
 

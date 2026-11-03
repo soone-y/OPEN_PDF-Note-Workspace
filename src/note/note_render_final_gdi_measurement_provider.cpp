@@ -32,14 +32,16 @@ public:
         if (GetObjectW(old_, sizeof(font), &font) != sizeof(font)) return;
         TEXTMETRICW baseMetrics{};
         if (!GetTextMetricsW(hdc_, &baseMetrics)) return;
+        const int baseCharacterHeight = NoteRenderFinalFontCharacterHeight(
+            baseMetrics.tmHeight, baseMetrics.tmInternalLeading);
         NoteRenderFinalRunFontStyle style;
         if (!ResolveNoteRenderFinalRunFontStyle(
-                line, run, std::max<LONG>(1, baseMetrics.tmHeight), &style)) {
+                line, run, baseCharacterHeight, &style)) {
             return;
         }
         lineHeightPermille_ = style.line_height_permille;
         const bool needsFont = style.bold || style.italic || !style.font_family.empty() ||
-            style.font_height_px != std::max<LONG>(1, baseMetrics.tmHeight);
+            style.overrides_font_height;
         if (!needsFont) {
             metrics_ = baseMetrics;
             valid_ = true;
@@ -47,7 +49,10 @@ public:
         }
         if (style.bold) font.lfWeight = FW_BOLD;
         if (style.italic) font.lfItalic = TRUE;
-        font.lfHeight = -static_cast<LONG>(style.font_height_px);
+        // Weight/slant alone keep the base font's exact logical size. A size
+        // or face change uses the shared character-height convention.
+        if (style.overrides_font_height || !style.font_family.empty())
+            font.lfHeight = -static_cast<LONG>(style.font_height_px);
         if (!style.font_family.empty()) {
             std::copy(style.font_family.begin(), style.font_family.end(), font.lfFaceName);
             font.lfFaceName[style.font_family.size()] = L'\0';
@@ -153,9 +158,10 @@ private:
     if (!outX || spaceWidthPx <= 0) return false;
     const int64_t adjusted = static_cast<int64_t>(baseX) +
         static_cast<int64_t>(indentColumns) * spaceWidthPx;
-    if (adjusted < std::numeric_limits<int>::min() ||
-        adjusted > std::numeric_limits<int>::max()) return false;
-    *outX = static_cast<int>(adjusted);
+    // Leave headroom for glyph widths, borders and viewport arithmetic.
+    // A user-supplied offset must not invalidate the whole publication.
+    constexpr int kCoordinateLimit = std::numeric_limits<int>::max() / 4;
+    *outX = static_cast<int>(std::clamp(adjusted, int64_t{-kCoordinateLimit}, int64_t{kCoordinateLimit}));
     return true;
 }
 
@@ -187,8 +193,8 @@ private:
     default:
         return false;
     }
-    if (x < std::numeric_limits<int>::min() || x > std::numeric_limits<int>::max()) return false;
-    *outX = static_cast<int>(x);
+    constexpr int kCoordinateLimit = std::numeric_limits<int>::max() / 4;
+    *outX = static_cast<int>(std::clamp(x, int64_t{-kCoordinateLimit}, int64_t{kCoordinateLimit}));
     return true;
 }
 
@@ -599,7 +605,7 @@ struct TaskCheckboxMetrics {
                                         uint32_t totalHeightPx,
                                         const std::vector<NoteRenderRunPlacement>& runs,
                                         std::vector<NoteRenderVisualDecoration>* out) noexcept {
-    if (!out || baseLeftPx < 0 || contentLeftPx < baseLeftPx || contentRightPx <= contentLeftPx ||
+    if (!out || contentLeftPx < baseLeftPx || contentRightPx <= contentLeftPx ||
         spaceWidthPx <= 0 || rowHeightPx == 0 || totalHeightPx == 0) {
         return false;
     }
@@ -823,12 +829,16 @@ struct TaskCheckboxMetrics {
         contentLeft += containerInset;
         int explicitIndentColumns = 0;
         if (!ResolveLineIndentColumns(sourcePlan, sourceLine,
-                                      std::max<LONG>(1, baseMetrics.tmHeight),
+                                      NoteRenderFinalFontCharacterHeight(baseMetrics.tmHeight, baseMetrics.tmInternalLeading),
                                       &explicitIndentColumns) ||
             !AddIndentColumnsToX(contentLeft, explicitIndentColumns, spaceWidthPx,
                                  &contentLeft)) {
             return false;
         }
+        // Keep the gutter's origin before list/quote insets are added. For a
+        // negative indent, the marker must move with its text, not invalidate
+        // the publication by landing left of an unshifted gutter.
+        const int decorationBaseLeft = std::min(static_cast<int>(basePadding) + containerInset, contentLeft);
         if (sourceLine.decoration.has(NoteRenderSourceLineDecorationListItem)) {
             const uint32_t depth = std::max<uint32_t>(1, sourceLine.decoration.list_depth);
             if (!AddColumns(&contentLeft, (depth - 1) * layoutKey.tab_columns, spaceWidthPx)) {
@@ -854,8 +864,16 @@ struct TaskCheckboxMetrics {
             !AddColumns(&contentLeft, options.code_block_inset_columns, spaceWidthPx)) {
             return false;
         }
-        const int contentRight = static_cast<int>(layoutKey.client_width_px - rightPadding) - containerInset;
-        if (contentLeft >= contentRight || layoutKey.tab_columns == 0 ||
+        int contentRight = static_cast<int>(layoutKey.client_width_px - rightPadding) - containerInset;
+        if (contentLeft >= contentRight) {
+            // Preserve offscreen indentation and horizontal scrolling. Wrap
+            // in one viewport-sized band rather than rejecting the frame.
+            const int64_t adjustedRight = int64_t{contentLeft} +
+                std::max<int64_t>(1, int64_t{contentRight} - static_cast<int>(basePadding) - containerInset);
+            if (adjustedRight > std::numeric_limits<int>::max()) return false;
+            contentRight = static_cast<int>(adjustedRight);
+        }
+        if (layoutKey.tab_columns == 0 ||
             layoutKey.tab_columns > static_cast<uint32_t>(std::numeric_limits<int>::max() / spaceWidthPx)) {
             return false;
         }
@@ -890,7 +908,7 @@ struct TaskCheckboxMetrics {
             const NoteRenderSourceRun& run = sourceLine.runs[runIndex];
             NoteRenderFinalRunFontStyle runStyle;
             if (!ResolveNoteRenderFinalRunFontStyle(
-                    sourceLine, run, std::max<LONG>(1, baseMetrics.tmHeight), &runStyle)) {
+                    sourceLine, run, NoteRenderFinalFontCharacterHeight(baseMetrics.tmHeight, baseMetrics.tmInternalLeading), &runStyle)) {
                 return false;
             }
             if (runStyle.anchor == NoteRenderFinalHorizontalAnchor::None) {
@@ -916,7 +934,7 @@ struct TaskCheckboxMetrics {
                 NoteRenderFinalRunFontStyle nextStyle;
                 if (!ResolveNoteRenderFinalRunFontStyle(
                         sourceLine, sourceLine.runs[groupEnd],
-                        std::max<LONG>(1, baseMetrics.tmHeight), &nextStyle)) {
+                        NoteRenderFinalFontCharacterHeight(baseMetrics.tmHeight, baseMetrics.tmInternalLeading), &nextStyle)) {
                     return false;
                 }
                 // Source-plan tag boundaries retain source coordinates for
@@ -982,10 +1000,9 @@ struct TaskCheckboxMetrics {
         // Negative explicit indents are valid legacy input.  Their ink is
         // clipped by the client at paint time, but geometry remains complete
         // and selection/hit testing must not silently drop to another model.
-        const int decorationBaseLeft = std::min(static_cast<int>(basePadding), contentLeft);
         if (!AddContainerDecorations(sourceLine, layoutKey, options, spaceWidthPx,
                                      totalHeightPx, &placement) ||
-            !AddVisualDecorations(sourceLine, decorationBaseLeft + containerInset, contentLeft,
+            !AddVisualDecorations(sourceLine, decorationBaseLeft, contentLeft,
                                   contentRight, spaceWidthPx, taskMetrics, rowHeight, totalHeightPx,
                                   placement.runs, &placement.decorations)) {
             return false;
@@ -1004,11 +1021,12 @@ struct TaskCheckboxMetrics {
     const NoteRenderFinalGdiMeasurementOptions& options,
     HDC hdc,
     TEXTMETRICW baseMetrics,
+    int spaceWidthPx,
     const NoteRenderAtomicGroup& group,
     std::vector<NoteRenderLineLayout>* lineLayouts,
     std::vector<NoteRenderLinePlacement>* linePlacements,
     NoteRenderAtomicGroupPlacement* outGroupPlacement) noexcept {
-    if (!lineLayouts || !linePlacements || !outGroupPlacement ||
+    if (!lineLayouts || !linePlacements || !outGroupPlacement || spaceWidthPx <= 0 ||
         group.kind != NoteRenderAtomicGroupKind::BlockMath ||
         group.first_line > group.last_line ||
         group.last_line.value >= lineLayouts->size() ||
@@ -1049,19 +1067,25 @@ struct TaskCheckboxMetrics {
             mathLayout.width <= 0 || mathLayout.height <= 0) {
             return false;
         }
-        SIZE space{};
         int containerInset = 0;
-        if (!GetTextExtentPoint32W(hdc, L" ", 1, &space) ||
-            !ContainerInsetPx(anchorLine, options, std::max<LONG>(1, space.cx), &containerInset) ||
+        if (!ContainerInsetPx(anchorLine, options, spaceWidthPx, &containerInset) ||
             leftPadding + static_cast<uint64_t>(containerInset) >
                 static_cast<uint64_t>(std::numeric_limits<int>::max())) return false;
         const int contentLeft = static_cast<int>(leftPadding) + containerInset;
         const int contentRight = static_cast<int>(layoutKey.client_width_px - rightPadding) - containerInset;
         const int contentWidth = contentRight - contentLeft;
         if (contentWidth <= 0) return false;
-        const int mathX = mathLayout.width >= contentWidth
+        int mathX = mathLayout.width >= contentWidth
             ? contentLeft
             : contentLeft + (contentWidth - mathLayout.width) / 2;
+        NoteRenderFinalRunFontStyle style;
+        if (!ResolveNoteRenderFinalRunFontStyle(anchorLine, *runIt,
+                NoteRenderFinalFontCharacterHeight(baseMetrics.tmHeight, baseMetrics.tmInternalLeading), &style)) return false;
+        if (style.has_indent && !AddIndentColumnsToX(mathX, style.indent_columns,
+                                                    spaceWidthPx, &mathX)) return false;
+        if (style.anchor != NoteRenderFinalHorizontalAnchor::None &&
+            !ResolveAnchoredGroupStartX(style.anchor, style.anchor_offset_columns,
+                spaceWidthPx, layoutKey.client_width_px, mathLayout.width, &mathX)) return false;
         const uint32_t verticalPadding = std::max<uint32_t>(1,
             static_cast<uint32_t>(std::max<LONG>(1, baseMetrics.tmHeight)) / 2);
         if (static_cast<uint32_t>(mathLayout.height) >
@@ -1069,7 +1093,11 @@ struct TaskCheckboxMetrics {
             mathX > std::numeric_limits<int>::max() - mathLayout.width) {
             return false;
         }
-        const uint32_t groupHeight = static_cast<uint32_t>(mathLayout.height) + verticalPadding * 2u;
+        uint32_t groupHeight = 0;
+        const uint64_t paddedHeight = uint64_t{static_cast<uint32_t>(mathLayout.height)} + uint64_t{verticalPadding} * 2;
+        if (paddedHeight > static_cast<uint64_t>(std::numeric_limits<LONG>::max()) ||
+            !ScaleLineHeight(static_cast<LONG>(paddedHeight),
+                             style.line_height_permille, &groupHeight)) return false;
         NoteRenderRunPlacement runPlacement;
         runPlacement.source_span = runIt->source_span;
         runPlacement.x_px = mathX;
@@ -1083,10 +1111,10 @@ struct TaskCheckboxMetrics {
             {runIt->source_span.end, mathX + mathLayout.width, 0});
         NoteRenderLinePlacement anchorPlacement;
         anchorPlacement.runs.push_back(std::move(runPlacement));
-        if (!AddContainerDecorations(anchorLine, layoutKey, options, std::max<LONG>(1, space.cx),
+        if (!AddContainerDecorations(anchorLine, layoutKey, options, spaceWidthPx,
                                      groupHeight, &anchorPlacement)) return false;
         (*lineLayouts)[group.first_line.value] = {
-            groupHeight, static_cast<uint32_t>(mathX + mathLayout.width), false};
+            groupHeight, static_cast<uint32_t>(std::max(0, mathX + mathLayout.width)), false};
         (*linePlacements)[group.first_line.value] = std::move(anchorPlacement);
         for (size_t line = group.first_line.value + 1; line <= group.last_line.value; ++line) {
             NoteRenderSourceLinePlan sourceLine;
@@ -1152,12 +1180,13 @@ struct MeasuredTableRow {
             mathLayout.height <= 0) {
             return false;
         }
-        if (mathLayout.width > std::numeric_limits<int>::max() - currentWidthPx ||
-            static_cast<uint32_t>(mathLayout.height) > *inOutHeightPx) {
+        if (mathLayout.width > std::numeric_limits<int>::max() - currentWidthPx) {
             return false;
         }
         *outWidthPx = mathLayout.width;
-        *inOutHeightPx = static_cast<uint32_t>(mathLayout.height);
+        uint32_t styledHeight = 0;
+        if (!ScaleLineHeight(mathLayout.height, font.line_height_permille(), &styledHeight)) return false;
+        *inOutHeightPx = std::max(*inOutHeightPx, styledHeight);
         return true;
     }
     std::vector<int> prefix;
@@ -1267,7 +1296,7 @@ struct MeasuredTableRow {
             tableX += containerInset;
             int indentColumns = 0;
             if (!ResolveLineIndentColumns(sourcePlan, row.source_line,
-                                          std::max<LONG>(1, baseMetrics.tmHeight),
+                                          NoteRenderFinalFontCharacterHeight(baseMetrics.tmHeight, baseMetrics.tmInternalLeading),
                                           &indentColumns) ||
                 !AddIndentColumnsToX(tableX, indentColumns, spaceWidthPx, &tableX) ||
                 tableX < 0) {
@@ -1428,7 +1457,7 @@ struct MeasuredTableRow {
                 NoteRenderAtomicGroupPlacement groupPlacement;
                 const NoteRenderAtomicGroup& group = measuredGroups[nextGroup];
                 const bool measured = group.kind == NoteRenderAtomicGroupKind::BlockMath
-                    ? MeasureBlockMathGroup(sourcePlan, layoutKey, options, hdc, baseMetrics, group,
+                    ? MeasureBlockMathGroup(sourcePlan, layoutKey, options, hdc, baseMetrics, spaceWidth, group,
                                             &candidate.line_layouts, &candidate.line_placements,
                                             &groupPlacement)
                     : MeasureTableGroup(sourcePlan, layoutKey, options, hdc, baseMetrics, spaceWidth,

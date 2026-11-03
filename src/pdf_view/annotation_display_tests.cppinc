@@ -1,0 +1,123 @@
+#include "pdf_view/blend_switch_tests.cppinc"
+
+// Isolated automation only: exercise the actual worker/cache and painter.
+static bool RunPdfAnnotationDisplayProbe(std::wstring* trace, std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) { if (outError) *outError=message;return false; };
+    if (g_pdf.pages.empty()) return fail(L"Annotation display requires a page.");
+    PdfInitialViewportUpdateGuard suppressAutomaticJobs;
+    auto& page=g_pdf.pages.front();
+    struct Restore {
+        std::vector<Annotation> annotations;bool shown;
+        ~Restore(){g_annots=std::move(annotations);g_showAnnots=shown;}
+    } restore{g_annots,g_showAnnots};
+    const auto start=GetTickCount64();
+    while (!EnsurePdfPageTextCoverage(0)) {
+        if (GetTickCount64()-start>10000) return fail(L"Text coverage worker did not finish.");
+        (void)ApplyPdfVirtualRenderResults(g_hPdfView);Sleep(1);
+    }
+    const auto* plane=page.textCoverage.data();
+    const auto bytes=page.textCoverage.size();
+    for(int i=0;i<2;++i) if(!EnsurePdfPageTextCoverage(0) || page.textCoverage.data()!=plane)
+        return fail(L"Repeated display requests rebuilt text coverage.");
+    {
+        std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
+        for(const auto& job:g_pdfVirtualJobs) if(job.textCoverage)
+            return fail(L"Cached coverage left duplicate worker requests.");
+    }
+    if(page.w<=0 || page.h<=0 || static_cast<uint64_t>(page.w)*page.h>pdf_text_coverage::kMaxPixels)
+        return fail(L"Display fixture dimensions exceed the probe budget.");
+    HDC dc=CreateCompatibleDC(nullptr);void* bits=nullptr;
+    BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth=page.w;info.bmiHeader.biHeight=-page.h;
+    info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
+    HBITMAP bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+    if(!dc || !bitmap || !bits){if(bitmap)DeleteObject(bitmap);if(dc)DeleteDC(dc);return fail(L"Display probe DIB failed.");}
+    auto old=SelectObject(dc,bitmap);
+    const int left=static_cast<int>(std::lround(PageClientLeft(0))),top=static_cast<int>(std::lround(PageClientTop(0)));
+    SetViewportOrgEx(dc,-left,-top,nullptr);
+    const RECT client{left,top,left+page.w,top+page.h};
+    auto* pixels=static_cast<uint32_t*>(bits);const size_t count=static_cast<size_t>(page.w)*page.h;
+    Annotation ann;ann.id=L"display-probe";ann.pageIndex=0;
+    ann.x1=0;ann.x2=page.widthPt;ann.y1=page.heightPt;ann.y2=0;
+    ann.type=Annotation::Type::TextColor;ann.color=RGB(240,20,30);ann.alpha=0.5;
+    SetAnnotationInputBasis(ann);bool ok=CanonicalizeAnnotation(ann);
+    size_t background=0,glyphs=0;
+    g_showAnnots=true;g_annots={ann};std::fill(pixels,pixels+count,0x002828a0u);
+    if(ok)DrawAnnotations(dc,client);
+    GdiFlush();
+    for(int y=2;y<page.h-2 && ok;++y)for(int x=2;x<page.w-2 && ok;++x){
+        const int sx=static_cast<int>(static_cast<int64_t>(x)*page.textCoverageW/page.w);
+        const int sy=static_cast<int>(static_cast<int64_t>(y)*page.textCoverageH/page.h);
+        const auto alpha=plane[static_cast<size_t>(sy)*page.textCoverageW+sx];
+        const auto value=pixels[static_cast<size_t>(y)*page.w+x]&0xffffff;
+        if(alpha==0){++background;ok=value==0x002828a0u;}
+        if(alpha==255){++glyphs;ok=value==0x00f0141eu;}
+    }
+    ok=ok && background>0 && glyphs>0;
+    ann.type=Annotation::Type::MarkerText;ann.color=RGB(255,160,0);ann.alpha=0.5;
+    constexpr uint32_t baseColors[]={0x00000000u,0x00103452u,0x00ffffffu};
+    constexpr uint32_t markedColors[]={0x00000000u,0x00102a29u,0x00ffcf7fu};
+    for(bool quads:{false,true}) {
+        if(quads) {
+            const auto left=std::min(ann.x1,ann.x2),right=std::max(ann.x1,ann.x2);
+            const auto bottom=std::min(ann.y1,ann.y2),top=std::max(ann.y1,ann.y2);
+            ann.quads={left,top,right,top,right,bottom,left,bottom};
+        }
+        g_annots={ann};
+        for(size_t i=0;i<count;++i)pixels[i]=baseColors[i%3];
+        if(ok)DrawAnnotations(dc,client);
+        GdiFlush();
+        for(int y=2;y<page.h-2 && ok;++y)for(int x=2;x<page.w-2 && ok;++x) {
+            const auto i=static_cast<size_t>(y)*page.w+x;
+            ok=(pixels[i]&0xffffff)==markedColors[i%3];
+        }
+    }
+    // Compare Legacy against the actual painter used before Multiply was added.
+    ann.markerDisplayMode=MarkerDisplayMode::Legacy;
+    for(size_t i=0;i<count;++i)pixels[i]=baseColors[i%3];
+    FillRectAlpha(dc,client,DarkenColor(ann.color,0.85),127);GdiFlush();
+    std::vector<uint32_t> legacyPixels(pixels,pixels+count);
+    for(size_t i=0;i<count;++i)pixels[i]=baseColors[i%3];
+    g_annots={ann};if(ok)DrawAnnotations(dc,client);GdiFlush();
+    for(int y=2;y<page.h-2 && ok;++y)for(int x=2;x<page.w-2 && ok;++x) {
+        const auto i=static_cast<size_t>(y)*page.w+x;
+        ok=(pixels[i]&0xffffff)==(legacyPixels[i]&0xffffff);
+    }
+    if(ok && page.viewRotation==0)ok=RunAnnotationBlendSwitchProbe(dc,client,pixels,count,trace,outError);
+    SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
+    if(!ok)return fail(L"Annotation painter changed background/failed to reveal glyphs or made marker boxes.");
+
+    // Actual bridge load/save, on owned automation files only. The original v1
+    // remains untouched while its migrated v2 copy retains Legacy explicitly.
+    const auto fixture=std::filesystem::path(g_currentSessionPath)/
+        (L"marker_display_v1_"+std::to_wstring(page.viewRotation)+L".clrop");
+    const std::string oldJson=R"({"version":1,"pdf_id":{"size":1},"pages":[{"page":0,"items":[{"type":"marker-text","id":"old-marker","created":"now","updated":"now","quads":[[0,10,20,10,20,0,0,0]]}]}]})";
+    {std::ofstream file(fixture,std::ios::binary);file<<oldJson;file.close();if(!file)return fail(L"Marker migration fixture write failed.");}
+    std::vector<Annotation> loaded;bool mismatch=false;std::wstring error;
+    if(!clrop_bridge::LoadAnnotations(fixture.wstring(),g_pdf.path,loaded,mismatch,nullptr,error,
+            clrop_bridge::LoadAnnotationsValidation::None) || loaded.size()!=1 ||
+       loaded[0].markerDisplayMode!=MarkerDisplayMode::Legacy)
+        return fail(L"Unspecified v1 marker did not retain Legacy display.");
+    Annotation added=loaded[0];added.id=L"new-marker";added.markerDisplayMode=MarkerDisplayMode::Multiply;
+    loaded.push_back(added);
+    const auto saved=fixture.parent_path()/(L"marker_display_v2_"+std::to_wstring(page.viewRotation)+L".clrop");
+    if(!clrop_bridge::SaveAnnotations(saved.wstring(),g_pdf.path,loaded,error))
+        return fail(L"Mixed marker display modes could not be saved.");
+    std::vector<Annotation> reopened;
+    if(!clrop_bridge::LoadAnnotations(saved.wstring(),g_pdf.path,reopened,mismatch,nullptr,error,
+            clrop_bridge::LoadAnnotationsValidation::None) || reopened.size()!=2 ||
+       reopened[0].markerDisplayMode!=MarkerDisplayMode::Legacy || reopened[1].markerDisplayMode!=MarkerDisplayMode::Multiply)
+        return fail(L"Mixed marker display modes did not survive reopen.");
+    reopened[0].markerDisplayMode=MarkerDisplayMode::Multiply;
+    std::string compact;
+    if(!clrop_bridge::SerializeAnnotations(g_pdf.path,reopened,compact,error) ||
+       compact.find("\"version\":2")==std::string::npos || compact.find("marker_display_mode")!=std::string::npos)
+        return fail(L"Multiply must be omitted, including when changing an old marker.");
+    {std::ifstream file(fixture,std::ios::binary);const std::string retained{std::istreambuf_iterator<char>(file),{}};
+        if(retained!=oldJson)return fail(L"Marker migration modified the original v1 fixture.");}
+    if(trace)*trace+=L"pdf_annotation_display:app_ok turn="+std::to_wstring(page.viewRotation)+
+        L" cache_hits=2 bytes="+std::to_wstring(bytes)+L" probe_ms="+std::to_wstring(GetTickCount64()-start)+L"\n";
+    if(trace)*trace+=L"pdf_marker_display:app_ok turn="+std::to_wstring(page.viewRotation)+L" rect=1 quads=1 colors=3\n";
+    if(trace)*trace+=L"pdf_marker_modes:app_ok turn="+std::to_wstring(page.viewRotation)+L" legacy=1 multiply=1 v1=1 v2=1 omitted=1\n";
+    return true;
+}

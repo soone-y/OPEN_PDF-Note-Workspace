@@ -4,6 +4,7 @@
 #include "core/atomic_write.h"
 #include "diagnostics/normal_operations.h"
 #include "core/path_safety.h"
+#include "core/identity_path_scope.h"
 #include "core/sha256.h"
 
 #include <objbase.h>
@@ -57,6 +58,7 @@ struct RuntimeCatalogState {
     bool configured = false;
     bool dirty = false;
     std::filesystem::path workspaceRoot;
+    std::vector<std::filesystem::path> registeredExternalRoots;
     std::filesystem::path storePath;
     WorkspaceResourceCatalog catalog;
 };
@@ -184,21 +186,10 @@ void AppendU64(std::string& out, std::uint64_t value) {
 [[nodiscard]] std::optional<std::string> RelativeKeyForPath(const RuntimeCatalogState& state,
                                                              const std::wstring& absolutePath) {
     if (!state.configured || state.workspaceRoot.empty() || absolutePath.empty()) return std::nullopt;
-    const std::filesystem::path absolute(
-        NormalizePathKey(absolutePath));
-    const std::filesystem::path root(
-        NormalizePathKey(state.workspaceRoot.wstring()));
-    const std::wstring absoluteKey = NormalizePathKey(absolute.wstring());
-    std::wstring rootKey = NormalizePathKey(root.wstring());
-    if (rootKey.empty()) return std::nullopt;
-    if (rootKey.back() != L'\\') rootKey.push_back(L'\\');
-    if (absoluteKey.size() <= rootKey.size() ||
-        absoluteKey.compare(0, rootKey.size(), rootKey) != 0) {
-        return std::nullopt;
-    }
-    const std::filesystem::path relative = absolute.lexically_relative(root);
-    if (!IsSafeRelativePath(relative)) return std::nullopt;
-    const std::string key = WideToUtf8Strict(NormalizeRelativePathKey(relative));
+    const auto scoped = identity_path_scope::KeyForPath(state.workspaceRoot,
+        state.registeredExternalRoots, absolutePath);
+    if (!scoped) return std::nullopt;
+    const std::string key = WideToUtf8Strict(*scoped);
     if (key.empty() || key.size() > kMaxRelativePathBytes) return std::nullopt;
     return key;
 }
@@ -255,6 +246,10 @@ void AppendU64(std::string& out, std::uint64_t value) {
         return false;
     }
     const std::string bytes = state.catalog.Serialize();
+    if (bytes.size() > kMaxCatalogBytes) {
+        if (outError) *outError = L"workspace resource catalog exceeds the readable size limit";
+        return false;
+    }
     const std::filesystem::path resource = state.workspaceRoot / L"__pdf_note_workspace__";
     std::wstring error;
     if (!write_checks::ObservedWriteBytes(state.workspaceRoot, state.storePath, bytes.data(), bytes.size(),
@@ -328,7 +323,7 @@ bool WorkspaceResourceCatalog::Parse(std::string_view bytes, std::wstring* outEr
     std::uint32_t reserved = 0;
     std::uint64_t count = 0;
     if (!ReadU32(bytes, &offset, &version) || !ReadU32(bytes, &offset, &reserved) ||
-        !ReadU64(bytes, &offset, &count) || version != kCatalogVersion || reserved != 0 ||
+        !ReadU64(bytes, &offset, &count) || (version != kCatalogVersion && version != 2) || reserved != 0 ||
         count > kMaxCatalogRecords) {
         if (outError) *outError = L"workspace resource catalog header fields are invalid";
         return false;
@@ -368,8 +363,12 @@ bool WorkspaceResourceCatalog::Parse(std::string_view bytes, std::wstring* outEr
         std::string path(bytes.substr(offset, pathSize));
         offset += pathSize;
         const auto pathWide = Utf8ToWideStrict(path);
-        if (!pathWide.has_value() || !IsSafeRelativePath(std::filesystem::path(*pathWide)) ||
-            WideToUtf8Strict(NormalizeRelativePathKey(std::filesystem::path(*pathWide))) != path ||
+        const bool external = pathWide && identity_path_scope::IsExternal(*pathWide);
+        const bool safe = pathWide && (external
+            ? version >= 2 && identity_path_scope::ValidExternalKey(*pathWide)
+            : IsSafeRelativePath(std::filesystem::path(*pathWide)) &&
+              WideToUtf8Strict(NormalizeRelativePathKey(std::filesystem::path(*pathWide))) == path);
+        if (!safe ||
             !parsed.BindPath(std::move(record), std::move(path))) {
             if (outError) *outError = L"workspace resource catalog contains duplicate or unsafe records";
             return false;
@@ -387,7 +386,10 @@ std::string WorkspaceResourceCatalog::Serialize() const {
     std::string out;
     out.reserve(kCatalogMagic.size() + 16 + recordsByPath_.size() * 128 + kCatalogDigestBytes);
     out.append(kCatalogMagic.data(), kCatalogMagic.size());
-    AppendU32(out, kCatalogVersion);
+    const bool external = std::any_of(recordsByPath_.begin(), recordsByPath_.end(), [](const auto& record) {
+        return record.first.rfind("@external:", 0) == 0;
+    });
+    AppendU32(out, external ? 2 : kCatalogVersion);
     AppendU32(out, 0);
     AppendU64(out, static_cast<std::uint64_t>(recordsByPath_.size()));
     for (const auto& [path, record] : recordsByPath_) {
@@ -420,7 +422,8 @@ bool WorkspaceResourceCatalog::BindPath(CatalogRecord record, std::string path) 
         return false;
     }
     const auto pathWide = Utf8ToWideStrict(path);
-    if (!pathWide.has_value() || !IsSafeRelativePath(std::filesystem::path(*pathWide))) return false;
+    if (!pathWide.has_value() || !(identity_path_scope::ValidExternalKey(*pathWide) ||
+        IsSafeRelativePath(std::filesystem::path(*pathWide)))) return false;
     const auto pathIt = recordsByPath_.find(path);
     if (pathIt != recordsByPath_.end() && pathIt->second.resourceId != record.resourceId) return false;
     if (pathIt == recordsByPath_.end() && recordsByPath_.size() >= kMaxCatalogRecords) return false;
@@ -437,7 +440,8 @@ bool WorkspaceResourceCatalog::RebindPath(WorkspaceResourceId resourceId,
                                           WorkspaceResourceFingerprint fingerprint) {
     if (!resourceId.valid() || !IsValidKind(kind) || !fingerprint.valid() || path.empty()) return false;
     const auto pathWide = Utf8ToWideStrict(path);
-    if (!pathWide.has_value() || !IsSafeRelativePath(std::filesystem::path(*pathWide))) return false;
+    if (!pathWide.has_value() || !(identity_path_scope::ValidExternalKey(*pathWide) ||
+        IsSafeRelativePath(std::filesystem::path(*pathWide)))) return false;
     const auto idIt = pathById_.find(resourceId);
     if (idIt == pathById_.end()) return false;
     const auto sourceIt = recordsByPath_.find(idIt->second);
@@ -465,10 +469,14 @@ bool WorkspaceResourceCatalog::UpdateFingerprint(WorkspaceResourceId resourceId,
 
 bool ConfigureRuntimeWorkspaceResourceCatalog(const std::filesystem::path& workspaceRoot,
                                               std::wstring* outError) {
+    return ConfigureRuntimeWorkspaceResourceCatalog(workspaceRoot, {}, outError);
+}
+
+bool ConfigureRuntimeWorkspaceResourceCatalog(const std::filesystem::path& workspaceRoot,
+    const std::vector<std::filesystem::path>& registeredExternalRoots, std::wstring* outError) {
     if (outError) outError->clear();
-    const std::filesystem::path normalizedRoot(
-        NormalizePathKey(workspaceRoot.wstring()));
-    if (workspaceRoot.empty() || normalizedRoot.empty() || !normalizedRoot.is_absolute()) {
+    const auto normalizedRoot = identity_path_scope::LocalPath(workspaceRoot.wstring());
+    if (!normalizedRoot) {
         if (outError) *outError = L"workspace resource catalog requires an absolute workspace root";
         return false;
     }
@@ -476,10 +484,15 @@ bool ConfigureRuntimeWorkspaceResourceCatalog(const std::filesystem::path& works
     const std::lock_guard<std::mutex> lock(state.mutex);
     state.configured = false;
     state.dirty = false;
-    state.workspaceRoot = normalizedRoot;
+    state.workspaceRoot = *normalizedRoot;
+    state.registeredExternalRoots = registeredExternalRoots;
     state.storePath = state.workspaceRoot / L"__pdf_note_workspace__" / L"__settings__" /
                       L"workspace_resource_registry.bin";
     WorkspaceResourceCatalog catalog;
+    if (!identity_path_scope::NoReparseAncestors(state.storePath)) {
+        if (outError) *outError = L"workspace resource catalog has an unsafe ancestor";
+        return false;
+    }
     // The catalog establishes resource identity, so following a reparse point
     // here would let a workspace silently borrow an unrelated catalog.  A
     // missing catalog is fine (it will be created by the first safe bind), but
@@ -507,8 +520,6 @@ std::optional<WorkspaceResourceIdentity> ResolveRuntimeWorkspaceResourceIdentity
         if (outError) *outError = L"workspace resource kind is invalid";
         return std::nullopt;
     }
-    WorkspaceResourceFingerprint observed;
-    if (!CaptureFingerprint(std::filesystem::path(absolutePath), &observed, outError)) return std::nullopt;
     RuntimeCatalogState& state = RuntimeCatalog();
     const std::lock_guard<std::mutex> lock(state.mutex);
     const auto relative = RelativeKeyForPath(state, absolutePath);
@@ -516,6 +527,8 @@ std::optional<WorkspaceResourceIdentity> ResolveRuntimeWorkspaceResourceIdentity
         if (outError) *outError = L"workspace resource path is outside the configured workspace";
         return std::nullopt;
     }
+    WorkspaceResourceFingerprint observed;
+    if (!CaptureFingerprint(std::filesystem::path(absolutePath), &observed, outError)) return std::nullopt;
     if (const auto existing = state.catalog.FindPath(*relative)) {
         if (existing->kind != kind) {
             if (outError) *outError = L"workspace resource alias has a different resource kind";
@@ -577,6 +590,14 @@ bool RebindRuntimeWorkspaceResourceIdentityPath(
     std::wstring* outError) {
     if (outError) outError->clear();
     if (!resourceId.valid() || !IsValidKind(kind) || !expectedDestinationFingerprint.valid()) return false;
+    RuntimeCatalogState& state = RuntimeCatalog();
+    const std::lock_guard<std::mutex> lock(state.mutex);
+    const auto oldRelative = RelativeKeyForPath(state, oldAbsolutePath);
+    const auto newRelative = RelativeKeyForPath(state, newAbsolutePath);
+    if (!oldRelative.has_value() || !newRelative.has_value()) {
+        if (outError) *outError = L"workspace resource rebind path is outside the configured scope";
+        return false;
+    }
     std::error_code ec;
     if (std::filesystem::exists(std::filesystem::path(oldAbsolutePath), ec) || ec) {
         if (outError) *outError = L"workspace resource source still exists during alias rebind";
@@ -586,14 +607,6 @@ bool RebindRuntimeWorkspaceResourceIdentityPath(
     if (!CaptureFingerprint(std::filesystem::path(newAbsolutePath), &observed, outError) ||
         observed != expectedDestinationFingerprint) {
         if (outError && outError->empty()) *outError = L"workspace resource destination fingerprint does not match";
-        return false;
-    }
-    RuntimeCatalogState& state = RuntimeCatalog();
-    const std::lock_guard<std::mutex> lock(state.mutex);
-    const auto oldRelative = RelativeKeyForPath(state, oldAbsolutePath);
-    const auto newRelative = RelativeKeyForPath(state, newAbsolutePath);
-    if (!oldRelative.has_value() || !newRelative.has_value()) {
-        if (outError) *outError = L"workspace resource rebind path is outside the configured workspace";
         return false;
     }
     const auto source = state.catalog.FindPath(*oldRelative);
@@ -609,10 +622,4 @@ bool RebindRuntimeWorkspaceResourceIdentityPath(
         return false;
     }
     return true;
-}
-
-std::filesystem::path RuntimeWorkspaceResourceCatalogPath() {
-    RuntimeCatalogState& state = RuntimeCatalog();
-    const std::lock_guard<std::mutex> lock(state.mutex);
-    return state.storePath;
 }

@@ -1,0 +1,34 @@
+Read-only viewer — licenses and copyright notices
+
+Use the file list to enter each folder and read the original documents.
+The original terms and notices take precedence over this guide.
+
+Application: PDF Note Workspace / Copyright (c) 2026 Soone-Y / zlib License
+  project/LICENSE.md
+  LICENSE.md beside the executable is the project's common license document.
+
+PDF rendering: PDFium binary package / PDFium and its bundled components
+  pdfium/LICENSE — binary package license
+  pdfium/pdfium.txt — PDFium license
+  Other documents in pdfium/ — licenses and copyright notices of bundled components
+  The complete PDFium notice collection is retained.
+
+Markdown parsing: MD4C / MIT License
+  md4c/LICENSE.md
+  MD4C is compiled into the executable; its original license is still bundled.
+
+C++ runtime: MinGW-w64 / GCC runtime
+  libstdc++-6.dll and libgcc_s_seh-1.dll:
+    mingw-w64/gcc/COPYING3.txt
+    mingw-w64/gcc/COPYING.RUNTIME.txt
+  libwinpthread-1.dll:
+    mingw-w64/winpthreads/COPYING.txt
+  The GCC Runtime Library Exception is included verbatim.
+
+This standalone viewer build does not bundle LibreOffice, zlib1.dll, or extra font files.
+It uses Windows components and installed fonts.
+User documents and images remain subject to their respective rights holders' terms.
+
+Keep LICENSE.md and the licenses folder together with the executable and four DLLs.
+manifest.json records the source and SHA-256 of the bundled documents.
+This is a local verification build; these checks do not approve a public release.

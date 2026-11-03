@@ -161,7 +161,7 @@ static void StageManagerApplySelection(StageManagerDialogState* ctx, int selecte
         detail = StageDiffEntryDetail(entry);
         hasSelection = true;
         canActivate = StageDiffCanActivate(entry);
-        canMerge = StageDiffCanMergeIntoCurrentPdf(entry);
+        canMerge = true;
     } else {
         detail = localization::Text(L"workspace.stage_manager.355c556c369f");
     }
@@ -248,7 +248,8 @@ static void StageManagerHandleAction(StageManagerDialogState* ctx, int actionId)
         break;
     }
     case kStageMgrMerge:
-        ok = MergeStagedAnnotationsIntoCurrentPdf(ctx->hwnd, entry.stagePath);
+        recovery::RequestStageRecovery(ctx->hwnd, entry.stagePath);
+        ok = true;
         break;
     case kStageMgrDiscard:
         ok = file_output::DiscardStagedDiff(entry.stagePath);
@@ -272,6 +273,9 @@ static void StageManagerHandleAction(StageManagerDialogState* ctx, int actionId)
 static LRESULT CALLBACK StageManagerDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* ctx = reinterpret_cast<StageManagerDialogState*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
     switch (msg) {
+    case kMsgStageRecovery:
+        if (ctx) StageManagerRefreshList(ctx);
+        return 0;
     case WM_CREATE: {
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
         ctx = reinterpret_cast<StageManagerDialogState*>(cs->lpCreateParams);
@@ -293,7 +297,7 @@ static LRESULT CALLBACK StageManagerDialogProc(HWND hWnd, UINT msg, WPARAM wPara
 
         const std::wstring activateLabel = localization::Text(L"workspace.stage_manager.ab2785e44160");
         const std::wstring integrateLabel = localization::Text(L"workspace.stage_manager.c166aa153cdf");
-        const std::wstring mergeLabel = localization::Text(L"workspace.stage_manager.277797d3d598");
+        const std::wstring mergeLabel = localization::Text(L"recovery.app.open");
         const std::wstring discardLabel = localization::Text(L"workspace.stage_manager.bd94165e161d");
         const std::wstring noBackupLabel = localization::Text(L"workspace.stage_manager.2d660f3156ba");
         const std::wstring closeLabel = localization::Text(L"workspace.stage_manager.603bc62f3f34");

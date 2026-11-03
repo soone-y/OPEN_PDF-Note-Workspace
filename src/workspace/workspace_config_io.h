@@ -18,12 +18,18 @@ void ResetSessionAndFiles();
 bool EnsureWorkspaceResourceDirs(std::filesystem::path* settingsDir);
 bool EnsureWorkspaceResourceDirsWithErr(const std::wstring& root, std::filesystem::path* settingsDir, std::wstring* outErr);
 bool VerifyWorkspaceWritableForEditing(HWND owner);
+// The error-output overloads leave notification to the caller (for retained retries).
+[[nodiscard]] bool VerifyWorkspaceWritableForEditing(HWND owner, std::wstring* outError);
 
 bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path& dir, const wchar_t* labelId);
+[[nodiscard]] bool VerifyDirReadableWritableForEditing(HWND owner, const std::filesystem::path& dir,
+                                                     const wchar_t* labelId, std::wstring* outError);
 bool TryOpenDirForList(const std::filesystem::path& dir, std::wstring* outErr);
 void ShowTempExternalLectureAccessWarning(HWND owner, const std::filesystem::path& dir, const std::wstring& readErr);
 void ForgetWritableProbe(const std::filesystem::path& dir);
 void RememberWritableProbe(const std::filesystem::path& dir);
+// Worker-safe fresh probe; no HWND, UI globals, warning state or cache writes.
+[[nodiscard]] bool ProbeDirectoryEditingAccess(const std::filesystem::path& dir, std::wstring* error);
 
 // Saving & Presets
 bool SaveNoteIfDirty(HWND hWnd);

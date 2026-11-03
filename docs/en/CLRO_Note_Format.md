@@ -14,6 +14,8 @@
 
 ## What it is good for
 
+See [Note writing guide](Note_Writing_Guide.md) for input assist and a reference of supported syntax with examples. The lower-left **Writing guide** button also opens it.
+
 Use Markdown-style headings, lists, emphasis, links, code, and tables to structure notes. Headings are also available in the application's heading view.
 
 ### Tables
@@ -35,17 +37,21 @@ This markup is not exclusive to `.clro`; `.md` and `.markdown` use the same rout
 
 ## Container blocks
 
-Surround text with standalone `::: note` and `:::` lines to display a block with a background, border, and inset. Headings, emphasis, links, tables, and math inside it retain their normal interpretation. A code block is a block whose body is instead displayed literally.
+Surround text with standalone `::: Title` and `:::` lines to display a block with a title, background, border, and inset. Headings, emphasis, links, tables, and math inside it retain their normal interpretation. A code block is a block whose body is instead displayed literally.
 
 ```text
-::: note
-**Additional information** and `code`
+::: Intermittent claudication
+Walking interrupted by repeated rest periods.
 :::
 ```
 
-`note` is an identifying name; a bare `:::` can also open an unnamed block. A named opening line inside a container creates a nested block. An unnamed closing line closes the innermost block and must have at least as many colons as its opening line. Up to three leading spaces are accepted. An unclosed block extends to the end of the document. Styling attributes and folding are not supported.
+The text after `:::` on the opening line is displayed as its title. You can also specify `::: note title="Additional information"`. Titles are literal bold text, not interpreted markup. `title=""` hides the title; unclosed quotes and duplicate `title=` attributes do not produce a title. The source is unchanged. Enclose explicit titles containing spaces in double or single quotes.
 
-Editing or selecting a row shows that row's source, not the entire enclosing container. Tables and display math inside it retain their own editing units. TXT output removes the wrapper syntax while preserving its body. Colons inside code or math do not open containers.
+A bare `:::` can also open an unnamed block. A named opening line inside a container creates a nested block. An unnamed closing line closes the innermost block and must have at least as many colons as its opening line. Up to three leading spaces are accepted. An unclosed block extends to the end of the document. Styling attributes other than the title and folding are not supported.
+
+For code blocks, use an opening line such as `` ```cpp title="example.cpp" `` to display a title separately from the `cpp` language name. Blocks without an explicit title retain their existing behavior.
+
+Editing or selecting a row shows that row's source, not the entire enclosing container. Tables and display math inside it retain their own editing units. TXT output removes the wrapper syntax while preserving its title and body. HTML output also includes the title. Colons inside code or math do not open containers.
 
 ## Mathematics and compatibility
 

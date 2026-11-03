@@ -26,6 +26,13 @@ struct NoteRenderFinalRunFontStyle {
     bool bold = false;
     bool italic = false;
     int font_height_px = 0;
+    // Includes valid relative +0: export may need to reset inherited heading
+    // size even when GDI can retain its exact existing logical font.
+    bool font_size_specified = false;
+    // Absolute size tags remain overrides even when rounded TEXTMETRIC
+    // character height equals their value (positive/negative LF conventions
+    // can select slightly different physical fonts). Weight alone is not one.
+    bool overrides_font_height = false;
     std::wstring_view font_family{};
     // 1000 is one normal line. The legacy `<m>` syntax stores its requested
     // extra line units as this multiplier, so placement owns the resulting
@@ -42,8 +49,14 @@ struct NoteRenderFinalRunFontStyle {
     int anchor_offset_columns = 0;
 };
 
-// `base_font_height_px` is the selected view font's actual TEXTMETRIC height,
-// not a configured point size.  The result is clamped to the same safe range
+// Character/em height for negative LOGFONT::lfHeight, excluding the cell's
+// internal leading. Cell/row height must never be fed back as a font size.
+[[nodiscard]] int NoteRenderFinalFontCharacterHeight(int cell_height_px,
+                                                    int internal_leading_px) noexcept;
+
+// `base_font_height_px` is the selected view font's character/em height,
+// not its full TEXTMETRIC cell height or a configured point size. Explicit
+// sizes are clamped to the same safe range
 // as the legacy markup parser. Invalid or unknown attributes are ignored: the
 // parser has already decided which spans are valid semantic style input.
 [[nodiscard]] bool ResolveNoteRenderFinalRunFontStyle(

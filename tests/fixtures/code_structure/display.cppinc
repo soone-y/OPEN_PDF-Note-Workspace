@@ -1,0 +1,3 @@
+void PaintAndScroll(int n) { first.scroll += n; Paint(first.scroll); }
+void HitTest(int n) { if (n > first.scroll) Paint(n); }
+void MoveCaret(int n) { first.scroll = n; Paint(n); }

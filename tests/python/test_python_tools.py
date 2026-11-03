@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
@@ -32,6 +32,29 @@ def load_module(name: str, rel_path: str):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+ReaderMigrationTests = load_module(
+    "test_readonly_viewer_migration", "tests/python/test_readonly_viewer_migration.py"
+).ReaderMigrationTests
+SearchCancelTests = load_module(
+    "test_search_cancel", "tests/python/test_search_cancel.py"
+).SearchCancelTests
+WritingGuideTests = load_module(
+    "test_note_writing_guide", "tests/python/test_note_writing_guide.py"
+).WritingGuideTests
+PrototypeLicenseTests = load_module(
+    "test_readonly_viewer_next_licenses", "tests/python/test_readonly_viewer_next_licenses.py"
+).PrototypeLicenseTests
+AnnotationShortcutContractTests = load_module(
+    "test_annotation_shortcut_contract", "tests/python/test_annotation_shortcut_contract.py"
+).AnnotationShortcutContractTests
+ApplicationShortcutContractTests = load_module(
+    "test_application_shortcut_contract", "tests/python/test_application_shortcut_contract.py"
+).ApplicationShortcutContractTests
+ImagePdfOrientationTests = load_module(
+    "test_image_pdf_orientation", "tests/python/test_image_pdf_orientation.py"
+).ImagePdfOrientationTests
 
 
 migrate_clrop_v1 = load_module("migrate_clrop_v1", "tools/migration/migrate_clrop_v1.py")
@@ -68,6 +91,9 @@ validate_public_site = load_module("validate_public_site", "site/github/scripts/
 validate_introduction_site = load_module(
     "validate_introduction_site", "site/cloudflare/scripts/validate_introduction_site.py"
 )
+SiteValidationRegressionTests = load_module(
+    "site_validation_regressions", "tests/python/test_site_validation.py"
+).SiteValidationRegressionTests
 release_license_gate = load_module("release_license_gate", "tools/release_checks/release_license_gate.py")
 release_text_gate = load_module("release_text_gate", "tools/release_checks/release_text_gate.py")
 release_locale_content_gate = load_module(
@@ -110,9 +136,29 @@ pe_fixtures = load_module("pe_fixtures", "tests/python/pe_fixtures.py")
 CheckFailureContractTests = load_module(
     "check_failure_contracts", "tests/python/test_check_failure_contracts.py"
 ).CheckFailureContractTests
+PublicStatisticsTests = load_module(
+    "public_statistics_tests", "tests/python/test_public_statistics.py"
+).PublicStatisticsTests
+PreparedStatisticsTests = sys.modules["public_statistics_tests"].PreparedStatisticsTests
+HistoricalStatisticsTests = sys.modules["public_statistics_tests"].HistoricalStatisticsTests
+StatisticsPipelineTests = sys.modules["public_statistics_tests"].StatisticsPipelineTests
+# Release/build regressions must run in the ordinary gate, not only on demand.
+ReleaseEntrypointTests = load_module(
+    "release_entrypoint_tests", "tests/python/test_release_entrypoints.py"
+).ReleaseEntrypointTests
+BuildVersionRefreshTests = load_module(
+    "build_version_refresh_tests", "tests/python/test_build_version_refresh.py"
+).BuildVersionRefreshTests
+OfficeWorkerStaticContractTests = load_module(
+    "office_worker_static_contract_tests", "tests/python/test_office_worker_static_contract.py"
+).OfficeWorkerStaticContractTests
 BackgroundAppTests = load_module(
     "background_app_tests", "tests/python/test_background_app.py"
 ).BackgroundAppTests
+IsolatedAppTests = load_module(
+    "isolated_app_tests", "tests/python/test_isolated_app_test.py"
+).IsolatedAppTests
+IsolatedAppWindowsTests = sys.modules["isolated_app_tests"].IsolatedAppWindowsTests
 
 # Run executable JSON persistence regressions in the ordinary repository gate.
 SetupJsonRoundTripTests = load_module(
@@ -149,7 +195,179 @@ def _validate_annotation_shortcuts(entries: list[dict]) -> None:
         seen.add(chord)
 
 
+class WriteChecksParentFallbackContractTests(unittest.TestCase):
+    def test_only_missing_session_children_can_use_the_existing_parent_probe(self) -> None:
+        source = (REPO_ROOT / "src/diagnostics/write_checks.cpp").read_text(encoding="utf-8")
+        probe = source[source.index("Result ProbeSessionDestination("):source.index("Result ReadProbeFile(")]
+        for guard in ("result.outcome != Outcome::Unavailable", "result.step != Step::Open",
+                      "result.error != ERROR_FILE_NOT_FOUND", "result.error != ERROR_PATH_NOT_FOUND",
+                      "kind != Kind::PdfWrite && kind != Kind::NoteWrite", "!IsSafeLocalPath(session)",
+                      "SameTarget(target.wstring(), (session / leaf).wstring())",
+                      "parentAttributes & FILE_ATTRIBUTE_DIRECTORY", "parentAttributes & FILE_ATTRIBUTE_REPARSE_POINT",
+                      "childError != ERROR_FILE_NOT_FOUND", "childError != ERROR_PATH_NOT_FOUND"):
+            self.assertIn(guard, probe)
+        self.assertLess(probe.index("parentAttributes"), probe.index("ProbeDirectory(session, true)"))
+        self.assertIn("result.operationPath = session.wstring()", probe)
+        self.assertNotIn("CreateDirectory", probe)
+        self.assertNotIn("EnsureDirectory", probe)
+
+    def test_display_uses_persisted_evidence_without_filesystem_queries(self) -> None:
+        source = (REPO_ROOT / "src/diagnostics/write_checks.cpp").read_text(encoding="utf-8")
+        classify = source[source.index("bool IsParentDestinationProbe("):source.index("Result ProbeSessionDestination(")]
+        self.assertIn("record.result.source != Source::Manual", classify)
+        self.assertIn("SameTarget(record.target", classify)
+        for forbidden in ("IsSafeLocalPath", "GetFileAttributes", "ProbeDirectory"):
+            self.assertNotIn(forbidden, classify)
+        ui = (REPO_ROOT / "src/ui/dialogs/write_checks_dialog.cpp").read_text(encoding="utf-8")
+        self.assertIn("auto status = ResultText(record, ctx.loadOk)", ui)
+        self.assertIn('T(L"dialog.details.status") + L"\\n" + ResultText(record, ctx.loadOk)', ui)
+        self.assertIn('L"checks.description.parent_probe" : L"checks.description.destination"', ui)
+        self.assertIn("Execute(kind, target, session, ctx.cancel)", ui)
+        self.assertIn("std::filesystem::path(ctx.snapshotSession).lexically_normal()", ui)
+        self.assertIn("ctx.targets[8] != CurrentPdfDirectory().lexically_normal()", ui)
+        self.assertIn("ctx.targets[9] != CurrentNoteDirectory().lexically_normal()", ui)
+        self.assertIn('L"checks.operation_path"), record->result.operationPath', ui)
+        # The current ledger already preserves manual operationPath; no format migration.
+        self.assertIn('const std::string header = "PDF_NOTE_WRITE_CHECKS_2\\n"', source)
+        self.assertIn("std::quoted(Encode(row.result.operationPath))", source)
+        self.assertIn("Decode(operation, row.result.operationPath)", source)
+
+    def test_short_results_and_scope_explanation_exist_in_both_locales(self) -> None:
+        for locale in ("ja", "en"):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            self.assertEqual(catalog["checks.parent_result"].count("{RESULT}"), 1)
+            self.assertTrue(catalog["checks.unavailable_short"])
+            self.assertTrue(catalog["checks.description.parent_probe"])
+        native = (REPO_ROOT / "tests/unit/write_checks_tests.cpp").read_text(encoding="utf-8")
+        for case in ("absentParent", "wrongLeaf", "wrongKind", "canceledDestination", "IsParentDestinationProbe(parentRows.front())"):
+            self.assertIn(case, native)
+
+
+class BottomPanePersistenceContractTests(unittest.TestCase):
+    def test_dedicated_settings_page_and_menu_keep_existing_page_ids(self) -> None:
+        nav = (REPO_ROOT / "src/settings/settings_navigation.h").read_text(encoding="utf-8")
+        self.assertIn("QuickNote = 14, BottomPane = 15, Count = 16", nav)
+        self.assertIn('{BottomPane, EnvironmentGroup, L"settings.page.bottom_pane"}', nav)
+        self.assertIn("sidebarOrder = {Environment, BottomPane, Palette", nav)
+        menu = (REPO_ROOT / "src/ui/menus/menu_build.cpp").read_text(encoding="utf-8")
+        self.assertIn('ID_SETTINGS_BOTTOM_PANE, text(L"menu.settings.bottom_pane")', menu)
+        dispatch = (REPO_ROOT / "src/app/command_dispatch.cppinc").read_text(encoding="utf-8")
+        self.assertIn("case ID_SETTINGS_BOTTOM_PANE:\n        ShowBottomPaneSettingsDialog(hWnd)", dispatch)
+        dialog = (REPO_ROOT / "src/settings/settings_general_dialog.cppinc").read_text(encoding="utf-8")
+        own = dialog[dialog.index("if (ctx->pageMode == GeneralSettingsPageMode::BottomPane)"):dialog.index("if (ctx->pageMode == GeneralSettingsPageMode::Basic)")]
+        self.assertIn("ctx->cbBottomPane = addCombo", own)
+        self.assertIn("settings.bottom_pane.persistence_hint", own)
+        self.assertEqual(dialog.count("ctx->cbBottomPane = addCombo"), 1)
+
+    def test_view_is_runtime_only_and_settings_commit_before_runtime_activation(self) -> None:
+        main = (REPO_ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        start = main.index("static void SetBottomPaneRuntimeMode(BottomPanePin pin, BottomNoteMode noteMode) {")
+        runtime = main[start:main.index("HACCEL BuildAccelerators()", start)]
+        self.assertIn("g_bottomPanePin = pin", runtime)
+        self.assertNotIn("g_config", runtime)
+        self.assertNotIn("Persist", runtime)
+        core = (REPO_ROOT / "src/core/app_core.cpp").read_text(encoding="utf-8")
+        persist = core[core.index("bool TryPersistConfig() {"):core.index("void PersistConfig() {")]
+        self.assertNotIn("g_config.bottomPanePin =", persist)
+        self.assertNotIn("g_config.bottomNoteMode =", persist)
+        self.assertIn('WideToUTF8(cfg.bottomPanePin.empty() ? L"note" : cfg.bottomPanePin)', core)
+        apply = (REPO_ROOT / "src/settings/settings_general_controls.cppinc").read_text(encoding="utf-8")
+        start = apply.index("if (ctx->cbBottomPane) {")
+        self.assertLess(apply.index("g_config.bottomPanePin = BottomPanePinToString(wantPin)", start), apply.index("const bool saved = TryPersistConfig()"))
+        self.assertLess(apply.index("const bool saved = TryPersistConfig()"), apply.index("g_bottomPanePin = ParseBottomPanePin(g_config.bottomPanePin)"))
+        self.assertNotIn("configuredPin != wantPin", apply)
+        shell = (REPO_ROOT / "src/settings/settings_shell.cppinc").read_text(encoding="utf-8")
+        self.assertIn("kSettingsNavBottomPane};", shell)
+        self.assertIn("ctx->currentCategory == page", shell)
+        self.assertIn("!UnifiedPageDirty(ctx, page) && !applyBottomPane", shell)
+
+    def test_failed_save_preserves_temporary_mode_and_native_regressions_are_present(self) -> None:
+        common = (REPO_ROOT / "src/settings/settings_common.cppinc").read_text(encoding="utf-8")
+        restore = common[common.index("static void RestoreSettingsRuntimeAfterFailedSave"):common.index("static void RequestLayout(HWND owner) {")]
+        self.assertLess(restore.index("const auto bottomPin = g_bottomPanePin"), restore.index("ApplyConfigToUI(owner)"))
+        self.assertLess(restore.index("ApplyConfigToUI(owner)"), restore.index("g_bottomPanePin = bottomPin"))
+        self.assertIn("g_bottomNoteMode = bottomMode", restore)
+        native = (REPO_ROOT / "tests/integration/settings_workflow_app_tests.cpp").read_text(encoding="utf-8")
+        for case in ("applying an unchanged saved choice overrides the temporary View mode",
+                     "saving unrelated settings preserves the temporary bottom-pane mode",
+                     "failed bottom-pane save preserves disk, temporary mode and retryable dialog draft",
+                     "restart restores the dialog default rather than the final temporary mode"):
+            self.assertIn(case, native)
+        self.assertIn('BottomPanePersistenceMatrix(executable, root / L"bottom_pane")', native)
+        runner = (REPO_ROOT / "tests/scripts/run_settings_workflow_tests.ps1").read_text(encoding="utf-8")
+        self.assertIn("[PASS] bottom-pane persistent default / temporary View / dialog precedence / failure / restart", runner)
+        for locale, temporary in (("ja", "一時"), ("en", "temporary")):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            for key in ("ui.menu_bottom_pane", "menu.view.readability"):
+                self.assertIn(temporary, catalog[key])
+            self.assertTrue(catalog["menu.settings.bottom_pane"])
+
+
+class PdfRotationPersistenceContractTests(unittest.TestCase):
+    def test_rotation_restores_before_page_geometry_fit_and_anchor(self) -> None:
+        document = (REPO_ROOT / "src/pdf_view/document_io.cppinc").read_text(encoding="utf-8")
+        start = document.index("bool LoadPdfDocument(")
+        pdf = document[start:]
+        self.assertLess(pdf.index("RestorePendingPdfPageRotations()"), pdf.index("BuildPageCaches(pdfWnd)"))
+        self.assertNotIn("RestorePendingPdfPageRotations()", document[:start])
+        state = (REPO_ROOT / "src/pdf_view/view_state.cppinc").read_text(encoding="utf-8")
+        queue = state[state.index("static void QueuePendingPdfRestoreForPath"):state.index("static void RestorePendingPdfPageRotations")]
+        self.assertIn("g_restorePdfOpeningAnchor =", queue)
+        self.assertIn("ReadPdfViewRecordForPath", queue)
+        self.assertNotIn('L"page")) return', queue)
+        self.assertIn("turns.size() == static_cast<size_t>(g_pdf.pageCount)", state)
+        zoom = (REPO_ROOT / "src/pdf_view/zoom_flow.cppinc").read_text(encoding="utf-8")
+        fit = zoom[zoom.index("static void CompleteInitialPdfFit"):zoom.index("static std::optional<double> PreferredInitialPdfScale")]
+        self.assertLess(fit.index("ApplyPdfScaleDirect"), fit.index("ApplyPendingPdfRestore"))
+
+    def test_rotation_is_captured_written_and_protects_unreadable_records(self) -> None:
+        state = (REPO_ROOT / "src/pdf_view/view_state.cppinc").read_text(encoding="utf-8")
+        self.assertIn("out.pageRotations = g_pdf.pageViewRotations", state)
+        self.assertIn("view_rotation_record::Decode(rotations, rec.pageRotations)", state)
+        self.assertIn("view_rotation_record::Encode(rec.pageRotations)", state)
+        save = state[state.index("void SaveLastPdfViewInfo()"):state.index("bool MovePdfViewInfoPath")]
+        self.assertLess(save.index("if (!complete)"), save.index("entries[record.path] = record"))
+        self.assertIn('L"pdf.view_state.save_failed"', save)
+        source = (REPO_ROOT / "src/pdf_view/pdf_view.cpp").read_text(encoding="utf-8")
+        rotate = source[source.index("static bool RotatePdfPageViews"):source.index("bool RotateCurrentPdfPageView")]
+        self.assertIn("SaveLastPdfViewInfo()", rotate)
+        codec = (REPO_ROOT / "src/pdf_view/view_rotation_record.h").read_text(encoding="utf-8")
+        self.assertIn("text[i] < '0' || text[i] > '3'", codec)
+        self.assertIn("kMaxPages", codec)
+        self.assertLess(codec.index("std::vector<int> parsed"), codec.index("out = std::move(parsed)"))
+
+    def test_persistent_menu_and_native_regressions_are_defined(self) -> None:
+        for locale in ("ja", "en"):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            self.assertNotIn("一時", catalog["menu.view.rotation"])
+            self.assertNotIn("temporary", catalog["menu.view.rotation"])
+            self.assertTrue(catalog["pdf.view_state.save_failed"])
+        native = (REPO_ROOT / "src/pdf_view/page_rotation_tests.cppinc").read_text(encoding="utf-8")
+        self.assertIn("stored.pageRotations != persistedTurns", native)
+        self.assertIn('{L"width", L"page", L"previous"}', native)
+        unit = (REPO_ROOT / "tests/unit/page_rotation_tests.cpp").read_text(encoding="utf-8")
+        self.assertIn("invalid suffix preserves output", unit)
+
+
 class DialogActionLabelTests(unittest.TestCase):
+    def test_help_groups_checks_and_document_information_without_changing_routes(self) -> None:
+        menu = (REPO_ROOT / "src/ui/menus/menu_build.cpp").read_text(encoding="utf-8")
+        start = menu.index("HMENU checks = CreatePopupMenu();")
+        end = menu.index('text(L"menu.help.checks").c_str());', start)
+        submenu = menu[start:end]
+        commands = ("ID_WRITE_CHECKS", "ID_SETTINGS_ASSETS", "ID_HELP_PDF_INFO", "ID_HELP_NOTE_INFO")
+        dispatch = (REPO_ROOT / "src/app/command_dispatch.cppinc").read_text(encoding="utf-8")
+        for command in commands:
+            self.assertIn(f"AppendMenuW(checks, MF_STRING, {command},", submenu)
+            self.assertNotIn(f"AppendMenuW(help, MF_STRING, {command},", menu)
+            self.assertEqual(menu.count(f"MF_STRING, {command},"), 1)
+            self.assertIn(f"case {command}:", dispatch)
+        self.assertIn("AppendMenuW(help, MF_POPUP, reinterpret_cast<UINT_PTR>(checks),", submenu)
+        self.assertIn("AppendMenuW(help, MF_STRING, ID_HELP_SHOW_LOG_PATH,", menu)
+        for locale, label in (("ja", "確認"), ("en", "Checks")):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            self.assertEqual(catalog["menu.help.checks"], label)
+
     def test_preset_restore_dialog_uses_the_output_dialog_theme_contract(self) -> None:
         ja = json.loads((REPO_ROOT / "locales/ja.json").read_text(encoding="utf-8"))
         en = json.loads((REPO_ROOT / "locales/en.json").read_text(encoding="utf-8"))
@@ -175,15 +393,15 @@ class DialogActionLabelTests(unittest.TestCase):
     def test_settings_persistence_uses_save_without_mislabeling_color_selection(self) -> None:
         for locale, label in (("ja", "保存"), ("en", "Save")):
             catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
-            for text_id in ("settings.unified.save_apply", "settings.common.5e0e1efd1bae",
-                            "settings.schedule.time.ok", "dialog.action.save"):
-                self.assertEqual(catalog[text_id], label)
-            self.assertNotIn("する", catalog["settings.unified.apply_hint"])
-            self.assertNotIn("Do:", catalog["settings.unified.apply_hint"])
+            self.assertEqual(catalog["dialog.action.save"], label)
+            self.assertIn(label, catalog["settings.navigation.save_close"])
+            self.assertIn(label, catalog["settings.navigation.save"])
+            self.assertNotEqual(catalog["settings.navigation.save_close"], catalog["settings.palette.use_color"])
         shortcuts = (REPO_ROOT / "src/settings/settings_shortcut_editor.cppinc").read_text(encoding="utf-8")
-        self.assertIn('localization::Text(L"dialog.action.save").c_str()', shortcuts)
+        self.assertIn('localization::Text(L"settings.shortcut.save_hint")', shortcuts)
         palette = (REPO_ROOT / "src/settings/settings_palette.cppinc").read_text(encoding="utf-8")
-        self.assertIn('L"BUTTON", UiOkLabel().c_str()', palette)
+        shell = (REPO_ROOT / "src/settings/settings_shell.cppinc").read_text(encoding="utf-8")
+        self.assertIn('selecting ? L"settings.palette.use_color" : L"settings.navigation.save_close"', shell)
         self.assertNotIn('L"BUTTON", UiApplyLabel().c_str()', palette)
 
     def test_common_choices_have_distinct_short_labels_in_both_locales(self) -> None:
@@ -204,7 +422,7 @@ class DialogActionLabelTests(unittest.TestCase):
                 self.assertIsNone(opaque_button.search(path.read_text(encoding="utf-8")), str(path))
         core = (REPO_ROOT / "src/core/app_core.cpp").read_text(encoding="utf-8")
         self.assertNotIn("ChooseColorW(", core)
-        self.assertIn("return ShowPaletteColorEditorDialog(owner, initial, outColor);", core)
+        self.assertIn("return SelectColorInPaletteSettings(owner, initial, outColor);", core)
 
     def test_keep_open_is_not_returned_as_a_closed_dialog_result(self) -> None:
         source = (REPO_ROOT / "src/ui/dialogs/dialogs.cpp").read_text(encoding="utf-8")
@@ -235,7 +453,463 @@ class DialogActionLabelTests(unittest.TestCase):
         self.assertIn("state.confirmLabel", browser)
 
 
+class PaletteGradientAutoSaveContractTests(unittest.TestCase):
+    def test_drag_repaints_local_controls_without_erasing_the_palette_page(self) -> None:
+        page = (REPO_ROOT / "src/settings/settings_palette.cppinc").read_text(encoding="utf-8")
+        edit = page[page.index("static void SetPaletteSettingsColor"):page.index("static void UpdatePaletteSettingsFromRgb")]
+        self.assertNotIn("InvalidateRect(hWnd", edit)
+        self.assertIn("InvalidatePaletteSlot(hWnd, idx)", edit)
+        self.assertIn("InvalidatePaletteSlot(hWnd, previousChangedSlot)", edit)
+        self.assertIn("InvalidateRect(ctx->selectedPreview, nullptr, FALSE)", page)
+        self.assertIn("if (current == text) return", page)
+        self.assertIn("SetPaletteControlText(edit, std::to_wstring(value))", page)
+        control = (REPO_ROOT / "src/ui/color_gradient.h").read_text(encoding="utf-8")
+        self.assertIn("state.color->h != previous.h", control)
+        self.assertIn("PaintBuffered(window, *state, dc, rc)", control)
+        self.assertLess(control.index("Paint(window, state, surface.dc, rc)"), control.index("BitBlt(dc"))
+        self.assertIn("SelectObject(dc, oldBitmap)", control)
+        self.assertIn("DeleteObject(bitmap)", control)
+        self.assertIn("DeleteDC(dc)", control)
+        shell = (REPO_ROOT / "src/settings/settings_shell.cppinc").read_text(encoding="utf-8")
+        start = shell.index("shell->childPalette = CreateWindowExW")
+        create = shell[start:shell.index("return shell->childPalette", start)]
+        self.assertIn("WS_CLIPCHILDREN", create)
+
+    def test_removed_palette_footer_notice_is_not_replaced_or_catalogued(self) -> None:
+        shell = (REPO_ROOT / "src/settings/settings_shell.cppinc").read_text(encoding="utf-8")
+        self.assertNotIn("settings.palette.auto.footer", shell)
+        self.assertIn('L"settings.navigation.palette_autosave"', shell)
+        self.assertIn("SetWindowTextW(ctx->labelApplyHint, hint.c_str())", shell)
+        for locale in ("ja", "en"):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            self.assertNotIn("settings.palette.auto.footer", catalog)
+
+    def test_gradient_is_inline_bounded_and_keyboard_accessible(self) -> None:
+        control = (REPO_ROOT / "src/ui/color_gradient.h").read_text(encoding="utf-8")
+        page = (REPO_ROOT / "src/settings/settings_palette.cppinc").read_text(encoding="utf-8")
+        self.assertIn("std::min(256", control)
+        self.assertIn("std::min(128", control)
+        self.assertIn("DLGC_WANTARROWS", control)
+        self.assertIn("case WM_CAPTURECHANGED: Cancel", control)
+        self.assertIn("VK_ESCAPE", control)
+        self.assertIn("gradientInitialColor", page)
+        self.assertIn("ui::color_gradient::Create", page)
+        self.assertNotIn("SaveDocument", control)
+        self.assertIn("source != ctx->hue && source != ctx->sv", page)
+
+    def test_auto_save_validates_preserves_snapshot_and_excludes_picker(self) -> None:
+        page = (REPO_ROOT / "src/settings/settings_palette.cppinc").read_text(encoding="utf-8")
+        start = page.index("static bool FlushPaletteAutoSave")
+        commit = page[start:page.index("static void SchedulePaletteAutoSave", start)]
+        self.assertLess(commit.index("if (ctx->colorPickerPurpose) return true"), commit.index("palette_active::Save"))
+        self.assertLess(commit.index("ReadPaletteEditorColor"), commit.index("palette_active::Save"))
+        self.assertLess(commit.index("palette_active::Save"), commit.index("ctx->runtimePending = true"))
+        self.assertIn("SetTimer(hWnd, kPaletteAutoSaveTimer, 500", page)
+        self.assertIn("KillTimer(hWnd, kPaletteAutoSaveTimer)", page)
+        self.assertIn("options.defaultResult = SilentDialogResult::No", page)
+        self.assertIn("options.escapeResult = SilentDialogResult::No", page)
+        wrapper = (REPO_ROOT / "src/settings/palette_active_store.h").read_text(encoding="utf-8")
+        self.assertIn("LoadDocument", wrapper)
+        self.assertIn("SaveDocument", wrapper)
+        self.assertIn('L"user_palette.json"', wrapper)
+
+    def test_palette_footer_is_close_only_and_other_tabs_retain_save(self) -> None:
+        shell = (REPO_ROOT / "src/settings/settings_shell.cppinc").read_text(encoding="utf-8")
+        self.assertIn("ctx->currentCategory == kSettingsNavPalette && !ctx->dirty", shell)
+        for control in ("btnApply", "btnRevert", "btnOk"):
+            self.assertIn(f"ShowWindow(ctx->{control}, selecting || paletteOnly ? SW_HIDE : SW_SHOW)", shell)
+        self.assertIn('button(IDCANCEL, selecting ? L"settings.common.603bc62f3f34" : L"settings.navigation.close"', shell)
+        self.assertIn("IDC_PALETTE_USE_COLOR", (REPO_ROOT / "src/settings/settings_palette.cppinc").read_text(encoding="utf-8"))
+        self.assertNotIn("SaveUserPaletteColorsForSettings", shell)
+        self.assertIn("ApplyGeneralSettings(ctx->generalPages[page].get())", shell)
+        for locale in ("ja", "en"):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            for suffix in ("saved", "pending", "incomplete", "failed", "runtime_failed", "unavailable", "discard_confirm"):
+                self.assertTrue(catalog[f"settings.palette.auto.{suffix}"])
+
+    def test_native_gradient_and_auto_save_failures_are_defined(self) -> None:
+        source = (REPO_ROOT / "tests/integration/workspace_memo_app_tests.cpp").read_text(encoding="utf-8")
+        for label in ("HSV RGB round trip within one channel step", "gradient Escape restores exact color without saving",
+            "gradient release auto-saves the chosen color", "gradient arrows select and save colors",
+            "incomplete numeric input never auto-saves", "palette footer contains the current exit action only",
+            "stale active palette cannot overwrite newer colors", "corrupt active palette cannot be auto-overwritten",
+            "active palette write failure preserves file and snapshot", "active auto-save retains previous palette bytes",
+            "stale UI auto-save preserves competing bytes and edited color",
+            "palette file success and related config failure are reported separately",
+            "runtime retry does not rewrite the already saved palette",
+            "default Close confirmation retains unsaved edit", "explicit discard closes without overwriting corrupt original"):
+            self.assertIn(label, source)
+
+
+class PaletteStockContractTests(unittest.TestCase):
+    def test_all_eight_slots_are_editable_and_not_described_as_fixed(self) -> None:
+        source = (REPO_ROOT / "src/settings/settings_palette.cppinc").read_text(encoding="utf-8")
+        self.assertIn("ctx->colors[idx] = color", source)
+        self.assertIn("IsPaletteSlotId(id) && code == BN_CLICKED", source)
+        self.assertIn("IDC_PALETTE_SLOT_COUNT = 8", source)
+        for locale in ("ja", "en"):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            self.assertNotIn("固定", catalog["settings.palette.be911f831213"])
+            self.assertNotIn("Fixed", catalog["settings.palette.be911f831213"])
+
+    def test_stock_is_separate_bounded_and_transactional(self) -> None:
+        model = (REPO_ROOT / "src/settings/palette_stock.h").read_text(encoding="utf-8")
+        store = (REPO_ROOT / "src/settings/palette_stock_store.h").read_text(encoding="utf-8")
+        self.assertIn("kMaxColors = 128", model)
+        self.assertIn("kMaxBytes = 64 * 1024", model)
+        self.assertIn('key != "colors"', model)
+        self.assertIn("out = std::move(colors)", model)
+        self.assertIn('L"color_stock.json"', store)
+        self.assertNotIn("g_workspaceRoot", store)
+        self.assertIn("current.bytes != state.bytes", store)
+        self.assertIn("WaitForSingleObject(mutex_, 0)", store)
+        self.assertIn("ReadFileBytesNoFollowLimitedWin32", store)
+        self.assertIn("FILE_ATTRIBUTE_REPARSE_POINT", store)
+        self.assertIn('L"__escape__"', store)
+        self.assertLess(store.index("state.bytes, temp, escape, &error"),
+                        store.index("FilePath(state.root, fileName), bytes, temp, escape, &error"))
+        self.assertGreater(store.index("state = std::move(next)"),
+                           store.index("FilePath(state.root, fileName), bytes, temp, escape, &error"))
+
+    def test_palette_offers_explicit_stock_operations_and_scroll_access(self) -> None:
+        source = (REPO_ROOT / "src/settings/settings_palette.cppinc").read_text(encoding="utf-8")
+        for name in ("IDC_PALETTE_STOCK_ADD", "IDC_PALETTE_STOCK_USE", "IDC_PALETTE_STOCK_REMOVE", "IDC_PALETTE_STOCK_RELOAD"):
+            self.assertIn(name, source)
+        self.assertIn("ValidatePaletteSettingsEditor(hWnd, ctx)", source)
+        self.assertIn("palette_stock::Save(ctx->stock, colors)", source)
+        self.assertIn("ctx->stockRoot != std::filesystem::path(g_workspaceRoot)", source)
+        self.assertIn("LBS_OWNERDRAWFIXED", source)
+        self.assertIn("LBN_DBLCLK", source)
+        self.assertIn("ScrollPaletteSettingsPage", source)
+        self.assertIn("case WM_VSCROLL", source)
+
+    def test_stock_is_in_assets_and_both_preset_directions(self) -> None:
+        assets = (REPO_ROOT / "src/settings/settings_assets.cppinc").read_text(encoding="utf-8")
+        presets = (REPO_ROOT / "src/workspace/workspace_config_io.cpp").read_text(encoding="utf-8")
+        self.assertIn('L"settings.assets.color_stock"', assets)
+        self.assertIn('palette_stock::FilePath(root)', assets)
+        self.assertIn('{L"color_stock.json", settings / L"color_stock.json"}', presets)
+        self.assertIn('if (name == L"color_stock.json") return settings / L"color_stock.json"', presets)
+        self.assertIn("palette_stock::Parse(bytes, colors)", presets)
+        self.assertIn("palette_stock::Parse(kv.second, colors)", presets)
+
+    def test_stock_runtime_regressions_are_defined(self) -> None:
+        integration = (REPO_ROOT / "tests/integration/workspace_memo_app_tests.cpp").read_text(encoding="utf-8")
+        automation = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(encoding="utf-8")
+        self.assertIn('{L"color_stock.json", settings / L"color_stock.json"}', automation)
+        self.assertIn("settings_bundle_invalid_stock.pnssettings", automation)
+        self.assertIn("malformed, duplicate, unknown, oversized, invalidStock", automation)
+        for expected in ("stock RGB/HEX round trip", "stock accepts all 128 colors", "stale stock cannot overwrite newer colors",
+                         "failed stock save retains file and snapshot", "corrupt stock is never overwritten with an empty default",
+                         "color stock survives Exit and is shared by palette entry points", "stock removal leaves palette slots unchanged",
+                         "explicit stock reload recovers without recreating the dialog"):
+            self.assertIn(expected, integration)
+        for locale in ("ja", "en"):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            self.assertTrue(catalog["settings.palette.stock.hint"])
+            self.assertTrue(catalog["settings.palette.stock.save_failed"])
+
+
+class PalettePresetContractTests(unittest.TestCase):
+    def test_format_is_one_immutable_eight_color_set_and_five_user_slots(self) -> None:
+        model = (REPO_ROOT / "src/settings/palette_presets.h").read_text(encoding="utf-8")
+        defaults = (REPO_ROOT / "src/core/app_core.cpp").read_text(encoding="utf-8")
+        self.assertIn("kSlotCount = 8", model)
+        self.assertIn("kUserCount = 5", model)
+        self.assertIn("std::array<std::optional<Colors>, kUserCount> users", model)
+        self.assertIn("colors != kInitial", model)
+        self.assertIn("appendColors(kInitial)", model)
+        self.assertIn("out = std::move(next)", model)
+        self.assertIn("kMaxBytes = 64 * 1024", model)
+        # The compiled initial set must agree with the existing application's first eight defaults.
+        default_block = defaults[defaults.index("constexpr COLORREF defaults[]"):
+                                 defaults.index("// Build the runtime palette")]
+        default_colors = re.findall(r"RGB\(\s*(\d+),\s*(\d+),\s*(\d+)\)", default_block)[:8]
+        initial_block = model[model.index("inline constexpr Colors kInitial"):model.index("struct Document")]
+        self.assertEqual(default_colors, re.findall(r"RGB\(\s*(\d+),\s*(\d+),\s*(\d+)\)", initial_block))
+
+    def test_preset_storage_reuses_safe_local_bounded_atomic_store(self) -> None:
+        wrapper = (REPO_ROOT / "src/settings/palette_presets_store.h").read_text(encoding="utf-8")
+        store = (REPO_ROOT / "src/settings/palette_stock_store.h").read_text(encoding="utf-8")
+        self.assertIn('L"palette_presets.json"', wrapper)
+        self.assertIn("LoadDocument", wrapper)
+        self.assertIn("SaveDocument", wrapper)
+        self.assertNotIn("g_workspaceRoot", wrapper)
+        self.assertIn("current.bytes != state.bytes", store)
+        self.assertIn("WaitForSingleObject(mutex_, 0)", store)
+        self.assertIn("FILE_ATTRIBUTE_REPARSE_POINT", store)
+        self.assertIn("ReadFileBytesNoFollowLimitedWin32", store)
+        self.assertIn("std::wstring_view(fileName)", store)
+        self.assertLess(store.index("state.bytes, temp, escape, &error"),
+                        store.index("FilePath(state.root, fileName), bytes, temp, escape, &error"))
+
+    def test_selection_previews_and_apply_commits_except_in_single_color_picker(self) -> None:
+        source = (REPO_ROOT / "src/settings/settings_palette.cppinc").read_text(encoding="utf-8")
+        command = source[source.index("static void HandlePaletteSetCommand"):
+                         source.index("static void ScrollPaletteSettingsPage")]
+        self.assertIn("CBN_SELCHANGE", source)
+        self.assertIn("Selection is preview only", source)
+        self.assertIn("SelectedPaletteSet(ctx)", command)
+        self.assertIn("std::copy(colors->begin(), colors->end(), ctx->colors)", command)
+        self.assertNotIn("SaveUserPaletteColorsForSettings", command)
+        self.assertIn("FlushPaletteAutoSave(hWnd, ctx)", command)
+        self.assertIn("if (ctx->colorPickerPurpose) return true", source)
+        self.assertNotIn("palette_stock::Save", command)
+        self.assertIn("IDC_PALETTE_SETS_PREVIEW", source)
+        self.assertIn("ValidatePaletteSettingsEditor(hWnd, ctx)", command)
+
+    def test_user_mutations_are_guarded_and_confirm_destructive_changes(self) -> None:
+        source = (REPO_ROOT / "src/settings/settings_palette.cppinc").read_text(encoding="utf-8")
+        self.assertIn("selected < 1 || selected > static_cast<int>(palette_presets::kUserCount)", source)
+        self.assertIn("palette_presets::Save(ctx->sets, doc)", source)
+        self.assertIn("ctx->stockRoot != std::filesystem::path(g_workspaceRoot)", source)
+        for key in ("apply_confirm", "overwrite_confirm", "clear_confirm"):
+            self.assertIn(f'L"settings.palette.sets.{key}"', source)
+        self.assertIn("options.defaultResult = SilentDialogResult::No", source)
+        self.assertIn("options.escapeResult = SilentDialogResult::No", source)
+        self.assertIn("ctx->sets.ready = false", source)
+        self.assertIn("selected == 0) return &palette_presets::kInitial", source)
+
+    def test_assets_and_workspace_preset_transfer_validate_palette_collections(self) -> None:
+        source = (REPO_ROOT / "src/workspace/workspace_config_io.cpp").read_text(encoding="utf-8")
+        assets = (REPO_ROOT / "src/settings/settings_assets.cppinc").read_text(encoding="utf-8")
+        self.assertIn('{L"palette_presets.json", settings / L"palette_presets.json"}', source)
+        self.assertIn('if (name == L"palette_presets.json")', source)
+        self.assertIn("palette_presets::Parse(bytes, doc)", source)
+        self.assertIn("palette_presets::Parse(kv.second, doc)", source)
+        self.assertIn('name == L"palette_presets.json" && importedEntry == entries.end()) continue', source)
+        self.assertEqual(source.count("palette_stock::WriteLock paletteLock"), 2)
+        self.assertIn("palette_presets::FilePath(root)", assets)
+        for locale in ("ja", "en"):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            for suffix in ("hint", "hint_picker", "initial", "save_failed", "load_failed"):
+                self.assertTrue(catalog[f"settings.palette.sets.{suffix}"])
+
+    def test_native_success_failure_and_cancellation_regressions_are_defined(self) -> None:
+        source = (REPO_ROOT / "tests/integration/workspace_memo_app_tests.cpp").read_text(encoding="utf-8")
+        for label in ("six palette sets round trip with repeated colors",
+                      "invalid palette collection preserves parsed users and immutable initial set",
+                      "stale palette collection cannot overwrite newer presets",
+                      "failed palette preset save retains file and snapshot",
+                      "initial palette set cannot be overwritten through a direct command",
+                      "cancelling preset overwrite preserves saved sets and editor colors",
+                      "palette preset and active application survive Close",
+                      "initial palette set remains usable when the user file is invalid",
+                      "explicit preset reload restores fifth user slot access"):
+            self.assertIn(label, source)
+        automation = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(encoding="utf-8")
+        self.assertIn('{L"palette_presets.json", settings / L"palette_presets.json"}', automation)
+        self.assertIn("settings_bundle_invalid_palette_sets.pnssettings", automation)
+        self.assertIn("settings_bundle_legacy_without_palette_sets.pnssettings", automation)
+        self.assertIn("invalidStock, invalidPaletteSets", automation)
+
+    def test_post_replacement_rollback_observes_different_incoming_bytes(self) -> None:
+        automation = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(encoding="utf-8")
+        io_source = (REPO_ROOT / "src/workspace/workspace_config_io.cpp").read_text(encoding="utf-8")
+        self.assertIn('name == L"palette_presets.json") fault_injection::MaybeThrow(L"settings_import_after_palette_presets_write")', io_source)
+        self.assertIn("mutatedSetsJson == paletteSetsJson", automation)
+        self.assertIn("else if (bytes == probe->expected) probe->sawReplacement = true", automation)
+        self.assertIn("afterPalette && !probe.sawReplacement", automation)
+        self.assertIn("err.find(point) == std::wstring::npos", automation)
+        self.assertIn("!UiAutomationSettingsBytesEqual(beforeFault, afterFault)", automation)
+        self.assertIn("write_checks::normalSink.store(previous_)", automation)
+        self.assertIn("if (!observation.armed())", automation)
+        self.assertIn("backupBytes == mutatedSetsJson", automation)
+        self.assertIn("recoveryBackup != previousFaultBackup", automation)
+        self.assertIn("if (std::filesystem::create_directory(backupDir, ec)) { created = true; break; }", io_source)
+        self.assertIn("if (!created || backupDir.empty()", io_source)
+
+    def test_cross_process_and_backup_denial_tests_are_owned_and_bounded(self) -> None:
+        helper = (REPO_ROOT / "tests/integration/palette_presets_test_support.h").read_text(encoding="utf-8")
+        native = (REPO_ROOT / "tests/integration/workspace_memo_app_tests.cpp").read_text(encoding="utf-8")
+        self.assertIn("CREATE_NO_WINDOW", helper)
+        self.assertIn("startup.wShowWindow = SW_HIDE", helper)
+        self.assertIn("WaitForSingleObject(release, 10000)", helper)
+        self.assertIn("TerminateProcess(process_.hProcess, 79)", helper)
+        self.assertIn("CloseHandle(process_.hProcess)", helper)
+        self.assertIn("DACL_SECURITY_INFORMATION, security_.data()", helper)
+        self.assertIn("scope restricted to out/tests", native)
+        self.assertIn("native write probe confirms backup denial is active", native)
+        self.assertIn("backup creation failure preserves preset file and all five user slots", native)
+        self.assertIn("cross-process lock refuses both palette writers without changing files or snapshots", native)
+        self.assertIn("preset saving resumes after the competing process releases its lock", native)
+
+    def test_complete_ui_round_trip_and_real_restart_are_defined(self) -> None:
+        native = (REPO_ROOT / "tests/integration/workspace_memo_app_tests.cpp").read_text(encoding="utf-8")
+        for label in ("UI saves each user set without altering other sets or rewriting the saved active palette",
+                      "confirmed UI overwrite replaces all eight colors in only the chosen user set",
+                      "UI applies every color from all five user sets",
+                      "automatic save persists all eight colors of the applied preset",
+                      "applying a preset preserves every hidden legacy palette slot",
+                      "restart isolated app with its original valid workspace setup",
+                      "applied preset colors survive actual process restart in all eight slots",
+                      "all five user presets and committed palette survive restart unchanged",
+                      "keyboard preset selection changes preview only",
+                      "palette preset and stock controls do not overlap"):
+            self.assertIn(label, native)
+
+    def test_import_preflight_distinguishes_missing_from_unreadable(self) -> None:
+        source = (REPO_ROOT / "src/workspace/workspace_config_io.cpp").read_text(encoding="utf-8")
+        capture = source[source.index("[[nodiscard]] static bool CaptureSettingsFileSnapshot"):
+                         source.index("static std::filesystem::path CreateSettingsImportBackupDir")]
+        self.assertIn("TryGetPathAttributesWin32(path, &attrs)", capture)
+        self.assertIn("error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND", capture)
+        self.assertIn("!ReadFileBytesNoFollowLimitedWin32(path, kMaxSnapshotFileBytes, bytes)", capture)
+        self.assertIn("kMaxSnapshotFileBytes = 512 * 1024", capture)
+        self.assertIn("could not capture existing settings file", capture)
+        self.assertIn("if (!capture(entry.name, entry.path)) return false", capture)
+        self.assertIn("if (!capture(kv.first, path)) return false", capture)
+        self.assertIn("*out = std::move(snapshot)", capture)
+        caller = source[source.index("bool ImportSettingsPresetFromFile("):]
+        self.assertLess(caller.index("if (!CaptureSettingsFileSnapshot(entries, &snapshot, outErr)) return false"),
+                        caller.index("CreateSettingsImportBackupDir(snapshot, outErr)"))
+
+    def test_snapshot_observation_fails_closed_and_read_denial_is_real(self) -> None:
+        source = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(encoding="utf-8")
+        capture = source[source.index("[[nodiscard]] static bool CaptureUiAutomationSettingsBytes"):
+                         source.index("static bool UiAutomationSettingsBytesEqual")]
+        self.assertIn("error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND", capture)
+        self.assertIn("!ReadFileBytesNoFollowLimitedWin32(item.second, kMaxSnapshotFileBytes, bytes)) return false", capture)
+        self.assertIn("*out = std::move(next)", capture)
+        self.assertNotIn("out->clear()", capture)
+        self.assertNotRegex(source, r"(?m)^\s*CaptureUiAutomationSettingsBytes\(")
+        for text in ("GENERIC_WRITE, FILE_SHARE_WRITE | FILE_SHARE_DELETE", "probeError != ERROR_SHARING_VIOLATION",
+                     "failedCaptureOutput = beforeDenied", "!deniedRecovery.empty()",
+                     "UiAutomationSettingsBytesEqual(beforeDenied, failedCaptureOutput)",
+                     "Unreadable settings were treated as missing or changed during import"):
+            self.assertIn(text, source)
+
+    def test_manual_acceptance_is_not_claimed_by_static_or_simulated_dpi(self) -> None:
+        procedure = (REPO_ROOT / "docs/internal/test_配色プリセット検査手順_2026-10-10.md").read_text(encoding="utf-8")
+        for text in ("ビルド禁止中", "コンパイル・実行とも未実施", "JA・EN", "100%、125%、150%、200%",
+                     "WM_DPICHANGED", "Windows警告音", "ディスクフル", "実際の電源断"):
+            self.assertIn(text, procedure)
+
+
 class AnnotationToolPolicyTests(unittest.TestCase):
+    def test_cached_note_syntax_reuse_checks_canonical_content_and_owner(self) -> None:
+        ops = (REPO_ROOT / "src/note_view/note_view_note_ops.cppinc").read_text(encoding="utf-8")
+        load = ops[ops.index("bool LoadNoteFile("):ops.index("void ClearNoteEditorSilently(")]
+        self.assertIn("GetEditTextForIndexing(targetEdit) == indexedText", load)
+        self.assertIn("cachedKernel->text_core().note_id() == loadedSnapshot.note_id", load)
+        self.assertIn("cachedKernel->content_kind() == CurrentNoteContentKind()", load)
+        self.assertIn("cachedKernel->text_core().MatchesRaw(indexedText)", load)
+        self.assertIn("cachedKernel->text_core().content_revision() == loadedSnapshot.content_revision", load)
+        self.assertIn("cachedKernel->text_core().SetPersistenceRevision(loadedSnapshot.persistence_revision)", load)
+        self.assertIn("if (keepCachedSyntax) ClearLegacyRenderCache();", load)
+        self.assertIn("else ClearLineCache();", load)
+        self.assertIn("TextSnapshotReadPolicy::DiskAndStage", load)
+        self.assertIn("std::move(storageSnapshot.diskBytes)", load)
+
+    def test_initial_pdf_cache_work_is_after_final_fit_and_restore(self) -> None:
+        zoom = (REPO_ROOT / "src/pdf_view/zoom_flow.cppinc").read_text(encoding="utf-8")
+        cache = (REPO_ROOT / "src/pdf_view/layout_cache.cppinc").read_text(encoding="utf-8")
+        probe = (REPO_ROOT / "src/pdf_view/initial_viewport_work_tests.cppinc").read_text(encoding="utf-8")
+        complete = zoom[zoom.index("static void CompleteInitialPdfFit"):zoom.index("static bool TryApplyInitialFitWidth")]
+        self.assertIn("PdfInitialViewportUpdateGuard viewportGuard", complete)
+        self.assertLess(complete.index("ApplyPendingPdfRestore"), complete.index("UpdatePdfVirtualScrollCaches"))
+        self.assertEqual(complete.count("UpdatePdfVirtualScrollCaches"), 1)
+        update = cache[cache.index("static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches"):]
+        self.assertLess(update.index("g_pdfInitialViewportUpdateDepth != 0"), update.index("ComputePdfVirtualViewport"))
+        self.assertIn("updates != 1 || premature != 0", probe)
+        self.assertIn("cases == 44", probe)
+        self.assertIn("reloaded.pageIndex != targetPage", probe)
+
+    def test_pending_pdf_queue_refreshes_without_preempting_active_render(self) -> None:
+        cache = (REPO_ROOT / "src/pdf_view/layout_cache.cppinc").read_text(encoding="utf-8")
+        update = cache[cache.index("static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches"):]
+        self.assertLess(update.index("ComputePdfVirtualViewport"), update.index("RefreshPdfVirtualJobPriorities"))
+        self.assertIn("std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);", update)
+        worker = cache[cache.index("static void PdfVirtualRenderWorkerMain"):cache.index("static bool EnsurePdfVirtualRenderWorker")]
+        self.assertIn("pdf_render_queue::ChooseNext(g_pdfVirtualJobs, g_pdfVirtualVisibleBurst)", worker)
+        self.assertIn("pdf_render_queue::AfterDispatch", worker)
+        refresh = cache[cache.index("static void RefreshPdfVirtualJobPriorities"):cache.index("static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches")]
+        self.assertNotIn("g_pdfVirtualWorkerActiveJob", refresh)
+        self.assertIn("job.generation != generation", refresh)
+        identity = cache[cache.index("static bool IsSamePdfVirtualJob"):cache.index("static void PdfVirtualRenderWorkerMain")]
+        self.assertNotIn(".visible", identity)
+        self.assertNotIn(".distance", identity)
+
+    def test_pdf_worker_probe_observes_real_render_and_owns_bounded_gates(self) -> None:
+        cache = (REPO_ROOT / "src/pdf_view/layout_cache.cppinc").read_text(encoding="utf-8")
+        probe = (REPO_ROOT / "src/pdf_view/worker_concurrency_tests.cppinc").read_text(encoding="utf-8")
+        worker = cache[cache.index("static void PdfVirtualRenderWorkerMain"):cache.index("static bool EnsurePdfVirtualRenderWorker")]
+        self.assertLess(worker.index("ObservePdfWorkerProbeLocked(lock, job);"), worker.index("RenderPdfPageBitmapOnWorker"))
+        self.assertLess(worker.index("RenderPdfPageBitmapOnWorker"), worker.index("ObservePdfWorkerProbeLocked(lock, job, &result)"))
+        self.assertIn("std::chrono::seconds(5)", cache)
+        self.assertIn("if (!probe.enabled) return;", cache)
+        self.assertIn("g_pdfVirtualWorkerStop || !probe.enabled", cache)
+        for required in ("probe.nonWhite != expected.size()", "staleRejected != 1", "stoppedResults != 1",
+                         "g_pdfVirtualWorkerProbe.enabled = false", "g_pdfVirtualWorkerCv.notify_all()",
+                         "ShutdownPdfVirtualRenderWorker()", "LoadPdfDocument(pdfWnd, alternatePdf)"):
+            self.assertIn(required, probe)
+        runner = (REPO_ROOT / "tests/scripts/run_ui_automation_fault_tests.ps1").read_text(encoding="utf-8")
+        self.assertIn("[string]$ArtifactName", runner)
+        self.assertIn("[string]$ExecutableName", runner)
+        self.assertIn("Refusing to remove an automation workspace", runner)
+        # Focused-mode membership has one authority: mode additions must not
+        # silently change full-suite, fixture, or completion-marker behavior.
+        self.assertIn("$focusedModeSwitches = @(\n", runner)
+        self.assertIn("$fullSuite = $selectedFocusedModes.Count -eq 0", runner)
+        self.assertIn("$requiresSessionFixture = -not", runner)
+
+    def test_auto_open_dispatch_is_before_note_and_deferred_for_unstable_geometry(self) -> None:
+        main = (REPO_ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        start = main.index("static void StartAutoOpenedPdfBeforeNote() {")
+        end = main.index("static bool FocusAutoOpenedSoleNoteForEditing() {", start)
+        route = main[start:end]
+        self.assertIn("g_bottomPanePin != BottomPanePin::Math", route)
+        self.assertLess(route.index("autoOpenNotePath ="), route.index("OpenPdfWithAnnotations"))
+        self.assertIn("const bool noteFirst = g_bottomPanePin == BottomPanePin::Math", route)
+        self.assertLess(route.index("if (noteFirst) openNote();"), route.index("OpenPdfWithAnnotations"))
+        self.assertLess(route.index("StartAutoOpenedPdfBeforeNote();"), route.index("if (!noteFirst) openNote();"))
+        self.assertIn("RestorePdfListSelectionToCurrent();", route)
+        self.assertIn("SessionAutoOpenMode::Off", route)
+        self.assertIn("SyncBottomPaneAfterNoteLoad(hWnd)", route)
+        self.assertIn("FocusAutoOpenedSoleNoteForEditing()", route)
+        self.assertNotIn("PeekMessage", route)
+        zoom = (REPO_ROOT / "src/pdf_view/zoom_flow.cppinc").read_text(encoding="utf-8")
+        public_start = zoom[zoom.index("bool StartPendingPdfInitialRender"):zoom.index("void SetPdfFlowMode")]
+        self.assertIn("IsWindowVisible(pdfWnd)", public_start)
+        self.assertIn("g_pdfInitialViewportUpdateDepth != 0", public_start)
+
+    def test_note_pdf_selection_have_one_recovery_boundary(self) -> None:
+        main = (REPO_ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        for name, next_name, opening in (
+            ("OnNoteSelChange", "OnPdfSelChange", "LoadNoteFile(hWnd, f.path)"),
+            ("OnPdfSelChange", "OnPdfDblClk", "OpenPdfWithAnnotations(hWnd, f.path)"),
+        ):
+            start = main.index(f"static void {name}(HWND hWnd) {{")
+            end = main.index(f"static void {next_name}(HWND hWnd)", start + 1)
+            route = main[start:end]
+            self.assertEqual(route.count("file_output::PrepareStagedDiffsForSwitch(hWnd)"), 1)
+            self.assertNotIn("if (!SaveNoteIfDirty(hWnd))", route)
+            self.assertLess(route.index("file_output::PrepareStagedDiffsForSwitch(hWnd)"),
+                            route.index("VerifyWorkspaceWritableForEditing(hWnd)"))
+            self.assertLess(route.index("VerifyWorkspaceWritableForEditing(hWnd)"), route.index(opening))
+
+    def test_open_work_probe_observes_production_routes_without_text_reads(self) -> None:
+        probe = (REPO_ROOT / "src/features/automation/main_ui_open_work_tests.cppinc").read_text(encoding="utf-8")
+        counter = (REPO_ROOT / "src/diagnostics/open_work_counters.h").read_text(encoding="utf-8")
+        runner = (REPO_ROOT / "tests/scripts/run_ui_automation_fault_tests.ps1").read_text(encoding="utf-8")
+        measured = probe[probe.index("open_work::Observation observation;"):probe.index("counts = observation.Read();")]
+        self.assertIn("SetListboxSelAndNotify(list, index)", measured)
+        self.assertNotIn("GetNoteAutomationIndexingText", measured)
+        self.assertNotIn("ReadUiAutomationFileBytes", measured)
+        self.assertIn("checks != expectedChecks || reads != expectedChecks", probe)
+        self.assertIn("SendUiAutomationNoteUndoChangedText", probe)
+        self.assertIn("SendUiAutomationNoteRedoChangedText", probe)
+        self.assertIn("finalBytes != originalBytes", probe)
+        self.assertIn("thread_local", counter)
+        self.assertIn("observationDepth != 0", counter)
+        self.assertIn("open_work:content_stage_undo_redo_ok", runner)
+        self.assertIn("open_work:paired_auto_open_ok", runner)
+        self.assertIn("open_work:paired_pdf_failure_ok", runner)
+        for marker in ("paired_note_failure_ok", "paired_long_complex_ok", "pdf_worker_concurrency_ok", "startup_restore_ok"):
+            self.assertIn("open_work:" + marker, runner)
+        self.assertIn("automation:open_work_ok", runner)
+        self.assertIn('"PDF_NOTE_SMALL_UI_AUTOMATION_OPEN_WORK_ONLY" =', runner)
+
     def test_annotation_panel_settings_open_the_active_tool_section(self) -> None:
         unified = (REPO_ROOT / "src/settings/settings_unified.cppinc").read_text(encoding="utf-8")
         annot = (REPO_ROOT / "src/settings/settings_annot.cppinc").read_text(encoding="utf-8")
@@ -244,27 +918,44 @@ class AnnotationToolPolicyTests(unittest.TestCase):
         self.assertIn("AnnotSettingsSectionForTool", unified)
         self.assertIn("case ToolMode::TextBox", unified)
         self.assertIn("return kAnnotSectionStroke", unified)
-        self.assertIn("shell->annotCtx->initialSection = shell->initialAnnotSection", annot)
+        shell = (REPO_ROOT / "src/settings/settings_shell.cppinc").read_text(encoding="utf-8")
+        self.assertIn("shell->annotCtx->initialSection = shell->initialAnnotSection", shell)
         self.assertIn("JumpAnnotSettingsToSection(hWnd, ctx, initialSection)", annot)
         self.assertIn("ShowAnnotationSettingsForTool(hWnd, g_toolMode)", dispatch)
 
-    def test_palette_uses_app_owned_editor_without_common_dialog_state(self) -> None:
+    def test_palette_color_creation_is_centralized_in_settings(self) -> None:
         palette = (REPO_ROOT / "src" / "settings" / "settings_palette.cppinc").read_text(encoding="utf-8")
         dispatch = (REPO_ROOT / "src" / "app" / "command_dispatch.cppinc").read_text(encoding="utf-8")
         core = (REPO_ROOT / "src" / "core" / "app_core.cpp").read_text(encoding="utf-8")
-        self.assertIn("ShowPaletteColorEditorDialog", palette)
+        unified = (REPO_ROOT / "src/settings/settings_unified.cppinc").read_text(encoding="utf-8")
+        shell = (REPO_ROOT / "src/settings/settings_shell.cppinc").read_text(encoding="utf-8")
         self.assertNotIn("ChooseColorW", palette)
         self.assertIn("IDC_PALETTE_EDITOR_HEX", palette)
-        self.assertIn("UpdatePaletteEditorFromHex", palette)
-        self.assertIn("IDC_PALETTE_EDITOR_CHOICE_BASE", palette)
-        self.assertIn("EnsurePaletteColorEditorClass", palette)
-        self.assertIn("ShowPaletteColorEditorDialogImpl", palette)
+        self.assertIn("UpdatePaletteSettingsFromHex", palette)
+        self.assertNotIn("PaletteColorEditorDlgClass", palette)
+        self.assertNotIn("ShowPaletteColorEditorDialogImpl", palette)
         self.assertNotIn("IDC_PALETTE_EDITOR_SV", palette)
         self.assertIn("SamplePaletteColorAtCursor", palette)
         self.assertIn("IDC_PALETTE_EDITOR_EYEDROPPER", palette)
-        self.assertIn("ShowPaletteColorEditorDialog(hWnd, picked, &picked)", dispatch)
+        self.assertIn("ShowAnnotationPaletteSettingsDialog(hWnd)", dispatch)
+        self.assertIn("ShowUnifiedSettingsDialog(owner, kSettingsNavPalette, -1, &request)", unified)
+        self.assertIn("palette->selectedSlot = kLastOkColorSlotIndex", shell)
+        self.assertIn("if (request.accepted) *outColor = request.selectedColor", unified)
+        self.assertIn("GetAncestor(owner, GA_ROOT)", unified)
+        self.assertIn("if (!ctx || IsUnifiedColorSelection(ctx)) return false", shell)
+        self.assertIn("if (ctx && !ctx->embedded) RestoreOwnerAfterModal(ctx->owner)", palette)
         self.assertNotIn("g_paletteDialogCustomColor", core)
         self.assertIn("Legacy Windows picker slots remain in JSON only", core)
+
+    def test_color_selection_regressions_cover_shared_page_and_cancellation(self) -> None:
+        automation = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(encoding="utf-8")
+        integration = (REPO_ROOT / "tests/integration/workspace_memo_app_tests.cpp").read_text(encoding="utf-8")
+        self.assertNotIn('L"PaletteColorEditorDlgClass"', automation)
+        self.assertIn('L"settings.palette.use_color"', automation)
+        self.assertIn("g_palette != originalPalette", automation)
+        self.assertIn("open annotation palette through full settings", integration)
+        self.assertIn("annotation palette Close preserves immediately saved colors", integration)
+        self.assertIn("saved annotation palette survives Exit", integration)
 
     def test_annotation_automation_covers_freehand_correction_and_history(self) -> None:
         automation = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(encoding="utf-8")
@@ -388,6 +1079,7 @@ class AnnotationToolPolicyTests(unittest.TestCase):
             "quickPdfScalePercent": "ParseJsonIntField",
             "quickPdfStandardTextAnnots": "ParseJsonBoolField",
             "quickPdfMatchPdfPaneTextLayout": "ParseJsonBoolField",
+            "quickPdfKeepPageRotation": "ParseJsonBoolField",
             "quickNoteStripMarkup": "ParseJsonBoolField",
             "quickNoteIncludeComments": "ParseJsonBoolField",
             "quickNoteMathPlaceholder": "ParseJsonBoolField",
@@ -429,6 +1121,7 @@ class AnnotationToolPolicyTests(unittest.TestCase):
             "ID_OP_MOVE_NOTE": "menu.common.note",
             "ID_VIEW_CLOSE_PDF": "menu.common.pdf",
             "ID_VIEW_CLOSE_NOTE": "menu.common.note",
+            "ID_FILE_CLOSE": "menu.file.close",
             "ID_VIEW_PDF_SINGLE_PAGE_MODE": "menu.scroll.page_display",
             "ID_FILE_SAVE_ALL": "menu.save.work",
             "ID_OP_STAGE_MANAGE": "menu.save.review_diffs",
@@ -440,7 +1133,6 @@ class AnnotationToolPolicyTests(unittest.TestCase):
             "ID_OP_OPEN_READONLY_VIEWER_FILE": "menu.viewer.open_file",
             "ID_OP_OPEN_READONLY_VIEWER": "menu.tools.open_in_viewer",
             "ID_SETTINGS_GENERAL": "menu.settings.dialog",
-            "ID_SETTINGS_PALETTE": "menu.settings.palette",
             "ID_HELP_GUIDE": "menu.help.dialog",
             "ID_HELP_NOTE_INFO": "menu.help.note_info",
         }
@@ -454,6 +1146,10 @@ class AnnotationToolPolicyTests(unittest.TestCase):
 
         self.assertNotIn("appendPending", menu)
         self.assertNotIn("menu.pending.", menu)
+        navigation = (REPO_ROOT / "src/settings/settings_navigation.h").read_text(encoding="utf-8")
+        shell = (REPO_ROOT / "src/settings/settings_shell.cppinc").read_text(encoding="utf-8")
+        self.assertIn("BottomPane, Palette, Files", navigation)
+        self.assertIn("page == kSettingsNavPalette) target = EnsureUnifiedPalettePage", shell)
 
         self.assertIn("OpenReadOnlyViewerCurrentOrPickFile", main)
         self.assertIn("LaunchReadOnlyViewerForFile(owner, *selected)", main)
@@ -624,6 +1320,19 @@ def repo_tempdir():
 
 
 class MigrateClropV1Tests(unittest.TestCase):
+    def test_newer_clrop_versions_are_preserved_even_with_force(self) -> None:
+        for version in (2, 3):
+            for force in (False, True):
+                with repo_tempdir() as root:
+                    path = root / "newer.clrop"
+                    original = json.dumps({"version": version, "pdf_id": {"size": 1},
+                        "pages": [{"page": 0, "items": [{"type": "marker-text", "marker_display_mode": "legacy"}]}]})
+                    path.write_text(original, encoding="utf-8")
+                    status, detail = migrate_clrop_v1.migrate_one(path, force=force, dry_run=False)
+                    self.assertEqual(status, "skipped" if version == 2 else "failed")
+                    self.assertEqual(path.read_text(encoding="utf-8"), original)
+                    self.assertEqual(list(root.iterdir()), [path])
+
     def test_current_v1_file_is_skipped_without_changes(self) -> None:
         with repo_tempdir() as root:
             path = root / "sample.clrop"
@@ -856,6 +1565,48 @@ class AnalyzeRepoTests(unittest.TestCase):
 
         self.assertTrue(rendered.isascii())
         self.assertEqual(json.loads(rendered), data)
+
+
+    def test_main_defaults_to_stdout_and_refuses_to_overwrite_report_files(self) -> None:
+        with repo_tempdir() as root:
+            (root / "tools").mkdir()
+            (root / "tools" / "sample.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = analyze_repo.main(["--root", str(root), "--scope", "all"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("Summary", stdout.getvalue())
+            self.assertFalse((root / "out" / "repo_report.txt").exists())
+
+            report = root / "out" / "repo_report.txt"
+            with redirect_stdout(stdout):
+                code = analyze_repo.main(["--root", str(root), "--scope", "all", "--report", str(report)])
+
+            self.assertEqual(code, 0)
+            self.assertTrue(report.exists())
+            self.assertIn("Summary", report.read_text(encoding="utf-8"))
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                code = analyze_repo.main(["--root", str(root), "--scope", "all", "--report", str(report)])
+
+            self.assertEqual(code, 2)
+            self.assertIn("already exists", stderr.getvalue())
+
+    def test_main_supports_report_stdout_without_creating_file(self) -> None:
+        with repo_tempdir() as root:
+            (root / "tools").mkdir()
+            (root / "tools" / "sample.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = analyze_repo.main(["--root", str(root), "--scope", "all", "--report-stdout"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("Summary", stdout.getvalue())
+            self.assertFalse((root / "report_stdout.txt").exists())
 
 
 class TextIntegrityGateTests(unittest.TestCase):
@@ -1164,6 +1915,83 @@ class CodeMetricsGuiTests(unittest.TestCase):
 
 
 class ValidateCodebaseTests(unittest.TestCase):
+    def test_final_render_boundary_accepts_current_runtime_route(self) -> None:
+        self.assertEqual(validate_codebase.find_final_render_publication_boundary_regressions(), [])
+        self.assertEqual(validate_codebase.find_note_render_incremental_regressions(), [])
+
+    def test_final_render_boundary_rejects_missing_proof_or_mixed_paint(self) -> None:
+        final_path = validate_codebase.REPO_ROOT / "src/note_view/note_view_final_render.cppinc"
+        input_path = validate_codebase.REPO_ROOT / "src/note_view/note_view_input_proc.cppinc"
+        read_text = Path.read_text
+        cases = (
+            (final_path, "bool FinalFrameCanUseCustomPaint(", "bool FinalRenderRouteEnabled(",
+             "if (!context.finalRenderState.has_frame()) return false;", "",
+             "require a published frame"),
+            (final_path, "bool FinalFrameCanUseCustomPaint(", "bool FinalRenderRouteEnabled(",
+             "return IsCurrentNoteTextCoreSynchronizedWithEditor(hWnd);", "return true;",
+             "require the current editor binding outside IME"),
+            (final_path, "bool FinalFrameCanUseCustomPaint(", "bool FinalRenderRouteEnabled(",
+             "context.finalImePreedit.source_identity() ==", "true ||",
+             "compare the IME source identity"),
+            (final_path, "bool FinalFrameCanUseCustomPaint(", "bool FinalRenderRouteEnabled(",
+             "if (!context.finalRenderState.has_frame())", "GetEditTextForIndexing(hWnd); if (!context.finalRenderState.has_frame())",
+             "must not materialize complete editor text"),
+            (final_path, "static bool TryPaintFinalNoteRenderFrame(", "static bool TryGetFinalNoteRenderHit(",
+             "WithdrawFinalNoteRenderFrame(hWnd);", "(void)hWnd;",
+             "a final paint failure must withdraw its publication"),
+            (input_path, "if (!finalPainted)", "if (savedOverlayDc != 0)",
+             "paintNoteBackground(paintDC);", "",
+             "native fallback after final paint failure must erase partial final pixels first"),
+            (input_path, "const bool finalPainted =", "case WM_IME_REQUEST",
+             "TryPaintFinalNoteRenderFrame(hWnd, paintDC);", "TryPaintFinalNoteRenderFrame(hWnd, paintDC); RefreshFinalNoteRenderFrame(hWnd);",
+             "paint must consume a publication without rebuilding or copying the document"),
+        )
+        for path, start, end, original, replacement, expected in cases:
+            with self.subTest(contract=expected):
+                source = read_text(path, encoding="utf-8")
+                begin = source.index(start)
+                finish = source.index(end, begin)
+                section = source[begin:finish]
+                self.assertEqual(section.count(original), 1)
+                changed = source[:begin] + section.replace(original, replacement, 1) + source[finish:]
+
+                def mutated_read_text(candidate: Path, *args, **kwargs):
+                    if candidate == path:
+                        return changed
+                    return read_text(candidate, *args, **kwargs)
+
+                with mock.patch.object(Path, "read_text", new=mutated_read_text):
+                    problems = validate_codebase.find_final_render_publication_boundary_regressions()
+                self.assertTrue(any(expected in item for item in problems), problems)
+
+    def test_owner_plan_rejects_missing_binding_or_partition_proof(self) -> None:
+        path = validate_codebase.REPO_ROOT / "src/note/note_presentation_owner_plan.cpp"
+        read_text = Path.read_text
+        source = read_text(path, encoding="utf-8")
+        cases = (
+            ("!input.editor_text_core_current", "false",
+             "owner planning must reject an unbound editor"),
+            ("input.ime_preedit && !input.ime_preedit_can_reuse_committed_layout", "false",
+             "owner planning must reject an unproven preedit layout"),
+            ("if (!IsExactOwnerPartition(candidate->owner_ranges_, input.visible_lines))", "if (false)",
+             "published line owners must form an exact visible partition"),
+            ("NotePresentationOwnerPlanBuildResult::InvariantViolation", "NotePresentationOwnerPlanBuildResult::Built",
+             "an inconsistent owner partition must reject publication"),
+        )
+        for original, replacement, expected in cases:
+            with self.subTest(contract=expected):
+                self.assertEqual(source.count(original), 1)
+                changed = source.replace(original, replacement, 1)
+
+                def mutated_read_text(candidate: Path, *args, **kwargs):
+                    if candidate == path:
+                        return changed
+                    return read_text(candidate, *args, **kwargs)
+
+                with mock.patch.object(Path, "read_text", new=mutated_read_text):
+                    problems = validate_codebase.find_note_render_incremental_regressions()
+                self.assertTrue(any(expected in item for item in problems), problems)
+
     def test_windows_powershell_requires_bom_for_non_ascii_source(self) -> None:
         with repo_tempdir() as root:
             script = root / "tests" / "scripts" / "sample.ps1"
@@ -1385,6 +2213,34 @@ class MdStructureScannerTests(unittest.TestCase):
 
 
 class CppIncludeVisualizerTests(unittest.TestCase):
+    def test_root_beneath_ignored_directory_still_scans_its_sources(self) -> None:
+        with repo_tempdir() as temp:
+            root = temp / "out" / "project"
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "main.cpp").write_text('#include "local.h"\n', encoding="utf-8")
+            (root / "src" / "local.h").write_text("#pragma once\n", encoding="utf-8")
+            (root / "build").mkdir()
+            (root / "build" / "generated.cpp").write_text("", encoding="utf-8")
+
+            result = cpp_include_visualizer.analyze_project(
+                root, cpp_include_visualizer.DEFAULT_IGNORE_DIRS
+            )
+
+            self.assertEqual(result.files, ["src/local.h", "src/main.cpp"])
+            self.assertEqual([(edge.src, edge.dst) for edge in result.edges],
+                             [("src/main.cpp", "src/local.h")])
+
+    def test_empty_scan_fails_without_writing_a_complete_report(self) -> None:
+        with repo_tempdir() as root:
+            report = root / "report.md"
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                code = cpp_include_visualizer.main([str(root), "--report", str(report)])
+
+            self.assertEqual(code, 2)
+            self.assertIn("no C/C++ source files", stderr.getvalue())
+            self.assertFalse(report.exists())
+
     def test_cppinc_files_are_scanned_and_resolved(self) -> None:
         with repo_tempdir() as root:
             (root / "src" / "main").mkdir(parents=True)
@@ -1452,6 +2308,109 @@ class CppIncludeVisualizerTests(unittest.TestCase):
             self.assertIn("resolved edges: 1", out.getvalue())
             self.assertIn("src_feature_feature_cpp", graph.read_text(encoding="utf-8"))
             self.assertIn("No cycles detected.", report.read_text(encoding="utf-8"))
+            self.assertTrue(report.read_text(encoding="utf-8").rstrip().endswith("ANALYSIS_COMPLETE"))
+
+    def test_main_refuses_to_overwrite_existing_report(self) -> None:
+        with repo_tempdir() as root:
+            (root / "main.cpp").write_text("", encoding="utf-8")
+            report = root / "report.md"
+            original = "previous report must remain unchanged\n"
+            report.write_text(original, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with mock.patch.object(sys, "stderr", stderr):
+                code = cpp_include_visualizer.main([str(root), "--report", str(report)])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(report.read_text(encoding="utf-8"), original)
+            self.assertIn("refusing to overwrite", stderr.getvalue())
+
+    def test_main_prints_report_to_stdout_without_creating_file(self) -> None:
+        with repo_tempdir() as root:
+            (root / "main.cpp").write_text('#include "local.h"\n', encoding="utf-8")
+            (root / "local.h").write_text("#pragma once\n", encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = cpp_include_visualizer.main([str(root), "--report-stdout"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("C/C++ Local Include Dependency Report", stdout.getvalue())
+            self.assertTrue(stdout.getvalue().rstrip().endswith("ANALYSIS_COMPLETE"))
+            self.assertIn("resolved edges: 1", stderr.getvalue())
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["local.h", "main.cpp"])
+
+    def test_report_records_provenance_and_prints_visible_todos(self) -> None:
+        with repo_tempdir() as root:
+            (root / "main.cpp").write_text("", encoding="utf-8")
+            report = root / "report.md"
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                code = cpp_include_visualizer.main([str(root), "--report", str(report)])
+
+            self.assertEqual(code, 0)
+            report_text = report.read_text(encoding="utf-8")
+            self.assertIn("## Reproducibility", report_text)
+            self.assertIn("Git commit", report_text)
+            self.assertIn("Analyzer SHA-256", report_text)
+            self.assertIn("Include resolution order", report_text)
+            self.assertIn("## Interpretation", report_text)
+            self.assertIn("## TODO (not analyzed)", report_text)
+            self.assertIn("Shared-state ownership", report_text)
+            self.assertIn("TODO (not analyzed):", stderr.getvalue())
+
+    def test_provenance_handles_non_ascii_git_status_bytes(self) -> None:
+        with repo_tempdir() as root:
+            mocked_results = [
+                mock.Mock(stdout="C:/repo\n"),
+                mock.Mock(stdout="deadbeef\n"),
+                mock.Mock(stdout=" M docs/\u65e5\u672c\u8a9e.md\n".encode("utf-8")),
+            ]
+            with mock.patch.object(cpp_include_visualizer.subprocess, "run", side_effect=mocked_results):
+                provenance = cpp_include_visualizer.collect_provenance(root, [], set(), None)
+
+            self.assertEqual(provenance["git_commit"], "deadbeef")
+            self.assertEqual(provenance["git_worktree_clean"], "false")
+
+    def test_cycle_and_layer_violation_are_reported(self) -> None:
+        with repo_tempdir() as root:
+            (root / "src" / "ui").mkdir(parents=True)
+            (root / "src" / "core").mkdir(parents=True)
+            (root / "src" / "ui" / "ui.cpp").write_text(
+                '#include "core/core.h"\n', encoding="utf-8"
+            )
+            (root / "src" / "core" / "core.h").write_text(
+                '#include "ui/ui.cpp"\n', encoding="utf-8"
+            )
+            layers = root / "layers.json"
+            layers.write_text(
+                json.dumps(
+                    {
+                        "layers": [
+                            {"name": "ui", "paths": ["src/ui/"], "may_depend_on": []},
+                            {"name": "core", "paths": ["src/core/"], "may_depend_on": []},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = root / "report.md"
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = cpp_include_visualizer.main(
+                    [str(root), "--include-root", "src", "--layers", str(layers), "--report", str(report)]
+                )
+
+            self.assertEqual(code, 0)
+            report_text = report.read_text(encoding="utf-8")
+            self.assertIn("src/ui/ui.cpp", report_text)
+            self.assertIn("src/core/core.h", report_text)
+            self.assertIn("Cycle Detection", report_text)
+            self.assertIn("layer violations: 2", stdout.getvalue())
 
     def test_main_writes_compact_index_without_printing_graph(self) -> None:
         with repo_tempdir() as root:
@@ -2784,6 +3743,71 @@ class LibreOfficeConversionQualityToolTests(unittest.TestCase):
 
 
 class RenderHumanDocsTests(unittest.TestCase):
+    def test_fenced_examples_keep_nested_shorter_fences_literal(self) -> None:
+        rendered = render_human_docs.simple_markdown_to_html(
+            "````markdown\n```text\n**literal**\n```\n````\n"
+            "~~~text\n```\n[example](missing.md)\n~~~\n"
+            "## After examples\n", ".",
+        )
+        self.assertIn("<pre><code>```text\n**literal**\n```</code></pre>", rendered)
+        self.assertIn("<pre><code>```\n[example](missing.md)</code></pre>", rendered)
+        self.assertIn('<h2 id="after-examples">After examples</h2>', rendered)
+        self.assertNotIn("<a ", rendered)
+        self.assertEqual(
+            render_human_docs.simple_markdown_to_html("```text\n<unclosed>\n", "."),
+            "<pre><code>&lt;unclosed&gt;</code></pre>",
+        )
+
+    def test_table_delimiters_do_not_remove_syntax_examples(self) -> None:
+        rendered = render_human_docs.simple_markdown_to_html(
+            "| Syntax | Example |\n| :--- | ---: |\n"
+            "| Rule | `---` |\n| Table | Header then `---` |\n"
+            "| Dashes | ---- |\n",
+            ".",
+        )
+        self.assertEqual(rendered.count("<tr>"), 4)
+        self.assertIn("<td>Rule</td><td><code>---</code></td>", rendered)
+        self.assertIn("<td>Table</td><td>Header then <code>---</code></td>", rendered)
+        self.assertIn("<td>Dashes</td><td>----</td>", rendered)
+
+    def test_inline_code_preserves_markdown_and_backtick_examples(self) -> None:
+        examples = {
+            "`**bold** [guide](guide.md) ![image](image.png) <u>&amp;</u>`":
+                "<code>**bold** [guide](guide.md) ![image](image.png) &lt;u&gt;&amp;amp;&lt;/u&gt;</code>",
+            "`` `code` ``": "<code>`code`</code>",
+            "`` ```text `` and `` ``` ``": "<code>```text</code> and <code>```</code>",
+            "``a`b``": "<code>a`b</code>",
+            "`  `": "<code>  </code>",
+            "`unclosed": "`unclosed",
+            "[`.clro` Note Format](guide.md)": '<a href="guide.html"><code>.clro</code> Note Format</a>',
+            "**Bold `**literal**`**": '<strong>Bold <code>**literal**</code></strong>',
+            "![`code` <label>](image.png)":
+                '<img src="image.png" alt="code &lt;label&gt;"><br><em>code &lt;label&gt;</em>',
+            "\x00code0\x00 `literal`": "\x00code0\x00 <code>literal</code>",
+            "**Bold** `**literal**` [guide](guide.md)":
+                '<strong>Bold</strong> <code>**literal**</code> <a href="guide.html">guide</a>',
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                self.assertEqual(render_human_docs.format_inline(source, "."), expected)
+
+    def test_renders_numbered_steps_and_standalone_captions(self) -> None:
+        rendered = render_human_docs.simple_markdown_to_html(
+            "# Guide\n\n*（画面の説明）*\n\n1. Open `file*name.pdf`.\n\n"
+            "2. **Save** the work.\n- Read the result.\n"
+            "3. Continue.\n```\n4. Keep this as code.\n```\n", "."
+        )
+        self.assertIn("<p><em>（画面の説明）</em></p>", rendered)
+        self.assertIn("<ol>\n<li>Open <code>file*name.pdf</code>.</li>\n<li><strong>Save</strong> the work.</li>\n</ol>", rendered)
+        self.assertIn("<ul>\n<li>Read the result.</li>\n</ul>", rendered)
+        self.assertIn('<ol start="3">\n<li>Continue.</li>\n</ol>', rendered)
+        self.assertIn("<pre><code>4. Keep this as code.</code></pre>", rendered)
+        unsupported_number = "9" * 5000 + ". Keep the source text."
+        self.assertEqual(
+            render_human_docs.simple_markdown_to_html(unsupported_number, "."),
+            f"<p>{unsupported_number}</p>",
+        )
+
     def test_mermaid_labels_only_allow_exact_line_break_tags(self) -> None:
         rendered = render_human_docs.render_mermaid_flowchart(
             [
@@ -2798,6 +3822,39 @@ class RenderHumanDocsTests(unittest.TestCase):
         self.assertIn("&lt;br onclick=alert(1)&gt;", rendered)
         self.assertIn('class="flowchart-branch">optional label</span>', rendered)
         self.assertIn(">End</span>", rendered)
+
+    def test_renders_source_readable_note_and_details_containers(self) -> None:
+        rendered = render_human_docs.simple_markdown_to_html(
+            "::: note\nKeep this visible.\n:::\n\n"
+            "::: details Optional explanation\nOpen this only when needed.\n:::\n\n"
+            "```text\n::: note\nThis remains code.\n:::\n```\n",
+            ".",
+        )
+        self.assertIn('<aside class="doc-note" role="note">\n<p>Keep this visible.</p>\n</aside>', rendered)
+        self.assertIn('<details class="doc-details"><summary>Optional explanation</summary>\n<p>Open this only when needed.</p>\n</details>', rendered)
+        self.assertIn('<pre><code>::: note\nThis remains code.\n:::</code></pre>', rendered)
+
+    def test_wraps_tables_for_horizontal_scrolling_without_splitting_code_words(self) -> None:
+        rendered = render_human_docs.simple_markdown_to_html(
+            "| Application | Role |\n| --- | --- |\n| `PDF Note Workspace` | Main app |\n",
+            ".",
+        )
+        self.assertIn('<div class="table-scroll"><table>', rendered)
+        self.assertIn('<td><code>PDF Note Workspace</code></td>', rendered)
+        self.assertTrue(rendered.endswith("</table></div>"))
+
+    def test_collapses_only_the_long_lookup_references_and_keeps_heading_ids(self) -> None:
+        body = '<h1 id="help">Help</h1>\n<h2 id="start">Start</h2>\n<p>First.</p>\n<h2 id="output">Output</h2>\n<p>Second.</p>'
+        rendered = render_human_docs.collapse_reference_sections(
+            body, Path("docs/ja/Help_Reference.md")
+        )
+        self.assertIn('<details class="doc-reference-section" open><summary id="start" role="heading" aria-level="2">Start</summary>', rendered)
+        self.assertIn('<details class="doc-reference-section"><summary id="output" role="heading" aria-level="2">Output</summary>', rendered)
+        self.assertNotIn('<h2 id="output">', rendered)
+        self.assertEqual(
+            render_human_docs.collapse_reference_sections(body, Path("docs/ja/Using_the_App.md")),
+            body,
+        )
 
     def test_generates_html_for_language_docs_including_introduction(self) -> None:
         with repo_tempdir() as site_dir:
@@ -2837,6 +3894,7 @@ class RenderHumanDocsTests(unittest.TestCase):
             self.assertIn('<h1 id="how-to-use">How to Use</h1>', human_html)
             self.assertIn('<h2 id="section-one">Section One</h2>', human_html)
             self.assertIn('<h2 id="section-one-1">Section One</h2>', human_html)
+            self.assertIn('<details class="document-outline"><summary>この文書の項目</summary>', human_html)
             self.assertIn('class="flowchart-diagram"', human_html)
             self.assertIn('>Download</span>', human_html)
             self.assertIn('>Extract</span>', human_html)
@@ -2964,9 +4022,10 @@ class PublicSnapshotContentGateTests(unittest.TestCase):
 class PublicSiteValidationTests(unittest.TestCase):
     def test_documentation_portal_source_maps_user_guides(self) -> None:
         portal = (REPO_ROOT / "site/github/index.html").read_text(encoding="utf-8-sig")
-        self.assertIn("はじめて使う方へ", portal)
-        self.assertIn('id="site-map-title">文書の全体像', portal)
-        self.assertIn("現在地：文書ポータルの案内ページ", portal)
+        self.assertIn("初めて使う・配布物を選ぶ", portal)
+        self.assertIn("起動や保存で困っている", portal)
+        for group in ("導入・更新", "資料を読む・記録する", "保存・復元・問題への対処", "ファイルと記法"):
+            self.assertIn(f"<h2>{group}</h2>", portal)
         self.assertIn('class="site-menu"', portal)
         self.assertIn('aria-current="page"><span class="menu-link-title">文書ポータルのトップ', portal)
         self.assertIn('class="menu-outside"', portal)
@@ -2985,8 +4044,10 @@ class PublicSiteValidationTests(unittest.TestCase):
         self.assertIn('href="en/index.html"', portal)
         english_portal = (REPO_ROOT / "site/github/en/index.html").read_text(encoding="utf-8-sig")
         self.assertIn('href="../index.html" lang="ja">日本語</a>', english_portal)
-        self.assertIn("Getting started", english_portal)
-        self.assertIn("Documentation at a glance", english_portal)
+        self.assertIn("Set up and open the app", english_portal)
+        self.assertIn("Resolve a problem", english_portal)
+        for group in ("Start using the app", "Read, annotate, and take notes", "Protect and restore your work", "Understand the files"):
+            self.assertIn(f"<h2>{group}</h2>", english_portal)
         self.assertIn('class="site-menu"', english_portal)
         self.assertIn('aria-current="page"><span class="menu-link-title">Documentation portal', english_portal)
         for guide in (
@@ -3193,7 +4254,7 @@ class IntroductionSiteValidationTests(unittest.TestCase):
                 '<?xml version="1.0"?><urlset><url><loc>'
                 'https://pdf-note-workspace.soone-y.com/</loc></url></urlset>'
             ),
-            "_headers": "/*\n  Content-Signal: search=yes, ai-input=yes, ai-train=no, use=reference\n*/\n",
+            "_headers": "/*\n  Content-Signal: search=yes, ai-input=yes, ai-train=no, use=reference\n",
         }.items():
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -3318,6 +4379,108 @@ class LocaleUsageValidationTests(unittest.TestCase):
 
             self.assertTrue(any("absent from Japanese catalog: screen.missing" in error for error in errors))
             self.assertTrue(any("English catalog contains Japanese text: screen.title" in error for error in errors))
+
+    def test_rejects_english_sentence_in_japanese_catalog(self) -> None:
+        with repo_tempdir() as root:
+            source = root / "src"
+            source.mkdir()
+            ja = root / "ja.json"
+            en = root / "en.json"
+            ja.write_text(json.dumps({"screen.error": "Operation transaction requires an open session.",
+                                      "screen.mixed": "保存失敗: Operation transaction requires an open session.",
+                                      "screen.placeholder": "{FILE} を確認してください。",
+                                      "ui.app_title": "PDF Note Workspace",
+                                      "screen.short": "Error"}), encoding="utf-8")
+            en.write_text(json.dumps({"screen.error": "Operation transaction requires an open session.",
+                                      "screen.mixed": "Operation transaction requires an open session.",
+                                      "screen.placeholder": "Check {FILE}.",
+                                      "ui.app_title": "PDF Note Workspace",
+                                      "screen.short": "Error"}), encoding="utf-8")
+
+            errors = validate_locale_usage.validate(source, ja, en)
+            self.assertIn("Japanese catalog contains English prose: screen.error", errors)
+            self.assertIn("Japanese catalog contains English prose: screen.mixed", errors)
+            self.assertIn("Japanese catalog has unapproved ASCII-only text: screen.short", errors)
+            self.assertFalse(any("ui.app_title" in error for error in errors))
+
+    def test_rejects_direct_ui_literals_even_when_japanese(self) -> None:
+        with repo_tempdir() as root:
+            source = root / "src"
+            source.mkdir()
+            (source / "screen.cpp").write_text(
+                'ShowSoftNotice(owner, L"保存できません");\n'
+                'ShowSilentMessageDialog(owner, L"Note", detail, kind);\n'
+                'ShowSilentMessageDialog(owner, title, L"Failed to save", kind);\n'
+                'ShowSoftNotice(owner, localization::Text(L"screen.error"));\n',
+                encoding="utf-8",
+            )
+            ja = root / "ja.json"
+            en = root / "en.json"
+            ja.write_text(json.dumps({"screen.error": "保存できません"}), encoding="utf-8")
+            en.write_text(json.dumps({"screen.error": "Could not save"}), encoding="utf-8")
+
+            errors = validate_locale_usage.validate(source, ja, en)
+            self.assertEqual(len(errors), 3)
+            self.assertTrue(all("direct UI literal" in error for error in errors))
+
+    def test_rejects_raw_file_operation_error_but_skips_automation_fixture(self) -> None:
+        with repo_tempdir() as root:
+            source = root / "src"
+            operation = source / "workspace" / "file_ops_move_rename.cppinc"
+            operation.parent.mkdir(parents=True)
+            operation.write_text(
+                'if (outErr) *outErr = L"Could not open file";\n'
+                'bool RunUiAutomationOperationTransactionRecoveryScenario() {\n'
+                '  if (outErr) *outErr = L"Fixture failed";\n}\n',
+                encoding="utf-8",
+            )
+            ja = root / "ja.json"
+            en = root / "en.json"
+            ja.write_text("{}", encoding="utf-8")
+            en.write_text("{}", encoding="utf-8")
+
+            errors = validate_locale_usage.validate(source, ja, en)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("raw operation error literal", errors[0])
+
+    def test_rejects_raw_readonly_viewer_status(self) -> None:
+        with repo_tempdir() as root:
+            source = root / "src"
+            viewer = source / "readonly_viewer" / "main.cpp"
+            viewer.parent.mkdir(parents=True)
+            viewer.write_text(
+                'SetViewerStatus(owner, L"File could not be opened");\n'
+                'SetViewerStatus(owner, localization::Text(L"viewer.error"));\n',
+                encoding="utf-8",
+            )
+            ja = root / "ja.json"
+            en = root / "en.json"
+            ja.write_text(json.dumps({"viewer.error": "ファイルを開けません"}), encoding="utf-8")
+            en.write_text(json.dumps({"viewer.error": "File could not be opened"}), encoding="utf-8")
+
+            errors = validate_locale_usage.validate(source, ja, en)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("raw viewer message", errors[0])
+
+    def test_ascii_exception_requires_its_reviewed_value(self) -> None:
+        with repo_tempdir() as root:
+            source = root / "src"
+            source.mkdir()
+            ja = root / "ja.json"
+            en = root / "en.json"
+            ja.write_text(json.dumps({"ui.app_title": "Operation failed"}), encoding="utf-8")
+            en.write_text(json.dumps({"ui.app_title": "Operation failed"}), encoding="utf-8")
+
+            errors = validate_locale_usage.validate(source, ja, en)
+            self.assertIn("Japanese catalog has unapproved ASCII-only text: ui.app_title", errors)
+
+    def test_text_encoding_error_ids_exist_in_both_catalogs(self) -> None:
+        source = (REPO_ROOT / "src/core/text_encoding.h").read_text(encoding="utf-8")
+        ids = set(re.findall(r'return L"(text_encoding\.[a-z0-9._]+)"', source))
+        self.assertGreaterEqual(len(ids), 9)
+        for locale in ("ja", "en"):
+            catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
+            self.assertEqual(ids - set(catalog), set())
 
 
 class OfficeLocalizationTests(unittest.TestCase):
@@ -3629,13 +4792,26 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
             (directory / "docs" / "README.md").write_text(text, encoding="utf-8")
             executable = directory / "pdf_note_workspace.exe"
             executable.write_bytes(("app-" + text).encode("utf-8"))
+            runtime = directory / "pdfium.dll"
+            runtime.write_bytes(b"runtime")
             edition = "full" if directory == full else "lite"
             (directory / "pdf_note_workspace.exe.buildinfo.txt").write_text(
                 "format\tpdf-note-build-info-v1\n"
                 "version\t1.0.0\n"
                 f"edition\t{edition}\n"
                 "locale\tja\n"
-                f"artifact\tpdf_note_workspace.exe\t{release_set_integrity_gate.sha256_file(executable)}\n",
+                f"artifact\tpdf_note_workspace.exe\t{release_set_integrity_gate.sha256_file(executable)}\n"
+                f"artifact\tpdfium.dll\t{release_set_integrity_gate.sha256_file(runtime)}\n",
+                encoding="utf-8",
+            )
+            viewer = directory / "readonly_viewer.exe"
+            viewer.write_bytes(b"viewer")
+            (directory / "readonly_viewer.exe.buildinfo.txt").write_text(
+                "format\tpdf-note-build-info-v1\n"
+                "version\t1.0.0\n"
+                "locale\tja\n"
+                f"artifact\treadonly_viewer.exe\t{release_set_integrity_gate.sha256_file(viewer)}\n"
+                f"artifact\tpdfium.dll\t{release_set_integrity_gate.sha256_file(runtime)}\n",
                 encoding="utf-8",
             )
         (full / "lo").mkdir(parents=True)
@@ -3671,6 +4847,24 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
             release_set, _, _ = self.make_release_set(root)
 
             self.assertEqual(release_set_integrity_gate.validate_release_set(release_set), [])
+
+    def test_rejects_viewer_that_differs_from_build_info(self) -> None:
+        with repo_tempdir() as root:
+            release_set, _, _ = self.make_release_set(root)
+            (release_set / "release_full" / "readonly_viewer.exe").write_bytes(b"changed viewer")
+
+            errors = release_set_integrity_gate.validate_release_set(release_set)
+
+            self.assertTrue(any("read-only viewer executable does not match its build-info hash" in error for error in errors))
+
+    def test_rejects_runtime_that_differs_from_build_info(self) -> None:
+        with repo_tempdir() as root:
+            release_set, _, _ = self.make_release_set(root)
+            (release_set / "release_full" / "pdfium.dll").write_bytes(b"changed runtime")
+
+            errors = release_set_integrity_gate.validate_release_set(release_set)
+
+            self.assertTrue(any("pdfium.dll does not match its build-info hash" in error for error in errors))
 
     def test_accepts_legacy_full_runtime_layout(self) -> None:
         with repo_tempdir() as root:

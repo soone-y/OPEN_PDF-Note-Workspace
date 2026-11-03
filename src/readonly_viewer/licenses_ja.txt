@@ -1,0 +1,34 @@
+読み取り専用ビューア — ライセンスと著作権表示
+
+左の一覧から各フォルダーに入り、原文を閲覧できます。
+ここでの案内より、各著作権者のライセンス原文を優先してください。
+
+本体: PDF Note Workspace / Copyright (c) 2026 Soone-Y / zlib License
+  project/LICENSE.md
+  exeと同じフォルダーの LICENSE.md は本プロジェクトの共通文書です。
+
+PDF表示: PDFium binary package / PDFiumと内包部品
+  pdfium/LICENSE — binary packageの原文
+  pdfium/pdfium.txt — PDFium本体の原文
+  pdfium/ 配下の残りの文書 — PDFiumに内包された部品の原文・著作権表示
+  PDFiumの文書一式を同梱し、一部の通知だけに省略しません。
+
+Markdown解析: MD4C / MIT License
+  md4c/LICENSE.md
+  MD4Cはexeへ組み込まれています。独立したDLLでなくても原文を同梱します。
+
+C++実行環境: MinGW-w64 / GCC runtime
+  libstdc++-6.dll、libgcc_s_seh-1.dll:
+    mingw-w64/gcc/COPYING3.txt
+    mingw-w64/gcc/COPYING.RUNTIME.txt
+  libwinpthread-1.dll:
+    mingw-w64/winpthreads/COPYING.txt
+  GCCの実行ライブラリ例外も原文のまま同梱します。
+
+このビューア単体のビルドはLibreOffice、zlib1.dll、追加フォントファイルを同梱しません。
+Windowsの標準機能・インストール済みフォントを使用します。
+文書・画像として表示する利用者のファイルは、それぞれの権利者の条件に従います。
+
+実行用のexeと4 DLLに加え、LICENSE.mdとlicensesフォルダーを一緒に保持してください。
+manifest.jsonは同梱文書の出所・SHA-256を記録する検査資料です。
+このビルドはローカル確認用です。正式な公開・配布物の受け入れ検査とは別です。

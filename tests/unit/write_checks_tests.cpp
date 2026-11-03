@@ -3,7 +3,37 @@
 #include <cassert>
 #include <fstream>
 #include <iostream>
+#include <sddl.h>
 using namespace write_checks;
+namespace {
+HANDLE persistEntered = nullptr, persistRelease = nullptr;
+std::atomic_bool persistTimedOut{false};
+void HoldLedgerWorker() {
+    SetEvent(persistEntered);
+    if (WaitForSingleObject(persistRelease, 5000) != WAIT_OBJECT_0) persistTimedOut = true;
+}
+struct ScopedWriteDenial {
+    std::filesystem::path path;
+    std::vector<BYTE> original;
+    bool applied = false;
+    void Deny(const std::filesystem::path& target) {
+        path = target;
+        DWORD bytes = 0;
+        GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, nullptr, 0, &bytes);
+        assert(bytes); original.resize(bytes);
+        assert(GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, original.data(), bytes, &bytes));
+        PSECURITY_DESCRIPTOR denied = nullptr;
+        assert(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(D;;0x00000006;;;WD)(A;;FA;;;WD)",
+            SDDL_REVISION_1, &denied, nullptr));
+        applied = SetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, denied) != FALSE;
+        LocalFree(denied); assert(applied);
+    }
+    void Restore() {
+        if (applied) { assert(SetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, original.data())); applied = false; }
+    }
+    ~ScopedWriteDenial() { Restore(); }
+};
+}
 int wmain() {
     ManualLimit limit;
     assert(limit.Start(0)); assert(!limit.Start(1)); limit.Finish(2, false);
@@ -33,6 +63,56 @@ int wmain() {
     const auto missing = ProbeDirectory(root / L"missing", true);
     assert(missing.outcome == Outcome::Unavailable && missing.step == Step::Open);
     assert(!std::filesystem::exists(root / L"missing", ec) && !ec);
+    std::atomic_bool destinationCancel{false};
+    const auto session = root / L"session";
+    assert(std::filesystem::create_directory(session, ec) && !ec);
+    for (const auto kind : {Kind::PdfWrite, Kind::NoteWrite}) {
+        const auto target = session / (kind == Kind::PdfWrite ? L"pdf" : L"note");
+        const auto parent = ProbeSessionDestination(kind, target, session, destinationCancel);
+        assert(parent.outcome == Outcome::Passed && parent.operationPath == session.wstring() && parent.remaining.empty());
+        Record row{kind, target.wstring(), parent};
+        assert(IsParentDestinationProbe(row));
+        row.result.source = Source::Normal; assert(!IsParentDestinationProbe(row));
+        assert(!std::filesystem::exists(target, ec) && !ec && std::filesystem::is_empty(session, ec) && !ec);
+        assert(std::filesystem::create_directory(target, ec) && !ec);
+        const auto direct = ProbeSessionDestination(kind, target, session, destinationCancel);
+        assert(direct.outcome == Outcome::Passed && direct.operationPath.empty());
+        // Deny child creation explicitly. Metadata-only directory handles do
+        // not prevent creating children on Windows.
+        ScopedWriteDenial denial; denial.Deny(target);
+        const auto denied = ProbeSessionDestination(kind, target, session, destinationCancel);
+        assert(denied.outcome != Outcome::Passed && denied.operationPath.empty());
+        denial.Restore();
+        assert(RemoveDirectoryW(target.c_str()));
+        { std::ofstream file(target); file << "not a directory"; }
+        const auto file = ProbeSessionDestination(kind, target, session, destinationCancel);
+        assert(file.outcome == Outcome::Unavailable && file.operationPath.empty());
+        assert(DeleteFileW(target.c_str()));
+    }
+    const auto absentSession = root / L"absent_session";
+    const auto absentParent = ProbeSessionDestination(Kind::PdfWrite, absentSession / L"pdf", absentSession, destinationCancel);
+    assert(absentParent.outcome == Outcome::Unavailable && absentParent.operationPath.empty());
+    const auto wrongLeaf = ProbeSessionDestination(Kind::PdfWrite, session / L"other", session, destinationCancel);
+    assert(wrongLeaf.outcome == Outcome::Unavailable && wrongLeaf.operationPath.empty());
+    const auto wrongKind = ProbeSessionDestination(Kind::TempWrite, session / L"pdf", session, destinationCancel);
+    assert(wrongKind.outcome == Outcome::Unavailable && wrongKind.operationPath.empty());
+    const auto flat = ProbeSessionDestination(Kind::PdfWrite, session, session, destinationCancel);
+    assert(flat.outcome == Outcome::Passed && flat.operationPath.empty());
+    destinationCancel.store(true);
+    const auto canceledDestination = ProbeSessionDestination(Kind::PdfWrite, session / L"pdf", session, destinationCancel);
+    assert(canceledDestination.outcome == Outcome::Canceled && canceledDestination.operationPath.empty());
+    destinationCancel.store(false);
+    // Parent evidence survives the existing v2 ledger without being promoted
+    // to a direct destination success after reload.
+    const auto parentStore = root / L"parent.log";
+    std::vector<Record> parentRows{{Kind::PdfWrite, (session / L"pdf").wstring(),
+        ProbeSessionDestination(Kind::PdfWrite, session / L"pdf", session, destinationCancel)}};
+    std::string parentBaseline; DWORD parentError = 0;
+    assert(Save(parentStore, parentRows, parentBaseline, parentError));
+    parentRows.clear(); assert(Load(parentStore, parentRows, parentBaseline, parentError));
+    assert(parentRows.size() == 1 && IsParentDestinationProbe(parentRows.front()));
+    assert(DeleteFileW(parentStore.c_str()));
+    assert(RemoveDirectoryW(session.c_str()));
     assert(!IsSafeLocalPath(L"C:relative")); assert(!IsSafeLocalPath(root / L".." / L"other"));
     const auto original = root / L"original.txt";
     { std::ofstream out(original); out << "original"; }
@@ -137,6 +217,7 @@ int wmain() {
     EnableNormalObservations();
     const auto workspaceFile = root / L"workspace.json";
     assert(ObservedWriteUtf8(root, workspaceFile, "config", root, root, &detail));
+    assert(FlushNormalObservations(root));
     assert(Load(normalStore, restored, persisted, error));
     const auto* normal = Find(restored, Kind::SettingsWrite, settings.wstring());
     assert(normal && normal->result.source == Source::Normal && normal->result.operationPath == config.wstring());
@@ -144,15 +225,43 @@ int wmain() {
     assert(persisted.rfind("PDF_NOTE_WRITE_CHECKS_2\n", 0) == 0);
     assert(SetFileAttributesW(config.c_str(), FILE_ATTRIBUTE_READONLY));
     assert(!ObservedWriteUtf8(root, config, "damaged", settings, settings, &detail));
+    assert(FlushNormalObservations(root));
     assert(Load(normalStore, restored, persisted, error));
     assert(Find(restored, Kind::SettingsWrite, settings.wstring())->result.outcome == Outcome::Failed);
     { std::ifstream in(config); std::string bytes; in >> bytes; assert(bytes == "first"); }
     assert(GetFileAttributesW(config.c_str()) & FILE_ATTRIBUTE_READONLY);
     assert(SetFileAttributesW(config.c_str(), FILE_ATTRIBUTE_NORMAL));
     assert(ObservedWriteUtf8(root, config, "second", settings, settings, &detail));
+    assert(FlushNormalObservations(root));
     assert(Load(normalStore, restored, persisted, error));
     assert(Find(restored, Kind::SettingsWrite, settings.wstring())->result.outcome == Outcome::Passed);
     assert(Find(restored, Kind::WorkspaceWrite, root.wstring() + L"\\")); // Same Windows target.
+    // The real ledger worker is blocked, yet operation completion and memory
+    // display continue. Two captured workspaces retain separate evidence.
+    persistEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    persistRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    assert(persistEntered && persistRelease);
+    SetBeforeNormalPersistForTesting(HoldLedgerWorker);
+    assert(ObservedWriteUtf8(root, config, "async-first", settings, settings, &detail));
+    assert(WaitForSingleObject(persistEntered, 5000) == WAIT_OBJECT_0);
+    assert(ObservedWriteUtf8(root, config, "second", settings, settings, &detail));
+    const auto otherRoot = root / L"other_workspace";
+    const auto otherConfig = otherRoot / L"workspace.json";
+    const auto otherStore = otherRoot / L"__pdf_note_workspace__" / L"__log__" / L"write_checks.log";
+    assert(ObservedWriteUtf8(otherRoot, otherConfig, "other", otherRoot, {}, &detail));
+    live.clear(); unsaved = false; normalError = 0;
+    assert(MergeNormalObservations(normalStore, live, unsaved, normalError) && unsaved && !persistTimedOut);
+    assert(Find(live, Kind::SettingsWrite, settings.wstring()));
+    SetBeforeNormalPersistForTesting(nullptr);
+    assert(SetEvent(persistRelease));
+    assert(FlushNormalObservations(root) && FlushNormalObservations(otherRoot) && !persistTimedOut);
+    assert(Load(otherStore, restored, persisted, error));
+    assert(Find(restored, Kind::WorkspaceWrite, otherRoot.wstring()));
+    CloseHandle(persistEntered); CloseHandle(persistRelease);
+    assert(DeleteFileW(otherConfig.c_str())); assert(DeleteFileW(otherStore.c_str()));
+    assert(RemoveDirectoryW(otherStore.parent_path().c_str()));
+    assert(RemoveDirectoryW(otherStore.parent_path().parent_path().c_str())); assert(RemoveDirectoryW(otherRoot.c_str()));
+    assert(Load(normalStore, restored, persisted, error));
     // Manual demo internals and canceled/no-op operations do not manufacture
     // normal evidence, or change the manual limit. Preserve Win32 error state.
     const auto before = persisted;
@@ -169,6 +278,7 @@ int wmain() {
         if (result.outcome == Outcome::Passed) observation.Success(); else observation.Failure(result.error);
     };
     observeRead();
+    assert(FlushNormalObservations(root));
     assert(Load(normalStore, restored, persisted, error));
     const auto firstRead = persisted;
     Sleep(2);
@@ -181,11 +291,12 @@ int wmain() {
     assert(Load(normalStore, restored, persisted, error) && persisted != firstRead);
     assert(Find(restored, Kind::SetupRead, original.wstring())->result.source == Source::Normal);
     locked = CreateFileW(original.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    assert(locked != INVALID_HANDLE_VALUE); observeRead(); CloseHandle(locked);
+    assert(locked != INVALID_HANDLE_VALUE); observeRead(); assert(FlushNormalObservations(root)); CloseHandle(locked);
     assert(Load(normalStore, restored, persisted, error));
     const auto* readFailure = Find(restored, Kind::SetupRead, original.wstring());
     assert(readFailure && readFailure->result.outcome == Outcome::Failed && readFailure->result.error == ERROR_SHARING_VIOLATION && readFailure->result.step == Step::Open);
     observeRead();
+    assert(FlushNormalObservations(root));
     assert(Load(normalStore, restored, persisted, error) && Find(restored, Kind::SetupRead, original.wstring())->result.outcome == Outcome::Passed);
     // A stale manual save merges into current evidence, never clobbering it.
     std::vector<Record> staleRows{{Kind::SettingsWrite, settings.wstring(), write}};
@@ -196,11 +307,13 @@ int wmain() {
     locked = CreateFileW(normalStore.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     assert(locked != INVALID_HANDLE_VALUE);
     assert(ObservedWriteUtf8(root, config, "third", settings, settings, &detail));
+    assert(!FlushNormalObservations(root));
     live.clear(); unsaved = false;
     assert(MergeNormalObservations(normalStore, live, unsaved, normalError) && unsaved && normalError);
     CloseHandle(locked);
     { std::ofstream out(normalStore, std::ios::binary | std::ios::trunc); out << "broken ledger\n"; }
     assert(ObservedWriteUtf8(root, config, "fourth", settings, settings, &detail));
+    assert(!FlushNormalObservations(root));
     { std::ifstream in(normalStore); std::string bytes; std::getline(in, bytes); assert(bytes == "broken ledger"); }
     live.clear(); unsaved = false;
     assert(MergeNormalObservations(normalStore, live, unsaved, normalError) && unsaved && normalError == ERROR_INVALID_DATA);
@@ -221,6 +334,7 @@ int wmain() {
     live.clear(); unsaved = false;
     assert(MergeNormalObservations(normalStore, live, unsaved, normalError));
     assert(Find(live, Kind::NoteWrite, exportFolder.wstring()));
+    ShutdownNormalObservations(); // Join before deleting owned fixture paths.
     assert(DeleteFileW(exportFile.c_str())); assert(RemoveDirectoryW(exportFolder.c_str()));
     assert(RemoveDirectoryW(exportFolder.parent_path().c_str()));
     assert(RemoveDirectoryW(exportFolder.parent_path().parent_path().c_str()));
