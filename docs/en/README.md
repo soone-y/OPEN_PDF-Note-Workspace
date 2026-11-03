@@ -8,16 +8,20 @@ This directory contains the guides for using the English release. Begin with [Ge
 
 [Using the Application](Using_the_App.md) is the everyday starting point: open a PDF, add notes or annotations, then save or export your work. Guides for formats, recovery, and troubleshooting are for the point at which you need them.
 
-- [Help Reference](Help_Reference.md)
-- [Saving and Recovery](Save_and_Recovery.md)
-- [File Formats](File_Formats.md)
-- [`.clro` Note Format](CLRO_Note_Format.md)
-- [Note writing guide](Note_Writing_Guide.md)
-- [`.clrop` PDF Annotation Data](CLROP_Annotation_Format.md)
-- [Using the Application](Using_the_App.md)
-- [Read-only Viewer](Read_Only_Viewer.md)
-- [Troubleshooting](Troubleshooting.md)
-- [Build and Verification](How_to_Build.md)
+## Choose a guide
+
+| Guide | Role |
+| --- | --- |
+| [Using the Application](Using_the_App.md) | Follow a complete first task from workspace preparation to sharing |
+| [Help Reference](Help_Reference.md) | Look up a feature's location, prerequisites, steps, results, settings and limits |
+| [Note writing guide](Note_Writing_Guide.md) | Copy syntax examples and understand their combinations |
+| [Saving and Recovery](Save_and_Recovery.md) | Protect originals, inspect failed saves, restore backups and rescue work |
+| [File Formats](File_Formats.md) | Choose note formats and keep PDF/annotation pairs together |
+| [CLRO Note Format](CLRO_Note_Format.md) | Understand supported note display and compatibility with other software |
+| [PDF Annotation Data](CLROP_Annotation_Format.md) | Save, move and share annotations without hand-editing JSON |
+| [Read-only Viewer](Read_Only_Viewer.md) | Compare saved documents in tabs and manage viewing sessions |
+| [Troubleshooting](Troubleshooting.md) | Take safe first steps when opening, saving or viewing fails |
+| [Build and Verification](How_to_Build.md) | Build and verify from source (developers) |
 
 The application has no external communication features. Saving uses recoverable operations and never overwrites an original PDF directly.
 

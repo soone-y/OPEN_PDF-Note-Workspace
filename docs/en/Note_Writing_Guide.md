@@ -32,7 +32,7 @@ Structured display can scroll past the end. Typing, inserting a newline, or movi
 | `c` | Font and text size | `<font=Consolas>text</>`, `<s=24>text</>` (px) |
 | `c` | Indentation and position | `<d=2>text</>`, `<d=center>text</>` |
 | `c` | Line height | `<m=5>text</>` (1.5 times baseline) |
-| `c` | Note/PDF link points | `<l=topic-a>text</>`; create the PDF point with PDF link |
+| `c` | Note/PDF link points | `<l=topic-a>text</>`; create the PDF point with Link (PDF link) |
 | `c` | Containers | Enclose with standalone `::: Note` and `:::` lines |
 | `c` | Block titles | Add `title="Title"` to the opening line |
 | `c` | Math enclosures | `$x^2$`, `\(x^2\)`; use `$$...$$` or `\[...\]` for block math |
@@ -55,7 +55,7 @@ For Markdown output, **Convert fullwidth syntax to halfwidth (CLRO → md)** def
 
 ## Apply with input assist
 
-Type in the lower-left input field, choose formatting, then Apply or Enter. To format existing text, leave the field empty and select note text instead. Bullet, Quote, Page reference, and PDF link are available in the same panel.
+Type in the lower-left input field, choose formatting, then Apply or Enter. To format existing text, leave the field empty and select note text instead. Bullet, Quote, Page reference, and Link (PDF link) are available in the same panel.
 
 Open this document with **Writing guide**, even before opening a note. Use `.clro`, `.md`, or `.markdown` for formatted notes.
 
@@ -230,7 +230,7 @@ Custom note links connect locations with the same identifier. `l` is an alias fo
 <link=topic-a>Destination</>
 ```
 
-Use **PDF link** to create corresponding PDF and note link points. Writing a note identifier alone does not create the PDF point. **Page reference** inserts text with a page number, a separate operation from the position link.
+Use **Link** (PDF link) to enter link creation, click the note position and the corresponding PDF position, and finish when both points exist. Choosing Link again ends pending creation and removes incomplete PDF markers. See [link operations](Help_Reference.md#markup-math-and-links). Writing a note identifier alone does not create the PDF point. **Page reference** inserts text with a page number, a separate operation from the position link.
 
 ### Container blocks `c`
 
@@ -348,7 +348,7 @@ Unknown math commands may remain as their names. Package loading, macro definiti
 | Apply with both the field and selection empty | Show guidance; leave the note unchanged |
 | Bullet or Quote | Prefix typed text or each selected line with `- ` or `> `. With neither, insert a starting marker |
 | Page reference | Insert the current PDF's name and page number as text |
-| PDF link | Start linking a PDF position with the note |
+| Link (PDF link) | Start linking a PDF position with the note |
 
 Choose heading levels 1 through 6. Combine bold, italic, strike, underline, text color, and background. `d` controls indentation, `m` adds line height, and `s` sets text size; see the Custom formatting attributes table for units and examples. Leave unused numeric fields empty.
 

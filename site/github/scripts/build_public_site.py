@@ -22,6 +22,9 @@ GITHUB_SITE_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = GITHUB_SITE_ROOT / "output" / "public"
 ALLOWLIST_PATH = GITHUB_SITE_ROOT / "documentation_portal_allowlist.json"
 VERSION_TOKEN = "__APP_VERSION__"
+WEB_ANALYTICS_SNIPPET = """<!-- Cloudflare Web Analytics -->
+<script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "385b96f498964281bc0c2a771cebd04f"}'></script>
+<!-- End Cloudflare Web Analytics -->"""
 
 
 def copy_file(source: Path, destination: Path) -> None:
@@ -119,6 +122,15 @@ def replace_version_tokens(site_dir: Path, version: str) -> None:
         markdown_file.write_text(text.replace(VERSION_TOKEN, version), encoding="utf-8")
 
 
+def add_web_analytics(site_dir: Path) -> None:
+    """Add the supplied beacon only to the staged website, never source documents."""
+    for html_file in sorted(site_dir.rglob("*.html")):
+        text = html_file.read_text(encoding="utf-8")
+        if text.count("</body>") != 1 or "data-cf-beacon" in text:
+            raise ValueError(f"Expected one body end and no existing analytics: {html_file}")
+        html_file.write_text(text.replace("</body>", WEB_ANALYTICS_SNIPPET + "\n</body>"), encoding="utf-8")
+
+
 def replace_staged_site(staging_dir: Path) -> None:
     """Install a complete staged site without deleting the current generation first."""
     OUTPUT_DIR.parent.mkdir(parents=True, exist_ok=True)
@@ -192,6 +204,7 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
         if render_human_docs([str(staging_dir)]) != 0:
             raise RuntimeError("render_human_docs.py failed")
 
+        add_web_analytics(staging_dir)
         replace_staged_site(staging_dir)
         print(f"Built selected public documentation: {OUTPUT_DIR}")
         return 0

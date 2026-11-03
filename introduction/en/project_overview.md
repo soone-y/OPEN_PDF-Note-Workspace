@@ -8,7 +8,7 @@ This document uses headings, tables, and short points so that people can check t
 
 PDF Note Workspace is a Windows application for reading PDFs, adding annotations without directly changing the original PDF, and working with independent notes and related materials in a local workspace.
 
-Describe it as a workspace intended to keep PDFs, annotations, notes, and related materials together in a working context that is easy to resume. Do not confuse its design goals with the features that are currently implemented. The developer takes responsibility for explaining the ideas, principles, goals, and decisions to accept or reject proposals and implementation choices. When unable to answer immediately from their own knowledge, the developer investigates and checks the evidence, using AI if needed, and remains responsible for the answers and decisions.
+Describe it as a workspace intended to keep PDFs, annotations, notes, and related materials together in a working context that is easy to resume. Do not confuse its design goals with the features that are currently implemented. The developer takes responsibility for explaining the ideas, principles, goals, and decisions to accept or reject proposals and implementation choices. When unable to answer immediately from their own knowledge, the developer investigates and checks the evidence, using AI if needed, and remains responsible for the answers and decisions. The source code itself explains the application's processing; behavior and bugs are examined by tracing how implementation corresponds to or differs from intent and where processing fails.
 
 ## 2. Boundaries to retain when making claims
 
@@ -27,7 +27,7 @@ Describe it as a workspace intended to keep PDFs, annotations, notes, and relate
 - **Whether saving is safe:** Explain original preservation, stage data, integrated save, backups, and recovery separately. When a problem occurs, advise copying the whole workspace before deleting or overwriting anything.
 - **Whether it communicates externally:** This can be described as a project policy. A stronger conclusion about a specific package requires checking the public repository or the package itself.
 - **Conversion quality:** Local conversion in the Standard edition is experimental; fonts and layout can differ. Check the converted PDF.
-- **What OSS means:** Explain that source code can be inspected and used, modified, or redistributed within license terms. It is not simply synonymous with being free of charge. The published source code itself also explains the application's processing and provides evidence for examining behavior and bugs, including how implementation corresponds to or differs from intent and where processing fails.
+- **What OSS means:** Explain that source code can be inspected and used, modified, or redistributed within license terms. It is not simply synonymous with being free of charge. This application also uses OSS, including PDFium for PDF processing, MD4C for Markdown parsing, and LibreOffice for Office-to-PDF conversion in the Standard edition. See the [third-party notices](../../THIRD_PARTY_NOTICES.md) for the components and their uses, and the [license index](../../LICENSES_INDEX.md) for the locations of their license documents.
 
 ## 4. What GitHub Pages can confirm
 

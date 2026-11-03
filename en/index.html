@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="ai-agent-entrypoint" content="../docs/en/README.html">
+  <title>PDF Note Workspace Documentation Portal</title>
+  <meta name="description" content="Find PDF Note Workspace setup and edition guidance, annotation and note editing instructions, a read-only viewer for multiple documents and CLROP annotations, saving and recovery, and troubleshooting.">
+  <link rel="canonical" href="https://soone-y.github.io/OPEN_PDF-Note-Workspace/en/">
+  <link rel="alternate" hreflang="ja" href="https://soone-y.github.io/OPEN_PDF-Note-Workspace/">
+  <link rel="alternate" hreflang="en" href="https://soone-y.github.io/OPEN_PDF-Note-Workspace/en/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="PDF Note Workspace Documentation">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:url" content="https://soone-y.github.io/OPEN_PDF-Note-Workspace/en/">
+  <meta property="og:title" content="PDF Note Workspace Documentation Portal">
+  <meta property="og:description" content="Find PDF Note Workspace setup and edition guidance, annotation and note editing instructions, a read-only viewer for multiple documents and CLROP annotations, saving and recovery, and troubleshooting.">
+  <meta property="og:image" content="https://soone-y.github.io/OPEN_PDF-Note-Workspace/docs/images/app_overview.png">
+  <meta property="og:image:alt" content="PDF Note Workspace showing a PDF, notes, a material list, and annotation controls in one window">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="PDF Note Workspace Documentation Portal">
+  <meta name="twitter:description" content="Find PDF Note Workspace setup and edition guidance, annotation and note editing instructions, a read-only viewer for multiple documents and CLROP annotations, saving and recovery, and troubleshooting.">
+  <meta name="twitter:image" content="https://soone-y.github.io/OPEN_PDF-Note-Workspace/docs/images/app_overview.png">
+  <meta name="twitter:image:alt" content="PDF Note Workspace showing a PDF, notes, a material list, and annotation controls in one window">
+  <style>
+    :root { --page:#fbfcfa; --card:#fff; --ink:#182521; --subtle:#52635b; --line:#cdd8d1; --green:#00AA7B; --peach:#FFBD85; --blue:#1D50DD; --green-wash:#eef6f2; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:24px; background:var(--page); color:var(--ink); font:16px/1.8 "Yu Gothic UI",Meiryo,system-ui,sans-serif; overflow-wrap:anywhere; }
+    main { width:min(100%,1040px); margin:auto; padding:12px 0 40px; }
+    h1 { margin:24px 0 0; font-size:clamp(26px,4vw,36px); line-height:1.45; color:var(--ink); }
+    h1 small { display:block; margin-top:5px; font-size:18px; font-weight:400; color:var(--subtle); }
+    h2 { margin:0 0 12px; font-size:21px; line-height:1.5; }
+    p { max-width:42em; }
+    .lead { margin:18px 0; color:var(--subtle); }
+    a { color:var(--blue); text-underline-offset:.2em; }
+    a:hover { text-decoration-thickness:2px; }
+    a:focus-visible,summary:focus-visible,input:focus-visible { outline:3px solid var(--blue); outline-offset:4px; }
+    .skip-link { position:absolute; top:8px; left:24px; z-index:2; padding:8px 16px; background:var(--card); transform:translateY(-150%); }
+    .skip-link:focus { transform:none; }
+    .utility-row { display:flex; align-items:center; flex-wrap:wrap; gap:12px 20px; padding-bottom:14px; border-bottom:1px solid var(--line); }
+    .language-link,.contrast-toggle { font-size:14px; }
+    .contrast-toggle { display:inline-flex; align-items:center; gap:7px; color:var(--subtle); }
+    .contrast-toggle input { width:18px; height:18px; accent-color:var(--blue); }
+    .external-links { display:flex; flex-wrap:wrap; gap:10px 22px; font-size:14px; }
+    .entry-list { margin:26px 0 32px; padding:0; list-style:none; }
+    .entry-list li { border-top:1px solid var(--line); }
+    .entry-list a { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,2fr); gap:12px 24px; padding:14px 0; text-decoration:none; }
+    .entry-list strong { text-decoration:underline; text-underline-offset:.2em; }
+    .entry-list span { color:var(--subtle); font-size:14px; }
+    .guide-groups { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:28px 48px; }
+    .guide-group { border-top:1px solid var(--line); padding-top:18px; min-width:0; }
+    .document-list { margin:0; padding:0; list-style:none; }
+    .document-list li { margin-top:14px; }
+    .document-list a { font-weight:600; }
+    .document-list span { display:block; margin-top:3px; color:var(--subtle); font-size:14px; }
+    .references { border-top:1px solid var(--line); margin-top:32px; padding-top:22px; }
+    .references ul { padding-left:1.3em; }
+    .references li { margin-block:10px; }
+    .note { margin:24px 0 0; padding-left:14px; border-left:3px solid var(--peach); color:var(--subtle); font-size:14px; }
+    .site-menu { position:relative; margin-left:auto; min-width:0; max-width:100%; }
+    .site-menu summary { cursor:pointer; padding:6px 10px; border:1px solid var(--line); background:var(--card); color:var(--ink); font-size:14px; }
+    .site-menu nav { position:absolute; z-index:1; top:calc(100% + 8px); right:0; width:min(360px,calc(100vw - 48px)); padding:12px; border:1px solid var(--line); background:var(--card); }
+    .site-menu nav a { display:block; padding:9px 6px; color:var(--blue); }
+    .site-menu nav a[aria-current="page"] { font-weight:700; }
+    .menu-link-title,.menu-link-detail { display:block; }
+    .menu-link-detail { margin-top:2px; color:var(--subtle); font-size:13px; }
+    .menu-current-label { margin-left:.45em; font-size:.8em; color:var(--subtle); }
+    .menu-outside { border-top:1px solid var(--line); margin-top:12px; padding-top:12px; }
+    html[data-contrast="high"] { --page:#fff; --card:#fff; --ink:#111; --subtle:#292929; --line:#222; --green:#006b4d; --peach:#9a4e00; --blue:#123bb1; --green-wash:#fff; }
+    @media(max-width:640px) { body { padding:18px; } main { padding-top:0; } .guide-groups { grid-template-columns:1fr; gap:26px; } .entry-list a { grid-template-columns:1fr; gap:3px; } .site-menu nav { width:min(360px,calc(100vw - 36px)); } }
+/* Shared interaction colors: destinations, local actions, and opened sections. */
+:root { --action:#007a59; --external-link:#1d50dd; --opened:#a16635; }
+html[data-contrast="high"] { --action:#00573f; --opened:#9a4e00; }
+:root a[href] { --destination:var(--action); color:var(--destination); }
+:root a:is([href^="http://"],[href^="https://"],[href^="//"]) { --destination:var(--external-link); }
+:root a[data-link-kind="internal"] { --destination:var(--action); }
+:root a[data-link-kind="external"] { --destination:var(--external-link); }
+:root a[href]:focus-visible { outline-color:var(--destination); }
+:root summary { color:var(--action); }
+:root details > summary:hover { color:var(--action); }
+:root :is(summary,button,input):focus-visible { outline-color:var(--action); }
+:root input[type="checkbox"] { accent-color:var(--action); }
+:root details[data-opened="true"] > summary { color:var(--opened); }
+:root .button { border-color:var(--destination); }
+:root a.button[href]:hover { background:var(--destination); color:#fff; }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <main id="content" tabindex="-1">
+    <div class="utility-row">
+      <a class="language-link" href="../index.html" lang="ja">日本語</a>
+      <label class="contrast-toggle"><input id="contrast-toggle" type="checkbox"><span>High contrast</span></label>
+      <details class="site-menu">
+        <summary aria-label="Open documentation menu">Documentation menu</summary>
+        <nav aria-label="Documentation menu">
+          <div class="menu-links">
+            <a href="index.html" aria-current="page"><span class="menu-link-title">Documentation portal<span class="menu-current-label">(Current document)</span></span><span class="menu-link-detail">Return to the English-language entry point</span></a>
+            <a href="../README.html"><span class="menu-link-title">Project overview</span><span class="menu-link-detail">Packages, Standard and Lite editions, and core policies</span></a>
+            <a href="../docs/en/README.html"><span class="menu-link-title">User documentation</span><span class="menu-link-detail">Setup, use, saving and recovery, file formats, and troubleshooting</span></a>
+            <a href="../introduction/en/index.html"><span class="menu-link-title">Background, design, and verification</span><span class="menu-link-detail">Selected English material plus Japanese reference documents</span></a>
+            <a href="../LICENSES_INDEX.html"><span class="menu-link-title">Licenses and third-party notices</span><span class="menu-link-detail">Terms and third-party components</span></a>
+          </div>
+          <div class="menu-outside">
+            <a href="https://pdf-note-workspace.soone-y.com/"><span class="menu-link-title">Product site</span><span class="menu-link-detail">Read an overview and find downloads</span></a>
+            <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases"><span class="menu-link-title">Get the release</span><span class="menu-link-detail">Open GitHub Releases</span></a>
+            <a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace"><span class="menu-link-title">GitHub repository</span><span class="menu-link-detail">Browse source, issues, and public history</span></a>
+          </div>
+        </nav>
+      </details>
+    </div>
+    <h1>PDF Note Workspace<small>Documentation</small></h1>
+    <p class="lead">Choose a guide for the task you want to do. Start with setup if you have just downloaded the app; use the recovery guide if you need to protect or restore your work.</p>
+    <div class="external-links"><a href="https://pdf-note-workspace.soone-y.com/">Product site</a><a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases">Get the release</a><a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace">GitHub repository</a></div>
+    <ul class="entry-list">
+     <li><a href="../docs/en/Getting_Started.html"><strong>Set up and open the app</strong><span>Choose Standard or Lite, extract the ZIP, and try the included samples.</span></a></li>
+     <li><a href="../docs/en/Troubleshooting.html"><strong>Resolve a problem</strong><span>Find what to check when the app will not start, save, or open a file.</span></a></li>
+    </ul>
+    <div class="guide-groups">
+     <section class="guide-group"><h2>Start using the app</h2><ul class="document-list">
+      <li><a href="../docs/en/Getting_Started.html">Setup and updates</a><span>Extract the ZIP, launch the app, and update to a new version.</span></li>
+      <li><a href="../docs/en/README.html">User guide overview</a><span>Find the English guides and recommended reading order.</span></li>
+     </ul></section>
+     <section class="guide-group"><h2>Read, annotate, and take notes</h2><ul class="document-list">
+      <li><a href="../docs/en/Using_the_App.html">Using the application</a><span>Open materials, edit notes, and export your work.</span></li>
+      <li><a href="../docs/en/Read_Only_Viewer.html">Compare files in the read-only viewer</a><span>Read multiple tabs and PDFs with CLROP annotations.</span></li>
+      <li><a href="../docs/en/Help_Reference.html">Features, operations and settings</a><span>Look up locations, steps, results, adjustable options and limits.</span></li>
+     </ul></section>
+     <section class="guide-group"><h2>Protect and restore your work</h2><ul class="document-list">
+      <li><a href="../docs/en/Save_and_Recovery.html">Saving and recovery</a><span>Understand backups, protected work, and how to restore it.</span></li>
+      <li><a href="../docs/en/Troubleshooting.html">Troubleshooting</a><span>Check startup, saving, and file problems.</span></li>
+     </ul></section>
+     <section class="guide-group"><h2>Understand the files</h2><ul class="document-list">
+      <li><a href="../docs/en/Note_Writing_Guide.html">Note writing and syntax examples</a><span>Look up input assist, headings, tables, math and links.</span></li>
+      <li><a href="../docs/en/File_Formats.html">PDF, annotation, and note files</a><span>Learn which files belong together when copying or moving them.</span></li>
+      <li><a href="../docs/en/CLRO_Note_Format.html">.clro note format</a><span>Look up note syntax and use with other software.</span></li>
+      <li><a href="../docs/en/CLROP_Annotation_Format.html">.clrop annotation data</a><span>Understand the PDF relationship and saved annotation data.</span></li>
+     </ul></section>
+    </div>
+    <section class="references"><h2>Project and reference material</h2><ul>
+     <li><a href="../README.html">Project overview and packages</a> — Standard and Lite editions, included features, and policies.</li>
+     <li><a href="../DOCUMENTATION.html">All public documents</a> — The complete index of public material.</li>
+     <li><a href="../introduction/en/index.html">Background, design, and verification</a> — Selected English explanations of the design and checks.</li>
+     <li><a href="../LICENSES_INDEX.html">Licenses and third-party notices</a> — Terms for the app and its components.</li>
+    </ul></section>
+    <section class="references" id="all-documents"><h2>All published documents</h2>
+<p>The entries above suggest where to start. This inventory links to every published document in browser-readable HTML. Use the language switch for the complete Japanese user-guide set. Background references marked Japanese retain their original language.</p>
+      <details><summary>All user and developer guides (14)</summary><ul>
+        <li><a href="../docs/en/CLROP_Annotation_Format.html">Save, move and share PDF annotation data</a></li>
+        <li><a href="../docs/en/CLRO_Note_Format.html">CLRO notes and compatibility</a></li>
+        <li><a href="../docs/en/File_Formats.html">Choose and handle file formats</a></li>
+        <li><a href="../docs/en/Getting_Started.html">Setup and updates</a></li>
+        <li><a href="../docs/en/Help_Reference.html">Detailed help: features, operations and settings</a></li>
+        <li><a href="../docs/en/How_to_Build.html">Build and verify from source</a></li>
+        <li><a href="../docs/en/Note_Writing_Guide.html">Note writing and syntax examples</a></li>
+        <li><a href="../docs/en/README.html">Documentation guide</a></li>
+        <li><a href="../docs/en/Read_Only_Viewer.html">Read-only viewer guide</a></li>
+        <li><a href="../docs/en/Save_and_Recovery.html">Saving, backups and recovery</a></li>
+        <li><a href="../docs/en/Troubleshooting.html">Troubleshooting</a></li>
+        <li><a href="../docs/en/Using_the_App.html">Using the app: first task through sharing</a></li>
+        <li><a href="../docs/en/legal/LICENSE.html">License</a></li>
+        <li><a href="../docs/en/legal/THIRD_PARTY_NOTICES.html">Third-party notices</a></li>
+      </ul></details>
+      <details><summary>Shared guidance, statistics and policies (9)</summary><ul>
+        <li><a href="../.github/SECURITY.html">Security reporting policy</a></li>
+        <li><a href="../DOCUMENTATION.html">Complete documentation map</a></li>
+        <li><a href="../LICENSE.html">Project license</a></li>
+        <li><a href="../LICENSES_INDEX.html">License index</a></li>
+        <li><a href="../README.html">Project overview and downloads</a></li>
+        <li><a href="../STATISTICS.html">Source scale, distribution sizes and verification scope</a></li>
+        <li><a href="../THIRD_PARTY_NOTICES.html">Third-party component notices</a></li>
+        <li><a href="../docs/statistics/HISTORY.html">Statistics history</a></li>
+        <li><a href="../docs/案内ドキュメントの構成.html">Documentation layout and language policy (Japanese)</a></li>
+      </ul></details>
+      <details><summary>All background, design and verification references (22)</summary><ul>
+        <li><a href="../introduction/core/answering_guidelines.html">Answering and reference guidance (Japanese)</a></li>
+        <li><a href="../introduction/core/architecture_layers.html">Architecture layers (Japanese)</a></li>
+        <li><a href="../introduction/core/code_symbol_index.html">Code symbol index (Japanese)</a></li>
+        <li><a href="../introduction/core/data_schemas.html">Data structures and annotation format (Japanese)</a></li>
+        <li><a href="../introduction/core/decision_support.html">Usage decisions (Japanese)</a></li>
+        <li><a href="../introduction/core/documentation_contract.html">Documentation roles and reference contract (Japanese)</a></li>
+        <li><a href="../introduction/core/features_and_scenarios.html">Features and scenarios (Japanese)</a></li>
+        <li><a href="../introduction/core/file_formats.html">File format reference (Japanese)</a></li>
+        <li><a href="../introduction/core/principles.html">Project principles (Japanese)</a></li>
+        <li><a href="../introduction/core/rationale.html">Rationale for the principles (Japanese)</a></li>
+        <li><a href="../introduction/core/repository_reference_map.html">Repository reference map (Japanese)</a></li>
+        <li><a href="../introduction/core/safety_and_nonnegotiables.html">Safety requirements (Japanese)</a></li>
+        <li><a href="../introduction/core/troubleshooting_quick.html">Troubleshooting reference (Japanese)</a></li>
+        <li><a href="../introduction/core/ui_concepts.html">UI concepts (Japanese)</a></li>
+        <li><a href="../introduction/core/use_cases.html">Use cases (Japanese)</a></li>
+        <li><a href="../introduction/core/user_guidance_reference.html">Supporting user guidance (Japanese)</a></li>
+        <li><a href="../introduction/en/features_and_scenarios.html">Features and scenarios (English)</a></li>
+        <li><a href="../introduction/en/file_formats.html">File formats and persistence (English)</a></li>
+        <li><a href="../introduction/en/index.html">Background reference index (English)</a></li>
+        <li><a href="../introduction/en/project_overview.html">Project overview reference (English)</a></li>
+        <li><a href="../introduction/index.html">Background, design and verification index (Japanese)</a></li>
+        <li><a href="../introduction/project_overview.html">Project overview reference (Japanese)</a></li>
+      </ul></details>
+<p>Statistics data: <a href="../docs/statistics/metrics.json">JSON</a>.</p>
+    </section>
+    <p class="note">Some detailed background and reference documents are available only in Japanese. The user guides linked above are in English.</p>
+  </main>
+  <script id="contrast-script">
+    (() => {
+      const storageKey = "pdf-note-workspace-high-contrast";
+      const toggle = document.querySelector("#contrast-toggle");
+      const apply = (enabled) => {
+        document.documentElement.dataset.contrast = enabled ? "high" : "";
+        toggle.checked = enabled;
+      };
+      let saved = null;
+      try { saved = localStorage.getItem(storageKey); } catch (_) { /* Storage unavailable. */ }
+      apply(saved === "true");
+      toggle.addEventListener("change", () => {
+        const left = window.scrollX;
+        const top = window.scrollY;
+        apply(toggle.checked);
+        requestAnimationFrame(() => window.scrollTo(left, top));
+        try { localStorage.setItem(storageKey, String(toggle.checked)); } catch (_) { /* Storage unavailable. */ }
+      });
+    })();
+  </script>
+<script id="navigation-state-script">
+(() => {
+  // Resolve against the public canonical URL, including during local preview.
+  const canonical = document.querySelector('link[rel="canonical"]');
+  if (canonical) {
+    const base = new URL(canonical.href);
+    document.querySelectorAll('a[href]').forEach(link => {
+      try {
+        const target = new URL(link.getAttribute('href'), base);
+        link.dataset.linkKind = target.origin === base.origin ? 'internal' : 'external';
+      } catch (_) { /* Leave malformed destinations to the existing link validator. */ }
+    });
+  }
+  document.querySelectorAll('details').forEach(entry => {
+    const summary = entry.querySelector(':scope > summary');
+    if (!summary) return;
+    summary.addEventListener('click', event => {
+      if (event.target.closest('a,button,input,select,textarea')) return;
+      const wasOpen = entry.open;
+      const pending = entry.dataset.readPending === 'true';
+      const epoch = entry.dataset.readEpoch;
+      // Wait for native summary activation; bulk actions invalidate pending work.
+      setTimeout(() => {
+        if (event.defaultPrevented || entry.open === wasOpen || entry.dataset.readEpoch !== epoch) return;
+        if (entry.open) {
+          entry.dataset.readPending = 'true';
+        } else {
+          if (pending) entry.dataset.opened = 'true';
+          delete entry.dataset.readPending;
+        }
+      }, 0);
+    });
+    entry.addEventListener('toggle', () => {
+      if (!entry.open) delete entry.dataset.readPending;
+    });
+  });
+})();
+</script>
+</body>
+</html>

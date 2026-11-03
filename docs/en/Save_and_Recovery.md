@@ -19,7 +19,7 @@ Closing a note ends that editor's undo/redo history. Unsaved edits remain in the
 - Continue editing: automatic work protection keeps the in-progress state.
 - Commit a checkpoint: use `Ctrl+S` or `Save > Save Work`.
 - Review work that could not be saved: open `Save > Review Save Status...`.
-- Restore a PDF position or last-open time: select the item from `Restore`. Use `Restore > Backups` to restore or individually delete a saved backup. Select an item and choose **Details...** to review and copy its full restore-destination and metadata paths first.
+- Restore a PDF position or last-open time: select the item from `Settings > Restore`. Use `Save > Saved file backups` to restore or individually delete a saved backup. Select an item and choose **Details...** to review and copy its full restore-destination and metadata paths first.
 
 ## Retry unsaved settings
 

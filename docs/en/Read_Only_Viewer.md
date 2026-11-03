@@ -74,8 +74,14 @@ Open **Settings → Shortcut reference** to see the viewer's keys.
 
 Page navigation, annotation visibility, and rotation apply to a PDF outside the search input field; native text selection takes priority there. Export starts by choosing a destination and leaves the original unchanged. Earlier `Ctrl+R` / `Ctrl+Shift+R` rotation keys remain available. Workspace memo, the unified output dialog, and quick output belong to the main application.
 
+## Export an annotated PDF copy
+
+Open the PDF with its matching `.clrop`, then use **File > Export Annotated PDF** (Ctrl+Alt+E) and choose a destination different from the source PDF. The same source path is rejected. This does not save changes into the original PDF, annotation file or note.
+
+The viewer draws annotations into page contents. This differs from the main application's standard PDF annotation export: the output writing is not intended for further individual annotation editing. Inspect the resulting appearance. Use [main-application output](Help_Reference.md#pdf-annotation-output) when standard annotations are needed, and retain the original PDF/CLROP pair for further work.
+
 ## Files and preferences
 
-Normal viewing operations do not edit or save the original PDF, `.clrop`, or note. To reopen selected materials next time, enable restoration in **Settings**, then mark tabs or a folder persistent in **Path Management**. These restoration preferences are saved to `readonly_setup.json` beside the executable. Use the main application to edit annotations or notes and combine the PDF and its annotations into a single exported PDF file.
+Normal viewing operations do not edit or save the original PDF, `.clrop`, or note. To reopen selected materials next time, enable restoration in **Settings**, then mark tabs or a folder persistent in **Path Management**. These restoration preferences are saved to `readonly_setup.json` beside the executable. Use the main application to edit annotations or notes and to export standard PDF annotations.
 
 Keep the bundled DLLs, `LICENSE.md`, and `licenses/` with the executable when moving it. The **Licenses** menu opens the guide and original notices. See [PDF and CLROP files](CLROP_Annotation_Format.md) for format details and [Using the Application](Using_the_App.md) for editing and output.

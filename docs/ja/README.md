@@ -4,7 +4,7 @@
 
 このフォルダは、アプリを使うための説明の入口です。ファイル名ではなく、今したいことから文書を選べます。
 
-初めて使う場合は、[Getting_Started.md](Getting_Started.md) で ZIP を展開して版を選び、次に [Using_the_App.md](Using_the_App.md) の「最初にすること」から始めてください。作業中に必要になった説明だけを開けば十分です。
+初めて使う場合は、[導入と更新](Getting_Started.md) で ZIP を展開して版を選び、次に [使い方：最初の作業から共有まで](Using_the_App.md) の「最初にすること」から始めてください。作業中に必要になった説明だけを開けば十分です。
 
 配布フォルダ内の EXE、DLL、`pdf_note_workspace_setup.json` は一緒に置いたまま使い、起動場所を変えたい場合はショートカットを作成してください。旧版の `pdf_workspace_setup.json` は読み取り互換のため残して構いません。
 
@@ -17,7 +17,11 @@
 | 通常版 | `.docx` / `.pptx` をアプリ内で PDF にして使いたい | 同梱 LibreOffice でローカル変換する。変換は試験的なため、結果を確認する |
 | Lite版 | PDF を既に用意している、または配布サイズを小さくしたい | Office-to-PDF 変換は行わない。PDF を用意してから取り込む |
 
-Lite版はウィンドウ名に `Lite` と表示されます。Lite版へ DOCX/PPTX をドロップしても変換・取込みはせず、Lite版では使えないことを表示します。Microsoft Office やオンライン変換サービスは、どちらの版でも使用しません。
+Lite版はウィンドウ名に `Lite` と表示されます。DOCX/PPTXをドロップすると元形式でコピーして取り込みますが、PDFへの変換は行いません。Microsoft Office やオンライン変換サービスは、どちらの版でも使用しません。
+
+## 文書の使い分け
+
+「使い方」は一連の作業を順に読む案内、「詳細ヘルプ」は機能を調べる中心文書です。記法の例は「ノートの書き方」、失敗時の復旧は「保存・バックアップ・復旧」にまとめています。詳しい条件は各専門文書を参照し、基本手順から該当箇所へ進めます。
 
 ## ファイル名が英語である理由
 
@@ -27,21 +31,21 @@ Lite版はウィンドウ名に `Lite` と表示されます。Lite版へ DOCX/P
 
 | 文書 | 読む場面 |
 | --- | --- |
-| [Getting_Started.md](Getting_Started.md) | ZIP の展開、ショートカット、関連付け、更新を行いたい |
-| [Using_the_App.md](Using_the_App.md) | PDFを開く、ノートや注釈を作る、出力する流れを知りたい |
-| [Note_Writing_Guide.md](Note_Writing_Guide.md) | 入力アシストの使い方と、対応するノート記法を例で調べたい |
-| [Read_Only_Viewer.md](Read_Only_Viewer.md) | 複数の資料や、CLROP注釈を伴うPDFを閲覧専用ソフトで読みたい |
+| [導入と更新](Getting_Started.md) | ZIP の展開、ショートカット、関連付け、更新を行いたい |
+| [使い方：最初の作業から共有まで](Using_the_App.md) | PDFを開く、ノートや注釈を作る、出力する流れを知りたい |
+| [ノートの書き方と記述例](Note_Writing_Guide.md) | 入力アシストの使い方と、対応するノート記法を例で調べたい |
+| [閲覧専用ソフトの使い方](Read_Only_Viewer.md) | 複数の資料や、CLROP注釈を伴うPDFを閲覧専用ソフトで読みたい |
 
 ## 保存・ファイル・困ったとき
 
 | 文書 | 読む場面 |
 | --- | --- |
-| [Help_Reference.md](Help_Reference.md) | アプリ内ヘルプの全項目、メニュー、設定、出力を詳しく調べたい |
-| [File_Formats.md](File_Formats.md) | `.clro`、`.md`、`.txt`、`.clrop` の違いを知りたい |
-| [CLRO_Note_Format.md](CLRO_Note_Format.md) | `.clro` ノートの役割、記法、他ソフトとの扱いを知りたい |
-| [CLROP_Annotation_Format.md](CLROP_Annotation_Format.md) | PDFと `.clrop` 注釈データの対応と中身を知りたい |
-| [Save_and_Recovery.md](Save_and_Recovery.md) | 保存、作業保護、バックアップ、復元を理解したい |
-| [Troubleshooting.md](Troubleshooting.md) | 困ったときの一次対応と、解決のための知識を得たい |
+| [詳細ヘルプ：機能・操作・設定](Help_Reference.md) | 機能の場所、前提、操作、結果、設定と制約を調べたい |
+| [ファイル形式を選ぶ・扱う](File_Formats.md) | `.clro`、`.md`、`.txt`、`.clrop` の違いを知りたい |
+| [CLROノートと他ソフトの互換性](CLRO_Note_Format.md) | `.clro` ノートの役割、記法、他ソフトとの扱いを知りたい |
+| [PDF注釈データの保存・移動・共有](CLROP_Annotation_Format.md) | PDFと注釈データを保存・移動・共有する方法を知りたい |
+| [保存・バックアップ・復旧](Save_and_Recovery.md) | 保存、作業保護、バックアップ、復元を理解したい |
+| [問題が起きたときの対処](Troubleshooting.md) | 困ったときの一次対応と、解決のための知識を得たい |
 
 アプリ内では「ヘルプ」から同じ主題をカテゴリ別に確認できます。ヘルプは外部サイトへ接続しません。
 
@@ -49,10 +53,10 @@ Lite版はウィンドウ名に `Lite` と表示されます。Lite版へ DOCX/P
 
 | 文書 | 読む場面 |
 | --- | --- |
-| [How_to_Build.md](How_to_Build.md) | ソースからビルド、テスト、release 作成を行いたい |
+| [ソースからのビルドと検証](How_to_Build.md) | ソースからビルド、テスト、release 作成を行いたい |
 
 
 ## ライセンス
 
-- リポジトリでは、ルートの `LICENSE.md`、`LICENSES_INDEX.md`、`THIRD_PARTY_NOTICES.md` を参照してください。
-- 配布物では、同じファイルを `docs/` フォルダに同梱しています。
+- [ライセンス原文と参考訳](legal/LICENSE.md)
+- [第三者コンポーネントの通知](legal/THIRD_PARTY_NOTICES.md)。配布物の `licenses/` には各原文を収録します。

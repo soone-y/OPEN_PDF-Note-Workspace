@@ -10,7 +10,7 @@
 | Work with other Markdown applications | `.md` / `.markdown` |
 | Keep an unformatted memo | `.txt` |
 
-`.clro`, `.md`, and `.markdown` use the same Markdown/MD4C note route. The difference is their product role: new notes, suggested names, and default naming use `.clro`. Existing `.md` files are never renamed or converted automatically, and copy, rename, and link operations keep the selected extension.
+`.clro`, `.md`, and `.markdown` use the same supported Markdown notation. The difference is their product role: new notes, suggested names, and default naming use `.clro`. Existing `.md` files are never renamed or converted automatically, and copy, rename, and link operations keep the selected extension.
 
 ## What it is good for
 

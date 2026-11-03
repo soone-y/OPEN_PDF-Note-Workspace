@@ -1,5 +1,7 @@
 # PDF Note Workspace
 
+[紹介サイト / Overview](https://pdf-note-workspace.soone-y.com/) · [詳細文書・使い方 / Documentation](https://soone-y.github.io/OPEN_PDF-Note-Workspace/) · [ダウンロード / Releases](https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases)
+
 PDFの表示・注釈の追加と、テキストファイルの編集ができるWindows用のオープンソースソフトです。PDFを表示したまま、同じ画面で授業のメモなどを入力できます。
 
 An open-source Windows application for displaying PDFs, adding annotations, and editing text files. You can keep a PDF visible while typing lecture notes in the same window.
@@ -8,7 +10,7 @@ An open-source Windows application for displaying PDFs, adding annotations, and 
 
 The application calls these text files "notes." They use extensions such as `.clro`, `.md`, and `.txt`, and contain the text you type.
 
-[紹介サイト / Overview](https://pdf-note-workspace.soone-y.com/) · [ダウンロード / Releases](https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases) · [日本語の文書](docs/ja/README.md) · [English documentation](docs/en/README.md)
+[日本語の文書](https://soone-y.github.io/OPEN_PDF-Note-Workspace/docs/ja/README.html)（[GitHubで読む](https://github.com/soone-y/OPEN_PDF-Note-Workspace/blob/main/docs/ja/README.md)） · [English documentation](https://soone-y.github.io/OPEN_PDF-Note-Workspace/docs/en/README.html) ([Read on GitHub](https://github.com/soone-y/OPEN_PDF-Note-Workspace/blob/main/docs/en/README.md))
 
 ![PDFを表示する欄、注釈ツール、テキストを編集する欄がある画面。 / PDF Note Workspace with a PDF pane, annotation tools, and a text editor.](docs/images/app_overview.png)
 

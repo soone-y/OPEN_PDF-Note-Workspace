@@ -124,13 +124,14 @@ html[data-contrast="high"] { --action:#00573f; --opened:#9a4e00; }
      <section class="guide-group"><h2>資料を読む・記録する</h2><ul class="document-list">
       <li><a href="docs/ja/Using_the_App.html">アプリの使い方</a><span>資料を開く、ノートを書く、出力する</span></li>
       <li><a href="docs/ja/Read_Only_Viewer.html">閲覧専用ソフトで読み比べる</a><span>複数タブと、CLROP注釈を伴うPDFの読み方</span></li>
-      <li><a href="docs/ja/Help_Reference.html">メニューと設定の詳細</a><span>操作や設定の項目を調べる</span></li>
+      <li><a href="docs/ja/Help_Reference.html">機能・操作・設定の詳細</a><span>使う場所、手順、結果、変更できる項目と制約を調べる</span></li>
      </ul></section>
      <section class="guide-group"><h2>保存・復元・問題への対処</h2><ul class="document-list">
       <li><a href="docs/ja/Save_and_Recovery.html">保存と復元</a><span>作業の保護、バックアップ、復元の手順</span></li>
       <li><a href="docs/ja/Troubleshooting.html">困ったとき</a><span>起動、保存、ファイルの問題を切り分ける</span></li>
      </ul></section>
      <section class="guide-group"><h2>ファイルと記法</h2><ul class="document-list">
+      <li><a href="docs/ja/Note_Writing_Guide.html">ノートの書き方と記述例</a><span>入力アシスト、見出し・表・数式・リンクの例を調べる</span></li>
       <li><a href="docs/ja/File_Formats.html">PDF・注釈・ノートの違い</a><span>コピーや移動で一緒に扱うファイルを確認する</span></li>
       <li><a href="docs/ja/CLRO_Note_Format.html">.clro ノート形式</a><span>ノートの書き方と他ソフトでの扱い</span></li>
       <li><a href="docs/ja/CLROP_Annotation_Format.html">.clrop 注釈データ</a><span>PDFとの対応と保存する内容</span></li>
@@ -142,9 +143,64 @@ html[data-contrast="high"] { --action:#00573f; --opened:#9a4e00; }
      <li><a href="introduction/index.html">背景・設計・確認資料</a> — 設計の考え方と確認した範囲</li>
      <li><a href="LICENSES_INDEX.html">ライセンスと第三者通知</a> — 本体と第三者コンポーネントの利用条件</li>
     </ul></section>
+    <section class="references" id="all-documents"><h2>公開文書の全一覧</h2>
+<p>上の入口は読む順番の案内です。以下は公開する全文書の一覧で、ブラウザで読めるHTMLを開きます。英語文書は右上のEnglishから、日本語文書は日本語の入口からも選べます。</p>
+      <details><summary>利用者・開発者向けの全文書 (14)</summary><ul>
+        <li><a href="docs/ja/CLROP_Annotation_Format.html">PDF注釈データの保存・移動・共有</a></li>
+        <li><a href="docs/ja/CLRO_Note_Format.html">CLROノートと他ソフトの互換性</a></li>
+        <li><a href="docs/ja/File_Formats.html">ファイル形式を選ぶ・扱う</a></li>
+        <li><a href="docs/ja/Getting_Started.html">導入と更新</a></li>
+        <li><a href="docs/ja/Help_Reference.html">詳細ヘルプ：機能・操作・設定</a></li>
+        <li><a href="docs/ja/How_to_Build.html">ソースからのビルドと検証</a></li>
+        <li><a href="docs/ja/Note_Writing_Guide.html">ノートの書き方と記述例</a></li>
+        <li><a href="docs/ja/README.html">文書案内</a></li>
+        <li><a href="docs/ja/Read_Only_Viewer.html">閲覧専用ソフトの使い方</a></li>
+        <li><a href="docs/ja/Save_and_Recovery.html">保存・バックアップ・復旧</a></li>
+        <li><a href="docs/ja/Troubleshooting.html">問題が起きたときの対処</a></li>
+        <li><a href="docs/ja/Using_the_App.html">使い方：最初の作業から共有まで</a></li>
+        <li><a href="docs/ja/legal/LICENSE.html">ライセンス</a></li>
+        <li><a href="docs/ja/legal/THIRD_PARTY_NOTICES.html">第三者コンポーネントの通知</a></li>
+      </ul></details>
+      <details><summary>共通の案内・統計・利用条件 (9)</summary><ul>
+        <li><a href=".github/SECURITY.html">セキュリティポリシー / Security Policy</a></li>
+        <li><a href="DOCUMENTATION.html">文書一覧 / Documentation Map</a></li>
+        <li><a href="LICENSE.html">ライセンス / License</a></li>
+        <li><a href="LICENSES_INDEX.html">PDF Note Workspace ライセンス整理表</a></li>
+        <li><a href="README.html">PDF Note Workspace</a></li>
+        <li><a href="STATISTICS.html">規模・検証状況 / Project statistics</a></li>
+        <li><a href="THIRD_PARTY_NOTICES.html">Third-Party Notices</a></li>
+        <li><a href="docs/statistics/HISTORY.html">統計履歴 / Statistics history</a></li>
+        <li><a href="docs/案内ドキュメントの構成.html">案内ドキュメントの構成</a></li>
+      </ul></details>
+      <details><summary>背景・設計・確認資料の全文書 (22)</summary><ul>
+        <li><a href="introduction/core/answering_guidelines.html">実装と確認で守る方針</a></li>
+        <li><a href="introduction/core/architecture_layers.html">構成レイヤー</a></li>
+        <li><a href="introduction/core/code_symbol_index.html">コード参照索引</a></li>
+        <li><a href="introduction/core/data_schemas.html">データ構造</a></li>
+        <li><a href="introduction/core/decision_support.html">判断のための資料</a></li>
+        <li><a href="introduction/core/documentation_contract.html">資料の扱いと確認範囲</a></li>
+        <li><a href="introduction/core/features_and_scenarios.html">主な機能と想定ケース</a></li>
+        <li><a href="introduction/core/file_formats.html">ファイル形式と保存</a></li>
+        <li><a href="introduction/core/principles.html">PDF Note Workspace の理念</a></li>
+        <li><a href="introduction/core/rationale.html">理念の根拠</a></li>
+        <li><a href="introduction/core/repository_reference_map.html">資料とリポジトリの参照地図</a></li>
+        <li><a href="introduction/core/safety_and_nonnegotiables.html">安全性と守る方針</a></li>
+        <li><a href="introduction/core/troubleshooting_quick.html">トラブルの確認観点</a></li>
+        <li><a href="introduction/core/ui_concepts.html">画面と操作の考え方</a></li>
+        <li><a href="introduction/core/use_cases.html">利用場面と設計の考え方</a></li>
+        <li><a href="introduction/core/user_guidance_reference.html">利用案内の参照資料</a></li>
+        <li><a href="introduction/en/features_and_scenarios.html">Features and Usage Scenarios（英語）</a></li>
+        <li><a href="introduction/en/file_formats.html">File Formats and Persistence（英語）</a></li>
+        <li><a href="introduction/en/index.html">Background, Design, and Verification Material（英語）</a></li>
+        <li><a href="introduction/en/project_overview.html">Project Overview Reference（英語）</a></li>
+        <li><a href="introduction/index.html">背景・設計・確認資料</a></li>
+        <li><a href="introduction/project_overview.html">説明と確認のための要点</a></li>
+      </ul></details>
+<p>統計の別形式：<a href="docs/statistics/metrics.json">JSON</a>。</p>
+    </section>
     <p class="note">資料のファイル名が英語でも、利用者向け文書の見出しと本文は日本語です。</p>
   </main>
-  <script>
+  <script id="contrast-script">
     (() => {
       const storageKey = "pdf-note-workspace-high-contrast";
       const toggle = document.querySelector("#contrast-toggle");

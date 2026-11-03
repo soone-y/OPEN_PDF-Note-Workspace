@@ -315,9 +315,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       background-color: var(--code-bg);
     }}
     .document-outline summary {{ cursor: pointer; padding: 11px 0 5px; color: var(--text-muted); font-size: 0.88em; font-weight: 700; }}
-    .document-outline ol {{ display: flex; flex-wrap: wrap; gap: 3px 18px; margin: 0; padding-left: 1.3em; }}
+    .document-outline ul {{ margin: 0; padding: 0; list-style: none; }}
     .document-outline li {{ margin: 0; }}
-    .document-outline a {{ font-size: 0.92em; }}
+    .document-outline a {{ display: block; padding: 3px 0; font-size: 0.92em; }}
 
     .doc-note, .doc-details {{
       margin: 1.2em 0;
@@ -473,7 +473,7 @@ html[data-contrast="high"] {{ --action:#00573f; --opened:#9a4e00; }}
   </footer>
 </div>
 
-<script>
+<script id="contrast-script">
   (() => {{
     const storageKey = "pdf-note-workspace-high-contrast";
     const toggle = document.querySelector("#contrast-toggle");
@@ -943,6 +943,7 @@ class DocumentSummaryParser(HTMLParser):
         self._parts: list[str] = []
         self._image = False
         self._emphasis_depth = 0
+        self._link_depth = 0
         self._plain_data = False
 
     def handle_starttag(self, tag: str, attrs) -> None:
@@ -951,21 +952,27 @@ class DocumentSummaryParser(HTMLParser):
             self._parts = []
             self._image = False
             self._emphasis_depth = 0
+            self._link_depth = 0
             self._plain_data = False
         elif tag == "img" and self._capture:
             self._image = True
         elif tag == "em" and self._capture:
             self._emphasis_depth += 1
+        elif tag == "a" and self._capture:
+            self._link_depth += 1
 
     def handle_data(self, data: str) -> None:
         if self._capture:
             self._parts.append(data)
-            if data.strip() and self._emphasis_depth == 0:
+            # A row of navigation links and separators is not descriptive prose.
+            if self._emphasis_depth == 0 and self._link_depth == 0 and any(char.isalnum() for char in data):
                 self._plain_data = True
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "em" and self._emphasis_depth:
             self._emphasis_depth -= 1
+        if tag == "a" and self._link_depth:
+            self._link_depth -= 1
         if tag != self._capture:
             return
         text = re.sub(r"\s+", " ", "".join(self._parts)).strip()
@@ -1017,7 +1024,7 @@ def document_outline_html(body_html: str, locale: str) -> str:
         f'<li><a href="#{html.escape(identifier, quote=True)}">{html.escape(label)}</a></li>'
         for identifier, label in parser.items
     )
-    return f'<details class="document-outline"><summary>{title}</summary><ol>{links}</ol></details>'
+    return f'<details class="document-outline"><summary>{title}</summary><ul role="list">{links}</ul></details>'
 
 
 def collapse_reference_sections(body_html: str, rel_path: Path) -> str:
