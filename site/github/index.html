@@ -56,6 +56,15 @@
     .references { border-top:1px solid var(--line); margin-top:32px; padding-top:22px; }
     .references ul { padding-left:1.3em; }
     .references li { margin-block:10px; }
+    .document-index > details { border-top:1px solid var(--line); margin-top:12px; }
+    .document-index > details > summary { cursor:pointer; padding:14px 0; font-weight:600; }
+    .jump-groups { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px 40px; padding:4px 0 18px; }
+    .jump-group { min-width:0; }
+    .jump-group h3 { margin:0 0 6px; font-size:15px; color:var(--subtle); font-weight:600; }
+    .references .jump-list { margin:0; padding:0; list-style:none; }
+    .references .jump-list li { margin:0; }
+    .jump-list a { display:block; padding:7px 0; text-underline-offset:.2em; overflow-wrap:anywhere; }
+    @media(max-width:640px) { .jump-groups { grid-template-columns:1fr; gap:18px; } }
     .note { margin:24px 0 0; padding-left:14px; border-left:3px solid var(--peach); color:var(--subtle); font-size:14px; }
     .site-menu { position:relative; margin-left:auto; min-width:0; max-width:100%; }
     .site-menu summary { cursor:pointer; padding:6px 10px; border:1px solid var(--line); background:var(--card); color:var(--ink); font-size:14px; }
@@ -114,6 +123,7 @@ html[data-contrast="high"] { --action:#00573f; --opened:#9a4e00; }
     <div class="external-links"><a href="https://pdf-note-workspace.soone-y.com/">紹介サイト</a><a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases">配布物を入手する</a><a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace">GitHubリポジトリ</a></div>
     <ul class="entry-list">
      <li><a href="docs/ja/Getting_Started.html"><strong>初めて使う・配布物を選ぶ</strong><span>通常版とLite版を選び、ZIPを展開してサンプルを試す</span></a></li>
+     <li><a href="introduction/project_overview.html"><strong>説明と確認のための要点</strong><span>文書を読むときの用語の使い分けと、確認できる範囲を知る</span></a></li>
      <li><a href="docs/ja/Troubleshooting.html"><strong>起動や保存で困っている</strong><span>起動できない、保存できない、ファイルが開けないときの確認</span></a></li>
     </ul>
     <div class="guide-groups">
@@ -139,63 +149,119 @@ html[data-contrast="high"] { --action:#00573f; --opened:#9a4e00; }
     </div>
     <section class="references"><h2>プロジェクトと根拠資料</h2><ul>
      <li><a href="README.html">概要と配布物</a> — 通常版・Lite版、含まれる機能、基本方針</li>
-     <li><a href="DOCUMENTATION.html">すべての公開文書</a> — 公開資料の一覧から探す</li>
+     <li><a href="DOCUMENTATION.html">文書一覧と用途</a> — 公開文書 __PUBLIC_DOCUMENT_COUNT__件（日英の各版を含む）</li>
      <li><a href="introduction/index.html">背景・設計・確認資料</a> — 設計の考え方と確認した範囲</li>
      <li><a href="LICENSES_INDEX.html">ライセンスと第三者通知</a> — 本体と第三者コンポーネントの利用条件</li>
     </ul></section>
-    <section class="references" id="all-documents"><h2>公開文書の全一覧</h2>
-<p>上の入口は読む順番の案内です。以下は公開する全文書の一覧で、ブラウザで読めるHTMLを開きます。英語文書は右上のEnglishから、日本語文書は日本語の入口からも選べます。</p>
-      <details><summary>利用者・開発者向けの全文書 (14)</summary><ul>
-        <li><a href="docs/ja/CLROP_Annotation_Format.html">PDF注釈データの保存・移動・共有</a></li>
-        <li><a href="docs/ja/CLRO_Note_Format.html">CLROノートと他ソフトの互換性</a></li>
-        <li><a href="docs/ja/File_Formats.html">ファイル形式を選ぶ・扱う</a></li>
-        <li><a href="docs/ja/Getting_Started.html">導入と更新</a></li>
-        <li><a href="docs/ja/Help_Reference.html">詳細ヘルプ：機能・操作・設定</a></li>
-        <li><a href="docs/ja/How_to_Build.html">ソースからのビルドと検証</a></li>
-        <li><a href="docs/ja/Note_Writing_Guide.html">ノートの書き方と記述例</a></li>
-        <li><a href="docs/ja/README.html">文書案内</a></li>
-        <li><a href="docs/ja/Read_Only_Viewer.html">閲覧専用ソフトの使い方</a></li>
-        <li><a href="docs/ja/Save_and_Recovery.html">保存・バックアップ・復旧</a></li>
-        <li><a href="docs/ja/Troubleshooting.html">問題が起きたときの対処</a></li>
-        <li><a href="docs/ja/Using_the_App.html">使い方：最初の作業から共有まで</a></li>
-        <li><a href="docs/ja/legal/LICENSE.html">ライセンス</a></li>
-        <li><a href="docs/ja/legal/THIRD_PARTY_NOTICES.html">第三者コンポーネントの通知</a></li>
-      </ul></details>
-      <details><summary>共通の案内・統計・利用条件 (9)</summary><ul>
-        <li><a href=".github/SECURITY.html">セキュリティポリシー / Security Policy</a></li>
-        <li><a href="DOCUMENTATION.html">文書一覧 / Documentation Map</a></li>
-        <li><a href="LICENSE.html">ライセンス / License</a></li>
-        <li><a href="LICENSES_INDEX.html">PDF Note Workspace ライセンス整理表</a></li>
-        <li><a href="README.html">PDF Note Workspace</a></li>
-        <li><a href="STATISTICS.html">規模・検証状況 / Project statistics</a></li>
-        <li><a href="THIRD_PARTY_NOTICES.html">Third-Party Notices</a></li>
-        <li><a href="docs/statistics/HISTORY.html">統計履歴 / Statistics history</a></li>
-        <li><a href="docs/案内ドキュメントの構成.html">案内ドキュメントの構成</a></li>
-      </ul></details>
-      <details><summary>背景・設計・確認資料の全文書 (22)</summary><ul>
-        <li><a href="introduction/core/answering_guidelines.html">実装と確認で守る方針</a></li>
-        <li><a href="introduction/core/architecture_layers.html">構成レイヤー</a></li>
-        <li><a href="introduction/core/code_symbol_index.html">コード参照索引</a></li>
-        <li><a href="introduction/core/data_schemas.html">データ構造</a></li>
-        <li><a href="introduction/core/decision_support.html">判断のための資料</a></li>
-        <li><a href="introduction/core/documentation_contract.html">資料の扱いと確認範囲</a></li>
-        <li><a href="introduction/core/features_and_scenarios.html">主な機能と想定ケース</a></li>
-        <li><a href="introduction/core/file_formats.html">ファイル形式と保存</a></li>
-        <li><a href="introduction/core/principles.html">PDF Note Workspace の理念</a></li>
-        <li><a href="introduction/core/rationale.html">理念の根拠</a></li>
-        <li><a href="introduction/core/repository_reference_map.html">資料とリポジトリの参照地図</a></li>
-        <li><a href="introduction/core/safety_and_nonnegotiables.html">安全性と守る方針</a></li>
-        <li><a href="introduction/core/troubleshooting_quick.html">トラブルの確認観点</a></li>
-        <li><a href="introduction/core/ui_concepts.html">画面と操作の考え方</a></li>
-        <li><a href="introduction/core/use_cases.html">利用場面と設計の考え方</a></li>
-        <li><a href="introduction/core/user_guidance_reference.html">利用案内の参照資料</a></li>
-        <li><a href="introduction/en/features_and_scenarios.html">Features and Usage Scenarios（英語）</a></li>
-        <li><a href="introduction/en/file_formats.html">File Formats and Persistence（英語）</a></li>
-        <li><a href="introduction/en/index.html">Background, Design, and Verification Material（英語）</a></li>
-        <li><a href="introduction/en/project_overview.html">Project Overview Reference（英語）</a></li>
-        <li><a href="introduction/index.html">背景・設計・確認資料</a></li>
-        <li><a href="introduction/project_overview.html">説明と確認のための要点</a></li>
-      </ul></details>
+    <section class="references document-index" id="all-documents"><h2>公開文書へのジャンプ一覧</h2>
+<p>用途別に文書名から直接開けます。各文書の内容と使い分けは<a href="DOCUMENTATION.html">文書一覧と用途</a>で確認できます。</p>
+      <details><summary>日本語の利用者・開発者向け文書 (14)</summary>
+        <div class="jump-groups">
+          <section class="jump-group"><h3>使い始める</h3><ul class="jump-list">
+            <li><a href="docs/ja/README.html">日本語文書入口</a></li>
+            <li><a href="docs/ja/Getting_Started.html">導入</a></li>
+            <li><a href="docs/ja/Using_the_App.html">基本操作</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>読む・記録する</h3><ul class="jump-list">
+            <li><a href="docs/ja/Read_Only_Viewer.html">閲覧専用ソフト</a></li>
+            <li><a href="docs/ja/Help_Reference.html">ヘルプ</a></li>
+            <li><a href="docs/ja/Note_Writing_Guide.html">ノートの書き方</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>保存・ファイル・問題への対処</h3><ul class="jump-list">
+            <li><a href="docs/ja/Save_and_Recovery.html">保存と復元</a></li>
+            <li><a href="docs/ja/File_Formats.html">ファイル形式</a></li>
+            <li><a href="docs/ja/CLRO_Note_Format.html">.clro ノート形式</a></li>
+            <li><a href="docs/ja/CLROP_Annotation_Format.html">.clrop 注釈データ</a></li>
+            <li><a href="docs/ja/Troubleshooting.html">問題解決</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>開発・利用条件</h3><ul class="jump-list">
+            <li><a href="docs/ja/How_to_Build.html">ビルドと検証</a></li>
+            <li><a href="docs/ja/legal/LICENSE.html">ライセンス</a></li>
+            <li><a href="docs/ja/legal/THIRD_PARTY_NOTICES.html">第三者通知</a></li>
+          </ul></section>
+        </div>
+      </details>
+      <details><summary>プロジェクト・共通文書 (9)</summary>
+        <div class="jump-groups">
+          <section class="jump-group"><h3>概要と案内</h3><ul class="jump-list">
+            <li><a href="README.html">プロジェクト概要</a></li>
+            <li><a href="DOCUMENTATION.html">文書一覧と用途</a></li>
+            <li><a href="docs/案内ドキュメントの構成.html">文書構成方針</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>統計と履歴</h3><ul class="jump-list">
+            <li><a href="STATISTICS.html">公開統計</a></li>
+            <li><a href="docs/statistics/HISTORY.html">統計履歴</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>ライセンス・報告窓口</h3><ul class="jump-list">
+            <li><a href="LICENSE.html">ライセンス</a></li>
+            <li><a href="THIRD_PARTY_NOTICES.html">第三者通知</a></li>
+            <li><a href="LICENSES_INDEX.html">ライセンス整理表</a></li>
+            <li><a href=".github/SECURITY.html">セキュリティ</a></li>
+          </ul></section>
+        </div>
+      </details>
+      <details><summary>背景・設計・技術資料 (24)</summary>
+        <div class="jump-groups">
+          <section class="jump-group"><h3>説明・資料の読み方</h3><ul class="jump-list">
+            <li><a href="introduction/index.html">背景・設計・確認資料の入口</a></li>
+            <li><a href="introduction/en/index.html">背景・設計・確認資料の入口（英語）</a></li>
+            <li><a href="introduction/project_overview.html">説明と確認のための要点</a></li>
+            <li><a href="introduction/en/project_overview.html">説明と確認のための要点（英語）</a></li>
+            <li><a href="introduction/core/documentation_contract.html">文書契約</a></li>
+            <li><a href="introduction/core/answering_guidelines.html">回答・参照指針</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>理念と設計</h3><ul class="jump-list">
+            <li><a href="introduction/core/principles.html">プロジェクトの理念</a></li>
+            <li><a href="introduction/core/rationale.html">理念の根拠</a></li>
+            <li><a href="introduction/development.html">開発の考え方</a></li>
+            <li><a href="introduction/en/development.html">開発の考え方（英語）</a></li>
+            <li><a href="introduction/core/use_cases.html">利用例</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>機能・利用判断・安全性</h3><ul class="jump-list">
+            <li><a href="introduction/core/features_and_scenarios.html">機能と想定ケース</a></li>
+            <li><a href="introduction/en/features_and_scenarios.html">機能と想定ケース（英語）</a></li>
+            <li><a href="introduction/core/decision_support.html">判断支援</a></li>
+            <li><a href="introduction/core/safety_and_nonnegotiables.html">安全要件</a></li>
+            <li><a href="introduction/core/troubleshooting_quick.html">問題解決の要点</a></li>
+            <li><a href="introduction/core/user_guidance_reference.html">利用案内の参照</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>仕組みと技術参照</h3><ul class="jump-list">
+            <li><a href="introduction/core/file_formats.html">ファイル形式資料</a></li>
+            <li><a href="introduction/en/file_formats.html">ファイル形式と保存（英語）</a></li>
+            <li><a href="introduction/core/ui_concepts.html">UIの概念</a></li>
+            <li><a href="introduction/core/architecture_layers.html">アーキテクチャ層</a></li>
+            <li><a href="introduction/core/data_schemas.html">データスキーマ</a></li>
+            <li><a href="introduction/core/code_symbol_index.html">コード記号索引</a></li>
+            <li><a href="introduction/core/repository_reference_map.html">リポジトリ参照地図</a></li>
+          </ul></section>
+        </div>
+      </details>
+      <details><summary>英語の利用者・開発者向け文書 (14)</summary>
+        <div class="jump-groups">
+          <section class="jump-group"><h3>使い始める</h3><ul class="jump-list">
+            <li><a href="docs/en/README.html">英語文書入口</a></li>
+            <li><a href="docs/en/Getting_Started.html">導入</a></li>
+            <li><a href="docs/en/Using_the_App.html">基本操作</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>読む・記録する</h3><ul class="jump-list">
+            <li><a href="docs/en/Read_Only_Viewer.html">閲覧専用ソフト</a></li>
+            <li><a href="docs/en/Help_Reference.html">ヘルプ</a></li>
+            <li><a href="docs/en/Note_Writing_Guide.html">ノートの書き方</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>保存・ファイル・問題への対処</h3><ul class="jump-list">
+            <li><a href="docs/en/Save_and_Recovery.html">保存と復元</a></li>
+            <li><a href="docs/en/File_Formats.html">ファイル形式</a></li>
+            <li><a href="docs/en/CLRO_Note_Format.html">.clro ノート形式</a></li>
+            <li><a href="docs/en/CLROP_Annotation_Format.html">.clrop 注釈データ</a></li>
+            <li><a href="docs/en/Troubleshooting.html">問題解決</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>開発・利用条件</h3><ul class="jump-list">
+            <li><a href="docs/en/How_to_Build.html">ビルドと検証</a></li>
+            <li><a href="docs/en/legal/LICENSE.html">ライセンス</a></li>
+            <li><a href="docs/en/legal/THIRD_PARTY_NOTICES.html">第三者通知</a></li>
+          </ul></section>
+        </div>
+      </details>
 <p>統計の別形式：<a href="docs/statistics/metrics.json">JSON</a>。</p>
     </section>
     <p class="note">資料のファイル名が英語でも、利用者向け文書の見出しと本文は日本語です。</p>

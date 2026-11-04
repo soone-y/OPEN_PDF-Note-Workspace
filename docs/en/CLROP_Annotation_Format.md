@@ -37,6 +37,6 @@ After a save failure, retain originals and protected work and follow [Saving and
 
 ## Technical format reference
 
-JSON structure, numeric formatting and line endings, defaults, compatibility, marker display modes, arc and boundary fields, shape rotation and coordinates are collected in the public [Data structures reference (Japanese)](https://soone-y.github.io/OPEN_PDF-Note-Workspace/introduction/core/data_schemas.html#1-注釈保存ファイル-clrop---classroom-pdf-annotation). They are not prerequisites for ordinary use.
+JSON structure, numeric formatting and line endings, defaults, compatibility, marker display modes, arc and boundary fields, shape rotation and coordinates are collected in the public [Data structures reference (Japanese)](https://soone-y.github.io/OPEN_PDF-Note-Workspace/introduction/core/data_schemas.html#1-%E6%B3%A8%E9%87%88%E4%BF%9D%E5%AD%98%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB-clrop---classroom-pdf-annotation). They are not prerequisites for ordinary use.
 
 See [File Formats](File_Formats.md) for the note/annotation comparison and [CLRO Note Format](CLRO_Note_Format.md) for human-authored text.

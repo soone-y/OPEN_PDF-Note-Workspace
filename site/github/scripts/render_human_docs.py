@@ -239,6 +239,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     h1 {{ font-size: 1.85em; color: var(--text-main); margin-top: 0; margin-bottom: 16px; line-height: 1.45; }}
     h2 {{ font-size: 1.35em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-top: 1.8em; margin-bottom: 12px; color: var(--text-main); }}
     h3 {{ font-size: 1.12em; margin-top: 1.4em; margin-bottom: 8px; color: var(--text-muted); }}
+    h4 {{ font-size: 1em; margin-top: 1.2em; margin-bottom: 8px; color: var(--text-main); }}
 
     p {{ margin-bottom: 1.1em; word-break: break-word; }}
 

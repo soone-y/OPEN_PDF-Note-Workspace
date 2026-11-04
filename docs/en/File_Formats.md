@@ -10,7 +10,7 @@
 
 ## Use an external folder
 
-Register [Temporary Paths](Help_Reference.md#use-an-external-folder-through-temporary-paths) to work with external files without copying them. Saving, renaming and moving affect the actual registered files. Removing a registration leaves originals intact. Ordinary use does not require startup JSON editing. Field names and manual editing are in the [technical reference (Japanese)](https://soone-y.github.io/OPEN_PDF-Note-Workspace/introduction/core/data_schemas.html#3-起動設定ワークスペース設定).
+Register [Temporary Paths](Help_Reference.md#use-an-external-folder-through-temporary-paths) to work with external files without copying them. Saving, renaming and moving affect the actual registered files. Removing a registration leaves originals intact. Ordinary use does not require startup JSON editing. Field names and manual editing are in the [technical reference (Japanese)](https://soone-y.github.io/OPEN_PDF-Note-Workspace/introduction/core/data_schemas.html#3-%E8%B5%B7%E5%8B%95%E8%A8%AD%E5%AE%9A%E3%83%AF%E3%83%BC%E3%82%AF%E3%82%B9%E3%83%9A%E3%83%BC%E3%82%B9%E8%A8%AD%E5%AE%9A).
 
 ## Format examples
 

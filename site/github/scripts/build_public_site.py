@@ -22,6 +22,7 @@ GITHUB_SITE_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = GITHUB_SITE_ROOT / "output" / "public"
 ALLOWLIST_PATH = GITHUB_SITE_ROOT / "documentation_portal_allowlist.json"
 VERSION_TOKEN = "__APP_VERSION__"
+DOCUMENT_COUNT_TOKEN = "__PUBLIC_DOCUMENT_COUNT__"
 WEB_ANALYTICS_SNIPPET = """<!-- Cloudflare Web Analytics -->
 <script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "385b96f498964281bc0c2a771cebd04f"}'></script>
 <!-- End Cloudflare Web Analytics -->"""
@@ -122,6 +123,16 @@ def replace_version_tokens(site_dir: Path, version: str) -> None:
         markdown_file.write_text(text.replace(VERSION_TOKEN, version), encoding="utf-8")
 
 
+def replace_document_count_tokens(site_dir: Path) -> None:
+    """Count rendered documents once per Markdown source, including each locale."""
+    count = sum(1 for path in site_dir.rglob("*.md") if path.with_suffix(".html").is_file())
+    for relative in ("index.html", "en/index.html"):
+        page = site_dir / relative
+        if page.is_file():
+            text = page.read_text(encoding="utf-8")
+            page.write_text(text.replace(DOCUMENT_COUNT_TOKEN, str(count)), encoding="utf-8")
+
+
 def add_web_analytics(site_dir: Path) -> None:
     """Add the supplied beacon only to the staged website, never source documents."""
     for html_file in sorted(site_dir.rglob("*.html")):
@@ -204,6 +215,7 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
         if render_human_docs([str(staging_dir)]) != 0:
             raise RuntimeError("render_human_docs.py failed")
 
+        replace_document_count_tokens(staging_dir)
         add_web_analytics(staging_dir)
         replace_staged_site(staging_dir)
         print(f"Built selected public documentation: {OUTPUT_DIR}")

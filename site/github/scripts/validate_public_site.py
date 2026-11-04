@@ -44,26 +44,38 @@ HTML_ID = re.compile(r"\bid=[\"']([^\"']+)[\"']", re.IGNORECASE)
 class VisibleAnchorParser(HTMLParser):
     """Collect anchors a reader can use without opening a site-menu."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, section_id: str | None = None) -> None:
         super().__init__()
         self.hrefs: list[str] = []
         self._details_stack: list[bool] = []
         self._site_menu_depth = 0
+        self._section_id = section_id
+        self._section_depth = 0
+        self._active_section_depth: int | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = dict(attrs)
+        if tag.lower() == "section":
+            self._section_depth += 1
+            if attributes.get("id") == self._section_id and self._section_id is not None:
+                self._active_section_depth = self._section_depth
         if tag.lower() == "details":
             is_site_menu = "site-menu" in (attributes.get("class") or "").split()
             self._details_stack.append(is_site_menu)
             if is_site_menu:
                 self._site_menu_depth += 1
             return
-        if tag.lower() == "a" and self._site_menu_depth == 0:
+        if (tag.lower() == "a" and self._site_menu_depth == 0
+                and (self._section_id is None or self._active_section_depth is not None)):
             href = attributes.get("href")
             if href:
                 self.hrefs.append(href)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "section":
+            if self._section_depth == self._active_section_depth:
+                self._active_section_depth = None
+            self._section_depth -= 1
         if tag.lower() != "details" or not self._details_stack:
             return
         if self._details_stack.pop():
@@ -402,9 +414,9 @@ def validate_portal_entrypoint(site: Path, errors: list[str]) -> None:
             errors.append(f"index.html must visibly link to portal external destination: {target}")
 
 
-def visible_local_html_links(site: Path, source_path: Path) -> set[Path]:
+def visible_local_html_links(site: Path, source_path: Path, *, section_id: str | None = None) -> set[Path]:
     """Return local HTML targets linked outside a collapsible site-menu."""
-    parser = VisibleAnchorParser()
+    parser = VisibleAnchorParser(section_id=section_id)
     parser.feed(source_path.read_text(encoding="utf-8-sig"))
     site_root = site.resolve()
     targets: set[Path] = set()
@@ -536,6 +548,24 @@ def validate_allowlist_coverage(site: Path, source_root: Path, allowlist_path: P
         errors.append(f"generated site contains file outside documentation portal allowlist: {path.as_posix()}")
 
 
+def validate_portal_jump_index(site: Path, source_root: Path, allowlist_path: Path, errors: list[str]) -> None:
+    """Both portal inventories must directly link every published document."""
+    try:
+        expected, _ = allowlisted_portal_paths(source_root.resolve(), allowlist_path.resolve())
+    except ValueError as error:
+        errors.append(f"documentation portal allowlist is invalid: {error}")
+        return
+    documents = {path.with_suffix(".html") for path in expected if path.suffix.lower() == ".md"}
+    for relative in ("index.html", "en/index.html"):
+        page = site / relative
+        if not page.is_file():
+            errors.append(f"portal jump index page is missing: {relative}")
+            continue
+        linked = visible_local_html_links(site, page, section_id="all-documents")
+        for missing in sorted(documents - linked, key=lambda path: path.as_posix()):
+            errors.append(f"portal jump index does not directly link document: {relative} -> {missing.as_posix()}")
+
+
 def validate_documentation_map(source_root: Path, allowlist_path: Path, errors: list[str]) -> None:
     """Require DOCUMENTATION.md to link every allowlisted Markdown document exactly as a public index."""
     try:
@@ -596,6 +626,7 @@ def validate_site(
         else:
             validate_allowlist_coverage(site, source_root, allowlist_path, errors)
             validate_documentation_map(source_root, allowlist_path, errors)
+            validate_portal_jump_index(site, source_root, allowlist_path, errors)
     return errors
 
 

@@ -129,9 +129,9 @@ Annotations are stored in the PDF's same-named `.clrop`, leaving the PDF origina
 
 ### Text boxes
 
-Choose Text and click on the page, then type. Enter adds a line. Ctrl+Enter or clicking outside the box confirms editing. Esc also confirms and ends editing; use Undo to reverse a change. Finish IME composition before commands. Click an existing box with Text to reedit it. Near its top and bottom edges, an excluded strip prevents reediting; an insertion caret indicates an eligible position. Each excluded strip is 10% of box height, capped at 31% of a line in its font.
+Choose Text and click on the page, then type. Enter adds a line. Ctrl+Enter or clicking outside the box confirms editing. Esc also confirms and ends editing; use Undo to reverse a change. Finish IME composition before commands. Click an existing box with Text to reedit it. Near its top and bottom edges, an excluded strip prevents reediting; an insertion caret indicates an eligible position. The top strip is 10% of box height, capped at 31% of a line in its font. The bottom uses the same limit, with the editable area extended downward by up to one screen pixel within the box.
 
-Choose font, size, text color, background and wrapping. Ctrl+drag changes position. A/B are saved creation-size presets: clicking either applies it, including clicking an active preset again. Selecting a box or applying a theme alone does not resize it.
+Alt+click starts a new text box, including over an existing box. While editing, it confirms the current text before starting the new box. Choose font, size, text color, background and wrapping. Ctrl+drag changes position. A/B are saved creation-size presets: clicking either applies it, including clicking an active preset again. Selecting a box or applying a theme alone does not resize it.
 
 While editing or selecting a text box, use `Ctrl++` / `Ctrl+-` to step through font sizes: 1pt steps from 4 to 24pt, 2pt from 24 to 32pt, 4pt from 32 to 48pt, 8pt from 48 to 96pt, then 16pt up to 192pt, with 200pt as the largest preset. A size between presets moves to the next preset in the requested direction. Use Properties to enter an individual size, including decimals, from 4 to 200pt.
 
@@ -159,6 +159,8 @@ Text color preserves filled, stroked, and filled-and-stroked lettering. Partiall
 
 With Pen, hold the mouse button and draw; release to finish one stroke. Choose width, color, opacity and handwriting correction. Pen suits handwritten notes; a free marker suits broader emphasis. Undo reverses a stroke, Ctrl+drag moves it, and the eraser or annotation list deletes it. Handwriting correction can reshape a stroke; inspect its result and Undo if it does not match your intention.
 
+Pen correction has four mutually exclusive choices: Off, Smooth, Pause and Auto. Smooth reduces hand tremor by refining the completed freehand path. Pause attempts conversion to a line or shape when you pause while drawing and then release; Auto attempts conversion when you finish drawing. Smooth and Auto are never combined. If correction is not accepted, the original path remains. After a correction, Undo once restores the original path; Undo again removes the stroke.
+
 Choose Line, Arrow or Wave and drag from start to end, then release. A line divides or connects elements; an arrow points to its endpoint and can use one or two heads; a wave provides a wavy emphasis. Adjust width, color, opacity and supported line style.
 
 While drawing a line, arrow or wave, press Ctrl or Enter to place a segment and continue drawing. When bending an arrow with Ctrl, intermediate segments become ordinary lines; the final segment receives the arrowhead when you release the mouse button. Intermediate segments keep the dash pattern, color, width and opacity. Enter keeps the selected line type and arrowhead setting for each segment.
@@ -172,6 +174,7 @@ Choose a shape and its appearance, then drag from one corner of its bounds to th
 | Rectangle / Square | Box a passage or table; a square keeps equal dimensions. |
 | Ellipse / Circle | Circle an object or key term; an ellipse allows different horizontal and vertical spans. |
 | Triangle / Equilateral triangle | Add a diagram element or attention mark; the equilateral variant keeps its proportions. |
+| Star | Draw and rotate a star with fixed proportions. Choose Outline, Fill, or Lines. Lines connects every second outer vertex with five straight segments to form a pentagram. |
 | Diamond | Distinguish a diagram element or a decision in a flow. |
 | Arc (parenthesis) | Group lines with an open bracket-like curve. It does not fill an enclosed area. |
 
@@ -189,11 +192,13 @@ Use the annotation list's **Edit** command to revise its source, color or positi
 
 ### Find, revise, duplicate or delete an annotation
 
+Stars have a subtle yellow background in the annotation list, including unselected rows. This covers Outline, Fill and Lines. Selected rows use the selection color.
+
 Select an annotation in the annotation list and right-click. **Properties** inspects it; **Edit** opens editable fields for its type, including source text, coordinates, color, width, opacity and text or shape options. Apply changes and inspect the page; canceling discards that edit.
 
 The same menu offers jumping to the annotation, copying its text, opening a note link, duplicating, bringing forward, sending backward and deleting. Text copying requires a text-bearing item; link opening requires a link marker. Stacking changes concern annotations on the same page. The jump command navigates the display; Ctrl+drag changes placement.
 
-With Eraser, click or drag over annotations to delete the touched annotation as a unit. It does not erase PDF text or images. Use list deletion when objects overlap. **Clear all** removes this PDF's separate-file annotations, leaving original PDF contents and native annotations intact. Undo (`Ctrl+Z`) reverses recent annotation operations; Redo is Ctrl+Y. Saving commits deletions to `.clrop`; recovery after saving or restarting requires retained backup/recovery data.
+With Eraser, click or drag over annotations to delete the touched annotation as a unit. It does not erase PDF text or images. Use list deletion when objects overlap. **Clear all** removes this PDF's separate-file annotations, leaving original PDF contents and native annotations intact. Undo (`Ctrl+Z`) reverses recent annotation operations; Redo is Ctrl+Y. Undo and Redo bring the affected annotation into view, reducing zoom when needed to fit it. If it still exceeds the viewport at minimum zoom, the view moves toward its center. When the operation removes an annotation, its former location is shown. For bulk operations spanning multiple pages, the affected area on the first target page is shown. In notes, the caret moves to the end of the resulting replacement, or to the deletion point for a deletion, and that position is scrolled into view. Saving commits deletions to `.clrop`; recovery after saving or restarting requires retained backup/recovery data.
 
 ### Colors, display and defaults
 
@@ -274,13 +279,13 @@ Before restoration, review protected work so an old original and a newer draft a
 
 ## Output
 
-Use **Output > Output Dialog...** to choose annotated PDF, selected-page PDF, single-page PNG, TXT, Markdown, or HTML. Set the destination folder and output file name before output; useful defaults are supplied and may be changed. With no queue, **Export** creates the current output alone. Add each desired setting to the queue, then select **Export all queued** to create all queued results and show one result list at the end. Use **Export selected** to create just one result: success removes that reservation and keeps the dialog and remaining queue open; failure or overwrite cancellation retains the reservation. Closing the dialog discards unexecuted reservations. Select a reservation to change its destination or file name and choose **Update reservation**, or move, remove, or clear it. The same destination cannot be queued twice, and the open original cannot be selected as output. Existing output files require an explicit overwrite confirmation. The application safely integrates current edits before output.
+Use **Output > Output Dialog...** to choose PDF output, single-page PNG, TXT, Markdown, or HTML. Set the destination folder and output file name before output; useful defaults are supplied and may be changed. With no queue, **Export** creates the current output alone. Add each desired setting to the queue, then select **Export all queued** to create all queued results and show one result list at the end. Use **Export selected** to create just one result: success removes that reservation and keeps the dialog and remaining queue open; failure or overwrite cancellation retains the reservation. Closing the dialog discards unexecuted reservations. Select a reservation to change its destination or file name and choose **Update reservation**, or move, remove, or clear it. The same destination cannot be queued twice, and the open original cannot be selected as output. Existing output files require an explicit overwrite confirmation. The application safely integrates current edits before output.
 
 Hover over the destination folder field to see the complete path, or select the field and use Ctrl+A, Ctrl+C to copy it. TXT markup removal defaults to OFF, including Quick Note; previously saved settings remain in effect.
 
 ### Merge queued PDFs
 
-Use **Move up** and **Move down** to change the queue order. Both separate output and merging run from top to bottom. **Merge queued PDFs** is available only with at least two reservations, all of them annotated PDFs or selected-page PDFs. Choose one destination; the merged PDF preserves each reservation's page order, crop, scale, and annotation options. Individual reservation destinations are not written, and the results dialog lists only the merged file. Success clears the completed queue while keeping the dialog open. Destination or overwrite cancellation and output failure retain the queue. PNG or note reservations prevent merging.
+Use **Move up** and **Move down** to change the queue order. Both separate output and merging run from top to bottom. **Merge queued PDFs** is available only with at least two reservations, all of them PDF outputs. Choose one destination; the merged PDF preserves each reservation's page order, crop, scale, and annotation options. Individual reservation destinations are not written, and the results dialog lists only the merged file. Success clears the completed queue while keeping the dialog open. Destination or overwrite cancellation and output failure retain the queue. PNG or note reservations prevent merging.
 
 After output, **Open with OS** in the results dialog reveals the selected output in Explorer. PDFs can open in the read-only viewer; other formats open with their associated application.
 
@@ -288,15 +293,15 @@ After output, **Open with OS** in the results dialog reveals the selected output
 
 The app's file and folder picker shows folders whose names include terms such as **course** or **lecture** in an upper **Suggestions** pane. When choosing a workspace, the current workspace is also suggested if it appears in the listing. Below a divider, **All entries (name order)** lists every folder followed by every file, including the suggestions. Either pane leads to the same location; selecting the same location in both panes for a multiple selection returns it once. Temporary path registration, opening files and choosing output destinations share this display. Locations without suggestions and the drive list use only the normal listing.
 
-**Quick PDF** uses the annotated-PDF settings saved with **Save as Quick PDF** in the dialog. **Quick Note** always creates TXT; save its text, math, comment-line, and markup choices with **Save as Quick Note**. **View quick output settings** opens a compact, immediately closable summary of both current quick-output configurations. Output always creates a separate result and does not overwrite the open original.
+**Quick PDF** uses the PDF output settings saved with **Save as Quick PDF** in the dialog. **Quick Note** always creates TXT; save its text, math, comment-line, and markup choices with **Save as Quick Note**. **View quick output settings** opens a compact, immediately closable summary of both current quick-output configurations. Output always creates a separate result and does not overwrite the open original.
 
 ### Text color output options
 
 For PDF **Text color output**, choose **Replace with highlight** (default), **Overlay on transparent background**, or an overlay with an automatic or specified background. Enter a specified color as `#RRGGBB`, for example `#FFFFFF`. Overlays use the original glyph outlines and positions in a Stamp annotation, preserving the page content and searchable text. Transparent overlays may leave edges of the original lettering visible; filled backgrounds also cover diagrams and rules within the selection. Automatic color estimates the surrounding representative color and does not reconstruct photos or gradients. If glyph outlines cannot be obtained, output stops rather than silently switching to a highlight. Each reservation retains its mode and color, including merges; **Set as Quick PDF** saves them for Quick PDF. PNG text-color rendering is unchanged.
 
-### Selected-page PDF and single-page PNG
+### PDF page selection and single-page PNG
 
-In the output dialog, select the source PDF and format. Page numbers start at 1: `1,3,5-7` outputs pages 1, 3, 5, 6 and 7 in that order. `4a,1n` includes separate-file annotations on page 4 and omits them on page 1. Repeated pages remain in the specified order. A range runs from the smaller to the larger page number.
+In the output dialog, select the source PDF and format. PDF output initially fills the page field with the full range (`1-10` for a ten-page PDF). Keep it to export all pages, or edit the same field to select pages. Page numbers start at 1: `1,3,5-7` outputs pages 1, 3, 5, 6 and 7 in that order. `4a,1n` includes separate-file annotations on page 4 and omits them on page 1. Repeated pages remain in the specified order. A range runs from the smaller to the larger page number.
 
 To crop a page, use a rectangle such as `1[0:0:360:540]`: the four values are left, bottom, right, top in PDF points (72 points per inch), measured from the lower-left of the page. Use a rectangle within the page with left < right and bottom < top. These are not screen pixels; review cropped results before sharing. The annotation suffix follows the rectangle, for example `1[0:0:360:540]a`.
 
@@ -364,7 +369,7 @@ Under **Note > Text and display**, choose a font and size and inspect the previe
 
 **Note > Markup** sets heading font/color, bold, underline and left bar, mark font/color and custom-tag style presets. It changes how supported syntax appears, whereas the input palette inserts syntax into the note. Review existing notes after changing it; the writing guide supplies the notation examples.
 
-**Annotation > Tools and display** sets creation defaults for text, markers, lines, shapes, pen, eraser and magnifier. Lines, arrows and waves may share color and width. Tool visibility choices are On, Off (disabled) or Off (hidden); individual direct-key bindings remain independent, while read-only and save-time restrictions still apply. Handwriting correction offers automatic, hold, smooth and off modes, with line/geometric/automatic styles and geometric-fill or always-fill choices. Inspect corrected strokes and Undo unwanted results. Edit an existing item through the annotation list instead of changing creation defaults.
+**Annotation > Tools and display** sets creation defaults for text, markers, lines, shapes, pen, eraser and magnifier. Lines, arrows and waves may share color and width. Tool visibility choices are On, Off (disabled) or Off (hidden); individual direct-key bindings remain independent, while read-only and save-time restrictions still apply. Pen correction offers four mutually exclusive modes: Off, Smooth (hand tremor reduction), Pause and Auto (line or shape conversion). Converted shape style offers line/geometric/automatic choices; corrected shape fill offers Off, Use geometric setting and Always fill. Style and fill apply to conversions in Pause or Auto, while Smooth keeps a freehand path. Inspect corrected strokes and Undo unwanted results. Edit an existing item through the annotation list instead of changing creation defaults.
 
 **Environment > Colors and palettes** manages reusable annotation colors. Selecting a color for one tool is distinct from editing palette contents. Select a screen theme in Window and shared controls; create a custom theme by duplicating the current one, then edit and save it separately. Palette/theme saves are not reversed by canceling the main settings dialog.
 

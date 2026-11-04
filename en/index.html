@@ -56,6 +56,15 @@
     .references { border-top:1px solid var(--line); margin-top:32px; padding-top:22px; }
     .references ul { padding-left:1.3em; }
     .references li { margin-block:10px; }
+    .document-index > details { border-top:1px solid var(--line); margin-top:12px; }
+    .document-index > details > summary { cursor:pointer; padding:14px 0; font-weight:600; }
+    .jump-groups { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px 40px; padding:4px 0 18px; }
+    .jump-group { min-width:0; }
+    .jump-group h3 { margin:0 0 6px; font-size:15px; color:var(--subtle); font-weight:600; }
+    .references .jump-list { margin:0; padding:0; list-style:none; }
+    .references .jump-list li { margin:0; }
+    .jump-list a { display:block; padding:7px 0; text-underline-offset:.2em; overflow-wrap:anywhere; }
+    @media(max-width:640px) { .jump-groups { grid-template-columns:1fr; gap:18px; } }
     .note { margin:24px 0 0; padding-left:14px; border-left:3px solid var(--peach); color:var(--subtle); font-size:14px; }
     .site-menu { position:relative; margin-left:auto; min-width:0; max-width:100%; }
     .site-menu summary { cursor:pointer; padding:6px 10px; border:1px solid var(--line); background:var(--card); color:var(--ink); font-size:14px; }
@@ -114,6 +123,7 @@ html[data-contrast="high"] { --action:#00573f; --opened:#9a4e00; }
     <div class="external-links"><a href="https://pdf-note-workspace.soone-y.com/">Product site</a><a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases">Get the release</a><a href="https://github.com/soone-y/OPEN_PDF-Note-Workspace">GitHub repository</a></div>
     <ul class="entry-list">
      <li><a href="../docs/en/Getting_Started.html"><strong>Set up and open the app</strong><span>Choose Standard or Lite, extract the ZIP, and try the included samples.</span></a></li>
+     <li><a href="../introduction/en/project_overview.html"><strong>Project overview reference</strong><span>Understand terminology and what the public documents establish.</span></a></li>
      <li><a href="../docs/en/Troubleshooting.html"><strong>Resolve a problem</strong><span>Find what to check when the app will not start, save, or open a file.</span></a></li>
     </ul>
     <div class="guide-groups">
@@ -139,63 +149,119 @@ html[data-contrast="high"] { --action:#00573f; --opened:#9a4e00; }
     </div>
     <section class="references"><h2>Project and reference material</h2><ul>
      <li><a href="../README.html">Project overview and packages</a> — Standard and Lite editions, included features, and policies.</li>
-     <li><a href="../DOCUMENTATION.html">All public documents</a> — The complete index of public material.</li>
+     <li><a href="../DOCUMENTATION.html">Documentation guide</a> — __PUBLIC_DOCUMENT_COUNT__ documents, counting Japanese and English versions separately.</li>
      <li><a href="../introduction/en/index.html">Background, design, and verification</a> — Selected English explanations of the design and checks.</li>
      <li><a href="../LICENSES_INDEX.html">Licenses and third-party notices</a> — Terms for the app and its components.</li>
     </ul></section>
-    <section class="references" id="all-documents"><h2>All published documents</h2>
-<p>The entries above suggest where to start. This inventory links to every published document in browser-readable HTML. Use the language switch for the complete Japanese user-guide set. Background references marked Japanese retain their original language.</p>
-      <details><summary>All user and developer guides (14)</summary><ul>
-        <li><a href="../docs/en/CLROP_Annotation_Format.html">Save, move and share PDF annotation data</a></li>
-        <li><a href="../docs/en/CLRO_Note_Format.html">CLRO notes and compatibility</a></li>
-        <li><a href="../docs/en/File_Formats.html">Choose and handle file formats</a></li>
-        <li><a href="../docs/en/Getting_Started.html">Setup and updates</a></li>
-        <li><a href="../docs/en/Help_Reference.html">Detailed help: features, operations and settings</a></li>
-        <li><a href="../docs/en/How_to_Build.html">Build and verify from source</a></li>
-        <li><a href="../docs/en/Note_Writing_Guide.html">Note writing and syntax examples</a></li>
-        <li><a href="../docs/en/README.html">Documentation guide</a></li>
-        <li><a href="../docs/en/Read_Only_Viewer.html">Read-only viewer guide</a></li>
-        <li><a href="../docs/en/Save_and_Recovery.html">Saving, backups and recovery</a></li>
-        <li><a href="../docs/en/Troubleshooting.html">Troubleshooting</a></li>
-        <li><a href="../docs/en/Using_the_App.html">Using the app: first task through sharing</a></li>
-        <li><a href="../docs/en/legal/LICENSE.html">License</a></li>
-        <li><a href="../docs/en/legal/THIRD_PARTY_NOTICES.html">Third-party notices</a></li>
-      </ul></details>
-      <details><summary>Shared guidance, statistics and policies (9)</summary><ul>
-        <li><a href="../.github/SECURITY.html">Security reporting policy</a></li>
-        <li><a href="../DOCUMENTATION.html">Complete documentation map</a></li>
-        <li><a href="../LICENSE.html">Project license</a></li>
-        <li><a href="../LICENSES_INDEX.html">License index</a></li>
-        <li><a href="../README.html">Project overview and downloads</a></li>
-        <li><a href="../STATISTICS.html">Source scale, distribution sizes and verification scope</a></li>
-        <li><a href="../THIRD_PARTY_NOTICES.html">Third-party component notices</a></li>
-        <li><a href="../docs/statistics/HISTORY.html">Statistics history</a></li>
-        <li><a href="../docs/案内ドキュメントの構成.html">Documentation layout and language policy (Japanese)</a></li>
-      </ul></details>
-      <details><summary>All background, design and verification references (22)</summary><ul>
-        <li><a href="../introduction/core/answering_guidelines.html">Answering and reference guidance (Japanese)</a></li>
-        <li><a href="../introduction/core/architecture_layers.html">Architecture layers (Japanese)</a></li>
-        <li><a href="../introduction/core/code_symbol_index.html">Code symbol index (Japanese)</a></li>
-        <li><a href="../introduction/core/data_schemas.html">Data structures and annotation format (Japanese)</a></li>
-        <li><a href="../introduction/core/decision_support.html">Usage decisions (Japanese)</a></li>
-        <li><a href="../introduction/core/documentation_contract.html">Documentation roles and reference contract (Japanese)</a></li>
-        <li><a href="../introduction/core/features_and_scenarios.html">Features and scenarios (Japanese)</a></li>
-        <li><a href="../introduction/core/file_formats.html">File format reference (Japanese)</a></li>
-        <li><a href="../introduction/core/principles.html">Project principles (Japanese)</a></li>
-        <li><a href="../introduction/core/rationale.html">Rationale for the principles (Japanese)</a></li>
-        <li><a href="../introduction/core/repository_reference_map.html">Repository reference map (Japanese)</a></li>
-        <li><a href="../introduction/core/safety_and_nonnegotiables.html">Safety requirements (Japanese)</a></li>
-        <li><a href="../introduction/core/troubleshooting_quick.html">Troubleshooting reference (Japanese)</a></li>
-        <li><a href="../introduction/core/ui_concepts.html">UI concepts (Japanese)</a></li>
-        <li><a href="../introduction/core/use_cases.html">Use cases (Japanese)</a></li>
-        <li><a href="../introduction/core/user_guidance_reference.html">Supporting user guidance (Japanese)</a></li>
-        <li><a href="../introduction/en/features_and_scenarios.html">Features and scenarios (English)</a></li>
-        <li><a href="../introduction/en/file_formats.html">File formats and persistence (English)</a></li>
-        <li><a href="../introduction/en/index.html">Background reference index (English)</a></li>
-        <li><a href="../introduction/en/project_overview.html">Project overview reference (English)</a></li>
-        <li><a href="../introduction/index.html">Background, design and verification index (Japanese)</a></li>
-        <li><a href="../introduction/project_overview.html">Project overview reference (Japanese)</a></li>
-      </ul></details>
+    <section class="references document-index" id="all-documents"><h2>Jump to any public document</h2>
+<p>Open any document by title, grouped by purpose. For descriptions and help choosing a document, see the <a href="../DOCUMENTATION.html">documentation guide</a>.</p>
+      <details><summary>English user and developer guides (14)</summary>
+        <div class="jump-groups">
+          <section class="jump-group"><h3>Get started</h3><ul class="jump-list">
+            <li><a href="../docs/en/README.html">English documentation index</a></li>
+            <li><a href="../docs/en/Getting_Started.html">getting started</a></li>
+            <li><a href="../docs/en/Using_the_App.html">using the app</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Read and take notes</h3><ul class="jump-list">
+            <li><a href="../docs/en/Read_Only_Viewer.html">read-only viewer</a></li>
+            <li><a href="../docs/en/Help_Reference.html">help reference</a></li>
+            <li><a href="../docs/en/Note_Writing_Guide.html">note writing guide</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Save, manage files and troubleshoot</h3><ul class="jump-list">
+            <li><a href="../docs/en/Save_and_Recovery.html">saving and recovery</a></li>
+            <li><a href="../docs/en/File_Formats.html">file formats</a></li>
+            <li><a href="../docs/en/CLRO_Note_Format.html">.clro note format</a></li>
+            <li><a href="../docs/en/CLROP_Annotation_Format.html">.clrop annotation data</a></li>
+            <li><a href="../docs/en/Troubleshooting.html">troubleshooting</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Development and terms</h3><ul class="jump-list">
+            <li><a href="../docs/en/How_to_Build.html">build and verification</a></li>
+            <li><a href="../docs/en/legal/LICENSE.html">license</a></li>
+            <li><a href="../docs/en/legal/THIRD_PARTY_NOTICES.html">third-party notices</a></li>
+          </ul></section>
+        </div>
+      </details>
+      <details><summary>Project and shared documents (9)</summary>
+        <div class="jump-groups">
+          <section class="jump-group"><h3>Overview and navigation</h3><ul class="jump-list">
+            <li><a href="../README.html">Project overview</a></li>
+            <li><a href="../DOCUMENTATION.html">Documentation guide</a></li>
+            <li><a href="../docs/案内ドキュメントの構成.html">Documentation structure</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Statistics and history</h3><ul class="jump-list">
+            <li><a href="../STATISTICS.html">Project statistics</a></li>
+            <li><a href="../docs/statistics/HISTORY.html">Statistics history</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Licenses and reporting</h3><ul class="jump-list">
+            <li><a href="../LICENSE.html">License</a></li>
+            <li><a href="../THIRD_PARTY_NOTICES.html">Third-party notices</a></li>
+            <li><a href="../LICENSES_INDEX.html">License index</a></li>
+            <li><a href="../.github/SECURITY.html">Security policy</a></li>
+          </ul></section>
+        </div>
+      </details>
+      <details><summary>Background, design and technical references (24)</summary>
+        <div class="jump-groups">
+          <section class="jump-group"><h3>Explanation and reading guidance</h3><ul class="jump-list">
+            <li><a href="../introduction/index.html">Background, design, and verification index (Japanese)</a></li>
+            <li><a href="../introduction/en/index.html">English background, design, and verification index (English)</a></li>
+            <li><a href="../introduction/project_overview.html">Points for explanation and verification (Japanese)</a></li>
+            <li><a href="../introduction/en/project_overview.html">Points for explanation and verification (English)</a></li>
+            <li><a href="../introduction/core/documentation_contract.html">Documentation contract (Japanese)</a></li>
+            <li><a href="../introduction/core/answering_guidelines.html">Answering guidelines (Japanese)</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Principles and design</h3><ul class="jump-list">
+            <li><a href="../introduction/core/principles.html">Project principles (Japanese)</a></li>
+            <li><a href="../introduction/core/rationale.html">Rationale for the principles (Japanese)</a></li>
+            <li><a href="../introduction/development.html">Development approach (Japanese)</a></li>
+            <li><a href="../introduction/en/development.html">English development approach (English)</a></li>
+            <li><a href="../introduction/core/use_cases.html">Use cases (Japanese)</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Features, suitability and safety</h3><ul class="jump-list">
+            <li><a href="../introduction/core/features_and_scenarios.html">Features and usage scenarios (Japanese)</a></li>
+            <li><a href="../introduction/en/features_and_scenarios.html">English features and usage scenarios (English)</a></li>
+            <li><a href="../introduction/core/decision_support.html">Decision support (Japanese)</a></li>
+            <li><a href="../introduction/core/safety_and_nonnegotiables.html">Safety and non-negotiables (Japanese)</a></li>
+            <li><a href="../introduction/core/troubleshooting_quick.html">Troubleshooting quick reference (Japanese)</a></li>
+            <li><a href="../introduction/core/user_guidance_reference.html">User guidance reference (Japanese)</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Implementation and technical references</h3><ul class="jump-list">
+            <li><a href="../introduction/core/file_formats.html">File formats reference (Japanese)</a></li>
+            <li><a href="../introduction/en/file_formats.html">English file formats and persistence (English)</a></li>
+            <li><a href="../introduction/core/ui_concepts.html">UI concepts (Japanese)</a></li>
+            <li><a href="../introduction/core/architecture_layers.html">Architecture layers (Japanese)</a></li>
+            <li><a href="../introduction/core/data_schemas.html">Data schemas (Japanese)</a></li>
+            <li><a href="../introduction/core/code_symbol_index.html">Code symbol index (Japanese)</a></li>
+            <li><a href="../introduction/core/repository_reference_map.html">Repository reference map (Japanese)</a></li>
+          </ul></section>
+        </div>
+      </details>
+      <details><summary>Japanese user and developer guides (14)</summary>
+        <div class="jump-groups">
+          <section class="jump-group"><h3>Get started</h3><ul class="jump-list">
+            <li><a href="../docs/ja/README.html">Japanese documentation index</a></li>
+            <li><a href="../docs/ja/Getting_Started.html">getting started</a></li>
+            <li><a href="../docs/ja/Using_the_App.html">using the app</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Read and take notes</h3><ul class="jump-list">
+            <li><a href="../docs/ja/Read_Only_Viewer.html">read-only viewer</a></li>
+            <li><a href="../docs/ja/Help_Reference.html">help reference</a></li>
+            <li><a href="../docs/ja/Note_Writing_Guide.html">note writing guide</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Save, manage files and troubleshoot</h3><ul class="jump-list">
+            <li><a href="../docs/ja/Save_and_Recovery.html">saving and recovery</a></li>
+            <li><a href="../docs/ja/File_Formats.html">file formats</a></li>
+            <li><a href="../docs/ja/CLRO_Note_Format.html">.clro note format</a></li>
+            <li><a href="../docs/ja/CLROP_Annotation_Format.html">.clrop annotation data</a></li>
+            <li><a href="../docs/ja/Troubleshooting.html">troubleshooting</a></li>
+          </ul></section>
+          <section class="jump-group"><h3>Development and terms</h3><ul class="jump-list">
+            <li><a href="../docs/ja/How_to_Build.html">build and verification</a></li>
+            <li><a href="../docs/ja/legal/LICENSE.html">license</a></li>
+            <li><a href="../docs/ja/legal/THIRD_PARTY_NOTICES.html">third-party notices</a></li>
+          </ul></section>
+        </div>
+      </details>
 <p>Statistics data: <a href="../docs/statistics/metrics.json">JSON</a>.</p>
     </section>
     <p class="note">Some detailed background and reference documents are available only in Japanese. The user guides linked above are in English.</p>

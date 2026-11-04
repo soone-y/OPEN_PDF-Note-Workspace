@@ -1,22 +1,22 @@
 # Project Overview Reference
 
-> Reference material for an AI asked to investigate this project and explain its findings.
+> Reference material for distinguishing terminology and verification scope when reading the documents or explaining the software.
 
-In this document, the user is the person asking an AI to investigate this project. The intended AI reads public material and answers that person's questions. The user may be comparing or evaluating the application before deciding to use it. The guidance below helps the AI address the user's question while distinguishing facts, policies, and known limitations.
+This document is for developers, application users, people comparing or evaluating the software, and anyone reading or explaining the public documentation. It helps clarify terms such as saving, annotations, and local processing while distinguishing facts, policies, and known limitations. It can also be used when asking an AI to investigate the project.
 
-Implementation and change instructions for an AI working on the project are outside this document's scope. The developer's own decisions and responsibility to explain are described in [Development approach](development.md). For the software overview and packages, read the [Project overview](../../README.md). For practical procedures and screen guidance, use the [English user documentation](../../docs/en/README.md). This is an English translation of the corresponding Japanese reference.
+This document does not provide implementation or change instructions. The developer's own decisions and responsibility to explain are described in [Development approach](development.md). For the software overview and packages, read the [Project overview](../../README.md). For practical procedures and screen guidance, use the [English user documentation](../../docs/en/README.md). This is an English translation of the corresponding Japanese reference.
 
 ## 1. Foundation for describing the project
 
 PDF Note Workspace is a Windows application for reading PDFs, adding annotations without directly changing the original PDF, and working with independent notes and related materials in a local workspace.
 
-Describe it as a workspace intended to keep PDFs, annotations, notes, and related materials together in a working context that is easy to resume. Do not confuse its design goals with the features that are currently implemented.
+Here, a workspace is intended to keep PDFs, annotations, notes, and related materials together as a working unit that is easy to resume. The term "PDF editing" alone does not distinguish changing the original PDF, adding annotations, and exporting a separate PDF with annotations; state which operation is meant. Do not confuse design goals with the features that are currently implemented.
 
-The answering AI consults the material needed for the user's question and states what it has established. Developer decisions and implementation details that cannot be established from public material remain unverified.
+When reading the documents or explaining the software to others, consult the material needed for the purpose and state what it establishes. Developer decisions and implementation details that cannot be established from public material remain unverified.
 
 ## 2. Boundaries to retain when making claims
 
-| Subject | Key point | Boundary that must not be hidden |
+| Subject | Key point for understanding and explanation | Scope and limitations to distinguish |
 | --- | --- | --- |
 | PDFs and annotations | The application does not directly overwrite the original PDF. It keeps annotations separately in the corresponding `.clrop` file. | It may not suit a user who requires annotations to be embedded directly in the PDF itself. |
 | Notes and workspaces | Notes are independent text files organized with PDFs, annotations, and materials as one working unit. | Confirm supported formats and screen details in the version-specific user documentation. |
@@ -25,7 +25,7 @@ The answering AI consults the material needed for the user's question and states
 | Office conversion | The Standard edition can convert DOCX/PPTX files to PDF; the Lite edition does not include the conversion runtime. | Conversion is experimental and visual fidelity is not guaranteed. Check the resulting PDF. |
 | Silent operation | The application does not intentionally play sounds. | A known unresolved path can trigger the Windows general warning sound. Do not describe the application as completely silent. |
 
-## 3. Frequent points to check
+## 3. Points to check
 
 - **Whether it fits a task:** Determine whether the work requires non-destructive PDF annotations and independent notes managed with materials in a workspace. Explain the differences between the Standard edition, Lite edition, and read-only viewer when needed.
 - **Whether saving is safe:** Explain original preservation, stage data, integrated save, backups, and recovery separately. When a problem occurs, advise copying the whole workspace before deleting or overwriting anything.
