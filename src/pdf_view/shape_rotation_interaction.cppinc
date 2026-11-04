@@ -122,13 +122,19 @@ static bool ShapeRotationMessage(HWND hwnd,UINT msg,WPARAM key,LPARAM value) {
 static void DrawShapeRotationHandles(HDC dc) {
     const int index=ShapeRotationIndex();POINT center{},handle{};
     if(index<0 || !ShapeRotationHandleGeometry(index,center,handle))return;
-    const int radius=std::max(5,static_cast<int>(std::lround(6*s_shapeRotation.dip)));
-    HPEN pen=CreatePen(PS_SOLID,2,GetSysColor(COLOR_HIGHLIGHT));
-    if(!pen)return;
-    const auto oldPen=SelectObject(dc,pen),oldBrush=SelectObject(dc,GetStockObject(WHITE_BRUSH));
+    // Keep the visible affordance quiet; the independent 10-DIP hit radius stays generous.
+    const int radius=std::max(2,static_cast<int>(std::lround(3*s_shapeRotation.dip)));
+    const int pivot=std::max(1,static_cast<int>(std::lround(2*s_shapeRotation.dip)));
+    HPEN guide=CreatePen(PS_DOT,1,RGB(220,220,220));
+    HPEN ring=CreatePen(PS_SOLID,1,RGB(192,192,192));
+    if(!guide || !ring){if(guide)DeleteObject(guide);if(ring)DeleteObject(ring);return;}
+    const auto oldPen=SelectObject(dc,guide),oldBrush=SelectObject(dc,GetStockObject(HOLLOW_BRUSH));
+    const auto oldBackgroundMode=SetBkMode(dc,TRANSPARENT);
     MoveToEx(dc,center.x,center.y,nullptr);LineTo(dc,handle.x,handle.y);
+    MoveToEx(dc,center.x-pivot,center.y,nullptr);LineTo(dc,center.x+pivot+1,center.y);
+    MoveToEx(dc,center.x,center.y-pivot,nullptr);LineTo(dc,center.x,center.y+pivot+1);
+    SelectObject(dc,ring);
     Ellipse(dc,handle.x-radius,handle.y-radius,handle.x+radius+1,handle.y+radius+1);
-    MoveToEx(dc,center.x-4,center.y,nullptr);LineTo(dc,center.x+5,center.y);
-    MoveToEx(dc,center.x,center.y-4,nullptr);LineTo(dc,center.x,center.y+5);
-    SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(pen);
+    SetBkMode(dc,oldBackgroundMode);
+    SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(ring);DeleteObject(guide);
 }

@@ -163,6 +163,7 @@ static std::wstring ToolModeLabelW(ToolMode mode) {
 
 static std::wstring ShapeKindLabelW(ShapeKind kind) {
     switch (kind) {
+    case ShapeKind::Star: return localization::Text(L"shape.star.label");
     case ShapeKind::Square:
         return localization::Text(L"settings.annot.06b65b92aa7f").c_str();
     case ShapeKind::Rectangle:
@@ -185,6 +186,7 @@ static std::wstring ShapeKindLabelW(ShapeKind kind) {
 
 static std::wstring ShapeDrawModeLabelW(ShapeDrawMode mode) {
     switch (mode) {
+    case ShapeDrawMode::Line: return localization::Text(L"shape.star.line");
     case ShapeDrawMode::Outline:
         return localization::Text(L"settings.annot.645bb2dffd79").c_str();
     case ShapeDrawMode::Fill:
@@ -684,15 +686,8 @@ static bool ApplyAnnotationSettings(AnnotSettingsCtx* ctx) {
     g_freehandWidthPt = GetSelectedPt(ctx->cbFreehandWidth, g_freehandWidthPt);
     if (ctx->cbFreehandCorrection) {
         DWORD_PTR data = SelectedComboItemData(ctx->cbFreehandCorrection, 0);
-        if (data == 3) {
-            g_config.freehandCorrection = L"auto";
-        } else if (data == 2) {
-            g_config.freehandCorrection = L"hold";
-        } else if (data == 1) {
-            g_config.freehandCorrection = L"smooth";
-        } else {
-            g_config.freehandCorrection = L"off";
-        }
+        if (data < std::size(kFreehandCorrectionModes))
+            g_config.freehandCorrection = kFreehandCorrectionModes[data];
     }
     if (ctx->cbFreehandCorrectionStyle) {
         DWORD_PTR data = SelectedComboItemData(ctx->cbFreehandCorrectionStyle, 0);
@@ -744,7 +739,7 @@ static bool ApplyAnnotationSettings(AnnotSettingsCtx* ctx) {
     }
     if (ctx->cbShapeDrawMode) {
         DWORD_PTR data = SelectedComboItemData(ctx->cbShapeDrawMode, static_cast<DWORD_PTR>(g_shapeDrawMode));
-        g_shapeDrawMode = static_cast<ShapeDrawMode>(static_cast<int>(data));
+        g_shapeDrawMode = ShapeDrawModeForKind(g_shapeKind,static_cast<ShapeDrawMode>(static_cast<int>(data)));
     }
     SyncLegacyShapeStateFromDetail();
     g_shapeColor = GetSelectedColor(ctx->cbShapeColor, g_shapeColor);
@@ -1295,23 +1290,13 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 
         if (ctx->cbFreehandCorrection) {
             SendMessageW(ctx->cbFreehandCorrection, CB_RESETCONTENT, 0, 0);
-            int idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
-                                                    reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.b5dc78ef1925").c_str())));
-            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(0));
-            idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.f037f17e4024").c_str())));
-            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(1));
-            idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.7525cc8169d2").c_str())));
-            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(2));
-            idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
-                                                reinterpret_cast<LPARAM>(localization::Text(L"settings.annot.9957a2dbbd88").c_str())));
-            if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(3));
-            std::wstring correctionMode = NormalizeFreehandCorrection(g_config.freehandCorrection);
-            SelectComboByItemData(ctx->cbFreehandCorrection,
-                                  correctionMode == L"auto" ? 3 :
-                                  correctionMode == L"hold" ? 2 :
-                                  correctionMode == L"smooth" ? 1 : 0);
+            for (int i = 0; i < static_cast<int>(std::size(kFreehandCorrectionModes)); ++i) {
+                const std::wstring label = FreehandCorrectionLabelW(kFreehandCorrectionModes[i]);
+                const int idx = static_cast<int>(SendMessageW(ctx->cbFreehandCorrection, CB_ADDSTRING, 0,
+                                                             reinterpret_cast<LPARAM>(label.c_str())));
+                if (idx >= 0) SendMessageW(ctx->cbFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(i));
+            }
+            SelectComboByItemData(ctx->cbFreehandCorrection, FreehandCorrectionModeIndex(g_config.freehandCorrection));
         }
 
         if (ctx->cbFreehandCorrectionStyle) {
@@ -1461,6 +1446,7 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 ShapeKind::Diamond,
                 ShapeKind::Triangle,
                 ShapeKind::EquilateralTriangle,
+                ShapeKind::Star,
             };
             for (ShapeKind kind : kinds) {
                 std::wstring label = ShapeKindLabelW(kind);
@@ -1478,8 +1464,10 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             const ShapeDrawMode modes[] = {
                 ShapeDrawMode::Fill,
                 ShapeDrawMode::Outline,
+                ShapeDrawMode::Line,
             };
             for (ShapeDrawMode mode : modes) {
+                if(mode==ShapeDrawMode::Line && g_shapeKind!=ShapeKind::Star)continue;
                 std::wstring label = ShapeDrawModeLabelW(mode);
                 int idx = static_cast<int>(SendMessageW(ctx->cbShapeDrawMode, CB_ADDSTRING, 0,
                                                         reinterpret_cast<LPARAM>(label.c_str())));
@@ -1632,6 +1620,18 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         int code = HIWORD(wParam);
         LogPanelEvent(L"Annot", L"WM_COMMAND", id, code, reinterpret_cast<HWND>(lParam));
         if (ctx && ctx->embedded) PostMessageW(GetParent(hWnd), kUnifiedSettingsDraftChangedMsg, 0, 0);
+        if(ctx && id==IDC_ANNOT_SHAPE_KIND && code==CBN_SELCHANGE) {
+            const bool star=SelectedComboItemData(ctx->cbShapeKind,0)==static_cast<DWORD_PTR>(ShapeKind::Star);
+            const auto selected=SelectedComboItemData(ctx->cbShapeDrawMode,static_cast<DWORD_PTR>(ShapeDrawMode::Outline));
+            const auto count=SendMessageW(ctx->cbShapeDrawMode,CB_GETCOUNT,0,0);
+            if(star && count==2) {
+                const auto i=SendMessageW(ctx->cbShapeDrawMode,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(localization::Text(L"shape.star.line").c_str()));
+                if(i!=CB_ERR && i!=CB_ERRSPACE)SendMessageW(ctx->cbShapeDrawMode,CB_SETITEMDATA,i,static_cast<LPARAM>(ShapeDrawMode::Line));
+            }
+            if(!star && count==3)SendMessageW(ctx->cbShapeDrawMode,CB_DELETESTRING,2,0);
+            SelectComboByItemData(ctx->cbShapeDrawMode,!star && selected==static_cast<DWORD_PTR>(ShapeDrawMode::Line) ? static_cast<DWORD_PTR>(ShapeDrawMode::Outline) : selected);
+            return 0;
+        }
         if (ctx && id == IDC_ANNOT_SECTION_LIST && code == CBN_SELCHANGE) {
             int sel = static_cast<int>(SendMessageW(ctx->navList, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {

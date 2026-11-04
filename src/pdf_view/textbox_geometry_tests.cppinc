@@ -3,8 +3,10 @@ static bool VerifyTextBoxReeditHoverHitPriority() {
     auto saved = std::move(g_annots);
     struct RestoreAnnotations {
         std::vector<Annotation>& saved;
-        ~RestoreAnnotations() { g_annots = std::move(saved); }
-    } restore{saved};
+        double scale;
+        ~RestoreAnnotations() { g_annots = std::move(saved); g_pdf.scale = scale; }
+    } restore{saved, g_pdf.scale};
+    g_pdf.scale = 1.0;
     Annotation box;
     box.type = Annotation::Type::TextBox;
     box.projectedCoordinates = true;
@@ -12,10 +14,12 @@ static bool VerifyTextBoxReeditHoverHitPriority() {
     box.fontPt = 40.0;
     box.x1 = 10; box.x2 = 110; box.y1 = 100; box.y2 = 50;
     g_annots = {box};
-    // Full width stays editable, but the vertical 10% inset creates new boxes.
+    // Full width and the upper boundary stay editable as before; only the
+    // lower excluded strip shrinks (one client pixel is 0.75 PDF points here).
     if (FindTextReeditAnnotation(0, 10, 75) != 0 || FindTextReeditAnnotation(0, 110, 75) != 0 ||
         FindTextReeditAnnotation(0, 60, 98) != -1 || FindTextReeditAnnotation(0, 60, 52) != -1 ||
         FindTextReeditAnnotation(0, 60, 95) != 0 || FindTextReeditAnnotation(0, 60, 55) != 0 ||
+        FindTextReeditAnnotation(0, 60, 54.5) != 0 || FindTextReeditAnnotation(0, 60, 54) != -1 ||
         FindTextReeditAnnotation(1, 60, 75) != -1) return false;
     auto math = box; math.type = Annotation::Type::MathBox;
     g_annots.push_back(math);
@@ -23,8 +27,9 @@ static bool VerifyTextBoxReeditHoverHitPriority() {
     g_annots.push_back(box);
     if (FindTextReeditAnnotation(0, 60, 75) != 2) return false;
 
-    // Tall boxes must not lose multiple lines at either edge. Small boxes
-    // retain the original 10%; font changes must invalidate the metric cache.
+    // Keep the upper 10%/31%-of-line boundary, extend only downward, and never
+    // accept a point outside the box. The extension stays fixed in screen pixels
+    // across zoom levels; font changes must invalidate the metric cache.
     for (const auto* face : {L"Arial", L"Yu Gothic"}) {
         double previousPt = 0.0, previousRow = 0.0;
         for (double pt : {8.0, 14.0, 32.0, 14.0}) {
@@ -36,21 +41,29 @@ static bool VerifyTextBoxReeditHoverHitPriority() {
                 (pt < previousPt && row >= previousRow)) return false;
             previousPt = pt;
             previousRow = row;
-            box.y1 = 1000; box.y2 = 0;
-            g_annots = {box};
-            if (FindTextReeditAnnotation(0, 60, row * 0.309) != -1 ||
-                FindTextReeditAnnotation(0, 60, row * 0.311) != 0 ||
-                FindTextReeditAnnotation(0, 60, 1000 - row * 0.309) != -1 ||
-                FindTextReeditAnnotation(0, 60, 1000 - row * 0.311) != 0 ||
-                FindTextReeditAnnotation(0, 10, 500) != 0 ||
-                FindTextReeditAnnotation(0, 110, 500) != 0 ||
-                FindTextReeditAnnotation(0, 9, 500) != -1) return false;
-            box.y1 = row;
-            g_annots = {box};
-            if (FindTextReeditAnnotation(0, 60, row * 0.09) != -1 ||
-                FindTextReeditAnnotation(0, 60, row * 0.11) != 0 ||
-                FindTextReeditAnnotation(0, 60, row * 0.91) != -1 ||
-                FindTextReeditAnnotation(0, 60, row * 0.89) != 0) return false;
+            for (double scale : {0.5, 1.0, 2.0}) {
+                g_pdf.scale = scale;
+                box.y1 = 1000; box.y2 = 0;
+                g_annots = {box};
+                const double downPt = 72.0 / kDpi / scale;
+                const double lowerEdge = std::max(0.0, row * 0.31 - downPt);
+                if (FindTextReeditAnnotation(0, 60, lowerEdge - 0.001) != -1 ||
+                    FindTextReeditAnnotation(0, 60, lowerEdge + 0.001) != 0 ||
+                    FindTextReeditAnnotation(0, 60, row * 0.31) != 0 ||
+                    FindTextReeditAnnotation(0, 60, 1000 - row * 0.309) != -1 ||
+                    FindTextReeditAnnotation(0, 60, 1000 - row * 0.311) != 0 ||
+                    FindTextReeditAnnotation(0, 10, 500) != 0 ||
+                    FindTextReeditAnnotation(0, 110, 500) != 0 ||
+                    FindTextReeditAnnotation(0, 9, 500) != -1) return false;
+                box.y1 = row;
+                g_annots = {box};
+                const double shortLowerEdge = std::max(0.0, row * 0.1 - downPt);
+                if (FindTextReeditAnnotation(0, 60, shortLowerEdge - 0.001) != -1 ||
+                    FindTextReeditAnnotation(0, 60, shortLowerEdge + 0.001) != 0 ||
+                    FindTextReeditAnnotation(0, 60, row * 0.11) != 0 ||
+                    FindTextReeditAnnotation(0, 60, row * 0.91) != -1 ||
+                    FindTextReeditAnnotation(0, 60, row * 0.89) != 0) return false;
+            }
         }
     }
     return true;

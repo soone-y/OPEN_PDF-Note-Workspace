@@ -335,13 +335,12 @@ static int LayoutAnnotToolbar(int baseX, int baseY, int areaW, PlaceFn place) {
         placeFull(g_hChkPanMouseWheelZoom, comboH);
     }
 
-    bool showAnnotMethod = ToolbarHasAnnotMethodOptions(g_toolMode);
+    bool showAnnotMethod = ToolbarHasAnnotMethodOptions(g_toolMode) && g_toolMode != ToolMode::Freehand;
     if (showAnnotMethod) {
         placeFull(g_hComboAnnotMethod, comboH);
     }
 
-    bool showFreehandCorrection =
-        g_toolMode == ToolMode::Freehand && FreehandCorrectionPenActive(g_config.freehandCorrection);
+    bool showFreehandCorrection = g_toolMode == ToolMode::Freehand;
     if (showFreehandCorrection) {
         placeFull(g_hComboFreehandCorrection, comboH);
     }

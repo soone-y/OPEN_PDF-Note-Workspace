@@ -134,8 +134,8 @@ static void DrawMultiplyShape(HDC dc, ShapeKind kind, ShapeDrawMode drawMode, co
     int penWidth, COLORREF color, BYTE alpha, const std::vector<double>& dash, double scale,
     double rotation, int contentRotation, double wholeAngle) {
     drawMode=ShapeDrawModeForKind(kind,drawMode);
-    auto outline=shape_outline::BuildOriented(kind,bounds.left,bounds.top,bounds.right,bounds.bottom,rotation,contentRotation,wholeAngle);
-    const auto runs=drawMode==ShapeDrawMode::Outline ? shape_outline::Dash(outline,dash,scale)
+    auto outline=shape_outline::BuildOriented(kind,bounds.left,bounds.top,bounds.right,bounds.bottom,rotation,contentRotation,wholeAngle,drawMode);
+    const auto runs=drawMode!=ShapeDrawMode::Fill ? shape_outline::Dash(outline,dash,scale)
         : std::vector<decltype(outline)>{outline};
     std::vector<std::vector<POINT>> paths;
     for(const auto& run:runs){
@@ -720,6 +720,10 @@ static ShapeBounds NormalizeShapeBounds(ShapeKind kind, double x1, double y1, do
         double side = std::min(width, height);
         x2 = x1 + signX * side;
         y2 = y1 + signY * side;
+    } else if (kind == ShapeKind::Star) {
+        const double ratio=(1+std::cos(shape_rotation::kPi/5))/(2*std::sin(2*shape_rotation::kPi/5));
+        const double useWidth=std::min(width,height/ratio);
+        x2=x1+signX*useWidth; y2=y1+signY*useWidth*ratio;
     } else if (kind == ShapeKind::EquilateralTriangle) {
         constexpr double kTriHeightRatio = 0.86602540378443864676; // sqrt(3) / 2
         double eqWidthFromHeight = height / kTriHeightRatio;
@@ -3000,12 +3004,10 @@ static bool HitTestEditCaretFromClientPoint(const POINT& pt, size_t* outEditInde
     }
     RECT actual{};
     if (!EditingBoxClientRect(actual)) return false;
-    POINT clamped = pt;
-    if (!PtInRect(&actual, pt)) {
-        if (!clampToOuter) return false;
-        clamped.x = std::clamp(pt.x, actual.left, std::max(actual.left, actual.right - 1));
-        clamped.y = std::clamp(pt.y, actual.top, std::max(actual.top, actual.bottom - 1));
-    }
+    if (!PtInRect(&actual, pt) && !clampToOuter) return false;
+    POINT clamped = TextBoxCaretHitPoint(pt);
+    clamped.x = std::clamp(clamped.x, actual.left, std::max(actual.left, actual.right - 1));
+    clamped.y = std::clamp(clamped.y, actual.top, std::max(actual.top, actual.bottom - 1));
     clamped = EditingLogicalToClient(clamped, true);
     if (!EnsureEditLayoutCache(true)) return false;
     RECT inner{};
@@ -3692,8 +3694,9 @@ static void RecalcEditingTextboxSize(bool includeComp) {
     const RECT logical{bounds.left, bounds.top,
         bounds.left + static_cast<LONG>(std::lround(width * pixelsPerPt)),
         bounds.top + static_cast<LONG>(std::lround(height * pixelsPerPt))};
-    POINT point{std::clamp(hit.x, bounds.left, std::max(bounds.left, bounds.right - 1)),
-                std::clamp(hit.y, bounds.top, std::max(bounds.top, bounds.bottom - 1))};
+    POINT point = TextBoxCaretHitPoint(hit);
+    point.x = std::clamp(point.x, bounds.left, std::max(bounds.left, bounds.right - 1));
+    point.y = std::clamp(point.y, bounds.top, std::max(bounds.top, bounds.bottom - 1));
     point = TextBoxLogicalToClient(point, bounds, logical, box.contentRotation, true);
     const double scale = LayoutToClientScale();
     const POINT local{static_cast<LONG>(std::lround((point.x - logical.left) / scale)),

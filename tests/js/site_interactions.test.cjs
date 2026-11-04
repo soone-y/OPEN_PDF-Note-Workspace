@@ -17,6 +17,16 @@ const pages = [
 ];
 const storageKey = 'pdf-note-workspace-high-contrast';
 
+function inlineScriptById(html, identifier, page) {
+  const openingTag = `<script id="${identifier}">`;
+  const start = html.indexOf(openingTag);
+  assert.notEqual(start, -1, `${page}: ${identifier} script missing`);
+  const contentStart = start + openingTag.length;
+  const end = html.indexOf('</script>', contentStart);
+  assert.notEqual(end, -1, `${page}: ${identifier} script is not closed`);
+  return html.slice(contentStart, end);
+}
+
 function run(source, saved, unavailable = false) {
   const dataset = {};
   const events = {};
@@ -55,10 +65,8 @@ function run(source, saved, unavailable = false) {
 
 for (const page of pages) {
   const html = fs.readFileSync(path.resolve(root, page), 'utf8');
-  const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)]
-    .map(match => match[1]).filter(source => source.includes(storageKey));
-  assert.equal(scripts.length, 1, `${page}: required contrast script missing or duplicated`);
-  const source = scripts[0];
+  const source = inlineScriptById(html, 'contrast-script', page);
+  assert.ok(source.includes(storageKey), `${page}: contrast script does not use the shared storage key`);
   for (const saved of [null, 'false', 'TRUE', 'true']) {
     const f = run(source, saved);
     assert.equal(f.toggle.checked, saved === 'true', page);
@@ -84,9 +92,8 @@ for (const page of pages) {
 // A link or search result can target a heading inside a collapsed details
 // container. The generated page must reveal that container before scrolling.
 const fragmentHtml = fs.readFileSync(pages[3], 'utf8');
-const fragmentSource = [...fragmentHtml.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)]
-  .map(match => match[1]).find(source => source.includes('revealFragment'));
-assert.ok(fragmentSource, 'generated document: fragment reveal script missing');
+const fragmentSource = inlineScriptById(fragmentHtml, 'contrast-script', pages[3]);
+assert.ok(fragmentSource.includes('revealFragment'), 'generated document: fragment reveal script missing');
 const fragmentEvents = {};
 const fragmentFrames = [];
 const fragmentToggle = { checked: false, addEventListener: (name, callback) => { fragmentEvents[name] = callback; } };

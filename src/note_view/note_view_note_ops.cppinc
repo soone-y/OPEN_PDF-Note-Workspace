@@ -330,36 +330,6 @@ MapPostEditEditorSelectionToCanonical(HWND hEdit,
     return note::NoteTextSelection{{*canonicalStart}, {*canonicalEnd}};
 }
 
-// Selection is view state, not a historic document state.  Keep the current
-// selection stable across an Undo/Redo whenever it is outside the replaced
-// range; shift it by the replacement delta when it follows the range.  A
-// selection which intersects the changed text has no unambiguous identity, so
-// collapse it at the end of the replacement instead of reviving a selection
-// made by an earlier edit.
-static note::NoteTextSelection TransformNoteSelectionThroughTextEdit(
-    note::NoteTextSelection selection, const note::TextEdit& edit) {
-    const size_t start = edit.start.value;
-    const size_t sourceEnd = SaturatingNoteTextOffsetAdd(start, edit.deleted_len);
-    const size_t destinationEnd =
-        SaturatingNoteTextOffsetAdd(start, edit.inserted_text.size());
-    const size_t selectionStart = std::min(selection.anchor.value, selection.caret.value);
-    const size_t selectionEnd = std::max(selection.anchor.value, selection.caret.value);
-    if (selectionStart != selectionEnd && selectionStart < sourceEnd && selectionEnd > start) {
-        return {{destinationEnd}, {destinationEnd}};
-    }
-
-    const auto transformOffset = [&](size_t offset) {
-        if (offset >= sourceEnd) {
-            return SaturatingNoteTextOffsetAdd(offset - edit.deleted_len,
-                                                edit.inserted_text.size());
-        }
-        if (offset <= start) return offset;
-        return start;
-    };
-    return {{transformOffset(selection.anchor.value)},
-            {transformOffset(selection.caret.value)}};
-}
-
 static note::NoteTextSelection CaptureCurrentNoteSelection(HWND hEdit, size_t textLength) {
     DWORD start = 0;
     DWORD end = 0;
@@ -976,13 +946,14 @@ bool ExecuteNoteUndoRedoFromFocus(HWND owner, bool undo) {
     // for the restored view selection.
     const note::NoteSourceLineMap::Snapshot editorBeforeSourceMap =
         kernel->text_core().source_line_map();
-    const note::NoteTextSelection selectionBeforeReplay =
-        CaptureCurrentNoteSelection(g_hNoteEdit, currentText.size());
     const auto replay = undo ? kernel->Undo(IsNoteRenderActive()) : kernel->Redo(IsNoteRenderActive());
     if (!replay.has_value() || !replay->applied()) return false;
     const note::TextEdit& edit = replay->apply_result.dirty_graph.edit;
-    const note::NoteTextSelection selectionAfterReplay =
-        TransformNoteSelectionThroughTextEdit(selectionBeforeReplay, edit);
+    // Reveal the result of this command even if the user navigated elsewhere.
+    // A deletion leaves the caret at its start; an insertion/restoration at its end.
+    const size_t replayCaret = SaturatingNoteTextOffsetAdd(
+        edit.start.value, edit.inserted_text.size());
+    const note::NoteTextSelection selectionAfterReplay{{replayCaret}, {replayCaret}};
     const auto editorEditStart = CanonicalNoteOffsetToEditorTransport(
         g_hNoteEdit, editorBeforeSourceMap, edit.start.value);
     const auto editorEditEnd = CanonicalNoteOffsetToEditorTransport(

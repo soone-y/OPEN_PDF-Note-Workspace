@@ -478,44 +478,8 @@ static std::optional<ToolMode> NextEnabledFamilyMode(AnnotToolFamily family, boo
     return modes[idx];
 }
 
-static std::vector<int> EnabledPenAnnotMethodDataSequence() {
-    std::vector<int> items;
-    for (ToolMode candidate : AnnotToolModeUiOrder()) {
-        if (AnnotToolFamilyForMode(candidate) != AnnotToolFamily::Pen) continue;
-        if (!ToolModeEnabledForCurrentPdfView(candidate)) continue;
-        if (candidate == ToolMode::Freehand) {
-            items.push_back(static_cast<int>(ToolMode::Freehand));
-            items.push_back(kAnnotMethodDataCorrectionPen);
-        } else {
-            items.push_back(static_cast<int>(candidate));
-        }
-    }
-    return items;
-}
-
-static int CurrentPenAnnotMethodData() {
-    if (g_toolMode == ToolMode::Freehand) {
-        return FreehandCorrectionPenActive(g_config.freehandCorrection)
-                   ? kAnnotMethodDataCorrectionPen
-                   : static_cast<int>(ToolMode::Freehand);
-    }
-    return static_cast<int>(g_toolMode);
-}
-
 static bool ApplyAnnotMethodData(HWND hWnd, int data) {
-    ToolMode nextMode{};
-    if (data == kAnnotMethodDataCorrectionPen) {
-        nextMode = ToolMode::Freehand;
-        if (!FreehandCorrectionPenActive(g_config.freehandCorrection)) {
-            g_config.freehandCorrection = L"auto";
-        }
-    } else {
-        nextMode = static_cast<ToolMode>(data);
-        if (nextMode == ToolMode::Freehand &&
-            FreehandCorrectionPenActive(g_config.freehandCorrection)) {
-            g_config.freehandCorrection = L"off";
-        }
-    }
+    ToolMode nextMode = static_cast<ToolMode>(data);
 
     if (!ToolModeEnabledForCurrentPdfView(nextMode) ||
         !ToolbarHasAnnotMethodOptions(nextMode)) {
@@ -550,19 +514,17 @@ static bool ApplyAnnotMethodData(HWND hWnd, int data) {
 }
 
 static bool CyclePenToolFamilyOption(HWND hWnd, bool reverse) {
-    auto items = EnabledPenAnnotMethodDataSequence();
-    if (items.size() <= 1) return false;
-    int current = CurrentPenAnnotMethodData();
-    auto it = std::find(items.begin(), items.end(), current);
-    size_t idx = 0;
-    if (it == items.end()) {
-        idx = reverse ? (items.size() - 1) : 0;
-    } else {
-        idx = static_cast<size_t>(std::distance(items.begin(), it));
-        idx = reverse ? (idx + items.size() - 1) % items.size()
-                      : (idx + 1) % items.size();
-    }
-    return ApplyAnnotMethodData(hWnd, items[idx]);
+    if (g_toolMode != ToolMode::Freehand || !ToolModeEnabledForCurrentPdfView(g_toolMode)) return false;
+    if (!CommitActiveNoteEditBoundary(hWnd)) return false;
+    EndInlineTextEditing(g_hPdfView, true);
+    const int count = static_cast<int>(std::size(kFreehandCorrectionModes));
+    const int current = FreehandCorrectionModeIndex(g_config.freehandCorrection);
+    const int next = (current + (reverse ? count - 1 : 1)) % count;
+    g_config.freehandCorrection = kFreehandCorrectionModes[next];
+    PersistConfig();
+    UpdateToolbarUI(hWnd);
+    if (g_hPdfView) SetFocus(g_hPdfView);
+    return true;
 }
 
 static bool SelectAnnotToolFamily(HWND hWnd, AnnotToolFamily family, bool cycleOption, bool reverse) {
@@ -1909,13 +1871,14 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
                 }
             }
         } else if (id == ID_TOOL_FREEHAND_CORRECTION && code == CBN_SELCHANGE) {
+            if (g_toolMode != ToolMode::Freehand || !ToolModeAvailableForCurrentPdfView(g_toolMode)) return;
             int sel = static_cast<int>(SendMessageW(g_hComboFreehandCorrection, CB_GETCURSEL, 0, 0));
             if (sel >= 0) {
                 LRESULT data = SendMessageW(g_hComboFreehandCorrection, CB_GETITEMDATA, sel, 0);
                 if (data != CB_ERR) {
-                    int v = static_cast<int>(data);
-                    std::wstring next = (v == 2) ? L"auto" : (v == 1) ? L"hold" : L"smooth";
-                    if (NormalizeCorrectionPenMode(g_config.freehandCorrection) != next) {
+                    if (data < 0 || data >= static_cast<LRESULT>(std::size(kFreehandCorrectionModes))) return;
+                    const wchar_t* next = kFreehandCorrectionModes[data];
+                    if (NormalizeFreehandCorrection(g_config.freehandCorrection) != next) {
                         g_config.freehandCorrection = next;
                         PersistConfig();
                     }

@@ -11,10 +11,29 @@ struct Point { double x, y; };
 using Run = std::vector<Point>;
 
 [[nodiscard]] inline Run Build(ShapeKind kind, double left, double top, double right,
-                               double bottom, double rotation = 0.0) {
+                               double bottom, double rotation = 0.0, ShapeDrawMode drawMode = ShapeDrawMode::Outline) {
     if (!std::isfinite(left) || !std::isfinite(top) || !std::isfinite(right) ||
         !std::isfinite(bottom) || right <= left || top == bottom) return {};
     const double cx = (left + right) * 0.5, cy = (top + bottom) * 0.5;
+    if (kind == ShapeKind::Star) {
+        // A regular five-point star fitted to its actual bounding box.
+        // The inner radius is the intersection radius of a regular pentagram.
+        const bool lines = drawMode == ShapeDrawMode::Line;
+        const double pi = shape_rotation::kPi;
+        const double radius = std::min((right-left)/(2*std::sin(2*pi/5)),
+            std::abs(bottom-top)/(1+std::cos(pi/5)));
+        const double sign = bottom > top ? 1.0 : -1.0;
+        const double centerY = cy + sign*radius*(1-std::cos(pi/5))*0.5;
+        Run points;
+        const int count = lines ? 5 : 10;
+        for (int i=0; i<count; ++i) {
+            const double angle = -pi/2 + (lines ? 4*pi*i/5 : pi*i/5);
+            const double r = !lines && i%2 ? radius*std::cos(2*pi/5)/std::cos(pi/5) : radius;
+            points.push_back({cx+r*std::cos(angle),centerY+sign*r*std::sin(angle)});
+        }
+        points.push_back(points.front());
+        return points;
+    }
     if (kind == ShapeKind::Arc) {
         // Open half ellipse: drag width is bow depth, drag height is the end-to-end span.
         Run points;constexpr int segments=64;points.reserve(segments+1);
@@ -53,12 +72,12 @@ using Run = std::vector<Point>;
 // Clockwise content orientation, in either screen (top < bottom) or PDF
 // (top > bottom) coordinates. The visual ellipse angle stays local to the shape.
 [[nodiscard]] inline Run BuildOriented(ShapeKind kind, double left, double top, double right,
-                                       double bottom, double angle, int turns, double wholeAngle = 0.0) {
+                                       double bottom, double angle, int turns, double wholeAngle = 0.0, ShapeDrawMode drawMode = ShapeDrawMode::Outline) {
     turns = ((turns % 4) + 4) % 4;
     const double width = right - left, height = std::abs(bottom - top);
     const double localW = turns % 2 ? height : width;
     const double localH = turns % 2 ? width : height;
-    auto points = Build(kind, 0, 0, localW, localH, angle);
+    auto points = Build(kind, 0, 0, localW, localH, angle,drawMode);
     const double sign = bottom > top ? 1.0 : -1.0;
     const double wholeC=wholeAngle==0.0 ? 1.0 : std::cos(wholeAngle),wholeS=wholeAngle==0.0 ? 0.0 : std::sin(sign*wholeAngle);
     const double cx=(left+right)*0.5,cy=(top+bottom)*0.5;

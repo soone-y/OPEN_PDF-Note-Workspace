@@ -313,6 +313,7 @@ static bool UndoTextEdit(HWND hwnd) {
     g_textEditUndo.pop_back();
     RecalcEditingTextboxSize(true);
     EnsureEditingTextBoxVisible(hwnd, L"undo_text_edit");
+    RevealEditingTextHistory(hwnd);
     UpdateImeWindowPosition(hwnd, true);
     InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
     return true;
@@ -345,6 +346,7 @@ static bool RedoTextEdit(HWND hwnd) {
     g_textEditRedo.pop_back();
     RecalcEditingTextboxSize(true);
     EnsureEditingTextBoxVisible(hwnd, L"redo_text_edit");
+    RevealEditingTextHistory(hwnd);
     UpdateImeWindowPosition(hwnd, true);
     InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
     return true;
@@ -810,6 +812,7 @@ static bool UndoAnnotCommand(HWND owner) {
     SynchronizePendingPdfLinkEndpointAfterHistoryReplay(cmd, /*undo=*/true);
     g_annotRedo.push_back(std::move(cmd));
     g_annotUndo.pop_back();
+    RevealAnnotationHistoryCommand(g_hPdfView, g_annotRedo.back(), true);
     InvalidatePendingAnnotStageCommands(CurrentLogicalPdfPath());
     MarkAnnotHistoryDirty();
     MarkAnnotsDirty(owner);
@@ -832,6 +835,7 @@ static bool RedoAnnotCommand(HWND owner) {
     g_annotUndo.push_back(std::move(cmd));
     g_annotRedo.pop_back();
     TrimAnnotHistory();
+    RevealAnnotationHistoryCommand(g_hPdfView, g_annotUndo.back(), false);
     InvalidatePendingAnnotStageCommands(CurrentLogicalPdfPath());
     MarkAnnotHistoryDirty();
     MarkAnnotsDirty(owner);

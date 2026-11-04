@@ -115,6 +115,64 @@ Copy-ReleaseTopDocuments -ReleaseRoot $Output -RepositoryRoot $Repository -Local
                                     for error in validate_markdown_links(release, release)),
                                 "The link gate must still reject a missing packaged document")
 
+    def test_private_fonts_follow_edition_without_changing_bytes_or_notices(self):
+        fonts = self.root / 'third_party/libreoffice/image/Fonts'
+        fonts.mkdir(parents=True)
+        selected = ('LiberationSans-Regular.ttf', 'LiberationSerif-Bold.ttf',
+                    'LiberationMono-Italic.ttf', 'Carlito-Regular.ttf',
+                    'Caladea-Bold.ttf', 'opens___.ttf')
+        for name in (*selected, 'unselected.ttf'):
+            (fonts / name).write_bytes(('fixture:' + name).encode('ascii'))
+        notices = ('license.txt', 'LICENSE.html', 'NOTICE')
+        for name in notices:
+            (fonts.parent / name).write_bytes(('notice:' + name).encode('ascii'))
+        self.write_script('copy_fonts.ps1', r'''
+param([string]$Source,[string]$Repository,[string]$Output,[switch]$Lite)
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$DryRun=$false
+$repoRoot=$Repository; $outDir=$Output
+$licensesDir=Join-Path $Output 'licenses'
+$libreOfficeImageDir=Join-Path $repoRoot 'third_party/libreoffice/image'
+$libreOfficeFontsDir=Join-Path $libreOfficeImageDir 'Fonts'
+$tokens=$null; $errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+if($errors.Count) { throw 'Packaging script parse failure' }
+foreach($name in @('Write-Info','Write-Warn','Ensure-Directory','Copy-File')) {
+    $functions=@($ast.FindAll({param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+    },$true))
+    if($functions.Count -ne 1) { throw "Missing function: $name" }
+    . ([scriptblock]::Create($functions[0].Extent.Text))
+}
+$blocks=@($ast.FindAll({param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+    $node.Clauses[0].Item1.Extent.Text -eq 'Test-Path -LiteralPath $libreOfficeFontsDir'
+},$true))
+if($blocks.Count -ne 1) { throw 'Missing private font packaging block' }
+. ([scriptblock]::Create($blocks[0].Extent.Text))
+''')
+        for lite in (False, True):
+            with self.subTest(lite=lite):
+                output = self.root / ('lite' if lite else 'full')
+                arguments = [POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                             str(self.root / 'copy_fonts.ps1'), '-Source',
+                             str(REPO_ROOT / 'scripts/release/pack_release.ps1'),
+                             '-Repository', str(self.root), '-Output', str(output)]
+                if lite:
+                    arguments.append('-Lite')
+                result = subprocess.run(arguments, cwd=self.root, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout.decode('utf-8', errors='replace'))
+                font_root = output / ('libreoffice' if lite else 'lo') / 'image/Fonts'
+                self.assertEqual({p.name for p in font_root.iterdir()}, set(selected))
+                self.assertFalse((output / ('lo' if lite else 'libreoffice')).exists())
+                for name in selected:
+                    self.assertEqual((font_root / name).read_bytes(), (fonts / name).read_bytes())
+                for name in notices:
+                    self.assertEqual((output / 'licenses/libreoffice' / name).read_bytes(),
+                                     (fonts.parent / name).read_bytes())
+
     def test_version_is_fixed_before_build_and_package_and_retry_retains_it(self):
         (self.root / "fail_build").touch()
         code, output = self.invoke("-Locale", "en")

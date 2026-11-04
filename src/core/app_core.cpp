@@ -6548,6 +6548,7 @@ const char* ShapeDetailKey(ShapeDetail detail) {
     case ShapeDetail::Triangle: return "triangle";
     case ShapeDetail::Diamond: return "diamond";
     case ShapeDetail::Arc: return "arc";
+    case ShapeDetail::Star: return "star";
     default: return "line";
     }
 }
@@ -6574,6 +6575,7 @@ bool ShapeDetailFromKey(const std::string& raw, ShapeDetail& out) {
     }
     if (key == "diamond") { out = ShapeDetail::Diamond; return true; }
     if (key == "arc") { out = ShapeDetail::Arc; return true; }
+    if (key == "star") { out = ShapeDetail::Star; return true; }
     return false;
 }
 
@@ -6587,6 +6589,7 @@ std::vector<ShapeDetail> OrderedShapeDetails() {
         ShapeDetail::Triangle,
         ShapeDetail::Diamond,
         ShapeDetail::Arc,
+        ShapeDetail::Star,
     };
 }
 
@@ -6610,6 +6613,7 @@ ToolMode ToolModeForShapeDetail(ShapeDetail detail) {
     case ShapeDetail::Triangle:
     case ShapeDetail::Diamond:
     case ShapeDetail::Arc:
+    case ShapeDetail::Star:
         return ToolMode::Shape;
     default:
         return ToolMode::Line;
@@ -6622,6 +6626,7 @@ ShapeKind ShapeKindForShapeDetail(ShapeDetail detail) {
     case ShapeDetail::Triangle: return ShapeKind::Triangle;
     case ShapeDetail::Diamond: return ShapeKind::Diamond;
     case ShapeDetail::Arc: return ShapeKind::Arc;
+    case ShapeDetail::Star: return ShapeKind::Star;
     case ShapeDetail::Rectangle:
     default:
         return ShapeKind::Rectangle;
@@ -6652,6 +6657,8 @@ ShapeDetail ShapeDetailForLegacyState(ToolMode mode, ShapeKind kind) {
             return ShapeDetail::Diamond;
         case ShapeKind::Arc:
             return ShapeDetail::Arc;
+        case ShapeKind::Star:
+            return ShapeDetail::Star;
         case ShapeKind::Rectangle:
         case ShapeKind::Square:
         default:

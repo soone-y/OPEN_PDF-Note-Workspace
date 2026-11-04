@@ -705,7 +705,10 @@ try {
     $libreOfficeImageDir = Join-Path $repoRoot "third_party\libreoffice\image"
     $libreOfficeFontsDir = Join-Path $libreOfficeImageDir "Fonts"
     if (Test-Path -LiteralPath $libreOfficeFontsDir) {
-        $privateFontDestDir = Join-Path $outDir "libreoffice\image\Fonts"
+        # Full keeps all LibreOffice assets under its short runtime root. Lite
+        # retains the font-only tree; never mutate a previously frozen package.
+        $privateFontRoot = if ($Lite) { "libreoffice" } else { "lo" }
+        $privateFontDestDir = Join-Path $outDir ($privateFontRoot + "\image\Fonts")
         $privateFontPatterns = @(
             "LiberationSans-*.ttf",
             "LiberationSerif-*.ttf",

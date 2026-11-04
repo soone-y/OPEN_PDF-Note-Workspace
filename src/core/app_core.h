@@ -120,7 +120,7 @@ enum class AnnotToolUiState { Enabled, Disabled, Hidden };
 enum class AnnotToolShortcutTargetKind { Category, Detail };
 enum class AnnotToolGeometry { None, Shape, Line, Wave, Arrow };
 enum class AnnotToolPresentation { None, Stroke, Emphasis };
-enum class ShapeDetail { Line, Arrow, Wave, Rectangle, Ellipse, Triangle, Diamond, Arc };
+enum class ShapeDetail { Line, Arrow, Wave, Rectangle, Ellipse, Triangle, Diamond, Arc, Star };
 struct ShapeToolSelection {
     AnnotToolPresentation presentation = AnnotToolPresentation::Stroke;
     AnnotToolGeometry geometry = AnnotToolGeometry::Line;

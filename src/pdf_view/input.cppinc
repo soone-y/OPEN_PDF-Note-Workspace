@@ -9,6 +9,7 @@
 static DWORD g_pdfRecentLinkPlacementDblClickSuppressUntil = 0;
 static POINT g_pdfRecentLinkPlacementDblClickSuppressPt = { -1, -1 };
 static ULONGLONG g_pdfIgnoreNextLeftKeyUntilTick = 0;
+static bool g_pdfTextBoxAltClickConsumed = false;
 
 static void NotifyAnnotationInputWhileHidden(HWND hwnd) {
     if (g_showAnnots) return;
@@ -739,26 +740,36 @@ static void ApplyCurrentLineToolStyle(Annotation& ann) {
     const double minY = std::min(ann.y1, ann.y2);
     const double maxY = std::max(ann.y1, ann.y2);
     if (px < minX || px > maxX || py < minY || py > maxY) return false;
-    // Keep the full width and the existing screen-vertical inset. Each edge
-    // excludes 10% of the box height, capped at 31% of its font's line height.
-    // MathBox retains its full bounds.
+    // Keep the full width and the existing upper inset. Both insets start at
+    // 10% of height, capped at 31% of a line; reclaim up to one screen pixel
+    // from the lower inset without extending outside the box.
+    // PDF Y increases upward. MathBox retains its full bounds.
     const double insetY = ann.type == Annotation::Type::TextBox
         ? std::min((maxY - minY) * 0.1, TextBoxReeditLineHeightPt(ann) * 0.31) : 0.0;
-    return py >= minY + insetY && py <= maxY - insetY;
+    const double scale = g_pdf.scale > 0.0 ? g_pdf.scale : 1.0;
+    const double downPt = kTextInputDownBiasPx * 72.0 / kDpi / scale;
+    const double lowerInset = std::max(0.0, insetY - downPt);
+    return py >= minY + lowerInset && py <= maxY - insetY;
 }
 
 // Preserve click priority (newest first, including MathBox blocking an underlying TextBox).
 [[nodiscard]] static int FindTextReeditAnnotation(int pageIndex, double px, double py) {
     for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
-        const auto ann = ProjectAnnotationForView(g_annots[static_cast<size_t>(i)]);
-        if ((ann.type == Annotation::Type::TextBox || ann.type == Annotation::Type::MathBox) &&
-            ann.pageIndex == pageIndex && IsPointInTextReeditBounds(ann, px, py)) return i;
+        const auto& source = g_annots[static_cast<size_t>(i)];
+        // Filter before projection: unrelated pages can require PDF metadata,
+        // and projecting freehand annotations copies/transforms every point.
+        if (source.pageIndex != pageIndex ||
+            (source.type != Annotation::Type::TextBox && source.type != Annotation::Type::MathBox)) continue;
+        Annotation projection;
+        const auto& ann = AnnotationForView(source, projection);
+        if (IsPointInTextReeditBounds(ann, px, py)) return i;
     }
     return -1;
 }
 
 static bool CanShowTextBoxEditCursorAtPoint(const POINT& pt) {
     if (IsPdfPreviewReadOnlyActive() || g_pdf.kind != DocKind::Pdf) return false;
+    if (g_toolMode == ToolMode::TextBox && (GetKeyState(VK_MENU) & 0x8000)) return false;
     if (g_pdf.editingText) {
         size_t unused = 0;
         return HitTestEditCaretFromClientPoint(pt, &unused, false);
@@ -952,7 +963,9 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             DWORD pos = GetMessagePos();
             POINT pt{ GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
             ScreenToClient(hwnd, &pt);
-            if (!(GetKeyState(VK_CONTROL)&0x8000) && IsShapeRotationHandle(hwnd,pt)) {
+            const bool newTextBox = g_toolMode == ToolMode::TextBox &&
+                (GetKeyState(VK_MENU) & 0x8000) != 0;
+            if (!newTextBox && !(GetKeyState(VK_CONTROL)&0x8000) && IsShapeRotationHandle(hwnd,pt)) {
                 SetCursor(LoadCursor(nullptr,IDC_HAND));return TRUE;
             }
             if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
@@ -1347,7 +1360,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         bool previewReadOnly = IsPdfPreviewReadOnlyActive();
         bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        if(ShapeRotationPointerDown(hwnd,pt,ctrlDown))return 0;
+        const bool newTextBox = g_toolMode == ToolMode::TextBox && !ctrlDown &&
+            (GetKeyState(VK_MENU) & 0x8000) != 0;
+        if (newTextBox) ResetShapeRotation(hwnd);
+        else if(ShapeRotationPointerDown(hwnd,pt,ctrlDown))return 0;
         int hitPageIndex = -1;
         double hitPx = 0.0, hitPy = 0.0, hitPageTop = 0.0;
         bool hitPage = HitTestPagePoint(pt, hitPageIndex, hitPx, hitPy, hitPageTop);
@@ -1443,7 +1459,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 return 0;
             }
         }
-        if (!g_linkPending.active && !ctrlDown && !g_pdf.editingText &&
+        if (!g_linkPending.active && !ctrlDown && !newTextBox && !g_pdf.editingText &&
             g_pdf.kind == DocKind::Pdf) {
             int hitIdx = -1;
             if (HitTestLinkMarkerAtPoint(pt, hitIdx)) {
@@ -1465,7 +1481,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         if (g_pdf.editingText) {
-            if (BeginTextBoxEditClickSelection(hwnd, pt, shiftDown)) {
+            if (!(newTextBox && hitPage) && BeginTextBoxEditClickSelection(hwnd, pt, shiftDown)) {
                 return 0;
             }
             // A PDF-surface click outside the active box is the explicit
@@ -1474,7 +1490,17 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // Keeping the edit open here made touchpad taps move the box rather
             // than confirm it.
             CommitTextEditing(hwnd, true);
-            return 0;
+            if (!(newTextBox && hitPage)) return 0;
+            // Reediting from another tool restores that tool on confirmation.
+            // This explicit gesture continues with the TextBox tool instead.
+            if (g_toolMode != ToolMode::TextBox) {
+                g_toolMode = ToolMode::TextBox;
+                g_activeColor = ToolColorForMode(g_toolMode);
+                UpdateToolbarUI(GetParent(hwnd));
+            }
+            // Confirmation can change the viewport; place the new box at the
+            // clicked position in the resulting view, keeping the old text.
+            hitPage = HitTestPagePoint(pt, hitPageIndex, hitPx, hitPy, hitPageTop);
         }
         if (ctrlDown) {
             int idx = -1;
@@ -1496,7 +1522,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         if (g_toolMode == ToolMode::TextBox && hitPage) {
             NotifyAnnotationInputWhileHidden(hwnd);
-            if (!ctrlDown) {
+            if (!newTextBox) {
                 const int hitIdx = FindTextReeditAnnotation(hitPageIndex, hitPx, hitPy);
                 if (hitIdx >= 0) {
                     SelectAnnotPanelAnnotationByIndex(hitIdx);
@@ -1507,9 +1533,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     SetCapture(hwnd);
                     return 0;
                 }
-             }
-             // new box (ctrl or no hit on existing)
-             ResetEditOriginal();
+            }
+            // Alt explicitly starts a new box even on top of existing text.
+            if (newTextBox) g_pdfTextBoxAltClickConsumed = true;
+            ResetEditOriginal();
             AdaptiveTextPreset preset = ComputeAdaptiveTextPresetForPage(hitPageIndex, g_textFontPt);
             double fontPt = preset.fontPt;
             double anchorX = hitPx - (kTextClickLeftOffsetPx * 72.0 / kDpi / g_pdf.scale);
@@ -1887,7 +1914,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         }
                         ann.alpha = ToolAlphaForMode(g_toolMode);
                         ann.width = (g_lineWidthPt > 0.0) ? g_lineWidthPt : 2.5;
-                        if ((ann.shapeDrawMode == ShapeDrawMode::Outline || ann.shapeBoundary != ShapeBoundary::None) && g_lineDashStyle == L"dash") {
+                        if ((ann.shapeDrawMode != ShapeDrawMode::Fill || ann.shapeBoundary != ShapeBoundary::None) && g_lineDashStyle == L"dash") {
                             ann.dash = { std::max(1.0, ann.width * 4.0), std::max(1.0, ann.width * 2.0) };
                         }
                         ann.x1 = bounds.left;
@@ -2251,6 +2278,19 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         break;
     }
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+        if (wParam == VK_MENU) {
+            if (msg == WM_SYSKEYDOWN && !(lParam & (1LL << 30)))
+                g_pdfTextBoxAltClickConsumed = false;
+            if (g_pdf.textBoxHoverValid) InvalidateRect(hwnd, nullptr, FALSE);
+            RefreshPdfViewClientCursor(hwnd);
+            if (msg == WM_SYSKEYUP && g_pdfTextBoxAltClickConsumed) {
+                g_pdfTextBoxAltClickConsumed = false;
+                return 0; // The placement gesture consumed Alt; keep focus in the box.
+            }
+        }
+        break;
     case WM_KEYDOWN: {
         const bool movementKey = pdf_keyboard_scroll::Motion::KeyIndex(static_cast<unsigned>(wParam)) >= 0;
         if (!movementKey && wParam != VK_SHIFT) StopPdfKeyboardScroll(hwnd);

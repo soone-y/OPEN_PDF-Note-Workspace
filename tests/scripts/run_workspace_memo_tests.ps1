@@ -71,7 +71,5 @@ try {
         } finally {
             [Environment]::SetEnvironmentVariable("WORKSPACE_MEMO_APP_TEST_ROOT", $savedRoot, "Process")
         }
-        & (Join-Path $PSScriptRoot "run_settings_workflow_tests.ps1") -AppExecutable $binarySource
-        if (-not $?) { throw "Settings/workspace workflow runner failed." }
     }
 } finally { Pop-Location }

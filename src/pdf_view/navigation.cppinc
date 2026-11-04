@@ -32,6 +32,11 @@ static constexpr double kTextBoxLayoutDpi = kTextBoxStableRasterDpi;
     return std::max(1, static_cast<int>(std::lround(fontPt * kTextBoxLayoutDpi / 72.0)));
 }
 static constexpr int kTextClickLeftOffsetPx = 2; // 新規文字注釈をクリック位置へ近づける（P3-14: 従来より4px右寄せ）
+static constexpr int kTextInputDownBiasPx = 1; // Screen-space bias shared by insertion, reediting and hover.
+[[nodiscard]] static POINT TextBoxCaretHitPoint(POINT point) {
+    point.y += kTextInputDownBiasPx;
+    return point;
+}
 static constexpr double kDefaultTextWidthPt = 60.0;
 static constexpr double kDefaultTextHeightPt = 24.0;
 static constexpr int kTextBoxDragThresholdPx = 6;
@@ -258,6 +263,8 @@ static void InvalidateEditingTextBoxRect(HWND hwnd, const RECT* before = nullptr
     }
 }
 
+static void RevealAnnotationHistoryCommand(HWND hwnd, const AnnotCommand& command, bool undo);
+static void RevealEditingTextHistory(HWND hwnd);
 #include "pdf_view/annotation_edit.cppinc"
 
 struct PdfSearchResultMarker {
@@ -475,6 +482,7 @@ static bool EnsureEditingTextBoxVisible(HWND hwnd, const wchar_t* reason) {
 #include "pdf_view/document_io.cppinc"
 
 #include "pdf_view/zoom_flow.cppinc"
+#include "pdf_view/history_reveal.cppinc"
 
 #include "pdf_view/interaction_overlay.cppinc"
 #include "pdf_view/shape_rotation_interaction.cppinc"

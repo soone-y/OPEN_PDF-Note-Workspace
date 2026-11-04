@@ -33,6 +33,7 @@ def load_module(name: str, relative: str):
 introduction = load_module("site_test_introduction", "site/cloudflare/scripts/validate_introduction_site.py")
 portal = load_module("site_test_portal", "site/github/scripts/validate_public_site.py")
 renderer = load_module("site_test_renderer", "site/github/scripts/render_human_docs.py")
+builder = load_module("site_test_builder", "site/github/scripts/build_public_site.py")
 
 
 class SiteValidationRegressionTests(unittest.TestCase):
@@ -70,6 +71,124 @@ class SiteValidationRegressionTests(unittest.TestCase):
         with mock.patch("socket.socket", side_effect=AssertionError("network forbidden")):
             self.assertEqual(introduction.validate_site(self.site), [])
 
+    def test_portal_document_count_tracks_rendered_sources_in_both_languages(self) -> None:
+        for relative in ("README.md", "docs/ja/Guide.md", "docs/en/Guide.md"):
+            source = self.portal / relative
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("# Guide", encoding="utf-8")
+            source.with_suffix(".html").write_text("<body>Guide</body>", encoding="utf-8")
+        (self.portal / "unrendered.md").write_text("# Not rendered", encoding="utf-8")
+        (self.portal / "asset.json").write_text("{}", encoding="utf-8")
+        pages = [self.portal / relative for relative in ("index.html", "en/index.html")]
+        for page in pages:
+            page.parent.mkdir(parents=True, exist_ok=True)
+            page.write_text(builder.DOCUMENT_COUNT_TOKEN, encoding="utf-8")
+        builder.replace_document_count_tokens(self.portal)
+        for page in pages:
+            self.assertEqual(page.read_text(encoding="utf-8"), "3")
+        (self.portal / "unrendered.html").write_text("<body>Guide</body>", encoding="utf-8")
+        for page in pages:
+            page.write_text(builder.DOCUMENT_COUNT_TOKEN, encoding="utf-8")
+        builder.replace_document_count_tokens(self.portal)
+        for page in pages:
+            self.assertEqual(page.read_text(encoding="utf-8"), "4")
+
+    def test_overview_reference_is_in_the_primary_portal_entries(self) -> None:
+        for relative, target in (("index.html", "introduction/project_overview.html"),
+                                 ("en/index.html", "../introduction/en/project_overview.html")):
+            with self.subTest(page=relative):
+                text = (REPO_ROOT / "site/github" / relative).read_text(encoding="utf-8")
+                entries = re.search(r'<ul class="entry-list">(.*?)</ul>', text, re.DOTALL).group(1)
+                self.assertIn(f'href="{target}"', entries)
+
+    def test_documentation_map_stacks_descriptions_and_paths_without_a_table(self) -> None:
+        source = REPO_ROOT / "DOCUMENTATION.md"
+        target = self.portal / source.name
+        shutil.copyfile(source, target)
+        rendered = renderer.convert_md_file_to_html(target, self.portal).read_text(encoding="utf-8")
+        body = re.search(r'<main[^>]*>(.*?)</main>', rendered, re.DOTALL).group(1)
+        headings = re.findall(r'^#### ', source.read_text(encoding="utf-8"), re.MULTILINE)
+        self.assertTrue(headings, "documentation entries must have individual headings")
+        self.assertEqual(body.count('<h4 '), len(headings))
+        self.assertNotIn('<table>', body)
+        self.assertNotIn('table-scroll', body)
+        self.assertIn('<p>パス / Path: <code>introduction/core/safety_and_nonnegotiables.md</code></p>', body)
+        self.assertIn('href="docs/ja/Using_the_App.html"', body)
+        self.assertIn('href="docs/en/Using_the_App.html"', body)
+        for entry in re.findall(r'^#### [^\n]+\n(.*?)(?=^#{2,4} |\Z)', source.read_text(encoding="utf-8"), re.MULTILINE | re.DOTALL):
+            paragraphs = [part.strip() for part in entry.strip().split("\n\n")]
+            descriptions = [part for part in paragraphs if not part.startswith("パス / Path:")]
+            self.assertGreaterEqual(len(descriptions), 2, "each catalogue entry needs Japanese and English descriptions")
+            self.assertEqual(entry.count("パス / Path:"), 1, "each document has its own source path")
+
+    def portal_jump_fixture(self) -> None:
+        expected, _ = portal.allowlisted_portal_paths(REPO_ROOT, portal.ALLOWLIST_PATH)
+        for relative in expected:
+            if relative.suffix.lower() == ".md":
+                page = self.portal / relative.with_suffix(".html")
+                page.parent.mkdir(parents=True, exist_ok=True)
+                page.write_text("<html></html>", encoding="utf-8")
+        for relative in ("index.html", "en/index.html"):
+            page = self.portal / relative
+            page.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO_ROOT / "site/github" / relative, page)
+
+    def test_each_portal_jump_index_links_every_public_document(self) -> None:
+        self.portal_jump_fixture()
+        errors: list[str] = []
+        portal.validate_portal_jump_index(self.portal, REPO_ROOT, portal.ALLOWLIST_PATH, errors)
+        self.assertEqual(errors, [])
+        for relative in ("index.html", "en/index.html"):
+            text = (self.portal / relative).read_text(encoding="utf-8")
+            inventory = text.split('id="all-documents"', 1)[1].split('<script', 1)[0]
+            self.assertIn('class="jump-groups"', inventory)
+            self.assertNotIn('<code>', inventory, "paths belong in the explanatory catalogue")
+            self.assertEqual(inventory.count('<details>'), 4, "one disclosure per major category; no nested disclosure")
+            for count, group in re.findall(r'<summary>[^<]+\((\d+)\)</summary>(.*?)</details>', inventory, re.DOTALL):
+                self.assertEqual(group.count('<li><a '), int(count), "category count must match its actual links")
+
+    def test_jump_index_cannot_rely_on_navigation_or_the_documentation_guide(self) -> None:
+        self.portal_jump_fixture()
+        for relative, prefix in (("index.html", ""), ("en/index.html", "../")):
+            with self.subTest(page=relative):
+                page = self.portal / relative
+                original = page.read_text(encoding="utf-8")
+                link = f'<a href="{prefix}introduction/project_overview.html">'
+                before, inventory = original.split('id="all-documents"', 1)
+                page.write_text(before + 'id="all-documents"' + inventory.replace(link, '<a href="#all-documents">'), encoding="utf-8")
+                errors: list[str] = []
+                portal.validate_portal_jump_index(self.portal, REPO_ROOT, portal.ALLOWLIST_PATH, errors)
+                self.assertTrue(any(f"{relative} -> introduction/project_overview.html" in error for error in errors), errors)
+                page.write_text(original, encoding="utf-8")
+
+    def test_analytics_is_added_once_to_site_html_without_changing_markdown(self) -> None:
+        self.metadata_portal_fixture()
+        markdown_before = {path: path.read_bytes() for path in self.portal.rglob("*.md")}
+        with mock.patch("socket.socket", side_effect=AssertionError("network forbidden")):
+            builder.add_web_analytics(self.portal)
+        pages = list(self.portal.rglob("*.html"))
+        self.assertEqual(len(pages), 4, "Japanese/English entries and generated documents")
+        for path in pages:
+            with self.subTest(page=path.relative_to(self.portal)):
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text.count("data-cf-beacon="), 1)
+                self.assertIn("src='https://static.cloudflareinsights.com/beacon.min.js'", text)
+                self.assertIn("type='module'", text)
+                config = re.search(r"data-cf-beacon='([^']+)'", text)
+                self.assertEqual(json.loads(config.group(1)), {"token": "385b96f498964281bc0c2a771cebd04f"})
+                self.assertLess(text.index("<!-- End Cloudflare Web Analytics -->"), text.index("</body>"))
+        self.assertEqual({path: path.read_bytes() for path in markdown_before}, markdown_before)
+        self.assertNotIn("data-cf-beacon", renderer.HTML_TEMPLATE, "standalone conversion remains offline")
+
+    def test_analytics_rejects_duplicate_beacons_and_missing_body_end(self) -> None:
+        page = self.portal / "index.html"
+        for text in ("<html></html>", "<body><script data-cf-beacon='{}'></script></body>"):
+            with self.subTest(text=text):
+                page.write_text(text, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    builder.add_web_analytics(self.portal)
+                self.assertEqual(page.read_text(encoding="utf-8"), text)
+
     def metadata_portal_fixture(self) -> None:
         for relative in ("index.html", "en/index.html"):
             path = self.portal / relative
@@ -106,6 +225,38 @@ class SiteValidationRegressionTests(unittest.TestCase):
         self.assertFalse(parser.alternates)
         self.assertIn("%E6%97%A5", parser.canonicals[0])
         self.assertEqual(path.read_text(encoding="utf-8"), "# 資料\n\n説明文。")
+
+    def test_readme_entry_links_prefer_html_and_keep_github_and_local_docs(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8-sig")
+        links = re.findall(r'\[([^\]]+)\]\(([^)]+)\)', readme.split('\n\n', 2)[1])
+        self.assertEqual(links, [
+            ('紹介サイト / Overview', 'https://pdf-note-workspace.soone-y.com/'),
+            ('詳細文書・使い方 / Documentation', 'https://soone-y.github.io/OPEN_PDF-Note-Workspace/'),
+            ('ダウンロード / Releases', 'https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases'),
+        ])
+        source = self.portal / "README.md"
+        source.write_text(readme, encoding="utf-8")
+        rendered = renderer.convert_md_file_to_html(source, self.portal).read_text(encoding="utf-8")
+        for locale, label in (('ja', '日本語の文書'), ('en', 'English documentation')):
+            pages = f'https://soone-y.github.io/OPEN_PDF-Note-Workspace/docs/{locale}/README.html'
+            github = f'https://github.com/soone-y/OPEN_PDF-Note-Workspace/blob/main/docs/{locale}/README.md'
+            self.assertIn(f'[{label}]({pages})', readme)
+            self.assertIn(github, readme)
+            self.assertIn(f'](docs/{locale}/README.md)', readme, 'keep the existing local/package entry')
+            self.assertIn(f'href="{pages}"', rendered)
+            self.assertIn(f'href="{github}"', rendered, 'GitHub fallback must not be rewritten to HTML')
+            self.assertIn(f'href="docs/{locale}/README.html"', rendered)
+        parser = portal.HTMLReferenceParser()
+        parser.feed(rendered)
+        self.assertTrue(parser.metadata['description'][0].startswith('PDFの表示・注釈の追加と、'))
+        self.assertNotIn('Overview', parser.metadata['description'][0])
+
+    def test_metadata_skips_link_only_navigation_but_keeps_linked_prose(self) -> None:
+        parser = renderer.DocumentSummaryParser()
+        parser.feed('<h1>Guide</h1><p><a href="/">Overview</a> · <a href="/docs/">Docs</a></p>'
+                    '<p><a href="/ja/">日本語</a>（<a href="/github/">GitHubで読む</a>）</p>'
+                    '<p>Read <a href="/notes/">notes</a> beside a PDF.</p>')
+        self.assertEqual(parser.paragraphs, ['Read notes beside a PDF.'])
 
     def test_gfm_callouts_are_single_notes_without_source_markers(self) -> None:
         rendered = renderer.simple_markdown_to_html(
@@ -480,6 +631,35 @@ class SiteValidationRegressionTests(unittest.TestCase):
         for validator in (introduction, portal):
             with self.subTest(validator=validator.__name__), redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
                 self.assertEqual(validator.main(["--site", str(self.root / "missing")]), 1)
+
+    def test_document_outline_preserves_setup_numbers_without_adding_list_numbers(self) -> None:
+        markdown = (REPO_ROOT / "docs/ja/Getting_Started.md").read_text(encoding="utf-8")
+        body = renderer.simple_markdown_to_html(markdown, "")
+        outline = renderer.document_outline_html(body, "ja")
+        links = re.findall(r'<li><a href="#([^"]+)">([^<]+)</a></li>', outline)
+        self.assertIn('<ul role="list">', outline)
+        self.assertNotIn('<ol', outline)
+        self.assertEqual([label for _, label in links], re.findall(r'^## (.+)$', markdown, re.MULTILINE))
+        self.assertEqual([label.split('. ', 1)[0] for _, label in links], [str(n) for n in range(8)])
+        for identifier, _ in links:
+            self.assertIn(f'id="{identifier}"', body)
+        css = re.search(r'\.document-outline ul\s*\{\{([^}]+)', renderer.HTML_TEMPLATE)
+        self.assertIsNotNone(css)
+        self.assertIn('list-style: none', css.group(1))
+        self.assertNotIn('display: flex', css.group(1))
+        self.assertIn('.document-outline a {{ display: block;', renderer.HTML_TEMPLATE)
+
+    def test_document_outline_does_not_number_unnumbered_headings(self) -> None:
+        for locale, title, labels in (
+            ('ja', 'この文書の項目', ['資料を開く', '記録を探す']),
+            ('en', 'On this page', ['Open files', 'Find notes']),
+        ):
+            with self.subTest(locale=locale):
+                body = renderer.simple_markdown_to_html('# Guide\n\n' + '\n\n'.join('## ' + label for label in labels), '')
+                outline = renderer.document_outline_html(body, locale)
+                self.assertIn(f'<summary>{title}</summary><ul role="list">', outline)
+                self.assertNotIn('<ol', outline)
+                self.assertEqual(re.findall(r'<li><a href="#[^"]+">([^<]+)</a></li>', outline), labels)
 
     def test_japanese_heading_punctuation_matches_markdown_link(self) -> None:
         document = self.portal / "docs/ja/Troubleshooting.md"

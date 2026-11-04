@@ -2090,7 +2090,7 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
             double bottom = std::min(a.y1, a.y2);
             double top = std::max(a.y1, a.y2);
             BYTE alpha = AlphaFromNorm(a.alpha > 0.0 ? a.alpha : 0.35);
-            const bool outline = ShapeDrawModeForKind(a.shapeKind,a.shapeDrawMode) == ShapeDrawMode::Outline;
+            const bool outline = ShapeDrawModeForKind(a.shapeKind,a.shapeDrawMode) != ShapeDrawMode::Fill;
             const double strokeW = a.width > 0.0 ? a.width : 2.5;
             auto applyShapeStyle = [&](FPDF_PAGEOBJECT obj) {
                 if (!obj) return;
@@ -2106,7 +2106,7 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
                 }
                 FPDFPage_InsertObject(page, obj);
                 if (!outline && a.shapeBoundary != ShapeBoundary::None && !a.dash.empty()) {
-                    auto border = shape_outline::CreateDashedPdfPath(a.shapeKind,left,top,right,bottom,a.shapeRotation,a.dash,a.shapeAngle);
+                    auto border = shape_outline::CreateDashedPdfPath(a.shapeKind,left,top,right,bottom,a.shapeRotation,a.dash,a.shapeAngle,a.shapeDrawMode);
                     if (border) {
                         SetStrokeAndWidth(border,ShapeBoundaryColor(a.shapeBoundary),alpha,strokeW,true);
                         FPDFPath_SetDrawMode(border,FPDF_FILLMODE_NONE,TRUE);FPDFPage_InsertObject(page,border);
@@ -2115,11 +2115,11 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
             };
             if (outline && !a.dash.empty()) {
                 applyShapeStyle(shape_outline::CreateDashedPdfPath(a.shapeKind, left, top, right, bottom,
-                    std::isfinite(a.shapeRotation) ? a.shapeRotation : kDefaultRotatedEllipseAngleRad, a.dash,a.shapeAngle));
+                    std::isfinite(a.shapeRotation) ? a.shapeRotation : kDefaultRotatedEllipseAngleRad, a.dash,a.shapeAngle,a.shapeDrawMode));
                 break;
             }
-            if (ShapeKindIsOpen(a.shapeKind) || a.shapeAngle != 0.0) {
-                applyShapeStyle(shape_outline::CreateDashedPdfPath(a.shapeKind,left,top,right,bottom,a.shapeRotation,{},a.shapeAngle));
+            if (a.shapeKind == ShapeKind::Star || ShapeKindIsOpen(a.shapeKind) || a.shapeAngle != 0.0) {
+                applyShapeStyle(shape_outline::CreateDashedPdfPath(a.shapeKind,left,top,right,bottom,a.shapeRotation,{},a.shapeAngle,a.shapeDrawMode));
                 break;
             }
             if (a.shapeKind == ShapeKind::Rectangle || a.shapeKind == ShapeKind::Square) {
@@ -2903,15 +2903,15 @@ static bool DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
             const BYTE alpha = AlphaFromNorm(ann.alpha > 0 ? ann.alpha : 0.35);
             const int penWidth = std::max(1, static_cast<int>(std::lround((ann.width > 0 ? ann.width : 2.5) * scale)));
             const COLORREF boundaryColor = ann.shapeBoundary == ShapeBoundary::None ? ann.color : ShapeBoundaryColor(ann.shapeBoundary);
-            if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) == ShapeDrawMode::Outline && (ShapeKindIsOpen(ann.shapeKind) || !ann.dash.empty() || ann.shapeAngle != 0.0)) {
+            if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) != ShapeDrawMode::Fill && (ShapeKindIsOpen(ann.shapeKind) || !ann.dash.empty() || ann.shapeAngle != 0.0)) {
                 ui::DrawDashedShapeOutline(hdc, ann.shapeKind, rect, ann.shapeRotation, penWidth, boundaryColor,
-                                           alpha, ann.dash, scale, ann.contentRotation, ann.shapeAngle);
+                                           alpha, ann.dash, scale, ann.contentRotation, ann.shapeAngle,ann.shapeDrawMode);
             } else {
                 std::vector<POINT> points;
                 for (const auto& p : shape_outline::BuildOriented(ann.shapeKind, rect.left, rect.top, rect.right,
-                                                                rect.bottom, ann.shapeRotation, ann.contentRotation, ann.shapeAngle))
+                                                                rect.bottom, ann.shapeRotation, ann.contentRotation, ann.shapeAngle,ann.shapeDrawMode))
                     points.push_back({static_cast<LONG>(std::lround(p.x)),static_cast<LONG>(std::lround(p.y))});
-                if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) == ShapeDrawMode::Outline)
+                if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) != ShapeDrawMode::Fill)
                     DrawShapeOutlineAlphaPx(hdc, rect, points, penWidth, boundaryColor, alpha);
                 else FillPolygonAlphaPx(hdc, points, ann.color, alpha);
             }

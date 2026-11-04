@@ -6,9 +6,9 @@ namespace ui {
 // All dash runs share one mask and one blend, keeping translucent joins uniform.
 inline void DrawDashedShapeOutline(HDC hdc, ShapeKind kind, const RECT& bounds, double rotation,
                                    int penWidth, COLORREF color, BYTE alpha,
-                                   const std::vector<double>& dash, double ptToPx, int contentRotation = 0, double wholeAngle = 0.0) {
+                                   const std::vector<double>& dash, double ptToPx, int contentRotation = 0, double wholeAngle = 0.0, ShapeDrawMode drawMode = ShapeDrawMode::Outline) {
     if (!hdc || penWidth <= 0 || alpha == 0) return;
-    const auto outline = shape_outline::BuildOriented(kind, bounds.left, bounds.top, bounds.right, bounds.bottom, rotation, contentRotation, wholeAngle);
+    const auto outline = shape_outline::BuildOriented(kind, bounds.left, bounds.top, bounds.right, bounds.bottom, rotation, contentRotation, wholeAngle,drawMode);
     const auto runs = shape_outline::Dash(outline, dash, ptToPx);
     if (runs.empty()) return;
     RECT clip{};

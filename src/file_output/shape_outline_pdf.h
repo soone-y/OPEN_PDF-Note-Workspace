@@ -6,10 +6,10 @@
 namespace shape_outline {
 // The caller owns the returned object. Failure destroys the unfinished path.
 [[nodiscard]] inline FPDF_PAGEOBJECT CreateDashedPdfPath(ShapeKind kind, double left, double top,
-    double right, double bottom, double visualRotation, const std::vector<double>& dash, double wholeAngle = 0.0) {
+    double right, double bottom, double visualRotation, const std::vector<double>& dash, double wholeAngle = 0.0, ShapeDrawMode drawMode = ShapeDrawMode::Outline) {
     const double rotation = std::isfinite(visualRotation) ? visualRotation : kDefaultRotatedEllipseAngleRad;
-    const auto outline = wholeAngle == 0.0 ? Build(kind,left,top,right,bottom,-rotation)
-        : BuildOriented(kind,left,top,right,bottom,rotation,0,wholeAngle);
+    const auto outline = wholeAngle == 0.0 ? Build(kind,left,top,right,bottom,-rotation,drawMode)
+        : BuildOriented(kind,left,top,right,bottom,rotation,0,wholeAngle,drawMode);
     const auto runs = Dash(outline,dash,1.0,0.75);
     FPDF_PAGEOBJECT path = nullptr;
     for (const auto& run : runs) {

@@ -465,6 +465,17 @@ static std::wstring GetNoteAutomationIndexingText() {
     return normalized;
 }
 
+static void TraceUiAutomationClipboardFailure(const wchar_t* operation, DWORD error, HWND owner,
+                                               ULONGLONG elapsedMs = 0, unsigned attempts = 0) {
+    const HWND locker = GetOpenClipboardWindow();
+    DWORD lockerPid = 0;
+    if (locker) GetWindowThreadProcessId(locker, &lockerPid);
+    AppendUiAutomationTrace(L"automation:clipboard_fixture_failure api=" + std::wstring(operation) +
+        L" error=" + std::to_wstring(error) + L" owner_valid=" + std::to_wstring(IsWindow(owner) != FALSE) +
+        L" locker_pid=" + std::to_wstring(lockerPid) + L" elapsed_ms=" + std::to_wstring(elapsedMs) +
+        L" attempts=" + std::to_wstring(attempts));
+}
+
 static bool OpenUiAutomationClipboard(HWND owner) {
     // Clipboard ownership is serialized across the desktop.  A fixed handful
     // of 1 ms retries is not enough when a clipboard manager or the shell is
@@ -473,11 +484,18 @@ static bool OpenUiAutomationClipboard(HWND owner) {
     // editing never waits here.
     constexpr ULONGLONG kRetryWindowMs = 500;
     constexpr DWORD kRetryIntervalMs = 5;
-    const ULONGLONG deadline = GetTickCount64() + kRetryWindowMs;
+    const ULONGLONG started = GetTickCount64();
+    const ULONGLONG deadline = started + kRetryWindowMs;
+    DWORD error = ERROR_SUCCESS;
+    unsigned attempts = 0;
     do {
+        ++attempts;
+        SetLastError(ERROR_SUCCESS);
         if (OpenClipboard(owner)) return true;
+        error = GetLastError();
         Sleep(kRetryIntervalMs);
     } while (GetTickCount64() < deadline);
+    TraceUiAutomationClipboardFailure(L"OpenClipboard", error, owner, GetTickCount64() - started, attempts);
     return false;
 }
 
@@ -485,9 +503,13 @@ static bool SetUiAutomationClipboardText(HWND owner, const std::wstring& text) {
     if (text.size() >= std::numeric_limits<size_t>::max() / sizeof(wchar_t)) return false;
     const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
     HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (!memory) return false;
+    if (!memory) {
+        TraceUiAutomationClipboardFailure(L"GlobalAlloc", GetLastError(), owner);
+        return false;
+    }
     void* destination = GlobalLock(memory);
     if (!destination) {
+        TraceUiAutomationClipboardFailure(L"GlobalLock", GetLastError(), owner);
         GlobalFree(memory);
         return false;
     }
@@ -498,11 +520,13 @@ static bool SetUiAutomationClipboardText(HWND owner, const std::wstring& text) {
         return false;
     }
     if (!EmptyClipboard()) {
+        TraceUiAutomationClipboardFailure(L"EmptyClipboard", GetLastError(), owner);
         CloseClipboard();
         GlobalFree(memory);
         return false;
     }
     if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+        TraceUiAutomationClipboardFailure(L"SetClipboardData", GetLastError(), owner);
         CloseClipboard();
         GlobalFree(memory);
         return false;
@@ -1902,9 +1926,9 @@ static bool RunUiAutomationNoteInputUndoRedoScenario(HWND owner, std::wstring* o
     SendMessageW(g_hNoteEdit, EM_GETSEL,
                  reinterpret_cast<WPARAM>(&selectionAfterUndoStart),
                  reinterpret_cast<LPARAM>(&selectionAfterUndoEnd));
-    if (selectionAfterUndoStart != stableSelectionStart ||
-        selectionAfterUndoEnd != stableSelectionEnd) {
-        if (outError) *outError = L"Undo jumped an unrelated Note selection to historic edit state.";
+    if (selectionAfterUndoStart != selectedPasteInsertAt + selectedPasteSource.size() ||
+        selectionAfterUndoEnd != selectionAfterUndoStart) {
+        if (outError) *outError = L"Undo did not move the Note caret to the restored text end.";
         return false;
     }
     if (!SendUiAutomationNoteRedoChangedText() ||
@@ -1918,15 +1942,14 @@ static bool RunUiAutomationNoteInputUndoRedoScenario(HWND owner, std::wstring* o
     SendMessageW(g_hNoteEdit, EM_GETSEL,
                  reinterpret_cast<WPARAM>(&selectionAfterRedoStart),
                  reinterpret_cast<LPARAM>(&selectionAfterRedoEnd));
-    if (selectionAfterRedoStart != stableSelectionStart ||
-        selectionAfterRedoEnd != stableSelectionEnd) {
-        if (outError) *outError = L"Redo jumped an unrelated Note selection to historic edit state.";
+    if (selectionAfterRedoStart != selectedPasteInsertAt + selectedPasteReplacement.size() ||
+        selectionAfterRedoEnd != selectionAfterRedoStart) {
+        if (outError) *outError = L"Redo did not move the Note caret to the replacement end.";
         return false;
     }
 
-    // A selection that intersects the replacement has no stable text identity.
-    // It must collapse at the end of each resulting replacement, rather than
-    // being restored from the earlier Paste snapshot.
+    // An intersecting selection also collapses at the end of the replay result.
+    // Both directions must reveal the command even after selection navigation.
     const DWORD pastedTextStart = static_cast<DWORD>(selectedPasteInsertAt);
     const DWORD pastedTextEnd = static_cast<DWORD>(
         selectedPasteInsertAt + selectedPasteReplacement.size());

@@ -951,7 +951,7 @@ static void DrawEraserHitVisualization(HDC hdc, const RECT& client) {
                 if (PtRectToClientRect(ann.pageIndex, minX, minY, maxX, maxY, r)) {
                     std::vector<POINT> points;
                     for (const auto& p : shape_outline::BuildOriented(ann.shapeKind, r.left, r.top, r.right, r.bottom,
-                                                                      ann.shapeRotation, ann.contentRotation, ann.shapeAngle))
+                                                                      ann.shapeRotation, ann.contentRotation, ann.shapeAngle,ann.shapeDrawMode))
                         points.push_back({static_cast<LONG>(std::lround(p.x)), static_cast<LONG>(std::lround(p.y))});
                     if(ShapeKindIsOpen(ann.shapeKind)) {
                         if(points.size()>=2)Polyline(hdc,points.data(),static_cast<int>(points.size()));
@@ -1023,10 +1023,10 @@ static bool HitTestLinkMarkerAtPoint(const POINT& pt, int& outIndex) {
     double px = 0.0, py = 0.0, pageTop = 0.0;
     if (!HitTestPagePoint(pt, pageIndex, px, py, pageTop)) return false;
     for (int i = static_cast<int>(g_annots.size()) - 1; i >= 0; --i) {
+        const auto& source = g_annots[static_cast<size_t>(i)];
+        if (source.type != Annotation::Type::LinkMarker || source.pageIndex != pageIndex) continue;
         Annotation projection;
-        const auto& ann = AnnotationForView(g_annots[static_cast<size_t>(i)], projection);
-        if (ann.type != Annotation::Type::LinkMarker) continue;
-        if (ann.pageIndex != pageIndex) continue;
+        const auto& ann = AnnotationForView(source, projection);
         double radius = (ann.width > 0.0) ? ann.width : 6.0;
         double dx = px - ann.x1;
         double dy = py - ann.y1;
@@ -1315,19 +1315,21 @@ static void CommitPendingTextBoxEdit(HWND hwnd) {
         g_textBoxReadableBackground = true;
         g_textBoxReadableBackgroundInverted = true;
     }
-    if (g_hPdfToolbar) {
-        RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
-    }
-    if (g_hMainWnd) {
-        UpdateToolbarUI(g_hMainWnd);
-    }
-
     const double editFontPt = (ann.fontPt > 0.0) ? ann.fontPt
         : ResolveAdaptiveTextFontPtForPage(ann.pageIndex, g_textFontPt);
     const auto origin = annotation_rotation::ContentOrigin(ann);
     const auto extent = annotation_rotation::ContentExtent(ann);
     BeginTextEdit(hwnd, ann.pageIndex, origin.x, origin.y, extent.width, extent.height,
                   ann.text, ann.fontName, editFontPt, ann.contentRotation);
+    // Publish the edit before syncing the toolbar. With the original removed
+    // from g_annots, syncing earlier rebuilt the size choices for creation
+    // defaults, only to rebuild them for the same box again in BeginTextEdit.
+    if (g_hMainWnd) UpdateToolbarUI(g_hMainWnd);
+    if (g_preEditToolbarState.toolMode != ToolMode::TextBox)
+        EnsureEditingTextBoxVisible(hwnd, L"reedit_toolbar_layout");
+    if (g_hPdfToolbar) {
+        RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+    }
     size_t clickCaret = 0;
     if (HitTestEditCaretFromClientPoint(downPt, &clickCaret, true)) {
         g_pdf.editCaret = clickCaret;
@@ -3160,9 +3162,10 @@ static void DrawTextBoxHoverCaret(HDC hdc, const RECT& client) {
     int pageIndex = -1;
     double hitPx = 0.0, hitPy = 0.0, dummyTop = 0.0;
     if (!HitTestPagePoint(g_pdf.textBoxHoverPos, pageIndex, hitPx, hitPy, dummyTop)) return;
+    const bool newTextBox = (GetKeyState(VK_MENU) & 0x8000) != 0;
     int linkIndex = -1;
-    if (HitTestLinkMarkerAtPoint(g_pdf.textBoxHoverPos, linkIndex)) return;
-    const int index = FindTextReeditAnnotation(pageIndex, hitPx, hitPy);
+    if (!newTextBox && HitTestLinkMarkerAtPoint(g_pdf.textBoxHoverPos, linkIndex)) return;
+    const int index = newTextBox ? -1 : FindTextReeditAnnotation(pageIndex, hitPx, hitPy);
     if (index >= 0) {
         const auto box = ProjectAnnotationForView(g_annots[static_cast<size_t>(index)]);
         // MathBox does not start inline text editing; do not advertise a new TextBox there.
@@ -3452,6 +3455,25 @@ static void DrawInProgress(HDC hdc, const RECT& client) {
             r.bottom = static_cast<LONG>(std::round(bounds.top));
             const double strokePt = (g_lineWidthPt > 0.0) ? g_lineWidthPt : 2.5;
             const int penW = static_cast<int>(std::round(std::max(1.0, strokePt * kDpi / 72.0 * g_pdf.scale)));
+            if(g_shapeKind == ShapeKind::Star) {
+                const std::vector<double> dash=g_lineDashStyle==L"dash" ? std::vector<double>{std::max(1.0,strokePt*4),std::max(1.0,strokePt*2)} : std::vector<double>{};
+                const COLORREF strokeColor=g_config.newShapeBoundary==ShapeBoundary::None ? color : ShapeBoundaryColor(g_config.newShapeBoundary);
+                if(g_shapeDrawMode!=ShapeDrawMode::Fill && g_config.newShapeBoundary!=ShapeBoundary::None)
+                    ui::DrawDashedShapeOutline(hdc,g_shapeKind,r,0,penW,strokeColor,alpha,dash,kDpi/72*g_pdf.scale,0,0,g_shapeDrawMode);
+                else if(g_config.newShapeBlendMode==AnnotationBlendMode::Multiply)
+                    DrawMultiplyShape(hdc,g_shapeKind,g_shapeDrawMode,r,penW,color,alpha,dash,kDpi/72*g_pdf.scale,0,0,0);
+                else if(g_shapeDrawMode!=ShapeDrawMode::Fill)
+                    ui::DrawDashedShapeOutline(hdc,g_shapeKind,r,0,penW,strokeColor,alpha,dash,kDpi/72*g_pdf.scale,0,0,g_shapeDrawMode);
+                else {
+                    std::vector<POINT> pts;
+                    for(const auto& p:shape_outline::Build(g_shapeKind,r.left,r.top,r.right,r.bottom))
+                        pts.push_back({static_cast<LONG>(std::lround(p.x)),static_cast<LONG>(std::lround(p.y))});
+                    FillPolygonAlphaPx(hdc,pts,color,alpha);
+                }
+                if(g_config.newShapeBoundary!=ShapeBoundary::None && g_shapeDrawMode==ShapeDrawMode::Fill)
+                    ui::DrawDashedShapeOutline(hdc,g_shapeKind,r,0,penW,strokeColor,alpha,dash,kDpi/72*g_pdf.scale,0,0,g_shapeDrawMode);
+                return;
+            }
             if(ShapeKindIsOpen(g_shapeKind)) {
                 const std::vector<double> dash=g_lineDashStyle==L"dash"
                     ? std::vector<double>{std::max(1.0,strokePt*4.0),std::max(1.0,strokePt*2.0)} : std::vector<double>{};
@@ -3466,16 +3488,16 @@ static void DrawInProgress(HDC hdc, const RECT& client) {
                 ui::DrawDashedShapeOutline(hdc,g_shapeKind,r,ShapeRotationFromClientEndpoints(x1,y1,x2,y2),
                     penW,ShapeBoundaryColor(g_config.newShapeBoundary),alpha,dash,kDpi/72.0*g_pdf.scale);
             };
-            if (g_shapeDrawMode == ShapeDrawMode::Outline && g_config.newShapeBoundary != ShapeBoundary::None) {drawBoundary();return;}
+            if (g_shapeDrawMode != ShapeDrawMode::Fill && g_config.newShapeBoundary != ShapeBoundary::None) {drawBoundary();return;}
             if (g_config.newShapeBlendMode == AnnotationBlendMode::Multiply) {
-                const std::vector<double> dash = g_shapeDrawMode == ShapeDrawMode::Outline && g_lineDashStyle == L"dash"
+                const std::vector<double> dash = g_shapeDrawMode != ShapeDrawMode::Fill && g_lineDashStyle == L"dash"
                     ? std::vector<double>{std::max(1.0,strokePt*4.0),std::max(1.0,strokePt*2.0)} : std::vector<double>{};
                 DrawMultiplyShape(hdc,g_shapeKind,g_shapeDrawMode,r,penW,color,alpha,dash,kDpi/72.0*g_pdf.scale,
                     ShapeRotationFromClientEndpoints(x1,y1,x2,y2));
                 drawBoundary();
                 return;
             }
-            if (g_shapeDrawMode == ShapeDrawMode::Outline && g_lineDashStyle == L"dash") {
+            if (g_shapeDrawMode != ShapeDrawMode::Fill && g_lineDashStyle == L"dash") {
                 ui::DrawDashedShapeOutline(hdc, g_shapeKind, r, ShapeRotationFromClientEndpoints(x1, y1, x2, y2),
                     penW, color, alpha, {std::max(1.0, strokePt * 4.0), std::max(1.0, strokePt * 2.0)},
                     kDpi / 72.0 * g_pdf.scale);
@@ -3483,20 +3505,20 @@ static void DrawInProgress(HDC hdc, const RECT& client) {
             }
             std::vector<POINT> pts;
             if (g_shapeKind == ShapeKind::Rectangle || g_shapeKind == ShapeKind::Square) {
-                if (g_shapeDrawMode == ShapeDrawMode::Outline) {
+                if (g_shapeDrawMode != ShapeDrawMode::Fill) {
                     DrawShapeOutlineAlphaPx(hdc, g_shapeKind, r, pts, penW, color, alpha);
                 } else {
                     FillRectAlpha(hdc, r, color, alpha);
                 }
             } else if (g_shapeKind == ShapeKind::Ellipse || g_shapeKind == ShapeKind::Circle) {
-                if (g_shapeDrawMode == ShapeDrawMode::Outline) {
+                if (g_shapeDrawMode != ShapeDrawMode::Fill) {
                     DrawShapeOutlineAlphaPx(hdc, g_shapeKind, r, pts, penW, color, alpha);
                 } else {
                     FillEllipseAlphaPx(hdc, r, color, alpha);
                 }
             } else if (g_shapeKind == ShapeKind::RotatedEllipse) {
                 pts = BuildRotatedEllipseOutlinePointsPx(r, ShapeRotationFromClientEndpoints(x1, y1, x2, y2));
-                if (g_shapeDrawMode == ShapeDrawMode::Outline) {
+                if (g_shapeDrawMode != ShapeDrawMode::Fill) {
                     DrawShapeOutlineAlphaPx(hdc, g_shapeKind, r, pts, penW, color, alpha);
                 } else {
                     FillPolygonAlphaPx(hdc, pts, color, alpha);
@@ -3518,7 +3540,7 @@ static void DrawInProgress(HDC hdc, const RECT& client) {
                         { static_cast<LONG>(std::lround(bounds.left)), static_cast<LONG>(std::lround(bounds.top)) },
                     };
                 }
-                if (g_shapeDrawMode == ShapeDrawMode::Outline) {
+                if (g_shapeDrawMode != ShapeDrawMode::Fill) {
                     DrawShapeOutlineAlphaPx(hdc, g_shapeKind, r, pts, penW, color, alpha);
                 } else {
                     FillPolygonAlphaPx(hdc, pts, color, alpha);
@@ -3660,22 +3682,22 @@ static void DrawAnnotations(HDC hdc, const RECT& client) {
             const int penW = std::max(1, static_cast<int>(std::lround((ann.width > 0 ? ann.width : 2.5) * scale)));
             const auto drawBoundary = [&]() {
                 ui::DrawDashedShapeOutline(hdc,ann.shapeKind,r,ann.shapeRotation,penW,ShapeBoundaryColor(ann.shapeBoundary),
-                    alpha,ann.dash,scale,ann.contentRotation,ann.shapeAngle);
+                    alpha,ann.dash,scale,ann.contentRotation,ann.shapeAngle,ann.shapeDrawMode);
             };
-            if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) == ShapeDrawMode::Outline && ann.shapeBoundary != ShapeBoundary::None) {
+            if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) != ShapeDrawMode::Fill && ann.shapeBoundary != ShapeBoundary::None) {
                 drawBoundary();
             } else if (ann.blendMode == AnnotationBlendMode::Multiply) {
                 DrawMultiplyShape(hdc,ann.shapeKind,ann.shapeDrawMode,r,penW,ann.color,alpha,ann.dash,scale,
                     ann.shapeRotation,ann.contentRotation,ann.shapeAngle);
-            } else if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) == ShapeDrawMode::Outline && (ShapeKindIsOpen(ann.shapeKind) || !ann.dash.empty() || ann.shapeAngle != 0.0)) {
+            } else if (ShapeDrawModeForKind(ann.shapeKind,ann.shapeDrawMode) != ShapeDrawMode::Fill && (ShapeKindIsOpen(ann.shapeKind) || !ann.dash.empty() || ann.shapeAngle != 0.0)) {
                 ui::DrawDashedShapeOutline(hdc, ann.shapeKind, r, ann.shapeRotation, penW, ann.color,
-                                           alpha, ann.dash, scale, ann.contentRotation, ann.shapeAngle);
+                                           alpha, ann.dash, scale, ann.contentRotation, ann.shapeAngle,ann.shapeDrawMode);
             } else {
                 std::vector<POINT> points;
                 for (const auto& p : shape_outline::BuildOriented(ann.shapeKind, r.left, r.top, r.right, r.bottom,
-                                                                  ann.shapeRotation, ann.contentRotation, ann.shapeAngle))
+                                                                  ann.shapeRotation, ann.contentRotation, ann.shapeAngle,ann.shapeDrawMode))
                     points.push_back({static_cast<LONG>(std::lround(p.x)), static_cast<LONG>(std::lround(p.y))});
-                if (ann.shapeDrawMode == ShapeDrawMode::Outline)
+                if (ann.shapeDrawMode != ShapeDrawMode::Fill)
                     DrawShapeOutlineAlphaPx(hdc, ann.shapeKind, r, points, penW, ann.color, alpha);
                 else FillPolygonAlphaPx(hdc, points, ann.color, alpha);
             }

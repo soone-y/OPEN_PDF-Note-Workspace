@@ -12,6 +12,7 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
     const double originalPt = g_textFontPt;
     const bool originalAdaptive = g_textFontUseA4Scale;
     const double originalScrollX = g_pdf.scrollX, originalScrollY = g_pdf.scrollY;
+    const double originalScale = g_pdf.scale;
     const bool originalDirty = g_annotsDirty, originalIntegrate = g_annotsNeedsIntegrate;
     auto originalUndo = g_annotUndo, originalRedo = g_annotRedo;
     auto originalPending = g_pendingAnnotStageCommands;
@@ -23,6 +24,7 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
     const auto restore = [&]() {
         if (g_pdf.editingText) EndInlineTextEditing(g_hPdfView, false);
         g_annots = originalAnnots;
+        g_pdf.scale = originalScale;
         g_pdf.pageViewRotations = originalRotations;
         BuildPageCaches(g_hPdfView);
         UpdatePageLayout(g_hPdfView);
@@ -45,6 +47,10 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
     g_textFontUseA4Scale = false;
     if (!EnsurePdfPageCoordinates(0)) return fail(L"Rotation fixture page geometry is unavailable.");
     const auto raw = g_pdf.pages.front();
+    const auto originalPdfId = clrop::ComputePdfFastId(CurrentLogicalPdfPath());
+    if (!clrop::PdfIdHasFastFingerprint(originalPdfId) ||
+        std::abs(originalPdfId.pageSizesPt.front()[0] - originalPdfId.pageSizesPt.front()[1]) < 1.0)
+        return fail(L"PDF identity rotation probe requires original non-square page dimensions.");
     Annotation fixture;
     fixture.type = Annotation::Type::TextBox; fixture.pageIndex = 0; fixture.id = L"rotation-existing";
     fixture.x1 = raw.pdfOriginX + 60; fixture.x2 = fixture.x1 + 180;
@@ -64,6 +70,9 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
             return fail(L"Current-page rotation did not select the requested quarter turn.");
         if (g_annotsDirty || g_annotsNeedsIntegrate || !AnnotationEquals(g_annots.front(),fixture) || !g_annotUndo.empty())
             return fail(L"View rotation changed persistent annotation state.");
+        const auto expectedOriginalId = BuildCurrentOpenPdfFastId();
+        if (!clrop::PdfIdFastMatches(originalPdfId, expectedOriginalId))
+            return fail(L"View rotation leaked into the original PDF identity used for annotation loading.");
         const int effective = page_rotation::Normalize(raw.intrinsicRotation + turn);
         const auto projected = ProjectAnnotationForView(fixture);
         RECT bounds{};
@@ -84,7 +93,9 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
             caret.x<editor.left-2 || caret.x>editor.right+2 || caret.y<editor.top-2 || caret.y>editor.bottom+2)
             return fail(L"Rotated caret is outside the physical editor bounds.");
         size_t caretIndex = 0;
-        if (!HitTestEditCaretFromClientPoint(caret,&caretIndex,true) || caretIndex != g_pdf.editCaret)
+        // Invert the intentional screen-down input bias before the round trip.
+        const POINT caretClick{caret.x, caret.y - kTextInputDownBiasPx};
+        if (!HitTestEditCaretFromClientPoint(caretClick,&caretIndex,true) || caretIndex != g_pdf.editCaret)
             return fail(L"Rotated caret and click position do not round trip.");
         SendMessageW(g_hPdfView,WM_CHAR,L'Z',0);
         CommitActiveTextEditing(true);
@@ -92,8 +103,22 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
             g_annots.front().projectedCoordinates || g_annots.front().text.find(L'Z')==std::wstring::npos)
             return fail(L"Reedited textbox failed to return to canonical coordinates.");
         const auto edited=g_annots.front();
+        // Replay must reveal a remote annotation and shrink an oversized one,
+        // in every page rotation, without altering canonical geometry.
+        ApplyPdfScaleDirect(g_hPdfView, kMaxScale, POINT{0, 0}, true);
+        g_pdf.scrollX = g_pdf.contentWidth; g_pdf.scrollY = g_pdf.contentHeight;
+        const auto annotationVisible = [&](const Annotation& source) {
+            const auto view = ProjectAnnotationForView(source);
+            RECT rect{}, client{};
+            return GetClientRect(g_hPdfView, &client) &&
+                PtRectToClientRect(view.pageIndex, view.x1, view.y1, view.x2, view.y2, rect) &&
+                rect.left >= client.left && rect.top >= client.top &&
+                rect.right <= client.right && rect.bottom <= client.bottom;
+        };
         if (!UndoAnnotCommand(owner) || !AnnotationEquals(g_annots.front(),fixture) ||
-            !RedoAnnotCommand(owner) || !AnnotationEquals(g_annots.front(),edited))
+            !annotationVisible(fixture) ||
+            !RedoAnnotCommand(owner) || !AnnotationEquals(g_annots.front(),edited) ||
+            !annotationVisible(edited))
             return fail(L"Rotated textbox undo/redo did not preserve the exact annotation.");
         const auto& page=g_pdf.pages.front();
         // Keep focus in the PDF pane: beginning the next empty box must publish
@@ -146,6 +171,17 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
         if (!clrop_bridge::LoadAnnotations(sidecar.wstring(),CurrentLogicalPdfPath(),reopened,mismatch,nullptr,error) ||
             mismatch || reopened.size()!=4 || !AnnotationEquals(reopened.back(),g_annots.back()))
             return fail(L"Oriented sidecar reload changed annotation geometry or content direction.");
+        if (!clrop_bridge::LoadAnnotations(sidecar.wstring(),CurrentLogicalPdfPath(),reopened,mismatch,nullptr,error,
+                clrop_bridge::LoadAnnotationsValidation::Fast, &expectedOriginalId) || mismatch || reopened.size()!=g_annots.size())
+            return fail(L"The application fast-load identity rejected an unchanged PDF after view rotation.");
+        for (size_t i=0; i<reopened.size(); ++i)
+            if (reopened[i].id != g_annots[i].id)
+                return fail(L"Original PDF identity validation changed an individual annotation ID.");
+        auto differentPdfId = expectedOriginalId;
+        std::swap(differentPdfId.pageSizesPt.front()[0], differentPdfId.pageSizesPt.front()[1]);
+        if (!clrop_bridge::LoadAnnotations(sidecar.wstring(),CurrentLogicalPdfPath(),reopened,mismatch,nullptr,error,
+                clrop_bridge::LoadAnnotationsValidation::Fast, &differentPdfId) || !mismatch)
+            return fail(L"Original PDF identity validation accepted genuinely different page dimensions.");
         std::vector<file_output::PdfPageSpec> pages{{0,true}};pages.front().rotation=turn;
         const auto output=std::filesystem::path(outputDirectory)/(L"rotation_"+std::to_wstring(turn)+L".pdf");
         if (!file_output::ExportPdfPages(owner,pages,output.wstring(),true,1.0,true))
@@ -232,12 +268,15 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
         BuildPageCaches(g_hPdfView);
         UpdatePageLayout(g_hPdfView);
         if (g_pdf.pages.front().viewRotation != persistedTurns.front()) return fail(L"Layout preceded rotation restore.");
+        if (!clrop::PdfIdFastMatches(originalPdfId, BuildCurrentOpenPdfFastId()))
+            return fail(L"Restored view rotation changed the PDF identity before annotation loading.");
     }
     g_config.pdfOpenViewMode = originalOpenMode;
     g_usePdfOpeningPreference = originalOpeningPreference;
     g_restorePdfOpeningAnchor = originalOpeningAnchor;
     g_pendingPdfRestore.reset();
     if (!RotateAllPdfPagesView(g_hPdfView, 0, true)) return fail(L"Cannot restore zero rotations after record probe.");
+    if (trace) *trace += L"pdf_rotation:pdf_id_original_ok cases=4 restore_modes=3\n";
     if (trace) *trace += L"pdf_rotation:canonical_edit_save_undo_export_ok cases=4\n";
     return true;
 }

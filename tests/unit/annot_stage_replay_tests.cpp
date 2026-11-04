@@ -477,6 +477,69 @@ int main() {
             values[0].x2==50 && values[0].shapeAngle==0.4 && values[0].dash==arc.dash,"arc dimensions, dash and rotation survive stage/redo");
         Check(TryApplyAnnotCommandReverse(&values,command) && AnnotationEquals(values[0],arc),"arc undo restores the original curve");
     }
+    for(auto mode:{ShapeDrawMode::Fill,ShapeDrawMode::Outline,ShapeDrawMode::Line}) {
+        Annotation star;star.type=Annotation::Type::Shape;star.shapeKind=ShapeKind::Star;star.id=L"star";star.pageIndex=0;
+        star.shapeDrawMode=mode;star.x2=100;star.y1=95.1056516295;star.shapeAngle=0.37;
+        auto change=Update(star);change.after.shapeAngle=0.81;change.after.shapeBoundary=ShapeBoundary::White;
+        const auto command=RoundTrip(change);std::vector<Annotation> values{star};
+        Check(TryApplyAnnotCommandForward(&values,command) && values[0].shapeKind==ShapeKind::Star &&
+            values[0].shapeDrawMode==mode && values[0].shapeAngle==0.81,"all star modes and rotation survive journal/redo");
+        Check(TryApplyAnnotCommandReverse(&values,command) && AnnotationEquals(values[0],star),"star undo restores dimensions, mode and angle");
+    }
+    // Inspector options must survive journal reload and undo without changing
+    // annotation identity, geometry or unrelated options.
+    {
+        Annotation link = Text(L"link-annotation");
+        link.type = Annotation::Type::LinkMarker;
+        link.linkId = L"old-anchor";
+        link.linkNotePath = L"C:\\notes\\old.clro";
+        auto edit = Update(link);
+        edit.after.text = link.text;
+        edit.after.fontPt = link.fontPt;
+        edit.after.linkId = L"new-anchor";
+        edit.after.linkNotePath = L"C:\\notes\\new \u30ce\u30fc\u30c8.clro";
+        for (bool searchById : {false, true}) {
+            if (searchById) edit.after.linkNotePath.clear();
+            const auto command = RoundTrip(edit);
+            std::vector<Annotation> values{link};
+            annot_stage_replay::State replay(values.size(), AnnotNumericPrecision::RoundTrip17);
+            Check(replay.Apply(&values, command) && AnnotationEquals(values[0], edit.after),
+                  "link retarget survives journal reload including empty search path");
+            Check(TryApplyAnnotCommandReverse(&values, command) && AnnotationEquals(values[0], link),
+                  "link retarget undo restores ID, path, identity and geometry");
+            Check(TryApplyAnnotCommandForward(&values, command) && AnnotationEquals(values[0], edit.after),
+                  "link retarget redo restores target");
+        }
+    }
+    for (auto background : {TextBackgroundAssistMode::Inherit, TextBackgroundAssistMode::Off,
+                            TextBackgroundAssistMode::Auto, TextBackgroundAssistMode::Inverted}) {
+        const Annotation text = Text(L"text-options");
+        auto edit = Update(text);
+        edit.after.writingMode = TextWritingMode::VerticalRl;
+        edit.after.backgroundAssistMode = background;
+        edit.after.textLines.clear();
+        const auto command = RoundTrip(edit);
+        std::vector<Annotation> values{text};
+        annot_stage_replay::State replay(values.size(), AnnotNumericPrecision::RoundTrip17);
+        Check(replay.Apply(&values, command) && AnnotationEquals(values[0], edit.after),
+              "writing direction and each background option survive journal reload");
+        Check(TryApplyAnnotCommandReverse(&values, command) && AnnotationEquals(values[0], text),
+              "text option undo restores source and font with previous options");
+    }
+    for (auto kind : {MathKind::Latex, MathKind::Markup}) {
+        Annotation math = Text(L"math-options");
+        math.type = Annotation::Type::MathBox;
+        math.mathKind = kind == MathKind::Latex ? MathKind::Markup : MathKind::Latex;
+        auto edit = Update(math);
+        edit.after.mathKind = kind;
+        const auto command = RoundTrip(edit);
+        std::vector<Annotation> values{math};
+        annot_stage_replay::State replay(values.size(), AnnotNumericPrecision::RoundTrip17);
+        Check(replay.Apply(&values, command) && AnnotationEquals(values[0], edit.after),
+              "math format and source survive journal reload");
+        Check(TryApplyAnnotCommandReverse(&values, command) && AnnotationEquals(values[0], math),
+              "math format undo restores source and format together");
+    }
     std::string oldJournal;
     auto oldChange=Update(marker);
     Check(SerializeAnnotCommandsJson({oldChange},&oldJournal),"legacy marker journal fixture");

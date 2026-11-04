@@ -2,10 +2,12 @@
 param(
     [string[]]$OnlyStep = @(),
     [switch]$ListSteps,
+    [switch]$ContinueOnFailure,
     [switch]$SkipBuild,
     [switch]$SkipReadOnlyViewerBuild,
     [switch]$SkipAtomicWrite,
     [switch]$SkipWorkspaceMemoTests,
+    [switch]$SkipSettingsWorkflowTests,
     [switch]$SkipPathSafety,
     [switch]$SkipFaultInjection,
     [switch]$SkipNoteParserTests,
@@ -64,7 +66,14 @@ foreach ($step in $OnlyStep) {
     if ($step -notin $knownSteps) { throw "Unknown step: $step. Use -ListSteps for available names." }
 }
 if (@($OnlyStep | Select-Object -Unique).Count -ne $OnlyStep.Count) { throw "Duplicate step in -OnlyStep." }
-$script:CompletedSelectedSteps = [System.Collections.Generic.List[string]]::new()
+$script:Interrupted = $false
+$script:PlanningSteps = $true
+$script:PlannedSteps = [System.Collections.Generic.List[object]]::new()
+$script:StepResults = [ordered]@{}
+$script:RunError = ""
+$script:RequestedSkipOptions = @($PSBoundParameters.Keys | Where-Object {
+    $_ -like 'Skip*' -and [bool]$PSBoundParameters[$_]
+})
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -92,6 +101,7 @@ $releaseScript = Join-Path $repoRoot "release.ps1"
 $workspaceBuildScript = Join-Path $repoRoot "scripts\build\build_workspace.ps1"
 $atomicWriteScript = Join-Path $PSScriptRoot "run_atomic_write_tests.ps1"
 $workspaceMemoTestScript = Join-Path $PSScriptRoot "run_workspace_memo_tests.ps1"
+$settingsWorkflowTestScript = Join-Path $PSScriptRoot "run_settings_workflow_tests.ps1"
 $pathSafetyScript = Join-Path $PSScriptRoot "run_path_safety_tests.ps1"
 $faultInjectionScript = Join-Path $PSScriptRoot "run_fault_injection_tests.ps1"
 $noteParserScript = Join-Path $PSScriptRoot "run_note_parser_tests.ps1"
@@ -137,7 +147,7 @@ $powershellExe = (Get-Command powershell -ErrorAction SilentlyContinue).Source
 $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
 $repoCheckLogRoot = $LogDir
 if ([string]::IsNullOrWhiteSpace($repoCheckLogRoot)) {
-    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $stamp = (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + [guid]::NewGuid().ToString("N")
     $repoCheckLogRoot = Join-Path $repoRoot "out/logs/repo_checks/$stamp"
 }
 $script:CurrentStepLogPath = ""
@@ -227,6 +237,10 @@ function Invoke-LoggedCommand {
             $PSNativeCommandUseErrorActionPreference = $previousNativeCommandErrorPreference
         }
     }
+    if ($exitCode -eq 130) {
+        $script:Interrupted = $true
+        throw [OperationCanceledException]::new("Checks interrupted from the notice.")
+    }
     if ($exitCode -ne 0) {
         throw ("{0}: {1} (exit={2})" -f $FailureMessage, $FilePath, $exitCode)
     }
@@ -239,9 +253,23 @@ function Invoke-Step {
     )
 
     if ($OnlyStep.Count -gt 0 -and $Name -notin $OnlyStep) { return }
+    if ($script:PlanningSteps -and $script:StepResults.Contains($Name)) {
+        throw "Duplicate planned check: $Name"
+    }
+    if (-not $script:StepResults.Contains($Name)) {
+        $script:StepResults[$Name] = [pscustomobject]@{
+            name = $Name; status = 'PENDING'; error = ''; elapsed_seconds = 0.0; log = ''
+        }
+    }
+    if ($script:PlanningSteps) {
+        $script:PlannedSteps.Add([pscustomobject]@{ Name = $Name; Action = $Action })
+        return
+    }
+    $record = $script:StepResults[$Name]
     New-Item -ItemType Directory -Force -Path $repoCheckLogRoot | Out-Null
     $script:CurrentStepName = $Name
     $script:CurrentStepLogPath = Join-Path $repoCheckLogRoot (Get-SafeLogFileName $Name)
+    $record.log = $script:CurrentStepLogPath
     if (Test-Path -LiteralPath $script:CurrentStepLogPath) {
         Remove-Item -LiteralPath $script:CurrentStepLogPath -Force
     }
@@ -260,12 +288,16 @@ function Invoke-Step {
             throw "Check action returned unexpected output: $Name. Use throw for failure and Write-Host or step logs for diagnostics."
         }
         $sw.Stop()
-        if ($OnlyStep.Count -gt 0) { $script:CompletedSelectedSteps.Add($Name) }
+        $record.status = 'PASS'
+        $record.elapsed_seconds = $sw.Elapsed.TotalSeconds
         Write-StepLogFooter -Status "PASS" -Elapsed $sw.Elapsed
         Write-Host ("[PASS] {0} ({1}s)" -f $Name, [Math]::Round($sw.Elapsed.TotalSeconds, 1)) -ForegroundColor Green
     }
     catch {
         $sw.Stop()
+        $record.status = 'FAIL'
+        $record.error = $_.Exception.Message
+        $record.elapsed_seconds = $sw.Elapsed.TotalSeconds
         Append-StepLog ("error: {0}" -f $_.Exception.Message)
         Write-StepLogFooter -Status "FAIL" -Elapsed $sw.Elapsed
         Write-Host ("[FAIL] {0} ({1}s)" -f $Name, [Math]::Round($sw.Elapsed.TotalSeconds, 1)) -ForegroundColor Red
@@ -276,6 +308,63 @@ function Invoke-Step {
     finally {
         $script:CurrentStepLogPath = ""
         $script:CurrentStepName = ""
+    }
+}
+
+function Write-RepoCheckSummary {
+    foreach ($name in $OnlyStep) {
+        if (-not $script:StepResults.Contains($name)) {
+            $script:StepResults[$name] = [pscustomobject]@{
+                name = $name; status = 'NOT_RUN'; error = 'Disabled by Skip/Include/Office options.'
+                elapsed_seconds = 0.0; log = ''
+            }
+        }
+    }
+    foreach ($record in $script:StepResults.Values) {
+        if ($record.status -eq 'PENDING') {
+            $record.status = 'NOT_RUN'
+            $record.error = 'Execution stopped before this step. ' + $script:RunError
+        }
+    }
+    $rows = @($script:StepResults.Values)
+    $counts = [ordered]@{
+        selected = $rows.Count
+        pass = @($rows | Where-Object status -eq 'PASS').Count
+        fail = @($rows | Where-Object status -eq 'FAIL').Count
+        not_run = @($rows | Where-Object status -eq 'NOT_RUN').Count
+    }
+    $passed = $rows.Count -gt 0 -and $counts.fail -eq 0 -and $counts.not_run -eq 0 -and
+        [string]::IsNullOrWhiteSpace($script:RunError)
+    $summary = [ordered]@{
+        format = 'repo-check-summary-v1'; finished_at = (Get-Date).ToString('o')
+        status = $(if ($passed) { 'PASS' } else { 'FAIL' })
+        continue_on_failure = [bool]$ContinueOnFailure
+        partial_run = $OnlyStep.Count -gt 0 -or $script:RequestedSkipOptions.Count -gt 0
+        skip_options = $script:RequestedSkipOptions
+        build_failed = $script:StepResults.Contains('Build') -and $script:StepResults['Build'].status -eq 'FAIL'
+        counts = $counts; run_error = $script:RunError; steps = $rows
+        excluded_by_selection_or_options = @($knownSteps | Where-Object { -not $script:StepResults.Contains($_) })
+    }
+    Write-Host ""
+    foreach ($record in $rows) {
+        Write-Host ("[{0}] {1}{2}" -f $record.status, $record.name,
+            $(if ($record.error) { ': ' + $record.error } else { '' }))
+    }
+    Write-Host ("Selected={0}; PASS={1}; FAIL={2}; NOT_RUN={3}" -f $counts.selected, $counts.pass, $counts.fail, $counts.not_run)
+    if ($summary.build_failed) {
+        Write-Host 'Build failed; checks using existing artifacts are diagnostic and cannot validate this build.'
+    }
+    New-Item -ItemType Directory -Force -Path $repoCheckLogRoot | Out-Null
+    $summaryPath = Join-Path $repoCheckLogRoot 'summary.json'
+    $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    Write-Host ("Repository check summary: {0}" -f $summaryPath)
+    if (-not $passed) {
+        if ($script:repoCheckExitCode -ne 130) { $script:repoCheckExitCode = 1 }
+    }
+    elseif ($summary.partial_run) {
+        Write-Host 'Selected steps passed; this is a partial run.' -ForegroundColor Green
+    } else {
+        Write-Host 'All selected checks passed.' -ForegroundColor Green
     }
 }
 
@@ -362,6 +451,7 @@ function Invoke-ChildPowerShellScript {
         [string[]]$Arguments = @()
     )
 
+    Assert-ScriptExists -Path $ScriptPath
     if ([string]::IsNullOrWhiteSpace($powershellExe)) {
         throw "powershell.exe not found in PATH."
     }
@@ -381,6 +471,7 @@ function Invoke-PythonScript {
         [string[]]$Arguments = @()
     )
 
+    Assert-ScriptExists -Path $ScriptPath
     if ([string]::IsNullOrWhiteSpace($pythonExe)) {
         throw "python.exe not found in PATH."
     }
@@ -391,6 +482,7 @@ function Invoke-PythonScript {
 function Invoke-PythonUnittestFile {
     param([Parameter(Mandatory)][string]$TestFile)
 
+    Assert-ScriptExists -Path $TestFile
     if ([string]::IsNullOrWhiteSpace($pythonExe)) {
         throw "python.exe not found in PATH."
     }
@@ -502,6 +594,9 @@ function Assert-FileOutputSystemDialogPolicy {
 }
 
 function Invoke-SafetyScans {
+    if (-not (Test-Path -LiteralPath $safetyScanIgnoreFile -PathType Leaf)) {
+        throw "Missing required safety scan policy: $safetyScanIgnoreFile"
+    }
     if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
         throw "rg not found in PATH."
     }
@@ -646,38 +741,6 @@ $repoCheckExitCode = 0
 Push-Location -LiteralPath $repoRoot
 try {
     if ($OnlyStep.Count -gt 0) { Write-Host ("Partial run; requested steps: " + ($OnlyStep -join ", ")) }
-    if ($OnlyStep.Count -eq 0) {
-        Assert-ScriptExists -Path $atomicWriteScript
-        Assert-ScriptExists -Path $workspaceMemoTestScript
-        Assert-ScriptExists -Path $pathSafetyScript
-        Assert-ScriptExists -Path $faultInjectionScript
-        Assert-ScriptExists -Path $noteParserScript
-        Assert-ScriptExists -Path $mermaidSubsetParserScript
-        Assert-ScriptExists -Path $clropJsonDirectParseScript
-        Assert-ScriptExists -Path $clropFileSafetyScript
-        Assert-ScriptExists -Path $docxSpaceProtectionScript
-        Assert-ScriptExists -Path $textEncodingScript
-        Assert-ScriptExists -Path $runtimeDependencyScript
-        Assert-ScriptExists -Path $themeSwitchingScript
-        Assert-ScriptExists -Path $workspaceConfigTestScript
-        Assert-ScriptExists -Path $workspaceConfigRecoveryTestScript
-        Assert-ScriptExists -Path $workspaceConfigUnknownFieldTestScript
-        Assert-ScriptExists -Path $appLogContractTestScript
-        Assert-ScriptExists -Path $publishVersionHistoryTestScript
-        Assert-ScriptExists -Path $officeConversionFixtureScript
-        Assert-ScriptExists -Path $officeUpstreamConversionScript
-        Assert-ScriptExists -Path $uiAutomationScript
-        Assert-ScriptExists -Path $pythonToolTestScript
-        Assert-ScriptExists -Path $cloudflareSiteValidationScript
-        Assert-ScriptExists -Path $githubSiteBuildScript
-        Assert-ScriptExists -Path $githubSiteValidationScript
-        Assert-ScriptExists -Path $codebaseValidationScript
-        Assert-ScriptExists -Path $scriptAndTextGateScript
-        Assert-ScriptExists -Path $safetyScanIgnoreFile
-        Assert-ScriptExists -Path $binaryScanScript
-        Assert-ScriptExists -Path $libreOfficeRuntimeGateScript
-    }
-
     if (-not $SkipBuild) {
         Invoke-Step -Name "Build" -Action {
             Assert-ScriptExists -Path $buildScript
@@ -734,6 +797,12 @@ try {
             $memoArguments = @()
             if (-not $SkipUiAutomation) { $memoArguments += "-AppIntegration" }
             Invoke-ChildPowerShellScript -ScriptPath $workspaceMemoTestScript -Arguments $memoArguments
+        }
+    }
+
+    if (-not $SkipUiAutomation -and -not $SkipSettingsWorkflowTests) {
+        Invoke-Step -Name "Settings And Workspace Workflow Tests" -Action {
+            Invoke-ChildPowerShellScript -ScriptPath $settingsWorkflowTestScript
         }
     }
 
@@ -852,7 +921,10 @@ try {
 
     if (-not $SkipUiAutomation) {
         Invoke-Step -Name "UI Automation Rollback Tests" -Action {
-            Invoke-ChildPowerShellScript -ScriptPath $uiAutomationScript
+            # The complete suite measured over 120 seconds before shutdown.
+            # Use an explicit bounded budget; focused runs keep their default,
+            # and the child still fails and stops its owned app on timeout.
+            Invoke-ChildPowerShellScript -ScriptPath $uiAutomationScript -Arguments @("-TimeoutSeconds", "240")
         }
     }
 
@@ -960,21 +1032,45 @@ try {
         }
     }
 
+    # Register every selected step before executing any action. This preserves
+    # the denominator and lets a failed child return control to the next step.
+    $script:PlanningSteps = $false
+    foreach ($planned in $script:PlannedSteps) {
+        try {
+            Invoke-Step -Name $planned.Name -Action $planned.Action
+        } catch {
+            # Log creation or diagnostic output can fail before the action's
+            # catch block; those failures must also appear in the summary.
+            $record = $script:StepResults[$planned.Name]
+            $record.status = 'FAIL'
+            if (-not $record.error) { $record.error = $_.Exception.Message }
+            if ($script:Interrupted -or $_.Exception -is [OperationCanceledException] -or -not $ContinueOnFailure) { throw }
+        }
+    }
+
     Write-Host ""
     if ($OnlyStep.Count -gt 0) {
-        $missing = @($OnlyStep | Where-Object { $_ -notin $script:CompletedSelectedSteps })
+        $missing = @($OnlyStep | Where-Object { -not $script:StepResults.Contains($_) })
         if ($missing.Count -gt 0) { throw ("Requested steps were not executed (check Skip/Include and Office options): " + ($missing -join ", ")) }
-        Write-Host "Selected steps passed; this is a partial run." -ForegroundColor Green
-    } else {
-        Write-Host "All selected checks passed." -ForegroundColor Green
+    }
+    if (@($script:StepResults.Values | Where-Object status -ne 'PASS').Count -gt 0) {
+        throw 'One or more selected checks failed; see the summary.'
     }
 }
 catch {
-    $repoCheckExitCode = 1
+    $repoCheckExitCode = if ($script:Interrupted -or $_.Exception -is [OperationCanceledException]) { 130 } else { 1 }
+    $script:RunError = $_.Exception.Message
     Write-Host ""
     Write-Host ("Repo checks failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    Write-Host "Failed or unexecuted checks cannot establish release acceptance."
+    Write-Host ("Repository check logs: {0}" -f $repoCheckLogRoot)
 }
 finally {
+    try { Write-RepoCheckSummary }
+    catch {
+        $repoCheckExitCode = 1
+        Write-Host ("Unable to write repository check summary: " + $_.Exception.Message) -ForegroundColor Red
+    }
     Pop-Location
 }
 

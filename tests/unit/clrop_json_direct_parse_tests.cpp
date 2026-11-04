@@ -315,6 +315,14 @@ void RunReadableSerializationTests() {
 
 int main() {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    for(const std::string mode:{"fill","outline","line"}) {
+        const std::string json=R"({"version":2,"pdf_id":{"size":1},"pages":[{"page":0,"items":[{"type":"shape","id":"star","created":"now","updated":"now","bbox":[0,95,100,95],"shape_kind":"star","shape_angle":0.37,"shape_draw_mode":")"+mode+R"("}]}]})";
+        clrop::Document doc,reopened;std::wstring error;std::string saved;
+        const bool ok=clrop::ParseClropFromJson(json,doc,error) && clrop::SerializeClrop(doc,saved,error) && clrop::ParseClropFromJson(saved,reopened,error);
+        Expect(ok && reopened.pages.size()==1 && reopened.pages[0].items.size()==1 &&
+            reopened.pages[0].items[0].shapeKind=="star" && reopened.pages[0].items[0].shapeDrawMode==mode &&
+            Near(reopened.pages[0].items[0].shapeAngle,0.37),"star modes and angle survive clrop save/reload");
+    }
 
     {
         std::error_code ec;

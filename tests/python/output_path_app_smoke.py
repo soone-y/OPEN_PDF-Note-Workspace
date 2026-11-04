@@ -395,6 +395,13 @@ def main():
                 if bool(send(check, 0xF0)) != enabled:
                     raise RuntimeError("Keep-page-rotation selection was not retained")
 
+            if u.GetDlgItem(export, 4012):
+                raise RuntimeError("Separate page-selection format must be removed")
+            page_spec = u.GetDlgItem(export, 4031)
+            if not u.IsWindowVisible(page_spec) or text(page_spec) != "1-5":
+                raise RuntimeError("Unified PDF output must show all pages by default")
+            if not u.IsWindowVisible(u.GetDlgItem(export, 4042)):
+                raise RuntimeError("Unified PDF output must expose annotation selection")
             if send(u.GetDlgItem(export, 4099), 0xF0) != 1:
                 raise RuntimeError("PDF output must default to keeping page rotation")
 
@@ -433,14 +440,14 @@ def main():
                 raise RuntimeError("Quick PDF preset did not save color-overlay settings")
             send(color_mode, 0x14E, 0)
             send(export, 0x111, 4120 | (1 << 16), color_mode)
-            click(4012)
+            click(4011)
             set_text(u.GetDlgItem(export, 4031), "1n")
             target(source_alias, "SAMPLE.PDF")
             click(4201)
             if count() or pdf.read_bytes() != source_pdf_bytes:
                 raise RuntimeError("A junction/case alias of the original PDF was accepted")
             # Invalid input must neither reserve a different page nor close UI.
-            for invalid in ("1xyz", "1-2xyz", "1-2147483647", "4294967297", "0", "6", "3-1"):
+            for invalid in ("", "1xyz", "1-2xyz", "1-2147483647", "4294967297", "0", "6", "3-1"):
                 set_text(u.GetDlgItem(export, 4031), invalid)
                 target(destination, "invalid.pdf")
                 click(4201)
@@ -452,14 +459,14 @@ def main():
             if u.IsWindowEnabled(u.GetDlgItem(export, 4212)):
                 raise RuntimeError("PDF merge is enabled with only one reservation")
             click(4001)
-            click(4012)
+            click(4011)
             target(destination_alias, "REORDERED.PDF")
             click(4201)
             if count() != 1:
                 raise RuntimeError("A junction/case alias reserved the same output destination twice")
-            # Adding switches the category; select PDF Pages again explicitly.
+            # Adding switches the category; select PDF output again explicitly.
             click(4001)
-            click(4012)
+            click(4011)
             set_text(u.GetDlgItem(export, 4031), "2[0:0:200:200]n")
             target(destination, "crop.pdf")
             click(4201)
@@ -607,21 +614,22 @@ def main():
             wait(lambda: u.IsWindowVisible(export) and u.GetDlgItem(export, 4212))
             reservations = u.GetDlgItem(export, 4210)
             click(4001)
-            click(4012)
+            click(4011)
             click(4082)  # Full size.
             preserve_rotation(False)  # OFF ignores all temporary view angles.
             set_text(u.GetDlgItem(export, 4031), "3a,1n,3a")
             target(destination, "merge-segment-a.pdf")
             click(4201)
             click(4001)
-            click(4012)
+            click(4011)
             click(4081)  # Half size for this crop segment only.
             preserve_rotation(True)  # This crop keeps page two's batch turn.
             set_text(u.GetDlgItem(export, 4031), "2[0:0:200:200]n")
             target(destination, "merge-segment-b.pdf")
             click(4201)
             click(4001)
-            click(4011)  # All pages, including the first/last page.
+            click(4011)
+            set_text(u.GetDlgItem(export, 4031), "1-5")  # Include the first/last page.
             click(4083)  # Double size for this segment only.
             preserve_rotation(True)  # Freeze batch angles plus page zero's individual adjustment.
             target(destination, "merge-segment-all.pdf")

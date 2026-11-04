@@ -83,9 +83,8 @@ void UpdateToolbarUI(HWND hWnd) {
         : g_config.newMarkerDisplayMode == MarkerDisplayMode::Multiply;
     SendMessageW(g_hRadioBlendNormal,BM_SETCHECK,multiplyBlend ? BST_UNCHECKED : BST_CHECKED,0);
     SendMessageW(g_hRadioBlendMultiply,BM_SETCHECK,multiplyBlend ? BST_CHECKED : BST_UNCHECKED,0);
-    bool showAnnotMethod = ToolbarHasAnnotMethodOptions(g_toolMode);
-    bool showFreehandCorrection =
-        g_toolMode == ToolMode::Freehand && FreehandCorrectionPenActive(g_config.freehandCorrection);
+    bool showAnnotMethod = ToolbarHasAnnotMethodOptions(g_toolMode) && g_toolMode != ToolMode::Freehand;
+    bool showFreehandCorrection = g_toolMode == ToolMode::Freehand;
     bool showMarkerTextStyle = ToolbarHasMarkerTextStyleOptions(g_toolMode);
     bool showLineDash = ToolbarHasLineDashOptions(g_toolMode,g_shapeKind);
     bool showShape = ToolbarHasShapeOptions(g_toolMode);

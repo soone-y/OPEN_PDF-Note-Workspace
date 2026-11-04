@@ -2,6 +2,7 @@
 #include "pdf_view/view_rotation_record.h"
 #include "clrop/rotation.h"
 #include "core/shape_outline.h"
+#include "file_output/shape_outline_pdf.h"
 #include "ui/quarter_turn_bitmap.h"
 #include "ui/alpha_polygon.h"
 #include "ui/dashed_shape_outline.h"
@@ -20,7 +21,37 @@ bool Near(double x, double y) { return std::abs(x - y) < 1e-10; }
 }
 
 int main() {
+    FPDF_InitLibrary();
     const double quarter=shape_rotation::kPi/2;
+    const double pi=shape_rotation::kPi;
+    const double starH=100*(1+std::cos(pi/5))/(2*std::sin(2*pi/5));
+    const auto star=shape_outline::Build(ShapeKind::Star,0,0,100,starH);
+    const auto pentagram=shape_outline::Build(ShapeKind::Star,0,0,100,starH,0,ShapeDrawMode::Line);
+    Expect(star.size()==11 && pentagram.size()==6,"star outline has ten edges; line mode has five segments");
+    Expect(Near(pentagram.front().x,pentagram.back().x) && Near(pentagram.front().y,pentagram.back().y),"pentagram closes after five segments");
+    double minX=100,maxX=0,minY=starH,maxY=0;
+    const double edge=std::hypot(pentagram[1].x-pentagram[0].x,pentagram[1].y-pentagram[0].y);
+    for(size_t i=0;i<5;++i) {
+        Expect(Near(std::hypot(pentagram[i+1].x-pentagram[i].x,pentagram[i+1].y-pentagram[i].y),edge),"regular pentagram has five equal straight edges");
+        minX=std::min(minX,pentagram[i].x);maxX=std::max(maxX,pentagram[i].x);
+        minY=std::min(minY,pentagram[i].y);maxY=std::max(maxY,pentagram[i].y);
+        const auto& outer=star[(4*i)%10];
+        Expect(Near(outer.x,pentagram[i].x) && Near(outer.y,pentagram[i].y),"line mode joins every second outer vertex");
+    }
+    Expect(Near(minX,0) && Near(maxX,100) && Near(minY,0) && Near(maxY,starH),"regular star exactly fits fixed aspect bounds");
+    for(auto mode:{ShapeDrawMode::Fill,ShapeDrawMode::Outline,ShapeDrawMode::Line}) {
+        Expect(ParseShapeKind(ShapeKindToString(ShapeKind::Star))==ShapeKind::Star && ParseShapeDrawMode(ShapeDrawModeToString(mode))==mode,"star metadata round trips");
+        for(int turn=0;turn<4;++turn) {
+            const auto kind=ShapeKind::Star;
+            const auto paper=shape_outline::BuildOriented(kind,0,0,turn%2?starH:100,turn%2?100:starH,0,turn,0.37,mode);
+            const auto pdf=shape_outline::BuildOriented(kind,0,starH,100,0,0,0,0.37,mode);
+            Expect(paper.size()==(mode==ShapeDrawMode::Line?6u:11u) && pdf.size()==paper.size(),"all star modes survive page and whole-shape rotation");
+        }
+        const auto pdf=shape_outline::CreateDashedPdfPath(ShapeKind::Star,0,starH,100,0,0,{},0.37,mode);
+        Expect(pdf && FPDFPath_CountSegments(pdf)==(mode==ShapeDrawMode::Line?6:11),"PDF output retains star topology after rotation");
+        FPDFPageObj_Destroy(pdf);
+    }
+
     const auto rotated=shape_outline::BuildOriented(ShapeKind::Rectangle,0,0,120,40,0,0,quarter);
     Expect(rotated.size()==5 && Near(rotated[0].x,80) && Near(rotated[0].y,-40),"whole-shape rotation preserves the pivot and dimensions");
     Expect(shape_rotation::HitBox(60,70,0,0,120,40,quarter) && !shape_rotation::HitBox(110,20,0,0,120,40,quarter),"rotated move/erase hit box follows the shape");
@@ -188,7 +219,7 @@ int main() {
     Expect(GetRValue(blended)==255 && std::abs(int(GetGValue(blended))-127)<=1 &&
            std::abs(int(GetBValue(blended))-127)<=1,"readonly shape fill retains the stored translucency");
     SelectObject(dc,old);DeleteObject(source);DeleteDC(dc);
-    FPDF_InitLibrary();
+
     FPDF_DOCUMENT document=FPDF_CreateNewDocument();
     FPDF_PAGE page=FPDFPage_New(document,0,600,800);
     Expect(document && page,"native rotation fixture allocation");

@@ -1,0 +1,129 @@
+// View-only navigation after a successful history replay. The command owns
+// the geometry, including annotations removed by the replay; no document
+// content or history entry is changed here.
+#include "core/shape_rotation.h"
+
+struct AnnotationHistoryBounds {
+    int page = -1;
+    double left = 0, bottom = 0, right = 0, top = 0;
+};
+
+static void IncludeAnnotationHistoryBounds(AnnotationHistoryBounds& bounds,
+                                         const Annotation& source) {
+    if (source.pageIndex < 0 || source.pageIndex >= static_cast<int>(g_pdf.pages.size()) ||
+        (bounds.page >= 0 && bounds.page != source.pageIndex) ||
+        !EnsurePdfPageCoordinates(source.pageIndex)) return;
+    const Annotation ann = ProjectAnnotationForView(source);
+    double left = std::min(ann.x1, ann.x2), right = std::max(ann.x1, ann.x2);
+    double bottom = std::min(ann.y1, ann.y2), top = std::max(ann.y1, ann.y2);
+    const auto include = [&](double x, double y) {
+        left = std::min(left, x); right = std::max(right, x);
+        bottom = std::min(bottom, y); top = std::max(top, y);
+    };
+    for (const auto& point : ann.path) include(point.x, point.y);
+    for (size_t i = 0; i + 1 < ann.quads.size(); i += 2)
+        include(ann.quads[i], ann.quads[i + 1]);
+    if (ann.type == Annotation::Type::Shape) {
+        const double cx = (left + right) * 0.5, cy = (bottom + top) * 0.5;
+        const double x1 = left, x2 = right, y1 = bottom, y2 = top;
+        for (const double x : {x1, x2}) for (const double y : {y1, y2}) {
+            const auto point = shape_rotation::Rotate(x, y, cx, cy, -ann.shapeAngle);
+            include(point.x, point.y);
+        }
+    }
+    // Include stroke caps, arrowheads, waves and point markers conservatively.
+    const double padding = ann.type == Annotation::Type::LinkMarker
+        ? std::max(6.0, std::abs(ann.width)) : std::max(2.0, std::abs(ann.width) * 4.0);
+    left -= padding; right += padding; bottom -= padding; top += padding;
+    if (!std::isfinite(left) || !std::isfinite(right) ||
+        !std::isfinite(bottom) || !std::isfinite(top)) return;
+    if (bounds.page < 0) {
+        bounds = {ann.pageIndex, left, bottom, right, top};
+    } else {
+        bounds.left = std::min(bounds.left, left); bounds.right = std::max(bounds.right, right);
+        bounds.bottom = std::min(bounds.bottom, bottom); bounds.top = std::max(bounds.top, top);
+    }
+}
+
+static void RevealAnnotationHistoryBounds(HWND hwnd, const AnnotationHistoryBounds& bounds) {
+    if (!hwnd || bounds.page < 0) return;
+    RECT client{};
+    if (!GetClientRect(hwnd, &client)) return;
+    const int width = client.right - client.left, height = client.bottom - client.top;
+    constexpr double margin = 24.0;
+    if (width <= margin * 2 || height <= margin * 2) return;
+    MarkPdfVirtualViewportChange();
+    // Stop outstanding animation so it cannot move away from the replay result.
+    g_scrollVelocity = 0.0;
+    KillTimer(hwnd, kScrollTimerId);
+    g_zoomAnimating = false;
+    KillTimer(hwnd, kZoomTimerId);
+    g_zoomAnchor = {};
+    if (PdfSinglePageModeActive() && g_pdf.singlePageIndex != bounds.page) {
+        g_pdf.singlePageIndex = bounds.page;
+        UpdatePageLayout(hwnd);
+    }
+    const double fit = std::min((width - margin * 2) / ((bounds.right - bounds.left) * kDpi / 72.0),
+                                (height - margin * 2) / ((bounds.top - bounds.bottom) * kDpi / 72.0));
+    if (fit < g_pdf.scale) ApplyPdfScaleDirect(hwnd, fit, POINT{width / 2, height / 2}, true);
+    const double left = DocToClientX(PdfPtToDocX(bounds.page, bounds.left));
+    const double right = DocToClientX(PdfPtToDocX(bounds.page, bounds.right));
+    const double top = DocToClientY(PdfPtToDocY(bounds.page, bounds.top));
+    const double bottom = DocToClientY(PdfPtToDocY(bounds.page, bounds.bottom));
+    const auto delta = [](double start, double end, double extent) {
+        if (end - start > extent - margin * 2) return (start + end - extent) * 0.5;
+        if (start < margin) return start - margin;
+        if (end > extent - margin) return end - extent + margin;
+        return 0.0;
+    };
+    g_pdf.scrollX += delta(left, right, width);
+    g_pdf.scrollY += delta(top, bottom, height);
+    ClampPdfScroll(height, width);
+    UpdatePdfVirtualScrollCaches(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+static void RevealAnnotationHistoryCommand(HWND hwnd, const AnnotCommand& command, bool undo) {
+    // Navigation must never turn an already successful document replay into a
+    // reported failure, even if allocating a disposable projection fails.
+    try {
+        AnnotationHistoryBounds bounds;
+        switch (command.kind) {
+        case AnnotCommandKind::Add: IncludeAnnotationHistoryBounds(bounds, command.after); break;
+        case AnnotCommandKind::Remove: IncludeAnnotationHistoryBounds(bounds, command.before); break;
+        case AnnotCommandKind::Update:
+            IncludeAnnotationHistoryBounds(bounds, undo ? command.before : command.after);
+            break;
+        case AnnotCommandKind::ClearAll:
+            for (const auto& ann : command.snapshot) IncludeAnnotationHistoryBounds(bounds, ann);
+            break;
+        case AnnotCommandKind::Reorder: {
+            const auto& destination = undo ? command.snapshot : command.afterSnapshot;
+            const auto& previous = undo ? command.afterSnapshot : command.snapshot;
+            for (size_t i = 0; i < destination.size(); ++i) {
+                if (i >= previous.size() || destination[i].id != previous[i].id)
+                    IncludeAnnotationHistoryBounds(bounds, destination[i]);
+            }
+            break;
+        }
+        }
+        RevealAnnotationHistoryBounds(hwnd, bounds);
+    } catch (...) {
+        // Content and replay stacks remain authoritative; only reveal is skipped.
+    }
+}
+
+static void RevealEditingTextHistory(HWND hwnd) {
+    if (!g_pdf.editingText) return;
+    try {
+        Annotation box;
+        box.type = Annotation::Type::TextBox;
+        box.pageIndex = g_pdf.editPage;
+        SetEditingAnnotationBounds(box);
+        AnnotationHistoryBounds bounds;
+        IncludeAnnotationHistoryBounds(bounds, box);
+        RevealAnnotationHistoryBounds(hwnd, bounds);
+    } catch (...) {
+        // The text edit was already replayed successfully.
+    }
+}

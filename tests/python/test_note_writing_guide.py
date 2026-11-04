@@ -61,7 +61,9 @@ class WritingGuideTests(unittest.TestCase):
                 links = re.findall(r"\[[^\]]*\]\(([^)]+)\)", "\n".join(prose))
                 self.assertGreaterEqual(len(links), 3)
                 for link in links:
-                    self.assertTrue((directory / link).is_file(), link)
+                    # Page fragments identify a heading, not part of its filename.
+                    # The generated-site gate validates the fragment itself.
+                    self.assertTrue((directory / link.split("#", 1)[0]).is_file(), link)
                 self.assertIn("[x]", guide)
                 self.assertIn("| :--- | :---: | ---: |", guide)
                 self.assertIn("![", guide)

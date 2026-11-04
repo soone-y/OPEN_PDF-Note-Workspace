@@ -1037,7 +1037,9 @@ static clrop::PdfId BuildCurrentOpenPdfFastId() {
     if (!g_pdf.pages.empty()) {
         id.pageSizesPt.reserve(g_pdf.pages.size());
         for (const auto& page : g_pdf.pages) {
-            id.pageSizesPt.push_back({page.widthPt, page.heightPt});
+            // BuildPageCaches reads these extents from the original PDF.
+            // Its intrinsic rotation is included; the user's view rotation is not.
+            id.pageSizesPt.push_back({page.canonicalWidthPt, page.canonicalHeightPt});
         }
         if (id.pageCount <= 0) {
             id.pageCount = static_cast<int>(id.pageSizesPt.size());
@@ -1310,8 +1312,8 @@ bool LoadAnnotationsForCurrentPdf(HWND owner) {
         return false;
     }
     if (mismatch) {
-        clrop::PdfId current = clrop::ComputePdfFastId(g_pdf.path);
-        std::wstring msg = BuildMismatchMessage(loadedId, current);
+        // Describe exactly the identity used by the comparison, not a second query.
+        std::wstring msg = BuildMismatchMessage(loadedId, expectedFastId);
         SilentDialogOptions options;
         options.title = L"clrop";
         options.message = msg;

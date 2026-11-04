@@ -120,7 +120,8 @@ static void CreateChildren(HWND hWnd) {
                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ANNOT_PANEL_CLEAR)),
                                     g_hInst, nullptr);
     g_hAnnotList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
-                                   WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP | LBS_NOINTEGRALHEIGHT,
+                                   WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP |
+                                   LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
                                    0, 0, 100, 100, hWnd,
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ANNOT_PANEL_LIST)),
                                    g_hInst, nullptr);
@@ -555,6 +556,7 @@ static void CreateChildren(HWND hWnd) {
         add(localization::Text(L"ui.layout.60bceaee61a7").c_str(), ShapeKind::Circle);
         add(localization::Text(L"ui.layout.3526a0625382").c_str(), ShapeKind::Ellipse);
         add(localization::Text(L"shape.arc.label").c_str(), ShapeKind::Arc);
+        add(localization::Text(L"shape.star.label").c_str(), ShapeKind::Star);
         add(localization::Text(L"ui.layout.06b65b92aa7f").c_str(), ShapeKind::Square);
         add(localization::Text(L"ui.layout.9117e6d6ff5f").c_str(), ShapeKind::Rectangle);
         add(localization::Text(L"ui.layout.55914cda2140").c_str(), ShapeKind::Diamond);
@@ -587,6 +589,7 @@ static void CreateChildren(HWND hWnd) {
         };
         add(localization::Text(L"ui.layout.9d960f334669").c_str(), ShapeDrawMode::Fill);
         add(localization::Text(L"ui.layout.645bb2dffd79").c_str(), ShapeDrawMode::Outline);
+        add(localization::Text(L"shape.star.line").c_str(), ShapeDrawMode::Line);
         int want = static_cast<int>(g_shapeDrawMode);
         int count = static_cast<int>(SendMessageW(g_hComboShapeDrawMode, CB_GETCOUNT, 0, 0));
         for (int i = 0; i < count; ++i) {

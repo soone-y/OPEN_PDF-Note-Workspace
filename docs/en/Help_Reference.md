@@ -194,7 +194,7 @@ Use the annotation list's **Edit** command to revise its source, color or positi
 
 Stars have a subtle yellow background in the annotation list, including unselected rows. This covers Outline, Fill and Lines. Selected rows use the selection color.
 
-Select an annotation in the annotation list and right-click. **Properties** inspects it; **Edit** opens editable fields for its type, including source text, coordinates, color, width, opacity and text or shape options. Apply changes and inspect the page; canceling discards that edit.
+Select an annotation in the annotation list and right-click. **Properties** inspects it; **Edit** opens editable fields for its type, including source text, coordinates, color, width, opacity and text or shape options. Text boxes also offer font, size, horizontal/vertical writing and background assistance; math boxes offer LaTeX/markup format. For links, edit the link ID and note path. Use the ID from the note’s `<link=ID>` tag; an empty path searches for the target by ID. These changes affect only the selected PDF annotation, leaving the note text and other annotations with that ID unchanged. Choose **Apply** or **Apply and close**, then inspect the page. Use **Undo** to reverse an applied change.
 
 The same menu offers jumping to the annotation, copying its text, opening a note link, duplicating, bringing forward, sending backward and deleting. Text copying requires a text-bearing item; link opening requires a link marker. Stacking changes concern annotations on the same page. The jump command navigates the display; Ctrl+drag changes placement.
 
@@ -244,7 +244,7 @@ Open Search from its menu or Ctrl+F. Enter a query, choose one range (current le
 
 Space-separated terms use AND; `OR` or `|` uses OR; `"..."` requests a phrase. For example, `heart valve` looks for both words and `heart OR lung` for either. Options control normalization of full/half-width forms, kana and separators, and case-insensitive matching.
 
-Select a result and press Enter or double-click to open its document and location. Visited results are colored. The context menu can open a result in the read-only viewer. Delete lowers a result in the list; it does not delete the source file. Open memo opens the same workspace memo used elsewhere.
+Select a result and press Enter or double-click to open its document and location. Visited results are colored. The context menu can open a result in the read-only viewer. Delete lowers a result in the list; it does not delete the source file. Open memo opens the same memo used elsewhere.
 
 Results are added in batches, and you can work in other windows while searching. Loading a complex document can still briefly delay a response to input.
 

@@ -246,9 +246,9 @@ def find_forbidden_ui_strings() -> list[str]:
         "マーカー（テキスト）": "テキストマーカー",
         "マーカー(フリー)": "フリーハンドマーカー",
         "ペン設定": "線設定",
-        "補正ペン": "線補正",
+        "補正ペン": "ペンの補正",
         "一時ペン": "一時線",
-        "Correction Pen": "Line correction",
+        "Correction Pen": "Pen correction",
         "Pen style": "Line style",
     }
     errors: list[str] = []
@@ -370,7 +370,6 @@ def find_rotated_ellipse_rotation_regressions() -> list[str]:
             'key == "shape_rotation"': "CLROP parser must read rotated ellipse angle",
         },
         "src/file_output/file_output.cpp": {
-            "rect.bottom, ann.shapeRotation, ann.contentRotation, ann.shapeAngle)": "bitmap export must render the stored local ellipse angle, content orientation and whole-shape angle",
             "pdfAngle = rotated ? -visualAngle : 0.0": "PDF export must account for PDF/client Y-axis direction",
         },
         "src/readonly_viewer/pdf_preview_panel.cpp": {
@@ -383,6 +382,12 @@ def find_rotated_ellipse_rotation_regressions() -> list[str]:
         for needle, message in needles.items():
             if needle not in text:
                 errors.append(f"{rel}: {message}")
+        if rel == "src/file_output/file_output.cpp" and not re.search(
+            r"shape_outline::BuildOriented\s*\(\s*ann\.shapeKind\s*,\s*rect\.left\s*,\s*rect\.top\s*,"
+            r"\s*rect\.right\s*,\s*rect\.bottom\s*,\s*ann\.shapeRotation\s*,\s*ann\.contentRotation\s*,"
+            r"\s*ann\.shapeAngle\s*,\s*ann\.shapeDrawMode\s*\)", text
+        ):
+            errors.append(f"{rel}: bitmap export must pass the stored ellipse angle, content orientation, whole-shape angle and draw mode")
     return errors
 
 

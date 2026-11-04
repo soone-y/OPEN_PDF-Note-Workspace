@@ -1915,6 +1915,29 @@ class CodeMetricsGuiTests(unittest.TestCase):
 
 
 class ValidateCodebaseTests(unittest.TestCase):
+    def test_rotated_ellipse_export_checks_angles_and_draw_mode(self) -> None:
+        self.assertEqual(validate_codebase.find_rotated_ellipse_rotation_regressions(), [])
+        path = validate_codebase.REPO_ROOT / "src/file_output/file_output.cpp"
+        read_text = Path.read_text
+        original = read_text(path, encoding="utf-8")
+        call = re.search(r"shape_outline::BuildOriented\([^)]*\)", original)
+        self.assertIsNotNone(call)
+        cases = [("whitespace", call.group().replace(",", ",\n    "), False)]
+        for field in ("shapeRotation", "contentRotation", "shapeAngle", "shapeDrawMode"):
+            cases.append((field, call.group().replace(f"ann.{field}", "0"), True))
+        for name, replacement, should_fail in cases:
+            with self.subTest(case=name):
+                changed = original[:call.start()] + replacement + original[call.end():]
+
+                def mutated_read_text(candidate: Path, *args, **kwargs):
+                    if candidate == path:
+                        return changed
+                    return read_text(candidate, *args, **kwargs)
+
+                with mock.patch.object(Path, "read_text", new=mutated_read_text):
+                    problems = validate_codebase.find_rotated_ellipse_rotation_regressions()
+                self.assertEqual(any("bitmap export must pass" in problem for problem in problems), should_fail, problems)
+
     def test_final_render_boundary_accepts_current_runtime_route(self) -> None:
         self.assertEqual(validate_codebase.find_final_render_publication_boundary_regressions(), [])
         self.assertEqual(validate_codebase.find_note_render_incremental_regressions(), [])
@@ -4953,6 +4976,15 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
 
 
 class ReleaseStartupSmokeGateTests(unittest.TestCase):
+    def test_control_must_be_ready_before_release_validation(self) -> None:
+        with mock.patch.object(release_startup_smoke_gate, "protect_entry_point", side_effect=SystemExit(130)) as protect, \
+                mock.patch.object(release_startup_smoke_gate, "validate_release_set") as validate:
+            with self.assertRaises(SystemExit) as result:
+                release_startup_smoke_gate.main(["--release-set", str(REPO_ROOT)])
+            self.assertEqual(result.exception.code, 130)
+            protect.assert_called_once_with()
+            validate.assert_not_called()
+
     def test_safe_extract_accepts_the_manifest_archive_root(self) -> None:
         with repo_tempdir() as root:
             release_dir = root / "release"
@@ -5050,7 +5082,7 @@ class BuildPublicSiteTests(unittest.TestCase):
                 "- ソースからビルドする: [docs/public/How_to_Build.md](docs/public/How_to_Build.md)",
                 encoding="utf-8",
             )
-            (root / "site" / "github" / "index.html").write_text("__APP_VERSION__", encoding="utf-8")
+            (root / "site" / "github" / "index.html").write_text("<html><body>__APP_VERSION__</body></html>", encoding="utf-8")
             (root / ".github" / "SECURITY.md").write_text("# Security", encoding="utf-8")
             (root / "introduction" / "core" / "semantic_search_index.json").write_text("{}", encoding="utf-8")
             (root / "introduction" / "core" / "internal.md").write_text("development-only", encoding="utf-8")
@@ -5102,6 +5134,8 @@ class BuildPublicSiteTests(unittest.TestCase):
                 self.assertEqual(build_public_site.build_site(documentation_portal=True), 0)
 
             site = root / "_site"
+            for page in site.rglob("*.html"):
+                self.assertEqual(page.read_text(encoding="utf-8").count("data-cf-beacon="), 1)
             self.assertTrue((site / "introduction" / "core" / "semantic_search_index.json").exists())
             self.assertFalse((site / "introduction" / "core" / "internal.md").exists())
             self.assertTrue((site / "docs" / "public" / "How_to_Use.md").exists())

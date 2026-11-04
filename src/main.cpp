@@ -6213,15 +6213,12 @@ static std::wstring AnnotMethodLabel(ToolMode mode) {
     }
 }
 
-static std::wstring CorrectionPenLabel() {
-    return localization::Text(L"main.ui.633976798904").c_str();
-}
-
 static std::wstring FreehandCorrectionModeLabel(const std::wstring& correction) {
-    std::wstring mode = NormalizeCorrectionPenMode(correction);
+    std::wstring mode = NormalizeFreehandCorrection(correction);
     if (mode == L"auto") return localization::Text(L"main.ui.9957a2dbbd88").c_str();
     if (mode == L"hold") return localization::Text(L"main.ui.278244fc5bc0").c_str();
-    return localization::Text(L"main.ui.f037f17e4024").c_str();
+    if (mode == L"smooth") return localization::Text(L"main.ui.f037f17e4024").c_str();
+    return localization::Text(L"main.ui.freehand_correction_off");
 }
 
 static void AddAnnotMethodComboItem(HWND combo, const std::wstring& label, int data,
@@ -6244,6 +6241,7 @@ static std::wstring ShapeDetailLabel(ShapeDetail detail) {
     case ShapeDetail::Triangle: return localization::Text(L"main.ui.b6ccd52bc893").c_str();
     case ShapeDetail::Diamond: return localization::Text(L"main.ui.55914cda2140").c_str();
     case ShapeDetail::Arc: return localization::Text(L"shape.arc.label");
+    case ShapeDetail::Star: return localization::Text(L"shape.star.label");
     default: return localization::Text(L"main.ui.692c81aaf8cd").c_str();
     }
 }
@@ -6277,11 +6275,6 @@ static bool SyncAnnotMethodCombo(ToolMode mode) {
     }
 
     int currentData = static_cast<int>(mode);
-    if (mode == ToolMode::Freehand) {
-        currentData = FreehandCorrectionPenActive(g_config.freehandCorrection)
-                          ? kAnnotMethodDataCorrectionPen
-                          : static_cast<int>(ToolMode::Freehand);
-    }
     SendMessageW(g_hComboAnnotMethod, WM_SETREDRAW, FALSE, 0);
     SendMessageW(g_hComboAnnotMethod, CB_RESETCONTENT, 0, 0);
     int matchIdx = -1;
@@ -6289,15 +6282,6 @@ static bool SyncAnnotMethodCombo(ToolMode mode) {
     auto appendCandidate = [&](ToolMode candidate) {
         if (AnnotToolFamilyForMode(candidate) != family) return;
         if (AnnotToolModeUiStateFor(candidate) != AnnotToolUiState::Enabled) return;
-        if (family == AnnotToolFamily::Pen && candidate == ToolMode::Freehand) {
-            AddAnnotMethodComboItem(g_hComboAnnotMethod, AnnotMethodLabel(candidate),
-                                    static_cast<int>(ToolMode::Freehand),
-                                    currentData, firstIdx, matchIdx);
-            AddAnnotMethodComboItem(g_hComboAnnotMethod, CorrectionPenLabel(),
-                                    kAnnotMethodDataCorrectionPen,
-                                    currentData, firstIdx, matchIdx);
-            return;
-        }
         AddAnnotMethodComboItem(g_hComboAnnotMethod, AnnotMethodLabel(candidate),
                                 static_cast<int>(candidate), currentData, firstIdx, matchIdx);
     };
@@ -6322,16 +6306,15 @@ static bool SyncFreehandCorrectionCombo() {
     SendMessageW(g_hComboFreehandCorrection, WM_SETREDRAW, FALSE, 0);
     SendMessageW(g_hComboFreehandCorrection, CB_RESETCONTENT, 0, 0);
 
-    const std::wstring modes[] = { L"smooth", L"hold", L"auto" };
     int matchIdx = -1;
-    std::wstring current = NormalizeCorrectionPenMode(g_config.freehandCorrection);
-    for (int i = 0; i < static_cast<int>(std::size(modes)); ++i) {
+    std::wstring current = NormalizeFreehandCorrection(g_config.freehandCorrection);
+    for (int i = 0; i < static_cast<int>(std::size(kFreehandCorrectionModes)); ++i) {
         int idx = static_cast<int>(SendMessageW(
             g_hComboFreehandCorrection, CB_ADDSTRING, 0,
-            reinterpret_cast<LPARAM>(FreehandCorrectionModeLabel(modes[static_cast<size_t>(i)]).c_str())));
+            reinterpret_cast<LPARAM>(FreehandCorrectionModeLabel(kFreehandCorrectionModes[i]).c_str())));
         if (idx < 0) continue;
         SendMessageW(g_hComboFreehandCorrection, CB_SETITEMDATA, idx, static_cast<LPARAM>(i));
-        if (modes[static_cast<size_t>(i)] == current) matchIdx = idx;
+        if (kFreehandCorrectionModes[i] == current) matchIdx = idx;
     }
 
     if (matchIdx < 0) matchIdx = 0;
@@ -6377,6 +6360,17 @@ static bool SyncLineDashStyleCombo() {
 static bool SyncShapeDrawModeCombo(ShapeDrawMode mode) {
     if (!g_hComboShapeDrawMode) return false;
     int before = SelectedComboData(g_hComboShapeDrawMode);
+    const bool star=g_shapeKind==ShapeKind::Star;
+    if (SendMessageW(g_hComboShapeDrawMode,CB_GETCOUNT,0,0)!=(star?3:2)) {
+        SendMessageW(g_hComboShapeDrawMode,CB_RESETCONTENT,0,0);
+        const std::pair<const wchar_t*,ShapeDrawMode> options[]={{L"ui.layout.9d960f334669",ShapeDrawMode::Fill},{L"ui.layout.645bb2dffd79",ShapeDrawMode::Outline},{L"shape.star.line",ShapeDrawMode::Line}};
+        for(const auto& option:options) {
+            if(option.second==ShapeDrawMode::Line && !star)continue;
+            const auto i=SendMessageW(g_hComboShapeDrawMode,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(localization::Text(option.first).c_str()));
+            if(i!=CB_ERR && i!=CB_ERRSPACE)SendMessageW(g_hComboShapeDrawMode,CB_SETITEMDATA,i,static_cast<LPARAM>(option.second));
+        }
+    }
+    if(!star && mode==ShapeDrawMode::Line)g_shapeDrawMode=mode=ShapeDrawMode::Outline;
     int want = static_cast<int>(mode);
     int count = static_cast<int>(SendMessageW(g_hComboShapeDrawMode, CB_GETCOUNT, 0, 0));
     int matchIdx = -1;
@@ -8704,7 +8698,7 @@ static bool DrawLeftPaneListItem(const DRAWITEMSTRUCT* dis) {
     if (dis->CtlType != ODT_LISTBOX || !dis->hwndItem) return false;
     HWND list = dis->hwndItem;
     if (list != g_hLectureList && list != g_hSessionList &&
-        list != g_hPdfList && list != g_hNoteList) {
+        list != g_hPdfList && list != g_hNoteList && list != g_hAnnotList) {
         return false;
     }
 
@@ -8718,6 +8712,12 @@ static bool DrawLeftPaneListItem(const DRAWITEMSTRUCT* dis) {
     const bool isOfficeSource =
         list == g_hPdfList && idx >= 0 && idx < static_cast<int>(g_pdfFiles.size()) &&
         IsOfficeFileListPath(g_pdfFiles[static_cast<size_t>(idx)].path);
+    // RefreshAnnotPanel keeps list rows in g_annots order, including after undo
+    // and reordering. Highlight all three drawing modes of the star shape.
+    const bool isStar = list == g_hAnnotList && idx >= 0 &&
+        static_cast<size_t>(idx) < g_annots.size() &&
+        g_annots[static_cast<size_t>(idx)].type == Annotation::Type::Shape &&
+        g_annots[static_cast<size_t>(idx)].shapeKind == ShapeKind::Star;
 
     COLORREF openBg = BlendColor(g_theme.selectionBg, g_theme.panelBg, 0.50);
     const COLORREF officeBg = BlendColor(g_theme.panelBg, g_theme.accent, 0.07);
@@ -8730,6 +8730,8 @@ static bool DrawLeftPaneListItem(const DRAWITEMSTRUCT* dis) {
     if (isSelected) {
         bg = g_theme.selectionBg;
         text = g_theme.selectionText;
+    } else if (isStar) {
+        bg = BlendColor(baseBg, RGB(255, 210, 64), 0.22);
     } else if (isOpen) {
         bg = isOfficeSource ? BlendColor(openBg, officeBg, 0.35) : openBg;
     } else if (isOfficeSource) {

@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <iterator>
 #include <cwctype>
 #include "fpdfview.h"
 #include "fpdf_text.h"
@@ -50,7 +51,8 @@ enum class ShapeKind {
     Ellipse,
     Circle,
     RotatedEllipse,
-    Arc // open parenthesis-like curve, v2
+    Arc, // open parenthesis-like curve, v2
+    Star
 };
 
 inline std::wstring ShapeKindToString(ShapeKind kind) {
@@ -64,6 +66,7 @@ inline std::wstring ShapeKindToString(ShapeKind kind) {
     case ShapeKind::Circle: return L"circle";
     case ShapeKind::RotatedEllipse: return L"rotated_ellipse";
     case ShapeKind::Arc: return L"arc";
+    case ShapeKind::Star: return L"star";
     default: return L"rectangle";
     }
 }
@@ -79,6 +82,7 @@ inline ShapeKind ParseShapeKind(const std::wstring& s) {
     if (t == L"ellipse" || t == L"oval") return ShapeKind::Ellipse;
     if (t == L"circle") return ShapeKind::Circle;
     if (t == L"arc") return ShapeKind::Arc;
+    if (t == L"star") return ShapeKind::Star;
     if (t == L"rotated_ellipse" || t == L"rotatedellipse" || t == L"slanted_ellipse" || t == L"tilted_ellipse")
         return ShapeKind::RotatedEllipse;
     return ShapeKind::Rectangle;
@@ -88,7 +92,8 @@ inline constexpr double kDefaultRotatedEllipseAngleRad = 0.78539816339744830962;
 
 enum class ShapeDrawMode {
     Fill,
-    Outline
+    Outline,
+    Line // five straight segments of a pentagram (Star only)
 };
 
 enum class ArrowHead {
@@ -98,13 +103,14 @@ enum class ArrowHead {
 
 [[nodiscard]] inline bool ShapeKindIsOpen(ShapeKind kind) noexcept { return kind == ShapeKind::Arc; }
 [[nodiscard]] inline ShapeDrawMode ShapeDrawModeForKind(ShapeKind kind,ShapeDrawMode mode) noexcept {
-    return ShapeKindIsOpen(kind) ? ShapeDrawMode::Outline : mode;
+    return ShapeKindIsOpen(kind) || (kind != ShapeKind::Star && mode == ShapeDrawMode::Line) ? ShapeDrawMode::Outline : mode;
 }
 
 inline std::wstring ShapeDrawModeToString(ShapeDrawMode mode) {
     switch (mode) {
     case ShapeDrawMode::Fill: return L"fill";
     case ShapeDrawMode::Outline: return L"outline";
+    case ShapeDrawMode::Line: return L"line";
     default: return L"fill";
     }
 }
@@ -113,6 +119,7 @@ inline ShapeDrawMode ParseShapeDrawMode(const std::wstring& s) {
     std::wstring t = s;
     std::transform(t.begin(), t.end(), t.begin(), ::towlower);
     if (t == L"outline" || t == L"stroke" || t == L"border") return ShapeDrawMode::Outline;
+    if (t == L"line") return ShapeDrawMode::Line;
     return ShapeDrawMode::Fill;
 }
 
@@ -149,15 +156,16 @@ inline bool FreehandSmoothingEnabled(const std::wstring& s) {
     return NormalizeFreehandCorrection(s) == L"smooth";
 }
 
-inline constexpr int kAnnotMethodDataCorrectionPen = -1001;
+inline constexpr const wchar_t* kFreehandCorrectionModes[] = {
+    L"off", L"smooth", L"hold", L"auto"
+};
 
-inline bool FreehandCorrectionPenActive(const std::wstring& s) {
-    return NormalizeFreehandCorrection(s) != L"off";
-}
-
-inline std::wstring NormalizeCorrectionPenMode(const std::wstring& s) {
-    std::wstring mode = NormalizeFreehandCorrection(s);
-    return mode == L"off" ? L"auto" : mode;
+[[nodiscard]] inline int FreehandCorrectionModeIndex(const std::wstring& s) {
+    const std::wstring mode = NormalizeFreehandCorrection(s);
+    for (int i = 0; i < static_cast<int>(std::size(kFreehandCorrectionModes)); ++i) {
+        if (mode == kFreehandCorrectionModes[i]) return i;
+    }
+    return 0;
 }
 
 inline std::wstring NormalizeFreehandCorrectionStyle(const std::wstring& s) {

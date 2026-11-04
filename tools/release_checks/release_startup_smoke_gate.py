@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from tools.dev.isolated_app_test import OwnedProcess, PrivateDesktop
+from tools.dev.isolated_app_test import OwnedProcess, PrivateDesktop, protect_entry_point
 
 
 STARTUP_WAIT_SECONDS = 4
@@ -161,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-set", type=Path, required=True)
     args = parser.parse_args(argv)
+    protect_entry_point()
     errors = validate_release_set(args.release_set.resolve())
     if errors:
         print("Release startup smoke gate failed:", file=sys.stderr)

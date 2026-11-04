@@ -34,9 +34,348 @@ runtime_gate = load_module("libreoffice_runtime_gate", "tools/release_checks/lib
 content_gate = load_module("public_snapshot_content_gate", "tools/release_checks/public_snapshot_content_gate.py")
 smask = load_module("check_pdf_smask_zero", "tests/scripts/check_pdf_smask_zero.py")
 pe_fixtures = load_module("pe_fixtures", "tests/python/pe_fixtures.py")
+check_evaluator = load_module("check_evaluator", "tools/dev/evaluate_checks.py")
 
 
 class CheckFailureContractTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_repo_aggregate_reaches_last_step_and_counts_all_failures(self):
+        # Keep the real plan, options, logging, loop and final exit. Replace only
+        # check actions so this evaluates the runner without building or UI use.
+        generator = r'''
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$sourcePath = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/scripts/run_repo_checks.ps1'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'Runner parse failure' }
+$source = [IO.File]::ReadAllText($sourcePath)
+$replacements = @()
+foreach ($command in $ast.FindAll({param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-Step'
+}, $true)) {
+    $elements = $command.CommandElements
+    for ($i = 0; $i -lt $elements.Count - 1; $i++) {
+        if ($elements[$i] -is [System.Management.Automation.Language.CommandParameterAst] -and
+            $elements[$i].ParameterName -eq 'Action' -and
+            $elements[$i + 1] -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+            $replacements += $elements[$i + 1].Extent
+        }
+    }
+}
+if ($replacements.Count -lt 30) { throw 'Incomplete fixture action replacement' }
+$replacement = @'
+{
+    if ($env:PDF_NOTE_CHECK_FIXTURE_MODE -eq 'interrupt' -and $script:CurrentStepName -eq 'Build') {
+        Invoke-LoggedCommand -FilePath $powershellExe -Arguments @('-NoProfile', '-Command', 'exit 130')
+    }
+    if ($env:PDF_NOTE_CHECK_FIXTURE_MODE -eq 'multiple') {
+        switch ($script:CurrentStepName) {
+            'Build' { throw 'fixture build failure' }
+            'Workspace Memo Tests' {
+                Invoke-LoggedCommand -FilePath $powershellExe -Arguments @('-NoProfile', '-Command', 'exit 7')
+            }
+            'Text Encoding Tests' { return $false }
+        }
+    }
+    Write-Host 'fixture action completed'
+}
+'@
+foreach ($extent in $replacements | Sort-Object StartOffset -Descending) {
+    $source = $source.Substring(0, $extent.StartOffset) + $replacement + $source.Substring($extent.EndOffset)
+}
+$destination = Join-Path $env:PDF_NOTE_CONTRACT_FIXTURE 'tests/scripts/run_repo_checks.ps1'
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+[IO.File]::WriteAllText($destination, $source, [Text.UTF8Encoding]::new($true))
+'''
+        shell = shutil.which("powershell.exe") or shutil.which("powershell")
+        with tempfile.TemporaryDirectory(prefix="pdf_note_aggregate_") as temporary:
+            root = Path(temporary)
+            script = root / "generate.ps1"
+            script.write_text(generator, encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update(PDF_NOTE_CONTRACT_REPO_ROOT=str(REPO_ROOT), PDF_NOTE_CONTRACT_FIXTURE=temporary)
+            generated = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], capture_output=True,
+                                       text=True, env=environment, timeout=30)
+            self.assertEqual(generated.returncode, 0, generated.stderr)
+            fixture = root / "tests/scripts/run_repo_checks.ps1"
+            for case, aggregate, mode in (("multiple", True, "multiple"), ("success", True, "success"),
+                                           ("fail_fast", False, "multiple"), ("interrupt", True, "interrupt")):
+                with self.subTest(case=case):
+                    environment["PDF_NOTE_CHECK_FIXTURE_MODE"] = mode
+                    log_dir = root / case
+                    args = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(fixture), "-LogDir", str(log_dir), "-FailureTailLines", "1"]
+                    if aggregate:
+                        args += ["-ContinueOnFailure"]
+                    result = subprocess.run(args, capture_output=True, text=True, env=environment, timeout=60)
+                    data = json.loads((log_dir / "summary.json").read_text(encoding="utf-8-sig"))
+                    self.assertEqual(result.returncode, 0 if mode == "success" else (130 if mode == "interrupt" else 1), result.stdout + result.stderr)
+                    self.assertGreater(data["counts"]["selected"], 30)
+                    self.assertEqual(data["counts"]["selected"], len(data["steps"]))
+                    self.assertEqual(sum(data["counts"][key] for key in ("pass", "fail", "not_run")),
+                                     data["counts"]["selected"])
+                    self.assertEqual(data["steps"][-1]["name"], "Binary Artifact Network Import Scan")
+                    self.assertEqual(data["steps"][-1]["status"], "PASS" if aggregate and mode != "interrupt" else "NOT_RUN")
+                    self.assertEqual(data["counts"]["fail"], 0 if mode == "success" else (3 if aggregate and mode != "interrupt" else 1))
+                    self.assertEqual(data["counts"]["not_run"], 0 if aggregate and mode != "interrupt" else data["counts"]["selected"] - 1)
+                    self.assertEqual(data["status"], "PASS" if mode == "success" else "FAIL")
+                    for row in data["steps"]:
+                        if row["status"] in ("PASS", "FAIL"):
+                            detail = Path(row["log"]).read_text(encoding="utf-8-sig")
+                            self.assertIn("status: " + row["status"], detail)
+                    self.assertIn("Repository check summary:", result.stdout)
+            # A requested-but-disabled check must remain in the denominator.
+            skipped_logs = root / "disabled"
+            skipped = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(fixture),
+                                      "-ContinueOnFailure", "-OnlyStep", "Atomic Write Tests", "-SkipAtomicWrite",
+                                      "-LogDir", str(skipped_logs)],
+                                     capture_output=True, text=True, env=environment, timeout=30)
+            self.assertEqual(skipped.returncode, 1)
+            disabled = json.loads((skipped_logs / "summary.json").read_text(encoding="utf-8-sig"))
+            self.assertEqual(disabled["counts"], {"selected": 1, "pass": 0, "fail": 0, "not_run": 1})
+            self.assertTrue(disabled["partial_run"])
+            self.assertIn("SkipAtomicWrite", disabled["skip_options"])
+            # Even when log creation fails, each planned step is attempted and
+            # its failure remains visible in the primary console/transcript.
+            blocked_logs = root / "log_path_is_a_file"
+            blocked_logs.write_text("keep this evidence", encoding="utf-8")
+            broken = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(fixture),
+                                     "-ContinueOnFailure", "-LogDir", str(blocked_logs)],
+                                    capture_output=True, text=True, env=environment, timeout=30)
+            self.assertEqual(broken.returncode, 1)
+            self.assertEqual(blocked_logs.read_text(encoding="utf-8"), "keep this evidence")
+            self.assertIn(f"Selected={data['counts']['selected']}; PASS=0; FAIL={data['counts']['selected']}; NOT_RUN=0", broken.stdout)
+            self.assertIn("Unable to write repository check summary", broken.stdout)
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_publish_requests_aggregate_checks_and_rejects_failure(self):
+        command = r'''
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'publish.ps1'), [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'Publish parse failure' }
+$functions = @($ast.FindAll({param($n)
+    $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-FullRepositoryChecks'
+}, $true))
+if ($functions.Count -ne 1) { throw 'Missing publish check entry point' }
+$functionsFile = Join-Path (Split-Path -Parent $env:PDF_NOTE_FAKE_CHECK_HOST) 'functions.ps1'
+[IO.File]::WriteAllText($functionsFile, $functions[0].Extent.Text)
+. $functionsFile
+function Get-Process { param($Id, $ErrorAction) [pscustomobject]@{ Path = $env:PDF_NOTE_FAKE_CHECK_HOST } }
+function Write-Info { param($Message) Write-Host $Message }
+foreach ($code in @(0, 7)) {
+    $env:PDF_NOTE_FAKE_CHECK_EXIT = [string]$code
+    $failed = $false
+    try { Invoke-FullRepositoryChecks }
+    catch {
+        if ($_.Exception.Message -notlike '*final confirmation word will not be issued*') { throw }
+        $failed = $true
+    }
+    if ($failed -ne ($code -ne 0)) { throw 'Publish accepted failed checks or rejected success' }
+}
+Write-Host 'PUBLISH_AGGREGATE_CONTRACT_PASS'
+'''
+        with tempfile.TemporaryDirectory(prefix="pdf_note_publish_checks_") as temporary:
+            root = Path(temporary)
+            entry = root / "tests/scripts/run_repo_checks.ps1"
+            entry.parent.mkdir(parents=True)
+            entry.write_text("throw 'Real checks must not be called by this fixture'", encoding="utf-8")
+            host = root / "fake_host.ps1"
+            host.write_text("if ($args -notcontains '-ContinueOnFailure') { throw 'Aggregate mode missing' }\n"
+                            "if (@($args | Where-Object { $_ -like '-Skip*' -or $_ -eq '-OnlyStep' }).Count) "
+                            "{ throw 'Publish requested partial checks' }\n"
+                            "Write-Output 'fixture summary emitted'\n"
+                            "$global:LASTEXITCODE = [int]$env:PDF_NOTE_FAKE_CHECK_EXIT\n", encoding="utf-8")
+            script = root / "publish_contract.ps1"
+            script.write_text(command, encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update(PDF_NOTE_CONTRACT_REPO_ROOT=str(REPO_ROOT), PDF_NOTE_FAKE_CHECK_HOST=str(host))
+            result = subprocess.run([shutil.which("powershell.exe") or shutil.which("powershell"),
+                                     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                                    capture_output=True, text=True, env=environment, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("PUBLISH_AGGREGATE_CONTRACT_PASS", result.stdout)
+
+    def test_evaluation_distinguishes_pass_fail_skip_and_empty(self):
+        class Probes(unittest.TestCase):
+            def good(self):
+                pass
+
+            def bad(self):
+                self.fail("intentional negative evaluation fixture")
+
+            @unittest.skip("required environment unavailable")
+            def skipped(self):
+                pass
+
+            @unittest.expectedFailure
+            def known_gap(self):
+                self.fail("known evaluation gap")
+
+        for name, expected in (("good", "PASS"), ("bad", "FAIL"),
+                               ("skipped", "INCOMPLETE"), ("known_gap", "INCOMPLETE"),
+                               (None, "INCOMPLETE")):
+            with self.subTest(probe=name):
+                suite = unittest.TestSuite([] if name is None else [Probes(name)])
+                result = check_evaluator.evaluate_suite(suite, io.StringIO())
+                self.assertEqual(result["status"], expected)
+                self.assertEqual(result["tests_run"], 0 if name is None else 1)
+
+    def test_evaluation_receipt_and_exit_reject_skip_empty_and_changed_inputs(self):
+        for case in ("pass", "skip", "empty", "changed", "error"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="pdf_note_evaluation_") as temporary:
+                def probe():
+                    if case == "skip":
+                        raise unittest.SkipTest("required fixture missing")
+
+                suite = unittest.TestSuite([] if case == "empty" else [unittest.FunctionTestCase(probe)])
+                snapshots = [{"input.py": "before"}, {"input.py": "after" if case == "changed" else "before"}]
+                if case == "error":
+                    snapshots = [OSError("unreadable evaluation input")]
+                with mock.patch.object(check_evaluator, "ROOT", Path(temporary)), \
+                     mock.patch.object(check_evaluator, "CHECK_ENTRIES", ()), \
+                     mock.patch.object(check_evaluator, "git", return_value="fixture_git"), \
+                     mock.patch.object(check_evaluator, "input_snapshot", side_effect=snapshots), \
+                     mock.patch.object(unittest.TestLoader, "loadTestsFromName", return_value=suite), \
+                     mock.patch.object(sys, "path", sys.path.copy()), redirect_stdout(io.StringIO()):
+                    exit_code = check_evaluator.main(["--evaluate", "--profile", "failure-contracts"])
+                reports = list(Path(temporary).glob("out/tests/check_evaluation/*/evaluation.json"))
+                self.assertEqual(len(reports), 1)
+                data = json.loads(reports[0].read_text(encoding="utf-8"))
+                expected = {"pass": "PASS", "skip": "INCOMPLETE", "empty": "INCOMPLETE",
+                            "changed": "INPUT_CHANGED", "error": "ERROR"}[case]
+                self.assertEqual(data["profiles"][0]["status"], expected)
+                self.assertEqual(exit_code, 0 if case == "pass" else 1)
+                self.assertEqual(data["status"], "PASS" if case == "pass" else "FAIL")
+                self.assertIn("evaluated_at", data["profiles"][0])
+                if case != "error":
+                    self.assertTrue(Path(data["profiles"][0]["log"]).is_file())
+
+    def test_evaluation_rejects_missing_source_scope(self):
+        with tempfile.TemporaryDirectory(prefix="pdf_note_empty_scope_") as temporary, \
+             mock.patch.object(check_evaluator, "ROOT", Path(temporary)), \
+             mock.patch.object(check_evaluator, "INPUT_PATTERNS", ("absent/*.py",)):
+            with self.assertRaisesRegex(RuntimeError, "has no files"):
+                check_evaluator.input_snapshot()
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_ui_evidence_retains_failure_and_refuses_reuse(self):
+        command = r'''
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$sourcePath = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/scripts/run_ui_automation_fault_tests.ps1'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'Runner parse failure' }
+$helper = @($ast.FindAll({param($n)
+    $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $n.Name -eq 'Write-UiAutomationFailureEvidence'
+}, $true))
+if ($helper.Count -ne 1) { throw 'Missing evidence helper' }
+Invoke-Expression $helper[0].Extent.Text
+$handler = @($ast.FindAll({param($n)
+    $n -is [System.Management.Automation.Language.CatchClauseAst] -and
+    $n.Extent.Text.Contains('Write-UiAutomationFailureEvidence -Paths')
+}, $true))
+if ($handler.Count -ne 1) { throw 'Missing failure handler' }
+$parameter = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'ArtifactName' })
+$first = Invoke-Expression $parameter[0].DefaultValue.Extent.Text
+$second = Invoke-Expression $parameter[0].DefaultValue.Extent.Text
+if ($first -eq $second -or $first -notmatch '^ui_automation_[a-f0-9]{32}$') { throw 'Evidence identity reused' }
+$source = [IO.File]::ReadAllText($sourcePath)
+$boundIdentity = $source.IndexOf("`$PSBoundParameters['ArtifactName'] = `$ArtifactName")
+$dispatch = $source.IndexOf('if (Invoke-AppTestDesktop')
+if ($boundIdentity -lt 0 -or $dispatch -lt 0 -or $boundIdentity -gt $dispatch) {
+    throw 'Identity not passed to isolated child'
+}
+$outDir = Join-Path $env:PDF_NOTE_CONTRACT_FIXTURE 'previous'
+New-Item -ItemType Directory -Path $outDir | Out-Null
+$marker = Join-Path $outDir 'keep.txt'
+[IO.File]::WriteAllText($marker, 'previous evidence')
+$guard = @($ast.FindAll({param($n)
+    $n -is [System.Management.Automation.Language.IfStatementAst] -and
+    $n.Clauses[0].Item1.Extent.Text -eq 'Test-Path -LiteralPath $outDir'
+}, $true))
+if ($guard.Count -ne 1) { throw 'Missing output reuse guard' }
+$refused = $false
+try { Invoke-Expression $guard[0].Extent.Text } catch { $refused = $true }
+if (-not $refused -or [IO.File]::ReadAllText($marker) -ne 'previous evidence') { throw 'Previous evidence lost' }
+$workspaceRoot = $outDir
+$resultFile = Join-Path $outDir 'result.txt'; $traceFile = Join-Path $outDir 'absent.trace'
+[IO.File]::WriteAllLines($resultFile, [string[]]@(0..34 | ForEach-Object { 'evidence-line-' + $_ }))
+$failed = $false
+try { Invoke-Expression ("try { throw 'original-child-failure' } " + $handler[0].Extent.Text) }
+catch { $failed = $_.Exception.Message -eq 'original-child-failure' }
+if (-not $failed) { throw 'Child failure was swallowed or replaced' }
+$large = Join-Path $outDir 'large.trace'
+$stream = [IO.File]::Create($large); $stream.SetLength(16MB + 1); $stream.Dispose()
+Write-UiAutomationFailureEvidence -Paths @($large)
+if ((Get-Item -LiteralPath $large).Length -ne (16MB + 1)) { throw 'Evidence truncated' }
+$locked = [IO.File]::Open($resultFile, 'Open', 'ReadWrite', 'None')
+try {
+    $failed = $false
+    try { Invoke-Expression ("try { throw 'original-child-failure' } " + $handler[0].Extent.Text) }
+    catch { $failed = $_.Exception.Message -eq 'original-child-failure' }
+    if (-not $failed) { throw 'Diagnostic read error replaced child failure' }
+} finally { $locked.Dispose() }
+Write-Host 'EVIDENCE_CONTRACT_PASS'
+'''
+        with tempfile.TemporaryDirectory(prefix="pdf_note_evidence_") as temporary:
+            script = Path(temporary) / "evidence.ps1"
+            script.write_text(command, encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update(PDF_NOTE_CONTRACT_REPO_ROOT=str(REPO_ROOT), PDF_NOTE_CONTRACT_FIXTURE=temporary)
+            result = subprocess.run([shutil.which("powershell.exe") or shutil.which("powershell"),
+                                     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                                    capture_output=True, text=True, env=environment, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            for marker in ("EVIDENCE_CONTRACT_PASS", "evidence-line-34", "Evidence file was not created",
+                           "16 MiB", "Unable to read diagnostic evidence"):
+                self.assertIn(marker, result.stdout)
+            self.assertNotIn("evidence-line-0\n", result.stdout)
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_settings_workflow_is_independent_and_propagates_failure(self):
+        command = r'''
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$path = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/scripts/run_repo_checks.ps1'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'Runner parse failure' }
+$blocks = @($ast.FindAll({param($n)
+    $n -is [System.Management.Automation.Language.IfStatementAst] -and
+    $n.Clauses[0].Item1.Extent.Text -eq '-not $SkipUiAutomation -and -not $SkipSettingsWorkflowTests'
+}, $true))
+if ($blocks.Count -ne 1) { throw 'Missing independent settings workflow step' }
+function Invoke-Step { param($Name, $Action) $script:step = $Name; & $Action }
+function Invoke-ChildPowerShellScript {
+    param($ScriptPath)
+    if ($ScriptPath -ne 'settings.ps1') { throw 'Wrong workflow entry point' }
+    $script:calls++
+    if ($script:injectFailure) { throw 'workflow-child-failure' }
+}
+$settingsWorkflowTestScript = 'settings.ps1'
+foreach ($case in @('default', 'skip_ui', 'skip_workflow', 'skip_memo', 'failure')) {
+    $SkipUiAutomation = $case -eq 'skip_ui'; $SkipSettingsWorkflowTests = $case -eq 'skip_workflow'
+    $SkipWorkspaceMemoTests = $case -eq 'skip_memo'; $script:injectFailure = $case -eq 'failure'
+    $script:calls = 0; $script:step = ''; $failed = $false
+    try { Invoke-Expression $blocks[0].Extent.Text }
+    catch { if ($_.Exception.Message -ne 'workflow-child-failure') { throw }; $failed = $true }
+    $expectedCalls = if ($case -in @('skip_ui', 'skip_workflow')) { 0 } else { 1 }
+    if ($script:calls -ne $expectedCalls -or $failed -ne ($case -eq 'failure')) { throw "Wrong workflow result: $case" }
+    if ($expectedCalls -and $script:step -ne 'Settings And Workspace Workflow Tests') { throw 'Wrong step identity' }
+}
+Write-Host 'WORKFLOW_CONTRACT_PASS'
+'''
+        environment = os.environ.copy()
+        environment["PDF_NOTE_CONTRACT_REPO_ROOT"] = str(REPO_ROOT)
+        result = subprocess.run([shutil.which("powershell.exe") or shutil.which("powershell"),
+                                 "-NoProfile", "-Command", command],
+                                capture_output=True, text=True, env=environment, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("WORKFLOW_CONTRACT_PASS", result.stdout)
+
     @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
     def test_pdf_textbox_reedit_gate_rejects_missing_cases(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell")
@@ -496,7 +835,8 @@ foreach ($fn in $ast.FindAll({param($node) $node -is [System.Management.Automati
 $repoCheckLogRoot = $PSScriptRoot
 $script:CurrentStepLogPath = ''; $script:CurrentStepName = ''
 $VerboseOutput = $false; $FailureTailLines = 1; $SkipBuild = $true
-$OnlyStep = @(); $script:CompletedSelectedSteps = [System.Collections.Generic.List[string]]::new()
+$OnlyStep = @()
+$script:PlanningSteps = $false; $script:StepResults = [ordered]@{}
 $binaryOutputDir = Join-Path $PSScriptRoot 'absent_full'
 $liteBinaryOutputDir = Join-Path $PSScriptRoot 'absent_lite'
 $shellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
@@ -520,7 +860,7 @@ foreach ($name in $cases.Keys) {
 $OnlyStep = @('chosen')
 Invoke-Step -Name 'excluded' -Action { throw 'excluded action ran' }
 Invoke-Step -Name 'chosen' -Action { Write-Host 'selected' }
-$results['selection'] = @{ failed = (Test-Path (Join-Path $PSScriptRoot 'excluded.log')); fail_log = $false; pass_log = ($script:CompletedSelectedSteps -contains 'chosen') }
+$results['selection'] = @{ failed = (Test-Path (Join-Path $PSScriptRoot 'excluded.log')); fail_log = $false; pass_log = ($script:StepResults['chosen'].status -eq 'PASS') }
 Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 3 -Compress))
 ''', encoding="utf-8")
             environment = os.environ.copy()

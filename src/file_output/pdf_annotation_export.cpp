@@ -198,7 +198,7 @@ template<class GetSegment>
     else if (a.type == Annotation::Type::Freehand || a.type == Annotation::Type::MarkerFree ||
              a.type == Annotation::Type::Line || a.type == Annotation::Type::Arrow ||
              a.type == Annotation::Type::Wave ||
-             (a.type == Annotation::Type::Shape && (ShapeKindIsOpen(a.shapeKind) || (a.shapeDrawMode == ShapeDrawMode::Outline && !a.dash.empty()))))
+             (a.type == Annotation::Type::Shape && (ShapeKindIsOpen(a.shapeKind) || (a.shapeDrawMode != ShapeDrawMode::Fill && !a.dash.empty()))))
         // Store actual dash runs as Ink strokes so external editors preserve gaps.
         subtype = FPDF_ANNOT_INK;
     else if (a.type == Annotation::Type::TextBox && preferFreeText && allText && VectorAppearance(scratch, true, ap))

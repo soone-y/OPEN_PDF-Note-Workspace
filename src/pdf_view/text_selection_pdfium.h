@@ -18,6 +18,14 @@ namespace text_selection {
         const auto ch=FPDFText_GetUnicode(text,i);
         o.object=reinterpret_cast<uintptr_t>(FPDFText_GetTextObject(text,i));
         o.em=FPDFText_GetFontSize(text,i);
+        // FontSize can be 1 while the text matrix supplies the visible size.
+        // Origins and glyph bounds are already in page space, so use page-space
+        // em height too. A rotation does not change the vector's length.
+        FS_MATRIX matrix{};
+        if(FPDFText_GetMatrix(text,i,&matrix)) {
+            const double scale=std::hypot(matrix.c,matrix.d);
+            if(std::isfinite(scale) && scale>0)o.em*=scale;
+        }
         o.drawable=ch>0x20 && ch!=0x3000 && o.object && FPDFText_GetCharOrigin(text,i,&o.x,&o.y);
     }
     Classify(boxes,origins);

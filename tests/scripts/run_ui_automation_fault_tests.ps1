@@ -20,7 +20,7 @@ param(
     [switch]$InputAssistOnly,
     [switch]$SkipPngExport,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$')]
-    [string]$ArtifactName = "ui_automation",
+    [string]$ArtifactName = ("ui_automation_" + [guid]::NewGuid().ToString("N")),
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$')]
     [string]$ExecutableName = "pdf_note_workspace",
     [ValidateRange(30, 600)]
@@ -58,6 +58,26 @@ if ($OpenWorkNoteLines -ne 0 -and -not $OpenWorkOnly) {
     throw "-OpenWorkNoteLines requires -OpenWorkOnly and changes only its disposable note fixture."
 }
 
+function Write-UiAutomationFailureEvidence {
+    param([Parameter(Mandatory)][string[]]$Paths)
+    # Diagnostic reads must neither replace the original failure nor interpret
+    # a partial trace as a completed check. Preserve the files in full.
+    foreach ($path in $Paths) {
+        Write-Host "Failure evidence: $path"
+        try {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Write-Host "Evidence file was not created."
+            } elseif ((Get-Item -LiteralPath $path).Length -gt 16MB) {
+                Write-Host "Evidence exceeds the 16 MiB diagnostic read budget; inspect the retained file."
+            } else {
+                Get-Content -LiteralPath $path -Tail 30 -ErrorAction Stop | ForEach-Object { Write-Host $_ }
+            }
+        } catch {
+            Write-Host ("Unable to read diagnostic evidence: " + $_.Exception.Message)
+        }
+    }
+}
+
 function Assert-PdfTextboxReeditFontTrace {
     param([string]$TraceText)
     if ($TraceText -notmatch '(?m)^pdf_textbox:presets_theme_ok cases=4$') {
@@ -93,8 +113,11 @@ function Assert-ImeGeometryTrace {
 }
 
 . (Join-Path $PSScriptRoot 'app_test_desktop.ps1')
-$privateClipboard = $fullSuite
-if (Invoke-AppTestDesktop -ScriptPath $PSCommandPath -Parameters $PSBoundParameters -PrivateClipboard:$privateClipboard) { return }
+# Carry the generated name into the isolated child instead of generating a
+# second identity there. Every wrapper and focused mode gets fresh evidence.
+$PSBoundParameters['ArtifactName'] = $ArtifactName
+$usesClipboard = $fullSuite
+if (Invoke-AppTestDesktop -ScriptPath $PSCommandPath -Parameters $PSBoundParameters -UsesClipboard:$usesClipboard) { return }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $binDir = Join-Path $repoRoot "out\\bin"
 $exePath = Join-Path $binDir ($ExecutableName + ".exe")
@@ -119,19 +142,10 @@ if ($requiresSessionFixture -and -not (Test-Path -LiteralPath $fixtureSessionSou
     throw "Fixture session not found: $fixtureSessionSource"
 }
 
-New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-if (((Get-Item -LiteralPath $outDir).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-    throw "Refusing to use a reparse-point automation output directory."
+if (Test-Path -LiteralPath $outDir) {
+    throw "Refusing to remove an automation workspace or previous evidence. Choose an unused -ArtifactName: $outDir"
 }
-if (Test-Path -LiteralPath $workspaceRoot) {
-    $automationTarget = [System.IO.Path]::GetFullPath($workspaceRoot)
-    $automationParent = [System.IO.Path]::GetFullPath($outDir) + [System.IO.Path]::DirectorySeparatorChar
-    if (-not $automationTarget.StartsWith($automationParent, [System.StringComparison]::OrdinalIgnoreCase) -or
-        (((Get-Item -LiteralPath $workspaceRoot).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
-        throw "Refusing to remove an automation workspace outside its owned output directory."
-    }
-    Remove-Item -LiteralPath $workspaceRoot -Force -Recurse
-}
+New-Item -ItemType Directory -Path $outDir -ErrorAction Stop | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $workspaceRoot "lecture1\session1") | Out-Null
 
 $workspaceJson = @'
@@ -305,10 +319,6 @@ try {
             throw "UI automation test timed out after $timeoutSec seconds."
         }
         if ($proc.ExitCode -ne 0) {
-            if ((Test-Path -LiteralPath $resultFile -PathType Leaf) -and
-                (Get-Item -LiteralPath $resultFile).Length -le 64KB) {
-                Get-Content -LiteralPath $resultFile -TotalCount 12 | ForEach-Object { Write-Host $_ }
-            }
             throw "UI automation app exit code was $($proc.ExitCode). Result: $resultFile; trace: $traceFile"
         }
     }
@@ -372,6 +382,9 @@ try {
         }
         if ($traceText -notmatch '(?m)^application_shortcuts:page_number_ok cases=9$') {
             throw 'Page-number validation and failure output-preservation checks did not complete.'
+        }
+        if ($traceText -notmatch '(?m)^pdf_rotation:pdf_id_original_ok cases=4 restore_modes=3$') {
+            throw 'Original PDF identity was not verified across view rotations, restored fit modes and mismatched original dimensions.'
         }
         if ($traceText -notmatch '(?m)^pdf_rotation:canonical_edit_save_undo_export_ok cases=4$' -or
             [regex]::Matches($traceText, '(?m)^pdf_rotation:case_ok turn=[0-3]$').Count -ne 4) {
@@ -627,6 +640,12 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Independent page rotation verification failed.' }
     }
     Write-Host "[PASS] UI automation" -ForegroundColor Green
+}
+catch {
+    Write-Host ("UI automation failure: " + $_.Exception.Message)
+    Write-UiAutomationFailureEvidence -Paths @($resultFile, $traceFile,
+        (Join-Path $workspaceRoot "__pdf_note_workspace__/__log__/preview_trace.log"))
+    throw
 }
 finally {
     Restore-Env

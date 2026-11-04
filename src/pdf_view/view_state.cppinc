@@ -665,7 +665,7 @@ static double NewTextBoxTopFromClickY(double clickYpt, double fontPt, const std:
     int padPx = std::max(1, static_cast<int>(std::round(kTextPadPx * scale)));
     // PDF Y increases upward; reduce the offset to start input slightly lower.
     constexpr int kTextClickDownOffsetPx = 2;
-    int offsetPx = padPx + lineHeightPx - kTextClickDownOffsetPx;
+    int offsetPx = padPx + lineHeightPx - kTextClickDownOffsetPx - kTextInputDownBiasPx;
     double offsetPt = offsetPx * 72.0 / kDpi / scale;
     return clickYpt + offsetPt;
 }

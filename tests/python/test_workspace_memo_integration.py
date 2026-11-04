@@ -73,9 +73,11 @@ class WorkspaceMemoIntegration(unittest.TestCase):
             menu_reference = f'ツールの「{menu_name}」' if language == "ja" else f"Tools > {menu_name}"
             self.assertEqual(help_text.count(menu_reference), 1)
             remaining_help = help_text.replace(menu_reference, "")
-            self.assertNotIn(old_name, remaining_help.lower())
-            self.assertNotIn(menu_name.lower(), remaining_help.lower())
-            self.assertIn(f"##{'#' if language == 'ja' else ''} {name}\n", help_text)
+            for forbidden in {old_name, menu_name.lower()}:
+                matches = [(number, line) for number, line in enumerate(remaining_help.splitlines(), 1)
+                           if forbidden in line.lower()]
+                self.assertFalse(matches, f"{language}: expanded memo name outside Tools menu: {matches[:3]}")
+            self.assertTrue(f"### {name}\n" in help_text, f"{language}: memo subsection heading is missing")
             self.assertIn("__pdf_note_workspace__/__memo__/workspace_memo.txt", help_text)
 
     def test_exit_and_root_switch_contract(self):
@@ -104,7 +106,10 @@ class WorkspaceMemoIntegration(unittest.TestCase):
     def test_runtime_suite_and_test_only_hooks(self):
         checks = source("tests/scripts/run_repo_checks.ps1")
         self.assertIn('if (-not $SkipUiAutomation) { $memoArguments += "-AppIntegration" }', checks)
+        self.assertIn('Invoke-Step -Name "Settings And Workspace Workflow Tests"', checks)
+        self.assertIn('if (-not $SkipUiAutomation -and -not $SkipSettingsWorkflowTests)', checks)
         runner = source("tests/scripts/run_workspace_memo_tests.ps1")
+        self.assertNotIn("run_settings_workflow_tests.ps1", runner)
         self.assertIn("-DWORKSPACE_MEMO_TESTING", runner)
         self.assertIn("tests/integration/workspace_memo_app_tests.cpp", runner)
         header = source("src/workspace/workspace_memo_store.h")

@@ -296,6 +296,50 @@ void PathMultiplyCases() {
     Require((pixels[25*size+25]&0xffffff)==0 && pixels[0]==0,"black backdrop must remain black");
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
 }
+void ScaledTextSelectionCases() {
+    using namespace text_selection;
+    auto doc=FPDF_CreateNewDocument();Require(doc!=nullptr,"scaled text document");
+    auto page=FPDFPage_New(doc,0,500,400);Require(page!=nullptr,"scaled text page");
+    const auto add=[&](float size,const FS_MATRIX& matrix,const char16_t* value) {
+        auto obj=FPDFPageObj_NewTextObj(doc,"Helvetica",size);
+        Require(obj && FPDFText_SetText(obj,reinterpret_cast<const unsigned short*>(value)) &&
+            FPDFPageObj_SetMatrix(obj,&matrix),"scaled text object");
+        FPDFPage_InsertObject(page,obj);
+    };
+    // Same visible font size, two equivalent PDF representations. The reference
+    // document uses size 1 with a ~25x matrix, including separate colored objects.
+    add(1,{25,0,0,25,30,340},u"Step1");
+    add(1,{25,0,0,25,110,340},u"marker connection");
+    add(25,{1,0,0,1,30,290},u"Step1");
+    add(25,{1,0,0,1,110,290},u"marker connection");
+    // A large gutter must stay split, even with the corrected size.
+    add(1,{25,0,0,25,30,240},u"Left");
+    add(1,{25,0,0,25,350,240},u"Right");
+    // Matrix rotation changes the reading axis, not the em height.
+    add(1,{0,25,-25,0,470,40},u"Vertical");
+    Require(FPDFPage_GenerateContent(page),"scaled text content");
+    Writer saved;Require(FPDF_SaveAsCopy(doc,&saved,FPDF_NO_INCREMENTAL),"scaled text serialize");
+    FPDF_ClosePage(page);FPDF_CloseDocument(doc);
+    doc=FPDF_LoadMemDocument64(saved.bytes.data(),saved.bytes.size(),nullptr);Require(doc!=nullptr,"scaled text reload");
+    page=FPDF_LoadPage(doc,0);auto text=FPDFText_LoadPage(page);Require(text!=nullptr,"scaled text extract");
+    const auto boxes=ReadPdf(text);
+    const auto bands=Build(boxes,[](size_t,const CharBox&){return true;},0,false,false,500,400);
+    Require(bands.size()==5,"scaled text connects within rows but not across rows/gutter");
+    std::vector<Span> topRows;size_t vertical=0;
+    for(const auto& band:bands) {
+        if(band.axis==Axis::Vertical){++vertical;continue;}
+        Require(band.axis==Axis::Horizontal,"scaled horizontal axis is known");
+        if(band.bottom>270)topRows.push_back(band);
+    }
+    Require(vertical==1 && topRows.size()==2,"scaled vertical and horizontal writing remain distinct");
+    Require(std::abs(topRows[0].left-topRows[1].left)<0.01 && std::abs(topRows[0].right-topRows[1].right)<0.01 &&
+        std::abs(std::abs(topRows[0].top-topRows[1].top)-50)<0.01 &&
+        std::abs((topRows[0].top-topRows[0].bottom)-(topRows[1].top-topRows[1].bottom))<0.01,
+        "equivalent font and matrix scales produce equivalent continuous bands");
+    FPDFText_ClosePage(text);FPDF_ClosePage(page);FPDF_CloseDocument(doc);
+    std::cout<<"pdf_marker_scaled_text:ok equivalent_size=1 separate_objects=1 row_gutter_separation=1 rotated=1\n";
+}
+
 void WritingDirectionCases() {
     using namespace text_selection;
     std::vector<CharBox> boxes;std::vector<Origin> origins;
@@ -410,6 +454,7 @@ void WritingDirectionCases() {
 int main() {
     FPDF_InitLibrary();
     try {
+        ScaledTextSelectionCases();
         WritingDirectionCases();
         MarkerPaintBoundsCases();
         MarkerPdfReferenceCases();

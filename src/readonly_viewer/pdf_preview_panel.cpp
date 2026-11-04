@@ -2902,12 +2902,13 @@ void AddClropItemToPdfPage(FPDF_DOCUMENT doc, FPDF_PAGE page, const clrop::Item&
             const auto& b = *item.bbox;
             const bool fill = item.shapeKind != "arc" && (item.shapeDrawMode == "fill" || item.shapeDrawMode == "filled");
             ShapeBoundary boundary = ShapeBoundary::None;
-            if ((!item.shapeBoundary.empty() && ParseShapeBoundary(item.shapeBoundary,boundary) && boundary != ShapeBoundary::None) || item.shapeAngle != 0.0 || item.shapeKind == "arc") {
+            if ((!item.shapeBoundary.empty() && ParseShapeBoundary(item.shapeBoundary,boundary) && boundary != ShapeBoundary::None) || item.shapeAngle != 0.0 || item.shapeKind == "arc" || item.shapeKind == "star") {
                 const auto kind = ParseShapeKind(Utf8ToWideLocal(item.shapeKind));
+                const auto drawMode = ParseShapeDrawMode(Utf8ToWideLocal(item.shapeDrawMode));
                 const auto angle = item.shapeRotation.value_or(kDefaultRotatedEllipseAngleRad);
                 const auto alpha = ClropAlphaByte(item,fill ? 0.35 : 1.0);
                 const auto addPath = [&](bool filling,const std::vector<double>& dash) {
-                    auto path = shape_outline::CreateDashedPdfPath(kind,b[0],b[1],b[0]+b[2],b[1]-b[3],angle,dash,item.shapeAngle);
+                    auto path = shape_outline::CreateDashedPdfPath(kind,b[0],b[1],b[0]+b[2],b[1]-b[3],angle,dash,item.shapeAngle,drawMode);
                     if (!path) return;
                     const bool stroke = !filling || (boundary != ShapeBoundary::None && item.dash.empty());
                     const auto borderColor = boundary == ShapeBoundary::None ? color : ShapeBoundaryColor(boundary);
@@ -3318,6 +3319,7 @@ void DrawClropItem(HDC hdc,
     }
     case clrop::Item::Kind::Shape: {
         const auto kind = ParseShapeKind(Utf8ToWideLocal(item.shapeKind));
+        const auto drawMode = ParseShapeDrawMode(Utf8ToWideLocal(item.shapeDrawMode));
         const double scale = static_cast<double>(pageRect.right - pageRect.left) / pageWidthPt;
         const bool fill = !ShapeKindIsOpen(kind) && (item.shapeDrawMode == "fill" || item.shapeDrawMode == "filled");
         ShapeBoundary boundary=ShapeBoundary::None;
@@ -3326,11 +3328,11 @@ void DrawClropItem(HDC hdc,
         const int penWidth = std::max(1, static_cast<int>(std::lround((item.width > 0 ? item.width : 2.0) * scale)));
         if (!fill && (ShapeKindIsOpen(kind) || !item.dash.empty() || boundary != ShapeBoundary::None || item.shapeAngle != 0.0)) {
             ui::DrawDashedShapeOutline(hdc, kind, bounds, item.shapeRotation.value_or(kDefaultRotatedEllipseAngleRad),
-                penWidth, strokeColor, ClropAlphaByte(item, 1.0), item.dash, scale, item.contentRotation / 90,item.shapeAngle);
+                penWidth, strokeColor, ClropAlphaByte(item, 1.0), item.dash, scale, item.contentRotation / 90,item.shapeAngle,drawMode);
         } else {
             std::vector<POINT> points;
             for (const auto& p : shape_outline::BuildOriented(kind, bounds.left, bounds.top, bounds.right, bounds.bottom,
-                item.shapeRotation.value_or(kDefaultRotatedEllipseAngleRad), item.contentRotation / 90,item.shapeAngle))
+                item.shapeRotation.value_or(kDefaultRotatedEllipseAngleRad), item.contentRotation / 90,item.shapeAngle,drawMode))
                 points.push_back({static_cast<LONG>(std::lround(p.x)), static_cast<LONG>(std::lround(p.y))});
             if (fill) {
                 ui::FillPolygonAlpha(hdc, points, color, ClropAlphaByte(item,0.35));

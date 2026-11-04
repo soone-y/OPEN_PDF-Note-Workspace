@@ -59,6 +59,9 @@ std::vector<std::filesystem::path> FontDirectoryCandidates() {
     std::vector<std::filesystem::path> candidates;
     const auto exeDir = ModuleDirectory();
     if (!exeDir.empty()) {
+        // Full packages group the runtime and private fonts under the short root.
+        // The following candidate remains valid for Lite and older packages.
+        candidates.push_back(exeDir / L"lo" / L"image" / L"Fonts");
         candidates.push_back(exeDir / L"libreoffice" / L"image" / L"Fonts");
         candidates.push_back(exeDir / L"third_party" / L"libreoffice" / L"image" / L"Fonts");
         candidates.push_back(exeDir / L".." / L"third_party" / L"libreoffice" / L"image" / L"Fonts");

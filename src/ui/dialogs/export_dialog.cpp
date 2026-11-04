@@ -417,7 +417,6 @@ struct ExportDialogState {
     HWND topPdf{};
     HWND topNote{};
     HWND pdfAll{};
-    HWND pdfPages{};
     HWND pdfPng{};
     HWND noteText{};
     HWND noteMarkup{};
@@ -491,7 +490,6 @@ constexpr int kExportDlgIdKeepPageRotation = 4099;
 constexpr int kExportDlgIdTopPdf = 4001;
 constexpr int kExportDlgIdTopNote = 4002;
 constexpr int kExportDlgIdPdfAll = 4011;
-constexpr int kExportDlgIdPdfPages = 4012;
 constexpr int kExportDlgIdPdfPng = 4013;
 constexpr int kExportDlgIdNoteText = 4021;
 constexpr int kExportDlgIdNoteMarkup = 4022;
@@ -833,7 +831,7 @@ static int ReferencePageIndexForSizePreview(ExportDialogState* ctx, ExportDialog
         if (v && *v >= 1) return clampIndex(*v - 1);
         return 0;
     }
-    if (kind == ExportDialogKind::PdfPages) {
+    if (kind == ExportDialogKind::PdfAll || kind == ExportDialogKind::PdfPages) {
         std::wstring spec = TrimWhitespace(ReadDialogText(ctx->editPageSpec));
         std::wstring err;
         bool defaultAnnot = IsExportDlgChecked(ctx->radioAnnotYes);
@@ -1017,7 +1015,6 @@ static void UpdateExportDialogSizeUi(ExportDialogState* ctx, int changedId) {
 static ExportDialogKind GetExportDialogKind(ExportDialogState* ctx) {
     if (!ctx) return ExportDialogKind::PdfAll;
     if (IsExportDlgChecked(ctx->topPdf)) {
-        if (IsExportDlgChecked(ctx->pdfPages)) return ExportDialogKind::PdfPages;
         if (IsExportDlgChecked(ctx->pdfPng)) return ExportDialogKind::PdfPng;
         return ExportDialogKind::PdfAll;
     }
@@ -1315,14 +1312,12 @@ static void UpdateExportDialogUi(ExportDialogState* ctx) {
 
     bool isPdf = IsExportDlgChecked(ctx->topPdf);
     ShowWindow(ctx->pdfAll, isPdf ? SW_SHOW : SW_HIDE);
-    ShowWindow(ctx->pdfPages, isPdf ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->pdfPng, isPdf ? SW_SHOW : SW_HIDE);
     ShowWindow(ctx->noteText, isPdf ? SW_HIDE : SW_SHOW);
     ShowWindow(ctx->noteMarkup, isPdf ? SW_HIDE : SW_SHOW);
 
     if (isPdf) {
         if (!IsExportDlgChecked(ctx->pdfAll) &&
-            !IsExportDlgChecked(ctx->pdfPages) &&
             !IsExportDlgChecked(ctx->pdfPng)) {
             CheckRadioButton(ctx->hwnd, kExportDlgIdPdfAll, kExportDlgIdPdfPng, kExportDlgIdPdfAll);
         }
@@ -1342,9 +1337,9 @@ static void UpdateExportDialogUi(ExportDialogState* ctx) {
         SetWindowTextW(ctx->editOutputName, suggestedName.c_str());
         ctx->suggestedOutputName = suggestedName;
     }
-    bool showPageSpec = (kind == ExportDialogKind::PdfPages);
+    bool showPageSpec = (kind == ExportDialogKind::PdfAll || kind == ExportDialogKind::PdfPages);
     bool showPageNumber = (kind == ExportDialogKind::PdfPng);
-    bool showAnnots = (kind == ExportDialogKind::PdfPages || kind == ExportDialogKind::PdfPng);
+    bool showAnnots = IsPdfExportKind(kind);
     bool showMath = (kind == ExportDialogKind::NoteText || kind == ExportDialogKind::NoteMarkup);
     bool showPlaceholder = showMath && IsExportDlgChecked(ctx->radioMathReplace);
     bool showIncludeComments = (kind == ExportDialogKind::NoteText ||
@@ -1560,7 +1555,7 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
         g_config.exportStandardTextAnnots = result.standardTextAnnots;
         SaveWorkspaceConfig(g_workspaceRoot, g_config);
     }
-    if (kind == ExportDialogKind::PdfPages) {
+    if (kind == ExportDialogKind::PdfAll || kind == ExportDialogKind::PdfPages) {
         std::wstring spec = TrimWhitespace(ReadDialogText(ctx->editPageSpec));
         if (spec.empty()) {
             return RejectExportDialogInput(ctx, localization::Text(L"export.page_spec_empty"), ctx->editPageSpec, true);
@@ -1637,13 +1632,8 @@ static bool BuildExportDialogResult(ExportDialogState* ctx, ExportDialogResult& 
         s_lastNoteTitleHeading = options.includeTitleHeading;
         s_lastNoteShiftHeadings = options.shiftHeadingLevels;
         result.noteMarkupOptions = options;
-    } else if (kind == ExportDialogKind::PdfAll) {
     }
     if (kind == ExportDialogKind::PdfAll || kind == ExportDialogKind::PdfPages) {
-        if (kind == ExportDialogKind::PdfAll) {
-            for (int page = 0; page < static_cast<int>(g_pdf.pages.size()); ++page)
-                result.pages.push_back(file_output::PdfPageSpec{page, true});
-        }
         for (auto& page : result.pages) page.rotation = ExportPageRotation(ctx, page.pageIndex);
     }
     outResult = std::move(result);
@@ -1771,7 +1761,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         const int stdTextY = outSizeY + 130;
         const int buttonsY = outSizeY + 222;
         const int quickButtonsY = buttonsY + 36;
-        const int reservationTitleY = quickButtonsY + 34;
+        const int reservationTitleY = quickButtonsY + 46;
         const int reservationListY = reservationTitleY + 20;
 
         ctx->topPdf = CreateWindowExW(0, L"BUTTON", L"PDF",
@@ -1787,13 +1777,9 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
                                       margin, row2Y, 150, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPdfAll),
                                       cs->hInstance, nullptr);
-        ctx->pdfPages = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.page_selection").c_str(),
-                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
-                                        margin + 160, row2Y, 150, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPdfPages),
-                                        cs->hInstance, nullptr);
         ctx->pdfPng = CreateWindowExW(0, L"BUTTON", localization::Text(L"export.single_page_png").c_str(),
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | BS_PUSHLIKE,
-                                      margin + 320, row2Y, 150, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPdfPng),
+                                      margin + 160, row2Y, 150, rowH, hWnd, reinterpret_cast<HMENU>(kExportDlgIdPdfPng),
                                       cs->hInstance, nullptr);
 
         ctx->noteText = CreateWindowExW(0, L"BUTTON", L"txt",
@@ -2094,6 +2080,9 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                                      margin + 310, quickButtonsY, 155, 26, hWnd,
                                                      reinterpret_cast<HMENU>(kExportDlgIdShowQuickSettings), cs->hInstance, nullptr);
+        CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                        margin, reservationTitleY - 11, 540, 2, hWnd, nullptr,
+                        cs->hInstance, nullptr);
         ctx->labelReservationTitle = CreateWindowExW(0, L"STATIC", localization::Text(L"export.reservation_list_title").c_str(),
                                                      WS_CHILD | WS_VISIBLE,
                                                      margin, reservationTitleY, 540, 20, hWnd, nullptr,
@@ -2138,7 +2127,6 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         applyFont(ctx->topPdf);
         applyFont(ctx->topNote);
         applyFont(ctx->pdfAll);
-        applyFont(ctx->pdfPages);
         applyFont(ctx->pdfPng);
         applyFont(ctx->noteText);
         applyFont(ctx->noteMarkup);
@@ -2235,8 +2223,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                          preferPdf ? kExportDlgIdTopPdf : kExportDlgIdTopNote);
         if (preferPdf) {
             int detail = kExportDlgIdPdfAll;
-            if (ctx->preset == ExportDialogKind::PdfPages) detail = kExportDlgIdPdfPages;
-            else if (ctx->preset == ExportDialogKind::PdfPng) detail = kExportDlgIdPdfPng;
+            if (ctx->preset == ExportDialogKind::PdfPng) detail = kExportDlgIdPdfPng;
             CheckRadioButton(hWnd, kExportDlgIdPdfAll, kExportDlgIdPdfPng, detail);
         } else {
             int detail = kExportDlgIdNoteText;
@@ -2245,6 +2232,9 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         }
 
         CheckRadioButton(hWnd, kExportDlgIdAnnotYes, kExportDlgIdAnnotNo, kExportDlgIdAnnotYes);
+        const int pageCount = static_cast<int>(g_pdf.pages.size());
+        const std::wstring allPages = pageCount > 1 ? L"1-" + std::to_wstring(pageCount) : L"1";
+        SetWindowTextW(ctx->editPageSpec, allPages.c_str());
         CheckRadioButton(hWnd, kExportDlgIdMathKeep, kExportDlgIdMathReplace, kExportDlgIdMathKeep);
         CheckRadioButton(hWnd, kExportDlgIdPngStylePdf, kExportDlgIdPngStyleViewer, kExportDlgIdPngStylePdf);
         CheckRadioButton(hWnd, kExportDlgIdMarkupMd, kExportDlgIdMarkupHtml,
@@ -2534,7 +2524,7 @@ static LRESULT CALLBACK ExportDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         if (HIWORD(wParam) == BN_CLICKED) {
             ClearExportDialogInlineError(ctx);
             const bool changesOutputKind = id == kExportDlgIdTopPdf || id == kExportDlgIdTopNote ||
-                                           id == kExportDlgIdPdfAll || id == kExportDlgIdPdfPages ||
+                                           id == kExportDlgIdPdfAll ||
                                            id == kExportDlgIdPdfPng || id == kExportDlgIdNoteText ||
                                            id == kExportDlgIdNoteMarkup;
             if (changesOutputKind && ctx && ctx->labelReservationList) {
@@ -2604,7 +2594,7 @@ bool ShowUnifiedExportDialog(HWND owner, ExportDialogKind preset, std::vector<Ex
     ScopedExportDialogOwner modalOwner(owner);
     HWND w = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, dialogTitle.c_str(),
                              WS_CAPTION | WS_POPUPWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 580, 740,
+                             CW_USEDEFAULT, CW_USEDEFAULT, 580, 752,
                              owner, nullptr, g_hInst, &ctx);
     if (!w) return false;
     RegisterAppExitBlockingDialog(w);
